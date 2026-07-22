@@ -70,6 +70,9 @@
 #include "default_scene_creator.hpp"
 #include "SceneSerializer.h"
 #include "ProjectManager.h"  // Project system
+#include "Api/RtPython.h"
+#include "Api/RtIpcPanel.h"
+#include "Api/RtApi.h"
 #include "MaterialManager.h"  // For material editing
 #include <map>  // For mesh grouping
 #include <unordered_set>  // For fast deletion lookup
@@ -3469,6 +3472,55 @@ void SceneUI::publishEditPinSelection(UIContext& ctx)
     }
 }
 
+void SceneUI::selectManagedMesh(UIContext& ctx, const std::shared_ptr<TriangleMesh>& mesh) {
+    if (!mesh) return;
+    int objectIndex = -1;
+    for (size_t i = 0; i < ctx.scene.world.objects.size(); ++i) {
+        if (ctx.scene.world.objects[i].get() == mesh.get()) {
+            objectIndex = static_cast<int>(i);
+            break;
+        }
+    }
+    ctx.selection.selectObject(mesh, objectIndex,
+        mesh->nodeName.empty() ? std::string("Managed Surface") : mesh->nodeName);
+    // Apply the reverse mapping immediately so another managed panel drawn in
+    // this same frame reflects the click without a one-frame selection delay.
+    syncManagedObjectSelection(ctx);
+}
+
+void SceneUI::syncManagedObjectSelection(UIContext& ctx) {
+    if (ctx.selection.selected.type != SelectableType::Object) return;
+    std::shared_ptr<TriangleMesh> selectedMesh = ctx.selection.selected.mesh_object;
+    if (!selectedMesh && ctx.selection.selected.object) {
+        selectedMesh = ctx.selection.selected.object->parentMesh;
+    }
+    if (!selectedMesh) return;
+
+    for (auto& terrain : TerrainManager::getInstance().getTerrains()) {
+        if (terrain.flatMesh.get() == selectedMesh.get()) {
+            terrain_brush.active_terrain_id = terrain.id;
+            break;
+        }
+    }
+
+    for (auto& surface : WaterManager::getInstance().getWaterSurfaces()) {
+        if (surface.flatMesh.get() == selectedMesh.get()) {
+            selected_water_surface_id = surface.id;
+            break;
+        }
+    }
+
+    auto& riverManager = RiverManager::getInstance();
+    for (auto& river : riverManager.getRivers()) {
+        if (river.flatMesh.get() == selectedMesh.get()) {
+            riverManager.editingRiverId = river.id;
+            riverManager.selectedControlPoint = -1;
+            if (river.waterSurfaceId >= 0) selected_water_surface_id = river.waterSurfaceId;
+            break;
+        }
+    }
+}
+
 void SceneUI::draw(UIContext& ctx)
 {
     // Apply project-scoped UI state after load finalization on the main thread.
@@ -3600,6 +3652,7 @@ void SceneUI::draw(UIContext& ctx)
         validateSelectionAgainstScene(ctx);
         selection_validation_pending = false;
     }
+    syncManagedObjectSelection(ctx);
 
     world_params_changed_this_frame = false;
     ImGuiIO& io = ImGui::GetIO();
@@ -3607,6 +3660,9 @@ void SceneUI::draw(UIContext& ctx)
     float screen_y = io.DisplaySize.y;
 
     drawMainMenuBar(ctx);
+    rtpython::drawConsole(&show_python_console);
+    rtipc_panel::draw(&show_remote_ipc_panel);
+    rtpython::drawAddonPanels();  // Faz 4b: addon-registered rt.ui panels
     handleEditorShortcuts(ctx);
 
     // Host the dockable layout (no-op when docking_enabled is false).
@@ -3831,6 +3887,7 @@ void SceneUI::draw(UIContext& ctx)
     
 void SceneUI::handleEditorShortcuts(UIContext& ctx)
 {
+    if (rtpython::wantsInputCapture() || rtapi::renderOutputPending()) return;
     ImGuiIO& io = ImGui::GetIO();
     const bool block_history_actions =
         g_scene_loading_in_progress.load() ||
@@ -4175,6 +4232,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             closeOtherBottomPanels(1);
             focus_bottom_panel_next_frame = true;
         });
+
+        if (UIWidgets::HorizontalTab("Python", UIWidgets::IconType::Console, show_python_console)) {
+            show_python_console = !show_python_console;
+        }
         
         if (UIWidgets::HorizontalTab("Graph", UIWidgets::IconType::Graph, show_terrain_graph))
         {
@@ -5342,6 +5403,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
 
 void SceneUI::handleSceneInteraction(UIContext& ctx, bool gizmo_hit)
 {
+    if (rtpython::wantsInputCapture() || rtapi::renderOutputPending()) return;
     bool mesh_paint_locked = false;
     if (paint_mode_state.enabled && paint_mode_state.hasValidTarget()) {
         if (auto mesh_adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter())) {
@@ -7289,8 +7351,12 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
                 size_t vCount = pm->geometry->get_vertex_count();
                 const Vec3* origP = pm->geometry->get_positions_orig();
                 if (!origP) origP = pm->geometry->get_positions();
+                // Clamp to the buffer's REAL length: a regenerating sim surface can leave a
+                // stale, shorter P_orig behind while vertex_count already advanced, so iterating
+                // to vCount would read past the end (the observed access violation).
+                const size_t posCount = (std::min)(vCount, pm->geometry->get_positions_orig_count());
                 if (origP) {
-                    for (size_t v = 0; v < vCount; ++v) {
+                    for (size_t v = 0; v < posCount; ++v) {
                         Vec3 p = origP[v];
                         bb_min.x = fminf(bb_min.x, p.x);
                         bb_min.y = fminf(bb_min.y, p.y);
@@ -7315,6 +7381,9 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
                     bool anyFace = false;
                     for (size_t f = 0; f < nF; ++f) {
                         const uint32_t a = idx[f * 3 + 0], b = idx[f * 3 + 1], c = idx[f * 3 + 2];
+                        // Stale/short P_orig or matID buffer (regenerating surface) must not be
+                        // indexed past its real length.
+                        if (a >= posCount || b >= posCount || c >= posCount) continue;
                         if (origP &&
                             (origP[b] - origP[a]).cross(origP[c] - origP[a]).length_squared() <= 1e-12f) {
                             continue; // degenerate face — no visible surface, ignore its material
@@ -7504,7 +7573,6 @@ void SceneUI::invalidateCache() {
     selection_outline_frame_cache.clear();
     material_slots_cache.clear();
     picking_vertices_synced = false;
-    SCENE_LOG_INFO("Selection cache fully cleared and invalidated");
 }
 
 // Update bounding box for a specific object (after transform)
@@ -7772,9 +7840,13 @@ void SceneUI::drawRenderWindow(UIContext& ctx) {
         }
         else if (ctx.render_settings.is_final_render_mode) {
             if (UIWidgets::DangerButton("Stop", ImVec2(60, 0))) {
-                ctx.render_settings.is_final_render_mode = false;
-                extern std::atomic<bool> rendering_stopped_cpu; // Also stop loop!
-                rendering_stopped_cpu = true;
+                if (rtapi::renderOutputPending()) {
+                    (void)rtapi::cancelRender();
+                } else {
+                    ctx.render_settings.is_final_render_mode = false;
+                    extern std::atomic<bool> rendering_stopped_cpu; // Also stop loop!
+                    rendering_stopped_cpu = true;
+                }
             }
         } else {
             if (UIWidgets::PrimaryButton("Render", ImVec2(60, 0))) {
@@ -7901,7 +7973,11 @@ void SceneUI::drawRenderWindow(UIContext& ctx) {
     
     // Safety: If window is closed, ensure we exit final render mode
     if (!show_render_window && ctx.render_settings.is_final_render_mode) {
-        ctx.render_settings.is_final_render_mode = false;
+        if (rtapi::renderOutputPending()) {
+            (void)rtapi::cancelRender();
+        } else {
+            ctx.render_settings.is_final_render_mode = false;
+        }
     }
     
     // Sync F12 trigger from main loop
@@ -8351,21 +8427,17 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                 }
 
                 invalidateCache();
-                SCENE_LOG_INFO("[LoadDebug] invalidateCache finished");
                 active_model_path = g_ProjectManager.getProjectName();
 
                 scene_loading_progress = 92;
                 setSceneLoadingStage("Waiting for backend...");
                 if (ctx.backend_ptr) {
-                    SCENE_LOG_INFO("[LoadDebug] Waiting for backend completion...");
                     ctx.backend_ptr->waitForCompletion();
-                    SCENE_LOG_INFO("[LoadDebug] Backend completion wait finished");
                 }
 
                 scene_loading_progress = 93;
                 setSceneLoadingStage("Registering animations...");
                 if (!ctx.scene.animationDataList.empty()) {
-                    SCENE_LOG_INFO("[LoadDebug] Registering animations start...");
                     auto& animCtrl = AnimationController::getInstance();
                     animCtrl.registerClips(ctx.scene.animationDataList);
                     const auto& clips = animCtrl.getAllClips();
@@ -8375,7 +8447,6 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                     }
                     SCENE_LOG_INFO("[SceneUI] Registered " + std::to_string(ctx.scene.animationDataList.size()) + " animation clips after project load.");
                 }
-                SCENE_LOG_INFO("[LoadDebug] Animations registration finished");
 
                 g_ProjectManager.getProjectData().is_modified = false;
 
@@ -8385,21 +8456,17 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                 if (terrain) {
                     scene_loading_progress = 95;
                     setSceneLoadingStage("Evaluating terrain graph...");
-                    SCENE_LOG_INFO("[LoadDebug] Evaluating terrain graph...");
                     auto t_start = std::chrono::steady_clock::now();
                     terrainNodeGraph.evaluateTerrain(terrain, ctx.scene);
                     auto t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t_start).count();
                     SCENE_LOG_INFO("[Load] Terrain graph evaluated in " + std::to_string(t_ms) + " ms");
                 }
-                SCENE_LOG_INFO("[LoadDebug] Terrain evaluation finished");
 
                 scene_loading_progress = 98;
                 setSceneLoadingStage("Syncing volumes...");
                 hairUI.clear();
-                SCENE_LOG_INFO("[LoadDebug] Syncing VDB volumes to GPU...");
                 SceneUI::syncVDBVolumesToGPU(ctx);
-                SCENE_LOG_INFO("[LoadDebug] VDB volumes synced to GPU");
 
                 scene_loading_progress = 100;
                 setSceneLoadingStage("Finalizing...");

@@ -137,6 +137,9 @@ public:
 
     Renderer(int image_width, int image_height, int max_depth, int samples_per_pixel);
     void resetResolution(int w, int h);
+    // Drop CUDA/OIDN objects that are tied to the active render backend.
+    // CPU state and denoiser settings remain intact and rebuild lazily.
+    void releaseGpuDenoiserResources();
     ~Renderer();
    
     void precompute_halton(int max_halton_index);

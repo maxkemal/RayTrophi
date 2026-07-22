@@ -275,7 +275,6 @@ int VDBVolumeManager::loadVDB(const std::string& filepath) {
         // Add to list
         volumes.push_back(std::move(vol));
 
-        SCENE_LOG_INFO("VDB loaded successfully: " + filepath + " (ID: " + std::to_string(volumes.back().id) + ")");
 
         return volumes.back().id;
     }

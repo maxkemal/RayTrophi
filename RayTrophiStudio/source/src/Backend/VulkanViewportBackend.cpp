@@ -4094,6 +4094,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                        std::to_string(objects.size()));
         return;
     }
+    const auto rasterBuildStart = std::chrono::steady_clock::now();
 
     // Skip rebuild if raster cache is still valid for the current scene generation.
     {
@@ -5229,10 +5230,13 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
     {
         extern std::atomic<uint64_t> g_scene_geometry_generation;
         m_rasterBuiltGeometryGeneration = g_scene_geometry_generation.load(std::memory_order_acquire);
+        const auto rasterBuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - rasterBuildStart).count();
         SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry done: gen=" +
                        std::to_string(m_rasterBuiltGeometryGeneration) +
                        " meshes=" + std::to_string(m_rasterMeshes.size()) +
-                       " instances=" + std::to_string(m_rasterInstances.size()));
+                       " instances=" + std::to_string(m_rasterInstances.size()) +
+                       " (" + std::to_string(rasterBuildMs) + " ms)");
     }
 }
 

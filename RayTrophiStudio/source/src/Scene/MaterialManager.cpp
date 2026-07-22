@@ -130,8 +130,12 @@ static void preloadTexturesParallel(const std::unordered_map<std::string, Textur
                   return a.estimated_cost > b.estimated_cost;
               });
 
+    // Full hardware width: stb decode is pure CPU work and this pool runs only during
+    // project load (nothing else competes). The old cap of 8 left half a 16-thread
+    // machine idle and made texture decode the single largest block of openProject
+    // (931 ms of the 1336 ms bedroom load — 3.8 s of decode squeezed through 8 threads).
     const unsigned hw_threads = std::max(1u, std::thread::hardware_concurrency());
-    const size_t max_parallel = std::max<size_t>(1, std::min(static_cast<size_t>(hw_threads), size_t(8)));
+    const size_t max_parallel = std::max<size_t>(1, static_cast<size_t>(hw_threads));
 
     std::deque<std::future<TextureLoadResult>> active_jobs;
 

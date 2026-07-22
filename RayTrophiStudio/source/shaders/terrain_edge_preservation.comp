@@ -1,10 +1,7 @@
 // terrain_edge_preservation.comp
-// Vulkan port of edgePreservationKernel (erosion_kernels.cu). Prevents a hard
-// "wall" at the terrain boundary by blending each edge cell toward an inward
-// reference point (smoothstep-weighted by distance from the edge).
-// Note: the CUDA kernel takes an `originalHeights` buffer but never reads it —
-// the blend uses the (already-eroded) heightmap itself. Preserved verbatim here
-// for 1:1 parity; see project_terrain_erosion_gpu_migration memory for cleanup.
+// Vulkan port of edgePreservationKernel (erosion_kernels.cu). Blends the
+// simulation back to the authored pre-erosion border with a smooth transition.
+// The original-height buffer is intentionally read; no hidden sea level is assumed.
 #version 450
 layout(local_size_x = 256) in;
 
@@ -36,21 +33,8 @@ void main() {
         float t = float(distFromEdge) / float(pc.edgeFadeWidth);
         float smoothT = t * t * (3.0 - 2.0 * t);
 
-        int inwardX = x;
-        int inwardY = y;
-
-        if (x < pc.mapWidth / 2) inwardX = x + pc.edgeFadeWidth;
-        else inwardX = x - pc.edgeFadeWidth;
-
-        if (y < pc.mapHeight / 2) inwardY = y + pc.edgeFadeWidth;
-        else inwardY = y - pc.edgeFadeWidth;
-
-        inwardX = clamp(inwardX, 0, pc.mapWidth - 1);
-        inwardY = clamp(inwardY, 0, pc.mapHeight - 1);
-
-        int inwardIdx = inwardY * pc.mapWidth + inwardX;
-        float inwardHeight = heightmap[inwardIdx];
-
-        heightmap[idx] = heightmap[idx] * smoothT + inwardHeight * 0.4 * (1.0 - smoothT);
+        // Restore the authored border instead of pulling it toward an arbitrary
+        // fraction of an inward sample (which visibly collapsed tall terrains).
+        heightmap[idx] = originalHeights[idx] * (1.0 - smoothT) + heightmap[idx] * smoothT;
     }
 }

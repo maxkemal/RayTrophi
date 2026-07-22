@@ -1484,6 +1484,39 @@ void Renderer::resetResolution(int w, int h) {
     cpu_pixel_list_valid = false;
 }
 
+void Renderer::releaseGpuDenoiserResources() {
+    std::lock_guard<std::mutex> lock(oidnMutex);
+    // OIDN filters may reference backend-owned CUDA frame pointers. Release
+    // those bindings before the backend destroys its render buffers/context.
+    oidnFilter = oidn::FilterRef();
+    oidnColorBuffer = oidn::BufferRef();
+    oidnAlbedoBuffer = oidn::BufferRef();
+    oidnNormalBuffer = oidn::BufferRef();
+    oidnOutputBuffer = oidn::BufferRef();
+    oidnDevice = oidn::DeviceRef();
+    oidnInitialized = false;
+    oidnCudaInitialized = false;
+    oidnCudaOrdinal = -1;
+    oidnCudaStream = nullptr;
+    oidnGpuCachedColor = nullptr;
+    oidnGpuCachedAlbedo = nullptr;
+    oidnGpuCachedNormal = nullptr;
+    oidnGpuCachedQuality = -1;
+    oidnCachedWidth = 0;
+    oidnCachedHeight = 0;
+
+    if (oidnGpuOutputDevPtr) {
+        cudaFree(oidnGpuOutputDevPtr);
+        oidnGpuOutputDevPtr = nullptr;
+    }
+    oidnGpuOutputBytes = 0;
+    if (oidnGpuPackedDevPtr) {
+        cudaFree(oidnGpuPackedDevPtr);
+        oidnGpuPackedDevPtr = nullptr;
+    }
+    oidnGpuPackedBytes = 0;
+}
+
 
 Renderer::~Renderer()
 {
@@ -4092,6 +4125,13 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
 
     // Create a dedicated loader for this import to keep the aiScene alive
     auto newLoader = std::make_shared<AssimpLoader>();
+    {
+        // Import-flat: skip the per-face facade soup at the source. The collapse pass below
+        // would discard it anyway; the loader emits one representative facade per non-skinned
+        // mesh instead (O(meshes) instead of O(faces) allocations on import).
+        extern bool g_dense_mesh_as_hittable;
+        newLoader->emitSingleFacadePerMesh = g_dense_mesh_as_hittable;
+    }
     auto [loaded_triangles, loaded_animations, loaded_bone_data] = newLoader->loadModelToTriangles(model_path, nullptr, import_prefix);
 
     // Store the context
@@ -4385,16 +4425,19 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     //  Selectable BVH (Embree or in-house BVH)
     update_progress(60, "Building BVH structure...");
     SCENE_LOG_INFO("Building BVH structure...");
+    const auto bvhBuildStart = std::chrono::steady_clock::now();
     if (use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
         embree_bvh->build(scene.world.objects);
         scene.bvh = embree_bvh;
-        SCENE_LOG_INFO("[Embree] BVH structure built successfully.");
     }
     else {
         scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0f, 1.0f);
-        SCENE_LOG_INFO("[RayTrophi: RT_BVH]  structure built successfully.");
     }
+    const auto bvhBuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - bvhBuildStart).count();
+    SCENE_LOG_INFO(std::string(use_embree ? "[Embree]" : "[RayTrophi: RT_BVH]") +
+                   " BVH structure built successfully (" + std::to_string(bvhBuildMs) + " ms).");
 
     // ---- 3. GPU setup deferred ----
     // GPU backend build (OptiX GAS / Vulkan AS) is deferred to scene_loading_done in
@@ -7603,7 +7646,6 @@ void Renderer::uploadHairToGPU() {
 
         vulkanBackend->clearHairGeometry(noHair || !hasVisibleHair);
         if (noHair || !hasVisibleHair) {
-            SCENE_LOG_INFO("[Hair GPU/Vulkan] Uploaded 0 grooms, 0 strands (combined)");
             vulkanBackend->resetAccumulation();
             return;
         }
@@ -8817,7 +8859,6 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
     if (render_settings.use_vulkan) {
         extern bool g_vulkan_rebuild_pending;
         g_vulkan_rebuild_pending = true;
-        SCENE_LOG_INFO("[Vulkan] Geometry update requested - signaling heavy rebuild flag.");
         return;
     }
     if (!g_hasCUDA) return;
@@ -8826,9 +8867,6 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
 
     // Handle empty list
     size_t hairCount = hairSystem.getTotalStrandCount();
-    SCENE_LOG_INFO("[OptiX Rebuild] Start Rebuild. Objects: " + std::to_string(objects.size()) + 
-                   ", Hair Strands: " + std::to_string(hairCount));
-
     if (objects.empty() && hairCount == 0) {
         SCENE_LOG_INFO("[OptiX] Scene empty (No objects, no hair), clearing GPU scene");
         if (optix_gpu_ptr) optix_gpu_ptr->clearScene();

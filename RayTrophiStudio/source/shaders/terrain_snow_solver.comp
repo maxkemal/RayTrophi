@@ -1,0 +1,197 @@
+#version 450
+
+// Coupled Snow Layer Jacobi solver. Each invocation owns one destination cell;
+// all neighbor transfers are gathered from immutable input buffers, so results
+// are deterministic and require neither float atomics nor sweep-order updates.
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height; int mode; int stride;
+    int windDx; int windDy; int pad0; int pad1;
+    float cellSize; float maxDepth; float transportRate; float slipAngle;
+    float windStrength; float meltAmount; float solarMelt; float refreezeRate;
+    float slipTangent; float geometryMaxStep; float relaxationLimit; float geometryDepthCap;
+    float geometrySurfaceWindow; float padf0;
+} pc;
+
+layout(set=0, binding=0)  buffer BaseField      { float base[]; };
+layout(set=0, binding=1)  buffer SnowInField    { float snowIn[]; };
+layout(set=0, binding=2)  buffer SnowOutField   { float snowOut[]; };
+layout(set=0, binding=3)  buffer ColdField      { float cold[]; };
+layout(set=0, binding=4)  buffer SolarField     { float solar[]; };
+layout(set=0, binding=5)  buffer WindField      { float windExposure[]; };
+layout(set=0, binding=6)  buffer IceInField     { float iceIn[]; };
+layout(set=0, binding=7)  buffer IceOutField    { float iceOut[]; };
+layout(set=0, binding=8)  buffer WaterInField   { float waterIn[]; };
+layout(set=0, binding=9)  buffer WaterOutField  { float waterOut[]; };
+layout(set=0, binding=10) buffer TraceField     { float runoffTrace[]; };
+layout(set=0, binding=11) buffer AvalancheField { float avalanche[]; };
+layout(set=0, binding=12) buffer GeometryIn     { float geometryIn[]; };
+layout(set=0, binding=13) buffer GeometryOut    { float geometryOut[]; };
+
+const int DX[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int DY[8] = int[8](-1,-1,-1,  0, 0,  1, 1, 1);
+const float DIST[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                1.0, 1.41421356, 1.0, 1.41421356);
+
+float safeValue(float v) { return (isnan(v) || isinf(v)) ? 0.0 : v; }
+
+struct SnowOutflow {
+    float weights[8];
+    float weightSum;
+    float moved;
+    float remaining;
+    float windMoved;
+    float avalancheActive;
+};
+
+SnowOutflow snowOutflow(int sx, int sy) {
+    SnowOutflow o;
+    o.weightSum = 0.0; o.moved = 0.0; o.windMoved = 0.0; o.avalancheActive = 0.0;
+    int index = sy * pc.width + sx;
+    float sourceDepth = max(snowIn[index], 0.0);
+    float sourceSurface = base[index] + sourceDepth;
+    float steepestDegrees = 0.0;
+    for (int d=0; d<8; ++d) {
+        o.weights[d] = 0.0;
+        int nx = sx + DX[d] * pc.stride;
+        int ny = sy + DY[d] * pc.stride;
+        if (nx < 0 || nx >= pc.width || ny < 0 || ny >= pc.height) continue;
+        int n = ny * pc.width + nx;
+        float drop = sourceSurface - (base[n] + snowIn[n]);
+        if (drop <= 0.0) continue;
+        float run = max(pc.cellSize * DIST[d] * float(pc.stride), 1e-6);
+        float degrees = atan(drop / run) * 57.2957795;
+        o.weights[d] = drop / run;
+        o.weightSum += o.weights[d];
+        steepestDegrees = max(steepestDegrees, degrees);
+    }
+    float avalancheExcess = steepestDegrees > pc.slipAngle
+        ? clamp((steepestDegrees - pc.slipAngle) / max(90.0 - pc.slipAngle, 1.0), 0.0, 1.0) : 0.0;
+    float settling = o.weightSum > 0.0
+        ? clamp(o.weightSum * pc.cellSize * float(pc.stride) / (pc.maxDepth * 8.0 + 1e-6), 0.0, 1.0) : 0.0;
+    float movedFraction = clamp(pc.transportRate * (avalancheExcess + settling * 0.16), 0.0, 0.65);
+    o.moved = sourceDepth * movedFraction;
+    o.remaining = sourceDepth - o.moved;
+    o.avalancheActive = avalancheExcess > 0.0 ? 1.0 : 0.0;
+    if (o.weightSum <= 0.0 || o.moved <= 0.0) { o.remaining += o.moved; o.moved = 0.0; }
+    int tx = sx + pc.windDx * pc.stride;
+    int ty = sy + pc.windDy * pc.stride;
+    if ((pc.windDx != 0 || pc.windDy != 0) && tx >= 0 && tx < pc.width && ty >= 0 && ty < pc.height) {
+        o.windMoved = o.remaining * clamp(pc.windStrength * (0.025 + windExposure[index] * 0.22), 0.0, 0.30);
+        o.remaining -= o.windMoved;
+    }
+    return o;
+}
+
+struct CreepOutflow { float excess[8]; float excessSum; float moved; float keep; };
+CreepOutflow creepOutflow(int sx, int sy) {
+    CreepOutflow o; o.excessSum = 0.0;
+    int index = sy * pc.width + sx;
+    float sourceDepth = clamp(snowIn[index], 0.0, pc.maxDepth);
+    float sourceSurface = base[index] + sourceDepth;
+    float maximumExcess = 0.0;
+    for (int d=0; d<8; ++d) {
+        o.excess[d] = 0.0;
+        int nx=sx+DX[d], ny=sy+DY[d];
+        if (nx<0 || nx>=pc.width || ny<0 || ny>=pc.height) continue;
+        int n=ny*pc.width+nx;
+        float allowedDrop = pc.slipTangent * pc.cellSize * DIST[d];
+        o.excess[d] = max(sourceSurface - (base[n] + snowIn[n]) - allowedDrop, 0.0);
+        o.excessSum += o.excess[d]; maximumExcess=max(maximumExcess,o.excess[d]);
+    }
+    float instability=clamp(maximumExcess/max(pc.slipTangent*pc.cellSize,0.01),0.0,1.0);
+    float mobility=clamp(0.16+pc.meltAmount*0.34+sourceDepth/pc.maxDepth*0.16,0.16,0.66);
+    o.moved=o.excessSum>1e-8 ? sourceDepth*mobility*instability : 0.0;
+    o.keep=sourceDepth-o.moved; return o;
+}
+
+struct RunoffOutflow { float weights[8]; float weightSum; float mobile; float keep; };
+RunoffOutflow runoffOutflow(int sx, int sy) {
+    RunoffOutflow o; o.weightSum=0.0;
+    int index=sy*pc.width+sx;
+    float sourceWater=max(waterIn[index],0.0);
+    float sourceSurface=base[index]+iceIn[index]+sourceWater*0.10;
+    for (int d=0; d<8; ++d) {
+        o.weights[d]=0.0; int nx=sx+DX[d], ny=sy+DY[d];
+        if(nx<0||nx>=pc.width||ny<0||ny>=pc.height) continue;
+        int n=ny*pc.width+nx;
+        float drop=sourceSurface-(base[n]+iceIn[n]+waterIn[n]*0.10);
+        if(drop>0.0){o.weights[d]=drop/DIST[d];o.weightSum+=o.weights[d];}
+    }
+    o.mobile=o.weightSum>0.0?sourceWater*0.72:0.0; o.keep=sourceWater-o.mobile; return o;
+}
+
+void main() {
+    int id=int(gl_GlobalInvocationID.x), total=pc.width*pc.height;
+    if(id>=total) return;
+    int x=id%pc.width, y=id/pc.width;
+
+    if(pc.mode==0){
+        SnowOutflow own=snowOutflow(x,y); float depth=own.remaining, avalancheIn=0.0;
+        for(int d=0;d<8;++d){int sx=x-DX[d]*pc.stride,sy=y-DY[d]*pc.stride;
+            if(sx<0||sx>=pc.width||sy<0||sy>=pc.height)continue; SnowOutflow s=snowOutflow(sx,sy);
+            if(s.weights[d]<=0.0||s.moved<=0.0)continue; float transfer=s.moved*(s.weights[d]/s.weightSum);
+            depth+=transfer; if(s.avalancheActive>0.0)avalancheIn+=transfer;}
+        if(pc.windDx!=0||pc.windDy!=0){int ux=x-pc.windDx*pc.stride,uy=y-pc.windDy*pc.stride;
+            if(ux>=0&&ux<pc.width&&uy>=0&&uy<pc.height)depth+=snowOutflow(ux,uy).windMoved;}
+        avalanche[id]+=avalancheIn; snowOut[id]=clamp(safeValue(depth),0.0,pc.maxDepth); return;
+    }
+    if(pc.mode==1){
+        float weighted=snowIn[id]*4.0, weightSum=4.0;
+        for(int d=0;d<8;++d){int nx=x+DX[d],ny=y+DY[d];if(nx<0||nx>=pc.width||ny<0||ny>=pc.height)continue;
+            int n=ny*pc.width+nx;if(abs(base[n]-base[id])>pc.relaxationLimit)continue;
+            float w=DIST[d]>1.0?0.70:1.0;weighted+=snowIn[n]*w;weightSum+=w;}
+        snowOut[id]=clamp(snowIn[id]*0.60+(weighted/weightSum)*0.40,0.0,pc.maxDepth);return;
+    }
+    if(pc.mode==2){
+        float warmth=1.0-cold[id], thermal=pc.meltAmount*(0.10+warmth*0.90);
+        float solarClear=clamp(pc.solarMelt+pc.meltAmount*0.70,0.0,1.0);
+        float meltFraction=clamp(1.0-(1.0-thermal)*(1.0-solar[id]*solarClear),0.0,1.0);
+        float melted=snowIn[id]*meltFraction;
+        float suppression=clamp(solar[id]+windExposure[id]*pc.windStrength,0.0,1.0);
+        float refrozen=melted*cold[id]*pc.refreezeRate*(1.0-suppression);
+        float remaining=snowIn[id]-melted;float compacted=remaining*cold[id]*pc.refreezeRate*0.12;
+        snowIn[id]=max(remaining-compacted,0.0);iceIn[id]=refrozen+compacted;waterIn[id]=melted-refrozen;return;
+    }
+    if(pc.mode==3){
+        CreepOutflow own=creepOutflow(x,y);float depth=own.keep;
+        for(int d=0;d<8;++d){int sx=x-DX[d],sy=y-DY[d];if(sx<0||sx>=pc.width||sy<0||sy>=pc.height)continue;
+            CreepOutflow s=creepOutflow(sx,sy);if(s.excess[d]>0.0&&s.moved>0.0)depth+=s.moved*(s.excess[d]/s.excessSum);}
+        snowOut[id]=clamp(safeValue(depth),0.0,pc.maxDepth);return;
+    }
+    if(pc.mode==4){
+        float clear=clamp(solar[id]*clamp(pc.solarMelt+pc.meltAmount*0.70,0.0,1.0)+windExposure[id]*pc.windStrength,0.0,1.0);
+        // Main melt already applied the full directional solar response. This
+        // cleanup only removes snow reintroduced onto exposed faces by creep.
+        float released=snowIn[id]*clear*0.35;snowIn[id]-=released;waterIn[id]+=released;return;
+    }
+    if(pc.mode==5){
+        RunoffOutflow own=runoffOutflow(x,y);float incoming=0.0;
+        for(int d=0;d<8;++d){int sx=x-DX[d],sy=y-DY[d];if(sx<0||sx>=pc.width||sy<0||sy>=pc.height)continue;
+            RunoffOutflow s=runoffOutflow(sx,sy);if(s.weights[d]>0.0&&s.mobile>0.0)incoming+=s.mobile*(s.weights[d]/s.weightSum);}
+        float exposure=clamp(solar[id]+windExposure[id]*pc.windStrength,0.0,1.0);
+        float frozen=incoming*cold[id]*pc.refreezeRate*0.08*(1.0-exposure);
+        iceOut[id]=clamp(safeValue(iceIn[id]+frozen),0.0,pc.maxDepth);
+        waterOut[id]=safeValue(own.keep+incoming-frozen);if(incoming>0.0)runoffTrace[id]+=incoming;return;
+    }
+    if(pc.mode==6){
+        // Relax the physical snow SURFACE, not depth alone. Smoothing depth
+        // simply copies every ground bump upward; smoothing base+depth lets
+        // snow fill small hollows and bury micro-relief like a real pack.
+        float ownSurface=base[id]+geometryIn[id];
+        float weighted=ownSurface*4.0,weightSum=4.0;
+        float minSurface=base[id],maxSurface=base[id]+pc.geometryDepthCap;
+        for(int d=0;d<8;++d){int nx=x+DX[d],ny=y+DY[d];if(nx<0||nx>=pc.width||ny<0||ny>=pc.height)continue;
+            int n=ny*pc.width+nx;if(abs(base[n]-base[id])>pc.geometrySurfaceWindow)continue;
+            float neighborSurface=base[n]+geometryIn[n];float step=pc.geometryMaxStep*DIST[d];
+            minSurface=max(minSurface,neighborSurface-step);maxSurface=min(maxSurface,neighborSurface+step);
+            float w=DIST[d]>1.0?0.65:1.0;weighted+=neighborSurface*w;weightSum+=w;}
+        if(minSurface>maxSurface){float mid=(minSurface+maxSurface)*0.5;minSurface=mid;maxSurface=mid;}
+        float relaxedSurface=ownSurface*0.35+(weighted/weightSum)*0.65;
+        geometryOut[id]=clamp(clamp(relaxedSurface,minSurface,maxSurface)-base[id],0.0,pc.geometryDepthCap);return;
+    }
+    if(pc.mode==7){
+        geometryIn[id]=clamp(safeValue(snowIn[id]+iceIn[id]*0.92),0.0,pc.geometryDepthCap);return;
+    }
+}

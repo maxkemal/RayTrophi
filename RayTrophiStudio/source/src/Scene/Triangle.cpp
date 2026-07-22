@@ -134,15 +134,22 @@ void Triangle::setMaterial(const std::shared_ptr<Material>& mat) {
 //     layout so active-set switching (applyUVSet) round-trips losslessly.
 void Triangle::setUVCoordinates(const Vec2& uv0, const Vec2& uv1, const Vec2& uv2) {
     if (parentMesh && parentMesh->geometry) {
-        Vec2* uvs = parentMesh->geometry->get_attribute_data_mut<Vec2>("uv");
-        if (uvs) {
-            uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
-            uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
-            uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
-            uvs[i0] = uv0;
-            uvs[i1] = uv1;
-            uvs[i2] = uv2;
-            return;
+        const auto& geom = *parentMesh->geometry;
+        const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+        if (idxOffset + 2 < geom.indices.size()) {
+            Vec2* uvs = parentMesh->geometry->get_attribute_data_mut<Vec2>("uv");
+            if (uvs) {
+                const size_t vCount = geom.get_vertex_count();
+                uint32_t i0 = geom.indices[idxOffset + 0];
+                uint32_t i1 = geom.indices[idxOffset + 1];
+                uint32_t i2 = geom.indices[idxOffset + 2];
+                if (i0 < vCount && i1 < vCount && i2 < vCount) {
+                    uvs[i0] = uv0;
+                    uvs[i1] = uv1;
+                    uvs[i2] = uv2;
+                    return;
+                }
+            }
         }
     }
     t0 = uv0;
@@ -155,12 +162,19 @@ void Triangle::setUVCoordinates(const Vec2& uv0, const Vec2& uv1, const Vec2& uv
 
 std::tuple<Vec2, Vec2, Vec2> Triangle::getUVCoordinates() const {
     if (parentMesh && parentMesh->geometry) {
-        const Vec2* uvs = parentMesh->geometry->get_attribute_data<Vec2>("uv");
-        if (uvs) {
-            uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
-            uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
-            uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
-            return std::make_tuple(uvs[i0], uvs[i1], uvs[i2]);
+        const auto& geom = *parentMesh->geometry;
+        const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+        if (idxOffset + 2 < geom.indices.size()) {
+            const Vec2* uvs = geom.get_attribute_data<Vec2>("uv");
+            if (uvs) {
+                const size_t vCount = geom.get_vertex_count();
+                uint32_t i0 = geom.indices[idxOffset + 0];
+                uint32_t i1 = geom.indices[idxOffset + 1];
+                uint32_t i2 = geom.indices[idxOffset + 2];
+                if (i0 < vCount && i1 < vCount && i2 < vCount) {
+                    return std::make_tuple(uvs[i0], uvs[i1], uvs[i2]);
+                }
+            }
         }
     }
     return std::make_tuple(t0, t1, t2);
@@ -172,15 +186,22 @@ void Triangle::setUVSetCoordinates(size_t set_index, const Vec2& uv0, const Vec2
         if (!parentMesh->geometry->has_attribute(attrName)) {
             parentMesh->geometry->add_attribute<Vec2>(attrName);
         }
-        Vec2* uvs = parentMesh->geometry->get_attribute_data_mut<Vec2>(attrName);
-        if (uvs) {
-            uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
-            uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
-            uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
-            uvs[i0] = uv0;
-            uvs[i1] = uv1;
-            uvs[i2] = uv2;
-            return;
+        const auto& geom = *parentMesh->geometry;
+        const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+        if (idxOffset + 2 < geom.indices.size()) {
+            Vec2* uvs = parentMesh->geometry->get_attribute_data_mut<Vec2>(attrName);
+            if (uvs) {
+                const size_t vCount = geom.get_vertex_count();
+                uint32_t i0 = geom.indices[idxOffset + 0];
+                uint32_t i1 = geom.indices[idxOffset + 1];
+                uint32_t i2 = geom.indices[idxOffset + 2];
+                if (i0 < vCount && i1 < vCount && i2 < vCount) {
+                    uvs[i0] = uv0;
+                    uvs[i1] = uv1;
+                    uvs[i2] = uv2;
+                    return;
+                }
+            }
         }
     }
     if (set_index == 0 && (!uv_sets || uv_sets->empty())) {
@@ -207,12 +228,19 @@ void Triangle::setUVSetCoordinates(size_t set_index, const Vec2& uv0, const Vec2
 std::tuple<Vec2, Vec2, Vec2> Triangle::getUVSetCoordinates(size_t set_index) const {
     if (parentMesh && parentMesh->geometry) {
         std::string attrName = (set_index == 0) ? "uv" : "uv" + std::to_string(set_index);
-        const Vec2* uvs = parentMesh->geometry->get_attribute_data<Vec2>(attrName);
-        if (uvs) {
-            uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
-            uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
-            uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
-            return std::make_tuple(uvs[i0], uvs[i1], uvs[i2]);
+        const auto& geom = *parentMesh->geometry;
+        const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+        if (idxOffset + 2 < geom.indices.size()) {
+            const Vec2* uvs = geom.get_attribute_data<Vec2>(attrName);
+            if (uvs) {
+                const size_t vCount = geom.get_vertex_count();
+                uint32_t i0 = geom.indices[idxOffset + 0];
+                uint32_t i1 = geom.indices[idxOffset + 1];
+                uint32_t i2 = geom.indices[idxOffset + 2];
+                if (i0 < vCount && i1 < vCount && i2 < vCount) {
+                    return std::make_tuple(uvs[i0], uvs[i1], uvs[i2]);
+                }
+            }
         }
     }
     if (!uv_sets || uv_sets->empty()) {
@@ -245,16 +273,23 @@ size_t Triangle::getUVSetCount() const {
 void Triangle::applyUVSet(size_t set_index) {
     if (parentMesh && parentMesh->geometry) {
         std::string attrName = (set_index == 0) ? "uv" : "uv" + std::to_string(set_index);
-        const Vec2* srcUvs = parentMesh->geometry->get_attribute_data<Vec2>(attrName);
-        Vec2* dstUvs = parentMesh->geometry->get_attribute_data_mut<Vec2>("uv");
-        if (srcUvs && dstUvs) {
-            uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
-            uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
-            uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
-            dstUvs[i0] = srcUvs[i0];
-            dstUvs[i1] = srcUvs[i1];
-            dstUvs[i2] = srcUvs[i2];
-            return;
+        const auto& geom = *parentMesh->geometry;
+        const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+        if (idxOffset + 2 < geom.indices.size()) {
+            const Vec2* srcUvs = geom.get_attribute_data<Vec2>(attrName);
+            Vec2* dstUvs = parentMesh->geometry->get_attribute_data_mut<Vec2>("uv");
+            if (srcUvs && dstUvs) {
+                const size_t vCount = geom.get_vertex_count();
+                uint32_t i0 = geom.indices[idxOffset + 0];
+                uint32_t i1 = geom.indices[idxOffset + 1];
+                uint32_t i2 = geom.indices[idxOffset + 2];
+                if (i0 < vCount && i1 < vCount && i2 < vCount) {
+                    dstUvs[i0] = srcUvs[i0];
+                    dstUvs[i1] = srcUvs[i1];
+                    dstUvs[i2] = srcUvs[i2];
+                    return;
+                }
+            }
         }
     }
     if (!uv_sets || uv_sets->empty()) {
@@ -283,7 +318,7 @@ void Triangle::set_normals(const Vec3& normal0, const Vec3& normal1, const Vec3&
 // ============================================================================
 
 void Triangle::set_transform(const Matrix4x4& t) {
-    auto handle = getTransformHandle();
+    Transform* handle = getTransformPtr();
     if (handle) {
         handle->setCurrent(t);
     }
@@ -295,7 +330,7 @@ void Triangle::updateTriangleTransform(Triangle& triangle, const Matrix4x4& tran
 }
 
 Matrix4x4 Triangle::getTransformMatrix() const {
-    auto handle = getTransformHandle();
+    Transform* handle = getTransformPtr();
     if (handle) {
         return handle->getFinal();
     }
@@ -349,11 +384,13 @@ void Triangle::initializeSkinData() {
 }
 
 bool Triangle::hasAnySkinWeights() const {
-    if (parentMesh && parentMesh->geometry && !parentMesh->geometry->skin_weights.empty()) {
+    const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+    if (parentMesh && parentMesh->geometry && !parentMesh->geometry->skin_weights.empty() &&
+        idxOffset + 2 < parentMesh->geometry->indices.size()) {
         size_t vCount = parentMesh->geometry->get_vertex_count();
-        uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
-        uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
-        uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
+        uint32_t i0 = parentMesh->geometry->indices[idxOffset + 0];
+        uint32_t i1 = parentMesh->geometry->indices[idxOffset + 1];
+        uint32_t i2 = parentMesh->geometry->indices[idxOffset + 2];
         if (i0 < vCount && i1 < vCount && i2 < vCount) {
             if (!parentMesh->geometry->skin_weights[i0].empty() ||
                 !parentMesh->geometry->skin_weights[i1].empty() ||
@@ -385,9 +422,16 @@ void Triangle::setSkinBoneWeights(int vertexIndex, const std::vector<std::pair<i
 const std::vector<std::pair<int, float>>& Triangle::getSkinBoneWeights(int vertexIndex) const {
     static const std::vector<std::pair<int, float>> empty;
     if (parentMesh && parentMesh->geometry && !parentMesh->geometry->skin_weights.empty()) {
-        uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + vertexIndex];
-        if (globalIndex < parentMesh->geometry->skin_weights.size()) {
-            return parentMesh->geometry->skin_weights[globalIndex];
+        // Bound-check `indices` before dereferencing: a Triangle can outlive a
+        // teardown/rebuild that emptied its geometry's index buffer while leaving
+        // skin_weights populated (surfaced by rapid script-driven create/delete).
+        // Mirrors the guard the UV accessors already use.
+        const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(vertexIndex);
+        if (vertexIndex >= 0 && vertexIndex < 3 && idxOffset < parentMesh->geometry->indices.size()) {
+            uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+            if (globalIndex < parentMesh->geometry->skin_weights.size()) {
+                return parentMesh->geometry->skin_weights[globalIndex];
+            }
         }
     }
     if (skinData && vertexIndex >= 0 && vertexIndex < 3) {
@@ -408,8 +452,10 @@ std::vector<Vec3>& Triangle::getOriginalVertexPositions() {
 }
 
 Vec3 Triangle::apply_bone_to_vertex(int vi, const std::vector<Matrix4x4>& finalBoneMatrices) const {
-    if (parentMesh && parentMesh->geometry && !parentMesh->geometry->skin_weights.empty()) {
-        uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + vi];
+    const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(vi);
+    if (parentMesh && parentMesh->geometry && !parentMesh->geometry->skin_weights.empty() &&
+        vi >= 0 && vi < 3 && idxOffset < parentMesh->geometry->indices.size()) {
+        uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
         if (globalIndex < parentMesh->geometry->skin_weights.size()) {
             const auto& boneWeights = parentMesh->geometry->skin_weights[globalIndex];
             if (boneWeights.empty()) return getVertexPosition(vi);
@@ -498,7 +544,10 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
         }
         
         // 3. Perform fast mesh-level parallel skinning
-        size_t vCount = parentMesh->geometry->get_vertex_count();
+        // Clamp to skin_weights.size(): the loop below indexes skin_weights[v] directly
+        // by vertex, so a mismatched (mid-rebuild) buffer must never over-read.
+        size_t vCount = (std::min)(parentMesh->geometry->get_vertex_count(),
+                                   parentMesh->geometry->skin_weights.size());
         const Vec3* origP = parentMesh->geometry->get_positions_orig();
         if (!origP) origP = parentMesh->geometry->get_positions();
         const Vec3* origN = parentMesh->geometry->get_normals_orig();
@@ -772,15 +821,18 @@ void Triangle::updateTransformedVertices() {
 
 void Triangle::updateTransformedVerticesWith(const Matrix4x4& finalTransform,
                                              const Matrix4x4& normalTransform) {
-    if (parentMesh && parentMesh->geometry) {
-        uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
-        uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
-        uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
+    const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+    if (parentMesh && parentMesh->geometry &&
+        idxOffset + 2 < parentMesh->geometry->indices.size()) {
+        const size_t vCount = parentMesh->geometry->get_vertex_count();
+        uint32_t i0 = parentMesh->geometry->indices[idxOffset + 0];
+        uint32_t i1 = parentMesh->geometry->indices[idxOffset + 1];
+        uint32_t i2 = parentMesh->geometry->indices[idxOffset + 2];
 
         Vec3* positions = parentMesh->geometry->get_positions_mut();
         Vec3* normals = parentMesh->geometry->get_normals_mut();
 
-        if (positions && normals) {
+        if (positions && normals && i0 < vCount && i1 < vCount && i2 < vCount) {
             positions[i0] = finalTransform.transform_point(getOriginalVertexPosition(0));
             positions[i1] = finalTransform.transform_point(getOriginalVertexPosition(1));
             positions[i2] = finalTransform.transform_point(getOriginalVertexPosition(2));
@@ -949,8 +1001,14 @@ const Vec3& Triangle::getOriginalVertexPosition(int i) const {
         }
         const Vec3* origPositions = parentMesh->geometry->get_positions_orig();
         if (origPositions) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            return origPositions[globalIndex];
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < geom.indices.size()) {
+                uint32_t globalIndex = geom.indices[idxOffset];
+                if (globalIndex < geom.get_vertex_count()) {
+                    return origPositions[globalIndex];
+                }
+            }
         }
     }
     auto origGeom = getOriginalGeometry();
@@ -985,9 +1043,15 @@ void Triangle::setOriginalVertexPosition(int i, const Vec3& pos) {
         }
         Vec3* origPositions = parentMesh->geometry->get_attribute_data_mut<Vec3>("P_orig");
         if (origPositions) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            origPositions[globalIndex] = pos;
-            return;
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < geom.indices.size()) {
+                uint32_t globalIndex = geom.indices[idxOffset];
+                if (globalIndex < geom.get_vertex_count()) {
+                    origPositions[globalIndex] = pos;
+                    return;
+                }
+            }
         }
     }
     auto origGeom = getOriginalGeometry();
@@ -1025,8 +1089,14 @@ const Vec3& Triangle::getOriginalVertexNormal(int i) const {
         }
         const Vec3* origNormals = parentMesh->geometry->get_normals_orig();
         if (origNormals) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            return origNormals[globalIndex];
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < geom.indices.size()) {
+                uint32_t globalIndex = geom.indices[idxOffset];
+                if (globalIndex < geom.get_vertex_count()) {
+                    return origNormals[globalIndex];
+                }
+            }
         }
     }
     auto origGeom = getOriginalGeometry();
@@ -1054,9 +1124,15 @@ void Triangle::setOriginalVertexNormal(int i, const Vec3& normal) {
         }
         Vec3* origNormals = parentMesh->geometry->get_attribute_data_mut<Vec3>("N_orig");
         if (origNormals) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            origNormals[globalIndex] = normal;
-            return;
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < geom.indices.size()) {
+                uint32_t globalIndex = geom.indices[idxOffset];
+                if (globalIndex < geom.get_vertex_count()) {
+                    origNormals[globalIndex] = normal;
+                    return;
+                }
+            }
         }
     }
     auto origGeom = getOriginalGeometry();
@@ -1094,9 +1170,12 @@ Vec3& Triangle::v_orig(int i) {
             }
         }
         Vec3* origPositions = parentMesh->geometry->get_attribute_data_mut<Vec3>("P_orig");
-        if (origPositions) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            return origPositions[globalIndex];
+        const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+        if (origPositions && idxOffset < parentMesh->geometry->indices.size()) {
+            uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+            if (globalIndex < parentMesh->geometry->get_vertex_count()) {
+                return origPositions[globalIndex];
+            }
         }
     }
     auto origGeom = getOriginalGeometry();
@@ -1132,9 +1211,12 @@ Vec3& Triangle::v_orig_norm(int i) {
             }
         }
         Vec3* origNormals = parentMesh->geometry->get_attribute_data_mut<Vec3>("N_orig");
-        if (origNormals) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            return origNormals[globalIndex];
+        const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+        if (origNormals && idxOffset < parentMesh->geometry->indices.size()) {
+            uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+            if (globalIndex < parentMesh->geometry->get_vertex_count()) {
+                return origNormals[globalIndex];
+            }
         }
     }
     auto origGeom = getOriginalGeometry();

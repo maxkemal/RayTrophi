@@ -374,7 +374,15 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
             float terrainY = sampleTerrainHeight(centerPos);
             centerY = terrainY + river->bankHeight;
         }
-        
+
+        // A section counts as carved when the bed sits meaningfully below the
+        // water level; only then is terrain distance the true water column and
+        // the shader can trust the depth attribute to hit zero at the waterline.
+        const bool terrainActive = TerrainManager::getInstance().hasActiveTerrain();
+        const float centerTerrainY = terrainActive ? sampleTerrainHeight(centerPos) : centerY;
+        const bool carvedSection = terrainActive && waterDepth > 0.001f &&
+            (centerY - centerTerrainY) > 0.35f * waterDepth;
+
         for (int j = 0; j <= widthSegs; ++j) {
             float widthT = (float)j / (float)widthSegs; // 0.0 to 1.0 (Left to Right)
             float offsetMult = (widthT - 0.5f) * 2.0f;  // -1.0 to 1.0
@@ -450,15 +458,35 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
             }
             
             // -----------------------------------------------------------------
-            
+
+            // ── Shore skirt ──────────────────────────────────────────────────
+            const float vertexTerrainY = terrainActive
+                ? sampleTerrainHeight(vertPos) : finalY;
+            if (terrainActive && (j == 0 || j == widthSegs)) {
+                // Bury the ribbon edge under the bank so the visible waterline
+                // is the terrain intersection curve, not the mesh border. When
+                // the bank sits below the surface (edge floating in air), drop
+                // the edge just beneath the terrain instead, capped so the
+                // surface never folds into a deep curtain.
+                const float bankEmbed = std::clamp(waterDepth * 0.4f, 0.04f, 0.35f);
+                const float maxDrop = (std::max)(waterDepth, 0.3f);
+                const float buried = vertexTerrainY - bankEmbed;
+                if (buried < finalY) finalY = (std::max)(buried, centerY - maxDrop);
+            }
+
             vertPos.y = finalY;
-            
+
             // Normal will be recalculated in smoothing step, so placeholder is fine
             Vec3 vertNormal(0, 1, 0);
-            
+
             Vec2 uv(uCoord, widthT);
-            const float crossSectionDepth = waterDepth *
+            float crossSectionDepth = waterDepth *
                 (1.0f - std::pow((std::min)(std::fabs(offsetMult), 1.0f), 4.0f));
+            if (carvedSection) {
+                // True water column above the carved bed: reaches zero exactly
+                // at the waterline so the shader can fade the interface out.
+                crossSectionDepth = (std::max)(centerY - vertexTerrainY, 0.0f);
+            }
             grid[i][j] = {vertPos, vertNormal, uv, flowDirection, crossSectionDepth,
                           hydraulic.flowSpeed, hydraulic.discharge, hydraulic.froude,
                           hydraulic.foamPotential, accumulatedLength, widthT,
@@ -619,10 +647,15 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
     if (existingSurf) {
         // UPDATE Existing Surface
         existingSurf->name = river->name;
-        existingSurf->params = river->waterParams;
+        // The linked WaterSurface is the live material authority. Its complete
+        // preset/custom payload may have been edited from Water UI and is also
+        // restored before rivers during project load. Pull it into the spline
+        // instead of overwriting it with legacy/incomplete river defaults.
+        river->waterParams = existingSurf->params;
         existingSurf->material_id = waterMatID;
         existingSurf->flatMesh = river->flatMesh;
         existingSurf->type = WaterSurface::Type::River;
+        waterMgr.syncSurfaceMaterial(existingSurf);
         
         river->waterSurfaceId = existingSurf->id;
         

@@ -57,4 +57,4 @@ struct MeshProfileTimer {
 
 #define MP_CONCAT2(a, b) a##b
 #define MP_CONCAT(a, b) MP_CONCAT2(a, b)
-#define MESH_PROFILE_SCOPE(tag) MeshProfileTimer MP_CONCAT(_meshprof_, __LINE__)(tag)
+#define MESH_PROFILE_SCOPE(tag) ((void)0)

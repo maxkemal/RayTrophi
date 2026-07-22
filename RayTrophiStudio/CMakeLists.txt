@@ -3,6 +3,17 @@ project(RayTrophi VERSION 1.0 LANGUAGES CXX CUDA)
 
 option(RAYTROPHI_ENABLE_OZZ "Enable future Ozz animation integration hooks" ON)
 
+# Embedded scripting. The repository-local vcpkg port currently pins Python
+# 3.11 and pybind11 2.13; scripts/install_python_scripting_deps.ps1 installs
+# both into vcpkg/installed/x64-windows.
+set(Python3_ROOT_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/tools/python3")
+find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter Development)
+find_package(pybind11 CONFIG REQUIRED PATHS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/share/pybind11")
+find_package(OpenSSL CONFIG REQUIRED PATHS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/share/openssl")
+
 set(RAYTROPHI_XATLAS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/external/xatlas" CACHE PATH "Path to vendored xatlas source directory")
 set(RAYTROPHI_HAS_XATLAS OFF)
 if(NOT (EXISTS "${RAYTROPHI_XATLAS_ROOT}/xatlas.h" AND EXISTS "${RAYTROPHI_XATLAS_ROOT}/xatlas.cpp"))
@@ -122,6 +133,7 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/Stylize/*.cpp"
     "source/src/Viewport/*.cpp"
     "source/src/MeshEdit/*.cpp"
+    "source/src/Api/*.cpp"
 )
 list(APPEND SOURCES_CPP ${SOURCES_CPP_ROOT})
 list(APPEND SOURCES_CPP "source/src/Render/FoliageWindSystem.cpp")
@@ -272,7 +284,7 @@ set(PTX_OUTPUTS
     "${PTX_OUTPUT_foliage}"
 )
 add_executable(${PROJECT_NAME} ${ALL_SOURCES} ${PTX_OUTPUTS})
-set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "RayTrophi Studio")
+set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "RayTrophiStudio")
 
 if(RAYTROPHI_ENABLE_OZZ)
     target_compile_definitions(${PROJECT_NAME} PRIVATE RAYTROPHI_ENABLE_OZZ=1)
@@ -360,8 +372,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     CUDA::cuda_driver
     CUDA::cufft           # cuFFT for FFT-based pressure solver
     Vulkan::Vulkan
-    kernel32 user32 gdi32 winspool comdlg32 advapi32 shell32 ole32 oleaut32 uuid
+    pybind11::embed
+    OpenSSL::SSL OpenSSL::Crypto
+    kernel32 user32 gdi32 winspool comdlg32 advapi32 shell32 ole32 oleaut32 uuid ws2_32 crypt32
 )
+
+# The project intentionally disables C++ exceptions broadly, but pybind11's
+# Python exception translation requires them in the binding TU only.
+if(MSVC)
+    set_source_files_properties(source/src/Api/RtPython.cpp PROPERTIES COMPILE_OPTIONS "/EHsc")
+endif()
 
 target_link_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/lib")
 target_link_libraries(${PROJECT_NAME} PRIVATE ${ADDITIONAL_LIBS})
@@ -400,6 +420,13 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Copying runtime assets to output directory/assets"
 )
 
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/../scripts"
+    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/scripts"
+    COMMENT "Copying Python scripts to output directory/scripts"
+)
+
 function(raytrophi_copy_runtime_dll DLL_PATH)
     if(EXISTS "${DLL_PATH}")
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -427,5 +454,14 @@ file(GLOB RAYTROPHI_VCPKG_RUNTIME_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/ins
 foreach(RUNTIME_DLL IN LISTS RAYTROPHI_VCPKG_RUNTIME_DLLS)
     raytrophi_copy_runtime_dll("${RUNTIME_DLL}")
 endforeach()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/tools/python3")
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/tools/python3"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/python"
+        COMMENT "Copying embedded Python standard library"
+    )
+endif()
 
 message(STATUS "Build setup complete for RayTrophi (Refactored)")

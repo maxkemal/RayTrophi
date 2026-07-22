@@ -4,9 +4,11 @@
 #include <chrono>
 #include <vector>
 #include <atomic>
+#include <charconv>
 #include <thread>
 #include <future>
 #include <algorithm>
+#include <cmath>
 #include <execution>
 #include <numeric>
 #include <exception>
@@ -31,6 +33,9 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"  // De�i�tirildi: sdlrenderer2
 #include <scene_ui.h>
+#include "Api/RtApi.h"
+#include "Api/RtPython.h"
+#include "Api/RtIpc.h"
 
 #include "EmbreeBVH.h"
 #include "ParallelBVHNode.h"
@@ -49,6 +54,7 @@
 #include "Triangle.h"         // Added for CPU sync
 #include "HittableInstance.h" // Added for instance CPU sync
 #include "MaterialManager.h"
+#include "TerrainManager.h"
 #include "WaterSystem.h"      // Added for WaterManager
 #include "VDBVolumeManager.h"
 
@@ -130,6 +136,17 @@ bool hasArg(int argc, char* argv[], std::string_view arg) {
         }
     }
     return false;
+}
+
+bool parseIntArgument(std::string_view text, int minimum, int& out) {
+    if (text.empty()) return false;
+    int value = 0;
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto parsed = std::from_chars(begin, end, value);
+    if (parsed.ec != std::errc() || parsed.ptr != end || value < minimum) return false;
+    out = value;
+    return true;
 }
 }
 
@@ -479,8 +496,7 @@ float pitch = 0.0f;
 bool dragging = false;
 int last_mouse_x = 0;
 int last_mouse_y = 0;
-float current_nav_dist = 10.0f; // NEW: Dynamic distance for sensitivity scaling
-float current_nav_depth = 10.0f; // UNCAPPED focal depth for screen-correct panning (nav_dist is capped for zoom stability)
+float current_nav_depth = 10.0f; // Focal depth for screen-correct panning
 float move_speed = 0.5f;
 HitRecord hit_record;
 Ray ray;
@@ -640,6 +656,10 @@ SceneUI ui;
 SceneData scene;
 Renderer ray_renderer(image_width, image_height, 1, 1);
 std::unique_ptr<Backend::IBackend> g_backend;
+// OptiX core residency cache. Scene-sized allocations are released when the
+// backend is suspended, but its context/modules/pipeline survive so repeated
+// Vulkan RT <-> OptiX switches do not continually grow the CUDA driver JIT cache.
+static std::unique_ptr<Backend::IBackend> g_suspended_optix_backend;
 std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 ColorProcessor color_processor(image_width, image_height);
 
@@ -656,6 +676,38 @@ static void syncMaterialBufferToViewportBackend(SceneData& scene, Renderer& rend
     }
     if (auto* vkAdapter = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
         renderer.updateBackendMaterials(scene, vkAdapter);
+    }
+}
+
+static void releaseCudaSceneResidencyForBackendSwitch() {
+    if (!g_hasCUDA) return;
+
+    // One device-wide fence, then release every unique Texture without paying
+    // another synchronization per material slot.
+    try { cudaDeviceSynchronize(); } catch (...) {}
+    std::unordered_set<Texture*> released;
+    const auto releaseTexture = [&](const std::shared_ptr<Texture>& texture) {
+        if (texture && released.insert(texture.get()).second) {
+            texture->cleanup_gpu(false);
+        }
+    };
+
+    for (const auto& material : MaterialManager::getInstance().getAllMaterials()) {
+        if (!material) continue;
+        releaseTexture(material->albedoProperty.texture);
+        releaseTexture(material->roughnessProperty.texture);
+        releaseTexture(material->metallicProperty.texture);
+        releaseTexture(material->specularProperty.texture);
+        releaseTexture(material->normalProperty.texture);
+        releaseTexture(material->opacityProperty.texture);
+        releaseTexture(material->transmissionProperty.texture);
+        releaseTexture(material->emissionProperty.texture);
+        releaseTexture(material->heightProperty.texture);
+    }
+
+    // Terrain splat maps are not necessarily referenced by a Material slot.
+    for (TerrainObject& terrain : TerrainManager::getInstance().getTerrains()) {
+        releaseTexture(terrain.splatMap);
     }
 }
 
@@ -680,25 +732,46 @@ static void shutdownAndResetBackendSafe(const char* reason) {
         SCENE_LOG_WARN(std::string("[Backend] waitForCompletion failed during reset (") +
                        (reason ? reason : "unknown") + ").");
     }
+    // These resources live outside g_backend but reference or duplicate its
+    // CUDA scene. Release them before destroying the backend/context so CPU
+    // mode returns close to viewport-only VRAM and the next backend starts from
+    // a clean residency baseline.
+    ray_renderer.releaseGpuDenoiserResources();
+    WaterManager::getInstance().releaseRuntimeGPUResources();
+    releaseCudaSceneResidencyForBackendSwitch();
+
+    const bool suspendOptix =
+        std::string_view(reason ? reason : "") == "backend_switch" &&
+        dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr;
 
     try {
-        g_backend->shutdown();
+        if (suspendOptix) {
+            auto* optixBackend = static_cast<Backend::OptixBackend*>(g_backend.get());
+            optixBackend->suspendForBackendSwitch();
+            if (g_suspended_optix_backend) {
+                g_suspended_optix_backend->shutdown();
+                g_suspended_optix_backend.reset();
+            }
+            g_suspended_optix_backend = std::move(g_backend);
+        } else {
+            g_backend->shutdown();
+            g_backend.reset();
+        }
     } catch (const std::exception& e) {
         SCENE_LOG_WARN(std::string("[Backend] shutdown failed during reset (") +
                        (reason ? reason : "unknown") + "): " + e.what());
+        g_backend.reset();
     } catch (...) {
         SCENE_LOG_WARN(std::string("[Backend] shutdown failed during reset (") +
                        (reason ? reason : "unknown") + ").");
+        g_backend.reset();
     }
-
-    g_backend.reset();
 
     // Release all VDB CUDA memory immediately when tearing down the backend.
     // This prevents VRAM double allocation leaks when switching to Vulkan or CPU rendering.
     if (g_hasCUDA) {
         VDBVolumeManager::getInstance().freeAllGPU();
     }
-
 #ifdef _WIN32
     // Heavy Vulkan scene rebuild/switch patterns can leave large freed pages in
     // process working set and CRT heap caches. Trim once after backend teardown
@@ -1809,10 +1882,122 @@ int main(int argc, char* argv[]) try {
     startupDiagLog("[Startup] locale set");
     
     // Save project path passed via command line
-    std::string project_to_load = "";
-    if (argc > 1) {
-        project_to_load = std::filesystem::absolute(argv[1]).string();
+    std::string project_to_load;
+    std::string script_to_run;
+    std::string cli_render_output;
+    int cli_render_spp = 128;
+    int cli_render_frame = -1;
+    // Multi-frame sequence render: --frames N-M [--frames-dir dir] [--spp N]
+    int  cli_seq_start_frame = -1;
+    int  cli_seq_end_frame   = -1;
+    std::string cli_seq_output_dir;
+    bool headless_requested = false;
+    bool cli_argument_error = false;
+    std::vector<std::string> cli_argument_errors;
+    int app_exit_code = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (!argv[i]) continue;
+        const std::string_view arg(argv[i]);
+        if (arg == "--script") {
+            if (i + 1 < argc && argv[i + 1]) {
+                script_to_run = std::filesystem::absolute(argv[++i]).string();
+            } else {
+                SCENE_LOG_ERROR("--script requires a Python file path");
+                cli_argument_errors.push_back("--script requires a Python file path");
+                cli_argument_error = true;
+            }
+        } else if (arg == "--project") {
+            if (i + 1 < argc && argv[i + 1]) {
+                project_to_load = std::filesystem::absolute(argv[++i]).string();
+            } else {
+                SCENE_LOG_ERROR("--project requires an .rtp file path");
+                cli_argument_errors.push_back("--project requires an .rtp file path");
+                cli_argument_error = true;
+            }
+        } else if (arg == "--render") {
+            if (i + 1 < argc && argv[i + 1]) {
+                cli_render_output = std::filesystem::absolute(argv[++i]).string();
+            } else {
+                SCENE_LOG_ERROR("--render requires an output .png path");
+                cli_argument_errors.push_back("--render requires an output .png path");
+                cli_argument_error = true;
+            }
+        } else if (arg == "--spp") {
+            if (i + 1 >= argc || !argv[i + 1] ||
+                !parseIntArgument(argv[++i], 1, cli_render_spp)) {
+                SCENE_LOG_ERROR("--spp requires a positive integer");
+                cli_argument_errors.push_back("--spp requires a positive integer");
+                cli_argument_error = true;
+            }
+        } else if (arg == "--frame") {
+            if (i + 1 >= argc || !argv[i + 1] ||
+                !parseIntArgument(argv[++i], 0, cli_render_frame)) {
+                SCENE_LOG_ERROR("--frame requires a non-negative integer");
+                cli_argument_errors.push_back("--frame requires a non-negative integer");
+                cli_argument_error = true;
+            }
+        } else if (arg == "--frames") {
+            // Accept "N-M" format, e.g. --frames 0-100
+            if (i + 1 < argc && argv[i + 1]) {
+                const std::string_view range(argv[++i]);
+                const auto dash = range.find('-');
+                int sf = -1, ef = -1;
+                bool parse_ok = dash != std::string_view::npos &&
+                    parseIntArgument(range.substr(0, dash), 0, sf) &&
+                    parseIntArgument(range.substr(dash + 1), sf, ef);
+                if (parse_ok) {
+                    cli_seq_start_frame = sf;
+                    cli_seq_end_frame   = ef;
+                } else {
+                    SCENE_LOG_ERROR("--frames requires a range in the form N-M (e.g. 0-100)");
+                    cli_argument_errors.push_back("--frames requires a range in the form N-M (e.g. 0-100)");
+                    cli_argument_error = true;
+                }
+            } else {
+                SCENE_LOG_ERROR("--frames requires a range argument (e.g. 0-100)");
+                cli_argument_errors.push_back("--frames requires a range argument (e.g. 0-100)");
+                cli_argument_error = true;
+            }
+        } else if (arg == "--frames-dir") {
+            if (i + 1 < argc && argv[i + 1]) {
+                cli_seq_output_dir = std::filesystem::absolute(argv[++i]).string();
+            } else {
+                SCENE_LOG_ERROR("--frames-dir requires a directory path");
+                cli_argument_errors.push_back("--frames-dir requires a directory path");
+                cli_argument_error = true;
+            }
+        } else if (arg == "--headless") {
+            headless_requested = true;
+        } else if (!arg.empty() && arg.front() != '-' && project_to_load.empty()) {
+            project_to_load = std::filesystem::absolute(argv[i]).string();
+        }
     }
+    const bool cli_render_mode = !cli_render_output.empty();
+    const bool cli_seq_mode = cli_seq_start_frame >= 0 && !cli_render_mode;
+    const bool run_hidden = cli_render_mode || cli_seq_mode || headless_requested;
+    if (headless_requested && !cli_render_mode && !cli_seq_mode) {
+        SCENE_LOG_ERROR("--headless requires --render <output.png> or --frames N-M");
+        cli_argument_errors.push_back("--headless requires --render <output.png> or --frames N-M");
+        cli_argument_error = true;
+    }
+    if (cli_render_mode && cli_seq_mode) {
+        SCENE_LOG_ERROR("--render and --frames cannot be combined; use one or the other");
+        cli_argument_errors.push_back("--render and --frames cannot be combined");
+        cli_argument_error = true;
+    }
+    // Default sequence output directory: EXE folder / frames
+    if (cli_seq_mode && cli_seq_output_dir.empty()) {
+        cli_seq_output_dir = (std::filesystem::current_path() / "frames").string();
+    }
+    if ((cli_render_mode || cli_seq_mode) && !project_to_load.empty()) {
+        std::error_code project_path_error;
+        if (!std::filesystem::is_regular_file(project_to_load, project_path_error)) {
+            SCENE_LOG_ERROR("CLI project file not found: " + project_to_load);
+            cli_argument_errors.push_back("CLI project file not found: " + project_to_load);
+            cli_argument_error = true;
+        }
+    }
+    if (cli_argument_error) app_exit_code = 2;
     startupDiagLog("[Startup] argv parsed");
     
 #ifdef _WIN32
@@ -1853,7 +2038,7 @@ int main(int argc, char* argv[]) try {
     // ===========================================================================
     SplashScreen splash;
     startupDiagLog("[Startup] SplashScreen constructed");
-    bool splashOk = splash.init("RayTrophi_image.png", 900, 700);
+    bool splashOk = !run_hidden && splash.init("RayTrophi_image.png", 900, 700);
     startupDiagLog(std::string("[Startup] splash.init done, ok=") + (splashOk ? "1" : "0"));
     if (splashOk) {
         splash.setStatus("Initializing...");
@@ -1865,6 +2050,9 @@ int main(int argc, char* argv[]) try {
     if (splashOk) { splash.setStatus("Detecting CUDA/OptiX hardware..."); splash.render(); }
         startupDiagLog("[Startup] before g_sceneLog.clear");
     g_sceneLog.clear();
+    for (const std::string& argument_error : cli_argument_errors) {
+        SCENE_LOG_ERROR("[CLI] " + argument_error);
+    }
         startupDiagLog("[Startup] g_sceneLog.clear done");
     detectOptixHardware();
         startupDiagLog("[Startup] detectOptixHardware done");
@@ -2056,6 +2244,15 @@ int main(int argc, char* argv[]) try {
             }
             syncVulkanWorldWithAtmosphere(vulkanBackend, wd);
         } else {
+            // Mirror the Vulkan branch's lazy LUT flush for OptiX/CPU backends: World::reset()
+            // and World::deserialize() no longer bake the atmosphere LUT synchronously — they
+            // only mark it dirty. Without this flush, an OptiX viewport in Nishita mode would
+            // re-enter the world-sync gate every frame (needsLUTUpdate() never clears) and
+            // render from a stale LUT.
+            if (wd.mode == WORLD_MODE_NISHITA && ray_renderer.world.needsLUTUpdate() &&
+                ray_renderer.world.flushLUT()) {
+                wd = ray_renderer.world.getGPUData();
+            }
             backend->setWorldData(&wd);
         }
     };
@@ -2262,13 +2459,18 @@ int main(int argc, char* argv[]) try {
     // Load Project or Create Default Scene
     if (!project_to_load.empty() && std::filesystem::exists(project_to_load)) {
         if (splashOk) { splash.setStatus("Loading Project..."); splash.render(); }
-        ProjectManager::getInstance().openProject(project_to_load, scene, render_settings, ray_renderer, g_backend.get(),
+        const bool project_opened = ProjectManager::getInstance().openProject(project_to_load, scene, render_settings, ray_renderer, g_backend.get(),
             [&](int progress, const std::string& msg) {
                 if (splashOk) {
                     splash.setStatus(msg);
                     splash.render();
                 }
             });
+        if (cli_render_mode && !project_opened) {
+            SCENE_LOG_ERROR("CLI project could not be loaded: " + project_to_load);
+            cli_argument_error = true;
+            app_exit_code = 2;
+        }
         ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
     } else {
         if (splashOk) { splash.setStatus("Creating default scene..."); splash.render(); }
@@ -2413,8 +2615,10 @@ int main(int argc, char* argv[]) try {
     }
     
     // Show main window now that loading is complete
-    SDL_ShowWindow(window);
-    SDL_MaximizeWindow(window);
+    if (!run_hidden) {
+        SDL_ShowWindow(window);
+        SDL_MaximizeWindow(window);
+    }
     
     // ===========================================================================
     // GPU MODE HUD NOTIFICATION - Inform user about rendering backend
@@ -2447,8 +2651,98 @@ int main(int argc, char* argv[]) try {
     pending_height = image_height;
     pending_resolution_change = true;
 
+    // Scripting/API facade: bind once, drain queued API work once per frame
+    // below (skipped while a scene load is in flight). See
+    // docs/API_SCRIPTING_ROADMAP.md.
+    rtapi::bind(&ui_ctx, &ui.history);
+
+    std::string python_error;
+    if (!rtpython::initialize(python_error)) {
+        SCENE_LOG_ERROR("Embedded Python initialization failed: " + python_error);
+        ui.addViewportMessage("Python runtime failed to initialize. See SceneLog.txt.", 8.0f,
+                              ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
+        if (cli_render_mode && !script_to_run.empty()) {
+            cli_argument_error = true;
+            app_exit_code = 2;
+        }
+    } else {
+        // The API smoke test (scripts/rt_api_smoke_test.py) is no longer run
+        // automatically at startup — the Python Console can now load and run it
+        // (or any script) on demand, so the auto-run only added launch cost.
+        // The explicit --script CLI path below stays for automation/render-farm.
+        if (!script_to_run.empty()) {
+            const rtapi::Result script_result = rtapi::runScriptFile(script_to_run);
+            if (!script_result.ok) {
+                SCENE_LOG_ERROR("Startup Python script failed: " + script_to_run + "\n" + script_result.error);
+                ui.show_python_console = true;
+                if (cli_render_mode) {
+                    cli_argument_error = true;
+                    app_exit_code = 2;
+                }
+            }
+        }
+    }
+
+    // IPC/JSON gate (Faz 4c): start the named-pipe server thread after Python
+    // init so that external processes can send JSON commands to rtapi.
+    {
+        std::string ipc_error;
+        if (rtipc::start(ipc_error)) {
+            SCENE_LOG_INFO("IPC server started on \\\\.\\pipe\\RayTrophiStudio");
+            if (rtipc::isRemoteRunning())
+                SCENE_LOG_INFO("Secure remote IPC TLS listener started");
+        } else {
+            SCENE_LOG_WARN("IPC server failed to start: " + ipc_error);
+        }
+    }
+
+    if (cli_argument_error) {
+        quit = true;
+    } else if (cli_render_mode) {
+        if (cli_render_frame >= 0) {
+            const rtapi::Result frame_result = rtapi::setFrame(cli_render_frame);
+            if (!frame_result.ok) {
+                SCENE_LOG_ERROR("CLI frame setup failed: " + frame_result.error);
+                app_exit_code = 2;
+                quit = true;
+            }
+        }
+        if (!quit) {
+            const rtapi::Result render_result = rtapi::renderFrame(cli_render_output, cli_render_spp);
+            if (!render_result.ok) {
+                SCENE_LOG_ERROR("CLI final render failed to start: " + render_result.error);
+                app_exit_code = 2;
+                quit = true;
+            } else {
+                SCENE_LOG_INFO("[CLI Render] Started: " + rtapi::renderOutputPath() +
+                               " | spp=" + std::to_string(cli_render_spp) +
+                               (cli_render_frame >= 0
+                                    ? " | frame=" + std::to_string(cli_render_frame)
+                                    : std::string()));
+            }
+        }
+    } else if (cli_seq_mode) {
+        // Multi-frame sequence render via the g_seq_save_active state machine.
+        const rtapi::Result seq_result = rtapi::renderSequence(
+            cli_seq_output_dir, cli_render_spp,
+            cli_seq_start_frame, cli_seq_end_frame);
+        if (!seq_result.ok) {
+            SCENE_LOG_ERROR("CLI sequence render failed to start: " + seq_result.error);
+            app_exit_code = 2;
+            quit = true;
+        } else {
+            SCENE_LOG_INFO("[CLI Sequence] Started: " + cli_seq_output_dir +
+                           " | frames=" + std::to_string(cli_seq_start_frame) +
+                           "-" + std::to_string(cli_seq_end_frame) +
+                           " | spp=" + std::to_string(cli_render_spp));
+        }
+    }
+
     SDL_Event e;
     while (!quit) {
+        if (!ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
+            rtapi::drainMainThreadQueue();
+        }
         // If Vulkan reported memory pressure (typically OOM/shared-memory exhaustion),
         // schedule a safe backend recreate using the already hardened switch path.
         if (isActiveRenderBackendVulkan() &&
@@ -2558,20 +2852,50 @@ int main(int argc, char* argv[]) try {
             // └─────────────────────────────────────────────────────────────────────┘
             bool asyncOptixHandled = false;
             if (requestedOptix && !currentIsOptix) {
-                if (!g_optix_async_in_progress.load(std::memory_order_acquire)) {
+                if (g_suspended_optix_backend) {
+                    // Reuse the already-compiled OptiX core. Its scene resources
+                    // were dropped on suspension and are rebuilt by the full sync.
+                    if (rendering_in_progress.load()) {
+                        ui.addViewportMessage("OptiX gecisi render/animasyon bitince uygulanacak.", 3.0f,
+                                              ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                        SDL_Delay(1);
+                    } else if (installPrebuiltOptixBackend(std::move(g_suspended_optix_backend))) {
+                        ui.addViewportMessage("OptiX ready (cached pipeline).", 3.0f,
+                                              ImVec4(0.45f, 0.95f, 0.45f, 1.0f));
+                        ui_ctx.render_settings.use_optix = true;
+                        ui_ctx.render_settings.use_vulkan = false;
+                        render_settings.use_optix = true;
+                        render_settings.use_vulkan = false;
+                        attachActiveBackendStatusCallback();
+                        (void)syncActiveRenderBackendScene(true);
+                        g_backend_switch_cooldown_frames = 3;
+                        g_anim_backend_needs_full_rebuild.store(true);
+                        render_settings.backend_changed = false;
+                        ui_ctx.render_settings.backend_changed = false;
+                        g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+                        g_deferred_render_backend_prepare_delay_frames = 0;
+                    } else {
+                        SCENE_LOG_ERROR("[OptiX] Cached backend resume failed.");
+                        render_settings.use_optix = false;
+                        ui_ctx.render_settings.use_optix = false;
+                    }
+                } else if (!g_optix_async_in_progress.load(std::memory_order_acquire)) {
                     g_optix_async_cache_likely_warm = isOptixDiskCacheLikelyWarm();
                     g_optix_async_in_progress.store(true, std::memory_order_release);
                     g_optix_async_start_time = std::chrono::steady_clock::now();
                     g_optix_async_future = std::async(std::launch::async, &buildOptixBackendWorker);
                     SCENE_LOG_INFO("[OptiX async] worker launched; current backend keeps rendering.");
                 }
-                ui.addViewportMessage(
-                    optixAsyncHudMessage(),
-                    optixAsyncHudDuration(true), ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
-                render_settings.backend_changed = false;
-                ui_ctx.render_settings.backend_changed = false;
-                g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
-                g_deferred_render_backend_prepare_delay_frames = 0;
+                if (!g_suspended_optix_backend &&
+                    g_optix_async_in_progress.load(std::memory_order_acquire)) {
+                    ui.addViewportMessage(
+                        optixAsyncHudMessage(),
+                        optixAsyncHudDuration(true), ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                    render_settings.backend_changed = false;
+                    ui_ctx.render_settings.backend_changed = false;
+                    g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+                    g_deferred_render_backend_prepare_delay_frames = 0;
+                }
                 asyncOptixHandled = true;
             }
 
@@ -2836,6 +3160,8 @@ int main(int argc, char* argv[]) try {
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
             if (e.type == SDL_QUIT) ui.tryExit();
+            const bool python_console_captures_input =
+                rtpython::wantsInputCapture() || rtapi::renderOutputPending();
 
             if (e.type == SDL_KEYDOWN) {
                 // ===================================================================
@@ -2860,7 +3186,8 @@ int main(int argc, char* argv[]) try {
                     }
                 }
                 
-                if (e.key.keysym.sym == SDLK_s && (e.key.keysym.mod & KMOD_CTRL)) {
+                if (!python_console_captures_input &&
+                    e.key.keysym.sym == SDLK_s && (e.key.keysym.mod & KMOD_CTRL)) {
                      ui_ctx.render_settings.save_image_requested = true;
                 }
                 
@@ -2872,14 +3199,14 @@ int main(int argc, char* argv[]) try {
                     // EXCEPTION: while the Geometry Graph node editor is focused, Delete is
                     // claimed by NodeEditorUIV2 for node/link deletion (see scene_ui.cpp's
                     // handleEditorShortcuts for the matching guard on the other Delete listener).
-                    if (!ImGui::GetIO().WantTextInput &&
+                    if (!python_console_captures_input && !ImGui::GetIO().WantTextInput &&
                         !ui.terrain_graph_focused && !ui.geometry_graph_focused && !ui.material_graph_focused) {
                         ui.triggerDelete(ui_ctx);
                     }
                 }
 
                 if (e.key.keysym.sym == SDLK_h) {
-                    if (!ImGui::GetIO().WantTextInput) {
+                    if (!python_console_captures_input && !ImGui::GetIO().WantTextInput) {
                         for (auto& obj : scene.world.objects) {
                             if (!obj) continue;
 
@@ -2915,7 +3242,7 @@ int main(int argc, char* argv[]) try {
                 // ===================================================================
                 // NUMPAD VIEW SHORTCUTS (Blender standard) - viewport nav only
                 // ===================================================================
-                if (!ImGui::GetIO().WantTextInput && scene.camera) {
+                if (!python_console_captures_input && !ImGui::GetIO().WantTextInput && scene.camera) {
                     const bool ctrl = (e.key.keysym.mod & KMOD_CTRL) != 0;
                     Camera& cam = *scene.camera;
 
@@ -3000,14 +3327,15 @@ int main(int argc, char* argv[]) try {
                 }
             }
 
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_MIDDLE && !input_locked) {
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_MIDDLE &&
+                !input_locked && !python_console_captures_input) {
                 dragging = true;
                 last_mouse_x = e.button.x;
                 last_mouse_y = e.button.y;
 
                 // --- Navigation Distance Calibration ---
                 // We raycast on middle-click to determine what the user is interacting with.
-                // This updates 'current_nav_dist' to provide perfect panning/rotation speed.
+                // This updates the focal depth used for distance-correct panning.
                 if (scene.initialized && scene.camera && scene.bvh &&
                     (!ImGui::GetIO().WantCaptureMouse || (ImGuizmo::IsOver() && !ImGuizmo::IsUsing()))) {
                     int win_w, win_h;
@@ -3035,9 +3363,7 @@ int main(int argc, char* argv[]) try {
                     yaw = atan2f(scene.camera->u.z, scene.camera->u.x) * 180.0f / 3.1415926535f - 90.0f;
 
                     if (scene.bvh->hit(r, 0.001f, 10000.0f, rec)) {
-                        // Cap the nav distance to something sane for panning/sensitivity (prevents "extreme movement")
                         const float safe_focus_dist = std::max(rec.t, 0.05f);
-                        current_nav_dist = std::min(safe_focus_dist, 500.0f);
                         // Panning uses the TRUE (uncapped) hit distance so a camera far from
                         // the scene pans at the right speed (the 500 cap made it crawl).
                         current_nav_depth = safe_focus_dist;
@@ -3052,7 +3378,6 @@ int main(int argc, char* argv[]) try {
                         }
                     } else {
                         // Fallback to existing focus distance if hitting background
-                        current_nav_dist = std::min(scene.camera->focus_dist, 500.0f);
                         // For panning over empty space, use whichever is larger: the focus
                         // distance or the distance to the framed pivot — keeps a far camera
                         // panning briskly instead of at the (possibly tiny) focus_dist.
@@ -3061,7 +3386,8 @@ int main(int argc, char* argv[]) try {
                     }
                 }
             }
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT && !input_locked) {
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT &&
+                !input_locked && !python_console_captures_input) {
                 if (!ImGui::GetIO().WantCaptureMouse) {
                     int win_w, win_h;
                     SDL_GetWindowSize(window, &win_w, &win_h);
@@ -3078,7 +3404,8 @@ int main(int argc, char* argv[]) try {
                     start_render = true;
             }
 
-            if (e.type == SDL_MOUSEMOTION && dragging && scene.camera && mouse_control_enabled && !input_locked) {
+            if (e.type == SDL_MOUSEMOTION && dragging && scene.camera && mouse_control_enabled &&
+                !input_locked && !python_console_captures_input) {
                 if (!ImGui::GetIO().WantCaptureMouse || (ImGuizmo::IsOver() && !ImGuizmo::IsUsing())) {
                     int dx = e.motion.x - last_mouse_x;
                     int dy = e.motion.y - last_mouse_y;
@@ -3102,11 +3429,11 @@ int main(int argc, char* argv[]) try {
                             const float vfov_rad = scene.camera->vfov * 3.14159265f / 180.0f;
                             pan_per_pixel = (2.0f * tanf(vfov_rad * 0.5f) * current_nav_depth) / (float)pan_h;
                         }
-                        // Screen-correct gives 1:1 cursor tracking, which felt sluggish next
-                        // to the rotate/WASD nav (and slower than the old near-distance pan).
-                        // Add a gain so panning covers ground briskly: ×6 puts the default
-                        // sens (0.4) at ~2.4× tracking; the slider scales it further.
-                        pan_per_pixel *= render_settings.mouse_sensitivity * 6.0f;
+                        // Keep the established 2.4x screen-tracking gain, but decouple
+                        // world-space pan from angular look sensitivity. Large-scene
+                        // navigation and the user's pan fine-tune compose explicitly.
+                        const float pan_scale = render_settings.navigation_scale * render_settings.pan_sensitivity;
+                        pan_per_pixel *= 2.4f * pan_scale;
 
                         // Clamp per-event pixel deltas so a framerate hitch can't fling the camera.
                         int safe_dx = std::clamp(dx, -50, 50);
@@ -3121,11 +3448,14 @@ int main(int argc, char* argv[]) try {
                     else {
                         bool is_ctrl_pressed = state[SDL_SCANCODE_LCTRL] || state[SDL_SCANCODE_RCTRL];
                         if (is_ctrl_pressed) {
-                            float zoom_speed = 0.04f * current_nav_dist;
-                            float zoom_amount = -(float)dy * zoom_speed * 0.1f; 
                             Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                            scene.camera->lookfrom += forward * zoom_amount;
-                            scene.camera->lookat += forward * zoom_amount;
+                            const float current_distance = std::max(
+                                (float)(scene.camera->lookat - scene.camera->lookfrom).length(), 0.01f);
+                            const float zoom_scale = render_settings.navigation_scale * render_settings.zoom_sensitivity;
+                            const float exponent = std::clamp((float)dy * 0.005f * zoom_scale, -4.0f, 4.0f);
+                            const float new_distance = std::clamp(current_distance * std::exp(exponent), 0.01f, 10000000.0f);
+                            scene.camera->lookfrom = scene.camera->lookat - forward * new_distance;
+                            scene.camera->focus_dist = new_distance;
                             scene.camera->update_camera_vectors();
                         }
                         else {
@@ -3158,24 +3488,30 @@ int main(int argc, char* argv[]) try {
                 }
             }
 
-            if (e.type == SDL_MOUSEWHEEL && mouse_control_enabled && scene.camera && !input_locked) {
+            if (e.type == SDL_MOUSEWHEEL && mouse_control_enabled && scene.camera &&
+                !input_locked && !python_console_captures_input) {
                 if (!ImGui::GetIO().WantCaptureMouse || (ImGuizmo::IsOver() && !ImGuizmo::IsUsing())) {
                     float scroll_amount = e.wheel.y;
                     const Uint8* k_state = SDL_GetKeyboardState(NULL);
                     bool is_shift = k_state[SDL_SCANCODE_LSHIFT] || k_state[SDL_SCANCODE_RSHIFT];
-                    float wheel_boost = is_shift ? (3.0f + render_settings.mouse_sensitivity * 2.0f) : 1.0f;
-                    float move_v = 1.5f * render_settings.mouse_sensitivity * wheel_boost;
+                    const float wheel_boost = is_shift ? 3.0f : 1.0f;
+                    const float zoom_scale = render_settings.navigation_scale * render_settings.zoom_sensitivity;
+                    const float exponent = std::clamp(-scroll_amount * 0.10f * wheel_boost * zoom_scale, -4.0f, 4.0f);
                     if (scene.camera->orthographic) {
-                        // Dollying does nothing under parallel projection — zoom by scaling the
-                        // visible extent instead so the grid/geometry actually grow/shrink.
-                        float zoom_factor = std::pow(0.9f, scroll_amount * wheel_boost);
+                        // Parallel projection zooms by changing its visible extent.
+                        const float zoom_factor = std::exp(exponent);
                         scene.camera->ortho_height = std::clamp(
                             scene.camera->ortho_height * zoom_factor, 0.01f, 100000.0f);
                         scene.camera->update_camera_vectors();
                     } else {
                         Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                        scene.camera->lookfrom += forward * scroll_amount * move_v;
-                        scene.camera->lookat = scene.camera->lookfrom + forward * scene.camera->focus_dist;
+                        // Exponential dolly gives the same perceptual response from centimetre
+                        // detail to kilometre terrain and cannot cross the orbit pivot.
+                        const float current_distance = std::max(
+                            (float)(scene.camera->lookat - scene.camera->lookfrom).length(), 0.01f);
+                        const float new_distance = std::clamp(current_distance * std::exp(exponent), 0.01f, 10000000.0f);
+                        scene.camera->lookfrom = scene.camera->lookat - forward * new_distance;
+                        scene.camera->focus_dist = new_distance;
                         scene.camera->update_camera_vectors();
                     }
                     ui.updateAutofocus(ui_ctx);
@@ -3712,6 +4048,10 @@ int main(int argc, char* argv[]) try {
             g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
             ui_ctx.start_render = true;
             SCENE_LOG_INFO("Project visualization ready.");
+
+            // Notify scripting rt.on_scene_load() subscribers. Fires for UI-driven
+            // opens; rtapi::openProject() raises this flag itself for API-driven ones.
+            rtapi::notifySceneLoaded();
         }
 
         // =========================================================================
@@ -3886,7 +4226,9 @@ int main(int argc, char* argv[]) try {
         bool keyboard_locked = ui_ctx.render_settings.animation_render_locked || 
                               (rendering_in_progress && ui_ctx.is_animation_mode);
 
-        if (mouse_control_enabled && scene.camera && !keyboard_locked && !ImGui::GetIO().WantTextInput) {
+        if (mouse_control_enabled && scene.camera && !keyboard_locked &&
+            !rtpython::wantsInputCapture() && !rtapi::renderOutputPending() &&
+            !ImGui::GetIO().WantTextInput) {
 
             Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
             Vec3 right = Vec3::cross(forward, scene.camera->vup).normalize();
@@ -3895,8 +4237,9 @@ int main(int argc, char* argv[]) try {
             // Arrow Keys + WASDQE for Camera Movement
             const Uint8* s = SDL_GetKeyboardState(NULL);
             bool is_shift = s[SDL_SCANCODE_LSHIFT] || s[SDL_SCANCODE_RSHIFT];
-            float boost = is_shift ? (4.0f + render_settings.mouse_sensitivity * 6.0f) : 1.0f;
-            float effective_speed = move_speed * (render_settings.mouse_sensitivity * 5.0f) * boost;
+            const float boost = is_shift ? 6.4f : 1.0f;
+            const float effective_speed = move_speed * 2.0f * render_settings.navigation_scale *
+                render_settings.fly_speed_multiplier * boost;
 
             if (key_state[SDL_SCANCODE_UP] || key_state[SDL_SCANCODE_W]) {
                 scene.camera->lookfrom += forward * effective_speed;
@@ -4253,14 +4596,6 @@ int main(int argc, char* argv[]) try {
                     int start_f = ui_ctx.render_settings.animation_start_frame;
                     int current_f = ui_ctx.render_settings.animation_playback_frame;
                     float time = (current_f - start_f) / fps;
-
-                    static bool last_vulkan_state = false;
-                    if (ui_ctx.render_settings.use_vulkan != last_vulkan_state) {
-                        SCENE_LOG_INFO(std::string("[DEBUG] Backend Viewport: use_vulkan=") + (ui_ctx.render_settings.use_vulkan ? "TRUE" : "FALSE") + 
-                                       " use_optix=" + (ui_ctx.render_settings.use_optix ? "TRUE" : "FALSE") + 
-                                       " hasOptix=" + (g_hasOptix ? "TRUE" : "FALSE"));
-                        last_vulkan_state = ui_ctx.render_settings.use_vulkan;
-                    }
 
                     // Allow GPU render path when:
                     // 1. A GPU backend is actually active, OR
@@ -5590,6 +5925,40 @@ int main(int argc, char* argv[]) try {
             }
         }
 
+        // ── RTAPI TARGETED FINAL-RENDER OUTPUT ──────────────────────────────
+        // Save only after the canonical display pipeline above has produced the
+        // same denoised/tonemapped/stylized `surface` the Render Result shows.
+        // This keeps Python and CLI automation bit-for-bit on the viewport path.
+        if (rtapi::renderOutputPending()) {
+            const rtapi::RenderJobInfo job = rtapi::renderStatus();
+            const bool reached_target =
+                job.target_samples > 0 && job.current_samples >= job.target_samples;
+            if (in_rendered_mode && (accumulation_done_for_display || reached_target)) {
+                const std::string output_path = rtapi::renderOutputPath();
+                const bool saved = surface && SaveSurface(surface, output_path.c_str());
+                if (saved) {
+                    rtapi::completeRenderOutput(true);
+                    SCENE_LOG_INFO("[RtApi Render] Complete: " + output_path);
+                    if (!cli_render_mode) {
+                        ui.addViewportMessage("Render saved: " + output_path, 5.0f,
+                                              ImVec4(0.35f, 1.0f, 0.5f, 1.0f));
+                    }
+                } else {
+                    const std::string error = surface
+                        ? "failed to encode/write PNG"
+                        : "render surface is unavailable";
+                    rtapi::completeRenderOutput(false, error);
+                    SCENE_LOG_ERROR("[RtApi Render] " + error + ": " + output_path);
+                    app_exit_code = 3;
+                }
+                if (cli_render_mode) quit = true;
+            } else {
+                // Hidden CLI windows have no interaction to wake them; explicitly
+                // keep the progressive main-loop render advancing to completion.
+                start_render = true;
+            }
+        }
+
         // ── VIEWPORT-DRIVEN SEQUENCE SAVE STATE MACHINE ──────────────────────
         // Renders an animation to disk through the interactive viewport itself.
         // Each frame accumulates to the interactive quality (max_samples / adaptive
@@ -5607,6 +5976,10 @@ int main(int argc, char* argv[]) try {
                 ui_ctx.render_settings.animation_render_locked = false;
                 g_camera_dirty = g_lights_dirty = g_world_dirty = true;
                 SCENE_LOG_INFO("[SeqSave] Cancelled at frame " + std::to_string(g_seq_save_frame));
+                if (cli_seq_mode) {
+                    // Cancelled by user / error in headless mode — exit cleanly.
+                    quit = true;
+                }
             } else if (in_rendered_mode && isActiveRenderBackendGpu() && g_backend) {
                 if (accumulation_done_for_display) {
                     if (!g_seq_save_dir.empty() && surface) {
@@ -5641,6 +6014,10 @@ int main(int argc, char* argv[]) try {
                         g_camera_dirty = g_lights_dirty = g_world_dirty = true;
                         SCENE_LOG_INFO("[SeqSave] Sequence complete (last frame " +
                                        std::to_string(g_seq_save_frame) + ").");
+                        if (cli_seq_mode) {
+                            // All frames saved — exit with success code.
+                            quit = true;
+                        }
                     } else {
                         ++g_seq_save_frame;
                         ui.timeline.setCurrentFrame(g_seq_save_frame);
@@ -6251,6 +6628,22 @@ int main(int argc, char* argv[]) try {
 
     }
     
+    // IPC server must stop before Python/rtapi teardown — the worker thread
+    // enqueues lambdas into rtapi::enqueue(), which references g_ctx.
+    rtipc::stop();
+
+    // Python holds callbacks into rtapi; finalize it before invalidating the
+    // facade and before renderer/UI teardown starts.
+    rtpython::shutdown();
+    rtapi::unbind();
+
+    // Explicitly tear down both the active renderer and the suspended OptiX
+    // core while CUDA/Vulkan runtime state is still alive.
+    shutdownAndResetBackendSafe("app_shutdown");
+    if (g_suspended_optix_backend) {
+        try { g_suspended_optix_backend->shutdown(); } catch (...) {}
+        g_suspended_optix_backend.reset();
+    }
     if (g_viewport_backend) {
         try { g_viewport_backend->waitForCompletion(); } catch (...) {}
         try { g_viewport_backend->shutdown(); } catch (...) {}
@@ -6269,7 +6662,7 @@ int main(int argc, char* argv[]) try {
     removeStartupCrashLogIfExists();
     SDL_Quit();
     g_sceneLog.closeLogFile();
-    return 0;
+    return app_exit_code;
 }
 
 catch (const std::exception& e) {

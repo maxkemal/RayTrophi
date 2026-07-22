@@ -384,6 +384,10 @@ private:
     OptixModule raygen_module = nullptr;
     OptixModule miss_module = nullptr;
     OptixModule hitgroup_module = nullptr;
+    // Built-in intersection modules are context-owned OptiX objects too. Keep
+    // their handles so backend teardown can release them with the pipeline.
+    OptixModule curve_is_module = nullptr;
+    OptixModule sphere_is_module = nullptr;
     RayGenParams params;
     OptixProgramGroup raygen_pg = nullptr;
     OptixProgramGroup miss_pg = nullptr;

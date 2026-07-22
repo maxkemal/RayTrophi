@@ -128,10 +128,14 @@ public:
 
     inline uint16_t getMaterialID() const {
         if (parentMesh && parentMesh->geometry) {
-            const uint16_t* matIDs = parentMesh->geometry->get_attribute_data<uint16_t>("materialID");
-            if (matIDs && !parentMesh->geometry->indices.empty()) {
-                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + 0];
-                return matIDs[globalIndex];
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+            if (idxOffset < geom.indices.size()) {
+                const uint16_t* matIDs = geom.get_attribute_data<uint16_t>("materialID");
+                if (matIDs) {
+                    uint32_t globalIndex = geom.indices[idxOffset];
+                    if (globalIndex < geom.get_vertex_count()) return matIDs[globalIndex];
+                }
             }
         }
         return materialID;
@@ -139,15 +143,20 @@ public:
 
     inline void setMaterialID(uint16_t id) {
         if (parentMesh && parentMesh->geometry) {
-            uint16_t* matIDs = parentMesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
-            if (matIDs && !parentMesh->geometry->indices.empty()) {
-                uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
-                uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
-                uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
-                matIDs[i0] = id;
-                matIDs[i1] = id;
-                matIDs[i2] = id;
-                return;
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
+            if (idxOffset + 2 < geom.indices.size()) {
+                uint16_t* matIDs = parentMesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
+                if (matIDs) {
+                    const size_t vCount = geom.get_vertex_count();
+                    uint32_t i0 = geom.indices[idxOffset + 0];
+                    uint32_t i1 = geom.indices[idxOffset + 1];
+                    uint32_t i2 = geom.indices[idxOffset + 2];
+                    if (i0 < vCount && i1 < vCount && i2 < vCount) {
+                        matIDs[i0] = id; matIDs[i1] = id; matIDs[i2] = id;
+                        return;
+                    }
+                }
             }
         }
         materialID = id;
@@ -158,52 +167,76 @@ public:
     // ========================================================================
     
     inline const Vec3& getVertexPosition(int i) const {
-        if (parentMesh && parentMesh->geometry) {
-            const Vec3* positions = parentMesh->geometry->get_positions();
-            if (positions) {
-                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-                return positions[globalIndex];
+        if (parentMesh && parentMesh->geometry && i >= 0 && i < 3) {
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < geom.indices.size()) {
+                const Vec3* positions = geom.get_positions();
+                if (positions) {
+                    uint32_t globalIndex = geom.indices[idxOffset];
+                    if (globalIndex < geom.get_vertex_count()) {
+                        return positions[globalIndex];
+                    }
+                }
             }
         }
-        return svr()[i].position;
+        return svr()[i >= 0 && i < 3 ? i : 0].position;
     }
     
     inline void setVertexPosition(int i, const Vec3& pos) { 
-        if (parentMesh && parentMesh->geometry) {
-            Vec3* positions = parentMesh->geometry->get_positions_mut();
-            if (positions) {
-                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-                positions[globalIndex] = pos;
-                vertexPositionsDirty = true;
-                return;
+        if (parentMesh && parentMesh->geometry && i >= 0 && i < 3) {
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < geom.indices.size()) {
+                Vec3* positions = parentMesh->geometry->get_positions_mut();
+                if (positions) {
+                    uint32_t globalIndex = geom.indices[idxOffset];
+                    if (globalIndex < geom.get_vertex_count()) {
+                        positions[globalIndex] = pos;
+                        vertexPositionsDirty = true;
+                        return;
+                    }
+                }
             }
         }
-        svw()[i].position = pos;
+        svw()[i >= 0 && i < 3 ? i : 0].position = pos;
         vertexPositionsDirty = true;
     }
     
     inline const Vec3& getVertexNormal(int i) const {
-        if (parentMesh && parentMesh->geometry) {
-            const Vec3* normals = parentMesh->geometry->get_normals();
-            if (normals) {
-                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-                return normals[globalIndex];
+        if (parentMesh && parentMesh->geometry && i >= 0 && i < 3) {
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < geom.indices.size()) {
+                const Vec3* normals = geom.get_normals();
+                if (normals) {
+                    uint32_t globalIndex = geom.indices[idxOffset];
+                    if (globalIndex < geom.get_vertex_count()) {
+                        return normals[globalIndex];
+                    }
+                }
             }
         }
-        return svr()[i].normal;
+        return svr()[i >= 0 && i < 3 ? i : 0].normal;
     }
     
     inline void setVertexNormal(int i, const Vec3& normal) { 
-        if (parentMesh && parentMesh->geometry) {
-            Vec3* normals = parentMesh->geometry->get_normals_mut();
-            if (normals) {
-                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-                normals[globalIndex] = normal;
-                vertexPositionsDirty = true;
-                return;
+        if (parentMesh && parentMesh->geometry && i >= 0 && i < 3) {
+            const auto& geom = *parentMesh->geometry;
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < geom.indices.size()) {
+                Vec3* normals = parentMesh->geometry->get_normals_mut();
+                if (normals) {
+                    uint32_t globalIndex = geom.indices[idxOffset];
+                    if (globalIndex < geom.get_vertex_count()) {
+                        normals[globalIndex] = normal;
+                        vertexPositionsDirty = true;
+                        return;
+                    }
+                }
             }
         }
-        svw()[i].normal = normal;
+        svw()[i >= 0 && i < 3 ? i : 0].normal = normal;
         vertexPositionsDirty = true;
     }
     
@@ -234,18 +267,24 @@ public:
     // ============================================================================
     inline Vec3& v_pos(int i) {
         if (parentMesh && parentMesh->geometry) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            Vec3* posData = parentMesh->geometry->get_positions_mut();
-            if (posData) return posData[globalIndex];
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < parentMesh->geometry->indices.size()) {
+                uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+                Vec3* posData = parentMesh->geometry->get_positions_mut();
+                if (posData) return posData[globalIndex];
+            }
         }
         return svw()[i].position;
     }
 
     inline const Vec3& v_pos(int i) const {
         if (parentMesh && parentMesh->geometry) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            const Vec3* posData = parentMesh->geometry->get_positions();
-            if (posData) return posData[globalIndex];
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < parentMesh->geometry->indices.size()) {
+                uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+                const Vec3* posData = parentMesh->geometry->get_positions();
+                if (posData) return posData[globalIndex];
+            }
         }
         return svr()[i].position;
     }
@@ -255,18 +294,24 @@ public:
 
     inline Vec3& v_norm(int i) {
         if (parentMesh && parentMesh->geometry) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            Vec3* normData = parentMesh->geometry->get_normals_mut();
-            if (normData) return normData[globalIndex];
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < parentMesh->geometry->indices.size()) {
+                uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+                Vec3* normData = parentMesh->geometry->get_normals_mut();
+                if (normData) return normData[globalIndex];
+            }
         }
         return svw()[i].normal;
     }
 
     inline const Vec3& v_norm(int i) const {
         if (parentMesh && parentMesh->geometry) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            const Vec3* normData = parentMesh->geometry->get_normals();
-            if (normData) return normData[globalIndex];
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < parentMesh->geometry->indices.size()) {
+                uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+                const Vec3* normData = parentMesh->geometry->get_normals();
+                if (normData) return normData[globalIndex];
+            }
         }
         return svr()[i].normal;
     }
@@ -276,9 +321,12 @@ public:
 
     inline Vec2& t_ref(int i) {
         if (parentMesh && parentMesh->geometry) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            Vec2* uvData = parentMesh->geometry->get_uvs_mut();
-            if (uvData) return uvData[globalIndex];
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < parentMesh->geometry->indices.size()) {
+                uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+                Vec2* uvData = parentMesh->geometry->get_uvs_mut();
+                if (uvData) return uvData[globalIndex];
+            }
         }
         if (i == 0) return t0;
         if (i == 1) return t1;
@@ -287,9 +335,12 @@ public:
 
     inline const Vec2& t_ref(int i) const {
         if (parentMesh && parentMesh->geometry) {
-            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
-            const Vec2* uvData = parentMesh->geometry->get_uvs();
-            if (uvData) return uvData[globalIndex];
+            const size_t idxOffset = static_cast<size_t>(faceIndex) * 3 + static_cast<size_t>(i);
+            if (idxOffset < parentMesh->geometry->indices.size()) {
+                uint32_t globalIndex = parentMesh->geometry->indices[idxOffset];
+                const Vec2* uvData = parentMesh->geometry->get_uvs();
+                if (uvData) return uvData[globalIndex];
+            }
         }
         if (i == 0) return t0;
         if (i == 1) return t1;

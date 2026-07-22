@@ -105,6 +105,9 @@ public:
     unsigned triangle_geom_id = 0xFFFFFFFF; // RTC_INVALID_GEOMETRY_ID
     std::vector<std::shared_ptr<HittableInstance>> instance_objects;
     std::vector<std::shared_ptr<Triangle>> cached_triangles; // [NEW] Önbelleklenmiş sahne üçgenleri
+    // Keep facade-less meshes alive for as long as this BVH can return hits.
+    // TriangleData keeps a compact raw mesh_ptr, while this vector owns its lifetime.
+    std::vector<std::shared_ptr<TriangleMesh>> cached_direct_meshes;
     
     // Grouping structure to exploit contiguous flat buffers
     struct EmbreeMeshGroup {

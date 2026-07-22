@@ -177,4 +177,15 @@ float waterV3FoamCoverage(float production, float breakup, float threshold) {
     return smoothstep(edge * 0.72, min(edge + 0.28, 1.0), coherentSignal);
 }
 
+// Structured coverage: the cell field carves filaments and holes out of the
+// mask (additive breakup) instead of merely dimming it, so patch borders are
+// ragged rather than smooth gradient blobs. Production still gates everything:
+// where nothing is produced, no pattern value can conjure foam.
+float waterV3FoamCoverageStructured(float production, float cell, float threshold) {
+    float edge = clamp(threshold, 0.02, 0.92);
+    float signal = clamp(production + (cell - 0.5) * (0.42 + 0.30 * production), 0.0, 1.0);
+    return smoothstep(edge * 0.72, min(edge + 0.28, 1.0), signal)
+         * smoothstep(0.0, 0.06, production);
+}
+
 #endif

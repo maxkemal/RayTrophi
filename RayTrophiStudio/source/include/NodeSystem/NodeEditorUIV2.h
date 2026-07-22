@@ -92,6 +92,7 @@ namespace NodeSystem {
         uint32_t selectedNodeId = 0;
         std::vector<uint32_t> selectedNodeIds;
         uint32_t selectedLinkId = 0;
+        uint32_t selectedPortalId = 0;
         uint32_t selectedGroupId = 0;
         uint32_t draggingNodeId = 0;
         uint32_t draggingGroupId = 0;
@@ -126,6 +127,7 @@ namespace NodeSystem {
         bool nodeContextMenuRequested_ = false;
         bool groupContextMenuRequested_ = false;
         uint32_t resizingGroupId = 0;
+        uint32_t draggingPortalId = 0;
         
         bool isCreatingLink = false;
         uint32_t linkStartPinId = 0;
@@ -162,12 +164,14 @@ namespace NodeSystem {
             selectedNodeId = 0;
             selectedNodeIds.clear();
             selectedLinkId = 0;
+            selectedPortalId = 0;
             selectedGroupId = 0;
             focusedGroupId = 0;
             draggingNodeId = 0;
             draggingGroupId = 0;
             resizingNodeId = 0;
             resizingGroupId = 0;
+            draggingPortalId = 0;
             isCreatingLink = false;
             linkStartPinId = 0;
             isBoxSelecting = false;
@@ -183,6 +187,7 @@ namespace NodeSystem {
         };
         std::unordered_map<uint32_t, ImVec2> pinPositions_;
         std::unordered_map<uint32_t, LinkScreenGeometry> linkScreenGeometry_;
+        std::unordered_map<uint32_t, ImVec2> portalSourcePositions_;
 
     public:
         ImVec2 canvasPos_;
@@ -242,11 +247,12 @@ namespace NodeSystem {
             // Reset pin cache
             pinPositions_.clear();
             linkScreenGeometry_.clear();
+            portalSourcePositions_.clear();
             
             // Draw groups (behind nodes)
             for (auto& group : graph.groups) {
                 if (focusedGroupId != 0) continue;
-                drawGroup(dl, group);
+                drawGroup(dl, group, graph);
             }
             
             // Draw nodes
@@ -254,6 +260,8 @@ namespace NodeSystem {
                 if (!isNodeVisible(graph, *node)) continue;
                 drawNode(dl, *node, graph);
             }
+
+            if (focusedGroupId == 0) prepareWirePortals(graph);
             
             // Draw internal links. In layer view, crossing links terminate at explicit
             // canvas-edge interface ports instead of disappearing or spanning other layers.
@@ -270,6 +278,21 @@ namespace NodeSystem {
                     drawLink(dl, link, graph);
                 } else if (focusedGroupId != 0 && startVisible != endVisible) {
                     (endVisible ? incomingBoundaryLinks : outgoingBoundaryLinks).push_back(&link);
+                } else if (focusedGroupId == 0) {
+                    // A collapsed group is a visual proxy for its hidden nodes. Its
+                    // interface pins were registered by drawGroup(), so crossing
+                    // links can keep their real graph pin ids while terminating on
+                    // the compact group tile. Links wholly inside one collapsed
+                    // group remain hidden.
+                    const NodeGroup* startGroup = startNode ? graph.getGroup(startNode->groupId) : nullptr;
+                    const NodeGroup* endGroup = endNode ? graph.getGroup(endNode->groupId) : nullptr;
+                    const bool sameCollapsedGroup = startGroup && endGroup &&
+                        startGroup->id == endGroup->id && startGroup->collapsed;
+                    if (!sameCollapsedGroup &&
+                        pinPositions_.find(link.startPinId) != pinPositions_.end() &&
+                        pinPositions_.find(link.endPinId) != pinPositions_.end()) {
+                        drawLink(dl, link, graph);
+                    }
                 }
             }
 
@@ -306,6 +329,8 @@ namespace NodeSystem {
                                               incoming ? incomingRows++ : outgoingRows++);
                 }
             }
+
+            if (focusedGroupId == 0) drawWirePortals(dl, graph);
             
             // Draw creating link
             if (isCreatingLink && linkStartPinId != 0) {
@@ -483,6 +508,7 @@ namespace NodeSystem {
                         port.dataType = internalPin->dataType;
                         port.imageSemantic = internalPin->imageSemantic;
                         port.imageChannels = internalPin->imageChannels;
+                        port.imageUnit = internalPin->imageUnit;
                         group.interfacePorts.push_back(std::move(port));
                         matched = &group.interfacePorts.back();
                         matchKind = MatchKind::Exact;
@@ -504,6 +530,7 @@ namespace NodeSystem {
                     matched->dataType = internalPin->dataType;
                     matched->imageSemantic = internalPin->imageSemantic;
                     matched->imageChannels = internalPin->imageChannels;
+                    matched->imageUnit = internalPin->imageUnit;
                     matched->connected = true;
                 }
 
@@ -939,7 +966,14 @@ namespace NodeSystem {
                 
                 // Delete keys
                 if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
-                    if (selectedLinkId != 0) {
+                    if (selectedPortalId != 0) {
+                        graph.portals.erase(std::remove_if(graph.portals.begin(), graph.portals.end(),
+                            [this](const WirePortal& portal) { return portal.id == selectedPortalId; }),
+                            graph.portals.end());
+                        selectedPortalId = 0;
+                        draggingPortalId = 0;
+                        if (onGraphModified) onGraphModified();
+                    } else if (selectedLinkId != 0) {
                         graph.removeLink(selectedLinkId);
                         selectedLinkId = 0;
                         if (onGraphModified) onGraphModified();
@@ -1770,6 +1804,18 @@ namespace NodeSystem {
                         ImDrawFlags_Closed, 1.0f * zoom);
                     break;
                 }
+
+                case PinShape::Arrow: {
+                    ImVec2 pts[3] = {
+                        {center.x - r * 0.75f, center.y - r},
+                        {center.x + r, center.y},
+                        {center.x - r * 0.75f, center.y + r}
+                    };
+                    dl->AddConvexPolyFilled(pts, 3, col);
+                    dl->AddPolyline(pts, 3, IM_COL32(255, 255, 255, 180),
+                                    ImDrawFlags_Closed, 1.0f * zoom);
+                    break;
+                }
                     
                 default:
                     dl->AddCircleFilled(center, r, col);
@@ -1785,9 +1831,13 @@ namespace NodeSystem {
                 dl->AddCircle(center, r * 1.6f, IM_COL32(255, 255, 255, 100), 0, 2.0f);
                 
                 // Tooltip
-                if (!pin.tooltip.empty()) {
-                    ImGui::SetTooltip("%s", pin.tooltip.c_str());
-                }
+                const auto visual = getDataTypeVisual(pin.dataType, pin.imageSemantic);
+                ImGui::BeginTooltip();
+                if (!pin.tooltip.empty()) ImGui::TextUnformatted(pin.tooltip.c_str());
+                ImGui::TextDisabled("%s%s%s", visual.displayName,
+                    pin.imageUnit != ImageUnit::Unknown ? " | " : "",
+                    getImageUnitName(pin.imageUnit));
+                ImGui::EndTooltip();
             }
             
             if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
@@ -1824,6 +1874,132 @@ namespace NodeSystem {
         // ========================================================================
         // LINK
         // ========================================================================
+
+        WirePortal* findWirePortalForPin(GraphBase& graph, uint32_t pinId) {
+            for (WirePortal& portal : graph.portals) {
+                if (portal.linkedPinId == pinId) return &portal;
+            }
+            return nullptr;
+        }
+
+        void createWireJunction(GraphBase& graph, uint32_t sourcePinId,
+                                const ImVec2& screenPosition) {
+            Pin* sourcePin = graph.findPin(sourcePinId);
+            if (!sourcePin || sourcePin->kind != PinKind::Output) return;
+            if (WirePortal* existing = findWirePortalForPin(graph, sourcePinId)) {
+                selectedPortalId = existing->id;
+                selectedLinkId = 0;
+                return;
+            }
+
+            WirePortal portal;
+            portal.id = graph.nextPortalId++;
+            portal.name = "Junction " + std::to_string(portal.id);
+            portal.linkedPinId = sourcePinId;
+            portal.position = ImVec2(
+                (screenPosition.x - canvasPos_.x - scrollX) / zoom,
+                (screenPosition.y - canvasPos_.y - scrollY) / zoom);
+            portal.color = sourcePin->cachedColor
+                ? sourcePin->cachedColor : IM_COL32(200, 150, 50, 255);
+            portal.kind = PinKind::Output;
+            graph.portals.push_back(std::move(portal));
+            selectedPortalId = graph.portals.back().id;
+            selectedLinkId = 0;
+            if (onGraphModified) onGraphModified();
+        }
+
+        void prepareWirePortals(GraphBase& graph) {
+            for (WirePortal& portal : graph.portals) {
+                Pin* pin = graph.findPin(portal.linkedPinId);
+                auto sourceIt = pinPositions_.find(portal.linkedPinId);
+                if (!pin || pin->kind != PinKind::Output || sourceIt == pinPositions_.end()) continue;
+                if (portalSourcePositions_.find(portal.linkedPinId) != portalSourcePositions_.end()) continue;
+                portalSourcePositions_[portal.linkedPinId] = sourceIt->second;
+                const ImVec2 center = nodeToScreen(portal.position.x, portal.position.y);
+                pinPositions_[portal.linkedPinId] = ImVec2(center.x + 14.0f * zoom, center.y);
+            }
+        }
+
+        void drawWirePortals(ImDrawList* dl, GraphBase& graph) {
+            for (WirePortal& portal : graph.portals) {
+                Pin* pin = graph.findPin(portal.linkedPinId);
+                const auto sourceIt = portalSourcePositions_.find(portal.linkedPinId);
+                if (!pin || sourceIt == portalSourcePositions_.end()) continue;
+
+                const ImVec2 center = nodeToScreen(portal.position.x, portal.position.y);
+                const ImVec2 trunkEnd(center.x - 8.0f * zoom, center.y);
+                const ImVec2 source = sourceIt->second;
+                ImU32 color = pin->cachedColor ? pin->cachedColor : portal.color;
+                const float cpDistance = std::max(45.0f * zoom,
+                    std::abs(trunkEnd.x - source.x) * 0.45f);
+                dl->AddBezierCubic(source, ImVec2(source.x + cpDistance, source.y),
+                    ImVec2(trunkEnd.x - cpDistance, trunkEnd.y), trunkEnd, color,
+                    std::max(1.0f, config.linkThickness * zoom));
+
+                const float bodyRadius = std::max(6.0f, 7.0f * zoom);
+                const bool selected = selectedPortalId == portal.id;
+                ImVec2 diamond[4] = {
+                    ImVec2(center.x, center.y - bodyRadius),
+                    ImVec2(center.x + bodyRadius, center.y),
+                    ImVec2(center.x, center.y + bodyRadius),
+                    ImVec2(center.x - bodyRadius, center.y)
+                };
+                dl->AddConvexPolyFilled(diamond, 4, IM_COL32(32, 36, 46, 255));
+                dl->AddPolyline(diamond, 4, selected ? IM_COL32(255, 220, 120, 255) : color,
+                                ImDrawFlags_Closed, selected ? 2.5f : 1.5f);
+
+                ImGui::SetCursorScreenPos(ImVec2(center.x - bodyRadius * 1.5f,
+                                                 center.y - bodyRadius * 1.5f));
+                ImGui::PushID(static_cast<int>(portal.id) + 9200000);
+                ImGui::InvisibleButton("WireJunctionBody",
+                    ImVec2(bodyRadius * 3.0f, bodyRadius * 3.0f));
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                    selectedPortalId = portal.id;
+                    selectedLinkId = 0;
+                    selectedNodeId = 0;
+                    selectedNodeIds.clear();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s | drag to move | Delete to remove",
+                                      portal.name.c_str());
+                }
+                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    draggingPortalId = portal.id;
+                    portal.position.x += ImGui::GetIO().MouseDelta.x / zoom;
+                    portal.position.y += ImGui::GetIO().MouseDelta.y / zoom;
+                    if (onGraphModified) onGraphModified();
+                } else if (draggingPortalId == portal.id &&
+                           ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                    draggingPortalId = 0;
+                }
+                ImGui::PopID();
+
+                // The small socket is the real source output mirrored at the
+                // junction. Dragging it creates another fan-out connection.
+                const ImVec2 socket(center.x + 14.0f * zoom, center.y);
+                const float socketRadius = std::max(4.5f, 5.0f * zoom);
+                dl->AddLine(ImVec2(center.x + bodyRadius, center.y), socket, color,
+                            std::max(1.0f, zoom));
+                dl->AddCircleFilled(socket, socketRadius, color);
+                ImGui::SetCursorScreenPos(ImVec2(socket.x - socketRadius * 2.0f,
+                                                 socket.y - socketRadius * 2.0f));
+                ImGui::PushID(static_cast<int>(portal.id) + 9300000);
+                ImGui::InvisibleButton("WireJunctionOutput",
+                    ImVec2(socketRadius * 4.0f, socketRadius * 4.0f));
+                if (ImGui::IsItemHovered()) {
+                    dl->AddCircle(socket, socketRadius * 1.6f,
+                                  IM_COL32(255, 255, 255, 135), 0, 2.0f);
+                    ImGui::SetTooltip("Drag to branch this cable");
+                }
+                if (ImGui::IsItemActive() &&
+                    ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && !isCreatingLink) {
+                    isCreatingLink = true;
+                    linkStartPinId = portal.linkedPinId;
+                    linkStartType = pin->dataType;
+                }
+                ImGui::PopID();
+            }
+        }
         
         ImVec2 getBezierPoint(const ImVec2& p1, const ImVec2& cp1, const ImVec2& cp2, const ImVec2& p2, float t) {
             float u = 1.0f - t;
@@ -1848,9 +2024,19 @@ namespace NodeSystem {
             
             // Get color from source pin
             Pin* sourcePin = graph.findPin(link.startPinId);
+            Pin* targetPin = graph.findPin(link.endPinId);
             ImU32 col = sourcePin && sourcePin->cachedColor 
                 ? sourcePin->cachedColor 
                 : IM_COL32(150, 150, 150, 255);
+
+            // Old projects retain formerly-permitted Image2D links. Make any
+            // semantic/unit mismatch unmistakable instead of silently treating
+            // it as a valid conversion.
+            const bool semanticWarning = sourcePin && targetPin &&
+                sourcePin->dataType == DataType::Image2D &&
+                targetPin->dataType == DataType::Image2D &&
+                !sourcePin->canConnectTo(*targetPin);
+            if (semanticWarning) col = IM_COL32(255, 170, 45, 255);
             
             if (link.colorOverride != 0) {
                 col = link.colorOverride;
@@ -1906,8 +2092,15 @@ namespace NodeSystem {
                 
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     selectedLinkId = link.id;
+                    selectedPortalId = 0;
                     selectedNodeId = 0;
                     if (onLinkSelected) onLinkSelected(link.id);
+                }
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    createWireJunction(graph, link.startPinId, ImGui::GetMousePos());
+                }
+                if (semanticWarning) {
+                    ImGui::SetTooltip("Legacy semantic/unit mismatch: insert an explicit conversion node");
                 }
             }
         }
@@ -1953,8 +2146,12 @@ namespace NodeSystem {
                                    std::max(2.0f, (config.linkThickness + 1.0f) * zoom));
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     selectedLinkId = link.id;
+                    selectedPortalId = 0;
                     selectedNodeId = 0;
                     if (onLinkSelected) onLinkSelected(link.id);
+                }
+                if (focusedGroupId == 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    createWireJunction(graph, link.startPinId, ImGui::GetMousePos());
                 }
             }
 
@@ -2079,12 +2276,86 @@ namespace NodeSystem {
         // ========================================================================
         // GROUP (Frame)
         // ========================================================================
+
+        void drawCollapsedGroupPorts(ImDrawList* dl, GraphBase& graph, NodeGroup& group,
+                                     const ImVec2& pos, const ImVec2& size) {
+            int inputRow = 0;
+            int outputRow = 0;
+            const float radius = std::max(4.0f, 4.5f * zoom);
+            const float firstRowY = pos.y + 43.0f * zoom;
+            const float rowStep = 22.0f * zoom;
+
+            for (const LayerInterfacePort& port : group.interfacePorts) {
+                if (!port.connected) continue;
+                const bool incoming = port.direction == LayerPortDirection::Input;
+                const int row = incoming ? inputRow++ : outputRow++;
+                const ImVec2 center(
+                    incoming ? pos.x : pos.x + size.x,
+                    firstRowY + static_cast<float>(row) * rowStep);
+
+                // The interface socket represents the actual hidden internal pin.
+                // Keeping that id means link editing, cycle checks and evaluation
+                // remain identical whether the group is expanded or collapsed.
+                Pin* internalPin = graph.findPin(port.internalPinId);
+                if (!internalPin) continue;
+                pinPositions_[internalPin->id] = center;
+
+                ImU32 color = internalPin->cachedColor
+                    ? internalPin->cachedColor : IM_COL32(150, 150, 165, 255);
+                dl->AddCircleFilled(center, radius, color);
+                dl->AddCircle(center, radius, IM_COL32(245, 248, 255, 210), 0,
+                              std::max(1.0f, zoom));
+
+                ImGui::SetCursorScreenPos(ImVec2(center.x - radius * 2.0f,
+                                                 center.y - radius * 2.0f));
+                ImGui::PushID(static_cast<int>(group.id) + 8100000);
+                ImGui::PushID(static_cast<int>(port.id));
+                ImGui::InvisibleButton("CollapsedGroupPort", ImVec2(radius * 4.0f, radius * 4.0f));
+                if (ImGui::IsItemHovered()) {
+                    dl->AddCircle(center, radius * 1.65f, IM_COL32(255, 255, 255, 135), 0, 2.0f);
+                    ImGui::SetTooltip("%s | %s group %s",
+                        port.name.c_str(), group.name.c_str(), incoming ? "input" : "output");
+                }
+                if (ImGui::IsItemActive() &&
+                    ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && !isCreatingLink) {
+                    isCreatingLink = true;
+                    linkStartPinId = internalPin->id;
+                    linkStartType = internalPin->dataType;
+                }
+                ImGui::PopID();
+                ImGui::PopID();
+
+                if (zoom > 0.45f) {
+                    const float labelWidth = size.x * 0.43f;
+                    const std::string label = fitTextToWidth(port.name, labelWidth);
+                    const ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+                    const float textX = incoming
+                        ? center.x + radius + 5.0f * zoom
+                        : center.x - radius - 5.0f * zoom - textSize.x;
+                    dl->AddText(ImVec2(textX, center.y - textSize.y * 0.5f),
+                                IM_COL32(222, 228, 238, 235), label.c_str());
+                }
+            }
+        }
         
-        void drawGroup(ImDrawList* dl, NodeGroup& group) {
+        void drawGroup(ImDrawList* dl, NodeGroup& group, GraphBase& graph) {
             ImVec2 pos = nodeToScreen(group.position.x, group.position.y);
+            int collapsedInputCount = 0;
+            int collapsedOutputCount = 0;
+            if (group.collapsed) {
+                for (const LayerInterfacePort& port : group.interfacePorts) {
+                    if (!port.connected) continue;
+                    if (port.direction == LayerPortDirection::Input) ++collapsedInputCount;
+                    else ++collapsedOutputCount;
+                }
+            }
+            const int collapsedRows = std::max(collapsedInputCount, collapsedOutputCount);
+            const float collapsedWidth = std::max(190.0f,
+                42.0f + ImGui::CalcTextSize(group.name.c_str()).x);
+            const float collapsedHeight = std::max(38.0f,
+                34.0f + static_cast<float>(collapsedRows) * 22.0f);
             ImVec2 size = group.collapsed
-                ? ImVec2(std::max(150.0f, 24.0f + ImGui::CalcTextSize(group.name.c_str()).x) * zoom,
-                         34.0f * zoom)
+                ? ImVec2(collapsedWidth * zoom, collapsedHeight * zoom)
                 : ImVec2(group.size.x * zoom, group.size.y * zoom);
             
             float radius = 8.0f * zoom;
@@ -2106,6 +2377,10 @@ namespace NodeSystem {
                 
             dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), borderCol, radius, 0, 
                 isSelected ? 1.8f * zoom : 1.0f * zoom);
+
+            if (group.collapsed) {
+                drawCollapsedGroupPorts(dl, graph, group, pos, size);
+            }
             
             // Resize Handle (Gaea-style)
             if (!group.collapsed) {

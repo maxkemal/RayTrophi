@@ -1124,7 +1124,7 @@ public:
     cudaTextureObject_t getTextureObject() const { return tex_obj; }
     bool isUploaded() const { return is_gpu_uploaded; }
 
-    void cleanup_gpu() {
+    void cleanup_gpu(bool synchronize = true) {
         if (tex_obj) {
             // Notify SceneTextureManager FIRST so any cached optixTextureId entries
             // pointing at this handle are cleared before the CUDA object is destroyed.
@@ -1135,7 +1135,7 @@ public:
 
             // Texture slot deletion can race with an in-flight OptiX launch.
             // Wait for outstanding CUDA work before freeing the texture object.
-            if (g_hasOptix || rendering_in_progress.load(std::memory_order_acquire)) {
+            if (synchronize && (g_hasOptix || rendering_in_progress.load(std::memory_order_acquire))) {
                 cudaDeviceSynchronize();
             }
 
@@ -1431,9 +1431,6 @@ private:
         int pixel_count = width * height;
         pixels.resize(pixel_count);
 
-        SCENE_LOG_INFO("COMPRESSED decode start: " + std::to_string(width) + "x" +
-            std::to_string(height) + " (" + std::to_string(pixel_count) + " pixels)");
-
         if (SDL_LockSurface(surface) != 0) {
             SCENE_LOG_ERROR("[DECODE ERROR] Failed to lock surface");
             SDL_FreeSurface(surface);
@@ -1493,11 +1490,11 @@ private:
         auto perf_end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(perf_end - perf_start);
 
-        SCENE_LOG_INFO("[SUCCESS] COMPRESSED texture decoded -> " + std::to_string(width) + "x" +
+       /* SCENE_LOG_INFO("[SUCCESS] COMPRESSED texture decoded -> " + std::to_string(width) + "x" +
             std::to_string(height) + (has_alpha ? " | alpha" : " | opaque") +
             (is_gray_scale ? " | grayscale" : " | color") + " | " +
             "Single-threaded safe load | " +
-            std::to_string(duration.count()) + "ms");
+            std::to_string(duration.count()) + "ms");*/
     }
 
 

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Kaynak Dosyalar">
@@ -22,6 +22,9 @@
     </Filter>
     <Filter Include="Kaynak Dosyalar\Utils">
       <UniqueIdentifier>4e535095-0350-48c9-a049-68105869e98a</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Api">
+      <UniqueIdentifier>{8a2f61d7-4c3e-4f5b-9a1d-2e7b90c4a5f3}</UniqueIdentifier>
     </Filter>
     <Filter Include="Kaynak Dosyalar\Core">
       <UniqueIdentifier>fcf3bac3-1868-4460-9dee-36b07e44d056</UniqueIdentifier>
@@ -145,6 +148,9 @@
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\SimulationCompute.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SnowComputeGPU.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
     <ClInclude Include="source\include\SimulationWorld.h">
@@ -355,6 +361,18 @@
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\ImGuizmo.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApi.h">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtPython.h">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtIpc.h">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TextEditor.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\SceneHistory.h">
@@ -583,6 +601,9 @@
     <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\SnowComputeGPU.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\TerrainFFT.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
@@ -672,6 +693,57 @@
     </ClCompile>
     <ClCompile Include="source\src\Utils\SceneExporter.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApi.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiModifiers.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiFluid.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiTerrain.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiHair.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPaint.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSculpt.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPython.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtConsole.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpc.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcSecurity.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcAudit.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcPanel.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcSession.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcTransportLocal.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcTransportTls.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\TextEditor.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Utils\SceneHistory.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>

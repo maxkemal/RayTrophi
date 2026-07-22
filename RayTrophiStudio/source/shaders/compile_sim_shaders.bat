@@ -37,6 +37,9 @@ glslc "%SHADER_DIR%sim_grid_subtract_gradient.comp"   -o "%SHADER_DIR%sim_grid_s
 glslc "%SHADER_DIR%sim_grid_advect_scalar.comp"       -o "%SHADER_DIR%sim_grid_advect_scalar.spv"       --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_advect_velocity.comp"     -o "%SHADER_DIR%sim_grid_advect_velocity.spv"     --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_velocity_dissipate.comp"  -o "%SHADER_DIR%sim_grid_velocity_dissipate.spv"  --target-env=vulkan1.2
+glslc "%SHADER_DIR%terrain_snow_solver.comp"           -o "%SHADER_DIR%terrain_snow_solver.spv"           --target-env=vulkan1.2
+glslc "%SHADER_DIR%terrain_hydraulic_droplet.comp"     -o "%SHADER_DIR%terrain_hydraulic_droplet.spv"     --target-env=vulkan1.2
+glslc "%SHADER_DIR%terrain_edge_preservation.comp"     -o "%SHADER_DIR%terrain_edge_preservation.spv"     --target-env=vulkan1.2
 
 if errorlevel 1 (
     echo FAILED: One or more shaders did not compile.

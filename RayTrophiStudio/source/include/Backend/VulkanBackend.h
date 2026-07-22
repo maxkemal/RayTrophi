@@ -1111,12 +1111,18 @@ namespace {
         // Ignore std::endl
         VulkanLogHelper& operator<<(std::ostream& (*)(std::ostream&)) { return *this; }
     };
+    class VulkanNullLogHelper {
+    public:
+        template<typename T>
+        VulkanNullLogHelper& operator<<(const T&) { return *this; }
+        VulkanNullLogHelper& operator<<(std::ostream& (*)(std::ostream&)) { return *this; }
+    };
 }
 
 // ============================================================================
 // IBackend Adapter
 // ============================================================================
-#define VK_INFO() VulkanLogHelper(LogLevel::Info)
+#define VK_INFO() VulkanNullLogHelper()
 #define VK_ERROR() VulkanLogHelper(LogLevel::Error)
 #define VK_WARN() VulkanLogHelper(LogLevel::Warning)
 
@@ -1816,6 +1822,7 @@ protected:
     // Returns true if the interop is ready for this frame's dimensions.
     bool ensureGpuDenoiserInterop(int width, int height, bool needAux);
     void destroyGpuDenoiserInterop();
+    void closeUnimportedDenoiserSharedHandles();
     
     // Status callback
     std::function<void(const std::string&, int)> m_statusCallback;

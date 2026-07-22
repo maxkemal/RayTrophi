@@ -410,6 +410,7 @@ namespace NodeSystem {
         DataType dataType = DataType::None;
         ImageSemantic imageSemantic = ImageSemantic::Generic;
         int imageChannels = 1;
+        ImageUnit imageUnit = ImageUnit::Unknown;
         bool connected = false;
     };
 
@@ -439,14 +440,14 @@ namespace NodeSystem {
     };
 
     // ============================================================================
-    // WIRE PORTAL (Gaea-inspired teleport connections)
+    // WIRE JUNCTION (editor-only fan-out / reroute proxy)
     // ============================================================================
     
     /**
-     * @brief Virtual connection point for long-distance links
+     * @brief Virtual connection point for organizing and branching links
      * 
-     * Instead of drawing long bezier curves, portals can "teleport"
-     * connections between distant nodes or different graph tabs.
+     * The junction mirrors one real output pin. It never merges values and does
+     * not participate in evaluation; every branch remains an ordinary graph link.
      */
     struct WirePortal {
         uint32_t id = 0;

@@ -101,7 +101,16 @@ enum class DenoiserQuality {
 
 struct RenderSettings {
     // Input / Interaction
+    // Angular look/orbit response only; independent of scene/world scale.
     float mouse_sensitivity = 0.4f;
+    // World-space navigation controls. navigation_scale may be raised
+    // automatically for large terrains, while the individual multipliers remain
+    // user-authored fine tuning.
+    float navigation_scale = 1.0f;
+    bool navigation_scale_auto = true;
+    float pan_sensitivity = 1.0f;
+    float zoom_sensitivity = 1.0f;
+    float fly_speed_multiplier = 1.0f;
 
     // Quality Preset
     QualityPreset quality_preset = QualityPreset::Preview;
@@ -235,7 +244,7 @@ public:
     UILogger() {
         logFilePath = "SceneLog.txt";
         // Program EXE’nin yanına log dosyası oluşturur
-        logFile.open(logFilePath, std::ios::out | std::ios::app);
+        openLogFileWithRotation(true);
         if (!logFile.is_open()) {
             std::cerr << "[LOGGER ERROR] Failed to open log file!\n";
         }
@@ -259,7 +268,7 @@ public:
             logFilePath = "SceneLog.txt";
         }
         // Re-open in the absolute path
-        logFile.open(logFilePath, std::ios::out | std::ios::app);
+        openLogFileWithRotation(false);
     }
 
     void add(const std::string& msg, LogLevel level = LogLevel::Info) {
@@ -315,6 +324,35 @@ private:
     std::vector<LogEntry> lines;
     std::ofstream logFile;
     std::string logFilePath;
+
+    void openLogFileWithRotation(bool freshSession) {
+        static constexpr uintmax_t kMaxLogFileBytes = 8u * 1024u * 1024u;
+        if (freshSession) {
+            logFile.open(logFilePath, std::ios::out | std::ios::trunc);
+            return;
+        }
+        try {
+            const std::filesystem::path activePath(logFilePath);
+            if (std::filesystem::exists(activePath) &&
+                std::filesystem::file_size(activePath) >= kMaxLogFileBytes) {
+                const std::filesystem::path previousPath =
+                    activePath.parent_path() / "SceneLog.previous.txt";
+                std::error_code ec;
+                std::filesystem::remove(previousPath, ec);
+                ec.clear();
+                std::filesystem::rename(activePath, previousPath, ec);
+                if (ec) {
+                    // Rotation can fail if another process has the file open;
+                    // truncate as a last resort so logging never grows forever.
+                    logFile.open(logFilePath, std::ios::out | std::ios::trunc);
+                    return;
+                }
+            }
+        } catch (...) {
+            // Logging must never prevent application startup.
+        }
+        logFile.open(logFilePath, std::ios::out | std::ios::app);
+    }
 
     const char* logLevelToString(LogLevel level) const {
         switch (level) {

@@ -1092,6 +1092,8 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             if (ImGui::MenuItem("Log Window", nullptr, &show_scene_log)) {
                  if (show_scene_log) show_animation_panel = false;
             }
+            ImGui::MenuItem("Python Console", nullptr, &show_python_console);
+            ImGui::MenuItem("Remote IPC Control", nullptr, &show_remote_ipc_panel);
             ImGui::Separator();
             // --- Dockable layout (modern movable/tabbable panels) ---
             if (ImGui::MenuItem("Dockable Layout", nullptr, &docking_enabled)) {

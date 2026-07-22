@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - VIEWPORT OVERLAYS
 // ═══════════════════════════════════════════════════════════════════════════════
 // This file contains viewport overlay components:
@@ -495,18 +495,23 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
         {
             static bool sens_open = false;
             const ImVec4 sensCol(0.85f, 0.80f, 0.35f, 1.0f);
-            if (iconToggleTypeBtn("##toggle_sens", sens_open, ImVec2(btn_h + 2.0f, btn_h), sensCol, UIWidgets::IconType::Sensitivity, 20.0f)) {
+            const bool sensToggleClicked = iconToggleTypeBtn("##toggle_sens", sens_open, ImVec2(btn_h + 2.0f, btn_h), sensCol, UIWidgets::IconType::Sensitivity, 20.0f);
+            const ImVec2 sensButtonMin = ImGui::GetItemRectMin();
+            const ImVec2 sensButtonMax = ImGui::GetItemRectMax();
+            if (sensToggleClicked) {
                 sens_open = !sens_open;
             }
-            char sens_body[64];
-            std::snprintf(sens_body, sizeof(sens_body), "Current: %.3f", ctx.render_settings.mouse_sensitivity);
-            viewportTooltip("Sensitivity", sens_body, sensCol);
+            char sens_body[96];
+            std::snprintf(sens_body, sizeof(sens_body), "Look: %.3f  Navigation: %.2fx",
+                ctx.render_settings.mouse_sensitivity, ctx.render_settings.navigation_scale);
+            viewportTooltip("Camera Controls", sens_body, sensCol);
 
+            bool sensSliderHoveredOrActive = false;
             if (sens_open) {
-                const float popup_w = 130.0f;
-                float popup_x = ImGui::GetItemRectMax().x - popup_w;
+                const float popup_w = 160.0f;
+                float popup_x = sensButtonMax.x - popup_w;
                 popup_x = (std::max)(8.0f, (std::min)(popup_x, io.DisplaySize.x - popup_w - 8.0f));
-                const float popup_y = (std::min)(ImGui::GetItemRectMax().y + 6.0f, io.DisplaySize.y - 90.0f);
+                const float popup_y = (std::min)(sensButtonMax.y + 6.0f, io.DisplaySize.y - 125.0f);
                 ImGui::SetNextWindowPos(ImVec2(popup_x, popup_y), ImGuiCond_Always);
                 ImGui::SetNextWindowSize(ImVec2(popup_w, 0));
                 
@@ -534,13 +539,34 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
                     dl->AddRectFilled(wpos, ImVec2(wpos.x + wsz.x, wpos.y + wsz.y), ImGui::ColorConvertFloat4ToU32(ImVec4(0.07f, 0.08f, 0.10f, 0.45f)), 8.0f);
                     dl->AddRect(wpos, ImVec2(wpos.x + wsz.x, wpos.y + wsz.y), ImGui::ColorConvertFloat4ToU32(ImVec4(0.72f, 0.78f, 0.88f, 0.15f)), 8.0f, 0, 1.0f);
 
+                    ImGui::TextDisabled("Look sensitivity");
                     ImGui::SetNextItemWidth(-1);
-                    ImGui::SliderFloat("##sens", &ctx.render_settings.mouse_sensitivity, 0.001f, 5.0f, "%.3f");
+                    ImGui::SliderFloat("##look_sens", &ctx.render_settings.mouse_sensitivity, 0.001f, 5.0f, "%.3f");
+                    sensSliderHoveredOrActive = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || ImGui::IsItemActive();
+
+                    ImGui::TextDisabled("Navigation scale");
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::SliderFloat("##nav_scale", &ctx.render_settings.navigation_scale, 0.1f, 5.0f, "%.2fx")) {
+                        ctx.render_settings.navigation_scale_auto = false;
+                    }
+                    sensSliderHoveredOrActive = sensSliderHoveredOrActive ||
+                        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) || ImGui::IsItemActive();
                 }
                 ImGui::End();
                 UIWidgets::PopControlSurfaceStyle();
 
                 ImGui::PopStyleVar(3);
+
+                // Keep the compact control modal only over its useful surface. A click
+                // anywhere else dismisses it without consuming the viewport action.
+                if (!sensToggleClicked && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    const ImVec2 mouse = ImGui::GetMousePos();
+                    const bool mouseOverButton = mouse.x >= sensButtonMin.x && mouse.x <= sensButtonMax.x &&
+                        mouse.y >= sensButtonMin.y && mouse.y <= sensButtonMax.y;
+                    if (!mouseOverButton && !sensSliderHoveredOrActive) {
+                        sens_open = false;
+                    }
+                }
             }
         }
 
@@ -1705,7 +1731,7 @@ void SceneUI::refreshSceneGeometryStats(SceneData& scene) {
         // triangle/flat-mesh count keeps "deleted" geometry in its totals.
         if (!obj || !obj->visible) continue;
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            const std::string& nn = tri->getNodeName();
+            std::string nn = tri->getNodeName();
             ++s.facade_tris;
             if (!nn.empty()) facade_nodes.insert(nn);
             if (tri->hasSkinData()) ++s.skinned_tris;

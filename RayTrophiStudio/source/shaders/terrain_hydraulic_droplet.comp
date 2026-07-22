@@ -177,6 +177,7 @@ void main() {
     float sediment = 0.0;
 
     float invCellSize = 1.0 / max(0.001, pc.cellSize);
+    float heightScale = max(0.001, pc.heightScale);
 
     for (int step = 0; step < pc.dropletLifetime; ++step) {
         int nodeX = int(posX);
@@ -197,8 +198,8 @@ void main() {
         float gradX = (h10 - h00) * (1.0 - v) + (h11 - h01) * v;
         float gradY = (h01 - h00) * (1.0 - u) + (h11 - h10) * u;
 
-        gradX *= invCellSize;
-        gradY *= invCellSize;
+        gradX *= heightScale * invCellSize;
+        gradY *= heightScale * invCellSize;
 
         dirX = dirX * pc.inertia - gradX * (1.0 - pc.inertia);
         dirY = dirY * pc.inertia - gradY * (1.0 - pc.inertia);
@@ -219,9 +220,11 @@ void main() {
         float oldH = bilinearInterpolate(pc.mapWidth, pc.mapHeight, posX, posY);
         float newH = bilinearInterpolate(pc.mapWidth, pc.mapHeight, newPosX, newPosY);
         float deltaHeight = newH - oldH;
+        float deltaWorld = deltaHeight * heightScale;
 
-        float localSlope = -deltaHeight * invCellSize;
-        float capacity = max(localSlope * speed * water * pc.sedimentCapacity * sqrt(max(0.0, localSlope) + 0.001), pc.minSlope);
+        float localSlope = -deltaWorld * invCellSize;
+        float capacity = max(localSlope * speed * water * pc.sedimentCapacity *
+                             sqrt(max(0.0, localSlope) + 0.001), pc.minSlope) / heightScale;
 
         float hardness = sampleHardness(pc.mapWidth, pc.mapHeight, posX, posY, 0.0);
         float hardnessFactor = 1.0 - hardness * 0.9;
@@ -241,7 +244,9 @@ void main() {
         if (deltaHeight > 0.0) {
             // UPHILL
             if (speed > 0.5 && sediment < capacity) {
-                float erodeAmount = min(deltaHeight * 0.3, oldH * 0.05);
+                // Translation invariant: erosion depends on local relief, not
+                // the heightfield's arbitrary zero/base elevation.
+                float erodeAmount = deltaHeight * 0.3;
                 erodeAmount *= hardnessFactor * maskValue;
                 erodeWithBrush(pc.mapWidth, pc.mapHeight, newPosX, newPosY, erodeAmount, pc.brushRadius);
                 sediment += erodeAmount;
@@ -262,7 +267,6 @@ void main() {
         } else {
             // DOWNHILL - EROSION
             float erodeAmount = min((capacity - sediment) * pc.erodeSpeed, -deltaHeight);
-            erodeAmount = min(erodeAmount, oldH * 0.05);
             erodeAmount *= hardnessFactor * maskValue;
             erodeWithBrush(pc.mapWidth, pc.mapHeight, posX, posY, erodeAmount, pc.brushRadius);
             sediment += erodeAmount;
@@ -278,7 +282,7 @@ void main() {
             }
         }
 
-        speed = sqrt(max(0.001, speed * speed - deltaHeight * pc.gravity));
+        speed = sqrt(max(0.001, speed * speed - deltaWorld * pc.gravity));
         water *= (1.0 - pc.evaporateSpeed);
 
         if (deltaHeight <= 0.0 && sediment > 0.0) {

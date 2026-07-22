@@ -48,10 +48,10 @@ It is not a render farm plugin or a library. It is an interactive editor with a 
 | **UI control points** | 1,278+ |
 | **Render backends** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
 | **Node systems** | Terrain (66), Animation (14+), Material (11+) |
-| **Last verified** | 2026-07-18 |
+| **Last verified** | 2026-07-22 — full build, local IPC and remote TLS/token/capability checks |
 <!-- STATS_END -->
 
-Counts cover `raytrac_sdl2/source` and exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`).
+Counts cover `RayTrophiStudio/source` and exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`).
 
 Full technical report: **[ARCHITECTURE.md](ARCHITECTURE.md)** · Türkçe: **[README_TR.md](README_TR.md)**
 
@@ -276,6 +276,35 @@ A post-convergence layer that reads the path-traced result + AOV buffers and res
 
 ---
 
+## Python automation & secure IPC
+
+RayTrophi includes an embedded Python 3.11 automation layer (`rt`, API version `0.5.0`) and a
+transport-independent JSON IPC protocol. Both surfaces drive the same live scene through the
+main-thread command queue and preserve undo/redo semantics.
+
+- Scene/object transforms, primitives, duplication and import
+- Materials, mesh attributes, lights, camera, world, post-processing and timeline/keyframes
+- Final-frame and sequence render jobs with status/cancel
+- Node graphs and parameters, modifiers, scatter and physics
+- Fluid/gas, terrain/river, hair, layered PBR paint and deterministic sculpt automation
+- Embedded Python console/workspace, live API reflection, addons and event callbacks
+- Local same-user Windows Named Pipe plus optional private TLS 1.2/1.3 control plane
+- Persistent hashed token vault, capabilities, expiry/revoke/rotation, IPv4 CIDR and canonical
+  workspace/export-root policies
+- Connection/session registry, bounded audit log, rate limits and **View → Remote IPC Control**
+  management panel
+
+The TLS listener is intended for loopback, trusted LAN or VPN use—not direct public-Internet
+exposure. Internet integrations belong behind a separate OIDC/mTLS gateway. See
+[IPC security and performance](docs/IPC_SECURITY_PERFORMANCE.md),
+[gateway boundary](docs/REMOTE_IPC_GATEWAY.md), and the
+[API & scripting roadmap](docs/API_SCRIPTING_ROADMAP.md).
+
+Regression clients live in `scripts/`: `rt_api_smoke_test.py`, `ipc_test_client.py`,
+`remote_ipc_client.py`, and `remote_ipc_security_test.py`.
+
+---
+
 ## 🚦 Quick Start
 
 ### Prerequisites
@@ -320,18 +349,18 @@ Managed dependencies: SDL2, Embree 4.x, Assimp 5.x, ImGui, OpenMP, stb_image, Ti
 **Visual Studio 2022 (recommended)**
 ```bash
 git clone https://github.com/maxkemal/RayTrophi.git
-cd RayTrophi/raytrac_sdl2
-# Open raytrac_sdl2.vcxproj in Visual Studio 2022
+cd RayTrophi
+# Open RayTrophiStudio.sln in Visual Studio 2022
 # Set Release | x64, then Build > Build Solution (Ctrl+Shift+B)
-# Output: x64/Release/raytracing_render_code.exe
+# Output: x64/Release/RayTrophiStudio.exe
 ```
 All dependencies (DLLs, PTX, shaders, resources) are copied to the output directory automatically.
 
 **CMake**
 ```bash
-cmake -S raytrac_sdl2 -B raytrac_sdl2/build -G "Visual Studio 17 2022" -A x64
-cmake --build raytrac_sdl2/build --config Release -j 12
-# Output: raytrac_sdl2/build/bin/RELEASE/"RayTrophi Studio.exe"
+cmake -S RayTrophiStudio -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release -j 12
+# Output: build/bin/RELEASE/RayTrophiStudio.exe
 ```
 CMake keeps its executable, PTX, Vulkan shaders, and runtime DLLs isolated under `build/bin/<CONFIG>` so it never overwrites the VS2022 `x64` output.
 
@@ -344,7 +373,7 @@ Launch the executable; the docked UI appears. Use **File → Load Scene** to imp
 
 ```
 RayTrophi/
-└── raytrac_sdl2/
+└── RayTrophiStudio/
     └── source/
         ├── src/
         │   ├── Core/        # Entry point (Main.cpp), project management
@@ -357,6 +386,7 @@ RayTrophi/
         │   ├── Paint/        # Mesh & terrain paint adapters, layer stack
         │   ├── Stylize/      # Stylize CPU/CUDA kernels and state
         │   ├── Animation/    # Animation controller, nodes, Ozz runtime
+        │   ├── Api/          # Python rt facade, JSON IPC, security, sessions, audit and panel
         │   ├── Viewport/     # Viewport scene sync
         │   ├── Math/         # Vec/Matrix/Quaternion
         │   ├── UI/           # ImGui panels, timeline, gizmos, editors

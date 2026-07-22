@@ -46,12 +46,13 @@ bool SceneTextureManager::initialize(const RenderBackendCapabilities& capabiliti
     }
     m_initialized = true;
 
-    SCENE_LOG_INFO(std::string("[SceneTextureManager] ") +
-                   (firstInit ? "Initialized" : "Reused") + " for " + m_ownerTag +
-                   " | Vulkan=" + (m_capabilities.hasVulkan ? std::string("yes") : std::string("no")) +
-                   " | MaterialPreview=" + (m_capabilities.hasMaterialPreview ? std::string("yes") : std::string("no")) +
-                   " | VulkanRT=" + (m_capabilities.hasVulkanRT ? std::string("yes") : std::string("no")) +
-                   " | OptiX=" + (m_capabilities.hasOptix ? std::string("yes") : std::string("no")));
+    if (firstInit) {
+        SCENE_LOG_INFO(std::string("[SceneTextureManager] Initialized for ") + m_ownerTag +
+                       " | Vulkan=" + (m_capabilities.hasVulkan ? std::string("yes") : std::string("no")) +
+                       " | MaterialPreview=" + (m_capabilities.hasMaterialPreview ? std::string("yes") : std::string("no")) +
+                       " | VulkanRT=" + (m_capabilities.hasVulkanRT ? std::string("yes") : std::string("no")) +
+                       " | OptiX=" + (m_capabilities.hasOptix ? std::string("yes") : std::string("no")));
+    }
     return true;
 }
 
@@ -650,6 +651,15 @@ void SceneTextureManager::clearOptixTextureId(int64_t textureId) {
         if (record.optixTextureId == textureId) {
             record.optixTextureId = 0;
         }
+    }
+}
+
+void SceneTextureManager::clearAllOptixTextureIds() {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    for (auto& [key, record] : m_recordsByKey) {
+        (void)key;
+        record.optixTextureId = 0;
+        record.hasOptixBacking = false;
     }
 }
 

@@ -653,8 +653,9 @@ bool TerrainManager::intersectRay(TerrainObject* terrain, const Ray& r, float& t
     
     // Terrain AABB (Local)
     float size = terrain->heightmap.scale_xz;
-    float maxY = terrain->heightmap.scale_y;
-    // Bounds: [0, 0, 0] to [size, maxY, size]
+    const float minY = terrain->heightmap.min_value * terrain->heightmap.scale_y;
+    const float maxY = terrain->heightmap.max_value * terrain->heightmap.scale_y;
+    // Procedural height buffers may exceed 0..1, so use their actual cached range.
     
     // AABB intersection test (Slabs)
     float t0 = t_min, t1 = t_max;
@@ -674,9 +675,17 @@ bool TerrainManager::intersectRay(TerrainObject* terrain, const Ray& r, float& t
         t0 = std::max(t0, std::min(tz1, tz2));
         t1 = std::min(t1, std::max(tz1, tz2));
     }
+
+    // Y axis: actual minimum/maximum terrain elevation.
+    if (abs(ray_dir.y) > 1e-6) {
+        const float ty1 = (minY - ray_orig.y) / ray_dir.y;
+        const float ty2 = (maxY - ray_orig.y) / ray_dir.y;
+        t0 = std::max(t0, std::min(ty1, ty2));
+        t1 = std::min(t1, std::max(ty1, ty2));
+    } else if (ray_orig.y < minY || ray_orig.y > maxY) {
+        return false;
+    }
     
-    // Y axis: 0..maxY (Optimization: Check Y range strictly?)
-    // Actually terrain can be anywhere between min and max height.
     if (t0 > t1) return false;
     
     // 2. Stepped Grid Traversal (Ray Marching)
@@ -925,6 +934,16 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuil
     int h = terrain->heightmap.height;
     float scale = terrain->heightmap.scale_xz;
     float max_h = terrain->heightmap.scale_y;
+
+    if (!terrain->heightmap.data.empty()) {
+        const auto bounds = std::minmax_element(
+            terrain->heightmap.data.begin(), terrain->heightmap.data.end());
+        terrain->heightmap.min_value = *bounds.first;
+        terrain->heightmap.max_value = *bounds.second;
+        if (terrain->heightmap.max_value - terrain->heightmap.min_value < 1.0e-6f) {
+            terrain->heightmap.max_value = terrain->heightmap.min_value + 1.0e-6f;
+        }
+    }
 
     // Rebuild topology whenever terrain resolution changes triangle count.
     const size_t required_triangle_count = (size_t)(std::max(0, w - 1)) * (size_t)(std::max(0, h - 1)) * 2ull;
@@ -1307,6 +1326,11 @@ void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mo
             if (val > 1.0f) val = 1.0f;
             
             terrain->heightmap.data[y * w + x] = val;
+            // Conservative incremental bounds: expanding is required for correct
+            // picking; stale wider bounds after lowering remain safe until the
+            // next full mesh refresh recomputes the exact range.
+            terrain->heightmap.min_value = (std::min)(terrain->heightmap.min_value, val);
+            terrain->heightmap.max_value = (std::max)(terrain->heightmap.max_value, val);
             terrain->markCellDirty(x, y); // Mark for partial mesh update
             changed = true;
         }
@@ -1934,13 +1958,36 @@ void TerrainManager::preserveEdges(TerrainObject* terrain, const std::vector<flo
     }
 }
 
-// Helper to get recommended fade width based on terrain size
-int TerrainManager::getEdgeFadeWidth(TerrainObject* terrain) {
+static void blendTerrainEdgesToLevel(std::vector<float>& data, int w, int h,
+                                     int fadeWidth, float targetLevel) {
+    if (w <= 0 || h <= 0 || data.size() != static_cast<size_t>(w) * h || fadeWidth <= 0) return;
+    fadeWidth = std::clamp(fadeWidth, 1, std::max(1, std::min(w, h) / 2));
+    #pragma omp parallel for
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const int distFromEdge = std::min({x, y, w - 1 - x, h - 1 - y});
+            if (distFromEdge >= fadeWidth) continue;
+            const float t = static_cast<float>(distFromEdge) / static_cast<float>(fadeWidth);
+            const float blend = t * t * (3.0f - 2.0f * t);
+            const int idx = y * w + x;
+            data[idx] = targetLevel * (1.0f - blend) + data[idx] * blend;
+        }
+    }
+}
+
+// Shared helper is intentionally free-standing because the Vulkan hydraulic
+// path below is also a free function rather than a TerrainManager member.
+static int recommendedEdgeFadeWidth(const TerrainObject* terrain) {
     if (!terrain) return 5;
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     // ~3-5% of terrain size, minimum 5 cells, maximum 20 cells
     return std::clamp(std::min(w, h) / 25, 5, 20);
+}
+
+// Public/member compatibility wrapper used by the rest of TerrainManager.
+int TerrainManager::getEdgeFadeWidth(TerrainObject* terrain) {
+    return recommendedEdgeFadeWidth(terrain);
 }
 
 // ===========================================================================
@@ -1959,10 +2006,10 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     
     // EDGE PRESERVATION: Save original heights before erosion
     std::vector<float> originalHeights = data;
-    int fadeWidth = getEdgeFadeWidth(terrain);
+    int fadeWidth = p.boundaryWidth > 0 ? p.boundaryWidth : getEdgeFadeWidth(terrain);
+    fadeWidth = std::clamp(fadeWidth, 1, std::max(1, std::min(w, h) / 2));
     
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937 gen(p.seed);
     std::uniform_real_distribution<float> distrib(0.0f, 1.0f);
 
     auto sampleHeight = [&](float x, float y) -> float {
@@ -2075,6 +2122,7 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
         float water = 1.0f;
         float sediment = 0.0f;
         float invCellSize = 1.0f / std::max(0.001f, cellSize);
+        const float heightScale = std::max(0.001f, terrain->heightmap.scale_y);
 
         for (int lifetime = 0; lifetime < p.dropletLifetime; lifetime++) {
             int nodeX = (int)posX;
@@ -2090,8 +2138,8 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             float u = posX - nodeX;
             float v = posY - nodeY;
 
-            float gradX = ((h10 - h00) * (1.0f - v) + (h11 - h01) * v) * invCellSize;
-            float gradY = ((h01 - h00) * (1.0f - u) + (h11 - h10) * u) * invCellSize;
+            float gradX = ((h10 - h00) * (1.0f - v) + (h11 - h01) * v) * heightScale * invCellSize;
+            float gradY = ((h01 - h00) * (1.0f - u) + (h11 - h10) * u) * heightScale * invCellSize;
 
             dirX = dirX * p.inertia - gradX * (1.0f - p.inertia);
             dirY = dirY * p.inertia - gradY * (1.0f - p.inertia);
@@ -2113,8 +2161,10 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             float oldH = sampleHeight(posX, posY);
             float newH = sampleHeight(newPosX, newPosY);
             float deltaHeight = newH - oldH;
-            float localSlope = -deltaHeight * invCellSize;
-            float capacity = fmaxf(localSlope * speed * water * p.sedimentCapacity * sqrtf(fmaxf(0.0f, localSlope) + 0.001f), p.minSlope);
+            const float deltaWorld = deltaHeight * heightScale;
+            float localSlope = -deltaWorld * invCellSize;
+            float capacity = fmaxf(localSlope * speed * water * p.sedimentCapacity *
+                sqrtf(fmaxf(0.0f, localSlope) + 0.001f), p.minSlope) / heightScale;
             
             float hardness = hasHardness ? sampleMap(terrain->hardnessMap, posX, posY, 0.0f) : 0.0f;
             float hardnessFactor = 1.0f - hardness * 0.9f;
@@ -2132,7 +2182,9 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
 
             if (deltaHeight > 0) {
                 if (speed > 0.5f && sediment < capacity) {
-                    float erodeAmount = fminf(deltaHeight * 0.3f, oldH * 0.05f);
+                    // Limit by the local uphill step, never by absolute elevation.
+                    // Adding a constant base height must not change erosion.
+                    float erodeAmount = deltaHeight * 0.3f;
                     erodeAmount *= hardnessFactor * maskValue;
                     erodeWithBrush(newPosX, newPosY, erodeAmount);
                     sediment += erodeAmount;
@@ -2153,7 +2205,6 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             }
             else {
                 float erode = fminf((capacity - sediment) * p.erodeSpeed, -deltaHeight);
-                erode = fminf(erode, oldH * 0.05f);
                 erode *= hardnessFactor * maskValue;
                 erodeWithBrush(posX, posY, erode);
                 sediment += erode;
@@ -2169,7 +2220,7 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
                 }
             }
             
-            speed = sqrtf(fmaxf(0.001f, speed*speed - deltaHeight * p.gravity));
+            speed = sqrtf(fmaxf(0.001f, speed*speed - deltaWorld * p.gravity));
             water *= (1.0f - p.evaporateSpeed);
 
             if (deltaHeight <= 0.0f && sediment > 0.0f) {
@@ -2244,31 +2295,12 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     }
     data = smoothed;
     
-    // EDGE FADE-OUT: Prevent "wall" effect at terrain boundaries
-    int edgeFadeWidth = std::max(3, w / 40);
-    
-    #pragma omp parallel for
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int idx = y * w + x;
-            int distFromEdge = std::min({x, y, w - 1 - x, h - 1 - y});
-            
-            if (distFromEdge < edgeFadeWidth) {
-                float t = (float)distFromEdge / (float)edgeFadeWidth;
-                float smoothT = t * t * (3.0f - 2.0f * t);  // Smoothstep
-                
-                // Look inward for reference
-                int inwardX = std::clamp(x + (x < w/2 ? edgeFadeWidth : -edgeFadeWidth), 0, w-1);
-                int inwardY = std::clamp(y + (y < h/2 ? edgeFadeWidth : -edgeFadeWidth), 0, h-1);
-                float inwardHeight = data[inwardY * w + inwardX];
-                
-                data[idx] = data[idx] * smoothT + inwardHeight * 0.4f * (1.0f - smoothT);
-            }
-        }
+    // Boundary policy is geometric, not an implicit pull toward height zero.
+    if (p.boundaryMode == ErosionBoundaryMode::Preserve) {
+        preserveEdges(terrain, originalHeights, fadeWidth);
+    } else if (p.boundaryMode == ErosionBoundaryMode::SeaLevel) {
+        blendTerrainEdgesToLevel(data, w, h, fadeWidth, p.boundaryLevel);
     }
-    
-    // EDGE PRESERVATION: Restore original edge heights with gradient blend
-    preserveEdges(terrain, originalHeights, fadeWidth);
     
     updateTerrainMesh(terrain);
     terrain->dirty_mesh = true;
@@ -3977,7 +4009,7 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
     gpuOps.gravity = p.gravity;
     gpuOps.cellSize = (float)terrain->heightmap.scale_xz / (float)w;
     gpuOps.heightScale = (float)terrain->heightmap.scale_y;
-    gpuOps.seed = (uint32_t)rand();
+    gpuOps.seed = p.seed;
     gpuOps.hasHardness = hasHardness ? 1u : 0u;
     gpuOps.hasMask = hasMask ? 1u : 0u;
 
@@ -4028,8 +4060,8 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
         dropletsProcessed += currentBatch;
     }
 
-    // Post-processing chain (1:1 with the CUDA host function): spike removal -> pit
-    // filling -> edge preservation (against the pre-erosion heights) -> final smoothing.
+    // Post-processing: repair isolated numerical artifacts, smooth, then apply
+    // the explicit boundary policy last so smoothing cannot corrupt the border.
     const uint32_t groups = (uint32_t)((numPixels + 255) / 256);
     ComputeBufferHandle hOriginal{};
     if (ok) {
@@ -4040,7 +4072,8 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
         postParams.cellSize = cellSize;
         postParams.pitThreshold = cellSize * 0.05f;
         postParams.spikeThreshold = cellSize * 0.1f;
-        postParams.edgeFadeWidth = std::max(3, w / 40);
+        postParams.edgeFadeWidth = p.boundaryWidth > 0 ? p.boundaryWidth : recommendedEdgeFadeWidth(terrain);
+        postParams.edgeFadeWidth = std::clamp(postParams.edgeFadeWidth, 1, std::max(1, std::min(w, h) / 2));
 
         ComputeBufferHandle spikeBufs[1] = { hHeight };
         ComputeDispatch spikeCmd;
@@ -4065,22 +4098,6 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
         }
 
         if (ok) {
-            hOriginal = backend->createBuffer(d);
-            ok = hOriginal.valid() && backend->uploadBuffer(hOriginal, terrain->heightmap.data.data(), mapSize);
-        }
-        if (ok) {
-            ComputeBufferHandle edgeBufs[2] = { hHeight, hOriginal };
-            ComputeDispatch edgeCmd;
-            edgeCmd.kernel = "terrain_edge_preservation";
-            edgeCmd.groups.groups_x = groups;
-            edgeCmd.buffers = edgeBufs;
-            edgeCmd.buffer_count = 2;
-            edgeCmd.constants = &postParams;
-            edgeCmd.constants_size = sizeof(postParams);
-            ok = backend->dispatch(edgeCmd);
-        }
-
-        if (ok) {
             struct SmoothPushConstants { int width, height; } smoothPc{ w, h };
             static_assert(sizeof(SmoothPushConstants) == 8, "must match terrain_smooth.comp push_constant size");
             ComputeBufferHandle smoothBufs[1] = { hHeight };
@@ -4093,11 +4110,31 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
             smoothCmd.constants_size = sizeof(smoothPc);
             ok = backend->dispatch(smoothCmd);
         }
+
+        if (ok && p.boundaryMode == ErosionBoundaryMode::Preserve) {
+            hOriginal = backend->createBuffer(d);
+            ok = hOriginal.valid() && backend->uploadBuffer(hOriginal, terrain->heightmap.data.data(), mapSize);
+        }
+        if (ok && p.boundaryMode == ErosionBoundaryMode::Preserve) {
+            ComputeBufferHandle edgeBufs[2] = { hHeight, hOriginal };
+            ComputeDispatch edgeCmd;
+            edgeCmd.kernel = "terrain_edge_preservation";
+            edgeCmd.groups.groups_x = groups;
+            edgeCmd.buffers = edgeBufs;
+            edgeCmd.buffer_count = 2;
+            edgeCmd.constants = &postParams;
+            edgeCmd.constants_size = sizeof(postParams);
+            ok = backend->dispatch(edgeCmd);
+        }
     }
 
     if (ok) {
         backend->synchronize();
         ok = backend->downloadBuffer(hHeight, terrain->heightmap.data.data(), mapSize);
+        if (ok && p.boundaryMode == ErosionBoundaryMode::SeaLevel) {
+            const int boundaryWidth = p.boundaryWidth > 0 ? p.boundaryWidth : recommendedEdgeFadeWidth(terrain);
+            blendTerrainEdgesToLevel(terrain->heightmap.data, w, h, boundaryWidth, p.boundaryLevel);
+        }
     }
 
     if (!ok) {
@@ -4216,7 +4253,7 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     gpuParams.gravity = params.gravity;
     gpuParams.cellSize = (float)terrain->heightmap.scale_xz / (float)w;
     gpuParams.heightScale = (float)terrain->heightmap.scale_y;
-    gpuParams.seed = (unsigned int)rand();
+    gpuParams.seed = params.seed;
     gpuParams.hardnessMap = hasHardness ? reinterpret_cast<float*>(d_hardness) : nullptr;
     gpuParams.maskMap = hasMask ? reinterpret_cast<float*>(d_mask) : nullptr;
     
@@ -4277,7 +4314,8 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     postParams.cellSize = cellSize;
     postParams.pitThreshold = cellSize * 0.05f;     // Match CPU
     postParams.spikeThreshold = cellSize * 0.1f;    // Match CPU
-    postParams.edgeFadeWidth = std::max(3, w / 40); // Match CPU
+    postParams.edgeFadeWidth = params.boundaryWidth > 0 ? params.boundaryWidth : getEdgeFadeWidth(terrain);
+    postParams.edgeFadeWidth = std::clamp(postParams.edgeFadeWidth, 1, std::max(1, std::min(w, h) / 2));
     
     // 1. SPIKE REMOVAL PASS (matches CPU post-erosion spike removal)
     if (spikeRemovalKernelFunc) {
@@ -4299,23 +4337,24 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
         }
     }
     
-    // 3. EDGE PRESERVATION PASS (matches CPU edge fade-out)
-    // We now preserve a copy of the original heights on device for a closer match.
-    if (edgePreservationKernelFunc) {
+    // 3. FINAL SMOOTHING PASS
+    void* smoothArgs[] = { &d_heightmap, &w, &h };
+    res = cuLaunchKernel((CUfunction)smoothKernelFunc,
+                         bx, by, 1, tx, ty, 1, 0, nullptr, smoothArgs, nullptr);
+    if (res != CUDA_SUCCESS) {
+         SCENE_LOG_WARN("[GPU Erosion] Smooth Kernel Failed: " + std::to_string(res));
+    }
+
+    // 4. Apply preservation last so smoothing cannot pull border samples away
+    // from the authored pre-erosion heightfield. Open and SeaLevel are handled
+    // without this kernel.
+    if (params.boundaryMode == ErosionBoundaryMode::Preserve && edgePreservationKernelFunc) {
         void* edgeArgs[] = { &d_heightmap, &d_original, &postParams };
         res = cuLaunchKernel((CUfunction)edgePreservationKernelFunc,
                              bx, by, 1, tx, ty, 1, 0, nullptr, edgeArgs, nullptr);
         if (res != CUDA_SUCCESS) {
             SCENE_LOG_WARN("[GPU Erosion] Edge Preservation Failed: " + std::to_string(res));
         }
-    }
-    
-    // 4. FINAL SMOOTHING PASS (existing behavior)
-    void* smoothArgs[] = { &d_heightmap, &w, &h };
-    res = cuLaunchKernel((CUfunction)smoothKernelFunc,
-                         bx, by, 1, tx, ty, 1, 0, nullptr, smoothArgs, nullptr);
-    if (res != CUDA_SUCCESS) {
-         SCENE_LOG_WARN("[GPU Erosion] Smooth Kernel Failed: " + std::to_string(res));
     }
     
     // Synchronize (Wait for completion)
@@ -4328,6 +4367,10 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
         if (res == CUDA_ERROR_LAUNCH_FAILED) {
             SCENE_LOG_ERROR("[GPU Erosion] Kernel crash detected (likely OOB or TDR).");
         }
+    }
+    if (res == CUDA_SUCCESS && params.boundaryMode == ErosionBoundaryMode::SeaLevel) {
+        const int boundaryWidth = params.boundaryWidth > 0 ? params.boundaryWidth : getEdgeFadeWidth(terrain);
+        blendTerrainEdgesToLevel(terrain->heightmap.data, w, h, boundaryWidth, params.boundaryLevel);
     }
     
     // Cleanup

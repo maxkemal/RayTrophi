@@ -153,7 +153,7 @@ struct RiverSpline {
     // ─────────────────────────────────────────────────────────────────────────
     // Serialization helpers
     // ─────────────────────────────────────────────────────────────────────────
-    nlohmann::json serializeSpline() const {
+    nlohmann::json serializeSpline(const WaterWaveParams* currentWaterParams = nullptr) const {
         nlohmann::json j;
         j["id"] = id;
         j["name"] = name;
@@ -162,6 +162,19 @@ struct RiverSpline {
         j["bankHeight"] = bankHeight;
         j["followTerrain"] = followTerrain;
         j["isClosed"] = spline.isClosed;
+        j["showControlPoints"] = showControlPoints;
+        j["showSpline"] = showSpline;
+
+        j["physics"] = {
+            {"enableTurbulence", physics.enableTurbulence},
+            {"enableBanking", physics.enableBanking},
+            {"enableFlowBulge", physics.enableFlowBulge},
+            {"turbulenceStrength", physics.turbulenceStrength},
+            {"turbulenceThreshold", physics.turbulenceThreshold},
+            {"noiseScale", physics.noiseScale},
+            {"bankingStrength", physics.bankingStrength},
+            {"flowBulgeStrength", physics.flowBulgeStrength}
+        };
         
         // Control points
         nlohmann::json pointsJson = nlohmann::json::array();
@@ -186,15 +199,8 @@ struct RiverSpline {
         }
         j["controlPoints"] = pointsJson;
         
-        // Water params (basic for now)
-        j["waterParams"] = {
-            {"clarity", waterParams.clarity},
-            {"ior", waterParams.ior},
-            {"micro_detail_strength", waterParams.micro_detail_strength},
-            {"micro_detail_scale", waterParams.micro_detail_scale},
-            {"micro_anim_speed", waterParams.micro_anim_speed},
-            {"micro_morph_speed", waterParams.micro_morph_speed}
-        };
+        const WaterWaveParams& savedWaterParams = currentWaterParams ? *currentWaterParams : waterParams;
+        j["waterParams"] = savedWaterParams.serializeParams();
         
         return j;
     }
@@ -207,6 +213,20 @@ struct RiverSpline {
         bankHeight = j.value("bankHeight", 0.05f);
         followTerrain = j.value("followTerrain", true);
         spline.isClosed = j.value("isClosed", false);
+        showControlPoints = j.value("showControlPoints", showControlPoints);
+        showSpline = j.value("showSpline", showSpline);
+
+        if (j.contains("physics") && j["physics"].is_object()) {
+            const auto& p = j["physics"];
+            physics.enableTurbulence = p.value("enableTurbulence", physics.enableTurbulence);
+            physics.enableBanking = p.value("enableBanking", physics.enableBanking);
+            physics.enableFlowBulge = p.value("enableFlowBulge", physics.enableFlowBulge);
+            physics.turbulenceStrength = p.value("turbulenceStrength", physics.turbulenceStrength);
+            physics.turbulenceThreshold = p.value("turbulenceThreshold", physics.turbulenceThreshold);
+            physics.noiseScale = p.value("noiseScale", physics.noiseScale);
+            physics.bankingStrength = p.value("bankingStrength", physics.bankingStrength);
+            physics.flowBulgeStrength = p.value("flowBulgeStrength", physics.flowBulgeStrength);
+        }
         
         spline.clear();
         hydraulics.clear();
@@ -243,12 +263,7 @@ struct RiverSpline {
         
         if (j.contains("waterParams")) {
             auto& wp = j["waterParams"];
-            waterParams.clarity = wp.value("clarity", 0.8f);
-            waterParams.ior = wp.value("ior", 1.333f);
-            waterParams.micro_detail_strength = wp.value("micro_detail_strength", 0.05f);
-            waterParams.micro_detail_scale = wp.value("micro_detail_scale", 20.0f);
-            waterParams.micro_anim_speed = wp.value("micro_anim_speed", 0.1f);
-            waterParams.micro_morph_speed = wp.value("micro_morph_speed", 1.0f);
+            waterParams.deserializeParams(wp);
         }
         
         needsRebuild = true;
@@ -308,16 +323,78 @@ public:
     
     // Serialization
     nlohmann::json serialize() const {
-        nlohmann::json j = nlohmann::json::array();
+        nlohmann::json riverItems = nlohmann::json::array();
         for (const auto& r : rivers) {
-            j.push_back(r.serializeSpline());
+            const WaterSurface* linkedSurface = r.waterSurfaceId >= 0
+                ? WaterManager::getInstance().getWaterSurface(r.waterSurfaceId) : nullptr;
+            riverItems.push_back(r.serializeSpline(linkedSurface ? &linkedSurface->params : nullptr));
         }
-        return j;
+        return {
+            {"version", 2},
+            {"items", riverItems},
+            {"authoring", {
+                {"defaultWidth", defaultWidth}, {"defaultDepth", defaultDepth},
+                {"showGizmosWhenInactive", showGizmosWhenInactive},
+                {"autoCarveOnMove", autoCarveOnMove},
+                {"carveDepthMult", carveDepthMult}, {"carveSmoothness", carveSmoothness},
+                {"carveAutoPostErosion", carveAutoPostErosion},
+                {"carveErosionIterations", carveErosionIterations},
+                {"carveEnableNoise", carveEnableNoise}, {"carveNoiseScale", carveNoiseScale},
+                {"carveNoiseStrength", carveNoiseStrength},
+                {"carveEnableDeepPools", carveEnableDeepPools},
+                {"carvePoolFrequency", carvePoolFrequency}, {"carvePoolDepthMult", carvePoolDepthMult},
+                {"carveEnableRiffles", carveEnableRiffles},
+                {"carveRiffleFrequency", carveRiffleFrequency}, {"carveRiffleDepthMult", carveRiffleDepthMult},
+                {"carveEnableAsymmetry", carveEnableAsymmetry},
+                {"carveAsymmetryStrength", carveAsymmetryStrength},
+                {"carveEnablePointBars", carveEnablePointBars},
+                {"carvePointBarStrength", carvePointBarStrength}
+            }}
+        };
     }
     
     void deserialize(const nlohmann::json& j, SceneData& scene) {
         clear();
-        for (const auto& rj : j) {
+        // Deterministic defaults for legacy array-only projects; do not leak
+        // authoring state from the previously opened project.
+        defaultWidth = 2.0f; defaultDepth = 0.5f; showGizmosWhenInactive = false;
+        autoCarveOnMove = false; carveDepthMult = 1.0f; carveSmoothness = 0.5f;
+        carveAutoPostErosion = true; carveErosionIterations = 10;
+        carveEnableNoise = true; carveNoiseScale = 0.08f; carveNoiseStrength = 0.15f;
+        carveEnableDeepPools = true; carvePoolFrequency = 0.1f; carvePoolDepthMult = 1.3f;
+        carveEnableRiffles = true; carveRiffleFrequency = 0.15f; carveRiffleDepthMult = 0.5f;
+        carveEnableAsymmetry = true; carveAsymmetryStrength = 0.4f;
+        carveEnablePointBars = true; carvePointBarStrength = 0.3f;
+        const nlohmann::json* riverItems = &j;
+        if (j.is_object()) {
+            if (j.contains("items") && j["items"].is_array()) riverItems = &j["items"];
+            if (j.contains("authoring") && j["authoring"].is_object()) {
+                const auto& a = j["authoring"];
+                defaultWidth = a.value("defaultWidth", defaultWidth);
+                defaultDepth = a.value("defaultDepth", defaultDepth);
+                showGizmosWhenInactive = a.value("showGizmosWhenInactive", showGizmosWhenInactive);
+                autoCarveOnMove = a.value("autoCarveOnMove", autoCarveOnMove);
+                carveDepthMult = a.value("carveDepthMult", carveDepthMult);
+                carveSmoothness = a.value("carveSmoothness", carveSmoothness);
+                carveAutoPostErosion = a.value("carveAutoPostErosion", carveAutoPostErosion);
+                carveErosionIterations = a.value("carveErosionIterations", carveErosionIterations);
+                carveEnableNoise = a.value("carveEnableNoise", carveEnableNoise);
+                carveNoiseScale = a.value("carveNoiseScale", carveNoiseScale);
+                carveNoiseStrength = a.value("carveNoiseStrength", carveNoiseStrength);
+                carveEnableDeepPools = a.value("carveEnableDeepPools", carveEnableDeepPools);
+                carvePoolFrequency = a.value("carvePoolFrequency", carvePoolFrequency);
+                carvePoolDepthMult = a.value("carvePoolDepthMult", carvePoolDepthMult);
+                carveEnableRiffles = a.value("carveEnableRiffles", carveEnableRiffles);
+                carveRiffleFrequency = a.value("carveRiffleFrequency", carveRiffleFrequency);
+                carveRiffleDepthMult = a.value("carveRiffleDepthMult", carveRiffleDepthMult);
+                carveEnableAsymmetry = a.value("carveEnableAsymmetry", carveEnableAsymmetry);
+                carveAsymmetryStrength = a.value("carveAsymmetryStrength", carveAsymmetryStrength);
+                carveEnablePointBars = a.value("carveEnablePointBars", carveEnablePointBars);
+                carvePointBarStrength = a.value("carvePointBarStrength", carvePointBarStrength);
+            }
+        }
+        if (!riverItems->is_array()) return;
+        for (const auto& rj : *riverItems) {
             RiverSpline river;
             river.deserializeSpline(rj);
             if (river.id >= next_id) next_id = river.id + 1;

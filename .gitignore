@@ -42,9 +42,17 @@ cmake_install.cmake
 
 # Temporary Scripts & Backups
 *.ps1
+!scripts/install_python_scripting_deps.ps1
+__pycache__/
+*.py[cod]
 *.bak
 *.old
 *.tmp
+ipc_tokens.json
+ipc_audit*.jsonl
+sertifika.pem
+private-key.pem
+*.key.pem
 _Unused/
 _Old/
 

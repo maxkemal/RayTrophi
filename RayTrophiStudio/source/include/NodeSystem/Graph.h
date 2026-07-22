@@ -53,6 +53,9 @@ namespace NodeSystem {
         uint32_t nextLinkId = 1;
         uint32_t nextGroupId = 1;
         uint32_t nextPortalId = 1;
+        // Deserialization may temporarily preserve links authored before image
+        // semantics became strict. The editor never enables this for new links.
+        bool allowLegacyImageSemanticLinks = false;
         
         // ========================================================================
         // NODE MANAGEMENT
@@ -93,6 +96,12 @@ namespace NodeSystem {
          * @brief Remove a node and all its connections
          */
         void removeNode(uint32_t nodeId) {
+            std::unordered_set<uint32_t> removedPinIds;
+            if (NodeBase* removedNode = getNode(nodeId)) {
+                for (const Pin& pin : removedNode->inputs) removedPinIds.insert(pin.id);
+                for (const Pin& pin : removedNode->outputs) removedPinIds.insert(pin.id);
+            }
+
             // Remove all links connected to this node
             links.erase(std::remove_if(links.begin(), links.end(), [this, nodeId](const Link& l) {
                 auto* startOwner = getPinOwner(l.startPinId);
@@ -106,6 +115,12 @@ namespace NodeSystem {
                 group.nodeIds.erase(std::remove(group.nodeIds.begin(), group.nodeIds.end(), nodeId),
                                     group.nodeIds.end());
             }
+
+            // Wire junctions are editor proxies for a real output pin.
+            portals.erase(std::remove_if(portals.begin(), portals.end(),
+                [&removedPinIds](const WirePortal& portal) {
+                    return removedPinIds.find(portal.linkedPinId) != removedPinIds.end();
+                }), portals.end());
             
             // Remove node
             nodes.erase(std::remove_if(nodes.begin(), nodes.end(), 
@@ -197,7 +212,11 @@ namespace NodeSystem {
             }
             
             if (!start->canConnectTo(*end)) {
-                return 0; // Type incompatible
+                const bool legacyImageLink = allowLegacyImageSemanticLinks &&
+                    start->dataType == DataType::Image2D && end->dataType == DataType::Image2D &&
+                    (start->imageChannels == 0 || end->imageChannels == 0 ||
+                     start->imageChannels == end->imageChannels);
+                if (!legacyImageLink) return 0; // Type/semantic/unit incompatible
             }
 
             if (wouldCreateCycle(startPinId, endPinId)) {

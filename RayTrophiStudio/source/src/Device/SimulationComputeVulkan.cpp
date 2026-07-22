@@ -534,7 +534,11 @@ private:
     // 10 bindings needed by sim_fluid_g2p (9 particle/velocity buffers +
     // fluid_mask for the solid FLIP limiter). Raising this only grows the
     // per-count descriptor layout table.
-    static constexpr uint32_t MAX_BINDINGS      = 10;
+    // Coupled terrain solvers keep several scalar fields resident at once.
+    // Snow uses 14 bindings (base, climate, ping-pong mass/ice/water and trace
+    // fields); Vulkan RT-class devices targeted by the renderer expose well
+    // above the core-minimum storage-buffer count.
+    static constexpr uint32_t MAX_BINDINGS      = 16;
     static constexpr uint32_t MAX_DESC_SETS     = 512;
     static constexpr uint32_t MAX_PUSH_CONSTANT = 128;
 
@@ -850,6 +854,11 @@ private:
             { "terrain_flow_fill",                  "terrain_flow_fill.spv",               3, 16 },
             { "terrain_flow_weights",                "terrain_flow_weights.spv",             2, 12 },
             { "terrain_flow_accumulate",             "terrain_flow_accumulate.spv",          3, 8  },
+            // Snow Layer's coupled Jacobi passes. Fourteen persistent scalar
+            // fields keep the entire settle/melt/runoff/geometry solve on the
+            // device; 88-byte constants select the current pass and physical
+            // metre-scale parameters. Gather writes need no float atomics.
+            { "terrain_snow_solver",                 "terrain_snow_solver.spv",             14, 88 },
         };
         for (const auto& d : defs)
             createPipeline(d.name, sd + "/" + d.spv, d.bufs, d.pc);

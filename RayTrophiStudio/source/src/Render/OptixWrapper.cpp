@@ -409,7 +409,6 @@ void OptixWrapper::clearScene() {
     if (d_params) {
         CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice));
     }
-    SCENE_LOG_INFO("[OptiX] Scene cleared (preserved core context/pipeline)");
 }
 
 // Overload for internal use (clean render launch)
@@ -684,9 +683,13 @@ void OptixWrapper::cleanup() {
     if (hit_shadow_pg) { optixProgramGroupDestroy(hit_shadow_pg); hit_shadow_pg = nullptr; }
     if (hair_hit_pg) { optixProgramGroupDestroy(hair_hit_pg); hair_hit_pg = nullptr; }
     if (hair_shadow_pg) { optixProgramGroupDestroy(hair_shadow_pg); hair_shadow_pg = nullptr; }
+    if (sphere_hit_pg) { optixProgramGroupDestroy(sphere_hit_pg); sphere_hit_pg = nullptr; }
+    if (sphere_shadow_pg) { optixProgramGroupDestroy(sphere_shadow_pg); sphere_shadow_pg = nullptr; }
     if (raygen_module) { optixModuleDestroy(raygen_module); raygen_module = nullptr; }
     if (miss_module) { optixModuleDestroy(miss_module); miss_module = nullptr; }
     if (hitgroup_module) { optixModuleDestroy(hitgroup_module); hitgroup_module = nullptr; }
+    if (curve_is_module) { optixModuleDestroy(curve_is_module); curve_is_module = nullptr; }
+    if (sphere_is_module) { optixModuleDestroy(sphere_is_module); sphere_is_module = nullptr; }
 
     if (d_converged_count) {
         cudaFree(d_converged_count);
@@ -736,6 +739,12 @@ void OptixWrapper::cleanup() {
 
 OptixWrapper::~OptixWrapper() {
     cleanup();
+    if (fft_ocean_state) {
+        auto* state = static_cast<FFTOceanState*>(fft_ocean_state);
+        cleanupFFTOcean(state);
+        delete state;
+        fft_ocean_state = nullptr;
+    }
 }
 
 
@@ -1061,21 +1070,20 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     OPTIX_CHECK(optixProgramGroupCreate(context, &hit_shadow_desc, 1, &pg_options, log, &log_size, &hit_shadow_pg));
 
     // Hair
-    OptixModule curveIS_module = nullptr;
     {
         OptixBuiltinISOptions builtinISOptions = {};
         builtinISOptions.builtinISModuleType = OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE;
         builtinISOptions.usesMotionBlur = false;
         builtinISOptions.buildFlags = OPTIX_BUILD_FLAG_NONE;
         builtinISOptions.curveEndcapFlags = 0;
-        OPTIX_CHECK(optixBuiltinISModuleGet(context, &module_options, &pipeline_options, &builtinISOptions, &curveIS_module));
+        OPTIX_CHECK(optixBuiltinISModuleGet(context, &module_options, &pipeline_options, &builtinISOptions, &curve_is_module));
     }
 
     OptixProgramGroupDesc hair_hit_desc = {};
     hair_hit_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     hair_hit_desc.hitgroup.moduleCH = hitgroup_module;
     hair_hit_desc.hitgroup.entryFunctionNameCH = "__closesthit__hair";
-    hair_hit_desc.hitgroup.moduleIS = curveIS_module;
+    hair_hit_desc.hitgroup.moduleIS = curve_is_module;
     log_size = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(context, &hair_hit_desc, 1, &pg_options, log, &log_size, &hair_hit_pg));
 
@@ -1085,7 +1093,7 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     hair_shadow_desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
     hair_shadow_desc.hitgroup.moduleAH = hitgroup_module;
     hair_shadow_desc.hitgroup.entryFunctionNameAH = "__anyhit__hair_shadow";
-    hair_shadow_desc.hitgroup.moduleIS = curveIS_module;
+    hair_shadow_desc.hitgroup.moduleIS = curve_is_module;
     log_size = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(context, &hair_shadow_desc, 1, &pg_options, log, &log_size, &hair_shadow_pg));
 
@@ -1094,20 +1102,19 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     // the normal from optixGetSphereData shades every point. Spheres are opaque
     // (built with DISABLE_ANYHIT), so no anyhit program; the shadow group reuses
     // the cheap __closesthit__shadow.
-    OptixModule sphereIS_module = nullptr;
     {
         OptixBuiltinISOptions builtinISOptions = {};
         builtinISOptions.builtinISModuleType = OPTIX_PRIMITIVE_TYPE_SPHERE;
         builtinISOptions.usesMotionBlur = false;
         builtinISOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
-        OPTIX_CHECK(optixBuiltinISModuleGet(context, &module_options, &pipeline_options, &builtinISOptions, &sphereIS_module));
+        OPTIX_CHECK(optixBuiltinISModuleGet(context, &module_options, &pipeline_options, &builtinISOptions, &sphere_is_module));
     }
 
     OptixProgramGroupDesc sphere_hit_desc = {};
     sphere_hit_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     sphere_hit_desc.hitgroup.moduleCH = hitgroup_module;
     sphere_hit_desc.hitgroup.entryFunctionNameCH = "__closesthit__sphere";
-    sphere_hit_desc.hitgroup.moduleIS = sphereIS_module;
+    sphere_hit_desc.hitgroup.moduleIS = sphere_is_module;
     log_size = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(context, &sphere_hit_desc, 1, &pg_options, log, &log_size, &sphere_hit_pg));
 
@@ -1115,7 +1122,7 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     sphere_shadow_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     sphere_shadow_desc.hitgroup.moduleCH = hitgroup_module;
     sphere_shadow_desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
-    sphere_shadow_desc.hitgroup.moduleIS = sphereIS_module;
+    sphere_shadow_desc.hitgroup.moduleIS = sphere_is_module;
     log_size = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(context, &sphere_shadow_desc, 1, &pg_options, log, &log_size, &sphere_shadow_pg));
 
@@ -1178,46 +1185,13 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     sbt.hitgroupRecordCount = 0;
 }
 void OptixWrapper::destroyTextureObjects() {
-    int texture_obj_count = 0;
     int array_count = 0;
-    
-    // 1. Texture Object'leri yok et
-    for (const auto& record : hitgroup_records) {
-        const HitGroupData& data = record.data;
 
-        if (data.albedo_tex) { 
-            cudaDestroyTextureObject(data.albedo_tex); 
-            texture_obj_count++;
-        }
-        if (data.roughness_tex) { 
-            cudaDestroyTextureObject(data.roughness_tex); 
-            texture_obj_count++;
-        }
-        if (data.normal_tex) { 
-            cudaDestroyTextureObject(data.normal_tex); 
-            texture_obj_count++;
-        }
-        if (data.metallic_tex) { 
-            cudaDestroyTextureObject(data.metallic_tex); 
-            texture_obj_count++;
-        }
-        if (data.specular_tex) {
-            cudaDestroyTextureObject(data.specular_tex);
-            texture_obj_count++;
-        }
-        if (data.transmission_tex) { 
-            cudaDestroyTextureObject(data.transmission_tex); 
-            texture_obj_count++;
-        }
-        if (data.opacity_tex) { 
-            cudaDestroyTextureObject(data.opacity_tex); 
-            texture_obj_count++;
-        }
-        if (data.emission_tex) { 
-            cudaDestroyTextureObject(data.emission_tex); 
-            texture_obj_count++;
-        }
-    }
+    // Hitgroup texture handles are borrowed from host Texture objects. Texture
+    // owns both cudaTextureObject_t and cudaArray_t and releases them together
+    // during backend-switch residency cleanup. Destroying borrowed handles here
+    // left Texture::tex_obj non-zero and its array resident, producing stale
+    // handles and cumulative VRAM across OptiX recreations.
 
     // 2. CUDA Array'leri serbest bırak (CRITICAL FIX!)
     for (auto& array : texture_arrays) {
@@ -1237,8 +1211,10 @@ void OptixWrapper::destroyTextureObjects() {
     // 3. SBT records'ları temizle
     hitgroup_records.clear();
     
-    SCENE_LOG_INFO("[GPU CLEANUP] Destroyed " + std::to_string(texture_obj_count) + 
-                   " texture objects and " + std::to_string(array_count) + " CUDA arrays.");
+    if (array_count > 0) {
+        SCENE_LOG_INFO("[GPU CLEANUP] Released " + std::to_string(array_count) +
+                       " legacy CUDA arrays.");
+    }
 }
 
 void OptixWrapper::buildFromData(const OptixGeometryData& data) {
@@ -4911,6 +4887,5 @@ void OptixWrapper::clearHairGeometry() {
     params.hair_handle = 0;
     params_dirty = true;
     
-    SCENE_LOG_INFO("[OptiX] Hair geometry cleared and TLAS rebuilt");
     resetAccumulation();
 }

@@ -90,8 +90,40 @@ namespace NodeSystem {
         Albedo,         ///< Color texture
         Roughness,      ///< PBR roughness
         Metallic,       ///< PBR metallic
-        AO              ///< Ambient occlusion
+        AO,             ///< Ambient occlusion
+        // Appended for serialized enum stability. These distinguish fields
+        // that share Image2D storage but must not be wired interchangeably.
+        PhysicalScalar, ///< SI-valued scalar field (depth, area, discharge...)
+        Direction,      ///< Encoded direction/vector field
+        Categorical,    ///< Discrete IDs/classes/orders
+        PackedData      ///< Multi-channel packed data
     };
+
+    enum class ImageUnit : uint8_t {
+        Unknown = 0,        ///< Legacy/wildcard unit
+        Unitless,           ///< Ratios and normalized values
+        Meters,
+        SquareMeters,
+        CubicMetersPerSecond,
+        MetersPerSecond,
+        MillimetersPerHour,
+        Degrees,
+        Identifier
+    };
+
+    inline const char* getImageUnitName(ImageUnit unit) {
+        switch (unit) {
+            case ImageUnit::Unitless: return "unitless";
+            case ImageUnit::Meters: return "m";
+            case ImageUnit::SquareMeters: return "m2";
+            case ImageUnit::CubicMetersPerSecond: return "m3/s";
+            case ImageUnit::MetersPerSecond: return "m/s";
+            case ImageUnit::MillimetersPerHour: return "mm/h";
+            case ImageUnit::Degrees: return "deg";
+            case ImageUnit::Identifier: return "ID";
+            default: return "";
+        }
+    }
 
     // ============================================================================
     // PIN VALUE TYPES
@@ -107,6 +139,7 @@ namespace NodeSystem {
         int height = 0;
         int channels = 1;
         ImageSemantic semantic = ImageSemantic::Generic;
+        ImageUnit unit = ImageUnit::Unknown;
         
         bool isValid() const {
             if (!data || width <= 0 || height <= 0 || channels <= 0) return false;
@@ -201,6 +234,14 @@ namespace NodeSystem {
                         return { IM_COL32(130, 130, 255, 255), PinShape::Circle, "Normal" };
                     case ImageSemantic::Albedo:
                         return { IM_COL32(255, 180, 180, 255), PinShape::Circle, "Albedo" };
+                    case ImageSemantic::PhysicalScalar:
+                        return { IM_COL32(65, 180, 225, 255), PinShape::Circle, "Physical Scalar" };
+                    case ImageSemantic::Direction:
+                        return { IM_COL32(45, 210, 195, 255), PinShape::Arrow, "Direction" };
+                    case ImageSemantic::Categorical:
+                        return { IM_COL32(235, 185, 65, 255), PinShape::Square, "Categorical" };
+                    case ImageSemantic::PackedData:
+                        return { IM_COL32(235, 105, 165, 255), PinShape::Circle, "Packed Data" };
                     default:
                         return { IM_COL32(150, 150, 150, 255), PinShape::Circle, "Image" };
                 }
@@ -254,6 +295,8 @@ namespace NodeSystem {
         DataType dataType = DataType::None;
         ImageSemantic imageSemantic = ImageSemantic::Generic;  ///< For Image2D pins
         int imageChannels = 1;                                 ///< 0 accepts any channel count
+        ImageUnit imageUnit = ImageUnit::Unknown;               ///< Physical unit/wildcard
+        uint32_t acceptedImageSemantics = 0;                    ///< Extra accepted input semantics
         
         // Connection rules
         bool allowMultipleConnections = false;  ///< Allow multiple inputs (for blend nodes)
@@ -280,6 +323,18 @@ namespace NodeSystem {
             cachedColor = visual.color;
             cachedShape = visual.shape;
         }
+
+        void acceptImageSemantic(ImageSemantic semantic) {
+            const uint32_t value = static_cast<uint32_t>(semantic);
+            if (value < 32u) acceptedImageSemantics |= (1u << value);
+        }
+
+        bool acceptsImageSemantic(ImageSemantic semantic) const {
+            if (imageSemantic == ImageSemantic::Generic || semantic == ImageSemantic::Generic ||
+                imageSemantic == semantic) return true;
+            const uint32_t value = static_cast<uint32_t>(semantic);
+            return value < 32u && (acceptedImageSemantics & (1u << value)) != 0u;
+        }
         
         bool canConnectTo(const Pin& other) const {
             // Basic rules: input->output or output->input, not same node
@@ -289,7 +344,13 @@ namespace NodeSystem {
             if (dataType == DataType::Image2D && other.dataType == DataType::Image2D) {
                 if (imageChannels > 0 && other.imageChannels > 0 &&
                     imageChannels != other.imageChannels) return false;
-                return true;
+                const Pin& inputPin = kind == PinKind::Input ? *this : other;
+                const Pin& outputPin = kind == PinKind::Output ? *this : other;
+                const bool semanticCompatible = inputPin.acceptsImageSemantic(outputPin.imageSemantic);
+                if (!semanticCompatible) return false;
+                const bool unitCompatible = imageUnit == other.imageUnit ||
+                    imageUnit == ImageUnit::Unknown || other.imageUnit == ImageUnit::Unknown;
+                return unitCompatible;
             }
 
             // Type compatibility
@@ -330,13 +391,15 @@ namespace NodeSystem {
          */
         static Pin createInput(const std::string& name, DataType type, 
                                ImageSemantic semantic = ImageSemantic::Generic,
-                               bool isOptional = false, int channels = 1) {
+                               bool isOptional = false, int channels = 1,
+                               ImageUnit unit = ImageUnit::Unknown) {
             Pin pin;
             pin.name = name;
             pin.kind = PinKind::Input;
             pin.dataType = type;
             pin.imageSemantic = semantic;
             pin.imageChannels = channels;
+            pin.imageUnit = unit;
             pin.optional = isOptional;
             pin.updateVisualCache();
             return pin;
@@ -347,13 +410,15 @@ namespace NodeSystem {
          */
         static Pin createOutput(const std::string& name, DataType type,
                                 ImageSemantic semantic = ImageSemantic::Generic,
-                                int channels = 1) {
+                                int channels = 1,
+                                ImageUnit unit = ImageUnit::Unknown) {
             Pin pin;
             pin.name = name;
             pin.kind = PinKind::Output;
             pin.dataType = type;
             pin.imageSemantic = semantic;
             pin.imageChannels = channels;
+            pin.imageUnit = unit;
             pin.updateVisualCache();
             return pin;
         }
@@ -458,13 +523,15 @@ namespace NodeSystem {
      * @brief Create an Image2D PinValue from raw float data
      */
     inline PinValue makeImageValue(const std::vector<float>& data, int width, int height, 
-                                    int channels = 1, ImageSemantic semantic = ImageSemantic::Generic) {
+                                    int channels = 1, ImageSemantic semantic = ImageSemantic::Generic,
+                                    ImageUnit unit = ImageUnit::Unknown) {
         Image2DData img;
         img.data = std::make_shared<std::vector<float>>(data);
         img.width = width;
         img.height = height;
         img.channels = channels;
         img.semantic = semantic;
+        img.unit = unit;
         return img;
     }
 
@@ -472,13 +539,15 @@ namespace NodeSystem {
      * @brief Create an Image2D PinValue by wrapping existing shared data
      */
     inline PinValue wrapImageValue(ImageData data, int width, int height,
-                                    int channels = 1, ImageSemantic semantic = ImageSemantic::Generic) {
+                                    int channels = 1, ImageSemantic semantic = ImageSemantic::Generic,
+                                    ImageUnit unit = ImageUnit::Unknown) {
         Image2DData img;
         img.data = data;
         img.width = width;
         img.height = height;
         img.channels = channels;
         img.semantic = semantic;
+        img.unit = unit;
         return img;
     }
 

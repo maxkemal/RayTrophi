@@ -367,6 +367,12 @@ namespace DNA {
          */
         template <typename T>
         void add_attribute(const std::string& name) {
+            // Serialize composition changes against evaluate_active_state(): it reads
+            // core_base/custom_base/delta_stack (and clones/resets core_active) under this
+            // same mutex. Without it, a concurrent reader (render/BVH thread) evaluating the
+            // active state while this thread swaps a core_base slot double-frees / uses-after-free
+            // the AttributeBuffer. Mutators previously left this lock to the read path only.
+            std::lock_guard<std::mutex> lock(active_state_mutex);
             auto buf = std::make_unique<AlignedAttributeBuffer<T>>();
             buf->resize(vertex_count);
             int ci = core_attr_index(name);
@@ -387,6 +393,7 @@ namespace DNA {
         // output pin is disconnected so foliage never samples stale data.
         bool remove_custom_attribute(const std::string& name) {
             if (core_attr_index(name) >= 0) return false;
+            std::lock_guard<std::mutex> lock(active_state_mutex);
             const bool removed = custom_base.erase(name) > 0;
             custom_active.erase(name);
             if (removed) {
@@ -482,6 +489,7 @@ namespace DNA {
                         std::vector<T>&& val, 
                         bool relative = false) 
         {
+            std::lock_guard<std::mutex> lock(active_state_mutex);
             delta_stack.push_back(std::make_unique<TypedAttributeDelta<T>>(
                 attr_name, std::move(idx), std::move(val), relative
             ));
@@ -493,6 +501,7 @@ namespace DNA {
          * @brief Pops the last delta from the stack (Instant O(1) Undo!).
          */
         void pop_delta() {
+            std::lock_guard<std::mutex> lock(active_state_mutex);
             if (!delta_stack.empty()) {
                 delta_stack.pop_back();
                 active_state_dirty = true;
@@ -505,6 +514,9 @@ namespace DNA {
         }
 
         void clear_deltas() noexcept {
+            // Locks the same mutex evaluate_active_state() uses: both reset core_active, so an
+            // unlocked reset here races the read path into a double-free (the observed crash).
+            std::lock_guard<std::mutex> lock(active_state_mutex);
             delta_stack.clear();
             for (auto& p : core_active) p.reset();
             custom_active.clear();
@@ -543,6 +555,7 @@ namespace DNA {
          * @brief Resizes all base attribute arrays (core slots + custom map).
          */
         void resize_vertices(size_t new_count) {
+            std::lock_guard<std::mutex> lock(active_state_mutex);
             vertex_count = new_count;
             for (auto& buf : core_base) {
                 if (buf) buf->resize(new_count);
@@ -556,6 +569,19 @@ namespace DNA {
 
         inline size_t get_vertex_count() const noexcept {
             return vertex_count;
+        }
+
+        // Actual element count of the buffer get_positions_orig()/get_positions() returns —
+        // NOT vertex_count. A regenerating surface (fluid/gas isosurface, particle mesh) can
+        // advance vertex_count while leaving a stale, shorter P_orig behind, so readers that
+        // iterate origP[0..N) MUST clamp their loop to this, not to get_vertex_count().
+        size_t get_positions_orig_count() const noexcept {
+            if (cached_pointers_dirty) evaluate_active_state();
+            const CoreSlots& core = delta_stack.empty() ? core_base : core_active;
+            const auto& orig = core[static_cast<size_t>(Attr::P_orig)];
+            if (orig) return orig->element_count();
+            const auto& p = core[static_cast<size_t>(Attr::P)];
+            return p ? p->element_count() : 0;
         }
     };
 

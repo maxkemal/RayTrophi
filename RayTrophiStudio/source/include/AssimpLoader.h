@@ -551,6 +551,15 @@ public:
     bool isFBX = false; // Track if current file is FBX (FBX formatı kontrolü)
     bool isGLTF = false; // Track if current file is GLTF/GLB (GLTF/GLB formatı kontrolü)
 
+    // Import-flat fast path (opt-in per caller). When true, processTriangles emits ONE
+    // representative facade per non-skinned mesh instead of N per-face facades — the world
+    // collapses the group to its SoA TriangleMesh anyway (create_scene import-flat pass), so
+    // the per-face soup was built only to be thrown away: O(faces) shared_ptr allocations.
+    // MUST stay false for callers that consume real per-face triangles (FoliageAssetLibrary
+    // scatter sources). Skinned meshes always get the full facade soup regardless (SoA
+    // skinning write-back is a later increment).
+    bool emitSingleFacadePerMesh = false;
+
     
     // Transform Cache: Ensures all meshes with the same nodeName share the same Transform.
     // Critical for Gizmo to move all object parts together.
@@ -814,12 +823,22 @@ public:
         SCENE_LOG_INFO("Importing file with Assimp: " + filename);
         
         // Optimized flags for large scenes (Büyük sahneler için optimize edilmiş bayraklar)
-        unsigned int importFlags = 
-            aiProcess_GenSmoothNormals |    
-            aiProcess_JoinIdenticalVertices| 
-            aiProcess_Triangulate |         
-            aiProcess_CalcTangentSpace |    
-            aiProcess_ImproveCacheLocality; 
+        // NOTE: intentionally NOT set:
+        // - aiProcess_ImproveCacheLocality: reorders indices for the GPU post-transform
+        //   vertex cache — irrelevant for a BVH ray tracer (the raster viewport rebuilds
+        //   its own buffers anyway) — while costing a full O(n) Tipsify pass per import.
+        // - aiProcess_CalcTangentSpace: NOTHING consumes aiMesh::mTangents (grep: zero
+        //   readers); every backend derives its own TBN at shade time. On a multi-million
+        //   vertex mesh this was one of the heaviest ReadFile post-process steps.
+        // - aiProcess_JoinIdenticalVertices for glTF/GLB: the glTF importer already emits
+        //   indexed meshes, so the weld pass only pays a full vertex-hash scan to find
+        //   nothing. Kept for OBJ/FBX/etc., where it produces the indexing we rely on.
+        unsigned int importFlags =
+            aiProcess_GenSmoothNormals |
+            aiProcess_Triangulate;
+        if (!this->isGLTF) {
+            importFlags |= aiProcess_JoinIdenticalVertices;
+        }
         
         // For FBX, global scale helps normalize units
         if (this->isFBX) {
@@ -900,14 +919,18 @@ public:
             }
         }
 
+        const auto assimpReadStart = std::chrono::steady_clock::now();
         this->scene = importer.ReadFile(fileNameStr, importFlags);
+        const auto assimpReadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - assimpReadStart).count();
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
             SCENE_LOG_ERROR("Assimp import failed: " + std::string(importer.GetErrorString()));
             return {};
         }
 
-        SCENE_LOG_INFO("Assimp file loaded successfully. Extracting geometry data...");
+        SCENE_LOG_INFO("Assimp file loaded successfully (" + std::to_string(assimpReadMs) +
+                       " ms). Extracting geometry data...");
 
         // If we created a temporary decoded glTF file for Assimp, remove it now
         // to avoid leaving debug artifacts. Keep it only on failure for debugging.
@@ -924,7 +947,6 @@ public:
         // Save the original root transform
         boneData.originalRootTransform = convert(scene->mRootNode->mTransformation);
 
-        SCENE_LOG_INFO("Clearing existing cameras, lights, and transform cache...");
         cameras.clear();
         lights.clear();
         clearTransformCache(); 
@@ -941,7 +963,6 @@ public:
 
         SCENE_LOG_INFO("Processing cameras...");
         processCameras(scene);
-        SCENE_LOG_INFO("Cameras processed: " + std::to_string(cameras.size()) + " camera(s) found.");
 
         SCENE_LOG_INFO("Processing lights...");
         processLights(scene);
@@ -959,15 +980,17 @@ public:
 
         if (load_geometry) {
             SCENE_LOG_INFO("Processing nodes to extract triangles...");
+            const auto extractStart = std::chrono::steady_clock::now();
             processNodeToTriangles(scene->mRootNode, scene, triangles, boneData, &geometry_data);
-            SCENE_LOG_INFO("Triangle extraction completed: " + std::to_string(triangles.size()) + " triangles processed.");
+            const auto extractMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - extractStart).count();
+            SCENE_LOG_INFO("Triangle extraction completed in " + std::to_string(extractMs) + " ms.");
         } else {
             SCENE_LOG_INFO("Animation-only import: geometry and material extraction skipped.");
         }
 
         // NOTE: Bone weights now assigned inside processNodeToTriangles -> processTriangles
         
-        SCENE_LOG_INFO("Processing animations...");
 
         if (scene->mNumAnimations > 0) {
             SCENE_LOG_INFO("Found " + std::to_string(scene->mNumAnimations) + " animation(s) in model.");
@@ -1067,11 +1090,11 @@ public:
         Assimp::Importer importer;
 
         // Flags for high-quality geometry import (Yüksek kaliteli geometri içe aktarımı için bayraklar)
+        // CalcTangentSpace dropped: aiMesh::mTangents has zero readers in the codebase.
         const aiScene* scene = importer.ReadFile(filename,
             aiProcess_GenSmoothNormals |
             aiProcess_GenNormals |
-            aiProcess_JoinIdenticalVertices|
-            aiProcess_CalcTangentSpace);
+            aiProcess_JoinIdenticalVertices);
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
             SCENE_LOG_ERROR("Model load failed! Assimp: " + std::string(importer.GetErrorString()));
@@ -2252,9 +2275,6 @@ private:
         const size_t validCount = validFaces.size();
         if (validCount == 0) return;
 
-        const size_t baseFaceIndex = triangles.size();
-        std::vector<std::shared_ptr<Triangle>> localTriangles(validCount);
-
         // --- NEW: Allocate and populate TriangleMesh and GeometryDetail ---
         auto triMesh = std::make_shared<TriangleMesh>();
         triMesh->nodeName = nodeName;
@@ -2402,7 +2422,17 @@ private:
             triMesh->geometry->skin_weights = std::move(meshVertexWeights);
         }
 
+        // ── Import-flat fast path: the SoA TriangleMesh above is fully built; the world will
+        // collapse this group to that mesh anyway, so skip the per-face facade soup entirely.
+        // ONE representative facade still carries parentMesh for downstream bookkeeping
+        // (bone-index shift dedupe, pivot recenter, import-flat collapse, nodeName grouping).
+        if (emitSingleFacadePerMesh && !hasActualWeights) {
+            triangles.push_back(std::make_shared<Triangle>(triMesh, 0u));
+            return;
+        }
+
         // Spawn lightweight Triangle facades
+        std::vector<std::shared_ptr<Triangle>> localTriangles(validCount);
         auto buildRange = [&](size_t start, size_t end) {
             for (size_t i = start; i < end; ++i) {
                 const unsigned int faceIdx = validFaces[i];

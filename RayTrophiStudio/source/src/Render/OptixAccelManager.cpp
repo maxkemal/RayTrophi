@@ -2545,7 +2545,6 @@ void OptixAccelManager::cleanup() {
 
     tlas_needs_rebuild = true;
     
-    SCENE_LOG_INFO("[OptixAccelManager] Cleaned up and reset caches");
 }
 
 void OptixAccelManager::clearInstances() {

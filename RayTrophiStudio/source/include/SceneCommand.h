@@ -23,6 +23,13 @@
 // Forward declarations
 struct UIContext;
 
+// Bumps the scene geometry generation and arms the CPU BVH / Vulkan / OptiX /
+// viewport rebuild-pending flags for the active backend, then resets
+// accumulation. This is the shared post-mutation refresh path used by the
+// SceneCommand implementations; it is also exposed here so the scripting facade
+// (RtApi mesh-data writes, Faz 3a) can trigger the exact same refresh.
+void scheduleSceneMutationRebuilds(UIContext& ctx, bool includeCpuBvh);
+
 // ============================================================================
 // COMMAND PATTERN - Base Class for Undo/Redo Operations
 // ============================================================================
@@ -65,17 +72,22 @@ public:
                        const std::vector<std::shared_ptr<Triangle>>& deleted_triangles)
         : object_name_(object_name)
         , deleted_triangles_(deleted_triangles) {}
-    
+
     void execute(UIContext& ctx) override;
     void undo(UIContext& ctx) override;
     Type getType() const override { return Type::Heavy; }
     std::string getDescription() const override {
         return "Delete " + object_name_;
     }
-    
+
 private:
     std::string object_name_;
     std::vector<std::shared_ptr<Triangle>> deleted_triangles_;
+    // Flat (direct-SoA) nodes have no per-face facades: execute() captures the node's
+    // TriangleMesh Hittables here (multi-material imports share one nodeName across
+    // several meshes) so undo can restore them even after a save-time
+    // compactPendingDeletedObjects() physically erased them from world.objects.
+    std::vector<std::shared_ptr<TriangleMesh>> deleted_flat_meshes_;
 };
 
 // ============================================================================
@@ -85,10 +97,21 @@ class DuplicateObjectCommand : public SceneCommand {
 public:
     DuplicateObjectCommand(const std::string& source_name,
                           const std::string& new_name,
-                          const std::vector<std::shared_ptr<Triangle>>& new_triangles)
+                          const std::vector<std::shared_ptr<Hittable>>& new_objects)
         : source_name_(source_name)
         , new_name_(new_name)
-        , new_triangles_(new_triangles) {}
+        , new_objects_(new_objects) {}
+
+    DuplicateObjectCommand(const std::string& source_name,
+                          const std::string& new_name,
+                          const std::vector<std::shared_ptr<Triangle>>& new_triangles)
+        : source_name_(source_name)
+        , new_name_(new_name) {
+        new_objects_.reserve(new_triangles.size());
+        for (const auto& triangle : new_triangles) {
+            new_objects_.push_back(std::static_pointer_cast<Hittable>(triangle));
+        }
+    }
     
     void execute(UIContext& ctx) override;
     void undo(UIContext& ctx) override;
@@ -100,7 +123,26 @@ public:
 private:
     std::string source_name_;
     std::string new_name_;
-    std::vector<std::shared_ptr<Triangle>> new_triangles_;
+    // Exact created world objects. Supports both legacy per-face Triangle
+    // groups and flat/direct-SoA TriangleMesh nodes.
+    std::vector<std::shared_ptr<Hittable>> new_objects_;
+};
+
+// ============================================================================
+// ADD OBJECT COMMAND - Stores newly created procedural object for undo/redo
+// ============================================================================
+class AddObjectCommand : public SceneCommand {
+public:
+    explicit AddObjectCommand(std::shared_ptr<Hittable> object)
+        : object_(std::move(object)) {}
+
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Heavy; }
+    std::string getDescription() const override;
+
+private:
+    std::shared_ptr<Hittable> object_;
 };
 
 // ============================================================================

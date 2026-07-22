@@ -6841,9 +6841,6 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
     m_textureIdToCacheKey.clear();
     m_nextTextureID = 1;
     ++m_textureCacheGeneration;
-    if (m_sceneTextureManager) {
-        m_sceneTextureManager->logBudgetSummary("after-purge");
-    }
 }
 
 void VulkanBackendAdapter::releaseInactiveViewportTextureCache() {
@@ -6953,9 +6950,6 @@ void VulkanBackendAdapter::setInteractiveViewportMatcapPresetImpl(int preset) {
 /* custom matcap support removed */
 
 void VulkanBackendAdapter::shutdown() {
-    if (m_sceneTextureManager) {
-        m_sceneTextureManager->clearAllVulkanBackingForOwner(sceneTextureOwnerScope());
-    }
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     if (!m_device) {
@@ -6968,6 +6962,12 @@ void VulkanBackendAdapter::shutdown() {
 
     destroyInteractiveViewportResources(false);
     destroyAllRasterMeshes();
+
+    // Destroy physical images while this VkDevice is still valid. Merely
+    // clearing shared-manager records loses their destroy callbacks and leaves
+    // reclamation to vkDestroyDevice/driver residency, which accumulated across
+    // repeated Vulkan RT <-> OptiX switches on WDDM.
+    purgeUploadedTextureCacheLocked();
 
     // Adapter-owned output/readback resources.
     if (m_outputImage.image) {
@@ -7001,13 +7001,23 @@ void VulkanBackendAdapter::shutdown() {
         m_device->destroyImage(m_pathStatsImage);
         m_pathStatsImage = {};
     }
-    if (m_denoiserColorStagingBuffer.buffer) {
+    if (m_denoiserColorStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserColorStagingBuffer);
+    if (m_denoiserAlbedoStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserAlbedoStagingBuffer);
+    if (m_denoiserNormalStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
+    if (m_denoiserPositionStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserPositionStagingBuffer);
 
-        m_denoiserColorStagingBuffer = {};
-        m_denoiserAlbedoStagingBuffer = {};
-        m_denoiserNormalStagingBuffer = {};
-        m_denoiserPositionStagingBuffer = {};
-    }
+    // Imported CUDA external-memory objects must die before their Vulkan
+    // allocations. Handles CUDA never consumed remain application-owned Win32
+    // HANDLEs and otherwise keep the allocations resident after device teardown.
+    m_device->drainDenoiserCopy();
+    destroyGpuDenoiserInterop();
+    closeUnimportedDenoiserSharedHandles();
+    if (m_denoiserColorSharedStaging.buffer) m_device->destroyBuffer(m_denoiserColorSharedStaging);
+    if (m_denoiserAlbedoSharedStaging.buffer) m_device->destroyBuffer(m_denoiserAlbedoSharedStaging);
+    if (m_denoiserNormalSharedStaging.buffer) m_device->destroyBuffer(m_denoiserNormalSharedStaging);
+    m_denoiserColorSharedAllocSize = 0;
+    m_denoiserAlbedoSharedAllocSize = 0;
+    m_denoiserNormalSharedAllocSize = 0;
     // Destroy the device object once. VulkanDevice destructor calls shutdown(),
     // so reset the unique_ptr to release all remaining VulkanDevice-owned resources.
     m_device.reset();
@@ -7587,10 +7597,6 @@ uint32_t VulkanBackendAdapter::uploadWeldedTriangles(const std::vector<TriangleD
         SCENE_LOG_ERROR("[Vulkan] Failed to create welded indexed BLAS for mesh: " + meshName);
         return UINT32_MAX;
     }
-
-    SCENE_LOG_INFO("[Vulkan] Welded indexed BLAS '" + meshName + "': " +
-                   std::to_string(triCount) + " tris, " + std::to_string(triCount * 3) +
-                   " corners -> " + std::to_string(vCount) + " unique verts");
 
     m_meshRegistry[meshName] = blasIndex;
     m_blasMaterialIds[blasIndex] = std::move(materialIndices);
@@ -8621,7 +8627,6 @@ void VulkanBackendAdapter::updateMeshTransform(uint32_t h, const Matrix4x4& t) {
 
 void VulkanBackendAdapter::rebuildAccelerationStructure() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    SCENE_LOG_INFO("[Vulkan] Full scene/project rebuild triggered.");
     m_meshRegistry.clear();
     m_blasMaterialBounds.clear();
     m_blasBuiltNonOpaque.clear();
@@ -9799,9 +9804,6 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         }
         m_topology_dirty = false;
 
-        SCENE_LOG_INFO("[Vulkan] TLAS rebuilt with " + std::to_string(allInstances.size()) + " instances ("
-            + std::to_string(vkInstances.size()) + " mesh, "
-            + std::to_string(m_hairVkInstances.size()) + " hair).");
     } else {
         SCENE_LOG_WARN("[Vulkan] updateGeometry: No valid geometry found in the scene.");
         // [VULKAN FIX] Also clear TLAS and disable RT when empty to prevent crash
@@ -11035,17 +11037,6 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     }
 
     if (m_textureUploadSummaryDirty) {
-        SCENE_LOG_INFO("[Vulkan] Texture upload summary | new=" + std::to_string(m_textureUploadCount) +
-                       " | bc4=" + std::to_string(m_textureUploadBC4Count) +
-                       " | bc5=" + std::to_string(m_textureUploadBC5Count) +
-                       " | bc7=" + std::to_string(m_textureUploadBC7Count) +
-                       " | r8=" + std::to_string(m_textureUploadR8Count) +
-                       " | rg8=" + std::to_string(m_textureUploadRG8Count) +
-                       " | rgba8=" + std::to_string(m_textureUploadRGBA8Count) +
-                       " | float=" + std::to_string(m_textureUploadFloatCount));
-        if (m_sceneTextureManager) {
-            m_sceneTextureManager->logBudgetSummary("after-upload-materials");
-        }
         m_textureUploadSummaryDirty = false;
     }
 
@@ -11511,7 +11502,9 @@ void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialDat
     }
 
     m_device->updateHairMaterialBuffer(gpuMats);
-    SCENE_LOG_INFO("[Vulkan] Hair materials uploaded: " + std::to_string(gpuMats.size()));
+    if (!gpuMats.empty()) {
+        SCENE_LOG_INFO("[Vulkan] Hair materials uploaded: " + std::to_string(gpuMats.size()));
+    }
 }
 
 void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<TerrainLayerData>& layers) {
@@ -11658,7 +11651,6 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
         gpuLayers.size() * sizeof(VulkanRT::VkTerrainLayerData),
         (uint32_t)gpuLayers.size());
 
-    SCENE_LOG_INFO("[Vulkan] Terrain layer materials uploaded: " + std::to_string(gpuLayers.size()));
 }
 
 void VulkanBackendAdapter::beginBatchedTextureUpload() {
@@ -17033,6 +17025,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         // write into the about-to-be-freed staging buffer.
         m_device->drainDenoiserCopy();
         destroyGpuDenoiserInterop();
+        closeUnimportedDenoiserSharedHandles();
         if (m_denoiserColorSharedStaging.buffer)  m_device->destroyBuffer(m_denoiserColorSharedStaging);
         if (m_denoiserAlbedoSharedStaging.buffer) m_device->destroyBuffer(m_denoiserAlbedoSharedStaging);
         if (m_denoiserNormalSharedStaging.buffer) m_device->destroyBuffer(m_denoiserNormalSharedStaging);
@@ -17042,12 +17035,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         m_denoiserColorSharedAllocSize = 0;
         m_denoiserAlbedoSharedAllocSize = 0;
         m_denoiserNormalSharedAllocSize = 0;
-        // The Win32 handles were either consumed by CUDA (ownership transferred
-        // in importGpuDenoiserInterop) or destroyed along with the VkDeviceMemory.
-        m_denoiserColorSharedHandle = nullptr;
-        m_denoiserAlbedoSharedHandle = nullptr;
-        m_denoiserNormalSharedHandle = nullptr;
-
         // Prefer half-float output to cut readback memory pressure by 50%.
         VkFormat outFmt = VK_FORMAT_R32G32B32A32_SFLOAT;
         VkFormatProperties fmtProps{};
@@ -17145,28 +17132,19 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
                              && m_denoiserNormalSharedStaging.buffer;
             if (!allOK) {
                 SCENE_LOG_WARN("[Vulkan] Exportable denoiser staging allocation failed — GPU-direct OIDN disabled.");
+                closeUnimportedDenoiserSharedHandles();
                 if (m_denoiserColorSharedStaging.buffer)  m_device->destroyBuffer(m_denoiserColorSharedStaging);
                 if (m_denoiserAlbedoSharedStaging.buffer) m_device->destroyBuffer(m_denoiserAlbedoSharedStaging);
                 if (m_denoiserNormalSharedStaging.buffer) m_device->destroyBuffer(m_denoiserNormalSharedStaging);
                 m_denoiserColorSharedStaging = {};
                 m_denoiserAlbedoSharedStaging = {};
                 m_denoiserNormalSharedStaging = {};
-                m_denoiserColorSharedHandle = nullptr;
-                m_denoiserAlbedoSharedHandle = nullptr;
-                m_denoiserNormalSharedHandle = nullptr;
                 m_denoiserColorSharedAllocSize = 0;
                 m_denoiserAlbedoSharedAllocSize = 0;
                 m_denoiserNormalSharedAllocSize = 0;
                 m_gpuDenoiserDisabled = true;
             }
         }
-
-        const uint64_t output_bytes = (uint64_t)width * height * bytesPerPixelForFormat(outFmt);
-        const uint64_t variance_bytes = (uint64_t)width * height * bytesPerPixelForFormat(VK_FORMAT_R32_SFLOAT);
-        const uint64_t denoiser_bytes = (uint64_t)width * height * bytesPerPixelForFormat(VK_FORMAT_R32G32B32A32_SFLOAT) * 3ull;
-        SCENE_LOG_INFO("[Perf] [Vulkan] render targets | output=" + std::to_string(output_bytes) +
-                       " bytes | variance=" + std::to_string(variance_bytes) +
-                       " bytes | denoiser=" + std::to_string(denoiser_bytes) + " bytes");
 
         if (!m_outputImage.image || !m_varianceImage.image || !m_stagingBuffer.buffer ||
             !m_denoiserColorImage.image || !m_denoiserAlbedoImage.image || !m_denoiserNormalImage.image ||
@@ -17232,7 +17210,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             std::filesystem::exists(shaderDir + "/volume_intersection.spv")) {
             volChitSPV = loadSPV(shaderDir + "/volume_closesthit.spv");
             volIntSPV  = loadSPV(shaderDir + "/volume_intersection.spv");
-            SCENE_LOG_INFO("[Vulkan] Volume shaders loaded successfully.");
         } else {
             SCENE_LOG_INFO("[Vulkan] Volume shaders not found — volume rendering disabled.");
         }
@@ -17248,7 +17225,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             if (std::filesystem::exists(shaderDir + "/hair_shadow_anyhit.spv")) {
                 hairAhitSPV = loadSPV(shaderDir + "/hair_shadow_anyhit.spv");
             }
-            SCENE_LOG_INFO("[Vulkan] Hair shaders loaded successfully.");
         } else {
             SCENE_LOG_INFO("[Vulkan] Hair shaders not found — hair rendering disabled.");
         }
@@ -17260,7 +17236,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             std::filesystem::exists(shaderDir + "/sphere_intersection.spv")) {
             sphereChitSPV = loadSPV(shaderDir + "/sphere_closesthit.spv");
             sphereIntSPV  = loadSPV(shaderDir + "/sphere_intersection.spv");
-            SCENE_LOG_INFO("[Vulkan] Foam sphere shaders loaded successfully.");
         } else {
             SCENE_LOG_INFO("[Vulkan] Foam sphere shaders not found — foam falls back to instanced spheres.");
         }
@@ -17269,7 +17244,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         std::vector<std::uint32_t> shadowMissSPV;
         if (std::filesystem::exists(shaderDir + "/shadow_miss.spv")) {
             shadowMissSPV = loadSPV(shaderDir + "/shadow_miss.spv");
-            SCENE_LOG_INFO("[Vulkan] Shadow miss shader loaded successfully.");
         } else {
             SCENE_LOG_INFO("[Vulkan] Shadow miss shader not found — shadow rays will use primary miss.");
         }
@@ -17278,7 +17252,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         std::vector<std::uint32_t> photonRgenSPV;
         if (std::filesystem::exists(shaderDir + "/photon.spv")) {
             photonRgenSPV = loadSPV(shaderDir + "/photon.spv");
-            SCENE_LOG_INFO("[Vulkan] Photon caustic raygen loaded successfully.");
         } else {
             SCENE_LOG_INFO("[Vulkan] photon.spv not found — photon caustics disabled.");
         }
@@ -17287,7 +17260,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (std::filesystem::exists(shaderDir + "/skinning.spv")) {
             std::vector<std::uint32_t> skinningSPV = loadSPV(shaderDir + "/skinning.spv");
             if (m_device->createSkinningPipeline(skinningSPV)) {
-                SCENE_LOG_INFO("[Vulkan] Skinning compute pipeline created successfully.");
             } else {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create Skinning compute pipeline.");
             }
@@ -17297,7 +17269,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (std::filesystem::exists(shaderDir + "/sculpt.spv")) {
             std::vector<std::uint32_t> sculptSPV = loadSPV(shaderDir + "/sculpt.spv");
             if (m_device->createSculptPipeline(sculptSPV)) {
-                SCENE_LOG_INFO("[Vulkan] Sculpt compute pipeline created successfully.");
             } else {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create Sculpt compute pipeline.");
             }
@@ -17308,7 +17279,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (std::filesystem::exists(shaderDir + "/tonemap.spv")) {
             std::vector<std::uint32_t> tonemapSPV = loadSPV(shaderDir + "/tonemap.spv");
             if (m_device->createTonemapPipeline(tonemapSPV)) {
-                SCENE_LOG_INFO("[Vulkan] Tonemap compute pipeline created — GPU tonemap path enabled.");
                 // Bind the persistent tonemap descriptor set to the current HDR+LDR
                 // images. The resize block already created them; we couldn't write the
                 // set there because the pipeline wasn't ready yet.
@@ -17330,7 +17300,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (std::filesystem::exists(shaderDir + "/stylize.spv")) {
             std::vector<std::uint32_t> stylizeSPV = loadSPV(shaderDir + "/stylize.spv");
             if (m_device->createStylizePipeline(stylizeSPV)) {
-                SCENE_LOG_INFO("[Vulkan] Stylize compute pipeline created — GPU stylize path enabled.");
             } else {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create Stylize compute pipeline; falling back to CPU stylize.");
             }
@@ -17342,7 +17311,6 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (std::filesystem::exists(shaderDir + "/atmosphere_lut.spv")) {
             std::vector<std::uint32_t> atmosphereSPV = loadSPV(shaderDir + "/atmosphere_lut.spv");
             if (m_device->createAtmosphereLUTPipeline(atmosphereSPV)) {
-                SCENE_LOG_INFO("[Vulkan] Atmosphere LUT compute pipeline created — GPU Nishita LUT path enabled.");
             } else {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create Atmosphere LUT compute pipeline; falling back to CPU LUT upload.");
             }
@@ -18326,6 +18294,24 @@ void VulkanBackendAdapter::destroyGpuDenoiserInterop() {
     m_gpuDenoiserInterop = nullptr;
 }
 
+void VulkanBackendAdapter::closeUnimportedDenoiserSharedHandles() {
+#ifdef _WIN32
+    auto closeHandle = [](void*& raw) {
+        if (raw) {
+            CloseHandle(static_cast<HANDLE>(raw));
+            raw = nullptr;
+        }
+    };
+    closeHandle(m_denoiserColorSharedHandle);
+    closeHandle(m_denoiserAlbedoSharedHandle);
+    closeHandle(m_denoiserNormalSharedHandle);
+#else
+    m_denoiserColorSharedHandle = nullptr;
+    m_denoiserAlbedoSharedHandle = nullptr;
+    m_denoiserNormalSharedHandle = nullptr;
+#endif
+}
+
 bool VulkanBackendAdapter::ensureGpuDenoiserInterop(int width, int height, bool needAux) {
     if (m_gpuDenoiserDisabled) return false;
     if (!m_device || !m_device->isInitialized()) return false;
@@ -18393,7 +18379,7 @@ bool VulkanBackendAdapter::ensureGpuDenoiserInterop(int width, int height, bool 
     s->cudaOrdinal = cudaOrdinal;
     s->stream = nullptr; // default stream; CPU already fence-synced the Vulkan copy
 
-    auto importOne = [&](void* win32Handle, uint64_t allocSize, uint64_t mappedBytes,
+    auto importOne = [&](void*& win32Handle, uint64_t allocSize, uint64_t mappedBytes,
                          cudaExternalMemory_t& outExt, void*& outDev) -> bool {
         cudaExternalMemoryHandleDesc desc{};
         desc.type = cudaExternalMemoryHandleTypeOpaqueWin32;
@@ -18405,6 +18391,8 @@ bool VulkanBackendAdapter::ensureGpuDenoiserInterop(int width, int height, bool 
             cudaGetLastError();
             return false;
         }
+        // CUDA owns the Win32 handle after a successful import.
+        win32Handle = nullptr;
         cudaExternalMemoryBufferDesc bufDesc{};
         bufDesc.offset = 0;
         bufDesc.size = mappedBytes;
@@ -18425,17 +18413,14 @@ bool VulkanBackendAdapter::ensureGpuDenoiserInterop(int width, int height, bool 
     // impossible). Memory cost is ~30 MB extra at 720p — acceptable.
     bool ok = importOne(m_denoiserColorSharedHandle, m_denoiserColorSharedAllocSize,
                         mappedBytes, s->colorExt, s->colorSrcDev);
-    m_denoiserColorSharedHandle = nullptr;
 
     if (ok) {
         ok = importOne(m_denoiserAlbedoSharedHandle, m_denoiserAlbedoSharedAllocSize,
                        mappedBytes, s->albedoExt, s->albedoSrcDev);
-        m_denoiserAlbedoSharedHandle = nullptr;
     }
     if (ok) {
         ok = importOne(m_denoiserNormalSharedHandle, m_denoiserNormalSharedAllocSize,
                        mappedBytes, s->normalExt, s->normalSrcDev);
-        m_denoiserNormalSharedHandle = nullptr;
     }
 
     if (ok) {

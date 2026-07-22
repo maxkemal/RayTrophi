@@ -79,13 +79,15 @@ namespace NodeSystem {
          */
         Pin& addInput(const std::string& name, DataType type, 
                       ImageSemantic semantic = ImageSemantic::Generic,
-                      bool optional = false) {
+                      bool optional = false,
+                      ImageUnit unit = ImageUnit::Unknown) {
             Pin pin;
             pin.name = name;
             pin.kind = PinKind::Input;
             pin.dataType = type;
             pin.imageSemantic = semantic;
             pin.optional = optional;
+            pin.imageUnit = unit;
             pin.updateVisualCache();
             inputs.push_back(std::move(pin));
             return inputs.back();
@@ -95,12 +97,14 @@ namespace NodeSystem {
          * @brief Add an output pin
          */
         Pin& addOutput(const std::string& name, DataType type,
-                       ImageSemantic semantic = ImageSemantic::Generic) {
+                       ImageSemantic semantic = ImageSemantic::Generic,
+                       ImageUnit unit = ImageUnit::Unknown) {
             Pin pin;
             pin.name = name;
             pin.kind = PinKind::Output;
             pin.dataType = type;
             pin.imageSemantic = semantic;
+            pin.imageUnit = unit;
             pin.updateVisualCache();
             outputs.push_back(std::move(pin));
             return outputs.back();

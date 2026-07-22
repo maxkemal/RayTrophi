@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -1180,6 +1180,10 @@ public:
     void drawRiverPanel(UIContext& ctx);       // Bezier spline river editor
     void drawRiverGizmos(UIContext& ctx, bool& gizmo_hit);  // River spline visualization
     void drawTerrainPanel(UIContext& ctx);
+    // Bidirectional bridge between canonical scene selection and the managed
+    // Terrain / Water / River list selections.
+    void syncManagedObjectSelection(UIContext& ctx);
+    void selectManagedMesh(UIContext& ctx, const std::shared_ptr<class TriangleMesh>& mesh);
      // Central query: is ANY viewport tool/brush mode active?
      // Used by idle-tier system so every tool keeps the viewport alive.
      // Add new tools here — one place, all modes covered.
@@ -1257,6 +1261,9 @@ public:
     bool editable_subdiv_display_signature_valid = false;
     // picking fails because Triangle::hit() reads stale local-space positions.
     bool picking_vertices_synced = false;
+    bool mesh_cache_valid = false;
+    bool show_python_console = false;
+    bool show_remote_ipc_panel = false;
 private:
     // --- UI Structure ---
     void drawPanels(UIContext& ctx);
@@ -1372,8 +1379,9 @@ private:
     Vec3 camera_initial_pos;
     Vec3 camera_initial_target;
     float camera_initial_fov;
-   
+
     bool show_scene_log = false; // Default closed
+
     bool focus_bottom_panel_next_frame = false;
     bool pending_project_ui_restore = false;
     // --- Modern dockable panel layout (ImGui docking) ---
@@ -1482,7 +1490,7 @@ private:
     // Key: nodeName, Value: list of unique material IDs used by that object
     std::map<std::string, std::vector<uint16_t>> material_slots_cache;
 
-    bool mesh_cache_valid = false;
+
     size_t last_scene_obj_count = 0; // Tracking for cache invalidation
     size_t last_scene_light_count = 0;
     size_t last_scene_camera_count = 0;

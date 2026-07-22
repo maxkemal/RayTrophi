@@ -115,6 +115,7 @@ public:
                                        int64_t& outTextureId,
                                        bool* outCreated = nullptr);
     void clearOptixTextureId(int64_t textureId);
+    void clearAllOptixTextureIds();
     size_t textureCount() const;
     uint64_t totalEstimatedTextureBytes() const;
     // Bytes physically resident on GPU. The Vulkan raster viewport and the

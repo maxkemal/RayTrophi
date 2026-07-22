@@ -57,7 +57,6 @@ bool VDBVolume::loadVDB(const std::string& path) {
     // Update bounds from VDB data
     updateBoundsFromVDB();
     
-    SCENE_LOG_INFO("VDBVolume: Loaded " + path + " (ID: " + std::to_string(id) + ")");
     
     // Auto-Rotate logic removed as per user request to avoid incorrect orientation for Y-up files.
     // if (name.find("Gas Volume") == std::string::npos && name.find("frame_") == std::string::npos) {
@@ -253,8 +252,6 @@ bool VDBVolume::loadVDBSequence(const std::string& pattern_or_file) {
     // CRITICAL: Set sequence flags AFTER loadVDB (which resets them)
     is_sequence = true;
     timeline_linked = true;
-    
-    SCENE_LOG_INFO("Loaded VDB Sequence: " + std::to_string(sequence_start_frame) + " - " + std::to_string(sequence_end_frame));
     
     return true;
 }
@@ -545,7 +542,6 @@ void VDBVolume::updateBoundsFromVDB() {
         
         scale_vec = Vec3(corrected_scale);
         updateTransformMatrix(); // Apply scale immediately
-        SCENE_LOG_INFO("[VDB] Auto-scaled massive bounds (" + std::to_string(max_d) + "m) to " + std::to_string(corrected_scale));
     }
 
     if (is_sequence) {

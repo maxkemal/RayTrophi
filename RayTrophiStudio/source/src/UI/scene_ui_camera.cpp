@@ -794,11 +794,32 @@
 
         if (ctx.mouse_control_enabled) {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("Sensitivity");
-            ImGui::SameLine(80);
+            ImGui::TextUnformatted("Look Sens");
+            ImGui::SameLine(100);
             ImGui::PushItemWidth(-1);
             ImGui::SliderFloat("##MouseSens", &ctx.render_settings.mouse_sensitivity, 0.01f, 5.0f, "%.2f");
             ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Angular yaw, pitch and orbit response. Independent of scene scale.");
+
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Nav Scale");
+            ImGui::SameLine(100);
+            ImGui::PushItemWidth(-1);
+            if (ImGui::SliderFloat("##NavigationScale", &ctx.render_settings.navigation_scale, 0.1f, 5.0f, "%.2fx")) {
+                ctx.render_settings.navigation_scale_auto = false;
+            }
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("World-space pan, dolly/zoom and fly scale. Large terrains may raise this automatically.");
+
+            ImGui::Checkbox("Auto terrain navigation", &ctx.render_settings.navigation_scale_auto);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Allow newly created large terrains to raise Navigation Scale. It never changes Look Sensitivity.");
+
+            if (ImGui::TreeNodeEx("Advanced Navigation", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                ImGui::SliderFloat("Pan##NavPan", &ctx.render_settings.pan_sensitivity, 0.1f, 4.0f, "%.2fx");
+                ImGui::SliderFloat("Zoom##NavZoom", &ctx.render_settings.zoom_sensitivity, 0.1f, 4.0f, "%.2fx");
+                ImGui::SliderFloat("Fly##NavFly", &ctx.render_settings.fly_speed_multiplier, 0.1f, 4.0f, "%.2fx");
+                ImGui::TreePop();
+            }
         }
 
         ImGui::Spacing();

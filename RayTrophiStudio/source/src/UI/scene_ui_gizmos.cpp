@@ -16,6 +16,8 @@
 #include "ProjectManager.h"
 #include "VDBVolumeManager.h"
 #include "GasVolume.h"  // For gas simulation gizmos
+#include "Api/RtPython.h"
+#include "Api/RtApi.h"
 #include "scene_ui_gas.hpp"  // For GasUI::selected_gas_volume
 #include "scene_ui_forcefield.hpp"
 #include "Backend/IViewportBackend.h"
@@ -1433,7 +1435,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
 
         // Parallel projection: each iteration only touches its own projected[i]
         // slot (read-only mesh/camera captures otherwise), so this is safe to
-        // fan out across cores. Terrain and other raw-Triangle (non-flat/SoA)
+        // fan out across cores. Legacy raw-Triangle (non-flat/SoA)
         // meshes push every real triangle into `tris`, unlike flat/proxy
         // TriangleMesh objects which only ever expose a single facade here —
         // for those dense raw meshes this per-triangle projection was the
@@ -1561,8 +1563,12 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         const float ox = static_cast<float>(min_x);
         const float oy = static_cast<float>(min_y);
 
-        // Rasterize each surviving triangle into the mask.
-        for (size_t i = 0; i < tris.size(); i += tri_stride) {
+        // Rasterize each surviving triangle into the mask. Flat/SoA nodes keep
+        // only ONE representative facade in `tris`; their real faces were
+        // projected from parentMesh above and therefore must be consumed using
+        // `tri_count`. Iterating tris.size() here reduced every flat selection
+        // to the representative face whenever the GPU outline was unavailable.
+        for (int64_t i = 0; i < tri_count; i += static_cast<int64_t>(tri_stride)) {
             const ProjTri& pt = projected[i];
             if (!pt.valid) continue;
             // Map to mask space.
@@ -1665,8 +1671,8 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         // Bucket by triangle count; neighbours inherit the result so the
         // perceived occlusion edge stays within a few pixels of truth.
         int oc_stride;
-        if      (tris.size() > 200000) oc_stride = 16;
-        else if (tris.size() >  30000) oc_stride = 10;
+        if      (tri_count > 200000) oc_stride = 16;
+        else if (tri_count >  30000) oc_stride = 10;
         else                           oc_stride = 6;
         bool last_occluded = false;
         int  last_oc_x = -9999, last_oc_y = -9999;
@@ -2885,7 +2891,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         oldEditMatrix.m[0][2] = editGizmoMatrix[8]; oldEditMatrix.m[1][2] = editGizmoMatrix[9]; oldEditMatrix.m[2][2] = editGizmoMatrix[10]; oldEditMatrix.m[3][2] = editGizmoMatrix[11];
         oldEditMatrix.m[0][3] = editGizmoMatrix[12]; oldEditMatrix.m[1][3] = editGizmoMatrix[13]; oldEditMatrix.m[2][3] = editGizmoMatrix[14]; oldEditMatrix.m[3][3] = editGizmoMatrix[15];
 
-        const bool manipulated = ImGuizmo::Manipulate(
+        const bool manipulated = !rtpython::wantsInputCapture() && !rtapi::renderOutputPending() && ImGuizmo::Manipulate(
             viewMatrix, projMatrix, editOperation, editMode, editGizmoMatrix);
         const bool gizmo_is_using_now = ImGuizmo::IsUsing();
 
@@ -3648,7 +3654,7 @@ mesh_edit_changed_confirmed:
 
     // Sim-driven bodies suppress the interactive gizmo (no per-frame vertex walk);
     // the live bbox in drawSelectionBoundingBox stands in for it while playing.
-    bool manipulated = skip_body_gizmo
+    bool manipulated = skip_body_gizmo || rtpython::wantsInputCapture() || rtapi::renderOutputPending()
         ? false
         : ImGuizmo::Manipulate(viewMatrix, projMatrix, operation, mode, objectMatrix);
 

@@ -1,4 +1,4 @@
-﻿#include "SceneCommand.h"
+#include "SceneCommand.h"
 #include "scene_ui.h"
 #include "Renderer.h"
 #include "ProjectManager.h"
@@ -8,11 +8,13 @@
 #include "Paint/MeshPaintAdapter.h"
 #include "HittableInstance.h"
 #include "TriangleMesh.h"  // FlatSculptEditCommand: SoA GeometryDetail write-back
+#include "GeometryNodesV2.h"  // rebakeFromOrig: flat-node transform restores P = getFinal() * P_orig
 #include "Backend/OptixBackend.h"
 #include "Backend/VulkanBackend.h"
 #include "Backend/IViewportBackend.h"
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 #include <SceneSelection.h>
 
 extern bool g_optix_rebuild_pending;
@@ -113,6 +115,15 @@ void setSceneNodeLocalVisibility(UIContext& ctx, const std::string& object_name,
             if (sceneCommandNodeMatches(inst->node_name, object_name)) {
                 inst->visible = visible;
             }
+            continue;
+        }
+        // Flat (direct-SoA) node: the TriangleMesh Hittable IS the object — without
+        // this branch a flat node's delete/undo left the real mesh untouched and only
+        // flipped throwaway rep facades.
+        if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (sceneCommandNodeMatches(tm->nodeName, object_name)) {
+                tm->visible = visible;
+            }
         }
     }
 }
@@ -123,6 +134,11 @@ bool activeSceneGpuRenderBackend(UIContext& ctx) {
     }
     return false;
 }
+
+} // anonymous namespace — closed so scheduleSceneMutationRebuilds below has
+  // external linkage (RtApi's mesh-data writes call it). It still reaches the
+  // helpers above: unnamed-namespace members are visible from this TU's global
+  // scope. The namespace is reopened right after for the remaining file-locals.
 
 void scheduleSceneMutationRebuilds(UIContext& ctx, bool includeCpuBvh) {
     // Invalidate cached raster geometry for both Solid/Matcap/Preview backends.
@@ -155,6 +171,8 @@ void scheduleSceneMutationRebuilds(UIContext& ctx, bool includeCpuBvh) {
 
     resetAccumulationForSceneMutation(ctx);
 }
+
+namespace { // reopen: the remaining helpers stay file-local (internal linkage)
 
 std::string getHittableNodeName(const std::shared_ptr<Hittable>& obj) {
     if (!obj) return "";
@@ -215,6 +233,19 @@ void scheduleUvGeometrySync(UIContext& ctx) {
 void DeleteObjectCommand::execute(UIContext& ctx) {
     bool needs_update = false;
 
+    // Flat (direct-SoA) node: capture the mesh Hittables once so undo can restore
+    // them even after compactPendingDeletedObjects() erased them from world.objects.
+    // Visibility itself is handled by the name-based helpers below.
+    if (deleted_flat_meshes_.empty()) {
+        for (auto& obj : ctx.scene.world.objects) {
+            if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                if (tm->nodeName == object_name_) {
+                    deleted_flat_meshes_.push_back(tm);
+                }
+            }
+        }
+    }
+
     for (const auto& tri : deleted_triangles_) {
         if (tri) {
             tri->visible = false;
@@ -261,7 +292,20 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
             extern bool g_cpu_sync_pending;
             g_cpu_sync_pending = true;
         }
-        
+        // CPU/Embree renders from the built BVH, not the visible flags — without a
+        // rebuild the deleted object keeps rendering (and pick-hitting) in CPU mode.
+        // The rebuild skips !visible objects, which removes it.
+        g_bvh_rebuild_pending = true;
+        // Drop the UI's per-node rep cache: it still maps this name, and a stale rep
+        // makes the next pick resolve to a single-triangle selection.
+        {
+            extern SceneUI ui;
+            ui.mesh_cache_valid = false;
+        }
+        if (ctx.selection.hasSelection() && ctx.selection.selected.name == object_name_) {
+            ctx.selection.clearSelection();
+        }
+
         ctx.start_render = true;
         ProjectManager::getInstance().markModified();
         SCENE_LOG_INFO("Redo: Deleted " + object_name_);
@@ -272,13 +316,60 @@ void DeleteObjectCommand::undo(UIContext& ctx) {
     bool needs_update = false;
     for (const auto& tri : deleted_triangles_) {
         if (tri) {
+            // Rep facade of a flat node: its parentMesh lives in world.objects as the
+            // real Hittable — pushing the throwaway facade back would duplicate face 0
+            // in the CPU BVH. The flat branch below restores the actual mesh instead.
+            const bool isFlatRepFacade = tri->parentMesh &&
+                std::find(ctx.scene.world.objects.begin(), ctx.scene.world.objects.end(),
+                          std::static_pointer_cast<Hittable>(tri->parentMesh)) != ctx.scene.world.objects.end();
             const bool existsInScene =
                 std::find(ctx.scene.world.objects.begin(), ctx.scene.world.objects.end(), tri) != ctx.scene.world.objects.end();
-            if (!existsInScene) {
+            if (!existsInScene && !isFlatRepFacade) {
                 ctx.scene.world.objects.push_back(tri);
             }
             tri->visible = true;
             needs_update = true;
+        }
+    }
+    // Flat (direct-SoA) node: put the captured meshes back. If a save-time compaction
+    // physically erased them, re-adding needs the full mutation refresh (BLAS/BVH/raster
+    // rebuild) — visibility flips alone can't resurrect geometry the backends dropped.
+    bool flat_readded = false;
+    for (const auto& tm : deleted_flat_meshes_) {
+        if (!tm) continue;
+        const bool existsInScene =
+            std::find(ctx.scene.world.objects.begin(), ctx.scene.world.objects.end(), tm) != ctx.scene.world.objects.end();
+        if (!existsInScene) {
+            ctx.scene.world.objects.push_back(tm);
+            flat_readded = true;
+        }
+        tm->visible = true;
+        needs_update = true;
+    }
+    if (flat_readded) {
+        scheduleSceneMutationRebuilds(ctx, true);
+    }
+    // Heal: earlier builds' undo pushed throwaway rep facades of flat nodes into
+    // world.objects. A name-matching Triangle whose parentMesh is itself a live world
+    // Hittable is such an orphan — the mesh IS the object; the facade only duplicates
+    // face 0 in the CPU BVH and hijacks selection into a single-triangle rep.
+    {
+        auto& objs = ctx.scene.world.objects;
+        std::unordered_set<const TriangleMesh*> world_meshes;
+        for (const auto& h : objs) {
+            if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(h)) {
+                world_meshes.insert(tm.get());
+            }
+        }
+        if (!world_meshes.empty()) {
+            objs.erase(std::remove_if(objs.begin(), objs.end(),
+                [&](const std::shared_ptr<Hittable>& h) {
+                    auto tri = std::dynamic_pointer_cast<Triangle>(h);
+                    return tri && tri->parentMesh &&
+                           tri->getNodeName() == object_name_ &&
+                           world_meshes.count(tri->parentMesh.get()) > 0;
+                }),
+                objs.end());
         }
     }
     ctx.scene.restoreObjectPendingDelete(object_name_);
@@ -302,8 +393,16 @@ void DeleteObjectCommand::undo(UIContext& ctx) {
             extern bool g_cpu_sync_pending;
             g_cpu_sync_pending = true;
         }
+        // Mirror of execute(): CPU BVH must re-include the restored object, and the
+        // rep cache must be rebuilt so picking selects the whole node again instead
+        // of a stale single-triangle rep.
+        g_bvh_rebuild_pending = true;
+        {
+            extern SceneUI ui;
+            ui.mesh_cache_valid = false;
+        }
     }
-    
+
     ProjectManager::getInstance().markModified();
     SCENE_LOG_INFO("Undo: Restored " + object_name_);
     ctx.start_render = true;
@@ -323,14 +422,14 @@ void DuplicateObjectCommand::execute(UIContext& ctx) {
     
     // For Redo, we just re-insert the specific pointers we saved.
     // Check if first one is in scene.
-    if (!new_triangles_.empty()) {
+    if (!new_objects_.empty()) {
         bool exists = false;
         for (const auto& obj : ctx.scene.world.objects) {
-            if (obj == new_triangles_[0]) { exists = true; break; }
+            if (obj == new_objects_[0]) { exists = true; break; }
         }
         
         if (!exists) {
-            ctx.scene.world.objects.insert(ctx.scene.world.objects.end(), new_triangles_.begin(), new_triangles_.end());
+            ctx.scene.world.objects.insert(ctx.scene.world.objects.end(), new_objects_.begin(), new_objects_.end());
             needs_update = true;
         }
     }
@@ -349,8 +448,7 @@ void DuplicateObjectCommand::undo(UIContext& ctx) {
     auto new_end = std::remove_if(objs.begin(), objs.end(), 
         [this](const std::shared_ptr<Hittable>& h) {
              // Match by pointer for robustness
-             for(auto& t : new_triangles_) if (std::dynamic_pointer_cast<Triangle>(h) == t) return true;
-             return false;
+             return std::find(new_objects_.begin(), new_objects_.end(), h) != new_objects_.end();
         });
     
     if (new_end != objs.end()) {
@@ -359,9 +457,61 @@ void DuplicateObjectCommand::undo(UIContext& ctx) {
     
     scheduleSceneMutationRebuilds(ctx, true);
     ctx.renderer.resetCPUAccumulation();
+    if (ctx.selection.hasSelection() && ctx.selection.selected.name == new_name_) {
+        ctx.selection.clearSelection();
+    }
     
     SCENE_LOG_INFO("Undo: Removed duplicate " + new_name_);
     ctx.start_render = true;
+}
+
+// ============================================================================
+// ADD OBJECT COMMAND IMPLEMENTATION
+// ============================================================================
+
+void AddObjectCommand::execute(UIContext& ctx) {
+    if (!object_) return;
+    auto& objs = ctx.scene.world.objects;
+    if (std::find(objs.begin(), objs.end(), object_) == objs.end()) {
+        objs.push_back(object_);
+        scheduleSceneMutationRebuilds(ctx, true);
+        ctx.renderer.resetCPUAccumulation();
+        {
+            extern SceneUI ui;
+            ui.mesh_cache_valid = false;
+        }
+        ctx.start_render = true;
+        ProjectManager::getInstance().markModified();
+        SCENE_LOG_INFO("Redo: Added " + getDescription());
+    }
+}
+
+void AddObjectCommand::undo(UIContext& ctx) {
+    if (!object_) return;
+    auto& objs = ctx.scene.world.objects;
+    auto it = std::find(objs.begin(), objs.end(), object_);
+    if (it != objs.end()) {
+        objs.erase(it);
+        scheduleSceneMutationRebuilds(ctx, true);
+        ctx.renderer.resetCPUAccumulation();
+        {
+            extern SceneUI ui;
+            ui.mesh_cache_valid = false;
+        }
+        if (ctx.selection.hasSelection() && ctx.selection.selected.object == object_) {
+            ctx.selection.clearSelection();
+        }
+        ctx.start_render = true;
+        ProjectManager::getInstance().markModified();
+        SCENE_LOG_INFO("Undo: Removed " + getDescription());
+    }
+}
+
+std::string AddObjectCommand::getDescription() const {
+    if (!object_) return "Add Object";
+    if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(object_)) return "Add Object " + tm->nodeName;
+    if (auto tri = std::dynamic_pointer_cast<Triangle>(object_)) return "Add Object " + tri->getNodeName();
+    return "Add Object";
 }
 
 // ============================================================================
@@ -371,6 +521,19 @@ void DuplicateObjectCommand::undo(UIContext& ctx) {
 void TransformCommand::applyState(UIContext& ctx, const TransformState& state) {
     // Find objects by name
     bool found = false;
+
+    // Flat (direct-SoA) node: no per-face facades to iterate — drive the mesh's own
+    // pivot and restore the P = getFinal() * P_orig invariant so the CPU-side world
+    // buffers (Embree facadeless groups, picking) read the moved surface. GPU
+    // instance matrices are handled by the shared found-block below, same as facades.
+    if (TriangleMesh* fm = ctx.scene.getFlatNodeMesh(object_name_)) {
+        if (fm->transform) {
+            fm->transform->setBase(state.matrix);
+            GeometryNodesV2::rebakeFromOrig(*fm);
+        }
+        found = true;
+    }
+
     for (auto& obj : ctx.scene.world.objects) {
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
         if (tri && tri->getNodeName() == object_name_) {
