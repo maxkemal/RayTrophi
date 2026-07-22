@@ -29,6 +29,12 @@ static constexpr int TERRAIN_SERIALIZATION_VERSION = 2;
 // EROSION PARAMETERS
 // ===========================================================================
 
+enum class ErosionBoundaryMode : int {
+    Preserve = 0, // Blend the simulation back to the authored border heights.
+    Open = 1,     // Water/sediment may leave the domain; do not reshape geometry.
+    SeaLevel = 2  // Blend border geometry toward an explicit normalized level.
+};
+
 struct HydraulicErosionParams {
     int iterations = 50000;        // Number of 'hits' (Determines passes in GPU)
     int dropletLifetime = 64;      // Max steps per droplet
@@ -40,6 +46,10 @@ struct HydraulicErosionParams {
     float evaporateSpeed = 0.01f;  // Evaporation rate
     float gravity = 9.8f;          // Gravitational acceleration
     int erosionRadius = 2;         // Default channel width
+    unsigned int seed = 1337u;     // Deterministic CPU/GPU droplet distribution
+    ErosionBoundaryMode boundaryMode = ErosionBoundaryMode::Preserve;
+    int boundaryWidth = 0;         // Cells; 0 selects a resolution-aware width
+    float boundaryLevel = 0.0f;    // Normalized height used by SeaLevel mode
 };
 
 struct ThermalErosionParams {

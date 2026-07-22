@@ -103,6 +103,11 @@ public:
                 {NodeType::NoiseGenerator, "Noise Generator"},
                 {NodeType::HardnessInput, "Hardness Input"}
             }},
+            {"Landform", ImVec4(0.58f, 0.42f, 0.30f, 1.0f), {
+                {NodeType::MountainRange, "Mountain Range / Orogeny"},
+                {NodeType::BasinValley, "Basin & Valley"},
+                {NodeType::TerrainDetail, "Terrain Detail"}
+            }},
             {"Erosion", ImVec4(0.3f, 0.5f, 0.9f, 1.0f), {
                 {NodeType::HydraulicErosion, "Hydraulic"},
                 {NodeType::ThermalErosion, "Thermal"},
@@ -428,11 +433,9 @@ public:
                     auto* newNode = graph.addTerrainNode(droppedType, spawnX, spawnY);
                     addNodeToActiveLayer(graph, newNode);
 
-                    if (newNode && tryInsertNodeIntoLink(graph, newNode, targetLink)) {
-                        // Successfully inserted!
-                        ProjectManager::getInstance().markModified();
-                    }
+                    if (newNode) tryInsertNodeIntoLink(graph, newNode, targetLink);
                     // If insertion failed, node is still created at position
+                    ProjectManager::getInstance().markModified();
                 } else {
                     // Normal drop - just create node
                     NodeSystem::NodeBase* node = graph.addTerrainNode(droppedType, spawnX, spawnY);
@@ -664,12 +667,17 @@ public:
         auto* terrainNode = dynamic_cast<TerrainNodesV2::TerrainNodeBase*>(node);
         if (!terrainNode) return;
         
-        // Check if this is a mask-producing node
+        // Check if this is a scalar-field-producing node (mask, physical,
+        // direction or categorical data all use the heat-map inspector).
         bool isMaskNode = false;
         int maskOutputIndex = -1;
         
         for (size_t i = 0; i < node->outputs.size(); i++) {
-            if (node->outputs[i].imageSemantic == NodeSystem::ImageSemantic::Mask) {
+            const auto semantic = node->outputs[i].imageSemantic;
+            if (semantic == NodeSystem::ImageSemantic::Mask ||
+                semantic == NodeSystem::ImageSemantic::PhysicalScalar ||
+                semantic == NodeSystem::ImageSemantic::Direction ||
+                semantic == NodeSystem::ImageSemantic::Categorical) {
                 isMaskNode = true;
                 maskOutputIndex = static_cast<int>(i);
                 break;
@@ -688,62 +696,26 @@ public:
         ImGui::Separator();
         ImGui::Spacing();
         
-        // Check if we need to update preview (node changed or refresh clicked)
+        // Check if we need to update preview. The inspector is an observational
+        // pull and must not depend on Apply Material / full terrain Evaluate.
         bool nodeChanged = (lastPreviewedNodeId != node->id);
         
-        // Wrap preview in collapsed header (Closed by default to prevent freeze)
-        if (ImGui::CollapsingHeader("Mask Preview (Click to Show)", ImGuiTreeNodeFlags_None)) {
-            
-            // Refresh button inside the header
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
-            bool refreshClicked = ImGui::SmallButton("Refresh");
-            
+        // The old Refresh button shared the collapsing-header row and could
+        // overlap its arrow/icon at narrow inspector widths. Preview is now
+        // revision-driven, so that second control is unnecessary.
+        if (ImGui::CollapsingHeader("Field Preview", ImGuiTreeNodeFlags_None)) {
             const bool revisionChanged = lastPreviewedRevision != maskPreviewRevision;
             const bool debounceElapsed =
-                (ImGui::GetTime() - pendingAutoPreviewSince) >= 0.15;
-            bool needsUpdate = nodeChanged || refreshClicked ||
+                (ImGui::GetTime() - pendingAutoPreviewSince) >= 0.08;
+            bool needsUpdate = nodeChanged ||
                                (revisionChanged && debounceElapsed && !propertyEditActiveThisFrame);
             
             if (needsUpdate && currentTerrain && !graph.isEvaluatingAsync()) {
                 NodeSystem::Image2DData image;
                 bool imageAvailable = graph.getCachedImageOutput(node->id, maskOutputIndex, image);
-                if (!imageAvailable && refreshClicked) {
-                    // An explicit refresh may need to pull the upstream DAG, but
-                    // erosion nodes mutate their TerrainObject while computing.
-                    // Run that pull on a detached data-only terrain so inspector
-                    // work can never dirty the live mesh or wake BVH rebuilds.
-                    TerrainObject scratchTerrain;
-                    scratchTerrain.id = currentTerrain->id;
-                    scratchTerrain.name = currentTerrain->name + "##MaskPreview";
-                    scratchTerrain.heightmap = currentTerrain->heightmap;
-                    scratchTerrain.original_heightmap_data = currentTerrain->original_heightmap_data;
-                    scratchTerrain.hardnessMap = currentTerrain->hardnessMap;
-                    scratchTerrain.flowMap = currentTerrain->flowMap;
-                    scratchTerrain.erosionMapRGBA = currentTerrain->erosionMapRGBA;
-                    scratchTerrain.defer_mesh_updates = true;
-
-                    TerrainNodesV2::TerrainContext tctx(&scratchTerrain);
-                    tctx.publishTerrainState = false;
-                    NodeSystem::EvaluationContext ctx(&graph);
-                    ctx.setDomainContext(&tctx);
-
-                    // requestOutput() updates NodeBase::dirty even with a local
-                    // EvaluationContext. Preserve graph authoring state so this
-                    // inspector pull cannot make the next real Evaluate reuse a
-                    // stale live-terrain result.
-                    std::vector<std::pair<NodeSystem::NodeBase*, bool>> dirtySnapshot;
-                    dirtySnapshot.reserve(graph.nodes.size());
-                    for (const auto& graphNode : graph.nodes) {
-                        dirtySnapshot.emplace_back(graphNode.get(), graphNode->dirty);
-                    }
-                    NodeSystem::PinValue result = node->requestOutput(maskOutputIndex, ctx);
-                    for (const auto& [graphNode, wasDirty] : dirtySnapshot) {
-                        graphNode->dirty = wasDirty;
-                    }
-                    if (const auto* computed = std::get_if<NodeSystem::Image2DData>(&result)) {
-                        image = *computed;
-                        imageAvailable = image.isValid();
-                    }
+                if (!imageAvailable) {
+                    imageAvailable = graph.evaluateInspectorImageOutput(
+                        node->id, maskOutputIndex, currentTerrain, image);
                 }
 
                 if (imageAvailable && image.isValid()) {
@@ -764,9 +736,17 @@ public:
                     lastPreviewedWidth = imgData->width;
                     lastPreviewedHeight = imgData->height;
                     lastPreviewedRevision = maskPreviewRevision;
-                    auto minMax = std::minmax_element(lastPreviewedData.begin(), lastPreviewedData.end());
-                    lastPreviewMin = *minMax.first;
-                    lastPreviewMax = *minMax.second;
+                    const auto previewSemantic = node->outputs[maskOutputIndex].imageSemantic;
+                    if (previewSemantic == NodeSystem::ImageSemantic::Mask) {
+                        // Masks have an authored absolute range. Auto-normalizing
+                        // every frame can visually cancel Contrast/Multiply edits.
+                        lastPreviewMin = 0.0f;
+                        lastPreviewMax = 1.0f;
+                    } else {
+                        auto minMax = std::minmax_element(lastPreviewedData.begin(), lastPreviewedData.end());
+                        lastPreviewMin = *minMax.first;
+                        lastPreviewMax = *minMax.second;
+                    }
                     updateMaskPreviewTexture();
                     previewDisplayColors.clear();
                     cachedPreviewZoom = -1.0f;
@@ -777,18 +757,16 @@ public:
                         previewZoom = 1.0f;
                     }
                 } else {
-                    // A slider drag invalidates the node before the debounced
-                    // material-only evaluation publishes its new cache. Keep
-                    // the last valid image and leave the revision pending; the
-                    // next frame after Apply Material will refresh it in place.
+                    // Keep the last valid image and leave the revision pending
+                    // when a transient pull fails; the inspector retries without
+                    // requiring Apply Material or a manual refresh.
                     const bool hasPreviousImageForNode =
                         lastPreviewedNodeId == node->id &&
                         lastPreviewedWidth > 0 && !lastPreviewedData.empty();
-                    if (!hasPreviousImageForNode || nodeChanged || refreshClicked) {
+                    if (!hasPreviousImageForNode || nodeChanged) {
                         lastPreviewedNodeId = node->id;
                         lastPreviewedWidth = 0;
                         lastPreviewedHeight = 0;
-                        lastPreviewedRevision = maskPreviewRevision;
                         lastPreviewedData.clear();
                         releaseMaskPreviewTexture();
                     }
@@ -1452,7 +1430,9 @@ private:
         // Use the exact geometry drawn this frame. This also covers virtual
         // layer-boundary cables, whose hidden endpoint has no ordinary node pin
         // position in the focused layer.
-        return editor.findVisibleLinkAt(graph, mousePos, 15.0f);
+        // A slightly forgiving hit corridor makes dropping a library node onto
+        // thin cables practical at low zoom without changing ordinary selection.
+        return editor.findVisibleLinkAt(graph, mousePos, 22.0f);
     }
     
     /**
@@ -1635,10 +1615,10 @@ private:
                 }
                 setupStatusUntil = ImGui::GetTime() + 4.0;
             }
-            if (ImGui::MenuItem("Add River Network")) {
+            if (ImGui::MenuItem("Add River & Lake (Easy)")) {
                 if (graph.addRiverNetworkSetup()) {
                     frameAllNodes(graph);
-                    setupStatus = "Hydrology ready: lakes, river network and RiverSpline";
+                    setupStatus = "Hydrology ready: one-control presets + detailed river/lake layers";
                     ProjectManager::getInstance().markModified();
                 } else {
                     setupStatus = "River setup needs a connected Height Output";
@@ -1839,7 +1819,10 @@ private:
             if (previewNode && !supportsHeightPreview) {
                 for (const auto& output : previewNode->outputs) {
                     if (output.dataType == NodeSystem::DataType::Image2D &&
-                        output.imageSemantic == NodeSystem::ImageSemantic::Mask) {
+                        (output.imageSemantic == NodeSystem::ImageSemantic::Mask ||
+                         output.imageSemantic == NodeSystem::ImageSemantic::PhysicalScalar ||
+                         output.imageSemantic == NodeSystem::ImageSemantic::Direction ||
+                         output.imageSemantic == NodeSystem::ImageSemantic::Categorical)) {
                         hasMaskOutput = true;
                     }
                     if (output.dataType == NodeSystem::DataType::Image2D &&
@@ -1850,7 +1833,10 @@ private:
             } else if (previewNode) {
                 for (const auto& output : previewNode->outputs) {
                     if (output.dataType == NodeSystem::DataType::Image2D &&
-                        output.imageSemantic == NodeSystem::ImageSemantic::Mask) {
+                        (output.imageSemantic == NodeSystem::ImageSemantic::Mask ||
+                         output.imageSemantic == NodeSystem::ImageSemantic::PhysicalScalar ||
+                         output.imageSemantic == NodeSystem::ImageSemantic::Direction ||
+                         output.imageSemantic == NodeSystem::ImageSemantic::Categorical)) {
                         hasMaskOutput = true;
                         break;
                     }

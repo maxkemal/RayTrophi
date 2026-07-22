@@ -1064,9 +1064,16 @@ struct SceneData {
         Matrix4x4 pivot = Matrix4x4::identity();
         bool have_pivot = false;
         for (auto& obj : world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri && tri->getNodeName() == rb.source_name) {
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                tri && tri->getNodeName() == rb.source_name) {
                 if (Transform* th = tri->getTransformPtr()) {
+                    pivot = th->getPivotMatrix();
+                    have_pivot = true;
+                }
+                break;
+            } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj);
+                       tm && tm->nodeName == rb.source_name) {
+                if (Transform* th = tm->transform.get()) {
                     pivot = th->getPivotMatrix();
                     have_pivot = true;
                 }
@@ -4066,6 +4073,13 @@ struct SceneData {
                     }
                 }
                 system.runtime->synchronizeGridDomainsNow();
+            }
+        }
+        for (auto& obj : fluid_objects) {
+            obj.resetState();
+            if (obj.pending_seed) {
+                obj.ensureGrid();
+                RayTrophiSim::Fluid::seedBox(obj.particles, obj.grid, obj.seed_min, obj.seed_max, obj.seed_particles_per_cell);
             }
         }
         // Rigid bodies respawn at their source objects' poses on the next step.

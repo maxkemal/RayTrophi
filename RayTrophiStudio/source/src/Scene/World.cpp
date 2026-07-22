@@ -771,12 +771,14 @@ void World::reset() {
     data.weather.surface_wetness_output = 0.0f;
     data.weather.surface_accumulation_output = 0.0f;
     
-    // Re-initialize LUT with defaults
-    if (atmosphere_lut) {
-        atmosphere_lut->precompute(data.nishita);
-    } else {
-        initializeLUT();
-    }
+    // Defer the LUT re-bake instead of precomputing synchronously: reset() runs inside
+    // newProject/openProject where a ~1.6s CPU sky bake blocked every project transition —
+    // even loads that immediately overwrite these defaults (deserialize) or never render
+    // the atmosphere at all (HDRI/color scenes). The runtime flushes lazily when Nishita
+    // is actually rendered: Vulkan generates the LUT on GPU, the OptiX/CPU world-sync
+    // branch and the CPU ray path call flushLUT() (which also self-initializes a missing
+    // atmosphere_lut).
+    lut_dirty = true;
 }
 
 AtmosphereAdvanced World::getAdvancedParams() const {
@@ -1087,11 +1089,22 @@ void World::deserialize(const nlohmann::json& j) {
             cosf(elevRad) * cosf(azimRad)
         ));
 
-        // CRITICAL: Re-initialize LUT after loading parameters
-        if (atmosphere_lut) {
-            atmosphere_lut->precompute(data.nishita); 
+        // CRITICAL: Re-initialize LUT after loading parameters — but ONLY when the loaded
+        // world actually renders the atmosphere. Every project carries a "nishita" block
+        // (defaults included), so the unconditional precompute made HDRI/color/interior
+        // scenes pay a multi-second CPU sky bake at load for a sky they never sample.
+        // For non-Nishita modes just mark the LUT dirty: the runtime already flushes it
+        // lazily on demand (Main world-sync gate checks needsLUTUpdate() when the mode is
+        // Nishita; the CPU ray path flushes in ray_color; flushLUT() self-initializes a
+        // missing LUT).
+        if (data.mode == WORLD_MODE_NISHITA) {
+            if (atmosphere_lut) {
+                atmosphere_lut->precompute(data.nishita);
+            } else {
+                initializeLUT();
+            }
         } else {
-            initializeLUT();
+            lut_dirty = true;
         }
     }
 

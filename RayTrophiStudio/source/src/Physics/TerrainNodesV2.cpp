@@ -11,6 +11,7 @@
 #include "FoliageAssetLibrary.h"
 #include "RiverSpline.h"
 #include "TerrainFFT.h"  // FFT-accelerated noise with CUDA fallback
+#include "SnowComputeGPU.h"
 #include "globals.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
@@ -31,6 +32,98 @@
 #include <image_filters.h>
 
 namespace TerrainNodesV2 {
+
+    // GPU droplet erosion deliberately lets many invocations update the same
+    // height buffer. On sufficiently steep procedural input a bad intermediate
+    // can otherwise become NaN/Inf (or a finite runaway) and later poison mesh
+    // bounds/BVH construction. Keep the solver result inside a generous envelope
+    // around its input and restore only anomalous samples from that input.
+    static size_t repairHydraulicHeightField(std::vector<float>& values,
+                                             const std::vector<float>& input,
+                                             float heightScale) {
+        if (values.size() != input.size() || values.empty()) return 0;
+
+        float inputMin = FLT_MAX;
+        float inputMax = -FLT_MAX;
+        for (float value : input) {
+            if (!std::isfinite(value)) continue;
+            inputMin = (std::min)(inputMin, value);
+            inputMax = (std::max)(inputMax, value);
+        }
+        if (inputMin == FLT_MAX) {
+            inputMin = 0.0f;
+            inputMax = 0.0f;
+        }
+
+        const float safeHeightScale = (std::max)(std::abs(heightScale), 0.001f);
+        const float sourceRelief = (std::max)(inputMax - inputMin, 0.0f);
+        // Allow two complete source-relief ranges of erosion/deposition, with a
+        // minimum 1 km world-space allowance for nearly flat source fields.
+        const float excursion = (std::max)(sourceRelief * 2.0f, 1000.0f / safeHeightScale);
+        const float safeMin = inputMin - excursion;
+        const float safeMax = inputMax + excursion;
+
+        size_t repaired = 0;
+        for (size_t i = 0; i < values.size(); ++i) {
+            const float value = values[i];
+            if (std::isfinite(value) && value >= safeMin && value <= safeMax) continue;
+            values[i] = std::isfinite(input[i]) ? input[i] : 0.0f;
+            ++repaired;
+        }
+        return repaired;
+    }
+
+    static size_t repairNonFiniteHeightField(std::vector<float>& values) {
+        size_t repaired = 0;
+        for (float& value : values) {
+            if (std::isfinite(value)) continue;
+            value = 0.0f;
+            ++repaired;
+        }
+        return repaired;
+    }
+
+    static float landformHash(int x, int y, int seed) {
+        uint32_t h = static_cast<uint32_t>(x) * 374761393u +
+            static_cast<uint32_t>(y) * 668265263u + static_cast<uint32_t>(seed) * 2246822519u;
+        h = (h ^ (h >> 13u)) * 1274126177u;
+        h ^= h >> 16u;
+        return static_cast<float>(h & 0x00ffffffu) / static_cast<float>(0x01000000u);
+    }
+
+    static float landformValueNoise(float x, float y, int seed) {
+        const int ix = static_cast<int>(std::floor(x));
+        const int iy = static_cast<int>(std::floor(y));
+        float fx = x - static_cast<float>(ix);
+        float fy = y - static_cast<float>(iy);
+        fx = fx * fx * (3.0f - 2.0f * fx);
+        fy = fy * fy * (3.0f - 2.0f * fy);
+        const float a = landformHash(ix, iy, seed);
+        const float b = landformHash(ix + 1, iy, seed);
+        const float c = landformHash(ix, iy + 1, seed);
+        const float d = landformHash(ix + 1, iy + 1, seed);
+        const float ab = a + (b - a) * fx;
+        const float cd = c + (d - c) * fx;
+        return ab + (cd - ab) * fy;
+    }
+
+    static float landformFbm(float x, float y, int seed, int octaves, float persistence) {
+        float value = 0.0f, amplitude = 1.0f, weight = 0.0f;
+        for (int octave = 0; octave < octaves; ++octave) {
+            value += landformValueNoise(x, y, seed + octave * 1013) * amplitude;
+            weight += amplitude;
+            amplitude *= persistence;
+            x *= 2.03f;
+            y *= 2.03f;
+        }
+        return weight > 1.0e-6f ? value / weight : 0.5f;
+    }
+
+    static float landformSmoothstep(float edge0, float edge1, float value) {
+        if (edge1 <= edge0) return value >= edge1 ? 1.0f : 0.0f;
+        const float t = clampValue((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    }
 
     static NodeSystem::Image2DData buildPackedErosionMap(
         const std::vector<float>& before,
@@ -379,6 +472,26 @@ namespace TerrainNodesV2 {
             }
             return value / maxAmp;
         };
+
+        // Signed gradient FBM for terrain height. The old "Perlin" path used
+        // Perlin::turb(), which folds every octave through abs(); that produces
+        // dense micro-ridges instead of a coherent base relief and gives
+        // hydraulic/fluvial solvers a field dominated by tiny pits. Honour the
+        // exposed persistence/lacunarity controls and remap once to [0, 1].
+        auto perlinFbm = [&perlin, this](float x, float y) -> float {
+            float value = 0.0f;
+            float amp = 1.0f;
+            float freq = 1.0f;
+            float maxAmp = 0.0f;
+            for (int i = 0; i < octaves; ++i) {
+                value += perlin.noise(Vec3(x * freq, y * freq, 0.0f)) * amp;
+                maxAmp += amp;
+                amp *= persistance;
+                freq *= lacunarity;
+            }
+            const float signedValue = maxAmp > 1.0e-6f ? value / maxAmp : 0.0f;
+            return signedValue * 0.5f + 0.5f;
+        };
         
         // Voronoi/Worley noise
         auto voronoi = [&hash2, this](float x, float y) -> float {
@@ -427,12 +540,12 @@ namespace TerrainNodesV2 {
         float seedOffsetX = (float)(seed % 1000) * 0.1f;
         float seedOffsetY = (float)((seed / 1000) % 1000) * 0.1f + 100.0f;
         
-        // Get terrain aspect ratio for proper noise scaling
-        float terrainAspect = 1.0f;
-        if (tctx->terrain && w > 0 && h > 0) {
-            // Use consistent scaling based on terrain's actual world size
-            terrainAspect = (float)w / (float)h;
-        }
+        // New graphs author wavelength in world metres, so the same mountain
+        // feature keeps its physical size on a 1 km or 50 km terrain. Legacy
+        // graphs retain their original Scale*Frequency contract exactly.
+        const float spatialFrequency = heightMode == NoiseHeightMode::WorldMeters
+            ? (std::max)(1.0e-5f, tctx->scale_xz / (std::max)(featureSizeMeters, 1.0f))
+            : (std::max)(1.0e-5f, scale * frequency * 1000.0f);
         
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
@@ -441,21 +554,14 @@ namespace TerrainNodesV2 {
                 float baseX = (float)x / (float)(std::max)(w, h);
                 float baseY = (float)y / (float)(std::max)(w, h);
                 
-                // Apply scale and frequency
-                float nx = baseX * scale * 10.0f + seedOffsetX;
-                float ny = baseY * scale * 10.0f + seedOffsetY;
-                
-                // Additional frequency multiplier
-                nx *= frequency * 100.0f;
-                ny *= frequency * 100.0f;
+                const float nx = baseX * spatialFrequency + seedOffsetX;
+                const float ny = baseY * spatialFrequency + seedOffsetY;
                 
                 float noiseValue = 0.0f;
                 
                 switch (noiseType) {
                     case NoiseType::Perlin: {
-                        // Use Perlin class with turb() for FBM
-                        Vec3 p(nx, ny, 0.0f);
-                        noiseValue = perlin.turb(p, octaves);
+                        noiseValue = perlinFbm(nx, ny);
                         break;
                     }
                     
@@ -518,12 +624,11 @@ namespace TerrainNodesV2 {
                     }
                     
                     case NoiseType::Warped: {
-                        // Domain warping: distort coordinates with noise
-                        float warpX = fbm(nx, ny) * warp_strength * 5.0f;
-                        float warpY = fbm(nx + 5.2f, ny + 1.3f) * warp_strength * 5.0f;
-                        
-                        Vec3 p(nx + warpX, ny + warpY, 0.0f);
-                        noiseValue = perlin.turb(p, octaves);
+                        // Signed domain offsets avoid the directional drift of
+                        // the previous positive-only warp.
+                        const float warpX = (fbm(nx, ny) * 2.0f - 1.0f) * warp_strength * 5.0f;
+                        const float warpY = (fbm(nx + 5.2f, ny + 1.3f) * 2.0f - 1.0f) * warp_strength * 5.0f;
+                        noiseValue = perlinFbm(nx + warpX, ny + warpY);
                         break;
                     }
                     
@@ -555,28 +660,270 @@ namespace TerrainNodesV2 {
                         switch (noiseType) {
                             case NoiseType::FFT_Ocean:
                                 noiseValue = TerrainFFT::CPUNoise::fbmNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                noiseValue = noiseValue * 0.5f + 0.5f;
                                 break;
                             case NoiseType::FFT_Ridge:
                                 noiseValue = TerrainFFT::CPUNoise::ridgedNoise(nx, ny, octaves, persistance, lacunarity, ridge_offset, 2.0f, seed);
                                 break;
                             case NoiseType::FFT_Billow:
                                 noiseValue = TerrainFFT::CPUNoise::billowNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                noiseValue = noiseValue * 0.5f + 0.5f;
                                 break;
                             case NoiseType::FFT_Turb:
                             default:
                                 noiseValue = TerrainFFT::CPUNoise::fbmNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                noiseValue = noiseValue * 0.5f + 0.5f;
                                 break;
                         }
                         break;
                     }
                 }
                 
-                // Scale to amplitude
-                (*result.data)[y * w + x] = noiseValue * amplitude;
+                // Erosion contracts consume a finite, non-negative heightfield.
+                // Keep every generator type in the same normalized range before
+                // applying authored amplitude; this prevents signed FFT valleys
+                // and over-range ridge offsets from destabilizing sediment caps.
+                if (!std::isfinite(noiseValue)) noiseValue = 0.0f;
+                const float normalizedNoise = clampValue(noiseValue, 0.0f, 1.0f);
+                if (heightMode == NoiseHeightMode::WorldMeters) {
+                    const float safeHeightScale = (std::max)(std::abs(tctx->scale_y), 0.001f);
+                    const float worldHeight = baseElevationMeters + normalizedNoise *
+                        (std::max)(0.0f, reliefMeters);
+                    (*result.data)[y * w + x] = worldHeight / safeHeightScale;
+                } else {
+                    (*result.data)[y * w + x] = normalizedNoise * (std::max)(0.0f, amplitude);
+                }
             }
         }
         
         return result;
+    }
+
+    NodeSystem::PinValue MountainRangeNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || tctx->width < 2 || tctx->height < 2) {
+            ctx.addError(id, "Mountain Range requires a terrain context");
+            return NodeSystem::PinValue{};
+        }
+        const auto base = getHeightInput(0, ctx);
+        const auto mask = getHeightInput(1, ctx);
+        const int w = base.isValid() ? base.width : tctx->width;
+        const int h = base.isValid() ? base.height : tctx->height;
+        if (mask.isValid() && (mask.width != w || mask.height != h)) {
+            ctx.addError(id, "Mountain Range inputs must use the same resolution");
+            return NodeSystem::PinValue{};
+        }
+
+        auto heightOut = createHeightOutput(w, h);
+        auto upliftOut = createMaskOutput(w, h);
+        auto ridgeOut = createMaskOutput(w, h);
+        const float terrainSize = std::isfinite(tctx->scale_xz)
+            ? (std::max)(tctx->scale_xz, 1.0f) : 100.0f;
+        const float heightScale = std::isfinite(tctx->scale_y)
+            ? (std::max)(std::abs(tctx->scale_y), 0.001f) : 10.0f;
+        const float halfWidth = (std::max)(widthMeters / terrainSize * 0.5f, 1.0f / (std::max)(w, h));
+        const float halfLength = (std::max)(lengthFraction * 0.5f, 0.025f);
+        const float radians = direction * 0.017453292519943295f;
+        const float cs = std::cos(radians), sn = std::sin(radians);
+        const float relief = reliefMeters / heightScale;
+
+        #pragma omp parallel for schedule(static)
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t index = static_cast<size_t>(y) * w + x;
+                const float px = static_cast<float>(x) / static_cast<float>(w - 1) - centerX;
+                const float py = static_cast<float>(y) / static_cast<float>(h - 1) - centerY;
+                const float along = px * cs + py * sn;
+                const float across = -px * sn + py * cs;
+                const float alongAbs = std::abs(along);
+                const float longitudinal = 1.0f - landformSmoothstep(halfLength * 0.72f, halfLength, alongAbs);
+                const float warpNoise = landformFbm(along * 7.0f + seed * 0.013f,
+                    seed * 0.007f, seed, 4, 0.55f) * 2.0f - 1.0f;
+                const float warpedAcross = across - warpNoise * halfWidth * warp * 1.8f;
+                const float normalizedDistance = std::abs(warpedAcross) / halfWidth;
+                float uplift = std::exp(-std::pow(normalizedDistance, ridgeSharpness)) * longitudinal;
+                float ridge = std::exp(-std::pow(normalizedDistance / 0.22f, 1.35f)) * longitudinal;
+
+                // Alternating side branches originate along the primary spine.
+                for (int branchIndex = 0; branchIndex < 4; ++branchIndex) {
+                    const float anchor = (-0.33f + branchIndex * 0.22f) * halfLength * 2.0f;
+                    const float branchAlong = along - anchor;
+                    const float branchLength = halfLength * (0.42f + 0.10f * (branchIndex & 1));
+                    if (branchAlong <= 0.0f || branchAlong >= branchLength) continue;
+                    const float side = (branchIndex & 1) ? 1.0f : -1.0f;
+                    const float branchAxis = warpedAcross - side * branchAlong * 0.62f;
+                    const float branchEnd = std::sin(clampValue(branchAlong / branchLength, 0.0f, 1.0f) * 3.14159265f);
+                    const float branchRidge = std::exp(-std::pow(std::abs(branchAxis) /
+                        (halfWidth * 0.24f), 1.45f)) * branchEnd * longitudinal * branches;
+                    uplift = (std::max)(uplift, branchRidge * 0.72f);
+                    ridge = (std::max)(ridge, branchRidge);
+                }
+
+                const float surfaceNoise = landformFbm(px * 18.0f + seed * 0.01f,
+                    py * 18.0f - seed * 0.017f, seed + 47, 4, 0.52f) * 2.0f - 1.0f;
+                uplift = clampValue(uplift * (1.0f + surfaceNoise * detail), 0.0f, 1.0f);
+                const float rawMask = mask.isValid() ? (*mask.data)[index] : 1.0f;
+                const float authoredMask = std::isfinite(rawMask) ? clampValue(rawMask, 0.0f, 1.0f) : 0.0f;
+                const float rawBaseHeight = base.isValid() ? (*base.data)[index] : 0.0f;
+                const float baseHeight = std::isfinite(rawBaseHeight) ? rawBaseHeight : 0.0f;
+                (*heightOut.data)[index] = baseHeight + uplift * authoredMask * relief;
+                (*upliftOut.data)[index] = uplift * authoredMask;
+                (*ridgeOut.data)[index] = clampValue(ridge * authoredMask, 0.0f, 1.0f);
+            }
+        }
+        ctx.setCachedValue(id, 0, heightOut);
+        ctx.setCachedValue(id, 1, upliftOut);
+        ctx.setCachedValue(id, 2, ridgeOut);
+        if (outputIndex == 1) return NodeSystem::PinValue{upliftOut};
+        if (outputIndex == 2) return NodeSystem::PinValue{ridgeOut};
+        return NodeSystem::PinValue{heightOut};
+    }
+
+    void MountainRangeNode::drawContent() {
+        bool edited = false;
+        edited |= ImGui::DragInt("Seed", &seed, 1.0f);
+        edited |= ImGui::SliderFloat("Direction", &direction, 0.0f, 360.0f, "%.0f deg");
+        edited |= ImGui::SliderFloat("Center X", &centerX, 0.0f, 1.0f);
+        edited |= ImGui::SliderFloat("Center Y", &centerY, 0.0f, 1.0f);
+        edited |= ImGui::SliderFloat("Length", &lengthFraction, 0.05f, 1.5f, "%.2fx terrain");
+        edited |= ImGui::DragFloat("Range Width", &widthMeters, 5.0f, 1.0f, 100000.0f, "%.0f m");
+        edited |= ImGui::DragFloat("Relief", &reliefMeters, 5.0f, 0.0f, 20000.0f, "%.0f m");
+        edited |= ImGui::SliderFloat("Ridge Sharpness", &ridgeSharpness, 0.5f, 8.0f);
+        edited |= ImGui::SliderFloat("Warp", &warp, 0.0f, 1.0f);
+        edited |= ImGui::SliderFloat("Branches", &branches, 0.0f, 1.0f);
+        edited |= ImGui::SliderFloat("Surface Detail", &detail, 0.0f, 1.0f);
+        if (edited) dirty = true;
+    }
+
+    NodeSystem::PinValue BasinValleyNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        const auto input = getHeightInput(0, ctx);
+        const auto mask = getHeightInput(1, ctx);
+        auto* tctx = getTerrainContext(ctx);
+        if (!input.isValid() || !tctx || input.width < 2 || input.height < 2) {
+            ctx.addError(id, "Basin & Valley requires a height input");
+            return NodeSystem::PinValue{};
+        }
+        if (mask.isValid() && (mask.width != input.width || mask.height != input.height)) {
+            ctx.addError(id, "Basin & Valley mask resolution mismatch");
+            return NodeSystem::PinValue{};
+        }
+        const int w = input.width, h = input.height;
+        auto heightOut = createHeightOutput(w, h);
+        auto valleyOut = createMaskOutput(w, h);
+        const float terrainSize = (std::max)(tctx->scale_xz, 1.0f);
+        const float heightScale = (std::max)(std::abs(tctx->scale_y), 0.001f);
+        const float halfWidth = (std::max)(widthMeters / terrainSize * 0.5f, 1.0f / (std::max)(w, h));
+        const float depth = depthMeters / heightScale;
+        const float radians = direction * 0.017453292519943295f;
+        const float cs = std::cos(radians), sn = std::sin(radians);
+        const float centerOffset = center - 0.5f;
+
+        #pragma omp parallel for schedule(static)
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t index = static_cast<size_t>(y) * w + x;
+                const float px = static_cast<float>(x) / static_cast<float>(w - 1) - 0.5f;
+                const float py = static_cast<float>(y) / static_cast<float>(h - 1) - 0.5f;
+                const float along = px * cs + py * sn;
+                const float across = -px * sn + py * cs;
+                const float noiseBend = (landformFbm(along * 5.0f + seed * 0.011f,
+                    seed * 0.019f, seed, 3, 0.55f) * 2.0f - 1.0f) * halfWidth * meander;
+                const float waveBend = std::sin((along + seed * 0.0007f) * 18.8495559f) * halfWidth * meander * 0.55f;
+                const float normalizedDistance = std::abs(across - centerOffset - noiseBend - waveBend) / halfWidth;
+                float valley = 0.0f;
+                if (normalizedDistance < 1.0f) {
+                    if (profile == ValleyProfile::UShape) {
+                        const float shoulderT = clampValue((normalizedDistance - floorWidth) /
+                            (std::max)(1.0f - floorWidth, 0.01f), 0.0f, 1.0f);
+                        valley = 1.0f - landformSmoothstep(0.0f, shoulderSoftness, shoulderT);
+                    } else {
+                        valley = std::pow(1.0f - normalizedDistance,
+                            0.65f + shoulderSoftness * 1.7f);
+                    }
+                }
+                const float authoredMask = mask.isValid() ? clampValue((*mask.data)[index], 0.0f, 1.0f) : 1.0f;
+                valley = clampValue(valley * authoredMask, 0.0f, 1.0f);
+                (*heightOut.data)[index] = (*input.data)[index] - depth * valley;
+                (*valleyOut.data)[index] = valley;
+            }
+        }
+        ctx.setCachedValue(id, 0, heightOut);
+        ctx.setCachedValue(id, 1, valleyOut);
+        return outputIndex == 1 ? NodeSystem::PinValue{valleyOut} : NodeSystem::PinValue{heightOut};
+    }
+
+    void BasinValleyNode::drawContent() {
+        bool edited = false;
+        edited |= ImGui::DragInt("Seed", &seed, 1.0f);
+        const char* profiles[] = { "V Valley", "U / Glacial Valley" };
+        int profileIndex = static_cast<int>(profile);
+        if (ImGui::Combo("Profile", &profileIndex, profiles, 2)) {
+            profile = static_cast<ValleyProfile>(profileIndex); edited = true;
+        }
+        edited |= ImGui::SliderFloat("Direction", &direction, 0.0f, 360.0f, "%.0f deg");
+        edited |= ImGui::SliderFloat("Position", &center, 0.0f, 1.0f);
+        edited |= ImGui::DragFloat("Valley Width", &widthMeters, 5.0f, 1.0f, 100000.0f, "%.0f m");
+        edited |= ImGui::DragFloat("Depth", &depthMeters, 2.0f, 0.0f, 10000.0f, "%.0f m");
+        if (profile == ValleyProfile::UShape) edited |= ImGui::SliderFloat("Floor Width", &floorWidth, 0.0f, 0.9f);
+        edited |= ImGui::SliderFloat("Meander", &meander, 0.0f, 1.0f);
+        edited |= ImGui::SliderFloat("Shoulder", &shoulderSoftness, 0.05f, 1.0f);
+        if (edited) dirty = true;
+    }
+
+    NodeSystem::PinValue TerrainDetailNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        const auto input = getHeightInput(0, ctx);
+        const auto mask = getHeightInput(1, ctx);
+        auto* tctx = getTerrainContext(ctx);
+        if (!input.isValid() || !tctx || input.width < 2 || input.height < 2) {
+            ctx.addError(id, "Terrain Detail requires a height input");
+            return NodeSystem::PinValue{};
+        }
+        if (mask.isValid() && (mask.width != input.width || mask.height != input.height)) {
+            ctx.addError(id, "Terrain Detail mask resolution mismatch");
+            return NodeSystem::PinValue{};
+        }
+        const int w = input.width, h = input.height;
+        auto result = createHeightOutput(w, h);
+        const float terrainSize = (std::max)(tctx->scale_xz, 1.0f);
+        const float heightScale = (std::max)(std::abs(tctx->scale_y), 0.001f);
+        const float macroCycles = terrainSize / (std::max)(macroSizeMeters, 1.0f);
+        const float mediumCycles = terrainSize / (std::max)(mediumSizeMeters, 1.0f);
+        const float microCycles = terrainSize / (std::max)(microSizeMeters, 0.1f);
+        const float mean = preserveMean ? 0.5f : 0.0f;
+
+        #pragma omp parallel for schedule(static)
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t index = static_cast<size_t>(y) * w + x;
+                const float u = static_cast<float>(x) / static_cast<float>(w - 1);
+                const float v = static_cast<float>(y) / static_cast<float>(h - 1);
+                const float macro = landformFbm(u * macroCycles, v * macroCycles, seed, 4, roughness) - mean;
+                const float medium = landformFbm(u * mediumCycles, v * mediumCycles, seed + 1709, 4, roughness) - mean;
+                const float micro = landformFbm(u * microCycles, v * microCycles, seed + 3253, 3, roughness) - mean;
+                const float displacementMeters = macro * macroAmountMeters +
+                    medium * mediumAmountMeters + micro * microAmountMeters;
+                const float authoredMask = mask.isValid() ? clampValue((*mask.data)[index], 0.0f, 1.0f) : 1.0f;
+                (*result.data)[index] = (*input.data)[index] + displacementMeters / heightScale * authoredMask;
+            }
+        }
+        return NodeSystem::PinValue{result};
+    }
+
+    void TerrainDetailNode::drawContent() {
+        bool edited = false;
+        edited |= ImGui::DragInt("Seed", &seed, 1.0f);
+        ImGui::TextDisabled("Macro");
+        edited |= ImGui::DragFloat("Size##Macro", &macroSizeMeters, 5.0f, 1.0f, 100000.0f, "%.0f m");
+        edited |= ImGui::DragFloat("Amount##Macro", &macroAmountMeters, 0.5f, 0.0f, 5000.0f, "%.1f m");
+        ImGui::TextDisabled("Medium");
+        edited |= ImGui::DragFloat("Size##Medium", &mediumSizeMeters, 2.0f, 1.0f, 50000.0f, "%.0f m");
+        edited |= ImGui::DragFloat("Amount##Medium", &mediumAmountMeters, 0.25f, 0.0f, 2000.0f, "%.1f m");
+        ImGui::TextDisabled("Micro");
+        edited |= ImGui::DragFloat("Size##Micro", &microSizeMeters, 0.5f, 0.1f, 10000.0f, "%.1f m");
+        edited |= ImGui::DragFloat("Amount##Micro", &microAmountMeters, 0.1f, 0.0f, 500.0f, "%.1f m");
+        edited |= ImGui::SliderFloat("Roughness", &roughness, 0.05f, 0.95f);
+        edited |= ImGui::Checkbox("Preserve Mean Height", &preserveMean);
+        if (edited) dirty = true;
     }
 
     // ============================================================================
@@ -643,6 +990,14 @@ namespace TerrainNodesV2 {
         // Create output using INPUT dimensions to propagate correctly
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
         *result.data = terrain->heightmap.data;
+
+        const size_t repairedSamples = repairHydraulicHeightField(
+            *result.data, originalHeight, preserved_scale_y);
+        if (repairedSamples != 0) {
+            SCENE_LOG_WARN("[Hydraulic Erosion] Repaired " + std::to_string(repairedSamples) +
+                " unstable height samples before terrain/BVH publication.");
+            terrain->heightmap.data = *result.data;
+        }
         
         // Apply Edge Falloff if enabled
         if (this->edgeFalloffWidth > 0.01f) {
@@ -681,6 +1036,25 @@ namespace TerrainNodesV2 {
         if (ImGui::DragFloat("Gravity", &params.gravity, 0.1f, 1.0f, 50.0f)) dirty = true;
         if (ImGui::DragFloat("Min Slope", &params.minSlope, 0.001f, 0.0f, 0.1f, "%.4f")) dirty = true;
         if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 15)) dirty = true;
+        int erosionSeed = static_cast<int>(params.seed);
+        if (ImGui::DragInt("Seed", &erosionSeed, 1.0f, 0, 2147483647)) {
+            params.seed = static_cast<unsigned int>((std::max)(erosionSeed, 0));
+            dirty = true;
+        }
+
+        const char* boundaryModes[] = { "Preserve Height", "Open Outlet", "Sea Level" };
+        int boundaryMode = static_cast<int>(params.boundaryMode);
+        if (ImGui::Combo("Boundary", &boundaryMode, boundaryModes, 3)) {
+            params.boundaryMode = static_cast<ErosionBoundaryMode>(boundaryMode);
+            dirty = true;
+        }
+        if (params.boundaryMode != ErosionBoundaryMode::Open) {
+            if (ImGui::DragInt("Boundary Width", &params.boundaryWidth, 1, 0, 512,
+                    params.boundaryWidth == 0 ? "Auto" : "%d cells")) dirty = true;
+        }
+        if (params.boundaryMode == ErosionBoundaryMode::SeaLevel) {
+            if (ImGui::DragFloat("Sea Level", &params.boundaryLevel, 0.01f, -1000.0f, 1000.0f, "%.3f normalized")) dirty = true;
+        }
 
         if (ImGui::Button(useGPU ? "Reset GPU Params" : "Reset CPU Params")) {
             params = HydraulicErosionParams();
@@ -688,7 +1062,7 @@ namespace TerrainNodesV2 {
         }
 
         ImGui::Separator();
-        ImGui::Text("Edge Falloff");
+        ImGui::Text("Additional Output Falloff");
         if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
         if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
     }
@@ -1577,6 +1951,11 @@ namespace TerrainNodesV2 {
         
         // Apply heightmap data
         terrain->heightmap.data = *inputHeight.data;
+        const size_t repairedSamples = repairNonFiniteHeightField(terrain->heightmap.data);
+        if (repairedSamples != 0) {
+            SCENE_LOG_WARN("[Height Output] Repaired " + std::to_string(repairedSamples) +
+                " non-finite height samples before mesh/BVH publication.");
+        }
         
         // Apply scale from context (guaranteed valid)
         terrain->heightmap.scale_xz = preserved_scale_xz;
@@ -2445,6 +2824,12 @@ namespace TerrainNodesV2 {
             ctx.addError(id, "Watershed Analysis requires a valid height input");
             return NodeSystem::PinValue{};
         }
+        const auto precipitation = getHeightInput(1, ctx);
+        if (precipitation.isValid() &&
+            (precipitation.width != height.width || precipitation.height != height.height)) {
+            ctx.addError(id, "Watershed Analysis precipitation input must match height resolution");
+            return NodeSystem::PinValue{};
+        }
 
         const int w = height.width;
         const int h = height.height;
@@ -2460,11 +2845,17 @@ namespace TerrainNodesV2 {
             createHeightOutput(w, h), createMaskOutput(w, h),
             createMaskOutput(w, h), createMaskOutput(w, h), createHeightOutput(w, h)
         };
+        result[1].semantic = NodeSystem::ImageSemantic::PhysicalScalar;
+        result[1].unit = NodeSystem::ImageUnit::Unitless;
+        result[2].semantic = NodeSystem::ImageSemantic::Direction;
+        result[2].unit = NodeSystem::ImageUnit::Unitless;
+        result[3].semantic = NodeSystem::ImageSemantic::Categorical;
+        result[3].unit = NodeSystem::ImageUnit::Identifier;
+        result[4].semantic = NodeSystem::ImageSemantic::PhysicalScalar;
+        result[4].unit = NodeSystem::ImageUnit::SquareMeters;
         std::vector<float>& filled = *result[0].data;
         filled = *height.data;
         std::vector<int> parent(static_cast<size_t>(count), -1);
-        std::vector<int> visitOrder;
-        visitOrder.reserve(static_cast<size_t>(count));
         std::vector<uint8_t> visited(static_cast<size_t>(count), 0);
 
         using QueueEntry = std::pair<float, int>;
@@ -2489,7 +2880,6 @@ namespace TerrainNodesV2 {
             const auto [priority, index] = frontier.top();
             frontier.pop();
             (void)priority;
-            visitOrder.push_back(index);
             if ((++processedCount & 0x3fff) == 0) {
                 if (ctx.isCancelled()) return NodeSystem::PinValue{};
                 ctx.reportNodeProgress(0.65f * static_cast<float>(processedCount) /
@@ -2507,7 +2897,15 @@ namespace TerrainNodesV2 {
                 parent[static_cast<size_t>(neighbor)] = index;
                 // The tiny deterministic index term prevents equal-height queue
                 // entries from producing platform-dependent drainage trees.
-                const float tie = static_cast<float>((neighbor * 1664525u + 1013904223u) & 0xffffu) /
+                // Avalanche-mixed: the previous raw LCG product kept a constant
+                // difference between adjacent indices, laying sawtooth ramps
+                // across flats that steered drainage into repeating diagonal
+                // sweeps (the geometric plains artifact).
+                uint32_t tieHash = static_cast<uint32_t>(neighbor);
+                tieHash ^= tieHash >> 16; tieHash *= 0x7feb352du;
+                tieHash ^= tieHash >> 15; tieHash *= 0x846ca68bu;
+                tieHash ^= tieHash >> 16;
+                const float tie = static_cast<float>(tieHash & 0xffffu) /
                     65535.0f * epsilon * 0.125f;
                 filled[static_cast<size_t>(neighbor)] = (std::max)(
                     filled[static_cast<size_t>(neighbor)], filled[static_cast<size_t>(index)] + epsilon + tie);
@@ -2515,9 +2913,230 @@ namespace TerrainNodesV2 {
             }
         }
 
-        std::vector<float> accumulation(static_cast<size_t>(count), (std::max)(rainfall, 0.001f));
-        for (auto it = visitOrder.rbegin(); it != visitOrder.rend(); ++it) {
-            const int index = *it;
+        // ---- Flat resolution (Garbrecht & Martz) ----
+        // The epsilon fill turns plains and filled depressions into almost
+        // perfect ramps. Steepest descent over such a ramp sends every cell the
+        // same way (parallel "power line" channels that never merge), while
+        // perturbing a copy of the surface instead created dither pits that cut
+        // rivers mid-plain and one forced merge at each flat's exit. So flats
+        // are routed in DIRECTION space: a global BFS gives every flat cell its
+        // exit distance, and each cell drains to a neighbor with a STRICTLY
+        // smaller exit distance — provably acyclic and sink-free, so a river
+        // entering a plain or a lake surface always reaches the far outlet.
+        // Which qualifying neighbor is taken is steered by a centering +
+        // rotated-dither potential, giving gradual confluences and gentle
+        // meanders instead of ruler lines. The published Filled Height is
+        // never modified here.
+        {
+            const float flatDropLimit = epsilon * 3.0f;
+            std::vector<uint8_t> flatCell(static_cast<size_t>(count), 0u);
+            for (int index = 0; index < count; ++index) {
+                const int cx = index % w;
+                const int cy = index / w;
+                float bestDrop = 0.0f;
+                int bestNeighbor = -1;
+                for (int direction = 0; direction < 8; ++direction) {
+                    const int nx = cx + kHydrologyDx[direction];
+                    const int ny = cy + kHydrologyDy[direction];
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    const int neighbor = ny * w + nx;
+                    const float dist = (kHydrologyDx[direction] != 0 && kHydrologyDy[direction] != 0)
+                        ? 1.41421356f : 1.0f;
+                    const float drop = (filled[static_cast<size_t>(index)] -
+                                        filled[static_cast<size_t>(neighbor)]) / dist;
+                    if (drop > bestDrop) { bestDrop = drop; bestNeighbor = neighbor; }
+                }
+                if (bestDrop >= flatDropLimit) {
+                    // Confident descent: take the steepest edge directly.
+                    // Boundary cells seeded as flood outlets stay roots.
+                    if (parent[static_cast<size_t>(index)] >= 0) {
+                        parent[static_cast<size_t>(index)] = bestNeighbor;
+                    }
+                } else {
+                    flatCell[static_cast<size_t>(index)] = 1u;
+                }
+                if ((index & 0x3fff) == 0 && ctx.isCancelled()) return NodeSystem::PinValue{};
+            }
+
+            std::vector<int> towardLower(static_cast<size_t>(count), -1);
+            std::vector<int> awayHigher(static_cast<size_t>(count), -1);
+            std::deque<int> bfsQueue;
+            const auto runFlatBfs = [&](std::vector<int>& distance) {
+                while (!bfsQueue.empty()) {
+                    const int index = bfsQueue.front();
+                    bfsQueue.pop_front();
+                    const int cx = index % w;
+                    const int cy = index / w;
+                    for (int direction = 0; direction < 8; ++direction) {
+                        const int nx = cx + kHydrologyDx[direction];
+                        const int ny = cy + kHydrologyDy[direction];
+                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                        const int neighbor = ny * w + nx;
+                        if (!flatCell[static_cast<size_t>(neighbor)] ||
+                            distance[static_cast<size_t>(neighbor)] >= 0) continue;
+                        distance[static_cast<size_t>(neighbor)] =
+                            distance[static_cast<size_t>(index)] + 1;
+                        bfsQueue.push_back(neighbor);
+                    }
+                }
+            };
+            for (int index = 0; index < count; ++index) {
+                if (!flatCell[static_cast<size_t>(index)]) continue;
+                const int cx = index % w;
+                const int cy = index / w;
+                // A flat cell on the map boundary is itself an outlet (the
+                // flood seeded it as a root), so it anchors the exit-distance
+                // field exactly like a lower non-flat neighbor would.
+                bool nearLowerExit = parent[static_cast<size_t>(index)] < 0;
+                bool nearHigherGround = false;
+                for (int direction = 0; direction < 8; ++direction) {
+                    const int nx = cx + kHydrologyDx[direction];
+                    const int ny = cy + kHydrologyDy[direction];
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    const int neighbor = ny * w + nx;
+                    if (flatCell[static_cast<size_t>(neighbor)]) continue;
+                    if (filled[static_cast<size_t>(neighbor)] <
+                        filled[static_cast<size_t>(index)]) nearLowerExit = true;
+                    else nearHigherGround = true;
+                }
+                if (nearLowerExit) {
+                    towardLower[static_cast<size_t>(index)] = 0;
+                    bfsQueue.push_back(index);
+                }
+                if (nearHigherGround) awayHigher[static_cast<size_t>(index)] = 0;
+            }
+            runFlatBfs(towardLower);
+            for (int index = 0; index < count; ++index) {
+                if (awayHigher[static_cast<size_t>(index)] == 0) bfsQueue.push_back(index);
+            }
+            runFlatBfs(awayHigher);
+
+            int maxAway = 0;
+            for (int index = 0; index < count; ++index) {
+                maxAway = (std::max)(maxAway, awayHigher[static_cast<size_t>(index)]);
+            }
+            const auto flatDitherHash = [](int hx, int hy) {
+                uint32_t v = static_cast<uint32_t>(hx) * 0x9E3779B9u ^
+                             static_cast<uint32_t>(hy) * 0x85EBCA6Bu;
+                v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; v ^= v >> 16;
+                return static_cast<float>(v & 0xffffu) / 65535.0f;
+            };
+            const auto flatDither = [&](float px, float py) {
+                // Rotated ~23 degrees so the noise lattice never aligns with the
+                // grid axes (same lesson as the fluvial meander noise).
+                const float qx = (px * 0.92106f - py * 0.38942f) * (1.0f / 17.0f);
+                const float qy = (px * 0.38942f + py * 0.92106f) * (1.0f / 17.0f);
+                const int ix = static_cast<int>(std::floor(qx));
+                const int iy = static_cast<int>(std::floor(qy));
+                const float tx = qx - static_cast<float>(ix);
+                const float ty = qy - static_cast<float>(iy);
+                const float sx = tx * tx * (3.0f - 2.0f * tx);
+                const float sy = ty * ty * (3.0f - 2.0f * ty);
+                const float a = flatDitherHash(ix, iy) * (1.0f - sx) + flatDitherHash(ix + 1, iy) * sx;
+                const float b = flatDitherHash(ix, iy + 1) * (1.0f - sx) + flatDitherHash(ix + 1, iy + 1) * sx;
+                return a * (1.0f - sy) + b * sy;
+            };
+            for (int index = 0; index < count; ++index) {
+                if (!flatCell[static_cast<size_t>(index)]) continue;
+                if (parent[static_cast<size_t>(index)] < 0) continue; // boundary outlet stays a root
+                const int cx = index % w;
+                const int cy = index / w;
+                const int exitDistance = towardLower[static_cast<size_t>(index)];
+                if (exitDistance == 0) {
+                    // Exit cell: hand the water to the lowest strictly lower
+                    // non-flat neighbor.
+                    int best = -1;
+                    float bestFill = filled[static_cast<size_t>(index)];
+                    for (int direction = 0; direction < 8; ++direction) {
+                        const int nx = cx + kHydrologyDx[direction];
+                        const int ny = cy + kHydrologyDy[direction];
+                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                        const int neighbor = ny * w + nx;
+                        if (flatCell[static_cast<size_t>(neighbor)]) continue;
+                        if (filled[static_cast<size_t>(neighbor)] < bestFill) {
+                            bestFill = filled[static_cast<size_t>(neighbor)];
+                            best = neighbor;
+                        }
+                    }
+                    if (best >= 0) parent[static_cast<size_t>(index)] = best;
+                } else if (exitDistance > 0) {
+                    // Interior flat cell: the parent MUST strictly reduce the
+                    // exit distance (this alone guarantees an acyclic, sink-free
+                    // flat forest that always reaches an exit). Among the
+                    // qualifying neighbors, the centering + dither potential
+                    // picks WHICH one, so tributaries converge gradually toward
+                    // a meandering centerline instead of running parallel and
+                    // colliding at a single forced point.
+                    int best = -1;
+                    float bestPotential = (std::numeric_limits<float>::max)();
+                    for (int direction = 0; direction < 8; ++direction) {
+                        const int nx = cx + kHydrologyDx[direction];
+                        const int ny = cy + kHydrologyDy[direction];
+                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                        const int neighbor = ny * w + nx;
+                        if (!flatCell[static_cast<size_t>(neighbor)]) continue;
+                        const int neighborDistance = towardLower[static_cast<size_t>(neighbor)];
+                        if (neighborDistance < 0 || neighborDistance >= exitDistance) continue;
+                        const float centering = awayHigher[static_cast<size_t>(neighbor)] >= 0
+                            ? static_cast<float>(maxAway - awayHigher[static_cast<size_t>(neighbor)])
+                            : 0.0f;
+                        const float potential = centering * 0.7f +
+                            flatDither(static_cast<float>(nx), static_cast<float>(ny)) * 2.0f;
+                        if (potential < bestPotential) { bestPotential = potential; best = neighbor; }
+                    }
+                    if (best >= 0) parent[static_cast<size_t>(index)] = best;
+                }
+                // exitDistance < 0: an enclosed flat with no exit at all, which
+                // a completed priority flood should not produce. Keep the flood
+                // parent; the topological validation below cuts any residue.
+                if ((index & 0x3fff) == 0 && ctx.isCancelled()) return NodeSystem::PinValue{};
+            }
+        }
+
+        // Topological order via indegree peeling (children pop before their
+        // parent). This is both the deterministic processing order for the
+        // accumulation below and the final safety net: any cell left unordered
+        // would sit on a residual parent cycle and is cut into a root, so every
+        // downstream consumer sees a guaranteed forest.
+        std::vector<int> pendingChildren(static_cast<size_t>(count), 0);
+        for (int index = 0; index < count; ++index) {
+            const int downstream = parent[static_cast<size_t>(index)];
+            if (downstream >= 0) ++pendingChildren[static_cast<size_t>(downstream)];
+        }
+        std::vector<int> topoOrder;
+        topoOrder.reserve(static_cast<size_t>(count));
+        for (int index = 0; index < count; ++index) {
+            if (pendingChildren[static_cast<size_t>(index)] == 0) topoOrder.push_back(index);
+        }
+        for (size_t head = 0; head < topoOrder.size(); ++head) {
+            const int downstream = parent[static_cast<size_t>(topoOrder[head])];
+            if (downstream >= 0 && --pendingChildren[static_cast<size_t>(downstream)] == 0) {
+                topoOrder.push_back(downstream);
+            }
+        }
+        if (static_cast<int>(topoOrder.size()) < count) {
+            std::vector<uint8_t> ordered(static_cast<size_t>(count), 0u);
+            for (int index : topoOrder) ordered[static_cast<size_t>(index)] = 1u;
+            for (int index = 0; index < count; ++index) {
+                if (!ordered[static_cast<size_t>(index)]) {
+                    parent[static_cast<size_t>(index)] = -1;
+                    topoOrder.push_back(index);
+                }
+            }
+        }
+
+        // Per-cell rain: uniform by default; the optional Precipitation input
+        // scales it (snow melt / climate masks), so snow-fed catchments carry
+        // visibly more water than rain-shadowed ones.
+        std::vector<float> accumulation(static_cast<size_t>(count));
+        const float baseRain = (std::max)(rainfall, 0.001f);
+        for (int index = 0; index < count; ++index) {
+            const float weight = precipitation.isValid()
+                ? clampValue((*precipitation.data)[static_cast<size_t>(index)], 0.0f, 4.0f)
+                : 1.0f;
+            accumulation[static_cast<size_t>(index)] = baseRain * (std::max)(weight, 0.001f);
+        }
+        for (int index : topoOrder) {
             const int downstream = parent[static_cast<size_t>(index)];
             if (downstream >= 0) {
                 accumulation[static_cast<size_t>(downstream)] += accumulation[static_cast<size_t>(index)];
@@ -2526,8 +3145,11 @@ namespace TerrainNodesV2 {
         ctx.reportNodeProgress(0.78f);
         const float maximumAccumulation = *(std::max_element)(accumulation.begin(), accumulation.end());
 
+        // Reverse topological order visits every parent before its children,
+        // so the root lookup below is always resolved.
         std::vector<int> basinRoot(static_cast<size_t>(count), -1);
-        for (int index : visitOrder) {
+        for (auto it = topoOrder.rbegin(); it != topoOrder.rend(); ++it) {
+            const int index = *it;
             const int downstream = parent[static_cast<size_t>(index)];
             basinRoot[static_cast<size_t>(index)] = downstream < 0
                 ? index : basinRoot[static_cast<size_t>(downstream)];
@@ -2575,7 +3197,8 @@ namespace TerrainNodesV2 {
         edited |= ImGui::SliderFloat("Rainfall", &rainfall, 0.01f, 10.0f, "%.2f");
         edited |= ImGui::SliderFloat("Flat Epsilon", &flatEpsilon, 0.0000001f, 0.001f, "%.7f",
                                      ImGuiSliderFlags_Logarithmic);
-        ImGui::TextDisabled("Priority flood + deterministic D8");
+        ImGui::TextDisabled("Priority flood + flat-routed D8");
+        ImGui::TextDisabled("Precipitation input scales rain/cell (snow melt)");
         if (edited) dirty = true;
     }
 
@@ -2608,6 +3231,8 @@ namespace TerrainNodesV2 {
             createMaskOutput(w, h), createHeightOutput(w, h), createHeightOutput(w, h),
             createMaskOutput(w, h), createMaskOutput(w, h), createMaskOutput(w, h)
         };
+        result[5].semantic = NodeSystem::ImageSemantic::Categorical;
+        result[5].unit = NodeSystem::ImageUnit::Identifier;
         std::vector<uint8_t> candidate(static_cast<size_t>(count), 0u);
         for (int index = 0; index < count; ++index) {
             const float depth = (*filled.data)[static_cast<size_t>(index)] -
@@ -2842,9 +3467,73 @@ namespace TerrainNodesV2 {
         const std::string ownershipPrefix =
             "AutoLake_T" + std::to_string(terrain->id) + "_N" + std::to_string(id) + "_";
 
+        struct PreservedLake {
+            std::string name;
+            WaterWaveParams params;
+            uint64_t featureId = 0;
+            Vec3 anchor = Vec3(0.0f);
+            float extent = 0.0f;
+            bool hasIdentity = false;
+            bool used = false;
+        };
         std::vector<int> surfacesToRemove = generatedWaterSurfaceIds;
+        std::vector<PreservedLake> preservedLakes;
+        preservedLakes.reserve(authoredWaterProfiles.size() + generatedWaterSurfaceIds.size());
+        for (const AuthoredWaterProfile& profile : authoredWaterProfiles) {
+            PreservedLake preserved;
+            preserved.name = profile.name;
+            preserved.params = profile.params;
+            preserved.featureId = profile.featureId;
+            preserved.anchor = profile.anchor;
+            preserved.extent = profile.extent;
+            preserved.hasIdentity = profile.hasIdentity;
+            preservedLakes.push_back(std::move(preserved));
+        }
         for (const auto& surface : waterManager.getWaterSurfaces()) {
-            if (surface.name.rfind(ownershipPrefix, 0) == 0) surfacesToRemove.push_back(surface.id);
+            const bool serializedOwner = std::find(generatedWaterSurfaceIds.begin(),
+                generatedWaterSurfaceIds.end(), surface.id) != generatedWaterSurfaceIds.end();
+            const bool matchingProducer = surface.has_generated_identity &&
+                surface.generated_terrain_id == terrain->id &&
+                surface.generated_node_id == id && surface.type == WaterSurface::Type::Lake;
+            if (serializedOwner || matchingProducer || surface.name.rfind(ownershipPrefix, 0) == 0) {
+                surfacesToRemove.push_back(surface.id);
+                PreservedLake preserved;
+                preserved.name = surface.name;
+                preserved.params = surface.params;
+                preserved.featureId = surface.generated_feature_id;
+                preserved.anchor = surface.generated_anchor;
+                preserved.extent = surface.generated_extent;
+                preserved.hasIdentity = surface.has_generated_identity;
+
+                // Projects saved before generated identity existed still have
+                // their generated mesh. Its local bounds provide a reliable
+                // one-time migration anchor when lake IDs/names have changed.
+                if (!preserved.hasIdentity && surface.flatMesh && surface.flatMesh->geometry &&
+                    surface.flatMesh->num_vertices() > 0) {
+                    const Vec3* positions = surface.flatMesh->geometry->get_positions_orig();
+                    if (positions) {
+                        Vec3 boundsMin = positions[0];
+                        Vec3 boundsMax = positions[0];
+                        for (size_t vertex = 1; vertex < surface.flatMesh->num_vertices(); ++vertex) {
+                            boundsMin.x = (std::min)(boundsMin.x, positions[vertex].x);
+                            boundsMin.z = (std::min)(boundsMin.z, positions[vertex].z);
+                            boundsMax.x = (std::max)(boundsMax.x, positions[vertex].x);
+                            boundsMax.z = (std::max)(boundsMax.z, positions[vertex].z);
+                        }
+                        preserved.anchor = (boundsMin + boundsMax) * 0.5f;
+                        preserved.extent = (std::max)(
+                            (boundsMax.x - boundsMin.x) * (boundsMax.z - boundsMin.z), 1.0f);
+                    }
+                }
+                auto existing = std::find_if(preservedLakes.begin(), preservedLakes.end(),
+                    [&](const PreservedLake& candidate) {
+                        return candidate.name == preserved.name ||
+                            (preserved.hasIdentity && candidate.hasIdentity &&
+                             candidate.featureId == preserved.featureId);
+                    });
+                if (existing != preservedLakes.end()) *existing = std::move(preserved);
+                else preservedLakes.push_back(std::move(preserved));
+            }
         }
         std::sort(surfacesToRemove.begin(), surfacesToRemove.end());
         surfacesToRemove.erase(std::unique(surfacesToRemove.begin(), surfacesToRemove.end()), surfacesToRemove.end());
@@ -2952,8 +3641,19 @@ namespace TerrainNodesV2 {
                 return index;
             };
 
-            for (int y = 0; y < h - 1; ++y) {
-                for (int x = 0; x < w - 1; ++x) {
+            // Each lake used to scan the entire terrain. Restrict marching
+            // squares to this body's measured bounds: identical shoreline,
+            // but cost now follows lake footprint instead of lakeCount * map.
+            const int minCellX = clampValue(
+                static_cast<int>(std::floor(body.boundsMin.x / cellSizeX)) - 1, 0, w - 2);
+            const int maxCellX = clampValue(
+                static_cast<int>(std::ceil(body.boundsMax.x / cellSizeX)) + 1, 0, w - 2);
+            const int minCellY = clampValue(
+                static_cast<int>(std::floor(body.boundsMin.z / cellSizeZ)) - 1, 0, h - 2);
+            const int maxCellY = clampValue(
+                static_cast<int>(std::ceil(body.boundsMax.z / cellSizeZ)) + 1, 0, h - 2);
+            for (int y = minCellY; y <= maxCellY; ++y) {
+                for (int x = minCellX; x <= maxCellX; ++x) {
                     const int code = (isInside(x, y) ? 1 : 0) |
                                      (isInside(x + 1, y) ? 2 : 0) |
                                      (isInside(x + 1, y + 1) ? 4 : 0) |
@@ -2983,21 +3683,78 @@ namespace TerrainNodesV2 {
             }
             if (indices.empty()) continue;
 
-            WaterWaveParams lakeParams;
-            lakeParams.applyPreset(WaterWaveParams::WaterPreset::Lake);
-            lakeParams.use_fft_mesh_displacement = false;
-            lakeParams.depth_max = (std::max)(body.maximumDepth, 0.25f);
-            lakeParams.fft_ocean_size = (std::max)(
-                (std::max)(body.boundsMax.x - body.boundsMin.x, body.boundsMax.z - body.boundsMin.z), 1.0f);
-            lakeParams.shore_foam_distance = (std::max)(cellSizeX, cellSizeZ) * 1.5f;
-
             std::shared_ptr<Transform> transform = terrain->transform;
             if (!transform) transform = std::make_shared<Transform>();
             const std::string surfaceName = ownershipPrefix + std::to_string(body.id);
+            WaterWaveParams lakeParams;
+            PreservedLake* preservedParams = nullptr;
+            // Runtime Water UI state is appended after the node backup and is
+            // therefore the newest authority when both describe one feature.
+            for (auto candidateIt = preservedLakes.rbegin(); candidateIt != preservedLakes.rend(); ++candidateIt) {
+                auto& candidate = *candidateIt;
+                if (!candidate.used && (candidate.name == surfaceName ||
+                    (candidate.hasIdentity && candidate.featureId == body.id))) {
+                    preservedParams = &candidate;
+                    break;
+                }
+            }
+            if (!preservedParams && !preservedLakes.empty()) {
+                float bestCost = (std::numeric_limits<float>::max)();
+                for (auto candidateIt = preservedLakes.rbegin(); candidateIt != preservedLakes.rend(); ++candidateIt) {
+                    auto& candidate = *candidateIt;
+                    if (candidate.used) continue;
+                    const float dx = candidate.anchor.x - body.centroid.x;
+                    const float dz = candidate.anchor.z - body.centroid.z;
+                    const float distance = std::sqrt(dx * dx + dz * dz);
+                    const float areaRatio = (candidate.extent > 0.0f && body.area > 0.0f)
+                        ? std::fabs(std::log(candidate.extent / body.area)) : 0.0f;
+                    const float cost = distance / (std::max)(terrain->heightmap.scale_xz, 1.0f) +
+                        areaRatio * 0.05f;
+                    if (cost < bestCost) {
+                        bestCost = cost;
+                        preservedParams = &candidate;
+                    }
+                }
+            }
+            if (preservedParams) {
+                // Graph re-evaluation rebuilds lake geometry, but material
+                // authorship belongs to Water UI and must survive that rebuild.
+                lakeParams = preservedParams->params;
+                preservedParams->used = true;
+            } else {
+                lakeParams.applyPreset(WaterWaveParams::WaterPreset::Lake);
+                lakeParams.use_fft_mesh_displacement = false;
+                lakeParams.depth_max = (std::max)(body.maximumDepth, 0.25f);
+                lakeParams.fft_ocean_size = (std::max)(
+                    (std::max)(body.boundsMax.x - body.boundsMin.x,
+                               body.boundsMax.z - body.boundsMin.z), 1.0f);
+                lakeParams.shore_foam_distance = (std::max)(cellSizeX, cellSizeZ) * 1.5f;
+            }
             WaterSurface* surface = waterManager.createWaterFromIndexedMesh(
                 scene, surfaceName, positions, uvs, indices, transform,
                 WaterSurface::Type::Lake, lakeParams, vertexDepth, shoreFactor);
             if (!surface) continue;
+            surface->has_generated_identity = true;
+            surface->generated_terrain_id = terrain->id;
+            surface->generated_node_id = id;
+            surface->generated_feature_id = body.id;
+            surface->generated_anchor = body.centroid;
+            surface->generated_extent = body.area;
+            AuthoredWaterProfile authored;
+            authored.surfaceId = surface->id;
+            authored.name = surface->name;
+            authored.params = surface->params;
+            authored.featureId = surface->generated_feature_id;
+            authored.anchor = surface->generated_anchor;
+            authored.extent = surface->generated_extent;
+            authored.hasIdentity = true;
+            auto savedProfile = std::find_if(authoredWaterProfiles.begin(), authoredWaterProfiles.end(),
+                [&](const AuthoredWaterProfile& profile) {
+                    return profile.name == authored.name ||
+                        (profile.hasIdentity && profile.featureId == authored.featureId);
+                });
+            if (savedProfile != authoredWaterProfiles.end()) *savedProfile = std::move(authored);
+            else authoredWaterProfiles.push_back(std::move(authored));
             body.waterSurfaceId = surface->id;
             generatedWaterSurfaceIds.push_back(surface->id);
             ++generatedCount;
@@ -3022,8 +3779,11 @@ namespace TerrainNodesV2 {
         int outputIndex, NodeSystem::EvaluationContext& ctx) {
         const auto accumulation = getHeightInput(0, ctx);
         const auto direction = getHeightInput(1, ctx);
+        const auto catchmentArea = getHeightInput(2, ctx);
         if (!accumulation.isValid() || !direction.isValid() ||
-            accumulation.width != direction.width || accumulation.height != direction.height) {
+            accumulation.width != direction.width || accumulation.height != direction.height ||
+            (catchmentArea.isValid() && (catchmentArea.width != accumulation.width ||
+                                         catchmentArea.height != accumulation.height))) {
             ctx.addError(id, "River Network requires matching accumulation and direction inputs");
             return NodeSystem::PinValue{};
         }
@@ -3040,8 +3800,10 @@ namespace TerrainNodesV2 {
                 const int ny = index / w + kHydrologyDy[d];
                 if (nx >= 0 && nx < w && ny >= 0 && ny < h) parent[static_cast<size_t>(index)] = ny * w + nx;
             }
-            active[static_cast<size_t>(index)] =
-                (*accumulation.data)[static_cast<size_t>(index)] >= catchmentThreshold ? 1u : 0u;
+            const bool channelActive = catchmentArea.isValid()
+                ? (*catchmentArea.data)[static_cast<size_t>(index)] >= minimumCatchmentAreaSquareMeters
+                : (*accumulation.data)[static_cast<size_t>(index)] >= catchmentThreshold;
+            active[static_cast<size_t>(index)] = channelActive ? 1u : 0u;
             if ((index & 0x7fff) == 0 && ctx.isCancelled()) return NodeSystem::PinValue{};
         }
 
@@ -3117,6 +3879,8 @@ namespace TerrainNodesV2 {
         std::array<NodeSystem::Image2DData, 3> result = {
             createMaskOutput(w, h), createMaskOutput(w, h), createMaskOutput(w, h)
         };
+        result[1].semantic = NodeSystem::ImageSemantic::Categorical;
+        result[1].unit = NodeSystem::ImageUnit::Identifier;
         for (int index = 0; index < count; ++index) {
             if (!active[static_cast<size_t>(index)]) continue;
             (*result[0].data)[static_cast<size_t>(index)] =
@@ -3135,8 +3899,14 @@ namespace TerrainNodesV2 {
 
     void RiverNetworkNode::drawContent() {
         bool edited = false;
+        edited |= ImGui::SliderFloat("Min Catchment Area", &minimumCatchmentAreaSquareMeters,
+                                     100.0f, 10000000.0f, "%.0f m2", ImGuiSliderFlags_Logarithmic);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Physical source area used when Catchment Area is connected; stable across map resolution and extent");
+        }
         edited |= ImGui::SliderFloat("Catchment", &catchmentThreshold, 0.0001f, 0.25f, "%.4f",
                                      ImGuiSliderFlags_Logarithmic);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Legacy normalized fallback when physical Catchment Area is not connected");
         edited |= ImGui::SliderInt("Min Branch", &minimumBranchLength, 2, 128);
         ImGui::TextDisabled("Strahler ordered channel graph");
         if (edited) dirty = true;
@@ -3182,6 +3952,18 @@ namespace TerrainNodesV2 {
             createHeightOutput(w, h), createHeightOutput(w, h), createHeightOutput(w, h),
             createHeightOutput(w, h)
         };
+        result[0].semantic = NodeSystem::ImageSemantic::PhysicalScalar;
+        result[0].unit = NodeSystem::ImageUnit::CubicMetersPerSecond;
+        for (int i : {1, 2}) {
+            result[static_cast<size_t>(i)].semantic = NodeSystem::ImageSemantic::PhysicalScalar;
+            result[static_cast<size_t>(i)].unit = NodeSystem::ImageUnit::Meters;
+        }
+        result[3].semantic = NodeSystem::ImageSemantic::PhysicalScalar;
+        result[3].unit = NodeSystem::ImageUnit::MetersPerSecond;
+        result[5].semantic = NodeSystem::ImageSemantic::PhysicalScalar;
+        result[5].unit = NodeSystem::ImageUnit::Unitless;
+        result[6].semantic = NodeSystem::ImageSemantic::Mask;
+        result[6].unit = NodeSystem::ImageUnit::Unitless;
         std::vector<int> parent(static_cast<size_t>(count), -1);
         std::vector<int> indegree(static_cast<size_t>(count), 0);
         std::vector<uint8_t> active(static_cast<size_t>(count), 0u);
@@ -3274,7 +4056,9 @@ namespace TerrainNodesV2 {
                 minimumWidthMeters, maximumWidthMeters);
             float low = minimumDepthMeters;
             float high = maximumDepthMeters;
-            for (int iteration = 0; iteration < 28; ++iteration) {
+            // Fourteen bisections already resolve the configured depth range
+            // below millimetre scale, while halving the hot hydraulic solve.
+            for (int iteration = 0; iteration < 14; ++iteration) {
                 const float depth = 0.5f * (low + high);
                 float area = 0.0f, topWidth = 0.0f, velocity = 0.0f;
                 const float solvedDischarge = sectionAtDepth(width, depth, slope, area, topWidth, velocity);
@@ -3326,6 +4110,32 @@ namespace TerrainNodesV2 {
                 (std::min)((std::max)((*result[4].data)[static_cast<size_t>(index)], requiredStage), maximumStage);
         }
 
+        // Foam persists downstream of where it is produced: advect it along the
+        // flow with a velocity-scaled e-folding length, so rapids leave a
+        // decaying whitewater trail instead of stopping at the cell edge. The
+        // topological order guarantees every upstream contributor is folded in
+        // before its downstream cell is visited, so trails accumulate through
+        // confluences transitively.
+        if (foamPersistenceMeters > 0.01f) {
+            for (size_t ordinal = 0; ordinal < order.size(); ++ordinal) {
+                const int index = order[ordinal];
+                const int downstream = parent[static_cast<size_t>(index)];
+                if (downstream < 0 || !active[static_cast<size_t>(downstream)]) continue;
+                const float velocity = (*result[3].data)[static_cast<size_t>(index)];
+                const float persistence = foamPersistenceMeters *
+                    (0.35f + 0.65f * clampValue(velocity * 0.5f, 0.0f, 1.5f));
+                const float carry = std::exp(-downstreamDistance[static_cast<size_t>(index)] /
+                    (std::max)(persistence, 0.5f));
+                // Foam drifting into still lake water disperses quickly.
+                const bool downstreamInLake = lakeMask.isValid() &&
+                    (*lakeMask.data)[static_cast<size_t>(downstream)] > 0.5f;
+                const float dispersal = downstreamInLake ? 0.25f : 1.0f;
+                float& target = (*result[6].data)[static_cast<size_t>(downstream)];
+                target = (std::max)(target,
+                    (*result[6].data)[static_cast<size_t>(index)] * carry * dispersal);
+            }
+        }
+
         for (int i = 0; i < 7; ++i) ctx.setCachedValue(id, i, result[static_cast<size_t>(i)]);
         ctx.reportNodeProgress(1.0f);
         return outputIndex >= 0 && outputIndex < 7
@@ -3358,6 +4168,10 @@ namespace TerrainNodesV2 {
         edited |= ImGui::SliderFloat("Min Freeboard", &minimumFreeboardMeters, 0.0f, 1.0f, "%.2f m");
         edited |= ImGui::SliderFloat("Max Freeboard", &maximumFreeboardMeters,
                                      minimumFreeboardMeters, 10.0f, "%.2f m");
+        edited |= ImGui::SliderFloat("Foam Persistence", &foamPersistenceMeters, 0.0f, 200.0f, "%.0f m");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("How far whitewater trails survive downstream of rapids (e-folding length)");
+        }
         ImGui::TextDisabled("Outputs: m3/s, m, m/s, stage, Froude, foam");
         if (edited) dirty = true;
     }
@@ -3370,6 +4184,7 @@ namespace TerrainNodesV2 {
         const auto hydraulicDepth = getHeightInput(3, ctx);
         const auto referenceHeight = getHeightInput(4, ctx);
         const auto waterLevel = getHeightInput(5, ctx);
+        const auto lakeMask = getHeightInput(6, ctx);
         auto* tctx = getTerrainContext(ctx);
         if (!height.isValid() || !channels.isValid() || !tctx ||
             height.width != channels.width || height.height != channels.height ||
@@ -3380,7 +4195,9 @@ namespace TerrainNodesV2 {
             (referenceHeight.isValid() &&
                 (height.width != referenceHeight.width || height.height != referenceHeight.height)) ||
             (waterLevel.isValid() &&
-                (height.width != waterLevel.width || height.height != waterLevel.height))) {
+                (height.width != waterLevel.width || height.height != waterLevel.height)) ||
+            (lakeMask.isValid() &&
+                (height.width != lakeMask.width || height.height != lakeMask.height))) {
             ctx.addError(id, "River Bed Carve requires matching height and channel inputs");
             return NodeSystem::PinValue{};
         }
@@ -3402,6 +4219,7 @@ namespace TerrainNodesV2 {
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 const size_t channelIndex = static_cast<size_t>(y) * w + x;
+                if (lakeMask.isValid() && (*lakeMask.data)[channelIndex] >= 0.5f) continue;
                 const float strength = clampValue((*channels.data)[channelIndex], 0.0f, 1.0f);
                 if (strength <= 0.0f) continue;
                 const float scale = std::sqrt(strength);
@@ -3441,6 +4259,10 @@ namespace TerrainNodesV2 {
                         const float exponent = 1.0f + (1.0f - bankSoftness) * 5.0f;
                         const float profile = std::pow((std::max)(core, 0.0f), exponent);
                         const size_t target = static_cast<size_t>(py) * w + px;
+                        // Clip the full bank stamp, not only its center. This
+                        // prevents a wide river ribbon from cutting submerged
+                        // trenches into the accepted lake footprint.
+                        if (lakeMask.isValid() && (*lakeMask.data)[target] >= 0.5f) continue;
                         const float waterLevelIncision = referenceHeight.isValid() && waterLevel.isValid()
                             ? (std::max)(((*referenceHeight.data)[target] -
                                 (*waterLevel.data)[channelIndex]) * heightScale, 0.0f)
@@ -3473,7 +4295,15 @@ namespace TerrainNodesV2 {
         auto bedMask = createMaskOutput(w, h);
         const float maskDenominator = (std::max)(safeMaximumDepth, 0.001f);
         for (size_t index = 0; index < carveDepth.size(); ++index) {
-            (*carved.data)[index] = (*height.data)[index] - carveDepth[index] / heightScale;
+            if (lakeMask.isValid() && waterLevel.isValid() && (*lakeMask.data)[index] >= 0.5f) {
+                // Snow geometry is upstream of the carve in the canonical DAG.
+                // Clear it just below open water so the analytical lake surface
+                // cannot become buried, without raising the underlying ground.
+                const float openWaterCeiling = (*waterLevel.data)[index] - 0.01f / heightScale;
+                (*carved.data)[index] = (std::min)((*height.data)[index], openWaterCeiling);
+            } else {
+                (*carved.data)[index] = (*height.data)[index] - carveDepth[index] / heightScale;
+            }
             (*bedMask.data)[index] = clampValue(riverBedDepth[index] / maskDenominator, 0.0f, 1.0f);
         }
         ctx.setCachedValue(id, 0, carved);
@@ -3560,25 +4390,10 @@ namespace TerrainNodesV2 {
             if ((source & 0x7fff) == 0 && ctx.isCancelled()) return NodeSystem::PinValue{};
             if (!active[static_cast<size_t>(source)] || incoming[static_cast<size_t>(source)] != 0) continue;
             SourceCandidate candidate;
-            if (lakeMask.isValid()) {
-                const int sx = source % w;
-                const int sy = source / w;
-                int bestLakePredecessor = -1;
-                float bestAccumulation = -1.0f;
-                for (int d = 0; d < 8; ++d) {
-                    const int nx = sx + kHydrologyDx[d];
-                    const int ny = sy + kHydrologyDy[d];
-                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                    const int neighbor = ny * w + nx;
-                    if ((*lakeMask.data)[static_cast<size_t>(neighbor)] >= 0.5f &&
-                        parent[static_cast<size_t>(neighbor)] == source &&
-                        (*accumulation.data)[static_cast<size_t>(neighbor)] > bestAccumulation) {
-                        bestLakePredecessor = neighbor;
-                        bestAccumulation = (*accumulation.data)[static_cast<size_t>(neighbor)];
-                    }
-                }
-                if (bestLakePredecessor >= 0) candidate.fullPath.push_back(bestLakePredecessor);
-            }
+            // A channel immediately downstream of a lake is a fresh visible
+            // outlet. Do not prepend a submerged lake cell: the analytical D8
+            // graph still carries discharge across the lake, while its water
+            // mesh begins cleanly on the dry side of the shoreline.
             int cursor = source;
             int guard = 0;
             while (cursor >= 0 && active[static_cast<size_t>(cursor)] && guard++ < count) {
@@ -3591,18 +4406,9 @@ namespace TerrainNodesV2 {
                 candidate.fullPath.push_back(cursor);
                 cursor = parent[static_cast<size_t>(cursor)];
             }
-            if (cursor >= 0 && lakeMask.isValid() &&
-                (*lakeMask.data)[static_cast<size_t>(cursor)] >= 0.5f) {
-                const int previous = candidate.fullPath.empty() ? -1 : candidate.fullPath.back();
-                if (previous != cursor) {
-                    if (previous >= 0) {
-                        const float dx = static_cast<float>(cursor % w - previous % w);
-                        const float dy = static_cast<float>(cursor / w - previous / w);
-                        candidate.lengthCells += std::sqrt(dx * dx + dy * dy);
-                    }
-                    candidate.fullPath.push_back(cursor);
-                }
-            }
+            // Likewise, an inlet ends at its final non-lake cell. Previously a
+            // submerged endpoint plus Bezier width made short lakes look as if
+            // one uninterrupted river ribbon continued underneath them.
             if (candidate.fullPath.size() >= 2) candidates.push_back(std::move(candidate));
         }
 
@@ -3731,9 +4537,57 @@ namespace TerrainNodesV2 {
     bool RiverSplineOutputNode::applyGeneratedRivers(SceneData& scene, TerrainObject* terrain) {
         if (!terrain) return false;
         auto& manager = RiverManager::getInstance();
+        auto& waterManager = WaterManager::getInstance();
         bool changed = false;
         const std::string ownershipPrefix =
             "AutoRiver_T" + std::to_string(terrain->id) + "_N" + std::to_string(id) + "_";
+
+        struct PreservedRiver {
+            int surfaceId = -1;
+            std::string name;
+            WaterWaveParams params;
+            uint64_t featureId = 0;
+            Vec3 anchor = Vec3(0.0f);
+            float extent = 0.0f;
+            bool hasIdentity = false;
+            bool used = false;
+        };
+        std::vector<PreservedRiver> preservedRivers;
+        for (const WaterSurface& surface : waterManager.getWaterSurfaces()) {
+            const bool matchingProducer = surface.has_generated_identity &&
+                surface.generated_terrain_id == terrain->id &&
+                surface.generated_node_id == id && surface.type == WaterSurface::Type::River;
+            if (!matchingProducer && surface.name.rfind(ownershipPrefix, 0) != 0) continue;
+
+            PreservedRiver preserved;
+            preserved.surfaceId = surface.id;
+            preserved.name = surface.name;
+            preserved.params = surface.params;
+            preserved.featureId = surface.generated_feature_id;
+            preserved.anchor = surface.generated_anchor;
+            preserved.extent = surface.generated_extent;
+            preserved.hasIdentity = surface.has_generated_identity;
+            if (!preserved.hasIdentity && surface.flatMesh && surface.flatMesh->geometry &&
+                surface.flatMesh->num_vertices() > 0) {
+                const Vec3* positions = surface.flatMesh->geometry->get_positions_orig();
+                if (positions) {
+                    Vec3 boundsMin = positions[0];
+                    Vec3 boundsMax = positions[0];
+                    for (size_t vertex = 1; vertex < surface.flatMesh->num_vertices(); ++vertex) {
+                        boundsMin.x = (std::min)(boundsMin.x, positions[vertex].x);
+                        boundsMin.z = (std::min)(boundsMin.z, positions[vertex].z);
+                        boundsMax.x = (std::max)(boundsMax.x, positions[vertex].x);
+                        boundsMax.z = (std::max)(boundsMax.z, positions[vertex].z);
+                    }
+                    preserved.anchor = (boundsMin + boundsMax) * 0.5f;
+                    const float dx = boundsMax.x - boundsMin.x;
+                    const float dz = boundsMax.z - boundsMin.z;
+                    preserved.extent = std::sqrt(dx * dx + dz * dz);
+                }
+            }
+            preservedRivers.push_back(std::move(preserved));
+        }
+
         std::vector<int> ownedIds = generatedRiverIds;
         for (const RiverSpline& river : manager.getRivers()) {
             if (river.name.rfind(ownershipPrefix, 0) == 0 &&
@@ -3744,6 +4598,16 @@ namespace TerrainNodesV2 {
         for (int riverId : ownedIds) {
             if (manager.getRiver(riverId)) {
                 manager.removeRiver(scene, riverId);
+                changed = true;
+            }
+        }
+        // During project loading WaterManager is restored before Terrain graph
+        // evaluation, while RiverManager is restored afterwards. Remove any
+        // saved generated surfaces that were not yet linked to a RiverSpline;
+        // their authored params are already captured above.
+        for (const PreservedRiver& preserved : preservedRivers) {
+            if (waterManager.getWaterSurface(preserved.surfaceId)) {
+                waterManager.removeWaterSurface(scene, preserved.surfaceId);
                 changed = true;
             }
         }
@@ -3785,10 +4649,45 @@ namespace TerrainNodesV2 {
                 widthCap < cellSize * 0.35f) {
                 continue;
             }
-            RiverSpline* river = manager.createRiver(
-                ownershipPrefix + "B" + std::to_string(branchIndex++));
+            const uint64_t featureId = static_cast<uint64_t>(branchIndex);
+            const std::string riverName = ownershipPrefix + "B" + std::to_string(branchIndex++);
+            Vec3 pathAnchor(0.0f);
+            for (const Vec3& point : worldPoints) pathAnchor = pathAnchor + point;
+            pathAnchor = pathAnchor * (1.0f / static_cast<float>(worldPoints.size()));
+
+            PreservedRiver* preservedParams = nullptr;
+            for (auto& candidate : preservedRivers) {
+                if (!candidate.used && (candidate.name == riverName ||
+                    candidate.name.rfind(riverName + "_", 0) == 0 ||
+                    (candidate.hasIdentity && candidate.featureId == featureId))) {
+                    preservedParams = &candidate;
+                    break;
+                }
+            }
+            if (!preservedParams && !preservedRivers.empty()) {
+                float bestCost = (std::numeric_limits<float>::max)();
+                for (auto& candidate : preservedRivers) {
+                    if (candidate.used) continue;
+                    const float dx = candidate.anchor.x - pathAnchor.x;
+                    const float dz = candidate.anchor.z - pathAnchor.z;
+                    const float distance = std::sqrt(dx * dx + dz * dz);
+                    const float lengthRatio = (candidate.extent > 0.0f && physicalLength > 0.0f)
+                        ? std::fabs(std::log(candidate.extent / physicalLength)) : 0.0f;
+                    const float cost = distance / (std::max)(size, 1.0f) + lengthRatio * 0.05f;
+                    if (cost < bestCost) {
+                        bestCost = cost;
+                        preservedParams = &candidate;
+                    }
+                }
+            }
+
+            RiverSpline* river = manager.createRiver(riverName);
             if (!river) continue;
             const int riverId = river->id;
+            if (preservedParams) {
+                river->waterParams = preservedParams->params;
+                preservedParams->used = true;
+            }
             river->followTerrain = false;
             river->lengthSubdivisions = clampValue(static_cast<int>(path.points.size()) * 4, 24, 192);
             for (size_t pointIndex = 0; pointIndex < path.points.size(); ++pointIndex) {
@@ -3818,7 +4717,17 @@ namespace TerrainNodesV2 {
                 controlPoint.autoTangent = false;
             }
             generatedRiverIds.push_back(riverId);
-            if (generateWaterMeshes) manager.generateMesh(manager.getRiver(riverId), scene);
+            if (generateWaterMeshes) {
+                manager.generateMesh(manager.getRiver(riverId), scene);
+                if (WaterSurface* surface = waterManager.getWaterSurface(river->waterSurfaceId)) {
+                    surface->has_generated_identity = true;
+                    surface->generated_terrain_id = terrain->id;
+                    surface->generated_node_id = id;
+                    surface->generated_feature_id = featureId;
+                    surface->generated_anchor = pathAnchor;
+                    surface->generated_extent = physicalLength;
+                }
+            }
             changed = true;
         }
         return changed;
@@ -3835,6 +4744,158 @@ namespace TerrainNodesV2 {
         edited |= ImGui::Checkbox("Generate Water Mesh", &generateWaterMeshes);
         ImGui::TextDisabled("Owned rivers: %d", static_cast<int>(generatedRiverIds.size()));
         ImGui::TextDisabled("Width also capped by terrain and path length");
+        if (edited) dirty = true;
+    }
+
+    const char* RiverLakeEasyNode::getPresetName(RiverLakePreset value) {
+        switch (value) {
+            case RiverLakePreset::TemperateValleys: return "Temperate Valleys";
+            case RiverLakePreset::AlpineSnowmelt: return "Alpine Snowmelt";
+            case RiverLakePreset::AridCanyons: return "Arid Canyons";
+            case RiverLakePreset::TropicalDrainage: return "Tropical Drainage";
+            case RiverLakePreset::BroadLowlands: return "Broad Lowlands";
+            default: return "Temperate Valleys";
+        }
+    }
+
+    NodeSystem::PinValue RiverLakeEasyNode::compute(
+        int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        const auto height = getHeightInput(0, ctx);
+        const auto precipitation = getHeightInput(1, ctx);
+        if (outputIndex == 1) {
+            if (!precipitation.isValid()) return NodeSystem::PinValue{};
+            bool snowmeltSource = false;
+            if (NodeSystem::GraphBase* graph = ctx.getGraph()) {
+                for (const auto& link : graph->links) {
+                    if (link.endPinId == inputs[1].id) {
+                        snowmeltSource = dynamic_cast<SnowClimateNode*>(
+                            graph->getPinOwner(link.startPinId)) != nullptr;
+                        break;
+                    }
+                }
+            }
+            if (!snowmeltSource) return NodeSystem::PinValue{precipitation};
+
+            // SnowClimate publishes meltwater, not total precipitation. Blend
+            // it additively over a preset climate baseline instead of treating
+            // zero melt as zero rainfall across the whole catchment.
+            float baseline = 0.75f, meltGain = 1.25f;
+            switch (preset) {
+                case RiverLakePreset::AlpineSnowmelt: baseline = 0.25f; meltGain = 2.25f; break;
+                case RiverLakePreset::AridCanyons: baseline = 0.35f; meltGain = 0.65f; break;
+                case RiverLakePreset::TropicalDrainage: baseline = 1.0f; meltGain = 0.5f; break;
+                case RiverLakePreset::BroadLowlands: baseline = 0.85f; meltGain = 0.75f; break;
+                default: break;
+            }
+            auto waterInput = createMaskOutput(precipitation.width, precipitation.height);
+            for (size_t index = 0; index < precipitation.pixelCount(); ++index) {
+                (*waterInput.data)[index] = clampValue(
+                    baseline + (*precipitation.data)[index] * meltGain, 0.001f, 4.0f);
+            }
+            return NodeSystem::PinValue{waterInput};
+        }
+        if (!height.isValid()) {
+            ctx.addError(id, "River & Lake (Easy) requires a height input");
+            return NodeSystem::PinValue{};
+        }
+        if (expertOverrides) return NodeSystem::PinValue{height};
+
+        struct PresetValues {
+            float rainfallMmH, runoff, catchmentAreaM2, lakeDepthM, lakeAreaM2;
+            float widthCoefficient, roughness;
+            int minimumBranchCells, maximumRivers, maximumLakes;
+            bool includeClosedBasins;
+        } values{};
+        switch (preset) {
+            case RiverLakePreset::AlpineSnowmelt:
+                values = {18.0f, 0.65f, 2500.0f, 0.15f, 180.0f, 3.8f, 0.045f, 7, 28, 48, true};
+                break;
+            case RiverLakePreset::AridCanyons:
+                values = {8.0f, 0.12f, 30000.0f, 0.45f, 2500.0f, 2.8f, 0.042f, 12, 12, 12, false};
+                break;
+            case RiverLakePreset::TropicalDrainage:
+                values = {90.0f, 0.75f, 1800.0f, 0.08f, 120.0f, 5.5f, 0.050f, 6, 40, 64, true};
+                break;
+            case RiverLakePreset::BroadLowlands:
+                values = {35.0f, 0.45f, 9000.0f, 0.08f, 500.0f, 6.0f, 0.055f, 10, 20, 48, true};
+                break;
+            case RiverLakePreset::TemperateValleys:
+            default:
+                values = {25.0f, 0.35f, 5000.0f, 0.10f, 250.0f, 4.5f, 0.035f, 8, 24, 48, true};
+                break;
+        }
+
+        const float amount = clampValue(waterAmount, 0.0f, 1.0f);
+        const float waterFactor = std::exp2((amount - 0.5f) * 2.0f); // 0.5x .. 2x
+        NodeSystem::GraphBase* graph = ctx.getGraph();
+        const auto nodeById = [graph](uint32_t nodeId) -> NodeSystem::NodeBase* {
+            return graph && nodeId != 0 ? graph->getNode(nodeId) : nullptr;
+        };
+        if (auto* watershed = dynamic_cast<WatershedAnalysisNode*>(nodeById(watershedNodeId))) {
+            // Accumulation represents physical contributing area. Storm strength
+            // belongs in Hydraulics, otherwise rainfall would be counted twice.
+            watershed->rainfall = 1.0f;
+        }
+        if (auto* network = dynamic_cast<RiverNetworkNode*>(nodeById(networkNodeId))) {
+            network->minimumCatchmentAreaSquareMeters = (std::max)(
+                values.catchmentAreaM2 / std::pow(waterFactor, 0.75f), 25.0f);
+            network->minimumBranchLength = values.minimumBranchCells;
+        }
+        if (auto* lake = dynamic_cast<LakeBasinNode*>(nodeById(lakeBasinNodeId))) {
+            lake->minimumDepthMeters = (std::max)(values.lakeDepthM / std::sqrt(waterFactor), 0.02f);
+            lake->minimumAreaSquareMeters = (std::max)(values.lakeAreaM2 / waterFactor, 4.0f);
+            lake->maximumLakes = values.maximumLakes;
+            lake->includeClosedBasins = values.includeClosedBasins;
+        }
+        if (auto* hydraulics = dynamic_cast<RiverHydraulicsNode*>(nodeById(hydraulicsNodeId))) {
+            hydraulics->rainfallMillimetersPerHour = values.rainfallMmH * waterFactor;
+            hydraulics->runoffCoefficient = clampValue(values.runoff *
+                (0.80f + amount * 0.40f), 0.0f, 1.0f);
+            hydraulics->dischargeScale = 1.0f;
+            hydraulics->widthCoefficient = values.widthCoefficient * std::pow(waterFactor, 0.18f);
+            hydraulics->manningRoughness = values.roughness;
+        }
+        if (auto* carve = dynamic_cast<RiverBedCarveNode*>(nodeById(carveNodeId))) {
+            carve->maximumDepth = 0.65f * std::pow(waterFactor, 0.30f);
+            carve->bankSoftness = preset == RiverLakePreset::AridCanyons ? 0.45f : 0.68f;
+        }
+        if (auto* spline = dynamic_cast<RiverSplineOutputNode*>(nodeById(splineOutputNodeId))) {
+            spline->maximumRivers = values.maximumRivers;
+            spline->generateWaterMeshes = generateWaterMeshes;
+        }
+        if (auto* lakeOutput = dynamic_cast<LakeSurfaceOutputNode*>(nodeById(lakeOutputNodeId))) {
+            lakeOutput->maximumGeneratedLakes = values.maximumLakes;
+            lakeOutput->generateWaterMeshes = generateWaterMeshes;
+        }
+        return NodeSystem::PinValue{height};
+    }
+
+    void RiverLakeEasyNode::drawContent() {
+        bool edited = false;
+        if (ImGui::BeginCombo("Preset", getPresetName(preset))) {
+            for (int i = 0; i <= static_cast<int>(RiverLakePreset::BroadLowlands); ++i) {
+                const auto candidate = static_cast<RiverLakePreset>(i);
+                const bool selected = candidate == preset;
+                if (ImGui::Selectable(getPresetName(candidate), selected)) {
+                    preset = candidate;
+                    edited = true;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        edited |= ImGui::SliderFloat("Water Amount", &waterAmount, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Jointly controls storm discharge, source catchment size, lake acceptance and channel scale");
+        }
+        edited |= ImGui::Checkbox("Generate Water Meshes", &generateWaterMeshes);
+        edited |= ImGui::Checkbox("Expert Overrides", &expertOverrides);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Stop preset writes so detailed River/Lake values can be edited independently");
+        }
+        if (expertOverrides) ImGui::TextDisabled("Preset writes paused; detailed controls are authoritative");
+        ImGui::TextDisabled("Expand this layer for full expert controls");
+        ImGui::TextDisabled("Physical area + Manning + lake spill workflow");
         if (edited) dirty = true;
     }
 
@@ -6642,7 +7703,10 @@ namespace TerrainNodesV2 {
         // These solvers are deterministic gather/scatter passes, not OpenMP
         // loops (parallel neighbor writes would race). Bound their total work
         // on large terrains so Evaluate cannot look like an infinite wait.
-        constexpr size_t kTargetCellPasses = 32ull * 1024ull * 1024ull;
+        // 128M cell-passes keeps full pass counts through 1024^2 and still
+        // grants ~30 passes at 2048^2 — the old 32M budget collapsed file-
+        // resolution terrains to 2-7 passes and visibly under-settled snow.
+        constexpr size_t kTargetCellPasses = 128ull * 1024ull * 1024ull;
         const int resolutionPassBudget = static_cast<int>((std::max)(
             size_t{2}, kTargetCellPasses / (std::max)(pixelCount, size_t{1})));
         const int settlePasses = clampValue((std::min)(settleIterations, resolutionPassBudget), 2, 64);
@@ -6716,9 +7780,20 @@ namespace TerrainNodesV2 {
             return sum / (std::max)(area, 1.0f);
         };
         const int minimumExtent = (std::min)(w, h);
-        const int nearRadius = (std::max)(2, minimumExtent / 96);
-        const int farRadius = (std::max)(nearRadius + 1, minimumExtent / 24);
+        // Valley-pocket detection works in physical metres, not grid fractions:
+        // resolution-relative radii shrank to a ~10-40 m window on a 1000 m
+        // terrain and missed its hundreds-of-metres valleys entirely. Extent
+        // caps keep toy terrains from classifying the whole map as one pocket.
+        const float safeCellSize = (std::max)(metric.cellSize, 1e-4f);
+        const int nearRadius = clampValue(static_cast<int>(30.0f / safeCellSize),
+                                          2, (std::max)(minimumExtent / 32, 2));
+        const int farRadius = clampValue(static_cast<int>(120.0f / safeCellSize),
+                                         nearRadius + 1, (std::max)(minimumExtent / 8, 3));
 
+        // Every write below targets the cell's own index, so the expensive
+        // climate sweep (two directional-exposure probes per cell) is safe to
+        // spread across all cores.
+        #pragma omp parallel for schedule(static)
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 const size_t index = static_cast<size_t>(y) * w + x;
@@ -6781,6 +7856,114 @@ namespace TerrainNodesV2 {
         // This extends downhill reach without multiplying the O(N) pass budget,
         // while the final local passes still settle the actual mesh grid.
         const int maximumTransportStride = clampValue(minimumExtent / 64, 1, 32);
+
+        // Keep the integral-image climate initialization on the CPU, then move
+        // every iterative Jacobi field to Vulkan compute. This is the useful
+        // split for large terrains: the one-off O(N) sweep is cheap, while the
+        // settle/creep/runoff/geometry passes account for almost all cell work.
+        // Small maps stay on CPU to avoid transfer/dispatch overhead.
+        if (useGPU && pixelCount >= 256ull * 256ull) {
+            const float windRadians = windAzimuth * 0.0174532925f;
+            const int gpuWindDx = clampValue(static_cast<int>(std::round(std::sin(windRadians))), -1, 1);
+            const int gpuWindDy = clampValue(static_cast<int>(std::round(std::cos(windRadians))), -1, 1);
+            const float authoredSlipRadians = clampValue(slipAngle, 5.0f, 80.0f) * 0.0174532925f;
+            const float wetSlipRadians = (std::min)(slipAngle, 27.0f) * 0.0174532925f;
+            const float effectiveSlipTangent = std::tan(authoredSlipRadians +
+                (wetSlipRadians - authoredSlipRadians) * clampValue(meltAmount, 0.0f, 1.0f));
+            const int softSnowPasses = clampValue(2 + settlePasses / 3, 3, 10);
+            const float geometryScale = affectGeometry ? clampValue(geometryAmount, 0.0f, 2.0f) : 0.0f;
+            // Deep drift mass remains available to masks/runoff, but geometry
+            // represents the compacted visible pack. Without this saturation,
+            // Valley Capture could raise an entire floor to Max Depth.
+            const float geometryDepthCap = (std::min)(safeMaxDepth,
+                (std::max)(snowfallMeters * 1.50f, 0.02f));
+            const float safeGeometryScale = (std::max)(geometryScale, 0.05f);
+            const float maximumAddedDepthStep = (std::max)(
+                metric.cellSize * std::tan(32.0f * 0.0174532925f) / safeGeometryScale, 0.01f);
+            const float geometrySurfaceWindow = (std::max)(
+                metric.cellSize * 0.25f, geometryDepthCap * 0.75f);
+            const int geometryRelaxPasses = geometryScale > 0.0f
+                ? clampValue(static_cast<int>(std::ceil(geometryDepthCap / maximumAddedDepthStep)), 4, 16) : 0;
+
+            SnowGpuParams gpuParams;
+            gpuParams.width = w; gpuParams.height = h;
+            gpuParams.settlePasses = settlePasses; gpuParams.runoffPasses = runoffPasses;
+            gpuParams.softSnowPasses = softSnowPasses;
+            gpuParams.geometryRelaxPasses = geometryRelaxPasses;
+            gpuParams.maximumTransportStride = maximumTransportStride;
+            gpuParams.windDx = gpuWindDx; gpuParams.windDy = gpuWindDy;
+            gpuParams.cellSize = metric.cellSize; gpuParams.maxDepth = safeMaxDepth;
+            gpuParams.transportRate = transportRate; gpuParams.slipAngleDegrees = slipAngle;
+            gpuParams.windStrength = windStrength; gpuParams.meltAmount = meltAmount;
+            gpuParams.solarMelt = solarMelt; gpuParams.refreezeRate = refreezeRate;
+            gpuParams.effectiveSlipTangent = effectiveSlipTangent;
+            gpuParams.geometryMaxStep = maximumAddedDepthStep;
+            gpuParams.relaxationHeightLimit = (std::max)(
+                metric.cellSize + safeMaxDepth * 0.35f, 0.05f);
+            gpuParams.geometryDepthCap = geometryDepthCap;
+            gpuParams.geometrySurfaceWindow = geometrySurfaceWindow;
+
+            std::vector<float> gpuIce, gpuWater, gpuRunoff, gpuAvalanche, gpuGeometry;
+            std::string gpuFailure;
+            if (solveSnowOnGpu(gpuParams, baseMeters, coldness, solar, windExposure,
+                               snowDepth, gpuIce, gpuWater, gpuRunoff, gpuAvalanche,
+                               gpuGeometry, &gpuFailure)) {
+                float maxRunoff = 1e-6f, maxAvalanche = 1e-6f;
+                for (size_t index = 0; index < pixelCount; ++index) {
+                    maxRunoff = (std::max)(maxRunoff, gpuRunoff[index] + gpuWater[index]);
+                    maxAvalanche = (std::max)(maxAvalanche, gpuAvalanche[index]);
+                }
+                // Optical coverage saturates after a modest physical layer;
+                // 10-20 cm already hides most terrain and should not require a
+                // full authored Snowfall metre value to look white.
+                const float maximumCoverageDepth = (std::max)(
+                    (std::min)(safeMaxDepth, 0.35f), 0.01f);
+                const float snowCoverageDepth = clampValue(snowfallMeters * 0.35f,
+                    (std::min)(0.06f, maximumCoverageDepth), maximumCoverageDepth);
+                const float visibleSnowThreshold = (std::max)(snowCoverageDepth * 0.02f, 0.002f);
+                const float iceCoverageDepth = (std::max)(snowfallMeters * 0.12f, 0.02f);
+                const float visibleIceThreshold = (std::max)(snowfallMeters * 0.03f, 0.003f);
+                const float coverageScale = clampValue(coverageAmount, 0.0f, 2.0f);
+                #pragma omp parallel for schedule(static)
+                for (int cell = 0; cell < static_cast<int>(pixelCount); ++cell) {
+                    const size_t index = static_cast<size_t>(cell);
+                    (*finalHeight.data)[index] = (*height.data)[index] +
+                        gpuGeometry[index] / safeHeightScale * geometryScale;
+                    (*snowMask.data)[index] = clampValue(smoothstepLocal(
+                        visibleSnowThreshold, snowCoverageDepth, snowDepth[index]) * coverageScale, 0.0f, 1.0f);
+                    (*iceMask.data)[index] = clampValue(smoothstepLocal(
+                        visibleIceThreshold, iceCoverageDepth, gpuIce[index]) * coverageScale, 0.0f, 1.0f);
+                    (*meltwaterMask.data)[index] = clampValue(
+                        (gpuRunoff[index] + gpuWater[index]) / maxRunoff, 0.0f, 1.0f);
+                    (*avalancheMask.data)[index] = clampValue(gpuAvalanche[index] / maxAvalanche, 0.0f, 1.0f);
+                }
+                ctx.reportNodeProgress(0.99f);
+                SCENE_LOG_INFO("[Snow Layer] Vulkan compute solve complete.");
+                ctx.setCachedValue(id, 0, finalHeight); ctx.setCachedValue(id, 1, snowMask);
+                ctx.setCachedValue(id, 2, iceMask); ctx.setCachedValue(id, 3, meltwaterMask);
+                ctx.setCachedValue(id, 4, avalancheMask);
+                switch (outputIndex) {
+                    case 0: return finalHeight; case 1: return snowMask; case 2: return iceMask;
+                    case 3: return meltwaterMask; case 4: return avalancheMask;
+                    default: return NodeSystem::PinValue{};
+                }
+            }
+            SCENE_LOG_WARN("[Snow Layer] GPU compute unavailable (" + gpuFailure + "); using CPU fallback.");
+        }
+        // GATHER formulation: each destination cell recomputes its neighbours'
+        // outbound distributions and collects its own share. This costs more
+        // arithmetic than the old scatter sweep, but there are no cross-cell
+        // writes, so every pass runs parallel across all cores with a fixed,
+        // deterministic gather order — scatter "+= into neighbour" is what kept
+        // this solver single-threaded.
+        struct SnowOutflow {
+            float weights[8];
+            float weightSum = 0.0f;
+            float moved = 0.0f;
+            float remaining = 0.0f;
+            float windMoved = 0.0f;
+            bool avalanche = false;
+        };
         for (int iteration = 0; iteration < settlePasses; ++iteration) {
             if (ctx.isCancelled()) return NodeSystem::PinValue{};
             const float coarseT = settlePasses > 1
@@ -6788,74 +7971,89 @@ namespace TerrainNodesV2 {
                 : 0.0f;
             const int transportStride = (std::max)(1, static_cast<int>(std::round(
                 1.0f + (maximumTransportStride - 1) * coarseT * coarseT)));
-            std::fill(nextDepth.begin(), nextDepth.end(), 0.0f);
+            const auto evalOutflow = [&](int sx, int sy) {
+                SnowOutflow out;
+                for (int direction = 0; direction < 8; ++direction) out.weights[direction] = 0.0f;
+                const size_t index = static_cast<size_t>(sy) * w + sx;
+                const float sourceDepth = (std::max)(snowDepth[index], 0.0f);
+                const float sourceSurface = baseMeters[index] + sourceDepth;
+                float steepestDegrees = 0.0f;
+                for (int direction = 0; direction < 8; ++direction) {
+                    const int nx = sx + dx[direction] * transportStride;
+                    const int ny = sy + dy[direction] * transportStride;
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    const size_t neighbor = static_cast<size_t>(ny) * w + nx;
+                    const float drop = sourceSurface - (baseMeters[neighbor] + snowDepth[neighbor]);
+                    if (drop <= 0.0f) continue;
+                    const float run = (std::max)(
+                        metric.cellSize * distance[direction] * transportStride, 1e-6f);
+                    const float degrees = std::atan(drop / run) * 57.2957795f;
+                    out.weights[direction] = drop / run;
+                    out.weightSum += out.weights[direction];
+                    steepestDegrees = (std::max)(steepestDegrees, degrees);
+                }
+                const float avalancheExcess = steepestDegrees > slipAngle
+                    ? clampValue((steepestDegrees - slipAngle) /
+                        (std::max)(90.0f - slipAngle, 1.0f), 0.0f, 1.0f) : 0.0f;
+                const float settling = out.weightSum > 0.0f
+                    ? clampValue(out.weightSum * metric.cellSize * transportStride /
+                        (safeMaxDepth * 8.0f + 1e-6f), 0.0f, 1.0f) : 0.0f;
+                float movedFraction = transportRate * (avalancheExcess + settling * 0.16f);
+                movedFraction = clampValue(movedFraction, 0.0f, 0.65f);
+                out.moved = sourceDepth * movedFraction;
+                out.remaining = sourceDepth - out.moved;
+                out.avalanche = avalancheExcess > 0.0f;
+                if (out.weightSum <= 0.0f || out.moved <= 0.0f) {
+                    out.remaining += out.moved;
+                    out.moved = 0.0f;
+                }
+                // Wind departs from whatever gravity leaves in place — same
+                // coarse-to-fine footprint as gravity transport (a fixed
+                // one-cell step capped drift reach at passes x cellSize).
+                const int windTx = sx + windDx * transportStride;
+                const int windTy = sy + windDy * transportStride;
+                if ((windDx != 0 || windDy != 0) &&
+                    windTx >= 0 && windTx < w && windTy >= 0 && windTy < h) {
+                    out.windMoved = out.remaining * clampValue(
+                        windStrength * (0.025f + windExposure[index] * 0.22f), 0.0f, 0.30f);
+                    out.remaining -= out.windMoved;
+                }
+                return out;
+            };
+            #pragma omp parallel for schedule(static)
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
                     const size_t index = static_cast<size_t>(y) * w + x;
-                    const float sourceDepth = (std::max)(snowDepth[index], 0.0f);
-                    const float sourceSurface = baseMeters[index] + sourceDepth;
-                    float weights[8] = {};
-                    float weightSum = 0.0f;
-                    float steepestDegrees = 0.0f;
+                    const SnowOutflow own = evalOutflow(x, y);
+                    float depth = own.remaining;
+                    float avalancheIn = 0.0f;
                     for (int direction = 0; direction < 8; ++direction) {
-                        const int nx = x + dx[direction] * transportStride;
-                        const int ny = y + dy[direction] * transportStride;
-                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                        const size_t neighbor = static_cast<size_t>(ny) * w + nx;
-                        const float drop = sourceSurface - (baseMeters[neighbor] + snowDepth[neighbor]);
-                        if (drop <= 0.0f) continue;
-                        const float run = (std::max)(
-                            metric.cellSize * distance[direction] * transportStride, 1e-6f);
-                        const float degrees = std::atan(drop / run) * 57.2957795f;
-                        weights[direction] = drop / run;
-                        weightSum += weights[direction];
-                        steepestDegrees = (std::max)(steepestDegrees, degrees);
+                        // The source scattering into this cell along `direction`
+                        // sits at the mirrored offset and uses that same weight.
+                        const int sx = x - dx[direction] * transportStride;
+                        const int sy = y - dy[direction] * transportStride;
+                        if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
+                        const SnowOutflow source = evalOutflow(sx, sy);
+                        if (source.weights[direction] <= 0.0f || source.moved <= 0.0f) continue;
+                        const float transfer = source.moved *
+                            (source.weights[direction] / source.weightSum);
+                        depth += transfer;
+                        if (source.avalanche) avalancheIn += transfer;
                     }
-
-                    const float avalancheExcess = steepestDegrees > slipAngle
-                        ? clampValue((steepestDegrees - slipAngle) /
-                            (std::max)(90.0f - slipAngle, 1.0f), 0.0f, 1.0f) : 0.0f;
-                    const float settling = weightSum > 0.0f
-                        ? clampValue(weightSum * metric.cellSize * transportStride /
-                            (safeMaxDepth * 8.0f + 1e-6f), 0.0f, 1.0f) : 0.0f;
-                    float movedFraction = transportRate * (avalancheExcess + settling * 0.16f);
-                    movedFraction = clampValue(movedFraction, 0.0f, 0.65f);
-                    float moved = sourceDepth * movedFraction;
-                    float remaining = sourceDepth - moved;
-                    if (weightSum > 0.0f && moved > 0.0f) {
-                        for (int direction = 0; direction < 8; ++direction) {
-                            if (weights[direction] <= 0.0f) continue;
-                            const int nx = x + dx[direction] * transportStride;
-                            const int ny = y + dy[direction] * transportStride;
-                            const size_t neighbor = static_cast<size_t>(ny) * w + nx;
-                            const float transfer = moved * (weights[direction] / weightSum);
-                            nextDepth[neighbor] += transfer;
-                            if (avalancheExcess > 0.0f) avalancheDeposit[neighbor] += transfer;
+                    if (windDx != 0 || windDy != 0) {
+                        const int ux = x - windDx * transportStride;
+                        const int uy = y - windDy * transportStride;
+                        if (ux >= 0 && ux < w && uy >= 0 && uy < h) {
+                            depth += evalOutflow(ux, uy).windMoved;
                         }
-                    } else {
-                        remaining += moved;
                     }
-
-                    const int wx = x + windDx, wy = y + windDy;
-                    if ((windDx != 0 || windDy != 0) && wx >= 0 && wx < w && wy >= 0 && wy < h) {
-                        // Repeated passes can now genuinely scour the windward
-                        // face and deposit that conserved mass downwind/into
-                        // sheltered valleys. The old fixed 0.025 factor barely
-                        // moved snow even with Wind at maximum.
-                        const float windMoved = remaining * clampValue(
-                            windStrength * (0.025f + windExposure[index] * 0.22f), 0.0f, 0.30f);
-                        remaining -= windMoved;
-                        nextDepth[static_cast<size_t>(wy) * w + wx] += windMoved;
-                    }
-                    nextDepth[index] += remaining;
+                    if (avalancheIn > 0.0f) avalancheDeposit[index] += avalancheIn;
+                    // Gather transport can converge many source cells into one
+                    // sink. Enforce the authored physical capacity every pass
+                    // so sinks cannot turn into vertex-height needles.
+                    nextDepth[index] = std::isfinite(depth)
+                        ? clampValue(depth, 0.0f, safeMaxDepth) : 0.0f;
                 }
-            }
-            // Gather transport can converge many source cells into a single
-            // sink. Enforce the authored physical capacity every pass so those
-            // sinks cannot turn into vertex-height needles.
-            for (size_t index = 0; index < pixelCount; ++index) {
-                const float value = nextDepth[index];
-                nextDepth[index] = std::isfinite(value) ? clampValue(value, 0.0f, safeMaxDepth) : 0.0f;
             }
             snowDepth.swap(nextDepth);
             ctx.reportNodeProgress(0.12f + 0.34f *
@@ -6867,6 +8065,8 @@ namespace TerrainNodesV2 {
         const float relaxationHeightLimit = (std::max)(
             metric.cellSize + safeMaxDepth * 0.35f, 0.05f);
         for (int relaxationPass = 0; relaxationPass < 2; ++relaxationPass) {
+            // Pure gather over the previous buffer: parallel-safe as-is.
+            #pragma omp parallel for schedule(static)
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
                     const size_t index = static_cast<size_t>(y) * w + x;
@@ -6890,13 +8090,20 @@ namespace TerrainNodesV2 {
         }
         ctx.reportNodeProgress(0.50f);
 
-        // The settle ping-pong buffer is no longer needed; recycle it for ice.
-        std::fill(nextDepth.begin(), nextDepth.end(), 0.0f);
-        std::vector<float>& iceDepth = nextDepth;
+        // Ice must own its storage. Recycling the settle ping-pong buffer here
+        // aliased iceDepth onto the very scratch the soft-snow relaxation below
+        // zero-fills and reuses: melt-produced ice was silently destroyed and
+        // the final ice outputs read leftover snow scratch instead — roughly
+        // doubling geometry depth and saturating the ice mask wherever snow
+        // existed at all.
+        std::vector<float> iceStorage(pixelCount, 0.0f);
+        std::vector<float>& iceDepth = iceStorage;
         std::vector<float> water(pixelCount, 0.0f);
         std::vector<float> nextWater(pixelCount, 0.0f);
         const float solarClearStrength = clampValue(solarMelt + meltAmount * 0.70f, 0.0f, 1.0f);
-        for (size_t index = 0; index < pixelCount; ++index) {
+        #pragma omp parallel for schedule(static)
+        for (int cell = 0; cell < static_cast<int>(pixelCount); ++cell) {
+            const size_t index = static_cast<size_t>(cell);
             const float warmth = 1.0f - coldness[index];
             // Melt=1 must not be defeated completely by the altitude/coldness
             // gate. It supplies a small global thaw and boosts directional sun
@@ -6931,50 +8138,59 @@ namespace TerrainNodesV2 {
         const float effectiveSlipTangent = std::tan(
             authoredSlipRadians + (wetSlipRadians - authoredSlipRadians) * clampValue(meltAmount, 0.0f, 1.0f));
         const int softSnowPasses = clampValue(2 + settlePasses / 3, 3, 10);
+        // Same gather/parallel treatment as the settle solver above.
+        struct CreepOutflow {
+            float excess[8];
+            float excessSum = 0.0f;
+            float moved = 0.0f;
+            float keep = 0.0f;
+        };
         for (int iteration = 0; iteration < softSnowPasses; ++iteration) {
             if (ctx.isCancelled()) return NodeSystem::PinValue{};
-            std::fill(nextDepth.begin(), nextDepth.end(), 0.0f);
+            const auto evalCreep = [&](int sx, int sy) {
+                CreepOutflow out;
+                for (int direction = 0; direction < 8; ++direction) out.excess[direction] = 0.0f;
+                const size_t index = static_cast<size_t>(sy) * w + sx;
+                const float sourceDepth = clampValue(snowDepth[index], 0.0f, safeMaxDepth);
+                const float sourceSurface = baseMeters[index] + sourceDepth;
+                float maximumExcess = 0.0f;
+                for (int direction = 0; direction < 8; ++direction) {
+                    const int nx = sx + dx[direction], ny = sy + dy[direction];
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    const size_t neighbor = static_cast<size_t>(ny) * w + nx;
+                    const float allowedDrop = effectiveSlipTangent * metric.cellSize * distance[direction];
+                    const float actualDrop = sourceSurface - (baseMeters[neighbor] + snowDepth[neighbor]);
+                    out.excess[direction] = (std::max)(actualDrop - allowedDrop, 0.0f);
+                    out.excessSum += out.excess[direction];
+                    maximumExcess = (std::max)(maximumExcess, out.excess[direction]);
+                }
+                const float stableStep = (std::max)(effectiveSlipTangent * metric.cellSize, 0.01f);
+                const float instability = clampValue(maximumExcess / stableStep, 0.0f, 1.0f);
+                const float mobility = clampValue(
+                    0.16f + meltAmount * 0.34f + sourceDepth / safeMaxDepth * 0.16f,
+                    0.16f, 0.66f);
+                out.moved = out.excessSum > 1e-8f
+                    ? sourceDepth * mobility * instability : 0.0f;
+                out.keep = sourceDepth - out.moved;
+                return out;
+            };
+            #pragma omp parallel for schedule(static)
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
                     const size_t index = static_cast<size_t>(y) * w + x;
-                    const float sourceDepth = clampValue(snowDepth[index], 0.0f, safeMaxDepth);
-                    const float sourceSurface = baseMeters[index] + sourceDepth;
-                    float excess[8] = {};
-                    float excessSum = 0.0f;
-                    float maximumExcess = 0.0f;
+                    float depth = evalCreep(x, y).keep;
                     for (int direction = 0; direction < 8; ++direction) {
-                        const int nx = x + dx[direction], ny = y + dy[direction];
-                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                        const size_t neighbor = static_cast<size_t>(ny) * w + nx;
-                        const float allowedDrop = effectiveSlipTangent * metric.cellSize * distance[direction];
-                        const float actualDrop = sourceSurface - (baseMeters[neighbor] + snowDepth[neighbor]);
-                        excess[direction] = (std::max)(actualDrop - allowedDrop, 0.0f);
-                        excessSum += excess[direction];
-                        maximumExcess = (std::max)(maximumExcess, excess[direction]);
+                        const int sx = x - dx[direction], sy = y - dy[direction];
+                        if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
+                        const CreepOutflow source = evalCreep(sx, sy);
+                        if (source.excess[direction] <= 0.0f || source.moved <= 0.0f) continue;
+                        depth += source.moved * (source.excess[direction] / source.excessSum);
                     }
-
-                    const float stableStep = (std::max)(effectiveSlipTangent * metric.cellSize, 0.01f);
-                    const float instability = clampValue(maximumExcess / stableStep, 0.0f, 1.0f);
-                    const float mobility = clampValue(
-                        0.16f + meltAmount * 0.34f + sourceDepth / safeMaxDepth * 0.16f,
-                        0.16f, 0.66f);
-                    const float moved = excessSum > 1e-8f
-                        ? sourceDepth * mobility * instability : 0.0f;
-                    nextDepth[index] += sourceDepth - moved;
-                    if (moved <= 0.0f) continue;
-                    for (int direction = 0; direction < 8; ++direction) {
-                        if (excess[direction] <= 0.0f) continue;
-                        const int nx = x + dx[direction], ny = y + dy[direction];
-                        const size_t neighbor = static_cast<size_t>(ny) * w + nx;
-                        nextDepth[neighbor] += moved * (excess[direction] / excessSum);
-                    }
+                    nextDepth[index] = std::isfinite(depth)
+                        ? clampValue(depth, 0.0f, safeMaxDepth) : 0.0f;
                 }
             }
-            for (size_t index = 0; index < pixelCount; ++index) {
-                const float value = nextDepth[index];
-                snowDepth[index] = std::isfinite(value)
-                    ? clampValue(value, 0.0f, safeMaxDepth) : 0.0f;
-            }
+            snowDepth.swap(nextDepth);
             ctx.reportNodeProgress(0.52f + 0.20f *
                 (static_cast<float>(iteration + 1) / softSnowPasses));
         }
@@ -6984,57 +8200,77 @@ namespace TerrainNodesV2 {
         // directional clearing component (not the global thermal melt) and add
         // that released mass to runoff. This preserves valley accumulation but
         // keeps exposed slopes genuinely bare.
-        for (size_t index = 0; index < pixelCount; ++index) {
+        #pragma omp parallel for schedule(static)
+        for (int cell = 0; cell < static_cast<int>(pixelCount); ++cell) {
+            const size_t index = static_cast<size_t>(cell);
             const float directionalClear = clampValue(
                 solar[index] * solarClearStrength + windExposure[index] * windStrength,
                 0.0f, 1.0f);
-            const float clearedSnow = snowDepth[index] * directionalClear;
+            // Full directional melt was already applied before creep. This is
+            // only a corrective pass for snow creep put back on an exposed face.
+            const float clearedSnow = snowDepth[index] * directionalClear * 0.35f;
             snowDepth[index] -= clearedSnow;
             water[index] += clearedSnow;
         }
 
+        // Gather/parallel like the settle solver. One behavioural improvement
+        // falls out for free: the scatter sweep mutated iceDepth mid-pass, so
+        // cells later in the row order saw partially updated ice (a sweep-order
+        // bias); the gather reads a per-pass ice snapshot instead.
+        struct RunoffOutflow {
+            float weights[8];
+            float weightSum = 0.0f;
+            float mobile = 0.0f;
+            float keep = 0.0f;
+        };
+        std::vector<float> iceBefore(pixelCount, 0.0f);
         for (int iteration = 0; iteration < runoffPasses; ++iteration) {
             if (ctx.isCancelled()) return NodeSystem::PinValue{};
-            std::fill(nextWater.begin(), nextWater.end(), 0.0f);
+            iceBefore = iceDepth;
+            const auto evalRunoff = [&](int sx, int sy) {
+                RunoffOutflow out;
+                for (int direction = 0; direction < 8; ++direction) out.weights[direction] = 0.0f;
+                const size_t index = static_cast<size_t>(sy) * w + sx;
+                const float sourceWater = (std::max)(water[index], 0.0f);
+                const float sourceSurface = baseMeters[index] + iceBefore[index] + sourceWater * 0.10f;
+                for (int direction = 0; direction < 8; ++direction) {
+                    const int nx = sx + dx[direction], ny = sy + dy[direction];
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    const size_t neighbor = static_cast<size_t>(ny) * w + nx;
+                    const float drop = sourceSurface -
+                        (baseMeters[neighbor] + iceBefore[neighbor] + water[neighbor] * 0.10f);
+                    if (drop <= 0.0f) continue;
+                    out.weights[direction] = drop / distance[direction];
+                    out.weightSum += out.weights[direction];
+                }
+                out.mobile = out.weightSum > 0.0f ? sourceWater * 0.72f : 0.0f;
+                out.keep = sourceWater - out.mobile;
+                return out;
+            };
+            #pragma omp parallel for schedule(static)
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
                     const size_t index = static_cast<size_t>(y) * w + x;
-                    const float sourceWater = (std::max)(water[index], 0.0f);
-                    const float sourceSurface = baseMeters[index] + iceDepth[index] + sourceWater * 0.10f;
-                    float weights[8] = {};
-                    float weightSum = 0.0f;
+                    float incomingSum = 0.0f;
+                    float waterLevel = evalRunoff(x, y).keep;
                     for (int direction = 0; direction < 8; ++direction) {
-                        const int nx = x + dx[direction], ny = y + dy[direction];
-                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                        const size_t neighbor = static_cast<size_t>(ny) * w + nx;
-                        const float drop = sourceSurface - (baseMeters[neighbor] + iceDepth[neighbor] + water[neighbor] * 0.10f);
-                        if (drop <= 0.0f) continue;
-                        weights[direction] = drop / distance[direction];
-                        weightSum += weights[direction];
+                        const int sx = x - dx[direction], sy = y - dy[direction];
+                        if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
+                        const RunoffOutflow source = evalRunoff(sx, sy);
+                        if (source.weights[direction] <= 0.0f || source.mobile <= 0.0f) continue;
+                        incomingSum += source.mobile *
+                            (source.weights[direction] / source.weightSum);
                     }
-
-                    const float mobile = weightSum > 0.0f ? sourceWater * 0.72f : 0.0f;
-                    nextWater[index] += sourceWater - mobile;
-                    if (mobile <= 0.0f) continue;
-                    for (int direction = 0; direction < 8; ++direction) {
-                        if (weights[direction] <= 0.0f) continue;
-                        const int nx = x + dx[direction], ny = y + dy[direction];
-                        const size_t neighbor = static_cast<size_t>(ny) * w + nx;
-                        const float incoming = mobile * (weights[direction] / weightSum);
-                        const float neighborExposure = clampValue(
-                            solar[neighbor] + windExposure[neighbor] * windStrength, 0.0f, 1.0f);
-                        const float frozen = incoming * coldness[neighbor] * refreezeRate * 0.08f *
-                            (1.0f - neighborExposure);
-                        iceDepth[neighbor] += frozen;
-                        nextWater[neighbor] += incoming - frozen;
-                        runoffTrace[neighbor] += incoming;
-                    }
+                    const float exposure = clampValue(
+                        solar[index] + windExposure[index] * windStrength, 0.0f, 1.0f);
+                    const float frozen = incomingSum * coldness[index] * refreezeRate * 0.08f *
+                        (1.0f - exposure);
+                    const float ice = iceBefore[index] + frozen;
+                    iceDepth[index] = std::isfinite(ice) ? clampValue(ice, 0.0f, safeMaxDepth) : 0.0f;
+                    if (incomingSum > 0.0f) runoffTrace[index] += incomingSum;
+                    waterLevel += incomingSum - frozen;
+                    nextWater[index] = std::isfinite(waterLevel) ? waterLevel : 0.0f;
                 }
-            }
-            for (size_t index = 0; index < pixelCount; ++index) {
-                const float ice = iceDepth[index];
-                iceDepth[index] = std::isfinite(ice) ? clampValue(ice, 0.0f, safeMaxDepth) : 0.0f;
-                if (!std::isfinite(nextWater[index])) nextWater[index] = 0.0f;
             }
             water.swap(nextWater);
             ctx.reportNodeProgress(0.72f + 0.23f *
@@ -7047,75 +8283,77 @@ namespace TerrainNodesV2 {
             maxRunoff = (std::max)(maxRunoff, runoffTrace[index] + water[index]);
             maxAvalanche = (std::max)(maxAvalanche, avalancheDeposit[index]);
         }
-        // Material coverage must follow the surviving physical pack.  The old
-        // upper threshold (35% of snowfall) made a heavily melted cell look
-        // identical to a full-depth cell: with 1 m authored snowfall, anything
-        // above only 0.35 m still wrote a fully saturated Snow splat channel.
-        // Normalize ordinary cover against one authored snowfall instead;
-        // deeper valley deposits may saturate, while partially melted slopes
-        // now fade continuously and reveal the lower material layers.
-        const float snowCoverageDepth = (std::max)(
-            (std::min)(snowfallMeters, safeMaxDepth), 0.02f);
+        // Material coverage follows surviving mass, but optical opacity is not
+        // linear with authored storm depth: a modest 10-20 cm pack already
+        // hides the substrate. Cap the saturation depth so Snowfall controls
+        // mass/transport without making default material coverage disappear.
+        const float maximumCoverageDepth = (std::max)(
+            (std::min)(safeMaxDepth, 0.35f), 0.01f);
+        const float snowCoverageDepth = clampValue(snowfallMeters * 0.35f,
+            (std::min)(0.06f, maximumCoverageDepth), maximumCoverageDepth);
         const float visibleSnowThreshold = (std::max)(snowCoverageDepth * 0.02f, 0.002f);
         const float iceCoverageDepth = (std::max)(snowfallMeters * 0.12f, 0.02f);
         const float visibleIceThreshold = (std::max)(snowfallMeters * 0.03f, 0.003f);
         const float geometryScale = affectGeometry ? clampValue(geometryAmount, 0.0f, 2.0f) : 0.0f;
         const float coverageScale = clampValue(coverageAmount, 0.0f, 2.0f);
 
-        // Geometry gets a final low-frequency snowpack surface independent of
-        // material-mask sharpness. Thick displacement needs more than a fixed
-        // three-pass blur: bound the added snow-depth gradient itself so no
-        // adjacent vertices can form a near-vertical snow wall or needle.
+        // Geometry models a compacted snow surface, not an unlimited copy of
+        // transported mass. Deep valley deposits still affect coverage and
+        // runoff, but their visible displacement saturates near 1.5x Snowfall.
         std::vector<float> geometryDepth(pixelCount, 0.0f);
         std::vector<float> nextGeometryDepth(pixelCount, 0.0f);
+        const float geometryDepthCap = (std::min)(safeMaxDepth,
+            (std::max)(snowfallMeters * 1.50f, 0.02f));
         for (size_t index = 0; index < pixelCount; ++index) {
             const float combined = snowDepth[index] + iceDepth[index] * 0.92f;
             geometryDepth[index] = std::isfinite(combined)
-                ? clampValue(combined, 0.0f, safeMaxDepth) : 0.0f;
+                ? clampValue(combined, 0.0f, geometryDepthCap) : 0.0f;
         }
         const float safeGeometryScale = (std::max)(geometryScale, 0.05f);
         const float maximumAddedDepthStep = (std::max)(
             metric.cellSize * std::tan(32.0f * 0.0174532925f) / safeGeometryScale, 0.01f);
+        const float geometrySurfaceWindow = (std::max)(
+            metric.cellSize * 0.25f, geometryDepthCap * 0.75f);
         const int geometryRelaxPasses = geometryScale > 0.0f
             ? clampValue(static_cast<int>(std::ceil(
-                safeMaxDepth / maximumAddedDepthStep)), 4, 16)
+                geometryDepthCap / maximumAddedDepthStep)), 4, 16)
             : 0;
         for (int pass = 0; pass < geometryRelaxPasses; ++pass) {
-            // Jacobi/ping-pong update: every worker owns one destination row
-            // and reads only the immutable previous-pass buffer.
+            // Relax base+snow surface. A depth-only blur preserves every ground
+            // bump as an identical bump in the snow; surface relaxation instead
+            // fills sub-pack hollows and buries small terrain noise.
             #pragma omp parallel for schedule(static)
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
                     const size_t index = static_cast<size_t>(y) * w + x;
-                    float weightedDepth = geometryDepth[index] * 4.0f;
+                    const float ownSurface = baseMeters[index] + geometryDepth[index];
+                    float weightedSurface = ownSurface * 4.0f;
                     float weightSum = 4.0f;
-                    float minimumAllowed = 0.0f;
-                    float maximumAllowed = safeMaxDepth;
+                    float minimumSurface = baseMeters[index];
+                    float maximumSurface = baseMeters[index] + geometryDepthCap;
                     for (int direction = 0; direction < 8; ++direction) {
                         const int nx = x + dx[direction], ny = y + dy[direction];
                         if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                         const size_t neighbor = static_cast<size_t>(ny) * w + nx;
+                        if (std::abs(baseMeters[neighbor] - baseMeters[index]) > geometrySurfaceWindow) continue;
+                        const float neighborSurface = baseMeters[neighbor] + geometryDepth[neighbor];
                         const float allowedStep = maximumAddedDepthStep * distance[direction];
-                        minimumAllowed = (std::max)(minimumAllowed,
-                            geometryDepth[neighbor] - allowedStep);
-                        maximumAllowed = (std::min)(maximumAllowed,
-                            geometryDepth[neighbor] + allowedStep);
+                        minimumSurface = (std::max)(minimumSurface, neighborSurface - allowedStep);
+                        maximumSurface = (std::min)(maximumSurface, neighborSurface + allowedStep);
                         const float weight = distance[direction] > 1.0f ? 0.65f : 1.0f;
-                        weightedDepth += geometryDepth[neighbor] * weight;
+                        weightedSurface += neighborSurface * weight;
                         weightSum += weight;
                     }
-                    const float localAverage = weightedDepth / (std::max)(weightSum, 1e-6f);
-                    // Conflicting neighbor envelopes can occur during the first
-                    // few iterations around a tall isolated deposit. Collapse
-                    // them toward their midpoint, then converge normally.
-                    if (minimumAllowed > maximumAllowed) {
-                        const float midpoint = (minimumAllowed + maximumAllowed) * 0.5f;
-                        minimumAllowed = midpoint;
-                        maximumAllowed = midpoint;
+                    if (minimumSurface > maximumSurface) {
+                        const float midpoint = (minimumSurface + maximumSurface) * 0.5f;
+                        minimumSurface = midpoint;
+                        maximumSurface = midpoint;
                     }
-                    const float smoothed = geometryDepth[index] * 0.45f + localAverage * 0.55f;
+                    const float localAverage = weightedSurface / (std::max)(weightSum, 1e-6f);
+                    const float relaxedSurface = ownSurface * 0.35f + localAverage * 0.65f;
                     nextGeometryDepth[index] = clampValue(
-                        smoothed, minimumAllowed, maximumAllowed);
+                        clampValue(relaxedSurface, minimumSurface, maximumSurface) - baseMeters[index],
+                        0.0f, geometryDepthCap);
                 }
             }
             geometryDepth.swap(nextGeometryDepth);
@@ -7193,6 +8431,10 @@ namespace TerrainNodesV2 {
         edited |= ImGui::DragFloat("Temperature", &baseTemperature, 0.25f, -80.0f, 60.0f, "%.1f C");
         edited |= ImGui::SliderFloat("Melt", &meltAmount, 0.0f, 1.0f);
         edited |= ImGui::SliderFloat("Wind", &windStrength, 0.0f, 1.0f);
+        if (ImGui::Checkbox("GPU Compute", &useGPU)) dirty = true;
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Uses Vulkan compute for 256x256 and larger maps. Falls back to the deterministic CPU solver if unavailable.");
+        }
 
         if (ImGui::TreeNode("Advanced Climate & Flow")) {
             edited |= ImGui::Checkbox("Relative Snow Line", &relativeSnowLine);
@@ -7557,6 +8799,9 @@ namespace TerrainNodesV2 {
         NodeSystem::AutoRegisterNode<HeightmapInputNode>     reg_HeightmapInput("TerrainV2.HeightmapInput");
         NodeSystem::AutoRegisterNode<HardnessInputNode>      reg_HardnessInput("TerrainV2.HardnessInput");
         NodeSystem::AutoRegisterNode<NoiseGeneratorNode>     reg_NoiseGenerator("TerrainV2.NoiseGenerator");
+        NodeSystem::AutoRegisterNode<MountainRangeNode>      reg_MountainRange("TerrainV2.MountainRange");
+        NodeSystem::AutoRegisterNode<BasinValleyNode>        reg_BasinValley("TerrainV2.BasinValley");
+        NodeSystem::AutoRegisterNode<TerrainDetailNode>      reg_TerrainDetail("TerrainV2.TerrainDetail");
         NodeSystem::AutoRegisterNode<HydraulicErosionNode>   reg_HydraulicErosion("TerrainV2.HydraulicErosion");
         NodeSystem::AutoRegisterNode<ThermalErosionNode>     reg_ThermalErosion("TerrainV2.ThermalErosion");
         NodeSystem::AutoRegisterNode<FluvialErosionNode>     reg_FluvialErosion("TerrainV2.FluvialErosion");
@@ -7590,6 +8835,7 @@ namespace TerrainNodesV2 {
         NodeSystem::AutoRegisterNode<RiverHydraulicsNode>    reg_RiverHydraulics("TerrainV2.RiverHydraulics");
         NodeSystem::AutoRegisterNode<RiverSplineOutputNode>  reg_RiverSplineOutput("TerrainV2.RiverSplineOutput");
         NodeSystem::AutoRegisterNode<RiverBedCarveNode>      reg_RiverBedCarve("TerrainV2.RiverBedCarve");
+        NodeSystem::AutoRegisterNode<RiverLakeEasyNode>      reg_RiverLakeEasy("TerrainV2.RiverLakeEasy");
         NodeSystem::AutoRegisterNode<SmoothNode>             reg_Smooth("TerrainV2.Smooth");
         NodeSystem::AutoRegisterNode<NormalizeNode>          reg_Normalize("TerrainV2.Normalize");
         NodeSystem::AutoRegisterNode<TerraceNode>            reg_Terrace("TerrainV2.Terrace");
@@ -7632,6 +8878,9 @@ namespace TerrainNodesV2 {
         switch (type) {
             case NodeType::HeightmapInput: node = addNode<HeightmapInputNode>(); break;
             case NodeType::NoiseGenerator: node = addNode<NoiseGeneratorNode>(); break;
+            case NodeType::MountainRange: node = addNode<MountainRangeNode>(); break;
+            case NodeType::BasinValley: node = addNode<BasinValleyNode>(); break;
+            case NodeType::TerrainDetail: node = addNode<TerrainDetailNode>(); break;
             case NodeType::HydraulicErosion: node = addNode<HydraulicErosionNode>(); break;
             case NodeType::ThermalErosion: node = addNode<ThermalErosionNode>(); break;
             case NodeType::FluvialErosion: node = addNode<FluvialErosionNode>(); break;
@@ -7675,6 +8924,7 @@ namespace TerrainNodesV2 {
             case NodeType::RiverHydraulics: node = addNode<RiverHydraulicsNode>(); break;
             case NodeType::RiverSplineOutput: node = addNode<RiverSplineOutputNode>(); break;
             case NodeType::RiverBedCarve: node = addNode<RiverBedCarveNode>(); break;
+            case NodeType::RiverLakeEasy: node = addNode<RiverLakeEasyNode>(); break;
             // NEW OPERATORS
             case NodeType::Smooth: node = addNode<SmoothNode>(); break;
             case NodeType::Normalize: node = addNode<NormalizeNode>(); break;
@@ -7826,8 +9076,8 @@ namespace TerrainNodesV2 {
         float preserved_scale_y = terrain->heightmap.scale_y;
 
         // Force valid scale values immediately - repair broken terrain state
-        if (preserved_scale_xz < 1.0f) preserved_scale_xz = 100.0f;
-        if (preserved_scale_y < 0.1f) preserved_scale_y = 10.0f;
+        if (!std::isfinite(preserved_scale_xz) || preserved_scale_xz < 1.0f) preserved_scale_xz = 100.0f;
+        if (!std::isfinite(preserved_scale_y) || preserved_scale_y < 0.1f) preserved_scale_y = 10.0f;
 
         // IMMEDIATELY apply valid scales to terrain (repair before evaluation)
         terrain->heightmap.scale_xz = preserved_scale_xz;
@@ -7899,8 +9149,16 @@ namespace TerrainNodesV2 {
             terrain->heightmap.data.resize(heightData.width * heightData.height);
         }
 
-        // Copy data directly to terrain
+        // Never publish non-finite vertex heights. Even one NaN/Inf expands or
+        // invalidates acceleration-structure bounds and appears as giant blocks
+        // in front of the camera. Solver nodes perform stronger source-relative
+        // validation; this is the final graph-boundary safety net.
         terrain->heightmap.data = *heightData.data;
+        const size_t repairedSamples = repairNonFiniteHeightField(terrain->heightmap.data);
+        if (repairedSamples != 0) {
+            SCENE_LOG_WARN("[Terrain Graph] Repaired " + std::to_string(repairedSamples) +
+                " non-finite output height samples before mesh/BVH publication.");
+        }
 
         const size_t pixelCount = static_cast<size_t>(heightData.width) * heightData.height;
         if (terrain->flowMap.size() != pixelCount) terrain->flowMap.clear();
@@ -8151,6 +9409,53 @@ namespace TerrainNodesV2 {
         return evaluatedAny;
     }
 
+    bool TerrainNodeGraphV2::evaluateInspectorImageOutput(
+        uint32_t nodeId, int outputIndex, TerrainObject* terrain,
+        NodeSystem::Image2DData& image) {
+        if (!terrain || isEvaluatingAsync()) return false;
+        NodeSystem::NodeBase* node = getNode(nodeId);
+        if (!node || outputIndex < 0 || outputIndex >= static_cast<int>(node->outputs.size())) {
+            return false;
+        }
+
+        TerrainObject scratchTerrain;
+        scratchTerrain.id = terrain->id;
+        scratchTerrain.name = terrain->name + "##FieldPreview";
+        scratchTerrain.heightmap = terrain->heightmap;
+        scratchTerrain.original_heightmap_data = terrain->original_heightmap_data;
+        scratchTerrain.hardnessMap = terrain->hardnessMap;
+        scratchTerrain.flowMap = terrain->flowMap;
+        scratchTerrain.erosionMapRGBA = terrain->erosionMapRGBA;
+        scratchTerrain.defer_mesh_updates = true;
+
+        TerrainContext scratchContext(&scratchTerrain);
+        scratchContext.publishTerrainState = false;
+        NodeSystem::EvaluationContext localContext(this);
+        NodeSystem::EvaluationContext* evaluation = cachedEvalContext_
+            ? cachedEvalContext_.get() : &localContext;
+
+        std::vector<std::pair<NodeSystem::NodeBase*, bool>> dirtySnapshot;
+        dirtySnapshot.reserve(nodes.size());
+        for (const auto& graphNode : nodes) {
+            dirtySnapshot.emplace_back(graphNode.get(), graphNode->dirty);
+        }
+
+        evaluation->setDomainContext(&scratchContext);
+        evaluation->clearErrors();
+        NodeSystem::PinValue result = node->requestOutput(outputIndex, *evaluation);
+        for (const auto& [graphNode, wasDirty] : dirtySnapshot) {
+            graphNode->dirty = wasDirty;
+        }
+        if (evaluation == cachedEvalContext_.get()) {
+            evaluation->setDomainContext(cachedTerrainCtx_.get());
+        }
+
+        const auto* computed = std::get_if<NodeSystem::Image2DData>(&result);
+        if (!computed || !computed->isValid()) return false;
+        image = *computed;
+        return true;
+    }
+
     bool TerrainNodeGraphV2::evaluateDirtyFoliageOutputs(TerrainObject* terrain) {
         if (!terrain || isEvaluatingAsync() || previewActive_ || !cachedEvalContext_) return false;
         if (classifyDirtyEvaluationImpact() != DirtyEvaluationImpact::FoliageOnly) return false;
@@ -8243,26 +9548,37 @@ namespace TerrainNodesV2 {
 
         TerrainContext tctx(terrain);
         captureTerrainSceneSun(tctx, scene);
-        NodeSystem::EvaluationContext ctx(this);
-        ctx.setDomainContext(&tctx);
+        auto evaluation = std::make_shared<NodeSystem::EvaluationContext>(this);
+        evaluation->setDomainContext(&tctx);
 
         // CRITICAL FIX: Clear cache and mark all nodes dirty before evaluation
         // Without this, intermediate nodes (deformation nodes) may be skipped
         // because their cached values would be reused instead of recomputing
-        ctx.clearCache();
-        ctx.clearErrors();
+        evaluation->clearCache();
+        evaluation->clearErrors();
         markAllDirty();
-        ctx.setTotalNodes(static_cast<int>(nodeCount()));
+        evaluation->setTotalNodes(static_cast<int>(nodeCount()));
 
         // Evaluate secondary outputs first (Splat, Hardness) — matches the
         // original synchronous order. Order doesn't affect correctness since any
         // node shared between chains is memoized in ctx regardless of which
         // chain visits it first; kept for behavioral parity with before.
-        bool updated = evaluateTerrainHeightData(terrain, ctx);
+        bool updated = evaluateTerrainHeightData(terrain, *evaluation);
         if (updated) {
             TerrainManager::getInstance().resizeSplatMap(terrain);
-            evaluateTerrainAuxOutputs(terrain, scene, ctx);
+            evaluateTerrainAuxOutputs(terrain, scene, *evaluation);
             finalizeTerrainMesh(scene, terrain);
+
+            // Project-load evaluation is also a valid committed cache baseline.
+            // Retaining it prevents the first interactive edit after loading an
+            // existing project from degenerating into an avoidable full graph run.
+            cachedTerrainCtx_ = std::make_unique<TerrainContext>(terrain);
+            captureTerrainSceneSun(*cachedTerrainCtx_, scene);
+            evaluation->setDomainContext(cachedTerrainCtx_.get());
+            cachedEvalContext_ = std::move(evaluation);
+        } else {
+            cachedEvalContext_.reset();
+            cachedTerrainCtx_.reset();
         }
     }
 
@@ -8272,29 +9588,47 @@ namespace TerrainNodesV2 {
             // Already running — ignore re-entrant clicks.
             return;
         }
+        lastAsyncEvaluationCancelled_ = false;
+        lastAsyncEvaluationError_.clear();
 
+        const uint32_t previewDirtyRoot = previewActive_ ? displayedPreviewNodeId_ : 0u;
         if (previewActive_) {
             restoreCommittedTerrainData(terrain);
             clearCommittedPreviewSnapshot();
+            // A selected-node preview may have cleared the dirty bit of its
+            // temporary terminal. Re-arm that exact downstream chain before
+            // committing so stateful erosion side data is published again.
+            if (previewDirtyRoot != 0) markDirtyDownstream(previewDirtyRoot);
         }
 
         activeTerrainCtx_ = std::make_unique<TerrainContext>(terrain);
         captureTerrainSceneSun(*activeTerrainCtx_, scene);
-        activeEvalContext = std::make_shared<NodeSystem::EvaluationContext>(this);
+        const bool cacheMatchesTerrain = cachedEvalContext_ && cachedTerrainCtx_ &&
+            cachedTerrainCtx_->width == activeTerrainCtx_->width &&
+            cachedTerrainCtx_->height == activeTerrainCtx_->height &&
+            std::abs(cachedTerrainCtx_->scale_xz - activeTerrainCtx_->scale_xz) < 1.0e-6f &&
+            std::abs(cachedTerrainCtx_->scale_y - activeTerrainCtx_->scale_y) < 1.0e-6f;
+        if (cacheMatchesTerrain) {
+            activeEvalContext = std::move(cachedEvalContext_);
+        } else {
+            activeEvalContext = std::make_shared<NodeSystem::EvaluationContext>(this);
+            activeEvalContext->clearCache();
+            markAllDirty();
+        }
+        cachedTerrainCtx_.reset();
         activeEvalContext->setDomainContext(activeTerrainCtx_.get());
-        activeEvalContext->clearCache();
         activeEvalContext->clearErrors();
-        markAllDirty();
-        activeEvalContext->setTotalNodes(static_cast<int>(nodeCount()));
+        const int dirtyNodeCount = static_cast<int>(std::count_if(
+            nodes.begin(), nodes.end(), [](const auto& node) {
+                return node && node->dirty;
+            }));
+        activeEvalContext->setTotalNodes((std::max)(1, dirtyNodeCount));
 
         pendingFinalizeTerrain_ = terrain;
         pendingFinalizeScene_ = &scene;
         lastHeightDataUpdated_.store(false);
         pendingEvaluationIsPreview_ = false;
         pendingPreviewNodeId_ = 0;
-        cachedEvalContext_.reset();
-        cachedTerrainCtx_.reset();
-
         // Worker thread only ever touches terrain->heightmap and the node graph's
         // cached PinValues (see evaluateTerrainHeightData's doc comment) — no
         // scene/world/GPU access here.
@@ -8371,7 +9705,13 @@ namespace TerrainNodesV2 {
 
         try {
             evalFuture_.get(); // join worker
+            lastAsyncEvaluationCancelled_ = activeEvalContext && activeEvalContext->isCancelled();
+            if (activeEvalContext && activeEvalContext->hasErrors()) {
+                const auto& errors = activeEvalContext->getErrors();
+                if (!errors.empty()) lastAsyncEvaluationError_ = errors.front().message;
+            }
         } catch (const std::exception& e) {
+            lastAsyncEvaluationError_ = e.what();
             SCENE_LOG_ERROR(std::string("Terrain node evaluation failed: ") + e.what());
             pendingFinalizeTerrain_ = nullptr;
             pendingFinalizeScene_ = nullptr;
@@ -8383,6 +9723,7 @@ namespace TerrainNodesV2 {
             cachedTerrainCtx_ = std::move(activeTerrainCtx_);
             return false;
         } catch (...) {
+            lastAsyncEvaluationError_ = "unknown terrain node evaluation error";
             SCENE_LOG_ERROR("Terrain node evaluation failed with an unknown exception.");
             pendingFinalizeTerrain_ = nullptr;
             pendingFinalizeScene_ = nullptr;
@@ -8498,7 +9839,8 @@ namespace TerrainNodesV2 {
 
         void layoutAutoManagedTerrainLayers(TerrainNodeGraphV2& graph) {
             static constexpr const char* kLayerOrder[] = {
-                "01 Analysis", "02 Biome", "03 River", "04 Lakes", "05 Snow", "06 Outputs"
+                "01 Analysis", "02 Biome", "03 River", "04 Lakes",
+                "05 Foliage", "05 Snow", "06 Outputs"
             };
             auto estimatedNodeSize = [](const NodeSystem::NodeBase& node) {
                 int inputs = 0, outputs = 0;
@@ -8507,10 +9849,42 @@ namespace TerrainNodesV2 {
                 const float custom = node.getCustomWidth();
                 const float width = node.uiWidth > 0.0f ? node.uiWidth
                     : (custom > 0.0f ? custom : 180.0f);
-                const float height = node.collapsed ? 34.0f
+                float height = node.collapsed ? 34.0f
                     : 54.0f + 22.0f * static_cast<float>(std::max(inputs, outputs));
+                // Pin count alone badly underestimates property-heavy preset
+                // nodes. Reserve their real inspector footprint so generated
+                // layers never place the next node inside an expanded panel.
+                if (!node.collapsed) {
+                    height = std::max(height, 260.0f);
+                    if (dynamic_cast<const RiverHydraulicsNode*>(&node)) height = std::max(height, 560.0f);
+                    else if (dynamic_cast<const SnowClimateNode*>(&node)) height = std::max(height, 620.0f);
+                    else if (dynamic_cast<const SurfaceComposerNode*>(&node)) height = std::max(height, 430.0f);
+                    else if (dynamic_cast<const BiomeComposerNode*>(&node)) height = std::max(height, 430.0f);
+                    else if (dynamic_cast<const FoliageLayerNode*>(&node)) height = std::max(height, 520.0f);
+                }
                 return ImVec2(width, height);
             };
+
+            // Easy controllers live outside the expert layers. Place them
+            // after the artist-authored chain first; otherwise their fixed
+            // preset coordinates can land directly on existing nodes.
+            float authoredMaxX = 40.0f;
+            float authoredMinY = FLT_MAX;
+            for (const auto& node : graph.nodes) {
+                if (dynamic_cast<RiverLakeEasyNode*>(node.get())) continue;
+                const NodeSystem::NodeGroup* group = node->groupId ? graph.getGroup(node->groupId) : nullptr;
+                if (group && group->comment == "Auto-managed terrain layer") continue;
+                authoredMaxX = std::max(authoredMaxX, node->x + estimatedNodeSize(*node).x);
+                authoredMinY = std::min(authoredMinY, node->y);
+            }
+            if (authoredMinY == FLT_MAX) authoredMinY = 80.0f;
+            float controllerX = authoredMaxX + 90.0f;
+            for (const auto& node : graph.nodes) {
+                if (!dynamic_cast<RiverLakeEasyNode*>(node.get()) || node->groupId != 0) continue;
+                node->x = controllerX;
+                node->y = authoredMinY;
+                controllerX += estimatedNodeSize(*node).x + 70.0f;
+            }
 
             // Put generated stages after the authored/base chain, never on top of it.
             float stageX = 40.0f;
@@ -8586,7 +9960,19 @@ namespace TerrainNodesV2 {
         }
         if (heightSourcePin == 0) return false;
 
+        const auto sourcePinForInput = [&](uint32_t inputPin) -> uint32_t {
+            for (const auto& link : links) {
+                if (link.endPinId == inputPin) return link.startPinId;
+            }
+            return 0;
+        };
+        RiverLakeEasyNode* riverEasy = nullptr;
+        for (const auto& node : nodes) {
+            if ((riverEasy = dynamic_cast<RiverLakeEasyNode*>(node.get()))) break;
+        }
+
         SnowClimateNode* snow = dynamic_cast<SnowClimateNode*>(getPinOwner(heightSourcePin));
+        RiverBedCarveNode* terminalCarve = dynamic_cast<RiverBedCarveNode*>(getPinOwner(heightSourcePin));
         uint32_t baseHeightPin = heightSourcePin;
         if (snow && !snow->outputs.empty() && snow->outputs[0].id == heightSourcePin) {
             // Setup already has a snow geometry terminal. Recover its immutable
@@ -8601,11 +9987,51 @@ namespace TerrainNodesV2 {
                 }
             }
             if (baseHeightPin == 0) return false;
+
+            // Migrate the legacy order ground -> river -> snow -> output into
+            // ground -> snow -> river -> output. Snowmelt can then feed the
+            // upstream hydrology controller without closing a DAG cycle.
+            if (auto* upstreamCarve = dynamic_cast<RiverBedCarveNode*>(getPinOwner(baseHeightPin))) {
+                if (!upstreamCarve->inputs.empty() && upstreamCarve->outputs.size() >= 1) {
+                    const uint32_t groundPin = sourcePinForInput(upstreamCarve->inputs[0].id);
+                    if (groundPin == 0) return false;
+                    addLink(groundPin, snow->inputs[0].id);
+                    addLink(snow->outputs[0].id, upstreamCarve->inputs[0].id);
+                    addLink(upstreamCarve->outputs[0].id, heightInputPin);
+                    baseHeightPin = groundPin;
+                    terminalCarve = upstreamCarve;
+                }
+            }
+        } else if (terminalCarve && !terminalCarve->inputs.empty()) {
+            // River already owns Height Output. Insert snow before the carve so
+            // visible snow is cut by the channel while its Meltwater output
+            // remains upstream of every hydrology consumer.
+            const uint32_t carveInputPin = sourcePinForInput(terminalCarve->inputs[0].id);
+            if (carveInputPin == 0) return false;
+            snow = dynamic_cast<SnowClimateNode*>(getPinOwner(carveInputPin));
+            if (snow && !snow->outputs.empty() && snow->outputs[0].id == carveInputPin) {
+                baseHeightPin = sourcePinForInput(snow->inputs[0].id);
+                if (baseHeightPin == 0) return false;
+            } else {
+                baseHeightPin = carveInputPin;
+                snow = dynamic_cast<SnowClimateNode*>(addTerrainNode(NodeType::SnowClimate, x, y));
+                if (!snow || snow->inputs.empty() || snow->outputs.size() < 4) return false;
+                addLink(baseHeightPin, snow->inputs[0].id);
+                addLink(snow->outputs[0].id, terminalCarve->inputs[0].id);
+            }
         } else {
             snow = dynamic_cast<SnowClimateNode*>(addTerrainNode(NodeType::SnowClimate, x, y));
             if (!snow || snow->inputs.empty() || snow->outputs.size() < 4) return false;
             addLink(baseHeightPin, snow->inputs[0].id);
             addLink(snow->outputs[0].id, heightInputPin);
+        }
+
+        if (riverEasy && riverEasy->inputs.size() >= 2 && snow && snow->outputs.size() >= 4) {
+            const uint32_t existingWaterSource = sourcePinForInput(riverEasy->inputs[1].id);
+            if (existingWaterSource == 0 ||
+                dynamic_cast<SnowClimateNode*>(getPinOwner(existingWaterSource))) {
+                addLink(snow->outputs[3].id, riverEasy->inputs[1].id);
+            }
         }
 
         SurfaceComposerNode* composer = nullptr;
@@ -8907,8 +10333,14 @@ namespace TerrainNodesV2 {
     }
 
     bool TerrainNodeGraphV2::addRiverNetworkSetup(float x, float y) {
+        // The guide watershed is a separate instance dedicated to Fluvial
+        // Erosion's Flow Guide; it must stay on the un-eroded base height to
+        // remain acyclic. It is identified by name across setup re-runs.
+        static constexpr const char* kGuideWatershedName = "Watershed (Erosion Guide)";
         HeightOutputNode* heightOutput = nullptr;
         WatershedAnalysisNode* watershed = nullptr;
+        WatershedAnalysisNode* guideWatershed = nullptr;
+        RiverLakeEasyNode* easy = nullptr;
         LakeBasinNode* lakeBasin = nullptr;
         LakeSurfaceOutputNode* lakeSurfaceOutput = nullptr;
         RiverNetworkNode* network = nullptr;
@@ -8922,7 +10354,14 @@ namespace TerrainNodesV2 {
         SurfaceComposerNode* surfaceComposer = nullptr;
         for (const auto& node : nodes) {
             if (!heightOutput) heightOutput = dynamic_cast<HeightOutputNode*>(node.get());
-            if (!watershed) watershed = dynamic_cast<WatershedAnalysisNode*>(node.get());
+            if (!easy) easy = dynamic_cast<RiverLakeEasyNode*>(node.get());
+            if (auto* candidateWatershed = dynamic_cast<WatershedAnalysisNode*>(node.get())) {
+                if (candidateWatershed->name == kGuideWatershedName) {
+                    if (!guideWatershed) guideWatershed = candidateWatershed;
+                } else if (!watershed) {
+                    watershed = candidateWatershed;
+                }
+            }
             if (!lakeBasin) lakeBasin = dynamic_cast<LakeBasinNode*>(node.get());
             if (!lakeSurfaceOutput) lakeSurfaceOutput = dynamic_cast<LakeSurfaceOutputNode*>(node.get());
             if (!network) network = dynamic_cast<RiverNetworkNode*>(node.get());
@@ -8946,6 +10385,13 @@ namespace TerrainNodesV2 {
         }
         if (authoredHeightPin == 0) return false;
 
+        const auto riverSourcePinForInput = [&](uint32_t inputPin) -> uint32_t {
+            for (const auto& link : links) {
+                if (link.endPinId == inputPin) return link.startPinId;
+            }
+            return 0;
+        };
+
         // Re-running the setup repairs/reuses the existing branch instead of
         // feeding its carved result back into watershed analysis.
         if (auto* existingCarve = dynamic_cast<RiverBedCarveNode*>(getPinOwner(authoredHeightPin))) {
@@ -8960,6 +10406,29 @@ namespace TerrainNodesV2 {
             }
         }
 
+        // Canonical snow/hydrology order:
+        // ground -> Snow, ground + Meltwater -> hydrology, Snow surface +
+        // hydrology fields -> River Bed Carve. This is acyclic and independent
+        // of which preset the artist added first.
+        SnowClimateNode* hydrologySnow = dynamic_cast<SnowClimateNode*>(getPinOwner(authoredHeightPin));
+        uint32_t hydrologyGroundPin = authoredHeightPin;
+        if (hydrologySnow && !hydrologySnow->inputs.empty() && hydrologySnow->outputs.size() >= 4 &&
+            hydrologySnow->outputs[0].id == authoredHeightPin) {
+            uint32_t snowInputPin = riverSourcePinForInput(hydrologySnow->inputs[0].id);
+            if (auto* upstreamCarve = dynamic_cast<RiverBedCarveNode*>(getPinOwner(snowInputPin))) {
+                if (!upstreamCarve->inputs.empty() && !upstreamCarve->outputs.empty()) {
+                    const uint32_t groundPin = riverSourcePinForInput(upstreamCarve->inputs[0].id);
+                    if (groundPin == 0) return false;
+                    addLink(groundPin, hydrologySnow->inputs[0].id);
+                    addLink(hydrologySnow->outputs[0].id, upstreamCarve->inputs[0].id);
+                    addLink(upstreamCarve->outputs[0].id, heightOutput->inputs[0].id);
+                    carve = upstreamCarve;
+                    snowInputPin = groundPin;
+                }
+            }
+            if (snowInputPin != 0) hydrologyGroundPin = snowInputPin;
+        }
+
         // If the authored branch already contains Fluvial Erosion, solve the
         // watershed from its un-eroded input and feed that accumulation back as
         // a guide. This ordering is acyclic:
@@ -8967,7 +10436,7 @@ namespace TerrainNodesV2 {
         FluvialErosionNode* guidedFluvial = nullptr;
         std::vector<NodeSystem::NodeBase*> searchStack;
         std::unordered_set<uint32_t> visitedNodes;
-        if (auto* owner = getPinOwner(authoredHeightPin)) searchStack.push_back(owner);
+        if (auto* owner = getPinOwner(hydrologyGroundPin)) searchStack.push_back(owner);
         while (!searchStack.empty() && !guidedFluvial) {
             NodeSystem::NodeBase* current = searchStack.back();
             searchStack.pop_back();
@@ -8985,7 +10454,7 @@ namespace TerrainNodesV2 {
             }
         }
 
-        uint32_t hydrologyHeightPin = authoredHeightPin;
+        uint32_t hydrologyHeightPin = hydrologyGroundPin;
         if (guidedFluvial && !guidedFluvial->inputs.empty()) {
             for (const auto& link : links) {
                 if (link.endPinId == guidedFluvial->inputs[0].id) {
@@ -8997,6 +10466,8 @@ namespace TerrainNodesV2 {
 
         if (!watershed) watershed = dynamic_cast<WatershedAnalysisNode*>(
             addTerrainNode(NodeType::WatershedAnalysis, x, y));
+        if (!easy) easy = dynamic_cast<RiverLakeEasyNode*>(
+            addTerrainNode(NodeType::RiverLakeEasy, x - 310.0f, y - 80.0f));
         if (!lakeBasin) lakeBasin = dynamic_cast<LakeBasinNode*>(
             addTerrainNode(NodeType::LakeBasin, x + 280.0f, y + 390.0f));
         if (!lakeSurfaceOutput) lakeSurfaceOutput = dynamic_cast<LakeSurfaceOutputNode*>(
@@ -9017,37 +10488,70 @@ namespace TerrainNodesV2 {
             addTerrainNode(NodeType::FlowMask, x - 310.0f, y + 470.0f));
         if (!soilDepth) soilDepth = dynamic_cast<SoilDepthNode*>(
             addTerrainNode(NodeType::SoilDepth, x - 40.0f, y + 470.0f));
-        if (!watershed || !lakeBasin || !lakeSurfaceOutput || !network || !hydraulics || !splineOutput || !carve ||
-            watershed->inputs.empty() || watershed->outputs.size() < 5 ||
+        if (!easy || !watershed || !lakeBasin || !lakeSurfaceOutput || !network || !hydraulics || !splineOutput || !carve ||
+            easy->inputs.size() < 2 || easy->outputs.size() < 2 ||
+            watershed->inputs.size() < 2 || watershed->outputs.size() < 5 ||
             lakeBasin->inputs.size() < 3 || lakeBasin->outputs.size() < 6 ||
             lakeSurfaceOutput->inputs.size() < 4 ||
-            network->inputs.size() < 2 || network->outputs.size() < 3 ||
+            network->inputs.size() < 3 || network->outputs.size() < 3 ||
             hydraulics->inputs.size() < 7 || hydraulics->outputs.size() < 7 ||
-            splineOutput->inputs.size() < 13 || carve->inputs.size() < 6 || carve->outputs.size() < 2 ||
+            splineOutput->inputs.size() < 13 || carve->inputs.size() < 7 || carve->outputs.size() < 2 ||
             !fields || fields->inputs.size() < 30 || !terrainAnalysis ||
             terrainAnalysis->inputs.empty() || terrainAnalysis->outputs.size() < 5 ||
             !flowMask || flowMask->inputs.empty() || flowMask->outputs.empty() ||
             !soilDepth || soilDepth->inputs.size() < 2 || soilDepth->outputs.empty()) return false;
 
-        addLink(hydrologyHeightPin, watershed->inputs[0].id);
-        addLink(hydrologyHeightPin, lakeBasin->inputs[0].id);
+        // Hydrology must analyze the terrain the rivers will actually inhabit.
+        // The MAIN watershed and every downstream hydrology consumer read the
+        // eroded ground surface before transient snow geometry. Fluvial's Flow
+        // Guide instead comes from a dedicated GUIDE
+        // watershed on the un-eroded base — the only wiring that is acyclic.
+        // Previously the main watershed also ran pre-erosion, so the extracted
+        // channels disagreed with the fluvially carved beds (flow-vs-carve
+        // mismatch), and connecting erosion output to it was refused as a cycle.
+        if (guidedFluvial && guidedFluvial->inputs.size() >= 4) {
+            if (!guideWatershed) guideWatershed = dynamic_cast<WatershedAnalysisNode*>(
+                addTerrainNode(NodeType::WatershedAnalysis, x - 310.0f, y - 140.0f));
+            if (guideWatershed && !guideWatershed->inputs.empty() &&
+                guideWatershed->outputs.size() >= 2) {
+                guideWatershed->name = kGuideWatershedName;
+                // Break the legacy main-watershed -> fluvial guide link first,
+                // otherwise linking eroded height into the main watershed below
+                // would be refused as a cycle.
+                removeLinkToInput(guidedFluvial->inputs[3].id);
+                addLink(hydrologyHeightPin, guideWatershed->inputs[0].id);
+                addLink(guideWatershed->outputs[1].id, guidedFluvial->inputs[3].id);
+            }
+        }
+        // The easy controller is deliberately a data pass-through. Keeping it
+        // upstream makes preset edits invalidate the complete detailed branch
+        // without duplicating any hydrology implementation.
+        addLink(hydrologyGroundPin, easy->inputs[0].id);
+        if (hydrologySnow && hydrologySnow->outputs.size() >= 4) {
+            const uint32_t existingWaterSource = riverSourcePinForInput(easy->inputs[1].id);
+            if (existingWaterSource == 0 ||
+                dynamic_cast<SnowClimateNode*>(getPinOwner(existingWaterSource))) {
+                addLink(hydrologySnow->outputs[3].id, easy->inputs[1].id);
+            }
+        }
+        addLink(easy->outputs[0].id, watershed->inputs[0].id);
+        addLink(easy->outputs[1].id, watershed->inputs[1].id);
+        addLink(easy->outputs[0].id, lakeBasin->inputs[0].id);
         addLink(watershed->outputs[0].id, lakeBasin->inputs[1].id);
         addLink(watershed->outputs[2].id, lakeBasin->inputs[2].id);
         addLink(lakeBasin->outputs[0].id, lakeSurfaceOutput->inputs[0].id);
         addLink(lakeBasin->outputs[1].id, lakeSurfaceOutput->inputs[1].id);
         addLink(lakeBasin->outputs[2].id, lakeSurfaceOutput->inputs[2].id);
         addLink(lakeBasin->outputs[5].id, lakeSurfaceOutput->inputs[3].id);
-        if (guidedFluvial && guidedFluvial->inputs.size() >= 4) {
-            addLink(watershed->outputs[1].id, guidedFluvial->inputs[3].id);
-        }
         addLink(watershed->outputs[1].id, network->inputs[0].id);
         addLink(watershed->outputs[2].id, network->inputs[1].id);
-        addLink(hydrologyHeightPin, terrainAnalysis->inputs[0].id);
+        addLink(watershed->outputs[4].id, network->inputs[2].id);
+        addLink(hydrologyGroundPin, terrainAnalysis->inputs[0].id);
         if (terrainAnalysis->inputs.size() >= 2) {
             addLink(watershed->outputs[1].id, terrainAnalysis->inputs[1].id);
         }
-        addLink(hydrologyHeightPin, flowMask->inputs[0].id);
-        addLink(hydrologyHeightPin, soilDepth->inputs[0].id);
+        addLink(hydrologyGroundPin, flowMask->inputs[0].id);
+        addLink(hydrologyGroundPin, soilDepth->inputs[0].id);
         addLink(flowMask->outputs[0].id, soilDepth->inputs[1].id);
         if (surfaceComposer && surfaceComposer->inputs.size() >= 10) {
             addLink(soilDepth->outputs[0].id, surfaceComposer->inputs[1].id);
@@ -9063,7 +10567,7 @@ namespace TerrainNodesV2 {
         addLink(authoredHeightPin, carve->inputs[0].id);
         addLink(network->outputs[0].id, carve->inputs[1].id);
         addLink(carve->outputs[0].id, heightOutput->inputs[0].id);
-        addLink(authoredHeightPin, hydraulics->inputs[0].id);
+        addLink(easy->outputs[0].id, hydraulics->inputs[0].id);
         addLink(watershed->outputs[4].id, hydraulics->inputs[1].id);
         addLink(watershed->outputs[2].id, hydraulics->inputs[2].id);
         addLink(network->outputs[0].id, hydraulics->inputs[3].id);
@@ -9074,6 +10578,7 @@ namespace TerrainNodesV2 {
         addLink(hydraulics->outputs[2].id, carve->inputs[3].id);
         addLink(hydrologyHeightPin, carve->inputs[4].id);
         addLink(hydraulics->outputs[4].id, carve->inputs[5].id);
+        addLink(lakeBasin->outputs[0].id, carve->inputs[6].id);
         addLink(hydraulics->outputs[1].id, splineOutput->inputs[6].id);
         addLink(hydraulics->outputs[2].id, splineOutput->inputs[7].id);
         addLink(hydraulics->outputs[3].id, splineOutput->inputs[8].id);
@@ -9100,6 +10605,14 @@ namespace TerrainNodesV2 {
                     fields->inputs[static_cast<size_t>(23 + i)].id);
         }
 
+        easy->watershedNodeId = watershed->id;
+        easy->lakeBasinNodeId = lakeBasin->id;
+        easy->lakeOutputNodeId = lakeSurfaceOutput->id;
+        easy->networkNodeId = network->id;
+        easy->hydraulicsNodeId = hydraulics->id;
+        easy->carveNodeId = carve->id;
+        easy->splineOutputNodeId = splineOutput->id;
+
         ensureTerrainLayerGroup(*this, "01 Analysis", IM_COL32(70, 105, 135, 90),
                                 {terrainAnalysis, flowMask, soilDepth});
         ensureTerrainLayerGroup(*this, "03 River", IM_COL32(32, 105, 175, 90),
@@ -9108,6 +10621,11 @@ namespace TerrainNodesV2 {
                                 {lakeBasin, lakeSurfaceOutput});
         ensureTerrainLayerGroup(*this, "06 Outputs", IM_COL32(105, 90, 130, 90),
                                 {heightOutput, fields, surfaceComposer});
+        // The controller stays visible while expert nodes start folded away.
+        // Expanding either layer exposes every original detailed control.
+        for (auto& group : groups) {
+            if (group.name == "03 River" || group.name == "04 Lakes") group.collapsed = true;
+        }
         layoutAutoManagedTerrainLayers(*this);
         markAllDirty();
         return true;
@@ -9135,6 +10653,7 @@ namespace TerrainNodesV2 {
         }
 
         noise->noiseType = NoiseType::Ridge;
+        noise->heightMode = NoiseHeightMode::LegacyAmplitude;
         noise->seed = 1847;
         noise->scale = 0.75f;
         noise->frequency = 0.012f;
@@ -9206,6 +10725,7 @@ namespace TerrainNodesV2 {
         j["nextPinId"] = nextPinId;
         j["nextLinkId"] = nextLinkId;
         j["nextGroupId"] = nextGroupId;
+        j["nextPortalId"] = nextPortalId;
         
         // Save nodes
         nlohmann::json nodesArray = nlohmann::json::array();
@@ -9278,13 +10798,29 @@ namespace TerrainNodesV2 {
                     {"externalPinId", port.externalPinId},
                     {"dataType", static_cast<int>(port.dataType)},
                     {"imageSemantic", static_cast<int>(port.imageSemantic)},
-                    {"imageChannels", port.imageChannels}
+                    {"imageChannels", port.imageChannels},
+                    {"imageUnit", static_cast<int>(port.imageUnit)}
                 });
             }
             groupJson["interfacePorts"] = std::move(portsArray);
             groupsArray.push_back(groupJson);
         }
         j["groups"] = groupsArray;
+
+        // Editor-only cable junctions. They mirror a real output pin and do not
+        // alter evaluation topology, so old projects remain fully compatible.
+        nlohmann::json portalsArray = nlohmann::json::array();
+        for (const auto& portal : portals) {
+            portalsArray.push_back({
+                {"id", portal.id},
+                {"name", portal.name},
+                {"linkedPinId", portal.linkedPinId},
+                {"position", {portal.position.x, portal.position.y}},
+                {"color", portal.color},
+                {"kind", static_cast<int>(portal.kind)}
+            });
+        }
+        j["wirePortals"] = std::move(portalsArray);
         
         return j;
     }
@@ -9302,6 +10838,7 @@ namespace TerrainNodesV2 {
         if (j.contains("nextPinId")) nextPinId = j["nextPinId"].get<uint32_t>();
         if (j.contains("nextLinkId")) nextLinkId = j["nextLinkId"].get<uint32_t>();
         if (j.contains("nextGroupId")) nextGroupId = j["nextGroupId"].get<uint32_t>();
+        if (j.contains("nextPortalId")) nextPortalId = j["nextPortalId"].get<uint32_t>();
         
         // ID mapping for proper link restoration
         std::unordered_map<uint32_t, uint32_t> oldToNewPinId;
@@ -9322,6 +10859,12 @@ namespace TerrainNodesV2 {
                     newNode = addTerrainNode(NodeType::HeightmapInput, x, y);
                 } else if (typeId == "TerrainV2.NoiseGenerator") {
                     newNode = addTerrainNode(NodeType::NoiseGenerator, x, y);
+                } else if (typeId == "TerrainV2.MountainRange") {
+                    newNode = addTerrainNode(NodeType::MountainRange, x, y);
+                } else if (typeId == "TerrainV2.BasinValley") {
+                    newNode = addTerrainNode(NodeType::BasinValley, x, y);
+                } else if (typeId == "TerrainV2.TerrainDetail") {
+                    newNode = addTerrainNode(NodeType::TerrainDetail, x, y);
                 } else if (typeId == "TerrainV2.HydraulicErosion") {
                     newNode = addTerrainNode(NodeType::HydraulicErosion, x, y);
                 } else if (typeId == "TerrainV2.ThermalErosion") {
@@ -9450,6 +10993,8 @@ namespace TerrainNodesV2 {
                     newNode = addTerrainNode(NodeType::RiverSplineOutput, x, y);
                 } else if (typeId == "TerrainV2.RiverBedCarve") {
                     newNode = addTerrainNode(NodeType::RiverBedCarve, x, y);
+                } else if (typeId == "TerrainV2.RiverLakeEasy") {
+                    newNode = addTerrainNode(NodeType::RiverLakeEasy, x, y);
                 }
                 
                 if (newNode) {
@@ -9486,6 +11031,27 @@ namespace TerrainNodesV2 {
             }
         }
         
+        // Controller references are serialized as node IDs, so remap them just
+        // like links before the newly allocated graph IDs are used.
+        const auto remapNodeId = [&](uint32_t oldId) -> uint32_t {
+            const auto it = oldToNewNodeId.find(oldId);
+            return it != oldToNewNodeId.end() ? it->second : 0u;
+        };
+        for (const auto& node : nodes) {
+            if (auto* easy = dynamic_cast<RiverLakeEasyNode*>(node.get())) {
+                easy->watershedNodeId = remapNodeId(easy->watershedNodeId);
+                easy->lakeBasinNodeId = remapNodeId(easy->lakeBasinNodeId);
+                easy->lakeOutputNodeId = remapNodeId(easy->lakeOutputNodeId);
+                easy->networkNodeId = remapNodeId(easy->networkNodeId);
+                easy->hydraulicsNodeId = remapNodeId(easy->hydraulicsNodeId);
+                easy->carveNodeId = remapNodeId(easy->carveNodeId);
+                easy->splineOutputNodeId = remapNodeId(easy->splineOutputNodeId);
+            }
+        }
+
+        // Restore legacy graphs losslessly. Semantic/unit mismatches remain
+        // visible as warning-colored wires, but cannot be newly authored.
+        allowLegacyImageSemanticLinks = true;
         // Restore links using ID mappings
         if (j.contains("links") && j["links"].is_array()) {
             for (const auto& linkJson : j["links"]) {
@@ -9500,6 +11066,7 @@ namespace TerrainNodesV2 {
                 }
             }
         }
+        allowLegacyImageSemanticLinks = false;
         
         // Restore groups
         if (j.contains("groups") && j["groups"].is_array()) {
@@ -9541,6 +11108,8 @@ namespace TerrainNodesV2 {
                             port.imageSemantic = static_cast<NodeSystem::ImageSemantic>(
                                 portJson.value("imageSemantic", static_cast<int>(NodeSystem::ImageSemantic::Generic)));
                             port.imageChannels = portJson.value("imageChannels", 1);
+                            port.imageUnit = static_cast<NodeSystem::ImageUnit>(
+                                portJson.value("imageUnit", static_cast<int>(NodeSystem::ImageUnit::Unknown)));
                             port.connected = false; // Reconciled against restored links on first editor frame.
                             group->nextInterfacePortId = (std::max)(group->nextInterfacePortId, port.id + 1u);
                             group->interfacePorts.push_back(std::move(port));
@@ -9556,6 +11125,33 @@ namespace TerrainNodesV2 {
                         }
                     }
                 }
+            }
+        }
+
+        // Restore cable junctions after pin ids have been remapped. Missing or
+        // stale pin references are ignored instead of affecting graph loading.
+        if (j.contains("wirePortals") && j["wirePortals"].is_array()) {
+            for (const auto& portalJson : j["wirePortals"]) {
+                const uint32_t oldLinkedPinId = portalJson.value("linkedPinId", 0u);
+                const auto pinIt = oldToNewPinId.find(oldLinkedPinId);
+                if (pinIt == oldToNewPinId.end()) continue;
+                NodeSystem::Pin* linkedPin = findPin(pinIt->second);
+                if (!linkedPin || linkedPin->kind != NodeSystem::PinKind::Output) continue;
+
+                NodeSystem::WirePortal portal;
+                portal.id = portalJson.contains("id")
+                    ? portalJson["id"].get<uint32_t>() : nextPortalId++;
+                portal.name = portalJson.value("name", "Junction " + std::to_string(portal.id));
+                portal.linkedPinId = pinIt->second;
+                if (portalJson.contains("position") && portalJson["position"].is_array() &&
+                    portalJson["position"].size() >= 2) {
+                    portal.position.x = portalJson["position"][0].get<float>();
+                    portal.position.y = portalJson["position"][1].get<float>();
+                }
+                portal.color = portalJson.value("color", portal.color);
+                portal.kind = NodeSystem::PinKind::Output;
+                nextPortalId = (std::max)(nextPortalId, portal.id + 1u);
+                portals.push_back(std::move(portal));
             }
         }
     }

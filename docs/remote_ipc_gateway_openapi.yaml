@@ -1,0 +1,91 @@
+openapi: 3.1.0
+info:
+  title: RayTrophi Private Gateway API
+  version: 1.0.0
+  description: Public-edge contract for a separate gateway; never expose DCC IPC directly.
+servers:
+  - url: https://gateway.example.invalid/v1
+security:
+  - oidc: []
+paths:
+  /rpc:
+    post:
+      operationId: invokeRpc
+      summary: Invoke one allow-listed RayTrophi operation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RpcRequest'}
+      responses:
+        '200':
+          description: RPC result or application error
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RpcResponse'}
+        '401': {description: Authentication required}
+        '403': {description: Capability or workspace policy denied}
+        '429': {description: Rate or operation budget exceeded}
+  /sessions:
+    get:
+      operationId: listSessions
+      summary: List sessions visible to an administrator
+      responses:
+        '200':
+          description: Active sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Session'}
+  /jobs/{jobId}:
+    get:
+      operationId: getJob
+      parameters:
+        - {name: jobId, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Job status}
+    delete:
+      operationId: cancelJob
+      parameters:
+        - {name: jobId, in: path, required: true, schema: {type: string}}
+      responses:
+        '202': {description: Cancellation requested}
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://identity.example.invalid/.well-known/openid-configuration
+  schemas:
+    RpcRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, method, params]
+      properties:
+        request_id: {type: string, format: uuid}
+        method: {type: string, maxLength: 128}
+        params: {type: object}
+    RpcResponse:
+      type: object
+      required: [request_id]
+      properties:
+        request_id: {type: string, format: uuid}
+        result: {}
+        error:
+          type: object
+          properties:
+            code: {type: string}
+            message: {type: string}
+    Session:
+      type: object
+      required: [connection_id, transport, connected_at, active]
+      properties:
+        connection_id: {type: string}
+        transport: {type: string, enum: [tls, gateway]}
+        peer_address: {type: string}
+        token_id: {type: string}
+        connected_at: {type: integer, format: int64}
+        last_activity_at: {type: integer, format: int64}
+        request_count: {type: integer, format: int64, minimum: 0}
+        error_count: {type: integer, format: int64, minimum: 0}
+        active: {type: boolean}

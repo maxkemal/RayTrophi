@@ -62,7 +62,9 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
     ImGui::Separator();
 
     if (BeginRiverSection("Manage Rivers", ImVec4(0.62f, 0.84f, 1.0f, 1.0f))) {
-        ImGui::Checkbox("Always Show Gizmos", &riverMgr.showGizmosWhenInactive);
+        if (ImGui::Checkbox("Always Show Gizmos", &riverMgr.showGizmosWhenInactive)) {
+            ProjectManager::getInstance().markModified();
+        }
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered()) {
@@ -99,6 +101,8 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
                 riverMgr.editingRiverId = river.id;
                 riverMgr.isEditing = true;
                 riverMgr.selectedControlPoint = -1;
+                if (river.waterSurfaceId >= 0) selected_water_surface_id = river.waterSurfaceId;
+                selectManagedMesh(ctx, river.flatMesh);
             }
 
             if (ImGui::BeginPopupContextItem()) {
@@ -150,8 +154,10 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
 
             ImGui::Separator();
             ImGui::TextDisabled("Default Values");
-            SceneUI::DrawSmartFloat("rdw", "Default Width", &riverMgr.defaultWidth, 0.5f, 20.0f, "%.1f", false, nullptr, 16);
-            SceneUI::DrawSmartFloat("rdd", "Default Depth", &riverMgr.defaultDepth, 0.1f, 5.0f, "%.1f", false, nullptr, 16);
+            bool authoringChanged = false;
+            authoringChanged |= SceneUI::DrawSmartFloat("rdw", "Default Width", &riverMgr.defaultWidth, 0.5f, 20.0f, "%.1f", false, nullptr, 16);
+            authoringChanged |= SceneUI::DrawSmartFloat("rdd", "Default Depth", &riverMgr.defaultDepth, 0.1f, 5.0f, "%.1f", false, nullptr, 16);
+            if (authoringChanged) ProjectManager::getInstance().markModified();
 
             if (rebuildNeeded) {
                 selectedRiver->needsRebuild = true;
@@ -311,7 +317,9 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
         }
 
         if (BeginRiverSection("Terrain Interaction", ImVec4(0.56f, 0.90f, 0.68f, 1.0f), false)) {
-            ImGui::Checkbox("Auto-Carve on Move", &riverMgr.autoCarveOnMove);
+            if (ImGui::Checkbox("Auto-Carve on Move", &riverMgr.autoCarveOnMove)) {
+                ProjectManager::getInstance().markModified();
+            }
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered()) {
@@ -328,6 +336,9 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
                 if (surf) {
                     ImGui::TextDisabled("Shared editor for the selected linked water surface.");
                     drawWaterSurfaceMaterialEditor(ctx, *surf, false);
+                    // Keep the spline-side mirror complete for code paths that
+                    // operate before the next mesh rebuild/project save.
+                    selectedRiver->waterParams = surf->params;
                 } else {
                     ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Linked WaterSurface could not be found");
                 }

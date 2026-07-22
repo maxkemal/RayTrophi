@@ -87,6 +87,11 @@ public:
     void resetAccumulation() override;
     float getMillisecondsPerSample() const override;
 
+    // Drop scene-sized allocations while retaining the CUDA/OptiX context,
+    // modules and pipeline for a later backend switch. Recreating those core
+    // objects repeatedly grows the NVIDIA driver's process-local JIT cache.
+    void suspendForBackendSwitch();
+
     // Extended IBackend methods (delegated to OptixWrapper)
     bool isUsingTLAS() const override;
     std::vector<int> getInstancesByNodeName(const std::string& nodeName) const override;

@@ -26,6 +26,7 @@
 #include "TerrainManager.h"
 #include "json.hpp"
 #include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -205,7 +206,13 @@ namespace TerrainNodesV2 {
         // Appended for serialized enum stability.
         FoliageLayer,
         FoliageSet,
-        FoliageOutput
+        FoliageOutput,
+        // Compact controller for the detailed river/lake hydrology subsystem.
+        RiverLakeEasy,
+        // Primary macro-landform synthesis. Appended for serialized enum stability.
+        MountainRange,
+        BasinValley,
+        TerrainDetail
     };
 
     // ============================================================================
@@ -315,7 +322,12 @@ namespace TerrainNodesV2 {
         char filePath[256] = "";
         
         // Settings
-        float heightScale = 1.0f; // Scale multiplier for loaded heightmap
+        // Scale multiplier for loaded heightmap ("Intensity" in the UI).
+        // Default 10 pairs with the 1000 m default terrain and scale_y = 10:
+        // normalized source values become ~100 m of relief, which is the range
+        // the SI-unit hydrology (discharge, channel geometry, fluvial
+        // thresholds) is tuned for. Serialized graphs keep their own value.
+        float heightScale = 10.0f;
         bool maintainAspectRatio = false; // Disable padding by default to stretch to terrain
         int maxResolution = 2048; // Limit import resolution
         int smoothIterations = 1; // Smoothing pass count (default 1 = mild blur)
@@ -601,6 +613,11 @@ namespace TerrainNodesV2 {
         FFT_Billow,  // FFT-based soft hills
         FFT_Turb     // FFT-based turbulence
     };
+
+    enum class NoiseHeightMode {
+        LegacyAmplitude = 0, // Existing graphs: raw 0..1 noise multiplied by Amplitude.
+        WorldMeters = 1      // Base elevation and relief are authored in world metres.
+    };
     
     class NoiseGeneratorNode : public TerrainNodeBase {
     public:
@@ -609,6 +626,10 @@ namespace TerrainNodesV2 {
         float scale = 0.1f;            // Terrain-appropriate scale
         float frequency = 0.01f;       // Detail frequency
         float amplitude = 1.0f;       // Reasonable height range
+        NoiseHeightMode heightMode = NoiseHeightMode::WorldMeters;
+        float featureSizeMeters = 500.0f;
+        float baseElevationMeters = 0.0f;
+        float reliefMeters = 100.0f;
         int octaves = 6;
         float persistance = 0.5f;
         float lacunarity = 2.0f;
@@ -650,9 +671,21 @@ namespace TerrainNodesV2 {
             }
             
             if (ImGui::DragInt("Seed", &seed)) dirty = true;
-            if (ImGui::DragFloat("Scale", &scale, 0.1f, 0.1f, 10.0f)) dirty = true;
-            if (ImGui::DragFloat("Frequency", &frequency, 0.0001f, 0.0001f, 0.1f, "%.4f")) dirty = true;
-            if (ImGui::DragFloat("Amplitude", &amplitude, 1.0f, 1.0f, 1000.0f)) dirty = true;
+            const char* heightModes[] = { "Legacy Amplitude", "World Metres" };
+            int heightModeIndex = static_cast<int>(heightMode);
+            if (ImGui::Combo("Height Units", &heightModeIndex, heightModes, 2)) {
+                heightMode = static_cast<NoiseHeightMode>(heightModeIndex);
+                dirty = true;
+            }
+            if (heightMode == NoiseHeightMode::WorldMeters) {
+                if (ImGui::DragFloat("Feature Size", &featureSizeMeters, 5.0f, 1.0f, 100000.0f, "%.0f m")) dirty = true;
+                if (ImGui::DragFloat("Base Elevation", &baseElevationMeters, 1.0f, -10000.0f, 10000.0f, "%.1f m")) dirty = true;
+                if (ImGui::DragFloat("Relief", &reliefMeters, 1.0f, 0.0f, 20000.0f, "%.1f m")) dirty = true;
+            } else {
+                if (ImGui::DragFloat("Scale", &scale, 0.1f, 0.1f, 10.0f)) dirty = true;
+                if (ImGui::DragFloat("Frequency", &frequency, 0.0001f, 0.0001f, 0.1f, "%.4f")) dirty = true;
+                if (ImGui::DragFloat("Amplitude", &amplitude, 1.0f, 0.0f, 1000.0f)) dirty = true;
+            }
             if (ImGui::DragInt("Octaves", &octaves, 1, 1, 12)) dirty = true;
             if (ImGui::DragFloat("Persistance", &persistance, 0.01f, 0.0f, 1.0f)) dirty = true;
             if (ImGui::DragFloat("Lacunarity", &lacunarity, 0.1f, 1.0f, 4.0f)) dirty = true;
@@ -679,6 +712,10 @@ namespace TerrainNodesV2 {
             j["scale"] = scale;
             j["frequency"] = frequency;
             j["amplitude"] = amplitude;
+            j["heightMode"] = static_cast<int>(heightMode);
+            j["featureSizeMeters"] = featureSizeMeters;
+            j["baseElevationMeters"] = baseElevationMeters;
+            j["reliefMeters"] = reliefMeters;
             j["octaves"] = octaves;
             j["persistance"] = persistance;
             j["lacunarity"] = lacunarity;
@@ -694,12 +731,186 @@ namespace TerrainNodesV2 {
             if (j.contains("scale")) scale = j["scale"].get<float>();
             if (j.contains("frequency")) frequency = j["frequency"].get<float>();
             if (j.contains("amplitude")) amplitude = j["amplitude"].get<float>();
+            // Graphs saved before the explicit height contract retain their exact
+            // raw-amplitude behaviour. Newly created nodes default to metres.
+            heightMode = j.contains("heightMode")
+                ? static_cast<NoiseHeightMode>(clampValue(j["heightMode"].get<int>(), 0, 1))
+                : NoiseHeightMode::LegacyAmplitude;
+            featureSizeMeters = j.value("featureSizeMeters", featureSizeMeters);
+            baseElevationMeters = j.value("baseElevationMeters", baseElevationMeters);
+            reliefMeters = j.value("reliefMeters", reliefMeters);
             if (j.contains("octaves")) octaves = j["octaves"].get<int>();
             if (j.contains("persistance")) persistance = j["persistance"].get<float>();
             if (j.contains("lacunarity")) lacunarity = j["lacunarity"].get<float>();
             if (j.contains("jitter")) jitter = j["jitter"].get<float>();
             if (j.contains("warp_strength")) warp_strength = j["warp_strength"].get<float>();
             if (j.contains("ridge_offset")) ridge_offset = j["ridge_offset"].get<float>();
+        }
+    };
+
+    // ============================================================================
+    // PRIMARY LANDFORM GENERATORS
+    // ============================================================================
+
+    class MountainRangeNode : public TerrainNodeBase {
+    public:
+        int seed = 4201;
+        float direction = 25.0f;
+        float centerX = 0.5f, centerY = 0.5f;
+        float lengthFraction = 0.9f;
+        float widthMeters = 260.0f;
+        float reliefMeters = 650.0f;
+        float ridgeSharpness = 2.2f;
+        float warp = 0.22f;
+        float branches = 0.35f;
+        float detail = 0.18f;
+
+        MountainRangeNode() {
+            name = "Mountain Range";
+            terrainNodeType = NodeType::MountainRange;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Base Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Uplift", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Ridge", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Mountain Range / Orogeny";
+            metadata.category = "Landform";
+            metadata.description = "Directional, branching macro-scale mountain uplift";
+            metadata.headerColor = IM_COL32(155, 105, 72, 255);
+            headerColor = ImVec4(0.61f, 0.41f, 0.28f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.MountainRange"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["seed"] = seed; j["direction"] = direction;
+            j["centerX"] = centerX; j["centerY"] = centerY;
+            j["lengthFraction"] = lengthFraction; j["widthMeters"] = widthMeters;
+            j["reliefMeters"] = reliefMeters; j["ridgeSharpness"] = ridgeSharpness;
+            j["warp"] = warp; j["branches"] = branches; j["detail"] = detail;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            seed = j.value("seed", seed); direction = j.value("direction", direction);
+            centerX = clampValue(j.value("centerX", centerX), 0.0f, 1.0f);
+            centerY = clampValue(j.value("centerY", centerY), 0.0f, 1.0f);
+            lengthFraction = clampValue(j.value("lengthFraction", lengthFraction), 0.05f, 1.5f);
+            widthMeters = (std::max)(j.value("widthMeters", widthMeters), 1.0f);
+            reliefMeters = (std::max)(j.value("reliefMeters", reliefMeters), 0.0f);
+            ridgeSharpness = clampValue(j.value("ridgeSharpness", ridgeSharpness), 0.5f, 8.0f);
+            warp = clampValue(j.value("warp", warp), 0.0f, 1.0f);
+            branches = clampValue(j.value("branches", branches), 0.0f, 1.0f);
+            detail = clampValue(j.value("detail", detail), 0.0f, 1.0f);
+        }
+    };
+
+    enum class ValleyProfile { VShape = 0, UShape = 1 };
+    class BasinValleyNode : public TerrainNodeBase {
+    public:
+        int seed = 731;
+        ValleyProfile profile = ValleyProfile::VShape;
+        float direction = 0.0f;
+        float center = 0.5f;
+        float widthMeters = 180.0f;
+        float floorWidth = 0.15f;
+        float depthMeters = 120.0f;
+        float meander = 0.18f;
+        float shoulderSoftness = 0.55f;
+
+        BasinValleyNode() {
+            name = "Basin & Valley";
+            terrainNodeType = NodeType::BasinValley;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Valley", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Basin & Valley";
+            metadata.category = "Landform";
+            metadata.description = "World-scale V/U valley profile with a meandering axis";
+            metadata.headerColor = IM_COL32(92, 128, 104, 255);
+            headerColor = ImVec4(0.36f, 0.50f, 0.41f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.BasinValley"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["seed"] = seed; j["profile"] = static_cast<int>(profile);
+            j["direction"] = direction; j["center"] = center;
+            j["widthMeters"] = widthMeters; j["floorWidth"] = floorWidth;
+            j["depthMeters"] = depthMeters; j["meander"] = meander;
+            j["shoulderSoftness"] = shoulderSoftness;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            seed = j.value("seed", seed);
+            profile = static_cast<ValleyProfile>(clampValue(j.value("profile", 0), 0, 1));
+            direction = j.value("direction", direction);
+            center = clampValue(j.value("center", center), 0.0f, 1.0f);
+            widthMeters = (std::max)(j.value("widthMeters", widthMeters), 1.0f);
+            floorWidth = clampValue(j.value("floorWidth", floorWidth), 0.0f, 0.9f);
+            depthMeters = (std::max)(j.value("depthMeters", depthMeters), 0.0f);
+            meander = clampValue(j.value("meander", meander), 0.0f, 1.0f);
+            shoulderSoftness = clampValue(j.value("shoulderSoftness", shoulderSoftness), 0.05f, 1.0f);
+        }
+    };
+
+    class TerrainDetailNode : public TerrainNodeBase {
+    public:
+        int seed = 991;
+        float macroSizeMeters = 800.0f, macroAmountMeters = 30.0f;
+        float mediumSizeMeters = 160.0f, mediumAmountMeters = 12.0f;
+        float microSizeMeters = 28.0f, microAmountMeters = 3.0f;
+        float roughness = 0.55f;
+        bool preserveMean = true;
+
+        TerrainDetailNode() {
+            name = "Terrain Detail";
+            terrainNodeType = NodeType::TerrainDetail;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            metadata.displayName = "Terrain Detail";
+            metadata.category = "Landform";
+            metadata.description = "Independent macro, medium and micro world-scale relief";
+            metadata.headerColor = IM_COL32(116, 112, 150, 255);
+            headerColor = ImVec4(0.45f, 0.44f, 0.59f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.TerrainDetail"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["seed"] = seed;
+            j["macroSizeMeters"] = macroSizeMeters; j["macroAmountMeters"] = macroAmountMeters;
+            j["mediumSizeMeters"] = mediumSizeMeters; j["mediumAmountMeters"] = mediumAmountMeters;
+            j["microSizeMeters"] = microSizeMeters; j["microAmountMeters"] = microAmountMeters;
+            j["roughness"] = roughness; j["preserveMean"] = preserveMean;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            seed = j.value("seed", seed);
+            macroSizeMeters = (std::max)(j.value("macroSizeMeters", macroSizeMeters), 1.0f);
+            macroAmountMeters = (std::max)(j.value("macroAmountMeters", macroAmountMeters), 0.0f);
+            mediumSizeMeters = (std::max)(j.value("mediumSizeMeters", mediumSizeMeters), 1.0f);
+            mediumAmountMeters = (std::max)(j.value("mediumAmountMeters", mediumAmountMeters), 0.0f);
+            microSizeMeters = (std::max)(j.value("microSizeMeters", microSizeMeters), 0.1f);
+            microAmountMeters = (std::max)(j.value("microAmountMeters", microAmountMeters), 0.0f);
+            roughness = clampValue(j.value("roughness", roughness), 0.05f, 0.95f);
+            preserveMean = j.value("preserveMean", preserveMean);
         }
     };
 
@@ -755,7 +966,11 @@ namespace TerrainNodesV2 {
                 {"depositSpeed", params.depositSpeed},
                 {"evaporateSpeed", params.evaporateSpeed},
                 {"gravity", params.gravity},
-                {"erosionRadius", params.erosionRadius}
+                {"erosionRadius", params.erosionRadius},
+                {"seed", params.seed},
+                {"boundaryMode", static_cast<int>(params.boundaryMode)},
+                {"boundaryWidth", params.boundaryWidth},
+                {"boundaryLevel", params.boundaryLevel}
             };
             j["edgeFalloffWidth"] = edgeFalloffWidth;
             j["edgeFalloffValue"] = edgeFalloffValue;
@@ -776,6 +991,11 @@ namespace TerrainNodesV2 {
                 params.evaporateSpeed = p.value("evaporateSpeed", params.evaporateSpeed);
                 params.gravity = p.value("gravity", params.gravity);
                 params.erosionRadius = p.value("erosionRadius", params.erosionRadius);
+                params.seed = p.value("seed", params.seed);
+                params.boundaryMode = static_cast<ErosionBoundaryMode>(
+                    clampValue(p.value("boundaryMode", static_cast<int>(params.boundaryMode)), 0, 2));
+                params.boundaryWidth = clampValue(p.value("boundaryWidth", params.boundaryWidth), 0, 512);
+                params.boundaryLevel = p.value("boundaryLevel", params.boundaryLevel);
             }
             if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
             if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
@@ -876,7 +1096,9 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow Guide", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+                "Flow Guide", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar, true,
+                1, NodeSystem::ImageUnit::Unitless));
+            inputs.back().acceptImageSemantic(NodeSystem::ImageSemantic::Mask);
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
@@ -1312,7 +1534,7 @@ namespace TerrainNodesV2 {
             // Explicit four-channel splat payload. Single-channel masks must be
             // combined through Splat Compose first.
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, false, 4));
+                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, false, 4));
             
             metadata.displayName = "Splat Output";
             metadata.category = "Output";
@@ -2139,7 +2361,7 @@ namespace TerrainNodesV2 {
             
             // 4-channel output for splat map
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
+                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, 4));
             
             metadata.displayName = "Auto Splat";
             metadata.category = "Texture";
@@ -2608,7 +2830,7 @@ namespace TerrainNodesV2 {
                     channelName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             }
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
+                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, 4));
             metadata.displayName = "Splat Compose";
             metadata.category = "Texture";
             metadata.headerColor = IM_COL32(195, 135, 55, 255);
@@ -2764,7 +2986,9 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar, true,
+                1, NodeSystem::ImageUnit::Unitless));
+            inputs.back().acceptImageSemantic(NodeSystem::ImageSemantic::Mask);
             for (const char* outputName : {"Slope", "Concavity", "Convexity", "Valley", "Wetness"}) {
                 outputs.push_back(NodeSystem::Pin::createOutput(
                     outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
@@ -2806,14 +3030,25 @@ namespace TerrainNodesV2 {
             terrainNodeType = NodeType::WatershedAnalysis;
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            // Appended optional input: serialized graphs map pins by index, so
+            // new pins must stay at the end. Scales per-cell rainfall — wire a
+            // snow-melt or climate mask here so flow accounts for snow water.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Precipitation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Filled Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            for (const char* outputName : {"Accumulation", "Flow Direction", "Drainage Basins"}) {
-                outputs.push_back(NodeSystem::Pin::createOutput(
-                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
-            }
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::Unitless));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction,
+                1, NodeSystem::ImageUnit::Unitless));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Drainage Basins", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Categorical,
+                1, NodeSystem::ImageUnit::Identifier));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::SquareMeters));
             metadata.displayName = "Watershed Analysis";
             metadata.category = "Hydrology";
             metadata.description = "Depression-safe D8 drainage, accumulation and catchments";
@@ -2855,17 +3090,21 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Filled Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction, true,
+                1, NodeSystem::ImageUnit::Unitless));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Lake Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Water Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            for (const char* outputName : {"Shoreline", "Spill Points", "Lake IDs"}) {
-                outputs.push_back(NodeSystem::Pin::createOutput(
-                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
-            }
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Shoreline", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Spill Points", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Lake IDs", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Categorical,
+                1, NodeSystem::ImageUnit::Identifier));
             metadata.displayName = "Lake Basin";
             metadata.category = "Hydrology";
             metadata.description = "Extracts lake levels, shorelines, storage and spill outlets";
@@ -2898,12 +3137,25 @@ namespace TerrainNodesV2 {
     // the block expansion produced by one-quad-per-wet-sample generation.
     class LakeSurfaceOutputNode : public TerrainNodeBase {
     public:
+        struct AuthoredWaterProfile {
+            int surfaceId = -1;
+            std::string name;
+            WaterWaveParams params;
+            uint64_t featureId = 0;
+            Vec3 anchor = Vec3(0.0f);
+            float extent = 0.0f;
+            bool hasIdentity = false;
+        };
+
         float surfaceOffsetMeters = 0.02f;
         float uvScaleMeters = 4.0f;
         int maximumGeneratedLakes = 32;
         bool generateWaterMeshes = true;
         int sourceLakeNodeId = -1;
         std::vector<int> generatedWaterSurfaceIds;
+        // Producer-owned copy of Water UI authorship. Generated scene objects
+        // are disposable during project-open Evaluate; this payload is not.
+        std::vector<AuthoredWaterProfile> authoredWaterProfiles;
         std::array<NodeSystem::Image2DData, 4> pendingFields;
 
         LakeSurfaceOutputNode() {
@@ -2916,7 +3168,8 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Lake Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Lake IDs", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Lake IDs", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Categorical,
+                false, 1, NodeSystem::ImageUnit::Identifier));
             metadata.displayName = "Lake Surface Output";
             metadata.category = "Output";
             metadata.description = "Builds owned WaterSurface meshes from analytical lakes";
@@ -2935,6 +3188,41 @@ namespace TerrainNodesV2 {
             j["maximumGeneratedLakes"] = maximumGeneratedLakes;
             j["generateWaterMeshes"] = generateWaterMeshes;
             j["generatedWaterSurfaceIds"] = generatedWaterSurfaceIds;
+            nlohmann::json profiles = nlohmann::json::array();
+            std::unordered_set<int> writtenSurfaceIds;
+            std::unordered_set<uint64_t> writtenFeatureIds;
+            std::unordered_set<std::string> writtenNames;
+            for (int surfaceId : generatedWaterSurfaceIds) {
+                const WaterSurface* surface = WaterManager::getInstance().getWaterSurface(surfaceId);
+                if (!surface) continue;
+                profiles.push_back({
+                    {"surfaceId", surface->id}, {"name", surface->name},
+                    {"params", surface->params.serializeParams()},
+                    {"featureId", surface->generated_feature_id},
+                    {"anchor", {surface->generated_anchor.x, surface->generated_anchor.y,
+                                 surface->generated_anchor.z}},
+                    {"extent", surface->generated_extent},
+                    {"hasIdentity", surface->has_generated_identity}
+                });
+                writtenSurfaceIds.insert(surface->id);
+                writtenFeatureIds.insert(surface->generated_feature_id);
+                writtenNames.insert(surface->name);
+            }
+            // Preserve the last producer-owned copy if serialization happens
+            // during a transient rebuild where the runtime object is absent.
+            for (const AuthoredWaterProfile& profile : authoredWaterProfiles) {
+                if (writtenSurfaceIds.count(profile.surfaceId) != 0 ||
+                    writtenNames.count(profile.name) != 0 ||
+                    (profile.hasIdentity && writtenFeatureIds.count(profile.featureId) != 0)) continue;
+                profiles.push_back({
+                    {"surfaceId", profile.surfaceId}, {"name", profile.name},
+                    {"params", profile.params.serializeParams()},
+                    {"featureId", profile.featureId},
+                    {"anchor", {profile.anchor.x, profile.anchor.y, profile.anchor.z}},
+                    {"extent", profile.extent}, {"hasIdentity", profile.hasIdentity}
+                });
+            }
+            j["authoredWaterProfiles"] = std::move(profiles);
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
@@ -2943,6 +3231,27 @@ namespace TerrainNodesV2 {
             maximumGeneratedLakes = clampValue(j.value("maximumGeneratedLakes", maximumGeneratedLakes), 1, 4096);
             generateWaterMeshes = j.value("generateWaterMeshes", generateWaterMeshes);
             generatedWaterSurfaceIds = j.value("generatedWaterSurfaceIds", std::vector<int>{});
+            authoredWaterProfiles.clear();
+            if (j.contains("authoredWaterProfiles") && j["authoredWaterProfiles"].is_array()) {
+                for (const auto& saved : j["authoredWaterProfiles"]) {
+                    AuthoredWaterProfile profile;
+                    profile.surfaceId = saved.value("surfaceId", -1);
+                    profile.name = saved.value("name", std::string{});
+                    profile.featureId = saved.value("featureId", uint64_t{0});
+                    profile.extent = saved.value("extent", 0.0f);
+                    profile.hasIdentity = saved.value("hasIdentity", false);
+                    if (saved.contains("params") && saved["params"].is_object()) {
+                        profile.params.deserializeParams(saved["params"]);
+                    }
+                    if (saved.contains("anchor") && saved["anchor"].is_array() &&
+                        saved["anchor"].size() >= 3) {
+                        profile.anchor = Vec3(saved["anchor"][0].get<float>(),
+                                              saved["anchor"][1].get<float>(),
+                                              saved["anchor"][2].get<float>());
+                    }
+                    authoredWaterProfiles.push_back(std::move(profile));
+                }
+            }
         }
     };
 
@@ -2951,19 +3260,30 @@ namespace TerrainNodesV2 {
     class RiverNetworkNode : public TerrainNodeBase {
     public:
         float catchmentThreshold = 0.0015f;
+        float minimumCatchmentAreaSquareMeters = 5000.0f;
         int minimumBranchLength = 8;
 
         RiverNetworkNode() {
             name = "River Network";
             terrainNodeType = NodeType::RiverNetwork;
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                false, 1, NodeSystem::ImageUnit::Unitless));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
-            for (const char* outputName : {"Channels", "Stream Order", "Sources"}) {
-                outputs.push_back(NodeSystem::Pin::createOutput(
-                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
-            }
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction,
+                false, 1, NodeSystem::ImageUnit::Unitless));
+            // Appended for pin-index serialization stability. When connected,
+            // this physical area replaces the domain-relative legacy threshold.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                true, 1, NodeSystem::ImageUnit::SquareMeters));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Stream Order", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Categorical,
+                1, NodeSystem::ImageUnit::Identifier));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Sources", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             metadata.displayName = "River Network";
             metadata.category = "Hydrology";
             metadata.description = "Extracts and prunes a connected stream hierarchy";
@@ -2977,11 +3297,14 @@ namespace TerrainNodesV2 {
         void serializeToJson(nlohmann::json& j) const override {
             TerrainNodeBase::serializeToJson(j);
             j["catchmentThreshold"] = catchmentThreshold;
+            j["minimumCatchmentAreaSquareMeters"] = minimumCatchmentAreaSquareMeters;
             j["minimumBranchLength"] = minimumBranchLength;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
             catchmentThreshold = clampValue(j.value("catchmentThreshold", catchmentThreshold), 0.00001f, 0.95f);
+            minimumCatchmentAreaSquareMeters = clampValue(
+                j.value("minimumCatchmentAreaSquareMeters", minimumCatchmentAreaSquareMeters), 1.0f, 1000000000.0f);
             minimumBranchLength = clampValue(j.value("minimumBranchLength", minimumBranchLength), 2, 256);
         }
     };
@@ -3008,6 +3331,7 @@ namespace TerrainNodesV2 {
         float bankFreeboardRatio = 0.35f;
         float minimumFreeboardMeters = 0.08f;
         float maximumFreeboardMeters = 2.0f;
+        float foamPersistenceMeters = 30.0f;
 
         RiverHydraulicsNode() {
             name = "River Hydraulics";
@@ -3015,9 +3339,11 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Bed Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                false, 1, NodeSystem::ImageUnit::SquareMeters));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction,
+                false, 1, NodeSystem::ImageUnit::Unitless));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             inputs.push_back(NodeSystem::Pin::createInput(
@@ -3026,11 +3352,24 @@ namespace TerrainNodesV2 {
                 "Lake Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Reference Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
-            for (const char* outputName : {"Discharge", "River Width", "Water Depth", "Flow Speed",
-                                           "Water Level", "Froude", "Foam Potential"}) {
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Discharge", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::CubicMetersPerSecond));
+            for (const char* outputName : {"River Width", "Water Depth"}) {
                 outputs.push_back(NodeSystem::Pin::createOutput(
-                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                    1, NodeSystem::ImageUnit::Meters));
             }
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Flow Speed", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::MetersPerSecond));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Water Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Froude", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::Unitless));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Foam Potential", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             metadata.displayName = "River Hydraulics";
             metadata.category = "Hydrology";
             metadata.description = "Manning discharge, normal depth, velocity and whitewater state";
@@ -3060,6 +3399,7 @@ namespace TerrainNodesV2 {
             j["bankFreeboardRatio"] = bankFreeboardRatio;
             j["minimumFreeboardMeters"] = minimumFreeboardMeters;
             j["maximumFreeboardMeters"] = maximumFreeboardMeters;
+            j["foamPersistenceMeters"] = foamPersistenceMeters;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
@@ -3081,6 +3421,8 @@ namespace TerrainNodesV2 {
             minimumFreeboardMeters = clampValue(j.value("minimumFreeboardMeters", minimumFreeboardMeters), 0.0f, 20.0f);
             maximumFreeboardMeters = clampValue(
                 j.value("maximumFreeboardMeters", maximumFreeboardMeters), minimumFreeboardMeters, 100.0f);
+            foamPersistenceMeters = clampValue(
+                j.value("foamPersistenceMeters", foamPersistenceMeters), 0.0f, 500.0f);
         }
     };
 
@@ -3103,13 +3445,19 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "River Width", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+                "River Width", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                true, 1, NodeSystem::ImageUnit::Meters));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Water Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+                "Water Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                true, 1, NodeSystem::ImageUnit::Meters));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Reference Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Water Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            // Appended for pin-index serialization stability. The drainage
+            // graph may cross a lake, but visible bed carving must stop there.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Carved Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -3179,20 +3527,36 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                false, 1, NodeSystem::ImageUnit::Unitless));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction,
+                false, 1, NodeSystem::ImageUnit::Unitless));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Lake Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
-            for (const char* inputName : {"River Width", "Water Depth", "Flow Speed", "Discharge",
-                                          "Froude", "Foam Potential", "River Water Level"}) {
-                inputs.push_back(NodeSystem::Pin::createInput(
-                    inputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
-            }
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "River Width", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                true, 1, NodeSystem::ImageUnit::Meters));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Water Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                true, 1, NodeSystem::ImageUnit::Meters));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow Speed", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                true, 1, NodeSystem::ImageUnit::MetersPerSecond));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Discharge", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                true, 1, NodeSystem::ImageUnit::CubicMetersPerSecond));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Froude", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                true, 1, NodeSystem::ImageUnit::Unitless));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Foam Potential", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "River Water Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
             metadata.displayName = "River Spline Output";
             metadata.category = "Output";
             metadata.description = "Creates owned RiverSpline branches from a river network";
@@ -3228,6 +3592,77 @@ namespace TerrainNodesV2 {
         }
     };
 
+    enum class RiverLakePreset {
+        TemperateValleys = 0,
+        AlpineSnowmelt,
+        AridCanyons,
+        TropicalDrainage,
+        BroadLowlands
+    };
+
+    // Pass-through controller for the detailed hydrology layer. It changes no
+    // height data itself: presets coherently drive the sibling expert nodes,
+    // which remain available by expanding the containing graph layer.
+    class RiverLakeEasyNode : public TerrainNodeBase {
+    public:
+        RiverLakePreset preset = RiverLakePreset::TemperateValleys;
+        float waterAmount = 0.50f;
+        bool generateWaterMeshes = true;
+        bool expertOverrides = false;
+        uint32_t watershedNodeId = 0;
+        uint32_t lakeBasinNodeId = 0;
+        uint32_t lakeOutputNodeId = 0;
+        uint32_t networkNodeId = 0;
+        uint32_t hydraulicsNodeId = 0;
+        uint32_t carveNodeId = 0;
+        uint32_t splineOutputNodeId = 0;
+
+        RiverLakeEasyNode() {
+            name = "River & Lake (Easy)";
+            terrainNodeType = NodeType::RiverLakeEasy;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Precipitation / Snowmelt", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Precipitation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "River & Lake (Easy)";
+            metadata.category = "Hydrology";
+            metadata.description = "One-control presets for the detailed physical river/lake layer";
+            metadata.headerColor = IM_COL32(30, 151, 205, 255);
+            headerColor = ImVec4(0.12f, 0.59f, 0.80f, 1.0f);
+        }
+
+        static const char* getPresetName(RiverLakePreset value);
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.RiverLakeEasy"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["preset"] = static_cast<int>(preset);
+            j["waterAmount"] = waterAmount;
+            j["generateWaterMeshes"] = generateWaterMeshes;
+            j["expertOverrides"] = expertOverrides;
+            j["watershedNodeId"] = watershedNodeId; j["lakeBasinNodeId"] = lakeBasinNodeId;
+            j["lakeOutputNodeId"] = lakeOutputNodeId; j["networkNodeId"] = networkNodeId;
+            j["hydraulicsNodeId"] = hydraulicsNodeId; j["carveNodeId"] = carveNodeId;
+            j["splineOutputNodeId"] = splineOutputNodeId;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            preset = static_cast<RiverLakePreset>(clampValue(j.value("preset", 0), 0, 4));
+            waterAmount = clampValue(j.value("waterAmount", waterAmount), 0.0f, 1.0f);
+            generateWaterMeshes = j.value("generateWaterMeshes", generateWaterMeshes);
+            expertOverrides = j.value("expertOverrides", expertOverrides);
+            watershedNodeId = j.value("watershedNodeId", 0u); lakeBasinNodeId = j.value("lakeBasinNodeId", 0u);
+            lakeOutputNodeId = j.value("lakeOutputNodeId", 0u); networkNodeId = j.value("networkNodeId", 0u);
+            hydraulicsNodeId = j.value("hydraulicsNodeId", 0u); carveNodeId = j.value("carveNodeId", 0u);
+            splineOutputNodeId = j.value("splineOutputNodeId", 0u);
+        }
+    };
+
     // Explicit sink for persistent named fields. Mesh publication is deferred to
     // TerrainManager's main-thread mesh finalize path.
     class TerrainFieldsOutputNode : public TerrainNodeBase {
@@ -3246,6 +3681,28 @@ namespace TerrainNodesV2 {
                 inputs.push_back(NodeSystem::Pin::createInput(
                     inputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             }
+            const auto setFieldContract = [&](size_t index, NodeSystem::ImageSemantic semantic,
+                                              NodeSystem::ImageUnit unit = NodeSystem::ImageUnit::Unknown) {
+                inputs[index].imageSemantic = semantic;
+                inputs[index].imageUnit = unit;
+                inputs[index].updateVisualCache();
+            };
+            setFieldContract(9, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Unitless);
+            setFieldContract(10, NodeSystem::ImageSemantic::Direction, NodeSystem::ImageUnit::Unitless);
+            setFieldContract(11, NodeSystem::ImageSemantic::Categorical, NodeSystem::ImageUnit::Identifier);
+            setFieldContract(13, NodeSystem::ImageSemantic::Categorical, NodeSystem::ImageUnit::Identifier);
+            setFieldContract(17, NodeSystem::ImageSemantic::Height);
+            setFieldContract(18, NodeSystem::ImageSemantic::Height);
+            setFieldContract(21, NodeSystem::ImageSemantic::Categorical, NodeSystem::ImageUnit::Identifier);
+            setFieldContract(22, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::SquareMeters);
+            setFieldContract(23, NodeSystem::ImageSemantic::PhysicalScalar,
+                             NodeSystem::ImageUnit::CubicMetersPerSecond);
+            setFieldContract(24, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Meters);
+            setFieldContract(25, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Meters);
+            setFieldContract(26, NodeSystem::ImageSemantic::PhysicalScalar,
+                             NodeSystem::ImageUnit::MetersPerSecond);
+            setFieldContract(27, NodeSystem::ImageSemantic::Height);
+            setFieldContract(28, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Unitless);
             metadata.displayName = "Terrain Fields Output";
             metadata.category = "Output";
             metadata.description = "Publishes terrain, biome and hydrology fields for downstream systems";
@@ -3293,7 +3750,7 @@ namespace TerrainNodesV2 {
                     outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             }
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Biome Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
+                "Biome Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, 4));
             metadata.displayName = "Biome Composer";
             metadata.category = "Data Maps";
             metadata.headerColor = IM_COL32(74, 154, 92, 255);
@@ -3363,8 +3820,10 @@ namespace TerrainNodesV2 {
         int seed = 1234;
         float minimumDistance = 0.5f;
         float maximumSlopeDegrees = 45.0f;
-        float minimumHeight = -10.0f;
-        float maximumHeight = 10.0f;
+        // Wide-open by default (mirrors InstanceGroup): the biome masks pick
+        // altitude; a fixed +/-10 m absolute band broke on 1000 m terrains.
+        float minimumHeight = -100000.0f;
+        float maximumHeight = 100000.0f;
         std::string densityField;
         std::string exclusionField;
         float exclusionThreshold = 0.5f;
@@ -3689,7 +4148,7 @@ namespace TerrainNodesV2 {
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Surface Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
+                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, 4));
             metadata.displayName = "Surface Composer";
             metadata.category = "Texture";
             metadata.headerColor = IM_COL32(190, 135, 52, 255);
@@ -3761,6 +4220,7 @@ namespace TerrainNodesV2 {
         int waterIterations = 10;
         float windStrength = 0.08f;
         float windAzimuth = 0.0f;
+        bool useGPU = true;
         bool useSceneSun = true;
         float sunAzimuth = 135.0f;
         float sunElevation = 35.0f;
@@ -3811,7 +4271,7 @@ namespace TerrainNodesV2 {
             j["valleyCapture"] = valleyCapture; j["transportRate"] = transportRate;
             j["slipAngle"] = slipAngle; j["settleIterations"] = settleIterations;
             j["waterIterations"] = waterIterations; j["windStrength"] = windStrength;
-            j["windAzimuth"] = windAzimuth; j["useSceneSun"] = useSceneSun;
+            j["windAzimuth"] = windAzimuth; j["useGPU"] = useGPU; j["useSceneSun"] = useSceneSun;
             j["sunAzimuth"] = sunAzimuth; j["sunElevation"] = sunElevation;
         }
 
@@ -3845,6 +4305,7 @@ namespace TerrainNodesV2 {
             waterIterations = clampValue(j.value("waterIterations", waterIterations), 1, 64);
             windStrength = clampValue(j.value("windStrength", windStrength), 0.0f, 1.0f);
             windAzimuth = j.value("windAzimuth", windAzimuth);
+            useGPU = j.value("useGPU", useGPU);
             useSceneSun = j.value("useSceneSun", useSceneSun);
             sunAzimuth = j.value("sunAzimuth", sunAzimuth);
             sunElevation = clampValue(j.value("sunElevation", sunElevation), -89.0f, 89.0f);
@@ -4206,6 +4667,8 @@ namespace TerrainNodesV2 {
         // Keep consumers locked until the completed worker result has also gone
         // through pollEvaluateAsync() and its main-thread finalize phase.
         bool isEvaluatingAsync() const override { return isEvaluating.load() || evalFuture_.valid(); }
+        bool lastAsyncEvaluationCancelled() const { return lastAsyncEvaluationCancelled_; }
+        const std::string& lastAsyncEvaluationError() const { return lastAsyncEvaluationError_; }
         uint32_t currentAsyncNodeId() const override {
             return activeEvalContext ? activeEvalContext->getCurrentNodeId() : 0;
         }
@@ -4234,6 +4697,13 @@ namespace TerrainNodesV2 {
             image = *cachedImage;
             return true;
         }
+
+        // Observational inspector pull. Reuses clean upstream values from the
+        // committed cache, evaluates dirty nodes against a detached terrain and
+        // restores authoring dirty state before returning.
+        bool evaluateInspectorImageOutput(uint32_t nodeId, int outputIndex,
+                                          TerrainObject* terrain,
+                                          NodeSystem::Image2DData& image);
 
         // Create a default graph with basic nodes
         void createDefaultGraph(TerrainObject* terrain);
@@ -4287,6 +4757,8 @@ namespace TerrainNodesV2 {
         std::atomic<bool> lastEvaluateResized_{false};
         std::atomic<bool> lastFinalizeWasFullRebuild_{false};
         std::atomic<bool> lastHeightDataUpdated_{false};
+        bool lastAsyncEvaluationCancelled_ = false;
+        std::string lastAsyncEvaluationError_;
         std::shared_ptr<NodeSystem::EvaluationContext> cachedEvalContext_;
         std::unique_ptr<TerrainContext> cachedTerrainCtx_;
         bool pendingEvaluationIsPreview_ = false;

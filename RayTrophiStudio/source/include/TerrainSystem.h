@@ -77,6 +77,10 @@ struct Heightmap {
     int height = 0;
     float scale_y = 10.0f;   // Maximum height
     float scale_xz = 100.0f; // World size (Total width/depth)
+    // Derived raw-data bounds. Procedural metre-authored graphs may exceed
+    // 0..1 or become negative, so picking cannot assume normalized heights.
+    float min_value = 0.0f;
+    float max_value = 0.0f;
     
     // Get height at grid coordinate (clamped)
     float getHeight(int x, int y) const {

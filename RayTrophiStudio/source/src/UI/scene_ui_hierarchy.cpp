@@ -2297,12 +2297,19 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::SetTooltip("Click on an object in viewport to set focus distance (ignores selection)");
                 }
 
-                // Mouse Sensitivity
+                // Camera navigation controls: angular look is intentionally
+                // independent from world-space pan/zoom/fly scaling.
                 ImGui::Spacing();
-                if (SceneUI::DrawSmartFloat("msens", "Mouse Sens", &ctx.render_settings.mouse_sensitivity, 0.01f, 5.0f, "%.3f", false, nullptr, 12)) {
-                    // Value updated directly via reference
+                SceneUI::DrawSmartFloat("msens", "Look Sens", &ctx.render_settings.mouse_sensitivity, 0.01f, 5.0f, "%.3f", false, nullptr, 12);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Yaw, pitch and orbit response");
+                if (SceneUI::DrawSmartFloat("navscale", "Nav Scale", &ctx.render_settings.navigation_scale, 0.1f, 5.0f, "%.2fx", false, nullptr, 12)) {
+                    ctx.render_settings.navigation_scale_auto = false;
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera rotation/panning speed");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Master world-space scale for pan, zoom and fly");
+                ImGui::Checkbox("Auto Terrain Navigation", &ctx.render_settings.navigation_scale_auto);
+                SceneUI::DrawSmartFloat("pansens", "Pan", &ctx.render_settings.pan_sensitivity, 0.1f, 4.0f, "%.2fx", false, nullptr, 12);
+                SceneUI::DrawSmartFloat("zoomsens", "Zoom", &ctx.render_settings.zoom_sensitivity, 0.1f, 4.0f, "%.2fx", false, nullptr, 12);
+                SceneUI::DrawSmartFloat("flysens", "Fly", &ctx.render_settings.fly_speed_multiplier, 0.1f, 4.0f, "%.2fx", false, nullptr, 12);
 
                 // ═══════════════════════════════════════════════════════════════════════════
                 // EXPOSURE SETTINGS - Professional camera exposure controls

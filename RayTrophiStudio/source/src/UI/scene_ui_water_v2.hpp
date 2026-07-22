@@ -314,13 +314,17 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
         return;
     }
 
-    static int selectedId = -1;
-    if (!WaterManager::getInstance().getWaterSurface(selectedId)) selectedId = surfaces.front().id;
+    if (!WaterManager::getInstance().getWaterSurface(selected_water_surface_id)) {
+        selected_water_surface_id = surfaces.front().id;
+    }
     ImGui::Spacing();
     if (ImGui::BeginListBox("##water_v2_surfaces", ImVec2(-1.0f, 92.0f))) {
         for (const WaterSurface& surface : surfaces) {
-            const bool selected = selectedId == surface.id;
-            if (ImGui::Selectable(surface.name.c_str(), selected)) selectedId = surface.id;
+            const bool selected = selected_water_surface_id == surface.id;
+            if (ImGui::Selectable(surface.name.c_str(), selected)) {
+                selected_water_surface_id = surface.id;
+                selectManagedMesh(ctx, surface.flatMesh);
+            }
             if (selected) ImGui::SetItemDefaultFocus();
         }
         ImGui::EndListBox();
@@ -332,10 +336,11 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
         WaterManager::getInstance().setPreviewTimeMode(static_cast<WaterPreviewTimeMode>(timeMode));
         ctx.renderer.resetCPUAccumulation();
         if (Backend::IBackend* backend = waterV2Backend(ctx)) backend->resetAccumulation();
+        ProjectManager::getInstance().markModified();
     }
 
-    if (WaterSurface* selected = WaterManager::getInstance().getWaterSurface(selectedId)) {
+    if (WaterSurface* selected = WaterManager::getInstance().getWaterSurface(selected_water_surface_id)) {
         ImGui::Separator();
-        if (drawWaterSurfaceMaterialEditor(ctx, *selected, true)) selectedId = -1;
+        if (drawWaterSurfaceMaterialEditor(ctx, *selected, true)) selected_water_surface_id = -1;
     }
 }

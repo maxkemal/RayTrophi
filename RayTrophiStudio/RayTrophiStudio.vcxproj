@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -102,14 +102,23 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros">
+    <RayTrophiPythonVersion>3.11</RayTrophiPythonVersion>
+    <RayTrophiPythonLib Condition="'$(Configuration)'=='Debug'">python311_d.lib</RayTrophiPythonLib>
+    <RayTrophiPythonLib Condition="'$(Configuration)'!='Debug'">python311.lib</RayTrophiPythonLib>
+    <RayTrophiPythonBin Condition="'$(Configuration)'=='Debug'">$(ProjectDir)..\vcpkg\installed\x64-windows\debug\bin</RayTrophiPythonBin>
+    <RayTrophiPythonBin Condition="'$(Configuration)'!='Debug'">$(ProjectDir)..\vcpkg\installed\x64-windows\bin</RayTrophiPythonBin>
+    <RayTrophiPythonTools>$(ProjectDir)..\vcpkg\installed\x64-windows\tools\python3</RayTrophiPythonTools>
     <RayTrophiXatlasRoot Condition="Exists('$(ProjectDir)external\xatlas\xatlas.cpp') and Exists('$(ProjectDir)external\xatlas\xatlas.h')">$(ProjectDir)external\xatlas</RayTrophiXatlasRoot>
     <RayTrophiXatlasRoot Condition="'$(RayTrophiXatlasRoot)'=='' and Exists('$(ProjectDir)external\xatlas\source\xatlas\xatlas.cpp') and Exists('$(ProjectDir)external\xatlas\source\xatlas\xatlas.h')">$(ProjectDir)external\xatlas\source\xatlas</RayTrophiXatlasRoot>
     <RayTrophiHasXatlas Condition="'$(RayTrophiXatlasRoot)'!=''">true</RayTrophiHasXatlas>
     <RayTrophiXatlasInclude Condition="'$(RayTrophiHasXatlas)'=='true'">;$(RayTrophiXatlasRoot)</RayTrophiXatlasInclude>
     <RayTrophiXatlasDefine Condition="'$(RayTrophiHasXatlas)'=='true'">;RAYTROPHI_HAS_XATLAS=1</RayTrophiXatlasDefine>
   </PropertyGroup>
+  <PropertyGroup>
+    <TargetName>RayTrophiStudio</TargetName>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
+    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(ProjectDir)..\vcpkg\installed\x64-windows\include\python$(RayTrophiPythonVersion);$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
     <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
@@ -117,7 +126,7 @@
     <LibraryPath>$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
+    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(ProjectDir)..\vcpkg\installed\x64-windows\include\python$(RayTrophiPythonVersion);$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
     <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
     <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -181,7 +190,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
@@ -239,7 +248,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
@@ -286,6 +295,10 @@
     <ClInclude Include="source\include\ImGuizmo.h" />
     <ClInclude Include="source\include\OptixAccelManager.h" />
     <ClInclude Include="source\include\OzzRuntime.h" />
+    <ClInclude Include="source\include\Api\RtApi.h" />
+    <ClInclude Include="source\include\Api\RtPython.h" />
+    <ClInclude Include="source\include\Api\RtIpc.h" />
+    <ClInclude Include="source\include\TextEditor.h" />
     <ClInclude Include="source\include\SceneCommand.h" />
     <ClInclude Include="source\include\SceneHistory.h" />
     <ClInclude Include="source\include\SceneSelection.h" />
@@ -409,6 +422,7 @@
     <ClInclude Include="source\include\Stylize\StylizeKernel.h" />
     <ClInclude Include="source\include\Stylize\StylizeModeState.h" />
     <ClInclude Include="source\include\SimulationCompute.h" />
+    <ClInclude Include="source\include\SnowComputeGPU.h" />
     <ClInclude Include="source\include\SimulationComputeVulkanContext.h" />
     <ClInclude Include="source\include\SimulationSystems.h" />
     <ClInclude Include="source\include\SimulationWorld.h" />
@@ -1327,6 +1341,25 @@
     <ClCompile Include="source\src\Utils\SceneCommand.cpp" />
     <ClCompile Include="source\src\Utils\MeshModifiers.cpp" />
     <ClCompile Include="source\src\Utils\SceneExporter.cpp" />
+    <ClCompile Include="source\src\Api\RtApi.cpp" />
+    <ClCompile Include="source\src\Api\RtApiModifiers.cpp" />
+    <ClCompile Include="source\src\Api\RtApiFluid.cpp" />
+    <ClCompile Include="source\src\Api\RtApiTerrain.cpp" />
+    <ClCompile Include="source\src\Api\RtApiHair.cpp" />
+    <ClCompile Include="source\src\Api\RtApiPaint.cpp" />
+    <ClCompile Include="source\src\Api\RtApiSculpt.cpp" />
+    <ClCompile Include="source\src\Api\RtPython.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtConsole.cpp" />
+    <ClCompile Include="source\src\Api\RtIpc.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcSecurity.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcAudit.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcPanel.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcSession.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcTransportLocal.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcTransportTls.cpp" />
+    <ClCompile Include="source\src\UI\TextEditor.cpp" />
     <ClCompile Include="source\src\Utils\SceneHistory.cpp" />
     <ClCompile Include="source\src\UI\SceneSelection.cpp" />
     <ClCompile Include="source\src\Utils\SceneSerializer.cpp" />
@@ -1375,6 +1408,7 @@
     <ClCompile Include="source\src\Physics\SurfaceFlowField.cpp" />
     <ClCompile Include="source\src\Physics\TerrainManager.cpp" />
     <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp" />
+    <ClCompile Include="source\src\Physics\SnowComputeGPU.cpp" />
     <ClCompile Include="source\src\Physics\TerrainFFT.cpp" />
     <ClCompile Include="source\src\Render\Texture.cpp" />
     <ClCompile Include="source\src\Utils\TextureCompressionCache.cpp" />
@@ -1430,4 +1464,29 @@
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.targets" />
   </ImportGroup>
+  <Target Name="CopyEmbeddedPythonRuntime" AfterTargets="Build"
+          Condition="'$(Platform)'=='x64' and Exists('$(RayTrophiPythonTools)')">
+    <ItemGroup>
+      <RayTrophiPythonRuntime Include="$(RayTrophiPythonTools)\**\*" />
+      <RayTrophiPythonDll Include="$(RayTrophiPythonBin)\python*.dll" />
+      <RayTrophiPythonExtension Include="$(RayTrophiPythonBin)\*.pyd" />
+      <RayTrophiOpenSslDll Include="$(RayTrophiPythonBin)\libssl*.dll;$(RayTrophiPythonBin)\libcrypto*.dll" />
+      <RayTrophiScript Include="$(ProjectDir)..\scripts\**\*.py" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RayTrophiPythonRuntime)"
+          DestinationFiles="@(RayTrophiPythonRuntime->'$(OutDir)python\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiPythonDll)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiPythonExtension)"
+          DestinationFolder="$(OutDir)python\DLLs"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiOpenSslDll)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiScript)"
+          DestinationFiles="@(RayTrophiScript->'$(OutDir)scripts\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>

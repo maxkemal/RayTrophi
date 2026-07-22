@@ -19,6 +19,7 @@
 #include <vector>
 #include <functional>
 #include <fstream>
+#include <istream>
 #include <unordered_map>
 
 // TextureType enum forward declaration (defined in Texture.h)
@@ -140,7 +141,7 @@ private:
     bool writeGeometryBinary(std::ofstream& out, const SceneData& scene);
     
     // Read geometry from binary file and recreate scene objects
-    bool readGeometryBinary(std::ifstream& in, SceneData& scene);
+    bool readGeometryBinary(std::istream& in, SceneData& scene);
     
     // ========================================================================
     // Component Serialization
@@ -168,7 +169,7 @@ private:
     // never be written into the project at all.
     nlohmann::json serializeTextures(std::ofstream& bin_out, bool embed_textures,
                                      const std::vector<std::shared_ptr<Texture>>& extra_textures = {});
-    void deserializeTextures(const nlohmann::json& j, std::ifstream& bin_in, const std::string& project_dir);
+    void deserializeTextures(const nlohmann::json& j, std::istream& bin_in, const std::string& project_dir);
 
     // Serialize Gas Volumes
     nlohmann::json serializeGasVolumes(const std::vector<std::shared_ptr<GasVolume>>& gas_volumes);

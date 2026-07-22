@@ -196,6 +196,17 @@ void WaterManager::removeWaterSurface(SceneData& scene, int id) {
 }
 
 void WaterManager::clear() {
+    releaseRuntimeGPUResources();
+    water_surfaces.clear();
+    next_id = 1;
+    last_resolved_preview_time = 0.0f;
+    static_preview_time = 0.0f;
+    last_simulation_time = 0.0f;
+    has_last_resolved_preview_time = false;
+    has_last_simulation_time = false;
+}
+
+void WaterManager::releaseRuntimeGPUResources() {
     // CRITICAL: Clear GPU material FFT handles BEFORE destroying FFT state
     // This prevents OptiX from trying to sample destroyed textures
     for (auto& surf : water_surfaces) {
@@ -227,13 +238,6 @@ void WaterManager::clear() {
              surf.gpu_geo_state = nullptr;
          }
     }
-    water_surfaces.clear();
-    next_id = 1;
-    last_resolved_preview_time = 0.0f;
-    static_preview_time = 0.0f;
-    last_simulation_time = 0.0f;
-    has_last_resolved_preview_time = false;
-    has_last_simulation_time = false;
 }
 
 WaterUpdateResult WaterManager::update(float waterTime) {
@@ -1914,6 +1918,17 @@ nlohmann::json WaterManager::serialize() const {
         ws["name"] = surf.name;
         ws["material_id"] = surf.material_id;
         ws["owns_scene_mesh"] = surf.owns_scene_mesh;
+        ws["generated_identity"] = {
+            {"valid", surf.has_generated_identity},
+            {"terrain_id", surf.generated_terrain_id},
+            {"node_id", surf.generated_node_id},
+            {"feature_id", surf.generated_feature_id},
+            {"anchor", {surf.generated_anchor.x, surf.generated_anchor.y, surf.generated_anchor.z}},
+            {"extent", surf.generated_extent}
+        };
+        // Versioned complete payload shared with RiverSpline. The legacy flat
+        // keys below remain for backward/forward project compatibility.
+        ws["params"] = surf.params.serializeParams();
         
         // Wave params
         ws["wave_speed"] = surf.params.wave_speed;
@@ -2038,6 +2053,7 @@ nlohmann::json WaterManager::serialize() const {
     }
     
     nlohmann::json result;
+    result["version"] = 3;
     result["water_surfaces"] = arr;
     result["next_id"] = next_id;
     result["preview_time_mode"] = static_cast<int>(preview_time_mode);
@@ -2061,10 +2077,26 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
     
     for (const auto& ws : j["water_surfaces"]) {
         WaterSurface surf;
-        surf.id = ws.value("id", next_id++);
+        // Avoid evaluating next_id++ as value()'s default when a serialized ID
+        // exists; that silently advanced generated surface IDs on every load.
+        surf.id = ws.contains("id") ? ws["id"].get<int>() : next_id++;
+        next_id = (std::max)(next_id, surf.id + 1);
         surf.name = ws.value("name", "Water_Plane_" + std::to_string(surf.id));
         surf.material_id = ws.value("material_id", 0);
         surf.owns_scene_mesh = ws.value("owns_scene_mesh", true);
+        if (ws.contains("generated_identity") && ws["generated_identity"].is_object()) {
+            const auto& identity = ws["generated_identity"];
+            surf.has_generated_identity = identity.value("valid", false);
+            surf.generated_terrain_id = identity.value("terrain_id", -1);
+            surf.generated_node_id = identity.value("node_id", 0u);
+            surf.generated_feature_id = identity.value("feature_id", uint64_t{0});
+            surf.generated_extent = identity.value("extent", 0.0f);
+            if (identity.contains("anchor") && identity["anchor"].is_array() &&
+                identity["anchor"].size() >= 3) {
+                surf.generated_anchor = Vec3(identity["anchor"][0], identity["anchor"][1],
+                                             identity["anchor"][2]);
+            }
+        }
         
         // Restore wave params
         surf.params.wave_speed = ws.value("wave_speed", 1.0f);
@@ -2167,6 +2199,15 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         // Water Preset (load as int, cast to enum)
         int preset_val = ws.value("current_preset", 0);
         surf.params.current_preset = static_cast<WaterWaveParams::WaterPreset>(preset_val);
+
+        // New projects use the complete nested contract. Keeping the legacy
+        // reads above lets old projects load with their historical defaults.
+        if (ws.contains("params") && ws["params"].is_object()) {
+            surf.params.deserializeParams(ws["params"]);
+        }
+        const float restoredAnimationSpeed = resolveSharedAnimationSpeed(&surf);
+        surf.params.fft_time_scale = restoredAnimationSpeed;
+        surf.params.geo_wave_speed = restoredAnimationSpeed;
         
         // Animation state. CUDA FFT displacement stays retired, while the
         // topology-stable Geometry Waves modifier is restored from the scene.

@@ -205,8 +205,12 @@ struct InstanceGroup {
         int exclusion_channel = -1;             // Channel to exclude (mask out)
         float exclusion_threshold = 0.5f;       // Value above which placement is prevented (For painting/spawning)
         float slope_max = 45.0f;                // Max slope angle
-        float height_min = -10.0f;
-        float height_max = 10.0f;
+        // Absolute-metre altitude band. Default must not gate anything:
+        // altitude selection belongs to the biome/density masks, and a fixed
+        // +/-10 m band (tuned for the old 10 m-relief toy terrains) silently
+        // emptied every layer above 10 m on real-scale 1000 m terrains.
+        float height_min = -100000.0f;
+        float height_max = 100000.0f;
         float curvature_min = -2.0f;            // Threshold between Ridge and Flat
         float curvature_max = 2.0f;             // Threshold between Flat and Gully
         int curvature_step = 1;                 // Feature Scale (Step size for Laplacian)

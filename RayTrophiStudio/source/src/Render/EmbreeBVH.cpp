@@ -151,7 +151,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     std::vector<std::shared_ptr<HittableInstance>> local_instances;
     // Flat/proxy migration: dense meshes may live in world.objects as a single TriangleMesh
     // (no per-face Triangle facades). Collected here and built as facade-less groups below.
-    std::vector<std::shared_ptr<TriangleMesh>> direct_meshes;
+    cached_direct_meshes.reserve(objects.size());
 
     cached_triangles.reserve(objects.size());
     local_instances.reserve(objects.size());
@@ -161,10 +161,19 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         if (!obj->visible) continue;
 
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            // A facade Triangle whose backing mesh geometry was cleared/rebuilt (indices
+            // emptied) but that still lingers in world.objects would form a degenerate group
+            // below and desync the facade's faceIndex from a shrunk index buffer. Mirror the
+            // validity gate used for direct meshes just below. Standalone (parentMesh-less)
+            // facades carry their own inline verts, so they are always kept.
+            if (tri->parentMesh &&
+                (!tri->parentMesh->geometry || tri->parentMesh->geometry->indices.empty())) {
+                continue;
+            }
             cached_triangles.push_back(tri);
         }
         else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
-            if (mesh->geometry && !mesh->geometry->indices.empty()) direct_meshes.push_back(mesh);
+            if (mesh->geometry && !mesh->geometry->indices.empty()) cached_direct_meshes.push_back(mesh);
         }
         else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
             local_instances.push_back(inst);
@@ -175,7 +184,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     }
 
     // 2. Build Triangle Geometry (if any)
-    if (!cached_triangles.empty() || !direct_meshes.empty()) {
+    if (!cached_triangles.empty() || !cached_direct_meshes.empty()) {
         // Group triangles by parentMesh to exploit contiguous flat buffers. facadeless groups
         // (tris empty) cover ALL faces of a TriangleMesh placed directly in world.objects.
         struct TempMeshGroup {
@@ -204,7 +213,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         }
 
         // facade-less direct meshes: one group each, covering every face from the SoA index buffer.
-        for (const auto& mesh : direct_meshes) {
+        for (const auto& mesh : cached_direct_meshes) {
             TempMeshGroup g;
             g.mesh = mesh.get();
             g.facadeless = true;
@@ -240,6 +249,17 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
             geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
             sizeof(unsigned) * 3, total_triangles
         );
+
+        // Embree returns null on a zero-sized buffer or if the device is in an error state
+        // (which a prior malformed rebuild during rapid script-driven create/delete can leave
+        // behind). The population loops below write into these unconditionally, so a null here
+        // is a guaranteed segfault — bail out of the triangle geometry cleanly instead.
+        if (!vertex_buffer || !index_buffer) {
+            SCENE_LOG_WARN("[EmbreeBVH::build] triangle buffer allocation returned null (verts=" +
+                           std::to_string(total_vertices) + " tris=" + std::to_string(total_triangles) +
+                           "); skipping triangle geometry this rebuild.");
+            rtcReleaseGeometry(geom);
+        } else {
 
         triangle_data.resize(total_triangles);
 
@@ -319,12 +339,14 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
             #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
             for (int i = 0; i < (int)group_tris_count; ++i) {
                 const auto& tri = group.tris[i];
-                uint32_t faceIdx = tri->faceIndex;
+                // size_t base avoids the uint32 overflow that would let a corrupt/garbage
+                // faceIndex wrap past the guard and index the SoA buffer out of bounds.
+                const size_t faceBase = static_cast<size_t>(tri->faceIndex) * 3;
                 size_t local_tri_offset = tri_offset + i;
-                if (group.mesh->geometry && faceIdx * 3 + 2 < group.mesh->geometry->indices.size()) {
-                    index_buffer[local_tri_offset * 3 + 0] = group.mesh->geometry->indices[faceIdx * 3 + 0] + static_cast<unsigned>(vertex_offset);
-                    index_buffer[local_tri_offset * 3 + 1] = group.mesh->geometry->indices[faceIdx * 3 + 1] + static_cast<unsigned>(vertex_offset);
-                    index_buffer[local_tri_offset * 3 + 2] = group.mesh->geometry->indices[faceIdx * 3 + 2] + static_cast<unsigned>(vertex_offset);
+                if (group.mesh->geometry && faceBase + 2 < group.mesh->geometry->indices.size()) {
+                    index_buffer[local_tri_offset * 3 + 0] = group.mesh->geometry->indices[faceBase + 0] + static_cast<unsigned>(vertex_offset);
+                    index_buffer[local_tri_offset * 3 + 1] = group.mesh->geometry->indices[faceBase + 1] + static_cast<unsigned>(vertex_offset);
+                    index_buffer[local_tri_offset * 3 + 2] = group.mesh->geometry->indices[faceBase + 2] + static_cast<unsigned>(vertex_offset);
                 } else {
                     index_buffer[local_tri_offset * 3 + 0] = 0;
                     index_buffer[local_tri_offset * 3 + 1] = 0;
@@ -380,6 +402,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         rtcCommitGeometry(geom);
         triangle_geom_id = rtcAttachGeometry(scene, geom);
         rtcReleaseGeometry(geom);
+        } // close else (buffer allocation succeeded)
     }
 
     // 3. Build Instances
@@ -630,6 +653,7 @@ void EmbreeBVH::clearGeometry() {
     }
     triangle_data.clear();
     cached_triangles.clear(); // [NEW] Önbelleği de temizle
+    cached_direct_meshes.clear();
     active_mesh_groups.clear();
     
     // CRITICAL FIX: Clear instance mappings to prevent stale pointers after rebuild
@@ -1015,16 +1039,21 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                 // facade path exactly — same SoA the facades read, so identical space/values).
                 const auto* g = tri.mesh_ptr->geometry.get();
                 const auto& gIdx = g->indices;
-                const uint32_t base = tri.face_index * 3u;
-                if (base + 2u < gIdx.size()) {
+                const size_t base = static_cast<size_t>(tri.face_index) * 3ull;
+                if (base + 2ull < gIdx.size()) {
                     const uint32_t i0 = gIdx[base + 0], i1 = gIdx[base + 1], i2 = gIdx[base + 2];
-                    const Vec3* N = g->get_normals();
-                    const Vec2* UV = g->get_uvs();
-                    if (N) rec.normal = (N[i0] * w + N[i1] * u + N[i2] * v).normalize();
-                    else   rec.normal = Vec3(0.0f, 1.0f, 0.0f);
-                    if (UV) { rec.u = UV[i0].u * w + UV[i1].u * u + UV[i2].u * v;
-                              rec.v = UV[i0].v * w + UV[i1].v * u + UV[i2].v * v; }
-                    else    { rec.u = 0.0f; rec.v = 0.0f; }
+                    const size_t vertexCount = g->get_vertex_count();
+                    if (i0 < vertexCount && i1 < vertexCount && i2 < vertexCount) {
+                        const Vec3* N = g->get_normals();
+                        const Vec2* UV = g->get_uvs();
+                        if (N) rec.normal = (N[i0] * w + N[i1] * u + N[i2] * v).normalize();
+                        else   rec.normal = Vec3(0.0f, 1.0f, 0.0f);
+                        if (UV) { rec.u = UV[i0].u * w + UV[i1].u * u + UV[i2].u * v;
+                                  rec.v = UV[i0].v * w + UV[i1].v * u + UV[i2].v * v; }
+                        else    { rec.u = 0.0f; rec.v = 0.0f; }
+                    } else {
+                        rec.normal = Vec3(0.0f, 1.0f, 0.0f); rec.u = 0.0f; rec.v = 0.0f;
+                    }
                 } else {
                     rec.normal = Vec3(0.0f, 1.0f, 0.0f); rec.u = 0.0f; rec.v = 0.0f;
                 }
@@ -1043,12 +1072,22 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
             rec.terrain_id = tri.terrain_id;
             rec.is_instance_hit = false; // Local geometry (e.g. Terrain)
             rec.triangle = tri.original_ptr; // Restore identity (null for facade-less)
+            rec.tri_mesh = nullptr;
+            rec.tri_face = 0;
             if (tri.original_ptr) {          // Faz 1: (mesh, faceIndex) handle
                 rec.tri_mesh = tri.original_ptr->parentMesh.get();
                 rec.tri_face = tri.original_ptr->faceIndex;
-            } else if (tri.mesh_ptr) {
-                rec.tri_mesh = tri.mesh_ptr;
-                rec.tri_face = tri.face_index;
+            } else if (tri.mesh_ptr && tri.mesh_ptr->geometry) {
+                const auto& indices = tri.mesh_ptr->geometry->indices;
+                const size_t base = static_cast<size_t>(tri.face_index) * 3ull;
+                if (base + 2ull < indices.size()) {
+                    const size_t vertexCount = tri.mesh_ptr->geometry->get_vertex_count();
+                    if (indices[base] < vertexCount && indices[base + 1] < vertexCount &&
+                        indices[base + 2] < vertexCount) {
+                        rec.tri_mesh = tri.mesh_ptr;
+                        rec.tri_face = tri.face_index;
+                    }
+                }
             }
             rec.pointiness = MeshAttr::samplePointiness(rec.tri_mesh, rec.tri_face, w, u, v);
             MeshAttr::sampleMaterialAttributes(rec.tri_mesh, rec.tri_face, w, u, v, rec.mat_attrib);

@@ -21,6 +21,8 @@
 #include "simdjson.h"
 #include <fstream>
 #include <filesystem>
+#include <istream>
+#include <streambuf>
 #include <sstream>
 #include <iomanip>
 #include <unordered_set>
@@ -880,7 +882,38 @@ static Matrix4x4 sjsonToMat4(simdjson::simdjson_result<simdjson::dom::element> r
     return sjsonToMat4(el);
 }
 
-static std::string readStringBinary(std::ifstream& in) {
+// Seekable read-only streambuf over an in-memory buffer. openProject reads the whole
+// project .bin into RAM once and parses from here: the geometry/skin-weight readers issue
+// millions of tiny read() calls, and against an ifstream each one pays the full iostream +
+// OS round-trip. Against this buffer a read() is a bounds check + memcpy.
+namespace {
+class MemReadBuf : public std::streambuf {
+public:
+    MemReadBuf(char* data, size_t size) {
+        setg(data, data, data + size);
+    }
+protected:
+    pos_type seekoff(off_type off, std::ios_base::seekdir dir, std::ios_base::openmode which) override {
+        if (!(which & std::ios_base::in)) return pos_type(off_type(-1));
+        char* base = eback();
+        char* target = nullptr;
+        switch (dir) {
+            case std::ios_base::beg: target = base + off; break;
+            case std::ios_base::cur: target = gptr() + off; break;
+            case std::ios_base::end: target = egptr() + off; break;
+            default: return pos_type(off_type(-1));
+        }
+        if (target < base || target > egptr()) return pos_type(off_type(-1));
+        setg(base, target, egptr());
+        return pos_type(target - base);
+    }
+    pos_type seekpos(pos_type pos, std::ios_base::openmode which) override {
+        return seekoff(off_type(pos), std::ios_base::beg, which);
+    }
+};
+} // namespace
+
+static std::string readStringBinary(std::istream& in) {
     uint16_t len = 0;
     in.read(reinterpret_cast<char*>(&len), sizeof(len));
     if (!in || len == 0) return "";
@@ -1747,8 +1780,36 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // 2. Prepare Binary Stream
     fs::path bin_path = pathFromUtf8(filepath);
     bin_path += ".bin";
-    std::ifstream in_bin(bin_path, std::ios::binary);
-    bool has_binary = in_bin.is_open();
+    std::ifstream bin_file(bin_path, std::ios::binary);
+    bool has_binary = bin_file.is_open();
+
+    // Fast path: slurp the whole .bin into RAM and parse from a memory stream.
+    // The skin-weight / standalone-triangle readers do per-element read() calls
+    // (10+ per triangle); against the file stream those dominate load time.
+    // Size-gated so a pathologically large .bin falls back to the file stream
+    // instead of doubling peak RSS.
+    std::vector<char> bin_data;
+    std::unique_ptr<MemReadBuf> bin_membuf;
+    std::unique_ptr<std::istream> bin_memstream;
+    if (has_binary) {
+        std::error_code size_ec;
+        const uintmax_t bin_size = fs::file_size(bin_path, size_ec);
+        constexpr uintmax_t kMaxInMemoryBin = 1ull << 30; // 1 GB
+        if (!size_ec && bin_size > 0 && bin_size <= kMaxInMemoryBin) {
+            ScopedPerfTimer timer("openProject slurp .bin");
+            bin_data.resize(static_cast<size_t>(bin_size));
+            if (bin_file.read(bin_data.data(), static_cast<std::streamsize>(bin_size))) {
+                bin_membuf = std::make_unique<MemReadBuf>(bin_data.data(), bin_data.size());
+                bin_memstream = std::make_unique<std::istream>(bin_membuf.get());
+            } else {
+                bin_data.clear();
+                bin_data.shrink_to_fit();
+                bin_file.clear();
+                bin_file.seekg(0, std::ios::beg);
+            }
+        }
+    }
+    std::istream& in_bin = bin_memstream ? *bin_memstream : static_cast<std::istream&>(bin_file);
     
     // Clear current project and scene
     if (progress_callback) progress_callback(5, "Clearing scene...");
@@ -2377,7 +2438,11 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         return false;
     }
     
-    if (in_bin.is_open()) in_bin.close();
+    if (bin_file.is_open()) bin_file.close();
+    bin_memstream.reset();
+    bin_membuf.reset();
+    bin_data.clear();
+    bin_data.shrink_to_fit();
 
     const ProjectBackendMode requested_backend_mode = modeFromSettings(settings);
     const bool backend_mode_changed =
@@ -2422,6 +2487,21 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                                   ? (scene.world.objects.size() - foliage_count)
                                   : scene.world.objects.size();
 
+    // Resolve type + node name ONCE per object, instead of once per (model × object):
+    // the old per-context scan did 2 dynamic_pointer_casts on every selectable object for
+    // every imported model, which is O(models × objects) RTTI on large scenes.
+    std::vector<std::pair<const std::string*, std::shared_ptr<Hittable>>> named_selectables;
+    named_selectables.reserve(selectable_count);
+    for (size_t i = 0; i < selectable_count; ++i) {
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i])) {
+            const std::string* name = &tri->getNodeName();
+            named_selectables.emplace_back(name, std::move(tri));
+        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(scene.world.objects[i])) {
+            const std::string* name = &mesh->nodeName;
+            named_selectables.emplace_back(name, std::move(mesh));
+        }
+    }
+
     // Rebuild members
     for (auto& ctx : scene.importedModelContexts) {
         if (ctx.importName.empty()) continue;
@@ -2437,15 +2517,9 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         }
         ctx.members.clear();
         std::string prefix = ctx.importName + "_";
-        for (size_t i = 0; i < selectable_count; ++i) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
-            if (tri && tri->getNodeName().find(prefix) == 0) {
-                ctx.members.push_back(tri);
-                continue;
-            }
-            auto mesh = std::dynamic_pointer_cast<TriangleMesh>(scene.world.objects[i]);
-            if (mesh && mesh->nodeName.find(prefix) == 0) {
-                ctx.members.push_back(mesh);
+        for (const auto& [namePtr, obj] : named_selectables) {
+            if (namePtr->compare(0, prefix.size(), prefix) == 0) {
+                ctx.members.push_back(obj);
             }
         }
         ctx.rebuildSkeletonRepresentation(scene.boneData);
@@ -2532,24 +2606,40 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
     
     if (progress_callback) progress_callback(80, "Processing objects...");
 
-    // Track new objects
+    // Track new objects. With import-flat, create_scene has already collapsed non-skinned
+    // groups to SoA TriangleMesh Hittables — the Triangle-only cast silently recorded
+    // NOTHING for them, so ImportedModelData.objects came back empty on flat imports.
+    // Handle both representations.
     std::unordered_set<std::string> processed_nodes;
     for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
-        if (tri) {
-            std::string unique_name = tri->getNodeName(); // Already prefixed by AssimpLoader now!
-            
-            if (processed_nodes.insert(unique_name).second) {
-                ImportedModelData::ObjectInstance inst;
-                inst.node_name = unique_name;
-                auto th = tri->getTransformPtr();
-                if (th) {
-                    inst.transform = th->base;
+        std::string unique_name; // Already prefixed by AssimpLoader now!
+        const Transform* th = nullptr;
+        uint16_t mat_id = 0;
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i])) {
+            unique_name = tri->getNodeName();
+            th = tri->getTransformPtr();
+            mat_id = tri->getMaterialID();
+        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(scene.world.objects[i])) {
+            unique_name = mesh->nodeName;
+            th = mesh->transform.get();
+            if (mesh->geometry && mesh->geometry->get_vertex_count() > 0) {
+                if (const uint16_t* ids = mesh->geometry->get_attribute_data<uint16_t>("materialID")) {
+                    mat_id = ids[0];
                 }
-                inst.material_id = tri->getMaterialID();
-                inst.visible = true;
-                model.objects.push_back(inst);
             }
+        } else {
+            continue;
+        }
+
+        if (processed_nodes.insert(unique_name).second) {
+            ImportedModelData::ObjectInstance inst;
+            inst.node_name = unique_name;
+            if (th) {
+                inst.transform = th->base;
+            }
+            inst.material_id = mat_id;
+            inst.visible = true;
+            model.objects.push_back(inst);
         }
     }
     
@@ -2568,22 +2658,21 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
         m.objects = std::move(unique_objs);
     }
 
-    // ── Import-flat (gated): collapse each freshly-imported dense, non-skinned facade group into
-    // the single shared SoA TriangleMesh the loader already built (the facades' common
-    // parentMesh), so the scene holds ONE Hittable per mesh instead of a per-face soup. Mirrors
-    // the materialize-flip / apply-flat path and activates the sculpt-on-flat SoA path on imported
-    // meshes (a cage-less direct mesh). Skinned meshes keep the facade path (SoA skinning
-    // write-back is a later increment); small meshes stay loose (facade overhead is negligible).
+    // ── Import-flat (gated): collapse each freshly-imported facade group into the single shared
+    // SoA TriangleMesh the loader already built (the facades' common parentMesh), so the scene
+    // holds ONE Hittable per mesh instead of a per-face soup. Mirrors the materialize-flip /
+    // apply-flat path and activates the sculpt-on-flat SoA path on imported meshes (a cage-less
+    // direct mesh). Skinned meshes collapse too: skin weights live per SoA vertex in
+    // GeometryDetail and every backend consumes TriangleMesh::applySkinning.
     // Runs AFTER the ImportedModelData tracking above, so serialization still records the per-node
     // instances. Selection/material on the collapsed mesh go through the representative-facade
     // path, registered by SceneUI::rebuildMeshCache on the next UI pass (e.g. selection/sculpt).
     {
         extern bool g_dense_mesh_as_hittable;
         if (g_dense_mesh_as_hittable && scene.world.objects.size() > objects_before) {
-            // Collapse EVERY non-skinned imported mesh to flat (threshold 1) — the per-face
+            // Collapse EVERY imported mesh to flat (threshold 1, skinned included) — the per-face
             // Triangle facade is being phased out entirely, so leaving small meshes as facades is
             // against the direction (and they leak into the viewport's loose-triangle HUD count).
-            // Skinned meshes still stay facade (SoA skinning write-back is a later increment).
             constexpr size_t kMinFlatFaces = 1;
             std::unordered_map<TriangleMesh*, std::shared_ptr<TriangleMesh>> flatGroups;
             std::unordered_map<TriangleMesh*, size_t> faceCounts;
@@ -3013,7 +3102,7 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
     return true;
 }
 
-bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
+bool ProjectManager::readGeometryBinary(std::istream& in, SceneData& scene) {
     // Read and validate header (accept RTP3, RTP4, RTP5, RTP6, RTP7, RTP8 formats)
     char magic[4];
     in.read(magic, 4);
@@ -3765,6 +3854,11 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["samples_per_pass"] = settings.samples_per_pass;
     j["show_scene_stats_hud"] = settings.show_scene_stats_hud;
     j["mouse_sensitivity"] = settings.mouse_sensitivity;
+    j["navigation_scale"] = settings.navigation_scale;
+    j["navigation_scale_auto"] = settings.navigation_scale_auto;
+    j["pan_sensitivity"] = settings.pan_sensitivity;
+    j["zoom_sensitivity"] = settings.zoom_sensitivity;
+    j["fly_speed_multiplier"] = settings.fly_speed_multiplier;
     j["max_bounces"] = settings.max_bounces;
     j["diffuse_bounces"] = settings.diffuse_bounces;
     j["transmission_bounces"] = settings.transmission_bounces;
@@ -3808,6 +3902,11 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.samples_per_pass = j.value("samples_per_pass", 1);
     settings.show_scene_stats_hud = j.value("show_scene_stats_hud", true);
     settings.mouse_sensitivity = j.value("mouse_sensitivity", 0.4f);
+    settings.navigation_scale = std::clamp(j.value("navigation_scale", 1.0f), 0.1f, 5.0f);
+    settings.navigation_scale_auto = j.value("navigation_scale_auto", true);
+    settings.pan_sensitivity = std::clamp(j.value("pan_sensitivity", 1.0f), 0.1f, 4.0f);
+    settings.zoom_sensitivity = std::clamp(j.value("zoom_sensitivity", 1.0f), 0.1f, 4.0f);
+    settings.fly_speed_multiplier = std::clamp(j.value("fly_speed_multiplier", 1.0f), 0.1f, 4.0f);
     settings.max_bounces = j.value("max_bounces", 10);
     settings.max_bounces = std::max(1, settings.max_bounces);
     settings.diffuse_bounces = std::clamp(j.value("diffuse_bounces", 4), 1, settings.max_bounces);
@@ -4413,7 +4512,7 @@ std::shared_ptr<Texture> resolveEmbeddedProjectTexture(const std::string& name) 
     return tex;
 }
 
-void ProjectManager::deserializeTextures(const json& j, std::ifstream& bin_in, const std::string& project_dir) {
+void ProjectManager::deserializeTextures(const json& j, std::istream& bin_in, const std::string& project_dir) {
     // Clear previous caches
     m_embedded_texture_cache.clear();
     m_texture_path_remap.clear();
@@ -4429,7 +4528,7 @@ void ProjectManager::deserializeTextures(const json& j, std::ifstream& bin_in, c
             std::string original_name = tex.value("original_name", "");
             std::string usage = tex.value("usage", "albedo");
 
-            if (size > 0 && bin_in.is_open() && !original_name.empty()) {
+            if (size > 0 && bin_in.good() && !original_name.empty()) {
                 bin_in.seekg(offset);
                 std::vector<char> data(size);
                 bin_in.read(data.data(), size);

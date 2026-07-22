@@ -31,6 +31,7 @@
 #include <unordered_set>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -166,8 +167,16 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
     // 1. TERRAIN MANAGEMENT (Create / Import)
     // -----------------------------------------------------------------------------
     if (UIWidgets::BeginSection("Terrain Management", ImVec4(0.4f, 0.8f, 0.5f, 1.0f), true)) {
-        static int new_res = 128;
-        static float new_size = 100.0f;
+        // Real-world scale defaults. The hydrology chain (Manning discharge,
+        // channel widths/depths, fluvial thresholds) computes in SI units, so a
+        // 100 m toy terrain yields centimetre-scale rivers that die under every
+        // minimum threshold. 1000 m with ~100 m relief puts slopes, catchment
+        // areas and foliage sizes in their intended ranges (user-validated).
+        // Resolution only governs PROCEDURAL sources (Noise etc.) — a file
+        // heightmap brings its own resolution via the node's Max Resolution —
+        // so default to 1024 (~1 m cells at 1000 m), fine enough for channels.
+        static int new_res = 1024;
+        static float new_size = 1000.0f;
 
         // Creation Params
         ImGui::TextDisabled("Create New Terrain:");
@@ -180,6 +189,36 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             auto t = TerrainManager::getInstance().createTerrain(ctx.scene, new_res, new_size);
             if (t) {
                 terrain_brush.active_terrain_id = t->id;
+
+                // Scale world-space navigation for large terrain extents without
+                // touching angular look/orbit sensitivity. Only an untouched
+                // default or our previous automatic value may be replaced;
+                // explicit user navigation choices always win.
+                const float terrainSize = t->heightmap.scale_xz;
+                float recommendedNavigationScale = 0.0f;
+                if (terrainSize >= 50000.0f) recommendedNavigationScale = 5.0f;
+                else if (terrainSize >= 10000.0f) recommendedNavigationScale = 3.5f;
+                else if (terrainSize >= 2000.0f) recommendedNavigationScale = 2.5f;
+                else if (terrainSize >= 500.0f) recommendedNavigationScale = 1.5f;
+
+                if (recommendedNavigationScale > 0.0f) {
+                    const float currentNavigationScale = ctx.render_settings.navigation_scale;
+                    if (ctx.render_settings.navigation_scale_auto && currentNavigationScale < recommendedNavigationScale) {
+                        ctx.render_settings.navigation_scale = recommendedNavigationScale;
+                        char message[192];
+                        std::snprintf(message, sizeof(message),
+                            "Large terrain (%.1f km): navigation scale %.2f -> %.2f. Look sensitivity unchanged.",
+                            terrainSize / 1000.0f, currentNavigationScale, recommendedNavigationScale);
+                        addViewportMessage(message, 5.0f, ImVec4(0.85f, 0.90f, 0.45f, 1.0f));
+                    } else if (!ctx.render_settings.navigation_scale_auto &&
+                               currentNavigationScale + 1.0e-4f < recommendedNavigationScale) {
+                        char message[192];
+                        std::snprintf(message, sizeof(message),
+                            "Large terrain (%.1f km): navigation %.2f preserved. Recommended %.2f via the HUD button.",
+                            terrainSize / 1000.0f, currentNavigationScale, recommendedNavigationScale);
+                        addViewportMessage(message, 5.0f, ImVec4(0.85f, 0.90f, 0.45f, 1.0f));
+                    }
+                }
                 // Open node graph for advanced editing immediately after creation
                 show_terrain_graph = true;
                 // Ensure graph is visible, focused, and large enough.
@@ -190,13 +229,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 preferred_bottom_panel_height = 420.0f;
                 bottom_panel_height = preferred_bottom_panel_height;
                 focus_bottom_panel_next_frame = true;
-                // If terrain has a generated flat mesh, select a throwaway representative
-                // facade (face 0) to sync viewport selection — same convention other flat
-                // (direct SoA) meshes use for their selection UI handle.
-                if (t->flatMesh && ctx.selection.hasSelection() == false) {
-                    auto rep = std::make_shared<Triangle>(t->flatMesh, 0);
-                    ctx.selection.selectObject(rep, -1, rep->getNodeName());
-                }
+                // Publish the new managed mesh through the canonical scene selection.
+                selectManagedMesh(ctx, t->flatMesh);
                 SCENE_LOG_INFO("Terrain created: " + t->name);
                 ctx.renderer.resetCPUAccumulation();
                 ScheduleTerrainTopologyRebuild(ctx);
@@ -264,11 +298,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                      
                      if (ImGui::Selectable(label.c_str(), is_selected)) {
                          terrain_brush.active_terrain_id = t.id;
-                         // Select a throwaway representative facade so the viewport selection matches the list
-                         if (t.flatMesh) {
-                             auto rep = std::make_shared<Triangle>(t.flatMesh, 0);
-                             ctx.selection.selectObject(rep, -1, rep->getNodeName());
-                         }
+                         // Keep viewport/hierarchy and managed-object panels aligned.
+                         selectManagedMesh(ctx, t.flatMesh);
                          SCENE_LOG_INFO("Active terrain switched to: " + t.name);
                          // Trigger rebuild for highlighting or gizmos if necessary
                          ctx.renderer.resetCPUAccumulation(); 
@@ -1871,58 +1902,60 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     ImGui::TextDisabled("Create or select a river before carving terrain.");
                 }
 
-                ImGui::Checkbox("Auto-Carve on Move", &riverMgr.autoCarveOnMove);
+                bool carveSettingsChanged = false;
+                carveSettingsChanged |= ImGui::Checkbox("Auto-Carve on Move", &riverMgr.autoCarveOnMove);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Automatically updates the active terrain while moving river points.");
                 }
 
-                SceneUI::DrawSmartFloat("cdm", "Depth Multiplier", &riverMgr.carveDepthMult, 0.1f, 3.0f, "%.1f", false, nullptr, 16);
-                SceneUI::DrawSmartFloat("csm", "Smoothness", &riverMgr.carveSmoothness, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
-                ImGui::Checkbox("Apply Post-Erosion", &riverMgr.carveAutoPostErosion);
+                carveSettingsChanged |= SceneUI::DrawSmartFloat("cdm", "Depth Multiplier", &riverMgr.carveDepthMult, 0.1f, 3.0f, "%.1f", false, nullptr, 16);
+                carveSettingsChanged |= SceneUI::DrawSmartFloat("csm", "Smoothness", &riverMgr.carveSmoothness, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+                carveSettingsChanged |= ImGui::Checkbox("Apply Post-Erosion", &riverMgr.carveAutoPostErosion);
                 if (riverMgr.carveAutoPostErosion) {
-                    ImGui::SliderInt("Erosion Iterations", &riverMgr.carveErosionIterations, 5, 30);
+                    carveSettingsChanged |= ImGui::SliderInt("Erosion Iterations", &riverMgr.carveErosionIterations, 5, 30);
                 }
 
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.55f, 0.92f, 0.76f, 1.0f), "Natural Riverbed");
 
-                ImGui::Checkbox("Edge Noise", &riverMgr.carveEnableNoise);
+                carveSettingsChanged |= ImGui::Checkbox("Edge Noise", &riverMgr.carveEnableNoise);
                 if (riverMgr.carveEnableNoise) {
                     ImGui::Indent();
-                    SceneUI::DrawSmartFloat("cns", "Noise Scale", &riverMgr.carveNoiseScale, 0.05f, 0.5f, "%.2f", false, nullptr, 16);
-                    SceneUI::DrawSmartFloat("cnst", "Noise Strength", &riverMgr.carveNoiseStrength, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+                    carveSettingsChanged |= SceneUI::DrawSmartFloat("cns", "Noise Scale", &riverMgr.carveNoiseScale, 0.05f, 0.5f, "%.2f", false, nullptr, 16);
+                    carveSettingsChanged |= SceneUI::DrawSmartFloat("cnst", "Noise Strength", &riverMgr.carveNoiseStrength, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
                     ImGui::Unindent();
                 }
 
-                ImGui::Checkbox("Deep Pools", &riverMgr.carveEnableDeepPools);
+                carveSettingsChanged |= ImGui::Checkbox("Deep Pools", &riverMgr.carveEnableDeepPools);
                 if (riverMgr.carveEnableDeepPools) {
                     ImGui::Indent();
-                    SceneUI::DrawSmartFloat("cpf", "Pool Frequency", &riverMgr.carvePoolFrequency, 0.0f, 0.5f, "%.2f", false, nullptr, 16);
-                    SceneUI::DrawSmartFloat("cpdm", "Pool Depth Mult", &riverMgr.carvePoolDepthMult, 1.0f, 3.0f, "%.1f", false, nullptr, 16);
+                    carveSettingsChanged |= SceneUI::DrawSmartFloat("cpf", "Pool Frequency", &riverMgr.carvePoolFrequency, 0.0f, 0.5f, "%.2f", false, nullptr, 16);
+                    carveSettingsChanged |= SceneUI::DrawSmartFloat("cpdm", "Pool Depth Mult", &riverMgr.carvePoolDepthMult, 1.0f, 3.0f, "%.1f", false, nullptr, 16);
                     ImGui::Unindent();
                 }
 
-                ImGui::Checkbox("Riffles", &riverMgr.carveEnableRiffles);
+                carveSettingsChanged |= ImGui::Checkbox("Riffles", &riverMgr.carveEnableRiffles);
                 if (riverMgr.carveEnableRiffles) {
                     ImGui::Indent();
-                    SceneUI::DrawSmartFloat("crf", "Riffle Frequency", &riverMgr.carveRiffleFrequency, 0.0f, 0.5f, "%.2f", false, nullptr, 16);
-                    SceneUI::DrawSmartFloat("crdm", "Riffle Depth Mult", &riverMgr.carveRiffleDepthMult, 0.1f, 0.8f, "%.2f", false, nullptr, 16);
+                    carveSettingsChanged |= SceneUI::DrawSmartFloat("crf", "Riffle Frequency", &riverMgr.carveRiffleFrequency, 0.0f, 0.5f, "%.2f", false, nullptr, 16);
+                    carveSettingsChanged |= SceneUI::DrawSmartFloat("crdm", "Riffle Depth Mult", &riverMgr.carveRiffleDepthMult, 0.1f, 0.8f, "%.2f", false, nullptr, 16);
                     ImGui::Unindent();
                 }
 
-                ImGui::Checkbox("Asymmetric Banks", &riverMgr.carveEnableAsymmetry);
+                carveSettingsChanged |= ImGui::Checkbox("Asymmetric Banks", &riverMgr.carveEnableAsymmetry);
                 if (riverMgr.carveEnableAsymmetry) {
                     ImGui::Indent();
-                    SceneUI::DrawSmartFloat("cas", "Asymmetry Strength", &riverMgr.carveAsymmetryStrength, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+                    carveSettingsChanged |= SceneUI::DrawSmartFloat("cas", "Asymmetry Strength", &riverMgr.carveAsymmetryStrength, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
                     ImGui::Unindent();
                 }
 
-                ImGui::Checkbox("Point Bars", &riverMgr.carveEnablePointBars);
+                carveSettingsChanged |= ImGui::Checkbox("Point Bars", &riverMgr.carveEnablePointBars);
                 if (riverMgr.carveEnablePointBars) {
                     ImGui::Indent();
-                    SceneUI::DrawSmartFloat("cpbs", "Point Bar Strength", &riverMgr.carvePointBarStrength, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+                    carveSettingsChanged |= SceneUI::DrawSmartFloat("cpbs", "Point Bar Strength", &riverMgr.carvePointBarStrength, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
                     ImGui::Unindent();
                 }
+                if (carveSettingsChanged) ProjectManager::getInstance().markModified();
 
                 const bool hasActiveTerrain = TerrainManager::getInstance().hasActiveTerrain();
                 const bool canCarve = hasActiveTerrain && selectedRiver && selectedRiver->spline.pointCount() >= 2;

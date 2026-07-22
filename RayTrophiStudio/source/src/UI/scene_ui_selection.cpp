@@ -1840,6 +1840,15 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             mesh_cache.erase(name);
             bbox_cache.erase(name);
             material_slots_cache.erase(name);
+            // Flat node: also drop the direct-mesh rep caches, or a click on the
+            // tombstoned object (stale BVH window) resolves through the old rep.
+            auto dmn_it = direct_mesh_nodes.find(name);
+            if (dmn_it != direct_mesh_nodes.end()) {
+                if (dmn_it->second.mesh) {
+                    direct_mesh_rep_by_ptr.erase(dmn_it->second.mesh.get());
+                }
+                direct_mesh_nodes.erase(dmn_it);
+            }
         }
         mesh_ui_cache.erase(
             std::remove_if(mesh_ui_cache.begin(), mesh_ui_cache.end(),
@@ -1861,6 +1870,12 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             ctx.renderer.resetCPUAccumulation();
             if (selectionHasGpuRenderBackend(ctx)) {
                 g_cpu_sync_pending = true;
+            } else {
+                // CPU render mode: Embree renders from the built BVH, not the visible
+                // flags — without a rebuild the soft-deleted object keeps rendering
+                // (the build pass skips !visible objects, so a rebuild removes it).
+                extern bool g_bvh_rebuild_pending;
+                g_bvh_rebuild_pending = true;
             }
             ctx.start_render = true;
 
@@ -2238,6 +2253,28 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
         sel.clearSelection();
         for (const auto& newItem : newSelectionList) {
             sel.addToSelection(newItem);
+        }
+
+        // Record object duplicates after the UI path has already created them.
+        // SceneHistory::record() does not execute commands; redo re-inserts the
+        // exact Hittables and undo removes them. This was previously missing,
+        // so Ctrl+Z / rt.undo() after a mesh duplicate reported nothing to undo.
+        for (const auto& pending : pendingCacheEntries) {
+            std::vector<std::shared_ptr<Hittable>> createdObjects;
+            for (const auto& object : ctx.scene.world.objects) {
+                if (!object) continue;
+                std::string nodeName;
+                if (auto tri = std::dynamic_pointer_cast<Triangle>(object)) {
+                    nodeName = tri->getNodeName();
+                } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object)) {
+                    nodeName = mesh->nodeName;
+                }
+                if (nodeName == pending.new_name) createdObjects.push_back(object);
+            }
+            if (!createdObjects.empty()) {
+                history.record(std::make_unique<DuplicateObjectCommand>(
+                    pending.source_name, pending.new_name, createdObjects));
+            }
         }
         
         bool rasterCloneSucceeded = false;

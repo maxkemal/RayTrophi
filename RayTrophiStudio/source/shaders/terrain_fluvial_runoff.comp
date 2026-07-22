@@ -110,11 +110,20 @@ vec3 addFlowState(float x, float y, float amount, vec2 direction) {
     // Scalar discharge alone cannot make later rainfall follow an established
     // channel.  Keep a persistent, discharge-weighted direction field so runoff
     // parcels converge into the same beds and tributaries merge coherently.
-    int directionX = clamp(int(round(x)), 0, pc.mapWidth - 1);
-    int directionY = clamp(int(round(y)), 0, pc.mapHeight - 1);
-    int directionIndex = directionY * pc.mapWidth + directionX;
-    float previousDirectionX = atomicAdd(flowDirectionX[directionIndex], direction.x * amount);
-    float previousDirectionY = atomicAdd(flowDirectionY[directionIndex], direction.y * amount);
+    // The memory must share the discharge's bilinear footprint: nearest-cell
+    // storage quantized the field per cell, and with high memory weight parcels
+    // locked into alternating-diagonal zigzag routes on plains, re-carving the
+    // same regular chevrons batch after batch.
+    float d00x = atomicAdd(flowDirectionX[y0 * pc.mapWidth + x0], direction.x * amount * w00);
+    float d10x = atomicAdd(flowDirectionX[y0 * pc.mapWidth + x1], direction.x * amount * w10);
+    float d01x = atomicAdd(flowDirectionX[y1 * pc.mapWidth + x0], direction.x * amount * w01);
+    float d11x = atomicAdd(flowDirectionX[y1 * pc.mapWidth + x1], direction.x * amount * w11);
+    float d00y = atomicAdd(flowDirectionY[y0 * pc.mapWidth + x0], direction.y * amount * w00);
+    float d10y = atomicAdd(flowDirectionY[y0 * pc.mapWidth + x1], direction.y * amount * w10);
+    float d01y = atomicAdd(flowDirectionY[y1 * pc.mapWidth + x0], direction.y * amount * w01);
+    float d11y = atomicAdd(flowDirectionY[y1 * pc.mapWidth + x1], direction.y * amount * w11);
+    float previousDirectionX = d00x * w00 + d10x * w10 + d01x * w01 + d11x * w11;
+    float previousDirectionY = d00y * w00 + d10y * w10 + d01y * w01 + d11y * w11;
     return vec3(previousFlow, previousDirectionX, previousDirectionY);
 }
 
@@ -224,15 +233,26 @@ float hash2(int xi, int yi) {
     return float(h & 0x00ffffffu) / float(0x01000000u);
 }
 
-float valueNoise(float x, float y) {
-    const float scale = 24.0;
-    float fx = x / scale; float fy = y / scale;
-    int ix = int(floor(fx)); int iy = int(floor(fy));
-    float tx = fx - float(ix); float ty = fy - float(iy);
+float valueNoiseLattice(vec2 q) {
+    int ix = int(floor(q.x)); int iy = int(floor(q.y));
+    float tx = q.x - float(ix); float ty = q.y - float(iy);
     float sx = tx * tx * (3.0 - 2.0 * tx);
     float sy = ty * ty * (3.0 - 2.0 * ty);
     return mix(mix(hash2(ix, iy), hash2(ix + 1, iy), sx),
                mix(hash2(ix, iy + 1), hash2(ix + 1, iy + 1), sx), sy);
+}
+
+// Meander guidance noise. The old single-octave, grid-aligned value noise gave
+// every plain the same 24-cell lattice texture: parcels settled into its
+// axis-aligned valleys and carved repeating chevron/herringbone trenches. Two
+// octaves, each rotated off the grid axes by an irrational angle, leave no
+// direction for the lattice to align with.
+float meanderNoise(vec2 p) {
+    const float c0 = 0.92106, s0 = 0.38942;  // ~22.9 degrees
+    const float c1 = 0.73169, s1 = -0.68163; // ~-42.9 degrees
+    vec2 q0 = vec2(p.x * c0 - p.y * s0, p.x * s0 + p.y * c0) * (1.0 / 24.0);
+    vec2 q1 = vec2(p.x * c1 - p.y * s1, p.x * s1 + p.y * c1) * (1.0 / 9.5) + vec2(37.7, 11.3);
+    return valueNoiseLattice(q0) * 0.65 + valueNoiseLattice(q1) * 0.35;
 }
 
 vec2 physicalGradient(float x, float y, float radius) {
@@ -298,10 +318,19 @@ void main() {
         vec2 catchmentGradient = coarse * 0.65 + broad * 0.35;
         grad = mix(grad, catchmentGradient, 0.12 + flatBlend * 0.68);
 
-        if (flatBlend > 0.0) {
-            float nX = valueNoise(posX + 1.0, posY) - valueNoise(posX - 1.0, posY);
-            float nY = valueNoise(posX, posY + 1.0) - valueNoise(posX, posY - 1.0);
-            grad += vec2(nX, nY) * pc.meanderStrength * flatBlend;
+        {
+            const float h = 1.5;
+            vec2 p = vec2(posX, posY);
+            vec2 noiseGrad = vec2(
+                meanderNoise(p + vec2(h, 0.0)) - meanderNoise(p - vec2(h, 0.0)),
+                meanderNoise(p + vec2(0.0, h)) - meanderNoise(p - vec2(0.0, h))) * (1.0 / h);
+            // The gradient part acts as pseudo micro-topography (channels settle
+            // into noise valleys); the perpendicular part adds sinuosity that
+            // breaks up straight parallel trails without creating fake pooling
+            // basins. A small floor keeps hillslope paths from running as
+            // perfectly straight parallel trenches.
+            vec2 steer = noiseGrad * 0.75 + vec2(noiseGrad.y, -noiseGrad.x) * 0.45;
+            grad += steer * pc.meanderStrength * (0.18 + 0.82 * flatBlend);
         }
 
         vec2 downhill = -grad;

@@ -48,10 +48,10 @@ Bu bir render-farm eklentisi ya da kütüphane değil. Modern dock'lu bir arayü
 | **UI kontrol noktası** | 1.278+ |
 | **Render backendleri** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
 | **Düğüm sistemleri** | Arazi (66), Animasyon (14+), Materyal (11+) |
-| **Son doğrulama** | 2026-07-18 |
+| **Son doğrulama** | 2026-07-22 — tam derleme, yerel IPC ve remote TLS/token/capability kontrolleri |
 <!-- STATS_END -->
 
-Sayımlar `raytrac_sdl2/source` kapsamındadır ve tek dosyalık dış kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar.
+Sayımlar `RayTrophiStudio/source` kapsamındadır ve tek dosyalık dış kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar.
 
 Tam teknik rapor: **[ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)** · English: **[README.md](README.md)**
 
@@ -276,6 +276,34 @@ Yakınsama sonrası, path-traced sonucu + AOV tamponlarını okuyup; sahne geome
 
 ---
 
+## Python otomasyonu & güvenli IPC
+
+RayTrophi, gömülü Python 3.11 otomasyon katmanı (`rt`, API sürümü `0.5.0`) ve transporttan
+bağımsız JSON IPC protokolü içerir. İki yüzey de aynı canlı sahneyi ana-thread komut kuyruğundan
+yönetir ve undo/redo semantiğini korur.
+
+- Sahne/obje dönüşümleri, primitive, çoğaltma ve import
+- Materyal, mesh attribute, ışık, kamera, dünya, post-process ve timeline/keyframe
+- Durum/iptal destekli tek-kare ve sekans render işleri
+- Node graph/parametre, modifier, scatter ve fizik
+- Fluid/gas, terrain/river, hair, katmanlı PBR paint ve deterministik sculpt otomasyonu
+- Gömülü Python konsolu/workspace, canlı API reflection, addon ve event callback'leri
+- Aynı kullanıcıya kısıtlı yerel Windows Named Pipe ve opsiyonel özel TLS 1.2/1.3 control plane
+- Hash'li kalıcı token kasası, capability, expiry/revoke/rotation, IPv4 CIDR ve canonical
+  workspace/export-root politikaları
+- Bağlantı/session registry, bounded audit, rate-limit ve **View → Remote IPC Control** paneli
+
+TLS listener; loopback, güvenilir LAN veya VPN içindir, public internete doğrudan açılmaz.
+Internet entegrasyonu ayrı OIDC/mTLS gateway arkasında yer alır. Ayrıntılar:
+[IPC güvenlik ve performans](docs/IPC_SECURITY_PERFORMANCE.md),
+[gateway sınırı](docs/REMOTE_IPC_GATEWAY.md) ve
+[API & scripting yol haritası](docs/API_SCRIPTING_ROADMAP.md).
+
+Regresyon istemcileri `scripts/` altındadır: `rt_api_smoke_test.py`, `ipc_test_client.py`,
+`remote_ipc_client.py` ve `remote_ipc_security_test.py`.
+
+---
+
 ## 🚦 Hızlı başlangıç
 
 ### Önkoşullar
@@ -320,18 +348,18 @@ Yönetilen bağımlılıklar: SDL2, Embree 4.x, Assimp 5.x, ImGui, OpenMP, stb_i
 **Visual Studio 2022 (önerilen)**
 ```bash
 git clone https://github.com/maxkemal/RayTrophi.git
-cd RayTrophi/raytrac_sdl2
-# raytrac_sdl2.vcxproj dosyasını Visual Studio 2022'de aç
+cd RayTrophi
+# RayTrophiStudio.sln dosyasını Visual Studio 2022'de aç
 # Release | x64 seç, sonra Build > Build Solution (Ctrl+Shift+B)
-# Çıktı: x64/Release/raytracing_render_code.exe
+# Çıktı: x64/Release/RayTrophiStudio.exe
 ```
 Tüm bağımlılıklar (DLL, PTX, shader, kaynaklar) çıktı dizinine otomatik kopyalanır.
 
 **CMake**
 ```bash
-cmake -S raytrac_sdl2 -B raytrac_sdl2/build -G "Visual Studio 17 2022" -A x64
-cmake --build raytrac_sdl2/build --config Release -j 12
-# Çıktı: raytrac_sdl2/build/bin/RELEASE/"RayTrophi Studio.exe"
+cmake -S RayTrophiStudio -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release -j 12
+# Çıktı: build/bin/RELEASE/RayTrophiStudio.exe
 ```
 CMake; çalıştırılabilir, PTX, Vulkan shader ve runtime DLL'lerini `build/bin/<CONFIG>` altında izole tutar, VS2022 `x64` çıktısının üzerine asla yazmaz.
 
@@ -344,7 +372,7 @@ CMake; çalıştırılabilir, PTX, Vulkan shader ve runtime DLL'lerini `build/bi
 
 ```
 RayTrophi/
-└── raytrac_sdl2/
+└── RayTrophiStudio/
     └── source/
         ├── src/
         │   ├── Core/        # Giriş noktası (Main.cpp), proje yönetimi
@@ -357,6 +385,7 @@ RayTrophi/
         │   ├── Paint/        # Mesh & arazi boyama adaptörleri, katman yığını
         │   ├── Stylize/      # Stylize CPU/CUDA çekirdekleri ve durumu
         │   ├── Animation/    # Animasyon denetleyici, düğümler, Ozz runtime
+        │   ├── Api/          # Python rt facade, JSON IPC, güvenlik, session, audit ve panel
         │   ├── Viewport/     # Viewport sahne senkronu
         │   ├── Math/         # Vec/Matrix/Quaternion
         │   ├── UI/           # ImGui panelleri, zaman çizelgesi, gizmolar, editörler

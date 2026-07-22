@@ -677,8 +677,7 @@ extern "C" __global__ void spikeRemovalKernel(float* heightmap, PostProcessParam
 }
 
 // -----------------------------------------------------------------------
-// Edge Preservation Kernel - Prevents "wall" effect at terrain boundaries
-// Matches CPU behavior in hydraulicErosion edge fade-out
+// Edge Preservation Kernel - restores the authored pre-erosion boundary.
 // -----------------------------------------------------------------------
 extern "C" __global__ void edgePreservationKernel(float* heightmap, float* originalHeights, PostProcessParamsGPU p) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -699,25 +698,9 @@ extern "C" __global__ void edgePreservationKernel(float* heightmap, float* origi
         float t = (float)distFromEdge / (float)p.edgeFadeWidth;
         float smoothT = t * t * (3.0f - 2.0f * t);
         
-        // Find inward reference point
-        int inwardX = x;
-        int inwardY = y;
-        
-        if (x < p.mapWidth / 2) inwardX = x + p.edgeFadeWidth;
-        else inwardX = x - p.edgeFadeWidth;
-        
-        if (y < p.mapHeight / 2) inwardY = y + p.edgeFadeWidth;
-        else inwardY = y - p.edgeFadeWidth;
-        
-        // Clamp
-        inwardX = max(0, min(p.mapWidth - 1, inwardX));
-        inwardY = max(0, min(p.mapHeight - 1, inwardY));
-        
-        int inwardIdx = inwardY * p.mapWidth + inwardX;
-        float inwardHeight = heightmap[inwardIdx];
-        
-        // Blend current with inward reference
-        heightmap[idx] = heightmap[idx] * smoothT + inwardHeight * 0.4f * (1.0f - smoothT);
+        // Restore the authored border; never introduce an implicit zero-level
+        // outlet by scaling an unrelated inward sample.
+        heightmap[idx] = originalHeights[idx] * (1.0f - smoothT) + heightmap[idx] * smoothT;
     }
 }
 
@@ -815,6 +798,7 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
     float sediment = 0.0f;
     
     float invCellSize = 1.0f / fmaxf(0.001f, p.cellSize);
+    float heightScale = fmaxf(0.001f, p.heightScale);
     
     // Droplet simulation loop
     for (int step = 0; step < p.dropletLifetime; step++) {
@@ -840,8 +824,8 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
         float gradY = (h01 - h00) * (1.0f - u) + (h11 - h10) * u;
         
         // Normalize by physical scale
-        gradX *= invCellSize;
-        gradY *= invCellSize;
+        gradX *= heightScale * invCellSize;
+        gradY *= heightScale * invCellSize;
         
         // Update direction with inertia
         dirX = dirX * p.inertia - gradX * (1.0f - p.inertia);
@@ -864,10 +848,12 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
         float oldH = bilinearInterpolate(heightmap, p.mapWidth, p.mapHeight, posX, posY);
         float newH = bilinearInterpolate(heightmap, p.mapWidth, p.mapHeight, newPosX, newPosY);
         float deltaHeight = newH - oldH;
+        float deltaWorld = deltaHeight * heightScale;
         
-        // Keep GPU solver on the same normalized sediment contract as the CPU path.
-        float localSlope = -deltaHeight * invCellSize;
-        float capacity = fmaxf(localSlope * speed * water * p.sedimentCapacity * sqrtf(fmaxf(0.0f, localSlope) + 0.001f), p.minSlope);
+        // Slopes/velocity are physical; sediment remains in height-buffer units.
+        float localSlope = -deltaWorld * invCellSize;
+        float capacity = fmaxf(localSlope * speed * water * p.sedimentCapacity *
+                               sqrtf(fmaxf(0.0f, localSlope) + 0.001f), p.minSlope) / heightScale;
 
         float hardness = sampleOptionalMap(p.hardnessMap, p.mapWidth, p.mapHeight, posX, posY, 0.0f);
         float hardnessFactor = 1.0f - hardness * 0.9f;
@@ -889,8 +875,10 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
             // UPHILL - MOMENTUM CHECK
             if (speed > 0.5f && sediment < capacity) {
                 // High momentum: carve through obstacle (creates channels)
-                // STABILITY: Cap at 30% of height diff and 5% of absolute height
-                float erodeAmount = fminf(deltaHeight * 0.3f, oldH * 0.05f);
+                // STABILITY: Cap at 30% of the local uphill step.
+                // Translation invariant: local relief, not absolute elevation,
+                // limits erosion.
+                float erodeAmount = deltaHeight * 0.3f;
                 erodeAmount *= hardnessFactor * maskValue;
                 erodeWithBrush(heightmap, p.mapWidth, p.mapHeight, newPosX, newPosY, erodeAmount, p.brushRadius);
                 sediment += erodeAmount;
@@ -914,8 +902,7 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
         } else {
             // DOWNHILL - EROSION (Droplet hungry)
             float erodeAmount = fminf((capacity - sediment) * p.erodeSpeed, -deltaHeight);
-            // STABILITY: Prevent deep pits (max 5% of local height)
-            erodeAmount = fminf(erodeAmount, oldH * 0.05f);
+            // Local downhill step already caps the removable depth.
             erodeAmount *= hardnessFactor * maskValue;
             erodeWithBrush(heightmap, p.mapWidth, p.mapHeight, posX, posY, erodeAmount, p.brushRadius);
             sediment += erodeAmount;
@@ -933,7 +920,7 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
         
         // Physics update (Correct gravity logic)
         // Kinetic Energy: v_new^2 = v_old^2 + g * (h_old - h_new) = v_old^2 - g * deltaHeight
-        speed = sqrtf(fmaxf(0.001f, speed*speed - deltaHeight * p.gravity));
+        speed = sqrtf(fmaxf(0.001f, speed*speed - deltaWorld * p.gravity));
         water *= (1.0f - p.evaporateSpeed);
 
         if (deltaHeight <= 0.0f && sediment > 0.0f) {

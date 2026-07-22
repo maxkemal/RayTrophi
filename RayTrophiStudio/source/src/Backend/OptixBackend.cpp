@@ -214,9 +214,25 @@ void OptixBackend::shutdown() {
     if (m_optix) {
         m_optix->cleanup();
     }
+    if (m_sceneTextureManager) {
+        // Texture objects/arrays are owned by host Texture instances and are
+        // released by the backend-switch residency pass. Never let the next
+        // OptiX backend reuse raw handles published by the previous lifetime.
+        m_sceneTextureManager->clearAllOptixTextureIds();
+    }
     // Important for OptiX -> Vulkan switches:
     // release CUDA allocator cache so shared GPU memory pressure does not
     // accumulate across backend toggles in long sessions.
+    trimCudaMemoryPool();
+}
+
+void OptixBackend::suspendForBackendSwitch() {
+    if (m_optix) {
+        m_optix->clearScene();
+    }
+    if (m_sceneTextureManager) {
+        m_sceneTextureManager->clearAllOptixTextureIds();
+    }
     trimCudaMemoryPool();
 }
 

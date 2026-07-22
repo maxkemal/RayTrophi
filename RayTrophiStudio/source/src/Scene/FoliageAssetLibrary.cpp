@@ -39,10 +39,14 @@ bool containsToken(const AssetRecord& asset, const std::vector<std::string>& tok
 
 std::vector<std::string> typeTokens(const std::string& layerType) {
     const std::string type = lowerCopy(layerType);
-    if (type.find("forest") != std::string::npos) return {"tree", "trees", "forest", "bush", "shrub"};
+    if (type.find("forest") != std::string::npos) return {"tree", "trees", "forest", "bush", "shrub",
+                                                          "pine", "fir", "spruce", "conifer", "larch"};
     if (type.find("grass") != std::string::npos) return {"grass", "meadow", "flower", "plant"};
     if (type.find("rock") != std::string::npos) return {"rock", "rocks", "stone", "cliff"};
-    if (type.find("alpine") != std::string::npos) return {"alpine", "mountain", "grass", "shrub", "rock"};
+    // Alpine must admit mountain conifers: with no tree-ish token here the
+    // hard type filter below made trees impossible to place on alpine layers.
+    if (type.find("alpine") != std::string::npos) return {"alpine", "mountain", "grass", "shrub", "rock",
+                                                          "pine", "fir", "spruce", "conifer", "larch", "tree"};
     return {};
 }
 

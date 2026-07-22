@@ -2299,6 +2299,16 @@ float calculateWaterCausticsGL(vec3 floor_position, float time, float caustic_sc
     return pow(max(caustic, 0.0), 2.0);
 }
 
+// Foam micro-structure: anisotropic cell field, [0,1]. Filaments stretch along
+// the first axis (downstream for rivers), a second rotated octave pops bubble
+// holes into them. Advection happens in the caller's coordinate, so the same
+// field serves rivers (ribbon metres) and open water (world XZ).
+float waterFoamCells(vec2 q) {
+    float filaments = water_fbm(q * vec2(0.55, 1.45));
+    float bubbles   = water_fbm(q * 2.6 + vec2(37.2, 11.7));
+    return clamp((filaments * 0.62 + bubbles * 0.38) * 0.5 + 0.5, 0.0, 1.0);
+}
+
 float calculateShoreFoamGL(float depth, float shore_distance, float shore_intensity, vec3 position, float time, float foam_scale) {
     if (depth > shore_distance || shore_distance < 0.001) return 0.0;
     float shore_t = 1.0 - (depth / shore_distance);
@@ -2629,6 +2639,27 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 carrierNormal, vec3 rayDir,
     float rapidResponse = waterV3RapidResponse(hydrology.froude);
     float dischargeResponse = 1.0 + min(log2(1.0 + hydrology.discharge) * 0.06, 0.35);
     float riverStrength = wave_strength * dischargeResponse * mix(0.65, 1.65, rapidResponse);
+
+    // ── Shore treatment (rivers) ─────────────────────────────────
+    // hydrology.depth carries the true water column above the carved bed and
+    // reaches zero at the terrain waterline. Fade the interface out over the
+    // last few centimetres: rays continue to the bank below, so the visible
+    // waterline is the terrain intersection curve instead of the mesh edge.
+    float shorePresence = 1.0;
+    if (isRiver && hydrology.width > 0.001) {
+        shorePresence = smoothstep(0.004, 0.05, hydrology.depth);
+        if (shorePresence < 0.999 && rnd(seed) >= shorePresence) {
+            payload.scatterOrigin = offset_ray(hitPos,
+                dot(rayDir, carrierNormal) < 0.0 ? -carrierNormal : carrierNormal);
+            payload.scatterDir = rayDir;
+            payload.scattered = true;
+            payload.bounceType = BOUNCE_TRANSMISSION;
+            return;
+        }
+        // The surviving shallow band stays calm so the waterline lies flat
+        // against the bank instead of carrying full channel waves.
+        riverStrength *= mix(0.45, 1.0, shorePresence);
+    }
     bool useFFTOcean = !isRiver && fft_height_tex > 0u && fft_normal_tex > 0u && fft_ocean_size > 0.001;
     vec3  waveNormal;
     float foam;
@@ -2788,19 +2819,29 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 carrierNormal, vec3 rayDir,
     }
     float shoreFoam = 0.0;
     if (isRiver && shore_foam_intensity > 0.01) {
-        shoreFoam = waterSurface.bankProximity * waterSurface.bankProximity
-                  * shore_foam_intensity * mix(0.35, 1.0, riverFoamBreakup);
+        float bankFoam = waterSurface.bankProximity * waterSurface.bankProximity
+                       * shore_foam_intensity * mix(0.35, 1.0, riverFoamBreakup);
+        // Waterline foam rides the true depth field: a thin band that peaks at
+        // the terrain intersection and dies off toward the channel. The
+        // presence factor keeps foam off the already-faded skirt fringe.
+        float band = max(shore_foam_distance, 0.04);
+        float waterline = 1.0 - smoothstep(0.0, band, hydrology.depth);
+        float waterlineFoam = waterline * waterline * shore_foam_intensity
+                            * mix(0.45, 1.0, riverFoamBreakup) * shorePresence;
+        shoreFoam = max(bankFoam, waterlineFoam);
     } else if (shore_foam_intensity > 0.01 && foundFloor) {
         shoreFoam = calculateShoreFoamGL(waterDepth, shore_foam_distance, shore_foam_intensity, hitPos, time, max(foam_noise_scale, 0.001));
     }
     vec2 foamCoord = isRiver ? riverMetricUV : hitPos.xz;
     vec2 foamDrift = isRiver ? vec2(time * riverSpeed * 0.12, 0.0)
                              : vec2(cos(wind_direction), sin(wind_direction)) * time * 0.08;
-    float foamBreakup = isRiver
-        ? riverFoamBreakup
-        : water_fbm(foamCoord * max(foam_noise_scale, 0.001) + foamDrift) * 0.5 + 0.5;
+    // One shared, advected cell field drives both the ragged coverage border
+    // and the lit structure inside the patch, so borders and interior move as
+    // a single coherent whitewater body.
+    vec2 foamCellCoord = foamCoord * max(foam_noise_scale, 0.001) + foamDrift;
+    float foamCell = waterFoamCells(foamCellCoord);
     float producedFoam = min(waterSurface.foamProduction * foam_level + shoreFoam, 1.0);
-    float totalFoam = waterV3FoamCoverage(producedFoam, foamBreakup, foam_threshold);
+    float totalFoam = waterV3FoamCoverageStructured(producedFoam, foamCell, foam_threshold);
 
     // Authored roughness controls only unresolved gloss. Direct explicit-light
     // response and indirect dielectric scattering share this exact value.
@@ -2817,9 +2858,33 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 carrierNormal, vec3 rayDir,
     // Foam is a shading lobe, not animated geometry. This avoids the legacy
     // foam-sphere BLAS/TLAS rebuild path while still producing whitewater.
     if (totalFoam > 0.001 && rnd(seed) < totalFoam) {
-        vec3 foamColor = mix(vec3(0.72, 0.76, 0.75), vec3(0.98), totalFoam);
-        scatterDiffuse(hitPos, shadingNormal, foamColor, seed);
-        return;
+        // Bubble holes: thin spots in the cell field let some rays reach the
+        // dielectric beneath, so the patch sparkles and breaks up instead of
+        // reading as a solid matte decal. Dense coverage closes the holes.
+        float holeChance = smoothstep(0.62, 0.18, foamCell) * (0.55 - 0.35 * totalFoam);
+        if (rnd(seed) >= holeChance) {
+            // Relief: tilt the shading normal by the cell-field gradient in the
+            // flow frame so clumps actually catch light. The two extra taps run
+            // only on this lobe, and the detail stays out of the denoiser's
+            // normal guide just like the capillary FBM above.
+            const float tapDistance = 0.35;
+            float cellU = waterFoamCells(foamCellCoord + vec2(tapDistance, 0.0));
+            float cellV = waterFoamCells(foamCellCoord + vec2(0.0, tapDistance));
+            vec3 foamNormalTS = normalize(vec3(-(cellU - foamCell) / tapDistance * 0.85, 1.0,
+                                               -(cellV - foamCell) / tapDistance * 0.85));
+            vec3 foamNormal = waterV3TangentToWorld(foamNormalTS, tgt, shadingNormal, btgt);
+            if (dot(foamNormal, -rayDir) < 0.0) foamNormal = shadingNormal;
+            // Crevices are waterlogged grey-cyan, crests dry bright white; a
+            // grazing-angle rim mimics the forward scatter of the bubble mass.
+            vec3 foamAlbedo = mix(vec3(0.52, 0.63, 0.66), vec3(0.96, 0.98, 0.99),
+                                  smoothstep(0.25, 0.85, foamCell));
+            float rim = pow(1.0 - clamp(dot(-rayDir, foamNormal), 0.0, 1.0), 3.0);
+            foamAlbedo = min(foamAlbedo * (1.0 + 0.35 * rim), vec3(1.0));
+            scatterDiffuse(hitPos, foamNormal, foamAlbedo, seed);
+            return;
+        }
+        // This sample fell through a bubble hole: continue into the dielectric
+        // below so broken foam shows glints of the water it rides on.
     }
 
     // The downward RT probe provides local optical depth. Use its shallow/deep
