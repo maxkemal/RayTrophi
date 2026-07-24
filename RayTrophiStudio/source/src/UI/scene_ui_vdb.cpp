@@ -136,6 +136,13 @@ void SceneUI::applyEstimatedVDBShaderDefaults(VDBVolume& vdb) {
     shader->scattering.coefficient = defaults.scattering_coefficient;
     shader->absorption.coefficient = defaults.absorption_coefficient;
     shader->quality.step_size = defaults.step_size;
+    const float voxel_size = vdb.getVoxelSize();
+    if (voxel_size > 1e-5f) {
+        shader->quality.voxel_step_multiplier =
+            (std::max)(0.1f, (std::min)(2.0f, defaults.step_size / voxel_size));
+        shader->quality.adaptive_stepping = true;
+        shader->quality.quality_preset = 4;
+    }
     shader->quality.max_steps = defaults.max_steps;
     shader->quality.shadow_steps = defaults.shadow_steps;
 }

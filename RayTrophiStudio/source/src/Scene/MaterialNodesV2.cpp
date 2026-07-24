@@ -41,6 +41,12 @@ namespace {
     NodeSystem::AutoRegisterNode<MaterialNodesV2::LayerWeightNode>       reg_MatLayerWeight("MatV2.LayerWeight");
     NodeSystem::AutoRegisterNode<MaterialNodesV2::AmbientOcclusionNode>  reg_MatAO("MatV2.AmbientOcclusion");
     NodeSystem::AutoRegisterNode<MaterialNodesV2::BevelNode>             reg_MatBevel("MatV2.Bevel");
+    NodeSystem::AutoRegisterNode<MaterialNodesV2::PrincipledVolumeNode>  reg_MatPrincipledVolume("MatV2.PrincipledVolume");
+    NodeSystem::AutoRegisterNode<MaterialNodesV2::VolumeInfoNode>        reg_MatVolumeInfo("MatV2.VolumeInfo");
+    NodeSystem::AutoRegisterNode<MaterialNodesV2::BlackbodyNode>         reg_MatBlackbody("MatV2.Blackbody");
+    NodeSystem::AutoRegisterNode<MaterialNodesV2::VolumeGridNode>        reg_MatVolumeGrid("MatV2.VolumeGrid");
+    NodeSystem::AutoRegisterNode<MaterialNodesV2::TimeNode>              reg_MatTime("MatV2.Time");
+    NodeSystem::AutoRegisterNode<MaterialNodesV2::CloudShapeNode>        reg_MatCloudShape("MatV2.CloudShape");
     // Legacy typeIds from before Voronoi/Checker were merged into the unified
     // Noise Texture node: create the unified node with the matching kind so
     // old saves keep loading (new saves always write "MatV2.Noise"; old

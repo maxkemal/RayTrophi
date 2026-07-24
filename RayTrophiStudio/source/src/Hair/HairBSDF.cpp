@@ -566,7 +566,8 @@ float HairBSDF::pdf(
             {"tipColor", {p.tipColor.x, p.tipColor.y, p.tipColor.z}},
             {"rootTipBalance", p.rootTipBalance},
             {"specularTint", p.specularTint},
-            {"diffuseSoftness", p.diffuseSoftness}
+            {"diffuseSoftness", p.diffuseSoftness},
+            {"selfShadow", p.selfShadow}
         };
         if (p.customAlbedoTexture && !p.customAlbedoTexture->name.empty()) {
             j["customAlbedoTexture"] = p.customAlbedoTexture->name;
@@ -601,6 +602,7 @@ float HairBSDF::pdf(
         p.rootTipBalance = j.value("rootTipBalance", 0.5f);
         p.specularTint = j.value("specularTint", 0.0f);
         p.diffuseSoftness = j.value("diffuseSoftness", 0.5f);
+        p.selfShadow = j.value("selfShadow", 1.0f);
 
         // Texture Restoration
         auto loadTex = [&](const std::string& key, std::shared_ptr<Texture>& tex, TextureType type) {

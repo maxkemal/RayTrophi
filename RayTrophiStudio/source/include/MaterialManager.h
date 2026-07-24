@@ -53,6 +53,9 @@ public:
      * @return Material ID (0-65534), or INVALID_MATERIAL_ID if full
      */
     uint16_t addMaterial(const std::string& name, std::shared_ptr<Material> mat);
+    /// Create a distinct asset, assigning a deterministic unique name and
+    /// keeping Material::materialName and the registry key identical.
+    uint16_t addUniqueMaterial(const std::string& baseName, std::shared_ptr<Material> mat);
 
     /**
      * @brief Get material ID by name

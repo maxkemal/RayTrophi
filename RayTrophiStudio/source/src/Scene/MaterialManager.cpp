@@ -332,6 +332,23 @@ uint16_t MaterialManager::addMaterial(const std::string& name, std::shared_ptr<M
     return id;
 }
 
+uint16_t MaterialManager::addUniqueMaterial(const std::string& baseName, std::shared_ptr<Material> mat) {
+    if (!mat) return INVALID_MATERIAL_ID;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (materials.size() >= MAX_MATERIALS) return INVALID_MATERIAL_ID;
+
+    const std::string root = baseName.empty() ? "Material" : baseName;
+    std::string name = root;
+    uint32_t suffix = 1;
+    while (nameToID.find(name) != nameToID.end()) name = root + "_" + std::to_string(suffix++);
+
+    const uint16_t id = static_cast<uint16_t>(materials.size());
+    mat->materialName = name;
+    materials.push_back(std::move(mat));
+    nameToID[name] = id;
+    return id;
+}
+
 uint16_t MaterialManager::getMaterialID(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex);
     auto it = nameToID.find(name);

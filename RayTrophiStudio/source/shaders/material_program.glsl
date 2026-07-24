@@ -50,6 +50,16 @@ struct MatProgOut {
     vec3  normal;      // tangent-space (Bump); default (0,0,1)
     bool  normalWorld; // StoreWorldNormal (Bevel): `normal` is WORLD-space — no TBN
     uint  written;
+    float volumeDensity;
+    vec3  volumeScatterColor;
+    float volumeScatterStrength;
+    vec3  volumeAbsorptionColor;
+    float volumeAbsorptionStrength;
+    vec3  volumeEmissionColor;
+    float volumeEmissionStrength;
+    float volumeAnisotropy;
+    float volumeMultiScatter;
+    uint  volumeWritten;
 };
 
 // ---- shared procedural math (port of MaterialProceduralMath.h) --------------
@@ -268,6 +278,10 @@ MatProgOut mp_defaultOut() {
     o.transmission = 0.0; o.emissionColor = vec3(0.0); o.emissionStrength = 0.0;
     o.opacity = 1.0; o.ior = 1.45; o.normal = vec3(0.0, 0.0, 1.0); o.normalWorld = false;
     o.written = 0u;
+    o.volumeDensity = 1.0; o.volumeScatterColor = vec3(1.0); o.volumeScatterStrength = 1.0;
+    o.volumeAbsorptionColor = vec3(0.0); o.volumeAbsorptionStrength = 0.0;
+    o.volumeEmissionColor = vec3(0.0); o.volumeEmissionStrength = 0.0;
+    o.volumeAnisotropy = 0.0; o.volumeMultiScatter = 0.0; o.volumeWritten = 0u;
     return o;
 }
 
@@ -289,7 +303,11 @@ const int MP_ATTRIB_SLOTS = 4;
 // declaring the prototype BEFORE including this file. Stages where tracing is illegal
 // (shadow any-hit) or meaningless (ray-gen) simply leave it undefined -> AO reads 1.0.
 MatProgOut evalMaterialProgram(uint pc, vec2 uv, vec3 gpos, vec3 gnrm, float gpoint, vec3 gobj,
-                               float gattr[MP_ATTRIB_SLOTS], vec3 gobjp, vec3 gview) {
+                               float gattr[MP_ATTRIB_SLOTS], vec3 gobjp, vec3 gview,
+                               float volDensity, float volTemperature, float volFlame,
+                               float volFuel, vec3 volVelocity, vec3 volPosition,
+                               vec3 volColor, vec3 volEmission, float volVoxelSize,
+                               vec3 volObjectPosition, float timelineTime) {
     MatProgOut o = mp_defaultOut();
     uint count = matprog.w[0];
     uint constBase = matprog.w[1u + count];
@@ -299,8 +317,13 @@ MatProgOut evalMaterialProgram(uint pc, vec2 uv, vec3 gpos, vec3 gnrm, float gpo
     // compiler compacts register live ranges and deactivates any program whose
     // PEAK LIVE register count exceeds kMatMaxRegs (MaterialProgram.h) — this
     // size MUST equal that constant.
-    const int MP_MAX_REGS = 32;
-    vec3 regs[MP_MAX_REGS];
+    // Surface shaders keep the full 32-register VM. Volume closest-hit defines
+    // a smaller limit before including this file because the array is charged
+    // to every ray-march invocation even when a particular VDB has no graph.
+#ifndef MP_REGISTER_COUNT
+#define MP_REGISTER_COUNT 32
+#endif
+    vec3 regs[MP_REGISTER_COUNT];
 
     for (uint guard = 0u; guard < 8192u; ++guard) {
         uint op = matprog.w[pc];
@@ -675,6 +698,64 @@ MatProgOut evalMaterialProgram(uint pc, vec2 uv, vec3 gpos, vec3 gnrm, float gpo
             o.written |= (1u << 9u);   // MatSlot::Normal
             pc += 8u;
             continue;
+        } else if (op == 32u) { r = vec3(volDensity);
+        } else if (op == 33u) { r = vec3(volTemperature);
+        } else if (op == 34u) { r = vec3(volFlame);
+        } else if (op == 35u) { r = vec3(volFuel);
+        } else if (op == 36u) { r = volVelocity;
+        } else if (op == 37u) { r = volPosition;
+        } else if (op == 38u) { // Blackbody (Kelvin -> RGB)
+            float temp = clamp(mp_rscalar(regs[in0]), 800.0, 40000.0) / 100.0;
+            float rr, gg, bb;
+            if (temp <= 66.0) {
+                rr = 1.0;
+                gg = clamp(0.39008158 * log(max(temp, 1.0)) - 0.63184144, 0.0, 1.0);
+            } else {
+                rr = clamp(1.29293619 * pow(temp - 60.0, -0.13320476), 0.0, 1.0);
+                gg = clamp(1.12989086 * pow(temp - 60.0, -0.07551485), 0.0, 1.0);
+            }
+            bb = temp >= 66.0 ? 1.0 :
+                 (temp <= 19.0 ? 0.0 :
+                  clamp(0.54320679 * log(temp - 10.0) - 1.19625409, 0.0, 1.0));
+            r = vec3(rr, gg, bb);
+        } else if (op == 39u) { r = volColor;
+        } else if (op == 40u) { r = volEmission;
+        } else if (op == 41u) { r = vec3(volVoxelSize);
+        } else if (op == 42u) { r = volObjectPosition;
+        } else if (op == 43u) { r = vec3(timelineTime);
+        } else if (op == 44u) { // Optimized animated cumulus shape
+            vec3 p = regs[in0] + regs[in2] * mp_rscalar(regs[in1]);
+            uint b = constBase + uint(cOff);
+            float baseScale = max(uintBitsToFloat(matprog.w[b]), 0.001);
+            float detailScale = max(uintBitsToFloat(matprog.w[b + 1u]), 0.001);
+            float coverage = clamp(uintBitsToFloat(matprog.w[b + 2u]), 0.0, 1.0);
+            float erosion = clamp(uintBitsToFloat(matprog.w[b + 3u]), 0.0, 1.0);
+            float hBottom = uintBitsToFloat(matprog.w[b + 4u]);
+            float hTop = max(uintBitsToFloat(matprog.w[b + 5u]), hBottom + 1e-4);
+            uint seed = uint(int(uintBitsToFloat(matprog.w[b + 6u])));
+            float warp = clamp(uintBitsToFloat(matprog.w[b + 7u]), 0.0, 2.0);
+            vec3 wp = p * (baseScale * 0.37);
+            // One low-frequency warp field rather than three independent FBMs:
+            // nine total octaves per sample (2 warp + 4 body + 3 erosion),
+            // preserving the rolling silhouette without tripling warp cost.
+            float warpField = mp_fbm3D(wp.x + 17.3, wp.y + 9.1, wp.z + 3.7,
+                                       2, 0.55, seed ^ 0xA511u) - 0.5;
+            vec3 curlish = vec3(warpField, -warpField * 0.7, warpField * 0.45);
+            vec3 q = p + curlish * warp;
+            float broad = mp_fbm3D(q.x * baseScale, q.y * baseScale, q.z * baseScale,
+                                   4, 0.58, seed ^ 0x9E37u);
+            float billow = 1.0 - abs(broad * 2.0 - 1.0);
+            float bodyNoise = mix(broad, billow, 0.32);
+            float body = smoothstep(coverage - 0.12, coverage + 0.12, bodyNoise);
+            // RayTrophi is Y-up everywhere; cloud height must follow the same
+            // world convention (Z is depth, not altitude).
+            float hn = clamp((p.y - hBottom) / (hTop - hBottom), 0.0, 1.0);
+            float heightMask = smoothstep(0.0, 0.12, hn) *
+                               (1.0 - smoothstep(0.68, 1.0, hn));
+            float fine = mp_fbm3D(q.x * detailScale, q.y * detailScale, q.z * detailScale,
+                                  3, 0.55, seed ^ 0xB529u);
+            float edge = (1.0 - body) * fine * erosion;
+            r = vec3(max(body * heightMask - edge, 0.0));
         } else if (op == 13u) {    // Store
             vec3 src = regs[in0];
             if (aux == 0)      { o.baseColor = src; }
@@ -687,7 +768,17 @@ MatProgOut evalMaterialProgram(uint pc, vec2 uv, vec3 gpos, vec3 gnrm, float gpo
             else if (aux == 7) { o.opacity = mp_rscalar(src); }
             else if (aux == 8) { o.ior = mp_rscalar(src); }
             else if (aux == 9) { o.normal = src; }
-            o.written |= (1u << uint(aux));
+            else if (aux == 16) { o.volumeDensity = mp_rscalar(src); }
+            else if (aux == 17) { o.volumeScatterColor = src; }
+            else if (aux == 18) { o.volumeScatterStrength = mp_rscalar(src); }
+            else if (aux == 19) { o.volumeAbsorptionColor = src; }
+            else if (aux == 20) { o.volumeAbsorptionStrength = mp_rscalar(src); }
+            else if (aux == 21) { o.volumeEmissionColor = src; }
+            else if (aux == 22) { o.volumeEmissionStrength = mp_rscalar(src); }
+            else if (aux == 23) { o.volumeAnisotropy = mp_rscalar(src); }
+            else if (aux == 24) { o.volumeMultiScatter = mp_rscalar(src); }
+            if (aux >= 16 && aux < 25) o.volumeWritten |= (1u << uint(aux - 16));
+            else o.written |= (1u << uint(aux));
             pc += 8u;
             continue;
         }

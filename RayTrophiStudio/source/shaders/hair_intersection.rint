@@ -14,9 +14,11 @@
  *   3. Body + iki cap (uç küre) hit'lerinden en yakını seç.
  *   4. hitAttributeEXT ile tangent (eksen) ve u parametresi raporla.
  *
- * Görsel kayıp: segment içi cubic eğrilik kaybolur; tipik dense hair'de (32+
- * segment/strand) imperceptible. Tangent süreksizliği segment sınırlarında C0
- * (eski C2 değil) — closesthit içinde komşu tangent harmanlanırsa C1 elde edilir.
+ * Görsel kayıp: segment içi cubic eğrilik (silüet) kaybolur; tipik dense hair'de
+ * (32+ segment/strand) imperceptible. Tangent ise ARTIK C1: intersection body/eksen
+ * geometrisi lineer kalsa da, raporlanan tangent gerçek kübik B-spline türevinden
+ * (hit'in u parametresinde) analitik hesaplanır → Marschner highlight'ı segment
+ * sınırlarında faseli görünmez, saç boyunca yumuşak akar (bkz. reportIntersection).
  *
  * SBT offset = m_hasVolumeShaders ? 2 : 1
  * Bu shader VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR ile çalışır.
@@ -183,7 +185,23 @@ void main()
     }
 
     if (bestT > 0.0) {
-        hairAttrib = vec4(bestTangent, bestU);
+        // ─── C¹ smooth tangent (kübik B-spline türevi) ──────────────────────
+        // bestTangent düz segment eksenidir (C0) → Marschner highlight'ı segment
+        // sınırlarında faseli görünür. Bunun yerine gerçek kübik B-spline eğrisinin
+        // türevini hit'in u parametresinde analitik değerlendiririz. Uniform B-spline
+        // türev bazı (unnormalized):
+        //   curve'(u) = 0.5 * [ -(1-u)^2·cp0 + (3u²-4u)·cp1 + (-3u²+2u+1)·cp2 + u²·cp3 ]
+        // Bu, komşu segment sınırında TAM C¹ sürekli: seg_i'nin curve'(1)=0.5(cp3-cp1)
+        // ile seg_{i+1}'in curve'(0)=0.5(cp3-cp1) birebir eşittir (paylaşılan CP'ler).
+        float u   = clamp(bestU, 0.0, 1.0);
+        float omu = 1.0 - u;
+        vec3 dcurve = 0.5 * ( -(omu * omu)              * seg.cp0.xyz
+                            + (3.0 * u * u - 4.0 * u)   * seg.cp1.xyz
+                            + (-3.0 * u * u + 2.0 * u + 1.0) * seg.cp2.xyz
+                            + (u * u)                   * seg.cp3.xyz );
+        vec3 smoothTangent = (dot(dcurve, dcurve) > 1e-12) ? normalize(dcurve) : bestTangent;
+
+        hairAttrib = vec4(smoothTangent, bestU);
         reportIntersectionEXT(bestT, 0u);
     }
 }

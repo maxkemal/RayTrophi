@@ -152,12 +152,25 @@ namespace MaterialNodesV2 {
                      //   while the silhouette stays sharp. No hook -> the plain shading
                      //   normal (identity: the node quietly does nothing where it can't
                      //   trace — editor preview, fold, OptiX). Same stochastic caveat as AO.
-        StoreWorldNormal // in0 = src -> writes the Normal slot AND marks it WORLD-space.
+        StoreWorldNormal, // in0 = src -> writes the Normal slot AND marks it WORLD-space.
                      //   Bump stores a TANGENT-space normal that the consumers push through
                      //   the mesh TBN; a Bevel normal is already world-space and shoving it
                      //   through a TBN would twist it by the UV layout. The flag rides in
                      //   MatProgramOutputs::normalIsWorld, and both consumers (closesthit,
                      //   apply_normal_map) branch on it.
+        VolumeDensity,     // current volume sample density (broadcast)
+        VolumeTemperature, // current volume sample temperature (broadcast)
+        VolumeFlame,       // current volume sample flame (broadcast)
+        VolumeFuel,        // current volume sample fuel (broadcast)
+        VolumeVelocity,    // current volume sample velocity
+        VolumePosition,    // current volume sample position
+        Blackbody,         // in0 = Kelvin -> physically plausible RGB
+        VolumeColor,
+        VolumeEmission,
+        VolumeVoxelSize,
+        VolumeObjectPosition,
+        Time,               // deterministic timeline seconds (broadcast)
+        CloudShape          // in0=position,in1=time,in2=wind; const cloud controls
     };
 
     // ---- Ambient Occlusion: the host's occlusion hook (CPU side) ----------------
@@ -266,6 +279,9 @@ namespace MaterialNodesV2 {
         bool     usesAO = false;
         // Same story for the Bevel node (the other tracing op).
         bool     usesBevel = false;
+        // Drives the deterministic backend timeline only when a compiled graph
+        // actually reads Time (Cloud Shape's implicit default counts).
+        bool     usesTime = false;
     };
 
     // Interpreter register cap (stack-allocated per shading call — no heap, no
@@ -994,6 +1010,20 @@ namespace MaterialNodesV2 {
                     }
                     outp.written |= (1u << ins.aux);
                     continue;  // Store writes no register
+                }
+                case MatOp::Blackbody: {
+                    const float temp = std::clamp(rscalar(regs[ins.inReg[0]]), 800.0f, 40000.0f) / 100.0f;
+                    if (temp <= 66.0f) {
+                        r.x = 1.0f;
+                        r.y = std::clamp(0.39008158f * std::log(std::max(temp, 1.0f)) - 0.63184144f, 0.0f, 1.0f);
+                    } else {
+                        r.x = std::clamp(1.29293619f * std::pow(temp - 60.0f, -0.13320476f), 0.0f, 1.0f);
+                        r.y = std::clamp(1.12989086f * std::pow(temp - 60.0f, -0.07551485f), 0.0f, 1.0f);
+                    }
+                    r.z = temp >= 66.0f ? 1.0f :
+                        (temp <= 19.0f ? 0.0f :
+                         std::clamp(0.54320679f * std::log(temp - 10.0f) - 1.19625409f, 0.0f, 1.0f));
+                    break;
                 }
                 case MatOp::StoreWorldNormal: {
                     const MatVal& src = regs[ins.inReg[0]];

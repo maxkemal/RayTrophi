@@ -81,7 +81,13 @@ struct HairMaterialParams {
     
     // --- NEW: Diffuse Softness (Multiple Scattering Weight) ---
     float diffuseSoftness = 0.5f;       // 0=hard specular only, 1=strong diffuse/MS component
-    
+
+    // --- NEW: Deep Self-Shadow (Vulkan RT) ---
+    // Hair casting soft shadows onto itself is what makes a groom read as a dense,
+    // volumetric mass instead of a flat bright fuzz. 0 = off (fast binary shadow path),
+    // 1 = full deep transmittance self-shadow. Costs extra shadow-ray traversal.
+    float selfShadow = 1.0f;
+
     // Custom Textures (Optional overrides)
     std::shared_ptr<Texture> customAlbedoTexture = nullptr;
     std::shared_ptr<Texture> customRoughnessTexture = nullptr;

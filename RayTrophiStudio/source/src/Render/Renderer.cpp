@@ -76,6 +76,14 @@
 #include "Backend/IViewportBackend.h"
 
 namespace {
+float rt_world_voxel_size(const VDBVolume& vdb) {
+    const Matrix4x4 m = vdb.getTransform();
+    const float sx = std::sqrt(m.m[0][0] * m.m[0][0] + m.m[1][0] * m.m[1][0] + m.m[2][0] * m.m[2][0]);
+    const float sy = std::sqrt(m.m[0][1] * m.m[0][1] + m.m[1][1] * m.m[1][1] + m.m[2][1] * m.m[2][1]);
+    const float sz = std::sqrt(m.m[0][2] * m.m[0][2] + m.m[1][2] * m.m[1][2] + m.m[2][2] * m.m[2][2]);
+    return std::max(1e-6f, vdb.getVoxelSize() * std::max(1e-6f, std::min(sx, std::min(sy, sz))));
+}
+
 float rt_cloud_lerp(float a, float b, float t) {
     return a + (b - a) * t;
 }
@@ -4954,7 +4962,10 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
                     if (t_enter < 0.001f) t_enter = 0.001f;
                     if (t_exit > remaining_dist) t_exit = remaining_dist;
 
-                    float shadow_step = vol_shader ? vol_shader->quality.step_size * 4.0f : 0.4f;
+                    const float shadow_voxel = vdb
+                        ? rt_world_voxel_size(*vdb)
+                        : std::max(1e-6f, shadow_rec.gas_volume->getSettings().voxel_size);
+                    float shadow_step = vol_shader ? vol_shader->quality.primaryStep(shadow_voxel) * 4.0f : shadow_voxel * 4.0f;
                     if (shadow_step < 0.05f) shadow_step = 0.05f;
 
                     float density_scale = (vol_shader ? vol_shader->density.multiplier : 1.0f) * den_scale;
@@ -5783,7 +5794,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 auto shader = rec.gas_volume->getShader();
 
                 // Step size from shader or default (FASTER rendering with larger steps)
-                float step_size = shader ? shader->quality.step_size : 0.15f;
+                const float gas_voxel = std::max(1e-6f, rec.gas_volume->getSettings().voxel_size);
+                float step_size = shader ? shader->quality.primaryStep(gas_voxel) : gas_voxel;
                 float anisotropy_g = shader ? shader->scattering.anisotropy : 0.0f;
                 float anisotropy_back = shader ? shader->scattering.anisotropy_back : -0.3f;
                 float lobe_mix = shader ? shader->scattering.lobe_mix : 0.7f;
@@ -5897,12 +5909,18 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         std::shared_ptr<VolumeShader> vol_shader = nullptr;
         Matrix4x4 inv_transform = Matrix4x4::identity();
         float den_scale = 1.0f;
+        float source_voxel_size = 0.1f;
 
         if (vdb) {
             live_vol_id = vdb->getVDBVolumeID();
             vol_shader = vdb->volume_shader;
             inv_transform = vdb->getInverseTransform();
             den_scale = vdb->density_scale;
+            const Matrix4x4 vm = vdb->getTransform();
+            const float sx = std::sqrt(vm.m[0][0] * vm.m[0][0] + vm.m[1][0] * vm.m[1][0] + vm.m[2][0] * vm.m[2][0]);
+            const float sy = std::sqrt(vm.m[0][1] * vm.m[0][1] + vm.m[1][1] * vm.m[1][1] + vm.m[2][1] * vm.m[2][1]);
+            const float sz = std::sqrt(vm.m[0][2] * vm.m[0][2] + vm.m[1][2] * vm.m[1][2] + vm.m[2][2] * vm.m[2][2]);
+            source_voxel_size = std::max(1e-6f, vdb->getVoxelSize() * std::max(1e-6f, std::min(sx, std::min(sy, sz))));
         }
         else if (rec.gas_volume && rec.gas_volume->render_path == GasVolume::VolumeRenderPath::VDBUnified) {
             live_vol_id = rec.gas_volume->live_vdb_id;
@@ -5917,6 +5935,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 inv_transform = m.inverse();
             }
             den_scale = 1.0f;
+            source_voxel_size = std::max(1e-6f, rec.gas_volume->getSettings().voxel_size);
         }
         float actual_step_size = 0.0f;
         const bool procedural_vdb = (vdb && vdb->isProceduralVolume());
@@ -5960,7 +5979,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     const Vec3 iso_abs_col = vol_shader ? vol_shader->absorption.color : Vec3(0.0f);
                     const float iso_abs_coeff = vol_shader ? vol_shader->absorption.coefficient : 0.0f;
                     const Vec3 iso_scatter_col = vol_shader ? vol_shader->scattering.color : Vec3(1.0f);
-                    const float iso_voxel = std::max(1e-4f, vdb->getVoxelSize());
+                    const float iso_voxel = std::max(1e-4f, source_voxel_size);
 
                     auto isoSample = [&](const Vec3& wp) -> float {
                         Vec3 lp = inv_transform.transform_point(wp);
@@ -5969,7 +5988,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         return std::max((v - iso_remap_low) / iso_remap_range, 0.0f) * iso_mult;
                     };
 
-                    const float iso_step_size = vol_shader ? vol_shader->quality.step_size : 0.1f;
+                    const float iso_step_size = vol_shader ? vol_shader->quality.primaryStep(source_voxel_size) : source_voxel_size;
                     const int   isoCap = std::clamp(vol_shader ? vol_shader->quality.max_steps : 256, 32, 2048);
                     const float marchLen = std::max(0.0f, t_exit - t_enter);
                     const float fineStep = std::min(std::max(iso_step_size, iso_voxel * 0.1f), iso_voxel * 0.5f);
@@ -6112,16 +6131,22 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     continue;
                 }
 
-                float step_size = vol_shader ? vol_shader->quality.step_size : 0.1f;
-                if (step_size < 0.001f) step_size = 0.001f;
+                float step_size = vol_shader ? vol_shader->quality.primaryStep(source_voxel_size) : source_voxel_size;
+                if (step_size < 1e-5f) step_size = 1e-5f;
 
                 float density_scale = (vol_shader ? vol_shader->density.multiplier : 1.0f) * den_scale;
 
                 // --- INITIALIZE VOLUME PARAMETERS (Moved up for scoping) ---
                 int max_steps = vol_shader ? vol_shader->quality.max_steps : 256;
-                Vec3 aabb_size = vdb ? (vdb->getWorldBounds().max - vdb->getWorldBounds().min) : (rec.gas_volume->getSettings().grid_size);
-                float volume_size = aabb_size.length();
-                actual_step_size = std::max(step_size, volume_size / (float)max_steps);
+                const float march_span = std::max(0.0f, t_exit - t_enter);
+                constexpr int hard_step_ceiling = 2048;
+                const int required_steps = static_cast<int>(std::ceil(march_span / step_size)) + 2;
+                const int effective_step_budget =
+                    std::min(hard_step_ceiling, std::max(max_steps, 1));
+                max_steps = std::min(required_steps, effective_step_budget);
+                actual_step_size = (required_steps > effective_step_budget)
+                    ? std::max(step_size, march_span / static_cast<float>(effective_step_budget))
+                    : step_size;
 
                 auto& mgr = VDBVolumeManager::getInstance();
 
@@ -6131,9 +6156,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 // Access generic Volume Shader properties
                 auto shader = vol_shader;
 
-                step_size = shader ? shader->quality.step_size : 0.1f;
+                step_size = shader ? shader->quality.primaryStep(source_voxel_size) : source_voxel_size;
                 // Avoid infinite loops with bad step size
-                if (step_size < 0.001f) step_size = 0.001f;
+                if (step_size < 1e-5f) step_size = 1e-5f;
 
                 density_scale = (shader ? shader->density.multiplier : 1.0f) * den_scale;
 
@@ -6198,7 +6223,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                 int steps = 0;
 
-                while (t < t_exit && steps < max_steps && current_transparency > 0.01f) {
+                while (t < t_exit && steps < max_steps && current_transparency > 0.001f) {
+                    float advance_step = std::min(actual_step_size, t_exit - t);
                     float threshold = ((float)rand() / RAND_MAX) * 0.01f;
 
                     Vec3 p = current_ray.at(t);
@@ -6243,10 +6269,18 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                         float sigma_a = d * absorption_coeff;
                         float sigma_t = sigma_s + sigma_a;
+                        // Match the GPU optical-depth budget: dense samples use
+                        // shorter segments while sparse/empty regions retain the
+                        // voxel-derived base step.
+                        if (shader && shader->quality.adaptive_stepping && sigma_t > 1e-6f) {
+                            advance_step = std::max(actual_step_size * 0.25f,
+                                std::min(actual_step_size, 0.2f / sigma_t));
+                            advance_step = std::min(advance_step, t_exit - t);
+                        }
 
                         float albedo_avg = volume_albedo.luminance();
-                        float T_single = exp(-sigma_t * actual_step_size);
-                        float T_multi_p = exp(-sigma_t * actual_step_size * 0.25f);
+                        float T_single = exp(-sigma_t * advance_step);
+                        float T_multi_p = exp(-sigma_t * advance_step * 0.25f);
                         float step_transmittance = T_single * (1.0f - multi_scatter * albedo_avg) + 
                                                    T_multi_p * (multi_scatter * albedo_avg);
 
@@ -6302,10 +6336,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                     float tv_enter, tv_exit;
                                     if (vdb->intersectTransformedAABB(shadow_ray_vol, 0.0f, light_dist, tv_enter, tv_exit)) {
                                         int shadow_steps = shader ? shader->quality.shadow_steps : 8;
-                                        float shadow_march_step = volume_size / std::max((float)shadow_steps, 1.0f);
-                                        if (shadow_march_step < 0.01f) shadow_march_step = 0.01f;
                                         if (tv_exit > light_dist) tv_exit = light_dist;
-                                        float t_shadow = ((float)rand() / RAND_MAX) * shadow_march_step;
+                                        float shadow_march_step = std::max(
+                                            step_size * 2.0f,
+                                            std::max(0.0f, tv_exit - tv_enter) / std::max((float)shadow_steps, 1.0f));
+                                        if (shadow_march_step < 1e-5f) shadow_march_step = 1e-5f;
+                                        float t_shadow = tv_enter + ((float)rand() / RAND_MAX) * shadow_march_step;
 
                                         while (t_shadow < tv_exit) {
                                             Vec3 slocal_p = inv_transform.transform_point(shadow_ray_vol.at(t_shadow));
@@ -6398,8 +6434,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         current_transparency *= step_transmittance;
                     }
 
-                    if (current_transparency < 0.01f) break;
-                    t += actual_step_size;
+                    if (current_transparency < 0.001f) break;
+                    t += advance_step;
                     steps++;
                 }
 
@@ -6471,7 +6507,6 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         if (rec.materialPtr && rec.materialPtr->type() == MaterialType::Volumetric) {
             auto vol = static_cast<Volumetric*>(rec.materialPtr);
             float step_size = vol->getStepSize();
-            float density_mult = vol->getDensity();
 
             // Find exit point
             Ray exit_ray(current_ray.at(rec.t + 0.001f), current_ray.direction);
@@ -6528,8 +6563,11 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 // (Optional: Implement if vol has properties for it)
 
                 if (d > 0.001f) {
-                    float sigma_s_scalar = d * density_mult * scattering_intensity;
-                    float sigma_a = d * density_mult * absorption_coeff;
+                    // calculate_density() already applies the material density
+                    // multiplier. Applying density_mult again made CPU opacity
+                    // quadratic and diverged from both GPU paths.
+                    float sigma_s_scalar = d * scattering_intensity;
+                    float sigma_a = d * absorption_coeff;
                     float sigma_t = sigma_s_scalar + sigma_a;
 
                     float step_transmittance = exp(-sigma_t * step_size);
@@ -6582,7 +6620,14 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                         if (vdb_s->intersectTransformedAABB(shadow_ray_vol, 0.001f, dist_trace, t_enter_s, t_exit_s)) {
                                             // Quick Shadow March
                                             float s_step = 0.5f;
-                                            if (vdb_s->volume_shader) s_step = vdb_s->volume_shader->quality.step_size * 2.0f;
+                                            if (vdb_s->volume_shader) {
+                                                const Matrix4x4 sm = vdb_s->getTransform();
+                                                const float ssx = std::sqrt(sm.m[0][0] * sm.m[0][0] + sm.m[1][0] * sm.m[1][0] + sm.m[2][0] * sm.m[2][0]);
+                                                const float ssy = std::sqrt(sm.m[0][1] * sm.m[0][1] + sm.m[1][1] * sm.m[1][1] + sm.m[2][1] * sm.m[2][1]);
+                                                const float ssz = std::sqrt(sm.m[0][2] * sm.m[0][2] + sm.m[1][2] * sm.m[1][2] + sm.m[2][2] * sm.m[2][2]);
+                                                const float svx = std::max(1e-6f, vdb_s->getVoxelSize() * std::max(1e-6f, std::min(ssx, std::min(ssy, ssz))));
+                                                s_step = vdb_s->volume_shader->quality.primaryStep(svx) * 2.0f;
+                                            }
                                             float t_s = t_enter_s + ((float)rand() / RAND_MAX) * s_step;
                                             auto& mgr = VDBVolumeManager::getInstance();
                                             int vid = vdb_s->getVDBVolumeID();
@@ -7335,7 +7380,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                 float t0_v, t1_v;
                                 if (v_ptr->intersectTransformedAABB(shadow_ray, 0.001f, distance, t0_v, t1_v)) {
                                     // Use a coarser step for shadow marching to preserve performance
-                                    float s_step = (v_ptr->volume_shader ? v_ptr->volume_shader->quality.step_size : 0.25f) * 2.5f;
+                                    const float shadowVoxel = rt_world_voxel_size(*v_ptr);
+                                    float s_step = (v_ptr->volume_shader
+                                        ? v_ptr->volume_shader->quality.primaryStep(shadowVoxel)
+                                        : shadowVoxel) * 2.5f;
                                     float t_v = t0_v + 0.001f;
                                     auto& mgr = VDBVolumeManager::getInstance();
                                     int vid = v_ptr->getVDBVolumeID();
@@ -7605,20 +7653,37 @@ void Renderer::uploadHairToGPU() {
                 const Hair::HairGroom* groom = hairSystem.getGroom(gName);
                 if (!groom || !groom->isVisible || groom->guides.empty()) continue;
                 const Matrix4x4& xf = groom->transform;
-                // Mirror the same strand selection logic as the ray-tracing upload
-                const auto& viewportStrands = (!groom->interpolated.empty() && !hideInterpolatedHair)
-                    ? groom->interpolated : groom->guides;
-                for (const auto& strand : viewportStrands) {
-                    const size_t n = strand.points.size();
-                    if (n < 2) continue;
+                // Mirror the ray-tracing upload: procedural children (no materialized
+                // interpolated), so the viewport wireframe matches what the RT render shows.
+                const uint32_t vpChildren = hideInterpolatedHair ? 0u : groom->params.interpolatedPerGuide;
+                const uint32_t vpBaseSeed = 54321u + static_cast<uint32_t>(gName.length());
+
+                auto emitLines = [&](const std::vector<Hair::HairPoint>& pts) {
+                    const size_t n = pts.size();
+                    if (n < 2) return;
                     const float invN = 1.0f / float(n - 1);
                     for (size_t i = 0; i + 1 < n; ++i) {
-                        Vec3 p0 = xf.transform_point(strand.points[i].position);
-                        Vec3 p1 = xf.transform_point(strand.points[i + 1].position);
+                        Vec3 p0 = xf.transform_point(pts[i].position);
+                        Vec3 p1 = xf.transform_point(pts[i + 1].position);
                         lineVerts.insert(lineVerts.end(),
                             { p0.x, p0.y, p0.z, float(i)     * invN,
                               p1.x, p1.y, p1.z, float(i + 1) * invN });
                     }
+                };
+
+                if (vpChildren > 0u) {
+                    Hair::HairStrand childBuf;
+                    for (size_t gi = 0; gi < groom->guides.size(); ++gi) {
+                        const Hair::HairStrand& guide = groom->guides[gi];
+                        if (guide.points.size() < 2) continue;
+                        for (uint32_t c = 0; c < vpChildren; ++c) {
+                            Hair::generateChildStrand(childBuf, guide, static_cast<uint32_t>(gi), c,
+                                                      groom->params, vpBaseSeed);
+                            emitLines(childBuf.points);
+                        }
+                    }
+                } else {
+                    for (const auto& strand : groom->guides) emitLines(strand.points);
                 }
             }
             vpb->uploadHairViewportLines(lineVerts, uint32_t(lineVerts.size() / 4));
@@ -7667,29 +7732,31 @@ void Renderer::uploadHairToGPU() {
             const Hair::HairGroom* groom = hairSystem.getGroom(name);
             if (!groom || !groom->isVisible) continue;
 
-            // Collect strands (prefer interpolated; fall back to guides)
-            const auto& srcStrands = (!groom->interpolated.empty() && !hideInterpolatedHair)
-                ? groom->interpolated : groom->guides;
-            if (srcStrands.empty()) continue;
-            // Calculate scale and extract parameters
+            // Procedural interpolated children (#1, Vulkan-first): children are no longer
+            // materialized in groom.interpolated — generate each child's geometry on the fly
+            // from its guide via the shared generator and emit its segments here. This removes
+            // the persistent millions-of-HairStrand RAM cost. hideInterpolatedHair (paint) or
+            // interpolatedPerGuide==0 → render the guides themselves.
+            if (groom->guides.empty()) continue;
+
             const Matrix4x4& transform = groom->transform;
             float sx = Vec3(transform.m[0][0], transform.m[1][0], transform.m[2][0]).length();
             float sy = Vec3(transform.m[0][1], transform.m[1][1], transform.m[2][1]).length();
             float sz = Vec3(transform.m[0][2], transform.m[1][2], transform.m[2][2]).length();
             float avgScale = (sx + sy + sz) / 3.0f;
             bool useBSpline = groom->params.useBSpline;
+            const uint32_t childrenPerGuide = hideInterpolatedHair ? 0u : groom->params.interpolatedPerGuide;
+            const uint32_t childBaseSeed    = 54321u + static_cast<uint32_t>(name.length());
 
-            for (const auto& s : srcStrands) {
-                if (s.points.size() < 4) continue;
+            // Build one HairStrandData from a strand's local-space control points.
+            auto emitStrand = [&](const std::vector<Hair::HairPoint>& pts, const Vec2& rootUV) {
+                if (pts.size() < 4) return;
                 Backend::HairStrandData sd;
-                // Override materialID to be the groom's index into allMaterials
-                // so the hair intersection shader fetches the correct material.
-                sd.materialID = groomMaterialIndex;
-                sd.rootUV     = s.rootUV;
-
-                size_t estimatedPoints = s.points.size() + (useBSpline ? 4 : 0);
-                sd.points.reserve(estimatedPoints);
-                sd.radii.reserve(estimatedPoints);
+                sd.materialID   = groomMaterialIndex;   // groom index into the hair material buffer
+                sd.rootUV       = rootUV;
+                sd.subdivisions = useBSpline ? groom->params.subdivisions : 0u;
+                sd.points.reserve(pts.size() + (useBSpline ? 4 : 0));
+                sd.radii.reserve(pts.size() + (useBSpline ? 4 : 0));
 
                 auto addPoint = [&](const Hair::HairPoint& hp) {
                     Vec3 p = transform.transform_point(hp.position);
@@ -7698,21 +7765,26 @@ void Renderer::uploadHairToGPU() {
                     sd.radii.push_back(r);
                 };
 
-                if (useBSpline) {
-                    addPoint(s.points.front());
-                    addPoint(s.points.front());
-                }
+                if (useBSpline) { addPoint(pts.front()); addPoint(pts.front()); }
+                for (const auto& hp : pts) addPoint(hp);
+                if (useBSpline) { addPoint(pts.back()); addPoint(pts.back()); }
 
-                for (const auto& hp : s.points) {
-                    addPoint(hp);
-                }
-
-                if (useBSpline) {
-                    addPoint(s.points.back());
-                    addPoint(s.points.back());
-                }
-                
                 combinedStrands.push_back(std::move(sd));
+            };
+
+            if (childrenPerGuide > 0u) {
+                Hair::HairStrand childBuf;   // reused scratch; child geometry never persists
+                for (size_t gi = 0; gi < groom->guides.size(); ++gi) {
+                    const Hair::HairStrand& guide = groom->guides[gi];
+                    if (guide.points.size() < 4) continue;
+                    for (uint32_t c = 0; c < childrenPerGuide; ++c) {
+                        Hair::generateChildStrand(childBuf, guide, static_cast<uint32_t>(gi), c,
+                                                  groom->params, childBaseSeed);
+                        emitStrand(childBuf.points, childBuf.rootUV);
+                    }
+                }
+            } else {
+                for (const auto& s : groom->guides) emitStrand(s.points, s.rootUV);
             }
 
             // Collect material for this groom
@@ -7729,6 +7801,7 @@ void Renderer::uploadHairToGPU() {
             mat.absorption      = mp.absorptionCoefficient;
             mat.specularTint    = mp.specularTint;
             mat.diffuseSoftness = mp.diffuseSoftness;
+            mat.selfShadow      = mp.selfShadow;
             mat.tint            = mp.tint;
             mat.tintColor       = mp.tintColor;
             mat.coat            = mp.coat;
@@ -7910,6 +7983,7 @@ void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
             h.tintColor = p.tintColor;
             h.specularTint = p.specularTint;
             h.diffuseSoftness = p.diffuseSoftness;
+            h.selfShadow = p.selfShadow;
             h.coatTint = p.coatTint;
             h.emission = p.emission;
             h.emissionStrength = p.emissionStrength;
@@ -9347,6 +9421,26 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                 data.roughnessTexChannel = pbsdf->roughness_tex_channel;
                 progPtr = pbsdf->proceduralProgram.get();
             }
+            else if (mat->type() == MaterialType::Volumetric) {
+                const auto* volume = static_cast<const Volumetric*>(mat.get());
+                data.isVolume = true;
+                data.flags |= Backend::IBackend::MAT_FLAG_VOLUME;
+                data.albedo = volume->getAlbedo();
+                data.emission = volume->getEmissionColor();
+                // Volumetric emission is already authored as a radiance colour.
+                data.emissionStrength = 1.0f;
+                data.volumeDensity = volume->getDensity();
+                data.volumeAbsorption = volume->getAbsorption();
+                data.volumeScattering = volume->getScattering();
+                data.volumeAnisotropy = volume->getG();
+                data.volumeStepSize = volume->getStepSize();
+                data.volumeMaxSteps = volume->getMaxSteps();
+                data.volumeNoiseScale = volume->getNoiseScale();
+                data.volumeMultiScatter = volume->getMultiScatter();
+                data.volumeLightSteps = volume->getLightSteps();
+                data.volumeShadowStrength = volume->getShadowStrength();
+                progPtr = volume->proceduralProgram.get();
+            }
 
             // Copy water-specific GPU params (live in GpuMaterial, not duplicated in PrincipledBSDF)
             // NOTE: bubble (is_bubble / bubble_ior / bubble_film) is already carried by
@@ -9440,6 +9534,8 @@ void Renderer::syncMaterialProgramsToBackend(Backend::IBackend* targetBackend) {
         const MaterialNodesV2::MaterialProgram* p = nullptr;
         if (mat && mat->type() == MaterialType::PrincipledBSDF) {
             p = static_cast<PrincipledBSDF*>(mat.get())->proceduralProgram.get();
+        } else if (mat && mat->type() == MaterialType::Volumetric) {
+            p = static_cast<Volumetric*>(mat.get())->proceduralProgram.get();
         }
         perMatPrograms.push_back(p);
     }
@@ -9534,6 +9630,24 @@ void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id, Bac
         data.heightTexture = getH(pbsdf->heightProperty.texture);
         data.metallicTexChannel  = pbsdf->metallic_tex_channel;
         data.roughnessTexChannel = pbsdf->roughness_tex_channel;
+    }
+    else if (mat->type() == MaterialType::Volumetric) {
+        const auto* volume = static_cast<const Volumetric*>(mat);
+        data.isVolume = true;
+        data.flags |= Backend::IBackend::MAT_FLAG_VOLUME;
+        data.albedo = volume->getAlbedo();
+        data.emission = volume->getEmissionColor();
+        data.emissionStrength = 1.0f;
+        data.volumeDensity = volume->getDensity();
+        data.volumeAbsorption = volume->getAbsorption();
+        data.volumeScattering = volume->getScattering();
+        data.volumeAnisotropy = volume->getG();
+        data.volumeStepSize = volume->getStepSize();
+        data.volumeMaxSteps = volume->getMaxSteps();
+        data.volumeNoiseScale = volume->getNoiseScale();
+        data.volumeMultiScatter = volume->getMultiScatter();
+        data.volumeLightSteps = volume->getLightSteps();
+        data.volumeShadowStrength = volume->getShadowStrength();
     }
 
     if (mat->gpuMaterial) {

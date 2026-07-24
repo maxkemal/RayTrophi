@@ -49,7 +49,9 @@ UNIFIED_FUNC float calculate_unified_density(const Vec3f& p, const UnifiedVolume
     
     // Fallback if AABB is invalid (size too small) -> Use World Space
     Vec3f pos_obj;
-    if (size.x < 0.0001f || size.y < 0.0001f || size.z < 0.0001f) {
+    const bool has_valid_bounds =
+        size.x >= 0.0001f && size.y >= 0.0001f && size.z >= 0.0001f;
+    if (!has_valid_bounds) {
         pos_obj = p; // Fallback to world space
     } else {
         pos_obj = (p - params.aabb_min) / size;
@@ -57,9 +59,10 @@ UNIFIED_FUNC float calculate_unified_density(const Vec3f& p, const UnifiedVolume
 
     // AABB Bounds Check (Crucial: Stop density outside object for correct transparency)
     // If we are outside the [0,1] range in any axis, we are outside the volume.
-    if (pos_obj.x < 0.0f || pos_obj.x > 1.0f ||
-        pos_obj.y < 0.0f || pos_obj.y > 1.0f ||
-        pos_obj.z < 0.0f || pos_obj.z > 1.0f) {
+    if (has_valid_bounds &&
+        (pos_obj.x < 0.0f || pos_obj.x > 1.0f ||
+         pos_obj.y < 0.0f || pos_obj.y > 1.0f ||
+         pos_obj.z < 0.0f || pos_obj.z > 1.0f)) {
         return 0.0f; 
     }
 
@@ -77,7 +80,7 @@ UNIFIED_FUNC float calculate_unified_density(const Vec3f& p, const UnifiedVolume
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     // EDGE FALLOFF - Smooth transition at AABB boundaries
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    {
+    if (has_valid_bounds) {
         // Falloff distance as percentage of normalized volume (15% each side)
         float falloff_dist = 0.15f;
         

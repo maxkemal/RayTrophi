@@ -27,6 +27,10 @@
 #include "PBRMaterialSnapshot.h"
 #include "Triangle.h"
 #include "TriangleMesh.h"
+#include "Volumetric.h"
+#include "VDBVolume.h"
+#include "GasVolume.h"
+#include "VolumeShader.h"
 #include "SceneSelection.h"
 #include "ProjectManager.h"
 #include "NodeSystem/NodeEditorUIV2.h"
@@ -39,6 +43,63 @@
 #include <vector>
 
 namespace MaterialNodesV2 {
+
+inline void materializeGraphFromVolumetric(MaterialNodeGraphV2& graph, const Volumetric& material) {
+    graph.clear();
+    auto* out = static_cast<OutputNode*>(graph.addMaterialNode(NodeType::Output, 500, 80));
+    auto* volume = static_cast<PrincipledVolumeNode*>(graph.addMaterialNode(NodeType::PrincipledVolume, 180, 80));
+    if (!out || !volume) return;
+    volume->defaults.density = material.getDensity();
+    const Vec3 scatter = material.getAlbedo();
+    volume->defaults.scatter_color[0] = scatter.x;
+    volume->defaults.scatter_color[1] = scatter.y;
+    volume->defaults.scatter_color[2] = scatter.z;
+    volume->defaults.scatter_strength = material.getScattering();
+    volume->defaults.absorption_strength = material.getAbsorption();
+    const Vec3 emission = material.getEmissionColor();
+    volume->defaults.emission_color[0] = emission.x;
+    volume->defaults.emission_color[1] = emission.y;
+    volume->defaults.emission_color[2] = emission.z;
+    volume->defaults.emission_strength = 1.0f;
+    volume->defaults.anisotropy = material.getG();
+    volume->defaults.sanitize();
+    graph.addLink(volume->outputs[0].id, out->inputs[OutputNode::InVolume].id);
+}
+
+inline void applyVolumeProgramToMaterial(const VolumeMaterialProgram& program, Volumetric& material) {
+    if (!program.active) return;
+    if (program.has(VolumeMaterialSlot::Density)) material.setDensity(program.density);
+    if (program.has(VolumeMaterialSlot::ScatterColor))
+        material.setAlbedo(Vec3(program.scatter_color[0], program.scatter_color[1], program.scatter_color[2]));
+    if (program.has(VolumeMaterialSlot::ScatterStrength)) material.setScattering(program.scatter_strength);
+    if (program.has(VolumeMaterialSlot::AbsorptionStrength)) material.setAbsorption(program.absorption_strength);
+    if (program.has(VolumeMaterialSlot::EmissionColor) || program.has(VolumeMaterialSlot::EmissionStrength))
+        material.setEmissionColor(Vec3(program.emission_color[0], program.emission_color[1], program.emission_color[2]) * program.emission_strength);
+    if (program.has(VolumeMaterialSlot::Anisotropy)) material.setG(program.anisotropy);
+    if (program.has(VolumeMaterialSlot::MultiScatter)) material.setMultiScatter(program.multi_scatter);
+}
+
+inline void pullVolumetricStateIntoGraph(MaterialNodeGraphV2& graph, const Volumetric& material) {
+    for (const auto& node : graph.nodes) {
+        auto* volume = dynamic_cast<PrincipledVolumeNode*>(node.get());
+        if (!volume) continue;
+        volume->defaults.density = material.getDensity();
+        const Vec3 scatter = material.getAlbedo();
+        volume->defaults.scatter_color[0] = scatter.x;
+        volume->defaults.scatter_color[1] = scatter.y;
+        volume->defaults.scatter_color[2] = scatter.z;
+        volume->defaults.scatter_strength = material.getScattering();
+        volume->defaults.absorption_strength = material.getAbsorption();
+        const Vec3 emission = material.getEmissionColor();
+        volume->defaults.emission_color[0] = emission.x;
+        volume->defaults.emission_color[1] = emission.y;
+        volume->defaults.emission_color[2] = emission.z;
+        volume->defaults.emission_strength = 1.0f;
+        volume->defaults.anisotropy = material.getG();
+        volume->defaults.sanitize();
+        return;
+    }
+}
 
 class MaterialNodeEditorUI {
 public:
@@ -86,6 +147,10 @@ public:
                 { NodeType::Fresnel, "Fresnel" },
                 { NodeType::LayerWeight, "Layer Weight" },
                 { NodeType::AmbientOcclusion, "Ambient Occlusion" },
+                { NodeType::VolumeInfo, "Volume Info" },
+                { NodeType::Blackbody, "Blackbody" },
+                { NodeType::VolumeGrid, "Volume Grid" },
+                { NodeType::Time, "Time" },
                 { NodeType::MaterialRef, "Material (Ref)" }
             } },
             { "Texture", ImVec4(0.75f, 0.55f, 0.25f, 1.0f), {
@@ -93,7 +158,8 @@ public:
                 // Voronoi/Checker live inside Noise Texture's Type combo now.
                 { NodeType::Noise, "Noise Texture" },
                 { NodeType::Wave, "Wave Texture" },
-                { NodeType::Gradient, "Gradient Texture" }
+                { NodeType::Gradient, "Gradient Texture" },
+                { NodeType::CloudShape, "Cloud Shape" }
             } },
             { "Color", ImVec4(0.7f, 0.6f, 0.3f, 1.0f), {
                 { NodeType::MixColor, "Mix Color" },
@@ -120,6 +186,7 @@ public:
             } },
             { "Shader", ImVec4(0.8f, 0.35f, 0.5f, 1.0f), {
                 { NodeType::MixMaterial, "Mix Material" },
+                { NodeType::PrincipledVolume, "Principled Volume" },
                 { NodeType::Output, "Material Output" }
             } }
         };
@@ -174,7 +241,8 @@ public:
                 }
                 for (uint16_t id : seen) {
                     // Only PrincipledBSDF materials are graph-editable
-                    if (dynamic_cast<PrincipledBSDF*>(mm.getMaterial(id))) {
+                    if (dynamic_cast<PrincipledBSDF*>(mm.getMaterial(id)) ||
+                        dynamic_cast<Volumetric*>(mm.getMaterial(id))) {
                         selMaterials.emplace_back(id, mm.getMaterialName(id));
                     }
                 }
@@ -199,28 +267,31 @@ public:
         // Active material resolution
         // ------------------------------------------------------------------
         PrincipledBSDF* pbsdf = nullptr;
+        Volumetric* volumetric = nullptr;
         uint16_t matId = MaterialManager::INVALID_MATERIAL_ID;
         if (!activeMaterialName.empty()) {
             matId = mm.getMaterialID(activeMaterialName);
             if (matId != MaterialManager::INVALID_MATERIAL_ID) {
                 pbsdf = dynamic_cast<PrincipledBSDF*>(mm.getMaterial(matId));
+                volumetric = dynamic_cast<Volumetric*>(mm.getMaterial(matId));
             }
-            if (!pbsdf) activeMaterialName.clear();  // deleted/renamed — drop stale binding
+            if (!pbsdf && !volumetric) activeMaterialName.clear();  // deleted/renamed - drop stale binding
         }
 
         std::shared_ptr<MaterialNodeGraphV2> graphPtr;
-        if (pbsdf) {
+        if (pbsdf || volumetric) {
             auto& slot = graphs[activeMaterialName];
             if (!slot) slot = std::make_shared<MaterialNodeGraphV2>();
             if (slot->nodes.empty()) {
                 // First open: the graph VISIBLY represents the material — bound
                 // textures come in as wired Image Texture nodes, albedo color as
                 // a Color node, everything else as Output defaults.
-                materializeGraphFromMaterial(*slot, *pbsdf);
+                if (pbsdf) materializeGraphFromMaterial(*slot, *pbsdf);
+                else materializeGraphFromVolumetric(*slot, *volumetric);
                 // (The one-shot backend sync is driven by MaterialNodeGraphV2::
                 // needsInitialApply, which a fresh graph and a disk-loaded graph both carry.)
             }
-            if (auto* out = slot->findOutputNode()) {
+            if (pbsdf) if (auto* out = slot->findOutputNode()) {
                 // Saved graphs from before a field-group existed (resin/bubble/
                 // extended): fill those groups from the material's live values
                 // instead of constructor defaults (no-op otherwise).
@@ -241,6 +312,10 @@ public:
                 if (liveApply) {
                     pullMaterialStateIntoGraph(*slot, *out, *pbsdf);
                 }
+            }
+            if (volumetric) {
+                if (auto* out = slot->findOutputNode()) out->syncPinVisibility(*slot, true);
+                if (liveApply) pullVolumetricStateIntoGraph(*slot, *volumetric);
             }
             graphPtr = slot;
         }
@@ -366,7 +441,7 @@ public:
         // ------------------------------------------------------------------
         ImGui::BeginChild("MatNodeCanvas", ImVec2(0, 0), true, ImGuiWindowFlags_NoScrollbar);
 
-        drawToolbar(ctx, graphPtr, pbsdf, matId);
+        drawToolbar(ctx, graphPtr, pbsdf, volumetric, matId);
 
         if (graphPtr) {
             const ImVec2 canvasPos = ImGui::GetCursorScreenPos();
@@ -438,11 +513,12 @@ public:
         // material immediately. Same per-edit cost as a material-panel slider.
         // ------------------------------------------------------------------
         if (graphChangedThisFrame_) {
-            if (liveApply && graphPtr && pbsdf) {
-                applyGraph(ctx, *graphPtr, pbsdf, matId);
+            if (liveApply && graphPtr && (pbsdf || volumetric)) {
+                if (pbsdf) applyGraph(ctx, *graphPtr, pbsdf, matId);
+                else applyVolumeGraph(ctx, *graphPtr, volumetric, matId);
             }
             graphChangedThisFrame_ = false;
-        } else if (graphPtr && pbsdf && liveApply && graphPtr->needsInitialApply) {
+        } else if (graphPtr && (pbsdf || volumetric) && liveApply && graphPtr->needsInitialApply) {
             // One-shot sync for a graph this session has not applied yet. It does two jobs,
             // and the second one is why an OPENED PROJECT used to be dead to node edits:
             //   1. pushes the folded material + per-pixel program to the backend, so Vulkan
@@ -453,7 +529,8 @@ public:
             // (slot->nodes.empty()), so a project whose graph came off DISK — nodes already
             // populated — never got it, and stayed deaf until Live was toggled off and on.
             // markProjectModified=false: this is semantically what is already on disk.
-            applyGraph(ctx, *graphPtr, pbsdf, matId, /*markProjectModified=*/false);
+            if (pbsdf) applyGraph(ctx, *graphPtr, pbsdf, matId, /*markProjectModified=*/false);
+            else applyVolumeGraph(ctx, *graphPtr, volumetric, matId, /*markProjectModified=*/false);
         }
     }
 
@@ -519,7 +596,7 @@ private:
 
     template<typename ContextT>
     void drawToolbar(ContextT& ctx, std::shared_ptr<MaterialNodeGraphV2>& graphPtr,
-                     PrincipledBSDF* pbsdf, uint16_t matId) {
+                     PrincipledBSDF* pbsdf, Volumetric* volumetric, uint16_t matId) {
         auto& mm = MaterialManager::getInstance();
 
         auto selectMaterial = [this](const std::string& name) {
@@ -549,7 +626,8 @@ private:
             const char* preview = activeMaterialName.empty() ? "<select material>" : activeMaterialName.c_str();
             if (ImGui::BeginCombo("##MatGraphTarget", preview)) {
                 for (const auto& mat : mm.getAllMaterials()) {
-                    if (!mat || mat->type() != MaterialType::PrincipledBSDF) continue;
+                    if (!mat || (mat->type() != MaterialType::PrincipledBSDF &&
+                                 mat->type() != MaterialType::Volumetric)) continue;
                     if (ImGui::Selectable(mat->materialName.c_str(), mat->materialName == activeMaterialName)) {
                         selectMaterial(mat->materialName);
                     }
@@ -559,17 +637,19 @@ private:
         }
 
         ImGui::SameLine();
-        ImGui::BeginDisabled(!graphPtr || !pbsdf);
-        if (ImGui::Checkbox("Live", &liveApply) && liveApply && graphPtr && pbsdf) {
+        ImGui::BeginDisabled(!graphPtr || (!pbsdf && !volumetric));
+        if (ImGui::Checkbox("Live", &liveApply) && liveApply && graphPtr) {
             // Re-entering live mode: sync the material to the graph's current state.
-            applyGraph(ctx, *graphPtr, pbsdf, matId);
+            if (pbsdf) applyGraph(ctx, *graphPtr, pbsdf, matId);
+            else applyVolumeGraph(ctx, *graphPtr, volumetric, matId);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Apply every graph edit immediately");
         if (!liveApply) {
             ImGui::SameLine();
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.3f, 1.0f));
             if (ImGui::Button("Apply")) {
-                applyGraph(ctx, *graphPtr, pbsdf, matId);
+                if (pbsdf) applyGraph(ctx, *graphPtr, pbsdf, matId);
+                else applyVolumeGraph(ctx, *graphPtr, volumetric, matId);
             }
             ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Apply the graph to the material (all backends)");
@@ -581,7 +661,8 @@ private:
             ImGui::SameLine();
             if (ImGui::Button("Pull")) {
                 if (auto* out = graphPtr->findOutputNode()) {
-                    out->initDefaultsFromMaterial(*pbsdf);
+                    if (pbsdf) out->initDefaultsFromMaterial(*pbsdf);
+                    else materializeGraphFromVolumetric(*graphPtr, *volumetric);
                     ProjectManager::getInstance().markModified();
                     graphChangedThisFrame_ = true;
                 }
@@ -600,7 +681,8 @@ private:
         if (ImGui::BeginPopup("MatGraphRebuildConfirm")) {
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Replace the graph with the material's current state?");
             if (ImGui::Button("Rebuild##confirm")) {
-                materializeGraphFromMaterial(*graphPtr, *pbsdf);
+                if (pbsdf) materializeGraphFromMaterial(*graphPtr, *pbsdf);
+                else materializeGraphFromVolumetric(*graphPtr, *volumetric);
                 lastWarnings.clear();
                 lastErrors.clear();
                 hasApplied = false;
@@ -682,6 +764,97 @@ private:
      * update chain a material-panel slider edit uses. No bake, no new GPU path.
      */
     template<typename ContextT>
+    bool publishVolumeProgram(ContextT& ctx, const std::string& materialName,
+                              const VolumeMaterialProgram& program) {
+        bool changed = false;
+        bool surfaceChanged = false;
+        const auto programJson = program.toJson();
+        const auto publish = [&](const std::shared_ptr<VolumeShader>& shader) {
+            if (!shader || shader->material_graph != materialName) return;
+            if (shader->material_program.toJson() == programJson) return;
+            shader->material_program = program;
+            changed = true;
+        };
+
+        for (const auto& vdb : ctx.scene.vdb_volumes) {
+            if (!vdb) continue;
+            const auto shader = vdb->getShader();
+            publish(shader);
+            if (vdb->render_as_isosurface && shader &&
+                shader->material_graph == materialName) {
+                // The same asset's Surface output owns this SDF boundary.
+                surfaceChanged = true;
+            }
+        }
+        for (const auto& gas : ctx.scene.gas_volumes) {
+            if (gas) publish(gas->getShader());
+        }
+
+        if (changed || surfaceChanged) {
+            // Graph publication belongs to the material lifecycle, not to the
+            // VDB/Gas panel. Consumers therefore stay live even while their
+            // properties panel is closed.
+            ctx.renderer.updateBackendGasVolumes(ctx.scene);
+        }
+        return changed || surfaceChanged;
+    }
+
+    template<typename ContextT>
+    void applyVolumeGraph(ContextT& ctx, MaterialNodeGraphV2& graph, Volumetric* material,
+                          uint16_t matId, bool markProjectModified = true) {
+        const VolumeGraphResult result = evaluateVolumeMaterialGraph(graph);
+        lastWarnings.clear();
+        lastErrors = result.errors;
+        lastApplyOk = result.ok;
+        hasApplied = true;
+        if (!result.ok || !material) return;
+        if (!result.program.active) {
+            lastWarnings.push_back("Material Output.Volume is unconnected; the volumetric material keeps its current values");
+        } else {
+            applyVolumeProgramToMaterial(result.program, *material);
+        }
+        {
+            MaterialProgram spatial = compileMaterialProgram(graph, nullptr);
+            if (spatial.active) {
+                material->proceduralProgram =
+                    std::make_shared<MaterialProgram>(std::move(spatial));
+                lastWarnings.push_back(
+                    "Spatial Volume Graph executes per march sample on Vulkan RT");
+            } else {
+                material->proceduralProgram.reset();
+            }
+        }
+        for (const auto& node : graph.nodes) {
+            auto* grid = dynamic_cast<VolumeGridNode*>(node.get());
+            if (!grid) continue;
+            std::string key = grid->gridName;
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            static const std::unordered_set<std::string> known = {
+                "density", "temperature", "heat", "flame", "fuel", "velocity", "vel",
+                "color", "colour", "emission", "voxel_size", "voxelsize"
+            };
+            if (known.count(key) == 0)
+                lastWarnings.push_back("Volume Grid '" + grid->gridName +
+                    "' is not bound by the current Vulkan semantic table and reads zero");
+        }
+        publishVolumeProgram(ctx, material->materialName, result.program);
+        if (result.program.density_noise_enabled && ctx.render_settings.use_optix) {
+            lastWarnings.push_back(
+                "Density field noise currently executes on Vulkan RT; OptiX parity is scheduled after the field contract stabilizes");
+        }
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterial(ctx.scene, matId);
+            ctx.renderer.syncMaterialProgramsToBackend(ctx.backend_ptr);
+            ctx.backend_ptr->resetAccumulation();
+        }
+        if (markProjectModified) ProjectManager::getInstance().markModified();
+        for (auto& node : graph.nodes) node->dirty = false;
+        graph.needsInitialApply = false;
+    }
+
+    template<typename ContextT>
     void applyGraph(ContextT& ctx, MaterialNodeGraphV2& graph, PrincipledBSDF* pbsdf, uint16_t matId,
                     bool markProjectModified = true) {
         MaterialGraphResult res = evaluateMaterialGraph(graph, pbsdf);
@@ -692,6 +865,19 @@ private:
         if (!res.ok || !pbsdf) return;
 
         const bool texChanged = applyShadeStateToMaterial(res.state, *pbsdf);
+        const VolumeGraphResult volumeResult = evaluateVolumeMaterialGraph(graph);
+        if (volumeResult.ok) {
+            publishVolumeProgram(ctx, pbsdf->materialName, volumeResult.program);
+            if (volumeResult.program.density_noise_enabled && ctx.render_settings.use_optix) {
+                lastWarnings.push_back(
+                    "Density field noise currently executes on Vulkan RT; OptiX parity is scheduled after the field contract stabilizes");
+            }
+        } else {
+            lastWarnings.push_back(
+                "Volume output could not be published; open diagnostics for the volume branch");
+            lastErrors.insert(lastErrors.end(), volumeResult.errors.begin(), volumeResult.errors.end());
+            lastApplyOk = false;
+        }
 
         // CPU -> GPU struct (the canonical sync, see MaterialManager::syncAllGpuMaterials)
         if (!pbsdf->gpuMaterial) pbsdf->gpuMaterial = std::make_shared<GpuMaterial>();

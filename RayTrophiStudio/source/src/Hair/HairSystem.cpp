@@ -185,19 +185,25 @@ void HairSystem::generateOnMesh(
         cdf.push_back(cumulative);
     }
     
-    // Generate guide strands
-    ThreadSafeRNG rng(12345 + static_cast<uint32_t>(groomName.length()));
-    groom.guides.reserve(params.guideCount);
-    
-    for (uint32_t i = 0; i < params.guideCount; ++i) {
+    // Generate guide strands. Each guide is independent (samples the surface, builds its
+    // own strand), so pre-size and fill in parallel. A per-guide deterministic RNG (seeded
+    // by guide index) replaces the old single sequential stream — this both unblocks the
+    // parallel-for AND makes the guide layout STABLE (order-independent) across runs.
+    const uint32_t guideSeedBase = 12345u + static_cast<uint32_t>(groomName.length());
+    groom.guides.assign(params.guideCount, HairStrand{});
+
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < static_cast<int>(params.guideCount); ++i) {
+        ThreadSafeRNG rng(guideSeedBase + static_cast<uint32_t>(i) * 2654435761u);
+
         // Sample triangle by area
         float r = rng.random();
         auto it = std::lower_bound(cdf.begin(), cdf.end(), r);
         size_t triIndex = std::distance(cdf.begin(), it);
         triIndex = std::min(triIndex, triangles.size() - 1);
-        
+
         const auto& tri = triangles[triIndex];
-        
+
         // Sample point on triangle (barycentric)
         float u = rng.random();
         float v = rng.random();
@@ -205,44 +211,40 @@ void HairSystem::generateOnMesh(
             u = 1.0f - u;
             v = 1.0f - v;
         }
-        
+
         Vec3 normal;
         Vec2 rootUV;
         Vec3 rootPos = sampleTriangleSurface(*tri, u, v, normal, rootUV);
-        
-        // Create strand
-        HairStrand strand;
-        strand.strandID = i;
+
+        HairStrand& strand = groom.guides[i];
+        strand.strandID = static_cast<uint32_t>(i);
         strand.materialID = params.defaultMaterialID;
         strand.meshMaterialID = tri->getMaterialID();
         strand.type = StrandType::GUIDE;
         strand.rootUV = rootUV;
         strand.randomSeed = rng.random();
-        
+
         // Calculate strand length with variation
         float lengthVariation = 1.0f + (rng.random() - 0.5f) * 2.0f * params.lengthVariation;
         float strandLength = params.length * lengthVariation;
-        
+
         strand.baseRootPos = rootPos;
         strand.baseLength = strandLength;
         strand.rootNormal = normal;
-        
+
         strand.points.resize(params.pointsPerStrand);
         strand.groomedPositions.resize(params.pointsPerStrand);
+        float div = (params.pointsPerStrand > 1) ? static_cast<float>(params.pointsPerStrand - 1) : 1.0f;
         for (uint32_t p = 0; p < params.pointsPerStrand; ++p) {
-            float t = static_cast<float>(p) / (params.pointsPerStrand - 1);
+            float t = static_cast<float>(p) / div;
             strand.groomedPositions[p] = rootPos + normal * (t * strandLength);
         }
-        
+
         // Skinning Data Initialization
         strand.triangleIndex = (uint32_t)triIndex;
         strand.barycentricUV = Vec2(u, v);
-        // Store the initial shape relative to the world (or bind pose if that's what we are in)
-        // Ideally, we'd store it relative to the triangle's local frame, but simply storing 
-        // the "Rest Shape" points allows us to re-calculate the deformation delta.
+        // Rest shape (for deformation delta) — snapshot of the freshly built groom pose.
         strand.restGroomedPositions = strand.groomedPositions;
-        
-        groom.guides.push_back(std::move(strand));
     }
 
     
@@ -300,77 +302,88 @@ bool HairSystem::importAlembic(const std::string& filepath, const std::string& g
 // Child Strand Interpolation
 // ============================================================================
 
+// Single source of truth for one interpolated child's geometry (see HairSystem.h).
+// Deterministic per (guideIndex, childIndex): a self-contained per-child RNG seed makes
+// this callable in any order / in parallel and produces identical results for the
+// materialized (interpolateChildren) and procedural (Vulkan upload) paths.
+void generateChildStrand(HairStrand& child, const HairStrand& guide,
+                         uint32_t guideIndex, uint32_t childIndex,
+                         const HairGenerationParams& params, uint32_t baseSeed) {
+    ThreadSafeRNG rng(baseSeed
+                      + guideIndex * 2654435761u
+                      + (childIndex + 1u) * 2246822519u);
+
+    child.materialID     = guide.materialID;
+    child.meshMaterialID = guide.meshMaterialID;
+    child.type           = StrandType::INTERPOLATED;
+    child.rootUV         = guide.rootUV;
+    child.randomSeed     = rng.random();
+    child.rootRadius     = guide.rootRadius * rng.random(0.7f, 1.0f);
+
+    // Offset child root from guide root (consumed before the point loop → stable per child)
+    const float offsetRadius = params.childRadius;
+    const float offsetAngle  = rng.random() * TWO_PI;
+    const Vec3  offset(cosf(offsetAngle) * offsetRadius, 0.0f, sinf(offsetAngle) * offsetRadius);
+
+    child.points.resize(guide.points.size());
+    for (size_t p = 0; p < guide.points.size(); ++p) {
+        const HairPoint& guidePoint = guide.points[p];
+        HairPoint&       childPoint = child.points[p];
+
+        childPoint.v_coord = guidePoint.v_coord;
+        const float t = childPoint.v_coord;
+
+        // Clumpiness: tips pull in (clump>=0) or flare out (clump<0) with t^2 falloff.
+        const float clump = params.clumpiness * guide.clumpScale;
+        float spreadFactor;
+        if (clump >= 0.0f) spreadFactor = 1.0f - powf(t, 2.0f) * clump;
+        else               spreadFactor = 1.0f + powf(t, 2.0f) * fabsf(clump);
+
+        childPoint.position = guidePoint.position + offset * spreadFactor;
+
+        // Unique child-only high-frequency variation
+        if (params.frizz > 0.0f) {
+            const Vec3 jvec(rng.random() - 0.5f, rng.random() - 0.5f, rng.random() - 0.5f);
+            childPoint.position = childPoint.position + jvec * (params.frizz * t * 0.01f);
+        }
+
+        childPoint.radius = guidePoint.radius * rng.random(0.7f, 1.0f);
+    }
+}
+
 void HairSystem::interpolateChildren(HairGroom& groom) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (groom.guides.empty() || groom.params.interpolatedPerGuide == 0) return;
-    
-    ThreadSafeRNG rng(54321 + static_cast<uint32_t>(groom.name.length()));
-    
-    groom.interpolated.clear();
-    groom.interpolated.reserve(groom.guides.size() * groom.params.interpolatedPerGuide);
-    
-    uint32_t childID = static_cast<uint32_t>(groom.guides.size());
-    
-    for (const auto& guide : groom.guides) {
-        for (uint32_t c = 0; c < groom.params.interpolatedPerGuide; ++c) {
-            HairStrand child;
-            child.strandID = childID++;
-            child.materialID = guide.materialID;
-            child.meshMaterialID = guide.meshMaterialID;
-            child.type = StrandType::INTERPOLATED;
-            child.randomSeed = rng.random();
-            child.rootRadius = guide.rootRadius * rng.random(0.7f, 1.0f);
-            // Offset child root from guide root
-            float offsetRadius = groom.params.childRadius; 
-            float offsetAngle = rng.random() * TWO_PI;
-            Vec3 offset(
-                cosf(offsetAngle) * offsetRadius,
-                0.0f,
-                sinf(offsetAngle) * offsetRadius
-            );
-            
-            child.rootUV = guide.rootUV;
-            child.points.resize(guide.points.size());
-            
-            for (size_t p = 0; p < guide.points.size(); ++p) {
-                const HairPoint& guidePoint = guide.points[p];
-                HairPoint& childPoint = child.points[p];
-                
-                childPoint.v_coord = guidePoint.v_coord;
-                float t = childPoint.v_coord;
 
-                // better Clumpiness Model:
-                float clump = groom.params.clumpiness * guide.clumpScale;
+    // Procedural mode (#1, default): do NOT materialize children — the Vulkan upload
+    // generates them on the fly from the guides, so keeping a persistent copy here would
+    // just burn RAM. CPU/OptiX (which read groom.interpolated) therefore see guides only
+    // until they are ported to generateChildStrand().
+    if (m_proceduralChildren) {
+        groom.interpolated.clear();
+        return;
+    }
 
-                
-                // clumpShape determines the power of the effect along the strand
-                float spreadFactor;
-                if (clump >= 0.0f) {
-                    // tips pull in: (1 - t^2) * (1 - clump) + (t^2) * 0
-                    // actually simpler: 1.0 - pow(t, 2.0) * clump
-                    spreadFactor = 1.0f - powf(t, 2.0f) * clump;
-                } else {
-                    // tips flare out: 1.0 + pow(t, 2.0) * abs(clump)
-                    spreadFactor = 1.0f + powf(t, 2.0f) * fabsf(clump);
-                }
+    if (groom.guides.empty() || groom.params.interpolatedPerGuide == 0) {
+        groom.interpolated.clear();
+        return;
+    }
 
-                childPoint.position = guidePoint.position + offset * spreadFactor;
-                
-                // Add unique child-only variation (high frequency)
-                if (groom.params.frizz > 0.0f) {
-                    Vec3 j(
-                        (rng.random() - 0.5f),
-                        (rng.random() - 0.5f),
-                        (rng.random() - 0.5f)
-                    );
-                    childPoint.position = childPoint.position + j * (groom.params.frizz * t * 0.01f);
-                }
-                
-                childPoint.radius = guidePoint.radius * rng.random(0.7f, 1.0f);
-            }
+    const uint32_t childrenPerGuide = groom.params.interpolatedPerGuide;
+    const size_t   guideCount       = groom.guides.size();
+    const uint32_t baseSeed         = 54321u + static_cast<uint32_t>(groom.name.length());
 
-            
-            groom.interpolated.push_back(std::move(child));
+    // Pre-size so every (guide, child) writes a FIXED slot — no shared push_back, so the
+    // whole thing parallelises per-guide. generateChildStrand is the shared generator, so
+    // this materialized path is byte-identical to the procedural Vulkan upload.
+    groom.interpolated.assign(guideCount * childrenPerGuide, HairStrand{});
+
+    #pragma omp parallel for schedule(static)
+    for (int gi = 0; gi < static_cast<int>(guideCount); ++gi) {
+        for (uint32_t c = 0; c < childrenPerGuide; ++c) {
+            HairStrand& child = groom.interpolated[static_cast<size_t>(gi) * childrenPerGuide + c];
+            generateChildStrand(child, groom.guides[gi], static_cast<uint32_t>(gi), c,
+                                groom.params, baseSeed);
+            child.strandID = static_cast<uint32_t>(guideCount + static_cast<size_t>(gi) * childrenPerGuide + c);
         }
     }
 }
@@ -1571,8 +1584,13 @@ void HairSystem::restyleGroomImpl(const std::string& name,
     HairGroom& groom = it->second;
     const HairGenerationParams& params = groom.params;
     
-    // 1. Update all guide strands based on new styling params
-    for (auto& strand : groom.guides) {
+    // 1. Update all guide strands based on new styling params. Each strand is independent
+    // (styling reads/writes only its own points; frizz uses a per-strand-seeded local RNG;
+    // forceSampler is a read-only field evaluation), so parallelise across guides — this is
+    // the hot path when dragging clumpiness/gravity/curl sliders on a dense groom.
+    #pragma omp parallel for schedule(static)
+    for (int si = 0; si < static_cast<int>(groom.guides.size()); ++si) {
+        HairStrand& strand = groom.guides[si];
         strand.points.resize(params.pointsPerStrand);
         
         // Initialize groomedPositions if they don't exist or if point count changed

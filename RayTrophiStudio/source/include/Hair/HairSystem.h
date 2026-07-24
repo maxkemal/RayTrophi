@@ -111,6 +111,17 @@ struct HairGroom {
     bool isVisible = true;                  // Render toggle
 };
 
+// ── Procedural interpolated-child generation ────────────────────────────────────────
+// Single source of truth for interpolated child geometry. Deterministic per
+// (guideIndex, childIndex, baseSeed). Fills `child` with control points in the guide's
+// LOCAL space (same space as guide.points) plus per-strand metadata — the caller applies
+// any groom transform afterwards. Called by BOTH the materialized path
+// (interpolateChildren → CPU/OptiX) and the procedural Vulkan upload, so every backend
+// that uses it produces identical children. baseSeed convention: 54321 + groomName.length().
+void generateChildStrand(HairStrand& child, const HairStrand& guide,
+                         uint32_t guideIndex, uint32_t childIndex,
+                         const HairGenerationParams& params, uint32_t baseSeed);
+
 /**
  * @brief Main Hair/Fur System
  * 
@@ -278,6 +289,14 @@ public:
     size_t getTotalPointCount() const;
     size_t getGroomCount() const { return m_grooms.size(); }
     bool isBVHDirty() const { return m_bvhDirty; }
+
+    // Procedural interpolated children (#1, Vulkan-first). When true (default) child
+    // geometry is NOT materialized into groom.interpolated — the Vulkan upload generates
+    // it on the fly, eliminating the persistent millions-of-HairStrand RAM cost. CPU/OptiX
+    // read groom.interpolated, so they render children only when this is false (until they
+    // are ported to the procedural generator).
+    void setProceduralChildren(bool enabled) { m_proceduralChildren = enabled; }
+    bool proceduralChildren() const { return m_proceduralChildren; }
     
     HairGroom* getGroom(const std::string& name);
     const HairGroom* getGroom(const std::string& name) const;
@@ -377,6 +396,7 @@ private:
 
     RTCScene m_embreeScene = nullptr;
     bool m_bvhDirty = true;
+    bool m_proceduralChildren = true;   // see setProceduralChildren()
 
     // Cached stats for O(1) retrieval
     mutable size_t m_totalStrandCount = 0;

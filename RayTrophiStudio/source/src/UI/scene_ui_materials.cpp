@@ -417,6 +417,49 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
     ImGui::Separator();
     ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.52f, 1.0f), "Slot Assignment & Actions");
+
+    // The ONE material-slot mutation path. Selection, +Surface and +Volume all
+    // call this so facade triangles, flat SoA meshes, Embree, terrain ownership,
+    // UI caches, graph target and the active backend cannot drift independently.
+    auto assignActiveSlot = [&](uint16_t newId) -> bool {
+        auto& mgr = MaterialManager::getInstance();
+        if (newId == MaterialManager::INVALID_MATERIAL_ID || newId == active_mat_id) return false;
+        Material* replacement = mgr.getMaterial(newId);
+        if (!replacement) return false;
+
+        const uint16_t oldId = active_mat_id;
+        for (auto& pair : cache_it->second) {
+            if (pair.second && pair.second->getMaterialID() == oldId) pair.second->setMaterialID(newId);
+        }
+
+        if (!cache_it->second.empty()) {
+            const auto& first = cache_it->second.front().second;
+            if (first && first->terrain_id != -1) {
+                if (TerrainObject* terrain = TerrainManager::getInstance().getTerrain(first->terrain_id))
+                    terrain->material_id = newId;
+            }
+        }
+
+        repaintDirectMeshMaterial(ctx, obj_name, oldId, newId);
+        if (active_slot_index < static_cast<int>(slots_it->second.size()))
+            slots_it->second[active_slot_index] = newId;
+
+        ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, oldId, newId);
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterial(ctx.scene, newId);
+            ctx.backend_ptr->resetAccumulation();
+        }
+
+        active_mat_id = newId;
+        active_mat_ptr = replacement;
+        current_mat_name = replacement->materialName;
+        materialNodeEditorUI.activeMaterialName = replacement->materialName;
+        materialNodeEditorUI.hasApplied = false;
+        g_ProjectManager.markModified();
+        return true;
+    };
+
     if (UIWidgets::IconActionButton("MaterialKeyAll", UIWidgets::IconType::AddKey, "",
         false, ImVec4(1.0f, 0.72f, 0.42f, 1.0f), ImVec2(42.0f, 38.0f),
         "Insert a material keyframe for the active slot at the current frame.")) {
@@ -464,60 +507,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
             ImGui::PushID((int)mat_id);
             if (ImGui::Selectable(label.c_str(), is_selected)) {
-                if ((uint16_t)i != active_mat_id) {
-                    // REPLACE MATERIAL LOGIC:
-                    // Find all triangles that WERE using 'active_mat_id' (the old material for this slot)
-                    // and update them to use 'i' (the new material).
-                    // This preserves other slots.
-
-                    int count_replaced = 0;
-                    for (auto& pair : cache_it->second) {
-                        if (pair.second->getMaterialID() == active_mat_id) {
-                            pair.second->setMaterialID((uint16_t)i);
-                            count_replaced++;
-                        }
-                    }
-
-                    // UPDATE CACHE IN-PLACE to prevent UI reversion
-                    if (active_slot_index < (int)slots_it->second.size()) {
-                        slots_it->second[active_slot_index] = (uint16_t)i;
-                    }
-
-                    SCENE_LOG_INFO("Replaced material in Slot " + std::to_string(active_slot_index) +
-                        " (ID: " + std::to_string(active_mat_id) + " -> " + std::to_string(i) +
-                        "). Triangles updated: " + std::to_string(count_replaced));
-
-                    // SYNC WITH TERRAIN MANAGER
-                    // If this object is a terrain, update the redundant material_id in TerrainObject
-                    // so it persists across rebuilds (erosion, resizing, etc.)
-                   if (!cache_it->second.empty()) {
-                        auto first_tri = cache_it->second[0].second;
-                        if (first_tri && first_tri->terrain_id != -1) {
-                            TerrainObject* terrain = TerrainManager::getInstance().getTerrain(first_tri->terrain_id);
-                            if (terrain) {
-                                terrain->material_id = (uint16_t)i;
-                                // Also update name suffix if strictly following naming convention? Not needed.
-                                SCENE_LOG_INFO("Synced TerrainObject Material ID for: " + terrain->name);
-                            }
-                        }
-                    }
-
-                    // Trigger Updates (Optimized)
-                    ctx.renderer.resetCPUAccumulation();
-                    
-                    // Flat/proxy: a dense single-TriangleMesh object isn't repainted by the
-                    // per-facade loop above (only its one rep face). Bulk-repaint SoA + CPU BVH.
-                    repaintDirectMeshMaterial(ctx, obj_name, active_mat_id, (uint16_t)i);
-
-                    // Update bindings on GPU (Fast Path) - CRITICAL FIX
-                    ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, (uint16_t)i);
-
-                    if (ctx.backend_ptr) {
-                        ctx.renderer.updateBackendMaterial(ctx.scene, static_cast<uint16_t>(i));
-                        ctx.backend_ptr->resetAccumulation();
-                    }
-                    g_ProjectManager.markModified();
-                }
+                assignActiveSlot(mat_id);
             }
             if (is_selected) ImGui::SetItemDefaultFocus();
             ImGui::PopID();
@@ -551,47 +541,11 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         if (ImGui::Selectable("Create & Assign")) {
             auto& mgr = MaterialManager::getInstance();
             auto new_mat = std::make_shared<PrincipledBSDF>(Vec3(0.8f), 0.5f, 0.0f);
-            std::string name = "Surface_" + std::to_string(mgr.getMaterialCount());
-            new_mat->materialName = name;
-            uint16_t new_id = mgr.addMaterial(name, new_mat);
-
-            // Assign to current slot triangles
-            for (auto& pair : cache_it->second) {
-                if (pair.second->getMaterialID() == active_mat_id) {
-                    pair.second->setMaterialID(new_id);
-                }
+            uint16_t new_id = mgr.addUniqueMaterial("Surface", new_mat);
+            if (!assignActiveSlot(new_id)) {
+                addViewportMessage("Surface material could not be created or assigned", 3.0f,
+                                   ImVec4(1.0f, 0.4f, 0.35f, 1.0f));
             }
-
-            // SYNC WITH TERRAIN MANAGER
-            if (!cache_it->second.empty()) {
-                auto first_tri = cache_it->second[0].second;
-                if (first_tri && first_tri->terrain_id != -1) {
-                    TerrainObject* terrain = TerrainManager::getInstance().getTerrain(first_tri->terrain_id);
-                    if (terrain) {
-                        terrain->material_id = new_id;
-                        SCENE_LOG_INFO("Synced TerrainObject Material ID (New Surf) for: " + terrain->name);
-                    }
-                }
-            }
-
-            // Flat/proxy: bulk-repaint a dense single-TriangleMesh object (SoA + CPU BVH).
-            repaintDirectMeshMaterial(ctx, obj_name, active_mat_id, new_id);
-
-            // UPDATE CACHE IN-PLACE
-            if (active_slot_index < (int)slots_it->second.size()) {
-                slots_it->second[active_slot_index] = new_id;
-            }
-            // Trigger updates (Optimized)
-            ctx.renderer.resetCPUAccumulation();
-            
-            // Update bindings on GPU (Fast Path)
-            ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, new_id);
-
-            if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterial(ctx.scene, new_id);
-                ctx.backend_ptr->resetAccumulation();
-            }
-            g_ProjectManager.markModified();
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -610,47 +564,11 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                 Vec3(0.0f),     // emission
                 perlin          // noise
             );
-            std::string name = "Volume_" + std::to_string(mgr.getMaterialCount());
-            new_mat->materialName = name;
-            uint16_t new_id = mgr.addMaterial(name, new_mat);
-
-            // Assign to current slot triangles
-            for (auto& pair : cache_it->second) {
-                if (pair.second->getMaterialID() == active_mat_id) {
-                    pair.second->setMaterialID(new_id);
-                }
+            uint16_t new_id = mgr.addUniqueMaterial("Volume", new_mat);
+            if (!assignActiveSlot(new_id)) {
+                addViewportMessage("Volume material could not be created or assigned", 3.0f,
+                                   ImVec4(1.0f, 0.4f, 0.35f, 1.0f));
             }
-
-            // SYNC WITH TERRAIN MANAGER
-            if (!cache_it->second.empty()) {
-                auto first_tri = cache_it->second[0].second;
-                if (first_tri && first_tri->terrain_id != -1) {
-                    TerrainObject* terrain = TerrainManager::getInstance().getTerrain(first_tri->terrain_id);
-                    if (terrain) {
-                        terrain->material_id = new_id;
-                        SCENE_LOG_INFO("Synced TerrainObject Material ID (New Vol) for: " + terrain->name);
-                    }
-                }
-            }
-
-            // Flat/proxy: bulk-repaint a dense single-TriangleMesh object (SoA + CPU BVH).
-            repaintDirectMeshMaterial(ctx, obj_name, active_mat_id, new_id);
-
-            // UPDATE CACHE IN-PLACE
-            if (active_slot_index < (int)slots_it->second.size()) {
-                slots_it->second[active_slot_index] = new_id;
-            }
-            // Trigger updates (Optimized)
-            ctx.renderer.resetCPUAccumulation();
-            
-            // Update bindings on GPU (Fast Path)
-            ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, new_id);
-
-            if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterial(ctx.scene, new_id);
-                ctx.backend_ptr->resetAccumulation();
-            }
-            g_ProjectManager.markModified();
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -659,22 +577,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     // �������������������������������������������������������������������������
     // MATERIAL EDITOR (Context-Aware for Active Slot)
     // �������������������������������������������������������������������������
-    // Re-fetch active material in case it changed
+    // used_material_ids is a reference to the cache updated by assignActiveSlot,
+    // so the editor below sees the newly assigned asset in the same frame.
     active_mat_id = used_material_ids[active_slot_index];
-    // NOTE: If we just replaced the material, the used_material_ids list is somewhat stale 
-    // until next frame, but since we updated the triangles, the 'active_mat_id' locally 
-    // typically refers to the old ID unless found again. 
-    // Ideally we should update the 'used_material_ids' vector immediately, but for now 
-    // we can re-query the triangles or just wait for next frame UI refresh. 
-    // To be safe, let's just use the pointer from the manager for the *assigned* ID.
-    // However, we just changed the ID in the triangles. The 'used_material_ids' array 
-    // still holds the OLD ID at index 'active_slot_index'.
-    // We should fix this visual glitch by simply returning if we made a heavy change, 
-    // or by updating the local array.
-
-    // Let's rely on the frame refresh for perfect consistency, but try to show 
-    // the potentially new material if we can.
-
     active_mat_ptr = MaterialManager::getInstance().getMaterial(active_mat_id);
     if (!active_mat_ptr) {
         ImGui::TextDisabled("Active material could not be resolved.");
@@ -896,10 +801,10 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         }
 
         // ===================================================================
-        // MULTI-SCATTERING CONTROLS
+        // LIGHTING / SELF-SHADOW CONTROLS
         // ===================================================================
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Multi-Scattering");
+        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Volume Lighting & Self Shadow");
 
         float multi_scatter = vol_mat->getMultiScatter();
         if (SceneUI::DrawSmartFloat("mscat", "MScat", &multi_scatter, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
@@ -920,13 +825,13 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward/Backward lobe blend (1.0=all forward, 0.0=all backward)");
 
         float light_steps_f = (float)vol_mat->getLightSteps();
-        if (SceneUI::DrawSmartFloat("lstep", "ShdStp", &light_steps_f, 0.0f, 8.0f, "%.0f", false, nullptr, 8)) {
+        if (SceneUI::DrawSmartFloat("lstep", "Shadow Steps", &light_steps_f, 0.0f, 48.0f, "%.0f", false, nullptr, 16)) {
             vol_mat->setLightSteps((int)light_steps_f); changed = true;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Light march steps for self-shadowing (0=disabled, 4-8 recommended)");
 
         float shadow_str = vol_mat->getShadowStrength();
-        if (SceneUI::DrawSmartFloat("shstr", "ShdStr", &shadow_str, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
+        if (SceneUI::DrawSmartFloat("shstr", "Shadow Strength", &shadow_str, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
             vol_mat->setShadowStrength(shadow_str); changed = true;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Self-shadow intensity (0=no shadows, 1=full shadows)");

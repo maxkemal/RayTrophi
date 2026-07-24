@@ -4613,6 +4613,8 @@ json ProjectManager::serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVo
              s["absorption"] = shader->absorption.toJson();
              s["emission"] = shader->emission.toJson();
              s["quality"] = shader->quality.toJson();
+             s["material_program"] = shader->material_program.toJson();
+             s["material_graph"] = shader->material_graph;
              
              // Motion blur manual
              s["motion_blur"] = {
@@ -4690,6 +4692,8 @@ void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) 
             if (j_shader.contains("absorption")) shader->absorption.fromJson(j_shader["absorption"]);
             if (j_shader.contains("emission")) shader->emission.fromJson(j_shader["emission"]);
             if (j_shader.contains("quality")) shader->quality.fromJson(j_shader["quality"]);
+            if (j_shader.contains("material_program")) shader->material_program.fromJson(j_shader["material_program"]);
+            shader->material_graph = j_shader.value("material_graph", std::string());
             
              if (j_shader.contains("motion_blur")) {
                  shader->motion_blur.enabled = j_shader["motion_blur"].value("enabled", false);
@@ -5187,6 +5191,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             s["absorption"] = domain.shader->absorption.toJson();
             s["emission"] = domain.shader->emission.toJson();
             s["quality"] = domain.shader->quality.toJson();
+            s["material_program"] = domain.shader->material_program.toJson();
+            s["material_graph"] = domain.shader->material_graph;
             s["motion_blur"] = {
                 {"enabled", domain.shader->motion_blur.enabled},
                 {"velocity_channel", domain.shader->motion_blur.velocity_channel},
@@ -5526,6 +5532,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             if (js.contains("absorption")) shader->absorption.fromJson(js["absorption"]);
             if (js.contains("emission")) shader->emission.fromJson(js["emission"]);
             if (js.contains("quality")) shader->quality.fromJson(js["quality"]);
+            if (js.contains("material_program")) shader->material_program.fromJson(js["material_program"]);
+            shader->material_graph = js.value("material_graph", std::string());
             if (js.contains("motion_blur")) {
                 shader->motion_blur.enabled = js["motion_blur"].value("enabled", false);
                 shader->motion_blur.velocity_channel = js["motion_blur"].value("velocity_channel", std::string("vel"));

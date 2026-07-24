@@ -123,6 +123,20 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     float dust_color_b_g;
     float dust_color_b_b;
     float shard_shape;              // 0=round chips, 1=elongated faceted crystals
+
+    // Block 23-24: closed-mesh volume medium (cold, volume flag only)
+    float volume_density;
+    float volume_absorption;
+    float volume_scattering;
+    float volume_anisotropy;
+    float volume_step_size;
+    float volume_max_steps;
+    float volume_noise_scale;
+    float volume_multi_scatter;
+    float volume_light_steps;
+    float volume_shadow_strength;
+    float _volume_pad0;
+    float _volume_pad1;
 };
 
 // AUTHORING struct only — VkGpuMaterial is what the CPU fill code writes, but it
@@ -131,7 +145,7 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
 // VkGpuMaterialExt (binding 24, feature-gated cold fields). Keeping the fill code
 // on this single struct means adding a material feature stays a one-place edit;
 // only the split decides which buffer the new field lands in.
-static_assert(sizeof(VkGpuMaterial) == 352, "VkGpuMaterial (authoring) must stay 352 bytes (22x16)");
+static_assert(sizeof(VkGpuMaterial) == 400, "VkGpuMaterial (authoring) must stay 400 bytes (25x16)");
 
 /**
  * @brief HOT material fields — binding 2, read by every closesthit/any-hit
@@ -191,8 +205,12 @@ struct VK_GPU_ALIGN(16) VkGpuMaterialExt {
     float clearcoat_film_thickness, dust_color_a_r, dust_color_a_g, dust_color_a_b;
     float dust_style, dust_color_b_r, dust_color_b_g, dust_color_b_b;
     float shard_shape, _ext_pad0, _ext_pad1, _ext_pad2;
+    // Block 14-16: closed-mesh volume
+    float volume_density, volume_absorption, volume_scattering, volume_anisotropy;
+    float volume_step_size, volume_max_steps, volume_noise_scale, volume_multi_scatter;
+    float volume_light_steps, volume_shadow_strength, _volume_pad0, _volume_pad1;
 };
-static_assert(sizeof(VkGpuMaterialExt) == 208, "VkGpuMaterialExt must stay 208 bytes (13x16); update shaders/material_struct.glsl `MaterialExt` to match");
+static_assert(sizeof(VkGpuMaterialExt) == 256, "VkGpuMaterialExt must stay 256 bytes (16x16); update shaders/material_struct.glsl `MaterialExt` to match");
 
 /// Derive the two GPU records from one authoring record. Field-for-field copy —
 /// keep in sync with both structs above (a missed field reads as 0 on the GPU,
@@ -222,6 +240,12 @@ inline void splitGpuMaterial(const VkGpuMaterial& m, VkGpuMaterialCore& c, VkGpu
     e.clearcoat_film_thickness = m.clearcoat_film_thickness; e.dust_color_a_r = m.dust_color_a_r; e.dust_color_a_g = m.dust_color_a_g; e.dust_color_a_b = m.dust_color_a_b;
     e.dust_style = m.dust_style; e.dust_color_b_r = m.dust_color_b_r; e.dust_color_b_g = m.dust_color_b_g; e.dust_color_b_b = m.dust_color_b_b;
     e.shard_shape = m.shard_shape; e._ext_pad0 = 0.0f; e._ext_pad1 = 0.0f; e._ext_pad2 = 0.0f;
+    e.volume_density = m.volume_density; e.volume_absorption = m.volume_absorption;
+    e.volume_scattering = m.volume_scattering; e.volume_anisotropy = m.volume_anisotropy;
+    e.volume_step_size = m.volume_step_size; e.volume_max_steps = m.volume_max_steps;
+    e.volume_noise_scale = m.volume_noise_scale; e.volume_multi_scatter = m.volume_multi_scatter;
+    e.volume_light_steps = m.volume_light_steps; e.volume_shadow_strength = m.volume_shadow_strength;
+    e._volume_pad0 = 0.0f; e._volume_pad1 = 0.0f;
 }
 
 // Flag bits for VkGpuMaterial::flags
@@ -233,6 +257,7 @@ static constexpr uint32_t VK_MAT_FLAG_MARBLE_VOLUME = (1u << 20); // Glass marbl
 static constexpr uint32_t VK_MAT_FLAG_RESIN_OBJ_SPACE = (1u << 21); // Interior volume anchored in OBJECT space (moves with the mesh)
 static constexpr uint32_t VK_MAT_FLAG_WATER_LAKE = (1u << 22); // Fetch-limited inland water profile
 static constexpr uint32_t VK_MAT_FLAG_WATER_RIVER = (1u << 23); // UV-flow-aligned river profile
+static constexpr uint32_t VK_MAT_FLAG_VOLUME = (1u << 24); // Closed triangle mesh volume boundary
 
 /**
  * @brief Per-terrain splat-layer descriptor uploaded to binding 12.

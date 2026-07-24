@@ -4155,6 +4155,7 @@ struct SceneData {
             auto it = fluid_render_bindings.find(obj.id);
             if (it == fluid_render_bindings.end() || !it->second.volume) continue;
             if (obj.render_mode != RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) continue;
+            if (obj.shader) it->second.volume->setShader(obj.shader);
             it->second.volume->render_isosurface_ior = obj.surface_ior;
             it->second.volume->render_isosurface_roughness = obj.surface_roughness;
             it->second.volume->render_isosurface_foam = obj.surface_foam;
@@ -5198,7 +5199,8 @@ private:
                 auto vol = std::make_shared<VDBVolume>();
                 vol->transient = true;
                 vol->name = obj.name + " [Fluid NanoVDB]";
-                vol->setShader(VolumeShader::createSmokePreset());
+                if (!obj.shader) obj.shader = VolumeShader::createSmokePreset();
+                vol->setShader(obj.shader);
                 binding.volume = vol;
                 addVDBVolume(vol);
                 world.objects.push_back(vol);
@@ -5213,7 +5215,9 @@ private:
             // density of Volume mode.
             const int cur_mode = static_cast<int>(obj.render_mode);
             if (cur_mode != binding.last_render_mode && binding.volume) {
-                auto shader = binding.volume->getShader();
+                if (!obj.shader) obj.shader = VolumeShader::createSmokePreset();
+                binding.volume->setShader(obj.shader);
+                auto shader = obj.shader;
                 if (shader) {
                     if (is_surface_route) {
                         shader->name = "Liquid Surface (SDF Proxy)";

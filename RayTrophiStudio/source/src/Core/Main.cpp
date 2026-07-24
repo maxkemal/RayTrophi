@@ -54,6 +54,8 @@
 #include "Triangle.h"         // Added for CPU sync
 #include "HittableInstance.h" // Added for instance CPU sync
 #include "MaterialManager.h"
+#include "PrincipledBSDF.h"
+#include "Volumetric.h"
 #include "TerrainManager.h"
 #include "WaterSystem.h"      // Added for WaterManager
 #include "VDBVolumeManager.h"
@@ -3287,6 +3289,70 @@ int main(int argc, char* argv[]) try {
                         refreshNumpadView();
                     };
 
+                    // Blender-style Frame Selected (Numpad .). Rebuild both the
+                    // orbit pivot and navigation distance from real world bounds;
+                    // this also repairs the near-zero wheel zoom caused by a stale
+                    // lookat point sitting almost on the camera.
+                    auto frame_selected = [&]() {
+                        if (!scene_selection.selected.is_valid()) {
+                            ui.addViewportMessage("Nothing selected", 1.2f,
+                                ImVec4(1.0f, 0.65f, 0.35f, 1.0f));
+                            return;
+                        }
+
+                        const SelectableItem& item = scene_selection.selected;
+                        AABB bounds;
+                        bool hasBounds = false;
+                        if (item.type == SelectableType::Object) {
+                            if (item.mesh_object) {
+                                hasBounds = item.mesh_object->bounding_box(0.0f, 0.0f, bounds);
+                            } else if (item.object) {
+                                hasBounds = item.object->bounding_box(0.0f, 0.0f, bounds);
+                            }
+                        } else if (item.type == SelectableType::VDBVolume && item.vdb_volume) {
+                            bounds = item.vdb_volume->getWorldBounds();
+                            hasBounds = true;
+                        } else if (item.type == SelectableType::GasVolume && item.gas_volume) {
+                            Vec3 bmin, bmax;
+                            item.gas_volume->getWorldBounds(bmin, bmax);
+                            bounds = AABB(bmin, bmax);
+                            hasBounds = true;
+                        }
+
+                        Vec3 center = item.position;
+                        float radius = 1.0f;
+                        if (hasBounds) {
+                            center = (bounds.min + bounds.max) * 0.5f;
+                            radius = std::max(0.001f, (bounds.max - bounds.min).length() * 0.5f);
+                        }
+
+                        Vec3 forward = (cam.lookat - cam.lookfrom).normalize();
+                        if (forward.length_squared() < 1e-8f) forward = Vec3(0.0f, 0.0f, -1.0f);
+                        const float halfV = std::max(1.0f, cam.vfov) * 0.5f *
+                            3.14159265f / 180.0f;
+                        const float halfH = std::atan(std::tan(halfV) *
+                            std::max(cam.aspect_ratio, 0.01f));
+                        const float limitingHalfFov = std::max(
+                            0.01f, std::min(halfV, halfH));
+                        const float framedDistance = std::clamp(
+                            (radius * 1.25f) / std::sin(limitingHalfFov),
+                            0.01f, 10000000.0f);
+
+                        cam.lookat = center;
+                        cam.lookfrom = center - forward * framedDistance;
+                        cam.focus_dist = framedDistance;
+                        if (cam.orthographic) {
+                            cam.ortho_height = std::max(0.01f, radius * 2.5f);
+                        }
+                        cam.update_camera_vectors();
+                        cam.markDirty();
+                        current_nav_depth = framedDistance;
+                        refreshNumpadView();
+                        ui.updateAutofocus(ui_ctx);
+                        ui.addViewportMessage("Frame Selected", 1.2f,
+                            ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                    };
+
                     switch (e.key.keysym.scancode) {
                         case SDL_SCANCODE_KP_1:
                             snap_view(ctrl ? Camera::StandardView::Back  : Camera::StandardView::Front,
@@ -3322,6 +3388,10 @@ int main(int argc, char* argv[]) try {
                         case SDL_SCANCODE_KP_6: orbit_cam(-15.0f,  0.0f); break; // orbit right
                         case SDL_SCANCODE_KP_8: orbit_cam( 0.0f,  15.0f); break; // orbit up
                         case SDL_SCANCODE_KP_2: orbit_cam( 0.0f, -15.0f); break; // orbit down
+                        case SDL_SCANCODE_KP_PERIOD:
+                        case SDL_SCANCODE_KP_DECIMAL:
+                            frame_selected();
+                            break;
                         default: break;
                     }
                 }
@@ -3712,11 +3782,29 @@ int main(int argc, char* argv[]) try {
             }
         }
 
+        // Material Time/Cloud Shape is also real timeline work. Previously the
+        // backend clock advanced only for water, foliage or scene animation, so
+        // a volume graph could read a permanently-zero Time value and its Wind
+        // advection appeared ineffective.
+        bool timeline_drives_material_time = false;
+        for (const auto& material : MaterialManager::getInstance().getAllMaterials()) {
+            const MaterialNodesV2::MaterialProgram* program = nullptr;
+            if (material && material->type() == MaterialType::PrincipledBSDF) {
+                program = static_cast<PrincipledBSDF*>(material.get())->proceduralProgram.get();
+            } else if (material && material->type() == MaterialType::Volumetric) {
+                program = static_cast<Volumetric*>(material.get())->proceduralProgram.get();
+            }
+            if (program && program->active && program->usesTime)
+                timeline_drives_material_time = true;
+            if (timeline_drives_material_time) break;
+        }
+
         const bool timeline_has_runtime_work =
             timeline_has_manual_keyframes ||
             timeline_drives_volumes ||
             timeline_drives_water ||
             timeline_drives_wind ||
+            timeline_drives_material_time ||
             !scene.animationDataList.empty();
         
         // =========================================================================
@@ -3842,8 +3930,20 @@ int main(int argc, char* argv[]) try {
             }
 
              // Update backend time only when something actually consumes timeline time.
-             if (g_backend && (timeline_drives_water || timeline_drives_wind || !scene.animationDataList.empty())) {
+             if (g_backend && (timeline_drives_water || timeline_drives_wind ||
+                               timeline_drives_material_time || !scene.animationDataList.empty())) {
                  g_backend->setTime(time_seconds, time_seconds);
+             }
+             // A time-driven material changes the density field itself. Continuing
+             // to accumulate samples from the previous timeline frame produces a
+             // frozen/ghosted cloud even though Time advances correctly. Invalidate
+             // once per new playback frame (scrubbing has the equivalent path below).
+             static int last_playing_material_time_frame = -1;
+             if (timeline_drives_material_time &&
+                 current_volume_frame != last_playing_material_time_frame) {
+                 if (g_backend) g_backend->resetAccumulation();
+                 ray_renderer.resetCPUAccumulation();
+                 last_playing_material_time_frame = current_volume_frame;
              }
 
              if (timeline_drives_water) {
@@ -3889,11 +3989,26 @@ int main(int argc, char* argv[]) try {
              
              // Force redraw only when playback has scene work to show.
              start_render = true;
-             if (timeline_drives_water || timeline_drives_wind || !scene.animationDataList.empty()) {
+             if (timeline_drives_water || timeline_drives_wind ||
+                 timeline_drives_material_time || !scene.animationDataList.empty()) {
                  g_needs_optix_sync.store(true, std::memory_order_release); // Signal that params changed
              }
              
         } else if (!timeline_playing) {
+             // Scrubbing a paused timeline must still update procedural material
+             // time and invalidate accumulation exactly once for the new frame.
+             static int last_material_time_frame = -1;
+             if (timeline_drives_material_time && current_volume_frame != last_material_time_frame) {
+                 const float material_fps = static_cast<float>(std::max(1, render_settings.animation_fps));
+                 const float material_time = current_volume_frame / material_fps;
+                 if (g_backend) {
+                     g_backend->setTime(material_time, 0.0f);
+                     g_backend->resetAccumulation();
+                 }
+                 ray_renderer.resetCPUAccumulation();
+                 start_render = true;
+                 last_material_time_frame = current_volume_frame;
+             }
              // Geometry-wave modifiers continue to support Realtime preview and
              // Timeline scrubbing while playback is stopped. Static resolves to
              // a frozen time and therefore becomes a no-op after the first frame.
