@@ -2118,10 +2118,34 @@ void SceneUI::drawHairTabContent(UIContext& ctx)
         if (selectedNodeName != lastSelectedMeshName) {
             lastSelectedMeshName = selectedNodeName;
             selectedMeshTriangles.clear();
+            // Flat-aware target gathering. After the DNA/SoA migration a mesh lives in
+            // world.objects as a SINGLE flat TriangleMesh, not a soup of Triangle
+            // shared_ptrs — so the old dynamic_cast<Triangle> path finds nothing and
+            // hair generation silently fails on any new/migrated object (old projects
+            // still show their baked grooms, but you can't groom a fresh layer).
+            // Build transient per-face facades from the flat mesh (canonical scatter
+            // pattern: Triangle(mesh, face)); fall back to the legacy soup otherwise.
+            // A flat object may be SEVERAL sibling TriangleMesh objects sharing one
+            // nodeName (one per material on multi-material imports) — collect every
+            // face of every matching sibling. TriangleMesh exposes nodeName as a
+            // member (no getNodeName()); a live mesh must also have geometry.
+            bool foundFlat = false;
             for (const auto& obj : ctx.scene.world.objects) {
-                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                if (tri && tri->getNodeName() == selectedNodeName) {
-                    selectedMeshTriangles.push_back(tri);
+                if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                    if (tmesh->nodeName != selectedNodeName || !tmesh->geometry) continue;
+                    for (size_t face = 0; face < tmesh->num_triangles(); ++face) {
+                        selectedMeshTriangles.push_back(
+                            std::make_shared<Triangle>(tmesh, static_cast<uint32_t>(face)));
+                    }
+                    foundFlat = true;
+                }
+            }
+            if (!foundFlat) {
+                for (const auto& obj : ctx.scene.world.objects) {
+                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                    if (tri && tri->getNodeName() == selectedNodeName) {
+                        selectedMeshTriangles.push_back(tri);
+                    }
                 }
             }
         }
@@ -8503,6 +8527,103 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     
     bool changed = false;
     ImGui::PushID(shader.get());
+
+    // Homogeneous Volume Material Graph output.  This is the first vertical
+    // slice of the graph runtime: enabled sockets override VolumeShader values
+    // and are folded into its existing GPU payload (zero per-march VM cost).
+    if (UIWidgets::BeginSection("Volume Graph (Homogeneous)", ImVec4(0.35f, 0.8f, 0.72f, 1.0f), false)) {
+        ImGui::Indent();
+        auto& program = shader->material_program;
+        const char* graphPreview = shader->material_graph.empty() ? "None (Volume Shader fallback)" : shader->material_graph.c_str();
+        if (ImGui::BeginCombo("Material Graph", graphPreview)) {
+            if (ImGui::Selectable("None (Volume Shader fallback)", shader->material_graph.empty())) {
+                shader->material_graph.clear();
+                program = VolumeMaterialProgram{};
+                changed = true;
+            }
+            for (const auto& material : MaterialManager::getInstance().getAllMaterials()) {
+                if (!material || (material->type() != MaterialType::PrincipledBSDF &&
+                                  material->type() != MaterialType::Volumetric)) continue;
+                const std::string& name = material->materialName;
+                const bool selected = shader->material_graph == name;
+                if (ImGui::Selectable(name.c_str(), selected)) {
+                    auto& graph = ctx.scene.material_node_graphs[name];
+                    if (!graph) graph = std::make_shared<MaterialNodesV2::MaterialNodeGraphV2>();
+                    if (graph->nodes.empty()) {
+                        if (auto* surface = dynamic_cast<PrincipledBSDF*>(material.get()))
+                            MaterialNodesV2::materializeGraphFromMaterial(*graph, *surface);
+                        else if (auto* volume = dynamic_cast<Volumetric*>(material.get()))
+                            MaterialNodesV2::materializeGraphFromVolumetric(*graph, *volume);
+                    }
+                    shader->material_graph = name;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        UIWidgets::HelpMarker("Select a graph authored in Material Nodes. Material Output.Volume drives this VDB/Gas/Fluid shader; Surface remains available to meshes.");
+
+        if (!shader->material_graph.empty()) {
+            auto graphIt = ctx.scene.material_node_graphs.find(shader->material_graph);
+            if (graphIt == ctx.scene.material_node_graphs.end() || !graphIt->second) {
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "Referenced graph is missing");
+                if (program.active) { program = VolumeMaterialProgram{}; changed = true; }
+            } else {
+                auto result = MaterialNodesV2::evaluateVolumeMaterialGraph(*graphIt->second);
+                if (!result.ok) {
+                    for (const auto& error : result.errors)
+                        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "%s", error.c_str());
+                } else {
+                    // JSON equality is acceptable in this editor-only path and keeps
+                    // the renderer quiet when the compiled closure did not change.
+                    if (program.toJson() != result.program.toJson()) {
+                        program = result.program;
+                        changed = true;
+                    }
+                    ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.6f, 1.0f),
+                                       program.active ? "Volume output compiled" : "Volume socket unconnected - using fallback");
+                }
+            }
+        }
+
+        if (shader->material_graph.empty() && ImGui::Checkbox("Enable Debug Output", &program.active)) changed = true;
+
+        if (program.active && shader->material_graph.empty()) {
+            auto socket = [&](const char* label, VolumeMaterialSlot slot) {
+                bool enabled = program.has(slot);
+                if (ImGui::Checkbox(label, &enabled)) {
+                    program.set(slot, enabled);
+                    changed = true;
+                }
+                return enabled;
+            };
+
+            if (socket("Density Socket", VolumeMaterialSlot::Density))
+                if (ImGui::DragFloat("Graph Density", &program.density, 0.01f, 0.0f, 100.0f)) changed = true;
+
+            if (socket("Scattering Color Socket", VolumeMaterialSlot::ScatterColor))
+                if (ImGui::ColorEdit3("Graph Scattering Color", program.scatter_color)) changed = true;
+            if (socket("Scattering Strength Socket", VolumeMaterialSlot::ScatterStrength))
+                if (ImGui::DragFloat("Graph Scattering Strength", &program.scatter_strength, 0.01f, 0.0f, 100.0f)) changed = true;
+
+            if (socket("Absorption Color Socket", VolumeMaterialSlot::AbsorptionColor))
+                if (ImGui::ColorEdit3("Graph Absorption Color", program.absorption_color)) changed = true;
+            if (socket("Absorption Strength Socket", VolumeMaterialSlot::AbsorptionStrength))
+                if (ImGui::DragFloat("Graph Absorption Strength", &program.absorption_strength, 0.01f, 0.0f, 100.0f)) changed = true;
+
+            if (socket("Emission Color Socket", VolumeMaterialSlot::EmissionColor))
+                if (ImGui::ColorEdit3("Graph Emission Color", program.emission_color)) changed = true;
+            if (socket("Emission Strength Socket", VolumeMaterialSlot::EmissionStrength))
+                if (ImGui::DragFloat("Graph Emission Strength", &program.emission_strength, 0.01f, 0.0f, 1000.0f)) changed = true;
+
+            if (socket("Anisotropy Socket", VolumeMaterialSlot::Anisotropy))
+                if (ImGui::SliderFloat("Graph Anisotropy", &program.anisotropy, -0.99f, 0.99f)) changed = true;
+
+            if (changed) program.sanitize();
+        }
+        ImGui::Unindent();
+        UIWidgets::EndSection();
+    }
     
     // ─────────────────────────────────────────────────────────────────────────
     // DENSITY
@@ -8697,12 +8818,12 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     // ─────────────────────────────────────────────────────────────────────────
     if (UIWidgets::BeginSection("Ray Marching Quality", ImVec4(0.7f, 0.7f, 0.7f, 1.0f), false)) { // Closed by default
         ImGui::Indent();
-        enum VolumeQualityPresetUI { VolQualityFast = 0, VolQualityBalanced = 1, VolQualityExact = 2, VolQualityCustom = 3 };
-        const char* qualityPresetNames[] = { "Fast", "Balanced", "Exact", "Custom" };
+        enum VolumeQualityPresetUI { VolQualityDraft = 0, VolQualityMedium = 1, VolQualityHigh = 2, VolQualityUltra = 3, VolQualityCustom = 4 };
+        const char* qualityPresetNames[] = { "Draft", "Medium", "High", "Ultra", "Custom" };
         int qualityPreset = shader->quality.quality_preset;
-        if (qualityPreset < VolQualityFast || qualityPreset > VolQualityCustom) {
-            qualityPreset = VolQualityBalanced;
-            shader->quality.quality_preset = VolQualityBalanced;
+        if (qualityPreset < VolQualityDraft || qualityPreset > VolQualityCustom) {
+            qualityPreset = VolQualityMedium;
+            shader->quality.quality_preset = VolQualityMedium;
             changed = true;
         }
         if (ImGui::Combo("Quality Preset", &qualityPreset, qualityPresetNames, IM_ARRAYSIZE(qualityPresetNames))) {
@@ -8712,32 +8833,44 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             //     imperceptible quality past shadow=4 / max=192 on diffuse media.
             //   - New presets give clear tiers: Fast = fluid editing, Balanced ≈ OptiX
             //     parity, Exact = converged stills / blackbody fire detail.
-            if (qualityPreset == VolQualityFast) {
-                shader->quality.step_size = 0.15f;
+            shader->quality.adaptive_stepping = true;
+            if (qualityPreset == VolQualityDraft) {
+                shader->quality.voxel_step_multiplier = 1.75f;
                 shader->quality.max_steps = 128;
                 shader->quality.shadow_steps = 2;
-                shader->quality.quality_preset = VolQualityFast;
+                shader->quality.shadow_stride = 4;
+                shader->quality.quality_preset = VolQualityDraft;
                 changed = true;
-            } else if (qualityPreset == VolQualityBalanced) {
-                shader->quality.step_size = 0.08f;
-                shader->quality.max_steps = 192;
+            } else if (qualityPreset == VolQualityMedium) {
+                shader->quality.voxel_step_multiplier = 0.875f;
+                shader->quality.max_steps = 256;
                 shader->quality.shadow_steps = 4;
-                shader->quality.quality_preset = VolQualityBalanced;
+                shader->quality.shadow_stride = 4;
+                shader->quality.quality_preset = VolQualityMedium;
                 changed = true;
-            } else if (qualityPreset == VolQualityExact) {
-                shader->quality.step_size = 0.04f;
+            } else if (qualityPreset == VolQualityHigh) {
+                shader->quality.voxel_step_multiplier = 0.425f;
                 shader->quality.max_steps = 512;
                 shader->quality.shadow_steps = 8;
-                shader->quality.quality_preset = VolQualityExact;
+                shader->quality.shadow_stride = 2;
+                shader->quality.quality_preset = VolQualityHigh;
+                changed = true;
+            } else if (qualityPreset == VolQualityUltra) {
+                shader->quality.voxel_step_multiplier = 0.25f;
+                shader->quality.max_steps = 1024;
+                shader->quality.shadow_steps = 12;
+                shader->quality.shadow_stride = 1;
+                shader->quality.quality_preset = VolQualityUltra;
                 changed = true;
             } else {
                 shader->quality.quality_preset = VolQualityCustom;
                 changed = true;
             }
         }
-        UIWidgets::HelpMarker("Fast: hizli preview, Balanced: varsayilan, Exact: parity/quality.");
+        UIWidgets::HelpMarker("Primary spacing follows source voxel size. Draft: 1.75, Medium: 0.875, High: 0.425, Ultra: 0.25 voxels/sample. Max Steps is a strict per-ray cost ceiling; low values can visibly reduce quality.");
 
-        if (ImGui::SliderFloat("Step Size", &shader->quality.step_size, 0.005f, 0.5f, "%.3f")) {
+        if (ImGui::SliderFloat("Voxels / Sample", &shader->quality.voxel_step_multiplier, 0.1f, 8.0f, "%.3f", ImGuiSliderFlags_Logarithmic)) {
+            shader->quality.adaptive_stepping = true;
             shader->quality.quality_preset = VolQualityCustom;
             changed = true;
         }
@@ -8749,12 +8882,18 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             shader->quality.quality_preset = VolQualityCustom;
             changed = true;
         }
+        if (ImGui::SliderInt("Shadow Update Stride", &shader->quality.shadow_stride, 1, 16)) {
+            shader->quality.quality_preset = VolQualityCustom;
+            changed = true;
+        }
+        UIWidgets::HelpMarker("1 evaluates self-shadow at every lit primary sample. 2-4 reuses the last result and usually gives the largest Vulkan RT speedup.");
         if (ImGui::SliderFloat("Shadow Strength", &shader->quality.shadow_strength, 0.0f, 1.0f)) changed = true;
 
         // Hard safety clamp for loaded scenes / manual edits beyond UI limits.
-        shader->quality.step_size = (std::max)(0.005f, (std::min)(shader->quality.step_size, 0.5f));
+        shader->quality.voxel_step_multiplier = (std::max)(0.1f, (std::min)(shader->quality.voxel_step_multiplier, 8.0f));
         shader->quality.max_steps = (std::max)(16, (std::min)(shader->quality.max_steps, 1024));
         shader->quality.shadow_steps = (std::max)(0, (std::min)(shader->quality.shadow_steps, 48));
+        shader->quality.shadow_stride = (std::max)(1, (std::min)(shader->quality.shadow_stride, 16));
         ImGui::Unindent();
         UIWidgets::EndSection();
     }

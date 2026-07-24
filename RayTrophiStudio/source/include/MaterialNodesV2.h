@@ -42,9 +42,11 @@
 #include "NodeSystem/EvaluationContext.h"
 #include "NodeSystem/NodeRegistry.h"
 #include "PrincipledBSDF.h"
+#include "Volumetric.h"
 #include "MaterialManager.h"
 #include "MaterialProceduralMath.h"
 #include "MaterialProgram.h"
+#include "VolumeMaterialProgram.h"
 #include "Texture.h"
 #include "Vec2.h"
 #include "Vec3.h"
@@ -52,6 +54,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -511,7 +514,13 @@ namespace MaterialNodesV2 {
         RGBCurves,
         LayerWeight,
         AmbientOcclusion,
-        Bevel
+        Bevel,
+        PrincipledVolume, // append only - serialized enum stability
+        VolumeInfo,
+        Blackbody, // append only - serialized enum stability
+        VolumeGrid,
+        Time,       // append only - serialized enum stability
+        CloudShape  // append only - serialized enum stability
     };
 
     // ============================================================================
@@ -556,6 +565,7 @@ namespace MaterialNodesV2 {
                                        const std::array<float, 3>& fallback) {
             const NodeSystem::PinValue val = getInputValue(index, ctx);
             if (const auto* v3 = std::get_if<std::array<float, 3>>(&val)) return *v3;
+            if (const auto* v2 = std::get_if<std::array<float, 2>>(&val)) return { (*v2)[0], (*v2)[1], 0.0f };
             if (const auto* f = std::get_if<float>(&val)) return { *f, *f, *f };
             return fallback;
         }
@@ -564,6 +574,7 @@ namespace MaterialNodesV2 {
         std::array<float, 2> getUVIn(int index, NodeSystem::EvaluationContext& ctx) {
             const NodeSystem::PinValue val = getInputValue(index, ctx);
             if (const auto* v2 = std::get_if<std::array<float, 2>>(&val)) return *v2;
+            if (const auto* v3 = std::get_if<std::array<float, 3>>(&val)) return { (*v3)[0], (*v3)[1] };
             if (const auto* mctx = getMaterialContext(ctx)) return { mctx->u, mctx->v };
             return { 0.5f, 0.5f };
         }
@@ -836,6 +847,285 @@ namespace MaterialNodesV2 {
         NodeSystem::PinValue compute(int, NodeSystem::EvaluationContext&) override {
             return std::array<float, 3>{ color[0], color[1], color[2] };
         }
+    };
+
+    /** A typed volume closure. Its unconnected sockets are intentional node
+     * defaults; once connected to Material Output.Volume the closure owns all
+     * homogeneous volume slots. Spatial inputs are compiled in the next stage. */
+    class PrincipledVolumeNode : public MaterialNodeBase {
+    public:
+        enum PinIdx { Density, ScatterColor, ScatterStrength, AbsorptionColor,
+                      AbsorptionStrength, EmissionColor, EmissionStrength,
+                      Anisotropy, MultiScatter, PinCount };
+        VolumeMaterialProgram defaults;
+
+        PrincipledVolumeNode() {
+            name = "Principled Volume";
+            materialNodeType = NodeType::PrincipledVolume;
+            auto in = [this](const char* n, NodeSystem::DataType t) {
+                inputs.push_back(NodeSystem::Pin::createInput(n, t));
+            };
+            in("Density", NodeSystem::DataType::Float);
+            in("Scattering Color", NodeSystem::DataType::Vector3);
+            in("Scattering Strength", NodeSystem::DataType::Float);
+            in("Absorption Color", NodeSystem::DataType::Vector3);
+            in("Absorption Strength", NodeSystem::DataType::Float);
+            in("Emission Color", NodeSystem::DataType::Vector3);
+            in("Emission Strength", NodeSystem::DataType::Float);
+            in("Anisotropy", NodeSystem::DataType::Float);
+            in("Multi Scatter", NodeSystem::DataType::Float);
+            outputs.push_back(NodeSystem::Pin::createOutput("Volume", NodeSystem::DataType::Volume));
+            metadata.displayName = "Principled Volume";
+            metadata.category = "Shader";
+            metadata.description = "Physical density, scattering, absorption and emission closure.";
+            metadata.headerColor = HeaderColors::shader();
+            defaults.active = true;
+            defaults.written = (1u << static_cast<uint32_t>(VolumeMaterialSlot::Count)) - 1u;
+        }
+        std::string getTypeId() const override { return "MatV2.PrincipledVolume"; }
+        void serializeParams(nlohmann::json& j) const override { j = defaults.toJson(); }
+        void deserializeParams(const nlohmann::json& j) override { defaults.fromJson(j); defaults.active = true; }
+        void drawContent() override {
+            ImGui::TextDisabled("Volume closure");
+            ImGui::TextDisabled("values live on sockets");
+        }
+        bool drawInputInlineWidget(int index, float width) override {
+            ImGui::SetNextItemWidth(width);
+            bool changed = false;
+            auto color = [&](float (&v)[3]) { return ImGui::ColorEdit3("##v", v, ImGuiColorEditFlags_NoInputs); };
+            switch (index) {
+                case Density: changed = ImGui::DragFloat("##v", &defaults.density, 0.01f, 0.0f, 100.0f); break;
+                case ScatterColor: changed = color(defaults.scatter_color); break;
+                case ScatterStrength: changed = ImGui::DragFloat("##v", &defaults.scatter_strength, 0.01f, 0.0f, 100.0f); break;
+                case AbsorptionColor: changed = color(defaults.absorption_color); break;
+                case AbsorptionStrength: changed = ImGui::DragFloat("##v", &defaults.absorption_strength, 0.01f, 0.0f, 100.0f); break;
+                case EmissionColor: changed = color(defaults.emission_color); break;
+                case EmissionStrength: changed = ImGui::DragFloat("##v", &defaults.emission_strength, 0.01f, 0.0f, 1000.0f); break;
+                case Anisotropy: changed = ImGui::SliderFloat("##v", &defaults.anisotropy, -0.99f, 0.99f); break;
+                case MultiScatter: changed = ImGui::SliderFloat("##v", &defaults.multi_scatter, 0.0f, 1.0f); break;
+                default: break;
+            }
+            if (changed) { defaults.sanitize(); dirty = true; }
+            return changed;
+        }
+        NodeSystem::PinValue compute(int, NodeSystem::EvaluationContext& ctx) override {
+            auto result = std::make_shared<VolumeMaterialProgram>(defaults);
+            auto vec = [&](int pin, float (&dst)[3]) {
+                const auto v = getVec3In(pin, ctx, {dst[0], dst[1], dst[2]});
+                dst[0] = v[0]; dst[1] = v[1]; dst[2] = v[2];
+            };
+            if (isInputConnected(Density, ctx)) result->density = getFloatIn(Density, ctx, result->density);
+            if (isInputConnected(ScatterColor, ctx)) vec(ScatterColor, result->scatter_color);
+            if (isInputConnected(ScatterStrength, ctx)) result->scatter_strength = getFloatIn(ScatterStrength, ctx, result->scatter_strength);
+            if (isInputConnected(AbsorptionColor, ctx)) vec(AbsorptionColor, result->absorption_color);
+            if (isInputConnected(AbsorptionStrength, ctx)) result->absorption_strength = getFloatIn(AbsorptionStrength, ctx, result->absorption_strength);
+            if (isInputConnected(EmissionColor, ctx)) vec(EmissionColor, result->emission_color);
+            if (isInputConnected(EmissionStrength, ctx)) result->emission_strength = getFloatIn(EmissionStrength, ctx, result->emission_strength);
+            if (isInputConnected(Anisotropy, ctx)) result->anisotropy = getFloatIn(Anisotropy, ctx, result->anisotropy);
+            if (isInputConnected(MultiScatter, ctx)) result->multi_scatter = getFloatIn(MultiScatter, ctx, result->multi_scatter);
+            result->active = true;
+            result->written = (1u << static_cast<uint32_t>(VolumeMaterialSlot::Count)) - 1u;
+            result->sanitize();
+            return result;
+        }
+    };
+
+    /**
+     * @brief Fields supplied by the current volume container at the ray-march point.
+     *
+     * VDB, Gas, Fluid, Cloud and SDF bridges expose the same semantic channels.
+     * Missing channels are deterministic zero; Density's preview value is one
+     * because the renderer already multiplies the sampled source field outside
+     * the homogeneous material closure.
+     */
+    class VolumeInfoNode : public MaterialNodeBase {
+    public:
+        enum OutputIdx {
+            Density, Temperature, Flame, Fuel, Velocity, Position,
+            Heat, Color, Emission, VoxelSize, ObjectPosition
+        };
+
+        VolumeInfoNode() {
+            name = "Volume Info";
+            materialNodeType = NodeType::VolumeInfo;
+            outputs.push_back(NodeSystem::Pin::createOutput("Density", NodeSystem::DataType::Float));
+            outputs.push_back(NodeSystem::Pin::createOutput("Temperature", NodeSystem::DataType::Float));
+            outputs.push_back(NodeSystem::Pin::createOutput("Flame", NodeSystem::DataType::Float));
+            outputs.push_back(NodeSystem::Pin::createOutput("Fuel", NodeSystem::DataType::Float));
+            outputs.push_back(NodeSystem::Pin::createOutput("Velocity", NodeSystem::DataType::Vector3));
+            outputs.push_back(NodeSystem::Pin::createOutput("Position", NodeSystem::DataType::Vector3));
+            outputs.push_back(NodeSystem::Pin::createOutput("Heat", NodeSystem::DataType::Float));
+            outputs.push_back(NodeSystem::Pin::createOutput("Color", NodeSystem::DataType::Vector3));
+            outputs.push_back(NodeSystem::Pin::createOutput("Emission", NodeSystem::DataType::Vector3));
+            outputs.push_back(NodeSystem::Pin::createOutput("Voxel Size", NodeSystem::DataType::Float));
+            outputs.push_back(NodeSystem::Pin::createOutput("Object Position", NodeSystem::DataType::Vector3));
+            metadata.displayName = "Volume Info";
+            metadata.category = "Input";
+            metadata.description =
+                "Current VDB/Gas/Fluid/SDF fields. Missing grids evaluate to zero.";
+            metadata.headerColor = HeaderColors::input();
+        }
+        std::string getTypeId() const override { return "MatV2.VolumeInfo"; }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override {
+            if (outputIndex == Density) return 1.0f; // sampled by the volume integrator
+            if (outputIndex == Velocity || outputIndex == Color || outputIndex == Emission)
+                return std::array<float, 3>{0.0f, 0.0f, 0.0f};
+            if (outputIndex == Position || outputIndex == ObjectPosition) {
+                if (const auto* mctx = getMaterialContext(ctx))
+                    return std::array<float, 3>{mctx->opx, mctx->opy, mctx->opz};
+                return std::array<float, 3>{0.5f, 0.5f, 0.5f};
+            }
+            return outputIndex == VoxelSize ? 1.0f : 0.0f;
+        }
+    };
+
+    class BlackbodyNode : public MaterialNodeBase {
+    public:
+        float temperature = 6500.0f;
+        BlackbodyNode() {
+            name = "Blackbody";
+            materialNodeType = NodeType::Blackbody;
+            inputs.push_back(NodeSystem::Pin::createInput("Temperature", NodeSystem::DataType::Float));
+            outputs.push_back(NodeSystem::Pin::createOutput("Color", NodeSystem::DataType::Vector3));
+            metadata.displayName = "Blackbody";
+            metadata.category = "Converter";
+            metadata.description = "Convert temperature in Kelvin to physically plausible emission color.";
+            metadata.headerColor = HeaderColors::convert();
+        }
+        std::string getTypeId() const override { return "MatV2.Blackbody"; }
+        void serializeParams(nlohmann::json& j) const override { j["temperature"] = temperature; }
+        void deserializeParams(const nlohmann::json& j) override {
+            temperature = std::clamp(j.value("temperature", temperature), 800.0f, 40000.0f);
+        }
+        bool drawInputInlineWidget(int index, float width) override {
+            if (index != 0) return false;
+            ImGui::SetNextItemWidth(width);
+            const bool changed = ImGui::DragFloat("##kelvin", &temperature, 25.0f, 800.0f, 40000.0f, "%.0f K");
+            if (changed) dirty = true;
+            return changed;
+        }
+        NodeSystem::PinValue compute(int, NodeSystem::EvaluationContext& ctx) override {
+            const float kelvin = std::clamp(getFloatIn(0, ctx, temperature), 800.0f, 40000.0f);
+            const float t = kelvin / 100.0f;
+            float r, g, b;
+            if (t <= 66.0f) {
+                r = 1.0f;
+                g = std::clamp(0.39008158f * std::log(std::max(t, 1.0f)) - 0.63184144f, 0.0f, 1.0f);
+            } else {
+                r = std::clamp(1.29293619f * std::pow(t - 60.0f, -0.13320476f), 0.0f, 1.0f);
+                g = std::clamp(1.12989086f * std::pow(t - 60.0f, -0.07551485f), 0.0f, 1.0f);
+            }
+            b = t >= 66.0f ? 1.0f :
+                (t <= 19.0f ? 0.0f :
+                 std::clamp(0.54320679f * std::log(t - 10.0f) - 1.19625409f, 0.0f, 1.0f));
+            return std::array<float, 3>{r, g, b};
+        }
+    };
+
+    class VolumeGridNode : public MaterialNodeBase {
+    public:
+        std::string gridName = "density";
+        VolumeGridNode() {
+            name = "Volume Grid";
+            materialNodeType = NodeType::VolumeGrid;
+            outputs.push_back(NodeSystem::Pin::createOutput("Value", NodeSystem::DataType::Float));
+            outputs.push_back(NodeSystem::Pin::createOutput("Vector", NodeSystem::DataType::Vector3));
+            metadata.displayName = "Volume Grid";
+            metadata.category = "Input";
+            metadata.description =
+                "Read a named volume field. Known semantic grids are bound directly; missing grids return zero.";
+            metadata.headerColor = HeaderColors::input();
+        }
+        std::string getTypeId() const override { return "MatV2.VolumeGrid"; }
+        void serializeParams(nlohmann::json& j) const override { j["grid"] = gridName; }
+        void deserializeParams(const nlohmann::json& j) override { gridName = j.value("grid", gridName); }
+        void drawContent() override {
+            char nameBuffer[64]{};
+            std::snprintf(nameBuffer, sizeof(nameBuffer), "%s", gridName.c_str());
+            ImGui::SetNextItemWidth(150.0f);
+            if (ImGui::InputText("Grid", nameBuffer, sizeof(nameBuffer))) {
+                gridName = nameBuffer;
+                dirty = true;
+            }
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext&) override {
+            if (outputIndex == 1) return std::array<float, 3>{0.0f, 0.0f, 0.0f};
+            return gridName == "density" ? 1.0f : 0.0f;
+        }
+    };
+
+    class TimeNode : public MaterialNodeBase {
+    public:
+        TimeNode() {
+            name = "Time";
+            materialNodeType = NodeType::Time;
+            outputs.push_back(NodeSystem::Pin::createOutput("Seconds", NodeSystem::DataType::Float));
+            metadata.displayName = "Time";
+            metadata.category = "Input";
+            metadata.description = "Deterministic animation timeline time in seconds.";
+            metadata.headerColor = HeaderColors::input();
+        }
+        std::string getTypeId() const override { return "MatV2.Time"; }
+        NodeSystem::PinValue compute(int, NodeSystem::EvaluationContext&) override { return 0.0f; }
+    };
+
+    class CloudShapeNode : public MaterialNodeBase {
+    public:
+        float baseScale = 1.2f;
+        float detailScale = 8.0f;
+        float coverage = 0.48f;
+        float erosion = 0.35f;
+        float heightBottom = 0.0f;
+        float heightTop = 1.0f;
+        float warp = 0.35f;
+        int seed = 0;
+        float wind[3] = { 0.05f, 0.0f, 0.0f };
+
+        CloudShapeNode() {
+            name = "Cloud Shape";
+            materialNodeType = NodeType::CloudShape;
+            inputs.push_back(NodeSystem::Pin::createInput("Position", NodeSystem::DataType::Vector3));
+            inputs.push_back(NodeSystem::Pin::createInput("Time", NodeSystem::DataType::Float));
+            inputs.push_back(NodeSystem::Pin::createInput("Wind", NodeSystem::DataType::Vector3));
+            outputs.push_back(NodeSystem::Pin::createOutput("Density", NodeSystem::DataType::Float));
+            metadata.displayName = "Cloud Shape";
+            metadata.category = "Volume";
+            metadata.description =
+                "Optimized animated cumulus field with low-frequency body, height profile, warp and edge erosion.";
+            metadata.headerColor = HeaderColors::texture();
+        }
+        std::string getTypeId() const override { return "MatV2.CloudShape"; }
+        void serializeParams(nlohmann::json& j) const override {
+            j["base_scale"] = baseScale; j["detail_scale"] = detailScale;
+            j["coverage"] = coverage; j["erosion"] = erosion;
+            j["height_bottom"] = heightBottom; j["height_top"] = heightTop;
+            j["warp"] = warp; j["seed"] = seed;
+            j["wind"] = { wind[0], wind[1], wind[2] };
+        }
+        void deserializeParams(const nlohmann::json& j) override {
+            baseScale = std::max(0.001f, j.value("base_scale", baseScale));
+            detailScale = std::max(0.001f, j.value("detail_scale", detailScale));
+            coverage = std::clamp(j.value("coverage", coverage), 0.0f, 1.0f);
+            erosion = std::clamp(j.value("erosion", erosion), 0.0f, 1.0f);
+            heightBottom = j.value("height_bottom", heightBottom);
+            heightTop = std::max(heightBottom + 1e-4f, j.value("height_top", heightTop));
+            warp = std::clamp(j.value("warp", warp), 0.0f, 2.0f);
+            seed = j.value("seed", seed);
+            if (j.contains("wind") && j["wind"].is_array() && j["wind"].size() >= 3) {
+                for (int i = 0; i < 3; ++i) wind[i] = j["wind"][i].get<float>();
+            }
+        }
+        void drawContent() override {
+            ImGui::SetNextItemWidth(125); if (ImGui::DragFloat("Base Scale", &baseScale, 0.01f, 0.001f, 100.0f)) dirty = true;
+            ImGui::SetNextItemWidth(125); if (ImGui::DragFloat("Detail Scale", &detailScale, 0.05f, 0.001f, 200.0f)) dirty = true;
+            ImGui::SetNextItemWidth(125); if (ImGui::SliderFloat("Coverage", &coverage, 0.0f, 1.0f)) dirty = true;
+            ImGui::SetNextItemWidth(125); if (ImGui::SliderFloat("Erosion", &erosion, 0.0f, 1.0f)) dirty = true;
+            ImGui::SetNextItemWidth(125); if (ImGui::SliderFloat("Warp", &warp, 0.0f, 2.0f)) dirty = true;
+            ImGui::SetNextItemWidth(125); if (ImGui::DragFloatRange2("Height", &heightBottom, &heightTop, 0.01f)) dirty = true;
+            ImGui::SetNextItemWidth(125); if (ImGui::DragInt("Seed", &seed, 1.0f)) dirty = true;
+            ImGui::SetNextItemWidth(125); if (ImGui::DragFloat3("Wind", wind, 0.01f)) dirty = true;
+        }
+        NodeSystem::PinValue compute(int, NodeSystem::EvaluationContext&) override { return 0.0f; }
     };
 
     class TextureCoordinateNode : public MaterialNodeBase {
@@ -3308,6 +3598,7 @@ namespace MaterialNodesV2 {
             InInteriorDensity, InInteriorColor, InInclusion, InDirt, InShard,
             // Bubble
             InBubbleIor, InBubbleFilm,
+            InVolume,
             PinCount
         };
 
@@ -3326,9 +3617,9 @@ namespace MaterialNodesV2 {
         // expanded the node is ~1000px tall, which is not an improvement over hiding the
         // values, it is just a different way to make them unreadable.
         bool grpBase = true;
-        bool grpEmission = true;
-        bool grpGlass = true;
-        bool grpDetail = true;
+        bool grpEmission = false;
+        bool grpGlass = false;
+        bool grpDetail = false;
         bool grpSubsurface = false;
         bool grpClearcoat = false;
         bool grpInterior = false;
@@ -3379,6 +3670,7 @@ namespace MaterialNodesV2 {
             // Bubble
             in("Bubble IOR", NodeSystem::DataType::Float);
             in("Bubble Film", NodeSystem::DataType::Float);
+            in("Volume", NodeSystem::DataType::Volume);
             outputs.push_back(NodeSystem::Pin::createOutput("Material", NodeSystem::DataType::Material));
             metadata.displayName = "Material Output";
             metadata.category = "Shader";
@@ -3393,7 +3685,7 @@ namespace MaterialNodesV2 {
         /// auto-expanded: otherwise the socket would vanish the moment the user
         /// unplugs it, and the re-connect could only land on some other visible
         /// pin (the "reconnect binds the wrong slot" trap).
-        void syncPinVisibility(const NodeSystem::GraphBase& graph) {
+        void syncPinVisibility(const NodeSystem::GraphBase& graph, bool volumeOnly = false) {
             bool* groupOf[PinCount] = {};
             auto mapRange = [&](int lo, int hi, bool* flag) {
                 for (int i = lo; i <= hi && i < PinCount; ++i) groupOf[i] = flag;
@@ -3412,6 +3704,11 @@ namespace MaterialNodesV2 {
 
             for (int i = 0; i < n; ++i) {
                 const bool connected = graph.getInputSource(inputs[i].id) != nullptr;
+                if (volumeOnly) {
+                    inputs[i].hidden = (i != InVolume);
+                    lastConnected_[i] = connected;
+                    continue;
+                }
                 if (lastConnected_[i] && !connected && i < PinCount && groupOf[i]) {
                     *groupOf[i] = true;  // just unplugged â€” keep the socket group open
                 }
@@ -3419,7 +3716,7 @@ namespace MaterialNodesV2 {
                 const bool groupVisible = (i < PinCount && groupOf[i]) ? *groupOf[i] : true;  // Surface & unknown: always
                 inputs[i].hidden = !(groupVisible || connected);
             }
-            if (!inputs.empty()) inputs[InSurface].hidden = false;
+            if (!inputs.empty() && !volumeOnly) inputs[InSurface].hidden = false;
         }
         std::string getTypeId() const override { return "MatV2.Output"; }
 
@@ -3858,6 +4155,12 @@ namespace MaterialNodesV2 {
                 case NodeType::LayerWeight:       node = addNode<LayerWeightNode>(); break;
                 case NodeType::AmbientOcclusion:  node = addNode<AmbientOcclusionNode>(); break;
                 case NodeType::Bevel:             node = addNode<BevelNode>(); break;
+                case NodeType::PrincipledVolume:  node = addNode<PrincipledVolumeNode>(); break;
+                case NodeType::VolumeInfo:        node = addNode<VolumeInfoNode>(); break;
+                case NodeType::Blackbody:         node = addNode<BlackbodyNode>(); break;
+                case NodeType::VolumeGrid:        node = addNode<VolumeGridNode>(); break;
+                case NodeType::Time:              node = addNode<TimeNode>(); break;
+                case NodeType::CloudShape:        node = addNode<CloudShapeNode>(); break;
             }
             if (node) {
                 node->x = x;
@@ -4050,6 +4353,162 @@ namespace MaterialNodesV2 {
         std::vector<std::string> errors;
         bool ok = false;
     };
+
+    struct VolumeGraphResult {
+        VolumeMaterialProgram program;
+        std::vector<std::string> errors;
+        bool ok = false;
+    };
+
+    /// Evaluate the typed closure connected to Material Output.Volume. Constant,
+    /// color and math chains are folded here; spatial lowering is deliberately a
+    /// separate compiler so homogeneous graphs never pay a ray-march VM cost.
+    inline VolumeGraphResult evaluateVolumeMaterialGraph(MaterialNodeGraphV2& graph) {
+        VolumeGraphResult res;
+        OutputNode* out = graph.findOutputNode();
+        if (!out || OutputNode::InVolume >= static_cast<int>(out->inputs.size())) {
+            res.errors.push_back("Graph has no Material Output.Volume socket");
+            return res;
+        }
+        NodeSystem::NodeBase* source = graph.getInputSourceNode(out->inputs[OutputNode::InVolume].id);
+        NodeSystem::Pin* sourcePin = graph.getInputSource(out->inputs[OutputNode::InVolume].id);
+        if (!source || !sourcePin) {
+            res.program = VolumeMaterialProgram{}; // inactive = VolumeShader fallback
+            res.ok = true;
+            return res;
+        }
+        int outputIndex = -1;
+        for (size_t i = 0; i < source->outputs.size(); ++i) {
+            if (source->outputs[i].id == sourcePin->id) { outputIndex = static_cast<int>(i); break; }
+        }
+        if (outputIndex < 0) {
+            res.errors.push_back("Material Output.Volume has an invalid source pin");
+            return res;
+        }
+        // A direct Volume Info.Density connection is the identity source field:
+        // the integrator already samples it, while this homogeneous closure
+        // contributes the material multiplier. It therefore needs no VM.
+        NodeSystem::NodeBase* identityDensityField = nullptr;
+        NoiseTextureNode* densityNoise = nullptr;
+        std::unordered_set<NodeSystem::NodeBase*> allowedDensityFieldNodes;
+        if (auto* closure = dynamic_cast<PrincipledVolumeNode*>(source)) {
+            NodeSystem::NodeBase* densityNode =
+                graph.getInputSourceNode(closure->inputs[PrincipledVolumeNode::Density].id);
+            NodeSystem::Pin* densityPin =
+                graph.getInputSource(closure->inputs[PrincipledVolumeNode::Density].id);
+            if (auto* info = dynamic_cast<VolumeInfoNode*>(densityNode)) {
+                if (densityPin && densityPin->id == info->outputs[VolumeInfoNode::Density].id)
+                    identityDensityField = info;
+            }
+
+            auto acceptDensityNoise = [&](NoiseTextureNode* noise) -> bool {
+                if (!noise || noise->kind != NoiseTextureNode::Kind::FBM ||
+                    std::fabs(noise->rough - 0.5f) > 1e-4f) return false;
+                NodeSystem::NodeBase* vectorNode =
+                    graph.getInputSourceNode(noise->inputs[0].id);
+                if (vectorNode) {
+                    auto* positionInfo = dynamic_cast<VolumeInfoNode*>(vectorNode);
+                    NodeSystem::Pin* vectorPin = graph.getInputSource(noise->inputs[0].id);
+                    if (!positionInfo || !vectorPin ||
+                        vectorPin->id != positionInfo->outputs[VolumeInfoNode::Position].id) return false;
+                    allowedDensityFieldNodes.insert(positionInfo);
+                } else if (noise->dimensions != 3) return false;
+                densityNoise = noise;
+                allowedDensityFieldNodes.insert(noise);
+                return true;
+            };
+
+            // Natural authoring shortcut:
+            // Volume Info.Position -> 3D Noise.Fac -> Principled Volume.Density.
+            // The source VDB density is implicit, so this means source * noise.
+            if (auto* noise = dynamic_cast<NoiseTextureNode*>(densityNode)) {
+                NodeSystem::Pin* noisePin = densityPin;
+                if (noisePin && noisePin->id == noise->outputs[0].id)
+                    acceptDensityNoise(noise);
+            }
+
+            // First bounded spatial lowering:
+            // Volume Info.Density * 3D Noise.Fac -> Principled Volume.Density.
+            // It maps to fixed per-volume parameters, not arbitrary bytecode.
+            if (!densityNoise) {
+                if (auto* math = dynamic_cast<MathNode*>(densityNode);
+                    math && static_cast<MathNode::Op>(math->op) == MathNode::Op::Multiply) {
+                    auto sourceAt = [&](int input) {
+                        return graph.getInputSourceNode(math->inputs[input].id);
+                    };
+                    auto pinAt = [&](int input) {
+                        return graph.getInputSource(math->inputs[input].id);
+                    };
+                    for (int fieldSide = 0; fieldSide < 2 && !densityNoise; ++fieldSide) {
+                        const int noiseSide = 1 - fieldSide;
+                        auto* info = dynamic_cast<VolumeInfoNode*>(sourceAt(fieldSide));
+                        auto* noise = dynamic_cast<NoiseTextureNode*>(sourceAt(noiseSide));
+                        NodeSystem::Pin* fieldPin = pinAt(fieldSide);
+                        NodeSystem::Pin* noisePin = pinAt(noiseSide);
+                        if (!info || !noise || !fieldPin || !noisePin) continue;
+                        if (fieldPin->id != info->outputs[VolumeInfoNode::Density].id ||
+                            noisePin->id != noise->outputs[0].id ||
+                            !acceptDensityNoise(noise)) continue;
+                        allowedDensityFieldNodes.insert(info);
+                        allowedDensityFieldNodes.insert(math);
+                    }
+                }
+            }
+        }
+
+        // Homogeneous phase must never silently bake a position-dependent field
+        // at the editor's preview coordinate. Spatial chains are rejected until
+        // the bounded Vulkan field VM owns their per-step evaluation.
+        std::unordered_set<NodeSystem::NodeBase*> visited;
+        std::function<bool(NodeSystem::NodeBase*)> isSpatial = [&](NodeSystem::NodeBase* node) {
+            if (!node || !visited.insert(node).second) return false;
+            if (node == identityDensityField || allowedDensityFieldNodes.count(node) != 0) return false;
+            if (auto* materialNode = dynamic_cast<MaterialNodeBase*>(node)) {
+                switch (materialNode->materialNodeType) {
+                    case NodeType::TextureCoordinate: case NodeType::ImageTexture:
+                    case NodeType::Noise: case NodeType::Wave: case NodeType::Gradient:
+                    case NodeType::Geometry: case NodeType::ObjectInfo: case NodeType::Attribute:
+                    case NodeType::Fresnel: case NodeType::LayerWeight:
+                    case NodeType::AmbientOcclusion: case NodeType::Bevel:
+                    case NodeType::VolumeInfo:
+                        return true;
+                    default: break;
+                }
+            }
+            for (const auto& input : node->inputs) {
+                if (isSpatial(graph.getInputSourceNode(input.id))) return true;
+            }
+            return false;
+        };
+        // Spatial subtrees are folded once below only to seed deterministic
+        // homogeneous fallbacks. compileMaterialProgram emits their real
+        // per-sample instructions; rejecting them here used to make the full
+        // Volume sockets look connectable while accepting only one FBM pattern.
+        const bool hasSpatialVolumeInputs = isSpatial(source);
+        (void)hasSpatialVolumeInputs;
+        MaterialEvalContext mctx;
+        NodeSystem::EvaluationContext ctx(&graph);
+        ctx.setDomainContext(&mctx);
+        NodeSystem::VolumeMaterialValue volume;
+        if (!NodeSystem::tryGetVolumeMaterial(source->requestOutput(outputIndex, ctx), volume)) {
+            res.errors.push_back("Material Output.Volume did not produce a volume closure");
+            return res;
+        }
+        res.program = *volume;
+        if (densityNoise) {
+            // The source grid is sampled by the integrator. Do not bake the
+            // editor preview's noise sample into the homogeneous multiplier.
+            res.program.density = 1.0f;
+            res.program.density_noise_enabled = true;
+            res.program.density_noise_scale = densityNoise->scale;
+            res.program.density_noise_strength = 1.0f;
+            res.program.density_noise_detail = densityNoise->detail;
+            res.program.density_noise_seed = densityNoise->seed;
+        }
+        res.program.sanitize();
+        res.ok = true;
+        return res;
+    }
 
     /**
      * @brief Evaluate the graph against the bound material and fold to a single
@@ -4299,6 +4758,11 @@ namespace MaterialNodesV2 {
                 case NodeType::HueSaturation: case NodeType::RGBCurves:
                 case NodeType::LayerWeight: case NodeType::AmbientOcclusion:
                 case NodeType::Bevel:
+                case NodeType::VolumeInfo:
+                case NodeType::Blackbody:
+                case NodeType::VolumeGrid:
+                case NodeType::Time:
+                case NodeType::CloudShape:
                     return true;
                 default: return false;  // MaterialRef / MixMaterial / Output
             }
@@ -4342,6 +4806,11 @@ namespace MaterialNodesV2 {
                         return true;
                     case NodeType::Bevel:
                         return true;   // same: only real at a real hit, with a real scene
+                    case NodeType::VolumeInfo:
+                    case NodeType::VolumeGrid:
+                    case NodeType::Time:
+                    case NodeType::CloudShape:
+                        return true;   // supplied independently at every volume-march sample
                     case NodeType::ObjectInfo:
                         // Constant WITHIN one object, but the whole reason the node exists is
                         // that a single material is shared by many objects. Folding it would
@@ -4508,6 +4977,84 @@ namespace MaterialNodesV2 {
                                       : outIndex == 3 ? MatOp::GeoPositionObj
                                       : outIndex == 4 ? MatOp::GeoIncoming
                                                       : MatOp::GeoPosition);
+                    break;
+                }
+                case NodeType::VolumeInfo: {
+                    static constexpr MatOp kOps[] = {
+                        MatOp::VolumeDensity, MatOp::VolumeTemperature,
+                        MatOp::VolumeFlame, MatOp::VolumeFuel,
+                        MatOp::VolumeVelocity, MatOp::VolumePosition,
+                        MatOp::VolumeTemperature, MatOp::VolumeColor,
+                        MatOp::VolumeEmission, MatOp::VolumeVoxelSize,
+                        MatOp::VolumeObjectPosition
+                    };
+                    const int safeOutput = std::clamp(outIndex, 0, 10);
+                    resultReg = emitGeo(kOps[safeOutput]);
+                    break;
+                }
+                case NodeType::Blackbody: {
+                    auto* bb = static_cast<BlackbodyNode*>(n);
+                    const int kelvin = inOr(0, bb->temperature, bb->temperature, bb->temperature);
+                    resultReg = nextReg++;
+                    MatInstr in;
+                    in.op = static_cast<uint16_t>(MatOp::Blackbody);
+                    in.outReg = static_cast<int16_t>(resultReg);
+                    in.inReg[0] = static_cast<int16_t>(kelvin);
+                    prog.instrs.push_back(in);
+                    break;
+                }
+                case NodeType::VolumeGrid: {
+                    auto* grid = static_cast<VolumeGridNode*>(n);
+                    std::string key = grid->gridName;
+                    std::transform(key.begin(), key.end(), key.begin(),
+                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    MatOp op = MatOp::Const;
+                    if (key == "density") op = MatOp::VolumeDensity;
+                    else if (key == "temperature" || key == "heat") op = MatOp::VolumeTemperature;
+                    else if (key == "flame") op = MatOp::VolumeFlame;
+                    else if (key == "fuel") op = MatOp::VolumeFuel;
+                    else if (key == "velocity" || key == "vel") op = MatOp::VolumeVelocity;
+                    else if (key == "color" || key == "colour") op = MatOp::VolumeColor;
+                    else if (key == "emission") op = MatOp::VolumeEmission;
+                    else if (key == "voxel_size" || key == "voxelsize") op = MatOp::VolumeVoxelSize;
+                    if (op == MatOp::Const) resultReg = emitConst3(0.0f, 0.0f, 0.0f);
+                    else resultReg = emitGeo(op);
+                    break;
+                }
+                case NodeType::Time: {
+                    prog.usesTime = true;
+                    resultReg = emitGeo(MatOp::Time);
+                    break;
+                }
+                case NodeType::CloudShape: {
+                    auto* cloud = static_cast<CloudShapeNode*>(n);
+                    const SrcRef positionSource = sourceOf(n->inputs[0].id);
+                    const SrcRef timeSource = sourceOf(n->inputs[1].id);
+                    // Useful without setup wires: volume object position and the
+                    // deterministic timeline are the semantic defaults.
+                    const int position = positionSource.node
+                        ? compileNode(positionSource.node, positionSource.outIndex)
+                        : emitGeo(MatOp::VolumeObjectPosition);
+                    const int time = timeSource.node
+                        ? compileNode(timeSource.node, timeSource.outIndex)
+                        : emitGeo(MatOp::Time);
+                    if (!timeSource.node) prog.usesTime = true;
+                    const int wind = inOr(2, cloud->wind[0], cloud->wind[1], cloud->wind[2]);
+                    const int off = static_cast<int>(prog.constPool.size());
+                    prog.constPool.insert(prog.constPool.end(), {
+                        cloud->baseScale, cloud->detailScale, cloud->coverage,
+                        cloud->erosion, cloud->heightBottom, cloud->heightTop,
+                        static_cast<float>(cloud->seed), cloud->warp
+                    });
+                    resultReg = nextReg++;
+                    MatInstr in;
+                    in.op = static_cast<uint16_t>(MatOp::CloudShape);
+                    in.outReg = static_cast<int16_t>(resultReg);
+                    in.inReg[0] = static_cast<int16_t>(position);
+                    in.inReg[1] = static_cast<int16_t>(time);
+                    in.inReg[2] = static_cast<int16_t>(wind);
+                    in.constOff = off;
+                    prog.instrs.push_back(in);
                     break;
                 }
                 case NodeType::ObjectInfo: {
@@ -5236,6 +5783,42 @@ namespace MaterialNodesV2 {
             }
         }
 
+        // Volume closure slots use the same validated expression VM, but are
+        // stored in a disjoint aux range (16..23).  Only spatially varying
+        // connections are emitted; homogeneous values remain folded into
+        // VolumeMaterialProgram and therefore cost nothing per march sample.
+        {
+            SrcRef volumeSource = sourceOf(out->inputs[OutputNode::InVolume].id);
+            auto* closure = dynamic_cast<PrincipledVolumeNode*>(volumeSource.node);
+            if (closure) {
+                for (int pin = 0; pin < PrincipledVolumeNode::PinCount; ++pin) {
+                    SrcRef s = sourceOf(closure->inputs[pin].id);
+                    if (!s.node || !subtreeSupported(s.node) || !subtreeSpatial(s.node)) continue;
+                    // Direct VDB density passthrough is already the marcher's base
+                    // density. Emitting LoadDensity + StoreDensity would invoke the
+                    // full VM at every sample without changing a single value.
+                    if (pin == PrincipledVolumeNode::Density) {
+                        if (auto* info = dynamic_cast<VolumeInfoNode*>(s.node)) {
+                            if (s.outIndex == VolumeInfoNode::Density) continue;
+                        }
+                        if (auto* grid = dynamic_cast<VolumeGridNode*>(s.node)) {
+                            std::string semantic = grid->gridName;
+                            std::transform(semantic.begin(), semantic.end(), semantic.begin(),
+                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                            if (s.outIndex == 0 && semantic == "density") continue;
+                        }
+                    }
+                    const int reg = compileNode(s.node, s.outIndex);
+                    MatInstr st;
+                    st.op = static_cast<uint16_t>(MatOp::Store);
+                    st.inReg[0] = static_cast<int16_t>(reg);
+                    st.aux = 16 + pin;
+                    prog.instrs.push_back(st);
+                    prog.drivenSlots |= (1u << static_cast<uint32_t>(16 + pin));
+                }
+            }
+        }
+
         // Normal Map slot: a Bump node here drives a per-pixel tangent-space normal
         // (MatSlot::Normal), consumed by apply_normal_map / closesthit. A direct
         // Image Texture stays a losslessly-bound normal map (evaluate's bind pass).
@@ -5352,11 +5935,12 @@ namespace MaterialNodesV2 {
         resetMaterialAttributeSlots();
 
         auto& mgr = MaterialManager::getInstance();
-        std::unordered_map<std::string, PrincipledBSDF*> byName;
+        std::unordered_map<std::string, Material*> byName;
         for (uint16_t id = 0; id < static_cast<uint16_t>(mgr.getMaterialCount()); ++id) {
             Material* m = mgr.getMaterial(id);
-            if (!m || m->type() != MaterialType::PrincipledBSDF) continue;
-            byName[mgr.getMaterialName(id)] = static_cast<PrincipledBSDF*>(m);
+            if (!m || (m->type() != MaterialType::PrincipledBSDF &&
+                       m->type() != MaterialType::Volumetric)) continue;
+            byName[mgr.getMaterialName(id)] = m;
         }
 
         size_t active = 0;
@@ -5364,14 +5948,18 @@ namespace MaterialNodesV2 {
             if (!graphPtr) continue;
             auto it = byName.find(matName);
             if (it == byName.end()) continue;   // graph orphaned by a material rename/delete
-            PrincipledBSDF* pbsdf = it->second;
-
+            Material* material = it->second;
+            PrincipledBSDF* pbsdf = material->type() == MaterialType::PrincipledBSDF
+                ? static_cast<PrincipledBSDF*>(material) : nullptr;
             MaterialProgram prog = compileMaterialProgram(*graphPtr, pbsdf);
             if (prog.active) {
-                pbsdf->proceduralProgram = std::make_shared<MaterialProgram>(std::move(prog));
+                if (pbsdf) pbsdf->proceduralProgram = std::make_shared<MaterialProgram>(std::move(prog));
+                else static_cast<Volumetric*>(material)->proceduralProgram =
+                    std::make_shared<MaterialProgram>(std::move(prog));
                 ++active;
             } else {
-                pbsdf->proceduralProgram.reset();
+                if (pbsdf) pbsdf->proceduralProgram.reset();
+                else static_cast<Volumetric*>(material)->proceduralProgram.reset();
             }
         }
         return active;

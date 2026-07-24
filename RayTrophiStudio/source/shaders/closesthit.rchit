@@ -3050,6 +3050,153 @@ void main() {
         geomNormal = -geomNormalRaw;
     }
 
+    // Closed triangle-mesh volume boundary.  Do not shade the shell as a
+    // surface: the entry hit simply continues into the mesh.  The following
+    // back-face hit receives gl_HitTEXT equal to the actual segment travelled
+    // inside, so it can apply the medium integral without a recursive exit-ray
+    // query (and without confusing another object with this mesh's exit).
+    if ((mat.flags & (1u << 24)) != 0u) {
+        vec3 scatterColor = max(vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b), vec3(0.0));
+        if ((payload.primaryMeta & PL_PRIMARY_DONE) == 0u) {
+            payload.primaryARG = packHalf2x16(scatterColor.rg);
+            payload.primaryABT = packHalf2x16(vec2(scatterColor.b, 1.0));
+            payload.primaryNrm = plPackNormal(-rayDir);
+            payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
+                                | (matIndex & PL_MATID_MASK) | PL_PRIMARY_DONE;
+        }
+
+        if (!surfaceFrontFace) {
+            float segmentLength = max(gl_HitTEXT, 0.0);
+            uint volumeProgram = matProgramOffset(matIndex);
+            int maxSteps = clamp(int(matx.volume_max_steps + 0.5), 1, 256);
+            float stepLength = max(matx.volume_step_size, segmentLength / float(maxSteps));
+            int stepCount = min(maxSteps, max(1, int(ceil(segmentLength / max(stepLength, 1e-4)))));
+            stepLength = segmentLength / float(stepCount);
+            float transmittance = 1.0;
+            vec3 integratedRadiance = vec3(0.0);
+
+            vec3 lightDir = vec3(0.0, 1.0, 0.0);
+            vec3 lightValue = vec3(0.0);
+            float pdfSelect = 1.0;
+            bool hasVolumeLight = false;
+            float volumeLightDistance = segmentLength;
+            if (cam.lightCount > 0u) {
+                vec3 samplePoint = gl_WorldRayOriginEXT + rayDir * (0.5 * segmentLength);
+                pdfSelect = 0.0;
+                int lightIndex = pick_smart_light_gl(uvec2(0), samplePoint, pdfSelect);
+                if (lightIndex >= 0 && pdfSelect > 1e-6) {
+                    float lightAttenuation;
+                    if (sample_light_direction_gl(
+                            lights.l[lightIndex], samplePoint,
+                            rnd(payload.seed), rnd(payload.seed),
+                            lightDir, volumeLightDistance, lightAttenuation)) {
+                        lightValue = lights.l[lightIndex].color.rgb *
+                                     lights.l[lightIndex].color.a * lightAttenuation;
+                        hasVolumeLight = true;
+                    }
+                }
+            }
+
+            for (int si = 0; si < stepCount && transmittance > 0.002; ++si) {
+                float t = (float(si) + 0.5) * stepLength;
+                vec3 p = gl_WorldRayOriginEXT + rayDir * t;
+                float density = max(matx.volume_density, 0.0);
+                float scatterStrength = max(matx.volume_scattering, 0.0);
+                float absorptionStrength = max(matx.volume_absorption, 0.0);
+                vec3 stepScatterColor = scatterColor;
+                vec3 absorptionColor = vec3(1.0);
+                vec3 emissionColor = max(vec3(mat.emission_r, mat.emission_g, mat.emission_b), vec3(0.0));
+                float emissionStrength = 1.0;
+                float anisotropy = matx.volume_anisotropy;
+                float multiScatter = clamp(matx.volume_multi_scatter, 0.0, 1.0);
+
+                if (volumeProgram != MATPROG_NONE) {
+                    vec3 objP = gl_WorldToObjectEXT * vec4(p, 1.0);
+                    MatProgOut vp = evalMaterialProgram(
+                        volumeProgram, vec2(0.0), p, -rayDir, 0.5,
+                        gl_ObjectToWorldEXT[3], hitAttribs, objP, -rayDir,
+                        1.0, 0.0, 0.0, 0.0, vec3(0.0), p,
+                        scatterColor, vec3(mat.emission_r, mat.emission_g, mat.emission_b),
+                        stepLength, objP, cam.waterTime);
+                    if ((vp.volumeWritten & (1u << 0)) != 0u) density = max(vp.volumeDensity, 0.0);
+                    if ((vp.volumeWritten & (1u << 1)) != 0u) stepScatterColor = max(vp.volumeScatterColor, vec3(0.0));
+                    if ((vp.volumeWritten & (1u << 2)) != 0u) scatterStrength = max(vp.volumeScatterStrength, 0.0);
+                    if ((vp.volumeWritten & (1u << 3)) != 0u) absorptionColor = max(vp.volumeAbsorptionColor, vec3(0.0));
+                    if ((vp.volumeWritten & (1u << 4)) != 0u) absorptionStrength = max(vp.volumeAbsorptionStrength, 0.0);
+                    if ((vp.volumeWritten & (1u << 5)) != 0u) emissionColor = max(vp.volumeEmissionColor, vec3(0.0));
+                    if ((vp.volumeWritten & (1u << 6)) != 0u) emissionStrength = max(vp.volumeEmissionStrength, 0.0);
+                    if ((vp.volumeWritten & (1u << 7)) != 0u) anisotropy = clamp(vp.volumeAnisotropy, -0.95, 0.95);
+                    if ((vp.volumeWritten & (1u << 8)) != 0u) multiScatter = clamp(vp.volumeMultiScatter, 0.0, 1.0);
+                } else if (matx.volume_noise_scale > 0.0) {
+                    density *= max(ch_fbmNoise(p * matx.volume_noise_scale, 4), 0.0);
+                }
+
+                float sigmaS = density * scatterStrength;
+                vec3 sigmaAColor = density * absorptionStrength * max(absorptionColor, vec3(1e-4));
+                float sigmaA = dot(sigmaAColor, vec3(0.2126, 0.7152, 0.0722));
+                float sigmaT = sigmaS + sigmaA;
+                float stepT = exp(-sigmaT * stepLength);
+                if (multiScatter > 0.0 && sigmaS > 0.0) {
+                    float albedoLum = dot(stepScatterColor, vec3(0.2126, 0.7152, 0.0722));
+                    stepT = mix(stepT, exp(-sigmaT * stepLength * 0.25),
+                                multiScatter * clamp(albedoLum, 0.0, 1.0));
+                }
+                vec3 source = emissionColor * emissionStrength * density;
+                if (hasVolumeLight && sigmaS > 1e-6) {
+                    int shadowSteps = clamp(int(matx.volume_light_steps + 0.5), 0, 48);
+                    float shadowTrans = 1.0;
+                    if (shadowSteps > 0 && matx.volume_shadow_strength > 0.0) {
+                        float shadowLength = min(max(volumeLightDistance, 0.0), segmentLength);
+                        float shadowStep = shadowLength / float(shadowSteps);
+                        float shadowTau = 0.0;
+                        for (int sj = 1; sj <= shadowSteps; ++sj) {
+                            vec3 sp = p + normalize(lightDir) * ((float(sj) - 0.5) * shadowStep);
+                            float sd = max(matx.volume_density, 0.0);
+                            if (volumeProgram != MATPROG_NONE) {
+                                vec3 sobjP = gl_WorldToObjectEXT * vec4(sp, 1.0);
+                                MatProgOut svp = evalMaterialProgram(
+                                    volumeProgram, vec2(0.0), sp, -rayDir, 0.5,
+                                    gl_ObjectToWorldEXT[3], hitAttribs, sobjP, -rayDir,
+                                    1.0, 0.0, 0.0, 0.0, vec3(0.0), sp,
+                                    scatterColor, vec3(mat.emission_r, mat.emission_g, mat.emission_b),
+                                    shadowStep, sobjP, cam.waterTime);
+                                if ((svp.volumeWritten & (1u << 0)) != 0u) {
+                                    sd = max(svp.volumeDensity, 0.0);
+                                }
+                            } else if (matx.volume_noise_scale > 0.0) {
+                                sd *= max(ch_fbmNoise(sp * matx.volume_noise_scale, 4), 0.0);
+                            }
+                            shadowTau += sd * (scatterStrength + absorptionStrength) * shadowStep;
+                            if (shadowTau > 12.0) break;
+                        }
+                        float physicalShadow = exp(-shadowTau);
+                        shadowTrans = mix(1.0, physicalShadow,
+                                          clamp(matx.volume_shadow_strength, 0.0, 1.0));
+                    }
+                    float g = clamp(anisotropy, -0.95, 0.95);
+                    float g2 = g * g;
+                    float cosTheta = dot(rayDir, normalize(lightDir));
+                    float phase = (1.0 - g2) *
+                        pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), -1.5);
+                    source += stepScatterColor * lightValue * shadowTrans * phase *
+                              sigmaS * (1.0 + multiScatter) / max(pdfSelect, 1e-6);
+                }
+                float integral = (sigmaT > 1e-6) ? (1.0 - stepT) / sigmaT : stepLength;
+                integratedRadiance += transmittance * source * integral;
+                transmittance *= stepT;
+            }
+            payload.radiance += integratedRadiance;
+            payload.attenuation *= vec3(transmittance);
+        }
+
+        payload.scatterOrigin = hitPos + rayDir * 0.002;
+        payload.scatterDir = rayDir;
+        payload.scattered = true;
+        payload.skipAABBs = false;
+        payload.bounceType = BOUNCE_TRANSPARENT;
+        return;
+    }
+
     // TBN must use ORIGINAL mesh UVs (not texture-sampling-flipped UVs).
     // Normal maps are authored in the original UV parameterisation; flipping V
     // here would negate the bitangent and invert the Green channel → bumps↔dents.
@@ -3216,7 +3363,9 @@ void main() {
         // incoming direction, which is exactly what a path tracer should ask them about.
         vec3 hitView = normalize(-gl_WorldRayDirectionEXT);
         MatProgOut mp = evalMaterialProgram(mp_procOff, rawUV, hitPos, worldNormal, hitPointiness, hitObjOrigin,
-                                            hitAttribs, hitObjPos, hitView);
+                                            hitAttribs, hitObjPos, hitView,
+                                            0.0, 0.0, 0.0, 0.0, vec3(0.0), hitPos,
+                                            vec3(0.0), vec3(0.0), 0.0, hitObjPos, cam.waterTime);
         mpWritten = mp.written;
         if ((mp.written & MP_SLOT_BASECOLOR)        != 0u) albedo       = max(mp.baseColor, vec3(0.0));
         if ((mp.written & MP_SLOT_ROUGHNESS)        != 0u) roughness    = clamp(mp.roughness, 0.0, 1.0);

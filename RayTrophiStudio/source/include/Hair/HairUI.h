@@ -1493,6 +1493,10 @@ inline void HairUI::drawMaterialPanel(Renderer* renderer) {
     if (ImGui::SliderFloat("Diffuse Softness", &m_currentMaterial.diffuseSoftness, 0.0f, 1.0f,
                      "%.2f")) changed = true;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls multiple scattering weight.\n0 = hard specular only\n0.5 = balanced (default)\n1.0 = strong diffuse/body color");
+
+    if (ImGui::SliderFloat("Self Shadow", &m_currentMaterial.selfShadow, 0.0f, 1.0f,
+                     "%.2f")) changed = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Deep hair self-shadowing (Vulkan RT).\nMakes the groom read as a dense, soft, volumetric mass instead of flat bright fuzz.\n0 = off (fastest binary shadow)\n1 = full deep self-shadow (softest, costs extra shadow rays)");
     
     // --- Root-to-Tip Gradient ---
     ImGui::Separator();

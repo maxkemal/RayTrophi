@@ -25,6 +25,7 @@
 #define VOLUME_SHADER_H
 
 #include "Vec3.h"
+#include "VolumeMaterialProgram.h"
 #include <string>
 #include <memory>
 #include <vector>
@@ -93,6 +94,7 @@ struct GpuVolumeShaderData {
     float step_size = 0.25f;
     int max_steps = 32;
     int shadow_steps = 6;
+    int shadow_stride = 4;
     float shadow_strength = 0.8f;
     
     // ─────────────────────────────────────────────────────────────────────────
@@ -112,6 +114,12 @@ struct GpuVolumeShaderData {
     float velocity_scale = 1.0f;
     float motion_pad1 = 0.0f;
     float motion_pad2 = 0.0f;
+
+    int density_noise_enabled = 0;
+    float density_noise_scale = 5.0f;
+    float density_noise_strength = 1.0f;
+    int density_noise_detail = 3;
+    int density_noise_seed = 0;
 };
 
 /**
@@ -202,6 +210,13 @@ struct ColorRamp {
 class VolumeShader {
 public:
     std::string name = "Untitled Volume Shader";
+    // Name of the Material Graph asset supplying Material Output.Volume.
+    // Empty means the traditional VolumeShader controls are authoritative.
+    std::string material_graph;
+    // Compiled homogeneous output of the Volume Material Graph. Connected graph
+    // sockets override only their corresponding legacy VolumeShader properties.
+    // Spatial programs intentionally live elsewhere so this fast path stays free.
+    VolumeMaterialProgram material_program;
     
 // ... (previous content)
 
@@ -386,19 +401,23 @@ public:
     // RAY MARCHING QUALITY
     // ═══════════════════════════════════════════════════════════════════════════
     struct QualitySettings {
-        float step_size = 0.15f;            ///< Base step size (auto-adjusted)
+        float step_size = 0.15f;          ///< Legacy/custom fixed world-space step
+        float voxel_step_multiplier = 1.0f; ///< Primary sample spacing in voxels
         int max_steps = 64;               ///< Maximum steps per ray
         int shadow_steps = 8;              ///< Steps for self-shadowing
+        int shadow_stride = 4;             ///< Reuse one shadow result across N primary samples
         float shadow_strength = 0.8f;      ///< Self-shadow intensity (0-1)
         bool adaptive_stepping = true;     ///< Adjust step based on density
-        int quality_preset = 1;            ///< 0=Fast, 1=Balanced, 2=Exact, 3=Custom
+        int quality_preset = 1;            ///< 0=Draft, 1=Medium, 2=High, 3=Ultra, 4=Custom
 
         // Serialization
         json toJson() const {
             json j;
             j["step_size"] = step_size;
+            j["voxel_step_multiplier"] = voxel_step_multiplier;
             j["max_steps"] = max_steps;
             j["shadow_steps"] = shadow_steps;
+            j["shadow_stride"] = shadow_stride;
             j["shadow_strength"] = shadow_strength;
             j["adaptive_stepping"] = adaptive_stepping;
             j["quality_preset"] = quality_preset;
@@ -406,18 +425,34 @@ public:
         }
 
         void fromJson(const json& j) {
+            const bool has_voxel_multiplier = j.contains("voxel_step_multiplier");
             if (j.contains("step_size")) step_size = j["step_size"];
+            if (has_voxel_multiplier) {
+                voxel_step_multiplier = j["voxel_step_multiplier"];
+            }
             if (j.contains("max_steps")) max_steps = j["max_steps"];
             if (j.contains("shadow_steps")) shadow_steps = j["shadow_steps"];
+            if (j.contains("shadow_stride")) shadow_stride = j["shadow_stride"];
             if (j.contains("shadow_strength")) shadow_strength = j["shadow_strength"];
             if (j.contains("adaptive_stepping")) adaptive_stepping = j["adaptive_stepping"];
+            if (!has_voxel_multiplier) adaptive_stepping = false;
             if (j.contains("quality_preset")) {
                 quality_preset = j["quality_preset"];
             } else {
                 // Backward compatibility for old scene files without preset selection.
                 quality_preset = 1; // Balanced
             }
-            if (quality_preset < 0 || quality_preset > 3) quality_preset = 1;
+            if (!has_voxel_multiplier) quality_preset = 4; // migrated fixed-step custom
+            if (quality_preset < 0 || quality_preset > 4) quality_preset = 1;
+            if (voxel_step_multiplier < 0.1f) voxel_step_multiplier = 0.1f;
+            if (voxel_step_multiplier > 8.0f) voxel_step_multiplier = 8.0f;
+            if (shadow_stride < 1) shadow_stride = 1;
+            if (shadow_stride > 16) shadow_stride = 16;
+        }
+
+        float primaryStep(float voxel_size) const {
+            if (!adaptive_stepping || voxel_size <= 1e-6f) return step_size;
+            return voxel_size * voxel_step_multiplier;
         }
     } quality;
 
@@ -446,6 +481,8 @@ public:
         
         // High quality rendering for explosions
         shader->quality.step_size = 0.05f; 
+        shader->quality.voxel_step_multiplier = 0.425f;
+        shader->quality.quality_preset = 2;
         shader->quality.max_steps = 512;
         shader->quality.shadow_steps = 12;
         shader->quality.shadow_strength = 0.9f;
@@ -468,6 +505,8 @@ public:
         shader->emission.mode = VolumeEmissionMode::None;
         
         shader->quality.step_size = 0.2f;
+        shader->quality.voxel_step_multiplier = 0.875f;
+        shader->quality.quality_preset = 1;
         shader->quality.max_steps = 512;
         shader->quality.shadow_steps = 8;
         shader->quality.shadow_strength = 0.9f;
@@ -488,11 +527,13 @@ public:
     json toJson() const {
         json j;
         j["name"] = name;
+        j["material_graph"] = material_graph;
         j["density"] = density.toJson();
         j["scattering"] = scattering.toJson();
         j["absorption"] = absorption.toJson();
         j["emission"] = emission.toJson();
         j["quality"] = quality.toJson();
+        j["material_program"] = material_program.toJson();
         j["motion_blur"] = {
             {"enabled", motion_blur.enabled},
             {"velocity_channel", motion_blur.velocity_channel},
@@ -503,11 +544,13 @@ public:
 
     void fromJson(const json& j) {
         if (j.contains("name")) name = j["name"];
+        if (j.contains("material_graph")) material_graph = j["material_graph"].get<std::string>();
         if (j.contains("density")) density.fromJson(j["density"]);
         if (j.contains("scattering")) scattering.fromJson(j["scattering"]);
         if (j.contains("absorption")) absorption.fromJson(j["absorption"]);
         if (j.contains("emission")) emission.fromJson(j["emission"]);
         if (j.contains("quality")) quality.fromJson(j["quality"]);
+        if (j.contains("material_program")) material_program.fromJson(j["material_program"]);
         if (j.contains("motion_blur")) {
             auto mb = j["motion_blur"];
             motion_blur.enabled = mb.value("enabled", false);
@@ -562,6 +605,7 @@ public:
         gpu.step_size = quality.step_size;
         gpu.max_steps = quality.max_steps;
         gpu.shadow_steps = quality.shadow_steps;
+        gpu.shadow_stride = quality.shadow_stride;
         gpu.shadow_strength = quality.shadow_strength;
         
         // Color Ramp
@@ -577,6 +621,48 @@ public:
         // Motion blur
         gpu.motion_blur_enabled = motion_blur.enabled ? 1 : 0;
         gpu.velocity_scale = motion_blur.scale;
+
+        // Homogeneous graph outputs are compile-time constants. Folding them
+        // here avoids a VM invocation at every primary and shadow march step.
+        VolumeMaterialProgram program = material_program;
+        program.sanitize();
+        if (program.active) {
+            // Density authored by a material is an extinction multiplier over
+            // the container's source field, never a replacement for it:
+            //   final = sampled_grid * container_multiplier * material_multiplier
+            // This preserves VDB/Gas/Fluid/SDF data when a shared material is bound.
+            if (program.has(VolumeMaterialSlot::Density))
+                gpu.density_multiplier *= program.density;
+            if (program.has(VolumeMaterialSlot::ScatterColor)) {
+                gpu.scatter_color_r = program.scatter_color[0];
+                gpu.scatter_color_g = program.scatter_color[1];
+                gpu.scatter_color_b = program.scatter_color[2];
+            }
+            if (program.has(VolumeMaterialSlot::ScatterStrength)) gpu.scatter_coefficient = program.scatter_strength;
+            if (program.has(VolumeMaterialSlot::AbsorptionColor)) {
+                gpu.absorption_color_r = program.absorption_color[0];
+                gpu.absorption_color_g = program.absorption_color[1];
+                gpu.absorption_color_b = program.absorption_color[2];
+            }
+            if (program.has(VolumeMaterialSlot::AbsorptionStrength)) gpu.absorption_coefficient = program.absorption_strength;
+            if (program.has(VolumeMaterialSlot::EmissionColor)) {
+                gpu.emission_color_r = program.emission_color[0];
+                gpu.emission_color_g = program.emission_color[1];
+                gpu.emission_color_b = program.emission_color[2];
+                if (gpu.emission_mode == 0) gpu.emission_mode = 1;
+            }
+            if (program.has(VolumeMaterialSlot::EmissionStrength)) {
+                gpu.emission_intensity = program.emission_strength;
+                if (program.emission_strength > 0.0f && gpu.emission_mode == 0) gpu.emission_mode = 1;
+            }
+            if (program.has(VolumeMaterialSlot::Anisotropy)) gpu.scatter_anisotropy = program.anisotropy;
+            if (program.has(VolumeMaterialSlot::MultiScatter)) gpu.scatter_multi = program.multi_scatter;
+            gpu.density_noise_enabled = program.density_noise_enabled ? 1 : 0;
+            gpu.density_noise_scale = program.density_noise_scale;
+            gpu.density_noise_strength = program.density_noise_strength;
+            gpu.density_noise_detail = program.density_noise_detail;
+            gpu.density_noise_seed = program.density_noise_seed;
+        }
         
         return gpu;
     }

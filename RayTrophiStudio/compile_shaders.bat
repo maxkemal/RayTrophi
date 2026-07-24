@@ -38,8 +38,16 @@ for %%e in (vert frag) do (
         echo Compiling: %%~nxf
         "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 -O
         if errorlevel 1 (
-            echo FAILED: %%~nxf
-            goto :error
+            REM A running preview/file watcher or antivirus can hold the old SPV
+            REM for a fraction of a second on Windows. Retry once before treating
+            REM a transient output-file lock as a shader compile failure.
+            echo   Output busy; retrying once...
+            timeout /t 1 /nobreak >nul
+            "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 -O
+            if errorlevel 1 (
+                echo FAILED: %%~nxf
+                goto :error
+            )
         )
         echo   OK: %%~nf.spv
     )

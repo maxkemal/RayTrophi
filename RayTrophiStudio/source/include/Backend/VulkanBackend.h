@@ -218,7 +218,7 @@ struct HairGpuMaterial {
     float randomHue;           // offset 128
     float randomValue;         // offset 132
     uint32_t groomID;          // offset 136
-    float pad;                 // offset 140
+    float selfShadow;          // offset 140 — 0=off (fast binary shadow), 1=full deep self-shadow
 };
 static_assert(sizeof(HairGpuMaterial) == 144, "HairGpuMaterial size mismatch");
 

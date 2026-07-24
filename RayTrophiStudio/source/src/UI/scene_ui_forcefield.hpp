@@ -927,6 +927,21 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                         fluid->level_set_stats.eff_nz);
                 }
             }
+
+            if (fluid->render_mode != RayTrophiSim::Fluid::FluidRenderMode::Particles) {
+                if (!fluid->shader) {
+                    fluid->shader = VolumeShader::createSmokePreset();
+                    fluid->shader->name = (fluid->render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF)
+                        ? "Liquid Surface (SDF)" : "Liquid Volume";
+                }
+                if (SceneUI::drawVolumeShaderUI(ui_ctx, fluid->shader, nullptr, nullptr)) {
+                    scene.refreshFluidSurfaceMaterial();
+                    ui_ctx.renderer.updateBackendGasVolumes(scene);
+                    ui_ctx.renderer.resetCPUAccumulation();
+                    if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                    ui_ctx.start_render = true;
+                }
+            }
         }
 
         {

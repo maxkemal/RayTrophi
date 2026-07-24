@@ -873,17 +873,23 @@ __device__ float3 raymarch_vdb_volume(
     float world_t_exit = t_exit / dir_length;
     float world_vol_extent = world_t_exit - world_t_enter;
 
-    // Safety Step Calculation: Ensures we reach the exit before hitting max_steps
-    float min_step_to_cover = world_vol_extent / fmaxf(1.0f, (float)vol.max_steps - 1.0f);
-    float base_step = fmaxf(vol.step_size, min_step_to_cover);
+    // Voxel-derived step controls quality. max_steps is a safety floor; only the
+    // hard ceiling is allowed to coarsen pathological rays.
+    const int hard_step_ceiling = 2048;
+    float requested_step = fmaxf(vol.step_size, 1e-5f);
+    int required_steps = (int)ceilf(world_vol_extent / requested_step) + 2;
+    int authored_step_budget = max(vol.max_steps, 1);
+    int effective_step_budget = min(hard_step_ceiling, authored_step_budget);
+    int march_step_limit = min(required_steps, effective_step_budget);
+    float base_step = (required_steps > effective_step_budget)
+        ? fmaxf(requested_step, world_vol_extent / (float)effective_step_budget)
+        : requested_step;
     
     // Quality clamp: Ensure we don't use a step larger than the voxel size if requested small
     float world_scale = 1.0f / fmaxf(1e-6f, length(make_float3(vol.inv_transform[0], vol.inv_transform[1], vol.inv_transform[2])));
     float world_voxel_size = vol.voxel_size * world_scale;
     base_step = fmaxf(0.0001f, fminf(base_step, fmaxf(world_voxel_size, world_vol_extent / 16.0f)));
     
-    // Re-verify that step will actually cover the volume (final safety)
-    base_step = fmaxf(base_step, min_step_to_cover);
     float min_step = fmaxf(base_step * 0.25f, 0.0001f);
     const float tau_max = 0.2f;
 
@@ -904,7 +910,7 @@ __device__ float3 raymarch_vdb_volume(
         reinterpret_cast<const nanovdb::FloatGrid*>(vol.temperature_grid) : nullptr;
     
     int steps = 0;
-    while (t < world_t_exit && steps < vol.max_steps && (transmittance.x + transmittance.y + transmittance.z) > 0.015f) {
+    while (t < world_t_exit && steps < march_step_limit && (transmittance.x + transmittance.y + transmittance.z) > 0.003f) {
         float3 world_pos = ray_origin + ray_dir * t;
         float3 local_pos = transform_point_affine(world_pos, vol.inv_transform);
         
@@ -3246,6 +3252,41 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             mat.transmission         = 0.0f;
             mat.transmission_density = 0.0f;  // now a plain diffuse base for scatter + NEE
             resin_active             = true;
+        }
+
+        // A mesh volume is a boundary, not a surface BSDF.  Handle it before
+        // scatter_material(): Volumetric deliberately has no surface lobe, so
+        // the old ordering terminated the path here and rendered the closed
+        // mesh black before the volume marcher could ever run.
+        if (payload.is_volumetric) {
+            float vol_transmittance = 1.0f;
+            float3 vol_color = raymarch_volumetric_object(
+                ray.origin, ray.direction, payload.aabb_min, payload.aabb_max,
+                payload.vol_density, payload.vol_absorption, payload.vol_scattering,
+                payload.vol_albedo, payload.vol_emission, payload.vol_g,
+                payload.vol_step_size, payload.vol_max_steps, payload.vol_noise_scale,
+                payload.vol_multi_scatter, payload.vol_g_back, payload.vol_lobe_mix,
+                payload.vol_light_steps, payload.vol_shadow_strength,
+                payload.nanovdb_grid, payload.has_nanovdb,
+                vol_transmittance, rng);
+
+            color += throughput * vol_color;
+            throughput *= make_float3(vol_transmittance);
+            if (vol_transmittance < 0.01f) break;
+
+            Ray exit_ray(payload.position + ray.direction * SCENE_EPSILON, ray.direction);
+            OptixHitResult exit_payload = {};
+            trace_ray(exit_ray, &exit_payload, SCENE_EPSILON, 1e16f);
+            if (!exit_payload.hit) {
+                float3 bg_color = evaluate_background(
+                    optixLaunchParams.world, ray.origin, ray.direction, rng,
+                    path_touched_transmissive);
+                float bg_factor = (bounce == 0) ? 1.0f : fmaxf(0.1f, 1.0f / (1.0f + bounce * 0.5f));
+                color += soft_clip_fireflies(throughput * bg_color * bg_factor, 64.0f);
+                break;
+            }
+            ray = Ray(exit_payload.position + ray.direction * 0.01f, ray.direction);
+            continue;
         }
 
         // --- Scatter başarısızsa: emission'ı ekle ve çık ---

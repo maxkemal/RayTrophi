@@ -137,6 +137,10 @@ bool materialCanUseOpaqueFastPath(uint32_t materialId) {
     Material* mat = MaterialManager::getInstance().getMaterial(static_cast<uint16_t>(materialId));
     if (!mat) return true;
     if (mat->isTransparent()) return false;
+    // Closed-mesh Volume materials need the shadow any-hit stage to integrate
+    // partial medium transmittance. Treating their boundary triangles as opaque
+    // turns every volume into a solid black shadow caster.
+    if (mat->type() == MaterialType::Volumetric) return false;
     // Transmissive glass/water must NOT take the opaque fast path: the shadow
     // any-hit implements coloured pass-through shadows (CPU shadow-walk parity),
     // and VK_GEOMETRY_OPAQUE_BIT would silently keep their shadows solid black.
@@ -3116,12 +3120,26 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
 
     // --- 1) Create shader modules ---
     auto createModule = [&](const std::vector<std::uint32_t>& code) -> VkShaderModule {
+        // Reject truncated/stale files before handing them to the driver. The
+        // SPIR-V header is five words and starts with 0x07230203.
+        if (code.size() < 5 || code[0] != 0x07230203u) {
+            VK_ERROR() << "[VulkanDevice] Invalid SPIR-V module (words="
+                       << code.size() << ")" << std::endl;
+            return VK_NULL_HANDLE;
+        }
         VkShaderModuleCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         ci.codeSize = code.size() * sizeof(uint32_t);
         ci.pCode = code.data();
-        VkShaderModule mod;
-        vkCreateShaderModule(m_device, &ci, nullptr, &mod);
+        VkShaderModule mod = VK_NULL_HANDLE;
+        const VkResult moduleResult =
+            vkCreateShaderModule(m_device, &ci, nullptr, &mod);
+        if (moduleResult != VK_SUCCESS) {
+            VK_ERROR() << "[VulkanDevice] vkCreateShaderModule failed: "
+                       << moduleResult << " (words=" << code.size() << ")"
+                       << std::endl;
+            return VK_NULL_HANDLE;
+        }
         return mod;
     };
 
@@ -3444,16 +3462,20 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[9].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
 
     // Binding 10: Hair Segment SSBO
+    // ANY_HIT added: hair_shadow_anyhit.rahit reads this to map gl_PrimitiveID → materialID
+    // for deep self-shadow. A shader stage touching a binding the layout doesn't expose to
+    // that stage makes the NVIDIA driver crash inside vkCreateRayTracingPipelinesKHR.
     bindings[10].binding = 10;
     bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[10].descriptorCount = 1;
-    bindings[10].stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[10].stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
     // Binding 11: Hair Material SSBO
+    // ANY_HIT added: hair_shadow_anyhit.rahit reads per-groom selfShadow strength.
     bindings[11].binding = 11;
     bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[11].descriptorCount = 1;
-    bindings[11].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[11].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
     // Binding 12: Terrain Layer SSBO
     bindings[12].binding = 12;
@@ -3797,6 +3819,7 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
         defaultHair.cuticleAngle = 0.05f;
         defaultHair.colorMode = 1; // Melanin
         defaultHair.radialRoughness = 0.3f;
+        defaultHair.selfShadow = 1.0f; // deep self-shadow on by default
         std::vector<VulkanRT::HairGpuMaterial> dummy(64, defaultHair);
         updateHairMaterialBuffer(dummy);
     }
@@ -4520,7 +4543,13 @@ void VulkanDevice::updateVolumeBuffer(const void* data, uint64_t size, uint32_t 
     }
     
     if (m_volumeBuffer.size < size) {
-        if (m_volumeBuffer.buffer) destroyBuffer(m_volumeBuffer);
+        // Binding 9 may still be referenced by an already submitted RT command
+        // buffer. Descriptor replacement does not extend the old buffer's
+        // lifetime, so retire it only after the queue is idle.
+        if (m_volumeBuffer.buffer) {
+            waitIdle();
+            destroyBuffer(m_volumeBuffer);
+        }
         BufferCreateInfo ci;
         ci.size = size > 1024 ? size : 1024;
         ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
@@ -8518,58 +8547,98 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
 
         // Default radius when per-point radii are absent
         const float defaultR = 0.002f;
+        auto getR = [&](int idx) {
+            if (idx >= 0 && idx < (int)strand.radii.size()) return strand.radii[idx];
+            return defaultR;
+        };
 
-        for (int i = 0; i < N - 3; i++) {
+        const uint32_t matID = strand.materialID;
+        maxMaterialID = (std::max)(maxMaterialID, static_cast<uint32_t>(matID));
+
+        // Store a segment from its 4 cubic-B-spline control points and append a
+        // LSS-tight AABB. The AABB spans the two endpoints curve(0)=(cp0+4cp1+cp2)/6
+        // and curve(1)=(cp1+4cp2+cp3)/6 — much tighter than the 4-CP convex hull.
+        // hair_intersection.rint reconstructs the same endpoints, so this bound is exact.
+        auto pushSeg = [&](const float cp0[4], const float cp1[4],
+                           const float cp2[4], const float cp3[4]) {
             VulkanRT::HairSegmentGPU seg{};
-            // Control points (vec4: xyz=position, w=radius)
-            auto getR = [&](int idx) {
-                if (idx < (int)strand.radii.size()) return strand.radii[idx];
-                return defaultR;
-            };
-            seg.cp0[0] = pts[i    ].x; seg.cp0[1] = pts[i    ].y; seg.cp0[2] = pts[i    ].z; seg.cp0[3] = getR(i);
-            seg.cp1[0] = pts[i + 1].x; seg.cp1[1] = pts[i + 1].y; seg.cp1[2] = pts[i + 1].z; seg.cp1[3] = getR(i + 1);
-            seg.cp2[0] = pts[i + 2].x; seg.cp2[1] = pts[i + 2].y; seg.cp2[2] = pts[i + 2].z; seg.cp2[3] = getR(i + 2);
-            seg.cp3[0] = pts[i + 3].x; seg.cp3[1] = pts[i + 3].y; seg.cp3[2] = pts[i + 3].z; seg.cp3[3] = getR(i + 3);
-            seg.strandID   = strandIdx;
-            seg.groomID    = strand.materialID;
-            seg.materialID = strand.materialID;
-            seg.padding    = 0;
-            maxMaterialID  = (std::max)(maxMaterialID, static_cast<uint32_t>(strand.materialID));
+            for (int k = 0; k < 4; ++k) {
+                seg.cp0[k] = cp0[k]; seg.cp1[k] = cp1[k];
+                seg.cp2[k] = cp2[k]; seg.cp3[k] = cp3[k];
+            }
+            seg.strandID = strandIdx; seg.groomID = matID; seg.materialID = matID; seg.padding = 0;
 
-            // LSS-tight AABB: hair_intersection.rint now treats each segment as a
-            // linear-swept-sphere between the cubic B-spline endpoints curve(u=0) and
-            // curve(u=1). The body lies entirely inside the union of the two endpoint
-            // spheres' bounding boxes — much tighter than the old "convex hull of 4
-            // control points ± max radius" approach, which over-estimated by ~3× in
-            // the curve direction because cp0 and cp3 sit far from the actual segment.
-            // Tighter AABBs reduce false-positive .rint invocations on close-up hair.
-            //
-            // Uniform cubic B-spline values at endpoints:
-            //   curve(0) = (cp0 + 4*cp1 + cp2) / 6,  curve(1) = (cp1 + 4*cp2 + cp3) / 6
-            // Same formulas applied to radii.
             const float inv6 = 1.0f / 6.0f;
-            const float p0x = (seg.cp0[0] + 4.0f * seg.cp1[0] + seg.cp2[0]) * inv6;
-            const float p0y = (seg.cp0[1] + 4.0f * seg.cp1[1] + seg.cp2[1]) * inv6;
-            const float p0z = (seg.cp0[2] + 4.0f * seg.cp1[2] + seg.cp2[2]) * inv6;
-            const float r0  = (seg.cp0[3] + 4.0f * seg.cp1[3] + seg.cp2[3]) * inv6;
-            const float p1x = (seg.cp1[0] + 4.0f * seg.cp2[0] + seg.cp3[0]) * inv6;
-            const float p1y = (seg.cp1[1] + 4.0f * seg.cp2[1] + seg.cp3[1]) * inv6;
-            const float p1z = (seg.cp1[2] + 4.0f * seg.cp2[2] + seg.cp3[2]) * inv6;
-            const float r1  = (seg.cp1[3] + 4.0f * seg.cp2[3] + seg.cp3[3]) * inv6;
-
-            const float minX = std::min(p0x - r0, p1x - r1);
-            const float minY = std::min(p0y - r0, p1y - r1);
-            const float minZ = std::min(p0z - r0, p1z - r1);
-            const float maxX = std::max(p0x + r0, p1x + r1);
-            const float maxY = std::max(p0y + r0, p1y + r1);
-            const float maxZ = std::max(p0z + r0, p1z + r1);
+            const float p0x = (cp0[0] + 4.0f * cp1[0] + cp2[0]) * inv6;
+            const float p0y = (cp0[1] + 4.0f * cp1[1] + cp2[1]) * inv6;
+            const float p0z = (cp0[2] + 4.0f * cp1[2] + cp2[2]) * inv6;
+            const float r0  = (cp0[3] + 4.0f * cp1[3] + cp2[3]) * inv6;
+            const float p1x = (cp1[0] + 4.0f * cp2[0] + cp3[0]) * inv6;
+            const float p1y = (cp1[1] + 4.0f * cp2[1] + cp3[1]) * inv6;
+            const float p1z = (cp1[2] + 4.0f * cp2[2] + cp3[2]) * inv6;
+            const float r1  = (cp1[3] + 4.0f * cp2[3] + cp3[3]) * inv6;
 
             VkAabbPositionsKHR aabb{};
-            aabb.minX = minX; aabb.minY = minY; aabb.minZ = minZ;
-            aabb.maxX = maxX; aabb.maxY = maxY; aabb.maxZ = maxZ;
+            aabb.minX = std::min(p0x - r0, p1x - r1);
+            aabb.minY = std::min(p0y - r0, p1y - r1);
+            aabb.minZ = std::min(p0z - r0, p1z - r1);
+            aabb.maxX = std::max(p0x + r0, p1x + r1);
+            aabb.maxY = std::max(p0y + r0, p1y + r1);
+            aabb.maxZ = std::max(p0z + r0, p1z + r1);
 
             segments.push_back(seg);
             aabbs.push_back(aabb);
+        };
+
+        // Tessellation: each cubic span becomes K = 2^subdivisions sub-segments.
+        //   subdivisions 0 → K=1  : ONE straight LSS chord between the true B-spline
+        //                           endpoints — unchanged behaviour, keeps the .rint's
+        //                           analytic C¹ tangent (real cubic CPs stored).
+        //   subdivisions >0 → K>1 : sample the TRUE cubic B-spline curve at K sub-points
+        //                           and emit short straight LSS sub-segments so the
+        //                           SILHOUETTE follows the curve (fixes kinked curls).
+        // NOTE: K multiplies the hair AABB/segment count — dense grooms scale VRAM/build
+        // time by K. The UI "Subdivisions" slider is the control; lower it if heavy.
+        const uint32_t K = 1u << (std::min)(strand.subdivisions, 4u);
+
+        for (int i = 0; i < N - 3; i++) {
+            const float c0[4] = { pts[i    ].x, pts[i    ].y, pts[i    ].z, getR(i    ) };
+            const float c1[4] = { pts[i + 1].x, pts[i + 1].y, pts[i + 1].z, getR(i + 1) };
+            const float c2[4] = { pts[i + 2].x, pts[i + 2].y, pts[i + 2].z, getR(i + 2) };
+            const float c3[4] = { pts[i + 3].x, pts[i + 3].y, pts[i + 3].z, getR(i + 3) };
+
+            if (K <= 1) {
+                pushSeg(c0, c1, c2, c3);   // real cubic segment (with analytic tangent)
+                continue;
+            }
+
+            // Uniform cubic B-spline basis at parameter t∈[0,1] (position + radius in .w).
+            auto evalBSpline = [&](float t, float out[4]) {
+                const float t2 = t * t, t3 = t2 * t, omt = 1.0f - t;
+                const float b0 = (omt * omt * omt) / 6.0f;
+                const float b1 = (3.0f * t3 - 6.0f * t2 + 4.0f) / 6.0f;
+                const float b2 = (-3.0f * t3 + 3.0f * t2 + 3.0f * t + 1.0f) / 6.0f;
+                const float b3 = t3 / 6.0f;
+                for (int k = 0; k < 4; ++k)
+                    out[k] = b0 * c0[k] + b1 * c1[k] + b2 * c2[k] + b3 * c3[k];
+            };
+
+            float prev[4]; evalBSpline(0.0f, prev);
+            for (uint32_t j = 1; j <= K; ++j) {
+                float cur[4]; evalBSpline((float)j / (float)K, cur);
+                // Store the straight sub-segment prev→cur as collinear, evenly-spaced
+                // cubic B-spline CPs so the .rint reproduces curve(0)=prev, curve(1)=cur:
+                //   cp1=prev, cp2=cur, cp0=2·prev−cur, cp3=2·cur−prev  (radius in .w too).
+                float scp0[4], scp1[4], scp2[4], scp3[4];
+                for (int k = 0; k < 4; ++k) {
+                    scp1[k] = prev[k];
+                    scp2[k] = cur[k];
+                    scp0[k] = 2.0f * prev[k] - cur[k];
+                    scp3[k] = 2.0f * cur[k]  - prev[k];
+                }
+                pushSeg(scp0, scp1, scp2, scp3);
+                for (int k = 0; k < 4; ++k) prev[k] = cur[k];
+            }
         }
         ++strandIdx;
     }
@@ -10841,6 +10910,17 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.shard_shape = static_cast<float>(m.shard_shape);
         if (m.resin_object_space) gm.flags |= VulkanRT::VK_MAT_FLAG_RESIN_OBJ_SPACE;
         if (m.glass_marble_volume) gm.flags |= VulkanRT::VK_MAT_FLAG_MARBLE_VOLUME;
+        if (m.isVolume) gm.flags |= VulkanRT::VK_MAT_FLAG_VOLUME;
+        gm.volume_density = m.volumeDensity;
+        gm.volume_absorption = m.volumeAbsorption;
+        gm.volume_scattering = m.volumeScattering;
+        gm.volume_anisotropy = m.volumeAnisotropy;
+        gm.volume_step_size = m.volumeStepSize;
+        gm.volume_max_steps = static_cast<float>(m.volumeMaxSteps);
+        gm.volume_noise_scale = m.volumeNoiseScale;
+        gm.volume_multi_scatter = m.volumeMultiScatter;
+        gm.volume_light_steps = static_cast<float>(m.volumeLightSteps);
+        gm.volume_shadow_strength = m.volumeShadowStrength;
         gm.uv_scale_x = static_cast<float>(m.uvScale.x);
         gm.uv_scale_y = static_cast<float>(m.uvScale.y);
         gm.uv_offset_x = static_cast<float>(m.uvOffset.x);
@@ -11325,6 +11405,17 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     gm.shard_shape = static_cast<float>(m.shard_shape);
     if (m.resin_object_space) gm.flags |= VulkanRT::VK_MAT_FLAG_RESIN_OBJ_SPACE;
     if (m.glass_marble_volume) gm.flags |= VulkanRT::VK_MAT_FLAG_MARBLE_VOLUME;
+    if (m.isVolume) gm.flags |= VulkanRT::VK_MAT_FLAG_VOLUME;
+    gm.volume_density = m.volumeDensity;
+    gm.volume_absorption = m.volumeAbsorption;
+    gm.volume_scattering = m.volumeScattering;
+    gm.volume_anisotropy = m.volumeAnisotropy;
+    gm.volume_step_size = m.volumeStepSize;
+    gm.volume_max_steps = static_cast<float>(m.volumeMaxSteps);
+    gm.volume_noise_scale = m.volumeNoiseScale;
+    gm.volume_multi_scatter = m.volumeMultiScatter;
+    gm.volume_light_steps = static_cast<float>(m.volumeLightSteps);
+    gm.volume_shadow_strength = m.volumeShadowStrength;
     gm.uv_scale_x = static_cast<float>(m.uvScale.x);
     gm.uv_scale_y = static_cast<float>(m.uvScale.y);
     gm.uv_offset_x = static_cast<float>(m.uvOffset.x);
@@ -11497,7 +11588,7 @@ void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialDat
         gm.randomHue      = m.randomHue;
         gm.randomValue    = m.randomValue;
         gm.groomID        = (uint32_t)i;
-        gm.pad            = 0.0f;
+        gm.selfShadow     = m.selfShadow;   // deep hair self-shadow strength (0..1)
         gpuMats.push_back(gm);
     }
 
@@ -18985,6 +19076,23 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
 
 void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vols) {
     if (!m_device) return;
+    // Sequence playback can upload a new NanoVDB frame while the viewport
+    // render thread is traversing the previous frame's device address. Match
+    // material-program updates and serialize the complete VDB resource update
+    // against renderProgressiveImpl.
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    bool gridUploadSynchronized = false;
+    auto synchronizeGridUpload = [&]() {
+        if (!gridUploadSynchronized) {
+            // CPU_TO_GPU NanoVDB buffers expose stable device addresses and are
+            // read directly by the RT shader. Rewriting one while an earlier
+            // dispatch is still traversing it can expose a partially updated
+            // tree to the driver. One queue-idle covers all density/temperature
+            // uploads in this synchronization batch.
+            m_device->waitIdle();
+            gridUploadSynchronized = true;
+        }
+    };
     if (vols.empty()) {
         // No active volumes: release any stale cached VDB buffers immediately.
         if (!m_vdbBuffers.empty() || !m_vdbTempBuffers.empty()) {
@@ -19113,6 +19221,11 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst._ext_reserved[4] = src.foam_color.y;
         dst._ext_reserved[5] = src.foam_color.z;
         dst._ext_reserved[6] = src.foam_opacity;
+        dst._ext_reserved[7] = src.density_noise_enabled ? 1.0f : 0.0f;
+        dst._ext_reserved[8] = src.density_noise_scale;
+        dst._ext_reserved[9] = src.density_noise_strength;
+        dst._ext_reserved[10] = static_cast<float>(src.density_noise_detail);
+        dst._ext_reserved[11] = static_cast<float>(src.density_noise_seed);
         dst.cloud_coverage = src.cloud_coverage;
         dst.cloud_detail = src.cloud_detail;
         dst.cloud_erosion = src.cloud_erosion;
@@ -19134,8 +19247,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.density_remap_high = src.density_remap_high;
         dst.noise_scale = 1.0f;
         dst._reserved[0] = (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
-        dst._reserved[1] = src.emission_pad;
-        
+        // 0 means no graph; otherwise material-table index + 1. Stored as an
+        // exact float (material counts are tiny relative to float integer range)
+        // to preserve the fixed 512-byte volume ABI.
+        dst._reserved[1] = src.material_program_index >= 0
+            ? static_cast<float>(src.material_program_index + 1) : 0.0f;
+        dst.shadow_stride = std::max(1, std::min(src.shadow_stride, 16));
         // Sync NanoVDB Host Buffer to Vulkan Device Buffer
         dst.volume_type = 2; // 2 = NanoVDB
         dst.vdb_grid_address = 0;
@@ -19185,6 +19302,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 
                 if (it != m_vdbBuffers.end() && it->second.buffer) {
                     if (needsUpload) {
+                        synchronizeGridUpload();
                         m_device->uploadBuffer(it->second, hostGrid, gridSize);
                         m_vdbUploadedVersions[vdb_id] = currentVersion;
                     }
@@ -19225,6 +19343,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 
                 if (it2 != m_vdbTempBuffers.end() && it2->second.buffer) {
                     if (needsTempUpload) {
+                        synchronizeGridUpload();
                         m_device->uploadBuffer(it2->second, hostTempGrid, tempGridSize);
                         m_vdbTempUploadedVersions[vdb_id] = currentVersion;
                     }
@@ -19337,6 +19456,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
 void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vols) {
     // Gas volumes use similar conversion — for now, handled as basic homogeneous volumes
     if (!m_device || vols.empty()) return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     std::vector<VulkanRT::VkVolumeInstance> instances(vols.size());
     for (size_t i = 0; i < vols.size(); i++) {

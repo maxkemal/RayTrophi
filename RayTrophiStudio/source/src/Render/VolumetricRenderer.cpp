@@ -7,10 +7,14 @@
 */
 #include "VolumetricRenderer.h"
 #include "Backend/IBackend.h"
+#include "Backend/VulkanBackend.h"
 #include "VDBVolume.h"
 #include "VDBVolumeManager.h"
 #include "GasVolume.h"
 #include "VolumeShader.h"
+#include "MaterialManager.h"
+#include "PrincipledBSDF.h"
+#include "Volumetric.h"
 #include "renderer.h" 
 #include "globals.h"
 #include <cmath>
@@ -51,6 +55,51 @@ constexpr const char* kInternalSkyCloudVolumeName = "__RayTrophi_Internal_SkyClo
 
 float clamp01(float v) {
     return (std::max)(0.0f, (std::min)(1.0f, v));
+}
+
+// A single material graph asset can provide both Surface and Volume outputs.
+// VDB/Gas/Fluid consume Volume through VolumeShader::material_program; an SDF
+// boundary consumes the same asset's Principled surface closure here.
+void applySharedSurfaceMaterial(VDBVolume& volume, const std::shared_ptr<VolumeShader>& shader) {
+    if (!volume.render_as_isosurface || !shader || shader->material_graph.empty()) return;
+    auto& materials = MaterialManager::getInstance();
+    const uint16_t id = materials.getMaterialID(shader->material_graph);
+    if (id == MaterialManager::INVALID_MATERIAL_ID) return;
+    auto* surface = dynamic_cast<PrincipledBSDF*>(materials.getMaterial(id));
+    if (!surface) return;
+
+    volume.render_isosurface_ior = (std::max)(1.0f, surface->getIOR());
+    volume.render_isosurface_roughness =
+        (std::max)(0.0f, (std::min)(1.0f, surface->getRoughnessValue(Vec2(0.5f, 0.5f))));
+}
+
+// A VDB only needs the material VM when the compiled graph actually writes at
+// least one Volume closure slot. Surface-only programs are valid for an SDF
+// boundary, but interpreting them at every VDB march sample is both ineffective
+// (volumeWritten stays zero) and extremely expensive.
+int resolveVolumeMaterialProgramIndex(const std::shared_ptr<VolumeShader>& shader) {
+    if (!shader || shader->material_graph.empty()) return -1;
+
+    auto& materials = MaterialManager::getInstance();
+    const uint16_t id = materials.getMaterialID(shader->material_graph);
+    if (id == MaterialManager::INVALID_MATERIAL_ID) return -1;
+
+    const MaterialNodesV2::MaterialProgram* program = nullptr;
+    if (auto* surface = dynamic_cast<PrincipledBSDF*>(materials.getMaterial(id))) {
+        program = surface->proceduralProgram.get();
+    } else if (auto* volume = dynamic_cast<Volumetric*>(materials.getMaterial(id))) {
+        program = volume->proceduralProgram.get();
+    }
+
+    constexpr uint32_t kVolumeSlotMask = 0x01FF0000u; // closure slots 16..24
+    if (!program || !program->active || (program->drivenSlots & kVolumeSlotMask) == 0u)
+        return -1;
+    // Must match MP_REGISTER_COUNT in volume_closesthit.rchit. Surface graphs
+    // retain the full 32-register VM; oversized volume graphs safely keep their
+    // already-folded material values instead of overflowing shader scratch.
+    constexpr int kVolumeVmRegisterLimit = 12;
+    if (program->regCount > kVolumeVmRegisterLimit) return -1;
+    return static_cast<int>(id);
 }
 
 std::shared_ptr<VDBVolume> findInternalSkyCloudVolume(SceneData& scene) {
@@ -306,6 +355,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
     // 1. Prepare VDB Volumes (Unified for VDB and Unified-Path Gas)
     std::vector<GpuVDBVolume> gpu_vdb_volumes;
     auto& mgr = VDBVolumeManager::getInstance();
+    const bool vulkanRT = dynamic_cast<Backend::VulkanBackendAdapter*>(backend) != nullptr;
 
     // 1a. Scan standard VDB objects
     for (const auto& vdb : scene.vdb_volumes) {
@@ -332,6 +382,16 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
 
         Matrix4x4 m = vdb->getTransform();
         Matrix4x4 inv = vdb->getInverseTransform();
+        // VDB transforms frequently contain scene-unit conversion or artist
+        // scaling. getVoxelSize() is native-grid space; ray marching happens in
+        // world space. Use the smallest transformed basis length so anisotropic
+        // scaling never undersamples the most compressed voxel axis.
+        const float scaleX = std::sqrt(m.m[0][0] * m.m[0][0] + m.m[1][0] * m.m[1][0] + m.m[2][0] * m.m[2][0]);
+        const float scaleY = std::sqrt(m.m[0][1] * m.m[0][1] + m.m[1][1] * m.m[1][1] + m.m[2][1] * m.m[2][1]);
+        const float scaleZ = std::sqrt(m.m[0][2] * m.m[0][2] + m.m[1][2] * m.m[1][2] + m.m[2][2] * m.m[2][2]);
+        const float minWorldScale = (std::max)(1e-6f, (std::min)(scaleX, (std::min)(scaleY, scaleZ)));
+        const float worldVoxelSize = (std::max)(1e-6f, vdb->getVoxelSize() * minWorldScale);
+        const float renderVoxelSize = vulkanRT ? worldVoxelSize : vdb->getVoxelSize();
         for (int i = 0; i < 3; ++i) for (int j = 0; j < 4; ++j) {
             gv.transform[i * 4 + j] = m.m[i][j];
             gv.inv_transform[i * 4 + j] = inv.m[i][j];
@@ -398,8 +458,14 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.cloud_seed = static_cast<float>(n.cloud_seed);
         }
 
-        // Shader
-        auto shader = vdb->volume_shader; 
+        // Shader. SDF volumes also resolve the Surface output from this same
+        // material asset, keeping water/glass boundaries and their interior
+        // volume under one graph selection.
+        auto shader = vdb->volume_shader;
+        applySharedSurfaceMaterial(*vdb, shader);
+        gv.material_program_index = resolveVolumeMaterialProgramIndex(shader);
+        gv.ior = (vdb->render_isosurface_ior > 1.0f) ? vdb->render_isosurface_ior : 1.33f;
+        gv.surface_roughness = clamp01(vdb->render_isosurface_roughness);
         if (shader) {
             GpuVolumeShaderData gs = shader->toGPU();
             gv.density_multiplier = gs.density_multiplier * vdb->density_scale;
@@ -419,11 +485,17 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.emission_intensity = gs.emission_intensity;
             gv.temperature_scale = gs.temperature_scale;
             gv.blackbody_intensity = gs.blackbody_intensity;
-            gv.step_size = gs.step_size;
+            gv.step_size = shader->quality.primaryStep(renderVoxelSize);
             gv.max_steps = gs.max_steps;
             gv.shadow_steps = gs.shadow_steps;
+            gv.shadow_stride = gs.shadow_stride;
             gv.shadow_strength = gs.shadow_strength;
-            gv.voxel_size = vdb->getVoxelSize();
+            gv.density_noise_enabled = gs.density_noise_enabled;
+            gv.density_noise_scale = gs.density_noise_scale;
+            gv.density_noise_strength = gs.density_noise_strength;
+            gv.density_noise_detail = gs.density_noise_detail;
+            gv.density_noise_seed = gs.density_noise_seed;
+            gv.voxel_size = renderVoxelSize;
             gv.max_temperature = 6000.0f; // Default for standard VDBs
             
             // Color Ramp
@@ -444,9 +516,9 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.scatter_color = make_float3(1.0f);
             gv.scatter_coefficient = 1.0f;
             gv.absorption_coefficient = 0.1f;
-            gv.step_size = 0.1f;
+            gv.step_size = (std::max)(renderVoxelSize, 1e-4f);
             gv.max_steps = 128;
-            gv.voxel_size = vdb->getVoxelSize();
+            gv.voxel_size = renderVoxelSize;
         }
         gpu_vdb_volumes.push_back(gv);
     }
@@ -498,28 +570,36 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.local_bbox_max = make_float3(gsize.x, gsize.y, gsize.z);
 
         auto shader = gas->getOrCreateShader(); 
+        gv.material_program_index = resolveVolumeMaterialProgramIndex(shader);
         if (shader) {
-            gv.density_multiplier = shader->density.multiplier;
-            gv.density_remap_low = shader->density.remap_low;
-            gv.density_remap_high = shader->density.remap_high;
-            gv.density_pad = shader->density.cutoff_threshold;
-            gv.scatter_color = make_float3(shader->scattering.color.x, shader->scattering.color.y, shader->scattering.color.z);
-            gv.scatter_coefficient = shader->scattering.coefficient;
-            gv.scatter_anisotropy = shader->scattering.anisotropy;
-            gv.scatter_anisotropy_back = shader->scattering.anisotropy_back;
-            gv.scatter_lobe_mix = shader->scattering.lobe_mix;
-            gv.scatter_multi = shader->scattering.multi_scatter;
-            gv.absorption_color = make_float3(shader->absorption.color.x, shader->absorption.color.y, shader->absorption.color.z);
-            gv.absorption_coefficient = shader->absorption.coefficient;
-            gv.emission_mode = static_cast<int>(shader->emission.mode);
-            gv.emission_color = make_float3(shader->emission.color.x, shader->emission.color.y, shader->emission.color.z);
-            gv.emission_intensity = shader->emission.intensity;
-            gv.temperature_scale = shader->emission.temperature_scale;
-            gv.blackbody_intensity = shader->emission.blackbody_intensity;
-            gv.step_size = shader->quality.step_size;
-            gv.max_steps = shader->quality.max_steps;
-            gv.shadow_steps = shader->quality.shadow_steps;
-            gv.shadow_strength = shader->quality.shadow_strength;
+            const GpuVolumeShaderData gs = shader->toGPU();
+            gv.density_multiplier = gs.density_multiplier;
+            gv.density_remap_low = gs.density_remap_low;
+            gv.density_remap_high = gs.density_remap_high;
+            gv.density_pad = gs.density_pad;
+            gv.scatter_color = make_float3(gs.scatter_color_r, gs.scatter_color_g, gs.scatter_color_b);
+            gv.scatter_coefficient = gs.scatter_coefficient;
+            gv.scatter_anisotropy = gs.scatter_anisotropy;
+            gv.scatter_anisotropy_back = gs.scatter_anisotropy_back;
+            gv.scatter_lobe_mix = gs.scatter_lobe_mix;
+            gv.scatter_multi = gs.scatter_multi;
+            gv.absorption_color = make_float3(gs.absorption_color_r, gs.absorption_color_g, gs.absorption_color_b);
+            gv.absorption_coefficient = gs.absorption_coefficient;
+            gv.emission_mode = gs.emission_mode;
+            gv.emission_color = make_float3(gs.emission_color_r, gs.emission_color_g, gs.emission_color_b);
+            gv.emission_intensity = gs.emission_intensity;
+            gv.temperature_scale = gs.temperature_scale;
+            gv.blackbody_intensity = gs.blackbody_intensity;
+            gv.step_size = shader->quality.primaryStep(gas->getSettings().voxel_size);
+            gv.max_steps = gs.max_steps;
+            gv.shadow_steps = gs.shadow_steps;
+            gv.shadow_stride = gs.shadow_stride;
+            gv.shadow_strength = gs.shadow_strength;
+            gv.density_noise_enabled = gs.density_noise_enabled;
+            gv.density_noise_scale = gs.density_noise_scale;
+            gv.density_noise_strength = gs.density_noise_strength;
+            gv.density_noise_detail = gs.density_noise_detail;
+            gv.density_noise_seed = gs.density_noise_seed;
             gv.voxel_size = gas->getSettings().voxel_size;
             const float ambientKelvin = gas->getSettings().ambient_temperature;
             gv.emission_pad = ambientKelvin + shader->emission.temperature_min;
@@ -575,26 +655,27 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
 
         auto shader = gas->getOrCreateShader();
         if (shader) {
-            gv.density_multiplier = shader->density.multiplier;
-            gv.density_remap_low = shader->density.remap_low;
-            gv.density_remap_high = shader->density.remap_high;
-            gv.density_pad = shader->density.cutoff_threshold;
-            gv.scatter_color = make_float3(shader->scattering.color.x, shader->scattering.color.y, shader->scattering.color.z);
-            gv.scatter_coefficient = shader->scattering.coefficient;
-            gv.absorption_color = make_float3(shader->absorption.color.x, shader->absorption.color.y, shader->absorption.color.z);
-            gv.absorption_coefficient = shader->absorption.coefficient;
-            gv.scatter_anisotropy = shader->scattering.anisotropy;
-            gv.scatter_anisotropy_back = shader->scattering.anisotropy_back;
-            gv.scatter_lobe_mix = shader->scattering.lobe_mix;
-            gv.emission_mode = (int)shader->emission.mode;
-            gv.emission_color = make_float3(shader->emission.color.x, shader->emission.color.y, shader->emission.color.z);
-            gv.emission_intensity = shader->emission.intensity;
-            gv.temperature_scale = shader->emission.temperature_scale;
-            gv.blackbody_intensity = shader->emission.blackbody_intensity;
-            gv.step_size = shader->quality.step_size;
-            gv.max_steps = shader->quality.max_steps;
-            gv.shadow_strength = shader->quality.shadow_strength;
-            gv.shadow_steps = shader->quality.shadow_steps;
+            const GpuVolumeShaderData gs = shader->toGPU();
+            gv.density_multiplier = gs.density_multiplier;
+            gv.density_remap_low = gs.density_remap_low;
+            gv.density_remap_high = gs.density_remap_high;
+            gv.density_pad = gs.density_pad;
+            gv.scatter_color = make_float3(gs.scatter_color_r, gs.scatter_color_g, gs.scatter_color_b);
+            gv.scatter_coefficient = gs.scatter_coefficient;
+            gv.absorption_color = make_float3(gs.absorption_color_r, gs.absorption_color_g, gs.absorption_color_b);
+            gv.absorption_coefficient = gs.absorption_coefficient;
+            gv.scatter_anisotropy = gs.scatter_anisotropy;
+            gv.scatter_anisotropy_back = gs.scatter_anisotropy_back;
+            gv.scatter_lobe_mix = gs.scatter_lobe_mix;
+            gv.emission_mode = gs.emission_mode;
+            gv.emission_color = make_float3(gs.emission_color_r, gs.emission_color_g, gs.emission_color_b);
+            gv.emission_intensity = gs.emission_intensity;
+            gv.temperature_scale = gs.temperature_scale;
+            gv.blackbody_intensity = gs.blackbody_intensity;
+            gv.step_size = shader->quality.primaryStep(gas->getSettings().voxel_size);
+            gv.max_steps = gs.max_steps;
+            gv.shadow_strength = gs.shadow_strength;
+            gv.shadow_steps = gs.shadow_steps;
             const float ambientKelvin = gas->getSettings().ambient_temperature;
             gv.emission_pad = ambientKelvin + shader->emission.temperature_min;
             gv.max_temperature = ambientKelvin + (std::max)(shader->emission.temperature_max, shader->emission.temperature_min + 1.0f);

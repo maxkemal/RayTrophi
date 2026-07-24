@@ -45,6 +45,7 @@ class TriangleMesh;
 // material parameter set + texture bindings (defined in MaterialNodesV2.h). Keeps NodeCore.h
 // free of the Material/Texture include chain.
 namespace MaterialNodesV2 { struct ShadeState; }
+struct VolumeMaterialProgram;
 
 namespace NodeSystem {
 
@@ -170,6 +171,7 @@ namespace NodeSystem {
     /// (MaterialNodesV2::ShadeState). Shared between MaterialRef / MixMaterial /
     /// Output nodes by shared_ptr — zero-copy through the graph.
     using MaterialValue = std::shared_ptr<MaterialNodesV2::ShadeState>;
+    using VolumeMaterialValue = std::shared_ptr<VolumeMaterialProgram>;
 
     using PinValue = std::variant<
         std::monostate,             // Empty / None
@@ -182,7 +184,8 @@ namespace NodeSystem {
         Image2DData,                // Image2D
         std::string,                // String
         GeometryValue,              // Geometry (DataType::Geometry)
-        MaterialValue               // Material (DataType::Material)
+        MaterialValue,              // Material (DataType::Material)
+        VolumeMaterialValue         // Volume closure (DataType::Volume)
     >;
 
     // ============================================================================
@@ -370,6 +373,12 @@ namespace NodeSystem {
                 (dataType == DataType::Vector3 && other.dataType == DataType::Float)) {
                 return true;
             }
+            // Coordinate nodes commonly expose Vector3 while UV-oriented
+            // texture inputs are Vector2. Consumers deterministically drop/add Z.
+            if ((dataType == DataType::Vector2 && other.dataType == DataType::Vector3) ||
+                (dataType == DataType::Vector3 && other.dataType == DataType::Vector2)) {
+                return true;
+            }
             
             return false;
         }
@@ -515,6 +524,14 @@ namespace NodeSystem {
         if (auto* mat = std::get_if<MaterialValue>(&value)) {
             out = *mat;
             return static_cast<bool>(*mat);
+        }
+        return false;
+    }
+
+    inline bool tryGetVolumeMaterial(const PinValue& value, VolumeMaterialValue& out) {
+        if (auto* volume = std::get_if<VolumeMaterialValue>(&value)) {
+            out = *volume;
+            return static_cast<bool>(*volume);
         }
         return false;
     }

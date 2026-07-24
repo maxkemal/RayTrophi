@@ -206,6 +206,10 @@ struct HairStrandData {
     std::vector<float> radii;
     uint16_t materialID;
     Vec2 rootUV;
+    // Cubic B-spline tessellation level (Vulkan RT). 0 = raw chord per span (linear,
+    // kinked curls); >0 = each span sampled into (1<<subdivisions) short LSS sub-segments
+    // so the silhouette follows the curve. Set from HairGenerationParams.subdivisions.
+    uint32_t subdivisions = 0;
 };
 
 struct ShaderProgramData {
@@ -420,6 +424,21 @@ public:
         uint32_t flags = 0;
         uint32_t terrainLayerIdx = 0; // Index into terrain layer buffer (valid when MAT_FLAG_TERRAIN set)
 
+        // Closed-mesh volume material.  The triangle boundary remains in the
+        // regular BLAS; renderers treat front faces as medium entry and back
+        // faces as exit, integrating over the real segment length.
+        bool  isVolume = false;
+        float volumeDensity = 0.0f;
+        float volumeAbsorption = 0.0f;
+        float volumeScattering = 0.0f;
+        float volumeAnisotropy = 0.0f;
+        float volumeStepSize = 0.05f;
+        int   volumeMaxSteps = 128;
+        float volumeNoiseScale = 1.0f;
+        float volumeMultiScatter = 0.0f;
+        int   volumeLightSteps = 4;
+        float volumeShadowStrength = 0.8f;
+
         // Thin-shell BUBBLE (champagne / soda / soap-foam close-up). Carried from
         // the host gpuMaterial so the backend can set GPU_MAT_FLAG_BUBBLE +
         // bubble_ior/bubble_film on the final GpuMaterial.
@@ -479,6 +498,7 @@ public:
     static constexpr uint32_t MAT_FLAG_WATER_FFT_READY = (1u << 18); // Vulkan height/normal slots contain FFT textures
     static constexpr uint32_t MAT_FLAG_WATER_LAKE = (1u << 22); // Fetch-limited inland water profile
     static constexpr uint32_t MAT_FLAG_WATER_RIVER = (1u << 23); // UV-flow-aligned river profile
+    static constexpr uint32_t MAT_FLAG_VOLUME = (1u << 24); // Closed triangle mesh bounds a volume medium
 
     /**
      * @brief Per-terrain layer descriptor for splat-map based blending.
@@ -536,6 +556,7 @@ public:
         Vec3 tintColor = Vec3(1, 1, 1);
         float specularTint = 0.0f;
         float diffuseSoftness = 0.5f;
+        float selfShadow = 1.0f;   // deep hair self-shadow strength (Vulkan RT): 0=off, 1=full
         Vec3 coatTint = Vec3(1, 1, 1);
         // Emission
         Vec3 emission = Vec3(0, 0, 0);

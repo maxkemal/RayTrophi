@@ -20,10 +20,12 @@
 #include "APICFluidSolver.h"
 #include "FluidLevelSet.h"
 #include "FluidRenderMode.h"
+#include "../VolumeShader.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <cstdint>
 
@@ -101,6 +103,9 @@ struct FluidObject {
     float surface_roughness = 0.0f;
     // Whitewater/foam strength 0..1 (curvature-driven).
     float surface_foam = 0.0f;
+    // Shared appearance asset bridge. VDB/Gas/domain fluids use the same
+    // VolumeShader material reference; the solver never reads this state.
+    std::shared_ptr<VolumeShader> shader;
 
     // Rebuild grid from domain_min/domain_max/voxel_size if dirty. Preserves
     // particles; the grid is scratch so reallocating is safe between steps.

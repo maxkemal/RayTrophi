@@ -9,7 +9,7 @@
 //                   Read by every closesthit / shadow any-hit invocation.
 //                   Mirrors VulkanRT::VkGpuMaterialCore byte-for-byte.
 //   `MaterialExt` — COLD extension, binding 24 (RT set) / binding 4 (material
-//                   preview set). 13 blocks x 16 B = 208 B stride. Read ONLY
+//                   preview set). 15 blocks x 16 B = 240 B stride. Read ONLY
 //                   inside feature-gated branches (SSS lobe, water fast path,
 //                   bubble, resin/interior volume, iridescent clearcoat).
 //                   Mirrors VulkanRT::VkGpuMaterialExt byte-for-byte.
@@ -80,6 +80,10 @@ struct MaterialExt {
     float clearcoat_film_thickness, dust_color_a_r, dust_color_a_g, dust_color_a_b;
     float dust_style, dust_color_b_r, dust_color_b_g, dust_color_b_b;
     float shard_shape, _ext_pad0, _ext_pad1, _ext_pad2;
+    // Block 14-16: closed-mesh volume medium
+    float volume_density, volume_absorption, volume_scattering, volume_anisotropy;
+    float volume_step_size, volume_max_steps, volume_noise_scale, volume_multi_scatter;
+    float volume_light_steps, volume_shadow_strength, _volume_pad0, _volume_pad1;
 };
 
 #endif // MATERIAL_STRUCT_GLSL

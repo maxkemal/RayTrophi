@@ -75,7 +75,7 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     int   volume_type;          // 0 = homogeneous, 1 = procedural noise, 2 = 3D texture (future)
     int   is_active;             // 1 = enabled, 0 = skip
     float voxel_size;           // Voxel size for adaptive stepping
-    int   _pad0;                // Alignment padding
+    int   shadow_stride;        // Reuse self-shadow across N primary samples
     
     // ═══════════════════════════ INVERSE TRANSFORM (48 bytes) ═══════════════
     // Row-major 3x4 inverse affine transform (world → object)
@@ -110,9 +110,8 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float cloud_offset_x;
     float cloud_offset_z;
     float cloud_seed;
-    // _ext_reserved[0] = isosurface IOR, [1] = isosurface roughness,
-    // [2] = isosurface foam strength (source_type==4 fluid surface). The rest
-    // is padding to 512 total bytes.
+    // [0..6] = isosurface/foam data. [7..11] = bounded Material Graph
+    // density-noise program (enabled, scale, strength, detail, seed).
     float _ext_reserved[12];
 };
 

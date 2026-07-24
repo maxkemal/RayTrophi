@@ -204,7 +204,7 @@ struct HairGpuMaterial {
     float randomHue;          // offset 128
     float randomValue;        // offset 132
     uint  groomID;            // offset 136
-    float pad;                // offset 140
+    float selfShadow;         // offset 140 — 0=off (fast binary shadow), 1=full deep self-shadow
 };
 layout(set = 0, binding = 11, scalar) readonly buffer HairMaterialSSBO {
     HairGpuMaterial hairMats[];
@@ -635,21 +635,40 @@ void main()
         // Shadow ray
         vec3 shadowOrig = offset_ray(hitPoint, normal);
         shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+
+        // Two shadow paths, chosen per-material by mat.selfShadow. Both use cullMask
+        // 0x01: hair instances carry mask 0xFF (so 0x01 already hits them) while volume
+        // AABBs carry mask 0x02 (so 0x01 excludes them) — do NOT widen to 0x03 or the
+        // shadow ray would strike volume AABBs and treat them as solid blockers.
+        //  - selfShadow > 0 → DEEP self-shadow. Drop OpaqueEXT so hair_shadow_anyhit
+        //    runs (accumulating transmittance) and drop TerminateOnFirstHit so the ray
+        //    passes through successive hair layers, each multiplying shadowPayload.rgb.
+        //    Opaque triangles still stop it (baked VK_GEOMETRY_OPAQUE_BIT → committed
+        //    opaque hit ends traversal, closesthit skipped → w stays 0 = occluded), so
+        //    hard shadows from solid geometry are preserved. This is what turns hair
+        //    from a flat bright fuzz into a soft, dense, volumetric mass.
+        //  - selfShadow == 0 → original fast path: hardware TerminateOnFirstHit + force
+        //    OpaqueEXT, so every hair hit is a hard binary occluder (fastest).
+        uint shadowFlags;
+        if (mat.selfShadow > 0.001) {
+            shadowFlags = gl_RayFlagsSkipClosestHitShaderEXT;
+        } else {
+            shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT |
+                          gl_RayFlagsSkipClosestHitShaderEXT |
+                          gl_RayFlagsOpaqueEXT;
+        }
         traceRayEXT(
-            topLevelAS,
-            gl_RayFlagsTerminateOnFirstHitEXT |
-            gl_RayFlagsSkipClosestHitShaderEXT |
-            gl_RayFlagsOpaqueEXT,
-            // mask 0x01 = triangles only, skip volume AABBs (mask 0x02)
+            topLevelAS, shadowFlags,
             0x01, 0, 0, 1,
             shadowOrig, HAIR_SHADOW_TMIN, lightDir, lightDist - 0.002,
             1
         );
-        if (shadowPayload.w < 0.5) continue;
+        if (shadowPayload.w < 0.5) continue;      // fully occluded by an opaque blocker
+        vec3 shadowVis = shadowPayload.rgb;       // accumulated transmittance (1,1,1 = clear)
 
         // Marschner BSDF evaluation
         vec3 bsdf = hair_bsdf_eval(V, lightDir, tangent, mat, sigma_a, h, vStrand);
-        radiance += max(bsdf * lightColor * atten, vec3(0.0));
+        radiance += max(bsdf * lightColor * atten * shadowVis, vec3(0.0));
     }
 
     // Exposure

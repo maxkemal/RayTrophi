@@ -20,6 +20,7 @@
 
 // Unified Volume Rendering icin gerekli
 #include "unified_volume.h"
+#include "MaterialProgram.h"
 
 class Volumetric : public Material {
 public:
@@ -101,6 +102,9 @@ public:
     void setDensitySource(int src) { density_source = src; }
 
     std::shared_ptr<Perlin> noise;
+    // Immutable spatial Volume Graph bytecode. Vulkan evaluates this at each
+    // march sample; homogeneous graphs leave it null and keep the zero-cost path.
+    std::shared_ptr<MaterialNodesV2::MaterialProgram> proceduralProgram;
 
 private:
     Vec3 albedo;       // Scattering color

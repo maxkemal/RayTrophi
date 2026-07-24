@@ -208,9 +208,9 @@ struct GpuVDBVolume {
     float voxel_size;  // Added for precision
     int max_steps;
     int shadow_steps;
+    int shadow_stride;
     float shadow_strength;
     float max_temperature; // For normalization
-    float pad;
     
     // ─────────────────────────────────────────────────────────────────────────
     // PIVOT & ANIMATION
@@ -242,6 +242,14 @@ struct GpuVDBVolume {
     // multiplier (foam_shader density × scatter). 0 → shader defaults.
     float3 foam_color;
     float  foam_opacity;
+
+    // Material Graph density-field modulation (Vulkan spatial slice).
+    int   density_noise_enabled;
+    float density_noise_scale;
+    float density_noise_strength;
+    int   density_noise_detail;
+    int   density_noise_seed;
+    int   material_program_index = -1; // Vulkan Volume Graph table index; -1 = none
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════

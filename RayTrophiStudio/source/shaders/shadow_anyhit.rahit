@@ -53,6 +53,7 @@ layout(set = 0, binding = 2, scalar) readonly buffer MaterialBuffer  { Material 
 layout(set = 0, binding = 4, scalar) readonly buffer GeometryBuffer  { VkGeometryData g[]; } geometries;
 layout(set = 0, binding = 5, scalar) readonly buffer InstanceBuffer  { VkInstanceData  i[]; } instances;
 layout(set = 0, binding = 6) uniform sampler2D materialTextures[];
+layout(set = 0, binding = 24, scalar) readonly buffer MaterialExtBuffer { MaterialExt x[]; } materialExts;
 
 // Shadow payload (location=1, same as closesthit declaration).
 // rgb = accumulated transmissive tint along the shadow ray (init 1,1,1 by the caller),
@@ -254,6 +255,29 @@ void main() {
         matIndex = mi.m[gl_PrimitiveID];
     }
     Material mat = materials.m[matIndex];
+    MaterialExt matx = materialExts.x[matIndex];
+
+    // Closed-mesh volume boundary: this is a participating medium, not an
+    // opaque shell. The any-hit stage cannot recover the exact entry/exit chord
+    // length without expanding the shadow payload ABI, so apply a conservative
+    // per-interface Beer-Lambert estimate. A closed object crosses this branch
+    // twice, producing a stable partial shadow while the primary volume marcher
+    // retains the full density-aware self-shadow integration.
+    if ((mat.flags & (1u << 24)) != 0u) {
+        float density = max(matx.volume_density, 0.0);
+        float sigmaT = density *
+            (max(matx.volume_scattering, 0.0) + max(matx.volume_absorption, 0.0));
+        float proxyDepth = max(matx.volume_step_size * 8.0, 1e-4);
+        float physicalT = exp(-sigmaT * proxyDepth);
+        float strength = clamp(matx.volume_shadow_strength, 0.0, 1.0);
+        float boundaryT = mix(1.0, physicalT, strength);
+        vec3 scatterTint = clamp(vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b),
+                                 vec3(0.0), vec3(1.0));
+        shadowPayload.rgb *= mix(vec3(1.0), sqrt(scatterTint), 1.0 - boundaryT)
+                           * boundaryT;
+        ignoreIntersectionEXT;
+        return;
+    }
 
     // --- Determine opacity value (0=fully transparent, 1=fully opaque) ---
     float maskValue = mat.opacity; // default: uniform material opacity

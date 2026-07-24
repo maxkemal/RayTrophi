@@ -1,5 +1,6 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_EXT_scalar_block_layout : require
 
 /**
  * @file hair_shadow_anyhit.rahit
@@ -26,7 +27,31 @@ layout(location = 1) rayPayloadInEXT vec4 shadowPayload;
 
 // Attributes from procedural intersection (hair_intersection.rint)
 // x,y,z = tangent, w = v parameter along strand (0 to 1)
-hitAttributeEXT vec4 hairAttrib; 
+hitAttributeEXT vec4 hairAttrib;
+
+// ─── Hair SSBOs (binding 10/11, must match hair_closesthit.rchit byte-for-byte) ──
+// Needed so this any-hit can read the per-groom self-shadow strength.
+struct HairSegmentGPU {
+    vec4 cp0; vec4 cp1; vec4 cp2; vec4 cp3;
+    uint strandID; uint groomID; uint materialID; uint padding;
+};
+layout(set = 0, binding = 10, scalar) readonly buffer HairSegmentSSBO {
+    HairSegmentGPU hairSegs[];
+};
+struct HairGpuMaterial {
+    vec3  baseColor;      float roughness;
+    float melanin;        float melaninRedness;  float ior;             float cuticleAngle;
+    uint  colorMode;      float radialRoughness;  float specularTint;    float diffuseSoftness;
+    vec3  tintColor;      float tint;
+    vec3  coatTint;       float coat;
+    vec3  emission;       float emissionStrength;
+    vec3  tipColor;       float rootTipBalance;
+    vec3  absorption;     uint  enableGradient;
+    float randomHue;      float randomValue;      uint  groomID;         float selfShadow;
+};
+layout(set = 0, binding = 11, scalar) readonly buffer HairMaterialSSBO {
+    HairGpuMaterial hairMats[];
+};
 
 void main() {
     // ---- CAMERA / BOUNCE / PHOTON RAYS -------------------------------------
@@ -44,33 +69,65 @@ void main() {
         return;
     }
 
-    float v = hairAttrib.w;
-
-    // Tip transparency (Matches OptiX logic: 1.0 - v * 0.3)
-    // At root (v=0), opacity is 1.0. At tip (v=1), opacity is 0.7.
-    float opacity = 1.0 - v * 0.3;
-    
-    // Fast path: fully opaque root segments
-    if (opacity >= 0.999) {
-        terminateRayEXT;   // accepted → w stays 0 → occluded
+    // Bevel probe rays (closesthit mp_traceBevel) reuse the location-1 payload with
+    // a completely different meaning (w's sign bit flags probe mode, xyz sums normals).
+    // Hair is irrelevant to edge-bevel probing — pass straight through without touching
+    // the payload, exactly as the triangle shadow any-hit does.
+    if ((floatBitsToUint(shadowPayload.w) & 0x80000000u) != 0u) {
+        ignoreIntersectionEXT;
         return;
     }
 
-    // Stochastic transparency test
-    // Use a hash of launch ID, frame count, and primitive ID for stable but randomized patterns.
-    uint seed = uint(gl_LaunchIDEXT.x) * 1973u + uint(gl_LaunchIDEXT.y) * 9277u;
-    seed ^= cam.frameCount * 83492791u;
-    seed ^= uint(gl_PrimitiveID) * 26699u;
-    
-    // PCG Hash to uniform float [0, 1]
-    seed = seed * 747796405u + 2891336453u;
-    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
-    float rnd = float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
+    float v = hairAttrib.w;
 
-    if (rnd < opacity) {
-        terminateRayEXT;   // accepted → w stays 0 → occluded
-    } else {
-        // Transparent - let the ray pass through
-        ignoreIntersectionEXT;
+    // Mode discriminator: hair's OWN deep self-shadow trace (hair_closesthit) is the
+    // only shadow ray in the whole pipeline that omits TerminateOnFirstHit. Every
+    // surface shadow ray (AO / sun / area / point, in closesthit.rchit) sets it. So:
+    //  - TerminateOnFirstHit SET  → a scene shadow ray that happens to graze hair:
+    //    reproduce the ORIGINAL stochastic binary behaviour EXACTLY, leaving all
+    //    existing scene-shadow semantics untouched (zero regression, no strength).
+    //  - TerminateOnFirstHit CLEAR → hair deep self-shadow: accumulate transmittance.
+    bool deep = (gl_IncomingRayFlagsEXT & gl_RayFlagsTerminateOnFirstHitEXT) == 0u;
+
+    if (!deep) {
+        // ---- ORIGINAL stochastic transparency (unchanged) --------------------
+        float opacity = 1.0 - v * 0.3;                    // opaque root → 0.7 at tip
+        if (opacity >= 0.999) { terminateRayEXT; return; } // fully opaque root
+
+        uint seed = uint(gl_LaunchIDEXT.x) * 1973u + uint(gl_LaunchIDEXT.y) * 9277u;
+        seed ^= cam.frameCount * 83492791u;
+        seed ^= uint(gl_PrimitiveID) * 26699u;
+        seed = seed * 747796405u + 2891336453u;
+        uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
+        float rnd = float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
+
+        if (rnd < opacity) terminateRayEXT;   // accepted → w stays 0 → occluded
+        else               ignoreIntersectionEXT;
+        return;
     }
+
+    // ---- DEEP self-shadow: accumulate per-segment transmittance ---------------
+    // Per-groom strength (0 = groom casts no self-shadow, 1 = full).
+    float strength = 1.0;
+    uint segIdx = uint(gl_PrimitiveID);
+    if (segIdx < hairSegs.length() && hairMats.length() > 0u) {
+        uint matID = hairSegs[segIdx].materialID;
+        if (matID >= hairMats.length()) matID = 0u;
+        strength = clamp(hairMats[matID].selfShadow, 0.0, 1.0);
+    }
+
+    float opacity = clamp((1.0 - v * 0.3) * strength, 0.0, 1.0);
+
+    // Order-independent product — converges smoothly and lets many hair layers stack
+    // into a soft, dense shadow (the whole point of "soft" hair).
+    shadowPayload.rgb *= (1.0 - opacity);
+
+    // Early-out once essentially fully blocked: mark occluded (w stays 0) and stop.
+    if (max(max(shadowPayload.r, shadowPayload.g), shadowPayload.b) < 0.02) {
+        shadowPayload.w = 0.0;
+        terminateRayEXT;
+        return;
+    }
+
+    ignoreIntersectionEXT;   // never commit — keep traversing to accumulate
 }

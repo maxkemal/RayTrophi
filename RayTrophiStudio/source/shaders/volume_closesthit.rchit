@@ -66,7 +66,7 @@ layout(push_constant) uniform CameraPC {
     float shakeRotX;
     float shakeRotY;
     float shakeRotZ;
-    float pad1;
+    float waterTime;
 } cam;
 
 // ============================================================
@@ -97,6 +97,13 @@ struct LightData {
 };
 
 layout(set = 0, binding = 3, scalar) readonly buffer LightBuffer { LightData l[]; } lights;
+layout(set = 0, binding = 6) uniform sampler2D materialTextures[];
+// Volume programs are live inside a long ray-march loop. Keeping the surface
+// VM's 32 vec3 register file here cuts GPU occupancy even for legacy VDBs whose
+// runtime branch never evaluates a graph. The host only binds programs whose
+// compacted peak-live count fits this volume-specific budget.
+#define MP_REGISTER_COUNT 12
+#include "material_program.glsl"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Binding 9: Volume Instances SSBO
@@ -142,7 +149,7 @@ struct VkVolumeInstance {
     int   volume_type;
     int   is_active;
     float voxel_size;
-    int   _pad0;
+    int   shadow_stride;
     
     // Inverse transform (48 bytes = 12 floats)
     float inv_transform[12];
@@ -487,6 +494,66 @@ float sampleNanoVDBFloatTrilinearAcc(
     return mix(dxy0, dxy1, frac.z);
 }
 
+// Conservative NanoVDB hierarchy skip. readaccessor_get_dim returns the size
+// of the inactive tile containing the current coordinate (1 inside a leaf,
+// 8/128/... in progressively coarser empty regions). Advance only to one voxel
+// before that tile's exit so trilinear reconstruction still sees density across
+// the active boundary.
+float nanoEmptyTileStep(
+    VkVolumeInstance vol,
+    vec3 worldPos,
+    vec3 worldDir,
+    float baseStep,
+    pnanovdb_buf_t buf,
+    pnanovdb_map_handle_t mapH,
+    inout pnanovdb_readaccessor_t acc)
+{
+    if (buf.address == 0) return baseStep;
+
+    vec3 localP;
+    localP.x = vol.inv_transform[0]*worldPos.x + vol.inv_transform[1]*worldPos.y
+             + vol.inv_transform[2]*worldPos.z + vol.inv_transform[3] - vol.pivot_offset[0];
+    localP.y = vol.inv_transform[4]*worldPos.x + vol.inv_transform[5]*worldPos.y
+             + vol.inv_transform[6]*worldPos.z + vol.inv_transform[7] - vol.pivot_offset[1];
+    localP.z = vol.inv_transform[8]*worldPos.x + vol.inv_transform[9]*worldPos.y
+             + vol.inv_transform[10]*worldPos.z + vol.inv_transform[11] - vol.pivot_offset[2];
+
+    vec3 worldP1 = worldPos + worldDir;
+    vec3 localP1;
+    localP1.x = vol.inv_transform[0]*worldP1.x + vol.inv_transform[1]*worldP1.y
+              + vol.inv_transform[2]*worldP1.z + vol.inv_transform[3] - vol.pivot_offset[0];
+    localP1.y = vol.inv_transform[4]*worldP1.x + vol.inv_transform[5]*worldP1.y
+              + vol.inv_transform[6]*worldP1.z + vol.inv_transform[7] - vol.pivot_offset[1];
+    localP1.z = vol.inv_transform[8]*worldP1.x + vol.inv_transform[9]*worldP1.y
+              + vol.inv_transform[10]*worldP1.z + vol.inv_transform[11] - vol.pivot_offset[2];
+
+    pnanovdb_vec3_t p0 = pnanovdb_vec3_uniform(0.0);
+    p0.x = localP.x; p0.y = localP.y; p0.z = localP.z;
+    pnanovdb_vec3_t p1 = pnanovdb_vec3_uniform(0.0);
+    p1.x = localP1.x; p1.y = localP1.y; p1.z = localP1.z;
+    pnanovdb_vec3_t ip0 = pnanovdb_map_apply_inverse(buf, mapH, p0);
+    pnanovdb_vec3_t ip1 = pnanovdb_map_apply_inverse(buf, mapH, p1);
+    vec3 idx = vec3(ip0.x, ip0.y, ip0.z);
+    vec3 idxDir = vec3(ip1.x - ip0.x, ip1.y - ip0.y, ip1.z - ip0.z);
+
+    pnanovdb_coord_t ijk;
+    ijk.x = int(floor(idx.x)); ijk.y = int(floor(idx.y)); ijk.z = int(floor(idx.z));
+    uint dim = pnanovdb_readaccessor_get_dim(PNANOVDB_GRID_TYPE_FLOAT, buf, acc, ijk);
+    bool voxelIsActive = pnanovdb_readaccessor_is_active(PNANOVDB_GRID_TYPE_FLOAT, buf, acc, ijk);
+    if (voxelIsActive || dim <= 1u) return baseStep;
+
+    vec3 tileMin = floor(idx / float(dim)) * float(dim);
+    vec3 tileMax = tileMin + vec3(float(dim));
+    vec3 boundary = mix(tileMin, tileMax, greaterThan(idxDir, vec3(0.0)));
+    vec3 axisT = vec3(1e30);
+    if (abs(idxDir.x) > 1e-8) axisT.x = (boundary.x - idx.x) / idxDir.x;
+    if (abs(idxDir.y) > 1e-8) axisT.y = (boundary.y - idx.y) / idxDir.y;
+    if (abs(idxDir.z) > 1e-8) axisT.z = (boundary.z - idx.z) / idxDir.z;
+    float tileExit = min(axisT.x, min(axisT.y, axisT.z));
+    if (!(tileExit > baseStep)) return baseStep;
+    return max(baseStep, tileExit - max(vol.voxel_size, baseStep));
+}
+
 // Trilinear interpolation of a FloatGrid
 float sampleNanoVDBFloatTrilinear(uint64_t gridAddr, vec3 worldPos) {
     if (gridAddr == 0) return 0.0;
@@ -602,6 +669,19 @@ float sampleTemperature(VkVolumeInstance vol, vec3 worldPos) {
     return sampleNanoVDBFloatTrilinear(vol.vdb_temp_address, localPos);
 }
 
+float applyMaterialDensityNoise(VkVolumeInstance vol, vec3 localPos, float density) {
+    if (vol._ext_reserved[7] < 0.5 || density <= 0.0) return density;
+    vec3 extent = max(vol.aabb_max - vol.aabb_min, vec3(1e-5));
+    vec3 p = (localPos - vol.aabb_min) / extent;
+    float scale = max(vol._ext_reserved[8], 0.001);
+    float strength = clamp(vol._ext_reserved[9], 0.0, 1.0);
+    int detail = clamp(int(vol._ext_reserved[10] + 0.5), 1, 8);
+    float seed = vol._ext_reserved[11];
+    vec3 seedOffset = vec3(seed * 0.1031, seed * 0.11369, seed * 0.13787);
+    float field = fbmNoise(p * scale + seedOffset, detail);
+    return density * mix(1.0, field, strength);
+}
+
 // ── Persistent-accessor density sampler ───────────────────────────────────
 // Same dispatch as sampleDensity but routes volume_type==2 NanoVDB reads through
 // the caller's pre-initialized accessor. Other volume types (homogeneous, procedural,
@@ -656,6 +736,7 @@ float sampleDensityAcc(
         density = proceduralCloudDensity(vol, localPos);
     }
 
+    density = applyMaterialDensityNoise(vol, localPos, density);
     float remappedDensity = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
     float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
     if (remappedDensity <= densityCutoff) {
@@ -722,6 +803,7 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
         density = proceduralCloudDensity(vol, localPos);
     }
     
+    density = applyMaterialDensityNoise(vol, localPos, density);
     // Apply density remap (No upper clamp, matches OptiX fmaxf)
     float remappedDensity = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
     float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
@@ -750,24 +832,43 @@ float lightMarchAcc(
     if (sigma_t <= EPSILON) return 1.0;
 
     int reqSteps = clamp(vol.shadow_steps, 1, 64);
-    float dMid = sampleDensityAcc(vol, pos + lightDir * (0.5 * maxDist), buf, mapH, acc);
-    float tauHint = max(0.0, dMid) * sigma_t * maxDist;
-    if (tauHint <= 0.02) return 1.0;
-    float stepScale = clamp(sqrt(tauHint), 0.25, 1.0);
-    int steps = int(ceil(float(reqSteps) * stepScale));
-    steps = clamp(steps, 3, min(reqSteps, 16));
-
-    float stepSize = maxDist / (float(steps) * 2.0);
+    int steps = min(reqSteps, 16);
+    uint shadowMatIndex = vol._reserved[1] > 0.5 ? uint(vol._reserved[1] - 1.0) : 0u;
+    bool allowSparseTraversal = buf.address != 0 &&
+        (vol._reserved[1] <= 0.5 || matProgramOffset(shadowMatIndex) == MATPROG_NONE);
+    // Match the established half-extent shadow integration while allowing
+    // inactive NanoVDB tiles to be crossed without spending density samples.
+    float marchLength = 0.5 * maxDist;
+    float stepSize = marchLength / float(max(steps, 1));
     stepSize = max(stepSize, 1e-5);
     float jitter = fract(sin(dot(pos, vec3(12.9898, 78.233, 37.719)) +
                              dot(lightDir, vec3(39.346, 11.135, 83.155))) * 43758.5453);
 
     float s_trans = 0.0;
-    for (int i = 0; i < steps; i++) {
-        vec3 samplePos = pos + lightDir * (float(i) + jitter + 0.5) * stepSize;
+    float distanceAlongRay = min((jitter + 0.5) * stepSize, marchLength);
+    int densitySamples = 0;
+    int traversalIters = 0;
+    int maxTraversalIters = steps * 4 + 8;
+    while (distanceAlongRay < marchLength &&
+           densitySamples < steps &&
+           traversalIters < maxTraversalIters) {
+        vec3 samplePos = pos + lightDir * distanceAlongRay;
+        if (allowSparseTraversal) {
+            float sparseStep = nanoEmptyTileStep(
+                vol, samplePos, lightDir, stepSize, buf, mapH, acc);
+            if (sparseStep > stepSize * 1.01) {
+                distanceAlongRay += min(sparseStep, marchLength - distanceAlongRay);
+                traversalIters++;
+                continue;
+            }
+        }
+
         float d = sampleDensityAcc(vol, samplePos, buf, mapH, acc);
         s_trans += d * sigma_t * stepSize;
         if (s_trans > 10.0) break;
+        distanceAlongRay += stepSize;
+        densitySamples++;
+        traversalIters++;
     }
 
     float beers = exp(-s_trans);
@@ -1306,20 +1407,39 @@ void main() {
     // ══════════════════════════════════════════════════════════════════════════
     float stepSize = max(vol.step_size, 1e-4);
     float marchDist = tFar - tNear;
-    int maxSteps = max(vol.max_steps, 1);
-    float minStepToCover = marchDist / float(maxSteps);
-    float baseStep = max(stepSize, minStepToCover);
-    float minStep = max(baseStep * 0.25, 1e-4);
-    const float tauMax = 0.2;
+    const int hardStepCeiling = 2048;
+    int authoredStepBudget = max(vol.max_steps, 1);
+    int effectiveStepBudget = min(hardStepCeiling, authoredStepBudget);
+    int requiredSteps = max(1, int(ceil(marchDist / stepSize)));
+    int maxSteps = min(requiredSteps, effectiveStepBudget);
+    // Canonical Vulkan baseline: divide the complete interval into a fixed,
+    // authored number of segments. Optical integration must never shorten the
+    // geometric advance and strand the ray before tFar.
+    float baseStep = marchDist / float(max(maxSteps, 1));
     
     float sigma_s_coeff = vol.scatter_coefficient;
     float sigma_a_coeff = vol.absorption_coefficient;
+    uint volumeMatIndex = vol._reserved[1] > 0.5 ? uint(vol._reserved[1] - 1.0) : 0u;
+    uint volumeProgram = vol._reserved[1] > 0.5 ? matProgramOffset(volumeMatIndex) : MATPROG_NONE;
+    // Preserve the legacy fast path: a temperature NanoVDB lookup is eight
+    // trilinear tree samples and must not run for an ordinary non-emissive cloud.
+    bool needsTemperature = (vol.emission_mode >= 2) || (volumeProgram != MATPROG_NONE);
     
     vec3  accumulated_radiance = vec3(0.0);
     float transmittance = 1.0;
     bool  didScatter = false;
     float scatterT = tFar; // will be set if scatter event happens
     vec3 ambientSky = sampleSkyAmbient(rayDir);
+    int shadowStride = clamp(vol.shadow_stride, 1, 16);
+    // Keep this scalarized. Some NVIDIA Vulkan RT compiler versions crash
+    // during pipeline creation on dynamically indexed local bool arrays in a
+    // closest-hit shader.
+    float cachedSceneShadow0 = 1.0;
+    float cachedSceneShadow1 = 1.0;
+    bool cachedSceneShadow0Valid = false;
+    bool cachedSceneShadow1Valid = false;
+    float cachedSunShadow = 1.0;
+    bool cachedSunShadowValid = false;
 
     // Jitter first sample to reduce banding. Mix in ray state so horizon rays do
     // not share coherent step planes across neighboring pixels.
@@ -1328,31 +1448,75 @@ void main() {
     int step = 0;
     while (t < tFar && step < maxSteps) {
         vec3  samplePos = rayOrigin + rayDir * t;
+
+        // A Volume Graph may synthesize density in inactive source voxels.
+        // Hierarchy skipping is therefore safe only for legacy/baked density.
+        if (vdbBuf.address != 0 && volumeProgram == MATPROG_NONE) {
+            float sparseStep = nanoEmptyTileStep(
+                vol, samplePos, rayDir, baseStep, vdbBuf, vdbMapH, vdbAcc);
+            if (sparseStep > baseStep * 1.01) {
+                int skippedSegments = max(1, int(floor(sparseStep / baseStep)));
+                step += skippedSegments;
+                t = tNear + (float(step) + rayJitter) * baseStep;
+                continue;
+            }
+        }
         
         float density = sampleDensityAcc(vol, samplePos, vdbBuf, vdbMapH, vdbAcc);
+        float temperature = needsTemperature ? sampleTemperature(vol, samplePos) : 0.0;
+        vec3 stepScatterColor = vol.scatter_color;
+        vec3 stepAbsorptionColor = vol.absorption_color;
+        vec3 stepEmissionColor = vol.emission_color;
+        float stepEmissionStrength = vol.emission_intensity;
+        float stepAnisotropy = vol.scatter_anisotropy;
+        float stepMultiScatter = vol.scatter_multi;
+        if (volumeProgram != MATPROG_NONE) {
+            float emptyAttribs[MP_ATTRIB_SLOTS];
+            for (int ai = 0; ai < MP_ATTRIB_SLOTS; ++ai) emptyAttribs[ai] = 0.0;
+            vec3 localPos;
+            localPos.x = vol.inv_transform[0]*samplePos.x + vol.inv_transform[1]*samplePos.y + vol.inv_transform[2]*samplePos.z + vol.inv_transform[3];
+            localPos.y = vol.inv_transform[4]*samplePos.x + vol.inv_transform[5]*samplePos.y + vol.inv_transform[6]*samplePos.z + vol.inv_transform[7];
+            localPos.z = vol.inv_transform[8]*samplePos.x + vol.inv_transform[9]*samplePos.y + vol.inv_transform[10]*samplePos.z + vol.inv_transform[11];
+            vec3 normalizedLocalPos = clamp(
+                (localPos - vol.aabb_min) / max(vol.aabb_max - vol.aabb_min, vec3(1e-6)),
+                vec3(0.0), vec3(1.0));
+            MatProgOut vp = evalMaterialProgram(
+                volumeProgram, vec2(0.0), samplePos, -rayDir, 0.5, vec3(0.0),
+                emptyAttribs, localPos, -rayDir,
+                density, temperature,
+                (temperature > 0.0) ? clamp(temperature / max(vol.max_temperature, 1.0), 0.0, 1.0) : 0.0,
+                0.0, vec3(0.0), samplePos,
+                vol.scatter_color, vol.emission_color, max(vol.voxel_size, 1e-6), normalizedLocalPos,
+                cam.waterTime);
+            if ((vp.volumeWritten & (1u << 0)) != 0u) density = max(vp.volumeDensity, 0.0);
+            if ((vp.volumeWritten & (1u << 1)) != 0u) stepScatterColor = max(vp.volumeScatterColor, vec3(0.0));
+            if ((vp.volumeWritten & (1u << 2)) != 0u) sigma_s_coeff = max(vp.volumeScatterStrength, 0.0);
+            if ((vp.volumeWritten & (1u << 3)) != 0u) stepAbsorptionColor = max(vp.volumeAbsorptionColor, vec3(0.0));
+            if ((vp.volumeWritten & (1u << 4)) != 0u) sigma_a_coeff = max(vp.volumeAbsorptionStrength, 0.0);
+            if ((vp.volumeWritten & (1u << 5)) != 0u) stepEmissionColor = max(vp.volumeEmissionColor, vec3(0.0));
+            if ((vp.volumeWritten & (1u << 6)) != 0u) stepEmissionStrength = max(vp.volumeEmissionStrength, 0.0);
+            if ((vp.volumeWritten & (1u << 7)) != 0u) stepAnisotropy = clamp(vp.volumeAnisotropy, -0.99, 0.99);
+            if ((vp.volumeWritten & (1u << 8)) != 0u) stepMultiScatter = clamp(vp.volumeMultiScatter, 0.0, 1.0);
+        }
         float sigma_s_local = density * sigma_s_coeff;
-        float sigma_a_local = density * sigma_a_coeff;
+        float sigma_a_local = density * sigma_a_coeff *
+            dot(max(stepAbsorptionColor, vec3(1e-4)), vec3(0.2126, 0.7152, 0.0722));
         float sigma_t_local = sigma_s_local + sigma_a_local;
         // Let low-density regions survive based on scattering optical depth, not
         // raw density alone. This means increasing scatter can actually keep thin
         // edges visible instead of them being discarded by a fixed density gate.
         float sparseCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.04;
         float scatter_keep = clamp((sigma_s_local * baseStep) / sparseCutoff, 0.0, 1.0);
-        if (rnd(payload.seed) > scatter_keep) {
-            t += baseStep;
-            step++;
-            continue;
-        }
         if (sigma_t_local <= EPSILON) {
-            t += baseStep;
             step++;
+            t = tNear + (float(step) + rayJitter) * baseStep;
             continue;
         }
         
-        // Optical-depth-limited adaptive step (industry-standard robustness in dense regions)
-        float dt = min(baseStep, tauMax / sigma_t_local);
-        dt = max(dt, minStep);
-        dt = min(dt, tFar - t);
+        // Fixed coverage segment. Beer-Lambert remains analytic over the full
+        // segment; adaptive optical substeps will return only with a separate
+        // substep budget.
+        float dt = min(baseStep, tFar - t);
         if (dt <= 1e-6) break;
 
         // Current extinction
@@ -1363,11 +1527,11 @@ void main() {
         // Blends single-scatter (Beer's law) with a softer 0.25x extinction approximation
         // to model multiple scattering. When scatter_multi > 0, volumes appear brighter
         // and more translucent — matching the OptiX renderer output.
-        if (vol.scatter_multi > 0.0 && sigma_s_local > 0.0) {
-            float albedo_avg = dot(vol.scatter_color, vec3(0.2126, 0.7152, 0.0722));
+        if (stepMultiScatter > 0.0 && sigma_s_local > 0.0) {
+            float albedo_avg = dot(stepScatterColor, vec3(0.2126, 0.7152, 0.0722));
             float T_multi = exp(-extinction * 0.25);
-            sampleTransmittance = sampleTransmittance * (1.0 - vol.scatter_multi * albedo_avg)
-                                 + T_multi * (vol.scatter_multi * albedo_avg);
+            sampleTransmittance = sampleTransmittance * (1.0 - stepMultiScatter * albedo_avg)
+                                 + T_multi * (stepMultiScatter * albedo_avg);
         }
         float one_minus_sampleT = 1.0 - sampleTransmittance;
         
@@ -1378,10 +1542,9 @@ void main() {
         if (vol.emission_mode >= 1) {
             if (vol.emission_mode == 1) {
                 // Plain constant-color emission
-                emis = vol.emission_color * vol.emission_intensity * density;
+                emis = stepEmissionColor * stepEmissionStrength * density;
             } else if (vol.emission_mode >= 2) {
                 // Blackbody / color-ramp — temperature grid first, density fallback for parity.
-                float temperature = sampleTemperature(vol, samplePos);
                 if (temperature <= 0.0) temperature = density;
 
                 vec3 e_color;
@@ -1414,8 +1577,7 @@ void main() {
                 int maxLightsToSample = min(int(cam.lightCount), 2);
                 float lightWeight = float(cam.lightCount) / float(maxLightsToSample);
                 for (int ls = 0; ls < maxLightsToSample; ls++) {
-                    int li = int(floor(rnd(payload.seed) * float(cam.lightCount)));
-                    li = clamp(li, 0, int(cam.lightCount) - 1);
+                    int li = min(ls, int(cam.lightCount) - 1);
                     LightData light = lights.l[li];
                     int lightType = int(light.position.w + 0.5);
                     
@@ -1438,7 +1600,7 @@ void main() {
                     
                     // Phase function evaluation
                     float cosTheta = dot(rayDir, lightDir);
-                    float phase = dualLobeHG(cosTheta, vol.scatter_anisotropy, 
+                    float phase = dualLobeHG(cosTheta, stepAnisotropy,
                                              vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
                     float powder = gpu_powder_effect(density, cosTheta);
                     phase *= (1.0 + powder * 0.5);
@@ -1449,13 +1611,27 @@ void main() {
                     // This prevents hard black shadows from solids inside the volume.
                     float shadowTr = 1.0;
                     if (sigma_t_local * dt > 0.02) {
-                        float shadowMaxDist = min(lightDist, max(8.0 * baseStep, marchDist * 0.35));
-                        shadowTr = lightMarchAcc(vol, samplePos, lightDir, shadowMaxDist, vdbBuf, vdbMapH, vdbAcc);
+                        bool shadowValid = (ls == 0)
+                            ? cachedSceneShadow0Valid : cachedSceneShadow1Valid;
+                        bool updateShadow = !shadowValid || (step % shadowStride) == 0;
+                        if (updateShadow) {
+                            float shadowMaxDist = min(lightDist, max(8.0 * baseStep, marchDist * 0.35));
+                            float evaluatedShadow = lightMarchAcc(
+                                vol, samplePos, lightDir, shadowMaxDist, vdbBuf, vdbMapH, vdbAcc);
+                            if (ls == 0) {
+                                cachedSceneShadow0 = evaluatedShadow;
+                                cachedSceneShadow0Valid = true;
+                            } else {
+                                cachedSceneShadow1 = evaluatedShadow;
+                                cachedSceneShadow1Valid = true;
+                            }
+                        }
+                        shadowTr = (ls == 0) ? cachedSceneShadow0 : cachedSceneShadow1;
                     }
                     
                     vec3 lightColor = light.color.rgb * light.color.a;
                     inscatter += lightWeight * lightColor * lightAtten * phase * shadowTr
-                               * vol.scatter_color * sigma_s_local;
+                               * stepScatterColor * sigma_s_local;
                 }
             }
             
@@ -1463,27 +1639,33 @@ void main() {
             if (worldData.w.mode == 2) {
                 vec3 sunDir = normalize(worldData.w.sunDir);
                 float cosSun = dot(rayDir, sunDir);
-                float sunPhase = dualLobeHG(cosSun, vol.scatter_anisotropy, 
+                float sunPhase = dualLobeHG(cosSun, stepAnisotropy,
                                             vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
                 float sunPowder = gpu_powder_effect(density, cosSun);
                 sunPhase *= (1.0 + sunPowder * 0.5);
                 
                 float sunShadowTr = 1.0;
                 if (sigma_t_local * dt > 0.02) {
-                    float sunShadowMaxDist = max(12.0 * baseStep, marchDist * 0.45);
-                    sunShadowTr = lightMarchAcc(vol, samplePos, sunDir, sunShadowMaxDist, vdbBuf, vdbMapH, vdbAcc);
+                    bool updateSunShadow = !cachedSunShadowValid || (step % shadowStride) == 0;
+                    if (updateSunShadow) {
+                        float sunShadowMaxDist = max(12.0 * baseStep, marchDist * 0.45);
+                        cachedSunShadow = lightMarchAcc(
+                            vol, samplePos, sunDir, sunShadowMaxDist, vdbBuf, vdbMapH, vdbAcc);
+                        cachedSunShadowValid = true;
+                    }
+                    sunShadowTr = cachedSunShadow;
                 }
                 
                 vec3 sunLi = sampleTransmittanceLUT(samplePos, sunDir) * worldData.w.sunColor * worldData.w.sunIntensity;
-                inscatter += sunLi * sunPhase * sunShadowTr * vol.scatter_color * sigma_s_local;
+                inscatter += sunLi * sunPhase * sunShadowTr * stepScatterColor * sigma_s_local;
             }
             
             // 3. Sky/Ambient lighting (closer to CPU world.evaluate(up) behavior)
             float thin_scatter = scatter_keep * scatter_keep;
-            inscatter += ambientSky * vol.scatter_color * sigma_s_local * thin_scatter;
+            inscatter += ambientSky * stepScatterColor * sigma_s_local * thin_scatter;
             
             // Multi-scatter ambient + source boost (matches OptiX ms_boost)
-            vec3 ms_boost = vec3(1.0) + vol.scatter_color * vol.scatter_multi * (2.0 * thin_scatter);
+            vec3 ms_boost = vec3(1.0) + stepScatterColor * stepMultiScatter * (2.0 * thin_scatter);
             inscatter *= ms_boost;
             
             // CPU parity integration:
@@ -1508,12 +1690,11 @@ void main() {
         }
         
         // Early termination if transmittance is negligible
-        if (transmittance < 0.01) {
-            transmittance = 0.0;
+        if (transmittance < 0.001) {
             break;
         }
-        t += dt;
         step++;
+        t = tNear + (float(step) + rayJitter) * baseStep;
     }
     
     // ══════════════════════════════════════════════════════════════════════════
