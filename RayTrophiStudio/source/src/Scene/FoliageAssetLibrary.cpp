@@ -178,7 +178,9 @@ void configurePlacement(ScatterSource& source,
                         float targetHeight,
                         float heightVariation,
                         bool alignToNormal,
-                        float normalInfluence) {
+                        float normalInfluence,
+                        float yOffsetMin,
+                        float yOffsetMax) {
     const float variation = (std::max)(0.0f, (std::min)(heightVariation, 0.95f));
     if (targetHeight > 0.0f && source.has_local_bbox) {
         const float sourceHeight = source.local_bbox.max.y - source.local_bbox.min.y;
@@ -193,6 +195,8 @@ void configurePlacement(ScatterSource& source,
     source.settings.normal_influence = alignToNormal
         ? (std::max)(0.0f, (std::min)(normalInfluence, 1.0f)) : 0.0f;
     source.settings.rotation_random_xz = 0.0f;
+    source.settings.y_offset_min = (std::min)(yOffsetMin, yOffsetMax);
+    source.settings.y_offset_max = (std::max)(yOffsetMin, yOffsetMax);
 }
 
 } // namespace FoliageAssets

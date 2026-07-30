@@ -260,6 +260,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             }
 
             int particle_system_delete_index = -1;
+            int simulation_domain_delete_system_index = -1;
+            int simulation_domain_delete_index = -1;
+            std::string simulation_domain_delete_name;
             for (int i = 0; i < static_cast<int>(ctx.scene.particle_systems.size()); ++i) {
                 auto& system = ctx.scene.particle_systems[static_cast<std::size_t>(i)];
                 ImGui::PushID(70000 + i);
@@ -323,8 +326,47 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::EndPopup();
                 }
 
-                if (system.runtime && !system.runtime->gridDomains().empty()) {
+                if (system.runtime &&
+                    (!system.runtime->emitters().empty() ||
+                     !system.runtime->gridDomains().empty())) {
                     ImGui::Indent(20.0f);
+                    const auto& emitters = system.runtime->emitters();
+                    for (int emitter_i = 0;
+                         emitter_i < static_cast<int>(emitters.size());
+                         ++emitter_i) {
+                        const auto& emitter =
+                            emitters[static_cast<std::size_t>(emitter_i)];
+                        SelectableItem emitter_item;
+                        emitter_item.type = SelectableType::ParticleEmitter;
+                        emitter_item.particle_system_index = i;
+                        emitter_item.particle_emitter_index = emitter_i;
+                        emitter_item.name = emitter.name;
+
+                        ImGui::PushID(70500 + i * 1000 + emitter_i);
+                        ImGuiTreeNodeFlags emitter_flags =
+                            ImGuiTreeNodeFlags_Leaf |
+                            ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                            ImGuiTreeNodeFlags_SpanAvailWidth;
+                        if (sel.isSelected(emitter_item)) {
+                            emitter_flags |= ImGuiTreeNodeFlags_Selected;
+                        }
+                        const ImVec4 emitter_color = emitter.enabled
+                            ? ImVec4(1.0f, 0.62f, 0.22f, 1.0f)
+                            : ImVec4(0.55f, 0.42f, 0.30f, 0.65f);
+                        ImGui::PushStyleColor(ImGuiCol_Text, emitter_color);
+                        ImGui::TreeNodeEx(emitter.name.c_str(), emitter_flags);
+                        ImGui::PopStyleColor();
+                        if (ImGui::IsItemClicked()) {
+                            ctx.scene.setActiveParticleSystemObject(
+                                static_cast<std::size_t>(i));
+                            sel.selectParticleEmitter(
+                                i, emitter_i, emitter.name);
+                            sel.selected.position = emitter.point;
+                            show_forcefield_tab = true;
+                            tab_to_focus = "Simulation";
+                        }
+                        ImGui::PopID();
+                    }
                     const auto& domains = system.runtime->gridDomains();
                     for (int domain_i = 0; domain_i < static_cast<int>(domains.size()); ++domain_i) {
                         const auto& domain = domains[static_cast<std::size_t>(domain_i)];
@@ -374,10 +416,16 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                 sel.selected.scale = mx - mn;
                             }
                             if (ImGui::MenuItem("Delete", "Del")) {
-                                if (!sel.isSelected(domain_item)) {
-                                    sel.selectSimulationDomain(i, domain_i, domain.name);
-                                }
-                                triggerDelete(ctx);
+                                // Do not erase the domain (and destroy its Vulkan
+                                // resources) while this loop still owns references
+                                // into gridDomains(). Apart from invalidating
+                                // `domain`/`domains`, later ImGui work in this same
+                                // iteration could observe freed state and surface as
+                                // a driver TDR. Resolve the request after every
+                                // particle/domain traversal has finished.
+                                simulation_domain_delete_system_index = i;
+                                simulation_domain_delete_index = domain_i;
+                                simulation_domain_delete_name = domain.name;
                             }
                             ImGui::EndPopup();
                         }
@@ -387,6 +435,14 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 }
 
                 ImGui::PopID();
+            }
+            if (simulation_domain_delete_system_index >= 0 &&
+                simulation_domain_delete_index >= 0) {
+                ctx.selection.selectSimulationDomain(
+                    simulation_domain_delete_system_index,
+                    simulation_domain_delete_index,
+                    simulation_domain_delete_name);
+                triggerDelete(ctx);
             }
             if (particle_system_delete_index >= 0) {
                 ctx.selection.selectParticleSystem(
@@ -1445,6 +1501,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             case SelectableType::GasVolume: typeIcon = "[GAS]"; typeColor = ImVec4(0.0f, 1.0f, 1.0f, 1.0f); break;
             case SelectableType::ParticleSystem: typeIcon = "[PART]"; typeColor = ImVec4(0.45f, 0.95f, 1.0f, 1.0f); break;
             case SelectableType::SimulationDomain: typeIcon = "[DOM]"; typeColor = ImVec4(0.50f, 0.78f, 1.0f, 1.0f); break;
+            case SelectableType::ParticleEmitter: typeIcon = "[EMIT]"; typeColor = ImVec4(1.0f, 0.62f, 0.22f, 1.0f); break;
             case SelectableType::World: typeIcon = "[W]"; typeColor = ImVec4(1.0f, 0.7f, 1.0f, 1.0f); break;
             default: break;
             }

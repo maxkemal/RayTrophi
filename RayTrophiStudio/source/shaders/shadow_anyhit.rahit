@@ -202,6 +202,19 @@ void main() {
         return;                                  // accept — closesthit shades it opaque
     }
 
+    // ---- Volume embedded-solid distance probe -----------------------------
+    // Volume closest-hit initializes w with this exact sentinel and forces
+    // any-hit for opaque geometry via NoOpaqueEXT. Return the committed
+    // candidate distance directly so the volume shader needs ONE trace instead
+    // of an existence trace followed by 5-6 binary-search traces.
+    const uint VOLUME_SOLID_PROBE = 0xC17D5EEDu;
+    if (floatBitsToUint(shadowPayload.w) == VOLUME_SOLID_PROBE) {
+        shadowPayload.x = gl_HitTEXT;
+        shadowPayload.w = 0.0; // hit; shadow miss leaves/sets w=1
+        terminateRayEXT;
+        return;
+    }
+
     // ---- Bevel probe mode (see the payload comment above) -----------------
     // Runs BEFORE any material work: the probe wants raw geometry. Alpha cutouts are
     // deliberately treated as solid here — beveling the edge of an alpha-card leaf is

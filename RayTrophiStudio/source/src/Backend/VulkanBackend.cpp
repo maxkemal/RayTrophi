@@ -64,6 +64,24 @@
 #include "oidn_blend_cuda.h"
 
 namespace {
+bool isUsableTLASInstanceTransform(const Matrix4x4& m) {
+    // Vulkan RT instance transforms must be finite and invertible. In particular,
+    // a zero-scale "hidden" scatter slot is not a valid VkTransformMatrixKHR.
+    // Some drivers tolerate it for a while and then hang during a later TLAS
+    // update; particle pause/cache restores made that show up as a Windows TDR.
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            if (!std::isfinite(m.m[row][col])) return false;
+        }
+    }
+
+    const float det =
+        m.m[0][0] * (m.m[1][1] * m.m[2][2] - m.m[1][2] * m.m[2][1]) -
+        m.m[0][1] * (m.m[1][0] * m.m[2][2] - m.m[1][2] * m.m[2][0]) +
+        m.m[0][2] * (m.m[1][0] * m.m[2][1] - m.m[1][1] * m.m[2][0]);
+    return std::isfinite(det) && std::abs(det) > 1.0e-20f;
+}
+
 bool isWaterTriangleMaterial(const std::shared_ptr<Triangle>& tri) {
     if (!tri) return false;
     Material* mat = MaterialManager::getInstance().getMaterial(tri->getMaterialID());
@@ -841,6 +859,7 @@ void VulkanDevice::shutdown() {
             safeDestroy(blas.baseNormalBuffer);
             safeDestroy(blas.boneIndexBuffer);
             safeDestroy(blas.boneWeightBuffer);
+            safeDestroy(blas.skinScratchBuffer);
         }
         m_blasList.clear();
 
@@ -877,6 +896,14 @@ void VulkanDevice::shutdown() {
         destroyBuffer(m_volumeBuffer);
         destroyBuffer(m_hairMaterialBuffer);
         destroyBuffer(m_hairSegmentBuffer);
+        if (m_hairSegmentStagingPtr) { vkUnmapMemory(m_device, m_hairSegmentStaging.memory); m_hairSegmentStagingPtr = nullptr; }
+        destroyBuffer(m_hairSegmentStaging);
+        // GPU hair expansion resources.
+        if (m_hairGuideStagingPtr) { vkUnmapMemory(m_device, m_hairGuideStaging.memory); m_hairGuideStagingPtr = nullptr; }
+        destroyBuffer(m_hairGuideStaging);
+        destroyBuffer(m_hairGuideBuffer);
+        destroyBuffer(m_hairAabbBuffer);
+        destroyHairExpandPipeline();
         destroyBuffer(m_terrainLayerBuffer);
         destroyBuffer(m_matProgramBuffer);
 
@@ -2709,7 +2736,7 @@ uint32_t VulkanDevice::createAABB_BLAS(const float aabbMin[3], const float aabbM
     return idx;
 }
 
-void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
+void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer externalCmd) {
     if (!hasHardwareRT() || !fpCreateAccelerationStructureKHR) return;
 
     uint32_t instanceCount = (uint32_t)info.instances.size();
@@ -2749,14 +2776,19 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
         if (src.blasIndex >= m_blasList.size()) continue;
 
         VkAccelerationStructureInstanceKHR dst{};
-        // VkTransformMatrixKHR is 3x4 row-major
-        const auto& m = src.transform;
+        // VkTransformMatrixKHR is 3x4 row-major. Never submit a singular/NaN
+        // transform to the driver. Stable scatter pools deliberately retain dead
+        // slots, but those slots must be identity + mask 0, not scale 0.
+        const bool transformUsable = isUsableTLASInstanceTransform(src.transform);
+        const Matrix4x4 safeTransform =
+            transformUsable ? src.transform : Matrix4x4::identity();
+        const auto& m = safeTransform;
         dst.transform.matrix[0][0] = m.m[0][0]; dst.transform.matrix[0][1] = m.m[0][1]; dst.transform.matrix[0][2] = m.m[0][2]; dst.transform.matrix[0][3] = m.m[0][3];
         dst.transform.matrix[1][0] = m.m[1][0]; dst.transform.matrix[1][1] = m.m[1][1]; dst.transform.matrix[1][2] = m.m[1][2]; dst.transform.matrix[1][3] = m.m[1][3];
         dst.transform.matrix[2][0] = m.m[2][0]; dst.transform.matrix[2][1] = m.m[2][1]; dst.transform.matrix[2][2] = m.m[2][2]; dst.transform.matrix[2][3] = m.m[2][3];
 
         dst.instanceCustomIndex = src.customIndex;
-        dst.mask = src.mask;
+        dst.mask = transformUsable ? src.mask : 0;
         dst.instanceShaderBindingTableRecordOffset = src.sbtRecordOffset;
         dst.flags = src.frontFaceCCW ? VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR : 0;
         if (src.opacityOverride == 1)      dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
@@ -2880,12 +2912,18 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
     rangeInfo.primitiveCount = instanceCount;
     const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfo = &rangeInfo;
 
-    VkCommandBuffer cmd = beginSingleTimeCommands();
-    if (cmd == VK_NULL_HANDLE) {
-        return;
+    if (externalCmd != VK_NULL_HANDLE) {
+        // Ping-pong prepass: record into the trace command buffer; the caller submits and
+        // owns the AS→raygen barrier. No self-contained submit/wait here.
+        fpCmdBuildAccelerationStructuresKHR(externalCmd, 1, &buildInfo, &pRangeInfo);
+    } else {
+        VkCommandBuffer cmd = beginSingleTimeCommands();
+        if (cmd == VK_NULL_HANDLE) {
+            return;
+        }
+        fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
+        endSingleTimeCommands(cmd);
     }
-    fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
-    endSingleTimeCommands(cmd);
 
     // Instance + scratch buffers are persistent device members now — nothing to free.
 
@@ -3409,7 +3447,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     // Binding 18: Foam sphere SSBO (intersection + closest-hit)
     // Binding 19: Photon caustic hash grid SSBO (photon raygen writes, camera
     //             raygen debug-reads, closesthit gathers in Dilim 2)
-    VkDescriptorSetLayoutBinding bindings[25] = {};
+    VkDescriptorSetLayoutBinding bindings[30] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -3560,9 +3598,24 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[24].descriptorCount = 1;
     bindings[24].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
+    // Bindings 25-28: fixed temporal ping-pong slots. Their descriptors never
+    // swap while an asynchronous frame is in flight; raygen selects read/write
+    // slots from the temporal frame parity.
+    for (uint32_t i = 25; i <= 28; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    }
+    bindings[29].binding = 29;
+    bindings[29].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[29].descriptorCount = 1;
+    bindings[29].stageFlags =
+        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount = 25;
+    dslCI.bindingCount = 30;
     dslCI.pBindings = bindings;
     vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_rtDescriptorSetLayout);
 
@@ -3783,7 +3836,12 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
                                      const ImageHandle* denoiserNormalImage,
                                      const ImageHandle* varianceImage,
                                      const ImageHandle* denoiserPositionImage,
-                                     const ImageHandle* pathStatsImage) {
+                                     const ImageHandle* pathStatsImage,
+                                     const ImageHandle* volumeTemporalColor0,
+                                     const ImageHandle* volumeTemporalColor1,
+                                     const ImageHandle* volumeTemporalMetadata0,
+                                     const ImageHandle* volumeTemporalMetadata1,
+                                     const BufferHandle* volumeInstrumentation) {
     if (!m_rtDescriptorSetLayout || !m_tlas.accel) {
         VK_ERROR() << "[VulkanDevice] Cannot bind RT descriptors: missing layout or TLAS" << std::endl;
         return;
@@ -4164,6 +4222,45 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w21.descriptorCount = 1;
     w21.pImageInfo = &pathStatsInfo;
     writes.push_back(w21);
+
+    const ImageHandle* temporalImages[4] = {
+        volumeTemporalColor0,
+        volumeTemporalColor1,
+        volumeTemporalMetadata0,
+        volumeTemporalMetadata1
+    };
+    VkDescriptorImageInfo temporalInfos[4]{};
+    VkWriteDescriptorSet temporalWrites[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
+        temporalInfos[i].imageView =
+            (temporalImages[i] && temporalImages[i]->view)
+                ? temporalImages[i]->view
+                : outputImage.view;
+        temporalInfos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        temporalWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        temporalWrites[i].dstSet = m_rtDescriptorSet;
+        temporalWrites[i].dstBinding = 25u + i;
+        temporalWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        temporalWrites[i].descriptorCount = 1;
+        temporalWrites[i].pImageInfo = &temporalInfos[i];
+        writes.push_back(temporalWrites[i]);
+    }
+
+    VkDescriptorBufferInfo volumeInstrumentationInfo{};
+    volumeInstrumentationInfo.buffer =
+        (volumeInstrumentation && volumeInstrumentation->buffer)
+            ? volumeInstrumentation->buffer
+            : m_materialBuffer.buffer;
+    volumeInstrumentationInfo.offset = 0;
+    volumeInstrumentationInfo.range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w29{};
+    w29.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w29.dstSet = m_rtDescriptorSet;
+    w29.dstBinding = 29;
+    w29.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w29.descriptorCount = 1;
+    w29.pBufferInfo = &volumeInstrumentationInfo;
+    writes.push_back(w29);
 
     // Binding 18: Foam point-sphere SSBO (fallback to materialBuffer when no foam
     // exists yet, so the binding is always valid; the foam consumer re-uploads it).
@@ -4683,7 +4780,11 @@ uint32_t VulkanDevice::createHairAABB_BLAS(const std::vector<VkAabbPositionsKHR>
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    // ALLOW_UPDATE so refitHairAABB_BLAS can refresh this AS in place while a groom
+    // animates / is brushed. Hair segment topology is constant across those updates, so
+    // tearing the BLAS down and rebuilding it every time was wasted work.
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     buildInfo.geometryCount = 1;
     buildInfo.pGeometries   = &geometry;
 
@@ -4757,6 +4858,9 @@ uint32_t VulkanDevice::createHairAABB_BLAS(const std::vector<VkAabbPositionsKHR>
 
     destroyBuffer(scratchBuffer);
     blasHandle.vertexBuffer = aabbBuffer; // keep AABB buffer alive in BLAS
+    blasHandle.allowUpdate  = true;
+    blasHandle.aabbCount    = primitiveCount;
+    blasHandle.refitCount   = 0;
 
     uint32_t idx = (uint32_t)m_blasList.size();
     m_blasList.push_back(blasHandle);
@@ -4765,6 +4869,397 @@ uint32_t VulkanDevice::createHairAABB_BLAS(const std::vector<VkAabbPositionsKHR>
               << ", segments=" << primitiveCount
               << ", size=" << (sizeInfo.accelerationStructureSize / 1024) << " KB)" << std::endl;
     return idx;
+}
+
+// GPU hair path: build the hair BLAS straight from a device-resident AABB buffer (the one
+// hair_expand.comp writes). No host AABB array, no upload. The buffer is NOT owned by the
+// BLAS (externalGeometry) — prepareHairExpandBuffers / teardown manage its lifetime.
+uint32_t VulkanDevice::createHairAABB_BLAS_Device(const BufferHandle& aabbBuffer, uint32_t aabbCount) {
+    if (!hasHardwareRT() || !fpCreateAccelerationStructureKHR) return UINT32_MAX;
+    if (!aabbBuffer.buffer || aabbCount == 0) return UINT32_MAX;
+
+    VkAccelerationStructureGeometryAabbsDataKHR aabbsData{};
+    aabbsData.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+    aabbsData.data.deviceAddress = aabbBuffer.deviceAddress;
+    aabbsData.stride = sizeof(VkAabbPositionsKHR);
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType          = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType   = VK_GEOMETRY_TYPE_AABBS_KHR;
+    geometry.flags          = 0;   // intersection shader decides
+    geometry.geometry.aabbs = aabbsData;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries   = &geometry;
+
+    uint32_t primitiveCount = aabbCount;
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    fpGetAccelerationStructureBuildSizesKHR(m_device,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &primitiveCount, &sizeInfo);
+
+    AccelStructHandle blasHandle{};
+    BufferCreateInfo asBufInfo;
+    asBufInfo.size     = sizeInfo.accelerationStructureSize;
+    asBufInfo.usage    = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
+    asBufInfo.location = MemoryLocation::GPU_ONLY;
+    blasHandle.buffer  = createBuffer(asBufInfo);
+    if (!blasHandle.buffer.buffer) return UINT32_MAX;
+
+    VkAccelerationStructureCreateInfoKHR asCI{};
+    asCI.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    asCI.buffer = blasHandle.buffer.buffer;
+    asCI.size   = sizeInfo.accelerationStructureSize;
+    asCI.type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (fpCreateAccelerationStructureKHR(m_device, &asCI, nullptr, &blasHandle.accel) != VK_SUCCESS ||
+        blasHandle.accel == VK_NULL_HANDLE) {
+        destroyBuffer(blasHandle.buffer); return UINT32_MAX;
+    }
+
+    uint64_t scratchAlignment = m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
+    uint64_t alignedScratchSize = (sizeInfo.buildScratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
+    BufferCreateInfo scratchCI;
+    scratchCI.size = alignedScratchSize;
+    scratchCI.usage = BufferUsage::STORAGE;
+    scratchCI.location = MemoryLocation::GPU_ONLY;
+    // Keep the build scratch as the persistent per-BLAS refit scratch (reused every frame).
+    blasHandle.skinScratchBuffer = createBuffer(scratchCI);
+    if (!blasHandle.skinScratchBuffer.buffer) {
+        if (fpDestroyAccelerationStructureKHR) fpDestroyAccelerationStructureKHR(m_device, blasHandle.accel, nullptr);
+        destroyBuffer(blasHandle.buffer); return UINT32_MAX;
+    }
+
+    buildInfo.dstAccelerationStructure  = blasHandle.accel;
+    buildInfo.scratchData.deviceAddress = blasHandle.skinScratchBuffer.deviceAddress;
+    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+    rangeInfo.primitiveCount = primitiveCount;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &rangeInfo;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();   // one-time initial build
+    if (cmd == VK_NULL_HANDLE) {
+        destroyBuffer(blasHandle.skinScratchBuffer);
+        if (fpDestroyAccelerationStructureKHR) fpDestroyAccelerationStructureKHR(m_device, blasHandle.accel, nullptr);
+        destroyBuffer(blasHandle.buffer); return UINT32_MAX;
+    }
+    fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
+    endSingleTimeCommands(cmd);
+
+    VkAccelerationStructureDeviceAddressInfoKHR addrInfo{};
+    addrInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    addrInfo.accelerationStructure = blasHandle.accel;
+    blasHandle.deviceAddress = fpGetAccelerationStructureDeviceAddressKHR(m_device, &addrInfo);
+
+    blasHandle.vertexBuffer     = aabbBuffer;   // ADDRESS only — not owned (see externalGeometry)
+    blasHandle.externalGeometry = true;         // clearHairGeometry must NOT destroy vertexBuffer
+    blasHandle.allowUpdate      = true;
+    blasHandle.aabbCount        = aabbCount;
+    blasHandle.refitCount       = 0;
+
+    uint32_t idx = (uint32_t)m_blasList.size();
+    m_blasList.push_back(blasHandle);
+    VK_INFO() << "[VulkanDevice] Hair AABB BLAS (device) created (index=" << idx
+              << ", segments=" << primitiveCount << ")" << std::endl;
+    return idx;
+}
+
+// GPU hair path: refit the hair BLAS in place, RECORDING into `cmd`. The AABBs already sit
+// in blas.vertexBuffer (compute wrote them this frame) — no upload. Periodic MODE_BUILD
+// reset (every kHairRefitBeforeRebuild) keeps the BVH from degenerating, same as
+// refitHairAABB_BLAS. Scratch is the persistent per-BLAS buffer allocated at create.
+bool VulkanDevice::recordHairBlasRefit(VkCommandBuffer cmd, uint32_t blasIndex, bool forceFullBuild) {
+    if (!hasHardwareRT() || !fpCmdBuildAccelerationStructuresKHR) return false;
+    if (cmd == VK_NULL_HANDLE || blasIndex >= m_blasList.size()) return false;
+    AccelStructHandle& blas = m_blasList[blasIndex];
+    if (!blas.allowUpdate || blas.accel == VK_NULL_HANDLE || !blas.vertexBuffer.buffer) return false;
+    if (!blas.skinScratchBuffer.buffer) return false;
+
+    // A MODE_UPDATE refit keeps the BVH topology from the last full build and only moves the
+    // AABBs. That is fine for coherent motion (a strand rigidly following its skinned scalp),
+    // but DYNAMIC hair (per-frame Verlet) moves control points chaotically and by large
+    // amounts, so 32 accumulated refits degenerate the BVH into huge overlapping nodes —
+    // traversal cost explodes (the "excessive path intersection depth / only Vulkan RT
+    // crawls" report; OptiX was unaffected because it rebuilds). For dynamic hair force a
+    // full MODE_BUILD every frame so the BVH is always freshly balanced. Non-dynamic hair
+    // keeps the cheap refit cadence. The periodic rebuild already exercised MODE_BUILD, so
+    // skinScratchBuffer is sized for a build.
+    // REVERTED (perf): a large-groom rebuild cadence was tried here to cap the per-frame cost,
+    // but amortising the rebuild re-introduces exactly the refit-BVH degeneration this flag
+    // exists to prevent — traversal then costs MORE than the build it saved. Back to the
+    // confirmed behaviour: dynamic hair rebuilds every frame.
+    constexpr uint32_t kHairRefitBeforeRebuild = 32;
+    const bool fullRebuild = forceFullBuild || (blas.refitCount >= kHairRefitBeforeRebuild);
+
+    VkAccelerationStructureGeometryAabbsDataKHR aabbsData{};
+    aabbsData.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+    aabbsData.data.deviceAddress = blas.vertexBuffer.deviceAddress;
+    aabbsData.stride = sizeof(VkAabbPositionsKHR);
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType          = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType   = VK_GEOMETRY_TYPE_AABBS_KHR;
+    geometry.flags          = 0;
+    geometry.geometry.aabbs = aabbsData;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    buildInfo.mode          = fullRebuild ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
+                                          : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    buildInfo.srcAccelerationStructure = fullRebuild ? VK_NULL_HANDLE : blas.accel;
+    buildInfo.dstAccelerationStructure = blas.accel;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries   = &geometry;
+    buildInfo.scratchData.deviceAddress = blas.skinScratchBuffer.deviceAddress;
+
+    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+    rangeInfo.primitiveCount = blas.aabbCount;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &rangeInfo;
+
+    fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
+    blas.refitCount = fullRebuild ? 0u : (blas.refitCount + 1u);
+    return true;
+}
+
+// Upload the guide points and (re)size guide + segment + AABB buffers for a worst-case
+// segment count. The segment SSBO and AABB buffer are device-local and compute-writable.
+bool VulkanDevice::prepareHairExpandBuffers(const std::vector<float>& guidePointsXYZR,
+                                            uint32_t worstCaseSegmentCount) {
+    if (guidePointsXYZR.empty() || worstCaseSegmentCount == 0) return false;
+    const uint64_t guideBytes = guidePointsXYZR.size() * sizeof(float);
+    const uint64_t segBytes   = (uint64_t)worstCaseSegmentCount * sizeof(VulkanRT::HairSegmentGPU);
+    const uint64_t aabbBytes  = (uint64_t)worstCaseSegmentCount * sizeof(VkAabbPositionsKHR);
+
+    // Any (re)allocation below rebinds the persistent descriptor set, which a previous
+    // frame's in-flight compute may still reference. A resize is a topology change (rare),
+    // so drain the GPU first — the guide-only fast path (no resize) never reaches this.
+    const bool willResize = (m_hairGuideBuffer.size < guideBytes * 2ull)   // double-buffered
+                         || (m_hairSegmentBuffer.size < segBytes)
+                         || (m_hairAabbBuffer.size < aabbBytes)
+                         || (m_hairExpandDescSet == VK_NULL_HANDLE);
+    if (willResize) waitIdle();
+
+    // Guide buffer (device-local) + persistent host-visible staging.
+    // ── PING-PONG: two regions in one allocation ─────────────────────────────────────
+    // The guide buffer is read by the hair expand compute inside the ping-pong trace
+    // submission. Overwriting the single copy from the CPU therefore raced the in-flight
+    // prepass, and the first fix for that was to drain every frame — correct, but it
+    // serialized CPU and GPU on EVERY frame of dynamic hair and killed the 2-slot overlap
+    // ("the GPU waits on itself"). Double-buffering removes the hazard AND the stall: the
+    // CPU writes region B while the GPU still reads region A. No descriptor change is
+    // needed because the shader already addresses guides through the per-dispatch
+    // `guideOffset` point index — callers just add hairGuideBasePoints().
+    const uint64_t guideRegionBytes = guideBytes;
+    if (m_hairGuideBuffer.size < guideRegionBytes * 2ull) {
+        if (m_hairGuideBuffer.buffer) destroyBuffer(m_hairGuideBuffer);
+        BufferCreateInfo ci; ci.size = guideRegionBytes * 2ull;
+        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        ci.location = MemoryLocation::GPU_ONLY;
+        m_hairGuideBuffer = createBuffer(ci);
+        if (!m_hairGuideBuffer.buffer) return false;
+        m_hairGuideSlot = 0;   // fresh allocation: restart the ping-pong
+    }
+    // One region holds exactly this upload's point count (4 floats = 1 vec4 point).
+    m_hairGuideSlotPoints = (uint32_t)(guidePointsXYZR.size() / 4);
+    if (m_hairGuideStaging.size < guideBytes) {
+        if (m_hairGuideStaging.buffer) {
+            if (m_hairGuideStagingPtr) { vkUnmapMemory(m_device, m_hairGuideStaging.memory); m_hairGuideStagingPtr = nullptr; }
+            destroyBuffer(m_hairGuideStaging);
+        }
+        BufferCreateInfo sci; sci.size = guideBytes;
+        sci.usage = BufferUsage::TRANSFER_SRC;
+        sci.location = MemoryLocation::CPU_TO_GPU;
+        m_hairGuideStaging = createBuffer(sci);
+        if (!m_hairGuideStaging.buffer) return false;
+        vkMapMemory(m_device, m_hairGuideStaging.memory, 0, VK_WHOLE_SIZE, 0, &m_hairGuideStagingPtr);
+    }
+    if (!m_hairGuideStagingPtr) return false;
+    memcpy(m_hairGuideStagingPtr, guidePointsXYZR.data(), guideBytes);
+    // Alternate the destination region, then publish its point base for the dispatches.
+    m_hairGuideSlot       = m_hairGuideSlot ^ 1u;
+    m_hairGuideBasePoints = m_hairGuideSlot * m_hairGuideSlotPoints;
+    {
+        VkCommandBuffer cmd = beginSingleTimeCommands();
+        if (cmd == VK_NULL_HANDLE) return false;
+        VkBufferCopy region{};
+        region.size      = guideBytes;
+        region.dstOffset = (VkDeviceSize)m_hairGuideSlot * guideRegionBytes;
+        vkCmdCopyBuffer(cmd, m_hairGuideStaging.buffer, m_hairGuideBuffer.buffer, 1, &region);
+        endSingleTimeCommands(cmd);
+    }
+
+    // Segment SSBO (device-local, compute-writable + shader-read at binding 10).
+    if (m_hairSegmentBuffer.size < segBytes) {
+        if (m_hairSegmentBuffer.buffer) destroyBuffer(m_hairSegmentBuffer);
+        BufferCreateInfo ci; ci.size = segBytes;
+        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        ci.location = MemoryLocation::GPU_ONLY;
+        m_hairSegmentBuffer = createBuffer(ci);
+        if (!m_hairSegmentBuffer.buffer) return false;
+        // Re-point binding 10 at the new segment buffer.
+        if (m_rtDescriptorSet != VK_NULL_HANDLE) {
+            VkDescriptorBufferInfo info{}; info.buffer = m_hairSegmentBuffer.buffer; info.offset = 0; info.range = VK_WHOLE_SIZE;
+            VkWriteDescriptorSet w{}; w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = m_rtDescriptorSet; w.dstBinding = 10; w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w.descriptorCount = 1; w.pBufferInfo = &info;
+            vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
+        }
+    }
+
+    // AABB buffer (device-local, compute-writable + AS-build read).
+    if (m_hairAabbBuffer.size < aabbBytes) {
+        if (m_hairAabbBuffer.buffer) destroyBuffer(m_hairAabbBuffer);
+        BufferCreateInfo ci; ci.size = aabbBytes;
+        ci.usage = BufferUsage::STORAGE | BufferUsage::ACCELERATION;
+        ci.location = MemoryLocation::GPU_ONLY;
+        m_hairAabbBuffer = createBuffer(ci);
+        if (!m_hairAabbBuffer.buffer) return false;
+    }
+
+    // Persistent descriptor set: allocate once, (re)write only when the bound buffers
+    // change. recordHairExpand then only binds it (no per-frame alloc → no pool reset that
+    // could invalidate an in-flight set). Safe to write here: willResize implied waitIdle.
+    if (m_hairExpandDescSet == VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        ai.descriptorPool = m_hairExpandDescPool;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &m_hairExpandDescLayout;
+        if (vkAllocateDescriptorSets(m_device, &ai, &m_hairExpandDescSet) != VK_SUCCESS) {
+            m_hairExpandDescSet = VK_NULL_HANDLE; return false;
+        }
+    }
+    if (m_hairExpandDescBuffers[0] != m_hairGuideBuffer.buffer ||
+        m_hairExpandDescBuffers[1] != m_hairSegmentBuffer.buffer ||
+        m_hairExpandDescBuffers[2] != m_hairAabbBuffer.buffer) {
+        VkDescriptorBufferInfo bInfo[3]{};
+        bInfo[0].buffer = m_hairGuideBuffer.buffer;   bInfo[0].range = VK_WHOLE_SIZE;
+        bInfo[1].buffer = m_hairSegmentBuffer.buffer; bInfo[1].range = VK_WHOLE_SIZE;
+        bInfo[2].buffer = m_hairAabbBuffer.buffer;    bInfo[2].range = VK_WHOLE_SIZE;
+        VkWriteDescriptorSet w[3]{};
+        for (int i = 0; i < 3; ++i) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = m_hairExpandDescSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bInfo[i];
+        }
+        vkUpdateDescriptorSets(m_device, 3, w, 0, nullptr);
+        m_hairExpandDescBuffers[0] = m_hairGuideBuffer.buffer;
+        m_hairExpandDescBuffers[1] = m_hairSegmentBuffer.buffer;
+        m_hairExpandDescBuffers[2] = m_hairAabbBuffer.buffer;
+    }
+    return true;
+}
+
+// Record the hair-expand compute dispatches (one per groom) into `cmd`. Shared bindings:
+// 0 = guide buffer, 1 = segment SSBO, 2 = AABB buffer (all device-resident).
+void VulkanDevice::recordHairExpand(VkCommandBuffer cmd, const std::vector<HairExpandPush>& dispatches) {
+    if (!hairExpandReady() || cmd == VK_NULL_HANDLE || dispatches.empty()) return;
+    if (m_hairExpandDescSet == VK_NULL_HANDLE) return;   // prepareHairExpandBuffers not run
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_hairExpandPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_hairExpandPipelineLayout, 0, 1, &m_hairExpandDescSet, 0, nullptr);
+
+    const uint32_t WG = 64;
+    for (const auto& d : dispatches) {
+        vkCmdPushConstants(cmd, m_hairExpandPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(HairExpandPush), &d);
+        const uint32_t kids = (d.childrenPerGuide > 0u) ? d.childrenPerGuide : 1u;
+        const uint32_t threads = d.guideCount * kids;
+        vkCmdDispatch(cmd, (threads + WG - 1) / WG, 1, 1);
+    }
+}
+
+// In-place hair BLAS refresh (see the declaration in VulkanBackend.h for why).
+//
+// MODE_UPDATE is the cheap path — it keeps the existing BVH topology and only refits the
+// bounds, roughly an order of magnitude cheaper than a build. It also degrades as the
+// geometry drifts away from the pose the tree was built for, so every kHairRefitBeforeRebuild
+// updates we do an in-place MODE_BUILD instead: still no destroy/create and no device
+// wait, but the tree is rebuilt optimally. Hair deforms locally around a scalp, so the
+// refit path is accurate between those resets (unlike foam, which disperses and therefore
+// rebuilds every frame — see updateFoamSphereBLAS).
+bool VulkanDevice::refitHairAABB_BLAS(uint32_t blasIndex, const std::vector<VkAabbPositionsKHR>& aabbs) {
+    if (!hasHardwareRT() || !fpCmdBuildAccelerationStructuresKHR) return false;
+    if (blasIndex >= m_blasList.size() || aabbs.empty()) return false;
+
+    AccelStructHandle& blas = m_blasList[blasIndex];
+    if (!blas.allowUpdate || blas.accel == VK_NULL_HANDLE || !blas.vertexBuffer.buffer) return false;
+    // The AS and its AABB buffer were sized for exactly this many primitives.
+    if (blas.aabbCount != (uint32_t)aabbs.size()) return false;
+    if (blas.vertexBuffer.size < aabbs.size() * sizeof(VkAabbPositionsKHR)) return false;
+
+    constexpr uint32_t kHairRefitBeforeRebuild = 32;
+    const bool fullRebuild = (blas.refitCount >= kHairRefitBeforeRebuild);
+
+    // Refresh the AABBs in the existing host-visible buffer.
+    uploadBuffer(blas.vertexBuffer, aabbs.data(), aabbs.size() * sizeof(VkAabbPositionsKHR));
+
+    VkAccelerationStructureGeometryAabbsDataKHR aabbsData{};
+    aabbsData.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+    aabbsData.data.deviceAddress = blas.vertexBuffer.deviceAddress;
+    aabbsData.stride = sizeof(VkAabbPositionsKHR);
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType          = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType   = VK_GEOMETRY_TYPE_AABBS_KHR;
+    geometry.flags          = 0; // not opaque — the intersection shader decides
+    geometry.geometry.aabbs = aabbsData;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    // Flags must match the original build exactly, or the pre-sized AS no longer fits.
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    buildInfo.mode          = fullRebuild ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR
+                                          : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    buildInfo.srcAccelerationStructure = fullRebuild ? VK_NULL_HANDLE : blas.accel;
+    buildInfo.dstAccelerationStructure = blas.accel;   // same handle + backing buffer
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries   = &geometry;
+
+    uint32_t primitiveCount = (uint32_t)aabbs.size();
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    fpGetAccelerationStructureBuildSizesKHR(m_device,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &primitiveCount, &sizeInfo);
+
+    const uint64_t needScratch = fullRebuild ? sizeInfo.buildScratchSize : sizeInfo.updateScratchSize;
+    const uint64_t scratchAlignment = m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
+    const uint64_t alignedScratch = (needScratch + scratchAlignment - 1) & ~(scratchAlignment - 1);
+
+    // Reuse the cached scratch across refits; only grow it. skinScratchBuffer is the
+    // per-BLAS "cached AS update scratch" slot and this BLAS never skins.
+    if (blas.skinScratchBuffer.size < alignedScratch) {
+        if (blas.skinScratchBuffer.buffer) destroyBuffer(blas.skinScratchBuffer);
+        BufferCreateInfo scratchCI;
+        scratchCI.size     = alignedScratch;
+        scratchCI.usage    = BufferUsage::STORAGE;
+        scratchCI.location = MemoryLocation::GPU_ONLY;
+        blas.skinScratchBuffer = createBuffer(scratchCI);
+        if (!blas.skinScratchBuffer.buffer) return false;
+    }
+    buildInfo.scratchData.deviceAddress = blas.skinScratchBuffer.deviceAddress;
+
+    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+    rangeInfo.primitiveCount = primitiveCount;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &rangeInfo;
+
+    // Same submit-and-fence-wait pattern as updateFoamSphereBLAS, which already refreshes
+    // a BLAS in place every frame: this goes to m_computeQueue, so it is ordered ahead of
+    // the next RT dispatch on that queue without a device-wide wait.
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return false;
+    fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
+    endSingleTimeCommands(cmd);
+
+    blas.refitCount = fullRebuild ? 0u : (blas.refitCount + 1u);
+    return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -4993,15 +5488,49 @@ void VulkanDevice::updateHairSegmentBuffer(const std::vector<VulkanRT::HairSegme
     if (segments.empty()) return;
     const uint64_t dataSize = segments.size() * sizeof(VulkanRT::HairSegmentGPU);
 
+    bool hairSegBufferGrew = false;
     if (m_hairSegmentBuffer.size < dataSize) {
         if (m_hairSegmentBuffer.buffer) destroyBuffer(m_hairSegmentBuffer);
         BufferCreateInfo ci;
         ci.size     = dataSize;
         ci.usage    = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
-        ci.location = MemoryLocation::GPU_ONLY;
+        ci.location = MemoryLocation::GPU_ONLY;   // device-local: read per ray at full speed
         m_hairSegmentBuffer = createBuffer(ci);
+        hairSegBufferGrew = true;
     }
-    uploadBuffer(m_hairSegmentBuffer, segments.data(), dataSize);
+
+    // Upload through a PERSISTENT staging buffer. The device-local SSBO cannot be mapped,
+    // so uploadBuffer() would allocate a throwaway host-visible staging buffer, map it,
+    // copy, submit a copy, and free it — every single frame, for a buffer that reaches
+    // hundreds of MB on a dense groom. Keep one staging buffer mapped for the lifetime of
+    // the hair state and only grow it; the per-frame cost drops to one memcpy + one copy.
+    if (m_hairSegmentStaging.size < dataSize) {
+        if (m_hairSegmentStaging.buffer) {
+            if (m_hairSegmentStagingPtr) { vkUnmapMemory(m_device, m_hairSegmentStaging.memory); m_hairSegmentStagingPtr = nullptr; }
+            destroyBuffer(m_hairSegmentStaging);
+        }
+        BufferCreateInfo sci;
+        sci.size     = dataSize;
+        sci.usage    = BufferUsage::TRANSFER_SRC;
+        sci.location = MemoryLocation::CPU_TO_GPU;
+        m_hairSegmentStaging = createBuffer(sci);
+        if (m_hairSegmentStaging.buffer)
+            vkMapMemory(m_device, m_hairSegmentStaging.memory, 0, VK_WHOLE_SIZE, 0, &m_hairSegmentStagingPtr);
+    }
+
+    if (m_hairSegmentStagingPtr && m_hairSegmentBuffer.buffer) {
+        memcpy(m_hairSegmentStagingPtr, segments.data(), dataSize);
+        VkCommandBuffer cmd = beginSingleTimeCommands();
+        if (cmd != VK_NULL_HANDLE) {
+            VkBufferCopy region{};
+            region.size = dataSize;
+            vkCmdCopyBuffer(cmd, m_hairSegmentStaging.buffer, m_hairSegmentBuffer.buffer, 1, &region);
+            endSingleTimeCommands(cmd);
+        }
+    } else {
+        // Staging allocation failed — fall back to the original per-call path.
+        uploadBuffer(m_hairSegmentBuffer, segments.data(), dataSize);
+    }
 
     // Live-update descriptor binding 10 if set exists
     if (m_rtDescriptorSet != VK_NULL_HANDLE) {
@@ -5018,13 +5547,17 @@ void VulkanDevice::updateHairSegmentBuffer(const std::vector<VulkanRT::HairSegme
         w.pBufferInfo    = &info;
         vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
     }
-    VK_INFO() << "[VulkanDevice] updateHairSegmentBuffer - " << segments.size() << " segments (" << dataSize << " bytes)" << std::endl;
+    // Only on (re)allocation: this runs on every brush dab and every animation frame.
+    if (hairSegBufferGrew)
+        VK_INFO() << "[VulkanDevice] hair segment buffer resized - " << segments.size()
+                  << " segments (" << dataSize << " bytes)" << std::endl;
 }
 
 void VulkanDevice::updateHairMaterialBuffer(const std::vector<VulkanRT::HairGpuMaterial>& materials) {
     if (materials.empty()) return;
     const uint64_t dataSize = materials.size() * sizeof(VulkanRT::HairGpuMaterial);
 
+    bool hairMatBufferGrew = false;
     if (m_hairMaterialBuffer.size < dataSize) {
         if (m_hairMaterialBuffer.buffer) destroyBuffer(m_hairMaterialBuffer);
         BufferCreateInfo ci;
@@ -5032,6 +5565,7 @@ void VulkanDevice::updateHairMaterialBuffer(const std::vector<VulkanRT::HairGpuM
         ci.usage    = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
         ci.location = MemoryLocation::GPU_ONLY;
         m_hairMaterialBuffer = createBuffer(ci);
+        hairMatBufferGrew = true;
     }
     uploadBuffer(m_hairMaterialBuffer, materials.data(), dataSize);
 
@@ -5050,7 +5584,9 @@ void VulkanDevice::updateHairMaterialBuffer(const std::vector<VulkanRT::HairGpuM
         w.pBufferInfo    = &info;
         vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
     }
-    VK_INFO() << "[VulkanDevice] updateHairMaterialBuffer - " << materials.size() << " materials (" << dataSize << " bytes)" << std::endl;
+    if (hairMatBufferGrew)
+        VK_INFO() << "[VulkanDevice] hair material buffer resized - " << materials.size()
+                  << " materials (" << dataSize << " bytes)" << std::endl;
 }
 
 void VulkanDevice::updateAtmosphereLUTs(const ImageHandle* lutImages) {
@@ -6315,7 +6851,8 @@ bool VulkanDevice::submitDenoiserCopyAsync(const ImageHandle* srcs, const Buffer
 
 bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h,
     const VulkanRT::ImageHandle& hdrImage, const VulkanRT::ImageHandle& ldrImage,
-    const VulkanRT::BufferHandle& ldrStaging, bool doTrace) {
+    const VulkanRT::BufferHandle& ldrStaging, bool doTrace,
+    const std::function<void(VkCommandBuffer)>& prepass) {
     if (slot >= kFrameSlotCount) return false;
     if (!m_rtPipelineReady || !fpCmdTraceRaysKHR || !m_tlas.accel) return false;
     if (m_tonemapPipeline == VK_NULL_HANDLE || m_tonemapDescSet == VK_NULL_HANDLE) return false;
@@ -6350,6 +6887,12 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     // holds the data; skip the photon pass + camera trace and just re-run
     // tonemap (with the current tonemap push constants) + the LDR copy.
     if (doTrace) {
+        // ── Hair GPU prepass (if any) — expand guides + rebuild/refit hair BLAS in place
+        //    into THIS command buffer, before the trace, so the AS updates ride the
+        //    ping-pong fence instead of a separate vkDeviceWaitIdle. The callback issues
+        //    its own compute→build→raygen barriers and leaves the AS ready for the trace.
+        if (prepass) prepass(cmd);
+
         // ── 0. Photon caustic pass (if scheduled) — must precede the camera trace
         //       in the SAME command buffer so the grid clear/fill cannot race the
         //       previous frame's in-flight camera reads.
@@ -6813,6 +7356,19 @@ bool VulkanBackendAdapter::initialize() {
 #else
     bool validation = false;
 #endif
+    // Release escape hatch: set RAYTROPHI_VK_VALIDATION=1 to turn the Khronos
+    // validation layer on without a Debug build. Driver-reset bugs (AS destroyed
+    // or descriptor rewritten while a trace still references it) are effectively
+    // unguessable from source but are named exactly — object handle and illegal
+    // operation — the moment the layer is loaded. Costs frame rate, so it stays
+    // opt-in rather than becoming the Release default.
+    if (const char* v = std::getenv("RAYTROPHI_VK_VALIDATION")) {
+        if (v[0] == '1' || v[0] == 'y' || v[0] == 'Y') {
+            validation = true;
+            VK_INFO() << "[Vulkan] Validation layer force-enabled via RAYTROPHI_VK_VALIDATION."
+                      << std::endl;
+        }
+    }
     bool ok = m_device->initialize(true, validation);
     if (ok) {
         m_sceneTextureManager->initialize(captureRuntimeRenderCapabilities(), "VulkanBackendAdapter");
@@ -7030,6 +7586,8 @@ void VulkanBackendAdapter::shutdown() {
         m_device->destroyImage(m_pathStatsImage);
         m_pathStatsImage = {};
     }
+    m_volumeTemporal.destroy(*m_device);
+    m_volumeInstrumentation.destroy(*m_device);
     if (m_denoiserColorStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserColorStagingBuffer);
     if (m_denoiserAlbedoStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserAlbedoStagingBuffer);
     if (m_denoiserNormalStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
@@ -8480,7 +9038,14 @@ void VulkanBackendAdapter::clearHairGeometry(bool rebuild_tlas) {
                 m_device->fpDestroyAccelerationStructureKHR(m_device->m_device, blas.accel, nullptr);
             }
             m_device->destroyBuffer(blas.buffer);
-            m_device->destroyBuffer(blas.vertexBuffer); // stores the AABB buffer for hair
+            // vertexBuffer holds the AABB buffer for hair. The GPU-path BLAS
+            // (createHairAABB_BLAS_Device) only borrows the shared m_hairAabbBuffer
+            // (externalGeometry) — destroying it here would double-free; that buffer is
+            // owned by the device and freed at teardown / on resize.
+            if (!blas.externalGeometry) m_device->destroyBuffer(blas.vertexBuffer);
+            // Cached refit scratch — hair BLASes never skin, so this slot is theirs
+            // (createHairAABB_BLAS_Device also parks its persistent scratch here).
+            if (blas.skinScratchBuffer.buffer) m_device->destroyBuffer(blas.skinScratchBuffer);
         }
         if (blasCount > firstHairBlas) {
             m_device->m_blasList.resize(firstHairBlas);
@@ -8495,6 +9060,12 @@ void VulkanBackendAdapter::clearHairGeometry(bool rebuild_tlas) {
     }
     m_hairVkInstances.clear();
     m_hairGroomRegistry.clear();
+    m_hairTopologySignature = 0;   // invalidates the CPU refit fast path
+    // GPU path: the hair BLAS just went away, so no prepass should run until the next
+    // uploadHairGuidesGPU rebuilds it. (uploadHairGuidesGPU re-arms these right after.)
+    m_hairGpuActive        = false;
+    m_hairDirtyGpu         = false;
+    m_hairGpuWorstSegments = 0;
 
     // Rebuild TLAS immediately only when requested. During full hair re-upload
     // we skip this intermediate rebuild to avoid doing TLAS twice.
@@ -8523,13 +9094,6 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
 
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-    // Vulkan hair currently uses a single combined upload. If an older code path
-    // accidentally tries to append another groom without a prior clear, recover
-    // by clearing stale hair state instead of keeping multiple incompatible SSBO/BLAS layouts alive.
-    if (!m_hairVkInstances.empty() || !m_hairGroomRegistry.empty()) {
-        SCENE_LOG_WARN("[Vulkan] uploadHairStrands called while hair state already exists. Forcing hair clear before re-upload.");
-        clearHairGeometry(false);
-    }
     if (groomName != "combined_hair") {
         SCENE_LOG_WARN("[Vulkan] uploadHairStrands expected combined_hair but got \"" + groomName + "\". Proceeding in combined mode.");
     }
@@ -8537,36 +9101,111 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
     // Convert all strands into B-spline segments: N points → N-3 cubic segments
     std::vector<VulkanRT::HairSegmentGPU> segments;
     std::vector<VkAabbPositionsKHR>       aabbs;
-    uint32_t strandIdx = 0;
     uint32_t maxMaterialID = 0;
 
-    for (const auto& strand : strands) {
-        const auto& pts = strand.points;
-        const int N = (int)pts.size();
-        if (N < 4) { ++strandIdx; continue; }
+    // Uniform cubic B-spline basis at t in [0,1] over 4 control points (xyz + radius).
+    auto evalSpan = [](const float c0[4], const float c1[4], const float c2[4], const float c3[4],
+                       float t, float out[4]) {
+        const float t2 = t * t, t3 = t2 * t, omt = 1.0f - t;
+        const float b0 = (omt * omt * omt) / 6.0f;
+        const float b1 = (3.0f * t3 - 6.0f * t2 + 4.0f) / 6.0f;
+        const float b2 = (-3.0f * t3 + 3.0f * t2 + 3.0f * t + 1.0f) / 6.0f;
+        const float b3 = t3 / 6.0f;
+        for (int k = 0; k < 4; ++k) out[k] = b0 * c0[k] + b1 * c1[k] + b2 * c2[k] + b3 * c3[k];
+    };
 
-        // Default radius when per-point radii are absent
-        const float defaultR = 0.002f;
-        auto getR = [&](int idx) {
-            if (idx >= 0 && idx < (int)strand.radii.size()) return strand.radii[idx];
-            return defaultR;
-        };
+    // ADAPTIVE tessellation rate for one span. Kmax (the "Subdivisions" slider) is a
+    // CEILING, not a fixed rate: spending 2^subdivisions sub-segments on a span that is
+    // already straight multiplies VRAM and BLAS build time for zero visual gain, and
+    // straight hair is the common case. Measure how far the curve departs from its chord
+    // and pick the smallest power-of-two K keeping that error under the strand radius —
+    // below the radius the LSS tube already covers it, so the silhouette is unchanged.
+    auto spanRate = [&](const float c0[4], const float c1[4], const float c2[4], const float c3[4],
+                        uint32_t Kmax) -> uint32_t {
+        if (Kmax <= 1) return 1u;
+        float e0[4], e1[4];
+        evalSpan(c0, c1, c2, c3, 0.0f, e0);
+        evalSpan(c0, c1, c2, c3, 1.0f, e1);
+        const float ax = e1[0] - e0[0], ay = e1[1] - e0[1], az = e1[2] - e0[2];
+        const float axisLenSq = ax * ax + ay * ay + az * az;
+        float maxDevSq = 0.0f;
+        if (axisLenSq > 1e-20f) {
+            const float invLenSq = 1.0f / axisLenSq;
+            for (int q = 1; q <= 3; ++q) {            // t = 0.25, 0.5, 0.75
+                float m[4]; evalSpan(c0, c1, c2, c3, 0.25f * (float)q, m);
+                const float dx = m[0] - e0[0], dy = m[1] - e0[1], dz = m[2] - e0[2];
+                const float proj = (dx * ax + dy * ay + dz * az) * invLenSq;
+                const float px = dx - proj * ax, py = dy - proj * ay, pz = dz - proj * az;
+                maxDevSq = (std::max)(maxDevSq, px * px + py * py + pz * pz);
+            }
+        }
+        const float tol = (std::max)((e0[3] + e1[3]) * 0.5f, 1e-6f);
+        // Chord error of a subdivided curve falls off as ~1/K², so K ~ sqrt(dev/tol).
+        const float need = std::sqrt(std::sqrt(maxDevSq) / tol);
+        uint32_t K = 1u;
+        while (K < Kmax && (float)K < need) K <<= 1;
+        return K;
+    };
 
+    const int strandCount = (int)strands.size();
+    auto cpAt = [](const HairStrandData& sd, int i, float out[4]) {
+        out[0] = sd.points[i].x; out[1] = sd.points[i].y; out[2] = sd.points[i].z;
+        out[3] = (i >= 0 && i < (int)sd.radii.size()) ? sd.radii[i] : 0.002f;
+    };
+
+    // Pass 1 (parallel): how many segments each strand will emit, so pass 2 can write into
+    // a pre-sized array from many threads. Regenerating and re-tessellating every strand
+    // runs on EVERY upload — every frame of a skinned animation — so this loop is hot.
+    std::vector<uint32_t> segCount(strands.size(), 0u);
+    #pragma omp parallel for schedule(static)
+    for (int si = 0; si < strandCount; ++si) {
+        const auto& strand = strands[si];
+        const int N = (int)strand.points.size();
+        if (N < 4) continue;
+        const uint32_t Kmax = 1u << (std::min)(strand.subdivisions, 4u);
+        uint32_t total = 0;
+        for (int i = 0; i < N - 3; ++i) {
+            float c0[4], c1[4], c2[4], c3[4];
+            cpAt(strand, i, c0); cpAt(strand, i + 1, c1);
+            cpAt(strand, i + 2, c2); cpAt(strand, i + 3, c3);
+            total += spanRate(c0, c1, c2, c3, Kmax);
+        }
+        segCount[si] = total;
+    }
+
+    // Exclusive prefix sum -> each strand's write offset.
+    std::vector<size_t> segOffset(strands.size() + 1, 0);
+    for (size_t i = 0; i < strands.size(); ++i) segOffset[i + 1] = segOffset[i] + segCount[i];
+    const size_t totalSegments = segOffset.back();
+
+    segments.resize(totalSegments);
+    aabbs.resize(totalSegments);
+    for (int si = 0; si < strandCount; ++si)
+        maxMaterialID = (std::max)(maxMaterialID, static_cast<uint32_t>(strands[si].materialID));
+
+    // Pass 2 (parallel): tessellate into the reserved range. Each segment records si as
+    // its strandID, matching the serial version's segment->strand mapping exactly.
+    #pragma omp parallel for schedule(static)
+    for (int si = 0; si < strandCount; ++si) {
+        const auto& strand = strands[si];
+        const int N = (int)strand.points.size();
+        if (N < 4) continue;
+        size_t out = segOffset[si];
         const uint32_t matID = strand.materialID;
-        maxMaterialID = (std::max)(maxMaterialID, static_cast<uint32_t>(matID));
+        const uint32_t Kmax  = 1u << (std::min)(strand.subdivisions, 4u);
 
-        // Store a segment from its 4 cubic-B-spline control points and append a
-        // LSS-tight AABB. The AABB spans the two endpoints curve(0)=(cp0+4cp1+cp2)/6
-        // and curve(1)=(cp1+4cp2+cp3)/6 — much tighter than the 4-CP convex hull.
-        // hair_intersection.rint reconstructs the same endpoints, so this bound is exact.
-        auto pushSeg = [&](const float cp0[4], const float cp1[4],
-                           const float cp2[4], const float cp3[4]) {
+        // Store a segment from its 4 cubic-B-spline control points and its LSS-tight AABB.
+        // The AABB spans the two endpoints curve(0)=(cp0+4cp1+cp2)/6 and
+        // curve(1)=(cp1+4cp2+cp3)/6 — much tighter than the 4-CP convex hull, and
+        // hair_intersection.rint reconstructs the same endpoints, so the bound is exact.
+        auto writeSeg = [&](const float cp0[4], const float cp1[4],
+                            const float cp2[4], const float cp3[4]) {
             VulkanRT::HairSegmentGPU seg{};
             for (int k = 0; k < 4; ++k) {
                 seg.cp0[k] = cp0[k]; seg.cp1[k] = cp1[k];
                 seg.cp2[k] = cp2[k]; seg.cp3[k] = cp3[k];
             }
-            seg.strandID = strandIdx; seg.groomID = matID; seg.materialID = matID; seg.padding = 0;
+            seg.strandID = (uint32_t)si; seg.groomID = matID; seg.materialID = matID; seg.padding = 0;
 
             const float inv6 = 1.0f / 6.0f;
             const float p0x = (cp0[0] + 4.0f * cp1[0] + cp2[0]) * inv6;
@@ -8579,56 +9218,39 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
             const float r1  = (cp1[3] + 4.0f * cp2[3] + cp3[3]) * inv6;
 
             VkAabbPositionsKHR aabb{};
-            aabb.minX = std::min(p0x - r0, p1x - r1);
-            aabb.minY = std::min(p0y - r0, p1y - r1);
-            aabb.minZ = std::min(p0z - r0, p1z - r1);
-            aabb.maxX = std::max(p0x + r0, p1x + r1);
-            aabb.maxY = std::max(p0y + r0, p1y + r1);
-            aabb.maxZ = std::max(p0z + r0, p1z + r1);
+            aabb.minX = (std::min)(p0x - r0, p1x - r1);
+            aabb.minY = (std::min)(p0y - r0, p1y - r1);
+            aabb.minZ = (std::min)(p0z - r0, p1z - r1);
+            aabb.maxX = (std::max)(p0x + r0, p1x + r1);
+            aabb.maxY = (std::max)(p0y + r0, p1y + r1);
+            aabb.maxZ = (std::max)(p0z + r0, p1z + r1);
 
-            segments.push_back(seg);
-            aabbs.push_back(aabb);
+            segments[out] = seg;
+            aabbs[out]    = aabb;
+            ++out;
         };
 
-        // Tessellation: each cubic span becomes K = 2^subdivisions sub-segments.
-        //   subdivisions 0 → K=1  : ONE straight LSS chord between the true B-spline
-        //                           endpoints — unchanged behaviour, keeps the .rint's
-        //                           analytic C¹ tangent (real cubic CPs stored).
-        //   subdivisions >0 → K>1 : sample the TRUE cubic B-spline curve at K sub-points
-        //                           and emit short straight LSS sub-segments so the
-        //                           SILHOUETTE follows the curve (fixes kinked curls).
-        // NOTE: K multiplies the hair AABB/segment count — dense grooms scale VRAM/build
-        // time by K. The UI "Subdivisions" slider is the control; lower it if heavy.
-        const uint32_t K = 1u << (std::min)(strand.subdivisions, 4u);
+        for (int i = 0; i < N - 3; ++i) {
+            float c0[4], c1[4], c2[4], c3[4];
+            cpAt(strand, i, c0); cpAt(strand, i + 1, c1);
+            cpAt(strand, i + 2, c2); cpAt(strand, i + 3, c3);
 
-        for (int i = 0; i < N - 3; i++) {
-            const float c0[4] = { pts[i    ].x, pts[i    ].y, pts[i    ].z, getR(i    ) };
-            const float c1[4] = { pts[i + 1].x, pts[i + 1].y, pts[i + 1].z, getR(i + 1) };
-            const float c2[4] = { pts[i + 2].x, pts[i + 2].y, pts[i + 2].z, getR(i + 2) };
-            const float c3[4] = { pts[i + 3].x, pts[i + 3].y, pts[i + 3].z, getR(i + 3) };
+            // Must match pass 1 exactly, or the reserved ranges do not line up.
+            const uint32_t K = spanRate(c0, c1, c2, c3, Kmax);
 
             if (K <= 1) {
-                pushSeg(c0, c1, c2, c3);   // real cubic segment (with analytic tangent)
+                writeSeg(c0, c1, c2, c3);   // real cubic segment (keeps the analytic tangent)
                 continue;
             }
 
-            // Uniform cubic B-spline basis at parameter t∈[0,1] (position + radius in .w).
-            auto evalBSpline = [&](float t, float out[4]) {
-                const float t2 = t * t, t3 = t2 * t, omt = 1.0f - t;
-                const float b0 = (omt * omt * omt) / 6.0f;
-                const float b1 = (3.0f * t3 - 6.0f * t2 + 4.0f) / 6.0f;
-                const float b2 = (-3.0f * t3 + 3.0f * t2 + 3.0f * t + 1.0f) / 6.0f;
-                const float b3 = t3 / 6.0f;
-                for (int k = 0; k < 4; ++k)
-                    out[k] = b0 * c0[k] + b1 * c1[k] + b2 * c2[k] + b3 * c3[k];
-            };
-
-            float prev[4]; evalBSpline(0.0f, prev);
+            // Sample the TRUE cubic B-spline at K sub-points and emit short straight LSS
+            // sub-segments so the SILHOUETTE follows the curve (fixes kinked curls).
+            float prev[4]; evalSpan(c0, c1, c2, c3, 0.0f, prev);
             for (uint32_t j = 1; j <= K; ++j) {
-                float cur[4]; evalBSpline((float)j / (float)K, cur);
-                // Store the straight sub-segment prev→cur as collinear, evenly-spaced
+                float cur[4]; evalSpan(c0, c1, c2, c3, (float)j / (float)K, cur);
+                // Store the straight sub-segment prev->cur as collinear, evenly-spaced
                 // cubic B-spline CPs so the .rint reproduces curve(0)=prev, curve(1)=cur:
-                //   cp1=prev, cp2=cur, cp0=2·prev−cur, cp3=2·cur−prev  (radius in .w too).
+                //   cp1=prev, cp2=cur, cp0=2*prev-cur, cp3=2*cur-prev  (radius in .w too).
                 float scp0[4], scp1[4], scp2[4], scp3[4];
                 for (int k = 0; k < 4; ++k) {
                     scp1[k] = prev[k];
@@ -8636,14 +9258,78 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
                     scp0[k] = 2.0f * prev[k] - cur[k];
                     scp3[k] = 2.0f * cur[k]  - prev[k];
                 }
-                pushSeg(scp0, scp1, scp2, scp3);
+                writeSeg(scp0, scp1, scp2, scp3);
                 for (int k = 0; k < 4; ++k) prev[k] = cur[k];
             }
         }
-        ++strandIdx;
     }
 
-    if (segments.empty()) return UINT32_MAX;
+    if (segments.empty()) {
+        // Nothing to draw: drop whatever hair state is live so a stale BLAS/SSBO pair
+        // cannot outlive it.
+        if (!m_hairVkInstances.empty() || !m_hairGroomRegistry.empty()) clearHairGeometry(true);
+        return UINT32_MAX;
+    }
+
+    // ── Fast path: same topology, moved vertices ─────────────────────────────
+    // Grooming a strand, animating a skinned scalp or nudging a material re-runs this
+    // whole function, but none of them change how many segments there are. When the
+    // signature matches we skip clearHairGeometry entirely: the BLAS is refit in place
+    // and only the segment SSBO and the TLAS are refreshed. What that saves versus the
+    // full path is the BLAS teardown, the BLAS build from scratch (the dominant GPU cost
+    // — millions of AABBs) and the scene-wide geometry-data buffer rebuild. One device
+    // sync remains; see the comment on the wait below for why it is not optional.
+    const uint64_t signature = (uint64_t)segments.size() * 1000003ull
+                             + (uint64_t)strands.size() * 131ull
+                             + (uint64_t)maxMaterialID;
+
+    // The live BLAS index is read back from the TLAS instance record rather than cached
+    // separately, so it cannot go stale behind a mesh-geometry rebuild. refitHairAABB_BLAS
+    // additionally refuses any AS that is not an AABB BLAS of exactly this size.
+    const uint32_t liveHairBlas = (m_hairVkInstances.size() == 1)
+                                ? m_hairVkInstances[0].blasIndex : UINT32_MAX;
+
+    if (liveHairBlas != UINT32_MAX && m_hairTopologySignature == signature) {
+        // Sync BEFORE touching anything the GPU may still be reading. The refit writes
+        // into the existing BLAS backing buffer in place, and createTLAS below destroys
+        // the current TLAS before building its replacement — both are use-after-free
+        // hazards against a frame still in flight. The old code reached these teardowns
+        // only through clearHairGeometry, which did this wait; the fast path skips
+        // clearHairGeometry, so it owes the wait itself. (Without it the driver faults —
+        // this is what took nvoglv64 down when grooms were deleted.)
+        //
+        // It is still far cheaper than the path it replaces: no BLAS teardown, no BLAS
+        // build from scratch, no scene-wide geometry-data buffer rebuild.
+        m_device->waitIdle();
+
+        if (m_device->refitHairAABB_BLAS(liveHairBlas, aabbs)) {
+            m_device->updateHairSegmentBuffer(segments);
+
+            // The BLAS bounds moved, so the TLAS — which cached this instance's extent at
+            // ITS build time — must be rebuilt or hair outside the old extent is missed.
+            std::vector<VulkanRT::TLASInstance> allInstances = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) allInstances.push_back(h);
+            if (!allInstances.empty()) {
+                VulkanRT::TLASCreateInfo tlasInfo;
+                tlasInfo.instances   = allInstances;
+                tlasInfo.allowUpdate = false;
+                m_device->createTLAS(tlasInfo);
+            }
+            resetAccumulation();
+
+            // Deliberately NOT logged: this is the common path and fires on every brush
+            // dab and every animation frame.
+            return m_hairGroomRegistry.empty() ? 0u : m_hairGroomRegistry.begin()->second;
+        }
+        // Refit refused (topology drifted under us) — fall through to the full rebuild.
+    }
+
+    // ── Slow path: topology changed (or first upload) ────────────────────────
+    // Vulkan hair uses a single combined upload; drop any previous hair state rather than
+    // keeping incompatible SSBO/BLAS layouts alive side by side.
+    if (!m_hairVkInstances.empty() || !m_hairGroomRegistry.empty()) {
+        clearHairGeometry(false);
+    }
 
     // Upload segment SSBO (append to existing)
     // TODO: support multi-groom by appending; for now replace entire buffer
@@ -8684,14 +9370,151 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
     uint32_t groomHandle = (uint32_t)(m_hairVkInstances.size() - 1);
     m_hairGroomRegistry.clear();
     m_hairGroomRegistry["combined_hair"] = groomHandle;
+    m_hairTopologySignature  = signature;
 
-    SCENE_LOG_INFO("[Vulkan] Hair upload material range: 0.." + std::to_string(maxMaterialID));
-
-    SCENE_LOG_INFO("[Vulkan] Hair groom \"" + groomName + "\" uploaded: "
-        + std::to_string(strands.size()) + " strands, "
-        + std::to_string(segments.size()) + " segments (BLAS=" + std::to_string(blasIdx) + ")");
+    // Report the VRAM the segment SSBO alone costs — it is the dominant hair allocation
+    // and scales with the Subdivisions slider, which is otherwise invisible to the user.
+    const uint64_t segMB = (uint64_t)segments.size() * sizeof(VulkanRT::HairSegmentGPU) / (1024ull * 1024ull);
+   /* SCENE_LOG_INFO("[Vulkan] Hair rebuilt: " + std::to_string(strands.size()) + " strands, "
+        + std::to_string(segments.size()) + " segments, ~" + std::to_string(segMB)
+        + " MB segment SSBO, materials 0.." + std::to_string(maxMaterialID)
+        + " (BLAS=" + std::to_string(blasIdx) + ")");*/
     return groomHandle;
 }
+
+// ── GPU hair path ────────────────────────────────────────────────────────────────────
+bool VulkanBackendAdapter::uploadHairGuidesGPU(const std::vector<float>& guidePointsXYZR,
+    const std::vector<VulkanRT::VulkanDevice::HairExpandPush>& dispatches,
+    uint32_t worstCaseSegmentCount, bool anyDynamic) {
+    if (!hairGpuAvailable() || guidePointsXYZR.empty() || dispatches.empty() || worstCaseSegmentCount == 0)
+        return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    // NOTE: no drain here. The guide buffer is DOUBLE-BUFFERED (see prepareHairExpandBuffers),
+    // so this upload writes the region the in-flight prepass is not reading. An earlier fix
+    // drained every in-flight trace here instead; it was correct but ran on EVERY frame of
+    // dynamic hair, serializing CPU and GPU and collapsing the 2-slot ping-pong throughput
+    // (the "GPU pegged but never progresses" report). Ping-pong removes hazard and stall both.
+    if (!m_device->prepareHairExpandBuffers(guidePointsXYZR, worstCaseSegmentCount)) return false;
+    m_hairGpuDispatches = dispatches;
+    // Re-base every dispatch onto the guide region just written.
+    {
+        const uint32_t base = m_device->hairGuideBasePoints();
+        for (auto& d : m_hairGpuDispatches) d.guideOffset += base;
+    }
+    m_hairAnyDynamic    = anyDynamic;   // dynamic hair → force MODE_BUILD in the prepass refit
+
+    const bool topologyChanged = (!m_hairGpuActive)
+                              || (worstCaseSegmentCount != m_hairGpuWorstSegments)
+                              || m_hairVkInstances.empty();
+
+    if (topologyChanged) {
+        // Only the topology change carries a full drain — steady-state frames refit in the
+        // ping-pong prepass. Run the compute ONCE here so the hair BLAS builds over real
+        // (filled) AABBs rather than uninitialized memory.
+        // clearHairGeometry() opens with its own vkDeviceWaitIdle, so drain here ONLY when
+        // there is nothing to clear; doing both stalled the device twice per rebuild, which
+        // matters when several rebuilds land in one frame (see the coalescing guard in
+        // Renderer::uploadHairToGPU — the pause-transition TDR).
+        if (!m_hairVkInstances.empty() || !m_hairGroomRegistry.empty()) {
+            clearHairGeometry(false);
+        } else {
+            m_device->waitIdle();
+        }
+
+        VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+        if (cmd == VK_NULL_HANDLE) return false;
+        m_device->recordHairExpand(cmd, m_hairGpuDispatches);
+        VkMemoryBarrier b{}; b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &b, 0, nullptr, 0, nullptr);
+        m_device->endSingleTimeCommands(cmd);
+
+        uint32_t blasIdx = m_device->createHairAABB_BLAS_Device(m_device->hairAabbBuffer(), worstCaseSegmentCount);
+        if (blasIdx == UINT32_MAX) return false;
+
+        VulkanRT::TLASInstance vi;
+        vi.blasIndex       = blasIdx;
+        vi.transform       = Matrix4x4();
+        vi.materialIndex   = 0;
+        vi.customIndex     = (uint32_t)m_hairVkInstances.size();
+        vi.mask            = 0xFF;
+        vi.frontFaceCCW    = false;
+        vi.sbtRecordOffset = m_device->getHairSbtOffset();
+        m_hairVkInstances.push_back(vi);
+        m_hairGroomRegistry.clear();
+        m_hairGroomRegistry["combined_hair"] = 0;
+
+        std::vector<VulkanRT::TLASInstance> all = m_vkInstances;
+        for (const auto& h : m_hairVkInstances) all.push_back(h);
+        if (!all.empty()) {
+            VulkanRT::TLASCreateInfo ti; ti.instances = all; ti.allowUpdate = true; // prepass refits it
+            m_device->createTLAS(ti);
+        }
+        m_hairGpuWorstSegments  = worstCaseSegmentCount;
+        m_hairGpuActive         = true;
+        m_hairTopologySignature = 0;   // the CPU refit path and the GPU path do not mix
+
+        SCENE_LOG_INFO("[Vulkan] Hair GPU path active: " + std::to_string(dispatches.size())
+            + " grooms, worst-case " + std::to_string(worstCaseSegmentCount) + " segments (BLAS="
+            + std::to_string(blasIdx) + ")");
+    }
+
+    m_hairDirtyGpu = true;   // a prepass is due this frame (guides moved)
+    resetAccumulation();
+    return true;
+}
+
+void VulkanBackendAdapter::recordHairPrepass(VkCommandBuffer cmd) {
+    if (!hairGpuPrepassPending() || cmd == VK_NULL_HANDLE) return;
+    if (!m_device || !m_device->hairExpandReady()) return;   // pipeline was torn down
+    if (m_hairVkInstances.size() != 1) return;
+    const uint32_t blasIdx = m_hairVkInstances[0].blasIndex;
+    // Defence in depth: a mesh-geometry rebuild empties m_blasList, so a cached hair BLAS
+    // index can dangle for one frame before uploadHairGuidesGPU rebuilds it. Building the
+    // TLAS over an out-of-range/foreign BLAS crashed the driver on timeline-animation
+    // rebuilds; skip the prepass this frame if the index no longer looks like our hair BLAS.
+    if (blasIdx >= m_device->m_blasList.size()) return;
+    if (!m_device->m_blasList[blasIdx].externalGeometry) return;   // not the GPU hair BLAS
+
+    // 1. Expand guides -> segment SSBO + AABB buffer (device-resident, no upload).
+    m_device->recordHairExpand(cmd, m_hairGpuDispatches);
+
+    // 2. compute write -> AS build read.
+    VkMemoryBarrier b1{}; b1.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    b1.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    b1.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &b1, 0, nullptr, 0, nullptr);
+
+    // 3. Refit the hair BLAS in place (full MODE_BUILD every frame for dynamic hair, whose
+    //    chaotic motion would otherwise degenerate a refit-only BVH — see recordHairBlasRefit).
+    m_device->recordHairBlasRefit(cmd, blasIdx, m_hairAnyDynamic);
+
+    // 4. Hair BLAS build -> raygen read (the trace immediately follows in this cmd).
+    //
+    // Do NOT rebuild/refit the TLAS here. recordHairBlasRefit updates the existing BLAS
+    // handle in place, so its device address — the only hair reference stored by the
+    // TLAS — is unchanged. Topology changes create a fresh BLAS and TLAS in
+    // uploadHairGuidesGPU(), while mesh/instance transform paths update the TLAS
+    // separately.
+    //
+    // The old per-frame createTLAS(ti, cmd) was also a driver-reset hazard: after any
+    // allowUpdate=false TLAS build (notably at a timeline pause transition), createTLAS
+    // took its destroy/recreate branch while this command buffer and the sibling frame
+    // slot still referenced the old TLAS/descriptor. Dynamic or force-driven hair made
+    // that illegal branch run immediately because it schedules this prepass every frame.
+    VkMemoryBarrier b3{}; b3.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    b3.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    b3.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1, &b3, 0, nullptr, 0, nullptr);
+
+    m_hairDirtyGpu = false;
+}
+
 void VulkanBackendAdapter::updateMeshTransform(uint32_t h, const Matrix4x4& t) { (void)h; (void)t; }
 
 void VulkanBackendAdapter::rebuildAccelerationStructure() {
@@ -8705,6 +9528,14 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
     m_instance_sync_cache.clear();
     m_hairVkInstances.clear();
     m_hairGroomRegistry.clear();
+    // The whole BLAS list dies below — force the next hair upload down the full path.
+    // Also disarm the GPU hair prepass: its cached BLAS index (m_hairVkInstances[0]) is now
+    // gone, so a prepass firing before the next uploadHairGuidesGPU would build the TLAS
+    // over a stale/invalid BLAS and crash the driver (seen on timeline-animation rebuilds).
+    m_hairTopologySignature = 0;
+    m_hairGpuActive        = false;
+    m_hairDirtyGpu         = false;
+    m_hairGpuWorstSegments = 0;
     m_meshBlasCount = 0; // Reset: all existing BLASes will be destroyed below
     m_topology_dirty = true;
     m_rasterGeometryDirty = true;
@@ -8718,7 +9549,21 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
     if (m_device) {
         m_device->waitIdle();
         
-        // Destroy all existing BLAS (Geometry)
+        // Destroy all existing BLAS (Geometry). Track handles across the WHOLE list:
+        // grouped/skinned BLAS metadata can legitimately retain aliases, and freeing an
+        // allocation twice is fatal inside the NVIDIA Vulkan driver.
+        std::set<VkBuffer> destroyedBlasBuffers;
+        std::set<VkDeviceMemory> freedBlasMemories;
+        auto destroyOwnedBlasBuffer = [&](VulkanRT::BufferHandle& buffer) {
+            if (buffer.buffer && destroyedBlasBuffers.insert(buffer.buffer).second) {
+                vkDestroyBuffer(m_device->m_device, buffer.buffer, nullptr);
+            }
+            if (buffer.memory && freedBlasMemories.insert(buffer.memory).second) {
+                vkFreeMemory(m_device->m_device, buffer.memory, nullptr);
+            }
+            buffer = {};
+        };
+
         for (auto& blas : m_device->m_blasList) {
             if (blas.accel && m_device->fpDestroyAccelerationStructureKHR) {
                 m_device->fpDestroyAccelerationStructureKHR(m_device->m_device, blas.accel, nullptr);
@@ -8737,12 +9582,27 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
             blas.pointinessBuffer    = {};
             blas.attribBuffer        = {};
             blas.waterBuffer         = {};
-            m_device->destroyBuffer(blas.buffer);       // dedicated AS backing buffer
-            m_device->destroyBuffer(blas.vertexBuffer); // single combined geometry buffer
-            m_device->destroyBuffer(blas.baseVertexBuffer);
-            m_device->destroyBuffer(blas.baseNormalBuffer);
-            m_device->destroyBuffer(blas.boneIndexBuffer);
-            m_device->destroyBuffer(blas.boneWeightBuffer);
+            destroyOwnedBlasBuffer(blas.buffer);       // dedicated AS backing buffer
+            // Device-resident geometry (including the GPU hair BLAS) only aliases
+            // its source buffer through vertexBuffer. The owner is respectively
+            // the device-resident mesh registry or m_hairAabbBuffer; freeing the
+            // alias here leaves the owner holding a stale VkBuffer/VkDeviceMemory
+            // and the next timeline play/rebuild double-frees it in vkFreeMemory.
+            // This must mirror clearHairGeometry()'s ownership rule.
+            // Postmortem: docs/VULKAN_HAIR_PAUSE_DOUBLE_FREE_POSTMORTEM.md
+            if (!blas.externalGeometry) {
+                destroyOwnedBlasBuffer(blas.vertexBuffer); // owned combined geometry buffer
+            } else {
+                blas.vertexBuffer = {};
+            }
+            destroyOwnedBlasBuffer(blas.baseVertexBuffer);
+            destroyOwnedBlasBuffer(blas.baseNormalBuffer);
+            destroyOwnedBlasBuffer(blas.boneIndexBuffer);
+            destroyOwnedBlasBuffer(blas.boneWeightBuffer);
+            // GPU hair keeps its build/update scratch per BLAS. Unlike the shared
+            // batch scratch this allocation is owned by the handle and must die
+            // with the acceleration structure.
+            destroyOwnedBlasBuffer(blas.skinScratchBuffer);
         }
         m_device->m_blasList.clear();
 
@@ -8824,6 +9684,26 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
     // frame or when topology changes (m_vkInstances empty / topology_dirty).
     // All other frames: compute-dispatch skinning and refit TLAS in-place.
     if (!m_vkInstances.empty() && !m_topology_dirty) {
+        // ── Single-copy AS race guard (drain in-flight trace BEFORE touching the AS) ──
+        // dispatchSkinning below refits each skinned mesh BLAS IN PLACE, and updateTLAS
+        // overwrites the single-copy TLAS. A previous frame's ping-pong trace may still be
+        // reading both through the TLAS on the graphics queue — modifying an acceleration
+        // structure while it is being traced is undefined behavior (the NVIDIA symptom is a
+        // silent hang / driver reset). This is the "sequence render stops at frame N" hang
+        // AND the "dynamic hair crashes in Vulkan RT" report: with dynamic hair the CPU
+        // rewrites the guides every frame (restyleGroom Verlet → uploadHairGuidesGPU) while
+        // this GPU skinning path rebuilds the mesh AS, so both race the in-flight trace.
+        // The old code only waited on the rigid (b.empty) path via a full vkDeviceWaitIdle
+        // and ASSUMED the skinned path was covered by dispatchSkinning's fence — but that
+        // fence drains only dispatchSkinning's OWN submit, not the RT graphics trace, so the
+        // skinned path was unguarded. It was masked until now by the per-frame CPU Embree
+        // refit that ran just before this call; deferring that refit for GPU sessions
+        // tightened the window and exposed the race. Fix = the "per-frame fence on the RT
+        // submission" the old comment hinted at: wait the in-flight frame-slot fences (which
+        // fence the whole trace+tonemap submit). Lighter than waitIdle and non-resetting, so
+        // the consume path still displays each slot; covers both rigid and skinned paths.
+        drainInFlightTraces();
+
         // 1. Refit each skinned BLAS (compute + AS update in one command buffer)
         if (!b.empty()) {
             for (uint32_t i = 0; i < (uint32_t)m_device->m_blasList.size(); ++i) {
@@ -8833,25 +9713,18 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
             }
         }
 
-        // 2. Refit TLAS with current instance list
-        // [HANG DIAGNOSIS] When the skin path runs, dispatchSkinning above
-        // submits compute work that internally drains via fence — so by the
-        // time we reach here the GPU is idle and updateTLAS is safe. On the
-        // rigid (non-skinned) keyframe path b is empty, dispatchSkinning is
-        // skipped, and updateTLAS proceeds while the previous frame's
-        // traceRays may still be in flight. Modifying an acceleration
-        // structure while it is being traced is undefined behavior in
-        // Vulkan — the typical NVIDIA driver symptom is a silent hang
-        // (no exception, no AV) inside subsequent traceRays, exactly
-        // matching the sequence-render-stops-at-frame-N report.
-        // waitIdle here is a heavy hammer for verification; once confirmed,
-        // a per-frame fence on the RT submission would be the targeted fix.
-        if (b.empty() && m_device) {
-            m_device->waitIdle();
+        // 2. TLAS. When the GPU hair prepass will rebuild the TLAS this frame — it does so
+        // from m_vkInstances + m_hairVkInstances INSIDE the async trace command buffer,
+        // guarded by the ping-pong fence — refitting it again here is a redundant full
+        // submit+wait that only stalls the CPU (and re-does GPU work the prepass repeats).
+        // During animation hair is dirty every frame, so the prepass always runs; defer to
+        // it. Only refit here when no prepass will (no GPU hair, or hair not dirty this
+        // frame) so the mesh skinning still reaches the TLAS. (safe: trace drained above.)
+        if (!hairGpuPrepassPending()) {
+            auto merged = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) merged.push_back(h);
+            m_device->updateTLAS(merged);
         }
-        auto merged = m_vkInstances;
-        for (const auto& h : m_hairVkInstances) merged.push_back(h);
-        m_device->updateTLAS(merged);
 
         // Sync raster viewport instances so Solid/Matcap mode reflects animation
         if (!m_rasterInstances.empty() && shouldUseInteractiveViewport()) {
@@ -9136,6 +10009,18 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     // [VULKAN STABILITY] Wait for GPU to finish current frame before destroying/rebuilding resources.
     // This is critical during "Import" where the renderer is already active.
     m_device->waitIdle();
+
+    // A volume whose world bounds are non-finite yields an infinite/NaN instance
+    // AABB. Ray traversal against that never terminates: the device TIMES OUT (TDR /
+    // "driver stopped responding") while the application keeps running — which looks
+    // nothing like a use-after-free and is why it is easy to misdiagnose.
+    // NOTE the trap this replaces: `if (size.x < 1e-4f) size.x = 1e-4f;` does NOT
+    // sanitise NaN, because every comparison against NaN is false, so the bad value
+    // sailed straight through the "avoid zero scaling" guard into the transform.
+    auto volumeBoundsUsable = [](const Vec3& mn, const Vec3& mx) {
+        return std::isfinite(mn.x) && std::isfinite(mn.y) && std::isfinite(mn.z) &&
+               std::isfinite(mx.x) && std::isfinite(mx.y) && std::isfinite(mx.z);
+    };
 
     // Reset ordered VDB instance list — rebuilt below during TLAS construction.
     // SSBO index 0..N must match TLAS customIndex 0..N so shaders look up correct volumes.
@@ -9447,6 +10332,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                 
                 // Construct a transform that maps [-0.5, 0.5]^3 to worldBounds
                 AABB worldBounds = vdb->getWorldBounds();
+                if (!volumeBoundsUsable(worldBounds.min, worldBounds.max)) return;
                 Vec3 center = (worldBounds.min + worldBounds.max) * 0.5f;
                 Vec3 size = worldBounds.max - worldBounds.min;
                 // Avoid zero scaling
@@ -9488,6 +10374,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
                 Vec3 worldMin, worldMax;
                 gas->getWorldBounds(worldMin, worldMax);
+                if (!volumeBoundsUsable(worldMin, worldMax)) return;
                 Vec3 center = (worldMin + worldMax) * 0.5f;
                 Vec3 size = worldMax - worldMin;
                 if (size.x < 1e-4f) size.x = 1e-4f;
@@ -9766,7 +10653,21 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                 vi.transform = inst.toMatrix();
                 vi.materialIndex = meta.materialBySource[srcIdx];
                 vi.customIndex = 0;
-                vi.mask = 0xFF;
+                // Particle pools retain inactive slots to keep scatter indices
+                // stable. A zero-scale matrix is singular and invalid for Vulkan
+                // RT; keep the slot with identity transform and mask it out.
+                if (isUsableTLASInstanceTransform(vi.transform)) {
+                    // 0x04 identifies transient simulation particles. Primary
+                    // rays (0xFF) still see them, while volume-internal solid
+                    // probes deliberately exclude this bit. Treating hundreds
+                    // of sparks/debris inside gas as solid blockers multiplied
+                    // every volume hit into several nested RT probes and could
+                    // exceed the Windows watchdog.
+                    vi.mask = group.transient ? 0x04 : 0xFF;
+                } else {
+                    vi.transform = Matrix4x4::identity();
+                    vi.mask = 0;
+                }
                 vi.frontFaceCCW = true;
                 vi.scatterGroupId = group.id;
                 vi.scatterInstanceIndex = static_cast<uint32_t>(i);
@@ -11594,7 +12495,7 @@ void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialDat
 
     m_device->updateHairMaterialBuffer(gpuMats);
     if (!gpuMats.empty()) {
-        SCENE_LOG_INFO("[Vulkan] Hair materials uploaded: " + std::to_string(gpuMats.size()));
+       // SCENE_LOG_INFO("[Vulkan] Hair materials uploaded: " + std::to_string(gpuMats.size()));
     }
 }
 
@@ -12912,6 +13813,10 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
     // Passing allowUpdate=false forces its full-rebuild branch (old TLAS destroyed,
     // built fresh; the instance buffer is still reused in place, so no per-frame
     // alloc churn). This is what the Solid→Rendered toggle did to cure the slowdown.
+    // NOTE: both call sites below already m_device->waitIdle() immediately before
+    // invoking this, which is strictly stronger than drainInFlightTraces(). The
+    // TLAS destroy/recreate branch is therefore already guarded here — this path
+    // is NOT the particle-burst driver reset. Do not add a drain.
     auto commitTLAS = [this](std::vector<VulkanRT::TLASInstance>& merged, bool rebuild) {
         if (rebuild) {
             VulkanRT::TLASCreateInfo ci;
@@ -12946,6 +13851,15 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
                 const auto* group = groupIt->second;
                 if (vi.scatterInstanceIndex >= group->instances.size()) continue;
                 vi.transform = group->instances[vi.scatterInstanceIndex].toMatrix();
+                if (isUsableTLASInstanceTransform(vi.transform)) {
+                    vi.mask = group->transient ? 0x04 : 0xFF;
+                } else {
+                    // Preserve the TLAS slot/index without ever feeding Vulkan a
+                    // non-invertible transform. Pause/cache restore commonly
+                    // collapses many particle slots at once.
+                    vi.transform = Matrix4x4::identity();
+                    vi.mask = 0;
+                }
             }
         };
 
@@ -13000,7 +13914,10 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
                 if (!(updatedInstances[i].transform == m_vkInstances[i].transform)) {
                     transform_changed = true;
                 }
-                if (updatedInstances[i].blasIndex != m_vkInstances[i].blasIndex || 
+                if (updatedInstances[i].mask != m_vkInstances[i].mask) {
+                    transform_changed = true; // TLAS payload only; instance SSBO is unchanged
+                }
+                if (updatedInstances[i].blasIndex != m_vkInstances[i].blasIndex ||
                     updatedInstances[i].materialIndex != m_vkInstances[i].materialIndex) {
                     data_changed = true;
                 }
@@ -13072,7 +13989,10 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
             if (!(updated[i].transform == m_vkInstances[i].transform)) {
                 transform_changed = true;
             }
-            if (updated[i].blasIndex != m_vkInstances[i].blasIndex || 
+            if (updated[i].mask != m_vkInstances[i].mask) {
+                transform_changed = true; // TLAS payload only; instance SSBO is unchanged
+            }
+            if (updated[i].blasIndex != m_vkInstances[i].blasIndex ||
                 updated[i].materialIndex != m_vkInstances[i].materialIndex) {
                 data_changed = true;
             }
@@ -17157,6 +18077,12 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         m_pathStatsImage = m_device->createImage2D(
             width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        if (!m_volumeTemporal.ensure(*m_device, width, height)) {
+            SCENE_LOG_WARN("[Vulkan] Volume temporal history allocation failed; temporal filtering will stay disabled.");
+        }
+        if (!m_volumeInstrumentation.ensure(*m_device)) {
+            SCENE_LOG_WARN("[Vulkan] Volume instrumentation buffer allocation failed.");
+        }
 
         VulkanRT::BufferCreateInfo stagingInfo;
         const uint64_t bytesPerPixel = (outFmt == VK_FORMAT_R16G16B16A16_SFLOAT) ? 8ull : 16ull;
@@ -17362,6 +18288,18 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             if (m_device->createSculptPipeline(sculptSPV)) {
             } else {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create Sculpt compute pipeline.");
+            }
+        }
+
+        // Load Hair Expand Compute Shader (optional). Present => the GPU hair path is
+        // enabled (hairGpuAvailable()); absent => the renderer keeps using the CPU
+        // uploadHairStrands path unchanged.
+        if (std::filesystem::exists(shaderDir + "/hair_expand.spv")) {
+            std::vector<std::uint32_t> hairSPV = loadSPV(shaderDir + "/hair_expand.spv");
+            if (m_device->createHairExpandPipeline(hairSPV)) {
+               // SCENE_LOG_INFO("[Vulkan] Hair expand compute pipeline ready (GPU hair path enabled).");
+            } else {
+                SCENE_LOG_ERROR("[Vulkan] Failed to create Hair Expand compute pipeline — using CPU hair path.");
             }
         }
 
@@ -17603,7 +18541,9 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
 
     pushConst.debugView = (uint32_t)std::max(0, m_debugView);
     pushConst.debugExposure = std::max(0.0f, m_debugExposure);
-    pushConst.debugFlags = 0u;
+    // bits 0-1: volume temporal write slot and valid-history flag.
+    pushConst.debugFlags = m_volumeTemporal.writeIndex()
+                         | (m_volumeTemporal.hasValidHistory() ? 2u : 0u);
     pushConst.debugParam = std::clamp(m_debugOverlay, 0.0f, 1.0f);
 
     pushConst.shakeEnabled = this->m_camera.shake_enabled ? 1 : 0;
@@ -17734,7 +18674,12 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             &m_denoiserNormalImage,
             &m_varianceImage,
             &m_denoiserPositionImage,
-            &m_pathStatsImage);
+            &m_pathStatsImage,
+            m_volumeTemporal.colorSlot(0),
+            m_volumeTemporal.colorSlot(1),
+            m_volumeTemporal.metadataSlot(0),
+            m_volumeTemporal.metadataSlot(1),
+            m_volumeInstrumentation.buffer());
         // Tonemap-side debug views (6/7/8 = path stats, 10-13 = first-hit AOVs,
         // 14 = sample heatmap) resolve at display time from persistent AOVs so
         // beauty accumulation + adaptive statistics keep running undisturbed.
@@ -17879,11 +18824,26 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         }
 
         if (useGpuTonemap) {
+            // Hair GPU prepass: expand guides + rebuild/refit hair BLAS INSIDE the
+            // trace command buffer (see recordHairPrepass), so those updates ride the
+            // ping-pong fence instead of a separate vkDeviceWaitIdle.
+            std::function<void(VkCommandBuffer)> hairPrepass;
+            if (hairGpuPrepassPending()) {
+                // The hair BLAS is single-copy, so the OTHER slot's in-flight trace must
+                // finish before we overwrite it this frame. Waiting the consume slot
+                // here (it is the only other in-flight slot) costs the GPU-GPU cross-slot
+                // overlap on hair-dirty frames only; the CPU-GPU overlap (guide prep vs GPU
+                // work) is untouched, and static frames keep full ping-pong.
+                if (m_tonemappedSlotInFlight[consumeSlot]) m_device->waitFrameSlot(consumeSlot);
+                hairPrepass = [this](VkCommandBuffer cmd) { recordHairPrepass(cmd); };
+            }
+
             // 1. Submit current frame's work asynchronously (no host wait).
             const bool submitted = m_device->submitTraceTonemapAsync(submitSlot, width, height,
-                m_outputImage, m_tonemappedImage, m_tonemappedStagings[submitSlot]);
+                m_outputImage, m_tonemappedImage, m_tonemappedStagings[submitSlot], true, hairPrepass);
             if (submitted) {
                 m_tonemappedSlotInFlight[submitSlot] = true;
+                m_volumeTemporal.advance();
             }
 
             // 2. Consume the previously-submitted slot's staging if any. This is where
@@ -17950,6 +18910,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             }
             return;
         }
+        m_volumeTemporal.advance();
 
         // If the output image is float/half-float RGBA, download HDR and tonemap on CPU
         if (m_outputImage.format == VK_FORMAT_R32G32B32A32_SFLOAT ||
@@ -19082,6 +20043,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     // against renderProgressiveImpl.
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     bool gridUploadSynchronized = false;
+    bool volumeContentChanged = false;
     auto synchronizeGridUpload = [&]() {
         if (!gridUploadSynchronized) {
             // CPU_TO_GPU NanoVDB buffers expose stable device addresses and are
@@ -19112,6 +20074,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         m_vdbTempUploadedVersions.clear();
         m_orderedVDBInstances.clear();
         m_device->updateVolumeBuffer(nullptr, 0, 0);
+        m_volumeTemporal.invalidate();
         return;
     }
 
@@ -19191,12 +20154,20 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
 
     // Convert GpuVDBVolume (OptiX/CUDA struct) → VkVolumeInstance (Vulkan SSBO)
     std::vector<VulkanRT::VkVolumeInstance> instances(orderedVols.size());
+    auto& vdbManager = VDBVolumeManager::getInstance();
+    auto hostGridLease = vdbManager.lockHostGridAccess();
     for (size_t i = 0; i < orderedVols.size(); i++) {
         auto& dst = instances[i];
         memset(&dst, 0, sizeof(dst));
         dst.is_active = 0;
         if (!orderedVols[i]) continue; // deleted/missing → leave inactive slot
         const auto& src = *orderedVols[i];
+        const bool liveDenseGas =
+            src.dense_fields_valid != 0 &&
+            src.dense_density_address != 0 &&
+            src.dense_resolution_x > 0 &&
+            src.dense_resolution_y > 0 &&
+            src.dense_resolution_z > 0;
 
         // Copy original transforms directly (preserves rotation)
         for (int i = 0; i < 12; ++i) {
@@ -19226,6 +20197,37 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst._ext_reserved[9] = src.density_noise_strength;
         dst._ext_reserved[10] = static_cast<float>(src.density_noise_detail);
         dst._ext_reserved[11] = static_cast<float>(src.density_noise_seed);
+        if (liveDenseGas) {
+            // source_type 5 reuses the volume ABI's reserved slots:
+            // [0..2] dense resolution, [3..5] dense world/grid origin.
+            dst.source_type = 5;
+            dst._ext_reserved[0] = static_cast<float>(src.dense_resolution_x);
+            dst._ext_reserved[1] = static_cast<float>(src.dense_resolution_y);
+            dst._ext_reserved[2] = static_cast<float>(src.dense_resolution_z);
+            // Dense simulation metadata is published in world space, whereas
+            // closest-hit samples after applying inv_transform.
+            dst._ext_reserved[3] =
+                src.inv_transform[0] * src.dense_origin.x +
+                src.inv_transform[1] * src.dense_origin.y +
+                src.inv_transform[2] * src.dense_origin.z +
+                src.inv_transform[3];
+            dst._ext_reserved[4] =
+                src.inv_transform[4] * src.dense_origin.x +
+                src.inv_transform[5] * src.dense_origin.y +
+                src.inv_transform[6] * src.dense_origin.z +
+                src.inv_transform[7];
+            dst._ext_reserved[5] =
+                src.inv_transform[8] * src.dense_origin.x +
+                src.inv_transform[9] * src.dense_origin.y +
+                src.inv_transform[10] * src.dense_origin.z +
+                src.inv_transform[11];
+        }
+        // Surface SDF owns slot 6 for foam opacity. Other volume types reuse
+        // that otherwise-free slot for the authored minimum emission
+        // temperature, avoiding a VkVolumeInstance ABI/size change.
+        if (dst.source_type != 4) {
+            dst._ext_reserved[6] = src.emission_pad;
+        }
         dst.cloud_coverage = src.cloud_coverage;
         dst.cloud_detail = src.cloud_detail;
         dst.cloud_erosion = src.cloud_erosion;
@@ -19246,7 +20248,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.density_remap_low = src.density_remap_low;
         dst.density_remap_high = src.density_remap_high;
         dst.noise_scale = 1.0f;
-        dst._reserved[0] = (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
+        // Apply the authored density cutoff consistently on dense Vulkan,
+        // NanoVDB Vulkan, OptiX and CPU. A Vulkan-only 1e-5 override retained a
+        // broad low-density absorption skirt which ended abruptly at the active
+        // AABB/topology boundary and looked like an aerial-perspective shadow.
+        dst._reserved[0] =
+            (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
         // 0 means no graph; otherwise material-table index + 1. Stored as an
         // exact float (material counts are tiny relative to float integer range)
         // to preserve the fixed 512-byte volume ABI.
@@ -19254,17 +20261,19 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             ? static_cast<float>(src.material_program_index + 1) : 0.0f;
         dst.shadow_stride = std::max(1, std::min(src.shadow_stride, 16));
         // Sync NanoVDB Host Buffer to Vulkan Device Buffer
-        dst.volume_type = 2; // 2 = NanoVDB
-        dst.vdb_grid_address = 0;
-        dst.vdb_temp_address = 0;
+        dst.volume_type = liveDenseGas ? 4 : 2;
+        dst.vdb_grid_address =
+            liveDenseGas ? src.dense_density_address : 0;
+        dst.vdb_temp_address =
+            liveDenseGas ? src.dense_temperature_address : 0;
         
         int vdb_id = src.vdb_id;
-        if (vdb_id >= 0) {
-            auto& mgr = VDBVolumeManager::getInstance();
-            void* hostGrid = mgr.getHostGrid(vdb_id);
-            size_t gridSize = mgr.getHostGridSize(vdb_id);
-            uint32_t currentVersion = mgr.getContentVersion(vdb_id);
-            
+        if (!liveDenseGas && vdb_id >= 0) {
+            void* hostGrid = vdbManager.getHostGrid(vdb_id);
+            const size_t gridSize = vdbManager.getHostGridSize(vdb_id);
+            const uint32_t currentVersion =
+                vdbManager.getContentVersion(vdb_id);
+
             if (hostGrid && gridSize > 0) {
                 auto it = m_vdbBuffers.find(vdb_id);
                 bool needsUpload = false;
@@ -19294,12 +20303,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                     needsUpload = true;
                 }
                 
-                // Check version
                 auto versionIt = m_vdbUploadedVersions.find(vdb_id);
-                if (versionIt == m_vdbUploadedVersions.end() || versionIt->second != currentVersion) {
+                if (versionIt == m_vdbUploadedVersions.end() ||
+                    versionIt->second != currentVersion) {
                     needsUpload = true;
+                    volumeContentChanged = true;
                 }
-                
                 if (it != m_vdbBuffers.end() && it->second.buffer) {
                     if (needsUpload) {
                         synchronizeGridUpload();
@@ -19311,8 +20320,10 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             }
 
             // Upload temperature NanoVDB grid for blackbody/color-ramp emission (mode 2)
-            void* hostTempGrid = mgr.getHostTemperatureGrid(vdb_id);
-            size_t tempGridSize = mgr.getHostTemperatureGridSize(vdb_id);
+            void* hostTempGrid =
+                vdbManager.getHostTemperatureGrid(vdb_id);
+            const size_t tempGridSize =
+                vdbManager.getHostTemperatureGridSize(vdb_id);
             if (hostTempGrid && tempGridSize > 0) {
                 auto it2 = m_vdbTempBuffers.find(vdb_id);
                 bool needsTempUpload = false;
@@ -19344,10 +20355,29 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 if (it2 != m_vdbTempBuffers.end() && it2->second.buffer) {
                     if (needsTempUpload) {
                         synchronizeGridUpload();
-                        m_device->uploadBuffer(it2->second, hostTempGrid, tempGridSize);
+                        m_device->uploadBuffer(
+                            it2->second, hostTempGrid, tempGridSize);
                         m_vdbTempUploadedVersions[vdb_id] = currentVersion;
                     }
                     dst.vdb_temp_address = it2->second.deviceAddress;
+                }
+            } else {
+                // The new sequence frame has no temperature channel. Do not
+                // retain a device address from the previous frame.
+                auto staleTemp = m_vdbTempBuffers.find(vdb_id);
+                if (staleTemp != m_vdbTempBuffers.end()) {
+                    synchronizeGridUpload();
+                    if (staleTemp->second.buffer)
+                        m_device->destroyBuffer(staleTemp->second);
+                    m_vdbTempBuffers.erase(staleTemp);
+                }
+                m_vdbTempUploadedVersions.erase(vdb_id);
+            }
+            if (dst.vdb_temp_address == 0) {
+                const auto existingTemp = m_vdbTempBuffers.find(vdb_id);
+                if (existingTemp != m_vdbTempBuffers.end() &&
+                    existingTemp->second.buffer) {
+                    dst.vdb_temp_address = existingTemp->second.deviceAddress;
                 }
             }
         }
@@ -19402,7 +20432,11 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // Flags
         // volume_type = 3 is an explicit procedural cloud source. Otherwise use
         // NanoVDB when uploaded, with the existing procedural-noise fallback.
-        dst.volume_type = (src.source_type == 3) ? 3 : ((dst.vdb_grid_address != 0) ? 2 : 1);
+        dst.volume_type = liveDenseGas
+            ? 4
+            : ((src.source_type == 3)
+                ? 3
+                : ((dst.vdb_grid_address != 0) ? 2 : 1));
         dst.is_active = 1;
         dst.voxel_size = src.voxel_size;
     }
@@ -19450,6 +20484,15 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     }
 
     // VK_INFO() << "[VulkanBackendAdapter] Uploaded " << instances.size() << " VDB volume(s) to Vulkan SSBO." << std::endl;
+    // Accumulation reset alone does not invalidate the separate volume
+    // temporal ping-pong history. A sequence frame may keep the same object
+    // and screen position while density/emission changes completely; accepting
+    // that history leaves bright flame cores behind. Reject history exactly
+    // when NanoVDB content changes, then allow it to rebuild over subsequent
+    // samples of the same sequence frame.
+    if (volumeContentChanged) {
+        m_volumeTemporal.invalidate();
+    }
     resetAccumulation();
 }
 
@@ -19523,8 +20566,35 @@ void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vol
 
 // Utility
 void VulkanBackendAdapter::waitForCompletion() { m_device->waitIdle(); }
+VulkanRT::VolumePerformanceStats
+VulkanBackendAdapter::getVolumePerformanceStats(bool synchronize) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) {
+        return {};
+    }
+    if (synchronize) {
+        m_device->waitIdle();
+    }
+    return m_volumeInstrumentation.read(*m_device);
+}
+
+void VulkanBackendAdapter::resetVolumePerformanceStats(bool enabled) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) {
+        return;
+    }
+    // Host writes must not race closest-hit/raygen atomics from an in-flight frame.
+    m_device->waitIdle();
+    m_volumeInstrumentation.reset(*m_device, enabled);
+}
+
 void VulkanBackendAdapter::resetAccumulation() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Accumulation resets are also the content-change boundary for live
+    // volumes. Keeping the volume-only temporal ping-pong valid here blended
+    // old gas positions into newly advected frames, leaving stationary smoke
+    // and particle-driven explosion trails even though the grid had moved.
+    m_volumeTemporal.invalidate();
     // [PERF] Skip GPU image clears if already at sample 0 — images were already
     // cleared by a prior resetAccumulation() this frame.  This eliminates 10-25
     // redundant synchronous GPU round-trips during camera movement.

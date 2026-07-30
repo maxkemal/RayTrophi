@@ -161,6 +161,15 @@ public:
     // vertices (invMass==0) are left on their pin. velocities==nullptr zeroes them.
     void setSoftBodyVertices(JoltBodyHandle handle, const std::vector<Vec3>& positions,
                              const std::vector<Vec3>* velocities = nullptr);
+    // Push apart any of the body's own vertices that ended up closer than
+    // 2*vertex_radius after this frame's update() (Jolt's soft body solver only
+    // collides vertices against OTHER bodies' shapes — it has no internal
+    // self-collision, so cloth folds through itself without this). Operates
+    // directly on the live SoftBodyMotionProperties vertices (COM-local space,
+    // so no world transform round-trip); pinned vertices (invMass == 0) act as
+    // immovable anchors via the usual inverse-mass weighting. No-op if the
+    // handle isn't a live soft body or vertex_radius <= 0.
+    void solveSoftBodySelfCollisions(JoltBodyHandle handle, float vertex_radius, int iterations = 4);
     void removeBody(JoltBodyHandle handle);
     void clearBodies();
     std::size_t bodyCount() const;

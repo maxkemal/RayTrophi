@@ -568,6 +568,31 @@ struct FluidDomainInfo {
     bool visible = true;
 };
 
+struct GasDomainSettings {
+    std::string quality_profile = "preview"; // interactive, preview, final, cinema, custom
+    uint32_t resource_budget_mb = 1024;
+    bool enforce_resource_budget = true;
+    bool use_sparse_tiles = true;
+    bool render_to_nanovdb = true;
+    bool fire_enabled = false;
+    float ignition_temperature = 0.3f;
+    float burn_rate = 1.5f;
+    float heat_release = 2.0f;
+    float smoke_generation = 0.6f;
+    float flame_dissipation = 3.0f;
+    float fire_max_temperature = 10.0f;
+    float buoyancy_heat = 1.0f;
+    float buoyancy_density = 0.08f;
+    float vorticity = 0.35f;
+    float fire_expansion = 0.0f;
+    float turbulence_strength = 0.0f;
+    float turbulence_scale = 1.2f;
+    int turbulence_octaves = 3;
+    float turbulence_lacunarity = 2.0f;
+    float turbulence_persistence = 0.5f;
+    float turbulence_speed = 0.5f;
+};
+
 Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_max,
                          float voxel_size, const std::string& type, FluidDomainInfo& out_info);
 Result removeFluidDomain(const std::string& domain_id_or_name);
@@ -581,6 +606,8 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const std::string* backend = nullptr, const std::string* boundary = nullptr,
                          const std::string* preset = nullptr, const float* viscosity = nullptr,
                          const bool* enabled = nullptr, const bool* visible = nullptr);
+Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSettings& out_settings);
+Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDomainSettings& settings);
 Result resetFluidSimulation();
 Result stepFluidSimulation(float dt = 0.0166667f);
 

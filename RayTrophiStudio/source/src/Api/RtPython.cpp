@@ -634,6 +634,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         py::dict d;
         d["id"] = info.id;
         d["name"] = info.name;
+        d["type"] = info.type;
         d["domain_min"] = vec3ToPython(info.domain_min);
         d["domain_max"] = vec3ToPython(info.domain_max);
         d["voxel_size"] = info.voxel_size;
@@ -703,6 +704,77 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     fluid.def("step", [](float dt) {
         requireResult(rtapi::stepFluidSimulation(dt));
     }, py::arg("dt") = 0.0166667f);
+
+    // Gas domains share the production grid-domain implementation with
+    // rt.fluid, so expose the complete lifecycle/control surface under the
+    // semantically correct rt.gas namespace as well.
+    gas.attr("get") = fluid.attr("get");
+    gas.attr("remove_domain") = fluid.attr("remove_domain");
+    gas.attr("clear") = fluid.attr("clear");
+    gas.attr("set_param") = fluid.attr("set_param");
+    gas.attr("reset") = fluid.attr("reset");
+    gas.attr("step") = fluid.attr("step");
+
+    auto gas_settings_to_dict = [](const rtapi::GasDomainSettings& s) {
+        py::dict d;
+        d["quality_profile"] = s.quality_profile;
+        d["resource_budget_mb"] = s.resource_budget_mb;
+        d["enforce_resource_budget"] = s.enforce_resource_budget;
+        d["use_sparse_tiles"] = s.use_sparse_tiles;
+        d["render_to_nanovdb"] = s.render_to_nanovdb;
+        d["fire_enabled"] = s.fire_enabled;
+        d["ignition_temperature"] = s.ignition_temperature;
+        d["burn_rate"] = s.burn_rate;
+        d["heat_release"] = s.heat_release;
+        d["smoke_generation"] = s.smoke_generation;
+        d["flame_dissipation"] = s.flame_dissipation;
+        d["fire_max_temperature"] = s.fire_max_temperature;
+        d["buoyancy_heat"] = s.buoyancy_heat;
+        d["buoyancy_density"] = s.buoyancy_density;
+        d["vorticity"] = s.vorticity;
+        d["fire_expansion"] = s.fire_expansion;
+        d["turbulence_strength"] = s.turbulence_strength;
+        d["turbulence_scale"] = s.turbulence_scale;
+        d["turbulence_octaves"] = s.turbulence_octaves;
+        d["turbulence_lacunarity"] = s.turbulence_lacunarity;
+        d["turbulence_persistence"] = s.turbulence_persistence;
+        d["turbulence_speed"] = s.turbulence_speed;
+        return d;
+    };
+    gas.def("get_settings", [gas_settings_to_dict](const std::string& domain) {
+        rtapi::GasDomainSettings settings;
+        requireResult(rtapi::getGasDomainSettings(domain, settings));
+        return gas_settings_to_dict(settings);
+    }, py::arg("domain"));
+    gas.def("set_settings", [](const std::string& domain, const py::kwargs& kwargs) {
+        rtapi::GasDomainSettings s;
+        requireResult(rtapi::getGasDomainSettings(domain, s));
+#define RT_GAS_KW(name, type) if (kwargs.contains(#name)) s.name = py::cast<type>(kwargs[#name])
+        RT_GAS_KW(quality_profile, std::string);
+        RT_GAS_KW(resource_budget_mb, uint32_t);
+        RT_GAS_KW(enforce_resource_budget, bool);
+        RT_GAS_KW(use_sparse_tiles, bool);
+        RT_GAS_KW(render_to_nanovdb, bool);
+        RT_GAS_KW(fire_enabled, bool);
+        RT_GAS_KW(ignition_temperature, float);
+        RT_GAS_KW(burn_rate, float);
+        RT_GAS_KW(heat_release, float);
+        RT_GAS_KW(smoke_generation, float);
+        RT_GAS_KW(flame_dissipation, float);
+        RT_GAS_KW(fire_max_temperature, float);
+        RT_GAS_KW(buoyancy_heat, float);
+        RT_GAS_KW(buoyancy_density, float);
+        RT_GAS_KW(vorticity, float);
+        RT_GAS_KW(fire_expansion, float);
+        RT_GAS_KW(turbulence_strength, float);
+        RT_GAS_KW(turbulence_scale, float);
+        RT_GAS_KW(turbulence_octaves, int);
+        RT_GAS_KW(turbulence_lacunarity, float);
+        RT_GAS_KW(turbulence_persistence, float);
+        RT_GAS_KW(turbulence_speed, float);
+#undef RT_GAS_KW
+        requireResult(rtapi::updateGasDomainSettings(domain, s));
+    }, py::arg("domain"));
 
     py::module_ terrain = module.def_submodule("terrain", "Terrain creation, queries, and procedural operations");
     auto terrain_info_to_dict = [](const rtapi::TerrainInfo& info) -> py::dict {

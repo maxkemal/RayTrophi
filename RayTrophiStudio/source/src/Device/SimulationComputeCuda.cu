@@ -816,6 +816,13 @@ __global__ void grid_subtract_gradient_kernel(float* vel_x,
         const int i = rem - j * (c.nx + 1);
         vel_x[id] -= scale * (sample_pressure(pressure, i, j, k, c) -
                               sample_pressure(pressure, i - 1, j, k, c));
+        if (c.boundary == 0) {
+            // Match the Vulkan open-boundary contract: projection may remove
+            // divergence at an exterior face, but it must never manufacture
+            // velocity pointing back into the domain from p=0 outside.
+            if (i == 0)    vel_x[id] = fminf(vel_x[id], 0.0f);
+            if (i == c.nx) vel_x[id] = fmaxf(vel_x[id], 0.0f);
+        }
     }
     if (id < vy_count) {
         const int plane = c.nx * (c.ny + 1);
@@ -825,6 +832,10 @@ __global__ void grid_subtract_gradient_kernel(float* vel_x,
         const int i = rem - j * c.nx;
         vel_y[id] -= scale * (sample_pressure(pressure, i, j, k, c) -
                               sample_pressure(pressure, i, j - 1, k, c));
+        if (c.boundary == 0) {
+            if (j == 0)    vel_y[id] = fminf(vel_y[id], 0.0f);
+            if (j == c.ny) vel_y[id] = fmaxf(vel_y[id], 0.0f);
+        }
     }
     if (id < vz_count) {
         const int plane = c.nx * c.ny;
@@ -834,6 +845,10 @@ __global__ void grid_subtract_gradient_kernel(float* vel_x,
         const int i = rem - j * c.nx;
         vel_z[id] -= scale * (sample_pressure(pressure, i, j, k, c) -
                               sample_pressure(pressure, i, j, k - 1, c));
+        if (c.boundary == 0) {
+            if (k == 0)    vel_z[id] = fminf(vel_z[id], 0.0f);
+            if (k == c.nz) vel_z[id] = fmaxf(vel_z[id], 0.0f);
+        }
     }
 }
 

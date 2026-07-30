@@ -1,0 +1,130 @@
+// sim_grid_maccormack_scalar.comp — limited MacCormack correction for scalars.
+//
+// Second pass of a two-dispatch MacCormack advection. sim_grid_advect_scalar
+// has already produced phi_fwd = A(phi, +dt); this kernel re-traces FORWARD
+// from the cell centre to evaluate A(phi_fwd, -dt) inline (no third buffer),
+// applies the correction
+//     phi_new = phi_fwd + (phi - A(phi_fwd,-dt)) / 2
+// and clamps it into the min/max of the eight source cells the forward
+// backtrace interpolated. The limiter is mandatory: unclamped MacCormack is
+// only conditionally stable and overshoots at sharp density/temperature
+// fronts, and that overshoot compounds into a blow-up within a few frames.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float voxel_size;
+    float dt;
+    int boundary;      // 0 = open, 1 = closed, 2 = periodic
+    float background;  // what lies beyond an OPEN wall for this field
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer VelX     { float vel_x[];    };
+layout(set = 0, binding = 1) readonly buffer VelY     { float vel_y[];    };
+layout(set = 0, binding = 2) readonly buffer VelZ     { float vel_z[];    };
+layout(set = 0, binding = 3) readonly buffer ScalarIn { float phi[];      };
+layout(set = 0, binding = 4) readonly buffer Forward  { float phi_fwd[];  };
+layout(set = 0, binding = 5) buffer          ScalarOut{ float phi_out[];  };
+layout(set = 0, binding = 6) readonly buffer SolidMask{ float solid_mask[]; };
+
+int wrapi(int v,int n){ return ((v%n)+n)%n; }
+
+// Boundary-aware fetch, identical in behaviour to sim_grid_advect_scalar's.
+// which==0 reads the original field, which==1 the forward-advected one.
+float fetchCell(int i,int j,int k,int which){
+    if (pc.boundary==2) {
+        int idx=wrapi(i,pc.nx)+wrapi(j,pc.ny)*pc.nx+wrapi(k,pc.nz)*pc.nx*pc.ny;
+        return which==0 ? phi[idx] : phi_fwd[idx];
+    }
+    if (i<0||i>=pc.nx||j<0||j>=pc.ny||k<0||k>=pc.nz) {
+        if (pc.boundary==0) return pc.background;
+        i=clamp(i,0,pc.nx-1); j=clamp(j,0,pc.ny-1); k=clamp(k,0,pc.nz-1);
+    }
+    int idx=i+j*pc.nx+k*pc.nx*pc.ny;
+    return which==0 ? phi[idx] : phi_fwd[idx];
+}
+
+float trilinearFwd(int i0,int j0,int k0,float fx,float fy,float fz) {
+    float c00=mix(fetchCell(i0,j0,k0,1),fetchCell(i0+1,j0,k0,1),fx);
+    float c10=mix(fetchCell(i0,j0+1,k0,1),fetchCell(i0+1,j0+1,k0,1),fx);
+    float c01=mix(fetchCell(i0,j0,k0+1,1),fetchCell(i0+1,j0,k0+1,1),fx);
+    float c11=mix(fetchCell(i0,j0+1,k0+1,1),fetchCell(i0+1,j0+1,k0+1,1),fx);
+    return mix(mix(c00,c10,fy),mix(c01,c11,fy),fz);
+}
+
+float sample_vx(float fi,float fj,float fk){
+    // Keep interpolation weights in [0,1] at domain exits. Index-only clamping
+    // extrapolates velocity once the mushroom cap reaches the top boundary.
+    fi=clamp(fi,0.0,float(pc.nx));
+    fj=clamp(fj,0.0,float(pc.ny-1));
+    fk=clamp(fk,0.0,float(pc.nz-1));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx); j0=clamp(j0,0,pc.ny-1); k0=clamp(k0,0,pc.nz-1);
+    int i1=min(i0+1,pc.nx),j1=min(j0+1,pc.ny-1),k1=min(k0+1,pc.nz-1);
+    #define V(a,b,c) vel_x[a+b*(pc.nx+1)+c*(pc.nx+1)*pc.ny]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+float sample_vy(float fi,float fj,float fk){
+    fi=clamp(fi,0.0,float(pc.nx-1));
+    fj=clamp(fj,0.0,float(pc.ny));
+    fk=clamp(fk,0.0,float(pc.nz-1));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx-1); j0=clamp(j0,0,pc.ny); k0=clamp(k0,0,pc.nz-1);
+    int i1=min(i0+1,pc.nx-1),j1=min(j0+1,pc.ny),k1=min(k0+1,pc.nz-1);
+    #define V(a,b,c) vel_y[a+b*pc.nx+c*pc.nx*(pc.ny+1)]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+float sample_vz(float fi,float fj,float fk){
+    fi=clamp(fi,0.0,float(pc.nx-1));
+    fj=clamp(fj,0.0,float(pc.ny-1));
+    fk=clamp(fk,0.0,float(pc.nz));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx-1); j0=clamp(j0,0,pc.ny-1); k0=clamp(k0,0,pc.nz);
+    int i1=min(i0+1,pc.nx-1),j1=min(j0+1,pc.ny-1),k1=min(k0+1,pc.nz);
+    #define V(a,b,c) vel_z[a+b*pc.nx+c*pc.nx*pc.ny]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx*pc.ny*pc.nz) return;
+    if (solid_mask[id] > 0.5) { phi_out[id] = pc.background; return; }
+    int i=id%pc.nx, j=(id/pc.nx)%pc.ny, k=id/(pc.nx*pc.ny);
+    float lx=float(i)+0.5, ly=float(j)+0.5, lz=float(k)+0.5;
+    float inv_h = pc.voxel_size>1e-6 ? 1.0/pc.voxel_size : 1.0;
+    float s = pc.dt*inv_h;
+
+    float vx=sample_vx(lx,ly-0.5,lz-0.5);
+    float vy=sample_vy(lx-0.5,ly,lz-0.5);
+    float vz=sample_vz(lx-0.5,ly-0.5,lz);
+
+    // Reverse pass: advect the forward result by -dt, i.e. sample it ahead.
+    float ax=lx+vx*s-0.5, ay=ly+vy*s-0.5, az=lz+vz*s-0.5;
+    int ai=int(floor(ax)), aj=int(floor(ay)), ak=int(floor(az));
+    float reverse = trilinearFwd(ai,aj,ak,ax-float(ai),ay-float(aj),az-float(ak));
+
+    // Source stencil of the forward backtrace supplies the monotonicity bounds.
+    float bx=lx-vx*s-0.5, by=ly-vy*s-0.5, bz=lz-vz*s-0.5;
+    int bi=int(floor(bx)), bj=int(floor(by)), bk=int(floor(bz));
+    float lo =  3.402823466e+38;
+    float hi = -3.402823466e+38;
+    for (int dk=0; dk<=1; ++dk)
+        for (int dj=0; dj<=1; ++dj)
+            for (int di=0; di<=1; ++di) {
+                float v = fetchCell(bi+di, bj+dj, bk+dk, 0);
+                lo = min(lo, v);
+                hi = max(hi, v);
+            }
+
+    phi_out[id] = clamp(phi_fwd[id] + 0.5*(phi[id] - reverse), lo, hi);
+}

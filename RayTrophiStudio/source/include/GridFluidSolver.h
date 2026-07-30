@@ -19,7 +19,7 @@
  * (FluidSim::FluidGrid). No third-party (GPL) solver code is used.
  *
  * CPU reference path (Core Principle: CPU first, GPU compute second). Fire /
- * combustion is intentionally NOT handled here yet; it will be an opt-in stage.
+ * combustion is an opt-in stage controlled by SolverParams::fire_enabled.
  */
 
 #include "Vec3.h"
@@ -88,6 +88,11 @@ struct SolverParams {
     bool channel_velocity = true;
     bool skip_velocity_advection = false;   // lets a caller run velocity advection first
     bool skip_scalar_advection = false;     // lets an external GPU path advect scalars
+    bool skip_combustion = false;           // lets an external GPU path burn fuel first
+    bool skip_buoyancy = false;             // lets an external GPU path add buoyancy first
+    bool skip_force_fields = false;          // lets an external GPU path apply shared fields first
+    bool skip_vorticity = false;            // lets an external GPU path add confinement first
+    bool skip_turbulence = false;           // lets an external GPU path add curl noise first
     bool skip_velocity_dissipation_clamp = false; // lets an external GPU path run velocity loss/limit
     bool skip_pressure_projection = false; // lets an external GPU path run projection
 

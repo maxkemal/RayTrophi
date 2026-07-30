@@ -39,6 +39,10 @@ const uint PL_MATID_MASK   = 0xFFFFu;
 const uint PL_PRIMARY_DONE = 1u << 16;
 const uint PL_DISP_SHIFT   = 17u;
 const uint PL_DISP_MASK    = 3u << 17;
+const uint PL_PRIMARY_VOLUME = 1u << 19;
+// For ray-marched fog/gas volumes, primaryNrm stores floatBitsToUint of the
+// optical-depth centroid ray distance instead of an octahedral normal.
+const uint PL_PRIMARY_VOLUME_DEPTH = 1u << 20;
 
 // Octahedral unit-vector packing for the denoiser normal AOV.
 vec2 plOctWrap(vec2 v) {

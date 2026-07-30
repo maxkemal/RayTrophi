@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #ifdef OPENVDB_ENABLED
@@ -64,14 +65,171 @@ inline Vec3 cellVelocity(const FluidGrid& g, int i, int j, int k) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Advection (semi-Lagrangian)
+// Advection (semi-Lagrangian + MacCormack)
 // ─────────────────────────────────────────────────────────────────────────
-void advectVelocity(FluidGrid& grid, float dt) {
+
+// Cell fetch that honours the domain boundary mode.
+//
+// This is what makes an Open domain actually open for the SCALAR fields. A
+// border-clamped fetch (zero-gradient) copies the edge cell back in, so smoke
+// that reaches the wall can never leave and the domain reads as Closed no
+// matter what the user picked. Open must instead pull in the background beyond
+// the wall: 0 for density/fuel, ambient for temperature. Closed keeps the
+// zero-gradient clamp and Periodic wraps.
+float fetchCell(const FluidGrid& grid,
+                const std::vector<float>& field,
+                int i, int j, int k,
+                Boundary boundary,
+                float background) {
+    if (boundary == Boundary::Periodic) {
+        i = ((i % grid.nx) + grid.nx) % grid.nx;
+        j = ((j % grid.ny) + grid.ny) % grid.ny;
+        k = ((k % grid.nz) + grid.nz) % grid.nz;
+        return field[grid.cellIndex(i, j, k)];
+    }
+    if (i < 0 || i >= grid.nx || j < 0 || j >= grid.ny || k < 0 || k >= grid.nz) {
+        if (boundary == Boundary::Open) {
+            return background;
+        }
+        i = std::clamp(i, 0, grid.nx - 1);
+        j = std::clamp(j, 0, grid.ny - 1);
+        k = std::clamp(k, 0, grid.nz - 1);
+    }
+    return field[grid.cellIndex(i, j, k)];
+}
+
+// Boundary-aware trilinear scalar sample at a world position.
+float sampleScalarAt(const FluidGrid& grid,
+                     const std::vector<float>& field,
+                     const Vec3& world_pos,
+                     Boundary boundary,
+                     float background) {
+    const Vec3 local = (world_pos - grid.origin) / grid.voxel_size - Vec3(0.5f, 0.5f, 0.5f);
+    const int i0 = static_cast<int>(std::floor(local.x));
+    const int j0 = static_cast<int>(std::floor(local.y));
+    const int k0 = static_cast<int>(std::floor(local.z));
+    const float tx = local.x - i0, ty = local.y - j0, tz = local.z - k0;
+
+    auto at = [&](int di, int dj, int dk) {
+        return fetchCell(grid, field, i0 + di, j0 + dj, k0 + dk, boundary, background);
+    };
+    const float c00 = at(0,0,0) + (at(1,0,0) - at(0,0,0)) * tx;
+    const float c10 = at(0,1,0) + (at(1,1,0) - at(0,1,0)) * tx;
+    const float c01 = at(0,0,1) + (at(1,0,1) - at(0,0,1)) * tx;
+    const float c11 = at(0,1,1) + (at(1,1,1) - at(0,1,1)) * tx;
+    const float c0 = c00 + (c10 - c00) * ty;
+    const float c1 = c01 + (c11 - c01) * ty;
+    return c0 + (c1 - c0) * tz;
+}
+
+// Min/max of the eight cell-centred samples the trilinear fetch at @p world_pos
+// would blend. MacCormack's correction is only conditionally stable, so the
+// corrected value must be clamped into this range; without the limiter the
+// second-order term overshoots at sharp fronts and the overshoot compounds into
+// a blow-up within a few dozen frames.
+void cellStencilRange(const FluidGrid& grid,
+                      const std::vector<float>& field,
+                      const Vec3& world_pos,
+                      Boundary boundary,
+                      float background,
+                      float& lo,
+                      float& hi) {
+    const Vec3 local = (world_pos - grid.origin) / grid.voxel_size - Vec3(0.5f, 0.5f, 0.5f);
+    const int i0 = static_cast<int>(std::floor(local.x));
+    const int j0 = static_cast<int>(std::floor(local.y));
+    const int k0 = static_cast<int>(std::floor(local.z));
+
+    lo = std::numeric_limits<float>::max();
+    hi = -std::numeric_limits<float>::max();
+    for (int dk = 0; dk <= 1; ++dk)
+        for (int dj = 0; dj <= 1; ++dj)
+            for (int di = 0; di <= 1; ++di) {
+                const float v = fetchCell(grid, field, i0 + di, j0 + dj, k0 + dk,
+                                          boundary, background);
+                lo = std::min(lo, v);
+                hi = std::max(hi, v);
+            }
+}
+
+// Extent / stride description of one staggered MAC face array.
+// @p component selects the array: 0 = x, 1 = y, 2 = z.
+struct FaceLayout {
+    int max_i, max_j, max_k;   // inclusive index bounds
+    int stride_j, stride_k;
+};
+
+FaceLayout faceLayout(const FluidGrid& grid, int component) {
+    FaceLayout l{};
+    l.max_i = (component == 0 ? grid.nx : grid.nx - 1);
+    l.max_j = (component == 1 ? grid.ny : grid.ny - 1);
+    l.max_k = (component == 2 ? grid.nz : grid.nz - 1);
+    l.stride_j = (component == 0 ? grid.nx + 1 : grid.nx);
+    l.stride_k = (component == 0 ? (grid.nx + 1) * grid.ny
+                : component == 1 ? grid.nx * (grid.ny + 1)
+                                 : grid.nx * grid.ny);
+    return l;
+}
+
+// Trilinear fetch from a face array in its own index space (border-clamped).
+float sampleFaceComponent(const std::vector<float>& faces,
+                          int component,
+                          const FluidGrid& grid,
+                          float fi, float fj, float fk) {
+    const FaceLayout l = faceLayout(grid, component);
+    const int i0 = static_cast<int>(std::floor(fi));
+    const int j0 = static_cast<int>(std::floor(fj));
+    const int k0 = static_cast<int>(std::floor(fk));
+    const float tx = fi - i0, ty = fj - j0, tz = fk - k0;
+
+    auto at = [&](int i, int j, int k) -> float {
+        i = std::clamp(i, 0, l.max_i);
+        j = std::clamp(j, 0, l.max_j);
+        k = std::clamp(k, 0, l.max_k);
+        return faces[static_cast<std::size_t>(i) + j * l.stride_j + k * l.stride_k];
+    };
+    const float c00 = at(i0, j0, k0)     + (at(i0 + 1, j0, k0)     - at(i0, j0, k0))     * tx;
+    const float c10 = at(i0, j0 + 1, k0) + (at(i0 + 1, j0 + 1, k0) - at(i0, j0 + 1, k0)) * tx;
+    const float c01 = at(i0, j0, k0 + 1)     + (at(i0 + 1, j0, k0 + 1)     - at(i0, j0, k0 + 1))     * tx;
+    const float c11 = at(i0, j0 + 1, k0 + 1) + (at(i0 + 1, j0 + 1, k0 + 1) - at(i0, j0 + 1, k0 + 1)) * tx;
+    const float c0 = c00 + (c10 - c00) * ty;
+    const float c1 = c01 + (c11 - c01) * ty;
+    return c0 + (c1 - c0) * tz;
+}
+
+// Min/max of the eight face samples the trilinear fetch would blend.
+void faceStencilRange(const FluidGrid& grid,
+                      const std::vector<float>& faces,
+                      int component,
+                      float fi, float fj, float fk,
+                      float& lo,
+                      float& hi) {
+    const FaceLayout l = faceLayout(grid, component);
+    const int i0 = static_cast<int>(std::floor(fi));
+    const int j0 = static_cast<int>(std::floor(fj));
+    const int k0 = static_cast<int>(std::floor(fk));
+
+    lo = std::numeric_limits<float>::max();
+    hi = -std::numeric_limits<float>::max();
+    for (int dk = 0; dk <= 1; ++dk)
+        for (int dj = 0; dj <= 1; ++dj)
+            for (int di = 0; di <= 1; ++di) {
+                const int i = std::clamp(i0 + di, 0, l.max_i);
+                const int j = std::clamp(j0 + dj, 0, l.max_j);
+                const int k = std::clamp(k0 + dk, 0, l.max_k);
+                const float v = faces[static_cast<std::size_t>(i) + j * l.stride_j + k * l.stride_k];
+                lo = std::min(lo, v);
+                hi = std::max(hi, v);
+            }
+}
+
+void advectVelocity(FluidGrid& grid, const SolverParams& params, float dt) {
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const float inv_h = grid.voxel_size > 1e-6f ? 1.0f / grid.voxel_size : 1.0f;
     std::vector<float> nvx(grid.vel_x.size(), 0.0f);
     std::vector<float> nvy(grid.vel_y.size(), 0.0f);
     std::vector<float> nvz(grid.vel_z.size(), 0.0f);
 
+    // Forward trace: v^ = A(v, +dt).
     for (int k = 0; k < nz; ++k)
         for (int j = 0; j < ny; ++j)
             for (int i = 0; i <= nx; ++i) {
@@ -94,23 +252,122 @@ void advectVelocity(FluidGrid& grid, float dt) {
                 nvz[grid.velZIndex(i, j, k)] = grid.sampleVelocity(back).z;
             }
 
-    grid.vel_x.swap(nvx);
-    grid.vel_y.swap(nvy);
-    grid.vel_z.swap(nvz);
+    if (params.advection == Advection::SemiLagrange) {
+        grid.vel_x.swap(nvx);
+        grid.vel_y.swap(nvy);
+        grid.vel_z.swap(nvz);
+        return;
+    }
+
+    // Backward trace of the forward result, then the MacCormack correction
+    // v_new = v^ + (v - A(v^, -dt)) / 2, clamped to the forward source stencil.
+    // The reverse pass advects with the ORIGINAL velocity field (grid.vel_*),
+    // which is still intact because the forward result went to nvx/nvy/nvz.
+    const std::vector<float>& ox = grid.vel_x;
+    const std::vector<float>& oy = grid.vel_y;
+    const std::vector<float>& oz = grid.vel_z;
+
+    std::vector<float> cvx(nvx.size(), 0.0f);
+    std::vector<float> cvy(nvy.size(), 0.0f);
+    std::vector<float> cvz(nvz.size(), 0.0f);
+
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i <= nx; ++i) {
+                const std::size_t c = grid.velXIndex(i, j, k);
+                const Vec3 p = faceXPos(grid, i, j, k);
+                const Vec3 vel = grid.sampleVelocity(p);
+                const Vec3 back = p - vel * dt;
+                const Vec3 fwd_pos = p + vel * dt;
+                const Vec3 lf = (fwd_pos - grid.origin) * inv_h;
+                const float reverse = sampleFaceComponent(nvx, 0, grid, lf.x, lf.y - 0.5f, lf.z - 0.5f);
+                float lo = 0.0f, hi = 0.0f;
+                const Vec3 lb = (back - grid.origin) * inv_h;
+                faceStencilRange(grid, ox, 0, lb.x, lb.y - 0.5f, lb.z - 0.5f, lo, hi);
+                cvx[c] = std::clamp(nvx[c] + 0.5f * (ox[c] - reverse), lo, hi);
+            }
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j <= ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const std::size_t c = grid.velYIndex(i, j, k);
+                const Vec3 p = faceYPos(grid, i, j, k);
+                const Vec3 vel = grid.sampleVelocity(p);
+                const Vec3 back = p - vel * dt;
+                const Vec3 fwd_pos = p + vel * dt;
+                const Vec3 lf = (fwd_pos - grid.origin) * inv_h;
+                const float reverse = sampleFaceComponent(nvy, 1, grid, lf.x - 0.5f, lf.y, lf.z - 0.5f);
+                float lo = 0.0f, hi = 0.0f;
+                const Vec3 lb = (back - grid.origin) * inv_h;
+                faceStencilRange(grid, oy, 1, lb.x - 0.5f, lb.y, lb.z - 0.5f, lo, hi);
+                cvy[c] = std::clamp(nvy[c] + 0.5f * (oy[c] - reverse), lo, hi);
+            }
+    for (int k = 0; k <= nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const std::size_t c = grid.velZIndex(i, j, k);
+                const Vec3 p = faceZPos(grid, i, j, k);
+                const Vec3 vel = grid.sampleVelocity(p);
+                const Vec3 back = p - vel * dt;
+                const Vec3 fwd_pos = p + vel * dt;
+                const Vec3 lf = (fwd_pos - grid.origin) * inv_h;
+                const float reverse = sampleFaceComponent(nvz, 2, grid, lf.x - 0.5f, lf.y - 0.5f, lf.z);
+                float lo = 0.0f, hi = 0.0f;
+                const Vec3 lb = (back - grid.origin) * inv_h;
+                faceStencilRange(grid, oz, 2, lb.x - 0.5f, lb.y - 0.5f, lb.z, lo, hi);
+                cvz[c] = std::clamp(nvz[c] + 0.5f * (oz[c] - reverse), lo, hi);
+            }
+
+    grid.vel_x.swap(cvx);
+    grid.vel_y.swap(cvy);
+    grid.vel_z.swap(cvz);
 }
 
-void advectScalar(FluidGrid& grid, std::vector<float>& field, float dt) {
+// @p background is what lies beyond an OPEN wall for this field: 0 for
+// density/fuel, ambient for temperature. Ignored for Closed / Periodic.
+void advectScalar(FluidGrid& grid,
+                  const SolverParams& params,
+                  std::vector<float>& field,
+                  float background,
+                  float dt) {
     if (field.empty()) {
         return;
     }
-    std::vector<float> next(field.size(), 0.0f);
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const Boundary boundary = params.boundary;
+
+    // Forward trace: phi^ = A(phi, +dt).
+    std::vector<float> forward(field.size(), 0.0f);
     for (int k = 0; k < nz; ++k)
         for (int j = 0; j < ny; ++j)
             for (int i = 0; i < nx; ++i) {
                 const Vec3 p = grid.gridToWorld(i, j, k);
                 const Vec3 back = p - grid.sampleVelocity(p) * dt;
-                next[grid.cellIndex(i, j, k)] = grid.sampleCellCentered(field, back);
+                forward[grid.cellIndex(i, j, k)] =
+                    sampleScalarAt(grid, field, back, boundary, background);
+            }
+
+    if (params.advection == Advection::SemiLagrange) {
+        field.swap(forward);
+        return;
+    }
+
+    // Reverse trace of the forward result + limited correction. The reverse
+    // sample uses the ORIGINAL velocity field, which the scalar pass never
+    // touches, so no extra velocity copy is needed.
+    std::vector<float> next(field.size(), 0.0f);
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const std::size_t c = grid.cellIndex(i, j, k);
+                const Vec3 p = grid.gridToWorld(i, j, k);
+                const Vec3 vel = grid.sampleVelocity(p);
+                const Vec3 back = p - vel * dt;
+                const Vec3 ahead = p + vel * dt;
+                const float reverse =
+                    sampleScalarAt(grid, forward, ahead, boundary, background);
+                float lo = 0.0f, hi = 0.0f;
+                cellStencilRange(grid, field, back, boundary, background, lo, hi);
+                next[c] = std::clamp(forward[c] + 0.5f * (field[c] - reverse), lo, hi);
             }
     field.swap(next);
 }
@@ -179,6 +436,10 @@ void vorticityConfinement(FluidGrid& grid, const SolverParams& params, float dt)
     for (int k = 1; k < nz - 1; ++k)
         for (int j = 1; j < ny - 1; ++j)
             for (int i = 1; i < nx - 1; ++i) {
+                const std::size_t c = grid.cellIndex(i, j, k);
+                if (grid.solid.size() == cells && grid.solid[c] != 0u) {
+                    continue;
+                }
                 const Vec3 vxp = cellVelocity(grid, i + 1, j, k);
                 const Vec3 vxm = cellVelocity(grid, i - 1, j, k);
                 const Vec3 vyp = cellVelocity(grid, i, j + 1, k);
@@ -189,7 +450,6 @@ void vorticityConfinement(FluidGrid& grid, const SolverParams& params, float dt)
                 const float wx = (vyp.z - vym.z) * inv2h - (vzp.y - vzm.y) * inv2h;
                 const float wy = (vzp.x - vzm.x) * inv2h - (vxp.z - vxm.z) * inv2h;
                 const float wz = (vxp.y - vxm.y) * inv2h - (vyp.x - vym.x) * inv2h;
-                const std::size_t c = grid.cellIndex(i, j, k);
                 omega[c] = Vec3(wx, wy, wz);
                 mag[c] = std::sqrt(wx * wx + wy * wy + wz * wz);
             }
@@ -198,19 +458,43 @@ void vorticityConfinement(FluidGrid& grid, const SolverParams& params, float dt)
     for (int k = 1; k < nz - 1; ++k)
         for (int j = 1; j < ny - 1; ++j)
             for (int i = 1; i < nx - 1; ++i) {
+                const std::size_t c = grid.cellIndex(i, j, k);
+                if (grid.solid.size() == cells && grid.solid[c] != 0u) {
+                    continue;
+                }
+                // Vorticity confinement is an artificial detail-restoration
+                // force, not physical wall momentum. Fade it by the six MAC-face
+                // open fractions so a moving collider cannot pump confinement
+                // energy inside/against its solid band; the open wake remains
+                // fully detailed one cell away.
+                float open_fraction = 1.0f;
+                if (grid.u_weight.size() == grid.vel_x.size() &&
+                    grid.v_weight.size() == grid.vel_y.size() &&
+                    grid.w_weight.size() == grid.vel_z.size()) {
+                    const float inv255 = 1.0f / 255.0f;
+                    open_fraction = (
+                        grid.u_weight[grid.velXIndex(i, j, k)] +
+                        grid.u_weight[grid.velXIndex(i + 1, j, k)] +
+                        grid.v_weight[grid.velYIndex(i, j, k)] +
+                        grid.v_weight[grid.velYIndex(i, j + 1, k)] +
+                        grid.w_weight[grid.velZIndex(i, j, k)] +
+                        grid.w_weight[grid.velZIndex(i, j, k + 1)]) *
+                        (inv255 / 6.0f);
+                    open_fraction = std::clamp(open_fraction, 0.0f, 1.0f);
+                }
                 const float gx = (mag[grid.cellIndex(i + 1, j, k)] - mag[grid.cellIndex(i - 1, j, k)]) * inv2h;
                 const float gy = (mag[grid.cellIndex(i, j + 1, k)] - mag[grid.cellIndex(i, j - 1, k)]) * inv2h;
                 const float gz = (mag[grid.cellIndex(i, j, k + 1)] - mag[grid.cellIndex(i, j, k - 1)]) * inv2h;
                 const float glen = std::sqrt(gx * gx + gy * gy + gz * gz) + 1e-12f;
                 const float nx_ = gx / glen, ny_ = gy / glen, nz_ = gz / glen;
 
-                const Vec3 w = omega[grid.cellIndex(i, j, k)];
+                const Vec3 w = omega[c];
                 // force = eps * (N x omega)
                 const Vec3 force(
                     eps * (ny_ * w.z - nz_ * w.y),
                     eps * (nz_ * w.x - nx_ * w.z),
                     eps * (nx_ * w.y - ny_ * w.x));
-                addToFaces(grid, i, j, k, force * dt);
+                addToFaces(grid, i, j, k, force * (dt * open_fraction * open_fraction));
             }
 }
 
@@ -235,6 +519,7 @@ void curlNoiseTurbulence(FluidGrid& grid, const SolverParams& params, float dt, 
     const bool has_density = params.channel_density && !grid.density.empty();
     const bool has_temp = params.channel_temperature && !grid.temperature.empty();
     const float heat_range = std::max(params.ignition_temperature - params.ambient_temperature, 1.0f);
+    std::vector<Vec3> cell_force(grid.getCellCount(), Vec3(0.0f));
 
     #pragma omp parallel for collapse(2)
     for (int k = 1; k < nz - 1; ++k) {
@@ -270,10 +555,47 @@ void curlNoiseTurbulence(FluidGrid& grid, const SolverParams& params, float dt, 
                 const Vec3 curl = Physics::Noise::curlFBM_animated(
                     wp, time_seconds, octaves, freq, lacunarity, persistence, anim_speed, seed);
 
-                addToFaces(grid, i, j, k, curl * (local_strength * dt));
+                cell_force[c] = curl * (local_strength * dt);
             }
         }
     }
+
+    // Gather cell-centred turbulence onto MAC faces. The former parallel
+    // addToFaces call let adjacent cells race on the same face, creating a
+    // nondeterministic velocity bias that grew during long fire simulations.
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i <= nx; ++i) {
+                float delta = 0.0f;
+                if (i > 0) delta +=
+                    0.5f * cell_force[grid.cellIndex(i - 1, j, k)].x;
+                if (i < nx) delta +=
+                    0.5f * cell_force[grid.cellIndex(i, j, k)].x;
+                grid.velXAt(i, j, k) += delta;
+            }
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j <= ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                float delta = 0.0f;
+                if (j > 0) delta +=
+                    0.5f * cell_force[grid.cellIndex(i, j - 1, k)].y;
+                if (j < ny) delta +=
+                    0.5f * cell_force[grid.cellIndex(i, j, k)].y;
+                grid.velYAt(i, j, k) += delta;
+            }
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int k = 0; k <= nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                float delta = 0.0f;
+                if (k > 0) delta +=
+                    0.5f * cell_force[grid.cellIndex(i, j, k - 1)].z;
+                if (k < nz) delta +=
+                    0.5f * cell_force[grid.cellIndex(i, j, k)].z;
+                grid.velZAt(i, j, k) += delta;
+            }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -290,13 +612,16 @@ void dissipate(std::vector<float>& field, float rate, float dt) {
 }
 
 void clampVelocity(FluidGrid& grid, float max_velocity) {
-    if (max_velocity <= 0.0f) {
-        return;
-    }
-    const float m = max_velocity;
-    for (float& v : grid.vel_x) v = std::clamp(v, -m, m);
-    for (float& v : grid.vel_y) v = std::clamp(v, -m, m);
-    for (float& v : grid.vel_z) v = std::clamp(v, -m, m);
+    const float m = std::max(0.0f, max_velocity);
+    auto sanitize = [m](std::vector<float>& values) {
+        for (float& v : values) {
+            if (!std::isfinite(v)) v = 0.0f;
+            else if (m > 0.0f) v = std::clamp(v, -m, m);
+        }
+    };
+    sanitize(grid.vel_x);
+    sanitize(grid.vel_y);
+    sanitize(grid.vel_z);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -446,10 +771,13 @@ void project(FluidGrid& grid, const SolverParams& params, float dt) {
     const float inv_h = 1.0f / h;
 
     std::vector<float>& div = grid.divergence;
-    std::vector<float>& P = grid.pressure; // warm-started across frames
+    std::vector<float>& P = grid.pressure;
     if (div.size() != grid.getCellCount() || P.size() != grid.getCellCount()) {
         return;
     }
+    // Cold-starting prevents the pressure null-space and accumulated SOR error
+    // from drifting across a long-running source.
+    std::fill(P.begin(), P.end(), 0.0f);
 
     // Solid (collider) mask. When present, solid cells act as internal Neumann
     // walls: their pressure is never solved, the Laplacian stencil mirrors the
@@ -463,16 +791,13 @@ void project(FluidGrid& grid, const SolverParams& params, float dt) {
                grid.solid[grid.cellIndex(ii, jj, kk)] != 0u;
     };
 
-    // Thermal expansion target: hot gas dilates, so the projection aims for a
-    // POSITIVE divergence φ = expansion·max(0, T - ambient) at hot cells instead
-    // of the usual div = 0. Subtracting φ from the measured divergence here makes
-    // the solved field satisfy ∇·u = φ (gas pushed outward → fire roll / blast).
+    // Combustion expansion target. Expansion follows the bounded flame/burn-rate
+    // field rather than absolute temperature: hot gas can remain hot for many
+    // frames and would otherwise inject fresh divergence energy every frame.
     const bool use_expansion =
-        params.expansion > 0.0f && params.channel_temperature &&
-        grid.temperature.size() == static_cast<std::size_t>(grid.getCellCount());
-    const float ambient = params.ambient_temperature;
+        params.expansion > 0.0f &&
+        grid.interaction.size() == static_cast<std::size_t>(grid.getCellCount());
     const float expansion = params.expansion;
-    const float max_phi = expansion * std::max(0.0f, params.max_temperature - ambient);
 
     // 1) Divergence of the current velocity field (skip solid cells).
     for (int k = 0; k < nz; ++k)
@@ -485,7 +810,8 @@ void project(FluidGrid& grid, const SolverParams& params, float dt) {
                 const float dw = grid.velZAt(i, j, k + 1) - grid.velZAt(i, j, k);
                 float d = (du + dv + dw) * inv_h;
                 if (use_expansion) {
-                    const float phi = std::min(max_phi, expansion * std::max(0.0f, grid.temperature[c] - ambient));
+                    const float phi =
+                        expansion * std::clamp(grid.interaction[c], 0.0f, 1.0f);
                     d -= phi; // target divergence φ instead of 0
                 }
                 div[c] = d;
@@ -664,16 +990,16 @@ void step(FluidGrid& grid,
 
     // 1) Transport.
     if (params.channel_velocity && !params.skip_velocity_advection) {
-        advectVelocity(grid, dt);
+        advectVelocity(grid, params, dt);
     }
     if (params.channel_density && !params.skip_scalar_advection) {
-        advectScalar(grid, grid.density, dt);
+        advectScalar(grid, params, grid.density, 0.0f, dt);
     }
     if (params.channel_temperature && !params.skip_scalar_advection) {
-        advectScalar(grid, grid.temperature, dt);
+        advectScalar(grid, params, grid.temperature, params.ambient_temperature, dt);
     }
     if (params.channel_fuel && !params.skip_scalar_advection) {
-        advectScalar(grid, grid.fuel, dt);
+        advectScalar(grid, params, grid.fuel, 0.0f, dt);
     }
 
     setWallBcs(grid, params.boundary);
@@ -684,14 +1010,24 @@ void step(FluidGrid& grid,
 
     // 2) Combustion: burn fuel -> heat + smoke (before buoyancy so released heat
     // lifts this step). Opt-in; no-op when fire is disabled.
-    processCombustion(grid, params, dt);
+    if (!params.skip_combustion) {
+        processCombustion(grid, params, dt);
+    }
 
     // 3) Body forces.
     if (params.channel_velocity) {
-        addBuoyancy(grid, params, dt);
-        addForceFields(grid, dt, forces, time_seconds);
-        vorticityConfinement(grid, params, dt);
-        curlNoiseTurbulence(grid, params, dt, time_seconds);
+        if (!params.skip_buoyancy) {
+            addBuoyancy(grid, params, dt);
+        }
+        if (!params.skip_force_fields) {
+            addForceFields(grid, dt, forces, time_seconds);
+        }
+        if (!params.skip_vorticity) {
+            vorticityConfinement(grid, params, dt);
+        }
+        if (!params.skip_turbulence) {
+            curlNoiseTurbulence(grid, params, dt, time_seconds);
+        }
     }
 
     // 4) Dissipation.
@@ -720,6 +1056,11 @@ void step(FluidGrid& grid,
         if (!params.skip_pressure_projection) {
             project(grid, params, dt);
         }
+        // Projection itself can create a velocity spike even when the
+        // pre-projection field was CFL-clamped (especially around strong local
+        // divergence and coarse/open boundaries). Never carry that spike into
+        // the next advection/vorticity step.
+        clampVelocity(grid, params.max_velocity);
         setWallBcs(grid, params.boundary);
         enforceSolidBoundaries(grid);
     }
@@ -980,7 +1321,7 @@ void advectVelocityField(FluidGrid& grid, const SolverParams& params, float dt) 
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || dt <= 0.0f || !params.channel_velocity) {
         return;
     }
-    advectVelocity(grid, dt);
+    advectVelocity(grid, params, dt);
 }
 
 } // namespace GridFluid

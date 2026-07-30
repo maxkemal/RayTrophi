@@ -1,0 +1,40 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "include/sim_force_fields.glsl"
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz; uint force_count;
+    float dt; float voxel_size; float time_seconds; uint system_mask;
+    vec4 origin;
+} pc;
+
+layout(set=0,binding=0,std430) readonly buffer ForceFields { PackedForceField fields[]; };
+layout(set=0,binding=1) readonly buffer VelX { float vel_x[]; };
+layout(set=0,binding=2) readonly buffer VelY { float vel_y[]; };
+layout(set=0,binding=3) readonly buffer VelZ { float vel_z[]; };
+layout(set=0,binding=4) writeonly buffer CellForceX { float force_x[]; };
+layout(set=0,binding=5) writeonly buffer CellForceY { float force_y[]; };
+layout(set=0,binding=6) writeonly buffer CellForceZ { float force_z[]; };
+
+uint cellIndex(int x,int y,int z){return uint(x+y*pc.nx+z*pc.nx*pc.ny);}
+uint velXIndex(int x,int y,int z){return uint(x+y*(pc.nx+1)+z*(pc.nx+1)*pc.ny);}
+uint velYIndex(int x,int y,int z){return uint(x+y*pc.nx+z*pc.nx*(pc.ny+1));}
+uint velZIndex(int x,int y,int z){return uint(x+y*pc.nx+z*pc.nx*pc.ny);}
+
+void main(){
+    uint id=gl_GlobalInvocationID.x,count=uint(pc.nx*pc.ny*pc.nz);
+    if(id>=count)return;
+    int x=int(id%uint(pc.nx));
+    int y=int((id/uint(pc.nx))%uint(pc.ny));
+    int z=int(id/uint(pc.nx*pc.ny));
+    vec3 wp=pc.origin.xyz+(vec3(x,y,z)+vec3(0.5))*pc.voxel_size;
+    vec3 velocity=vec3(
+        .5*(vel_x[velXIndex(x,y,z)]+vel_x[velXIndex(x+1,y,z)]),
+        .5*(vel_y[velYIndex(x,y,z)]+vel_y[velYIndex(x,y+1,z)]),
+        .5*(vel_z[velZIndex(x,y,z)]+vel_z[velZIndex(x,y,z+1)]));
+    vec3 total=vec3(0.0);
+    for(uint i=0u;i<pc.force_count;++i)
+        total+=simEvaluateForceField(fields[i],wp,velocity,pc.time_seconds,pc.system_mask);
+    force_x[id]=total.x;force_y[id]=total.y;force_z[id]=total.z;
+}

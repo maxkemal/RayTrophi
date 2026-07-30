@@ -3853,6 +3853,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["samples_per_pixel"] = settings.samples_per_pixel;
     j["samples_per_pass"] = settings.samples_per_pass;
     j["show_scene_stats_hud"] = settings.show_scene_stats_hud;
+    j["volume_metrics_overlay"] = settings.volume_metrics_overlay;
     j["mouse_sensitivity"] = settings.mouse_sensitivity;
     j["navigation_scale"] = settings.navigation_scale;
     j["navigation_scale_auto"] = settings.navigation_scale_auto;
@@ -3901,6 +3902,7 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.samples_per_pixel = j.value("samples_per_pixel", 1);
     settings.samples_per_pass = j.value("samples_per_pass", 1);
     settings.show_scene_stats_hud = j.value("show_scene_stats_hud", true);
+    settings.volume_metrics_overlay = j.value("volume_metrics_overlay", false);
     settings.mouse_sensitivity = j.value("mouse_sensitivity", 0.4f);
     settings.navigation_scale = std::clamp(j.value("navigation_scale", 1.0f), 0.1f, 5.0f);
     settings.navigation_scale_auto = j.value("navigation_scale_auto", true);
@@ -4719,14 +4721,17 @@ void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) 
 // ═══════════════════════════════════════════════════════════════════════════
 
 json ProjectManager::serializeGasVolumes(const std::vector<std::shared_ptr<GasVolume>>& gas_volumes) {
+    (void)gas_volumes;
     json arr = json::array();
-    for (const auto& gas : gas_volumes) {
-        if (gas) arr.push_back(gas->toJson());
-    }
     return arr;
 }
 
 void ProjectManager::deserializeGasVolumes(const json& j_arr, SceneData& scene) {
+    (void)scene;
+    if (j_arr.is_array() && !j_arr.empty()) {
+        SCENE_LOG_WARN("[ProjectManager] Ignored retired legacy GasVolume data. Use Simulation Domains.");
+    }
+    return;
     for (const auto& j : j_arr) {
         try {
             auto gas = std::make_shared<GasVolume>();
@@ -4812,6 +4817,7 @@ json ProjectManager::serializeRigidBodies(const SceneData& scene) {
         b["soft_gravity_factor"] = rb.getSoftGravityFactor();
         b["soft_mass"] = rb.getSoftMass();
         b["soft_two_sided"] = rb.getSoftTwoSided();
+        b["soft_self_collision"] = rb.getSoftSelfCollision();
         b["force_field_enabled"] = rb.force_field_enabled;
         b["force_field_scale"] = rb.force_field_scale;
         // Cloth/soft pin regions (world-space spheres).
@@ -4903,6 +4909,7 @@ void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
         rb.setSoftGravityFactor(item.value("soft_gravity_factor", rb.getSoftGravityFactor()));
         rb.setSoftMass(item.value("soft_mass", rb.getSoftMass()));
         rb.setSoftTwoSided(item.value("soft_two_sided", rb.getSoftTwoSided()));
+        rb.setSoftSelfCollision(item.value("soft_self_collision", rb.getSoftSelfCollision()));
         rb.force_field_enabled = item.value("force_field_enabled", rb.force_field_enabled);
         rb.force_field_scale = item.value("force_field_scale", rb.force_field_scale);
         if (item.contains("soft_pins") && item["soft_pins"].is_array()) {
@@ -5016,18 +5023,30 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         c["restitution"] = collider.restitution;
         c["friction"] = collider.friction;
         c["thickness"] = collider.thickness;
+        c["gas_interaction_enabled"] = collider.gas_interaction_enabled;
+        c["gas_density_rate"] = collider.gas_density_rate;
+        c["gas_temperature_rate"] = collider.gas_temperature_rate;
+        c["gas_fuel_rate"] = collider.gas_fuel_rate;
+        c["gas_flame_rate"] = collider.gas_flame_rate;
+        c["gas_surface_band_voxels"] = collider.gas_surface_band_voxels;
+        c["gas_ignite_on_contact"] = collider.gas_ignite_on_contact;
+        c["gas_ignition_temperature"] = collider.gas_ignition_temperature;
+        c["gas_surface_fuel_capacity"] = collider.gas_surface_fuel_capacity;
+        c["gas_surface_burn_rate"] = collider.gas_surface_burn_rate;
         return c;
     };
 
     auto serializeFlowSource = [](const RayTrophiSim::SimulationFlowSourceDesc& source) {
         json f;
         f["name"] = source.name;
+        f["timeline_uid"] = source.timeline_uid;
         f["source_mode"] = static_cast<int>(source.source_mode);
         f["source_name"] = source.source_name;
         f["domain_index"] = source.domain_index;
         f["enabled"] = source.enabled;
         f["position"] = vec3ToJson(source.position);
         f["velocity"] = vec3ToJson(source.velocity);
+        f["velocity_coupling"] = source.velocity_coupling;
         f["radius"] = source.radius;
         f["density"] = source.density;
         f["temperature"] = source.temperature;
@@ -5041,6 +5060,30 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["end_time"] = source.end_time;
         f["use_particle_limit"] = source.use_particle_limit;
         f["max_emitted_particles"] = source.max_emitted_particles;
+        f["keyframes"] = json::array();
+        for (const auto& [frame, key] : source.keyframes) {
+            f["keyframes"].push_back({
+                {"frame", frame},
+                {"has_enabled", key.has_enabled},
+                {"has_position", key.has_position},
+                {"has_velocity", key.has_velocity},
+                {"has_radius", key.has_radius},
+                {"has_density", key.has_density},
+                {"has_temperature", key.has_temperature},
+                {"has_fuel", key.has_fuel},
+                {"has_falloff", key.has_falloff},
+                {"has_velocity_coupling", key.has_velocity_coupling},
+                {"enabled", key.enabled},
+                {"position", vec3ToJson(key.position)},
+                {"velocity", vec3ToJson(key.velocity)},
+                {"radius", key.radius},
+                {"density", key.density},
+                {"temperature", key.temperature},
+                {"fuel", key.fuel},
+                {"falloff", key.falloff},
+                {"velocity_coupling", key.velocity_coupling}
+            });
+        }
         return f;
     };
 
@@ -5064,6 +5107,10 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["bounds_max"] = vec3ToJson(domain.bounds_max);
         d["resolution"] = { domain.resolution_x, domain.resolution_y, domain.resolution_z };
         d["max_auto_resolution"] = domain.max_auto_resolution;
+        d["quality_profile"] = static_cast<uint32_t>(domain.quality_profile);
+        d["resource_budget_mb"] = domain.resource_budget_mb;
+        d["enforce_resource_budget"] = domain.enforce_resource_budget;
+        d["force_disk_cache"] = domain.force_disk_cache;
         d["voxel_size"] = domain.voxel_size;
         d["padding"] = domain.padding;
         d["channels"] = domain.channels;
@@ -5177,6 +5224,11 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["smoke_generation"] = domain.smoke_generation;
         d["flame_dissipation"] = domain.flame_dissipation;
         d["fire_max_temperature"] = domain.fire_max_temperature;
+        d["fire_expansion"] = domain.fire_expansion;
+        d["gas_buoyancy_heat"] = domain.gas_buoyancy_heat;
+        d["gas_buoyancy_density"] = domain.gas_buoyancy_density;
+        d["gas_vorticity"] = domain.gas_vorticity;
+        d["gas_maccormack_advection"] = domain.gas_maccormack_advection;
         d["turbulence_strength"] = domain.turbulence_strength;
         d["turbulence_scale"] = domain.turbulence_scale;
         d["turbulence_octaves"] = domain.turbulence_octaves;
@@ -5224,6 +5276,10 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
                 {"rest_density", physics.rest_density},
                 {"buoyancy", physics.buoyancy},
                 {"gravity_scale", physics.gravity_scale},
+                {"grid_density_deposit", physics.grid_density_deposit},
+                {"grid_temperature_deposit", physics.grid_temperature_deposit},
+                {"grid_fuel_deposit", physics.grid_fuel_deposit},
+                {"grid_deposit_fade_with_age", physics.grid_deposit_fade_with_age},
                 {"vorticity", physics.vorticity}
             }}
         };
@@ -5339,6 +5395,16 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         collider.restitution = item.value("restitution", collider.restitution);
         collider.friction = item.value("friction", collider.friction);
         collider.thickness = item.value("thickness", collider.thickness);
+        collider.gas_interaction_enabled = item.value("gas_interaction_enabled", collider.gas_interaction_enabled);
+        collider.gas_density_rate = item.value("gas_density_rate", collider.gas_density_rate);
+        collider.gas_temperature_rate = item.value("gas_temperature_rate", collider.gas_temperature_rate);
+        collider.gas_fuel_rate = item.value("gas_fuel_rate", collider.gas_fuel_rate);
+        collider.gas_flame_rate = item.value("gas_flame_rate", collider.gas_flame_rate);
+        collider.gas_surface_band_voxels = item.value("gas_surface_band_voxels", collider.gas_surface_band_voxels);
+        collider.gas_ignite_on_contact = item.value("gas_ignite_on_contact", collider.gas_ignite_on_contact);
+        collider.gas_ignition_temperature = item.value("gas_ignition_temperature", collider.gas_ignition_temperature);
+        collider.gas_surface_fuel_capacity = item.value("gas_surface_fuel_capacity", collider.gas_surface_fuel_capacity);
+        collider.gas_surface_burn_rate = item.value("gas_surface_burn_rate", collider.gas_surface_burn_rate);
         return collider;
     };
 
@@ -5348,12 +5414,15 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             return source;
         }
         source.name = item.value("name", source.name);
+        source.timeline_uid =
+            item.value("timeline_uid", source.timeline_uid);
         source.source_mode = static_cast<RayTrophiSim::SimulationFlowSourceMode>(item.value("source_mode", static_cast<int>(source.source_mode)));
         source.source_name = item.value("source_name", source.source_name);
         source.domain_index = item.value("domain_index", source.domain_index);
         source.enabled = item.value("enabled", source.enabled);
         if (item.contains("position")) source.position = jsonToVec3(item["position"]);
         if (item.contains("velocity")) source.velocity = jsonToVec3(item["velocity"]);
+        source.velocity_coupling = item.value("velocity_coupling", source.velocity_coupling);
         source.radius = item.value("radius", source.radius);
         source.density = item.value("density", source.density);
         source.temperature = item.value("temperature", source.temperature);
@@ -5367,6 +5436,40 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.end_time = item.value("end_time", source.end_time);
         source.use_particle_limit = item.value("use_particle_limit", source.use_particle_limit);
         source.max_emitted_particles = item.value("max_emitted_particles", source.max_emitted_particles);
+        if (item.contains("keyframes") && item["keyframes"].is_array()) {
+            for (const auto& key_item : item["keyframes"]) {
+                if (!key_item.is_object()) continue;
+                const int frame = key_item.value("frame", 0);
+                RayTrophiSim::SimulationFlowSourceDesc::Keyframe key;
+                // Presence defaults preserve projects written by the first
+                // all-properties flow-key implementation.
+                key.has_enabled = key_item.value("has_enabled", key_item.contains("enabled"));
+                key.has_position = key_item.value("has_position", key_item.contains("position"));
+                key.has_velocity = key_item.value("has_velocity", key_item.contains("velocity"));
+                key.has_radius = key_item.value("has_radius", key_item.contains("radius"));
+                key.has_density = key_item.value("has_density", key_item.contains("density"));
+                key.has_temperature = key_item.value("has_temperature", key_item.contains("temperature"));
+                key.has_fuel = key_item.value("has_fuel", key_item.contains("fuel"));
+                key.has_falloff = key_item.value("has_falloff", key_item.contains("falloff"));
+                key.has_velocity_coupling = key_item.value(
+                    "has_velocity_coupling", key_item.contains("velocity_coupling"));
+                key.enabled = key_item.value("enabled", key.enabled);
+                if (key_item.contains("position"))
+                    key.position = jsonToVec3(key_item["position"]);
+                if (key_item.contains("velocity"))
+                    key.velocity = jsonToVec3(key_item["velocity"]);
+                key.radius = key_item.value("radius", key.radius);
+                key.density = key_item.value("density", key.density);
+                key.temperature =
+                    key_item.value("temperature", key.temperature);
+                key.fuel = key_item.value("fuel", key.fuel);
+                key.falloff = key_item.value("falloff", key.falloff);
+                key.velocity_coupling =
+                    key_item.value("velocity_coupling",
+                                   key.velocity_coupling);
+                source.keyframes[frame] = key;
+            }
+        }
         source.fluid_emit_accumulator = 0.0f;
         source.total_emitted_particles = 0;
         return source;
@@ -5398,6 +5501,14 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.resolution_z = item["resolution"][2].get<int>();
         }
         domain.max_auto_resolution = item.value("max_auto_resolution", domain.max_auto_resolution);
+        domain.quality_profile = static_cast<RayTrophiSim::SimulationDomainQualityProfile>(
+            std::clamp(item.value("quality_profile", static_cast<uint32_t>(domain.quality_profile)), 0u, 4u));
+        domain.resource_budget_mb = std::clamp(
+            item.value("resource_budget_mb", domain.resource_budget_mb), 128u, 32768u);
+        domain.enforce_resource_budget =
+            item.value("enforce_resource_budget", domain.enforce_resource_budget);
+        domain.force_disk_cache =
+            item.value("force_disk_cache", domain.force_disk_cache);
         domain.voxel_size = item.value("voxel_size", domain.voxel_size);
         domain.padding = item.value("padding", domain.padding);
         domain.channels = item.value("channels", domain.channels);
@@ -5517,6 +5628,12 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.smoke_generation = item.value("smoke_generation", domain.smoke_generation);
         domain.flame_dissipation = item.value("flame_dissipation", domain.flame_dissipation);
         domain.fire_max_temperature = item.value("fire_max_temperature", domain.fire_max_temperature);
+        domain.fire_expansion = item.value("fire_expansion", domain.fire_expansion);
+        domain.gas_buoyancy_heat = item.value("gas_buoyancy_heat", domain.gas_buoyancy_heat);
+        domain.gas_buoyancy_density = item.value("gas_buoyancy_density", domain.gas_buoyancy_density);
+        domain.gas_vorticity = item.value("gas_vorticity", domain.gas_vorticity);
+        domain.gas_maccormack_advection =
+            item.value("gas_maccormack_advection", domain.gas_maccormack_advection);
         domain.turbulence_strength = item.value("turbulence_strength", domain.turbulence_strength);
         domain.turbulence_scale = item.value("turbulence_scale", domain.turbulence_scale);
         domain.turbulence_octaves = item.value("turbulence_octaves", domain.turbulence_octaves);
@@ -5569,6 +5686,14 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             physics.rest_density = p.value("rest_density", physics.rest_density);
             physics.buoyancy = p.value("buoyancy", physics.buoyancy);
             physics.gravity_scale = p.value("gravity_scale", physics.gravity_scale);
+            physics.grid_density_deposit =
+                p.value("grid_density_deposit", physics.grid_density_deposit);
+            physics.grid_temperature_deposit =
+                p.value("grid_temperature_deposit", physics.grid_temperature_deposit);
+            physics.grid_fuel_deposit =
+                p.value("grid_fuel_deposit", physics.grid_fuel_deposit);
+            physics.grid_deposit_fade_with_age =
+                p.value("grid_deposit_fade_with_age", physics.grid_deposit_fade_with_age);
             physics.vorticity = p.value("vorticity", physics.vorticity);
         }
     };

@@ -1,0 +1,78 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz; int octaves;
+    float dt; float voxel_size; float strength; float scale;
+    float lacunarity; float persistence; float speed; float time_seconds;
+    float ambient; float ignition; float max_velocity; int seed;
+    int has_density; int has_temperature; int pad0; int pad1;
+    vec4 origin;
+} pc;
+
+layout(set=0,binding=0) readonly buffer Density { float density[]; };
+layout(set=0,binding=1) readonly buffer Temperature { float temperature[]; };
+layout(set=0,binding=2) readonly buffer Interaction { float interaction[]; };
+layout(set=0,binding=3) readonly buffer SolidMask { float solid[]; };
+layout(set=0,binding=4) buffer ForceX { float fx[]; };
+layout(set=0,binding=5) buffer ForceY { float fy[]; };
+layout(set=0,binding=6) buffer ForceZ { float fz[]; };
+
+uint cellIndex(int x,int y,int z){ return uint(x+y*pc.nx+z*pc.nx*pc.ny); }
+
+vec3 analyticCurlFbm(vec3 world_position) {
+    vec3 result=vec3(0.0);
+    float frequency=max(pc.scale,1e-4);
+    float amplitude=1.0;
+    float animation=pc.time_seconds*pc.speed;
+    float seed_phase=float(pc.seed)*0.61803398875;
+    for(int octave=0; octave<8; ++octave) {
+        if(octave>=pc.octaves) break;
+        vec3 p=world_position*frequency;
+        float o=float(octave);
+        float a=animation*(1.0+o*0.173)+seed_phase+o*2.399963;
+        // Curl of a separable vector potential. It is analytically
+        // divergence-free, deterministic and needs no finite differences.
+        vec3 c=frequency*vec3(
+            cos(p.y+a+5.1)-cos(p.z+a+2.3),
+            cos(p.z+a+1.7)-cos(p.x+a+4.4),
+            cos(p.x+a+0.6)-cos(p.y+a+3.8));
+        result+=c*amplitude;
+        frequency*=max(pc.lacunarity,1.0);
+        amplitude*=clamp(pc.persistence,0.0,1.0);
+    }
+    return result;
+}
+
+void main(){
+    uint id=gl_GlobalInvocationID.x;
+    uint count=uint(pc.nx*pc.ny*pc.nz);
+    if(id>=count) return;
+    fx[id]=0.0; fy[id]=0.0; fz[id]=0.0;
+    int x=int(id%uint(pc.nx));
+    int y=int((id/uint(pc.nx))%uint(pc.ny));
+    int z=int(id/uint(pc.nx*pc.ny));
+    if(x==0||y==0||z==0||x>=pc.nx-1||y>=pc.ny-1||z>=pc.nz-1||solid[id]>0.5) return;
+    float d=pc.has_density!=0 ? max(density[id],0.0) : 0.0;
+    float heat=pc.has_temperature!=0
+        ? clamp((temperature[id]-pc.ambient)/max(pc.ignition-pc.ambient,1.0),0.0,3.0)
+        : 0.0;
+    float flame=clamp(interaction[id]*0.05,0.0,2.0);
+    float inv2h=.5/max(pc.voxel_size,1e-6);
+    vec3 dg=vec3(0.0);
+    if(pc.has_density!=0) {
+        dg=vec3(
+            density[cellIndex(x+1,y,z)]-density[cellIndex(x-1,y,z)],
+            density[cellIndex(x,y+1,z)]-density[cellIndex(x,y-1,z)],
+            density[cellIndex(x,y,z+1)]-density[cellIndex(x,y,z-1)])*inv2h;
+    }
+    float edge=clamp(length(dg)*0.08,0.0,2.0);
+    float activity=max(max(d,heat*0.35),max(flame*0.5,edge*0.25));
+    if(activity<0.01) return;
+    float local_strength=pc.strength*clamp(
+        0.18+0.45*sqrt(d)+0.40*min(heat,1.5)+
+        0.30*min(flame,1.5)+0.35*min(edge,1.0),0.0,2.5);
+    vec3 wp=pc.origin.xyz+vec3(x+0.5,y+0.5,z+0.5)*pc.voxel_size;
+    vec3 force=analyticCurlFbm(wp)*(local_strength*pc.dt);
+    fx[id]=force.x; fy[id]=force.y; fz[id]=force.z;
+}

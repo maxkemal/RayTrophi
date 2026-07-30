@@ -1,0 +1,48 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz; int octaves;
+    float dt; float voxel_size; float strength; float scale;
+    float lacunarity; float persistence; float speed; float time_seconds;
+    float ambient; float ignition; float max_velocity; int seed;
+    int has_density; int has_temperature; int pad0; int pad1;
+    vec4 origin;
+} pc;
+
+layout(set=0,binding=0) buffer VelX { float vx[]; };
+layout(set=0,binding=1) buffer VelY { float vy[]; };
+layout(set=0,binding=2) buffer VelZ { float vz[]; };
+layout(set=0,binding=3) readonly buffer ForceX { float fx[]; };
+layout(set=0,binding=4) readonly buffer ForceY { float fy[]; };
+layout(set=0,binding=5) readonly buffer ForceZ { float fz[]; };
+layout(set=0,binding=6) readonly buffer UWeight { float uw[]; };
+layout(set=0,binding=7) readonly buffer VWeight { float vw[]; };
+layout(set=0,binding=8) readonly buffer WWeight { float ww[]; };
+
+uint cellIndex(int x,int y,int z){ return uint(x+y*pc.nx+z*pc.nx*pc.ny); }
+
+void main(){
+    uint id=gl_GlobalInvocationID.x;
+    uint xc=uint((pc.nx+1)*pc.ny*pc.nz);
+    uint yc=uint(pc.nx*(pc.ny+1)*pc.nz);
+    uint zc=uint(pc.nx*pc.ny*(pc.nz+1));
+    if(id<xc){
+        int x=int(id%uint(pc.nx+1)),y=int((id/uint(pc.nx+1))%uint(pc.ny));
+        int z=int(id/uint((pc.nx+1)*pc.ny)); float d=0;
+        if(x>0)d+=.5*fx[cellIndex(x-1,y,z)]; if(x<pc.nx)d+=.5*fx[cellIndex(x,y,z)];
+        vx[id]=clamp(vx[id]+d*uw[id],-pc.max_velocity,pc.max_velocity);
+    }
+    if(id<yc){
+        int x=int(id%uint(pc.nx)),y=int((id/uint(pc.nx))%uint(pc.ny+1));
+        int z=int(id/uint(pc.nx*(pc.ny+1))); float d=0;
+        if(y>0)d+=.5*fy[cellIndex(x,y-1,z)]; if(y<pc.ny)d+=.5*fy[cellIndex(x,y,z)];
+        vy[id]=clamp(vy[id]+d*vw[id],-pc.max_velocity,pc.max_velocity);
+    }
+    if(id<zc){
+        int x=int(id%uint(pc.nx)),y=int((id/uint(pc.nx))%uint(pc.ny));
+        int z=int(id/uint(pc.nx*pc.ny)); float d=0;
+        if(z>0)d+=.5*fz[cellIndex(x,y,z-1)]; if(z<pc.nz)d+=.5*fz[cellIndex(x,y,z)];
+        vz[id]=clamp(vz[id]+d*ww[id],-pc.max_velocity,pc.max_velocity);
+    }
+}

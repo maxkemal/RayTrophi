@@ -1,0 +1,50 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float dt;
+    float voxel_size;
+    float strength;
+    float max_velocity;
+} pc;
+
+layout(set=0,binding=0) readonly buffer VelX { float vx[]; };
+layout(set=0,binding=1) readonly buffer VelY { float vy[]; };
+layout(set=0,binding=2) readonly buffer VelZ { float vz[]; };
+layout(set=0,binding=3) buffer CurlX { float wx[]; };
+layout(set=0,binding=4) buffer CurlY { float wy[]; };
+layout(set=0,binding=5) buffer CurlZ { float wz[]; };
+layout(set=0,binding=6) buffer CurlMagnitude { float wm[]; };
+layout(set=0,binding=7) readonly buffer SolidMask { float solid[]; };
+
+uint cellIndex(int x,int y,int z) { return uint(x+y*pc.nx+z*pc.nx*pc.ny); }
+uint xIndex(int x,int y,int z) { return uint(x+y*(pc.nx+1)+z*(pc.nx+1)*pc.ny); }
+uint yIndex(int x,int y,int z) { return uint(x+y*pc.nx+z*pc.nx*(pc.ny+1)); }
+uint zIndex(int x,int y,int z) { return uint(x+y*pc.nx+z*pc.nx*pc.ny); }
+
+vec3 cellVelocity(int x,int y,int z) {
+    return vec3(
+        .5*(vx[xIndex(x,y,z)]+vx[xIndex(x+1,y,z)]),
+        .5*(vy[yIndex(x,y,z)]+vy[yIndex(x,y+1,z)]),
+        .5*(vz[zIndex(x,y,z)]+vz[zIndex(x,y,z+1)]));
+}
+
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+    uint count=uint(pc.nx*pc.ny*pc.nz);
+    if(id>=count) return;
+    int x=int(id%uint(pc.nx));
+    int y=int((id/uint(pc.nx))%uint(pc.ny));
+    int z=int(id/uint(pc.nx*pc.ny));
+    wx[id]=0.0; wy[id]=0.0; wz[id]=0.0; wm[id]=0.0;
+    if(x==0||y==0||z==0||x>=pc.nx-1||y>=pc.ny-1||z>=pc.nz-1||solid[id]>0.5) return;
+    float inv2h=.5/max(pc.voxel_size,1e-6);
+    vec3 xp=cellVelocity(x+1,y,z), xm=cellVelocity(x-1,y,z);
+    vec3 yp=cellVelocity(x,y+1,z), ym=cellVelocity(x,y-1,z);
+    vec3 zp=cellVelocity(x,y,z+1), zm=cellVelocity(x,y,z-1);
+    vec3 w=vec3((yp.z-ym.z)-(zp.y-zm.y),
+                (zp.x-zm.x)-(xp.z-xm.z),
+                (xp.y-xm.y)-(yp.x-ym.x))*inv2h;
+    wx[id]=w.x; wy[id]=w.y; wz[id]=w.z; wm[id]=length(w);
+}

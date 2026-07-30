@@ -371,6 +371,15 @@ int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
         return pixel.a / 255.0f;
     };
 
+    // Border keep-out: procedural edge falloff leaves a flat lip at the
+    // outermost rows (height = falloff target, gradient ~0), which passes the
+    // slope filter and lines the terrain rim with instances at that height.
+    const float edgeMarginMeters = brush_settings.edge_margin < 0.0f
+        ? 2.0f * (std::max)(cellX, cellZ)
+        : brush_settings.edge_margin;
+    const float edgeMarginUV = terrainScale > 1e-6f
+        ? std::clamp(edgeMarginMeters / terrainScale, 0.0f, 0.49f) : 0.0f;
+
     const float minDistanceSq = brush_settings.min_distance * brush_settings.min_distance;
     const bool checkOverlap = brush_settings.min_distance > 0.01f;
     const float cellSize = brush_settings.min_distance > 0.1f ? brush_settings.min_distance : 1.0f;
@@ -382,6 +391,10 @@ int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
     for (int attempt = 0; spawned < target && attempt < maxAttempts; ++attempt) {
         const float u = dist01(rng);
         const float v = dist01(rng);
+
+        if (edgeMarginUV > 0.0f &&
+            (u < edgeMarginUV || u > 1.0f - edgeMarginUV ||
+             v < edgeMarginUV || v > 1.0f - edgeMarginUV)) continue;
 
         if (!brush_settings.density_mask_attribute.empty()) {
             const float densityField = sampleNamedField(brush_settings.density_mask_attribute, u, v);

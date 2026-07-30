@@ -1214,6 +1214,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         // Slope Limit
                         ImGui::DragFloat("Slope Limit", &group.brush_settings.slope_max, 1.0f, 0.0f, 90.0f, "%.1f deg");
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Maximum steepness for placement.\n0 = Only flats\n90 = Everywhere including vertical cliffs.");
+
+                        // Terrain-border keep-out band
+                        ImGui::DragFloat("Edge Margin", &group.brush_settings.edge_margin, 0.25f, -1.0f, 100000.0f,
+                                         group.brush_settings.edge_margin < 0.0f ? "Auto (2 cells)" : "%.2f m");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep-out band from the terrain border.\n-1 = Auto (two heightmap cells), 0 = off.\nPrevents instances lining the edge-falloff rim at y=0.");
                         
                         // Slope Direction (Exposure/Aspect)
                         ImGui::TextDisabled("Aspect Filter (Biology):");
@@ -1399,6 +1404,13 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         float scale = t->heightmap.scale_xz;
                         float hmCellSizeX = scale / (float)(std::max(1, t->heightmap.width - 1));
                         float hmCellSizeZ = scale / (float)(std::max(1, t->heightmap.height - 1));
+                        // Border keep-out (mirrors InstanceGroup::scatterFillTerrain): the
+                        // edge-falloff lip at the outermost rows must not collect instances.
+                        const float edgeMarginMeters = group.brush_settings.edge_margin < 0.0f
+                            ? 2.0f * std::max(hmCellSizeX, hmCellSizeZ)
+                            : group.brush_settings.edge_margin;
+                        const float edgeMarginUV = scale > 1e-6f
+                            ? std::clamp(edgeMarginMeters / scale, 0.0f, 0.49f) : 0.0f;
                         auto sampleNamedTerrainField = [&](const std::string& fieldName, float u, float v) -> float {
                             if (fieldName.empty()) return 1.0f;
                             const auto fieldIt = t->analysisFields.find(fieldName);
@@ -1422,6 +1434,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             
                             float r1 = dist(rng);
                             float r2 = dist(rng);
+
+                            if (edgeMarginUV > 0.0f &&
+                                (r1 < edgeMarginUV || r1 > 1.0f - edgeMarginUV ||
+                                 r2 < edgeMarginUV || r2 > 1.0f - edgeMarginUV)) continue;
 
                             if (!group.brush_settings.density_mask_attribute.empty()) {
                                 const float densityField = sampleNamedTerrainField(

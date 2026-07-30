@@ -33,6 +33,7 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include "Core/RenderStateManager.h"
 #include "globals.h"
 #include "SurfaceMeshCache.h"
+#include "HittableInstance.h"
 #include "ColliderMeshBVH.h"
 #include "MeshModifiers.h"
 #include "GeometryNodesV2.h"
@@ -110,6 +111,15 @@ struct SceneData {
     // resolves once for the whole bake instead of N times per frame.
     mutable std::unordered_set<std::string> surface_cache_epoch_done_;
     mutable uint64_t surface_cache_epoch_gen_ = ~0ull;
+    struct SimulationLocalBounds {
+        Vec3 min = Vec3(0.0f);
+        Vec3 max = Vec3(0.0f);
+        uint64_t geometry_generation = 0;
+        bool valid = false;
+    };
+    // Lightweight transform-only collider path. Local bounds are rebuilt only
+    // when topology changes; animation then costs one matrix fetch + 8 points.
+    mutable std::unordered_map<std::string, SimulationLocalBounds> simulation_local_bounds_;
     // Last sim-source pose matrix actually pushed onto each object by
     // applySimSourceObjectPosesForFrame. Lets that pass be a cheap no-op when the
     // evaluated pose is unchanged (so it can be called every idle UI frame to keep
@@ -1869,6 +1879,10 @@ struct SceneData {
     uint64_t sim_render_frame_counter = 0;
     bool simulation_render_updated = false;  // a live volume's content changed this step
     bool force_simulation_render_sync_ = false;
+    // Authoring gate for Flow Source keyframes. While enabled, timeline scrub
+    // moves the playhead without restoring/resimulating expensive gas state;
+    // the UI keeps staged slider values until the user commits a diamond key.
+    bool simulation_key_authoring_mode_ = false;
 
     // ── Timeline bake / scrub cache (memory) ─────────────────────────────────
     // sim_timeline_frame_ < 0 means "free-run" (interactive realtime preview, the
@@ -1905,8 +1919,15 @@ struct SceneData {
     // restored the grid but left the discrete particle SoA empty (clear()ed on the
     // rewind) — frames up to the previously-played head showed NO particles until
     // the sim re-simulated PAST the cache (the reported "empty until played frame"
-    // bug). Indexed [frame] -> per-system {SoA, alive}. Cleared with the fluid cache.
-    std::map<int, std::vector<std::pair<RayTrophiSim::ParticleSoABuffers, std::size_t>>> particle_frame_cache_;
+    // bug). Runtime emitter/flow counters are part of the same snapshot: without
+    // them, crossing from cached playback into the first uncached frame re-fired
+    // one-shot bursts as though the simulation had returned to frame zero.
+    struct ParticleFrameSnapshot {
+        RayTrophiSim::ParticleSoABuffers buffers;
+        std::size_t alive_count = 0;
+        RayTrophiSim::ParticleSimulationRuntimeState runtime;
+    };
+    std::map<int, std::vector<ParticleFrameSnapshot>> particle_frame_cache_;
     int sim_timeline_frame_ = -1;
     int rigid_timeline_frame_ = -1;
     static constexpr int kMaxCachedSimFrames = 600;
@@ -2041,9 +2062,17 @@ struct SceneData {
                     // unloading the VDB causes the same full-rebuild cycle every time
                     // the fluid transitions between empty/non-empty (e.g. on timeline
                     // loop or when density briefly hits 0 at simulation start).
-                    // Just signal an SSBO re-sync; the last-uploaded density stays
-                    // registered (shows a momentary stale frame, then updates naturally).
+                    // Keep the last-uploaded buffers registered, but mark their
+                    // content inactive for this empty/cache-miss frame. The slot
+                    // reactivates naturally when a solved frame is published.
                     if (system.domain_vdb_ids[d] >= 0) {
+                        // This early-out happens before the normal dense-field
+                        // publication below. Clear the occupied-content gate or a
+                        // rewind to empty frame 0 retains `true` from the last
+                        // non-empty frame and Vulkan marches the stale domain AABB
+                        // as a black box. Buffer addresses and slot identity stay
+                        // intact; only this empty frame is omitted from the packet.
+                        mgr.setLiveDenseContentActive(system.domain_vdb_ids[d], false);
                         g_gas_volumes_dirty = true;
                     }
                     // Particles/splat-sphere mode: the kept-alive volume must NOT
@@ -2271,6 +2300,12 @@ struct SceneData {
                 else if (cells >= 104LL * 104 * 104) stride = 2;
 
                 const int prev_id = system.domain_vdb_ids[d];
+                const auto dense_gpu_view =
+                    system.runtime->gasGpuFieldView(d, simulation_world.compute());
+                const bool use_live_dense_gpu =
+                    !render_settings.use_optix &&
+                    state.type == RayTrophiSim::SimulationDomainType::Gas &&
+                    dense_gpu_view.valid();
                 // Live Render Update OFF freezes the volume so the path tracer can
                 // converge instead of resetting forever. Always do the first upload
                 // (prev_id < 0) so a frozen domain still shows a static frame.
@@ -2307,10 +2342,12 @@ struct SceneData {
                     (d >= system.domain_vdb_upload_signatures.size() ||
                      system.domain_vdb_upload_signatures[d] != upload_sig ||
                      surface_sdf_changed);
-                const bool do_update = force_sync || (prev_id < 0) ||
+                const bool do_update =
+                    (!use_live_dense_gpu || prev_id < 0) &&
+                    (force_sync || (prev_id < 0) ||
                     (density_ptr_override
                         ? (upload_changed && ((frame % stride) == 0))
-                        : ((frame % stride) == 0));
+                        : ((frame % stride) == 0)));
                 if (do_update) {
                     // Upload temperature too when the shader maps it to emission
                     // (blackbody / channel-driven fire). registerOrUpdateLiveVolume
@@ -2399,6 +2436,29 @@ struct SceneData {
                 const int id = system.domain_vdb_ids[d];
                 if (id < 0) {
                     continue;
+                }
+                if (use_live_dense_gpu) {
+                    mgr.setLiveDenseGpuFields(
+                        id,
+                        dense_gpu_view.density_address,
+                        dense_gpu_view.temperature_address,
+                        dense_gpu_view.fuel_address,
+                        dense_gpu_view.flame_address,
+                        dense_gpu_view.resolution_x,
+                        dense_gpu_view.resolution_y,
+                        dense_gpu_view.resolution_z,
+                        dense_gpu_view.origin.x,
+                        dense_gpu_view.origin.y,
+                        dense_gpu_view.origin.z,
+                        dense_gpu_view.voxel_size,
+                        dense_gpu_view.version,
+                        state.active_density_cells > 0,
+                        state.active_density_min,
+                        state.active_density_max);
+                    simulation_render_updated = true;
+                    g_gas_volumes_dirty = true;
+                } else {
+                    mgr.clearLiveDenseGpuFields(id);
                 }
 
                 const Vec3 world_min = state.grid.origin;
@@ -2746,8 +2806,59 @@ struct SceneData {
                 h = mix(h, qf(c.friction));
                 h = mix(h, qf(c.restitution));
                 h = mix(h, qf(c.thickness));
+                h = mix(h, c.gas_interaction_enabled ? 1ull : 0ull);
+                h = mix(h, qf(c.gas_density_rate));
+                h = mix(h, qf(c.gas_temperature_rate));
+                h = mix(h, qf(c.gas_fuel_rate));
+                h = mix(h, qf(c.gas_flame_rate));
+                h = mix(h, qf(c.gas_surface_band_voxels));
             }
             h = mix(h, s.runtime->flowSources().size());
+            // Flow sources are domain-owned emitters. Hash their authored
+            // routing, fields and animation keys, otherwise moving/keying one
+            // while keeping the same source count can replay a stale gas/fluid
+            // cache (especially visible with multiple domains/systems).
+            // Runtime counters/accumulators are deliberately excluded.
+            for (const auto& f : s.runtime->flowSources()) {
+                h = mix(h, f.enabled ? 1ull : 0ull);
+                h = mix(h, static_cast<uint64_t>(f.source_mode));
+                h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(f.domain_index)));
+                for (char ch : f.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, qf(f.position.x)); h = mix(h, qf(f.position.y)); h = mix(h, qf(f.position.z));
+                h = mix(h, qf(f.velocity.x)); h = mix(h, qf(f.velocity.y)); h = mix(h, qf(f.velocity.z));
+                h = mix(h, qf(f.radius));
+                h = mix(h, qf(f.density));
+                h = mix(h, qf(f.temperature));
+                h = mix(h, qf(f.fuel));
+                h = mix(h, qf(f.falloff));
+                h = mix(h, qf(f.velocity_coupling));
+                h = mix(h, qf(f.fluid_particles_per_second));
+                h = mix(h, qf(f.fluid_velocity_spread));
+                h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
+                h = mix(h, f.use_time_limit ? 1ull : 0ull);
+                h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
+                h = mix(h, f.use_particle_limit ? 1ull : 0ull);
+                h = mix(h, static_cast<uint64_t>(f.max_emitted_particles));
+                h = mix(h, f.keyframes.size());
+                for (const auto& [frame, k] : f.keyframes) {
+                    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(frame)));
+                    h = mix(h, k.has_enabled ? 1ull : 0ull);
+                    h = mix(h, k.has_position ? 1ull : 0ull);
+                    h = mix(h, k.has_velocity ? 1ull : 0ull);
+                    h = mix(h, k.has_radius ? 1ull : 0ull);
+                    h = mix(h, k.has_density ? 1ull : 0ull);
+                    h = mix(h, k.has_temperature ? 1ull : 0ull);
+                    h = mix(h, k.has_fuel ? 1ull : 0ull);
+                    h = mix(h, k.has_falloff ? 1ull : 0ull);
+                    h = mix(h, k.has_velocity_coupling ? 1ull : 0ull);
+                    h = mix(h, k.enabled ? 1ull : 0ull);
+                    h = mix(h, qf(k.position.x)); h = mix(h, qf(k.position.y)); h = mix(h, qf(k.position.z));
+                    h = mix(h, qf(k.velocity.x)); h = mix(h, qf(k.velocity.y)); h = mix(h, qf(k.velocity.z));
+                    h = mix(h, qf(k.radius)); h = mix(h, qf(k.density));
+                    h = mix(h, qf(k.temperature)); h = mix(h, qf(k.fuel));
+                    h = mix(h, qf(k.falloff)); h = mix(h, qf(k.velocity_coupling));
+                }
+            }
         }
         h = mix(h, gas_volumes.size());
         h = mix(h, fluid_objects.size());
@@ -2894,8 +3005,57 @@ struct SceneData {
                 h = mix(h, qf(c.friction));
                 h = mix(h, qf(c.restitution));
                 h = mix(h, qf(c.thickness));
+                h = mix(h, c.gas_interaction_enabled ? 1ull : 0ull);
+                h = mix(h, qf(c.gas_density_rate));
+                h = mix(h, qf(c.gas_temperature_rate));
+                h = mix(h, qf(c.gas_fuel_rate));
+                h = mix(h, qf(c.gas_flame_rate));
+                h = mix(h, qf(c.gas_surface_band_voxels));
             }
             h = mix(h, s.runtime->flowSources().size());
+            // Keep the general simulation-cache signature sensitive to the
+            // same authored flow-source state as the fluid coupling signature.
+            // Per-step accumulator/emitted counters must not participate.
+            for (const auto& f : s.runtime->flowSources()) {
+                h = mix(h, f.enabled ? 1ull : 0ull);
+                h = mix(h, static_cast<uint64_t>(f.source_mode));
+                h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(f.domain_index)));
+                for (char ch : f.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, qf(f.position.x)); h = mix(h, qf(f.position.y)); h = mix(h, qf(f.position.z));
+                h = mix(h, qf(f.velocity.x)); h = mix(h, qf(f.velocity.y)); h = mix(h, qf(f.velocity.z));
+                h = mix(h, qf(f.radius));
+                h = mix(h, qf(f.density));
+                h = mix(h, qf(f.temperature));
+                h = mix(h, qf(f.fuel));
+                h = mix(h, qf(f.falloff));
+                h = mix(h, qf(f.velocity_coupling));
+                h = mix(h, qf(f.fluid_particles_per_second));
+                h = mix(h, qf(f.fluid_velocity_spread));
+                h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
+                h = mix(h, f.use_time_limit ? 1ull : 0ull);
+                h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
+                h = mix(h, f.use_particle_limit ? 1ull : 0ull);
+                h = mix(h, static_cast<uint64_t>(f.max_emitted_particles));
+                h = mix(h, f.keyframes.size());
+                for (const auto& [frame, k] : f.keyframes) {
+                    h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(frame)));
+                    h = mix(h, k.has_enabled ? 1ull : 0ull);
+                    h = mix(h, k.has_position ? 1ull : 0ull);
+                    h = mix(h, k.has_velocity ? 1ull : 0ull);
+                    h = mix(h, k.has_radius ? 1ull : 0ull);
+                    h = mix(h, k.has_density ? 1ull : 0ull);
+                    h = mix(h, k.has_temperature ? 1ull : 0ull);
+                    h = mix(h, k.has_fuel ? 1ull : 0ull);
+                    h = mix(h, k.has_falloff ? 1ull : 0ull);
+                    h = mix(h, k.has_velocity_coupling ? 1ull : 0ull);
+                    h = mix(h, k.enabled ? 1ull : 0ull);
+                    h = mix(h, qf(k.position.x)); h = mix(h, qf(k.position.y)); h = mix(h, qf(k.position.z));
+                    h = mix(h, qf(k.velocity.x)); h = mix(h, qf(k.velocity.y)); h = mix(h, qf(k.velocity.z));
+                    h = mix(h, qf(k.radius)); h = mix(h, qf(k.density));
+                    h = mix(h, qf(k.temperature)); h = mix(h, qf(k.fuel));
+                    h = mix(h, qf(k.falloff)); h = mix(h, qf(k.velocity_coupling));
+                }
+            }
         }
         h = mix(h, gas_volumes.size());
         h = mix(h, fluid_objects.size());
@@ -3105,15 +3265,38 @@ struct SceneData {
 
         // Single pass over world.objects; transform handles are shared per mesh,
         // but set on every matching triangle to stay correct if they aren't.
+        //
+        // The evaluated keyframe matrix is an ABSOLUTE object pose. Transform's
+        // final contract is current * base; leaving a previous animation/current
+        // matrix alive and then writing the same absolute pose into base applies
+        // translation twice when play starts. Besides shifting analytical
+        // colliders by +delta, this made SDF diverge in the opposite direction
+        // because its sampling path uses inverse(final). Reset current before
+        // installing the absolute base/pivot pose.
         for (auto& obj : world.objects) {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (!tri) continue;
-            const std::string& nn = tri->getNodeName();
-            if (nn.empty()) continue;
-            for (std::size_t i = 0; i < posed_names.size(); ++i) {
-                if (posed_names[i] != nn) continue;
-                if (Transform* th = tri->getTransformPtr()) th->setPivotMatrix(posed_mats[i]);
-                break;
+            if (tri) {
+                const std::string& nn = tri->getNodeName();
+                if (nn.empty()) continue;
+                for (std::size_t i = 0; i < posed_names.size(); ++i) {
+                    if (posed_names[i] != nn) continue;
+                    if (Transform* th = tri->getTransformPtr()) {
+                        th->setCurrent(Matrix4x4::identity());
+                        th->setPivotMatrix(posed_mats[i]);
+                    }
+                    break;
+                }
+                continue;
+            }
+            auto flat_mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+            if (flat_mesh && flat_mesh->transform) {
+                const std::string& nn = flat_mesh->nodeName;
+                for (std::size_t i = 0; i < posed_names.size(); ++i) {
+                    if (posed_names[i] != nn) continue;
+                    flat_mesh->transform->setCurrent(Matrix4x4::identity());
+                    flat_mesh->transform->setPivotMatrix(posed_mats[i]);
+                    break;
+                }
             }
         }
         // These objects just moved without bumping g_scene_geometry_generation, so
@@ -3121,6 +3304,12 @@ struct SceneData {
         // rebuild from the new world verts. Static (un-posed) objects keep their
         // memo and stay cheap.
         for (const auto& name : posed_names) surface_cache_epoch_done_.erase(name);
+
+        // Cache reset/restore can reach this outside TimelineWidget's normal
+        // backend transform-update path. Keep the rendered object and the
+        // collider resolver on the same newly-applied CPU pose.
+        g_gpu_refit_pending = true;
+        g_bvh_rebuild_pending = true;
     }
 
     bool hasSimFrame(int frame) const {
@@ -3148,7 +3337,7 @@ struct SceneData {
                 bytes += n.second.size() * sizeof(Vec3);
         for (const auto& f : particle_frame_cache_)
             for (const auto& snap : f.second)
-                bytes += snap.first.position_x.size() * 80;  // ~20 float columns + flags
+                bytes += snap.buffers.position_x.size() * 80;  // ~20 float columns + flags
         for (const auto& f : rigid_frame_cache_)
             bytes += f.second.size() * sizeof(RayTrophiSim::RigidBodyFrameState);
         return bytes;
@@ -3889,8 +4078,15 @@ struct SceneData {
         psnap.clear();
         psnap.reserve(particle_systems.size());
         for (auto& system : particle_systems) {
-            if (system.runtime) psnap.emplace_back(system.runtime->buffers(), system.runtime->aliveCount());
-            else psnap.emplace_back();
+            if (system.runtime) {
+                ParticleFrameSnapshot snapshot;
+                snapshot.buffers = system.runtime->buffers();
+                snapshot.alive_count = system.runtime->aliveCount();
+                snapshot.runtime = system.runtime->captureRuntimeState();
+                psnap.emplace_back(std::move(snapshot));
+            } else {
+                psnap.emplace_back();
+            }
         }
         // Capture the rigid bodies in the SAME pass so replay restores them in
         // lockstep with this fluid frame (see rigid_frame_cache_).
@@ -3952,12 +4148,20 @@ struct SceneData {
                 if (particle_systems[i].runtime) {
                     particle_systems[i].runtime->setGridDomainStates(it->second[i]);
                     if (have_particles) {
-                        particle_systems[i].runtime->restoreSoA(pit->second[i].first, pit->second[i].second);
+                        particle_systems[i].runtime->restoreSoA(
+                            pit->second[i].buffers, pit->second[i].alive_count);
+                        particle_systems[i].runtime->restoreRuntimeState(pit->second[i].runtime);
                     }
                     invalidateSimulationRenderBindings(particle_systems[i]);
                 }
             }
             simulation_world.resetTime(static_cast<float>(frame) * fixed_dt, frame);
+            // A cached grid/particle snapshot does not contain the authored
+            // transform of object-bound colliders/emitters. Pose those sources
+            // to the same frame before exposing the restored state; otherwise
+            // the collider gizmo/voxel mask starts at the previous live pose and
+            // only converges toward the object over subsequent simulation steps.
+            applySimSourceObjectPosesForFrame(frame);
             return true;
         }
         // Disk fallback: stream the frame from the on-disk bake cache (render-only).
@@ -4005,6 +4209,9 @@ struct SceneData {
             }
         }
         simulation_world.resetTime(static_cast<float>(frame) * fixed_dt, frame);
+        // Disk cache stores simulation fields, not source-object transforms.
+        // Keep collider/emitter/domain bindings on the exact restored frame.
+        applySimSourceObjectPosesForFrame(frame);
         return true;
     }
 
@@ -4105,6 +4312,16 @@ struct SceneData {
         force_simulation_render_sync_ = true;
     }
 
+    void setSimulationKeyAuthoringMode(bool enabled) {
+        if (simulation_key_authoring_mode_ == enabled) return;
+        simulation_key_authoring_mode_ = enabled;
+        if (!enabled) force_simulation_render_sync_ = true;
+    }
+
+    bool simulationKeyAuthoringMode() const {
+        return simulation_key_authoring_mode_;
+    }
+
     // A fluid-affecting setup edit rewinds the sim to frame 0 (see
     // updateSimulationTimeline) instead of auto-resimming up to a high parked
     // frame. The UI layer consumes this to move the timeline playhead to start.
@@ -4168,11 +4385,129 @@ struct SceneData {
     //   live_mode == false : Timeline (default) — play bakes into the cache, scrub
     //                        restores/resimulates, and a stopped timeline stays
     //                        frozen (no stepping, no render churn → cheap/idle).
+    void syncFlowSourceKeysFromTimeline() {
+        bool keys_changed = false;
+        auto keyEqual = [](const auto& a, const auto& b) {
+            return a.has_enabled == b.has_enabled &&
+                   a.has_position == b.has_position &&
+                   a.has_velocity == b.has_velocity &&
+                   a.has_radius == b.has_radius &&
+                   a.has_density == b.has_density &&
+                   a.has_temperature == b.has_temperature &&
+                   a.has_fuel == b.has_fuel &&
+                   a.has_falloff == b.has_falloff &&
+                   a.has_velocity_coupling == b.has_velocity_coupling &&
+                   a.enabled == b.enabled &&
+                   a.position.x == b.position.x &&
+                   a.position.y == b.position.y &&
+                   a.position.z == b.position.z &&
+                   a.velocity.x == b.velocity.x &&
+                   a.velocity.y == b.velocity.y &&
+                   a.velocity.z == b.velocity.z &&
+                   a.radius == b.radius &&
+                   a.density == b.density &&
+                   a.temperature == b.temperature &&
+                   a.fuel == b.fuel &&
+                   a.falloff == b.falloff &&
+                   a.velocity_coupling == b.velocity_coupling;
+        };
+        for (auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            auto& sources = system.runtime->flowSources();
+            for (std::size_t flow_i = 0; flow_i < sources.size(); ++flow_i) {
+                auto& source = sources[flow_i];
+                const std::string track_name =
+                    "Simulation Flow " +
+                    std::to_string(source.timeline_uid);
+                auto track_it = timeline.tracks.find(track_name);
+                if (track_it == timeline.tracks.end()) continue;
+
+                std::map<int, RayTrophiSim::SimulationFlowSourceDesc::Keyframe>
+                    synchronized;
+                for (const Keyframe& marker : track_it->second.keyframes) {
+                    if (!marker.has_emitter) continue;
+                    RayTrophiSim::SimulationFlowSourceDesc::Keyframe key;
+                    if (!source.keyframes.empty()) {
+                        auto nearest = source.keyframes.lower_bound(marker.frame);
+                        if (nearest == source.keyframes.end()) {
+                            key = source.keyframes.rbegin()->second;
+                        } else if (nearest == source.keyframes.begin()) {
+                            key = nearest->second;
+                        } else {
+                            auto previous = std::prev(nearest);
+                            key = (marker.frame - previous->first <=
+                                   nearest->first - marker.frame)
+                                ? previous->second : nearest->second;
+                        }
+                    }
+                    const EmitterKeyframe& emitter = marker.emitter;
+                    key.has_enabled = emitter.has_enabled;
+                    key.has_position = emitter.has_position;
+                    key.has_velocity = emitter.has_velocity;
+                    key.has_radius = emitter.has_radius;
+                    key.has_density = emitter.has_density_rate;
+                    key.has_temperature = emitter.has_temperature;
+                    key.has_fuel = emitter.has_fuel_rate;
+                    if (emitter.has_enabled) {
+                        key.enabled = emitter.enabled;
+                    }
+                    if (emitter.has_position) {
+                        key.position = emitter.position;
+                    }
+                    if (emitter.has_velocity) {
+                        key.velocity = emitter.velocity;
+                    }
+                    if (emitter.has_radius) {
+                        key.radius = emitter.radius;
+                    }
+                    if (emitter.has_density_rate) {
+                        key.density = emitter.density_rate;
+                    }
+                    if (emitter.has_temperature) {
+                        key.temperature = emitter.temperature;
+                    }
+                    if (emitter.has_fuel_rate) {
+                        key.fuel = emitter.fuel_rate;
+                    }
+                    synchronized[marker.frame] = key;
+                }
+                bool same = source.keyframes.size() == synchronized.size();
+                if (same) {
+                    auto a = source.keyframes.begin();
+                    auto b = synchronized.begin();
+                    for (; a != source.keyframes.end(); ++a, ++b) {
+                        if (a->first != b->first ||
+                            !keyEqual(a->second, b->second)) {
+                            same = false;
+                            break;
+                        }
+                    }
+                }
+                if (!same) {
+                    source.keyframes = std::move(synchronized);
+                    keys_changed = true;
+                }
+            }
+        }
+        if (keys_changed) {
+            clearSimFrameCache();
+            force_simulation_render_sync_ = true;
+        }
+    }
+
     void updateSimulationTimeline(int tl_frame, bool playing, float realtime_dt, float fps, bool live_mode,
                                   bool ui_editing = false) {
         if (tl_frame < 0) tl_frame = 0;
+        syncFlowSourceKeysFromTimeline();
         simulation_render_updated = false;
         const bool force_resync = force_simulation_render_sync_;
+        if (simulation_key_authoring_mode_ && !playing) {
+            // Key editing and simulation playback are intentionally separated:
+            // scrubbing only chooses the frame to author. Keep the last solved
+            // gas image and never auto-restore/resimulate while staging values.
+            force_simulation_render_sync_ = false;
+            return;
+        }
 
         // Catch a user moving a rigid's source object (gizmo) while the timeline is
         // IDLE — sitting on its current baked frame, not playing/scrubbing. Only
@@ -4907,6 +5242,15 @@ public:
         return (p.parent_path() / (p.stem().string() + ".simcache")).string();
     }
 
+    // Gas/volumetric grid disk cache directory. Mirrors simCacheDirForProject
+    // but uses ".volcache" to keep fluid particle cache and gas grid cache
+    // separate. Used by Cinema profile and manual disk-bake workflows.
+    static std::string volCacheDirForProject(const std::string& project_path) {
+        if (project_path.empty()) return std::string();
+        std::filesystem::path p(project_path);
+        return (p.parent_path() / (p.stem().string() + ".volcache")).string();
+    }
+
 private:
     void invalidateSimulationRenderBindings(ParticleSystemObject& system) {
         // Invalidates NanoVDB host/GPU bindings so the next syncSimulationRenderVolumes
@@ -5377,35 +5721,35 @@ public:
     // One-click behaviour presets. Each builds a fully-configured system (physics +
     // emitter/domain + RT render look) so the user does not have to dial in the many
     // particle/domain/shader knobs by hand. 0=Campfire, 1=Explosion, 2=Smoke.
-    enum class ParticleSystemPreset { Campfire = 0, Explosion = 1, Smoke = 2 };
+    // Explosion is the general airburst; GroundBurst is the dirt-and-debris
+    // ground detonation that climbs; Fireball is the slow fuel-rich mushroom.
+    enum class ParticleSystemPreset {
+        Campfire = 0, Explosion = 1, Smoke = 2, GroundBurst = 3, Fireball = 4,
+        Flamethrower = 5
+    };
 
     ParticleSystemObject& addParticleSystemPreset(ParticleSystemPreset preset) {
+        const std::size_t systems_before = particle_systems.size();
         const char* preset_name = "Particle System";
         switch (preset) {
-            case ParticleSystemPreset::Campfire:  preset_name = "Campfire";  break;
-            case ParticleSystemPreset::Explosion: preset_name = "Explosion"; break;
-            case ParticleSystemPreset::Smoke:     preset_name = "Smoke";     break;
+            case ParticleSystemPreset::Campfire:    preset_name = "Campfire";     break;
+            case ParticleSystemPreset::Explosion:   preset_name = "Explosion";    break;
+            case ParticleSystemPreset::Smoke:       preset_name = "Smoke";        break;
+            case ParticleSystemPreset::GroundBurst: preset_name = "Ground Burst"; break;
+            case ParticleSystemPreset::Fireball:    preset_name = "Fireball";     break;
+            case ParticleSystemPreset::Flamethrower:preset_name = "Flamethrower"; break;
         }
-        // Apply to the ACTIVE system (create one only if none exists) instead of
+        // This replaces the old policy that avoided
         // spawning a brand-new system on every click — consecutive preset presses
-        // would otherwise pile up systems that all simulate + refit at once. To get
-        // a separate effect, click "Add Particle System" first, then a preset.
-        ParticleSystemObject& sys = ensureActiveParticleSystemObject();
+        // Each click now creates a fresh runtime; existing systems are untouched.
+        ParticleSystemObject& sys = addParticleSystemObject(preset_name);
         auto rt = sys.runtime;
         if (!rt) return sys;
 
-        // Clean slate so the preset fully defines the system (drop old render group,
-        // domain volumes, emitters/colliders/domains/flow + any live particles).
-        destroyParticleRenderGroup(sys);
-        destroyDomainVolumes(sys);
-        rt->clear();
-        rt->clearEmitters();
-        rt->clearColliders();
-        rt->clearGridDomains();
-        rt->clearFlowSources();
-        rt->resetGridDomainStates();
+        // The new runtime starts empty. Scene-wide rigid-body proxy colliders
+        // installed by addParticleSystemObject are intentionally retained.
         sys.render = ParticleRenderSettings{};
-        sys.name = preset_name;
+        sys.name = std::string(preset_name) + " #" + std::to_string(sys.id);
 
         switch (preset) {
             case ParticleSystemPreset::Campfire: {
@@ -5426,6 +5770,60 @@ public:
                 e.start_color = Vec3(1.0f, 0.8f, 0.35f); e.end_color = Vec3(0.9f, 0.15f, 0.03f);
                 e.angular_velocity = 2.0f; e.angular_jitter = 3.0f;
                 rt->addEmitter(e);
+
+                // Rising embers feed the plume they came from: a little fuel so
+                // they keep the flame alive as they drift, plus heat so the gas
+                // lifts around each one instead of ignoring them.
+                rt->physicsSettings().grid_density_deposit = 0.8f;
+                rt->physicsSettings().grid_temperature_deposit = 1.6f;
+                rt->physicsSettings().grid_fuel_deposit = 0.45f;
+
+                // Hybrid effect: sparks remain discrete RT particles while a
+                // co-located Vulkan gas domain supplies flame and smoke.
+                RayTrophiSim::SimulationGridDomainDesc dom;
+                dom.name = "Campfire Gas";
+                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
+                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                dom.gas_maccormack_advection = true;
+                dom.bounds_min = Vec3(-1.5f, 0.0f, -1.5f);
+                dom.bounds_max = Vec3(1.5f, 4.0f, 1.5f);
+                // voxel_size is the resolution authority: the domain sync
+                // recomputes resolution_* from extent/voxel_size whenever
+                // preserve_voxel_size_on_resize is set (the default), so writing
+                // resolution_* here would simply be overwritten on frame 1.
+                // 0.055 over 3x4x3 m -> ~55x73x55.
+                dom.voxel_size = 0.055f;
+                dom.channels |= static_cast<uint32_t>(
+                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
+                dom.fire_enabled = true;
+                dom.ignition_temperature = 0.2f;
+                dom.burn_rate = 2.4f;
+                dom.heat_release = 2.8f;
+                dom.smoke_generation = 0.7f;
+                dom.flame_dissipation = 2.4f;
+                dom.gas_buoyancy_heat = 1.4f;
+                dom.gas_buoyancy_density = 0.04f;
+                dom.gas_vorticity = 0.55f;
+                dom.fire_expansion = 0.02f;
+                dom.turbulence_strength = 0.52f;
+                dom.turbulence_scale = 2.0f;
+                dom.turbulence_octaves = 4;
+                dom.turbulence_persistence = 0.52f;
+                dom.shader = VolumeShader::createFirePreset();
+                rt->addGridDomain(dom);
+
+                RayTrophiSim::SimulationFlowSourceDesc fire;
+                fire.name = "Campfire Flame Source";
+                fire.domain_index = 0;
+                fire.position = e.point;
+                fire.radius = 0.32f;
+                fire.velocity = Vec3(0.0f, 1.1f, 0.0f);
+                fire.density = 0.35f;
+                fire.temperature = 1.2f;
+                fire.fuel = 1.5f;
+                fire.falloff = 1.5f;
+                rt->addFlowSource(fire);
+
                 sys.blend_mode = ParticleBlendMode::Additive;
                 sys.render.render_in_raytrace = true;
                 sys.render.shape = ParticleRenderShape::Sphere;
@@ -5456,6 +5854,77 @@ public:
                 e.start_color = Vec3(1.0f, 0.9f, 0.5f); e.end_color = Vec3(0.3f, 0.08f, 0.02f);
                 e.angular_velocity = 4.0f; e.angular_jitter = 8.0f;
                 rt->addEmitter(e);
+
+                RayTrophiSim::ParticleEmitterDesc core = e;
+                core.name = "Explosion Fireball Core";
+                core.burst_count = 220;
+                core.speed = 2.2f;
+                core.spread = 2.8f;
+                core.lifetime_seconds = 0.7f;
+                core.start_size = 0.32f;
+                core.end_size = 0.05f;
+                core.size_jitter = 0.35f;
+                core.start_color = Vec3(1.0f, 0.95f, 0.65f);
+                core.end_color = Vec3(1.0f, 0.16f, 0.015f);
+                core.angular_velocity = 1.5f;
+                core.angular_jitter = 3.0f;
+                core.seed = 0x51f15e5du;
+                rt->addEmitter(core);
+
+                // THE point of the preset: the shrapnel is burning. Each piece
+                // drops fuel and heat into the gas along its arc, so the domain
+                // ignites where the debris flies and the fireball spreads WITH
+                // the scatter instead of being a static ball the debris exits.
+                rt->physicsSettings().grid_density_deposit = 2.2f;
+                rt->physicsSettings().grid_temperature_deposit = 6.0f;
+                rt->physicsSettings().grid_fuel_deposit = 2.8f;
+
+                // Short fuel/heat pulse drives a real volumetric blast; the
+                // discrete burst remains the hot debris/spark layer.
+                RayTrophiSim::SimulationGridDomainDesc dom;
+                dom.name = "Explosion Gas";
+                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
+                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                dom.gas_maccormack_advection = true;
+                dom.bounds_min = Vec3(-3.0f, 0.0f, -3.0f);
+                dom.bounds_max = Vec3(3.0f, 6.0f, 3.0f);
+                dom.voxel_size = 0.075f;   // 6 m box -> 80^3
+                dom.channels |= static_cast<uint32_t>(
+                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
+                dom.fire_enabled = true;
+                dom.ignition_temperature = 0.1f;
+                dom.burn_rate = 7.0f;
+                dom.heat_release = 5.0f;
+                dom.smoke_generation = 1.1f;
+                dom.flame_dissipation = 1.8f;
+                dom.fire_expansion = 0.85f;
+                dom.gas_buoyancy_heat = 0.35f;
+                dom.gas_buoyancy_density = 0.02f;
+                dom.gas_vorticity = 0.8f;
+                dom.turbulence_strength = 0.90f;
+                dom.turbulence_scale = 2.6f;
+                dom.turbulence_octaves = 5;
+                dom.turbulence_lacunarity = 2.1f;
+                dom.turbulence_persistence = 0.56f;
+                dom.turbulence_speed = 1.35f;
+                dom.shader = VolumeShader::createExplosionPreset();
+                rt->addGridDomain(dom);
+
+                RayTrophiSim::SimulationFlowSourceDesc blast;
+                blast.name = "Explosion Fuel Pulse";
+                blast.domain_index = 0;
+                blast.position = e.point;
+                blast.radius = 0.75f;
+                blast.velocity = Vec3(0.0f, 0.5f, 0.0f);
+                blast.density = 2.0f;
+                blast.temperature = 5.0f;
+                blast.fuel = 8.0f;
+                blast.falloff = 0.6f;
+                blast.use_time_limit = true;
+                blast.start_time = 0.0f;
+                blast.end_time = 0.12f;
+                rt->addFlowSource(blast);
+
                 sys.blend_mode = ParticleBlendMode::Additive;
                 sys.render.render_in_raytrace = true;
                 sys.render.shape = ParticleRenderShape::Tetra;  // chunky debris (or set SceneMeshes)
@@ -5471,10 +5940,20 @@ public:
                 rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Preview);
                 RayTrophiSim::SimulationGridDomainDesc dom;
                 dom.name = "Smoke Domain";
+                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
+                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                dom.gas_maccormack_advection = true;
                 dom.bounds_min = Vec3(-2.0f, 0.0f, -2.0f);
                 dom.bounds_max = Vec3(2.0f, 5.0f, 2.0f);
-                dom.resolution_x = dom.resolution_y = dom.resolution_z = 64;
+                dom.voxel_size = 0.07f;    // 4x5x4 m -> ~57x71x57
                 dom.fire_enabled = false;                       // smoke only, no combustion
+                dom.gas_buoyancy_heat = 0.75f;
+                dom.gas_buoyancy_density = 0.035f;
+                dom.gas_vorticity = 0.48f;
+                dom.turbulence_strength = 0.42f;
+                dom.turbulence_scale = 1.45f;
+                dom.turbulence_octaves = 4;
+                dom.turbulence_persistence = 0.52f;
                 dom.shader = VolumeShader::createSmokePreset();
                 rt->addGridDomain(dom);
                 RayTrophiSim::SimulationFlowSourceDesc fs;
@@ -5488,9 +5967,309 @@ public:
                 sys.render.render_in_raytrace = false;          // volumetric, drawn by the VDB bridge
                 break;
             }
+            case ParticleSystemPreset::GroundBurst: {
+                // Ground detonation: the floor clips the blast, so energy that
+                // would have gone downward is redirected outward and then up.
+                // Debris is thrown low and wide, drags burning fuel through the
+                // domain, and the column climbs behind it.
+                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
+                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
+                rt->setGravity(Vec3(0.0f, -9.81f, 0.0f));
+                rt->setLinearDrag(0.2f);
+                rt->setCollisionPlane(0.0f, true, 0.25f);   // dirt skips along the ground
+
+                // Low, wide shrapnel fan: spread stays under a hemisphere so the
+                // cone hugs the ground instead of firing straight up.
+                RayTrophiSim::ParticleEmitterDesc debris;
+                debris.name = "Ground Debris";
+                debris.point = Vec3(0.0f, 0.15f, 0.0f);
+                debris.direction = Vec3(0.0f, 1.0f, 0.0f);
+                debris.rate_per_second = 0.0f;
+                debris.burst_count = 380;
+                debris.speed = 7.5f;
+                debris.spread = 1.45f;
+                debris.lifetime_seconds = 2.6f;
+                debris.start_size = 0.09f; debris.end_size = 0.03f; debris.size_jitter = 0.7f;
+                debris.start_opacity = 1.0f; debris.end_opacity = 0.0f;
+                debris.start_color = Vec3(1.0f, 0.72f, 0.28f);
+                debris.end_color = Vec3(0.22f, 0.09f, 0.05f);
+                debris.angular_velocity = 5.0f; debris.angular_jitter = 9.0f;
+                rt->addEmitter(debris);
+
+                // Slow, heavy dirt that arcs and falls back: mass, not fire.
+                RayTrophiSim::ParticleEmitterDesc dirt = debris;
+                dirt.name = "Thrown Dirt";
+                dirt.burst_count = 260;
+                dirt.speed = 4.0f;
+                dirt.spread = 1.1f;
+                dirt.lifetime_seconds = 3.2f;
+                dirt.start_size = 0.13f; dirt.end_size = 0.09f; dirt.size_jitter = 0.8f;
+                dirt.start_color = Vec3(0.42f, 0.31f, 0.2f);
+                dirt.end_color = Vec3(0.2f, 0.15f, 0.1f);
+                dirt.seed = 0x6a17d17du;
+                rt->addEmitter(dirt);
+
+                rt->physicsSettings().grid_density_deposit = 3.0f;
+                rt->physicsSettings().grid_temperature_deposit = 5.0f;
+                rt->physicsSettings().grid_fuel_deposit = 2.2f;
+
+                RayTrophiSim::SimulationGridDomainDesc dom;
+                dom.name = "Ground Burst Gas";
+                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
+                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                dom.gas_maccormack_advection = true;
+                // Wide and shallow: a ground burst spreads before it climbs.
+                dom.bounds_min = Vec3(-4.0f, 0.0f, -4.0f);
+                dom.bounds_max = Vec3(4.0f, 6.0f, 4.0f);
+                dom.voxel_size = 0.095f;   // 8x6x8 m -> ~84x63x84
+                dom.channels |= static_cast<uint32_t>(
+                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
+                dom.fire_enabled = true;
+                dom.ignition_temperature = 0.12f;
+                dom.burn_rate = 6.0f;
+                dom.heat_release = 4.2f;
+                dom.smoke_generation = 1.6f;      // dirty, sooty ground blast
+                dom.flame_dissipation = 2.2f;
+                dom.fire_expansion = 0.65f;
+                dom.gas_buoyancy_heat = 0.5f;
+                dom.gas_buoyancy_density = 0.05f; // heavier, dirt-laden smoke
+                dom.gas_vorticity = 0.78f;
+                dom.turbulence_strength = 0.78f;
+                dom.turbulence_scale = 2.2f;
+                dom.turbulence_octaves = 4;
+                dom.turbulence_persistence = 0.55f;
+                dom.turbulence_speed = 1.2f;
+                dom.shader = VolumeShader::createExplosionPreset();
+                rt->addGridDomain(dom);
+
+                // Shallow, wide fuel disc right at the ground.
+                RayTrophiSim::SimulationFlowSourceDesc blast;
+                blast.name = "Ground Fuel Pulse";
+                blast.domain_index = 0;
+                blast.position = Vec3(0.0f, 0.12f, 0.0f);
+                blast.radius = 0.9f;
+                blast.velocity = Vec3(0.0f, 1.2f, 0.0f);
+                blast.density = 2.4f;
+                blast.temperature = 4.5f;
+                blast.fuel = 7.0f;
+                blast.falloff = 0.5f;
+                blast.use_time_limit = true;
+                blast.start_time = 0.0f;
+                blast.end_time = 0.1f;
+                rt->addFlowSource(blast);
+
+                sys.blend_mode = ParticleBlendMode::Additive;
+                sys.render.render_in_raytrace = true;
+                sys.render.shape = ParticleRenderShape::Tetra;
+                sys.render.emissive = true;
+                sys.render.base_color = Vec3(1.0f, 0.72f, 0.3f);
+                sys.render.color_end  = Vec3(0.2f, 0.08f, 0.03f);
+                sys.render.color_buckets = 8;
+                sys.render.emission_strength = 5.0f;
+                break;
+            }
+            case ParticleSystemPreset::Fireball: {
+                // Fuel-rich deflagration: little shrapnel, a long fuel burn and
+                // strong thermal lift, so the mass rolls upward into a mushroom
+                // instead of punching outward. The tall domain is the point.
+                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
+                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
+                rt->setGravity(Vec3(0.0f, -3.2f, 0.0f));   // embers loft
+                rt->setLinearDrag(0.55f);
+
+                RayTrophiSim::ParticleEmitterDesc embers;
+                embers.name = "Fireball Embers";
+                embers.point = Vec3(0.0f, 0.6f, 0.0f);
+                embers.direction = Vec3(0.0f, 1.0f, 0.0f);
+                embers.rate_per_second = 0.0f;
+                embers.burst_count = 180;
+                embers.speed = 3.0f;
+                embers.spread = 2.4f;
+                embers.lifetime_seconds = 3.0f;
+                embers.start_size = 0.11f; embers.end_size = 0.02f; embers.size_jitter = 0.55f;
+                embers.start_opacity = 1.0f; embers.end_opacity = 0.0f;
+                embers.start_color = Vec3(1.0f, 0.88f, 0.5f);
+                embers.end_color = Vec3(0.8f, 0.12f, 0.02f);
+                embers.angular_velocity = 2.0f; embers.angular_jitter = 4.0f;
+                rt->addEmitter(embers);
+
+                // Embers are the fuel carriers here: they keep re-igniting the
+                // rising column, which is what sustains a mushroom cap.
+                rt->physicsSettings().grid_density_deposit = 1.6f;
+                rt->physicsSettings().grid_temperature_deposit = 7.0f;
+                rt->physicsSettings().grid_fuel_deposit = 3.5f;
+
+                RayTrophiSim::SimulationGridDomainDesc dom;
+                dom.name = "Fireball Gas";
+                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
+                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                dom.gas_maccormack_advection = true;
+                dom.bounds_min = Vec3(-2.5f, 0.0f, -2.5f);
+                dom.bounds_max = Vec3(2.5f, 9.0f, 2.5f);   // tall: room to climb
+                dom.voxel_size = 0.085f;   // 5x9x5 m -> ~59x106x59
+                dom.channels |= static_cast<uint32_t>(
+                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
+                dom.fire_enabled = true;
+                dom.ignition_temperature = 0.15f;
+                dom.burn_rate = 3.2f;             // slower burn = longer flame life
+                dom.heat_release = 4.5f;
+                dom.smoke_generation = 1.3f;
+                dom.flame_dissipation = 1.2f;     // flame lingers
+                dom.fire_expansion = 0.35f;       // sustained roll without late pressure growth
+                dom.gas_buoyancy_heat = 1.8f;     // strong lift -> mushroom
+                dom.gas_buoyancy_density = 0.03f;
+                dom.gas_vorticity = 0.68f;        // curls the cap without injecting runaway energy
+                dom.turbulence_strength = 0.58f;
+                dom.turbulence_scale = 1.8f;
+                dom.turbulence_octaves = 4;
+                dom.turbulence_persistence = 0.54f;
+                dom.turbulence_speed = 0.9f;
+                dom.shader = VolumeShader::createExplosionPreset();
+                rt->addGridDomain(dom);
+
+                RayTrophiSim::SimulationFlowSourceDesc fuel;
+                fuel.name = "Fireball Fuel Charge";
+                fuel.domain_index = 0;
+                fuel.position = Vec3(0.0f, 0.6f, 0.0f);
+                fuel.radius = 0.8f;
+                fuel.velocity = Vec3(0.0f, 2.0f, 0.0f);
+                fuel.density = 1.4f;
+                fuel.temperature = 4.0f;
+                fuel.fuel = 10.0f;
+                fuel.falloff = 0.8f;
+                fuel.use_time_limit = true;
+                fuel.start_time = 0.0f;
+                fuel.end_time = 0.35f;            // long charge -> sustained roll
+                rt->addFlowSource(fuel);
+
+                sys.blend_mode = ParticleBlendMode::Additive;
+                sys.render.render_in_raytrace = true;
+                sys.render.shape = ParticleRenderShape::Sphere;
+                sys.render.emissive = true;
+                sys.render.base_color = Vec3(1.0f, 0.82f, 0.42f);
+                sys.render.color_end  = Vec3(0.6f, 0.1f, 0.02f);
+                sys.render.color_buckets = 10;
+                sys.render.emission_strength = 9.0f;
+                break;
+            }
+            case ParticleSystemPreset::Flamethrower: {
+                // Directional, fuel-rich jet. Low expansion keeps a coherent
+                // flame tongue while high source velocity carries ignition to
+                // collider surfaces several metres away.
+                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
+                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
+                rt->setGravity(Vec3(0.0f, -2.0f, 0.0f));
+                rt->setLinearDrag(0.35f);
+
+                RayTrophiSim::ParticleEmitterDesc sparks;
+                sparks.name = "Flamethrower Embers";
+                sparks.point = Vec3(0.0f, 1.0f, 0.0f);
+                sparks.direction = Vec3(1.0f, 0.05f, 0.0f);
+                sparks.rate_per_second = 180.0f;
+                sparks.speed = 11.0f;
+                sparks.spread = 0.16f;
+                sparks.lifetime_seconds = 1.1f;
+                sparks.start_size = 0.055f; sparks.end_size = 0.012f;
+                sparks.start_opacity = 1.0f; sparks.end_opacity = 0.0f;
+                sparks.start_color = Vec3(1.0f, 0.92f, 0.48f);
+                sparks.end_color = Vec3(1.0f, 0.12f, 0.01f);
+                sparks.seed = 0xf1a6e701u;
+                rt->addEmitter(sparks);
+                rt->physicsSettings().grid_density_deposit = 0.35f;
+                rt->physicsSettings().grid_temperature_deposit = 2.2f;
+                rt->physicsSettings().grid_fuel_deposit = 0.75f;
+
+                RayTrophiSim::SimulationGridDomainDesc dom;
+                dom.name = "Flamethrower Gas";
+                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
+                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                dom.gas_maccormack_advection = true;
+                dom.bounds_min = Vec3(-1.0f, -1.0f, -2.2f);
+                dom.bounds_max = Vec3(9.0f, 3.5f, 2.2f);
+                dom.voxel_size = 0.075f;
+                dom.channels |= static_cast<uint32_t>(
+                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
+                dom.fire_enabled = true;
+                dom.ignition_temperature = 0.18f;
+                dom.burn_rate = 4.8f;
+                dom.heat_release = 3.8f;
+                dom.smoke_generation = 0.48f;
+                dom.flame_dissipation = 2.0f;
+                dom.fire_expansion = 0.08f;
+                dom.gas_buoyancy_heat = 0.48f;
+                dom.gas_buoyancy_density = 0.015f;
+                dom.gas_vorticity = 0.46f;
+                dom.turbulence_strength = 0.62f;
+                dom.turbulence_scale = 3.1f;
+                dom.turbulence_octaves = 4;
+                dom.turbulence_persistence = 0.50f;
+                dom.turbulence_speed = 1.6f;
+                dom.shader = VolumeShader::createFirePreset();
+                // A flamethrower is a hot, optically thin gas jet, not a dense
+                // liquid sheet.  Keep this look local to the preset: large
+                // density/black absorption values collapse the mean free path
+                // and make every fuel-bearing voxel glow as an opaque ribbon.
+                dom.shader->name = "Flamethrower Fire";
+                dom.shader->density.multiplier = 1.65f;
+                dom.shader->density.cutoff_threshold = 0.018f;
+                dom.shader->density.edge_falloff = 0.08f;
+                dom.shader->scattering.color = Vec3(1.0f, 0.72f, 0.38f);
+                dom.shader->scattering.coefficient = 0.12f;
+                dom.shader->scattering.anisotropy = 0.18f;
+                dom.shader->scattering.multi_scatter = 0.08f;
+                dom.shader->absorption.color = Vec3(0.16f, 0.055f, 0.018f);
+                dom.shader->absorption.coefficient = 0.55f;
+                dom.shader->emission.blackbody_intensity = 9.0f;
+                dom.shader->emission.temperature_min = 850.0f;
+                dom.shader->emission.temperature_max = 1900.0f;
+                dom.shader->emission.color_ramp.enabled = true;
+                dom.shader->emission.color_ramp.stops = {
+                    {0.00f, Vec3(0.0f, 0.0f, 0.0f), 0.0f},
+                    {0.12f, Vec3(0.10f, 0.015f, 0.002f), 0.12f},
+                    {0.34f, Vec3(0.90f, 0.12f, 0.008f), 0.58f},
+                    {0.62f, Vec3(1.00f, 0.52f, 0.055f), 0.86f},
+                    {0.84f, Vec3(1.00f, 0.88f, 0.48f), 0.96f},
+                    {1.00f, Vec3(0.82f, 0.91f, 1.00f), 1.0f}
+                };
+                rt->addGridDomain(dom);
+
+                RayTrophiSim::SimulationFlowSourceDesc jet;
+                jet.name = "Flamethrower Fuel Jet";
+                jet.domain_index = 0;
+                jet.position = Vec3(0.0f, 1.0f, 0.0f);
+                jet.radius = 0.24f;
+                jet.velocity = Vec3(12.0f, 0.4f, 0.0f);
+                jet.velocity_coupling = 16.0f;
+                jet.density = 0.42f;
+                jet.temperature = 2.8f;
+                jet.fuel = 3.6f;
+                jet.falloff = 1.8f;
+                jet.use_time_limit = false;
+                rt->addFlowSource(jet);
+
+                sys.blend_mode = ParticleBlendMode::Additive;
+                sys.render.render_in_raytrace = true;
+                sys.render.shape = ParticleRenderShape::Sphere;
+                sys.render.emissive = true;
+                sys.render.base_color = Vec3(1.0f, 0.82f, 0.32f);
+                sys.render.color_end = Vec3(0.85f, 0.08f, 0.01f);
+                sys.render.color_buckets = 10;
+                sys.render.emission_strength = 7.0f;
+                break;
+            }
         }
 
         applyParticleSystemEnabledState(sys);
+        if (particle_systems.size() != systems_before + 1u) {
+            SCENE_LOG_ERROR(
+                "[ParticlePreset] Additive preset invariant failed: system count " +
+                std::to_string(systems_before) + " -> " +
+                std::to_string(particle_systems.size()) + ".");
+        } else {
+            SCENE_LOG_INFO(
+                "[ParticlePreset] Added '" + sys.name + "'; systems=" +
+                std::to_string(particle_systems.size()) + ".");
+        }
         return sys;
     }
 
@@ -5582,7 +6361,8 @@ public:
                     domain.source_name == node_name) return true;
             }
             for (const auto& source : system.runtime->flowSources()) {
-                if (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::ObjectBounds &&
+                if ((source.source_mode == RayTrophiSim::SimulationFlowSourceMode::ObjectBounds ||
+                     source.source_mode == RayTrophiSim::SimulationFlowSourceMode::MeshSurface) &&
                     source.source_name == node_name) return true;
             }
         }
@@ -5657,7 +6437,8 @@ public:
                 flow_sources.erase(
                     std::remove_if(flow_sources.begin(), flow_sources.end(),
                         [&](const RayTrophiSim::SimulationFlowSourceDesc& source) {
-                            return source.source_mode == RayTrophiSim::SimulationFlowSourceMode::ObjectBounds &&
+                            return (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::ObjectBounds ||
+                                    source.source_mode == RayTrophiSim::SimulationFlowSourceMode::MeshSurface) &&
                                    source.source_name == node_name;
                         }),
                     flow_sources.end());
@@ -5718,7 +6499,8 @@ public:
                 flow_sources.erase(
                     std::remove_if(flow_sources.begin(), flow_sources.end(),
                         [&](const RayTrophiSim::SimulationFlowSourceDesc& source) {
-                            return source.source_mode == RayTrophiSim::SimulationFlowSourceMode::ObjectBounds &&
+                            return (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::ObjectBounds ||
+                                    source.source_mode == RayTrophiSim::SimulationFlowSourceMode::MeshSurface) &&
                                    !source.source_name.empty() &&
                                    !hasLiveSimulationObject(source.source_name);
                         }),
@@ -5732,9 +6514,11 @@ public:
     void invalidateSurfaceMeshCache(const std::string& node_name = std::string()) const {
         if (node_name.empty()) {
             surface_mesh_cache.clear();
+            simulation_local_bounds_.clear();
             last_sim_pose_applied_.clear();  // drop stale sim-pose memo on full reset/reload
         } else {
             surface_mesh_cache.erase(node_name);
+            simulation_local_bounds_.erase(node_name);
             last_sim_pose_applied_.erase(node_name);
         }
         ++surface_mesh_cache_version;
@@ -5800,9 +6584,26 @@ public:
                 auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj);
                 if (!tm || tm->nodeName != node_name || !tm->geometry) continue;
                 DNA::GeometryDetail* g = tm->geometry.get();
-                const Vec3* P  = g->get_attribute_data<Vec3>("P");       // world-baked
+                const Vec3* P = g->get_attribute_data<Vec3>("P");
+                const Vec3* P_orig = g->get_attribute_data<Vec3>("P_orig");
                 const Vec2* uv = g->get_attribute_data<Vec2>("uv");
                 const uint16_t* mat = g->get_attribute_data<uint16_t>("materialID");
+                // GPU transform edits intentionally do not rebake P every frame.
+                // Build the simulation surface in current world space from the
+                // authoritative local P_orig + final matrix when available;
+                // otherwise the SDF cook sees the pre-rotate/pre-scale P and its
+                // later world_to_local conversion produces an offset grid.
+                std::vector<Vec3> transformed_positions;
+                if (P_orig && tm->transform) {
+                    const std::size_t vertex_count = g->get_vertex_count();
+                    transformed_positions.resize(vertex_count);
+                    const Matrix4x4 final_transform = tm->transform->getFinal();
+                    for (std::size_t i = 0; i < vertex_count; ++i) {
+                        transformed_positions[i] =
+                            final_transform.transform_point(P_orig[i]);
+                    }
+                    P = transformed_positions.data();
+                }
                 auto& fcache = surface_mesh_cache[node_name];
                 fcache = RayTrophiSim::SurfaceMeshCache::buildFromSoA(
                     node_name, P, uv, mat, g->indices.data(), g->indices.size(),
@@ -5823,7 +6624,130 @@ public:
         return cache.empty() ? nullptr : &cache;
     }
 
+    bool resolveLightweightObjectOBBForSimulation(
+        const std::string& node_name,
+        RayTrophiSim::ParticleColliderOBB& out_obb) const {
+        if (node_name.empty()) return false;
+
+        Matrix4x4 world_matrix = Matrix4x4::identity();
+        std::vector<std::shared_ptr<Triangle>> source_triangles;
+        const TriangleMesh* flat_mesh = nullptr;
+        const uint64_t generation =
+            g_scene_geometry_generation.load(std::memory_order_acquire);
+        auto& cached = simulation_local_bounds_[node_name];
+        const bool rebuild_local_bounds =
+            !cached.valid || cached.geometry_generation != generation;
+
+        for (const auto& obj : world.objects) {
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                if (tri->getNodeName() == node_name) {
+                    if (source_triangles.empty()) world_matrix = tri->getTransformMatrix();
+                    source_triangles.push_back(tri);
+                    if (!rebuild_local_bounds) break;
+                }
+            }
+        }
+        if (source_triangles.empty()) for (const auto& obj : world.objects) {
+            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                if (inst->node_name == node_name && inst->source_triangles && !inst->source_triangles->empty()) {
+                    world_matrix = inst->transform;
+                    if (rebuild_local_bounds) source_triangles.assign(inst->source_triangles->begin(), inst->source_triangles->end());
+                    else source_triangles.push_back(inst->source_triangles->front());
+                    break;
+                }
+            }
+            if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                if (tm->nodeName == node_name && tm->geometry) {
+                    flat_mesh = tm.get();
+                    world_matrix = tm->transform ? tm->transform->getFinal() : Matrix4x4::identity();
+                    break;
+                }
+            }
+        }
+        if (source_triangles.empty() && !flat_mesh) return false;
+
+        if (rebuild_local_bounds) {
+            Vec3 local_min(std::numeric_limits<float>::max());
+            Vec3 local_max(-std::numeric_limits<float>::max());
+            bool have_point = false;
+            auto includePoint = [&](const Vec3& p) {
+                local_min = Vec3::min(local_min, p);
+                local_max = Vec3::max(local_max, p);
+                have_point = true;
+            };
+            if (!source_triangles.empty()) {
+                for (const auto& tri : source_triangles) {
+                    if (!tri) continue;
+                    includePoint(tri->getOriginalVertexPosition(0));
+                    includePoint(tri->getOriginalVertexPosition(1));
+                    includePoint(tri->getOriginalVertexPosition(2));
+                }
+            } else {
+                DNA::GeometryDetail* geometry = flat_mesh->geometry.get();
+                // Flat-mesh P is world-baked (see the surface-cache path above).
+                // Feeding it into local bounds and then applying world_matrix
+                // rotates/scales the collider twice. Prefer the authored local
+                // P_orig; older/procedural meshes without it are unbaked through
+                // inverse(world) before entering the local-bounds cache.
+                const Vec3* positions = geometry
+                    ? geometry->get_attribute_data<Vec3>("P_orig") : nullptr;
+                const Vec3* world_positions = geometry
+                    ? geometry->get_attribute_data<Vec3>("P") : nullptr;
+                const bool unbake_world_positions =
+                    positions == nullptr && world_positions != nullptr;
+                const Matrix4x4 world_to_local =
+                    unbake_world_positions
+                        ? world_matrix.inverse()
+                        : Matrix4x4::identity();
+                const Vec3* source_positions =
+                    positions ? positions : world_positions;
+                if (source_positions) {
+                    for (uint32_t index : geometry->indices) {
+                        Vec3 point = source_positions[index];
+                        if (unbake_world_positions) {
+                            point = world_to_local.transform_point(point);
+                        }
+                        includePoint(point);
+                    }
+                }
+            }
+            if (!have_point) {
+                simulation_local_bounds_.erase(node_name);
+                return false;
+            }
+            cached.min = local_min;
+            cached.max = local_max;
+            cached.geometry_generation = generation;
+            cached.valid = true;
+        }
+
+        out_obb.local_bounds_min = cached.min;
+        out_obb.local_bounds_max = cached.max;
+        out_obb.local_to_world = world_matrix;
+        return true;
+    }
+
     bool resolveObjectBoundsForSimulation(const std::string& node_name, Vec3& out_min, Vec3& out_max) const {
+        RayTrophiSim::ParticleColliderOBB lightweight;
+        if (resolveLightweightObjectOBBForSimulation(node_name, lightweight)) {
+            const Vec3& mn = lightweight.local_bounds_min;
+            const Vec3& mx = lightweight.local_bounds_max;
+            const Vec3 corners[8] = {
+                Vec3(mn.x, mn.y, mn.z), Vec3(mx.x, mn.y, mn.z),
+                Vec3(mn.x, mx.y, mn.z), Vec3(mx.x, mx.y, mn.z),
+                Vec3(mn.x, mn.y, mx.z), Vec3(mx.x, mn.y, mx.z),
+                Vec3(mn.x, mx.y, mx.z), Vec3(mx.x, mx.y, mx.z)
+            };
+            out_min = Vec3(std::numeric_limits<float>::max());
+            out_max = Vec3(-std::numeric_limits<float>::max());
+            for (const Vec3& corner : corners) {
+                const Vec3 world_corner =
+                    lightweight.local_to_world.transform_point(corner);
+                out_min = Vec3::min(out_min, world_corner);
+                out_max = Vec3::max(out_max, world_corner);
+            }
+            return true;
+        }
         const auto* surface_cache = getSurfaceMeshCacheForObject(node_name);
         if (!surface_cache) {
             return false;
@@ -5835,6 +6759,9 @@ public:
 
     bool resolveObjectOBBForSimulation(const std::string& node_name,
                                        RayTrophiSim::ParticleColliderOBB& out_obb) const {
+        if (resolveLightweightObjectOBBForSimulation(node_name, out_obb)) {
+            return true;
+        }
         const auto* surface_cache = getSurfaceMeshCacheForObject(node_name);
         if (!surface_cache) {
             return false;
@@ -5958,11 +6885,18 @@ public:
                     }
 
                     if (emitter.source_mode == RayTrophiSim::ParticleEmitterSourceMode::ObjectOrigin) {
-                        const auto* surface_cache = getSurfaceMeshCacheForObject(emitter.source_name);
-                        if (!surface_cache) {
+                        Vec3 bounds_min;
+                        Vec3 bounds_max;
+                        if (!resolveObjectBoundsForSimulation(
+                                emitter.source_name, bounds_min, bounds_max)) {
                             return false;
                         }
-                        out_position = surface_cache->centroid + emitter.local_offset;
+                        // Resolve from the current world bounds on every spawn
+                        // tick. A cached mesh centroid can describe the import
+                        // pose when the object is moved through its transform
+                        // handle without rebaking vertex positions.
+                        out_position = (bounds_min + bounds_max) * 0.5f +
+                                       emitter.local_offset;
                         return true;
                     }
 
@@ -6029,7 +6963,8 @@ public:
                 });
             runtime.setFlowSourceBoundsResolver(
                 [this](const RayTrophiSim::SimulationFlowSourceDesc& source, Vec3& out_min, Vec3& out_max) {
-                    if (source.source_mode != RayTrophiSim::SimulationFlowSourceMode::ObjectBounds ||
+                    if ((source.source_mode != RayTrophiSim::SimulationFlowSourceMode::ObjectBounds &&
+                         source.source_mode != RayTrophiSim::SimulationFlowSourceMode::MeshSurface) ||
                         source.source_name.empty()) {
                         return false;
                     }
@@ -6365,6 +7300,65 @@ public:
         return domain;
     }
 
+    bool removeSimulationGridDomain(
+        std::size_t system_index,
+        std::size_t domain_index,
+        const std::function<void()>& after_render_detach = {}) {
+        if (system_index >= particle_systems.size()) return false;
+        auto& system = particle_systems[system_index];
+        if (!system.runtime ||
+            domain_index >= system.runtime->gridDomains().size()) {
+            return false;
+        }
+
+        // First detach every RT/NanoVDB consumer while the compute buffers are
+        // still valid. The caller drains in-flight rendering before entering.
+        removeDomainVolume(system, domain_index);
+        removeFoamDomainVolume(system, domain_index);
+
+        auto erase_index = [domain_index](auto& values) {
+            if (domain_index < values.size()) {
+                values.erase(values.begin() +
+                    static_cast<std::ptrdiff_t>(domain_index));
+            }
+        };
+        erase_index(system.domain_vdb_ids);
+        erase_index(system.domain_volumes);
+        erase_index(system.domain_foam_vdb_ids);
+        erase_index(system.domain_foam_volumes);
+        erase_index(system.domain_foam_density);
+        erase_index(system.domain_sdf_buffers);
+        erase_index(system.domain_sdf_stats);
+        erase_index(system.domain_sdf_signatures);
+        erase_index(system.domain_vdb_upload_signatures);
+        erase_index(system.domain_last_fluid_render_mode);
+
+        // A live Vulkan-RT volume can read the solver's dense compute buffers
+        // through published device addresses. Give the renderer a two-phase
+        // deletion boundary: the volume/world entries above are already gone,
+        // but the owning compute buffers below are still alive. Vulkan can now
+        // rebuild its TLAS/volume table without the domain before those buffers
+        // are physically destroyed.
+        if (after_render_detach) {
+            after_render_detach();
+        }
+
+        // Only after all render consumers are detached may the indexed Vulkan
+        // storage buffers be destroyed and the solver vectors compacted.
+        const bool removed = system.runtime->removeGridDomain(
+            domain_index, &simulation_world.compute());
+        if (removed) {
+            clearSimFrameCache();
+            force_simulation_render_sync_ = true;
+            g_gas_volumes_dirty = true;
+            g_geometry_dirty = true;
+            g_vulkan_rebuild_pending = true;
+            g_optix_rebuild_pending = true;
+            g_bvh_rebuild_pending = true;
+        }
+        return removed;
+    }
+
     RayTrophiSim::SimulationGridDomainDesc& addSimulationGridDomainFromObject(const std::string& node_name) {
         RayTrophiSim::SimulationGridDomainDesc desc;
         desc.name = node_name.empty() ? "Grid Domain" : node_name + " Domain";
@@ -6554,6 +7548,28 @@ public:
     Physics::ForceFieldManager force_field_manager;
     RayTrophiSim::SimulationWorld simulation_world;
 
+    // Live dense gas fields publish raw Vulkan buffer device addresses through
+    // VDBVolumeManager so Vulkan RT can ray-march the simulation without a host
+    // copy. Those addresses borrow the lifetime of the current simulation
+    // compute backend. Clear them BEFORE replacing/destroying that backend;
+    // otherwise a Vulkan -> OptiX/CPU -> Vulkan round-trip can republish a freed
+    // VkBuffer address in the volume SSBO and the first RT traversal causes a
+    // device loss/TDR. Host OpenVDB/NanoVDB data and stable volume ids remain
+    // intact, so the non-Vulkan path keeps rendering and the next Vulkan solve
+    // naturally publishes fresh addresses.
+    void invalidateSimulationDenseGpuAddresses() {
+        auto& manager = VDBVolumeManager::getInstance();
+        for (auto& system : particle_systems) {
+            for (const int volume_id : system.domain_vdb_ids) {
+                if (volume_id >= 0) {
+                    manager.clearLiveDenseGpuFields(volume_id);
+                }
+            }
+        }
+        force_simulation_render_sync_ = true;
+        g_gas_volumes_dirty = true;
+    }
+
     void syncSimulationWorld() {
         simulation_world.setForceFieldManager(&force_field_manager);
 
@@ -6574,9 +7590,10 @@ public:
 
         auto& compute = simulation_world.compute();
 
-        if (vulkan_only_requested && !auto_gpu_requested) {
+        if (vulkan_only_requested) {
             // Explicit Vulkan-only path (testing / non-NVIDIA systems)
             if (compute.backendType() != RayTrophiSim::ComputeBackendType::VulkanCompute) {
+                invalidateSimulationDenseGpuAddresses();
                 auto vk_backend =
                     RayTrophiSim::createVulkanSimulationComputeBackend(g_vulkan_sim_compute_ctx);
                 g_hasVulkanComputeSim = (vk_backend != nullptr);
@@ -6586,10 +7603,10 @@ public:
             // Auto: try CUDA first, fall back to Vulkan
             if (compute.backendType() == RayTrophiSim::ComputeBackendType::CUDA) {
                 // Already on CUDA — keep it
-            } else if (compute.backendType() == RayTrophiSim::ComputeBackendType::VulkanCompute) {
-                // Already on Vulkan — keep it
             } else {
-                // Try CUDA
+                // GPU_Compute is CUDA-preferred even if an earlier selection
+                // left this context on Vulkan.
+                invalidateSimulationDenseGpuAddresses();
                 auto cuda_backend = RayTrophiSim::createCudaSimulationComputeBackend();
                 if (cuda_backend) {
                     compute.setBackend(std::move(cuda_backend));
@@ -6602,6 +7619,7 @@ public:
                 }
             }
         } else if (compute.backendType() != RayTrophiSim::ComputeBackendType::CPU) {
+            invalidateSimulationDenseGpuAddresses();
             compute.setBackend(nullptr);
         }
     }
@@ -6681,6 +7699,7 @@ public:
         mesh_paint_layer_stacks.clear();
         object_groups.clear();
         surface_cache_epoch_done_.clear();
+        simulation_local_bounds_.clear();
         last_sim_pose_applied_.clear();
         soft_weld_cache_.clear();
         rigid_bake_cache_.clear();

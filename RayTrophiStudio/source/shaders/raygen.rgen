@@ -193,6 +193,12 @@ layout(set = 0, binding = 17, rgba32f) uniform image2D denoiserPositionImage;
 // so Transmission/Absorption/Bounce Count resolve at TONEMAP time — toggling
 // them never resets the beauty accumulation.
 layout(set = 0, binding = 21, rgba16f) uniform image2D pathStatsImage;
+// Fixed ping-pong slots. Do not swap descriptors between asynchronous frames;
+// temporal frame parity chooses which slot is read and which is written.
+layout(set = 0, binding = 25, rgba16f) uniform image2D volumeTemporalColor0;
+layout(set = 0, binding = 26, rgba16f) uniform image2D volumeTemporalColor1;
+layout(set = 0, binding = 27, rgba32f) uniform image2D volumeTemporalMetadata0;
+layout(set = 0, binding = 28, rgba32f) uniform image2D volumeTemporalMetadata1;
 
 // ════════════════════════════════════════════════════════════════════════════════
 // Binding 9: Volume Instances SSBO (OptiX-compatible volumetric data)
@@ -312,6 +318,8 @@ const uint BOUNCE_GLASS_REFLECT = 6u; // glass mirror lobe (no interface crossin
 const uint MAT_FLAG_MARBLE_VOLUME = (1u << 20);
 
 #include "rt_payload.glsl"
+#include "volume_temporal.glsl"
+#include "volume_instrumentation.glsl"
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
 
@@ -909,6 +917,7 @@ void main() {
     vec3 primaryNormal    = vec3(0.0);
     uint primaryMaterialId = PL_MATID_MASK;   // 16-bit id space; 0xFFFF = none
     bool primaryHitValid  = false;
+    bool primaryVolumeHit = false;
     float firstHitTransmission = 0.0;
 
     // PRIMARY HIT POSITION — saved at bounce 0 for aerial perspective & fog
@@ -978,6 +987,8 @@ void main() {
         );
 
         seed = payload.seed;
+        bool currentBounceIsVolume =
+            (payload.primaryMeta & PL_PRIMARY_VOLUME) != 0u;
 
         // (Glass-marble FULL VOLUME interior medium march was removed — the feature was too
         // camera-angle dependent and the interior dust/dirt never read as intended. Inclusion
@@ -987,8 +998,23 @@ void main() {
             vec2 aRG = unpackHalf2x16(payload.primaryARG);
             vec2 aBT = unpackHalf2x16(payload.primaryABT);
             primaryAlbedo = vec3(aRG, aBT.x);
-            primaryNormal = plUnpackNormal(payload.primaryNrm);
             primaryMaterialId = payload.primaryMeta & PL_MATID_MASK;
+            primaryVolumeHit = (payload.primaryMeta & PL_PRIMARY_VOLUME) != 0u;
+            bool hasVolumeDepth =
+                (payload.primaryMeta & PL_PRIMARY_VOLUME_DEPTH) != 0u;
+            if (primaryVolumeHit && hasVolumeDepth) {
+                primaryNormal = -normalize(primaryRayDir);
+                float representativeVolumeT = uintBitsToFloat(payload.primaryNrm);
+                if (representativeVolumeT > 0.0 &&
+                    !isnan(representativeVolumeT) &&
+                    !isinf(representativeVolumeT)) {
+                    firstHitPos =
+                        primaryRayOrigin + primaryRayDir * representativeVolumeT;
+                    firstHitValid = true;
+                }
+            } else {
+                primaryNormal = plUnpackNormal(payload.primaryNrm);
+            }
             firstHitTransmission = aBT.y;
             primaryHitValid = true;
         }
@@ -1011,7 +1037,8 @@ void main() {
         float hitPosLen2 = dot(payload.scatterOrigin, payload.scatterOrigin);
         bool hasHitPoint = hitPosLen2 > 1e-12;
         bool terminalHit = (!payload.scattered) && hasHitPoint;
-        if (!firstHitValid && !isTransparentPass && (payload.scattered || terminalHit)) {
+        if (!firstHitValid && !isTransparentPass && !currentBounceIsVolume &&
+            (payload.scattered || terminalHit)) {
             firstHitPos   = payload.scatterOrigin;
             firstHitValid = true;
         }
@@ -1070,7 +1097,7 @@ void main() {
         rayDir    = payload.scatterDir;
 
         // Record first substantive hit position (surface/volume) for aerial/fog distance.
-        if (!firstHitValid && !isTransparentPass) {
+        if (!firstHitValid && !isTransparentPass && !currentBounceIsVolume) {
             firstHitPos   = payload.scatterOrigin;
             firstHitValid = true;
         }
@@ -1101,7 +1128,12 @@ void main() {
         vec3 primaryOrigin = primaryRayOrigin;
         vec3 fogDir = firstHitValid ? normalize(firstHitPos - primaryOrigin) : normalize(primaryRayDir);
         float hitDist = firstHitValid ? length(firstHitPos - primaryOrigin) : (worldData.w.fogDistance * 0.8);
-        hitDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
+        // A volume AABB is not an opaque atmospheric endpoint. Its own
+        // Beer-Lambert compositing is already in the path radiance; scaling
+        // aerial distance by its weak opacity creates a domain-shaped halo.
+        if (!primaryVolumeHit) {
+            hitDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
+        }
         hitDist = min(hitDist, worldData.w.fogDistance);
 
         // OptiX-parity analytical height fog.
@@ -1131,10 +1163,20 @@ void main() {
     // Nishita-based distance haze: uses Transmittance + SkyView LUTs
     // ══════════════════════════════════════════════════════════════════════
     bool hasAtmosLUTs = worldData.w._pad5 != 0;
-    if (worldData.w.mode == 2 && worldData.w.aerialEnabled != 0 && hasAtmosLUTs) {
+    // Nishita miss radiance already represents the atmosphere to infinity.
+    // Aerial perspective is a finite-distance surface effect; applying it
+    // again on a sky miss double-hazes both the sky and any nearby volume
+    // composited in front of it.
+    if (worldData.w.mode == 2 && worldData.w.aerialEnabled != 0 &&
+        hasAtmosLUTs && firstHitValid) {
         vec3 primaryOrigin = primaryRayOrigin;
         float hitDist = firstHitValid ? length(firstHitPos - primaryOrigin) : max(worldData.w.aerialMinDistance, 10000.0);
-        hitDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
+        // Volume transmittance is already composed in the path. Treating the
+        // volume AABB as an aerial endpoint makes weak density fringe pixels
+        // use a different haze distance than adjacent sky pixels.
+        if (!primaryVolumeHit) {
+            hitDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
+        }
         
         if (hitDist > 0.1 && hitDist < 1e6) {
             vec3  rayDir      = firstHitValid ? normalize(firstHitPos - primaryOrigin) : normalize(primaryRayDir);
@@ -1314,6 +1356,68 @@ void main() {
         float dist = sqrt(vx*vx + vy*vy) / 1.414;
         float vignette = 1.0 - cam.vignetteAmount * pow(dist, cam.vignetteFalloff);
         exposedRadiance *= max(0.0, vignette);
+    }
+
+    // Volume-only temporal stabilization. A small world-space neighborhood
+    // search performs reprojection without tying the shader ABI to another
+    // camera matrix. Position/transmittance disagreement rejects stale history.
+    {
+        uint temporalWriteSlot = cam.debugFlags & 1u;
+        uint temporalReadSlot = temporalWriteSlot ^ 1u;
+        bool historyAvailable = (cam.debugFlags & 2u) != 0u;
+        vec4 currentMetadata = primaryVolumeHit && firstHitValid
+            ? vec4(firstHitPos, clamp(firstHitTransmission, 0.0, 1.0))
+            : vec4(0.0, 0.0, 0.0, -1.0);
+        vec4 temporalColor = vec4(exposedRadiance, 1.0);
+
+        if (historyAvailable && primaryVolumeHit && firstHitValid) {
+            ivec2 size = imageSize(volumeTemporalMetadata0);
+            ivec2 center = ivec2(pixel);
+            ivec2 bestPixel = center;
+            float bestDistance = 1.0e30;
+
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    ivec2 candidate = clamp(center + ivec2(ox, oy), ivec2(0), size - 1);
+                    vec4 candidateMetadata =
+                        volumeTemporalLoadMetadata(temporalReadSlot, candidate);
+                    if (candidateMetadata.w >= 0.0) {
+                        float worldDistance =
+                            distance(candidateMetadata.xyz, currentMetadata.xyz);
+                        if (worldDistance < bestDistance) {
+                            bestDistance = worldDistance;
+                            bestPixel = candidate;
+                        }
+                    }
+                }
+            }
+
+            vec4 previousMetadata =
+                volumeTemporalLoadMetadata(temporalReadSlot, bestPixel);
+            float positionTolerance =
+                max(0.05, length(firstHitPos - primaryRayOrigin) * 0.002);
+            uint rejection = volumeTemporalValidate(
+                previousMetadata, currentMetadata, positionTolerance, 0.15);
+            if (rejection == VOLUME_TEMPORAL_ACCEPTED) {
+                vec4 history = volumeTemporalLoadColor(temporalReadSlot, bestPixel);
+                float priorM2 = imageLoad(varianceImage, ivec2(pixel)).r;
+                float variance = history.a > 1.0
+                    ? priorM2 / max(history.a - 1.0, 1.0)
+                    : 0.0;
+                temporalColor.rgb = volumeTemporalBlend(
+                    exposedRadiance, history.rgb, history.a, 16.0, variance);
+                temporalColor.a = min(history.a + 1.0, 16.0);
+                exposedRadiance = temporalColor.rgb;
+                volumeRecordTemporal(true);
+            } else {
+                volumeRecordTemporal(false);
+            }
+        } else if (primaryVolumeHit && firstHitValid) {
+            volumeRecordTemporal(false);
+        }
+
+        volumeTemporalStore(
+            temporalWriteSlot, ivec2(pixel), temporalColor, currentMetadata);
     }
 
     // Welford running average

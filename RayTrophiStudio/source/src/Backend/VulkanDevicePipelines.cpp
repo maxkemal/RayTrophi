@@ -251,6 +251,87 @@ bool VulkanDevice::createSculptPipeline(const std::vector<uint32_t>& computeSPV)
     return true;
 }
 
+// hair_expand.comp: 3 storage buffers (guide[in], segment[out], aabb[out]) + a 128-byte
+// push-constant block (HairExpandPush). Mirrors createSculptPipeline exactly, only the
+// binding count and push size differ.
+bool VulkanDevice::createHairExpandPipeline(const std::vector<uint32_t>& computeSPV) {
+    if (computeSPV.empty()) return false;
+
+    destroyHairExpandPipeline();
+
+    const uint32_t kMaxSets = 8;   // one groom = one descriptor set; a few grooms at once
+    VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets * 3} };
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = poolSizes;
+    poolInfo.maxSets = kMaxSets;
+    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_hairExpandDescPool) != VK_SUCCESS) return false;
+
+    std::vector<VkDescriptorSetLayoutBinding> bindings(3);
+    for (int i = 0; i < 3; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = (uint32_t)bindings.size();
+    layoutInfo.pBindings = bindings.data();
+    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_hairExpandDescLayout) != VK_SUCCESS) {
+        destroyHairExpandPipeline(); return false;
+    }
+
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc.offset = 0;
+    pc.size = 128;   // HairExpandPush is 116 bytes; round up
+    VkPipelineLayoutCreateInfo plInfo{};
+    plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plInfo.setLayoutCount = 1;
+    plInfo.pSetLayouts = &m_hairExpandDescLayout;
+    plInfo.pushConstantRangeCount = 1;
+    plInfo.pPushConstantRanges = &pc;
+    if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_hairExpandPipelineLayout) != VK_SUCCESS) {
+        destroyHairExpandPipeline(); return false;
+    }
+
+    VkShaderModuleCreateInfo smInfo{};
+    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
+    smInfo.pCode = computeSPV.data();
+    VkShaderModule compModule = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(m_device, &smInfo, nullptr, &compModule) != VK_SUCCESS) {
+        destroyHairExpandPipeline(); return false;
+    }
+
+    VkComputePipelineCreateInfo cpInfo{};
+    cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpInfo.layout = m_hairExpandPipelineLayout;
+    cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpInfo.stage.module = compModule;
+    cpInfo.stage.pName = "main";
+    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &m_hairExpandPipeline) != VK_SUCCESS) {
+        vkDestroyShaderModule(m_device, compModule, nullptr);
+        destroyHairExpandPipeline(); return false;
+    }
+    vkDestroyShaderModule(m_device, compModule, nullptr);
+    return true;
+}
+
+void VulkanDevice::destroyHairExpandPipeline() {
+    if (m_hairExpandPipeline)       { vkDestroyPipeline(m_device, m_hairExpandPipeline, nullptr);            m_hairExpandPipeline = VK_NULL_HANDLE; }
+    if (m_hairExpandPipelineLayout) { vkDestroyPipelineLayout(m_device, m_hairExpandPipelineLayout, nullptr); m_hairExpandPipelineLayout = VK_NULL_HANDLE; }
+    if (m_hairExpandDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_hairExpandDescLayout, nullptr); m_hairExpandDescLayout = VK_NULL_HANDLE; }
+    if (m_hairExpandDescPool)       { vkDestroyDescriptorPool(m_device, m_hairExpandDescPool, nullptr);        m_hairExpandDescPool = VK_NULL_HANDLE; }
+    // The set is freed with the pool; drop the cached handle + buffer pointers so a later
+    // recreate re-allocates and rewrites.
+    m_hairExpandDescSet = VK_NULL_HANDLE;
+    m_hairExpandDescBuffers[0] = m_hairExpandDescBuffers[1] = m_hairExpandDescBuffers[2] = VK_NULL_HANDLE;
+}
+
 bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV) {
     if (computeSPV.empty()) return false;
 

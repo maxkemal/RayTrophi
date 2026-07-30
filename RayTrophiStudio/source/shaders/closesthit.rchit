@@ -97,6 +97,7 @@ const uint MAT_FLAG_MARBLE_VOLUME = (1u << 20); // glass marble full-volume medi
 // Payload — shared ABI, single source of truth
 // ============================================================
 #include "rt_payload.glsl"
+#include "volume_instrumentation.glsl"
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 // Separate shadow payload storage to avoid corrupting the main payload during shadow tracing.
@@ -384,6 +385,48 @@ struct VkVolumeInstance {
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
 
+// Live Vulkan gas density is a device-addressable dense float grid. Surface
+// shadows must sample it too; otherwise source type 5 falls through to the
+// default homogeneous density and the complete domain becomes a shadow box.
+layout(buffer_reference, std430, buffer_reference_align = 4)
+readonly buffer ChDenseGasFloatGrid {
+    float values[];
+};
+
+float ch_sampleDenseGasFloat(uint64_t address, VkVolumeInstance vol, vec3 localPos) {
+    if (address == 0) return 0.0;
+    ivec3 resolution = ivec3(
+        int(vol._ext_reserved[0] + 0.5),
+        int(vol._ext_reserved[1] + 0.5),
+        int(vol._ext_reserved[2] + 0.5));
+    if (any(lessThanEqual(resolution, ivec3(0)))) return 0.0;
+
+    float voxelSize = max(vol.voxel_size, 1e-6);
+    vec3 gridOrigin = vec3(vol._ext_reserved[3], vol._ext_reserved[4], vol._ext_reserved[5]);
+    vec3 gridPos = (localPos - gridOrigin) / voxelSize - vec3(0.5);
+    if (any(lessThan(gridPos, vec3(-0.5))) ||
+        any(greaterThan(gridPos, vec3(resolution) - vec3(0.5)))) return 0.0;
+
+    ivec3 p0 = clamp(ivec3(floor(gridPos)), ivec3(0), resolution - ivec3(1));
+    ivec3 p1 = min(p0 + ivec3(1), resolution - ivec3(1));
+    vec3 f = clamp(gridPos - vec3(p0), vec3(0.0), vec3(1.0));
+    ChDenseGasFloatGrid grid = ChDenseGasFloatGrid(address);
+    int xy = resolution.x * resolution.y;
+    int i000 = p0.x + p0.y * resolution.x + p0.z * xy;
+    int i100 = p1.x + p0.y * resolution.x + p0.z * xy;
+    int i010 = p0.x + p1.y * resolution.x + p0.z * xy;
+    int i110 = p1.x + p1.y * resolution.x + p0.z * xy;
+    int i001 = p0.x + p0.y * resolution.x + p1.z * xy;
+    int i101 = p1.x + p0.y * resolution.x + p1.z * xy;
+    int i011 = p0.x + p1.y * resolution.x + p1.z * xy;
+    int i111 = p1.x + p1.y * resolution.x + p1.z * xy;
+    float z0 = mix(mix(grid.values[i000], grid.values[i100], f.x),
+                   mix(grid.values[i010], grid.values[i110], f.x), f.y);
+    float z1 = mix(mix(grid.values[i001], grid.values[i101], f.x),
+                   mix(grid.values[i011], grid.values[i111], f.x), f.y);
+    return mix(z0, z1, f.z);
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // Volumetric shadow transmittance — surface shader side
 // Computes soft light attenuation through VDB/gas volume AABBs.
@@ -561,10 +604,17 @@ float ch_volDensity(VkVolumeInstance vol, vec3 wp,
         }
     } else if (vol.volume_type == 3 || vol.source_type == 3) {
         density = ch_proceduralCloudDensity(vol, lp, bmin, bmax);
+    } else if (vol.volume_type == 4 && vol.source_type == 5) {
+        density = ch_sampleDenseGasFloat(vol.vdb_grid_address, vol, lp);
     }
     density = max((density - vol.density_remap_low) /
                   max(vol.density_remap_high - vol.density_remap_low, 1e-6), 0.0);
-    return max(density * vol.density_multiplier, 0.0);
+    float densityCutoff = max(vol._reserved[0], 0.0);
+    if (density <= densityCutoff) return 0.0;
+    float cutoffFade = densityCutoff > 0.0
+        ? smoothstep(densityCutoff, densityCutoff * 2.0, density)
+        : 1.0;
+    return max(density * vol.density_multiplier * cutoffFade, 0.0);
 }
 
 // Ray-march all active volumes between shadowOrigin and light (maxDist).
@@ -647,13 +697,7 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
             if (opticalDepth > 10.0) break;
         }
 
-        float beers = exp(-opticalDepth);
-        float physTrans = beers;
-        if (vol.scatter_multi > 0.0 && vol.scatter_coefficient > 0.0) {
-            float albedoLum = dot(vol.scatter_color, vec3(0.2126, 0.7152, 0.0722));
-            float beersSoft = exp(-opticalDepth * 0.25);
-            physTrans = beers * (1.0 - vol.scatter_multi * albedoLum) + beersSoft * (vol.scatter_multi * albedoLum);
-        }
+        float physTrans = exp(-opticalDepth);
         float strength = clamp(vol.shadow_strength, 0.0, 1.0);
         transmittance *= (1.0 - strength * (1.0 - physTrans));
         if (transmittance <= 0.0) break;
@@ -3057,13 +3101,7 @@ void main() {
     // query (and without confusing another object with this mesh's exit).
     if ((mat.flags & (1u << 24)) != 0u) {
         vec3 scatterColor = max(vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b), vec3(0.0));
-        if ((payload.primaryMeta & PL_PRIMARY_DONE) == 0u) {
-            payload.primaryARG = packHalf2x16(scatterColor.rg);
-            payload.primaryABT = packHalf2x16(vec2(scatterColor.b, 1.0));
-            payload.primaryNrm = plPackNormal(-rayDir);
-            payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
-                                | (matIndex & PL_MATID_MASK) | PL_PRIMARY_DONE;
-        }
+        bool primaryVolumeInteraction = false;
 
         if (!surfaceFrontFace) {
             float segmentLength = max(gl_HitTEXT, 0.0);
@@ -3074,6 +3112,8 @@ void main() {
             stepLength = segmentLength / float(stepCount);
             float transmittance = 1.0;
             vec3 integratedRadiance = vec3(0.0);
+            uint measuredDensitySamples = 0u;
+            uint measuredShadowSamples = 0u;
 
             vec3 lightDir = vec3(0.0, 1.0, 0.0);
             vec3 lightValue = vec3(0.0);
@@ -3098,6 +3138,7 @@ void main() {
             }
 
             for (int si = 0; si < stepCount && transmittance > 0.002; ++si) {
+                measuredDensitySamples++;
                 float t = (float(si) + 0.5) * stepLength;
                 vec3 p = gl_WorldRayOriginEXT + rayDir * t;
                 float density = max(matx.volume_density, 0.0);
@@ -3147,9 +3188,16 @@ void main() {
                     float shadowTrans = 1.0;
                     if (shadowSteps > 0 && matx.volume_shadow_strength > 0.0) {
                         float shadowLength = min(max(volumeLightDistance, 0.0), segmentLength);
-                        float shadowStep = shadowLength / float(shadowSteps);
+                        float shadowTauHint =
+                            density * (scatterStrength + absorptionStrength) * shadowLength;
+                        int effectiveShadowSteps = clamp(
+                            int(ceil(float(shadowSteps) *
+                                     clamp(sqrt(max(shadowTauHint, 0.0)), 0.20, 1.0))),
+                            min(2, shadowSteps), shadowSteps);
+                        float shadowStep = shadowLength / float(effectiveShadowSteps);
                         float shadowTau = 0.0;
-                        for (int sj = 1; sj <= shadowSteps; ++sj) {
+                        for (int sj = 1; sj <= effectiveShadowSteps; ++sj) {
+                            measuredShadowSamples++;
                             vec3 sp = p + normalize(lightDir) * ((float(sj) - 0.5) * shadowStep);
                             float sd = max(matx.volume_density, 0.0);
                             if (volumeProgram != MATPROG_NONE) {
@@ -3185,6 +3233,36 @@ void main() {
                 integratedRadiance += transmittance * source * integral;
                 transmittance *= stepT;
             }
+            volumeRecordShadowSamples(measuredShadowSamples);
+            uint marchOutcome = transmittance <= 0.002
+                ? VOLUME_MARCH_EXTINCTION
+                : VOLUME_MARCH_COMPLETED;
+            volumeRecordRay(
+                measuredDensitySamples, 0u, 0u, 0u, marchOutcome);
+
+            // Match the VDB primary-hit contract: an empty/near-empty medium is
+            // a transparent pass, not geometry at the AABB/mesh boundary.
+            // Recording the front face with transmission=1 made raygen multiply
+            // aerial distance by zero, so background seen through an empty
+            // volume skipped atmosphere and exposed the enclosing mesh as a
+            // ghost box. Publish only a substantive optical interaction and
+            // carry the measured segment transmittance.
+            float volumeContribution = max(max(integratedRadiance.r,
+                                               integratedRadiance.g),
+                                           integratedRadiance.b);
+            float volumeOpacity = 1.0 - transmittance;
+            primaryVolumeInteraction =
+                volumeOpacity > 0.04 || volumeContribution > 5e-4;
+            if ((payload.primaryMeta & PL_PRIMARY_DONE) == 0u &&
+                primaryVolumeInteraction) {
+                payload.primaryARG = packHalf2x16(scatterColor.rg);
+                payload.primaryABT = packHalf2x16(vec2(scatterColor.b, transmittance));
+                payload.primaryNrm = plPackNormal(-rayDir);
+                payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
+                                    | (matIndex & PL_MATID_MASK)
+                                    | PL_PRIMARY_DONE | PL_PRIMARY_VOLUME;
+            }
+
             payload.radiance += integratedRadiance;
             payload.attenuation *= vec3(transmittance);
         }
@@ -3193,7 +3271,11 @@ void main() {
         payload.scatterDir = rayDir;
         payload.scattered = true;
         payload.skipAABBs = false;
-        payload.bounceType = BOUNCE_TRANSPARENT;
+        // Only an optically empty interval is a free transparent pass. A real
+        // medium interaction must be visible to raygen's first-hit/aerial logic.
+        if (!primaryVolumeInteraction) {
+            payload.bounceType = BOUNCE_TRANSPARENT;
+        }
         return;
     }
 

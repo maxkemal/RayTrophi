@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include <SurfaceMeshCache.h>
@@ -93,6 +94,17 @@ enum class SimulationGridDomainBoundaryMode {
     Open,
     Closed,
     Periodic
+};
+
+// User-facing production intent. Custom preserves manual tuning; the other
+// profiles provide predictable safety/cost defaults without hiding the actual
+// resolution and memory budget from advanced users.
+enum class SimulationDomainQualityProfile : uint32_t {
+    Interactive = 0,
+    Preview = 1,
+    Final = 2,
+    Cinema = 3,   // Cinema-grade: RAM limit lifted, disk bake mandatory, grid up to 2048
+    Custom = 4
 };
 
 enum class SimulationFlowSourceMode {
@@ -182,6 +194,23 @@ struct ParticlePhysicsSettings {
     float buoyancy = 0.0f;
     float gravity_scale = 1.0f;
     float vorticity = 0.0f;
+
+    // ── Particle → gas grid coupling ─────────────────────────────────────────
+    // Discrete particles deposit into every Gas domain they fly through, so
+    // scattering debris CARRIES fire and smoke instead of being a decorative
+    // overlay on top of an unrelated volume. Rates are per SECOND (scaled by dt,
+    // so the look no longer changes with framerate) and per particle.
+    //   density     → smoke trail
+    //   temperature → the ember glows and lifts the gas around it
+    //   fuel        → the ember can IGNITE gas it passes through; this is what
+    //                 makes an explosion's debris spread flame outward
+    // Fuel deposit needs the domain's Fuel channel + fire_enabled to do anything.
+    float grid_density_deposit = 0.0f;
+    float grid_temperature_deposit = 0.0f;
+    float grid_fuel_deposit = 0.0f;
+    // Scale deposit by remaining life (full at birth → 0 at death). A cooling
+    // ember should stop igniting things long before it disappears.
+    bool grid_deposit_fade_with_age = true;
 };
 
 struct SimulationGridDomainDesc {
@@ -207,6 +236,18 @@ struct SimulationGridDomainDesc {
     int resolution_y = 64;
     int resolution_z = 64;
     int max_auto_resolution = 128;
+    SimulationDomainQualityProfile quality_profile = SimulationDomainQualityProfile::Preview;
+    // Hard combined working-set budget for this domain. The solver clamps grid
+    // dimensions before allocation; this is an execution guard, not just a UI
+    // estimate. Zero disables the guard for deliberate expert/offline runs.
+    uint32_t resource_budget_mb = 1024;
+    bool enforce_resource_budget = true;
+    // Cinema-grade volumetric disk cache. Directory auto-derived from project
+    // path as <project>.volcache (same pattern as fluid's <project>.simcache).
+    // When true the solver writes baked grid frames to disk instead of holding
+    // the full working set in RAM — enables grid resolutions beyond what system
+    // memory can sustain (512+). Set automatically by the Cinema profile.
+    bool force_disk_cache = false;
     float voxel_size = 0.1f;
     float padding = 0.0f;
     bool adaptive_lock_floor = true;
@@ -246,6 +287,18 @@ struct SimulationGridDomainDesc {
     float smoke_generation = 0.6f;
     float flame_dissipation = 3.0f;
     float fire_max_temperature = 10.0f;
+    // Gas motion belongs to the domain, not to the discrete-particle physics
+    // preset. Hybrid effects (spark particles + fire grid) otherwise inherit
+    // Spark's zero buoyancy and move only through combustion expansion.
+    float gas_buoyancy_heat = 1.0f;
+    float gas_buoyancy_density = 0.08f;
+    float gas_vorticity = 0.35f;
+    // Advection scheme. Plain semi-Lagrangian is first-order and smears smoke
+    // into mush within a few dozen frames; MacCormack adds a limited
+    // second-order correction (one extra pass) and is what keeps wisps and
+    // flame fronts readable. Defaults to MacCormack for new domains — the
+    // deserializer keeps whatever an older project stored.
+    bool gas_maccormack_advection = true;
     // Thermal expansion: gas dilation driven by (temperature - ambient). Gives
     // fire its rolling billow and turns a sudden fuel ignition into a real
     // explosion blast. 0 = incompressible smoke (default; old projects unchanged).
@@ -331,6 +384,16 @@ struct SimulationGridDomainState {
     FluidSim::FluidGrid grid;
     std::size_t active_density_cells = 0;
     float max_density = 0.0f;
+    // Inclusive active-density cell bounds. Empty when max < min. Used by the
+    // dense Vulkan RT bridge to ray-march only the occupied sub-domain.
+    int active_density_min[3] = {0, 0, 0};
+    int active_density_max[3] = {-1, -1, -1};
+    // Gas runtime telemetry. The authored domain.backend is only the requested
+    // backend; this reports what the most recent solver step actually executed.
+    bool gas_gpu_requested = false;
+    bool gas_gpu_active = false;
+    bool gas_gpu_partial = false;
+    std::string gas_compute_status = "Not stepped";
     // Fluid-only runtime state. Empty for Gas domains.
     Fluid::FluidParticles particles;
     Fluid::APICSolverStats fluid_stats;
@@ -363,6 +426,27 @@ struct SimulationGpuFoamRenderBuffer {
     bool valid() const { return spheres.valid() && count > 0; }
 };
 
+// Backend-neutral publication record for Vulkan RT live-volume consumption.
+// Addresses are zero until buffers are resident on an address-capable Vulkan
+// compute backend. NanoVDB remains the bake/export path.
+struct SimulationGasGpuFieldView {
+    uint64_t density_address = 0;
+    uint64_t temperature_address = 0;
+    uint64_t fuel_address = 0;
+    uint64_t flame_address = 0;
+    int resolution_x = 0;
+    int resolution_y = 0;
+    int resolution_z = 0;
+    Vec3 origin = Vec3(0.0f);
+    float voxel_size = 0.0f;
+    uint64_t version = 0;
+
+    bool valid() const {
+        return density_address != 0 &&
+               resolution_x > 0 && resolution_y > 0 && resolution_z > 0;
+    }
+};
+
 struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle vel_x;
     ComputeBufferHandle vel_y;
@@ -370,12 +454,20 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle density;
     ComputeBufferHandle temperature;
     ComputeBufferHandle fuel;
+    ComputeBufferHandle interaction;
     ComputeBufferHandle pressure;
     ComputeBufferHandle divergence;
     ComputeBufferHandle scratch_vel_x;
     ComputeBufferHandle scratch_vel_y;
     ComputeBufferHandle scratch_vel_z;
     ComputeBufferHandle scratch_scalar;
+    // MacCormack second-pass targets. The correction kernels read the original
+    // field AND the forward-advected field while writing a third, so the result
+    // cannot alias either input.
+    ComputeBufferHandle scratch_scalar2;
+    ComputeBufferHandle scratch2_vel_x;
+    ComputeBufferHandle scratch2_vel_y;
+    ComputeBufferHandle scratch2_vel_z;
     ComputeBufferHandle fluid_positions;
     ComputeBufferHandle fluid_velocities;
     ComputeBufferHandle fluid_affine;
@@ -384,6 +476,24 @@ struct SimulationGridDomainComputeBuffers {
     // Float buffer (0.0f = air, 1.0f = fluid cell). Rebuilt from particle
     // positions every step before GPU pressure projection.
     ComputeBufferHandle fluid_mask;
+    // APIC Wind surface-drag: one ordered-float height per XZ grid column.
+    ComputeBufferHandle fluid_surface_columns;
+    // Gas collider coupling (all GPU backends): cell-centred solid occupancy
+    // (0=open, 1=solid) plus moving-wall linear velocity components.
+    ComputeBufferHandle gas_solid_mask;
+    ComputeBufferHandle gas_solid_vel_x;
+    ComputeBufferHandle gas_solid_vel_y;
+    ComputeBufferHandle gas_solid_vel_z;
+    ComputeBufferHandle gas_source_density;
+    ComputeBufferHandle gas_source_temperature;
+    ComputeBufferHandle gas_source_fuel;
+    ComputeBufferHandle gas_source_flame;
+    ComputeBufferHandle gas_source_band;
+    ComputeBufferHandle gas_source_ignition;
+    ComputeBufferHandle gas_source_fuel_capacity;
+    ComputeBufferHandle gas_source_burn_rate;
+    // Two cell-sized planes: filtered surface temperature, then remaining fuel.
+    ComputeBufferHandle gas_surface_state;
     // GPU MGPCG (Layer A: Jacobi-preconditioned CG) scratch. Solves the same
     // free-surface Poisson system as the SOR path; allocated lazily alongside
     // the cell buffers. cg_partials holds per-block double partial sums for the
@@ -417,16 +527,44 @@ struct SimulationGridDomainComputeBuffers {
     int resolution_y = 0;
     int resolution_z = 0;
     ComputeBackendType backend = ComputeBackendType::CPU;
+    // GPU-resident simulation fields flag. When true, GPU compute kernels
+    // operate directly between persistent VRAM buffers without host round-trips.
+    bool gpu_resident_fields_valid = false;
 };
 
 struct SimulationFlowSourceDesc {
+    struct Keyframe {
+        bool has_enabled = false;
+        bool has_position = false;
+        bool has_velocity = false;
+        bool has_radius = false;
+        bool has_density = false;
+        bool has_temperature = false;
+        bool has_fuel = false;
+        bool has_falloff = false;
+        bool has_velocity_coupling = false;
+        bool enabled = true;
+        Vec3 position = Vec3(0.0f);
+        Vec3 velocity = Vec3(0.0f);
+        float radius = 0.35f;
+        float density = 1.0f;
+        float temperature = 0.0f;
+        float fuel = 0.0f;
+        float falloff = 1.0f;
+        float velocity_coupling = 8.0f;
+    };
     std::string name = "Flow Source";
+    uint64_t timeline_uid = 0;
     SimulationFlowSourceMode source_mode = SimulationFlowSourceMode::Point;
     std::string source_name;
     int domain_index = 0;
     bool enabled = true;
     Vec3 position = Vec3(0.0f, 1.0f, 0.0f);
     Vec3 velocity = Vec3(0.0f, 1.0f, 0.0f);
+    // Per-second relaxation toward `velocity`. The source is a boundary/inflow
+    // target, not a force; additive velocity injection accumulates energy until
+    // the gas becomes numerically unstable.
+    float velocity_coupling = 8.0f;
     float radius = 0.35f;
     // Gas (target domain type == Gas): per-second injection amounts into the
     // density/temperature/fuel channels.
@@ -463,7 +601,13 @@ struct SimulationFlowSourceDesc {
     bool use_particle_limit = false;
     int max_emitted_particles = 100000;
     int total_emitted_particles = 0;
+    std::map<int, Keyframe> keyframes;
 };
+
+// Evaluates the independently keyed flow-source channels at a timeline frame.
+// Shared by the solver and authoring UI so displayed values match simulation.
+SimulationFlowSourceDesc::Keyframe evaluateSimulationFlowSource(
+    const SimulationFlowSourceDesc& source, int frame);
 
 struct ParticleSurfaceSample {
     Vec3 position = Vec3(0.0f);
@@ -497,7 +641,13 @@ struct ParticleEmitterDesc {
     Vec3 direction = Vec3(0.0f, 1.0f, 0.0f);
     float surface_offset = 0.02f;
     float rate_per_second = 32.0f;
+    // One-shot spawn count. Consumed via `burst_consumed` at runtime so the desc
+    // itself survives replay and serialization — zeroing this directly made the
+    // Explosion preset fire once and then stay dead forever (including on disk).
     int burst_count = 0;
+    // Runtime-only: set when the burst has fired, cleared by clear()/rewind so
+    // the same explosion replays. Never serialized.
+    bool burst_consumed = false;
     float speed = 2.0f;
     float spread = 0.35f;
     float lifetime_seconds = 4.0f;
@@ -533,6 +683,18 @@ struct ParticleColliderDesc {
     float restitution = 0.35f;
     float friction = 0.0f;
     float thickness = 0.0f;
+    // Optional gas-surface source. Disabled by default so ordinary particle /
+    // fluid colliders remain pure boundaries with zero scalar injection.
+    bool gas_interaction_enabled = false;
+    float gas_density_rate = 0.0f;
+    float gas_temperature_rate = 0.0f;
+    float gas_fuel_rate = 0.0f;
+    float gas_flame_rate = 0.0f;
+    float gas_surface_band_voxels = 1.0f;
+    bool gas_ignite_on_contact = false;
+    float gas_ignition_temperature = 0.8f;
+    float gas_surface_fuel_capacity = 4.0f;
+    float gas_surface_burn_rate = 0.75f;
 
     // Advanced complex object settings
     int sdf_resolution_mode = 1;       // 0: Low (32^3), 1: Med (64^3), 2: High (128^3)
@@ -632,6 +794,22 @@ struct ParticleSimulationStats {
     std::size_t domain_count = 0;
 };
 
+// Runtime-only counters that are required to continue a simulation from a
+// timeline snapshot. Particle/grid data alone is not sufficient: restoring a
+// cached frame while leaving these counters in their rewind state re-arms burst
+// emitters and makes the first uncached frame behave like frame zero.
+struct ParticleSimulationRuntimeState {
+    std::vector<float> emitter_accumulators;
+    std::vector<uint8_t> emitter_burst_consumed;
+    std::vector<float> flow_emit_accumulators;
+    std::vector<int> flow_total_emitted_particles;
+    std::vector<Vec3> previous_collider_centers;
+    std::vector<uint8_t> previous_collider_center_valid;
+    std::vector<Matrix4x4> previous_collider_transforms;
+    std::vector<uint8_t> previous_collider_transform_valid;
+    uint32_t emitter_spawn_serial = 1;
+};
+
 class ParticleSimulationSystem final : public ISimulationSystem {
 public:
     const char* name() const override { return "Particles"; }
@@ -646,9 +824,10 @@ public:
     // Overwrite the live discrete-particle SoA with a captured snapshot (timeline
     // frame cache replay). Restores the alive count and forces a GPU re-upload so a
     // cached-frame scrub/loop-back shows the exact particles that were baked, instead
-    // of an empty SoA. Grid domains/emitter accumulators are NOT touched here (those
-    // are handled by the grid-domain cache + the deterministic re-sim path).
+    // of an empty SoA.
     void restoreSoA(const ParticleSoABuffers& src, std::size_t alive_count);
+    ParticleSimulationRuntimeState captureRuntimeState() const;
+    void restoreRuntimeState(const ParticleSimulationRuntimeState& state);
     void releaseComputeResources(SimulationComputeContext& compute);
     std::size_t spawn(const ParticleSpawnDesc& desc);
     bool kill(std::size_t index);
@@ -674,10 +853,15 @@ public:
     std::vector<SimulationGridDomainDesc>& gridDomains();
     const std::vector<SimulationGridDomainDesc>& gridDomains() const;
     const std::vector<SimulationGridDomainState>& gridDomainStates() const;
+    SimulationGasGpuFieldView gasGpuFieldView(
+        std::size_t domain_index,
+        const SimulationComputeContext& compute) const;
     const SimulationGpuFoamRenderBuffer* gridDomainFoamRenderBuffer(std::size_t domain_index) const;
     void setGridDomainStates(const std::vector<SimulationGridDomainState>& states); // timeline cache restore
     SimulationGridDomainDesc& addGridDomain(const SimulationGridDomainDesc& desc);
-    bool removeGridDomain(std::size_t index);
+    bool removeGridDomain(
+        std::size_t index,
+        SimulationComputeContext* compute = nullptr);
     void clearGridDomains();
     void resetGridDomainStates();
     void setGridDomainBoundsResolver(std::function<bool(const SimulationGridDomainDesc&, Vec3&, Vec3&)> resolver);
@@ -744,7 +928,10 @@ private:
     void applyColliders(Vec3& position, Vec3& velocity, const Vec3* previous_position = nullptr) const;
     void synchronizeGridDomains();
     void stepGridDomains(const SimulationContext& context);
-    void injectFlowSourcesIntoGridDomains(float dt, float time_seconds);
+    void injectFlowSourcesIntoGridDomains(float dt,
+                                          float time_seconds,
+                                          int frame,
+                                          SimulationComputeContext* compute);
     void buildNeighborGrid(float cell_size);
     void solveSelfCollisions(float dt);
     void uploadToCompute(const SimulationContext& context);
@@ -776,8 +963,11 @@ private:
     // velocity = (resolved centre this step - last step) / dt, recomputed once
     // per stepGridDomains and stamped into FluidGrid::solid_vel by voxelization.
     std::vector<Vec3>    collider_velocities_;
+    std::vector<Vec3>    collider_angular_velocities_;
     std::vector<Vec3>    prev_collider_centers_;
     std::vector<uint8_t> prev_collider_center_valid_;
+    std::vector<Matrix4x4> prev_collider_transforms_;
+    std::vector<uint8_t> prev_collider_transform_valid_;
     std::vector<SimulationGridDomainDesc> grid_domains_;
     std::vector<SimulationGridDomainState> grid_domain_states_;
     std::vector<SimulationGridDomainComputeBuffers> grid_domain_compute_buffers_;

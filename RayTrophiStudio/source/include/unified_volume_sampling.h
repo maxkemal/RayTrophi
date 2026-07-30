@@ -137,16 +137,14 @@ UNIFIED_FUNC float light_march_transmittance(
         }
         
         float light_density = calculate_unified_density(light_pos, params);
-        density_accum += light_density * params.absorption_prob * light_step;
+        density_accum += light_density *
+            (params.absorption_prob + params.scattering_factor) * light_step;
         
         if (density_accum > 5.0f) break; // Early exit for dense regions
     }
     
     // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
-    float beers = expf(-density_accum);
-    float beers_soft = expf(-density_accum * 0.25f);
-    float albedo_avg = (params.albedo.x + params.albedo.y + params.albedo.z) / 3.0f;
-    float phys_trans = beers * (1.0f - params.multi_scatter * albedo_avg) + beers_soft * (params.multi_scatter * albedo_avg);
+    float phys_trans = expf(-density_accum);
     
     return 1.0f - params.shadow_strength * (1.0f - phys_trans);
     
@@ -189,9 +187,10 @@ UNIFIED_FUNC Vec3f unified_march_volume(
             float albedo_avg = (params.albedo.x + params.albedo.y + params.albedo.z) / 3.0f;
             
             // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches Renderer.cpp) ---
-            Vec3f T_single = Vec3f(expf(-sigma_t_rgb.x * params.step_size), expf(-sigma_t_rgb.y * params.step_size), expf(-sigma_t_rgb.z * params.step_size));
-            Vec3f T_multi_p = Vec3f(expf(-sigma_t_rgb.x * params.step_size * 0.25f), expf(-sigma_t_rgb.y * params.step_size * 0.25f), expf(-sigma_t_rgb.z * params.step_size * 0.25f));
-            Vec3f step_T = T_single * (1.0f - params.multi_scatter * albedo_avg) + T_multi_p * (params.multi_scatter * albedo_avg);
+            Vec3f step_T = Vec3f(
+                expf(-sigma_t_rgb.x * params.step_size),
+                expf(-sigma_t_rgb.y * params.step_size),
+                expf(-sigma_t_rgb.z * params.step_size));
             
             // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
             // IN-SCATTERING CALCULATION
@@ -204,13 +203,18 @@ UNIFIED_FUNC Vec3f unified_march_volume(
             // Light marching for self-shadowing
             float light_T = light_march_transmittance(p, sun_dir, params);
             
-            // Powder effect
-            float powder = powder_effect_volume(d, cos_theta);
-            
-            // In-scatter contribution
+            float sigma_t_scalar =
+                d * (params.scattering_factor + params.absorption_prob);
+            float scattering_albedo =
+                sigma_s / ((sigma_t_scalar > 1e-6f) ? sigma_t_scalar : 1e-6f);
+            float phase_mix = params.multi_scatter * scattering_albedo;
+            phase_mix = (phase_mix < 0.0f) ? 0.0f :
+                        ((phase_mix > 1.0f) ? 1.0f : phase_mix);
+            phase = phase * (1.0f - phase_mix) +
+                    (1.0f / (4.0f * 3.14159265358979323846f)) * phase_mix;
             Vec3f Li = Vec3f(params.sun_intensity);
-            Vec3f inscatter = params.albedo * Li * phase * sigma_s * light_T;
-            inscatter = inscatter * (1.0f + powder * 0.5f); // Powder boost
+            Vec3f inscatter =
+                params.albedo * Li * phase * scattering_albedo * light_T;
             
             // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
             // EMISSION

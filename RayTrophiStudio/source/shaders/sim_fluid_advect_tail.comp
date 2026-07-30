@@ -1,0 +1,120 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz; int particle_count;
+    int boundary;
+    float origin_x; float origin_y; float origin_z;
+    float voxel_size; float dt;
+    float velocity_damping; float max_velocity;
+    float wall_damping; float air_drag;
+    int air_threshold; int substeps;
+} pc;
+
+layout(set=0,binding=0) buffer Positions { float positions[]; };
+layout(set=0,binding=1) buffer Velocities { float velocities[]; };
+layout(set=0,binding=2) readonly buffer VelX { float vx[]; };
+layout(set=0,binding=3) readonly buffer VelY { float vy[]; };
+layout(set=0,binding=4) readonly buffer VelZ { float vz[]; };
+layout(set=0,binding=5) readonly buffer CellMask { float mask[]; };
+layout(set=0,binding=6) readonly buffer SolidVX { float svx[]; };
+layout(set=0,binding=7) readonly buffer SolidVY { float svy[]; };
+layout(set=0,binding=8) readonly buffer SolidVZ { float svz[]; };
+
+int cellIndex(ivec3 c) { return c.x + c.y*pc.nx + c.z*pc.nx*pc.ny; }
+bool inside(ivec3 c) {
+    return all(greaterThanEqual(c, ivec3(0))) &&
+           all(lessThan(c, ivec3(pc.nx,pc.ny,pc.nz)));
+}
+bool solidAt(vec3 p) {
+    ivec3 c = ivec3(floor((p-vec3(pc.origin_x,pc.origin_y,pc.origin_z))/pc.voxel_size));
+    return inside(c) && mask[cellIndex(c)] < -0.5;
+}
+vec3 solidVelocity(vec3 p) {
+    ivec3 c = ivec3(floor((p-vec3(pc.origin_x,pc.origin_y,pc.origin_z))/pc.voxel_size));
+    if (!inside(c) || mask[cellIndex(c)] >= -0.5) return vec3(0.0);
+    int q=cellIndex(c); return vec3(svx[q],svy[q],svz[q]);
+}
+float fetchComp(int comp, ivec3 c) {
+    if (comp==0) {
+        c=clamp(c,ivec3(0),ivec3(pc.nx,pc.ny-1,pc.nz-1));
+        return vx[c.x+c.y*(pc.nx+1)+c.z*(pc.nx+1)*pc.ny];
+    }
+    if (comp==1) {
+        c=clamp(c,ivec3(0),ivec3(pc.nx-1,pc.ny,pc.nz-1));
+        return vy[c.x+c.y*pc.nx+c.z*pc.nx*(pc.ny+1)];
+    }
+    c=clamp(c,ivec3(0),ivec3(pc.nx-1,pc.ny-1,pc.nz));
+    return vz[c.x+c.y*pc.nx+c.z*pc.nx*pc.ny];
+}
+float sampleComp(int comp, vec3 p) {
+    vec3 g=(p-vec3(pc.origin_x,pc.origin_y,pc.origin_z))/pc.voxel_size;
+    if(comp==0) g-=vec3(0,0.5,0.5);
+    else if(comp==1) g-=vec3(0.5,0,0.5);
+    else g-=vec3(0.5,0.5,0);
+    ivec3 b=ivec3(floor(g)); vec3 f=fract(g);
+    float s=0.0;
+    for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+        vec3 w=mix(vec3(1.0)-f,f,vec3(x,y,z));
+        s+=fetchComp(comp,b+ivec3(x,y,z))*w.x*w.y*w.z;
+    }
+    return s;
+}
+vec3 sampleVelocity(vec3 p) {
+    return vec3(sampleComp(0,p),sampleComp(1,p),sampleComp(2,p));
+}
+
+void main() {
+    int id=int(gl_GlobalInvocationID.x);
+    if(id>=pc.particle_count || pc.voxel_size<=1e-6 || pc.dt<=0.0) return;
+    int p3=id*3;
+    vec3 p=vec3(positions[p3],positions[p3+1],positions[p3+2]);
+    vec3 v=vec3(velocities[p3],velocities[p3+1],velocities[p3+2]);
+    if(any(isnan(p)) || any(isnan(v))) return;
+
+    ivec3 cc=ivec3(floor((p-vec3(pc.origin_x,pc.origin_y,pc.origin_z))/pc.voxel_size));
+    if(inside(cc) && mask[cellIndex(cc)]>=0.0 && mask[cellIndex(cc)]<float(max(1,pc.air_threshold))) {
+        float speed=length(v);
+        if(speed>1e-4) v*=1.0/(1.0+max(0.0,pc.air_drag)*speed*pc.dt);
+    }
+    v*=clamp(pc.velocity_damping,0.0,1.0);
+    float speed=length(v);
+    if(pc.max_velocity>0.0 && speed>pc.max_velocity) v*=pc.max_velocity/speed;
+
+    int steps=clamp(pc.substeps,1,32);
+    float sdt=pc.dt/float(steps);
+    vec3 omin=vec3(pc.origin_x,pc.origin_y,pc.origin_z);
+    vec3 omax=omin+vec3(pc.nx,pc.ny,pc.nz)*pc.voxel_size;
+    vec3 lo=omin+vec3(0.01*pc.voxel_size);
+    vec3 hi=omax-vec3(0.01*pc.voxel_size);
+    vec3 span=omax-omin;
+    for(int s=0;s<steps;++s) {
+        vec3 vm=sampleVelocity(p+sampleVelocity(p)*(0.5*sdt));
+        vec3 pn=p+vm*sdt;
+        if(solidAt(pn)) {
+            vec3 resolved=p, t=resolved; t.x=pn.x;
+            if(!solidAt(t)) resolved.x=pn.x; else v.x=solidVelocity(t).x;
+            t=resolved; t.y=pn.y;
+            if(!solidAt(t)) resolved.y=pn.y; else v.y=solidVelocity(t).y;
+            t=resolved; t.z=pn.z;
+            if(!solidAt(t)) resolved.z=pn.z; else v.z=solidVelocity(t).z;
+            pn=resolved;
+        }
+        if(pc.boundary==1) {
+            p=pn; // host compacts outflow before CPU reseed
+            if(any(lessThan(p,omin))||any(greaterThan(p,omax))) break;
+        } else if(pc.boundary==2) {
+            p=omin+mod(mod(pn-omin,span)+span,span);
+        } else {
+            if(pn.x<lo.x){pn.x=lo.x;v.x=abs(v.x)*pc.wall_damping;}
+            if(pn.x>hi.x){pn.x=hi.x;v.x=-abs(v.x)*pc.wall_damping;}
+            if(pn.y<lo.y){pn.y=lo.y;v.y=abs(v.y)*pc.wall_damping;}
+            if(pn.y>hi.y){pn.y=hi.y;v.y=-abs(v.y)*pc.wall_damping;}
+            if(pn.z<lo.z){pn.z=lo.z;v.z=abs(v.z)*pc.wall_damping;}
+            if(pn.z>hi.z){pn.z=hi.z;v.z=-abs(v.z)*pc.wall_damping;}
+            p=pn;
+        }
+    }
+    positions[p3]=p.x;positions[p3+1]=p.y;positions[p3+2]=p.z;
+    velocities[p3]=v.x;velocities[p3+1]=v.y;velocities[p3+2]=v.z;
+}

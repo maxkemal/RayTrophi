@@ -1,4 +1,4 @@
-// ===============================================================================
+﻿// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
@@ -391,21 +391,35 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         return;
     }
 
-    const auto& grid_domains = particles->gridDomains();
-    const auto& grid_domain_states = particles->gridDomainStates();
-    for (std::size_t domain_index = 0; domain_index < grid_domains.size(); ++domain_index) {
+    // Domain overlays are scene-wide. The authoring panel edits only the active
+    // runtime, but hiding every other system's domain made additive presets look
+    // as if the previous domain had been deleted. Selection identity is the
+    // (system,index) pair; a local domain index alone is ambiguous across systems.
+    for (std::size_t overlay_system_index = 0;
+         overlay_system_index < ctx.scene.particle_systems.size();
+         ++overlay_system_index) {
+        const auto& overlay_system =
+            ctx.scene.particle_systems[overlay_system_index];
+        if (!overlay_system.runtime || !overlay_system.visible) continue;
+        const auto& grid_domains = overlay_system.runtime->gridDomains();
+        const auto& grid_domain_states =
+            overlay_system.runtime->gridDomainStates();
+        for (std::size_t domain_index = 0; domain_index < grid_domains.size(); ++domain_index) {
         const auto& domain = grid_domains[domain_index];
         if (!domain.enabled) {
             continue;
         }
         const bool selected =
-            static_cast<int>(domain_index) == selected_domain_index ||
+            (ctx.selection.selected.type == SelectableType::SimulationDomain &&
+             ctx.selection.selected.particle_system_index ==
+                 static_cast<int>(overlay_system_index) &&
+             ctx.selection.selected.simulation_domain_index ==
+                 static_cast<int>(domain_index)) ||
             (!domain.source_name.empty() && domain.source_name == selected_source_name);
         Vec3 min_bound = domain.bounds_min;
         Vec3 max_bound = domain.bounds_max;
         bool using_runtime_bounds = false;
         if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::ManualBox &&
-            !selected &&
             domain_index < grid_domain_states.size() &&
             grid_domain_states[domain_index].valid) {
             min_bound = grid_domain_states[domain_index].bounds_min;
@@ -452,20 +466,40 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         } else {
             drawAABB(Vec3::min(min_bound, max_bound) - pad, Vec3::max(min_bound, max_bound) + pad, color, thickness);
         }
+        }
     }
+
+    // The remaining authoring overlays below are for the active system panel.
+    const auto& grid_domains = particles->gridDomains();
+    const auto& grid_domain_states = particles->gridDomainStates();
 
     // Flow-source authoring overlay: spawn region (Point sphere) + an arrow
     // showing the emission velocity direction so the user is not setting the
     // launch vector blind. Per-point normal emission (MeshSurface) has no single
     // direction, so its arrow is omitted.
     {
-        const auto& flow_sources = particles->flowSources();
-        for (const auto& src : flow_sources) {
+        for (std::size_t overlay_system_index = 0;
+             overlay_system_index < ctx.scene.particle_systems.size();
+             ++overlay_system_index) {
+            const auto& overlay_system =
+                ctx.scene.particle_systems[overlay_system_index];
+            if (!overlay_system.runtime || !overlay_system.visible) continue;
+            const auto& overlay_domains =
+                overlay_system.runtime->gridDomains();
+            const auto& flow_sources =
+                overlay_system.runtime->flowSources();
+            for (const auto& src : flow_sources) {
             if (!src.enabled) continue;
-            if (src.domain_index < 0 || src.domain_index >= static_cast<int>(grid_domains.size())) continue;
-            if (!grid_domains[static_cast<std::size_t>(src.domain_index)].enabled) continue;
+            if (src.domain_index < 0 ||
+                src.domain_index >= static_cast<int>(overlay_domains.size())) continue;
+            if (!overlay_domains[static_cast<std::size_t>(src.domain_index)].enabled) continue;
 
-            const bool src_selected = (src.domain_index == selected_domain_index);
+            const bool src_selected =
+                ctx.selection.selected.type == SelectableType::SimulationDomain &&
+                ctx.selection.selected.particle_system_index ==
+                    static_cast<int>(overlay_system_index) &&
+                ctx.selection.selected.simulation_domain_index ==
+                    src.domain_index;
             const ImU32 src_col = src_selected ? IM_COL32(255, 180, 60, 245) : IM_COL32(255, 160, 40, 165);
             const float src_thick = src_selected ? 2.2f : 1.4f;
 
@@ -497,6 +531,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
                     }
                 }
             }
+            }
         }
     }
 
@@ -505,8 +540,10 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     // OFF — the Particles render mode draws real RT instances now, so the
     // overlay would double-paint on top of them). The Seed AABB outline is
     // separate and always drawn for authoring feedback.
+    ImDrawList* fluid_draw_list = ImGui::GetForegroundDrawList();
     for (std::size_t domain_index = 0; domain_index < grid_domain_states.size(); ++domain_index) {
         const auto& state = grid_domain_states[domain_index];
+
         if (!state.valid || state.type != RayTrophiSim::SimulationDomainType::Fluid) {
             continue;
         }
@@ -537,7 +574,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         if (!draw_particle_dots || state.particles.empty()) {
             continue;
         }
-        ImDrawList* fluid_draw_list = ImGui::GetForegroundDrawList();
+
         const std::size_t count = state.particles.size();
         const std::size_t stride = count > 6000 ? (count / 6000 + 1) : 1;
         const float focal_px = screen_h / (2.0f * std::max(tan_half_fov, 1e-4f));
@@ -554,7 +591,51 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         }
     }
 
-    for (const auto& emitter : particles->emitters()) {
+    // Like domains, particle emitters belong to every visible system, not just
+    // the active panel runtime. Draw them all and identify the selected marker
+    // by both owner-system and emitter index.
+    for (std::size_t overlay_system_index = 0;
+         overlay_system_index < ctx.scene.particle_systems.size();
+         ++overlay_system_index) {
+        const auto& overlay_system =
+            ctx.scene.particle_systems[overlay_system_index];
+        if (!overlay_system.runtime || !overlay_system.visible) continue;
+        const auto& overlay_emitters = overlay_system.runtime->emitters();
+        for (std::size_t emitter_index = 0;
+             emitter_index < overlay_emitters.size();
+             ++emitter_index) {
+        const auto& emitter = overlay_emitters[emitter_index];
+        const bool point_selected =
+            ctx.selection.selected.type == SelectableType::ParticleEmitter &&
+            ctx.selection.selected.particle_system_index ==
+                static_cast<int>(overlay_system_index) &&
+            ctx.selection.selected.particle_emitter_index ==
+                static_cast<int>(emitter_index);
+        if (emitter.source_mode ==
+            RayTrophiSim::ParticleEmitterSourceMode::Point) {
+            ImVec2 screen_pos;
+            float depth = 0.0f;
+            if (projectPoint(emitter.point, screen_pos, depth)) {
+                const ImU32 color = emitter.enabled
+                    ? (point_selected
+                        ? IM_COL32(255, 205, 75, 255)
+                        : IM_COL32(255, 145, 45, 210))
+                    : IM_COL32(130, 95, 60, 100);
+                const float radius = point_selected ? 8.0f : 5.5f;
+                fluid_draw_list->AddCircle(
+                    screen_pos, radius, color, 16,
+                    point_selected ? 2.5f : 1.5f);
+                fluid_draw_list->AddLine(
+                    ImVec2(screen_pos.x - radius - 3.0f, screen_pos.y),
+                    ImVec2(screen_pos.x + radius + 3.0f, screen_pos.y),
+                    color, 1.4f);
+                fluid_draw_list->AddLine(
+                    ImVec2(screen_pos.x, screen_pos.y - radius - 3.0f),
+                    ImVec2(screen_pos.x, screen_pos.y + radius + 3.0f),
+                    color, 1.4f);
+            }
+            continue;
+        }
         if ((emitter.spawn_mode != RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface &&
              emitter.spawn_mode != RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface) ||
             emitter.source_name.empty()) {
@@ -565,7 +646,10 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         if (!ctx.scene.resolveObjectBoundsForSimulation(emitter.source_name, min_bound, max_bound)) {
             continue;
         }
-        const bool selected = emitter.source_name == selected_source_name;
+        const bool selected =
+            point_selected ||
+            (!emitter.source_name.empty() &&
+             emitter.source_name == selected_source_name);
         const ImU32 color = emitter.enabled
             ? (selected ? IM_COL32(80, 240, 255, 245) : IM_COL32(80, 220, 255, 150))
             : IM_COL32(80, 150, 170, 70);
@@ -574,6 +658,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             drawOBB(corners, color, selected ? 2.2f : 1.3f);
         } else {
             drawAABB(min_bound, max_bound, color, selected ? 2.2f : 1.3f);
+        }
         }
     }
 
@@ -2993,6 +3078,8 @@ mesh_edit_changed_confirmed:
     }
 
     auto* selected_domain = static_cast<RayTrophiSim::SimulationGridDomainDesc*>(nullptr);
+    auto* selected_particle_emitter =
+        static_cast<RayTrophiSim::ParticleEmitterDesc*>(nullptr);
     if (sel.selected.type == SelectableType::SimulationDomain &&
         sel.selected.particle_system_index >= 0 &&
         sel.selected.particle_system_index < static_cast<int>(ctx.scene.particle_systems.size())) {
@@ -3005,6 +3092,24 @@ mesh_edit_changed_confirmed:
             const Vec3 mx = Vec3::max(selected_domain->bounds_min, selected_domain->bounds_max);
             sel.selected.position = (mn + mx) * 0.5f;
             sel.selected.scale = mx - mn;
+        }
+    }
+    if (sel.selected.type == SelectableType::ParticleEmitter &&
+        sel.selected.particle_system_index >= 0 &&
+        sel.selected.particle_system_index <
+            static_cast<int>(ctx.scene.particle_systems.size())) {
+        auto& system = ctx.scene.particle_systems[
+            static_cast<std::size_t>(sel.selected.particle_system_index)];
+        if (system.runtime &&
+            sel.selected.particle_emitter_index >= 0 &&
+            sel.selected.particle_emitter_index <
+                static_cast<int>(system.runtime->emitters().size())) {
+            selected_particle_emitter =
+                &system.runtime->emitters()[static_cast<std::size_t>(
+                    sel.selected.particle_emitter_index)];
+            sel.selected.position = selected_particle_emitter->point;
+            sel.selected.rotation = Vec3(0.0f);
+            sel.selected.scale = Vec3(1.0f);
         }
     }
 
@@ -3028,6 +3133,10 @@ mesh_edit_changed_confirmed:
         startMat.m[0][0] = extent.x;
         startMat.m[1][1] = extent.y;
         startMat.m[2][2] = extent.z;
+    } else if (selected_particle_emitter) {
+        startMat.m[0][3] = selected_particle_emitter->point.x;
+        startMat.m[1][3] = selected_particle_emitter->point.y;
+        startMat.m[2][3] = selected_particle_emitter->point.z;
     }
 
     // Handle Light Rotation (Directional/Spot)
@@ -3276,6 +3385,12 @@ mesh_edit_changed_confirmed:
         objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
     }
     else if (selected_domain) {
+        objectMatrix[0] = startMat.m[0][0]; objectMatrix[1] = startMat.m[1][0]; objectMatrix[2] = startMat.m[2][0]; objectMatrix[3] = startMat.m[3][0];
+        objectMatrix[4] = startMat.m[0][1]; objectMatrix[5] = startMat.m[1][1]; objectMatrix[6] = startMat.m[2][1]; objectMatrix[7] = startMat.m[3][1];
+        objectMatrix[8] = startMat.m[0][2]; objectMatrix[9] = startMat.m[1][2]; objectMatrix[10] = startMat.m[2][2]; objectMatrix[11] = startMat.m[3][2];
+        objectMatrix[12] = startMat.m[0][3]; objectMatrix[13] = startMat.m[1][3]; objectMatrix[14] = startMat.m[2][3]; objectMatrix[15] = startMat.m[3][3];
+    }
+    else if (selected_particle_emitter) {
         objectMatrix[0] = startMat.m[0][0]; objectMatrix[1] = startMat.m[1][0]; objectMatrix[2] = startMat.m[2][0]; objectMatrix[3] = startMat.m[3][0];
         objectMatrix[4] = startMat.m[0][1]; objectMatrix[5] = startMat.m[1][1]; objectMatrix[6] = startMat.m[2][1]; objectMatrix[7] = startMat.m[3][1];
         objectMatrix[8] = startMat.m[0][2]; objectMatrix[9] = startMat.m[1][2]; objectMatrix[10] = startMat.m[2][2]; objectMatrix[11] = startMat.m[3][2];
@@ -4024,9 +4139,42 @@ mesh_edit_changed_confirmed:
             sel.selected.rotation = Vec3(0.0f);
             sel.selected.scale = extent;
 
+            // Bounds drive both the solver allocation and the generated RT
+            // volume. Invalidate them together; otherwise Vulkan keeps drawing
+            // the previous domain-state bounds while the hierarchy proxy has
+            // already moved to the edited descriptor bounds.
+            ctx.scene.clearSimFrameCache();
+            ctx.scene.requestSimulationTimelineRenderResync();
             if (ctx.backend_ptr) {
                 ctx.backend_ptr->resetAccumulation();
             }
+            ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
+        }
+        else if (selected_particle_emitter) {
+            // Runtime descriptor is authoritative. Preset emitters are no longer
+            // anonymous panel rows: hierarchy selection and viewport gizmo edit
+            // the exact emitter consumed by the simulation.
+            const Vec3 old_position = selected_particle_emitter->point;
+            const Vec3 emitter_delta = newPos - old_position;
+            selected_particle_emitter->source_mode =
+                RayTrophiSim::ParticleEmitterSourceMode::Point;
+            selected_particle_emitter->source_name.clear();
+            selected_particle_emitter->point = newPos;
+            // Hybrid fire presets pair the visible particle emitter with a gas
+            // flow source at the same authored origin. Preserve that pairing
+            // when the emitter is moved, without dragging unrelated sources.
+            auto& owner_system = ctx.scene.particle_systems[
+                static_cast<std::size_t>(sel.selected.particle_system_index)];
+            for (auto& flow : owner_system.runtime->flowSources()) {
+                if ((flow.position - old_position).length_squared() <= 1e-8f) {
+                    flow.position = flow.position + emitter_delta;
+                }
+            }
+            sel.selected.position = newPos;
+            ctx.scene.clearSimFrameCache();
+            ctx.scene.requestSimulationTimelineRenderResync();
+            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
             ctx.renderer.resetCPUAccumulation();
             ProjectManager::getInstance().markModified();
         }

@@ -38,6 +38,8 @@
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/SceneTextureManager.h"
+#include "Backend/VulkanVolumeInstrumentation.h"
+#include "Backend/VulkanVolumeTemporal.h"
 #include "AtmosphereLUT.h"
 
 // Facade-mesh SoA database (DNA::GeometryDetail) — used by the indexed-BLAS upload path.
@@ -373,8 +375,14 @@ struct AccelStructHandle {
     BufferHandle waterBuffer;
     VkDeviceAddress deviceAddress = 0;
 
-    // Phase 3d: geometry buffer is owned elsewhere (device-resident CC output); the
-    // attribute BufferHandles only carry addresses, so cleanup must NOT destroy them.
+    // OWNERSHIP INVARIANT: when true, vertexBuffer and all attribute BufferHandles are
+    // BORROWED aliases and cleanup must NOT destroy/free them. This covers both
+    // device-resident CC output and GPU hair's shared m_hairAabbBuffer.
+    //
+    // Regression signature if this rule is broken:
+    // timeline Play -> Pause works once, the second Pause/Play closes the app, and the
+    // stack ends in nvoglv64.dll -> VulkanDevice::destroyBuffer/vkFreeMemory from
+    // rebuildAccelerationStructure(). See docs/VULKAN_HAIR_PAUSE_DOUBLE_FREE_POSTMORTEM.md.
     bool externalGeometry = false;
 
     // Skinning
@@ -385,6 +393,13 @@ struct AccelStructHandle {
     VkGeometryFlagsKHR geometryFlags = 0;
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
+    // AABB BLAS only: how many AABBs this AS was built/sized for. A refit is legal only
+    // while the count is unchanged (see refitHairAABB_BLAS).
+    uint32_t aabbCount = 0;
+    // Consecutive MODE_UPDATE refits since the last full build. A refit keeps the original
+    // BVH topology, so after enough deformation the tree degenerates — we force a
+    // periodic in-place rebuild to reset it.
+    uint32_t refitCount = 0;
     BufferHandle baseVertexBuffer;
     BufferHandle baseNormalBuffer;
     BufferHandle boneIndexBuffer;
@@ -526,6 +541,16 @@ public:
      */
     uint32_t createHairAABB_BLAS(const std::vector<VkAabbPositionsKHR>& aabbs);
 
+    // In-place hair BLAS refresh: re-upload the AABBs into the existing (host-visible)
+    // buffer and rebuild/refit the SAME acceleration structure handle. No destroy, no
+    // create, no vkDeviceWaitIdle — which is the whole point, because hair topology is
+    // constant while a groom animates or is brushed, and the old path tore the BLAS down
+    // and rebuilt it from scratch every time.
+    // Returns false when the BLAS index is invalid, the AS was not built with
+    // ALLOW_UPDATE, or the AABB count no longer matches — caller must fall back to a
+    // full createHairAABB_BLAS.
+    bool refitHairAABB_BLAS(uint32_t blasIndex, const std::vector<VkAabbPositionsKHR>& aabbs);
+
     // Foam point-sphere AABB BLAS (combined, one per foam cloud). The AS + AABB
     // buffer are sized for `poolCapacity` (the group's full instance pool) but only
     // the supplied `aabbs` (LIVE spheres, compact) are built — so each frame rebuilds
@@ -558,7 +583,73 @@ public:
     /**
      * @brief Build top-level acceleration structure (instances)
      */
-    void createTLAS(const TLASCreateInfo& info);
+    // When externalCmd is given, the acceleration-structure BUILD is recorded into it and
+    // NOT submitted (the caller owns the submit — used by the hair ping-pong prepass so the
+    // TLAS rebuild rides the trace command buffer). All host-side work (instance upload, AS
+    // create, scratch, descriptor update) still happens inline. externalCmd=NULL keeps the
+    // original self-contained behaviour.
+    void createTLAS(const TLASCreateInfo& info, VkCommandBuffer externalCmd = VK_NULL_HANDLE);
+    // True when createTLAS(instanceCount, allowUpdate=true) would take its in-place
+    // MODE_UPDATE branch. When false it takes the destroy + recreate branch instead, which
+    // also rewrites RT descriptor binding 1 — both are ILLEGAL to do while recording into a
+    // command buffer that (or whose sibling frame slot) still references the old TLAS.
+    // Callers that record a TLAS build into an EXTERNAL cmd buffer (the hair ping-pong
+    // prepass) MUST check this first and fall back to an out-of-band rebuild.
+    bool canUpdateTLAS(uint32_t instanceCount) const {
+        return m_tlas.accel != VK_NULL_HANDLE && m_tlasSupportsUpdate
+            && instanceCount == m_tlasInstanceCount;
+    }
+
+    // GPU hair path: build the hair BLAS directly from a device-resident AABB buffer that
+    // the compute shader fills (no host AABB array, no upload). Registers and returns the
+    // BLAS index, or UINT32_MAX. allowUpdate is set so recordHairBlasRefit can refit it.
+    uint32_t createHairAABB_BLAS_Device(const BufferHandle& aabbBuffer, uint32_t aabbCount);
+    // GPU hair path: refit the hair BLAS in place, recording into `cmd`. The AABBs already
+    // live in the BLAS's geometry buffer (compute wrote them this frame) — no upload. Same
+    // periodic MODE_BUILD reset as refitHairAABB_BLAS.
+    // forceFullBuild: MODE_BUILD every frame instead of the periodic-reset refit cadence —
+    // required for dynamic (Verlet) hair, whose chaotic per-frame motion degenerates a
+    // refit-only BVH into a pathological traversal cost.
+    bool recordHairBlasRefit(VkCommandBuffer cmd, uint32_t blasIndex, bool forceFullBuild = false);
+
+    // ── GPU hair expansion (hair_expand.comp) — public API ────────────────────
+    bool hairExpandReady() const {
+        return m_hairExpandPipeline != VK_NULL_HANDLE && m_hairExpandPipelineLayout != VK_NULL_HANDLE
+            && m_hairExpandDescLayout != VK_NULL_HANDLE && m_hairExpandDescPool != VK_NULL_HANDLE;
+    }
+    // Push-constant block for hair_expand.comp — MUST match the shader's `PC` layout
+    // (mat4 first, then the scalars in declaration order).
+    struct HairExpandPush {
+        float    transform[16];  // groom.transform, column-major (GLSL mat4)
+        uint32_t guideOffset;
+        uint32_t guideCount;
+        uint32_t childrenPerGuide;
+        uint32_t pointsPerStrand;
+        uint32_t Kmax;
+        uint32_t useBSpline;
+        uint32_t groomIndex;
+        uint32_t segmentBase;
+        float    avgScale;
+        float    childRadius;
+        float    clumpiness;
+        float    frizz;
+        uint32_t childBaseSeed;
+    };
+    bool createHairExpandPipeline(const std::vector<uint32_t>& computeSPV);
+    void destroyHairExpandPipeline();
+    // (Re)size guide + segment + AABB buffers for a worst-case segment count and upload the
+    // guide points. Returns false if any allocation failed (caller falls back to CPU path).
+    bool prepareHairExpandBuffers(const std::vector<float>& guidePointsXYZR,
+                                  uint32_t worstCaseSegmentCount);
+    // Record the compute dispatches into `cmd` (one per groom). Does not submit.
+    void recordHairExpand(VkCommandBuffer cmd, const std::vector<HairExpandPush>& dispatches);
+    // Accessors the adapter needs to build the hair BLAS from the compute output.
+    const BufferHandle& hairAabbBuffer() const { return m_hairAabbBuffer; }
+    // Point-index base of the guide region written by the LAST prepareHairExpandBuffers.
+    // The guide buffer is double-buffered (two regions in one allocation) so the CPU can
+    // upload frame N+1's guides while the GPU still reads frame N's — callers must add this
+    // to each dispatch's guideOffset. See prepareHairExpandBuffers.
+    uint32_t hairGuideBasePoints() const { return m_hairGuideBasePoints; }
     
     /**
      * @brief Update existing BLAS (for animation)
@@ -651,7 +742,12 @@ public:
                            const ImageHandle* denoiserNormalImage = nullptr,
                            const ImageHandle* varianceImage = nullptr,
                            const ImageHandle* denoiserPositionImage = nullptr,
-                           const ImageHandle* pathStatsImage = nullptr);
+                           const ImageHandle* pathStatsImage = nullptr,
+                           const ImageHandle* volumeTemporalColor0 = nullptr,
+                           const ImageHandle* volumeTemporalColor1 = nullptr,
+                           const ImageHandle* volumeTemporalMetadata0 = nullptr,
+                           const ImageHandle* volumeTemporalMetadata1 = nullptr,
+                           const BufferHandle* volumeInstrumentation = nullptr);
     void updateRTTextureDescriptor(uint32_t slot, const ImageHandle& image);
     void clearImage(const ImageHandle& image, float r, float g, float b, float a);
 
@@ -884,11 +980,17 @@ public:
     // doTrace=false skips the photon pass + camera trace and only re-runs the
     // tonemap + LDR copy on the EXISTING accumulation image — used to refresh
     // the presentation (e.g. sample-heatmap toggle) without adding a sample.
+    // `prepass`, when set, is recorded into the SAME command buffer just before the camera
+    // trace (only when doTrace). The hair GPU path uses it to expand guides + refit the
+    // hair BLAS + rebuild the TLAS in place, so those updates ride the ping-pong fence
+    // instead of a separate vkDeviceWaitIdle. The callback must leave the acceleration
+    // structures ready for the trace (it issues its own AS→raygen barrier).
     bool submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h,
                                  const ImageHandle& hdrImage,
                                  const ImageHandle& ldrImage,
                                  const BufferHandle& ldrStaging,
-                                 bool doTrace = true);
+                                 bool doTrace = true,
+                                 const std::function<void(VkCommandBuffer)>& prepass = {});
     bool waitFrameSlot(uint32_t slot, uint64_t timeoutNs = UINT64_MAX);
     // Updates the persistent tonemap descriptor set with new image views. Caller MUST
     // ensure no in-flight submission references the previous binding (drain fences first).
@@ -1009,8 +1111,42 @@ private:
    
 
     // Hair GPU buffers (bindings 10 and 11)
-    BufferHandle m_hairSegmentBuffer;    // HairSegmentGPU[] — binding 10
+    BufferHandle m_hairSegmentBuffer;    // HairSegmentGPU[] — binding 10 (GPU_ONLY: shaders read it per ray)
+    // Persistent host-visible staging for m_hairSegmentBuffer. The segment SSBO stays
+    // device-local so ray traversal reads it at full speed, but it is re-uploaded every
+    // frame of a skinned animation — so instead of allocating a fresh multi-hundred-MB
+    // staging buffer (and mapping/unmapping/freeing it) on every one of those frames, we
+    // keep one persistently-mapped staging buffer and only grow it. m_hairSegmentStagingPtr
+    // is its persistent mapping. See updateHairSegmentBuffer.
+    BufferHandle m_hairSegmentStaging;
+    void*        m_hairSegmentStagingPtr = nullptr;
     BufferHandle m_hairMaterialBuffer;   // HairGpuMaterial[] — binding 11
+
+    // ── GPU hair expansion (hair_expand.comp) ────────────────────────────────
+    // Guide control points uploaded by the CPU (skinning+styling result, tiny), plus the
+    // compute pipeline that expands them into the segment SSBO + a device-resident AABB
+    // buffer with NO host round-trip. See createHairExpandPipeline / recordHairExpand.
+    // The whole GPU path is opt-in behind hairExpandReady(): if the pipeline is absent the
+    // renderer keeps using the CPU uploadHairStrands path unchanged.
+    BufferHandle m_hairGuideBuffer;          // vec4[] guide points (pos.xyz, radius), pre-transform
+                                             // DOUBLE-SIZED: two alternating regions (ping-pong)
+    uint32_t     m_hairGuideSlot = 0;        // region written by the next upload (0/1)
+    uint32_t     m_hairGuideBasePoints = 0;  // point-index base of the region just written
+    uint32_t     m_hairGuideSlotPoints = 0;  // capacity of ONE region, in points (vec4s)
+    BufferHandle m_hairGuideStaging;         // persistent host-visible staging for the above
+    void*        m_hairGuideStagingPtr = nullptr;
+    BufferHandle m_hairAabbBuffer;           // VkAabbPositionsKHR[] written by the compute shader,
+                                             // consumed as the hair BLAS geometry (worst-case sized)
+    VkPipeline            m_hairExpandPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout      m_hairExpandPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_hairExpandDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool      m_hairExpandDescPool = VK_NULL_HANDLE;
+    // Persistent set: allocated once, rewritten only when the buffers are (re)allocated
+    // (prepareHairExpandBuffers), which happens behind a waitIdle. recordHairExpand only
+    // binds it — never allocates per frame, so no in-flight set can be reset out from
+    // under the GPU. m_hairExpandDescBuffers caches the buffers it currently points at.
+    VkDescriptorSet       m_hairExpandDescSet = VK_NULL_HANDLE;
+    VkBuffer              m_hairExpandDescBuffers[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 
     // Foam point-sphere buffer (binding 18). One combined buffer for the whole
     // foam cloud: { vec4 centreRadius, uint matId, uint pad[3] } per sphere,
@@ -1282,6 +1418,32 @@ public:
 
     uint32_t uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) override;
     void clearHairGeometry(bool rebuild_tlas = true);
+
+    // ── GPU hair path (opt-in; falls back to uploadHairStrands when unavailable) ──
+    // True when the compute pipeline exists and hardware RT is present.
+    bool hairGpuAvailable() const {
+        return m_device && m_device->isInitialized() && m_device->hasHardwareRT() && m_device->hairExpandReady();
+    }
+    // Upload guide points + per-groom dispatch metadata for GPU expansion. `guidePointsXYZR`
+    // is a flat vec4 array (pos.xyz, radius) laid out guide-major, matching the guideOffset
+    // fields inside `dispatches`. `worstCaseSegmentCount` sizes the segment/AABB buffers.
+    // On the first upload / whenever the worst-case count changes it rebuilds the hair BLAS
+    // (running the compute once so the BLAS builds over real AABBs); otherwise it just
+    // refreshes the guide buffer and marks the frame dirty for the ping-pong prepass.
+    // Returns false on any failure — caller must fall back to the CPU path.
+    bool uploadHairGuidesGPU(const std::vector<float>& guidePointsXYZR,
+                             const std::vector<VulkanRT::VulkanDevice::HairExpandPush>& dispatches,
+                             uint32_t worstCaseSegmentCount,
+                             bool anyDynamic = false);
+    // Records the hair GPU prepass (expand → in-place BLAS rebuild/refit + barriers) into a
+    // trace command buffer. Passed as the `prepass` callback to submitTraceTonemapAsync.
+    void recordHairPrepass(VkCommandBuffer cmd);
+    // True when a GPU hair prepass should run this frame.
+    bool hairGpuPrepassPending() const { return m_hairGpuActive && m_hairDirtyGpu; }
+    // True while the GPU hair path owns a live hair BLAS. False means the geometry was torn
+    // down (full rebuild / clearHairGeometry) and the next upload MUST run the expensive
+    // topology path — callers use this to decide whether a redundant upload can be skipped.
+    bool hairGpuActive() const { return m_hairGpuActive; }
     // Upload flat LINE_LIST vertex data {x,y,z,v_coord} x vertexCount for the raster viewport hair overlay
     void uploadHairViewportLines(const std::vector<float>& vertexData, uint32_t vertexCount);
     // Upload camera-facing particle billboards for the raster viewport overlay.
@@ -1509,6 +1671,8 @@ public:
     // ========================================================================
     void waitForCompletion() override;
     void resetAccumulation() override;
+    VulkanRT::VolumePerformanceStats getVolumePerformanceStats(bool synchronize = true);
+    void resetVolumePerformanceStats(bool enabled = true);
     float getMillisecondsPerSample() const override;
 
     // ========================================================================
@@ -1774,6 +1938,25 @@ protected:
     VulkanRT::BufferHandle m_tonemappedStagings[2];
     bool m_tonemappedSlotInFlight[2] = {false, false};
     uint32_t m_tonemappedFrameSlot = 0;
+
+    // ── Single-copy AS/buffer hazard guard ───────────────────────────────────────────
+    // The BLAS/TLAS and the hair guide/segment buffers are single-copy (not ping-ponged).
+    // ANY main-thread path that rewrites one in place (skinned/deform BLAS refit, TLAS
+    // update, hair guide upload, incremental append) must first wait for the in-flight
+    // async ping-pong trace(s) that read them through the TLAS — modifying an acceleration
+    // structure (or a buffer it will read) while a submitted trace is still reading it is
+    // undefined behaviour (silent NVIDIA driver reset / TDR). waitFrameSlot waits the whole
+    // trace+tonemap submit fence; it does NOT reset the fence (the consume path still
+    // displays each slot) and is a no-op when the slot is idle, so calling this liberally is
+    // cheap. This is the shared choke point behind the "play→stop / pause with dynamic hair
+    // or a force-field sim crashes only in Vulkan RT" reports: the deferred deform/rebuild
+    // flush at the pause transition drove these refit paths without a drain.
+    void drainInFlightTraces() {
+        if (!m_device) return;
+        for (uint32_t s = 0; s < VulkanRT::VulkanDevice::kFrameSlotCount; ++s) {
+            if (m_tonemappedSlotInFlight[s]) m_device->waitFrameSlot(s);
+        }
+    }
     VulkanRT::ImageHandle m_denoiserColorImage;
     VulkanRT::ImageHandle m_denoiserAlbedoImage;
     VulkanRT::ImageHandle m_denoiserNormalImage;
@@ -1789,6 +1972,8 @@ protected:
     // a = bounce count avg. Raygen binding 21; tonemap reads it for the
     // Transmission / Absorption / Bounce Count views.
     VulkanRT::ImageHandle m_pathStatsImage;
+    VulkanRT::VulkanVolumeTemporal m_volumeTemporal;
+    VulkanRT::VulkanVolumeInstrumentation m_volumeInstrumentation;
 
     // GPU stylize: host-visible color SSBO (graded surface round-trip) + params SSBO.
     // Persistent; color buffer reallocated on resolution change.
@@ -1968,6 +2153,22 @@ protected:
     std::vector<VulkanRT::TLASInstance> m_hairVkInstances;
     // groomName -> BLAS index (so we can re-upload strands when they change)
     std::unordered_map<std::string, uint32_t> m_hairGroomRegistry;
+
+    // Signature of the hair topology the live BLAS was built for (segment / strand /
+    // material counts). While it is unchanged, an upload only has to refresh the segment
+    // SSBO and refit the BLAS in place — no teardown, no vkDeviceWaitIdle. Grooming and
+    // skinned animation change positions, not topology, so they hit that path
+    // continuously. 0 = no live hair BLAS / force the full path.
+    // The BLAS index itself is NOT cached here; it is read from m_hairVkInstances[0]
+    // so it cannot go stale behind a mesh-geometry rebuild.
+    uint64_t m_hairTopologySignature = 0;
+
+    // ── GPU hair expansion state (uploadHairGuidesGPU / recordHairPrepass) ────
+    bool     m_hairGpuActive = false;                 // GPU path is driving hair this session
+    bool     m_hairDirtyGpu  = false;                 // a prepass is due (guides changed this frame)
+    bool     m_hairAnyDynamic = false;                // any visible groom uses Verlet dynamics → force hair BLAS MODE_BUILD
+    uint32_t m_hairGpuWorstSegments = 0;              // worst-case segment count the buffers/BLAS are sized for
+    std::vector<VulkanRT::VulkanDevice::HairExpandPush> m_hairGpuDispatches;   // one per visible groom
 
     // Number of mesh BLASes stored at the start of m_device->m_blasList.
     // Hair BLASes are always appended after this index so clearHairGeometry()

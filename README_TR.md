@@ -48,7 +48,7 @@ Bu bir render-farm eklentisi ya da kütüphane değil. Modern dock'lu bir arayü
 | **UI kontrol noktası** | 1.278+ |
 | **Render backendleri** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
 | **Düğüm sistemleri** | Arazi (66), Animasyon (14+), Materyal (11+) |
-| **Son doğrulama** | 2026-07-22 — tam derleme, yerel IPC ve remote TLS/token/capability kontrolleri |
+| **Son doğrulama** | 2026-07-30 — Vulkan GPU gas/fluid/particle force alanları, hareketli collider, cache replay ve backend geçiş testleri |
 <!-- STATS_END -->
 
 Sayımlar `RayTrophiStudio/source` kapsamındadır ve tek dosyalık dış kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar.
@@ -173,9 +173,16 @@ CUDA ve CPU backend'li, çok iş parçacıklı grid ve parçacık tabanlı bir F
 - Adaptif çözünürlük, açık/kapalı sınır modları, sızıntıyı önleyen dinamik parçacık yeniden tohumlama, sıvı materyal preset'leri (Su, Yağ, Özel)
 
 ### Gaz, duman & ateş
-- Sıcaklık, is ve yakıt yoğunluğu için çok iş parçacıklı yoğun-ızgara çözücü
+- Sıcaklık, is ve yakıt yoğunluğu için CPU referans yolunu koruyan **Vulkan Compute yoğun-ızgara çözücü**
+- Advection, combustion, buoyancy, vorticity confinement, curl türbülansı, pressure projection ve dış kuvvetler için kalıcı GPU aşamaları
+- Wind, vortex, turbulence, attractor/point ve drag alanlarını ortak paketlenmiş GPU evaluator üzerinden; affect mask, falloff ve domain sahipliği korunarak değerlendirme
+- Animasyonlu primitive/SDF collider'lar ve materyal tabanlı collider-source etkileşimi: sıcaklık, yakıt, duman ve tutuşma enjeksiyonu
+- Çoklu gas domain, emitter, collider, force field ve birbirini silmeden eklenebilen patlama/alev preset'leri
+- Simülasyon belleği ile Vulkan RT dense-volume yayını arasında yaşam süresi denetimi; Play/Pause, cache replay, domain silme ve backend değişimlerinde güvenli kaynak ayrımı
 - Yanma dinamikleri (tutuşma, ısı salımı, alev sönümlenmesi) + prosedürel FBM curl-noise türbülans
 - Verimli büyük domainler için seyrek-VDB aktif-voksel Poisson çözümü
+
+> Vulkan yolu üretim önceliğidir; CPU doğruluk/fallback, CUDA ise desteklenen alternatif compute yoludur. GPU başarısızlığı yalnız ilgili domaini kontrollü fallback'e indirir.
 
 ### Whitewater (Ihmsen ve ark. 2012)
 Hapsolmuş hava ve dalga tepesi potansiyellerinden üretilen ikincil **sprey** (havada), **köpük** (yüzeyde) ve **kabarcık** (su altı); collider tepkisiyle çözücü içinde taşınır:

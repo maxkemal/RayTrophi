@@ -937,7 +937,7 @@ __device__ float3 raymarch_vdb_volume(
         float sigma_t = sigma_a + sigma_s;
         float sparse_cutoff = (vol.density_pad > 0.0f) ? vol.density_pad : 0.04f;
         float scatter_keep = fminf(1.0f, fmaxf(0.0f, (sigma_s * base_step) / sparse_cutoff));
-        if (curand_uniform(rng) <= scatter_keep) {
+        if (sigma_t > 1e-8f) {
             if (sigma_t <= 1e-8f) { t += base_step; steps++; continue; }
             float step = fminf(base_step, tau_max / sigma_t);
             step = fmaxf(step, min_step);
@@ -946,14 +946,7 @@ __device__ float3 raymarch_vdb_volume(
             float albedo_avg = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
             
             // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches CPU Scalar Model) ---
-            float T_single = expf(-sigma_t * step);
-            float step_transmittance = T_single;
-            
-            // Only use multi-scatter softening if there is actually scattering happening
-            if (vol.scatter_coefficient > 1e-6f && vol.scatter_multi > 1e-6f) {
-                float T_multi_p = expf(-sigma_t * step * 0.25f);
-                step_transmittance = T_single * (1.0f - vol.scatter_multi * albedo_avg) + T_multi_p * (vol.scatter_multi * albedo_avg);
-            }
+            float step_transmittance = expf(-sigma_t * step);
             float one_minus_T = 1.0f - step_transmittance;
             
             // Emission
@@ -969,17 +962,19 @@ __device__ float3 raymarch_vdb_volume(
                 }
                 if (!isfinite(temperature)) temperature = density;
                 
-                float kelvin = (temperature > 20.0f) ? (temperature * vol.temperature_scale) : ((temperature * 3000.0f + 1000.0f) * vol.temperature_scale);
-                float t_ramp;
-                if (temperature > 20.0f) {
-                    float ramp_min = (vol.emission_pad > 20.0f) ? vol.emission_pad : 0.0f;
-                    float ramp_max = (vol.max_temperature > ramp_min + 1.0f) ? vol.max_temperature : 6000.0f;
-                    t_ramp = (temperature - ramp_min) / fmaxf(ramp_max - ramp_min, 1.0f);
-                } else {
-                    t_ramp = temperature;
-                }
+                float ramp_min = fmaxf(vol.emission_pad, 0.0f);
+                float ramp_max = (vol.max_temperature > ramp_min + 1.0f)
+                    ? vol.max_temperature : (ramp_min + 1500.0f);
+                float authored_kelvin = (temperature > 20.0f)
+                    ? fminf(fmaxf(temperature, ramp_min), ramp_max)
+                    : ramp_min + fminf(fmaxf(temperature, 0.0f), 1.0f) *
+                      (ramp_max - ramp_min);
+                float kelvin = authored_kelvin * vol.temperature_scale;
+                float t_ramp = (authored_kelvin - ramp_min) /
+                               fmaxf(ramp_max - ramp_min, 1.0f);
                 
-                float ramp_t_clamped = fminf(fmaxf(t_ramp, 0.0f), 1.0f);
+                float ramp_t_clamped = fminf(
+                    fmaxf(t_ramp * vol.temperature_scale, 0.0f), 1.0f);
                 float3 e_color = vol.color_ramp_enabled ? sample_color_ramp(vol, ramp_t_clamped) : blackbody_to_rgb(kelvin);
                 float emit_gate = (vol.color_ramp_enabled && temperature > 20.0f && t_ramp <= 0.0f) ? 0.0f : 1.0f;
                 emission = clamp_volume_radiance(e_color * (density * vol.blackbody_intensity * emit_gate), 64.0f);
@@ -996,8 +991,11 @@ __device__ float3 raymarch_vdb_volume(
                 
                 float cos_theta = dot(local_ray_dir, local_sun_dir);
                 float phase = gpu_phase_dual_hg(cos_theta, vol.scatter_anisotropy, vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
-                float powder = gpu_powder_effect(density, cos_theta);
-                phase *= (1.0f + powder * 0.5f);
+                float scattering_albedo = sigma_s / fmaxf(sigma_t, 1e-8f);
+                float phase_mix = fminf(
+                    fmaxf(vol.scatter_multi * scattering_albedo, 0.0f), 1.0f);
+                phase = phase * (1.0f - phase_mix) +
+                        (1.0f / (4.0f * M_PIf)) * phase_mix;
 
                 float shadow = 1.0f;
                 if (vol.shadow_steps > 0) {
@@ -1035,10 +1033,7 @@ __device__ float3 raymarch_vdb_volume(
                     }
                     
                     // --- MULTI-OCTAVE SHADOWING (Matches CPU 1.0 - strength * (1-T) ) ---
-                    float beers = expf(-s_trans);
-                    float beers_soft = expf(-s_trans * 0.25f);
-                    float albedo_lum = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
-                    float phys_trans = beers * (1.0f - vol.scatter_multi * albedo_lum) + beers_soft * (vol.scatter_multi * albedo_lum);
+                    float phys_trans = expf(-s_trans);
                     float shadow_strength = fminf(fmaxf(vol.shadow_strength * 1.08f, 0.0f), 1.0f);
                     shadow = 1.0f - shadow_strength * (1.0f - phys_trans);
                 }
@@ -1066,8 +1061,8 @@ __device__ float3 raymarch_vdb_volume(
             }
 
             float3 albedo = vol.scatter_color;
-            float3 ms_boost = make_float3(1.0f) + albedo * vol.scatter_multi * (2.0f * thin_scatter);
-            float3 inscatter = (albedo * total_light * sigma_s * ms_boost);
+            float scattering_albedo = sigma_s / fmaxf(sigma_t, 1e-8f);
+            float3 inscatter = albedo * total_light * scattering_albedo;
             
             // CPU/Vulkan parity integration
             accumulated_color += transmittance * (inscatter + emission) * one_minus_T;
@@ -2447,9 +2442,7 @@ __device__ float3 raymarch_volumetric_object(
             float albedo_avg = vol_albedo.x * 0.2126f + vol_albedo.y * 0.7152f + vol_albedo.z * 0.0722f;
             
             // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches CPU Scalar Model) ---
-            float T_single = expf(-sigma_t * actual_step_size);
-            float T_multi_p = expf(-sigma_t * actual_step_size * 0.25f);
-            float step_transmittance = T_single * (1.0f - multi_scatter * albedo_avg) + T_multi_p * (multi_scatter * albedo_avg);
+            float step_transmittance = expf(-sigma_t * actual_step_size);
             
             float shadow_trans = 1.0f;
             if (light_steps > 0) {
@@ -2471,22 +2464,17 @@ __device__ float3 raymarch_volumetric_object(
                     if (density_accum > 5.0f) break;
                 }
                 // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
-                float beers = expf(-density_accum);
-                float phys_trans = beers;
-                
-                // Multi-scatter softening guard
-                if (sigma_s > 1e-6f && multi_scatter > 1e-6f) {
-                    float beers_soft = expf(-density_accum * 0.25f);
-                    float albedo_p = vol_albedo.x * 0.2126f + vol_albedo.y * 0.7152f + vol_albedo.z * 0.0722f;
-                    phys_trans = beers * (1.0f - multi_scatter * albedo_p) + beers_soft * (multi_scatter * albedo_p);
-                }
+                float phys_trans = expf(-density_accum);
                 shadow_trans = 1.0f - shadow_strength * (1.0f - phys_trans);
             }
             
             float cos_theta = dot(ray_dir, sun_dir);
             float phase = gpu_phase_dual_hg(cos_theta, vol_g, g_back, lobe_mix);
-            float powder = gpu_powder_effect(local_density, cos_theta);
-            phase *= (1.0f + powder * 0.5f);
+            float scattering_albedo = sigma_s / fmaxf(sigma_t, 1e-8f);
+            float phase_mix = fminf(
+                fmaxf(multi_scatter * scattering_albedo, 0.0f), 1.0f);
+            phase = phase * (1.0f - phase_mix) +
+                    (1.0f / (4.0f * M_PIf)) * phase_mix;
 
             float3 sun_trans = gpu_get_transmittance(optixLaunchParams.world, pos, sun_dir);
             float3 sun_color = sun_trans * sun_intensity;
@@ -2500,8 +2488,9 @@ __device__ float3 raymarch_volumetric_object(
             }
             float3 total_light = shadow_radiance + ambient;
 
-            float3 ms_boost = make_float3(1.0f) + vol_albedo * multi_scatter * 2.0f;
-            float3 source = (vol_albedo * total_light * sigma_s * ms_boost + vol_emission * local_density);
+            float3 source =
+                vol_albedo * total_light * scattering_albedo +
+                vol_emission * local_density;
             
             // Energy-stable integration (Parity with Renderer.cpp)
             float one_minus_T = 1.0f - step_transmittance;
@@ -2605,7 +2594,7 @@ __device__ float3 raymarch_gas_volume(
         float sigma_t = sigma_a + sigma_s;
         float sparse_cutoff = (vol.density_pad > 0.0f) ? vol.density_pad : 0.04f;
         float scatter_keep = fminf(1.0f, fmaxf(0.0f, (sigma_s * base_step) / sparse_cutoff));
-        if (curand_uniform(rng) <= scatter_keep) {
+        if (sigma_t > 1e-8f) {
             if (sigma_t <= 1e-8f) { t += base_step; steps++; continue; }
             float step = fminf(base_step, tau_max / sigma_t);
             step = fmaxf(step, min_step);
@@ -2614,9 +2603,7 @@ __device__ float3 raymarch_gas_volume(
             float albedo_avg = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
             
             // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches CPU Scalar Model) ---
-            float T_single = expf(-sigma_t * step);
-            float T_multi_p = expf(-sigma_t * step * 0.25f);
-            float step_transmittance = T_single * (1.0f - vol.scatter_multi * albedo_avg) + T_multi_p * (vol.scatter_multi * albedo_avg);
+            float step_transmittance = expf(-sigma_t * step);
             float one_minus_T = 1.0f - step_transmittance;
             
             float3 total_radiance = make_float3(0.0f);
@@ -2648,15 +2635,9 @@ __device__ float3 raymarch_gas_volume(
                      if(shadow_density_sum > 10.0f) break; 
                  }
                  // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
-                 float beers = expf(-shadow_density_sum * shadow_step * (vol.absorption_coefficient + vol.scatter_coefficient));
-                 float phys_trans = beers;
-                 
-                 // Multi-scatter softening guard: Only soften shadow if scattering is present
-                 if (vol.scatter_coefficient > 1e-6f && vol.scatter_multi > 1e-6f) {
-                     float beers_soft = expf(-shadow_density_sum * shadow_step * (vol.absorption_coefficient + vol.scatter_coefficient) * 0.25f);
-                     float albedo_lum = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
-                     phys_trans = beers * (1.0f - vol.scatter_multi * albedo_lum) + beers_soft * (vol.scatter_multi * albedo_lum);
-                 }
+                 float phys_trans = expf(
+                     -shadow_density_sum * shadow_step *
+                     (vol.absorption_coefficient + vol.scatter_coefficient));
                  float shadow_strength = fminf(fmaxf(vol.shadow_strength * 1.08f, 0.0f), 1.0f);
                  shadow_trans = 1.0f - shadow_strength * (1.0f - phys_trans);
             }
@@ -2665,8 +2646,12 @@ __device__ float3 raymarch_gas_volume(
             total_radiance = sun_color * shadow_trans * phase;
 
             // --- RESTORED PARITY FEATURES (Powder + Ambient) ---
-            float powder = gpu_powder_effect(density, cos_theta);
-            total_radiance = total_radiance * (1.0f + powder * 0.5f);
+            float scattering_albedo = sigma_s / fmaxf(sigma_t, 1e-8f);
+            float phase_mix = fminf(
+                fmaxf(vol.scatter_multi * scattering_albedo, 0.0f), 1.0f);
+            float physical_phase = phase * (1.0f - phase_mix) +
+                (1.0f / (4.0f * M_PIf)) * phase_mix;
+            total_radiance = sun_color * shadow_trans * physical_phase;
             
             float thin_scatter = scatter_keep * scatter_keep;
             // Gated by volume_atmosphere_ambient (default OFF, Vulkan parity).
@@ -2686,25 +2671,28 @@ __device__ float3 raymarch_gas_volume(
                     if (!isfinite(temperature)) temperature = density; 
                 }
                 
-                float3 e_color; float kelvin; float t_ramp_val;
-                if (temperature > 20.0f) { // Likely physical Kelvin
-                    kelvin = temperature * vol.temperature_scale;
-                    float ramp_min = (vol.emission_pad > 20.0f) ? vol.emission_pad : 0.0f;
-                    float ramp_max = (vol.max_temperature > ramp_min + 1.0f) ? vol.max_temperature : 6000.0f;
-                    t_ramp_val = (temperature - ramp_min) / fmaxf(ramp_max - ramp_min, 1.0f);
-                } else { // Likely normalized 0-1
-                    kelvin = (temperature * 3000.0f + 1000.0f) * vol.temperature_scale;
-                    t_ramp_val = temperature;
-                }
-                float ramp_t_clamped = fminf(fmaxf(t_ramp_val, 0.0f), 1.0f);
+                float ramp_min = fmaxf(vol.emission_pad, 0.0f);
+                float ramp_max = (vol.max_temperature > ramp_min + 1.0f)
+                    ? vol.max_temperature : (ramp_min + 1500.0f);
+                float authored_kelvin = (temperature > 20.0f)
+                    ? fminf(fmaxf(temperature, ramp_min), ramp_max)
+                    : ramp_min + fminf(fmaxf(temperature, 0.0f), 1.0f) *
+                      (ramp_max - ramp_min);
+                float kelvin = authored_kelvin * vol.temperature_scale;
+                float t_ramp_val = (authored_kelvin - ramp_min) /
+                                   fmaxf(ramp_max - ramp_min, 1.0f);
+                float3 e_color;
+                float ramp_t_clamped = fminf(
+                    fmaxf(t_ramp_val * vol.temperature_scale, 0.0f), 1.0f);
                 if (vol.color_ramp_enabled) e_color = sample_color_ramp_gas(vol, ramp_t_clamped);
                 else e_color = blackbody_to_rgb(kelvin);
                 float emit_gate = (vol.color_ramp_enabled && temperature > 20.0f && t_ramp_val <= 0.0f) ? 0.0f : 1.0f;
                 emission = clamp_volume_radiance(e_color * density * vol.blackbody_intensity * emit_gate, 64.0f);
             }
 
-            float3 ms_boost = make_float3(1.0f) + vol.scatter_color * vol.scatter_multi * (2.0f * thin_scatter);
-            float3 source = (vol.scatter_color * total_radiance * sigma_s * ms_boost + emission);
+            float3 source =
+                vol.scatter_color * total_radiance * scattering_albedo +
+                emission;
             
             // CPU/Vulkan parity integration
             accumulated_color += source * (one_minus_T * transmittance);

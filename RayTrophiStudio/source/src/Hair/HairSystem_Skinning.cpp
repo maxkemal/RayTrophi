@@ -1,6 +1,7 @@
-
+﻿
 #include "Hair/HairSystem.h"
 #include "Triangle.h"
+#include "TriangleMesh.h"
 #include "Quaternion.h"
 #include <mutex>
 
@@ -12,7 +13,7 @@ void HairSystem::updateSkinnedGroom(const std::string& groomName, const std::vec
     if (it == m_grooms.end()) return;
     
     HairGroom& groom = it->second;
-    if (groom.boundTriangles.empty()) return;
+    if (groom.bound.empty()) return;
 
     // --- CHANGE DETECTION ---
     // If we have bone matrices, compare with cached to avoid setting dirty flags every frame
@@ -39,18 +40,49 @@ void HairSystem::updateSkinnedGroom(const std::string& groomName, const std::vec
         }
     }
     
+    // Force field liveness: while the field time changes (animated/simulated field) keep
+    // ticking so the strands respond every frame even if the skeleton is momentarily still;
+    // a static field time lets a static pose stop (bones already drive motion during play).
+    static std::unordered_map<std::string, float> lastEnvTimeMap;
+    float& lastEnvTime = lastEnvTimeMap[groomName];
+    const bool forceWake = (m_envForce != nullptr) && (lastEnvTime != m_envTime);
+
     // Also check if groom itself is dirty (e.g. from UI parameter change)
-    if (!matricesChanged && !groom.isDirty) return;
-    
+    if (!matricesChanged && !groom.isDirty && !forceWake) return;
+
     lastMatrices = boneMatrices;
+    lastEnvTime  = m_envTime;
     groom.isDirty = false; // We are processing it now
 
     bool anyChange = false;
 
-    for (auto& strand : groom.guides) {
-        if (strand.triangleIndex >= groom.boundTriangles.size()) continue;
-        const Triangle& tri = *groom.boundTriangles[strand.triangleIndex];
-        
+    // Lock the scalp meshes once, and hoist the node-level matrices out of the loop:
+    // rootMat is the SAME for every strand of a groom (it is the mesh node transform),
+    // so inverting/transposing it per strand was pure per-frame waste.
+    const auto boundLocked = groom.bound.lockMeshes();
+    const int boundCount   = (int)groom.bound.size();
+    Matrix4x4 rootMat = Matrix4x4::identity();
+    {
+        Triangle probe;
+        if (const Triangle* t0 = groom.bound.resolve(boundLocked, 0, probe))
+            rootMat = t0->getTransformMatrix();
+    }
+    const Matrix4x4 rootNormMat = rootMat.inverse().transpose();
+
+    // Each guide is independent (reads the scalp, writes only its own points), so this
+    // parallelises cleanly. Signed loop variable: MSVC only implements OpenMP 2.0.
+    const int guideCount = (int)groom.guides.size();
+    #pragma omp parallel for schedule(static)
+    for (int gi = 0; gi < guideCount; ++gi) {
+        HairStrand& strand = groom.guides[gi];
+        // Unsigned compare on purpose: an unbound strand carries 0xFFFFFFFF, which a
+        // signed compare would read as -1 and wrongly accept.
+        if (strand.triangleIndex >= (uint32_t)boundCount) continue;
+        Triangle scratch;   // per-thread stack facade
+        const Triangle* triPtr = groom.bound.resolve(boundLocked, strand.triangleIndex, scratch);
+        if (!triPtr) continue;
+        const Triangle& tri = *triPtr;
+
         float u = strand.barycentricUV.u;
         float v = strand.barycentricUV.v;
         float w = 1.0f - u - v;
@@ -68,7 +100,17 @@ void HairSystem::updateSkinnedGroom(const std::string& groomName, const std::vec
         // Consistent tangent in local bind space
         Vec3 rawT0 = (rawV1 - rawV0).normalize();
 
-        Vec3 P0 = groom.initialMeshTransform.transform_point(rawP0);
+        // ORIGIN of the bind frame must be the point the rest pose was authored around,
+        // not a freshly measured one. restGroomedPositions comes from generation, where
+        // the root was sampled off the scalp's CURRENT surface via sampleTriangleSurface;
+        // re-deriving the origin here from getOriginalVertexPosition + initialMeshTransform
+        // lands in a different space whenever the scalp was posed (or the node transform
+        // is not identity), and the constant difference is added to every strand — which
+        // is exactly the "hair follows the object but sits far away" symptom. baseRootPos
+        // is the generation-time root and is by construction in the same space as the rest
+        // pose, so (rest - P0) stays the small root-relative shape offset it is meant to be.
+        // The rotation part was already correct, so the measured frame axes are kept.
+        Vec3 P0 = strand.baseRootPos;
         Vec3 N0 = groom.initialMeshTransform.transform_vector(rawN0).normalize();
         Vec3 T0 = groom.initialMeshTransform.transform_vector(rawT0).normalize();
         
@@ -101,8 +143,6 @@ void HairSystem::updateSkinnedGroom(const std::string& groomName, const std::vec
         }
 
         Matrix4x4 normalMat = skinMat.inverse().transpose();
-        Matrix4x4 rootMat = tri.getTransformMatrix();
-        Matrix4x4 rootNormMat = rootMat.inverse().transpose();
 
         Vec3 P1 = (rootMat * skinMat).transform_point(rawP0);
         Vec3 N1 = (rootNormMat * normalMat).transform_vector(rawN0).normalize();
@@ -137,11 +177,11 @@ void HairSystem::updateSkinnedGroom(const std::string& groomName, const std::vec
             Vec3 revolvedOffset = R.transform_vector(localOffset); 
             strand.groomedPositions[i] = P1 + revolvedOffset;
         }
-        anyChange = true;
     }
+    anyChange = guideCount > 0;
 
     if (anyChange) {
-        restyleGroom(groomName);
+        restyleGroom(groomName, m_envForce, m_envTime);   // apply the scene force field in the Verlet
         m_bvhDirty = true;
     }
 }

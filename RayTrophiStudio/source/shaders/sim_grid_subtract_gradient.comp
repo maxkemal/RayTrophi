@@ -19,8 +19,28 @@ layout(set = 0, binding = 1) buffer VelY      { float vel_y[];    };
 layout(set = 0, binding = 2) buffer VelZ      { float vel_z[];    };
 layout(set = 0, binding = 3) readonly buffer Pressure  { float pressure[]; };
 layout(set = 0, binding = 4) readonly buffer Divergence{ float dummy[];    };
+layout(set = 0, binding = 5) readonly buffer Flame     { float flame_dummy[]; };
+layout(set = 0, binding = 6) readonly buffer SolidMask { float solid_mask[]; };
+layout(set = 0, binding = 7) readonly buffer SolidVelX { float solid_vx[]; };
+layout(set = 0, binding = 8) readonly buffer SolidVelY { float solid_vy[]; };
+layout(set = 0, binding = 9) readonly buffer SolidVelZ { float solid_vz[]; };
+layout(set = 0, binding = 10) readonly buffer FaceWeightU { float weight_u[]; };
+layout(set = 0, binding = 11) readonly buffer FaceWeightV { float weight_v[]; };
+layout(set = 0, binding = 12) readonly buffer FaceWeightW { float weight_w[]; };
+
+int wrap(int v, int n) { return ((v % n) + n) % n; }
+int cell(int i,int j,int k){return i+j*pc.nx+k*pc.nx*pc.ny;}
+bool solid(int i,int j,int k){
+    return i>=0&&i<pc.nx&&j>=0&&j<pc.ny&&k>=0&&k<pc.nz&&solid_mask[cell(i,j,k)]>0.5;
+}
 
 float sample_p(int i, int j, int k) {
+    // Must match sim_grid_sor's sampler exactly. Missing the periodic branch
+    // made the solve wrap while the gradient clamped, so the divergence at the
+    // seam was never removed and accumulated across frames.
+    if (pc.boundary == 2) {
+        return pressure[wrap(i,pc.nx) + wrap(j,pc.ny)*pc.nx + wrap(k,pc.nz)*pc.nx*pc.ny];
+    }
     if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz) {
         if (pc.boundary == 0) return 0.0; // open
         i = clamp(i, 0, pc.nx-1);
@@ -46,7 +66,18 @@ void main() {
         int rem = id - k*plane;
         int j = rem / (pc.nx+1);
         int i = rem - j*(pc.nx+1);
-        vel_x[id] -= scale * (sample_p(i,j,k) - sample_p(i-1,j,k));
+        float fw=clamp(weight_u[id],0.0,1.0);
+        if (fw<=0.0||solid(i-1,j,k)||solid(i,j,k)) {
+            vel_x[id]=solid(i,j,k)?solid_vx[cell(i,j,k)]:solid_vx[cell(i-1,j,k)];
+        } else {
+        vel_x[id] -= fw*scale * (sample_p(i,j,k) - sample_p(i-1,j,k));
+        if (pc.boundary == 0) {
+            // Open faces are outflow-only: pressure projection may not create
+            // artificial inflow from the zero-pressure exterior.
+            if (i == 0)     vel_x[id] = min(vel_x[id], 0.0);
+            if (i == pc.nx) vel_x[id] = max(vel_x[id], 0.0);
+        }
+        }
     }
     if (id < vy_count) {
         int plane = pc.nx*(pc.ny+1);
@@ -54,7 +85,16 @@ void main() {
         int rem = id - k*plane;
         int j = rem / pc.nx;
         int i = rem - j*pc.nx;
-        vel_y[id] -= scale * (sample_p(i,j,k) - sample_p(i,j-1,k));
+        float fw=clamp(weight_v[id],0.0,1.0);
+        if (fw<=0.0||solid(i,j-1,k)||solid(i,j,k)) {
+            vel_y[id]=solid(i,j,k)?solid_vy[cell(i,j,k)]:solid_vy[cell(i,j-1,k)];
+        } else {
+        vel_y[id] -= fw*scale * (sample_p(i,j,k) - sample_p(i,j-1,k));
+        if (pc.boundary == 0) {
+            if (j == 0)     vel_y[id] = min(vel_y[id], 0.0);
+            if (j == pc.ny) vel_y[id] = max(vel_y[id], 0.0);
+        }
+        }
     }
     if (id < vz_count) {
         int plane = pc.nx*pc.ny;
@@ -62,6 +102,15 @@ void main() {
         int rem = id - k*plane;
         int j = rem / pc.nx;
         int i = rem - j*pc.nx;
-        vel_z[id] -= scale * (sample_p(i,j,k) - sample_p(i,j,k-1));
+        float fw=clamp(weight_w[id],0.0,1.0);
+        if (fw<=0.0||solid(i,j,k-1)||solid(i,j,k)) {
+            vel_z[id]=solid(i,j,k)?solid_vz[cell(i,j,k)]:solid_vz[cell(i,j,k-1)];
+        } else {
+        vel_z[id] -= fw*scale * (sample_p(i,j,k) - sample_p(i,j,k-1));
+        if (pc.boundary == 0) {
+            if (k == 0)     vel_z[id] = min(vel_z[id], 0.0);
+            if (k == pc.nz) vel_z[id] = max(vel_z[id], 0.0);
+        }
+        }
     }
 }

@@ -83,7 +83,13 @@ struct PackedForceField {
     int noise_octaves = 4;
     int noise_seed = 42;
     int use_noise = 0;
+    int fluid_surface_drag = 0;
+    float fluid_drag_coupling = 4.0f;
+    float fluid_surface_depth = 0.5f;
+    float fluid_curl_detail = 0.0f;
 };
+static_assert(sizeof(PackedForceField) == 160,
+              "PackedForceField CPU/GLSL storage-buffer ABI changed");
 
 class SimulationForceFieldSnapshot {
 public:

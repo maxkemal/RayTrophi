@@ -440,6 +440,9 @@
     <ClInclude Include="source\include\Backend\OptixBackend.h" />
     <ClInclude Include="source\include\Backend\SceneTextureManager.h" />
     <ClInclude Include="source\include\Backend\VulkanBackend.h" />
+    <ClInclude Include="source\include\Backend\VulkanVolumeInstrumentation.h" />
+    <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h" />
+    <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc" />
@@ -1287,6 +1290,8 @@
     <ClCompile Include="source\src\Backend\SceneTextureManager.cpp" />
     <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp" />
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
     <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />
     <ClCompile Include="source\src\Render\HitMaterialResolver.cpp" />
@@ -1380,9 +1385,11 @@
     <ClCompile Include="source\src\UI\scene_ui_procamera.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_scatter.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_selection.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_simulation_domains.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_stylize.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_vdb.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_viewport.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_volume_performance.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_world.cpp" />
     <ClCompile Include="source\src\UI\SequencerAdapter.cpp" />
     <ClCompile Include="source\src\UI\SplashScreen.cpp" />

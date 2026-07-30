@@ -337,6 +337,7 @@ private:
     Vec3 evaluateCurlNoise(const Vec3& world_pos, float time) const;
     Vec3 evaluateDrag(const Vec3& local_pos, const Vec3& velocity, float time) const;
     Vec3 evaluateMagnetic(const Vec3& local_pos, float time) const;
+    Vec3 evaluateDirectionalNoise(const Vec3& world_pos, float time) const;
     
     // Transform world position to local space
     Vec3 worldToLocal(const Vec3& world_pos) const;

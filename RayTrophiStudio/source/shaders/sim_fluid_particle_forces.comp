@@ -1,36 +1,59 @@
-// sim_fluid_particle_forces.comp — gravity + container motion integration.
-// Velocities: 3 tightly-packed floats per particle (stride 12, NOT vec4/16).
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "include/sim_force_fields.glsl"
 layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
-    int   particle_count;
-    float dt;
+    int particle_count; float dt;
     float gravity_x; float gravity_y; float gravity_z;
     float container_velocity_x; float container_velocity_y; float container_velocity_z;
     float max_velocity;
+    uint force_count; float time_seconds; uint system_mask; uint pad0;
+    uint align_pad0; uint align_pad1; uint align_pad2;
+    vec4 grid_origin;
+    int column_nx; int column_nz; float voxel_size; uint pad1;
 } pc;
 
-layout(set = 0, binding = 0) buffer Velocities { float vel_data[]; };
+layout(set=0,binding=0) readonly buffer Positions { float pos_data[]; };
+layout(set=0,binding=1) buffer Velocities { float vel_data[]; };
+layout(set=0,binding=2,std430) readonly buffer ForceFields { PackedForceField fields[]; };
+layout(set=0,binding=3) readonly buffer SurfaceColumns { uint column_height_bits[]; };
 
-void main() {
-    int id = int(gl_GlobalInvocationID.x);
-    if (id >= pc.particle_count) return;
-
-    // Read velocity (3 floats, stride 12)
-    vec3 v = vec3(vel_data[id*3], vel_data[id*3+1], vel_data[id*3+2]);
-
-    v += vec3(pc.gravity_x, pc.gravity_y, pc.gravity_z) * pc.dt;
-    v += vec3(pc.container_velocity_x, pc.container_velocity_y, pc.container_velocity_z);
-
-    if (pc.max_velocity > 1e-6) {
-        float sp2 = dot(v,v);
-        if (sp2 > pc.max_velocity * pc.max_velocity)
-            v *= pc.max_velocity * inversesqrt(sp2);
+void main(){
+    int id=int(gl_GlobalInvocationID.x);
+    if(id>=pc.particle_count)return;
+    vec3 p=vec3(pos_data[id*3],pos_data[id*3+1],pos_data[id*3+2]);
+    vec3 v=vec3(vel_data[id*3],vel_data[id*3+1],vel_data[id*3+2]);
+    vec3 a=vec3(pc.gravity_x,pc.gravity_y,pc.gravity_z);
+    for(uint i=0u;i<pc.force_count;++i)
+        a+=simEvaluateForceField(fields[i],p,v,pc.time_seconds,pc.system_mask);
+    if(pc.column_nx>0&&pc.column_nz>0&&pc.voxel_size>1e-6){
+        int gx=clamp(int(floor((p.x-pc.grid_origin.x)/pc.voxel_size)),0,pc.column_nx-1);
+        int gz=clamp(int(floor((p.z-pc.grid_origin.z)/pc.voxel_size)),0,pc.column_nz-1);
+        float surface=pc.grid_origin.y+
+            uintBitsToFloat(column_height_bits[gz*pc.column_nx+gx])*pc.voxel_size;
+        for(uint i=0u;i<pc.force_count;++i){
+            PackedForceField f=fields[i];
+            if(f.enabled==0||f.type!=0||f.fluid_surface_drag==0||
+               (f.affect_mask&pc.system_mask)==0u)continue;
+            vec3 lp=simForceToLocal(f,p);
+            if(!simForceInside(f,lp))continue;
+            float fall=simForceFalloff(f,length(lp));
+            float depth=surface-p.y;
+            float w=1.0-clamp(depth/max(f.fluid_surface_depth,1e-4),0.0,1.0);
+            if(w<=0.0||fall<=0.0)continue;
+            vec3 dir=vec3(f.direction_x,f.direction_y,f.direction_z);
+            vec3 target=length(dir)>1e-6?normalize(dir)*f.strength:vec3(0.0);
+            if(f.fluid_curl_detail>0.0)
+                target+=simForceCurl(p,f,pc.time_seconds)*
+                    (f.strength*f.fluid_curl_detail);
+            vec3 rel=target*(w*fall)-v;rel.y=0.0;
+            a+=rel*(f.fluid_drag_coupling*w*fall);
+        }
     }
-
-    // Write velocity (3 floats, stride 12)
-    vel_data[id*3]   = v.x;
-    vel_data[id*3+1] = v.y;
-    vel_data[id*3+2] = v.z;
+    v+=a*pc.dt;
+    v+=vec3(pc.container_velocity_x,pc.container_velocity_y,pc.container_velocity_z);
+    if(pc.max_velocity>1e-6&&dot(v,v)>pc.max_velocity*pc.max_velocity)
+        v*=pc.max_velocity*inversesqrt(dot(v,v));
+    vel_data[id*3]=v.x;vel_data[id*3+1]=v.y;vel_data[id*3+2]=v.z;
 }

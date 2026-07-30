@@ -1,0 +1,26 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "include/sim_force_fields.glsl"
+layout(local_size_x=256) in;
+layout(push_constant) uniform PC {
+    int particle_count; float dt;
+    float gravity_x; float gravity_y; float gravity_z;
+    float buoyancy; float drag_factor; float time_seconds;
+    uint system_mask; uint force_count;
+} pc;
+layout(set=0,binding=0) readonly buffer PX {float px[];};
+layout(set=0,binding=1) readonly buffer PY {float py[];};
+layout(set=0,binding=2) readonly buffer PZ {float pz[];};
+layout(set=0,binding=3) buffer VX {float vx[];};
+layout(set=0,binding=4) buffer VY {float vy[];};
+layout(set=0,binding=5) buffer VZ {float vz[];};
+layout(set=0,binding=6,std430) readonly buffer ForceFields {PackedForceField fields[];};
+void main(){
+    int id=int(gl_GlobalInvocationID.x);if(id>=pc.particle_count)return;
+    vec3 p=vec3(px[id],py[id],pz[id]),v=vec3(vx[id],vy[id],vz[id]);
+    vec3 a=vec3(pc.gravity_x,pc.gravity_y+pc.buoyancy,pc.gravity_z);
+    for(uint i=0u;i<pc.force_count;++i)
+        a+=simEvaluateForceField(fields[i],p,v,pc.time_seconds,pc.system_mask);
+    v=(v+a*pc.dt)*pc.drag_factor;
+    vx[id]=v.x;vy[id]=v.y;vz[id]=v.z;
+}

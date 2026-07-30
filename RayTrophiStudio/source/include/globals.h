@@ -156,6 +156,7 @@ struct RenderSettings {
     // açılır/kapanır, accumulation'a dokunmaz, reset tetiklemez. 1-4 ve 9
     // raygen tarafındadır (veri üretimini değiştirir) → geçişte reset gerekir.
     int debug_view = 0;
+    bool volume_metrics_overlay = false;
     float debug_exposure = 1.0f;        // false-color / enerji kazancı
     float debug_overlay = 0.0f;         // 0 = salt debug … 1 = salt beauty (karışım)
 

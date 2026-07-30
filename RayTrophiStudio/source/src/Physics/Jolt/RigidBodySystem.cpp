@@ -658,6 +658,15 @@ void RigidBodySystem::step(const SimulationContext& ctx) {
 
     world_->update(dt, collision_steps);
 
+    // Self-collision: Jolt's soft body solver only collides vertices against
+    // OTHER bodies' shapes, never against its own mesh, so cloth/soft bodies
+    // fold through themselves without this opt-in pass.
+    for (RigidBodyObject& rb : *bodies_) {
+        if (rb.created && rb.enabled && rb.kind != BodyKind::Rigid && rb.getSoftSelfCollision()) {
+            world_->solveSoftBodySelfCollisions(rb.handle, rb.getSoftVertexRadius(), rb.getSoftIterations());
+        }
+    }
+
     // Drain impact events (Faz 1 fracture foundation): map Jolt body handles back
     // to scene-node names so consumers (fracture trigger, UI, audio) can threshold
     // a hard hit. Refilled every step; empty when capture is disabled.

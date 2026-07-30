@@ -24,10 +24,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 JPH_SUPPRESS_WARNINGS
@@ -569,6 +572,114 @@ void JoltWorld::setSoftBodyVertices(JoltBodyHandle handle, const std::vector<Vec
         }
     }
     impl_->physics_system->GetBodyInterface().ActivateBody(id);
+}
+
+void JoltWorld::solveSoftBodySelfCollisions(JoltBodyHandle handle, float vertex_radius, int iterations) {
+    if (!impl_->initialized || handle == kInvalidBody || vertex_radius <= 0.0f) return;
+    JPH::BodyID id = toBodyID(handle);
+    JPH::BodyLockWrite lock(impl_->physics_system->GetBodyLockInterface(), id);
+    if (!lock.Succeeded()) return;
+    JPH::Body& body = lock.GetBody();
+    if (!body.IsSoftBody()) return;
+
+    JPH::SoftBodyMotionProperties* mp =
+        static_cast<JPH::SoftBodyMotionProperties*>(body.GetMotionProperties());
+    auto& verts = mp->GetVertices();
+    const uint32_t n = (uint32_t)verts.size();
+    if (n < 2) return;
+
+    const float min_dist = vertex_radius * 2.0f;
+    const float min_dist_sq = min_dist * min_dist;
+    const float cell = std::max(min_dist, 1.0e-4f);
+    const float inv_cell = 1.0f / cell;
+    const int iters = std::clamp(iterations, 1, 16);
+
+    // Exclude vertex pairs that are already tied together by a structural/shear/bend
+    // constraint (mesh edges + the diagonal "opposite corner" pairs CreateConstraints
+    // derives from each quad). Without this, any vertex_radius bigger than about half
+    // the mesh's edge/diagonal spacing makes the self-collision push fight the edge
+    // constraint every substep (one pulls the pair together, the other shoves them
+    // apart) -> visible jitter/explosion; a smaller radius avoids the fight but then
+    // never reaches far enough to catch an actual fold-through. Skipping the pair
+    // entirely lets radius be set close to the real vertex spacing safely.
+    std::unordered_set<uint64_t> excluded;
+    const auto& edges = mp->GetSettings()->mEdgeConstraints;
+    excluded.reserve(edges.size() * 2);
+    for (const auto& e : edges) {
+        const uint32_t a = std::min(e.mVertex[0], e.mVertex[1]);
+        const uint32_t b = std::max(e.mVertex[0], e.mVertex[1]);
+        excluded.insert(((uint64_t)a << 32) | b);
+    }
+
+    auto cellCoord = [&](const JPH::Vec3& p, int32_t& cx, int32_t& cy, int32_t& cz) {
+        cx = (int32_t)std::floor(p.GetX() * inv_cell);
+        cy = (int32_t)std::floor(p.GetY() * inv_cell);
+        cz = (int32_t)std::floor(p.GetZ() * inv_cell);
+    };
+    auto cellHash = [](int32_t cx, int32_t cy, int32_t cz) -> uint64_t {
+        return (uint64_t)(uint32_t)cx * 73856093u ^ (uint64_t)(uint32_t)cy * 19349663u ^
+               (uint64_t)(uint32_t)cz * 83492791u;
+    };
+
+    std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+    grid.reserve((std::size_t)n * 2);
+
+    for (int iter = 0; iter < iters; ++iter) {
+        grid.clear();
+        for (uint32_t i = 0; i < n; ++i) {
+            int32_t cx, cy, cz;
+            cellCoord(verts[i].mPosition, cx, cy, cz);
+            grid[cellHash(cx, cy, cz)].push_back(i);
+        }
+
+        for (uint32_t i = 0; i < n; ++i) {
+            auto& vi = verts[i];
+            int32_t cx, cy, cz;
+            cellCoord(vi.mPosition, cx, cy, cz);
+
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const auto git = grid.find(cellHash(cx + dx, cy + dy, cz + dz));
+                        if (git == grid.end()) continue;
+                        for (uint32_t j : git->second) {
+                            if (j <= i) continue;
+                            if (excluded.count(((uint64_t)i << 32) | j)) continue;
+                            auto& vj = verts[j];
+
+                            const JPH::Vec3 delta = vj.mPosition - vi.mPosition;
+                            const float dist_sq = delta.LengthSq();
+                            if (dist_sq >= min_dist_sq || dist_sq < 1.0e-12f) continue;
+
+                            const float inv_i = vi.mInvMass;
+                            const float inv_j = vj.mInvMass;
+                            const float weight_sum = inv_i + inv_j;
+                            if (weight_sum <= 1.0e-8f) continue;  // both pinned: nothing to push
+
+                            const float dist = std::sqrt(dist_sq);
+                            const JPH::Vec3 normal = delta / std::max(dist, 1.0e-6f);
+                            const float wi = inv_i / weight_sum;
+                            const float wj = inv_j / weight_sum;
+
+                            const JPH::Vec3 push = normal * (min_dist - dist);
+                            vi.mPosition -= push * wi;
+                            vj.mPosition += push * wj;
+
+                            // Kill approaching relative normal velocity so pushed-apart
+                            // layers don't immediately re-interpenetrate next substep.
+                            const JPH::Vec3 rel_v = vj.mVelocity - vi.mVelocity;
+                            const float vn = rel_v.Dot(normal);
+                            if (vn < 0.0f) {
+                                const JPH::Vec3 impulse = normal * (-vn);
+                                vi.mVelocity -= impulse * wi;
+                                vj.mVelocity += impulse * wj;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 void JoltWorld::removeBody(JoltBodyHandle handle) {

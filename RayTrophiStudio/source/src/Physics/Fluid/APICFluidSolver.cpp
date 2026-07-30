@@ -2318,7 +2318,8 @@ void step(FluidParticles& particles,
     //     v *= 1/(1 + k|v|dt) — unconditionally stable, no inner iterate.
     //     Bulk particles are skipped (their dissipation comes from
     //     internal_friction inside gridToParticle).
-    if (params.air_drag > 0.0f && dt > 0.0f) {
+    if (!params.particle_tail_precomputed &&
+        params.air_drag > 0.0f && dt > 0.0f) {
         const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
         const float invH = (grid.voxel_size > 1e-6f) ? (1.0f / grid.voxel_size) : 0.0f;
         const int air_threshold = std::max(1, params.reseed_min_per_cell);
@@ -2364,27 +2365,30 @@ void step(FluidParticles& particles,
         }
     }
 
+    if (!params.particle_tail_precomputed) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(thread_count) if(particle_parallel)
 #endif
-    for (int64_t raw_i = 0; raw_i < static_cast<int64_t>(particles.velocity.size()); ++raw_i) {
-        Vec3& v = particles.velocity[static_cast<size_t>(raw_i)];
-        v = v * std::clamp(params.velocity_damping, 0.0f, 1.0f);
-        clampVelocity(v);
+        for (int64_t raw_i = 0; raw_i < static_cast<int64_t>(particles.velocity.size()); ++raw_i) {
+            Vec3& v = particles.velocity[static_cast<size_t>(raw_i)];
+            v = v * std::clamp(params.velocity_damping, 0.0f, 1.0f);
+            clampVelocity(v);
+        }
     }
     stage_end = SolverClock::now();
     out_stats.g2p_ms = elapsedMs(stage_begin, stage_end); // includes air drag + damping
 
     // 7. Advect particle positions
     stage_begin = SolverClock::now();
-    out_stats.advect_substeps = advectParticles(particles,
-                                                grid,
-                                                dt,
-                                                params,
-                                                params.max_velocity,
-                                                params.wall_damping,
-                                                params.cfl,
-                                                params.max_substeps);
+    out_stats.advect_substeps = params.particle_tail_precomputed ? 0 :
+        advectParticles(particles,
+                        grid,
+                        dt,
+                        params,
+                        params.max_velocity,
+                        params.wall_damping,
+                        params.cfl,
+                        params.max_substeps);
     stage_end = SolverClock::now();
     out_stats.advect_ms = elapsedMs(stage_begin, stage_end);
 

@@ -936,8 +936,8 @@ struct WorldKeyframe {
     float multi_scatter_factor = 0.3f;
     int aerial_perspective = 1;
     float aerial_density = 1.0f;
-    float aerial_min_distance = 10.0f;
-    float aerial_max_distance = 5000.0f;
+    float aerial_min_distance = 1000.0f;
+    float aerial_max_distance = 10000.0f;
     int env_overlay_enabled = 0;
     float env_overlay_intensity = 1.0f;
     float env_overlay_rotation = 0.0f;
@@ -3389,7 +3389,7 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.multi_scatter_enabled = j.value("mse", 1); w.multi_scatter_factor = j.value("msf", 0.3f);
     w.aerial_perspective = j.value("ape", 1);
     w.aerial_density = j.value("apden", 1.0f);
-    w.aerial_min_distance = j.value("apmin", 10.0f); w.aerial_max_distance = j.value("apmax", 5000.0f);
+    w.aerial_min_distance = j.value("apmin", 1000.0f); w.aerial_max_distance = j.value("apmax", 10000.0f);
 
     w.env_overlay_enabled = j.value("ove", 0);
     w.env_overlay_intensity = j.value("ovi", 1.0f); w.env_overlay_rotation = j.value("ovr", 0.0f);

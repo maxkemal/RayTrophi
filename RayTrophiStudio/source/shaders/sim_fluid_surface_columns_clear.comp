@@ -1,0 +1,12 @@
+#version 450
+layout(local_size_x=256) in;
+layout(push_constant) uniform PC {
+    int particle_count; float dt;
+    float gravity_x; float gravity_y; float gravity_z;
+    float container_velocity_x; float container_velocity_y; float container_velocity_z;
+    float max_velocity; uint force_count; float time_seconds; uint system_mask; uint pad0;
+    uint align_pad0; uint align_pad1; uint align_pad2;
+    vec4 grid_origin; int column_nx; int column_nz; float voxel_size; uint pad1;
+} pc;
+layout(set=0,binding=0) buffer Columns { uint heights[]; };
+void main(){uint i=gl_GlobalInvocationID.x,n=uint(pc.column_nx*pc.column_nz);if(i<n)heights[i]=0u;}

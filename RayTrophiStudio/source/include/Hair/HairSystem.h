@@ -26,6 +26,7 @@
 
 // Forward declarations
 class Triangle;
+class TriangleMesh;
 class Mesh;
 class Hittable;
 class Renderer;
@@ -90,6 +91,74 @@ struct HairGenerationParams {
 
 
 /**
+ * @brief A groom's scalp binding — (flat mesh, face index) pairs, NOT facade objects.
+ *
+ * A groom has to remember which face each guide sits on so skinning and brush-added
+ * strands can rebuild the surface frame every frame. It used to keep a
+ * `std::vector<std::shared_ptr<Triangle>>` holding a materialized facade for EVERY face
+ * of the scalp mesh. After the DNA/SoA migration that is pure overhead: a facade is
+ * ~150 B (object + make_shared control block), so a 1M-face scalp cost ~166 MB of
+ * objects whose only real content is `parentMesh + faceIndex`. Worse, each facade owns a
+ * `shared_ptr<TriangleMesh>`, so a live groom pinned the whole scalp geometry alive even
+ * after the object was deleted from the scene.
+ *
+ * We store the two numbers instead and rebuild a facade on the STACK on demand
+ * (`resolve()`, zero allocation). The mesh handles are weak, so a deleted scalp frees
+ * its geometry; `HairSystem::rebindGroomsToScene` re-attaches them by node name (which
+ * is also what restores the binding after a project reload — it is not serialized).
+ */
+struct HairBoundSurface {
+    // Flat parent meshes, deduped, in scene order. A multi-material import splits one
+    // node into several sibling TriangleMeshes sharing a nodeName, so this is a list.
+    std::vector<std::weak_ptr<TriangleMesh>> meshes;
+    std::vector<uint32_t> faceMesh;   // slot -> index into `meshes`
+    std::vector<uint32_t> faceIndex;  // slot -> face inside that mesh
+    // ONLY populated for pre-flat standalone Triangle soup (legacy projects / non-flat
+    // sources). When non-empty it is the authority and the flat arrays are unused.
+    std::vector<std::shared_ptr<Triangle>> legacy;
+
+    size_t size() const { return legacy.empty() ? faceIndex.size() : legacy.size(); }
+    bool empty() const { return size() == 0; }
+    void clear();
+
+    // Build from a transient facade list (what generation is handed by the UI/scripting).
+    // Facades carrying a parentMesh collapse to (mesh, face); anything else falls back to
+    // `legacy` so the old standalone-soup path keeps working unchanged.
+    void build(const std::vector<std::shared_ptr<Triangle>>& tris);
+
+    // Lock every parent mesh ONCE — call outside a per-strand loop, then pass the result
+    // to resolve() so the hot loop pays one atomic per strand instead of a weak_ptr lock.
+    std::vector<std::shared_ptr<TriangleMesh>> lockMeshes() const;
+
+    // Bind `scratch` to slot `i` and return a Triangle view of it, or nullptr when the
+    // slot is out of range or its mesh has been destroyed. The legacy path returns the
+    // stored object and leaves `scratch` alone.
+    const Triangle* resolve(const std::vector<std::shared_ptr<TriangleMesh>>& locked,
+                            size_t i, Triangle& scratch) const;
+
+    // Materialize every slot as a real facade. ONLY for generation, which needs a
+    // std::vector<std::shared_ptr<Triangle>>; the result is transient and must not be stored.
+    std::vector<std::shared_ptr<Triangle>> materialize() const;
+
+    // True when at least one parent mesh is still alive (or this is a legacy binding).
+    bool isAlive() const;
+
+    // True when the bound scalp carries skin weights — the test that routes a groom to
+    // the skinned update instead of the rigid-transform one.
+    //
+    // Cached: TriangleMesh::hasSkinWeights() walks the whole per-vertex weight array, and
+    // this is asked once per groom per frame from updateAllTransforms. Whether a mesh is
+    // rigged does not change without a rebind, which resets the cache.
+    bool hasSkinData() const;
+    void invalidateSkinCache() { m_skinCached = false; }
+
+private:
+    mutable bool m_skinCached = false;
+    mutable bool m_skinCachedValue = false;
+public:
+};
+
+/**
  * @brief Hair groom/asset container
  */
 struct HairGroom {
@@ -97,11 +166,10 @@ struct HairGroom {
     std::vector<HairStrand> guides;         // Master strands
     std::vector<HairStrand> interpolated;   // Generated children
     HairGenerationParams params;
-    
+
     // Binding info
     std::string boundMeshName;              // Source scalp mesh
-    std::vector<std::shared_ptr<Triangle>> boundTriangles; // All triangles of the bound mesh (for skinning)
-    std::weak_ptr<Triangle> boundMeshPtr;   // Cached pointer to source scalp mesh (for fast transform updates - kept for legacy)
+    HairBoundSurface bound;                 // (flat mesh, face) binding — see HairBoundSurface
     Matrix4x4 transform;                    // Delta transform (from initial position)
     Matrix4x4 initialMeshTransform;         // Mesh transform when hair was generated
     
@@ -165,6 +233,25 @@ public:
     );
     
     /**
+     * @brief Re-run generation for a groom using its STORED scalp binding.
+     * Replaces the old "copy groom.boundTriangles out, hand it back to generateOnMesh"
+     * dance, which only worked while the groom kept a facade per face alive.
+     * @return false when the groom is unknown or its scalp mesh is gone.
+     */
+    bool regenerateGroom(const std::string& groomName, const HairGenerationParams& params);
+
+    /**
+     * @brief (Re)attach every groom whose scalp binding is empty or dead to a scene mesh
+     *        matching its boundMeshName.
+     *
+     * The binding is NOT serialized (it is derived from the scene), so after a project
+     * reload every groom starts unbound and, before this existed, silently stopped
+     * following its mesh — the old fallback scanned world.objects for `Triangle`, which
+     * a flat scene no longer contains. Cheap no-op once everything is bound.
+     */
+    void rebindGroomsToScene(const std::vector<std::shared_ptr<Hittable>>& sceneObjects);
+
+    /**
      * @brief Generate fur with undercoat + guard hairs
      */
     void generateFur(
@@ -185,10 +272,19 @@ public:
     // ========================================================================
     
     /**
-     * @brief Build acceleration structure for all grooms
-     * Uses Embree's curve primitives (RTC_GEOMETRY_TYPE_ROUND_BEZIER_CURVE)
+     * @brief Mark the CPU (Embree) acceleration structure as needing a rebuild.
+     *
+     * DEFERRED: this no longer builds anything. The Embree scene is only ever read by the
+     * CPU/Embree renderer and by brush picking, but it was being rebuilt from scratch on
+     * every groom change — including every frame of a skinned animation under Vulkan RT
+     * or OptiX, where nothing reads it at all. The build now happens on first use (see
+     * ensureBVH), so an animating groom pays for it exactly zero times.
      */
     void buildBVH(bool includeInterpolated = true);
+
+    /** Force any pending CPU BVH build to happen now. Rarely needed — the intersection
+     *  entry points call it themselves. */
+    void ensureBVH() const;
     
     /**
      * @brief Ray-hair intersection (CPU)
@@ -290,6 +386,17 @@ public:
     size_t getGroomCount() const { return m_grooms.size(); }
     bool isBVHDirty() const { return m_bvhDirty; }
 
+    // Advance the dynamics frame token. Call ONCE per viewport frame (top of the main loop).
+    // updateAllTransforms is invoked more than once per frame (animation update + UI draw),
+    // so updateRigidDynamicGroom uses this token to integrate the Verlet at most once per
+    // frame. Left at 0 in headless/offline paths that never call it → per-frame dedup is
+    // simply disabled there (they already invoke updateAllTransforms once per frame).
+    void beginDynamicsFrame() { ++m_dynamicsFrame; }
+    // Current viewport frame token (0 = headless/offline, dedup disabled). Also used by
+    // Renderer::uploadHairToGPU to coalesce the several hair uploads that can otherwise
+    // fire in a single frame (see the per-frame guard there).
+    uint64_t dynamicsFrame() const { return m_dynamicsFrame; }
+
     // Procedural interpolated children (#1, Vulkan-first). When true (default) child
     // geometry is NOT materialized into groom.interpolated — the Vulkan upload generates
     // it on the fly, eliminating the persistent millions-of-HairStrand RAM cost. CPU/OptiX
@@ -339,7 +446,12 @@ public:
      * Call this when the mesh moves/rotates/scales
      */
     void updateGroomTransform(const std::string& groomName, const Matrix4x4& meshTransform);
-    
+    // Dynamic hair on a RIGID (non-skinned) scalp. Bakes the moved rest shape into world-space
+    // groomedPositions, pins the groom transform to identity, and runs the Verlet pass so the
+    // strands lag/swing with inertia when the object is moved by a node/timeline anim or the
+    // gizmo — the plain updateGroomTransform only rigid-follows and looks frozen.
+    void updateRigidDynamicGroom(const std::string& groomName, const Matrix4x4& currentMeshTransform);
+
     /**
      * @brief Get transformed hair positions for rendering
      * Applies groom.transform to all points
@@ -355,6 +467,15 @@ public:
      * @brief Update all grooms from their bound meshes
      */
     void updateAllTransforms(const std::vector<std::shared_ptr<Hittable>>& sceneObjects, const std::vector<Matrix4x4>& boneMatrices);
+
+    // Per-frame dynamics environment (force fields). Set ONCE per frame before updateAllTransforms.
+    // The dynamic-hair tick applies this force in its Verlet AND uses `time` as the "field is
+    // live" signal: while time changes (sim/animated field) the strands keep responding; when it
+    // stops changing they damp to the field's deflected equilibrium and settle (no perpetual
+    // re-render). A null snapshot means no field this frame.
+    void setDynamicsEnvironment(const RayTrophiSim::SimulationForceFieldSnapshot* force, float time) {
+        m_envForce = force; m_envTime = time;
+    }
     
     /**
      * @brief Update groom that is bound to a specific mesh by its boundMeshName
@@ -394,8 +515,20 @@ private:
     
     // Embree scene for hair BVH
 
-    RTCScene m_embreeScene = nullptr;
+    // Mutable: the CPU BVH is a lazily materialized cache, so the const intersection
+    // entry points must be able to build it on demand.
+    mutable RTCScene m_embreeScene = nullptr;
+    // "Geometry changed, consumers should resync" latch. Cleared by buildBVH() exactly as
+    // before, so isBVHDirty() keeps driving the GPU re-upload at the same cadence.
     bool m_bvhDirty = true;
+    uint64_t m_dynamicsFrame = 0;   // viewport frame token for rigid-dynamic per-frame dedup (see beginDynamicsFrame)
+    const RayTrophiSim::SimulationForceFieldSnapshot* m_envForce = nullptr;  // per-frame force field (setDynamicsEnvironment)
+    float m_envTime = 0.0f;                                                   // force-field time; a change == field is live
+    // Separate: is the Embree scene itself stale. Set by buildBVH(), cleared by the lazy
+    // ensureBVH(). Splitting the two is what lets an animating groom re-upload to the GPU
+    // every frame without also rebuilding a CPU BVH nobody reads.
+    mutable bool m_cpuBvhDirty = true;
+    mutable bool m_bvhIncludeInterpolated = true;  // argument of the pending buildBVH()
     bool m_proceduralChildren = true;   // see setProceduralChildren()
 
     // Cached stats for O(1) retrieval
@@ -414,7 +547,7 @@ private:
         float vStep;
     };
     std::vector<SegmentMap> m_segMap;
-    
+
     // High-performance tangent buffer for smooth shading
     // Stores [T_start, T_mid, T_end] triplets for each segment
     std::vector<Vec3> m_smoothTangents; 
@@ -426,6 +559,10 @@ private:
         const std::vector<std::shared_ptr<Triangle>>& triangles
     );
     
+    // Does the actual Embree scene build. Non-const (it clears per-groom dirty flags);
+    // ensureBVH() is the const entry point that drives it.
+    void buildBVHImpl(bool includeInterpolated);
+
     void interpolateChildren(HairGroom& groom);
     void restyleGroomImpl(const std::string& name,
                           const std::function<Vec3(const Vec3&, const Vec3&)>& forceSampler,

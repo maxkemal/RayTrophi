@@ -261,11 +261,11 @@ public:
     // ═══════════════════════════════════════════════════════════════════════════
     struct ScatteringSettings {
         Vec3 color = Vec3(1.0f);           ///< Scatter albedo
-        float coefficient = 1.0f;           ///< Scatter strength (sigma_s)
+        float coefficient = 1.0f;           ///< sigma_s per world unit at density 1
         float anisotropy = 0.0f;           ///< Phase function G (-1 to 1)
         float anisotropy_back = -0.3f;     ///< Backward scatter G (silver lining)
         float lobe_mix = 0.7f;             ///< Forward/back blend (1=all forward)
-        float multi_scatter = 0.3f;        ///< Multi-scatter approximation (0-1)
+        float multi_scatter = 0.3f;        ///< Energy-conserving phase isotropization (0-1)
 
         // Serialization
         json toJson() const {
@@ -294,7 +294,7 @@ public:
     // ═══════════════════════════════════════════════════════════════════════════
     struct AbsorptionSettings {
         Vec3 color = Vec3(0.0f);           ///< Absorption color tint
-        float coefficient = 0.1f;           ///< Absorption strength (sigma_a)
+        float coefficient = 0.1f;           ///< sigma_a per world unit at density 1
 
         // Serialization
         json toJson() const {
@@ -479,12 +479,29 @@ public:
         shader->emission.temperature_min = 100.0f;   // Explosions start hotter
         shader->emission.temperature_max = 2000.0f;  // Higher max for white-hot core
         
-        // High quality rendering for explosions
-        shader->quality.step_size = 0.05f; 
-        shader->quality.voxel_step_multiplier = 0.425f;
+        // Quality, but bounded. These two settings MULTIPLY with domain
+        // resolution and it is easy to walk into a GPU watchdog timeout:
+        // the primary step is voxel_step_multiplier * voxel_size, so halving the
+        // voxel size doubles the step COUNT, and every primary sample pays
+        // shadow_steps/shadow_stride extra samples on top.
+        //
+        // The previous values (multiplier 0.425, max_steps 512, shadow_steps 12)
+        // cost ~512*(12/4)+512 ≈ 2048 volume evaluations per ray against the
+        // ~192 of the default smoke/fire path — roughly 10x. On a fine domain
+        // (a few hundred voxels across) a ray genuinely consumed that whole
+        // budget, and the first full-viewport frame overran the driver's ~2 s
+        // watchdog: the app stays alive while the GPU is reset (TDR). That reads
+        // as "Vulkan driver stopped" and looks nothing like a shader bug.
+        //
+        // New budget: 192*(8/4)+192 ≈ 576 evaluations — ~3.5x cheaper than before,
+        // and ~3x the default path, which is a fair price for a hero explosion.
+        // 0.7 voxels still oversamples the grid, so detail is not what was lost.
+        shader->quality.step_size = 0.05f;
+        shader->quality.voxel_step_multiplier = 0.7f;
         shader->quality.quality_preset = 2;
-        shader->quality.max_steps = 512;
-        shader->quality.shadow_steps = 12;
+        shader->quality.max_steps = 192;
+        shader->quality.shadow_steps = 8;
+        shader->quality.shadow_stride = 4;
         shader->quality.shadow_strength = 0.9f;
         
         return shader;

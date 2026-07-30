@@ -222,6 +222,13 @@ struct InstanceGroup {
         
         float slope_direction_angle = 0.0f;     // Preferred direction (degrees, 0 = North/Z+)
         float slope_direction_influence = 0.0f; // 0 = Ignore direction, 1 = Strict placement only in direction
+
+        // Terrain-border keep-out band in meters. Procedural edge falloff pins
+        // the outermost heightmap rows to the falloff target (usually 0) with a
+        // zero-gradient lip, so samples landing there pass the slope test and
+        // form a line of instances at the terrain rim. <0 = auto (two heightmap
+        // cells), 0 = disabled, >0 = explicit meters from the terrain border.
+        float edge_margin = -1.0f;
         
         // Global overrides (if needed, but per-source is preferred)
         bool use_global_settings = false;       // If true, overrides source settings

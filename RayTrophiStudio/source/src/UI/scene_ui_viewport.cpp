@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "UI/scene_ui_volume_performance.hpp"
 #include "ui_modern.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
@@ -1891,6 +1892,46 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 if (instance_count > 0) {
                     drawHudLine("Instances: " + formatCompactCount(instance_count), IM_COL32(190, 192, 195, 200));
                     drawHudLine("Instance tris: " + formatCompactCount(instance_triangle_count), IM_COL32(190, 192, 195, 200));
+                }
+            }
+
+            if (ctx.render_settings.volume_metrics_overlay) {
+                VulkanRT::VolumePerformanceStats volumeStats{};
+                if (GetCachedVolumePerformanceStats(volumeStats)) {
+                    const uint32_t traversal =
+                        volumeStats.densitySamples + volumeStats.emptySegmentsSkipped;
+                    const uint32_t temporal =
+                        volumeStats.temporalAccepted + volumeStats.temporalRejected;
+                    const float samplesPerRay = volumeStats.volumeRays
+                        ? float(volumeStats.densitySamples) / float(volumeStats.volumeRays)
+                        : 0.0f;
+                    const float skipRatio = traversal
+                        ? 100.0f * float(volumeStats.emptySegmentsSkipped) / float(traversal)
+                        : 0.0f;
+                    const float temporalAcceptance = temporal
+                        ? 100.0f * float(volumeStats.temporalAccepted) / float(temporal)
+                        : 0.0f;
+
+                    char metricsLine[160];
+                    std::snprintf(
+                        metricsLine, sizeof(metricsLine),
+                        "Volume: %u rays  %.2f samples/ray",
+                        volumeStats.volumeRays, samplesPerRay);
+                    drawHudLine(metricsLine, IM_COL32(130, 215, 255, 220));
+                    std::snprintf(
+                        metricsLine, sizeof(metricsLine),
+                        "  empty skip %.1f%%  majorant %u",
+                        skipRatio, volumeStats.majorantSegmentsSkipped);
+                    drawHudLine(metricsLine, IM_COL32(155, 205, 225, 210));
+                    std::snprintf(
+                        metricsLine, sizeof(metricsLine),
+                        "  temporal accept %.1f%%  shadow %u",
+                        temporalAcceptance, volumeStats.shadowDensitySamples);
+                    drawHudLine(metricsLine, IM_COL32(155, 205, 225, 210));
+                } else {
+                    drawHudLine(
+                        "Volume metrics: press Refresh Metrics in Render Settings",
+                        IM_COL32(245, 180, 90, 210));
                 }
             }
 

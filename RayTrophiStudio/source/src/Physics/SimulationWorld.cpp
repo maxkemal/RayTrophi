@@ -134,6 +134,10 @@ PackedForceField SimulationForceFieldSnapshot::packField(const Physics::ForceFie
     packed.noise_octaves = field.noise.octaves;
     packed.noise_seed = field.noise.seed;
     packed.use_noise = field.use_noise ? 1 : 0;
+    packed.fluid_surface_drag = field.fluid_surface_drag ? 1 : 0;
+    packed.fluid_drag_coupling = field.fluid_drag_coupling;
+    packed.fluid_surface_depth = field.fluid_surface_depth;
+    packed.fluid_curl_detail = field.fluid_curl_detail;
 
     return packed;
 }

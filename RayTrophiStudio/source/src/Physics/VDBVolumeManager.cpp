@@ -398,57 +398,55 @@ bool VDBVolumeManager::updateVolume(int volume_id, const std::string& filepath, 
         // New OpenVDB Pointers
         auto* new_ovdb_grid = new openvdb::FloatGrid::Ptr(density_grid);
         auto* new_ovdb_temp = temp_grid ? new openvdb::FloatGrid::Ptr(temp_grid) : nullptr;
+
+        float new_bbox_min[3]{-0.5f, -0.5f, -0.5f};
+        float new_bbox_max[3]{ 0.5f,  0.5f,  0.5f};
+        const openvdb::CoordBBox bbox =
+            density_grid->evalActiveVoxelBoundingBox();
+        if (!bbox.empty()) {
+            const openvdb::BBoxd world_bbox =
+                density_grid->transform().indexToWorld(bbox);
+            for (int axis = 0; axis < 3; ++axis) {
+                new_bbox_min[axis] =
+                    static_cast<float>(world_bbox.min()[axis]);
+                new_bbox_max[axis] =
+                    static_cast<float>(world_bbox.max()[axis]);
+            }
+        }
+        const float new_voxel_size =
+            static_cast<float>(density_grid->voxelSize()[0]);
         
         // --------------------------------------------------------------------
         // FREE OLD RESOURCES
         // --------------------------------------------------------------------
         
-        // Free old OpenVDB
-        if (vol.internal_openvdb_grid) {
-             delete static_cast<openvdb::FloatGrid::Ptr*>(vol.internal_openvdb_grid);
+        {
+            // Render backends snapshot the NanoVDB bytes under this same lock.
+            // Replace-and-delete must be atomic or a manual sequence scrub can
+            // free the host buffer while Vulkan is copying/traversing it.
+            std::lock_guard<std::mutex> hostLock(host_grid_mutex);
+            if (vol.internal_openvdb_grid)
+                delete static_cast<openvdb::FloatGrid::Ptr*>(vol.internal_openvdb_grid);
+            if (vol.internal_openvdb_temperature)
+                delete static_cast<openvdb::FloatGrid::Ptr*>(vol.internal_openvdb_temperature);
+            if (vol.internal_nano_handle)
+                delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_handle);
+            if (vol.internal_nano_temperature_handle)
+                delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_temperature_handle);
+
+            vol.filepath = filepath;
+            vol.internal_openvdb_grid = new_ovdb_grid;
+            vol.internal_openvdb_temperature = new_ovdb_temp;
+            vol.internal_nano_handle = new_nano_handle;
+            vol.internal_nano_temperature_handle = new_nano_temp_handle;
+            vol.has_temperature = (temp_grid != nullptr);
+            for (int axis = 0; axis < 3; ++axis) {
+                vol.bbox_min[axis] = new_bbox_min[axis];
+                vol.bbox_max[axis] = new_bbox_max[axis];
+            }
+            vol.voxel_size = new_voxel_size;
+            vol.content_version++;
         }
-        if (vol.internal_openvdb_temperature) {
-             delete static_cast<openvdb::FloatGrid::Ptr*>(vol.internal_openvdb_temperature);
-        }
-        
-        // Free old NanoVDB
-        if (vol.internal_nano_handle) {
-            delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_handle);
-        }
-        if (vol.internal_nano_temperature_handle) {
-             delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_temperature_handle);
-        }
-        
-        // --------------------------------------------------------------------
-        // ASSIGN NEW RESOURCES
-        // --------------------------------------------------------------------
-        vol.filepath = filepath; // Update path to new frame
-        vol.filepath = filepath;
-        vol.internal_openvdb_grid = new_ovdb_grid;
-        vol.internal_openvdb_temperature = new_ovdb_temp;
-        vol.internal_nano_handle = new_nano_handle;
-        vol.internal_nano_temperature_handle = new_nano_temp_handle;
-        
-        vol.has_temperature = (temp_grid != nullptr);
-        vol.content_version++;
-        
-        // UPDATE BOUNDING BOX from new frame's density grid
-        openvdb::CoordBBox bbox = density_grid->evalActiveVoxelBoundingBox();
-        if (bbox.empty()) {
-            vol.bbox_min[0] = -0.5f; vol.bbox_min[1] = -0.5f; vol.bbox_min[2] = -0.5f;
-            vol.bbox_max[0] = 0.5f;  vol.bbox_max[1] = 0.5f;  vol.bbox_max[2] = 0.5f;
-        } else {
-            openvdb::BBoxd world_bbox = density_grid->transform().indexToWorld(bbox);
-            vol.bbox_min[0] = static_cast<float>(world_bbox.min().x());
-            vol.bbox_min[1] = static_cast<float>(world_bbox.min().y());
-            vol.bbox_min[2] = static_cast<float>(world_bbox.min().z());
-            vol.bbox_max[0] = static_cast<float>(world_bbox.max().x());
-            vol.bbox_max[1] = static_cast<float>(world_bbox.max().y());
-            vol.bbox_max[2] = static_cast<float>(world_bbox.max().z());
-        }
-        
-        // Update voxel size too (in case it changed)
-        vol.voxel_size = static_cast<float>(density_grid->voxelSize()[0]);
         
         // SMART GPU SYNC: Only re-allocate if existing buffer is too small.
         // This prevents flickering caused by constant cudaFree/cudaMalloc during simulation.
@@ -521,9 +519,20 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
         {
             // copyFromDense reads-only from the dense buffer; const_cast is safe.
             DenseFloat dense(dense_bbox, const_cast<float*>(density_ptr));
-            openvdb::tools::copyFromDense(dense, *density_grid, /*tolerance*/ 0.0001f);
+            // Timeline replay must preserve the same low-density content as the
+            // direct Vulkan dense-field path. A larger sparse conversion cutoff
+            // carved each plume into visible voxel shells after cache restore.
+            openvdb::tools::copyFromDense(dense, *density_grid, /*tolerance*/ 1.0e-6f);
         }
-        density_grid->setTransform(openvdb::math::Transform::createLinearTransform(voxel_size));
+        // FluidGrid values are cell-centred: dense sample (i,j,k) lives at
+        // origin + (ijk + 0.5) * h. NanoVDB index coordinates otherwise place
+        // them at voxel corners, shifting replay by half a cell relative to the
+        // live dense sampler and exposing the grid pattern under trilinear fetch.
+        auto live_transform =
+            openvdb::math::Transform::createLinearTransform(voxel_size);
+        live_transform->postTranslate(openvdb::Vec3d(
+            0.5 * voxel_size, 0.5 * voxel_size, 0.5 * voxel_size));
+        density_grid->setTransform(live_transform);
 
         // 2. NanoVDB conversion for density
         auto temp_handle = nanovdb::tools::createNanoGrid(*density_grid);
@@ -547,10 +556,10 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
             openvdb::FloatGrid::Ptr temp_grid = openvdb::FloatGrid::create(0.0f);
             {
                 DenseFloat dense(dense_bbox, const_cast<float*>(temp_ptr));
-                // Threshold matches the old loop's `t > 300.0f` Kelvin floor:
-                // values within 300 of the background (0) are dropped, keeping
-                // only voxels hotter than ~300K.
-                openvdb::tools::copyFromDense(dense, *temp_grid, /*tolerance*/ 300.0f);
+                // Temperature was already scaled to Kelvin by the live bridge.
+                // Keep near-zero heat just like sampleDenseGasFloat; the old
+                // 300 K cutoff produced bright/grey cell-sized emission rims.
+                openvdb::tools::copyFromDense(dense, *temp_grid, /*tolerance*/ 1.0e-3f);
             }
             temp_grid->setTransform(density_grid->transform().copy());
             auto t_handle = nanovdb::tools::createNanoGrid(*temp_grid);
@@ -980,6 +989,74 @@ uint32_t VDBVolumeManager::getContentVersion(int volume_id) const {
     int idx = findVolumeIndex(volume_id);
     if (idx < 0) return 0;
     return volumes[idx].content_version;
+}
+
+void VDBVolumeManager::setLiveDenseGpuFields(
+    int volume_id,
+    uint64_t density_address,
+    uint64_t temperature_address,
+    uint64_t fuel_address,
+    uint64_t flame_address,
+    int res_x, int res_y, int res_z,
+    float origin_x, float origin_y, float origin_z,
+    float voxel_size,
+    uint64_t version,
+    bool content_active,
+    const int active_min[3],
+    const int active_max[3]) {
+    VDBVolumeData* volume = getVolume(volume_id);
+    if (!volume) return;
+    volume->dense_density_address = density_address;
+    volume->dense_temperature_address = temperature_address;
+    volume->dense_fuel_address = fuel_address;
+    volume->dense_flame_address = flame_address;
+    volume->dense_resolution[0] = res_x;
+    volume->dense_resolution[1] = res_y;
+    volume->dense_resolution[2] = res_z;
+    volume->dense_origin[0] = origin_x;
+    volume->dense_origin[1] = origin_y;
+    volume->dense_origin[2] = origin_z;
+    volume->dense_voxel_size = voxel_size;
+    volume->dense_version = version;
+    volume->dense_content_active = content_active;
+    for (int axis = 0; axis < 3; ++axis) {
+        volume->dense_active_min[axis] = active_min ? active_min[axis] : 0;
+        volume->dense_active_max[axis] = active_max ? active_max[axis] : -1;
+    }
+}
+
+void VDBVolumeManager::clearLiveDenseGpuFields(int volume_id) {
+    VDBVolumeData* volume = getVolume(volume_id);
+    if (!volume) return;
+    volume->dense_density_address = 0;
+    volume->dense_temperature_address = 0;
+    volume->dense_fuel_address = 0;
+    volume->dense_flame_address = 0;
+    volume->dense_resolution[0] = 0;
+    volume->dense_resolution[1] = 0;
+    volume->dense_resolution[2] = 0;
+    volume->dense_origin[0] = 0.0f;
+    volume->dense_origin[1] = 0.0f;
+    volume->dense_origin[2] = 0.0f;
+    volume->dense_voxel_size = 0.0f;
+    volume->dense_version = 0;
+    volume->dense_content_active = false;
+    volume->dense_active_min[0] = volume->dense_active_min[1] =
+        volume->dense_active_min[2] = 0;
+    volume->dense_active_max[0] = volume->dense_active_max[1] =
+        volume->dense_active_max[2] = -1;
+}
+
+void VDBVolumeManager::setLiveDenseContentActive(int volume_id, bool active) {
+    VDBVolumeData* volume = getVolume(volume_id);
+    if (!volume) return;
+    volume->dense_content_active = active;
+    if (!active) {
+        volume->dense_active_min[0] = volume->dense_active_min[1] =
+            volume->dense_active_min[2] = 0;
+        volume->dense_active_max[0] = volume->dense_active_max[1] =
+            volume->dense_active_max[2] = -1;
+    }
 }
 
 float VDBVolumeManager::sampleDensityCPU(int volume_id, float x, float y, float z) const {

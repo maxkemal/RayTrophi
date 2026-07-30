@@ -5143,7 +5143,8 @@ namespace TerrainNodesV2 {
         void applyFoliageAssetRefSettings(const FoliageLayerNode::AssetRef& ref,
                                           ScatterSource& source) {
             FoliageAssets::configurePlacement(source, ref.targetHeight, ref.heightVariation,
-                                              ref.alignToNormal, ref.normalInfluence);
+                                              ref.alignToNormal, ref.normalInfluence,
+                                              ref.yOffsetMin, ref.yOffsetMax);
             source.weight = (std::max)(0.0f, ref.weight);
         }
 
@@ -5158,6 +5159,8 @@ namespace TerrainNodesV2 {
                 ref.weight = source.weight;
                 ref.alignToNormal = source.settings.align_to_normal;
                 ref.normalInfluence = source.settings.normal_influence;
+                ref.yOffsetMin = source.settings.y_offset_min;
+                ref.yOffsetMax = source.settings.y_offset_max;
                 if (source.has_local_bbox) {
                     const float sourceHeight = source.local_bbox.max.y - source.local_bbox.min.y;
                     const float scaleMin = source.settings.scale_min;
@@ -5229,6 +5232,7 @@ namespace TerrainNodesV2 {
             layer.maximumSlopeDegrees = settings.slope_max;
             layer.minimumHeight = settings.height_min;
             layer.maximumHeight = settings.height_max;
+            layer.edgeMargin = settings.edge_margin;
             layer.densityField = settings.density_mask_attribute;
             layer.exclusionField = settings.exclusion_mask_attribute;
             layer.exclusionThreshold = settings.exclusion_threshold;
@@ -5246,6 +5250,7 @@ namespace TerrainNodesV2 {
             settings.slope_max = clampValue(layer.maximumSlopeDegrees, 0.0f, 90.0f);
             settings.height_min = (std::min)(layer.minimumHeight, layer.maximumHeight);
             settings.height_max = (std::max)(layer.minimumHeight, layer.maximumHeight);
+            settings.edge_margin = clampValue(layer.edgeMargin, -1.0f, 100000.0f);
             settings.density_mask_attribute = layer.densityField;
             settings.exclusion_mask_attribute = layer.exclusionField;
             settings.exclusion_threshold = clampValue(layer.exclusionThreshold, 0.0f, 1.0f);
@@ -5288,7 +5293,9 @@ namespace TerrainNodesV2 {
                 {"targetHeight", (std::max)(0.0f, asset.targetHeight)},
                 {"heightVariation", clampValue(asset.heightVariation, 0.0f, 0.95f)},
                 {"alignToNormal", asset.alignToNormal},
-                {"normalInfluence", clampValue(asset.normalInfluence, 0.0f, 1.0f)}
+                {"normalInfluence", clampValue(asset.normalInfluence, 0.0f, 1.0f)},
+                {"yOffsetMin", asset.yOffsetMin},
+                {"yOffsetMax", asset.yOffsetMax}
             });
         }
         const std::string resolvedGroupName = instanceGroupName.empty()
@@ -5310,6 +5317,7 @@ namespace TerrainNodesV2 {
             {"maximumSlopeDegrees", maximumSlopeDegrees},
             {"minimumHeight", minimumHeight},
             {"maximumHeight", maximumHeight},
+            {"edgeMargin", edgeMargin},
             {"densityField", densityField},
             {"exclusionField", exclusionField},
             {"exclusionThreshold", exclusionThreshold},
@@ -5472,6 +5480,10 @@ namespace TerrainNodesV2 {
                         asset.heightVariation = static_cast<float>(variationPercent) * 0.01f;
                         edited = true;
                     }
+                    ImGui::SetNextItemWidth(135.0f);
+                    edited |= ImGui::DragFloatRange2("Y-Off", &asset.yOffsetMin, &asset.yOffsetMax,
+                                                     0.01f, -10000.0f, 10000.0f,
+                                                     "Min %.2f m", "Max %.2f m");
                     if (ImGui::Checkbox("Follow Slope", &asset.alignToNormal)) {
                         if (asset.alignToNormal && asset.normalInfluence <= 0.0f) {
                             asset.normalInfluence = 1.0f;
@@ -5505,6 +5517,13 @@ namespace TerrainNodesV2 {
         edited |= ImGui::SliderFloat("Max Slope", &maximumSlopeDegrees, 0.0f, 90.0f, "%.1f deg");
         edited |= ImGui::DragFloatRange2("Height", &minimumHeight, &maximumHeight,
                                         0.25f, -100000.0f, 100000.0f, "Min %.2f", "Max %.2f");
+        edited |= ImGui::DragFloat("Edge Margin", &edgeMargin, 0.25f, -1.0f, 100000.0f,
+                                   edgeMargin < 0.0f ? "Auto (2 cells)" : "%.2f m");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("Keep-out band from the terrain border.\n"
+                              "-1 = Auto (two heightmap cells), 0 = off.\n"
+                              "Prevents instances lining the edge-falloff rim at y=0.");
+        }
         ImGui::SeparatorText("Named Fields");
         edited |= drawFoliageFieldPicker("Density Field", densityField);
         edited |= drawFoliageFieldPicker("Exclusion Field", exclusionField);
@@ -5567,7 +5586,9 @@ namespace TerrainNodesV2 {
                 {"targetHeight", asset.targetHeight},
                 {"heightVariation", asset.heightVariation},
                 {"alignToNormal", asset.alignToNormal},
-                {"normalInfluence", asset.normalInfluence}
+                {"normalInfluence", asset.normalInfluence},
+                {"yOffsetMin", asset.yOffsetMin},
+                {"yOffsetMax", asset.yOffsetMax}
             });
         }
         j["settingsCaptured"] = settingsCaptured;
@@ -5579,6 +5600,7 @@ namespace TerrainNodesV2 {
         j["maximumSlopeDegrees"] = maximumSlopeDegrees;
         j["minimumHeight"] = minimumHeight;
         j["maximumHeight"] = maximumHeight;
+        j["edgeMargin"] = edgeMargin;
         j["densityField"] = densityField;
         j["exclusionField"] = exclusionField;
         j["exclusionThreshold"] = exclusionThreshold;
@@ -5605,6 +5627,8 @@ namespace TerrainNodesV2 {
                 ref.heightVariation = clampValue(item.value("heightVariation", 0.15f), 0.0f, 0.95f);
                 ref.alignToNormal = item.value("alignToNormal", false);
                 ref.normalInfluence = clampValue(item.value("normalInfluence", 0.0f), 0.0f, 1.0f);
+                ref.yOffsetMin = clampValue(item.value("yOffsetMin", 0.0f), -10000.0f, 10000.0f);
+                ref.yOffsetMax = clampValue(item.value("yOffsetMax", 0.0f), -10000.0f, 10000.0f);
                 if (!ref.relativeEntryPath.empty()) assetSources.push_back(std::move(ref));
             }
         }
@@ -5618,6 +5642,7 @@ namespace TerrainNodesV2 {
         minimumHeight = j.value("minimumHeight", minimumHeight);
         maximumHeight = j.value("maximumHeight", maximumHeight);
         if (minimumHeight > maximumHeight) std::swap(minimumHeight, maximumHeight);
+        edgeMargin = clampValue(j.value("edgeMargin", edgeMargin), -1.0f, 100000.0f);
         densityField = j.value("densityField", std::string{});
         exclusionField = j.value("exclusionField", std::string{});
         exclusionThreshold = clampValue(j.value("exclusionThreshold", exclusionThreshold), 0.0f, 1.0f);
@@ -5745,6 +5770,8 @@ namespace TerrainNodesV2 {
                     ref.heightVariation = clampValue(asset.value("heightVariation", 0.15f), 0.0f, 0.95f);
                     ref.alignToNormal = asset.value("alignToNormal", false);
                     ref.normalInfluence = clampValue(asset.value("normalInfluence", 0.0f), 0.0f, 1.0f);
+                    ref.yOffsetMin = clampValue(asset.value("yOffsetMin", 0.0f), -10000.0f, 10000.0f);
+                    ref.yOffsetMax = clampValue(asset.value("yOffsetMax", 0.0f), -10000.0f, 10000.0f);
                     if (!ref.relativeEntryPath.empty()) sharedBinding.push_back(std::move(ref));
                 }
                 if (!synchronizeFoliageLibrarySources(sharedBinding, *group)) ++lastMissingAssetCount;
@@ -5764,6 +5791,7 @@ namespace TerrainNodesV2 {
                 settings.height_min = layer.value("minimumHeight", settings.height_min);
                 settings.height_max = layer.value("maximumHeight", settings.height_max);
                 if (settings.height_min > settings.height_max) std::swap(settings.height_min, settings.height_max);
+                settings.edge_margin = clampValue(layer.value("edgeMargin", settings.edge_margin), -1.0f, 100000.0f);
                 settings.density_mask_attribute = layer.value("densityField", std::string{});
                 settings.exclusion_mask_attribute = layer.value("exclusionField", std::string{});
                 settings.exclusion_threshold = clampValue(layer.value("exclusionThreshold", settings.exclusion_threshold), 0.0f, 1.0f);

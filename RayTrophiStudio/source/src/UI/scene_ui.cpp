@@ -52,6 +52,7 @@
 #include "scene_ui_animgraph.hpp" // Animation Graph Editor
 #include "scene_ui_gas.hpp"     // Gas Simulation panel
 #include "scene_ui_forcefield.hpp" // Force Field panel
+#include "UI/scene_ui_volume_performance.hpp"
 #include "ParallelBVHNode.h"
 #include "Triangle.h"  // For object hierarchy
 #include "HittableInstance.h"
@@ -1674,6 +1675,8 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         UIWidgets::EndSection();
     }
 
+    DrawVolumePerformancePanel(ctx);
+
     if (UIWidgets::BeginSection("Light Transport & Denoise", ImVec4(0.95f, 0.68f, 0.34f, 1.0f))) {
         UIWidgets::ColoredHeader("Light Paths", ImVec4(1.0f, 0.88f, 0.54f, 1.0f));
         ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 1, 64);
@@ -1725,6 +1728,13 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         UIWidgets::Divider();
         UIWidgets::ColoredHeader("Debug Visualizer (Vulkan RT)", ImVec4(1.0f, 0.62f, 0.42f, 1.0f));
         {
+            ImGui::Checkbox(
+                "Volume Metrics Overlay##volumeperf",
+                &ctx.render_settings.volume_metrics_overlay);
+            UIWidgets::HelpMarker(
+                "Shows the latest synchronized Volumetrics snapshot in the viewport. "
+                "Capture or reset it under Performance > Volumetrics.");
+
             const char* dv_items[] = {
                 "Off", "Photon Grid (volume)", "Light Shaft Density",
                 "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
@@ -3407,6 +3417,20 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
                        item.simulation_domain_index < static_cast<int>(
                            ctx.scene.particle_systems[static_cast<std::size_t>(item.particle_system_index)]
                                .runtime->gridDomains().size());
+            case SelectableType::ParticleEmitter:
+                if (item.particle_system_index < 0 ||
+                    item.particle_system_index >= static_cast<int>(ctx.scene.particle_systems.size())) {
+                    return false;
+                }
+                if (!ctx.scene.particle_systems[
+                        static_cast<std::size_t>(item.particle_system_index)].runtime) {
+                    return false;
+                }
+                return item.particle_emitter_index >= 0 &&
+                       item.particle_emitter_index < static_cast<int>(
+                           ctx.scene.particle_systems[
+                               static_cast<std::size_t>(item.particle_system_index)]
+                               .runtime->emitters().size());
             case SelectableType::World:
                 return true;
             case SelectableType::None:
@@ -3448,6 +3472,7 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
                    rebound_primary.object_index != ctx.selection.selected.object_index ||
                    rebound_primary.particle_system_index != ctx.selection.selected.particle_system_index ||
                    rebound_primary.simulation_domain_index != ctx.selection.selected.simulation_domain_index ||
+                   rebound_primary.particle_emitter_index != ctx.selection.selected.particle_emitter_index ||
                    rebound_primary.name != ctx.selection.selected.name) {
             ctx.selection.selected = rebound_primary;
             ctx.selection.updatePositionFromSelection();
@@ -3707,40 +3732,20 @@ void SceneUI::draw(UIContext& ctx)
     // --- ANIMATION UPDATE ---
     processAnimations(ctx);
 
-    // --- HAIR FORCE FIELD UPDATE (Global - runs regardless of panel focus) ---
+    // --- HAIR DYNAMICS ENVIRONMENT (Global - runs regardless of panel focus) ---
+    // Publish the current scene force field + time to the hair system ONCE per frame. The
+    // dynamic-hair tick (updateSkinnedGroom / updateRigidDynamicGroom, reached via
+    // updateAllTransforms here and in the animation path) applies this force INSIDE its Verlet
+    // and settles when the field is static. We no longer restyle here separately: the old path
+    // re-applied the force and the transform sync below then overwrote it with a force-less
+    // restyle, so the field only appeared once playback STOPPED. Upload is driven downstream by
+    // the isBVHDirty() check (the dynamics tick raises m_bvhDirty when the field moves hair).
     {
-        static float lastHairForceTime = -999.0f;
-        static bool wasHairPlaying = false;
-        
-        bool isPlaying = timeline.isPlaying();
-        float currentTime = ctx.scene.timeline.current_frame / 24.0f; // Assume 24 FPS
-        bool timeChanged = (currentTime != lastHairForceTime);
-        
-        // Only update if: timeline is playing OR time changed (scrubbing)
         ctx.scene.refreshSimulationForceFieldSnapshot();
         const auto& forceSnapshot = ctx.scene.getSimulationWorld().getForceFieldSnapshot();
-
-        if (!forceSnapshot.empty() &&
-            ctx.renderer.getHairSystem().getGroomNames().size() > 0 &&
-            (isPlaying || timeChanged)) {
-            
-            for (const auto& groomName : ctx.renderer.getHairSystem().getGroomNames()) {
-                ctx.renderer.getHairSystem().restyleGroom(groomName, &forceSnapshot, currentTime);
-            }
-            lastHairForceTime = currentTime;
-            
-            // Rebuild hair BVH and upload to GPU
-            ctx.renderer.getHairSystem().buildBVH(!ctx.renderer.hideInterpolatedHair);
-            ctx.renderer.uploadHairToGPU();
-            ctx.renderer.resetCPUAccumulation();
-        }
-        
-        // If we just stopped playing, mark for one final update
-        if (wasHairPlaying && !isPlaying && ctx.renderer.getHairSystem().getGroomNames().size() > 0) {
-            ctx.renderer.getHairSystem().buildBVH(!ctx.renderer.hideInterpolatedHair);
-            ctx.renderer.uploadHairToGPU();
-        }
-        wasHairPlaying = isPlaying;
+        const float currentTime = ctx.scene.timeline.current_frame / 24.0f; // matches the sim time base
+        ctx.renderer.getHairSystem().setDynamicsEnvironment(
+            forceSnapshot.empty() ? nullptr : &forceSnapshot, currentTime);
     }
 
     drawSelectionGizmos(ctx);
@@ -3776,6 +3781,20 @@ void SceneUI::draw(UIContext& ctx)
     } else if (!render_owns_sim && ctx.scene.anySimulationRuntimeEnabled()) {
         const float rt_dt = std::clamp(io.DeltaTime, 0.0f, 1.0f / 30.0f);
         const bool live_mode = !g_sim_timeline_mode;
+        // Vulkan RT samples live Gas fields directly from the simulation
+        // compute buffers (device addresses, not a copied NanoVDB snapshot).
+        // The interactive renderer may have two asynchronous frame slots still
+        // reading those buffers. Do not let the next simulation step overwrite
+        // them until both RT reads have completed. Queue ordering inside the
+        // simulation compute context alone cannot protect a different render
+        // queue; the old race eventually presented as a pause-independent TDR
+        // during particle-driven explosions.
+        Backend::IBackend* simulationRenderBackend = getSceneUiRenderBackend(ctx);
+        if ((live_mode || timeline.isPlaying()) &&
+            dynamic_cast<Backend::VulkanBackendAdapter*>(
+                simulationRenderBackend) != nullptr) {
+            simulationRenderBackend->waitForCompletion();
+        }
         // Timeline mode (default): play bakes into the cache, scrub restores, a
         // stopped timeline stays frozen. Live mode: continuous free-run preview.
         // ui_editing: while a widget is held (slider drag, etc.) the sim-config
@@ -8638,7 +8657,11 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
         if (vdb) grids = vdb->getAvailableGrids();
         else if (gas) grids = {"density", "fuel", "temperature", "interaction"}; // Standard Gas grids
         
-        if (!grids.empty() && ImGui::BeginCombo("Channel", shader->density.channel.c_str())) {
+        // Live Gas RT consumes fixed dense density/temperature buffers. The old
+        // combo changed only this serialized name, not the bound GPU address.
+        if (gas) {
+            ImGui::TextDisabled("Channel: density (Gas solver)");
+        } else if (!grids.empty() && ImGui::BeginCombo("Channel", shader->density.channel.c_str())) {
             for (const auto& g : grids) {
                 if (ImGui::Selectable(g.c_str(), shader->density.channel == g)) {
                     shader->density.channel = g;
@@ -8649,9 +8672,23 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
         }
         
         if (ImGui::SliderFloat("Multiplier", &shader->density.multiplier, 0.0f, 100.0f)) changed = true;
-        if (ImGui::DragFloatRange2("Remap", &shader->density.remap_low, &shader->density.remap_high, 0.01f, 0.0f, 1.0f)) changed = true;
+        if (ImGui::DragFloatRange2("Remap", &shader->density.remap_low, &shader->density.remap_high, 0.01f, 0.0f, 1.0f)) {
+            shader->density.remap_high = (std::max)(
+                shader->density.remap_high, shader->density.remap_low + 1.0e-4f);
+            changed = true;
+        }
         if (ImGui::SliderFloat("Edge Cutoff", &shader->density.cutoff_threshold, 0.0f, 0.5f)) changed = true;
-        if (ImGui::SliderFloat("Edge Falloff", &shader->density.edge_falloff, 0.0f, 2.0f)) changed = true;
+        if (gas && ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Baked/OptiX sampling uses this value. Vulkan live Gas keeps a\n"
+                "small numerical cutoff so low-density smoke is not erased.");
+        }
+        if (ImGui::SliderFloat("Edge Falloff (CPU)", &shader->density.edge_falloff, 0.0f, 2.0f)) changed = true;
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Currently evaluated by the CPU volume marcher. GPU RT paths\n"
+                "do not yet carry this field in the volume instance ABI.");
+        }
         
         ImGui::Unindent();
         UIWidgets::EndSection();
@@ -8670,7 +8707,9 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             shader->scattering.color = Vec3(col[0], col[1], col[2]);
             changed = true;
         }
-        if (ImGui::DragFloat("Scattering Strength", &shader->scattering.coefficient, 0.1f, 0.0f, 100.0f)) changed = true;
+        if (ImGui::DragFloat("Scattering Coeff (1/unit)", &shader->scattering.coefficient,
+                             0.01f, 0.0f, 100.0f, "%.4f")) changed = true;
+        UIWidgets::HelpMarker("Physical sigma_s per world unit at density 1. It controls extinction and the probability that removed light is scattered rather than absorbed.");
         if (ImGui::SliderFloat("Anisotropy (G)", &shader->scattering.anisotropy, -0.99f, 0.99f)) changed = true;
         
         ImGui::Separator();
@@ -8679,12 +8718,23 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             shader->absorption.color = Vec3(abs_col[0], abs_col[1], abs_col[2]);
             changed = true;
         }
-        if (ImGui::DragFloat("Absorption Coeff", &shader->absorption.coefficient, 0.1f, 0.0f, 100.0f)) changed = true;
+        if (ImGui::DragFloat("Absorption Coeff (1/unit)", &shader->absorption.coefficient,
+                             0.01f, 0.0f, 100.0f, "%.4f")) changed = true;
+        UIWidgets::HelpMarker("Physical sigma_a per world unit at density 1. Absorption Color selects the wavelengths removed by the medium; black preserves legacy neutral/achromatic absorption.");
+
+        const float sigmaTUi = (std::max)(
+            shader->scattering.coefficient + shader->absorption.coefficient,
+            1.0e-6f);
+        const float scatteringAlbedoUi =
+            shader->scattering.coefficient / sigmaTUi;
+        ImGui::TextDisabled("At density 1: mean free path %.4g units, scattering albedo %.3f",
+                            1.0f / sigmaTUi, scatteringAlbedoUi);
         
         if (ImGui::TreeNode("Advanced Scattering")) {
             if (ImGui::SliderFloat("Back Scatter G", &shader->scattering.anisotropy_back, -0.99f, 0.0f)) changed = true;
             if (ImGui::SliderFloat("Lobe Mix", &shader->scattering.lobe_mix, 0.0f, 1.0f)) changed = true;
-            if (ImGui::SliderFloat("Multi-Scatter", &shader->scattering.multi_scatter, 0.0f, 1.0f)) changed = true;
+            if (ImGui::SliderFloat("Multi-Scatter Isotropization", &shader->scattering.multi_scatter, 0.0f, 1.0f)) changed = true;
+            UIWidgets::HelpMarker("Energy-conserving approximation: blends the normalized dual-HG phase toward an isotropic lobe. It is most visible when Forward/Back G are non-zero; with an already isotropic phase it intentionally has little effect.");
             ImGui::TreePop();
         }
         ImGui::Unindent();
@@ -8719,7 +8769,9 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             if (vdb) grids = vdb->getAvailableGrids();
             else if (gas) grids = {"temperature", "fuel", "density"}; 
 
-            if (!grids.empty() && ImGui::BeginCombo("Temp Channel", shader->emission.temperature_channel.c_str())) {
+            if (gas) {
+                ImGui::TextDisabled("Temp Channel: temperature (Gas solver)");
+            } else if (!grids.empty() && ImGui::BeginCombo("Temp Channel", shader->emission.temperature_channel.c_str())) {
                 for (const auto& g : grids) {
                     if (ImGui::Selectable(g.c_str(), shader->emission.temperature_channel == g)) {
                          shader->emission.temperature_channel = g;
@@ -8735,8 +8787,18 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             // Temperature range for color mapping
             ImGui::Separator();
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Temperature Range (K above ambient)");
-            if (ImGui::DragFloat("Temp Min", &shader->emission.temperature_min, 10.0f, 0.0f, 2000.0f, "%.0f K")) changed = true;
-            if (ImGui::DragFloat("Temp Max", &shader->emission.temperature_max, 50.0f, 100.0f, 5000.0f, "%.0f K")) changed = true;
+            if (ImGui::DragFloat("Temp Min", &shader->emission.temperature_min, 10.0f, 0.0f, 2000.0f, "%.0f K")) {
+                shader->emission.temperature_max = (std::max)(
+                    shader->emission.temperature_max,
+                    shader->emission.temperature_min + 1.0f);
+                changed = true;
+            }
+            if (ImGui::DragFloat("Temp Max", &shader->emission.temperature_max, 50.0f, 100.0f, 5000.0f, "%.0f K")) {
+                shader->emission.temperature_max = (std::max)(
+                    shader->emission.temperature_max,
+                    shader->emission.temperature_min + 1.0f);
+                changed = true;
+            }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Fire typically ranges 500-1500K above ambient.\nExplosions can reach 2000-3000K.");
             }

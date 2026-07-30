@@ -54,6 +54,17 @@ layout(set = 0, binding = 11, scalar) readonly buffer HairMaterialSSBO {
 };
 
 void main() {
+    // Same single-trace embedded-solid probe contract as shadow_anyhit. Hair is
+    // normally irrelevant to gas presets, but its SBT any-hit must understand
+    // the sentinel if a volume probe encounters a groom before a triangle.
+    const uint VOLUME_SOLID_PROBE = 0xC17D5EEDu;
+    if (floatBitsToUint(shadowPayload.w) == VOLUME_SOLID_PROBE) {
+        shadowPayload.x = gl_HitTEXT;
+        shadowPayload.w = 0.0;
+        terminateRayEXT;
+        return;
+    }
+
     // ---- CAMERA / BOUNCE / PHOTON RAYS -------------------------------------
     // Since camera rays dropped gl_RayFlagsOpaqueEXT (alpha cutout moved into
     // the triangle any-hit), this shader runs for them too. The shadow logic
