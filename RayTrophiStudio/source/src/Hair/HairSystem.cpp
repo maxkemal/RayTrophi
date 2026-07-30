@@ -11,6 +11,7 @@
 #include "Hair/HairSystem.h"
 #include "SimulationWorld.h"
 #include "Triangle.h"
+#include "TriangleMesh.h"
 #include "Vec3.h"
 #include "Vec2.h"
 
@@ -36,6 +37,35 @@ constexpr float TWO_PI = 2.0f * PI;
 // Random Number Generator (thread-safe)
 // ============================================================================
 
+// Cheap counter-based RNG for the per-child generator.
+//
+// generateChildStrand used ThreadSafeRNG, i.e. a std::mt19937 CONSTRUCTED PER CHILD.
+// Seeding mt19937 initialises 624 words of state — utterly disproportionate for the
+// handful of values a child needs, and the procedural path regenerates every child of
+// every guide on every frame of a skinned animation. This is a PCG-style bijective hash
+// on a counter: same statistical quality for jitter, a few ALU ops, no state to seed.
+//
+// NOTE: this changes the random *sequence*, so the per-child jitter pattern of an
+// existing groom looks different (still stable and deterministic — same seed, same
+// result, in any order, on any thread). Materialized children saved in a project file
+// are loaded from binary and are unaffected.
+class FastChildRNG {
+public:
+    explicit FastChildRNG(uint32_t seed) : m_state(seed * 747796405u + 2891336453u) {}
+
+    float random() {
+        m_state = m_state * 747796405u + 2891336453u;
+        uint32_t w = ((m_state >> ((m_state >> 28u) + 4u)) ^ m_state) * 277803737u;
+        w = (w >> 22u) ^ w;
+        // 24-bit mantissa → [0,1)
+        return (float)(w >> 8) * (1.0f / 16777216.0f);
+    }
+    float random(float lo, float hi) { return lo + (hi - lo) * random(); }
+
+private:
+    uint32_t m_state;
+};
+
 class ThreadSafeRNG {
 public:
     ThreadSafeRNG(uint32_t seed = 42) : gen(seed), dist(0.0f, 1.0f) {}
@@ -49,6 +79,113 @@ private:
     std::mt19937 gen;
     std::uniform_real_distribution<float> dist;
 };
+
+// ============================================================================
+// HairBoundSurface — (flat mesh, face) scalp binding, see HairSystem.h
+// ============================================================================
+
+void HairBoundSurface::clear() {
+    meshes.clear();
+    faceMesh.clear();
+    faceIndex.clear();
+    legacy.clear();
+    invalidateSkinCache();
+}
+
+void HairBoundSurface::build(const std::vector<std::shared_ptr<Triangle>>& tris) {
+    clear();
+    if (tris.empty()) return;
+
+    // Any facade without a parentMesh means this is a pre-flat standalone soup; the
+    // compact form cannot represent it, so keep the whole list as-is.
+    for (const auto& t : tris) {
+        if (!t || !t->parentMesh) { legacy = tris; return; }
+    }
+
+    faceMesh.reserve(tris.size());
+    faceIndex.reserve(tris.size());
+    // Dedup by raw pointer — a groom binds to a handful of sibling meshes at most, so a
+    // linear scan beats a hash map here.
+    std::vector<TriangleMesh*> seen;
+    for (const auto& t : tris) {
+        TriangleMesh* raw = t->parentMesh.get();
+        uint32_t slot = 0;
+        bool found = false;
+        for (uint32_t i = 0; i < (uint32_t)seen.size(); ++i) {
+            if (seen[i] == raw) { slot = i; found = true; break; }
+        }
+        if (!found) {
+            slot = (uint32_t)seen.size();
+            seen.push_back(raw);
+            meshes.push_back(t->parentMesh);
+        }
+        faceMesh.push_back(slot);
+        faceIndex.push_back(t->faceIndex);
+    }
+}
+
+std::vector<std::shared_ptr<TriangleMesh>> HairBoundSurface::lockMeshes() const {
+    std::vector<std::shared_ptr<TriangleMesh>> locked;
+    locked.reserve(meshes.size());
+    for (const auto& w : meshes) locked.push_back(w.lock());
+    return locked;
+}
+
+const Triangle* HairBoundSurface::resolve(const std::vector<std::shared_ptr<TriangleMesh>>& locked,
+                                          size_t i, Triangle& scratch) const {
+    if (!legacy.empty()) {
+        if (i >= legacy.size()) return nullptr;
+        return legacy[i].get();
+    }
+    if (i >= faceIndex.size()) return nullptr;
+    const uint32_t m = faceMesh[i];
+    if (m >= locked.size() || !locked[m]) return nullptr;
+    // Assign the members directly instead of going through the facade constructor: the
+    // constructor also recomputes a bounding box, which nothing on the hair path reads.
+    // Re-assigning parentMesh costs an atomic refcount pair, so skip it while a scan
+    // stays inside one mesh — face slots are laid out in mesh-major blocks.
+    if (scratch.parentMesh.get() != locked[m].get()) scratch.parentMesh = locked[m];
+    scratch.faceIndex = faceIndex[i];
+    return &scratch;
+}
+
+std::vector<std::shared_ptr<Triangle>> HairBoundSurface::materialize() const {
+    if (!legacy.empty()) return legacy;
+    std::vector<std::shared_ptr<Triangle>> out;
+    auto locked = lockMeshes();
+    out.reserve(faceIndex.size());
+    for (size_t i = 0; i < faceIndex.size(); ++i) {
+        const uint32_t m = faceMesh[i];
+        if (m >= locked.size() || !locked[m]) continue;
+        out.push_back(std::make_shared<Triangle>(locked[m], faceIndex[i]));
+    }
+    return out;
+}
+
+bool HairBoundSurface::isAlive() const {
+    if (!legacy.empty()) return true;
+    for (const auto& w : meshes) {
+        if (!w.expired()) return true;
+    }
+    return false;
+}
+
+bool HairBoundSurface::hasSkinData() const {
+    if (m_skinCached) return m_skinCachedValue;
+    bool result = false;
+    if (!legacy.empty()) {
+        result = legacy[0] && legacy[0]->hasSkinData();
+    } else {
+        for (const auto& w : meshes) {
+            if (auto m = w.lock()) {
+                if (m->hasSkinWeights()) { result = true; break; }
+            }
+        }
+    }
+    m_skinCachedValue = result;
+    m_skinCached = true;
+    return result;
+}
 
 // ============================================================================
 // HairSystem Implementation
@@ -147,10 +284,10 @@ void HairSystem::generateOnMesh(
     // but we could explicitly set it if needed (e.g. from a global default).
 
     
-    // Store bound mesh name and initial transform
+    // Store bound mesh name and initial transform. The binding keeps (mesh, face) pairs,
+    // NOT a facade per face — see HairBoundSurface.
     groom.boundMeshName = triangles[0]->getNodeName();
-    groom.boundMeshPtr = triangles[0]; // Cache for transform updates
-    groom.boundTriangles = triangles;  // Store all triangles for skinning lookups
+    groom.bound.build(triangles);
     // Hair is generated in world space, so start with identity transform
     // Store the initial mesh transform for delta calculation when mesh moves
     groom.transform.setIdentity();
@@ -192,6 +329,10 @@ void HairSystem::generateOnMesh(
     const uint32_t guideSeedBase = 12345u + static_cast<uint32_t>(groomName.length());
     groom.guides.assign(params.guideCount, HairStrand{});
 
+    // Skinned scalps must have their rest root captured in BIND space (see the per-strand
+    // branch below). Queried once — it is the same authority updateSkinnedGroom uses.
+    const bool meshSkinned = groom.bound.hasSkinData();
+
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < static_cast<int>(params.guideCount); ++i) {
         ThreadSafeRNG rng(guideSeedBase + static_cast<uint32_t>(i) * 2654435761u);
@@ -214,7 +355,33 @@ void HairSystem::generateOnMesh(
 
         Vec3 normal;
         Vec2 rootUV;
-        Vec3 rootPos = sampleTriangleSurface(*tri, u, v, normal, rootUV);
+        Vec3 rootPos;
+        if (meshSkinned) {
+            // Capture the rest root in the mesh's BIND pose, independent of the frame the
+            // timeline happens to be on when the groom is (re)generated. sampleTriangleSurface
+            // reads getV0()/getN0() — the CURRENT, possibly skinned/posed surface — so if hair
+            // is created while the character is mid-animation, baseRootPos/restGroomedPositions
+            // land in that posed space while updateSkinnedGroom and bakeGroomToRest treat
+            // baseRootPos as the world-BIND root, producing the "hair spawns at the wrong place
+            // depending on which frame the object was on" offset. Rebuild the root from the
+            // original (bind-local) vertices through initialMeshTransform — the exact space
+            // updateSkinnedGroom uses for P0/N0 — so it matches regardless of the current pose.
+            // Barycentric convention (v0*w + v1*u + v2*v) mirrors sampleTriangleSurface exactly.
+            float w = 1.0f - u - v;
+            Vec3 bl = tri->getOriginalVertexPosition(0) * w +
+                      tri->getOriginalVertexPosition(1) * u +
+                      tri->getOriginalVertexPosition(2) * v;
+            Vec3 bn = (tri->getOriginalVertexNormal(0) * w +
+                       tri->getOriginalVertexNormal(1) * u +
+                       tri->getOriginalVertexNormal(2) * v).normalize();
+            rootPos = groom.initialMeshTransform.transform_point(bl);
+            normal  = groom.initialMeshTransform.transform_vector(bn).normalize();
+            Vec2 uv0 = tri->t_ref(0), uv1 = tri->t_ref(1), uv2 = tri->t_ref(2);
+            rootUV = Vec2(uv0.x * w + uv1.x * u + uv2.x * v,
+                          uv0.y * w + uv1.y * u + uv2.y * v);
+        } else {
+            rootPos = sampleTriangleSurface(*tri, u, v, normal, rootUV);
+        }
 
         HairStrand& strand = groom.guides[i];
         strand.strandID = static_cast<uint32_t>(i);
@@ -309,9 +476,9 @@ bool HairSystem::importAlembic(const std::string& filepath, const std::string& g
 void generateChildStrand(HairStrand& child, const HairStrand& guide,
                          uint32_t guideIndex, uint32_t childIndex,
                          const HairGenerationParams& params, uint32_t baseSeed) {
-    ThreadSafeRNG rng(baseSeed
-                      + guideIndex * 2654435761u
-                      + (childIndex + 1u) * 2246822519u);
+    FastChildRNG rng(baseSeed
+                     + guideIndex * 2654435761u
+                     + (childIndex + 1u) * 2246822519u);
 
     child.materialID     = guide.materialID;
     child.meshMaterialID = guide.meshMaterialID;
@@ -394,6 +561,27 @@ void HairSystem::interpolateChildren(HairGroom& groom) {
 
 void HairSystem::buildBVH(bool includeInterpolated) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // DEFERRED — see the declaration. Only the CPU/Embree renderer and brush picking ever
+    // read this scene, but every caller here rebuilds it after any groom change, which on
+    // a skinned animation meant a full Embree rebuild of thousands of curves EVERY FRAME
+    // while Vulkan RT / OptiX did the actual rendering and never touched it. Record the
+    // request; ensureBVH() does the work the first time somebody actually traces a ray.
+    m_bvhIncludeInterpolated = includeInterpolated;
+    m_cpuBvhDirty = true;   // rebuilt lazily, on the first trace that needs it
+    m_bvhDirty    = false;  // the "geometry changed" latch clears here, exactly as before
+}
+
+void HairSystem::ensureBVH() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_cpuBvhDirty && m_embreeScene) return;
+    m_cpuBvhDirty = false;
+    // The BVH is a cache: building it does not change what the object represents, but the
+    // build does touch non-const state (per-groom dirty flags), so the const entry point
+    // drives the non-const impl here rather than making the whole groom map mutable.
+    const_cast<HairSystem*>(this)->buildBVHImpl(m_bvhIncludeInterpolated);
+}
+
+void HairSystem::buildBVHImpl(bool includeInterpolated) {
     // Get Embree device (assuming it's available globally or passed in)
     // For now, we'll create a local device - in production, share with EmbreeBVH
     static RTCDevice embreeDevice = nullptr;
@@ -407,7 +595,12 @@ void HairSystem::buildBVH(bool includeInterpolated) {
     
     m_embreeScene = rtcNewScene(embreeDevice);
     rtcSetSceneFlags(m_embreeScene, RTC_SCENE_FLAG_ROBUST);
-    rtcSetSceneBuildQuality(m_embreeScene, RTC_BUILD_QUALITY_HIGH);
+    // MEDIUM, not HIGH. HIGH buys spatial splits, which pay off for triangles with bad
+    // aspect ratios and very little for curve primitives — but it costs a large multiple
+    // of the build time, and this scene is rebuilt on every groom edit (brush drag runs
+    // it at 15 Hz) even when Vulkan/OptiX is doing the actual rendering and the only
+    // consumer left is brush picking.
+    rtcSetSceneBuildQuality(m_embreeScene, RTC_BUILD_QUALITY_MEDIUM);
     
     // Clear buffers and geom mapping for fresh build
     m_smoothTangents.clear();
@@ -598,9 +791,11 @@ void HairSystem::buildBVH(bool includeInterpolated) {
     }
     
     rtcCommitScene(m_embreeScene);
-    m_bvhDirty = false;
-    
-    // Clear dirty flags for all grooms now that they are in the BVH
+    // Do NOT clear m_bvhDirty here — that latch is the GPU-resync signal and is owned by
+    // buildBVH()/isBVHDirty(). This function only builds the CPU scene; its own staleness
+    // flag (m_cpuBvhDirty) was already cleared by ensureBVH() before calling in.
+
+    // Clear per-groom dirty flags now that they are in the BVH.
     for (auto& [name, groom] : m_grooms) {
         groom.isDirty = false;
     }
@@ -618,6 +813,8 @@ bool HairSystem::intersect(
     HairHitInfo& hitInfo
 ) const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Materialize the deferred CPU BVH — this is the only place it is actually needed.
+    ensureBVH();
     if (!m_embreeScene || m_grooms.empty()) return false;
     
     RTCRayHit rayhit;
@@ -751,6 +948,8 @@ bool HairSystem::intersectVolumetric(
     HairHitInfo& hitInfo
 ) const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Materialize the deferred CPU BVH — this is the only place it is actually needed.
+    ensureBVH();
     if (!m_embreeScene) return false;
 
     float bestMetric = 1e30f;
@@ -869,8 +1068,10 @@ bool HairSystem::occluded(
     float tMax
 ) const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Materialize the deferred CPU BVH — this is the only place it is actually needed.
+    ensureBVH();
     if (!m_embreeScene) return false;
-    
+
     RTCRay ray;
     ray.org_x = rayOrigin.x;
     ray.org_y = rayOrigin.y;
@@ -1158,6 +1359,7 @@ void HairSystem::clearAll() {
         m_embreeScene = nullptr;
     }
     m_bvhDirty = true;
+    m_cpuBvhDirty = true;
 }
 
 void HairSystem::removeGroom(const std::string& name) {
@@ -1302,7 +1504,7 @@ void HairSystem::updateGroomTransform(const std::string& groomName, const Matrix
     
     // [FIX] Skinned grooms handle their own transform (Identity + Vertex Deformation)
     // Applying rigid transform on top would cause Double Transformation.
-    if (!groom.boundTriangles.empty() && groom.boundTriangles[0]->hasSkinData()) return;
+    if (groom.bound.hasSkinData()) return;
     
     // Calculate delta transform: currentTransform * inverse(initialTransform)
     // This gives us the relative movement from when hair was generated
@@ -1326,9 +1528,109 @@ void HairSystem::updateGroomTransform(const std::string& groomName, const Matrix
     }
 }
 
+void HairSystem::updateRigidDynamicGroom(const std::string& groomName, const Matrix4x4& currentMeshTransform) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    auto it = m_grooms.find(groomName);
+    if (it == m_grooms.end()) return;
+    HairGroom& groom = it->second;
+    if (groom.bound.hasSkinData()) return;   // skinned grooms drive themselves elsewhere
+
+    // Per-frame dedup. updateAllTransforms is called more than once per frame (Renderer::
+    // updateAnimationState AND the UI draw), and — unlike the old freeze-on-stop behaviour —
+    // we now KEEP integrating after motion stops (settle), so a plain change-detection gate
+    // would double-integrate on settle frames. m_dynamicsFrame is bumped once per viewport
+    // frame (beginDynamicsFrame); tick at most once per token. When it is 0 (headless/offline
+    // that never calls beginDynamicsFrame) the gate is disabled and the single per-frame call
+    // ticks normally.
+    static std::unordered_map<std::string, uint64_t> s_lastFrame;
+    if (m_dynamicsFrame != 0 && s_lastFrame[groomName] == m_dynamicsFrame) return;
+
+    // World delta from the pose the groom was generated in.
+    const Matrix4x4 delta = currentMeshTransform * groom.initialMeshTransform.inverse();
+
+    static std::unordered_map<std::string, Matrix4x4> s_lastDelta;
+    static std::unordered_map<std::string, int>        s_calm;   // consecutive near-still frames
+    auto lastIt = s_lastDelta.find(groomName);
+    bool moved = (lastIt == s_lastDelta.end());
+    if (!moved) {
+        const Matrix4x4& L = lastIt->second;
+        for (int i = 0; i < 4 && !moved; ++i)
+            for (int j = 0; j < 4 && !moved; ++j)
+                if (std::abs(L.m[i][j] - delta.m[i][j]) > 1e-6f) moved = true;
+    }
+
+    // Force field liveness: a changing force time means the field is animated/simulated, so
+    // keep responding; a static time (field constant, or none) lets the hair damp to the
+    // field's deflected equilibrium and settle. This is the "affected by fields but does not
+    // dominate / does not break the damping" rule — no separate 'is-playing' flag needed.
+    static std::unordered_map<std::string, float> s_lastEnvTime;
+    const bool forceWake = (m_envForce != nullptr) && (s_lastEnvTime[groomName] != m_envTime);
+
+    // Inertia / natural settle with TWO limits so one stubborn strand cannot pin the renderer
+    // in permanent reset-accumulation: (1) the fraction gate in the probe below calls the groom
+    // "still" once all but a tiny handful of strands have stopped, and (2) a hard budget of
+    // frames since the last real drive (object move / live field) force-settles even a slow
+    // limit-cycle. Either condition → stop ticking so the path tracer converges. A live field
+    // (forceWake) refills the budget every frame, so continuous response is never capped — the
+    // cap only bites when nothing is driving the hair yet a straggler keeps jittering.
+    constexpr int kCalmFramesToRest = 6;
+    constexpr int kMaxSettleFrames  = 300;   // ~5s @60fps hard cap on free-swing after a drive
+    static std::unordered_map<std::string, int> s_budget;
+    if (moved) s_lastDelta[groomName] = delta;
+    if (moved || forceWake) { s_calm[groomName] = 0; s_budget[groomName] = kMaxSettleFrames; }
+    else if (s_budget[groomName] > 0) --s_budget[groomName];
+    if ((s_calm[groomName] >= kCalmFramesToRest || s_budget[groomName] <= 0) && !groom.isDirty) {
+        return;   // hair still (few movers) OR swing budget spent → settle, let the render converge
+    }
+    if (m_dynamicsFrame != 0) s_lastFrame[groomName] = m_dynamicsFrame;
+    s_lastEnvTime[groomName] = m_envTime;
+    groom.isDirty = false;
+
+    // Bake the moved rest shape into world-space groomedPositions (the Verlet goal). Each
+    // guide is independent, so parallelise. Baking always from restGroomedPositions (the
+    // fixed rest) keeps this idempotent per frame — no drift.
+    const int guideCount = (int)groom.guides.size();
+    #pragma omp parallel for schedule(static)
+    for (int gi = 0; gi < guideCount; ++gi) {
+        HairStrand& strand = groom.guides[gi];
+        if (strand.restGroomedPositions.size() != strand.groomedPositions.size())
+            strand.restGroomedPositions = strand.groomedPositions;
+        for (size_t i = 0; i < strand.groomedPositions.size(); ++i)
+            strand.groomedPositions[i] = delta.transform_point(strand.restGroomedPositions[i]);
+    }
+
+    // World-space now — the render must NOT re-apply the delta on top (mirrors the skinned
+    // path, which also pins transform to identity). restyleGroom runs the styling + Verlet
+    // integration around the moved goal, so the strands lag and swing with inertia.
+    groom.transform.setIdentity();
+    restyleGroom(groomName, m_envForce, m_envTime);   // apply the scene force field in the Verlet
+    m_bvhDirty = true;
+
+    // Residual-motion probe for the settle gate above: after the Verlet step, prevPositions[p]
+    // holds the pre-step position, so (points[last] - prevPositions[last]) is the tip step this
+    // frame. COUNT how many sampled tips still moved past a per-strand threshold (scales with
+    // hair size) rather than taking the max — so a single lingering strand does not keep the
+    // whole groom "moving". "Still" = at most ~5% of sampled strands moving (the "moving-strand
+    // limit"); that is what lets the accumulation converge while stragglers damp out.
+    int sampled = 0, movers = 0;
+    const int sampleStride = (guideCount > 32) ? (guideCount / 32) : 1;
+    for (int gi = 0; gi < guideCount; gi += sampleStride) {
+        const HairStrand& strand = groom.guides[gi];
+        if (strand.points.size() < 2 || strand.prevPositions.size() != strand.points.size()) continue;
+        ++sampled;
+        const size_t last = strand.points.size() - 1;
+        Vec3 step = strand.points[last].position - strand.prevPositions[last];
+        const float eps = (strand.baseLength > 1e-5f ? strand.baseLength : 1.0f) * 2e-3f; // 0.2%/frame
+        if (Vec3::dot(step, step) > eps * eps) ++movers;
+    }
+    const bool stillThisFrame = (sampled == 0) || (movers * 20 <= sampled);   // <=5% still moving
+    if (stillThisFrame) s_calm[groomName]++;
+    else                s_calm[groomName] = 0;
+}
+
 Vec3 HairSystem::getTransformedPosition(const HairStrand& strand, size_t pointIndex, const Matrix4x4& transform) const {
     if (pointIndex >= strand.points.size()) return Vec3(0, 0, 0);
-    
+
     const Vec3& localPos = strand.points[pointIndex].position;
     return transform.transform_point(localPos);
 }
@@ -1341,52 +1643,111 @@ void HairSystem::markDirty(const std::string& groomName) {
     }
 }
 
+void HairSystem::rebindGroomsToScene(const std::vector<std::shared_ptr<Hittable>>& sceneObjects) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    std::unordered_set<std::string> wanted;
+    for (const auto& [name, groom] : m_grooms) {
+        if (!groom.boundMeshName.empty() && !groom.bound.isAlive()) wanted.insert(groom.boundMeshName);
+    }
+    if (wanted.empty()) return;
+
+    // Rebuild the (mesh, face) binding straight from the scene. Face slots must line up
+    // with what generation produced, because HairStrand::triangleIndex indexes into them:
+    // generation walked every sibling TriangleMesh sharing the node name in scene order
+    // and emitted faces 0..n-1 for each, so we reproduce exactly that walk.
+    std::unordered_map<std::string, HairBoundSurface> rebuilt;
+    for (const auto& obj : sceneObjects) {
+        if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (!tmesh->geometry || !wanted.count(tmesh->nodeName)) continue;
+            HairBoundSurface& bs = rebuilt[tmesh->nodeName];
+            const uint32_t slot = (uint32_t)bs.meshes.size();
+            bs.meshes.push_back(tmesh);
+            const size_t n = tmesh->num_triangles();
+            bs.faceMesh.reserve(bs.faceMesh.size() + n);
+            bs.faceIndex.reserve(bs.faceIndex.size() + n);
+            for (size_t f = 0; f < n; ++f) {
+                bs.faceMesh.push_back(slot);
+                bs.faceIndex.push_back((uint32_t)f);
+            }
+            continue;
+        }
+        // Pre-flat standalone soup (legacy projects).
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            const std::string& n = tri->getNodeName();
+            if (wanted.count(n)) rebuilt[n].legacy.push_back(tri);
+        }
+    }
+
+    for (auto& [name, groom] : m_grooms) {
+        if (groom.boundMeshName.empty() || groom.bound.isAlive()) continue;
+        auto it = rebuilt.find(groom.boundMeshName);
+        if (it == rebuilt.end() || it->second.empty()) continue;
+        groom.bound = it->second;
+        groom.bound.invalidateSkinCache();
+        groom.isDirty = true;
+        m_bvhDirty = true;
+    }
+}
+
+bool HairSystem::regenerateGroom(const std::string& groomName, const HairGenerationParams& params) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    auto it = m_grooms.find(groomName);
+    if (it == m_grooms.end()) return false;
+    // Facades exist only for the duration of this call.
+    const auto tris = it->second.bound.materialize();
+    if (tris.empty()) return false;
+    generateOnMesh(tris, params, groomName);
+    return true;
+}
+
 void HairSystem::updateAllTransforms(const std::vector<std::shared_ptr<Hittable>>& sceneObjects, const std::vector<Matrix4x4>& boneMatrices) {
     if (m_grooms.empty()) return;
 
-    // 1. First pass: Update from cached pointers where possible
-    std::unordered_set<std::string> meshesToFind;
-    for (auto& [name, groom] : m_grooms) {
-        if (groom.boundMeshName.empty()) continue;
-
-        // Check if we have skinning data
-        if (!groom.boundTriangles.empty() && groom.boundTriangles[0]->hasSkinData()) {
-            updateSkinnedGroom(name, boneMatrices);
-            continue; // Skip rigid transform update
-        }
-
-        if (auto mesh = groom.boundMeshPtr.lock()) {
-            // Check if this mesh is actually the one we expect (same name)
-            // This handles cases where mesh objects might be replaced but pointers linger
-            if (mesh->getNodeName() == groom.boundMeshName) {
-                updateFromMeshTransform(groom.boundMeshName, mesh->getTransformMatrix());
-                continue; 
-            }
-        }
-        
-        // If we reach here, we need to find the mesh in sceneObjects
-        meshesToFind.insert(groom.boundMeshName);
+    // Self-heal the scalp bindings first. They are derived from the scene and never
+    // serialized, so after a project reload every groom starts unbound — and the old
+    // fallback scanned world.objects for `Triangle`, which a flat scene has none of, so
+    // hair silently stopped following its mesh. This is a no-op once everything is bound.
+    bool needRebind = false;
+    for (const auto& [name, groom] : m_grooms) {
+        if (!groom.boundMeshName.empty() && !groom.bound.isAlive()) { needRebind = true; break; }
     }
+    if (needRebind) rebindGroomsToScene(sceneObjects);
 
-    if (meshesToFind.empty()) return;
+    for (auto& [name, groom] : m_grooms) {
+        if (groom.boundMeshName.empty() || groom.bound.empty()) continue;
 
-    // 2. Second pass: Scan scene only for grooms that aren't cached yet
-    for (const auto& obj : sceneObjects) {
-        if (meshesToFind.empty()) break; 
+        if (groom.bound.hasSkinData()) {
+            updateSkinnedGroom(name, boneMatrices);
+            continue; // Skinned grooms drive their own positions; no rigid transform on top
+        }
 
-        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (tri) {
-            const std::string& name = tri->getNodeName();
-            auto it = meshesToFind.find(name);
-            if (it != meshesToFind.end()) {
-                // Found it! Cache it for next frame
-                for (auto& [gName, g] : m_grooms) {
-                    if (g.boundMeshName == name) {
-                        g.boundMeshPtr = tri;
-                    }
+        // Rigid: read the scalp's current matrix through a stack facade (slot 0 is enough,
+        // every sibling of a node shares the node transform).
+        auto locked = groom.bound.lockMeshes();
+        Triangle scratch;
+        const Triangle* tri = groom.bound.resolve(locked, 0, scratch);
+        if (!tri) continue;
+        const Matrix4x4 currentXform = tri->getTransformMatrix();
+        if (groom.params.useDynamics) {
+            // Dynamic hair must SWING when the object moves (node/timeline anim, gizmo drag),
+            // not just rigid-follow — otherwise the strands look frozen while the mesh moves.
+            // (Force fields are applied inside its Verlet.)
+            updateRigidDynamicGroom(name, currentXform);
+        } else {
+            updateGroomTransform(name, currentXform);
+            // Non-dynamic hair still bends statically under an active force field (the static
+            // path in restyleGroomImpl keeps the strand local and evaluates the field in world
+            // via groom.transform — no baking). Re-apply only when the field time changes so a
+            // constant/absent field converges instead of restyling every frame.
+            if (m_envForce) {
+                static std::unordered_map<std::string, float> s_lastStaticEnvTime;
+                float& lt = s_lastStaticEnvTime[name];
+                if (lt != m_envTime || groom.isDirty) {
+                    lt = m_envTime;
+                    restyleGroom(name, m_envForce, m_envTime);
+                    m_bvhDirty = true;
                 }
-                updateFromMeshTransform(name, tri->getTransformMatrix());
-                meshesToFind.erase(it);
             }
         }
     }
@@ -1444,6 +1805,11 @@ void HairSystem::addStrandsAtPosition(const std::string& groomName, const Vec3& 
     std::iota(indices.begin(), indices.end(), 0);
     uint32_t currentGuideCount = static_cast<uint32_t>(groom.guides.size());
 
+    // Lock the scalp meshes once for the whole batch; each worker binds its own stack
+    // facade against them (see HairBoundSurface::resolve).
+    const auto boundLocked = groom.bound.lockMeshes();
+    const size_t boundCount = groom.bound.size();
+
     std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
         // Thread-local random generator for thread safety
         thread_local std::mt19937 tl_gen(42 + i + currentGuideCount);
@@ -1478,14 +1844,16 @@ void HairSystem::addStrandsAtPosition(const std::string& groomName, const Vec3& 
         
         // --- SKINNING FIX FOR BRUSH-ADDED STRANDS ---
         // We need barycentric coords and triangle index for skinning to work.
-        // For now, we find the closest triangle in boundTriangles.
+        // For now, we find the closest face in the scalp binding.
         strand.triangleIndex = 0;
         strand.barycentricUV = Vec2(0.33f, 0.33f); // Fallback
         strand.restGroomedPositions = strand.groomedPositions;
-        
+
         float minDistSq = 1e30f;
-        for (size_t tIdx = 0; tIdx < groom.boundTriangles.size(); ++tIdx) {
-            const auto& tri = groom.boundTriangles[tIdx];
+        Triangle scratch;   // one stack facade per worker, rebound per slot
+        for (size_t tIdx = 0; tIdx < boundCount; ++tIdx) {
+            const Triangle* tri = groom.bound.resolve(boundLocked, tIdx, scratch);
+            if (!tri) continue;
             Vec3 cnt = (tri->getV0() + tri->getV1() + tri->getV2()) * 0.333333f;
             Vec3 cntLocal = inverseTransform.transform_point(cnt);
             float distSq = (cntLocal - rootPos).length_squared();
@@ -1659,12 +2027,18 @@ void HairSystem::restyleGroomImpl(const std::string& name,
                 goalPos = goalPos + jitter * (params.frizz * t * strandLength * 0.05f);
             }
 
-            if (!params.useDynamics) {
-                // Static procedural logic
-                if (params.gravity > 0.0f) {
-                    goalPos.y -= t * t * params.gravity * strandLength;
-                }
+            // Gravity droops the GOAL shape in BOTH modes. Dynamic hair used to shape-match
+            // to a gravity-LESS straight rest (gravity was applied only as a tiny per-step
+            // Verlet force that the 10%/step shape-matching immediately cancelled), so it
+            // barely drooped and "weight did nothing" — the core "not physical" complaint.
+            // t*t gives a natural root-anchored bend that grows toward the tip, scaled by the
+            // strand length so it reads consistently across hair sizes.
+            if (params.gravity > 0.0f) {
+                goalPos.y -= t * t * params.gravity * strandLength;
+            }
 
+            if (!params.useDynamics) {
+                // Static: also fold a steady external-force bend into the goal.
                 if (forceSampler && params.forceInfluence > 0.0f) {
                     Vec3 currentWorldPos = groom.transform.transform_point(goalPos);
                     Vec3 force = forceSampler(currentWorldPos, Vec3(0,0,0));
@@ -1672,7 +2046,10 @@ void HairSystem::restyleGroomImpl(const std::string& name,
                 }
                 point.position = goalPos;
             } else {
-                // Physics Dynamics logic (Verlet Integration)
+                // Dynamics: Verlet inertia + damping + transient external forces AROUND the
+                // drooped goal. Gravity is already baked into goalPos (do NOT re-add), so the
+                // strand SETTLES to the drooped shape and the physics adds secondary swing /
+                // inertia / wind response on top.
                 if (initPhysics || p == 0) {
                     point.position = goalPos;
                     strand.prevPositions[p] = goalPos;
@@ -1682,29 +2059,28 @@ void HairSystem::restyleGroomImpl(const std::string& name,
                     float dt = 1.0f / 60.0f; // Fixed timestep for stability
                     float dtSq = dt * dt;
 
-                    Vec3 totalForce(0, 0, 0);
-
-                    // Gravity
-                    if (params.gravity > 0.0f) {
-                        totalForce.y -= params.gravity * 9.81f; // Real gravity scale
-                    }
-
-                    // External Forces
+                    // External force fields as acceleration (velocity-dependent, e.g. wind).
+                    Vec3 accel(0, 0, 0);
                     if (forceSampler && params.forceInfluence > 0.0f) {
                         Vec3 currentWorldPos = groom.transform.transform_point(current);
                         Vec3 vel = (current - prev) / dt;
                         Vec3 force = forceSampler(currentWorldPos, vel);
-                        totalForce = totalForce + force * (params.forceInfluence * 5.0f); // Scaled for dynamics
+                        accel = accel + force * (params.forceInfluence * 5.0f);
                     }
 
-                    // Verlet step
-                    Vec3 nextPos = current + (current - prev) * params.physicsDamping + totalForce * (1.0f / params.physicsMass) * dtSq;
-                    
-                    // --- Shape Matching (Position Based Stiffness) ---
-                    // This is unconditionally stable regardless of mass or timestep
-                    nextPos = nextPos + (goalPos - nextPos) * params.physicsStiffness;
+                    // Verlet: damped velocity + external acceleration.
+                    Vec3 velocity = (current - prev) * params.physicsDamping;
+                    Vec3 nextPos  = current + velocity + accel * dtSq;
 
-                    // --- Surface Collision (Scalp) ---
+                    // Shape restoring toward the drooped goal, divided by mass: HEAVIER hair
+                    // resists the pull, so it deviates/swings more and settles slower. This
+                    // makes physicsMass a real "weight" knob — before, mass only scaled the
+                    // force term, so heavier hair was LESS mobile (backwards).
+                    float restore = params.physicsStiffness / (std::max)(params.physicsMass, 0.05f);
+                    restore = (std::min)(restore, 1.0f);   // clamp for stability
+                    nextPos = nextPos + (goalPos - nextPos) * restore;
+
+                    // --- Surface Collision (Scalp plane at the root) ---
                     Vec3 toPoint = nextPos - strand.points[0].position; // root is points[0]
                     float dotN = Vec3::dot(toPoint, strand.rootNormal);
                     float offset = 0.002f; // 2mm offset from skin
@@ -1712,7 +2088,7 @@ void HairSystem::restyleGroomImpl(const std::string& name,
                          Vec3 correction = strand.rootNormal * (offset - dotN);
                          nextPos = nextPos + correction;
                          // Prevent bounce by adjusting the previous position so velocity into scalp is zero
-                         strand.prevPositions[p] = current + correction; 
+                         strand.prevPositions[p] = current + correction;
                     } else {
                          strand.prevPositions[p] = current;
                     }
@@ -1748,7 +2124,7 @@ void HairSystem::restyleGroomImpl(const std::string& name,
 
     // [FIX] Skinned grooms have their positions updated to current World Space directly.
     // So we must ensure their transform is Identity to prevent double transformation.
-    if (!groom.boundTriangles.empty() && groom.boundTriangles[0]->hasSkinData()) {
+    if (groom.bound.hasSkinData()) {
         groom.transform.setIdentity();
     }
 
@@ -1809,6 +2185,12 @@ void HairSystem::bakeGroomToRest(const std::string& groomName) {
         }
     };
 
+    // Lock the scalp meshes once for the whole loop; the stack facade below is rebound
+    // per strand (see HairBoundSurface::resolve).
+    const auto boundLocked = groom.bound.lockMeshes();
+    const size_t boundCount = groom.bound.size();
+    Triangle boundScratch;
+
     for (auto& strand : groom.guides) {
         if (!strand.groomedPositions.empty()) {
             // Ensure rest capacity
@@ -1817,14 +2199,18 @@ void HairSystem::bakeGroomToRest(const std::string& groomName) {
             }
 
             // Case 1: Skinned Mesh
-            if (!groom.boundTriangles.empty() && strand.triangleIndex < groom.boundTriangles.size()) {
-                const auto& tri = *groom.boundTriangles[strand.triangleIndex];
+            const Triangle* boundTri = (strand.triangleIndex < boundCount)
+                ? groom.bound.resolve(boundLocked, strand.triangleIndex, boundScratch)
+                : nullptr;
+            if (boundTri) {
+                const Triangle& tri = *boundTri;
                 
                 // 1. Calculate Old Frame (Bind Pose)
                 // [FIX] P0 must be World Space at Generation time, so apply Initial Transform
-                Vec3 rawP0 = getPos(tri, strand.barycentricUV.u, strand.barycentricUV.v, true);
                 Vec3 rawN0 = getNorm(tri, strand.barycentricUV.u, strand.barycentricUV.v, true);
-                Vec3 P0 = groom.initialMeshTransform.transform_point(rawP0);
+                // Same bind-frame origin as updateSkinnedGroom — the two must agree or a
+                // bake and the next skinned update disagree about where "rest" lives.
+                Vec3 P0 = strand.baseRootPos;
                 Vec3 N0 = groom.initialMeshTransform.transform_vector(rawN0).normalize();
                 
                 // 2. Calculate New Frame (Current Pose)
@@ -1959,6 +2345,10 @@ nlohmann::json HairSystem::serialize(std::ostream* binaryOut) const {
         if (binaryOut) {
             // Binary Serialization (Fast)
             g["storage"] = "binary";
+            // v2 appends the scalp-binding fields (triangleIndex, barycentricUV) and the
+            // rest pose. Without them a reloaded groom could not skin: it had no idea
+            // which face each guide sat on. Readers without the key fall back to v1.
+            g["binaryVersion"] = 2;
             
             // Record start offset
             std::streampos startPos = binaryOut->tellp();
@@ -1996,6 +2386,15 @@ nlohmann::json HairSystem::serialize(std::ostream* binaryOut) const {
                 if (numGroomed > 0) {
                     binaryOut->write(reinterpret_cast<const char*>(strand.groomedPositions.data()), numGroomed * sizeof(Vec3));
                 }
+
+                // v2: scalp binding + rest pose
+                binaryOut->write(reinterpret_cast<const char*>(&strand.triangleIndex), sizeof(strand.triangleIndex));
+                binaryOut->write(reinterpret_cast<const char*>(&strand.barycentricUV), sizeof(strand.barycentricUV));
+                uint32_t numRest = (uint32_t)strand.restGroomedPositions.size();
+                binaryOut->write(reinterpret_cast<const char*>(&numRest), sizeof(numRest));
+                if (numRest > 0) {
+                    binaryOut->write(reinterpret_cast<const char*>(strand.restGroomedPositions.data()), numRest * sizeof(Vec3));
+                }
             }
 
             // Write Interpolated (Optional - can be regenerated, but saving preserves exact state)
@@ -2029,6 +2428,13 @@ nlohmann::json HairSystem::serialize(std::ostream* binaryOut) const {
                 uint32_t numGroomed = (uint32_t)strand.groomedPositions.size();
                 binaryOut->write(reinterpret_cast<const char*>(&numGroomed), sizeof(numGroomed));
                 if (numGroomed > 0) binaryOut->write(reinterpret_cast<const char*>(strand.groomedPositions.data()), numGroomed * sizeof(Vec3));
+
+                // v2: scalp binding + rest pose
+                binaryOut->write(reinterpret_cast<const char*>(&strand.triangleIndex), sizeof(strand.triangleIndex));
+                binaryOut->write(reinterpret_cast<const char*>(&strand.barycentricUV), sizeof(strand.barycentricUV));
+                uint32_t numRest = (uint32_t)strand.restGroomedPositions.size();
+                binaryOut->write(reinterpret_cast<const char*>(&numRest), sizeof(numRest));
+                if (numRest > 0) binaryOut->write(reinterpret_cast<const char*>(strand.restGroomedPositions.data()), numRest * sizeof(Vec3));
             }
 
             std::streampos endPos = binaryOut->tellp();
@@ -2070,6 +2476,7 @@ void HairSystem::deserialize(const nlohmann::json& j, std::istream* binaryIn) {
             if (g.contains("material")) groom.material = g["material"];
             
             std::string storage = g.value("storage", "json");
+            const int binVersion = g.value("binaryVersion", 1);
 
             if (storage == "binary" && binaryIn) {
                 // Load from binary stream
@@ -2104,6 +2511,21 @@ void HairSystem::deserialize(const nlohmann::json& j, std::istream* binaryIn) {
                     if (numGroomed > 0) {
                         s.groomedPositions.resize(numGroomed);
                         binaryIn->read(reinterpret_cast<char*>(s.groomedPositions.data()), numGroomed * sizeof(Vec3));
+                    }
+
+                    if (binVersion >= 2) {
+                        binaryIn->read(reinterpret_cast<char*>(&s.triangleIndex), sizeof(s.triangleIndex));
+                        binaryIn->read(reinterpret_cast<char*>(&s.barycentricUV), sizeof(s.barycentricUV));
+                        uint32_t numRest;
+                        binaryIn->read(reinterpret_cast<char*>(&numRest), sizeof(numRest));
+                        if (numRest > 0) {
+                            s.restGroomedPositions.resize(numRest);
+                            binaryIn->read(reinterpret_cast<char*>(s.restGroomedPositions.data()), numRest * sizeof(Vec3));
+                        }
+                    } else {
+                        // v1 never stored the binding; the rest pose is the loaded groom pose,
+                        // which is what the pre-v2 runtime effectively used anyway.
+                        s.restGroomedPositions = s.groomedPositions;
                     }
                 };
 

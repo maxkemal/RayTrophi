@@ -1,0 +1,35 @@
+// Bounded one-way fuel combustion for gas domains.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float dt;
+    float ignition_temperature;
+    float burn_rate;
+    float heat_release;
+    float smoke_generation;
+    float flame_decay;
+    float max_temperature;
+} pc;
+
+layout(set=0,binding=0) buffer Fuel        { float fuel[]; };
+layout(set=0,binding=1) buffer Temperature { float temperature[]; };
+layout(set=0,binding=2) buffer Density     { float density[]; };
+layout(set=0,binding=3) buffer Flame       { float flame[]; };
+
+void main(){
+    uint id=gl_GlobalInvocationID.x;
+    uint count=uint(pc.nx*pc.ny*pc.nz);
+    if(id>=count) return;
+    flame[id]*=pc.flame_decay;
+    float f=fuel[id],t=temperature[id];
+    if(f<=1e-5||t<pc.ignition_temperature) return;
+    float burned=min(f,max(0.0,pc.burn_rate)*f*pc.dt);
+    if(burned<=0.0) return;
+    fuel[id]=f-burned;
+    temperature[id]=min(t+pc.heat_release*burned,pc.max_temperature);
+    density[id]+=pc.smoke_generation*burned;
+    float inv_dt=pc.dt>1e-5 ? 1.0/pc.dt : 0.0;
+    flame[id]=min(1.0,flame[id]+burned*inv_dt);
+}

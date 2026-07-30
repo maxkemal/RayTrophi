@@ -160,12 +160,13 @@ Result updateHairGroom(const std::string& groom_name, const HairSettings& settin
     auto& system = g_ctx->renderer.getHairSystem();
     auto* groom = system.getGroom(groom_name);
     if (!groom) return Result::fail("hair groom not found: " + groom_name);
-    const auto triangles = groom->boundTriangles;
-    if (triangles.empty()) return Result::fail("hair groom has no bound mesh triangles: " + groom_name);
     const auto material = groom->material;
     const std::string material_name = groom->materialName;
     const bool old_visible = groom->isVisible;
-    system.generateOnMesh(triangles, toCore(settings), groom_name);
+    // Regenerate straight from the stored (mesh, face) binding — the groom no longer keeps
+    // a Triangle facade per scalp face to hand back here.
+    if (!system.regenerateGroom(groom_name, toCore(settings)))
+        return Result::fail("hair groom has no live bound mesh: " + groom_name);
     groom = system.getGroom(groom_name);
     groom->material = material; groom->materialName = material_name;
     groom->isVisible = visible ? *visible : old_visible;

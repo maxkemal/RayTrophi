@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 
 
@@ -52,6 +53,22 @@ struct VDBVolumeData {
     size_t gpu_temp_buffer_size = 0;
     bool gpu_uploaded = false;
     uint32_t content_version = 1;
+
+    // Live Vulkan-compute dense fields. These addresses belong to the shared
+    // simulation/RT VkDevice and are never owned or freed by this manager.
+    uint64_t dense_density_address = 0;
+    uint64_t dense_temperature_address = 0;
+    uint64_t dense_fuel_address = 0;
+    uint64_t dense_flame_address = 0;
+    int dense_resolution[3] = {0, 0, 0};
+    float dense_origin[3] = {0.0f, 0.0f, 0.0f};
+    float dense_voxel_size = 0.0f;
+    uint64_t dense_version = 0;
+    // Host-side render gate. Keep the live addresses/binding stable while an
+    // empty dense domain is omitted from the Vulkan volume packet.
+    bool dense_content_active = false;
+    int dense_active_min[3] = {0, 0, 0};
+    int dense_active_max[3] = {-1, -1, -1};
     
     // Grid type info
     bool has_density = false;
@@ -129,6 +146,27 @@ public:
     void* getHostTemperatureGrid(int volume_id) const;
     size_t getHostTemperatureGridSize(int volume_id) const;
     uint32_t getContentVersion(int volume_id) const;
+    // Keeps NanoVDB host handles alive while a backend uploads or analyzes
+    // them. Sequence replacement uses the same mutex.
+    std::unique_lock<std::mutex> lockHostGridAccess() const {
+        return std::unique_lock<std::mutex>(host_grid_mutex);
+    }
+    void setLiveDenseGpuFields(int volume_id,
+                               uint64_t density_address,
+                               uint64_t temperature_address,
+                               uint64_t fuel_address,
+                               uint64_t flame_address,
+                               int res_x, int res_y, int res_z,
+                               float origin_x, float origin_y, float origin_z,
+                               float voxel_size,
+                               uint64_t version,
+                               bool content_active,
+                               const int active_min[3],
+                               const int active_max[3]);
+    void clearLiveDenseGpuFields(int volume_id);
+    // Toggle only the content gate while preserving persistent Vulkan buffer
+    // addresses and the stable TLAS/SSBO binding.
+    void setLiveDenseContentActive(int volume_id, bool active);
     
     // CPU Sampling (for CPU renderer)
     float sampleDensityCPU(int volume_id, float x, float y, float z) const;
@@ -155,5 +193,6 @@ private:
     
     // Helper to find volume index by ID
     int findVolumeIndex(int volume_id) const;
+    mutable std::mutex host_grid_mutex;
 };
 

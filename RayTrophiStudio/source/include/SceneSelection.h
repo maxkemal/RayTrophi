@@ -43,6 +43,7 @@ enum class SelectableType {
     ForceField, // Physics Force Field
     ParticleSystem, // Particle simulation object
     SimulationDomain, // Non-renderable grid/domain proxy
+    ParticleEmitter, // Independently transformable runtime emitter proxy
     World       // World/Environment settings
 };
 
@@ -89,6 +90,7 @@ struct SelectableItem {
     int force_field_index = -1;
     int particle_system_index = -1;
     int simulation_domain_index = -1;
+    int particle_emitter_index = -1;
     
     // Transform data (cached for gizmo)
     Vec3 position = Vec3(0, 0, 0);
@@ -118,6 +120,10 @@ struct SelectableItem {
             return particle_system_index == other.particle_system_index &&
                    simulation_domain_index == other.simulation_domain_index;
         }
+        if (type == SelectableType::ParticleEmitter) {
+            return particle_system_index == other.particle_system_index &&
+                   particle_emitter_index == other.particle_emitter_index;
+        }
         return false;
     }
     
@@ -137,6 +143,7 @@ struct SelectableItem {
         force_field_index = -1;
         particle_system_index = -1;
         simulation_domain_index = -1;
+        particle_emitter_index = -1;
         has_cached_aabb = false;
     }
 };
@@ -173,6 +180,7 @@ public:
     void selectForceField(std::shared_ptr<Physics::ForceField> field, int index = -1, const std::string& name = "Force Field");
     void selectParticleSystem(int index, const std::string& name = "Particle System");
     void selectSimulationDomain(int particle_system_index, int domain_index, const std::string& name = "Grid Domain");
+    void selectParticleEmitter(int particle_system_index, int emitter_index, const std::string& name = "Particle Emitter");
     void selectCamera(std::shared_ptr<Camera> camera);
     void selectCameraTarget(std::shared_ptr<Camera> camera);
     void selectWorld();  // Select World/Environment

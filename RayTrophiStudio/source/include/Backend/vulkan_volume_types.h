@@ -72,7 +72,7 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float shadow_strength;      // Self-shadow intensity (maps to vol_shadow_strength)
     
     // ═══════════════════════════ FLAGS & PADDING (16 bytes) ═════════════════
-    int   volume_type;          // 0 = homogeneous, 1 = procedural noise, 2 = 3D texture (future)
+    int   volume_type;          // 0=homogeneous, 1=noise, 2=NanoVDB, 3=cloud, 4=live dense gas
     int   is_active;             // 1 = enabled, 0 = skip
     float voxel_size;           // Voxel size for adaptive stepping
     int   shadow_stride;        // Reuse self-shadow across N primary samples
@@ -101,7 +101,7 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float ramp_colors_g[8];       // stop G components
     float ramp_colors_b[8];       // stop B components
     float pivot_offset[3];        // Pivot correction identical to OptiX
-    int   source_type;            // 0=default/NanoVDB, 3=procedural cloud
+    int   source_type;            // 0=NanoVDB, 3=cloud, 4=surface SDF, 5=live dense gas
     float cloud_coverage;
     float cloud_detail;
     float cloud_erosion;
@@ -110,8 +110,9 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float cloud_offset_x;
     float cloud_offset_z;
     float cloud_seed;
-    // [0..6] = isosurface/foam data. [7..11] = bounded Material Graph
-    // density-noise program (enabled, scale, strength, detail, seed).
+    // [0..6] = isosurface/foam data for source_type 4. For other volume
+    // types [6] stores authored minimum emission temperature. [7..11] =
+    // bounded Material Graph density-noise program.
     float _ext_reserved[12];
 };
 

@@ -1,0 +1,242 @@
+// hair_expand.comp
+// GPU hair expansion: one invocation = one OUTPUT strand (a guide, or one interpolated
+// child of a guide). Reproduces on the GPU exactly what the CPU path did on every frame
+// of a skinned animation:
+//   * generateChildStrand()  (HairSystem.cpp) — deterministic per (guide,child) child geom
+//   * FastChildRNG           (HairSystem.cpp) — PCG-style counter hash
+//   * emitStrand B-spline end-clamp (Renderer.cpp uploadHairToGPU)
+//   * uploadHairStrands adaptive tessellation + LSS-tight AABB (VulkanBackend.cpp)
+// so the ray-tracing side (hair_intersection.rint / hair_closesthit.rchit) is UNCHANGED.
+//
+// WORST-CASE + DEGENERATE-SLOT layout (see the plan): every output strand reserves a
+// FIXED (spansPerStrand * Kmax) segment block, so a thread writes at a deterministic
+// index with NO prefix-sum / atomics. A span whose adaptive rate K < Kmax fills its
+// first K sub-slots with real LSS sub-segments and the rest with degenerate (zero-size)
+// AABBs, which the BVH culls — traversal stays at the adaptive cost, only VRAM is the
+// worst case. The CPU fallback (uploadHairStrands) remains the source of truth for the
+// exact same math; keep the two in sync.
+#version 450
+layout(local_size_x = 64) in;
+
+// Guide control points in the SAME space emitStrand transforms from (i.e. pre-transform,
+// "local"): xyz = position, w = radius. Laid out guide-major: guide g point p at
+// index (guideOffset + g)*pointsPerStrand + p.
+layout(std430, set = 0, binding = 0) readonly buffer GuideBuf { vec4 guidePts[]; };
+
+// Output: matches VulkanRT::HairSegmentGPU (80 bytes) and the .rint's HairSegmentGPU.
+struct HairSegmentGPU {
+    vec4 cp0; vec4 cp1; vec4 cp2; vec4 cp3;   // xyz = pos, w = radius
+    uint strandID; uint groomID; uint materialID; uint padding;
+};
+layout(std430, set = 0, binding = 1) writeonly buffer SegBuf { HairSegmentGPU segs[]; };
+
+// Output: matches VkAabbPositionsKHR (6 floats: min.xyz, max.xyz), tightly packed.
+layout(std430, set = 0, binding = 2) writeonly buffer AabbBuf { float aabb[]; };
+
+layout(push_constant) uniform PC {
+    mat4 transform;      // groom.transform (delta) applied to every emitted point
+    uint guideOffset;    // first guide of this groom in guidePts / global strand index
+    uint guideCount;
+    uint childrenPerGuide;   // 0 => emit guides themselves
+    uint pointsPerStrand;    // P (unclamped guide points)
+    uint Kmax;               // 2^subdivisions ceiling (>=1)
+    uint useBSpline;         // 1 => end-clamp + B-spline; 0 => linear (Kmax forced 1 host-side)
+    uint groomIndex;         // per-segment materialID / groomID
+    uint segmentBase;        // first segment slot for this groom
+    float avgScale;          // radius scale from the transform (matches emitStrand)
+    float childRadius;
+    float clumpiness;
+    float frizz;
+    uint  childBaseSeed;     // 54321 + name.length()
+} pc;
+
+const float PI     = 3.14159265358979323846;
+const float TWO_PI = 6.28318530717958647692;
+
+// ── FastChildRNG (PCG-style counter hash), byte-identical to the C++ version ──────────
+uint  g_rngState;
+void  rngSeed(uint s) { g_rngState = s * 747796405u + 2891336453u; }
+float rngNext() {
+    g_rngState = g_rngState * 747796405u + 2891336453u;
+    uint w = ((g_rngState >> ((g_rngState >> 28u) + 4u)) ^ g_rngState) * 277803737u;
+    w = (w >> 22u) ^ w;
+    return float(w >> 8u) * (1.0 / 16777216.0);   // 24-bit mantissa -> [0,1)
+}
+float rngRange(float lo, float hi) { return lo + (hi - lo) * rngNext(); }
+
+// ── Uniform cubic B-spline basis at t in [0,1] over 4 control points (xyz + radius) ────
+vec4 evalSpan(vec4 c0, vec4 c1, vec4 c2, vec4 c3, float t) {
+    float t2 = t*t, t3 = t2*t, omt = 1.0 - t;
+    float b0 = (omt*omt*omt) / 6.0;
+    float b1 = (3.0*t3 - 6.0*t2 + 4.0) / 6.0;
+    float b2 = (-3.0*t3 + 3.0*t2 + 3.0*t + 1.0) / 6.0;
+    float b3 = t3 / 6.0;
+    return b0*c0 + b1*c1 + b2*c2 + b3*c3;
+}
+
+// ── Adaptive rate for one span — mirrors uploadHairStrands' spanRate() ─────────────────
+uint spanRate(vec4 c0, vec4 c1, vec4 c2, vec4 c3, uint Kmax) {
+    if (Kmax <= 1u) return 1u;
+    vec4 e0 = evalSpan(c0, c1, c2, c3, 0.0);
+    vec4 e1 = evalSpan(c0, c1, c2, c3, 1.0);
+    vec3 axis = e1.xyz - e0.xyz;
+    float axisLenSq = dot(axis, axis);
+    float maxDevSq = 0.0;
+    if (axisLenSq > 1e-20) {
+        float invLenSq = 1.0 / axisLenSq;
+        for (int q = 1; q <= 3; ++q) {
+            vec3 m = evalSpan(c0, c1, c2, c3, 0.25 * float(q)).xyz;
+            vec3 d = m - e0.xyz;
+            float proj = dot(d, axis) * invLenSq;
+            vec3 perp = d - proj * axis;
+            maxDevSq = max(maxDevSq, dot(perp, perp));
+        }
+    }
+    float tol = max((e0.w + e1.w) * 0.5, 1e-6);   // avg endpoint radius (matches C++)
+    float need = sqrt(sqrt(maxDevSq) / tol);
+    uint K = 1u;
+    while (K < Kmax && float(K) < need) K <<= 1u;
+    return K;
+}
+
+// Degenerate segment + AABB written into an unused reserved slot: a zero-length point at
+// the origin. hair_intersection.rint's rounded-cone solve produces no hit for it, and the
+// zero-size AABB is culled by the BVH.
+void writeDegenerate(uint slot, uint strandID) {
+    HairSegmentGPU s;
+    s.cp0 = vec4(0.0); s.cp1 = vec4(0.0); s.cp2 = vec4(0.0); s.cp3 = vec4(0.0);
+    s.strandID = strandID; s.groomID = pc.groomIndex; s.materialID = pc.groomIndex; s.padding = 0u;
+    segs[slot] = s;
+    uint a = slot * 6u;
+    aabb[a+0u]=0.0; aabb[a+1u]=0.0; aabb[a+2u]=0.0;
+    aabb[a+3u]=0.0; aabb[a+4u]=0.0; aabb[a+5u]=0.0;
+}
+
+void writeSeg(uint slot, uint strandID, vec4 cp0, vec4 cp1, vec4 cp2, vec4 cp3) {
+    HairSegmentGPU s;
+    s.cp0 = cp0; s.cp1 = cp1; s.cp2 = cp2; s.cp3 = cp3;
+    s.strandID = strandID; s.groomID = pc.groomIndex; s.materialID = pc.groomIndex; s.padding = 0u;
+    segs[slot] = s;
+
+    // LSS-tight AABB over the two spline endpoints (matches uploadHairStrands exactly).
+    const float inv6 = 1.0 / 6.0;
+    vec3 p0 = (cp0.xyz + 4.0*cp1.xyz + cp2.xyz) * inv6;
+    float r0 = (cp0.w + 4.0*cp1.w + cp2.w) * inv6;
+    vec3 p1 = (cp1.xyz + 4.0*cp2.xyz + cp3.xyz) * inv6;
+    float r1 = (cp1.w + 4.0*cp2.w + cp3.w) * inv6;
+    vec3 mn = min(p0 - r0, p1 - r1);
+    vec3 mx = max(p0 + r0, p1 + r1);
+    uint a = slot * 6u;
+    aabb[a+0u]=mn.x; aabb[a+1u]=mn.y; aabb[a+2u]=mn.z;
+    aabb[a+3u]=mx.x; aabb[a+4u]=mx.y; aabb[a+5u]=mx.z;
+}
+
+const uint MAX_P = 16u;          // pointsPerStrand cap (matches HairGenerationParams usage)
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint kids = max(pc.childrenPerGuide, 1u);
+    uint total = pc.guideCount * kids;
+    if (tid >= total) return;
+
+    uint localGuide = tid / kids;          // guide index within this groom
+    uint childIndex = tid - localGuide * kids;
+    bool isChild = (pc.childrenPerGuide > 0u);
+
+    uint P = min(pc.pointsPerStrand, MAX_P);
+    // guideOffset is a POINT-flat base (grooms may differ in pointsPerStrand, so a global
+    // guide index would not translate to a flat point index).
+    uint gBase = pc.guideOffset + localGuide * pc.pointsPerStrand;
+
+    // strandID feeds per-strand random variation only; groom-local tid plus the groom index
+    // keeps it deterministic and unique across grooms without a running global counter.
+    uint strandID = (pc.groomIndex << 20u) + tid;
+
+    // Build this strand's P local control points (pos + radius).
+    vec4 pts[MAX_P];
+
+    if (!isChild) {
+        for (uint p = 0u; p < P; ++p) pts[p] = guidePts[gBase + p];
+    } else {
+        // generateChildStrand: deterministic per-child RNG, offset, clumpiness, frizz.
+        rngSeed(pc.childBaseSeed + localGuide * 2654435761u + (childIndex + 1u) * 2246822519u);
+        rngNext();                                  // child.randomSeed (consumed, unused here)
+        float childRootRadiusScale = rngRange(0.7, 1.0);   // child.rootRadius scale (unused per-point below)
+        float offsetAngle = rngNext() * TWO_PI;
+        vec3  offset = vec3(cos(offsetAngle) * pc.childRadius, 0.0, sin(offsetAngle) * pc.childRadius);
+        float div = (P > 1u) ? float(P - 1u) : 1.0;
+
+        for (uint p = 0u; p < P; ++p) {
+            vec4 gp = guidePts[gBase + p];
+            float t = float(p) / div;               // v_coord == p/(P-1)  (see restyleGroomImpl)
+            float clump = pc.clumpiness;             // guide.clumpScale == 1.0 default
+            float spread = (clump >= 0.0) ? (1.0 - t*t*clump) : (1.0 + t*t*(-clump));
+            vec3 pos = gp.xyz + offset * spread;
+            if (pc.frizz > 0.0) {
+                vec3 jvec = vec3(rngNext() - 0.5, rngNext() - 0.5, rngNext() - 0.5);
+                pos += jvec * (pc.frizz * t * 0.01);
+            }
+            float rad = gp.w * rngRange(0.7, 1.0);
+            pts[p] = vec4(pos, rad);
+        }
+    }
+
+    // Apply the groom transform + radius scale (emitStrand's addPoint).
+    for (uint p = 0u; p < P; ++p) {
+        vec3 wp = (pc.transform * vec4(pts[p].xyz, 1.0)).xyz;
+        float r = max((pts[p].w > 0.0 ? pts[p].w : 0.002) * pc.avgScale, 1e-5);
+        pts[p] = vec4(wp, r);
+    }
+
+    // End-clamp into the extended array (emitStrand: front x2 + P + back x2 when B-spline).
+    // ext length = P + 4 (B-spline) or P (linear). spansPerStrand below matches host.
+    vec4 ext[20];   // MAX_P (16) + 4
+    uint extN;
+    if (pc.useBSpline != 0u) {
+        ext[0] = pts[0]; ext[1] = pts[0];
+        for (uint p = 0u; p < P; ++p) ext[2u + p] = pts[p];
+        ext[2u + P] = pts[P - 1u]; ext[3u + P] = pts[P - 1u];
+        extN = P + 4u;
+    } else {
+        for (uint p = 0u; p < P; ++p) ext[p] = pts[p];
+        extN = P;
+    }
+
+    uint spans = (extN >= 4u) ? (extN - 3u) : 0u;
+    uint Kmax  = max(pc.Kmax, 1u);
+
+    // Reserved block for this strand: spans*Kmax segments, span-major. spans and Kmax are
+    // the SAME for every strand of a groom (spans depends only on pointsPerStrand), so the
+    // host reserves guideCount*kids*spans*Kmax and this index is collision-free.
+    uint strandSegBase = pc.segmentBase + tid * spans * Kmax;
+
+    for (uint span = 0u; span < spans; ++span) {
+        vec4 c0 = ext[span];
+        vec4 c1 = ext[span + 1u];
+        vec4 c2 = ext[span + 2u];
+        vec4 c3 = ext[span + 3u];
+        uint spanSlot = strandSegBase + span * Kmax;
+
+        uint K = (pc.useBSpline != 0u) ? spanRate(c0, c1, c2, c3, Kmax) : 1u;
+
+        if (K <= 1u) {
+            writeSeg(spanSlot, strandID, c0, c1, c2, c3);
+            for (uint k = 1u; k < Kmax; ++k) writeDegenerate(spanSlot + k, strandID);
+            continue;
+        }
+
+        // Sample the true cubic B-spline at K sub-points; each sub-segment is stored as
+        // collinear evenly-spaced CPs so .rint reproduces curve(0)=prev, curve(1)=cur.
+        vec4 prev = evalSpan(c0, c1, c2, c3, 0.0);
+        for (uint k = 1u; k <= K; ++k) {
+            vec4 cur = evalSpan(c0, c1, c2, c3, float(k) / float(K));
+            vec4 scp1 = prev;
+            vec4 scp2 = cur;
+            vec4 scp0 = 2.0 * prev - cur;
+            vec4 scp3 = 2.0 * cur - prev;
+            writeSeg(spanSlot + (k - 1u), strandID, scp0, scp1, scp2, scp3);
+            prev = cur;
+        }
+        for (uint k = K; k < Kmax; ++k) writeDegenerate(spanSlot + k, strandID);
+    }
+}

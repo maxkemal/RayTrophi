@@ -72,6 +72,11 @@ struct SoftBodyComponent {
     float soft_gravity_factor = 1.0f;
     float soft_mass = 1.0f;             // total mass distributed over the mesh vertices (kg)
     bool  soft_two_sided = true;        // cloth: collide both faces
+    // Jolt's soft body solver only collides vertices against OTHER bodies' shapes
+    // (no internal self-collision), so cloth/soft meshes fold through themselves
+    // without this. When on, a post-step pass pushes apart own vertices closer
+    // than 2*soft_vertex_radius (see JoltWorld::solveSoftBodySelfCollisions).
+    bool  soft_self_collision = false;
     std::vector<SoftPinRegion> soft_pins;
 };
 
@@ -162,6 +167,8 @@ struct RigidBodyObject {
     inline void setSoftMass(float val) { ensureSoftBody(); soft_body->soft_mass = val; }
     inline bool getSoftTwoSided() const { return soft_body ? soft_body->soft_two_sided : true; }
     inline void setSoftTwoSided(bool val) { ensureSoftBody(); soft_body->soft_two_sided = val; }
+    inline bool getSoftSelfCollision() const { return soft_body ? soft_body->soft_self_collision : false; }
+    inline void setSoftSelfCollision(bool val) { ensureSoftBody(); soft_body->soft_self_collision = val; }
 
     const std::vector<SoftPinRegion>& getSoftPins() const;
     std::vector<SoftPinRegion>& getSoftPinsMut();

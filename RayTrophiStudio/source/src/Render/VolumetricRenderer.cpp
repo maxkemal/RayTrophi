@@ -19,6 +19,7 @@
 #include "globals.h"
 #include <cmath>
 #include <algorithm> // For std::min, std::max
+#include <limits>
 #include "AtmosphereLUT.h"
 #include "GodRaysModel.h"
 
@@ -363,6 +364,41 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
 
         GpuVDBVolume gv = {};
         gv.vdb_id = vdb->getVDBVolumeID();
+        const VDBVolumeData* live_data =
+            vulkanRT ? mgr.getVolume(gv.vdb_id) : nullptr;
+        // These are raw Vulkan buffer device addresses owned by the simulation
+        // compute context. They are valid only for the Vulkan RT consumer;
+        // publishing them in the OptiX/CUDA volume packet gives OptiX an address
+        // from a different API/allocator and also keeps a false external
+        // lifetime dependency across Play/Pause.
+        if (live_data) {
+            // A dense volume has no NanoVDB topology for empty-space skipping.
+            // Marching a completely empty AABB is perversely the worst case:
+            // every ray consumes max_steps because opacity never terminates it.
+            // Omit only the packet entry; the TLAS object and live addresses
+            // remain stable, so the backend emits is_active=0 for this slot and
+            // can reactivate it without a geometry rebuild.
+            if (live_data->dense_density_address != 0 &&
+                !live_data->dense_content_active) {
+                continue;
+            }
+            gv.dense_density_address = live_data->dense_density_address;
+            gv.dense_temperature_address = live_data->dense_temperature_address;
+            gv.dense_fuel_address = live_data->dense_fuel_address;
+            gv.dense_flame_address = live_data->dense_flame_address;
+            gv.dense_resolution_x = live_data->dense_resolution[0];
+            gv.dense_resolution_y = live_data->dense_resolution[1];
+            gv.dense_resolution_z = live_data->dense_resolution[2];
+            gv.dense_origin = make_float3(
+                live_data->dense_origin[0],
+                live_data->dense_origin[1],
+                live_data->dense_origin[2]);
+            gv.dense_fields_valid =
+                live_data->dense_density_address != 0 &&
+                live_data->dense_resolution[0] > 0 &&
+                live_data->dense_resolution[1] > 0 &&
+                live_data->dense_resolution[2] > 0;
+        }
         const bool proceduralVolume = vdb->isProceduralVolume();
         
         // PROACTIVE CUDA UPLOAD ON BACKEND SWITCH:
@@ -403,6 +439,59 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         AABB wb = vdb->getWorldBounds();
         gv.world_bbox_min = make_float3(wb.min.x, wb.min.y, wb.min.z);
         gv.world_bbox_max = make_float3(wb.max.x, wb.max.y, wb.max.z);
+
+        if (live_data && live_data->dense_density_address != 0 &&
+            live_data->dense_content_active) {
+            // Dense simulation buffers cover the full allocation, but only a
+            // small part normally contains visible smoke. NanoVDB gets this
+            // optimization from tree topology; live dense Gas needs an explicit
+            // occupied AABB. Pad by one cell for trilinear filtering.
+            int amin[3];
+            int amax[3];
+            for (int axis = 0; axis < 3; ++axis) {
+                amin[axis] = (std::max)(0, live_data->dense_active_min[axis] - 1);
+                amax[axis] = (std::min)(
+                    live_data->dense_resolution[axis] - 1,
+                    live_data->dense_active_max[axis] + 1);
+            }
+            const float h = (std::max)(live_data->dense_voxel_size, 1.0e-6f);
+            const Vec3 activeWorldMin(
+                live_data->dense_origin[0] + static_cast<float>(amin[0]) * h,
+                live_data->dense_origin[1] + static_cast<float>(amin[1]) * h,
+                live_data->dense_origin[2] + static_cast<float>(amin[2]) * h);
+            const Vec3 activeWorldMax(
+                live_data->dense_origin[0] + static_cast<float>(amax[0] + 1) * h,
+                live_data->dense_origin[1] + static_cast<float>(amax[1] + 1) * h,
+                live_data->dense_origin[2] + static_cast<float>(amax[2] + 1) * h);
+
+            Vec3 localMin(
+                std::numeric_limits<float>::max(),
+                std::numeric_limits<float>::max(),
+                std::numeric_limits<float>::max());
+            Vec3 localMax(
+                -std::numeric_limits<float>::max(),
+                -std::numeric_limits<float>::max(),
+                -std::numeric_limits<float>::max());
+            for (int corner = 0; corner < 8; ++corner) {
+                const Vec3 wp(
+                    (corner & 1) ? activeWorldMax.x : activeWorldMin.x,
+                    (corner & 2) ? activeWorldMax.y : activeWorldMin.y,
+                    (corner & 4) ? activeWorldMax.z : activeWorldMin.z);
+                const Vec3 lp = inv.transform_point(wp);
+                localMin.x = (std::min)(localMin.x, lp.x);
+                localMin.y = (std::min)(localMin.y, lp.y);
+                localMin.z = (std::min)(localMin.z, lp.z);
+                localMax.x = (std::max)(localMax.x, lp.x);
+                localMax.y = (std::max)(localMax.y, lp.y);
+                localMax.z = (std::max)(localMax.z, lp.z);
+            }
+            gv.local_bbox_min = make_float3(localMin.x, localMin.y, localMin.z);
+            gv.local_bbox_max = make_float3(localMax.x, localMax.y, localMax.z);
+            gv.world_bbox_min = make_float3(
+                activeWorldMin.x, activeWorldMin.y, activeWorldMin.z);
+            gv.world_bbox_max = make_float3(
+                activeWorldMax.x, activeWorldMax.y, activeWorldMax.z);
+        }
 
         // Pivot offset
         gv.pivot_offset[0] = 0.0f;
@@ -496,7 +585,13 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.density_noise_detail = gs.density_noise_detail;
             gv.density_noise_seed = gs.density_noise_seed;
             gv.voxel_size = renderVoxelSize;
-            gv.max_temperature = 6000.0f; // Default for standard VDBs
+            // Publish the authored range for both color-ramp and blackbody
+            // evaluation. A hard-coded 6000 K made these UI controls appear
+            // ineffective on ordinary VDB assets.
+            gv.emission_pad = shader->emission.temperature_min;
+            gv.max_temperature = (std::max)(
+                shader->emission.temperature_max,
+                shader->emission.temperature_min + 1.0f);
             
             // Color Ramp
             gv.color_ramp_enabled = gs.color_ramp_enabled;

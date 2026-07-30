@@ -131,6 +131,16 @@ public:
     std::vector<Vec3>    solid_vel; // linear velocity of the solid in each solid cell
                                     // (moving colliders); 0 elsewhere. Cell-centered,
                                     // size == solid. Read by advect for momentum transfer.
+    // Lazy, opt-in per-solid-cell gas source rates (density, heat, fuel, flame).
+    // Populated only when a collider enables Gas Interaction.
+    std::vector<float> solid_gas_density;
+    std::vector<float> solid_gas_temperature;
+    std::vector<float> solid_gas_fuel;
+    std::vector<float> solid_gas_flame;
+    std::vector<float> solid_gas_band;
+    std::vector<float> solid_gas_ignition;
+    std::vector<float> solid_gas_fuel_capacity;
+    std::vector<float> solid_gas_burn_rate;
 
     // Variational solid coupling: fractional MAC-FACE open weights (Batty 2007),
     // quantized 0..255 (255 = fully open to fluid, 0 = fully blocked by a solid).
@@ -199,16 +209,20 @@ public:
         size_t cell_count = static_cast<size_t>(nx) * ny * nz;
 
         // Staggered velocity grids
-        vel_x.resize((nx + 1) * ny * nz, 0.0f);
-        vel_y.resize(nx * (ny + 1) * nz, 0.0f);
-        vel_z.resize(nx * ny * (nz + 1), 0.0f);
+        // A grid resize changes the flattened row/slice strides. `resize(n, 0)`
+        // preserves the old prefix, which then gets reinterpreted using the new
+        // nx/ny strides and appears as repeated/mirrored blocks. A layout change
+        // is a fresh simulation field: initialize every channel from scratch.
+        vel_x.assign(static_cast<size_t>(nx + 1) * ny * nz, 0.0f);
+        vel_y.assign(static_cast<size_t>(nx) * (ny + 1) * nz, 0.0f);
+        vel_z.assign(static_cast<size_t>(nx) * ny * (nz + 1), 0.0f);
 
         // Cell-centered scalars
-        density.resize(cell_count, 0.0f);
+        density.assign(cell_count, 0.0f);
         if (allocate_gas_channels) {
-            temperature.resize(cell_count, 0.0f);
-            fuel.resize(cell_count, 0.0f);
-            interaction.resize(cell_count, 0.0f);
+            temperature.assign(cell_count, 0.0f);
+            fuel.assign(cell_count, 0.0f);
+            interaction.assign(cell_count, 0.0f);
         } else {
             // Liquid (APIC) domains never touch the combustion channels — every
             // gas-side consumer already guards with .empty()/size checks. Release
@@ -217,9 +231,24 @@ public:
             std::vector<float>().swap(fuel);
             std::vector<float>().swap(interaction);
         }
-        pressure.resize(cell_count, 0.0f);
-        divergence.resize(cell_count, 0.0f);
-        solid.resize(cell_count, 0);
+        pressure.assign(cell_count, 0.0f);
+        divergence.assign(cell_count, 0.0f);
+        solid.assign(cell_count, 0);
+        // Lazy fields carry layout-dependent indexing too. Release them so
+        // their respective builders recreate them for the new dimensions.
+        std::vector<Vec3>().swap(solid_vel);
+        std::vector<float>().swap(solid_gas_density);
+        std::vector<float>().swap(solid_gas_temperature);
+        std::vector<float>().swap(solid_gas_fuel);
+        std::vector<float>().swap(solid_gas_flame);
+        std::vector<float>().swap(solid_gas_band);
+        std::vector<float>().swap(solid_gas_ignition);
+        std::vector<float>().swap(solid_gas_fuel_capacity);
+        std::vector<float>().swap(solid_gas_burn_rate);
+        std::vector<uint8_t>().swap(u_weight);
+        std::vector<uint8_t>().swap(v_weight);
+        std::vector<uint8_t>().swap(w_weight);
+        std::vector<float>().swap(fluid_phi);
         // A (re)allocation can change the cell count / layout, so the cached
         // collider-voxelization signature is no longer trustworthy — force the
         // next voxelizeCollidersIntoGrid to do a full restamp.
@@ -235,9 +264,14 @@ public:
         tiles_y = (ny + TILE_SIZE - 1) / TILE_SIZE;
         tiles_z = (nz + TILE_SIZE - 1) / TILE_SIZE;
         total_tiles = tiles_x * tiles_y * tiles_z;
-        tile_active_mask.resize(total_tiles, 0);
+        tile_active_mask.assign(total_tiles, 0);
         active_tiles.clear();
         active_tiles.reserve(total_tiles);
+        active_tile_count = 0;
+        collider_voxel_sig = 0;
+        collider_weights_sig = 0;
+        collider_weights_init = false;
+        collider_track_dim[0] = collider_track_dim[1] = collider_track_dim[2] = -1;
     }
     
     void clear() {

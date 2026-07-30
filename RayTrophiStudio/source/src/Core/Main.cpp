@@ -531,6 +531,10 @@ std::atomic<uint64_t> g_scene_geometry_generation{1};
 // ===========================================================================
 bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
 bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
+// A transform refit consumed by the Solid/Matcap raster backend still has to be
+// applied to the inactive RT backend when Rendered mode resumes. Keeping this
+// separate avoids either losing the RT update or refitting raster every idle frame.
+bool g_render_backend_refit_pending = false;
 bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
 bool g_vulkan_device_cc_refit_pending = false; // Slice 4: device-resident CC position-only edit — MODE_UPDATE-refit the BLAS instead of a full rebuild
 bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
@@ -733,6 +737,18 @@ static void shutdownAndResetBackendSafe(const char* reason) {
     } catch (...) {
         SCENE_LOG_WARN(std::string("[Backend] waitForCompletion failed during reset (") +
                        (reason ? reason : "unknown") + ").");
+    }
+    // A Vulkan simulation backend borrows the render backend's VkDevice and
+    // queues. Destroy it while that device is still alive; otherwise switching
+    // Vulkan RT -> OptiX leaves SimulationWorld holding a backend whose next
+    // createBuffer() calls vkCreateBuffer on a dead VkDevice.
+    if (scene.simulation_world.compute().backendType() ==
+        RayTrophiSim::ComputeBackendType::VulkanCompute) {
+        // The live-volume bridge stores raw device addresses borrowed from this
+        // compute backend. Invalidate them while the VkDevice/buffers are still
+        // alive so a later Vulkan RT activation cannot traverse stale addresses.
+        scene.invalidateSimulationDenseGpuAddresses();
+        scene.simulation_world.compute().setBackend(nullptr);
     }
     // These resources live outside g_backend but reference or duplicate its
     // CUDA scene. Release them before destroying the backend/context so CPU
@@ -2742,6 +2758,11 @@ int main(int argc, char* argv[]) try {
 
     SDL_Event e;
     while (!quit) {
+        // One dynamics tick token per viewport frame. updateAllTransforms runs more than once
+        // per frame (animation update + UI draw); this lets rigid-dynamic hair integrate its
+        // Verlet at most once per frame while still settling after the object stops.
+        ray_renderer.getHairSystem().beginDynamicsFrame();
+
         if (!ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
             rtapi::drainMainThreadQueue();
         }
@@ -4877,10 +4898,29 @@ int main(int argc, char* argv[]) try {
 
                         if (g_gas_volumes_dirty) {
                             if (activeViewportBackend && activeViewportBackend == g_backend.get()) {
-                                ray_renderer.updateBackendGasVolumes(scene);
-                                activeViewportBackend->resetAccumulation();
+                                // A particle pool/source can change TLAS topology in
+                                // the same tick that a gas flow source publishes its
+                                // first volume. Do not build the Vulkan volume SSBO
+                                // against the OLD TLAS customIndex order immediately
+                                // before the deferred full rebuild. The rebuild block
+                                // below first creates the final TLAS and then performs
+                                // the volume sync, giving geometry and volume slots one
+                                // atomic publication point.
+                                const bool defer_for_vulkan_topology =
+                                    backendIsVulkan && g_vulkan_rebuild_pending;
+                                if (!defer_for_vulkan_topology) {
+                                    ray_renderer.updateBackendGasVolumes(scene);
+                                    activeViewportBackend->resetAccumulation();
+                                    // Clear only after the RT backend actually consumed
+                                    // the update. In Solid/Matcap the active viewport
+                                    // backend is the raster adapter, not g_backend; the
+                                    // old unconditional clear silently dropped an empty
+                                    // cache-miss frame's dense-content gate. Returning to
+                                    // Vulkan RT then reused the previous active volume
+                                    // SSBO slot and rendered the domain as a black box.
+                                    g_gas_volumes_dirty = false;
+                                }
                             }
-                            g_gas_volumes_dirty = false;
                         }
 
                         static int last_timeline_lut_update_frame = std::numeric_limits<int>::min();
@@ -5049,7 +5089,7 @@ int main(int argc, char* argv[]) try {
                                 static uint64_t s_lastRenderedGeometryGen = 0;
                                 const uint64_t currentGen = g_scene_geometry_generation.load(std::memory_order_acquire);
                                 const bool geometryChangedSinceSolid = (currentGen != s_lastRenderedGeometryGen)
-                                    || g_geometry_dirty || g_materials_dirty || g_texture_pool_dirty || g_gas_volumes_dirty;
+                                    || g_geometry_dirty || g_materials_dirty || g_texture_pool_dirty;
 
                                 auto* vkRenderBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
                                 if (vkRenderBackend != nullptr) {
@@ -5057,8 +5097,6 @@ int main(int argc, char* argv[]) try {
                                         // Geometry changed while in Solid mode — full sync needed
                                         vkRenderBackend->rebuildAccelerationStructure();
                                         vkRenderBackend->updateGeometry(scene.world.objects);
-                                        ui.syncVDBVolumesToGPU(ui_ctx);
-                                        ray_renderer.updateBackendGasVolumes(scene);
                                         ray_renderer.uploadHairToGPU();
                                         ray_renderer.updateBackendMaterials(scene);
                                         syncMaterialBufferToViewportBackend(scene, ray_renderer);
@@ -5066,7 +5104,23 @@ int main(int argc, char* argv[]) try {
                                         g_materials_dirty = false;
                                         g_gas_volumes_dirty = false;
                                         g_texture_pool_dirty = false;
+                                        g_render_backend_refit_pending = false;
+                                    } else if (g_render_backend_refit_pending) {
+                                        // Solid mode already updated the raster
+                                        // transforms, but its consumption of the
+                                        // shared refit request must not leave the
+                                        // inactive Vulkan TLAS at its old poses.
+                                        vkRenderBackend->updateInstanceTransforms(scene.world.objects);
+                                        g_render_backend_refit_pending = false;
                                     }
+                                    // Cached/dense volume bindings can change while
+                                    // Solid owns the viewport without changing mesh
+                                    // topology. Republish them on every transition
+                                    // back to Rendered. This refreshes the volume
+                                    // table but does not force a BLAS/TLAS rebuild.
+                                    ui.syncVDBVolumesToGPU(ui_ctx);
+                                    ray_renderer.updateBackendGasVolumes(scene);
+                                    g_gas_volumes_dirty = false;
                                     // Always sync lightweight state (camera/lights/world may have changed)
                                     if (scene.camera) {
                                         ray_renderer.syncCameraToBackend(*scene.camera);
@@ -5084,8 +5138,12 @@ int main(int argc, char* argv[]) try {
                                         g_optix_rebuild_pending = true;
                                         g_geometry_dirty = false;
                                         g_gas_volumes_dirty = false;
+                                        g_render_backend_refit_pending = false;
                                         // Preserve pending material uploads so the post-rebuild
                                         // g_needs_optix_sync pass refreshes OptiX texture handles.
+                                    } else if (g_render_backend_refit_pending) {
+                                        g_backend->updateInstanceTransforms(scene.world.objects);
+                                        g_render_backend_refit_pending = false;
                                     } else if (g_needs_optix_sync.load(std::memory_order_acquire)) {
                                         (void)syncActiveRenderBackendScene();
                                     } else {
@@ -6319,16 +6377,9 @@ int main(int argc, char* argv[]) try {
              (!interactive_viewport_active && active_vulkan_render_backend && g_hasVulkan && g_backend));
         scene.setDeformRefitActive(deform_refit_path_live);
 
-        // Play → pause: force ONE full backend rebuild on the active GPU renderer.
-        // Water-only playback keeps its bounded topology-stable refit; other
-        // animation may still request one quality rebuild on the pause edge.
-        // During playback the per-frame motion path only REFITS the acceleration
-        // structure (TLAS UPDATE + mesh BLAS refit) — fast, but a refit keeps the
-        // tree topology from the geometry's earlier positions, so after a stretch
-        // of heavy motion (sim, soft/rigid, sculpt) the BVH degrades and every
-        // paused-frame sample traces slowly. The user worked around this by
-        // toggling Solid→Rendered (which rebuilds). Automate that toggle: on the
-        // play→pause edge, rebuild once so the held frame converges at full speed.
+        // Play -> pause quality maintenance. OptiX retains its historical one-shot
+        // rebuild. Vulkan only resets accumulation: a playback-state edge is not a
+        // structural scene change and must not force a full BLAS/TLAS teardown.
         {
             const bool anim_active =
                 ui.timeline.isPlaying() || ui_ctx.render_settings.animation_is_playing;
@@ -6337,8 +6388,23 @@ int main(int argc, char* argv[]) try {
             static bool s_prev_anim_active = false;
             if (s_prev_anim_active && !anim_active && !interactive_viewport_active &&
                 !water_only_animation) {
-                if (active_optix_backend)         g_optix_rebuild_pending = true;
-                else if (active_vulkan_render_backend) g_vulkan_rebuild_pending = true;
+                if (active_optix_backend) {
+                    g_optix_rebuild_pending = true;
+                } else if (active_vulkan_render_backend && g_backend) {
+                    // Do NOT promote a Vulkan playback-state edge to a full scene
+                    // teardown. Particle+gas presets can carry hundreds of particle
+                    // TLAS instances, several source BLASes and a large dense volume;
+                    // rebuilding all of them in one pause frame can trip Windows TDR,
+                    // commonly on the second pause/play cycle.
+                    //
+                    // The final playing frame already synchronized transforms. Real
+                    // source/pool/topology changes independently set
+                    // g_vulkan_rebuild_pending in their structural-change paths.
+                    // If pause-time BVH optimization is needed later, it must be a
+                    // bounded TLAS-only rebuild that preserves every BLAS/buffer.
+                    g_backend->resetAccumulation();
+                    start_render = true;
+                }
             }
             s_prev_anim_active = anim_active;
         }
@@ -6371,6 +6437,10 @@ int main(int argc, char* argv[]) try {
                     // Solid mode: only sync raster instance transforms (no TLAS cost)
                     if (auto* vkBackend = rasterViewportBackend) {
                         vkBackend->syncRasterInstanceTransforms(scene.world.objects);
+                        // Raster consumed the immediate request, but the inactive
+                        // Vulkan/OptiX RT backend still owns stale TLAS matrices.
+                        // Carry that obligation across the viewport-mode boundary.
+                        g_render_backend_refit_pending = true;
                     }
                 } else if (!interactive_viewport_active) {
                     // Rendered mode: full TLAS refit
@@ -6724,6 +6794,7 @@ int main(int argc, char* argv[]) try {
                 g_backend->updateGeometry(scene.world.objects);
                 // Re-sync VDB SSBO after TLAS rebuild so SSBO order matches TLAS customIndex.
                 ui.syncVDBVolumesToGPU(ui_ctx);
+                g_gas_volumes_dirty = false;
                 // Re-upload hair after full BLAS rebuild
                 ray_renderer.uploadHairToGPU();
                 // Upload material SSBO after geometry rebuild

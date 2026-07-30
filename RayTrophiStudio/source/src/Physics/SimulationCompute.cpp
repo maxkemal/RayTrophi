@@ -233,6 +233,11 @@ void* SimulationComputeContext::nativeBufferPtr(ComputeBufferHandle handle) cons
     return backend_->nativeBufferPtr(handle);
 }
 
+uint64_t SimulationComputeContext::bufferDeviceAddress(
+    ComputeBufferHandle handle) const {
+    return backend_->bufferDeviceAddress(handle);
+}
+
 bool SimulationComputeContext::dispatch(const ComputeDispatch& cmd) {
     return backend_->dispatch(cmd);
 }

@@ -819,6 +819,45 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             int closest_domain_system_index = -1;
             int closest_domain_index = -1;
             float closest_domain_t = closest_force_field_t;
+            int closest_emitter_system_index = -1;
+            int closest_emitter_index = -1;
+            float closest_emitter_t = closest_force_field_t;
+
+            for (int system_i = 0;
+                 system_i < static_cast<int>(ctx.scene.particle_systems.size());
+                 ++system_i) {
+                auto& system = ctx.scene.particle_systems[
+                    static_cast<std::size_t>(system_i)];
+                if (!system.visible || !system.runtime) continue;
+                auto& emitters = system.runtime->emitters();
+                for (int emitter_i = 0;
+                     emitter_i < static_cast<int>(emitters.size());
+                     ++emitter_i) {
+                    const auto& emitter =
+                        emitters[static_cast<std::size_t>(emitter_i)];
+                    if (!emitter.enabled ||
+                        emitter.source_mode !=
+                            RayTrophiSim::ParticleEmitterSourceMode::Point) {
+                        continue;
+                    }
+                    const Vec3 oc = r.origin - emitter.point;
+                    const float radius =
+                        std::max(0.18f, emitter.start_size * 3.0f);
+                    const float a = r.direction.dot(r.direction);
+                    const float half_b = oc.dot(r.direction);
+                    const float c = oc.dot(oc) - radius * radius;
+                    const float discriminant = half_b * half_b - a * c;
+                    if (discriminant <= 0.0f) continue;
+                    const float candidate =
+                        (-half_b - std::sqrt(discriminant)) / a;
+                    if (candidate > 0.001f &&
+                        candidate < closest_emitter_t) {
+                        closest_emitter_t = candidate;
+                        closest_emitter_system_index = system_i;
+                        closest_emitter_index = emitter_i;
+                    }
+                }
+            }
 
             auto isNearProjectedDomainEdge = [&](const Vec3& in_min, const Vec3& in_max) -> bool {
                 const Vec3 mn = Vec3::min(in_min, in_max);
@@ -1063,6 +1102,11 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     min_dist = closest_domain_t;
                     found_hit = true;
                 }
+                if (closest_emitter_index >= 0 &&
+                    closest_emitter_t < min_dist) {
+                    min_dist = closest_emitter_t;
+                    found_hit = true;
+                }
 
                 if (found_hit) {
                     min_dist = std::max(min_dist, 0.05f);
@@ -1100,7 +1144,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 closest_domain_t < closest_so_far &&
                 closest_domain_t < closest_camera_t &&
                 closest_domain_t < closest_t &&
-                closest_domain_t < closest_force_field_t) {
+                closest_domain_t < closest_force_field_t &&
+                (closest_emitter_index < 0 ||
+                 closest_domain_t < closest_emitter_t)) {
                 auto& system = ctx.scene.particle_systems[static_cast<std::size_t>(closest_domain_system_index)];
                 auto& domain = system.runtime->gridDomains()[static_cast<std::size_t>(closest_domain_index)];
                 const Vec3 mn = Vec3::min(domain.bounds_min, domain.bounds_max);
@@ -1122,6 +1168,43 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     ctx.selection.selectSimulationDomain(closest_domain_system_index, closest_domain_index, domain.name);
                     ctx.selection.selected.position = item.position;
                     ctx.selection.selected.scale = item.scale;
+                }
+                show_forcefield_tab = true;
+                tab_to_focus = "Simulation";
+                return;
+            }
+
+            if (closest_emitter_index >= 0 &&
+                closest_emitter_t < closest_so_far &&
+                closest_emitter_t < closest_camera_t &&
+                closest_emitter_t < closest_t &&
+                closest_emitter_t < closest_force_field_t &&
+                (closest_domain_index < 0 ||
+                 closest_emitter_t < closest_domain_t)) {
+                auto& system = ctx.scene.particle_systems[
+                    static_cast<std::size_t>(closest_emitter_system_index)];
+                auto& emitter = system.runtime->emitters()[
+                    static_cast<std::size_t>(closest_emitter_index)];
+                SelectableItem item;
+                item.type = SelectableType::ParticleEmitter;
+                item.particle_system_index = closest_emitter_system_index;
+                item.particle_emitter_index = closest_emitter_index;
+                item.name = emitter.name;
+                item.position = emitter.point;
+                ctx.scene.setActiveParticleSystemObject(
+                    static_cast<std::size_t>(closest_emitter_system_index));
+                if (ctrl_held) {
+                    if (ctx.selection.isSelected(item)) {
+                        ctx.selection.removeFromSelection(item);
+                    } else {
+                        ctx.selection.addToSelection(item);
+                    }
+                } else {
+                    ctx.selection.selectParticleEmitter(
+                        closest_emitter_system_index,
+                        closest_emitter_index,
+                        emitter.name);
+                    ctx.selection.selected.position = emitter.point;
                 }
                 show_forcefield_tab = true;
                 tab_to_focus = "Simulation";
@@ -1624,6 +1707,15 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         std::unique(simulation_domains_to_delete.begin(), simulation_domains_to_delete.end()),
         simulation_domains_to_delete.end());
 
+    // Selection drives the domain authoring overlay. Clear it before detaching
+    // the RT volume/compute buffers so no later UI pass in this frame can draw
+    // or manipulate an index whose domain has already been erased. This also
+    // makes hierarchy-context deletion and viewport Del share identical gizmo
+    // lifetime semantics.
+    if (!simulation_domains_to_delete.empty()) {
+        ctx.selection.clearSelection();
+    }
+
     int simulation_domain_deleted_count = 0;
     for (const auto& [system_index, domain_index] : simulation_domains_to_delete) {
         if (system_index < 0 || system_index >= static_cast<int>(ctx.scene.particle_systems.size())) {
@@ -1636,9 +1728,59 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             continue;
         }
         const std::string domain_name = system.runtime->gridDomains()[static_cast<std::size_t>(domain_index)].name;
-        system.runtime->removeGridDomain(static_cast<std::size_t>(domain_index));
-        ++simulation_domain_deleted_count;
-        SCENE_LOG_INFO("Deleted Simulation Domain: " + domain_name);
+        // Domain removal invalidates RT volume and dense-compute device
+        // addresses. Drain the active backend before SceneData detaches and
+        // destroys those resources.
+        extern std::unique_ptr<Backend::IBackend> g_backend;
+        extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+        Backend::IBackend* render_backend = g_backend
+            ? g_backend.get() : ctx.backend_ptr;
+        Backend::IBackend* viewport_backend = g_viewport_backend
+            ? static_cast<Backend::IBackend*>(g_viewport_backend.get())
+            : nullptr;
+        if (render_backend) render_backend->waitForCompletion();
+        if (viewport_backend && viewport_backend != render_backend)
+            viewport_backend->waitForCompletion();
+
+        // Live dense gas/fluid fields publish borrowed VkBuffer device
+        // addresses to Vulkan RT. Rendering is drained above; invalidate those
+        // borrowed views before the owning compute buffers are destroyed.
+        // The remaining domains republish valid addresses on the next render
+        // synchronization.
+        ctx.scene.invalidateSimulationDenseGpuAddresses();
+        bool rebuilt_vulkan_without_domain = false;
+        auto detach_render_consumer = [&]() {
+            auto* vulkan_backend =
+                dynamic_cast<Backend::VulkanBackendAdapter*>(render_backend);
+            if (!vulkan_backend) {
+                return;
+            }
+
+            // Two-phase destruction: rebuild RT topology while the removed
+            // domain's solver buffers are still alive. Only after this callback
+            // returns does SceneData release those buffers. This closes the
+            // old one-frame window where an existing TLAS/descriptor could
+            // still dereference a buffer already destroyed by SimComputeVk.
+            vulkan_backend->rebuildAccelerationStructure();
+            vulkan_backend->updateGeometry(ctx.scene.world.objects);
+            syncVDBVolumesToGPU(ctx);
+            vulkan_backend->resetAccumulation();
+            rebuilt_vulkan_without_domain = true;
+        };
+
+        if (ctx.scene.removeSimulationGridDomain(
+                static_cast<std::size_t>(system_index),
+                static_cast<std::size_t>(domain_index),
+                detach_render_consumer)) {
+            ++simulation_domain_deleted_count;
+            SCENE_LOG_INFO("Deleted Simulation Domain: " + domain_name);
+        }
+        if (rebuilt_vulkan_without_domain) {
+            // SceneData raises this flag conservatively for callers that defer
+            // topology work. This path has already rebuilt atomically above.
+            extern bool g_vulkan_rebuild_pending;
+            g_vulkan_rebuild_pending = false;
+        }
     }
 
     if (simulation_domain_deleted_count > 0) {
@@ -1858,11 +2000,13 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             mesh_ui_cache.end());
         last_scene_obj_count = ctx.scene.world.objects.size();
 
-        // Immediately rebuild the lightweight tri_to_index so viewport picking
-        // keeps working with the stale BVH (no expensive full rebuild needed).
-        rebuildTriToIndex(ctx.scene.world.objects);
-
         if (deleted_objects > 0) {
+            // Only mesh/object deletion changes triangle picking. Particle
+            // systems and simulation domains have no triangle entries; running
+            // this for a domain teardown needlessly touches shared scene caches
+            // during the Vulkan two-phase resource transition.
+            rebuildTriToIndex(ctx.scene.world.objects);
+
             extern bool g_cpu_sync_pending;
             for (const auto& name : deleted_names) {
                 setSelectionObjectVisibility(ctx, name, false);

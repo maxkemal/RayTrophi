@@ -1,0 +1,215 @@
+// sim_grid_maccormack_velocity.comp — limited MacCormack correction for the
+// staggered MAC velocity field.
+//
+// Second pass of a two-dispatch MacCormack advection. sim_grid_advect_velocity
+// has already written v_fwd = A(v, +dt) into fwd_*; this kernel re-traces
+// forward to evaluate A(v_fwd, -dt) inline, applies
+//     v_new = v_fwd + (v - A(v_fwd,-dt)) / 2
+// and clamps each component into the min/max of the eight ORIGINAL face samples
+// the forward backtrace interpolated. Tracing always uses the original field
+// (vel_*), which the forward pass left intact.
+//
+// One invocation covers the same face index in all three arrays, matching how
+// sim_grid_advect_velocity is dispatched (groups sized by the largest array).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float voxel_size;
+    float dt;
+    int boundary; // 0=open, 1=closed, 2=periodic
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer VelX  { float vel_x[]; };
+layout(set = 0, binding = 1) readonly buffer VelY  { float vel_y[]; };
+layout(set = 0, binding = 2) readonly buffer VelZ  { float vel_z[]; };
+layout(set = 0, binding = 3) readonly buffer FwdX  { float fwd_x[]; };
+layout(set = 0, binding = 4) readonly buffer FwdY  { float fwd_y[]; };
+layout(set = 0, binding = 5) readonly buffer FwdZ  { float fwd_z[]; };
+layout(set = 0, binding = 6) buffer          OutX  { float out_x[]; };
+layout(set = 0, binding = 7) buffer          OutY  { float out_y[]; };
+layout(set = 0, binding = 8) buffer          OutZ  { float out_z[]; };
+layout(set = 0, binding = 9) readonly buffer SolidMask { float solid_mask[]; };
+
+bool solid_cell(int i,int j,int k) {
+    if (i<0||i>=pc.nx||j<0||j>=pc.ny||k<0||k>=pc.nz) return false;
+    return solid_mask[i+j*pc.nx+k*pc.nx*pc.ny] > 0.5;
+}
+
+// Clamped index helpers per face array.
+#define FX(f,a,b,c) f[clamp(a,0,pc.nx) + clamp(b,0,pc.ny-1)*(pc.nx+1) + clamp(c,0,pc.nz-1)*(pc.nx+1)*pc.ny]
+#define FY(f,a,b,c) f[clamp(a,0,pc.nx-1) + clamp(b,0,pc.ny)*pc.nx + clamp(c,0,pc.nz-1)*pc.nx*(pc.ny+1)]
+#define FZ(f,a,b,c) f[clamp(a,0,pc.nx-1) + clamp(b,0,pc.ny-1)*pc.nx + clamp(c,0,pc.nz)*pc.nx*pc.ny]
+
+float lerpX(int i0,int j0,int k0,float fx,float fy,float fz,int which){
+    float c00,c10,c01,c11;
+    if (which==0) {
+        c00=mix(FX(vel_x,i0,j0,k0),FX(vel_x,i0+1,j0,k0),fx);
+        c10=mix(FX(vel_x,i0,j0+1,k0),FX(vel_x,i0+1,j0+1,k0),fx);
+        c01=mix(FX(vel_x,i0,j0,k0+1),FX(vel_x,i0+1,j0,k0+1),fx);
+        c11=mix(FX(vel_x,i0,j0+1,k0+1),FX(vel_x,i0+1,j0+1,k0+1),fx);
+    } else {
+        c00=mix(FX(fwd_x,i0,j0,k0),FX(fwd_x,i0+1,j0,k0),fx);
+        c10=mix(FX(fwd_x,i0,j0+1,k0),FX(fwd_x,i0+1,j0+1,k0),fx);
+        c01=mix(FX(fwd_x,i0,j0,k0+1),FX(fwd_x,i0+1,j0,k0+1),fx);
+        c11=mix(FX(fwd_x,i0,j0+1,k0+1),FX(fwd_x,i0+1,j0+1,k0+1),fx);
+    }
+    return mix(mix(c00,c10,fy),mix(c01,c11,fy),fz);
+}
+float lerpY(int i0,int j0,int k0,float fx,float fy,float fz,int which){
+    float c00,c10,c01,c11;
+    if (which==0) {
+        c00=mix(FY(vel_y,i0,j0,k0),FY(vel_y,i0+1,j0,k0),fx);
+        c10=mix(FY(vel_y,i0,j0+1,k0),FY(vel_y,i0+1,j0+1,k0),fx);
+        c01=mix(FY(vel_y,i0,j0,k0+1),FY(vel_y,i0+1,j0,k0+1),fx);
+        c11=mix(FY(vel_y,i0,j0+1,k0+1),FY(vel_y,i0+1,j0+1,k0+1),fx);
+    } else {
+        c00=mix(FY(fwd_y,i0,j0,k0),FY(fwd_y,i0+1,j0,k0),fx);
+        c10=mix(FY(fwd_y,i0,j0+1,k0),FY(fwd_y,i0+1,j0+1,k0),fx);
+        c01=mix(FY(fwd_y,i0,j0,k0+1),FY(fwd_y,i0+1,j0,k0+1),fx);
+        c11=mix(FY(fwd_y,i0,j0+1,k0+1),FY(fwd_y,i0+1,j0+1,k0+1),fx);
+    }
+    return mix(mix(c00,c10,fy),mix(c01,c11,fy),fz);
+}
+float lerpZ(int i0,int j0,int k0,float fx,float fy,float fz,int which){
+    float c00,c10,c01,c11;
+    if (which==0) {
+        c00=mix(FZ(vel_z,i0,j0,k0),FZ(vel_z,i0+1,j0,k0),fx);
+        c10=mix(FZ(vel_z,i0,j0+1,k0),FZ(vel_z,i0+1,j0+1,k0),fx);
+        c01=mix(FZ(vel_z,i0,j0,k0+1),FZ(vel_z,i0+1,j0,k0+1),fx);
+        c11=mix(FZ(vel_z,i0,j0+1,k0+1),FZ(vel_z,i0+1,j0+1,k0+1),fx);
+    } else {
+        c00=mix(FZ(fwd_z,i0,j0,k0),FZ(fwd_z,i0+1,j0,k0),fx);
+        c10=mix(FZ(fwd_z,i0,j0+1,k0),FZ(fwd_z,i0+1,j0+1,k0),fx);
+        c01=mix(FZ(fwd_z,i0,j0,k0+1),FZ(fwd_z,i0+1,j0,k0+1),fx);
+        c11=mix(FZ(fwd_z,i0,j0+1,k0+1),FZ(fwd_z,i0+1,j0+1,k0+1),fx);
+    }
+    return mix(mix(c00,c10,fy),mix(c01,c11,fy),fz);
+}
+
+float sampleVelX(float fi,float fj,float fk){
+    if (pc.boundary==0 &&
+        (fi<0.0||fi>float(pc.nx)||fj<0.0||fj>float(pc.ny-1)||
+         fk<0.0||fk>float(pc.nz-1))) return 0.0;
+    fi=clamp(fi,0.0,float(pc.nx));
+    fj=clamp(fj,0.0,float(pc.ny-1));
+    fk=clamp(fk,0.0,float(pc.nz-1));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    return lerpX(i0,j0,k0,fi-i0,fj-j0,fk-k0,0);
+}
+float sampleVelY(float fi,float fj,float fk){
+    if (pc.boundary==0 &&
+        (fi<0.0||fi>float(pc.nx-1)||fj<0.0||fj>float(pc.ny)||
+         fk<0.0||fk>float(pc.nz-1))) return 0.0;
+    fi=clamp(fi,0.0,float(pc.nx-1));
+    fj=clamp(fj,0.0,float(pc.ny));
+    fk=clamp(fk,0.0,float(pc.nz-1));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    return lerpY(i0,j0,k0,fi-i0,fj-j0,fk-k0,0);
+}
+float sampleVelZ(float fi,float fj,float fk){
+    if (pc.boundary==0 &&
+        (fi<0.0||fi>float(pc.nx-1)||fj<0.0||fj>float(pc.ny-1)||
+         fk<0.0||fk>float(pc.nz))) return 0.0;
+    fi=clamp(fi,0.0,float(pc.nx-1));
+    fj=clamp(fj,0.0,float(pc.ny-1));
+    fk=clamp(fk,0.0,float(pc.nz));
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    return lerpZ(i0,j0,k0,fi-i0,fj-j0,fk-k0,0);
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    float inv_h = pc.voxel_size>1e-6 ? 1.0/pc.voxel_size : 1.0;
+    float s = pc.dt*inv_h;
+
+    int vx_count = (pc.nx+1)*pc.ny*pc.nz;
+    int vy_count = pc.nx*(pc.ny+1)*pc.nz;
+    int vz_count = pc.nx*pc.ny*(pc.nz+1);
+
+    if (id < vx_count) {
+        int plane=(pc.nx+1)*pc.ny, k=id/plane, rem=id-k*plane, j=rem/(pc.nx+1), i=rem-j*(pc.nx+1);
+        if (solid_cell(i-1,j,k)||solid_cell(i,j,k)) { out_x[id]=0.0; }
+        else {
+        float lx=float(i),ly=float(j)+0.5,lz=float(k)+0.5;
+        float vx=sampleVelX(lx,ly-0.5,lz-0.5);
+        float vy=sampleVelY(lx-0.5,ly,lz-0.5);
+        float vz=sampleVelZ(lx-0.5,ly-0.5,lz);
+        float ax=lx+vx*s, ay=ly+vy*s-0.5, az=lz+vz*s-0.5;
+        bool reverseOutside = ax<0.0||ax>float(pc.nx)||
+                              ay<0.0||ay>float(pc.ny-1)||
+                              az<0.0||az>float(pc.nz-1);
+        ax=clamp(ax,0.0,float(pc.nx));
+        ay=clamp(ay,0.0,float(pc.ny-1));
+        az=clamp(az,0.0,float(pc.nz-1));
+        int ai=int(floor(ax)),aj=int(floor(ay)),ak=int(floor(az));
+        float reverse=(pc.boundary==0 && reverseOutside)
+            ? vel_x[id]
+            : lerpX(ai,aj,ak,ax-float(ai),ay-float(aj),az-float(ak),1);
+        float bx=lx-vx*s, by=ly-vy*s-0.5, bz=lz-vz*s-0.5;
+        int bi=int(floor(bx)),bj=int(floor(by)),bk=int(floor(bz));
+        float lo= 3.402823466e+38, hi=-3.402823466e+38;
+        for (int dk=0;dk<=1;++dk) for (int dj=0;dj<=1;++dj) for (int di=0;di<=1;++di) {
+            float v=FX(vel_x,bi+di,bj+dj,bk+dk); lo=min(lo,v); hi=max(hi,v);
+        }
+        out_x[id]=clamp(fwd_x[id]+0.5*(vel_x[id]-reverse),lo,hi);
+        }
+    }
+    if (id < vy_count) {
+        int plane=pc.nx*(pc.ny+1), k=id/plane, rem=id-k*plane, j=rem/pc.nx, i=rem-j*pc.nx;
+        if (solid_cell(i,j-1,k)||solid_cell(i,j,k)) { out_y[id]=0.0; }
+        else {
+        float lx=float(i)+0.5,ly=float(j),lz=float(k)+0.5;
+        float vx=sampleVelX(lx,ly-0.5,lz-0.5);
+        float vy=sampleVelY(lx-0.5,ly,lz-0.5);
+        float vz=sampleVelZ(lx-0.5,ly-0.5,lz);
+        float ax=lx+vx*s-0.5, ay=ly+vy*s, az=lz+vz*s-0.5;
+        bool reverseOutside = ax<0.0||ax>float(pc.nx-1)||
+                              ay<0.0||ay>float(pc.ny)||
+                              az<0.0||az>float(pc.nz-1);
+        ax=clamp(ax,0.0,float(pc.nx-1));
+        ay=clamp(ay,0.0,float(pc.ny));
+        az=clamp(az,0.0,float(pc.nz-1));
+        int ai=int(floor(ax)),aj=int(floor(ay)),ak=int(floor(az));
+        float reverse=(pc.boundary==0 && reverseOutside)
+            ? vel_y[id]
+            : lerpY(ai,aj,ak,ax-float(ai),ay-float(aj),az-float(ak),1);
+        float bx=lx-vx*s-0.5, by=ly-vy*s, bz=lz-vz*s-0.5;
+        int bi=int(floor(bx)),bj=int(floor(by)),bk=int(floor(bz));
+        float lo= 3.402823466e+38, hi=-3.402823466e+38;
+        for (int dk=0;dk<=1;++dk) for (int dj=0;dj<=1;++dj) for (int di=0;di<=1;++di) {
+            float v=FY(vel_y,bi+di,bj+dj,bk+dk); lo=min(lo,v); hi=max(hi,v);
+        }
+        out_y[id]=clamp(fwd_y[id]+0.5*(vel_y[id]-reverse),lo,hi);
+        }
+    }
+    if (id < vz_count) {
+        int plane=pc.nx*pc.ny, k=id/plane, rem=id-k*plane, j=rem/pc.nx, i=rem-j*pc.nx;
+        if (solid_cell(i,j,k-1)||solid_cell(i,j,k)) { out_z[id]=0.0; }
+        else {
+        float lx=float(i)+0.5,ly=float(j)+0.5,lz=float(k);
+        float vx=sampleVelX(lx,ly-0.5,lz-0.5);
+        float vy=sampleVelY(lx-0.5,ly,lz-0.5);
+        float vz=sampleVelZ(lx-0.5,ly-0.5,lz);
+        float ax=lx+vx*s-0.5, ay=ly+vy*s-0.5, az=lz+vz*s;
+        bool reverseOutside = ax<0.0||ax>float(pc.nx-1)||
+                              ay<0.0||ay>float(pc.ny-1)||
+                              az<0.0||az>float(pc.nz);
+        ax=clamp(ax,0.0,float(pc.nx-1));
+        ay=clamp(ay,0.0,float(pc.ny-1));
+        az=clamp(az,0.0,float(pc.nz));
+        int ai=int(floor(ax)),aj=int(floor(ay)),ak=int(floor(az));
+        float reverse=(pc.boundary==0 && reverseOutside)
+            ? vel_z[id]
+            : lerpZ(ai,aj,ak,ax-float(ai),ay-float(aj),az-float(ak),1);
+        float bx=lx-vx*s-0.5, by=ly-vy*s-0.5, bz=lz-vz*s;
+        int bi=int(floor(bx)),bj=int(floor(by)),bk=int(floor(bz));
+        float lo= 3.402823466e+38, hi=-3.402823466e+38;
+        for (int dk=0;dk<=1;++dk) for (int dj=0;dj<=1;++dj) for (int di=0;di<=1;++di) {
+            float v=FZ(vel_z,bi+di,bj+dj,bk+dk); lo=min(lo,v); hi=max(hi,v);
+        }
+        out_z[id]=clamp(fwd_z[id]+0.5*(vel_z[id]-reverse),lo,hi);
+        }
+    }
+}

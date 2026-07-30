@@ -154,6 +154,10 @@ struct APICSolverParams {
     // GPU split-step second call: boundary+viscosity+pressure already done
     // externally; skip to air_drag → velocity_damping → advect → reseed only.
     bool  pressure_g2p_precomputed = false;
+    // Vulkan tail dispatch already applied spray drag, damping, particle
+    // advection and domain/collider boundaries. CPU retains only the
+    // topology-changing reseed/reference fallback.
+    bool  particle_tail_precomputed = false;
 
     // (Legacy GPU split-step — kept for compatibility, no longer used.)
     bool  stop_after_viscosity = false;

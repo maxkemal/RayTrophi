@@ -5723,6 +5723,18 @@ void TerrainManager::updateFoliage(TerrainObject* terrain, OptixWrapper* optix) 
             splatW = splatTex->width;
             splatH = splatTex->height;
         }
+
+        // Border keep-out (two heightmap cells): the procedural edge-falloff lip
+        // pins the outermost rows to the falloff target, which otherwise collects
+        // a line of instances along the terrain rim.
+        const float legacyCellX = terrain->heightmap.scale_xz /
+            (float)(std::max)(1, terrain->heightmap.width - 1);
+        const float legacyCellZ = terrain->heightmap.scale_xz /
+            (float)(std::max)(1, terrain->heightmap.height - 1);
+        const float edgeMarginUV = terrain->heightmap.scale_xz > 1e-6f
+            ? std::clamp(2.0f * (std::max)(legacyCellX, legacyCellZ) /
+                         terrain->heightmap.scale_xz, 0.0f, 0.49f)
+            : 0.0f;
         
         // Structure to hold pre-computed instance data
         struct InstanceData {
@@ -5762,6 +5774,10 @@ void TerrainManager::updateFoliage(TerrainObject* terrain, OptixWrapper* optix) 
                         // Random position on terrain (0..1)
                         float u = dist(rng);
                         float v = dist(rng);
+
+                        if (edgeMarginUV > 0.0f &&
+                            (u < edgeMarginUV || u > 1.0f - edgeMarginUV ||
+                             v < edgeMarginUV || v > 1.0f - edgeMarginUV)) continue;
 
                         // Grid coords for heightmap
                         int gx = (int)(u * (terrain->heightmap.width - 1));

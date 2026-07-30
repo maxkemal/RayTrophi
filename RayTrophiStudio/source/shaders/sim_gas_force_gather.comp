@@ -1,0 +1,55 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz; uint force_count;
+    float dt; float voxel_size; float time_seconds; uint system_mask;
+    vec4 origin;
+} pc;
+
+layout(set=0,binding=0) readonly buffer CellForceX { float force_x[]; };
+layout(set=0,binding=1) readonly buffer CellForceY { float force_y[]; };
+layout(set=0,binding=2) readonly buffer CellForceZ { float force_z[]; };
+layout(set=0,binding=3) buffer VelX { float vel_x[]; };
+layout(set=0,binding=4) buffer VelY { float vel_y[]; };
+layout(set=0,binding=5) buffer VelZ { float vel_z[]; };
+
+uint cellIndex(int x,int y,int z) { return uint(x+y*pc.nx+z*pc.nx*pc.ny); }
+
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+    uint countX=uint((pc.nx+1)*pc.ny*pc.nz);
+    uint countY=uint(pc.nx*(pc.ny+1)*pc.nz);
+    uint countZ=uint(pc.nx*pc.ny*(pc.nz+1));
+    if(id<countX) {
+        int x=int(id%uint(pc.nx+1));
+        int y=int((id/uint(pc.nx+1))%uint(pc.ny));
+        int z=int(id/uint((pc.nx+1)*pc.ny));
+        float a=0.0;
+        if(x>0) a+=0.5*force_x[cellIndex(x-1,y,z)];
+        if(x<pc.nx) a+=0.5*force_x[cellIndex(x,y,z)];
+        vel_x[id]+=a*pc.dt;
+        return;
+    }
+    id-=countX;
+    if(id<countY) {
+        int x=int(id%uint(pc.nx));
+        int y=int((id/uint(pc.nx))%uint(pc.ny+1));
+        int z=int(id/uint(pc.nx*(pc.ny+1)));
+        float a=0.0;
+        if(y>0) a+=0.5*force_y[cellIndex(x,y-1,z)];
+        if(y<pc.ny) a+=0.5*force_y[cellIndex(x,y,z)];
+        vel_y[id]+=a*pc.dt;
+        return;
+    }
+    id-=countY;
+    if(id<countZ) {
+        int x=int(id%uint(pc.nx));
+        int y=int((id/uint(pc.nx))%uint(pc.ny));
+        int z=int(id/uint(pc.nx*pc.ny));
+        float a=0.0;
+        if(z>0) a+=0.5*force_z[cellIndex(x,y,z-1)];
+        if(z<pc.nz) a+=0.5*force_z[cellIndex(x,y,z)];
+        vel_z[id]+=a*pc.dt;
+    }
+}

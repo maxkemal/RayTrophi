@@ -130,6 +130,9 @@ Vec3 ForceField::evaluate(const Vec3& world_pos, float time, const Vec3& velocit
         case ForceFieldType::Magnetic:
             force = evaluateMagnetic(local_pos, time);
             break;
+        case ForceFieldType::DirectionalNoise:
+            force = evaluateDirectionalNoise(world_pos, time);
+            break;
         default:
             break;
     }
@@ -318,6 +321,17 @@ Vec3 ForceField::evaluateMagnetic(const Vec3& local_pos, float time) const {
     );
     
     return force * strength;
+}
+
+Vec3 ForceField::evaluateDirectionalNoise(const Vec3& world_pos, float time) const {
+    // A signed animated scalar modulates the authored direction. Unlike Wind's
+    // optional gust multiplier, Directional Noise is intrinsically noisy and
+    // may reverse locally around zero.
+    const float n = Noise::fbm3D_animated(
+        world_pos, time * noise.speed,
+        noise.octaves, noise.frequency,
+        noise.lacunarity, noise.persistence, noise.seed);
+    return direction * (strength * noise.amplitude * n);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -2,6 +2,7 @@
 
 #include "GasVolume.h"
 #include "GasSimulator.h"
+#include "LegacyFeatures.h"
 
 namespace RayTrophiSim {
 
@@ -14,10 +15,17 @@ void GasVolumeSimulationSystem::setUploadStream(void* stream) {
 }
 
 bool GasVolumeSimulationSystem::enabled() const {
+    if constexpr (!RayTrophiLegacy::kGasVolumeRuntimeEnabled) {
+        return false;
+    }
     return volumes_ != nullptr && !volumes_->empty();
 }
 
 void GasVolumeSimulationSystem::step(const SimulationContext& context) {
+    if constexpr (!RayTrophiLegacy::kGasVolumeRuntimeEnabled) {
+        (void)context;
+        return;
+    }
     if (!volumes_) {
         return;
     }

@@ -444,6 +444,15 @@
     <ClInclude Include="source\include\Backend\VulkanBackend.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\VulkanVolumeInstrumentation.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\AssetRegistry.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -847,6 +856,9 @@
     <ClCompile Include="source\src\UI\scene_ui_selection.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_simulation_domains.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_stylize.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
@@ -983,6 +995,15 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_volume_performance.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp">

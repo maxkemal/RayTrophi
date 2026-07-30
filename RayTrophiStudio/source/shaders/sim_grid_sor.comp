@@ -18,8 +18,23 @@ layout(set = 0, binding = 1) readonly buffer VelY     { float vel_y[];    };
 layout(set = 0, binding = 2) readonly buffer VelZ     { float vel_z[];    };
 layout(set = 0, binding = 3) buffer          Pressure { float pressure[]; };
 layout(set = 0, binding = 4) readonly buffer Diverg   { float divergence[];};
+layout(set = 0, binding = 5) readonly buffer Flame     { float flame_dummy[]; };
+layout(set = 0, binding = 6) readonly buffer SolidMask { float solid_mask[]; };
+layout(set = 0, binding = 7) readonly buffer SolidVelX { float solid_vx[]; };
+layout(set = 0, binding = 8) readonly buffer SolidVelY { float solid_vy[]; };
+layout(set = 0, binding = 9) readonly buffer SolidVelZ { float solid_vz[]; };
+layout(set = 0, binding = 10) readonly buffer FaceWeightU { float weight_u[]; };
+layout(set = 0, binding = 11) readonly buffer FaceWeightV { float weight_v[]; };
+layout(set = 0, binding = 12) readonly buffer FaceWeightW { float weight_w[]; };
 
 int wrap(int v, int n) { return ((v % n) + n) % n; }
+bool solid(int i,int j,int k) {
+    if(i<0||i>=pc.nx||j<0||j>=pc.ny||k<0||k>=pc.nz) return false;
+    return solid_mask[i+j*pc.nx+k*pc.nx*pc.ny]>0.5;
+}
+int vx(int i,int j,int k){return i+j*(pc.nx+1)+k*(pc.nx+1)*pc.ny;}
+int vy(int i,int j,int k){return i+j*pc.nx+k*pc.nx*(pc.ny+1);}
+int vz(int i,int j,int k){return i+j*pc.nx+k*pc.nx*pc.ny;}
 
 float sample_p(int i, int j, int k) {
     if (pc.boundary == 2) {
@@ -40,13 +55,19 @@ void main() {
     int j = (id/pc.nx) % pc.ny;
     int k = id / (pc.nx*pc.ny);
     if (((i+j+k) & 1) != pc.parity) return;
+    if (solid(i,j,k)) { pressure[id]=0.0; return; }
 
-    float sum = sample_p(i-1,j,k)+sample_p(i+1,j,k)
-               +sample_p(i,j-1,k)+sample_p(i,j+1,k)
-               +sample_p(i,j,k-1)+sample_p(i,j,k+1);
+    float sum=0.0, diag=0.0;
+    float w;
+    w=clamp(weight_u[vx(i,j,k)],0.0,1.0);if(!solid(i-1,j,k)){sum+=w*sample_p(i-1,j,k);diag+=w;}
+    w=clamp(weight_u[vx(i+1,j,k)],0.0,1.0);if(!solid(i+1,j,k)){sum+=w*sample_p(i+1,j,k);diag+=w;}
+    w=clamp(weight_v[vy(i,j,k)],0.0,1.0);if(!solid(i,j-1,k)){sum+=w*sample_p(i,j-1,k);diag+=w;}
+    w=clamp(weight_v[vy(i,j+1,k)],0.0,1.0);if(!solid(i,j+1,k)){sum+=w*sample_p(i,j+1,k);diag+=w;}
+    w=clamp(weight_w[vz(i,j,k)],0.0,1.0);if(!solid(i,j,k-1)){sum+=w*sample_p(i,j,k-1);diag+=w;}
+    w=clamp(weight_w[vz(i,j,k+1)],0.0,1.0);if(!solid(i,j,k+1)){sum+=w*sample_p(i,j,k+1);diag+=w;}
     float h      = max(pc.voxel_size, 1e-6);
     float inv_dt = pc.dt > 1e-8 ? 1.0/pc.dt : 0.0;
     float rhs    = divergence[id] * h * h * inv_dt;
-    float p_gs   = (sum - rhs) / 6.0;
+    float p_gs   = diag>0.0 ? (sum-rhs)/diag : 0.0;
     pressure[id] += pc.sor_omega * (p_gs - pressure[id]);
 }

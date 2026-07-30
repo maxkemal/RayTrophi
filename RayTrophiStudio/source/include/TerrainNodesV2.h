@@ -3803,6 +3803,10 @@ namespace TerrainNodesV2 {
             float heightVariation = 0.15f;
             bool alignToNormal = false;
             float normalInfluence = 0.0f;
+            // Random world-Y offset band applied per instance (meters). Mirrors
+            // the Terrain UI source "Y-Off" control on the shared InstanceGroup.
+            float yOffsetMin = 0.0f;
+            float yOffsetMax = 0.0f;
         };
         std::string instanceGroupName;
         int instanceGroupId = -1;
@@ -3824,6 +3828,9 @@ namespace TerrainNodesV2 {
         // altitude; a fixed +/-10 m absolute band broke on 1000 m terrains.
         float minimumHeight = -100000.0f;
         float maximumHeight = 100000.0f;
+        // Terrain-border keep-out in meters; <0 = auto (two heightmap cells),
+        // 0 = off. Mirrors InstanceGroup::BrushSettings::edge_margin.
+        float edgeMargin = -1.0f;
         std::string densityField;
         std::string exclusionField;
         float exclusionThreshold = 0.5f;

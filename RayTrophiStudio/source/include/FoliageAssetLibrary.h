@@ -30,6 +30,8 @@ void configurePlacement(ScatterSource& source,
                         float targetHeight,
                         float heightVariation,
                         bool alignToNormal,
-                        float normalInfluence);
+                        float normalInfluence,
+                        float yOffsetMin = 0.0f,
+                        float yOffsetMax = 0.0f);
 
 } // namespace FoliageAssets

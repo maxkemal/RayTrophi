@@ -907,14 +907,20 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"particle_count", info.particle_count}, {"render_mode", info.render_mode}};
         });
     }
-    if (method == "fluid.get") {
+    if (method == "fluid.get" || method == "gas.get") {
         std::string domain = requireString(params, "domain");
         return enqueueQuery([domain](UIContext&) {
             rtapi::FluidDomainInfo info;
             rtapi::Result r = rtapi::getFluidDomain(domain, info);
             if (!r.ok) return json{{"__error", r.error}};
-            return json{{"id", info.id}, {"name", info.name}, {"voxel_size", info.voxel_size},
-                        {"particle_count", info.particle_count}, {"render_mode", info.render_mode}};
+            return json{{"id", info.id}, {"name", info.name}, {"type", info.type},
+                        {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
+                        {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
+                        {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
+                        {"render_mode", info.render_mode}, {"backend", info.backend},
+                        {"boundary", info.boundary}, {"preset", info.preset},
+                        {"viscosity", info.viscosity}, {"enabled", info.enabled},
+                        {"visible", info.visible}};
         });
     }
     if (method == "fluid.seed") {
@@ -927,20 +933,109 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::seedFluidParticles(domain, smin, smax, ppc, replace);
         });
     }
-    if (method == "fluid.clear") {
+    if (method == "fluid.clear" || method == "gas.clear") {
         std::string domain = requireString(params, "domain");
         return enqueueResult([domain](UIContext&) { return rtapi::clearFluidParticles(domain); });
     }
-    if (method == "fluid.remove_domain") {
+    if (method == "fluid.remove_domain" || method == "gas.remove_domain") {
         std::string domain = requireString(params, "domain");
         return enqueueResult([domain](UIContext&) { return rtapi::removeFluidDomain(domain); });
     }
-    if (method == "fluid.reset") {
+    if (method == "fluid.set_param" || method == "gas.set_param") {
+        std::string domain = requireString(params, "domain");
+        return enqueueResult([domain, params](UIContext&) {
+            Vec3 dmin, dmax;
+            float voxel_size = 0.0f, viscosity = 0.0f;
+            std::string render_mode, backend, boundary, preset;
+            bool enabled = false, visible = false;
+            const Vec3* p_dmin = nullptr; const Vec3* p_dmax = nullptr;
+            const float* p_voxel = nullptr; const float* p_viscosity = nullptr;
+            const std::string* p_render = nullptr; const std::string* p_backend = nullptr;
+            const std::string* p_boundary = nullptr; const std::string* p_preset = nullptr;
+            const bool* p_enabled = nullptr; const bool* p_visible = nullptr;
+            if (params.contains("domain_min")) { dmin = requireVec3(params, "domain_min"); p_dmin = &dmin; }
+            if (params.contains("domain_max")) { dmax = requireVec3(params, "domain_max"); p_dmax = &dmax; }
+            if (params.contains("voxel_size")) { voxel_size = params.at("voxel_size").get<float>(); p_voxel = &voxel_size; }
+            if (params.contains("render_mode")) { render_mode = params.at("render_mode").get<std::string>(); p_render = &render_mode; }
+            if (params.contains("backend")) { backend = params.at("backend").get<std::string>(); p_backend = &backend; }
+            else if (params.contains("device")) { backend = params.at("device").get<std::string>(); p_backend = &backend; }
+            if (params.contains("boundary")) { boundary = params.at("boundary").get<std::string>(); p_boundary = &boundary; }
+            if (params.contains("preset")) { preset = params.at("preset").get<std::string>(); p_preset = &preset; }
+            if (params.contains("viscosity")) { viscosity = params.at("viscosity").get<float>(); p_viscosity = &viscosity; }
+            if (params.contains("enabled")) { enabled = params.at("enabled").get<bool>(); p_enabled = &enabled; }
+            if (params.contains("visible")) { visible = params.at("visible").get<bool>(); p_visible = &visible; }
+            return rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
+                                            p_backend, p_boundary, p_preset, p_viscosity,
+                                            p_enabled, p_visible);
+        });
+    }
+    if (method == "fluid.reset" || method == "gas.reset") {
         return enqueueResult([](UIContext&) { return rtapi::resetFluidSimulation(); });
     }
-    if (method == "fluid.step") {
+    if (method == "fluid.step" || method == "gas.step") {
         float dt = optionalFloat(params, "dt", 0.0166667f);
         return enqueueResult([dt](UIContext&) { return rtapi::stepFluidSimulation(dt); });
+    }
+    if (method == "gas.get_settings") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::GasDomainSettings s;
+            auto r = rtapi::getGasDomainSettings(domain, s);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"quality_profile", s.quality_profile},
+                        {"resource_budget_mb", s.resource_budget_mb},
+                        {"enforce_resource_budget", s.enforce_resource_budget},
+                        {"use_sparse_tiles", s.use_sparse_tiles},
+                        {"render_to_nanovdb", s.render_to_nanovdb},
+                        {"fire_enabled", s.fire_enabled},
+                        {"ignition_temperature", s.ignition_temperature},
+                        {"burn_rate", s.burn_rate}, {"heat_release", s.heat_release},
+                        {"smoke_generation", s.smoke_generation},
+                        {"flame_dissipation", s.flame_dissipation},
+                        {"fire_max_temperature", s.fire_max_temperature},
+                        {"buoyancy_heat", s.buoyancy_heat},
+                        {"buoyancy_density", s.buoyancy_density},
+                        {"vorticity", s.vorticity}, {"fire_expansion", s.fire_expansion},
+                        {"turbulence_strength", s.turbulence_strength},
+                        {"turbulence_scale", s.turbulence_scale},
+                        {"turbulence_octaves", s.turbulence_octaves},
+                        {"turbulence_lacunarity", s.turbulence_lacunarity},
+                        {"turbulence_persistence", s.turbulence_persistence},
+                        {"turbulence_speed", s.turbulence_speed}};
+        });
+    }
+    if (method == "gas.set_settings") {
+        std::string domain = requireString(params, "domain");
+        return enqueueResult([domain, params](UIContext&) {
+            rtapi::GasDomainSettings s;
+            auto r = rtapi::getGasDomainSettings(domain, s);
+            if (!r.ok) return r;
+#define RT_GAS_JSON(name, type) if (params.contains(#name)) s.name = params.at(#name).get<type>()
+            RT_GAS_JSON(quality_profile, std::string);
+            RT_GAS_JSON(resource_budget_mb, uint32_t);
+            RT_GAS_JSON(enforce_resource_budget, bool);
+            RT_GAS_JSON(use_sparse_tiles, bool);
+            RT_GAS_JSON(render_to_nanovdb, bool);
+            RT_GAS_JSON(fire_enabled, bool);
+            RT_GAS_JSON(ignition_temperature, float);
+            RT_GAS_JSON(burn_rate, float);
+            RT_GAS_JSON(heat_release, float);
+            RT_GAS_JSON(smoke_generation, float);
+            RT_GAS_JSON(flame_dissipation, float);
+            RT_GAS_JSON(fire_max_temperature, float);
+            RT_GAS_JSON(buoyancy_heat, float);
+            RT_GAS_JSON(buoyancy_density, float);
+            RT_GAS_JSON(vorticity, float);
+            RT_GAS_JSON(fire_expansion, float);
+            RT_GAS_JSON(turbulence_strength, float);
+            RT_GAS_JSON(turbulence_scale, float);
+            RT_GAS_JSON(turbulence_octaves, int);
+            RT_GAS_JSON(turbulence_lacunarity, float);
+            RT_GAS_JSON(turbulence_persistence, float);
+            RT_GAS_JSON(turbulence_speed, float);
+#undef RT_GAS_JSON
+            return rtapi::updateGasDomainSettings(domain, s);
+        });
     }
 
     auto terrainInfoJson = [](const rtapi::TerrainInfo& info) {

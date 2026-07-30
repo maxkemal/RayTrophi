@@ -1,0 +1,79 @@
+// Direct gas-source injection into scalar and staggered MAC fields.
+// Every invocation owns each addressed element; no float atomics are required.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    uint channel_mask;
+    vec4 origin_voxel;
+    vec4 center_radius;
+    vec4 scalar_amounts;
+    vec4 velocity_falloff;
+    vec4 shape_extent;
+    vec4 source_control;
+} pc;
+
+layout(set=0,binding=0) buffer Density     { float density[]; };
+layout(set=0,binding=1) buffer Temperature { float temperature[]; };
+layout(set=0,binding=2) buffer Fuel        { float fuel[]; };
+layout(set=0,binding=3) buffer Pressure    { float pressure[]; };
+layout(set=0,binding=4) buffer VelX        { float vel_x[]; };
+layout(set=0,binding=5) buffer VelY        { float vel_y[]; };
+layout(set=0,binding=6) buffer VelZ        { float vel_z[]; };
+
+const uint DENSITY=1u, TEMPERATURE=2u, VELOCITY=4u, FUEL=8u, PRESSURE=16u;
+
+float weightAt(vec3 p) {
+    if (pc.shape_extent.w > 0.5) {
+        vec3 halfExtent=max(pc.shape_extent.xyz,vec3(1e-6));
+        vec3 q=abs(p-pc.center_radius.xyz)/halfExtent;
+        float d=max(q.x,max(q.y,q.z));
+        if(d>1.0) return 0.0;
+        float edge=max(0.0,1.0-d);
+        return pc.velocity_falloff.w<=0.0 ? 1.0 : pow(edge,pc.velocity_falloff.w);
+    }
+    float r=max(pc.center_radius.w,1e-6);
+    float d=length(p-pc.center_radius.xyz)/r;
+    if(d>1.0) return 0.0;
+    float edge=max(0.0,1.0-d);
+    return pc.velocity_falloff.w<=0.0 ? 1.0 : pow(edge,pc.velocity_falloff.w);
+}
+
+void main(){
+    uint id=gl_GlobalInvocationID.x;
+    uint nx=uint(pc.nx),ny=uint(pc.ny),nz=uint(pc.nz);
+    float h=pc.origin_voxel.w;
+    uint nc=nx*ny*nz;
+    if(id<nc){
+        uint x=id%nx,y=(id/nx)%ny,z=id/(nx*ny);
+        vec3 p=pc.origin_voxel.xyz+(vec3(x,y,z)+vec3(0.5))*h;
+        float w=weightAt(p);
+        if((pc.channel_mask&DENSITY)!=0u) density[id]+=pc.scalar_amounts.x*w;
+        if((pc.channel_mask&TEMPERATURE)!=0u) temperature[id]+=pc.scalar_amounts.y*w;
+        if((pc.channel_mask&FUEL)!=0u) fuel[id]+=pc.scalar_amounts.z*w;
+        if((pc.channel_mask&PRESSURE)!=0u) pressure[id]+=pc.scalar_amounts.w*w;
+    }
+    if((pc.channel_mask&VELOCITY)==0u) return;
+    uint n=(nx+1u)*ny*nz;
+    if(id<n){
+        uint x=id%(nx+1u),y=(id/(nx+1u))%ny,z=id/((nx+1u)*ny);
+        vec3 p=pc.origin_voxel.xyz+vec3(float(x),float(y)+.5,float(z)+.5)*h;
+        float w=clamp(pc.source_control.x*weightAt(p),0.0,1.0);
+        vel_x[id]=mix(vel_x[id],pc.velocity_falloff.x,w);
+    }
+    n=nx*(ny+1u)*nz;
+    if(id<n){
+        uint x=id%nx,y=(id/nx)%(ny+1u),z=id/(nx*(ny+1u));
+        vec3 p=pc.origin_voxel.xyz+vec3(float(x)+.5,float(y),float(z)+.5)*h;
+        float w=clamp(pc.source_control.x*weightAt(p),0.0,1.0);
+        vel_y[id]=mix(vel_y[id],pc.velocity_falloff.y,w);
+    }
+    n=nx*ny*(nz+1u);
+    if(id<n){
+        uint x=id%nx,y=(id/nx)%ny,z=id/(nx*ny);
+        vec3 p=pc.origin_voxel.xyz+vec3(float(x)+.5,float(y)+.5,float(z))*h;
+        float w=clamp(pc.source_control.x*weightAt(p),0.0,1.0);
+        vel_z[id]=mix(vel_z[id],pc.velocity_falloff.z,w);
+    }
+}

@@ -1,0 +1,44 @@
+// Gas buoyancy on Y-oriented MAC faces.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float dt;
+    float density_weight;
+    float heat_weight;
+    float ambient_temperature;
+    // Channel presence, mirroring the CPU addBuoyancy fallbacks: an absent
+    // density channel contributes 0 and an absent temperature channel reads as
+    // ambient. Without these the shader reads a zeroed buffer and turns
+    // heat_weight*(0 - ambient) into a constant domain-wide downdraft.
+    int has_density;
+    int has_temperature;
+} pc;
+
+layout(set=0,binding=0) readonly buffer Density     { float density[]; };
+layout(set=0,binding=1) readonly buffer Temperature { float temperature[]; };
+layout(set=0,binding=2) buffer VelY                 { float vel_y[]; };
+
+uint cellIndex(int x,int y,int z){
+    return uint(x+y*pc.nx+z*pc.nx*pc.ny);
+}
+
+void main(){
+    uint id=gl_GlobalInvocationID.x;
+    uint count=uint(pc.nx*(pc.ny+1)*pc.nz);
+    if(id>=count) return;
+    int x=int(id%uint(pc.nx));
+    int y=int((id/uint(pc.nx))%uint(pc.ny+1));
+    int z=int(id/uint(pc.nx*(pc.ny+1)));
+    if(y<=0||y>=pc.ny) return;
+    uint below=cellIndex(x,y-1,z);
+    uint above=cellIndex(x,y,z);
+    float d=pc.has_density!=0 ? .5*(density[below]+density[above]) : 0.0;
+    float t=pc.has_temperature!=0
+        ? .5*(temperature[below]+temperature[above])
+        : pc.ambient_temperature;
+    float force=pc.density_weight*d+
+        pc.heat_weight*(t-pc.ambient_temperature);
+    vel_y[id]+=force*pc.dt;
+}

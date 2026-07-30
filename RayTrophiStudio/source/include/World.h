@@ -155,7 +155,7 @@ struct AtmosphereAdvanced {
     // Aerial Perspective Distance Control (UI adjustable)
     float aerial_density;         // Independent haze density/strength multiplier
     float aerial_min_distance;     // No haze below this distance (meters, default: 1000)
-    float aerial_max_distance;     // Full haze at this distance (meters, default: 5000)
+    float aerial_max_distance;     // Full haze at this distance (meters, default: 10000)
     
     // Environment Texture Overlay (Moved here for better UI grouping)
     int env_overlay_enabled;       // 1 = blend environment texture with Nishita

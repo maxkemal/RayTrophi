@@ -199,6 +199,7 @@ public:
     bool endTransferBatch();
 
     void* nativeBufferPtr(ComputeBufferHandle handle) const;
+    uint64_t bufferDeviceAddress(ComputeBufferHandle handle) const;
     bool dispatch(const ComputeDispatch& cmd);
     bool supportsDispatch() const;  // true when the backend can run kernels (GPU)
 

@@ -1,0 +1,72 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float dt;
+    float voxel_size;
+    float strength;
+    float max_velocity;
+} pc;
+
+layout(set=0,binding=0) buffer VelX { float vx[]; };
+layout(set=0,binding=1) buffer VelY { float vy[]; };
+layout(set=0,binding=2) buffer VelZ { float vz[]; };
+layout(set=0,binding=3) readonly buffer CurlX { float wx[]; };
+layout(set=0,binding=4) readonly buffer CurlY { float wy[]; };
+layout(set=0,binding=5) readonly buffer CurlZ { float wz[]; };
+layout(set=0,binding=6) readonly buffer CurlMagnitude { float wm[]; };
+layout(set=0,binding=7) readonly buffer SolidMask { float solid[]; };
+layout(set=0,binding=8) readonly buffer UWeight { float uw[]; };
+layout(set=0,binding=9) readonly buffer VWeight { float vw[]; };
+layout(set=0,binding=10) readonly buffer WWeight { float wwgt[]; };
+
+uint cellIndex(int x,int y,int z) { return uint(x+y*pc.nx+z*pc.nx*pc.ny); }
+uint xIndex(int x,int y,int z) { return uint(x+y*(pc.nx+1)+z*(pc.nx+1)*pc.ny); }
+uint yIndex(int x,int y,int z) { return uint(x+y*pc.nx+z*pc.nx*(pc.ny+1)); }
+uint zIndex(int x,int y,int z) { return uint(x+y*pc.nx+z*pc.nx*pc.ny); }
+
+vec3 forceAt(int x,int y,int z) {
+    if(x<=0||y<=0||z<=0||x>=pc.nx-1||y>=pc.ny-1||z>=pc.nz-1) return vec3(0);
+    uint c=cellIndex(x,y,z);
+    if(solid[c]>0.5) return vec3(0);
+    float inv2h=.5/max(pc.voxel_size,1e-6);
+    vec3 grad=vec3(
+        wm[cellIndex(x+1,y,z)]-wm[cellIndex(x-1,y,z)],
+        wm[cellIndex(x,y+1,z)]-wm[cellIndex(x,y-1,z)],
+        wm[cellIndex(x,y,z+1)]-wm[cellIndex(x,y,z-1)])*inv2h;
+    vec3 n=grad/(length(grad)+1e-12);
+    vec3 w=vec3(wx[c],wy[c],wz[c]);
+    float openness=(uw[xIndex(x,y,z)]+uw[xIndex(x+1,y,z)]+
+                    vw[yIndex(x,y,z)]+vw[yIndex(x,y+1,z)]+
+                    wwgt[zIndex(x,y,z)]+wwgt[zIndex(x,y,z+1)])/6.0;
+    return pc.strength*pc.voxel_size*cross(n,w)*openness*openness;
+}
+
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+    uint xcount=uint((pc.nx+1)*pc.ny*pc.nz);
+    uint ycount=uint(pc.nx*(pc.ny+1)*pc.nz);
+    uint zcount=uint(pc.nx*pc.ny*(pc.nz+1));
+    if(id<xcount) {
+        int x=int(id%uint(pc.nx+1)), y=int((id/uint(pc.nx+1))%uint(pc.ny));
+        int z=int(id/uint((pc.nx+1)*pc.ny));
+        vec3 f=vec3(0); float n=0;
+        if(x>0){f+=forceAt(x-1,y,z);n+=1;} if(x<pc.nx){f+=forceAt(x,y,z);n+=1;}
+        vx[id]=clamp(vx[id]+pc.dt*f.x/max(n,1),-pc.max_velocity,pc.max_velocity);
+    }
+    if(id<ycount) {
+        int x=int(id%uint(pc.nx)), y=int((id/uint(pc.nx))%uint(pc.ny+1));
+        int z=int(id/uint(pc.nx*(pc.ny+1)));
+        vec3 f=vec3(0); float n=0;
+        if(y>0){f+=forceAt(x,y-1,z);n+=1;} if(y<pc.ny){f+=forceAt(x,y,z);n+=1;}
+        vy[id]=clamp(vy[id]+pc.dt*f.y/max(n,1),-pc.max_velocity,pc.max_velocity);
+    }
+    if(id<zcount) {
+        int x=int(id%uint(pc.nx)), y=int((id/uint(pc.nx))%uint(pc.ny));
+        int z=int(id/uint(pc.nx*pc.ny));
+        vec3 f=vec3(0); float n=0;
+        if(z>0){f+=forceAt(x,y,z-1);n+=1;} if(z<pc.nz){f+=forceAt(x,y,z);n+=1;}
+        vz[id]=clamp(vz[id]+pc.dt*f.z/max(n,1),-pc.max_velocity,pc.max_velocity);
+    }
+}

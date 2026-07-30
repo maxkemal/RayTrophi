@@ -744,6 +744,7 @@ json InstanceManager::serialize(std::ostream* binaryOut) {
             {"allow_gullies", group.brush_settings.allow_gullies},
             {"slope_direction_angle", group.brush_settings.slope_direction_angle},
             {"slope_direction_influence", group.brush_settings.slope_direction_influence},
+            {"edge_margin", group.brush_settings.edge_margin},
             {"use_global_settings", group.brush_settings.use_global_settings},
             {"density_mask_attribute", group.brush_settings.density_mask_attribute},
             {"exclusion_mask_attribute", group.brush_settings.exclusion_mask_attribute},
@@ -968,6 +969,7 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
             group.brush_settings.allow_gullies = s.value("allow_gullies", true);
             group.brush_settings.slope_direction_angle = s.value("slope_direction_angle", 0.0f);
             group.brush_settings.slope_direction_influence = s.value("slope_direction_influence", 0.0f);
+            group.brush_settings.edge_margin = s.value("edge_margin", -1.0f);
             group.brush_settings.use_global_settings = s.value("use_global_settings", false);
             group.brush_settings.density_mask_attribute = s.value("density_mask_attribute", s.value("mask_attribute", std::string()));
             group.brush_settings.exclusion_mask_attribute = s.value("exclusion_mask_attribute", std::string());
@@ -1163,6 +1165,7 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
             if (!s_el["allow_gullies"].get(v)) bs.allow_gullies = sj_bool(v, true);
             if (!s_el["slope_direction_angle"].get(v)) bs.slope_direction_angle = (float)sj_double(v, 0.0);
             if (!s_el["slope_direction_influence"].get(v)) bs.slope_direction_influence = (float)sj_double(v, 0.0);
+            if (!s_el["edge_margin"].get(v)) bs.edge_margin = (float)sj_double(v, -1.0);
             if (!s_el["use_global_settings"].get(v)) bs.use_global_settings = sj_bool(v, false);
             { simdjson::dom::element mv;
               if (!s_el["density_mask_attribute"].get(mv)) bs.density_mask_attribute = sj_str(mv);

@@ -1,0 +1,65 @@
+// Gas divergence with a temperature-driven expansion target.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    int boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int iterations;
+    int parity;
+    float density_correction;
+    int particles_per_cell;
+    int variational;
+    int gfm_active;
+    float expansion;
+    float ambient_temperature;
+    float max_temperature;
+} pc;
+
+layout(set=0,binding=0) readonly buffer VelX       { float vel_x[]; };
+layout(set=0,binding=1) readonly buffer VelY       { float vel_y[]; };
+layout(set=0,binding=2) readonly buffer VelZ       { float vel_z[]; };
+layout(set=0,binding=3) buffer Pressure            { float pressure[]; };
+layout(set=0,binding=4) buffer Divergence          { float divergence[]; };
+layout(set=0,binding=5) readonly buffer Flame      { float flame[]; };
+layout(set=0,binding=6) readonly buffer SolidMask  { float solid_mask[]; };
+layout(set=0,binding=7) readonly buffer SolidVelX  { float solid_vx[]; };
+layout(set=0,binding=8) readonly buffer SolidVelY  { float solid_vy[]; };
+layout(set=0,binding=9) readonly buffer SolidVelZ  { float solid_vz[]; };
+layout(set=0,binding=10) readonly buffer FaceWeightU { float weight_u[]; };
+layout(set=0,binding=11) readonly buffer FaceWeightV { float weight_v[]; };
+layout(set=0,binding=12) readonly buffer FaceWeightW { float weight_w[]; };
+
+int vx(int i,int j,int k){return i+j*(pc.nx+1)+k*(pc.nx+1)*pc.ny;}
+int vy(int i,int j,int k){return i+j*pc.nx+k*pc.nx*(pc.ny+1);}
+int vz(int i,int j,int k){return i+j*pc.nx+k*pc.nx*pc.ny;}
+int cell(int i,int j,int k){return i+j*pc.nx+k*pc.nx*pc.ny;}
+bool solid(int i,int j,int k){
+    return i>=0&&i<pc.nx&&j>=0&&j<pc.ny&&k>=0&&k<pc.nz&&solid_mask[cell(i,j,k)]>0.5;
+}
+
+void main(){
+    int id=int(gl_GlobalInvocationID.x);
+    if(id>=pc.nx*pc.ny*pc.nz) return;
+    int i=id%pc.nx,j=(id/pc.nx)%pc.ny,k=id/(pc.nx*pc.ny);
+    if(solid(i,j,k)){ divergence[id]=0.0; pressure[id]=0.0; return; }
+    float inv_h=pc.voxel_size>1e-6 ? 1.0/pc.voxel_size : 1.0;
+    float wu0=clamp(weight_u[vx(i,j,k)],0.0,1.0),wu1=clamp(weight_u[vx(i+1,j,k)],0.0,1.0);
+    float wv0=clamp(weight_v[vy(i,j,k)],0.0,1.0),wv1=clamp(weight_v[vy(i,j+1,k)],0.0,1.0);
+    float ww0=clamp(weight_w[vz(i,j,k)],0.0,1.0),ww1=clamp(weight_w[vz(i,j,k+1)],0.0,1.0);
+    float ux0=wu0*vel_x[vx(i,j,k)]+(1.0-wu0)*(solid(i-1,j,k)?solid_vx[cell(i-1,j,k)]:0.0);
+    float ux1=wu1*vel_x[vx(i+1,j,k)]+(1.0-wu1)*(solid(i+1,j,k)?solid_vx[cell(i+1,j,k)]:0.0);
+    float uy0=wv0*vel_y[vy(i,j,k)]+(1.0-wv0)*(solid(i,j-1,k)?solid_vy[cell(i,j-1,k)]:0.0);
+    float uy1=wv1*vel_y[vy(i,j+1,k)]+(1.0-wv1)*(solid(i,j+1,k)?solid_vy[cell(i,j+1,k)]:0.0);
+    float uz0=ww0*vel_z[vz(i,j,k)]+(1.0-ww0)*(solid(i,j,k-1)?solid_vz[cell(i,j,k-1)]:0.0);
+    float uz1=ww1*vel_z[vz(i,j,k+1)]+(1.0-ww1)*(solid(i,j,k+1)?solid_vz[cell(i,j,k+1)]:0.0);
+    float d=(ux1-ux0+uy1-uy0+uz1-uz0)*inv_h;
+    if(pc.expansion>0.0){
+        float phi=pc.expansion*clamp(flame[id],0.0,1.0);
+        d-=phi;
+    }
+    divergence[id]=d;
+}

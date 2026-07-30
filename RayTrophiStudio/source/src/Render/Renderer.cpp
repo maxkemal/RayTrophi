@@ -1,4 +1,4 @@
-#include "renderer.h"
+﻿#include "renderer.h"
 #include <SDL_image.h>
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
@@ -2240,12 +2240,17 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                 }
             }
             
-            // Rebuild BVHs
-            auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
-            if (embree_ptr) {
-                embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+            // Rebuild BVHs — only when CPU skinning was actually applied (CPU render / picking).
+            // In the GPU path (apply_cpu_skinning == false, e.g. entering the Hair tab in a
+            // Vulkan session) the CPU verts were never skinned, so this refit just re-bakes the
+            // bind pose for a BVH nothing traces this frame; skip it to avoid the stall.
+            if (apply_cpu_skinning) {
+                auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
+                if (embree_ptr) {
+                    embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+                }
             }
-            
+
             if (hairSystem.getTotalStrandCount() > 0) {
                 hairSystem.updateAllTransforms(scene.world.objects, this->finalBoneMatrices);
                 if (hairSystem.isBVHDirty()) {
@@ -3034,9 +3039,22 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     // --- 4. Ad�m: BVH G�ncelle (only if geometry changed) ---
     // OPTIMIZATION: Skip CPU BVH rebuild for camera-only or material-only animations
     if (geometry_changed) {
-        auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
-        if (embree_ptr) {
-            embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+        // When rendering on the GPU (apply_cpu_skinning == false) the Embree/CPU BVH is not
+        // traced this frame: Vulkan RT uses its own TLAS and viewport picking is disabled in
+        // animation mode (scene_ui_gizmos gates on !ctx.is_animation_mode). Worse, CPU skinning
+        // is NOT applied in that mode, so this refit was re-baking the SAME static bind-pose
+        // vertices every animated frame — a full vertex bake + rtcCommitScene over the whole
+        // character for nothing, a large slice of the "CPU pegged at 100% while the GPU renders
+        // hair" cost. Skip it. We deliberately do NOT raise g_bvh_rebuild_pending here (doing so
+        // per frame would kick a full async EmbreeBVH::build over the entire scene every frame);
+        // the CPU BVH is rebuilt on demand by the paths that actually need it — timeline scrub,
+        // gizmo/selection, and the CPU render path itself (which calls this with
+        // apply_cpu_skinning == true and refits normally).
+        if (apply_cpu_skinning) {
+            auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
+            if (embree_ptr) {
+                embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+            }
         }
     }
     
@@ -6262,7 +6280,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     if (cutoff_threshold <= 0.0f) cutoff_threshold = 0.04f;
                     float scatter_keep = std::clamp((sigma_s * actual_step_size) / cutoff_threshold, 0.0f, 1.0f);
 
-                    if (((float)rand() / RAND_MAX) <= scatter_keep) {
+                    if (d > 0.0f) {
                         if (bounce == 0 && first_vol_t < 0.0f && d > 0.05f) {
                             first_vol_t = t;
                         }
@@ -6279,10 +6297,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         }
 
                         float albedo_avg = volume_albedo.luminance();
-                        float T_single = exp(-sigma_t * advance_step);
-                        float T_multi_p = exp(-sigma_t * advance_step * 0.25f);
-                        float step_transmittance = T_single * (1.0f - multi_scatter * albedo_avg) + 
-                                                   T_multi_p * (multi_scatter * albedo_avg);
+                        float step_transmittance = exp(-sigma_t * advance_step);
 
                         Vec3f total_radiance(0.0f);
 
@@ -6356,14 +6371,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                             t_shadow += shadow_march_step;
                                         }
 
-                                        float beers = exp(-density_accum);
-                                        float phys_trans = beers;
-                                        
-                                        // Match GPU Fix: Only use multi-scatter softening if scattering is actually present
-                                        if (scattering_intensity > 1e-6f && multi_scatter > 1e-6f) {
-                                            float beers_soft = exp(-density_accum * 0.25f);
-                                            phys_trans = beers * (1.0f - multi_scatter * albedo_avg) + beers_soft * (multi_scatter * albedo_avg);
-                                        }
+                                        float phys_trans = exp(-density_accum);
                                         shadow_transmittance = 1.0f - shadow_strength * (1.0f - phys_trans);
                                     }
                                 }
@@ -6377,9 +6385,14 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                     return (1.0f - g2) / (4.0f * 3.14159f * std::pow(std::max(denom, 0.0001f), 1.5f));
                                 };
                                 float phase = hg(cos_theta, anisotropy_g) * lobe_mix + hg(cos_theta, anisotropy_back) * (1.0f - lobe_mix);
-                                float powder = 1.0f - std::exp(-d * 2.0f);
-                                float forward_bias = 0.5f + 0.5f * std::max(0.0f, cos_theta);
-                                phase *= (1.0f + powder * forward_bias * 0.5f);
+                                const float scattering_albedo =
+                                    sigma_s / std::max(sigma_t, 1e-6f);
+                                const float isotropic_phase =
+                                    1.0f / (4.0f * 3.14159265358979323846f);
+                                const float phase_mix = std::clamp(
+                                    multi_scatter * scattering_albedo, 0.0f, 1.0f);
+                                phase = phase * (1.0f - phase_mix) +
+                                        isotropic_phase * phase_mix;
 
                                 total_radiance += light_intensity * shadow_transmittance * phase;
                             }
@@ -6397,20 +6410,19 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         } else if (emission_mode == VolumeEmissionMode::Blackbody || emission_mode == VolumeEmissionMode::ChannelDriven) {
                             float temp_val = mgr.hasTemperatureGrid(live_vol_id) ? mgr.sampleTemperatureCPU(live_vol_id, local_p.x, local_p.y, local_p.z) : density;
                             
-                            float kelvin = 0.0f;
-                            float t_ramp = 0.0f;
                             float t_scale = shader ? shader->emission.temperature_scale : 1.0f;
+                            float t_min = shader ? shader->emission.temperature_min : 0.0f;
                             float t_max = shader ? shader->emission.temperature_max : 1500.0f;
 
-                            if (temp_val > 20.0f) {
-                                kelvin = temp_val * t_scale;
-                                t_ramp = temp_val / std::max(1.0f, t_max);
-                            } else {
-                                // Fallback for density-driven or normalized channels (GPU Parity)
-                                kelvin = (temp_val * 3000.0f + 1000.0f) * t_scale;
-                                // For density-driven fire, we want it to map more aggressively to the hot end
-                                t_ramp = std::max(0.0f, std::min(1.0f, temp_val * 2.0f)); 
-                            }
+                            t_max = std::max(t_max, t_min + 1.0f);
+                            float authored_kelvin = temp_val > 20.0f
+                                ? std::clamp(temp_val, t_min, t_max)
+                                : t_min + std::clamp(temp_val, 0.0f, 1.0f) *
+                                  (t_max - t_min);
+                            float kelvin = authored_kelvin * t_scale;
+                            float t_ramp = std::clamp(
+                                ((authored_kelvin - t_min) / (t_max - t_min)) * t_scale,
+                                0.0f, 1.0f);
 
                             if (shader && shader->emission.color_ramp.enabled) {
                                 step_emission = toVec3f(shader->emission.color_ramp.sample(t_ramp)) * d * shader->emission.blackbody_intensity;
@@ -6420,12 +6432,11 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         }
 
                         // --- VOLUMETRIC INTEGRATION: Multi-Scattering Stable (Parity with GPU) ---
-                        float sigma_t_safe = std::max(sigma_t, 1e-6f);
                         Vec3f albedo = (volume_albedo);
-
-                        // Multi-scattering energy gain (Simulates diffuse internal bounces)
-                        Vec3f ms_boost = Vec3f(1.0f) + albedo * multi_scatter * 2.0f;
-                        Vec3f source = (albedo * total_radiance * sigma_s * ms_boost + step_emission);
+                        Vec3f source =
+                            albedo * total_radiance *
+                            (sigma_s / std::max(sigma_t, 1e-6f)) +
+                            step_emission;
                         
                         // Stable Analytical Integration over step
                         Vec3f step_color = source * ((1.0f - step_transmittance) );
@@ -7640,13 +7651,50 @@ void Renderer::resetCPUAccumulation() {
 void Renderer::uploadHairToGPU() {
     if (!m_backend) return;
 
+    // ── Per-frame coalescing (driver-timeout guard) ──────────────────────────────
+    // uploadHairToGPU has many callers that can ALL fire in the same frame — most of them
+    // at the timeline pause transition, where `skip_backend_for_anim` drops to false and the
+    // rebuild/refit work deferred during playback flushes at once (raster rebuild, Vulkan
+    // rebuild, deform refit, viewport-mode switch, the UI hair sync, and the animation
+    // update). Each call is heavy: the GPU topology path does waitIdle + clearHairGeometry
+    // (another vkDeviceWaitIdle) + a full AABB BLAS build over the worst-case segment count,
+    // and the CPU fallback additionally materializes every segment host-side. With a large
+    // groom (the reported 15000 strands / 1.08M segments) stacking several of those into one
+    // frame serializes seconds of GPU work behind host waits — the driver watchdog then
+    // resets the device (TDR). That is the "pause crashes, only in Vulkan RT" report: not a
+    // data race but a stall, which is why the earlier AS/guide drain fixes did not cure it.
+    // The log signature is the give-away: "Hair GPU path active" printed twice in a row
+    // (two full topology rebuilds), preceded by a CPU "(combined)" build of the same groom.
+    //
+    // One upload per viewport frame is enough — the ping-pong prepass re-expands the guides
+    // and refits the BLAS every frame anyway. Skip only when the GPU path still owns a live
+    // hair BLAS: if anything tore it down (full rebuild / clearHairGeometry clears
+    // hairGpuActive) the upload MUST run or the hair vanishes. Frame token 0 (headless /
+    // offline render, which never calls beginDynamicsFrame) disables the guard entirely.
+    {
+        const uint64_t frameToken = hairSystem.dynamicsFrame();
+        static uint64_t s_lastUploadFrame = 0;
+        auto* vkCoalesce = dynamic_cast<Backend::VulkanBackendAdapter*>(m_backend);
+        if (frameToken != 0 && s_lastUploadFrame == frameToken &&
+            vkCoalesce && vkCoalesce->hairGpuActive()) {
+            return;
+        }
+        s_lastUploadFrame = frameToken;
+    }
+
     // ── Raster viewport hair line overlay ────────────────────────────────────
-    // Always runs regardless of render backend (Vulkan RT or OptiX).
     // g_viewport_backend is the VulkanViewportBackend used for Solid/Matcap display.
+    //
+    // ONLY built for the raster viewport modes. This used to run unconditionally on every
+    // hair upload — including in Rendered mode, where the line buffer it fills is never
+    // drawn — and it regenerates every procedural child as line vertices, which is tens of
+    // MB and a full pass over the groom. The Solid/Matcap transition in Main.cpp calls
+    // uploadHairToGPU() again *after* switching the mode, so the overlay is still built
+    // exactly when it becomes visible.
     {
         extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
         auto* vpb = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get());
-        if (vpb) {
+        if (vpb && vpb->getViewportMode() != Backend::ViewportMode::Rendered) {
             std::vector<float> lineVerts;
             const auto groomNames = hairSystem.getGroomNames();
             for (const auto& gName : groomNames) {
@@ -7709,10 +7757,142 @@ void Renderer::uploadHairToGPU() {
             }
         }
 
-        vulkanBackend->clearHairGeometry(noHair || !hasVisibleHair);
+        // Only tear hair down when there is genuinely none left. This used to run
+        // unconditionally — including when hair WAS present — which destroyed the hair
+        // BLAS and invalidated the topology signature on every single upload, so
+        // uploadHairStrands could never take its in-place refit path and every brush dab
+        // paid a full vkDeviceWaitIdle + BLAS teardown + rebuild. uploadHairStrands does
+        // its own clear when the topology actually changed.
         if (noHair || !hasVisibleHair) {
+            vulkanBackend->clearHairGeometry(true);
             vulkanBackend->resetAccumulation();
             return;
+        }
+
+        // Build the per-groom hair material (shared by the GPU and CPU paths).
+        auto buildHairMaterial = [&](const Hair::HairGroom* groom, uint32_t groomIndex) {
+            const auto& mp = groom->material;
+            Backend::IBackend::HairMaterialData mat;
+            mat.color = mp.color;                 mat.melanin = mp.melanin;
+            mat.melaninRedness = mp.melaninRedness; mat.roughness = mp.roughness;
+            mat.radialRoughness = mp.radialRoughness; mat.ior = mp.ior;
+            mat.cuticleAngle = mp.cuticleAngle * 3.14159f / 180.0f;
+            mat.colorMode = (int)mp.colorMode;    mat.absorption = mp.absorptionCoefficient;
+            mat.specularTint = mp.specularTint;   mat.diffuseSoftness = mp.diffuseSoftness;
+            mat.selfShadow = mp.selfShadow;       mat.tint = mp.tint;
+            mat.tintColor = mp.tintColor;         mat.coat = mp.coat;
+            mat.coatTint = mp.coatTint;           mat.emission = mp.emission;
+            mat.emissionStrength = mp.emissionStrength;
+            mat.enableRootTipGradient = mp.enableRootTipGradient;
+            mat.tipColor = mp.tipColor;           mat.rootTipBalance = mp.rootTipBalance;
+            mat.randomHue = mp.randomHue;         mat.randomValue = mp.randomValue;
+            if (mp.customAlbedoTexture && mp.customAlbedoTexture->is_loaded())
+                mat.albedoTexture = reinterpret_cast<int64_t>(mp.customAlbedoTexture.get());
+            if (mp.customRoughnessTexture && mp.customRoughnessTexture->is_loaded())
+                mat.roughnessTexture = reinterpret_cast<int64_t>(mp.customRoughnessTexture.get());
+            if (mp.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP && mat.albedoTexture == -1) {
+                auto& matMgr = MaterialManager::getInstance();
+                const auto& all_mats = matMgr.getAllMaterials();
+                int scalpMatID = groom->params.defaultMaterialID;
+                if (scalpMatID >= 0 && (size_t)scalpMatID < all_mats.size()) {
+                    const auto& scalpMat = all_mats[scalpMatID];
+                    if (scalpMat) {
+                        if (scalpMat->albedoProperty.texture && scalpMat->albedoProperty.texture->is_loaded())
+                            mat.scalpAlbedoTexture = reinterpret_cast<int64_t>(scalpMat->albedoProperty.texture.get());
+                        mat.scalpBaseColor = scalpMat->albedoProperty.color;
+                    }
+                }
+            }
+            (void)groomIndex;
+            return mat;
+        };
+
+        // ── GPU expansion path (opt-in; falls back to the CPU path below) ────────
+        // When the hair_expand compute pipeline is available, upload only the guide points
+        // (tiny) + per-groom dispatch metadata; the GPU expands children + tessellates +
+        // fills the segment/AABB buffers, and the ping-pong prepass refits the BLAS/TLAS.
+        // CPU produces NO children/segments here.
+        if (vulkanBackend->hairGpuAvailable()) {
+            using HairPush = VulkanRT::VulkanDevice::HairExpandPush;
+            std::vector<float> guidePts;                 // vec4 flat: pos.xyz, radius (guide-major)
+            std::vector<HairPush> dispatches;
+            std::vector<Backend::IBackend::HairMaterialData> gpuMaterials;
+            uint32_t groomIndex = 0, pointBase = 0, segBase = 0;
+            bool anyDynamic = false;   // any dynamic groom → force hair BLAS MODE_BUILD (BVH health)
+
+            for (const auto& name : groomNames) {
+                const Hair::HairGroom* groom = hairSystem.getGroom(name);
+                if (!groom || !groom->isVisible || groom->guides.empty()) continue;
+
+                const uint32_t P = groom->params.pointsPerStrand;
+                const bool useBSpline = groom->params.useBSpline;
+                const uint32_t extN = useBSpline ? (P + 4u) : P;
+                if (P < 4 || extN < 4) continue;   // need >=4 control points for a span
+
+                const uint32_t guideCount = (uint32_t)groom->guides.size();
+                const uint32_t children   = hideInterpolatedHair ? 0u : groom->params.interpolatedPerGuide;
+                const uint32_t Kmax  = useBSpline ? (1u << (std::min)(groom->params.subdivisions, 4u)) : 1u;
+                const uint32_t spans = extN - 3u;
+                const uint32_t kids  = children > 0u ? children : 1u;
+                const uint32_t segThisGroom = guideCount * kids * spans * Kmax;
+
+                const Matrix4x4& xf = groom->transform;
+                float sx = Vec3(xf.m[0][0], xf.m[1][0], xf.m[2][0]).length();
+                float sy = Vec3(xf.m[0][1], xf.m[1][1], xf.m[2][1]).length();
+                float sz = Vec3(xf.m[0][2], xf.m[1][2], xf.m[2][2]).length();
+                float avgScale = (sx + sy + sz) / 3.0f;
+
+                // Guide control points, raw local (pos + radius); pad short strands.
+                guidePts.reserve(guidePts.size() + (size_t)guideCount * P * 4);
+                for (const auto& g : groom->guides) {
+                    for (uint32_t p = 0; p < P; ++p) {
+                        const Hair::HairPoint& hp = (p < g.points.size()) ? g.points[p] : g.points.back();
+                        guidePts.push_back(hp.position.x);
+                        guidePts.push_back(hp.position.y);
+                        guidePts.push_back(hp.position.z);
+                        guidePts.push_back(hp.radius);
+                    }
+                }
+
+                HairPush pc{};
+                // Matrix4x4 is row-major (m[row][col]); GLSL mat4 is column-major.
+                for (int c = 0; c < 4; ++c) for (int r = 0; r < 4; ++r) pc.transform[c * 4 + r] = xf.m[r][c];
+                pc.guideOffset      = pointBase;   // POINT-flat base (grooms may differ in P)
+                pc.guideCount       = guideCount;
+                pc.childrenPerGuide = children;
+                pc.pointsPerStrand  = P;
+                pc.Kmax             = Kmax;
+                pc.useBSpline       = useBSpline ? 1u : 0u;
+                pc.groomIndex       = groomIndex;
+                pc.segmentBase      = segBase;
+                pc.avgScale         = avgScale;
+                pc.childRadius      = groom->params.childRadius;
+                pc.clumpiness       = groom->params.clumpiness;
+                pc.frizz            = groom->params.frizz;
+                pc.childBaseSeed    = 54321u + (uint32_t)name.length();
+                dispatches.push_back(pc);
+
+                pointBase += guideCount * P;
+                segBase   += segThisGroom;
+                anyDynamic |= groom->params.useDynamics;
+                gpuMaterials.push_back(buildHairMaterial(groom, groomIndex));
+                ++groomIndex;
+            }
+
+            const uint32_t worstSegments = segBase;
+            if (!dispatches.empty() && worstSegments > 0) {
+                if (!gpuMaterials.empty()) vulkanBackend->uploadHairMaterials(gpuMaterials);
+                if (vulkanBackend->uploadHairGuidesGPU(guidePts, dispatches, worstSegments, anyDynamic)) {
+                    static size_t s_lastGpuSeg = SIZE_MAX;
+                    if (worstSegments != s_lastGpuSeg) {
+                        s_lastGpuSeg = worstSegments;
+                        SCENE_LOG_INFO("[Hair GPU/compute] " + std::to_string(dispatches.size())
+                            + " grooms, worst-case " + std::to_string(worstSegments) + " segments");
+                    }
+                    return;   // GPU path handled everything (prepass refits each frame)
+                }
+                // uploadHairGuidesGPU failed — fall through to the CPU path below.
+            }
         }
 
         // [FIX] Combine ALL visible grooms into ONE strand list so that only a
@@ -7726,6 +7906,20 @@ void Renderer::uploadHairToGPU() {
         // correct entry in the per-groom hair material buffer.
         std::vector<Backend::HairStrandData> combinedStrands;
         std::vector<Backend::IBackend::HairMaterialData> allMaterials;
+
+        // Pre-size: one entry per emitted strand (guides, or guides x children). Each
+        // HairStrandData owns two heap vectors, so letting this array grow by doubling
+        // moved hundreds of thousands of them per upload.
+        {
+            size_t expected = 0;
+            for (const auto& name : groomNames) {
+                const Hair::HairGroom* g = hairSystem.getGroom(name);
+                if (!g || !g->isVisible || g->guides.empty()) continue;
+                const uint32_t kids = hideInterpolatedHair ? 0u : g->params.interpolatedPerGuide;
+                expected += g->guides.size() * (kids > 0u ? kids : 1u);
+            }
+            combinedStrands.reserve(expected);
+        }
 
         uint32_t groomMaterialIndex = 0;
         for (const auto& name : groomNames) {
@@ -7748,13 +7942,17 @@ void Renderer::uploadHairToGPU() {
             const uint32_t childrenPerGuide = hideInterpolatedHair ? 0u : groom->params.interpolatedPerGuide;
             const uint32_t childBaseSeed    = 54321u + static_cast<uint32_t>(name.length());
 
-            // Build one HairStrandData from a strand's local-space control points.
-            auto emitStrand = [&](const std::vector<Hair::HairPoint>& pts, const Vec2& rootUV) {
+            // Fill an EXISTING HairStrandData from a strand's local-space control points.
+            // Writes through a reference so the parallel child loop below can target a
+            // pre-sized slot instead of appending.
+            auto fillStrand = [&](Backend::HairStrandData& sd,
+                                  const std::vector<Hair::HairPoint>& pts, const Vec2& rootUV) {
                 if (pts.size() < 4) return;
-                Backend::HairStrandData sd;
                 sd.materialID   = groomMaterialIndex;   // groom index into the hair material buffer
                 sd.rootUV       = rootUV;
                 sd.subdivisions = useBSpline ? groom->params.subdivisions : 0u;
+                sd.points.clear();
+                sd.radii.clear();
                 sd.points.reserve(pts.size() + (useBSpline ? 4 : 0));
                 sd.radii.reserve(pts.size() + (useBSpline ? 4 : 0));
 
@@ -7768,21 +7966,43 @@ void Renderer::uploadHairToGPU() {
                 if (useBSpline) { addPoint(pts.front()); addPoint(pts.front()); }
                 for (const auto& hp : pts) addPoint(hp);
                 if (useBSpline) { addPoint(pts.back()); addPoint(pts.back()); }
+            };
 
-                combinedStrands.push_back(std::move(sd));
+            auto emitStrand = [&](const std::vector<Hair::HairPoint>& pts, const Vec2& rootUV) {
+                if (pts.size() < 4) return;
+                combinedStrands.emplace_back();
+                fillStrand(combinedStrands.back(), pts, rootUV);
             };
 
             if (childrenPerGuide > 0u) {
-                Hair::HairStrand childBuf;   // reused scratch; child geometry never persists
-                for (size_t gi = 0; gi < groom->guides.size(); ++gi) {
+                // Every child is generated from scratch here on EVERY upload — which on a
+                // skinned animation is every frame — so this loop is the hot path for a
+                // dense groom (guides x children strands). generateChildStrand is
+                // deterministic per (guide, child) and writes only its own output, so fill
+                // a pre-sized block in parallel instead of appending serially.
+                const int guideCount = (int)groom->guides.size();
+                const size_t base = combinedStrands.size();
+                combinedStrands.resize(base + (size_t)guideCount * childrenPerGuide);
+
+                #pragma omp parallel for schedule(static)
+                for (int gi = 0; gi < guideCount; ++gi) {
+                    Hair::HairStrand childBuf;   // per-thread scratch; children never persist
                     const Hair::HairStrand& guide = groom->guides[gi];
-                    if (guide.points.size() < 4) continue;
+                    const size_t slot0 = base + (size_t)gi * childrenPerGuide;
                     for (uint32_t c = 0; c < childrenPerGuide; ++c) {
+                        Backend::HairStrandData& sd = combinedStrands[slot0 + c];
+                        if (guide.points.size() < 4) continue;   // leaves an empty entry
                         Hair::generateChildStrand(childBuf, guide, static_cast<uint32_t>(gi), c,
                                                   groom->params, childBaseSeed);
-                        emitStrand(childBuf.points, childBuf.rootUV);
+                        fillStrand(sd, childBuf.points, childBuf.rootUV);
                     }
                 }
+
+                // Drop the empty slots left by guides too short to emit (rare).
+                combinedStrands.erase(
+                    std::remove_if(combinedStrands.begin() + base, combinedStrands.end(),
+                                   [](const Backend::HairStrandData& sd) { return sd.points.empty(); }),
+                    combinedStrands.end());
             } else {
                 for (const auto& s : groom->guides) emitStrand(s.points, s.rootUV);
             }
@@ -7850,8 +8070,19 @@ void Renderer::uploadHairToGPU() {
             vulkanBackend->uploadHairMaterials(allMaterials);
         }
 
-        SCENE_LOG_INFO("[Hair GPU/Vulkan] Uploaded " + std::to_string(groomMaterialIndex)
-            + " grooms, " + std::to_string(combinedStrands.size()) + " strands (combined)");
+        // Only when the shape of the upload actually changes. This function runs on every
+        // brush dab (15 Hz) and every animation frame, and the unconditional line buried
+        // everything else in the console.
+        {
+            static size_t s_lastLoggedStrands = SIZE_MAX;
+            static uint32_t s_lastLoggedGrooms = UINT32_MAX;
+            if (combinedStrands.size() != s_lastLoggedStrands || groomMaterialIndex != s_lastLoggedGrooms) {
+                s_lastLoggedStrands = combinedStrands.size();
+                s_lastLoggedGrooms  = groomMaterialIndex;
+                SCENE_LOG_INFO("[Hair GPU/Vulkan] " + std::to_string(groomMaterialIndex)
+                    + " grooms, " + std::to_string(combinedStrands.size()) + " strands (combined)");
+            }
+        }
         vulkanBackend->resetAccumulation();
         return;
     }

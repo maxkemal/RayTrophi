@@ -75,6 +75,18 @@ struct VkVolumeInstance {
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
 
 void main() {
+    // An empty simulation domain deliberately keeps its procedural AABB in the
+    // TLAS so customIndex -> volume-SSBO slots remain stable across frame 0/1
+    // and empty/non-empty transitions. It must nevertheless behave as if no
+    // geometry exists. Reject it here, before reportIntersectionEXT: reporting
+    // the AABB and returning `scattered=false` from closest-hit terminates the
+    // camera path in raygen and paints the box black instead of revealing the
+    // scene behind it.
+    uint volIdx = gl_InstanceCustomIndexEXT;
+    if (volumes.v[volIdx].is_active == 0) {
+        return;
+    }
+
     // AABB is implicitly defined by the procedural geometry bounds
     // gl_ObjectRayOriginEXT and gl_ObjectRayDirectionEXT are in object space
     vec3 rayOrigin = gl_ObjectRayOriginEXT;
@@ -111,7 +123,6 @@ void main() {
         // at ray tmin lets the sky volume win closest-hit ordering and skip
         // smaller domain volumes inside it. Only push that procedural source
         // toward its exit surface; normal domain volumes keep near hits.
-        uint volIdx = gl_InstanceCustomIndexEXT;
         bool proceduralSkyCloud = volumes.v[volIdx].source_type == 3 ||
                                   volumes.v[volIdx].volume_type == 3;
         if (proceduralSkyCloud && rawTNear <= gl_RayTminEXT) {

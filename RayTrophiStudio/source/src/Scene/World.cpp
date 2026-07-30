@@ -141,8 +141,8 @@ World::World() {
     data.advanced.multi_scatter_factor = 0.3f;
     data.advanced.aerial_perspective = 1;
     data.advanced.aerial_density = 1.0f;
-    data.advanced.aerial_min_distance = 10.0f;    // Minimal haze starts almost immediately (10m)
-    data.advanced.aerial_max_distance = 5000.0f;   // Full haze at 5km
+    data.advanced.aerial_min_distance = 1000.0f;   // Preserve nearby subjects/volumes
+    data.advanced.aerial_max_distance = 10000.0f;  // Full landscape haze at 10km
     data.advanced.env_overlay_enabled = 0;
     data.advanced.env_overlay_intensity = 1.0f;
     data.advanced.env_overlay_rotation = 0.0f;
@@ -1065,8 +1065,8 @@ void World::deserialize(const nlohmann::json& j) {
             data.advanced.multi_scatter_factor = a.value("multi_scatter_factor", 0.3f);
             data.advanced.aerial_perspective = a.value("aerial_perspective", 1);
             data.advanced.aerial_density = a.value("aerial_density", 1.0f);
-            data.advanced.aerial_min_distance = a.value("aerial_min_distance", 10.0f);
-            data.advanced.aerial_max_distance = a.value("aerial_max_distance", 5000.0f);
+            data.advanced.aerial_min_distance = a.value("aerial_min_distance", 1000.0f);
+            data.advanced.aerial_max_distance = a.value("aerial_max_distance", 10000.0f);
             
             // Env Overlay
             data.advanced.env_overlay_enabled = a.value("env_overlay_enabled", 0);

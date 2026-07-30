@@ -48,7 +48,7 @@ It is not a render farm plugin or a library. It is an interactive editor with a 
 | **UI control points** | 1,278+ |
 | **Render backends** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
 | **Node systems** | Terrain (66), Animation (14+), Material (11+) |
-| **Last verified** | 2026-07-22 — full build, local IPC and remote TLS/token/capability checks |
+| **Last verified** | 2026-07-30 — Vulkan GPU gas/fluid/particle force fields, moving colliders, cache replay, and backend switching |
 <!-- STATS_END -->
 
 Counts cover `RayTrophiStudio/source` and exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`).
@@ -173,9 +173,16 @@ A multi-threaded grid- and particle-based FX suite with CUDA and CPU backends, i
 - Adaptive resolution, open/closed boundary modes, dynamic particle reseeding to prevent leaks, fluid material presets (Water, Oil, Custom)
 
 ### Gas, smoke & fire
-- Multi-threaded dense-grid solver for temperature, soot, and fuel density
+- A **Vulkan Compute dense-grid solver** for temperature, soot, and fuel density, with the CPU reference path retained
+- Persistent GPU stages for advection, combustion, buoyancy, vorticity confinement, curl turbulence, pressure projection, and external forces
+- Wind, vortex, turbulence, attractor/point, and drag fields evaluated through one packed GPU evaluator with affect masks, falloff, and domain ownership
+- Animated primitive/SDF colliders and material-driven collider-source coupling for heat, fuel, smoke, and ignition injection
+- Multiple gas domains, emitters, colliders, force fields, and non-destructive explosion/fire presets in one scene
+- Lifetime-safe sharing between simulation memory and Vulkan RT dense-volume publication; guarded Play/Pause, cache replay, domain deletion, and backend switching
 - Combustion dynamics (ignition, heat release, flame dissipation) with procedural FBM curl-noise turbulence
 - Sparse-VDB active-voxel Poisson solve for efficient large domains
+
+> Vulkan is the production-priority path; CPU remains the correctness/fallback reference and CUDA is a supported alternative compute path. A GPU failure falls back only the affected domain.
 
 ### Whitewater (Ihmsen et al. 2012)
 Secondary **spray** (airborne), **foam** (surface), and **bubbles** (submerged) generated from trapped-air and wave-crest potentials, and advected through the solver with full collider response:

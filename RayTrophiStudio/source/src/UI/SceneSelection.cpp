@@ -126,6 +126,11 @@ void SceneSelection::updatePositionFromSelection() {
         case SelectableType::SimulationDomain:
             selected.rotation = Vec3(0, 0, 0);
             break;
+
+        case SelectableType::ParticleEmitter:
+            selected.rotation = Vec3(0, 0, 0);
+            selected.scale = Vec3(1, 1, 1);
+            break;
             
         default:
             break;
@@ -229,6 +234,9 @@ static void ApplyTransformToItem(SelectableItem& item, const Matrix4x4& delta_tr
 
         case SelectableType::SimulationDomain:
             break;
+
+        case SelectableType::ParticleEmitter:
+            break;
             
         default:
             break;
@@ -316,6 +324,12 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
             result.m[1][3] = selected.position.y;
             result.m[2][3] = selected.position.z;
             break;
+
+        case SelectableType::ParticleEmitter:
+            result.m[0][3] = selected.position.x;
+            result.m[1][3] = selected.position.y;
+            result.m[2][3] = selected.position.z;
+            break;
             
         default:
             break;
@@ -388,6 +402,10 @@ bool SceneSelection::isSelected(const SelectableItem& item) const {
             if (s.particle_system_index == item.particle_system_index &&
                 s.simulation_domain_index == item.simulation_domain_index) return true;
         }
+        else if (s.type == SelectableType::ParticleEmitter) {
+            if (s.particle_system_index == item.particle_system_index &&
+                s.particle_emitter_index == item.particle_emitter_index) return true;
+        }
     }
     return false;
 }
@@ -457,6 +475,10 @@ void SceneSelection::removeFromSelection(const SelectableItem& item) {
             else if (s.type == SelectableType::SimulationDomain) {
                 return s.particle_system_index == item.particle_system_index &&
                        s.simulation_domain_index == item.simulation_domain_index;
+            }
+            else if (s.type == SelectableType::ParticleEmitter) {
+                return s.particle_system_index == item.particle_system_index &&
+                       s.particle_emitter_index == item.particle_emitter_index;
             }
             return false;
         });
@@ -596,6 +618,16 @@ void SceneSelection::selectSimulationDomain(int particle_system_index, int domai
     item.type = SelectableType::SimulationDomain;
     item.particle_system_index = particle_system_index;
     item.simulation_domain_index = domain_index;
+    item.name = name;
+    addToSelection(item);
+}
+
+void SceneSelection::selectParticleEmitter(int particle_system_index, int emitter_index, const std::string& name) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::ParticleEmitter;
+    item.particle_system_index = particle_system_index;
+    item.particle_emitter_index = emitter_index;
     item.name = name;
     addToSelection(item);
 }

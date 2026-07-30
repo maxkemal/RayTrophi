@@ -332,6 +332,16 @@ void gatherSceneMeshSource(const std::vector<std::shared_ptr<Hittable>>& objects
 }
 
 constexpr std::size_t kMaxParticleInstancesTotal = 300000;
+constexpr std::size_t kParticlePoolChunk = 4096;
+
+inline std::size_t particlePoolCapacityFor(std::size_t soa_slots) {
+    const std::size_t capped =
+        std::min(soa_slots, kMaxParticleInstancesTotal);
+    if (capped == 0) return 0;
+    std::size_t cap = kParticlePoolChunk;
+    while (cap < capped && cap < kMaxParticleInstancesTotal) cap <<= 1;
+    return std::min(cap, kMaxParticleInstancesTotal);
+}
 
 // Fluid particle instancing caps. Without a cap a million-particle seed
 // produces a million TLAS instances; the OptiX/Vulkan accel build then runs out
@@ -385,25 +395,37 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
     auto& im = InstanceManager::getInstance();
 
     // Caller can suppress the instanced geometry (e.g. Debug display mode shows the
-    // lightweight ImGui overlay instead). Empty the groups but keep them + their
-    // materials alive so re-enabling is a cheap rebuild, not a full recreate.
+    // lightweight ImGui overlay instead). Keep the complete pool and collapse its
+    // transforms instead of clearing the vector. Clearing changed TLAS topology and
+    // forced a full Vulkan teardown exactly while live Gas/VDB resources were also
+    // updating; toggling "Render in Ray Tracing" then starting playback could TDR
+    // immediately. Stable slots take the ordinary TLAS-refit path and Vulkan maps
+    // their singular zero scale to identity + instance mask 0.
     if (!enable_rt_geometry) {
-        bool emptied = false;
+        bool collapsed = false;
         for (auto& system : particle_systems) {
             if (system.render_instance_group_id < 0) continue;
             if (InstanceGroup* g = im.getGroup(system.render_instance_group_id)) {
                 if (!g->instances.empty()) {
-                    g->instances.clear();
-                    g->gpu_dirty = true;
-                    g_source_state[system.render_instance_group_id].content_hash = 1;
-                    emptied = true;
+                    bool group_changed = false;
+                    for (auto& tr : g->instances) {
+                        group_changed = group_changed ||
+                            tr.scale.x != 0.0f || tr.scale.y != 0.0f || tr.scale.z != 0.0f;
+                        tr.position = Vec3(0.0f, 0.0f, 0.0f);
+                        tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
+                        tr.scale = Vec3(0.0f, 0.0f, 0.0f);
+                    }
+                    if (group_changed) {
+                        g->gpu_dirty = true;
+                        g_source_state[system.render_instance_group_id].content_hash = 0;
+                        collapsed = true;
+                    }
                 }
             }
         }
-        if (emptied) {
-            g_geometry_dirty = true;
-            g_vulkan_rebuild_pending = true;
-            g_optix_rebuild_pending = true;
+        if (collapsed) {
+            g_gpu_refit_pending = true;
+            g_particle_cpu_geometry_dirty = true;
         }
         return;
     }
@@ -420,11 +442,49 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
     std::size_t total_instances = 0;
 
     for (auto& system : particle_systems) {
-        const bool wants = system.visible && system.enabled && system.runtime &&
+        // A system with no runtime is genuinely gone, so its group must go too.
+        // Everything else (hidden, disabled, or "Render in Ray Tracing" off) is a
+        // TOGGLE: collapse the group but KEEP its stable slots, exactly like the Debug-display
+        // branch above.
+        //
+        // Deleting instead was the cause of the driver loss on unchecking
+        // "Render in Ray Tracing". deleteGroup() does groups.erase() on the
+        // InstanceManager's vector, and the RT scene build holds a REFERENCE to
+        // that vector (plus a scatterMeta array sized from it) while it walks the
+        // groups reading source triangles. Only the OptiX/viewport rebuilds are
+        // gated at the top of this function — the pathtrace build has no such
+        // flag — so the erase could pull the group out from under an in-flight
+        // build, which then fed freed triangle data into a BLAS.
+        // Emptying keeps every pointer and index valid, costs nothing, and makes
+        // re-enabling a cheap refill rather than a full recreate.
+        const bool alive = system.runtime != nullptr;
+        const bool wants = alive && system.visible && system.enabled &&
                            system.render.render_in_raytrace;
 
-        if (!wants) {
+        if (!alive) {
             destroyParticleRenderGroup(system);
+            continue;
+        }
+        if (!wants) {
+            if (system.render_instance_group_id >= 0) {
+                if (InstanceGroup* g = im.getGroup(system.render_instance_group_id)) {
+                    if (!g->instances.empty()) {
+                        bool group_changed = false;
+                        for (auto& tr : g->instances) {
+                            group_changed = group_changed ||
+                                tr.scale.x != 0.0f || tr.scale.y != 0.0f || tr.scale.z != 0.0f;
+                            tr.position = Vec3(0.0f, 0.0f, 0.0f);
+                            tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
+                            tr.scale = Vec3(0.0f, 0.0f, 0.0f);
+                        }
+                        if (group_changed) {
+                            g->gpu_dirty = true;
+                            g_source_state[system.render_instance_group_id].content_hash = 0;
+                            motion_change = true;
+                        }
+                    }
+                }
+            }
             continue;
         }
 
@@ -531,18 +591,31 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
             structural_change = true;
         }
 
-        // Refresh the stable instance pool from the alive SoA. The pool is kept at
-        // the SoA capacity (which only ever grows), so per-frame the instance
-        // COUNT is constant and the backends' scatter bindings stay index-valid.
+        // Refresh the stable instance pool from the alive SoA. Do not mirror an
+        // unbounded SoA slot history one-for-one: dead particle slots can make
+        // buffers_.alive grow for the whole run even though rendering is capped
+        // at kMaxParticleInstancesTotal. Mirroring that history grew the Vulkan
+        // TLAS/raster pool every frame and repeatedly rebuilt its GPU buffers.
+        // Geometric chunks keep bindings stable while making growth infrequent.
         // Dead slots collapse to scale 0 (degenerate -> no GPU intersection). A
         // cheap content hash lets a settled simulation skip all GPU work so the
         // path tracer converges instead of refitting the TLAS for nothing.
         const auto& buf = system.runtime->buffers();
-        const std::size_t cap = buf.alive.size();
+        const std::size_t soa_slots = buf.alive.size();
+        const std::size_t cap = particlePoolCapacityFor(soa_slots);
         const float mult = std::max(1e-4f, system.render.size_multiplier);
 
         std::vector<InstanceTransform>& inst = group->instances;
-        const bool pool_grew = cap != inst.size();  // capacity only grows
+        // The pool is MONOTONIC. A cached frame restore may install a smaller SoA
+        // than the peak reached during the previous play session. Shrinking here
+        // turned that normal pause/restore into a structural Vulkan rebuild; the
+        // next Play grew it again and triggered another full rebuild. Burst presets
+        // (Ground Burst / Explosion / Fireball) consequently stacked large
+        // particle+gas rebuilds on every pause/play cycle and could hit Windows TDR.
+        //
+        // Keep the peak pool and collapse slots beyond the current SoA to scale 0.
+        // This also preserves the backend's per-slot source/material bindings.
+        const bool pool_grew = cap > inst.size();
         if (pool_grew) {
             inst.resize(cap);
             structural_change = true;  // backend must (re)create the scatter slots
@@ -573,7 +646,7 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
         uint64_t content = 1469598103934665603ull;     // transforms (drives cheap refit)
         uint64_t bucket_sig = 1469598103934665603ull;   // over-life age buckets (drives rebuild)
         std::size_t alive_drawn = 0;
-        for (std::size_t i = 0; i < cap; ++i) {
+        for (std::size_t i = 0; i < inst.size(); ++i) {
             InstanceTransform& tr = inst[i];
             tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
 
@@ -594,12 +667,25 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
             }
             tr.source_index = src_index;
 
-            float sz = (i < buf.size.size()) ? buf.size[i] : 0.05f;
+            const bool has_slot = i < soa_slots;
+            float sz = (has_slot && i < buf.size.size()) ? buf.size[i] : 0.0f;
             sz *= mult;
-            const bool alive = (buf.alive[i] != 0u) && sz > 1e-5f &&
+            const float px = (has_slot && i < buf.position_x.size()) ? buf.position_x[i] : 0.0f;
+            const float py = (has_slot && i < buf.position_y.size()) ? buf.position_y[i] : 0.0f;
+            const float pz = (has_slot && i < buf.position_z.size()) ? buf.position_z[i] : 0.0f;
+            // A non-finite transform must NEVER reach the acceleration structure.
+            // The instance AABB derived from it is infinite/NaN, and ray traversal
+            // against that does not terminate: the symptom is a GPU TIMEOUT (TDR /
+            // "driver stopped responding") with the application still alive — not a
+            // crash, which is why it reads nothing like a normal use-after-free.
+            // `sz > 1e-5f` already rejects a NaN size (NaN compares false), but the
+            // POSITION was previously copied through unchecked. A single bad slot —
+            // e.g. an SoA entry left stale by a cache stop/resume — hangs the device.
+            const bool finite_pose = std::isfinite(px) && std::isfinite(py) &&
+                                     std::isfinite(pz) && std::isfinite(sz);
+            const bool alive = has_slot && (buf.alive[i] != 0u) && sz > 1e-5f && finite_pose &&
                                total_instances < kMaxParticleInstancesTotal;
             if (alive) {
-                const float px = buf.position_x[i], py = buf.position_y[i], pz = buf.position_z[i];
                 tr.position = Vec3(px, py, pz);
                 tr.scale = Vec3(sz, sz, sz);
                 if (over_life) {
@@ -670,6 +756,10 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
         // manual Rendered-mode toggle. Consumed only when a raster viewport is
         // active (harmless in Rendered mode).
         g_viewport_raster_rebuild_pending = true;
+        // Solid can consume/clear the shared geometry dirty flags while the RT
+        // backend is inactive. The generation token survives that hand-off and
+        // forces Solid -> Rendered to rebuild the particle topology exactly once.
+        g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
     } else if (motion_change) {
         g_gpu_refit_pending = true;
     }

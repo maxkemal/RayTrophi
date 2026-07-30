@@ -250,6 +250,18 @@ struct GpuVDBVolume {
     int   density_noise_detail;
     int   density_noise_seed;
     int   material_program_index = -1; // Vulkan Volume Graph table index; -1 = none
+
+    // Vulkan live gas-domain dense fields. Host-only transport metadata; OptiX
+    // ignores these fields and continues to consume NanoVDB pointers above.
+    uint64_t dense_density_address;
+    uint64_t dense_temperature_address;
+    uint64_t dense_fuel_address;
+    uint64_t dense_flame_address;
+    int dense_resolution_x;
+    int dense_resolution_y;
+    int dense_resolution_z;
+    int dense_fields_valid;
+    float3 dense_origin;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════

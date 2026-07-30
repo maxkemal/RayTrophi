@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -43,6 +44,14 @@
 #include <vector>
 
 namespace RayTrophiSim {
+
+namespace {
+// Handles survive in simulation-system caches across compute-backend switches.
+// A per-backend counter restarted at 1, so an old Vulkan handle could collide
+// with an unrelated buffer in a newly-created Vulkan backend and pass the
+// getBufferSize()-based stale-handle test. Keep IDs process-unique instead.
+std::atomic<uint64_t> g_nextVulkanSimulationBufferId{1};
+}
 
 // ── SPIR-V loading ────────────────────────────────────────────────────────────
 
@@ -155,7 +164,15 @@ public:
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VkBuffer buf = VK_NULL_HANDLE;
-        if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) return {};
+        const VkResult createResult =
+            vkCreateBuffer(m_device, &bci, nullptr, &buf);
+        if (createResult != VK_SUCCESS) {
+            logSimulationComputeInfo(
+                "[SimComputeVk][ERROR] vkCreateBuffer failed: name=" +
+                desc.debug_name + " bytes=" + std::to_string(desc.size_bytes) +
+                " VkResult=" + std::to_string(static_cast<int>(createResult)));
+            return {};
+        }
 
         VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(m_device, buf, &req);
@@ -203,7 +220,16 @@ public:
                 return {};
             }
             ai.memoryTypeIndex = memType;
-            if (vkAllocateMemory(m_device, &ai, nullptr, &mem) != VK_SUCCESS) {
+            const VkResult allocResult =
+                vkAllocateMemory(m_device, &ai, nullptr, &mem);
+            if (allocResult != VK_SUCCESS) {
+                logSimulationComputeInfo(
+                    "[SimComputeVk][ERROR] vkAllocateMemory failed: name=" +
+                    desc.debug_name + " requested=" +
+                    std::to_string(desc.size_bytes) + " allocation=" +
+                    std::to_string(static_cast<uint64_t>(req.size)) +
+                    " VkResult=" +
+                    std::to_string(static_cast<int>(allocResult)));
                 vkDestroyBuffer(m_device, buf, nullptr);
                 return {};
             }
@@ -221,10 +247,18 @@ public:
                 : "[SimComputeVk] ReBAR unavailable; uploads use staging copies.");
         }
 
-        uint64_t id = m_nextId++;
-        m_buffers[id] = { buf, mem, desc.size_bytes, mapped };
+        uint64_t id =
+            g_nextVulkanSimulationBufferId.fetch_add(1, std::memory_order_relaxed);
+        m_buffers[id] = { buf, mem, desc.size_bytes, mapped,
+                          desc.usage, desc.debug_name };
         ComputeBufferHandle h;
         h.id = id;
+        // ComputeBufferHandle defaults to CPU. Leaving that tag unchanged made
+        // ensureComputeBuffer treat every live Vulkan allocation as belonging
+        // to another backend on the next frame. It then overwrote the handle
+        // without destroying the old VkBuffer: exactly +60 buffers/frame for
+        // the Fireball preset and roughly +1 GB VRAM/s.
+        h.backend = type();
         return h;
     }
 
@@ -237,6 +271,12 @@ public:
         // next submit touch a destroyed handle — adaptive domains hit exactly
         // this by resizing buffers between steps. Flush first.
         if (m_recording) synchronize();
+        // synchronize() fences only this compute queue. Live Gas fields may
+        // also be referenced by Vulkan RT on another queue of the same device.
+        // Destruction/resizing is a rare structural operation, so use a full
+        // device lifetime boundary here rather than allowing vkDestroyBuffer
+        // to race an external queue reader.
+        vkDeviceWaitIdle(m_device);
         if (it->second.buffer) vkDestroyBuffer(m_device, it->second.buffer, nullptr);
         if (it->second.memory) vkFreeMemory(m_device, it->second.memory, nullptr);
         m_buffers.erase(it);
@@ -246,16 +286,27 @@ public:
     bool resizeBuffer(ComputeBufferHandle h, std::size_t new_size) override {
         auto it = m_buffers.find(h.id);
         if (it == m_buffers.end() || it->second.size >= new_size) return it != m_buffers.end();
+        // Preserve the address-capable usage of live Gas render fields across
+        // adaptive-domain growth.
+        const ComputeBufferUsage old_usage = it->second.usage;
+        const std::string old_name = it->second.debug_name;
         if (m_recording) synchronize(); // see destroyBuffer — same stale-handle window
+        vkDeviceWaitIdle(m_device);      // also covers external RT/viewport queues
         if (it->second.buffer) vkDestroyBuffer(m_device, it->second.buffer, nullptr);
         if (it->second.memory) vkFreeMemory(m_device, it->second.memory, nullptr);
         it->second = {};
 
-        ComputeBufferDesc d; d.size_bytes = new_size;
+        ComputeBufferDesc d;
+        d.size_bytes = new_size;
+        d.usage = old_usage;
+        d.debug_name = old_name;
         ComputeBufferHandle nh = createBuffer(d);
         if (!nh.valid()) return false;
+        // createBuffer may rehash m_buffers; the old iterator is not stable.
         auto src = m_buffers.find(nh.id);
-        it->second = src->second;
+        auto dst = m_buffers.find(h.id);
+        if (src == m_buffers.end() || dst == m_buffers.end()) return false;
+        dst->second = std::move(src->second);
         m_buffers.erase(src);
         return true;
     }
@@ -404,7 +455,20 @@ public:
     // ── Frame lifecycle ───────────────────────────────────────────────────────
 
     void beginFrame(uint64_t /*frame_index*/) override {}
-    void endFrame() override {}
+    void endFrame() override {
+        // A simulation frame is a resource-lifetime boundary. Leaving a recorded
+        // command buffer open allowed particle/gas dispatches to survive across a
+        // timeline Pause/Play edge. A later cache restore could then resize or
+        // replace buffers still referenced by those unsubmitted commands; when a
+        // subsequent synchronize finally submitted the accumulated work, NVIDIA
+        // could hang in the driver (typically after the second/third pause).
+        //
+        // Submit and fence every completed simulation frame. Many solver phases
+        // already synchronize through their download batches, so this is a cheap
+        // no-op there; it only closes upload/dispatch-only tails that previously
+        // escaped the frame.
+        synchronize();
+    }
 
     void synchronize() override {
         if (!m_recording) return;
@@ -547,6 +611,8 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         std::size_t    size   = 0;
         void*          mapped = nullptr; // non-null: ReBAR (device-local host-visible) — uploads are direct memcpy
+        ComputeBufferUsage usage = ComputeBufferUsage::Storage;
+        std::string       debug_name;
     };
 
     struct PipelineEntry {
@@ -570,7 +636,6 @@ private:
     std::unordered_map<std::string, PipelineEntry> m_pipelines;
     std::unordered_map<uint64_t, Buf>              m_buffers;
 
-    uint64_t m_nextId         = 1;
     bool     m_ready          = false;
     bool     m_recording      = false;
     bool     m_has_float_atomics = false;
@@ -752,7 +817,9 @@ private:
             // FluidDensitySplatGpuConstants = 36 bytes (nx,ny,nz,particle_count,orig_x,orig_y,orig_z,voxel_size,particle_density)
             // FluidParticleIntegrateGpuConstants = 36 bytes (9 fields × 4)
             { "sim_fluid_clear_float",              "sim_fluid_clear_float.spv",           1, 36 },
-            { "sim_fluid_particle_integrate_forces","sim_fluid_particle_forces.spv",       1, 36 },
+            { "sim_fluid_particle_integrate_forces","sim_fluid_particle_forces.spv",       4, 96 },
+            { "sim_fluid_surface_columns_clear",    "sim_fluid_surface_columns_clear.spv", 1, 96 },
+            { "sim_fluid_surface_columns_build",    "sim_fluid_surface_columns_build.spv", 2, 96 },
             { "sim_fluid_p2g_scatter",              "sim_fluid_p2g_scatter.spv",           5, 36 },
             // Normalize shares the scatter pass's 5-buffer dispatch (vel/weight
             // at bindings 3/4 — CUDA index parity). Registering it as 2 bound a
@@ -764,14 +831,16 @@ private:
             // FluidG2PGpuConstants = 17 fields x 4 = 68 (has use_solid_flip_limiter);
             // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
             { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                  10, 68 },
+            { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 64 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
             // declare only the leading fields; the pipeline range must cover the
             // full struct the host pushes (old 36 made vkCmdPushConstants exceed
             // the range → validation error / UB on the gas + SOR paths).
             { "sim_fluid_free_surface_sor",         "sim_fluid_free_surface_sor.spv",      3, 52 },
             { "sim_grid_divergence",                "sim_grid_divergence.spv",             5, 52 },
-            { "sim_grid_sor",                       "sim_grid_sor.spv",                    5, 52 },
-            { "sim_grid_subtract_gradient",         "sim_grid_subtract_gradient.spv",      5, 52 },
+            { "sim_gas_divergence",                 "sim_gas_divergence.spv",             13, 64 },
+            { "sim_grid_sor",                       "sim_grid_sor.spv",                   13, 52 },
+            { "sim_grid_subtract_gradient",         "sim_grid_subtract_gradient.spv",     13, 52 },
             // MGPCG free-surface pressure solve (Faz 1 Vulkan port of the CUDA
             // sim_fluid_cg_* family — plain path only: non-variational, non-GFM,
             // non-fused reductions, no multigrid; the host's generic path covers
@@ -801,9 +870,25 @@ private:
             { "sim_fluid_cg_jacobi_dot",            "sim_fluid_cg_jacobi_dot.spv",         4, 52 },
             { "sim_fluid_cg_spmv_dot",              "sim_fluid_cg_spmv_dot.spv",           5, 52 },
             { "sim_fluid_cg_axpy2_dev",             "sim_fluid_cg_axpy2_dev.spv",          5, 52 },
-            { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          5, 20 },
-            { "sim_grid_advect_velocity",           "sim_grid_advect_velocity.spv",        6, 20 },
+            { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          7, 28 },
+            { "sim_grid_advect_velocity",           "sim_grid_advect_velocity.spv",       10, 24 },
             { "sim_grid_velocity_dissipate_clamp",  "sim_grid_velocity_dissipate.spv",     3, 20 },
+            // MacCormack second pass (limited correction). Same 24B push-constant
+            // as the matching first-pass advection kernel; the extra bindings are
+            // the forward-advected field(s) plus a non-aliasing output.
+            { "sim_grid_maccormack_scalar",         "sim_grid_maccormack_scalar.spv",      7, 28 },
+            { "sim_grid_maccormack_velocity",       "sim_grid_maccormack_velocity.spv",   10, 24 },
+            { "sim_gas_inject",                     "sim_gas_inject.spv",                   7, 112 },
+            { "sim_gas_buoyancy",                   "sim_gas_buoyancy.spv",                 3, 36 },
+            { "sim_gas_force_evaluate",             "sim_gas_force_evaluate.spv",           7, 48 },
+            { "sim_gas_force_gather",               "sim_gas_force_gather.spv",             6, 48 },
+            { "sim_particle_force_integrate",        "sim_particle_force_integrate.spv",      7, 40 },
+            { "sim_gas_combustion",                 "sim_gas_combustion.spv",               4, 40 },
+            { "sim_gas_vorticity_curl",             "sim_gas_vorticity_curl.spv",           8, 28 },
+            { "sim_gas_vorticity_force",            "sim_gas_vorticity_force.spv",         11, 28 },
+            { "sim_gas_turbulence_cell",            "sim_gas_turbulence_cell.spv",          7, 96 },
+            { "sim_gas_turbulence_gather",          "sim_gas_turbulence_gather.spv",        9, 96 },
+            { "sim_gas_collider_source",            "sim_gas_collider_source.spv",         14, 20 },
             // Mesh subdivision (linear 1->4). 2 SSBO (in/out tris) + 16B push-const.
             { "subdivide_linear",                   "subdivide_linear.spv",                2, 16 },
             // Catmull-Clark GPU refine (Phase 3b): per-level sparse stencil apply (5 SSBO:
