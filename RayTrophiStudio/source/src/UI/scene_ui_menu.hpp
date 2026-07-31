@@ -691,6 +691,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             if (ImGui::MenuItem("Exit", "Alt+F4")) {
                  tryExit();
             }
+            rtui::drawMenuRegion("menu.file");
             ImGui::EndMenu();
         }
 
@@ -722,6 +723,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             if (ImGui::MenuItem("Delete Selected", "Del/X", false, ctx.selection.hasSelection())) {
                 triggerDelete(ctx);
             }
+            rtui::drawMenuRegion("menu.edit");
             ImGui::EndMenu();
         }
 
@@ -1080,6 +1082,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  SCENE_LOG_INFO("Starting Final Render via Menu (F12)");
                  addViewportMessage("Starting Render...");
              }
+             rtui::drawMenuRegion("menu.render");
              ImGui::EndMenu();
         }
 
@@ -1133,11 +1136,37 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             if (ImGui::MenuItem("Paint Mode Tab", nullptr, &show_paint_tab)) {
                 if (show_paint_tab) { tab_to_focus = "Paint"; focus_properties_panel_next_frame = true; }
             }
-            if (ImGui::MenuItem("System Tab", nullptr, &show_system_tab)) { 
+            if (ImGui::MenuItem("System Tab", nullptr, &show_system_tab)) {
                 if (show_system_tab) { tab_to_focus = "System"; focus_properties_panel_next_frame = true; }
             }
-            
-            
+
+            // Addon panels (rt.ui). Closing an addon window only hides it, so this
+            // is how the user gets it back without reloading the addon. Panels
+            // mounted into a region are listed read-only — their host tab owns them.
+            {
+                const std::vector<rtui::PanelInfo> addon_panels = rtui::listPanels();
+                if (!addon_panels.empty()) {
+                    ImGui::Separator();
+                    if (ImGui::BeginMenu("Addon Panels")) {
+                        for (const rtui::PanelInfo& panel : addon_panels) {
+                            const std::string label =
+                                panel.title.empty() ? ("Panel " + std::to_string(panel.id)) : panel.title;
+                            bool visible = panel.visible;
+                            if (panel.region.empty()) {
+                                if (ImGui::MenuItem(label.c_str(), nullptr, &visible))
+                                    rtui::setPanelVisible(panel.id, visible);
+                            } else {
+                                if (ImGui::MenuItem((label + "  [" + panel.region + "]").c_str(),
+                                                    nullptr, &visible))
+                                    rtui::setPanelVisible(panel.id, visible);
+                            }
+                        }
+                        ImGui::EndMenu();
+                    }
+                }
+            }
+
+            rtui::drawMenuRegion("menu.view");
             ImGui::EndMenu();
         }
         
@@ -1155,6 +1184,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             }
             ImGui::Separator();
             ImGui::MenuItem("Quick Guide & Shortcuts", nullptr, &show_controls_window);
+            rtui::drawMenuRegion("menu.help");
             ImGui::EndMenu();
         }
 

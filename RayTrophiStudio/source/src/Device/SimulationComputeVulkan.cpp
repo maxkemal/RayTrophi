@@ -832,6 +832,7 @@ private:
             // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
             { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                  10, 68 },
             { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 64 },
+            { "sim_fluid_surface_combustion",       "sim_fluid_surface_combustion.spv",    6, 96 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
             // declare only the leading fields; the pipeline range must cover the
             // full struct the host pushes (old 36 made vkCmdPushConstants exceed

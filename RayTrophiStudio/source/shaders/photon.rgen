@@ -195,6 +195,7 @@ void main() {
     // closesthit skips the primary-AOV work for photon paths.
     payload.primaryMeta = plMetaReset(0u) | PL_PRIMARY_DONE;
     payload.skipAABBs = false;
+    payload.skipGasVolumes = false;
 
     for (int bounce = 0; bounce < 8; ++bounce) {
         payload.radiance      = vec3(0.0);

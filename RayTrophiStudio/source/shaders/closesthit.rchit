@@ -2952,6 +2952,7 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 carrierNormal, vec3 rayDir,
 // Main — Closest Hit Entry Point
 // ============================================================
 void main() {
+    payload.skipGasVolumes = false;
     // ----------------------------------------------------------
     // 1. Instance & materyal verisi
     // ----------------------------------------------------------

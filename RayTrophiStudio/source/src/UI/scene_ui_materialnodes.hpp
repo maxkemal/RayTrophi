@@ -24,6 +24,7 @@
 
 #include "imgui.h"
 #include "MaterialNodesV2.h"
+#include "MaterialGraphApply.h"
 #include "PBRMaterialSnapshot.h"
 #include "Triangle.h"
 #include "TriangleMesh.h"
@@ -759,46 +760,14 @@ private:
         ImGui::Separator();
     }
 
+    // publishVolumeProgram moved to MaterialGraphApply.cpp (non-UI) so the
+    // scripting facade shares one implementation. Unqualified calls below
+    // resolve to the free function in this same namespace.
+
     /**
      * @brief Fold the graph into the material and push it through the SAME
      * update chain a material-panel slider edit uses. No bake, no new GPU path.
      */
-    template<typename ContextT>
-    bool publishVolumeProgram(ContextT& ctx, const std::string& materialName,
-                              const VolumeMaterialProgram& program) {
-        bool changed = false;
-        bool surfaceChanged = false;
-        const auto programJson = program.toJson();
-        const auto publish = [&](const std::shared_ptr<VolumeShader>& shader) {
-            if (!shader || shader->material_graph != materialName) return;
-            if (shader->material_program.toJson() == programJson) return;
-            shader->material_program = program;
-            changed = true;
-        };
-
-        for (const auto& vdb : ctx.scene.vdb_volumes) {
-            if (!vdb) continue;
-            const auto shader = vdb->getShader();
-            publish(shader);
-            if (vdb->render_as_isosurface && shader &&
-                shader->material_graph == materialName) {
-                // The same asset's Surface output owns this SDF boundary.
-                surfaceChanged = true;
-            }
-        }
-        for (const auto& gas : ctx.scene.gas_volumes) {
-            if (gas) publish(gas->getShader());
-        }
-
-        if (changed || surfaceChanged) {
-            // Graph publication belongs to the material lifecycle, not to the
-            // VDB/Gas panel. Consumers therefore stay live even while their
-            // properties panel is closed.
-            ctx.renderer.updateBackendGasVolumes(ctx.scene);
-        }
-        return changed || surfaceChanged;
-    }
-
     template<typename ContextT>
     void applyVolumeGraph(ContextT& ctx, MaterialNodeGraphV2& graph, Volumetric* material,
                           uint16_t matId, bool markProjectModified = true) {
@@ -857,93 +826,18 @@ private:
     template<typename ContextT>
     void applyGraph(ContextT& ctx, MaterialNodeGraphV2& graph, PrincipledBSDF* pbsdf, uint16_t matId,
                     bool markProjectModified = true) {
-        MaterialGraphResult res = evaluateMaterialGraph(graph, pbsdf);
-        lastWarnings = res.warnings;
-        lastErrors = res.errors;
-        lastApplyOk = res.ok;
+        // The fold + compile + publish core lives in MaterialGraphApply.cpp so the
+        // scripting facade (rt.nodes.apply) runs this exact path instead of a copy.
+        // Only the OptiX per-triangle bundle refresh below stays here: it needs CUDA
+        // types the facade deliberately does not pull in.
+        const GraphApplyReport report =
+            applyMaterialGraph(ctx, graph, pbsdf, matId, markProjectModified);
+        lastWarnings = report.warnings;
+        lastErrors = report.errors;
+        lastApplyOk = report.ok;
         hasApplied = true;
-        if (!res.ok || !pbsdf) return;
-
-        const bool texChanged = applyShadeStateToMaterial(res.state, *pbsdf);
-        const VolumeGraphResult volumeResult = evaluateVolumeMaterialGraph(graph);
-        if (volumeResult.ok) {
-            publishVolumeProgram(ctx, pbsdf->materialName, volumeResult.program);
-            if (volumeResult.program.density_noise_enabled && ctx.render_settings.use_optix) {
-                lastWarnings.push_back(
-                    "Density field noise currently executes on Vulkan RT; OptiX parity is scheduled after the field contract stabilizes");
-            }
-        } else {
-            lastWarnings.push_back(
-                "Volume output could not be published; open diagnostics for the volume branch");
-            lastErrors.insert(lastErrors.end(), volumeResult.errors.begin(), volumeResult.errors.end());
-            lastApplyOk = false;
-        }
-
-        // CPU -> GPU struct (the canonical sync, see MaterialManager::syncAllGpuMaterials)
-        if (!pbsdf->gpuMaterial) pbsdf->gpuMaterial = std::make_shared<GpuMaterial>();
-        const PBRMaterialSnapshot snapshot = capturePBRMaterialSnapshot(*pbsdf);
-        applyPBRMaterialSnapshotToGpuMaterial(snapshot, *pbsdf->gpuMaterial);
-
-        // Compile the spatially-varying chains into a per-pixel program. Both the
-        // CPU render (Faz 2a) and Vulkan RT (Faz 2b, closesthit VM) consume it, so
-        // these slots shade per-pixel on both. active=false (all-constant / direct
-        // texture bind) clears it -> zero per-pixel cost, unchanged behaviour.
-        const bool hadPointiness = pbsdf->proceduralProgram && pbsdf->proceduralProgram->usesPointiness;
-        const bool hadAttributes = pbsdf->proceduralProgram && pbsdf->proceduralProgram->usesAttributes;
-        const size_t attrSlotsBefore = MaterialNodesV2::materialAttributeSlots().size();
-        {
-            MaterialProgram prog = compileMaterialProgram(graph, pbsdf);
-            const int drivenCount = prog.active ?
-                [&] { int c = 0; for (uint32_t s = 0; s < static_cast<uint32_t>(MatSlot::Count); ++s)
-                                     if (prog.drivenSlots & (1u << s)) ++c; return c; }() : 0;
-            if (prog.active) pbsdf->proceduralProgram = std::make_shared<MaterialProgram>(std::move(prog));
-            else pbsdf->proceduralProgram.reset();
-            if (drivenCount > 0) {
-                lastWarnings.push_back(std::to_string(drivenCount) +
-                    " slot(s) shade PER-PIXEL on CPU + Vulkan RT; the frozen OptiX backend uses the folded average");
-            }
-        }
-
-        // Pointiness is the one Geometry output that isn't free at the shading point: it
-        // needs a per-vertex precompute (CPU caches, built in rebuildBVH) and a per-vertex
-        // GPU block (uploaded with the BLAS). Both are lazy, so the FIRST graph to read it
-        // has to force one geometry pass. Strictly on the transition (or when the geometry
-        // on the GPU predates it) — otherwise every slider tweak would rebuild the scene.
-        // The project-load sync (markProjectModified == false) rebuilds geometry itself.
-        const bool usesPointiness = pbsdf->proceduralProgram && pbsdf->proceduralProgram->usesPointiness;
-        // The Attribute node needs the exact same one-time geometry pass, plus one extra
-        // trigger the pointiness gate has no equivalent of: picking a DIFFERENT attribute
-        // name interns a NEW slot, and the per-vertex blocks already on the GPU carry only
-        // the old slots. Without the slot-count check the newly chosen channel would read 0
-        // everywhere until something else happened to rebuild the geometry.
-        const bool usesAttributes = pbsdf->proceduralProgram && pbsdf->proceduralProgram->usesAttributes;
-        const bool attrSlotsGrew  = MaterialNodesV2::materialAttributeSlots().size() != attrSlotsBefore;
-        const bool needAttribPass = usesAttributes &&
-            (!hadAttributes || attrSlotsGrew ||
-             (ctx.backend_ptr && !ctx.backend_ptr->geometryHasAttributes()));
-        const bool needPointinessPass = usesPointiness &&
-            (!hadPointiness || (ctx.backend_ptr && !ctx.backend_ptr->geometryHasPointiness()));
-
-        if (markProjectModified && (needPointinessPass || needAttribPass)) {
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-            if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
-        }
-
-        if (usesAttributes) {
-            // An Attribute node whose name is not interned compiled to a constant 0 — say so,
-            // or the user just sees a black material and has no idea the budget ran out.
-            for (const auto& n : graph.nodes) {
-                auto* an = dynamic_cast<MaterialNodesV2::AttributeNode*>(n.get());
-                if (!an) continue;
-                if (an->attributeName.empty()) {
-                    lastWarnings.push_back("Attribute node has no channel selected - reads 0");
-                } else if (MaterialNodesV2::findMaterialAttributeSlot(an->attributeName) < 0) {
-                    lastWarnings.push_back("Attribute '" + an->attributeName + "': all " +
-                        std::to_string(MaterialNodesV2::kMatAttribSlots) +
-                        " attribute slots are in use - reads 0");
-                }
-            }
-        }
+        if (!report.ok || !pbsdf) return;
+        const bool texChanged = report.texture_changed;
 
         if (texChanged) {
             // OptiX per-triangle texture bundles — same loop as the material
@@ -971,33 +865,6 @@ private:
                 t->setTextureBundle(bundle);
             }
         }
-
-        ctx.renderer.resetCPUAccumulation();
-        if (ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterial(ctx.scene, matId);
-            // Faz 2b: re-upload the per-pixel program buffer so Vulkan RT reflects
-            // Noise/ColorRamp edits live (updateBackendMaterial only refreshes the
-            // folded VkGpuMaterial, not the program stream). No-op off Vulkan.
-            ctx.renderer.syncMaterialProgramsToBackend(ctx.backend_ptr);
-            ctx.backend_ptr->resetAccumulation();
-        }
-        // First-open sync (markProjectModified == false) must NOT dirty the project:
-        // it only pushes the freshly-materialized graph's folded material + per-pixel
-        // program to the backend, which is semantically identical to what's on disk.
-        if (markProjectModified) ProjectManager::getInstance().markModified();
-
-        // Clear every node's dirty flag so next frame's edit detection (a false->true
-        // transition) fires reliably. evaluate only clears nodes it actually FOLDS;
-        // nodes on binding-only chains (e.g. a Bump on the Normal Map slot) are never
-        // evaluated, so markAllDirty leaves them stuck dirty — which would swallow all
-        // their later param edits (strength/distance wouldn't re-apply live).
-        //
-        // This is ALSO what arms live apply for a graph loaded from disk: its nodes are born
-        // dirty (NodeBase::dirty = true), and until they are cleared once no edit can produce
-        // the false->true transition live apply looks for. See MaterialNodeGraphV2::
-        // needsInitialApply — this function is the only place that clears it.
-        for (auto& n : graph.nodes) n->dirty = false;
-        graph.needsInitialApply = false;
     }
 };
 

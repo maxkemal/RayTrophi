@@ -10346,9 +10346,10 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
                 vi.customIndex = (uint32_t)m_orderedVDBInstances.size(); // stable SSBO index
                 m_orderedVDBInstances.push_back(vdb); // record TLAS order for SSBO build
-                // 0x02 = volume-only mask. Shadow rays use mask 0x01 (triangles only),
-                // so they never intersect volume AABBs and cannot cast hard shadows.
-                vi.mask = 0x02;
+                // SurfaceSDF uses a separate volume bit so a gas closest-hit can
+                // hand the ray to the exact coincident liquid boundary without
+                // disabling other procedural geometry.
+                vi.mask = vdb->render_as_isosurface ? 0x08 : 0x02;
                 vi.frontFaceCCW = false;
                 // SBT offset = 1 → routes to hit group index (raygen=0, miss=1, triangle_hit=2, volume_hit=3)
                 // In the SBT hit region, triangle is at offset 0, volume is at offset 1

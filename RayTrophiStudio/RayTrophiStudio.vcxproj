@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -297,6 +297,10 @@
     <ClInclude Include="source\include\OzzRuntime.h" />
     <ClInclude Include="source\include\Api\RtApi.h" />
     <ClInclude Include="source\include\Api\RtPython.h" />
+    <ClInclude Include="source\include\Api\RtUi.h" />
+    <ClInclude Include="source\include\MaterialGraphApply.h" />
+    <ClInclude Include="source\src\Api\RtUiBindings.h" />
+    <ClInclude Include="source\src\Api\RtPyCommon.h" />
     <ClInclude Include="source\include\Api\RtIpc.h" />
     <ClInclude Include="source\include\TextEditor.h" />
     <ClInclude Include="source\include\SceneCommand.h" />
@@ -1349,6 +1353,9 @@
     <ClCompile Include="source\src\Api\RtApi.cpp" />
     <ClCompile Include="source\src\Api\RtApiModifiers.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluid.cpp" />
+    <ClCompile Include="source\src\Api\RtApiForceField.cpp" />
+    <ClCompile Include="source\src\Api\RtApiParticle.cpp" />
+    <ClCompile Include="source\src\Api\RtApiAnim.cpp" />
     <ClCompile Include="source\src\Api\RtApiTerrain.cpp" />
     <ClCompile Include="source\src\Api\RtApiHair.cpp" />
     <ClCompile Include="source\src\Api\RtApiPaint.cpp" />
@@ -1356,6 +1363,20 @@
     <ClCompile Include="source\src\Api\RtPython.cpp">
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtUi.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtAddons.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPyScene.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiLights.cpp" />
+    <ClCompile Include="source\src\Api\RtApiSelect.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMaterial.cpp" />
+    <ClCompile Include="source\src\Api\RtApiNodes.cpp" />
+    <ClCompile Include="source\src\Scene\MaterialGraphApply.cpp" />
     <ClCompile Include="source\src\Api\RtConsole.cpp" />
     <ClCompile Include="source\src\Api\RtIpc.cpp" />
     <ClCompile Include="source\src\Api\RtIpcSecurity.cpp" />
@@ -1394,6 +1415,7 @@
     <ClCompile Include="source\src\UI\SequencerAdapter.cpp" />
     <ClCompile Include="source\src\UI\SplashScreen.cpp" />
     <ClCompile Include="source\src\Scene\SpotLight.cpp" />
+    <ClCompile Include="source\src\Scene\SceneDataParticlePresets.cpp" />
     <ClCompile Include="source\src\Physics\ParticleSimulation.cpp" />
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp" />
     <ClCompile Include="source\src\Physics\SimCache.cpp" />

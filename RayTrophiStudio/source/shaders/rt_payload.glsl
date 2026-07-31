@@ -4,7 +4,7 @@
 // registers/scratch across every traceRayEXT, so its size is a direct
 // occupancy cost on the whole pipeline — keep it packed.
 //
-// 20 dwords (was 29). What got packed or dropped:
+// 21 dwords (was 29). What got packed or dropped:
 //   - primaryAlbedo/primaryTransmission → 2x packHalf2x16 (denoiser AOV data,
 //     averaged over samples; half is far below what OIDN can resolve)
 //   - primaryNormal → snorm16x2 octahedral (same argument)
@@ -23,6 +23,7 @@ struct RayPayload {
     bool  scattered;
     bool  skipAABBs;      // set by volume_closesthit when a solid surface is found inside
     uint  bounceType;
+    bool  skipGasVolumes; // one-shot handoff from a gas segment to a SurfaceSDF
     // ── Primary-hit AOV block, packed ───────────────────────────────────────
     uint  primaryARG;     // packHalf2x16(primaryAlbedo.r, primaryAlbedo.g)
     uint  primaryABT;     // packHalf2x16(primaryAlbedo.b, primaryTransmission)

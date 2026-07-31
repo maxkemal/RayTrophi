@@ -150,6 +150,10 @@ public:
     // Same shortcut-guard as geometry_graph_focused, for the Material Graph window.
     bool material_graph_focused = false;
     bool show_anim_graph = false;     // Animation node editor panel
+    // Same shortcut-guard as geometry_graph_focused, for the AnimGraph window. Without it,
+    // one Delete keypress had two listeners: the AnimGraph canvas removed the selected node
+    // AND the global/SDL handler deleted the selected scene object behind it.
+    bool anim_graph_focused = false;
     bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
     bool show_forcefield_tab = true;   // Simulation tab (Default open)
     bool show_world_tab = true;        // World & Sky tab (Default open)

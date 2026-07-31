@@ -61,6 +61,26 @@ def main():
     unknown = exchange(args.host, args.port, args.ca, args.token, "internal.not_registered")
     check("default deny", "not enabled" in unknown.get("error", ""), unknown)
 
+    # Classification regression: these write methods live in plural namespaces
+    # that the capability table once listed in the singular, so they were
+    # fail-closed as "not enabled" while their sibling READ methods passed on
+    # the .get/.list substring heuristics. Each call below is expected to fail
+    # on its own merits (bad index / missing graph); what must never come back
+    # is the default-deny message. Bad arguments keep the scene untouched.
+    for method, params in (("lights.set_position", {"index": 999999,
+                                                    "position": [0, 0, 0]}),
+                           ("nodes.set_param", {"graph_type": "material",
+                                                "graph_name": "__rt_ipc_missing__",
+                                                "node_id": 1, "pin_index": 0,
+                                                "value": 0.5}),
+                           ("modifiers.set_param", {"object": "__rt_ipc_missing__",
+                                                    "index": 0, "levels": 1}),
+                           ("anim.remove_key", {"object_name": "__rt_ipc_missing__",
+                                                "frame": 0})):
+        classified = exchange(args.host, args.port, args.ca, args.token, method, params)
+        check(f"{method} is classified",
+              "not enabled" not in classified.get("error", ""), classified)
+
     batch = exchange(args.host, args.port, args.ca, args.token, "batch", {
         "calls": [{"method": "version", "params": {}},
                   {"method": "internal.not_registered", "params": {}}]})

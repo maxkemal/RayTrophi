@@ -227,6 +227,14 @@ uint32_t requiredCapabilities(const std::string& method) {
         return Render;
     }
     if (method == "request_render" || method == "reset_accumulation") return Render;
+    // Read-only methods whose names miss the substring heuristics below.
+    if (method == "material.info" || method == "material.of_object" ||
+        method == "material.textures" || method == "nodes.graphs" ||
+        method == "forcefield.evaluate" || method == "particle.stats" ||
+        method == "particle.emitters" || method == "anim.characters" ||
+        method == "anim.character" || method == "anim.clips" ||
+        method == "anim.graph_status")
+        return Read;
     const bool read_method = method == "version" || method == "project.path" ||
         method == "undo_description" || method == "redo_description" ||
         method.find(".get") != std::string::npos || method.find(".list") != std::string::npos ||
@@ -234,10 +242,16 @@ uint32_t requiredCapabilities(const std::string& method) {
         method.find(".object_exists") != std::string::npos ||
         method.find(".sample_height") != std::string::npos;
     if (read_method) return Read;
+    // These MUST be the namespaces RtIpc.cpp::dispatchMethod actually uses —
+    // a name that is here but never dispatched is dead, and a dispatched name
+    // that is missing here silently fail-closes in authorize(). They were once
+    // singular ("light.", "node.", "modifier.") while every method was plural,
+    // which cost 14 write methods; scripts/audit_ipc_capabilities.py now diffs
+    // the two files so the pair cannot drift apart again.
     static const char* namespaces[] = {
-        "scene.", "object.", "material.", "light.", "timeline.", "camera.",
-        "world.", "post.", "sequence.", "keyframe.", "node.", "modifier.",
-        "scatter.", "physics.", "fluid.", "gas.", "terrain.", "river.",
+        "scene.", "select.", "material.", "lights.", "timeline.", "camera.",
+        "world.", "post.", "anim.", "nodes.", "modifiers.",
+        "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "terrain.",
         "hair.", "paint.", "sculpt.", "project.", "undo", "redo"
     };
     for (const char* prefix : namespaces)

@@ -1583,6 +1583,22 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
     if (!gpu_buffers.fluid_positions.valid() ||
         gpu_buffers.fluid_positions.backend != compute->backendType() ||
         gpu_buffers.fluid_particle_capacity < particle_count) {
+        // Flow emitters change the live particle count frequently. Allocating
+        // these buffers at the exact count made every growth destroy/recreate
+        // all three streams; a transient allocation/upload failure then sent
+        // the whole fluid step down the CPU fallback path. Keep spare capacity
+        // and grow geometrically so normal emitter growth remains on GPU.
+        std::size_t new_capacity =
+            std::max<std::size_t>(gpu_buffers.fluid_particle_capacity, 4096u);
+        while (new_capacity < particle_count) {
+            const std::size_t next = new_capacity + new_capacity / 2u;
+            if (next <= new_capacity) {
+                new_capacity = particle_count;
+                break;
+            }
+            new_capacity = next;
+        }
+
         if (gpu_buffers.fluid_positions.valid()) {
             compute->destroyBuffer(gpu_buffers.fluid_positions);
             gpu_buffers.fluid_positions = {};
@@ -1597,20 +1613,20 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
         }
         ComputeBufferDesc desc;
         desc.debug_name = "FluidParticlePositions";
-        desc.size_bytes = position_bytes;
+        desc.size_bytes = new_capacity * sizeof(Vec3);
         desc.usage = usage;
         gpu_buffers.fluid_positions = compute->createBuffer(desc);
         desc.debug_name = "FluidParticleVelocities";
-        desc.size_bytes = velocity_bytes;
+        desc.size_bytes = new_capacity * sizeof(Vec3);
         gpu_buffers.fluid_velocities = compute->createBuffer(desc);
         desc.debug_name = "FluidParticleAffine";
-        desc.size_bytes = affine_bytes;
+        desc.size_bytes = new_capacity * sizeof(Fluid::AffineC);
         gpu_buffers.fluid_affine = compute->createBuffer(desc);
         gpu_buffers.fluid_particle_capacity =
             (gpu_buffers.fluid_positions.valid() &&
              gpu_buffers.fluid_velocities.valid() &&
              gpu_buffers.fluid_affine.valid())
-                ? particle_count
+                ? new_capacity
                 : 0;
     }
 
@@ -4034,6 +4050,89 @@ struct GasColliderSourceGpuConstants {
 static_assert(sizeof(GasColliderSourceGpuConstants)==20,
               "sim_gas_collider_source push-constant ABI changed");
 
+struct FluidSurfaceCombustionGpuConstants {
+    int fluid_dim[4] = {};
+    int gas_dim[4] = {};
+    float fluid_origin_voxel[4] = {};
+    float gas_origin_voxel[4] = {};
+    float material0[4] = {};
+    float material1[4] = {};
+};
+static_assert(sizeof(FluidSurfaceCombustionGpuConstants)==96,
+              "sim_fluid_surface_combustion push-constant ABI changed");
+
+bool runGpuFluidSurfaceCombustion(
+    const SimulationGridDomainDesc& fluid_domain,
+    const FluidSim::FluidGrid& fluid_grid,
+    SimulationGridDomainComputeBuffers& fluid_buffers,
+    const SimulationGridDomainDesc& gas_domain,
+    const FluidSim::FluidGrid& gas_grid,
+    SimulationGridDomainComputeBuffers& gas_buffers,
+    float dt,
+    SimulationComputeContext* compute) {
+    if (!fluid_domain.fluid_flammable ||
+        fluid_domain.type != SimulationDomainType::Fluid ||
+        gas_domain.type != SimulationDomainType::Gas ||
+        !gas_domain.fire_enabled ||
+        fluid_domain.backend != SimulationDomainBackend::GPU_Vulkan ||
+        gas_domain.backend != SimulationDomainBackend::GPU_Vulkan ||
+        !compute ||
+        compute->backendType()!=ComputeBackendType::VulkanCompute ||
+        !compute->supportsDispatch() ||
+        !(dt>0.0f) || !std::isfinite(dt)) {
+        return false;
+    }
+    const Vec3 overlap_min=Vec3::max(fluid_domain.bounds_min,gas_domain.bounds_min);
+    const Vec3 overlap_max=Vec3::min(fluid_domain.bounds_max,gas_domain.bounds_max);
+    if(overlap_min.x>=overlap_max.x || overlap_min.y>=overlap_max.y ||
+       overlap_min.z>=overlap_max.z) return false;
+    ComputeBufferHandle buffers[6]={
+        // The post-step density splat is the authoritative liquid occupancy
+        // used by the SDF/render bridge. The pressure fluid_mask is transient
+        // solver scratch and can describe the pre-advect particle layout.
+        fluid_buffers.density,
+        fluid_buffers.fluid_combustion_state,
+        gas_buffers.density,
+        gas_buffers.temperature,
+        gas_buffers.fuel,
+        gas_buffers.interaction};
+    for(const auto& handle:buffers) if(!handle.valid()) return false;
+
+    FluidSurfaceCombustionGpuConstants pc;
+    pc.fluid_dim[0]=fluid_grid.nx;
+    pc.fluid_dim[1]=fluid_grid.ny;
+    pc.fluid_dim[2]=fluid_grid.nz;
+    pc.gas_dim[0]=gas_grid.nx;
+    pc.gas_dim[1]=gas_grid.ny;
+    pc.gas_dim[2]=gas_grid.nz;
+    pc.fluid_origin_voxel[0]=fluid_grid.origin.x;
+    pc.fluid_origin_voxel[1]=fluid_grid.origin.y;
+    pc.fluid_origin_voxel[2]=fluid_grid.origin.z;
+    pc.fluid_origin_voxel[3]=fluid_grid.voxel_size;
+    pc.gas_origin_voxel[0]=gas_grid.origin.x;
+    pc.gas_origin_voxel[1]=gas_grid.origin.y;
+    pc.gas_origin_voxel[2]=gas_grid.origin.z;
+    pc.gas_origin_voxel[3]=gas_grid.voxel_size;
+    pc.material0[0]=std::max(0.0f,fluid_domain.fluid_ignition_temperature);
+    pc.material0[1]=std::max(0.0f,fluid_domain.fluid_evaporation_rate);
+    pc.material0[2]=std::max(0.0f,fluid_domain.fluid_surface_fuel_capacity);
+    pc.material0[3]=dt;
+    pc.material1[0]=std::max(0.0f,fluid_domain.fluid_combustion_heat_release);
+    pc.material1[1]=std::max(0.0f,fluid_domain.fluid_combustion_smoke_yield);
+    pc.material1[2]=std::max(0.0f,fluid_domain.fluid_surface_cooling);
+    pc.material1[3]=fluid_domain.fluid_auto_ignite?1.0f:0.0f;
+
+    ComputeDispatch cmd;
+    cmd.kernel="sim_fluid_surface_combustion";
+    cmd.buffers=buffers;
+    cmd.buffer_count=6;
+    cmd.constants=&pc;
+    cmd.constants_size=sizeof(pc);
+    cmd.groups.groups_x=
+        (static_cast<uint32_t>(fluid_grid.getCellCount())+255u)/256u;
+    return compute->dispatch(cmd);
+}
+
 bool runGpuColliderGasSource(FluidSim::FluidGrid& grid,
                              const GridFluid::SolverParams& params,
                              float dt,
@@ -4139,7 +4238,8 @@ bool runGpuScalarAdvection(FluidSim::FluidGrid& grid,
                            const GridFluid::SolverParams& params,
                            float dt,
                            SimulationComputeContext* compute,
-                           SimulationGridDomainComputeBuffers& gpu_buffers) {
+                           SimulationGridDomainComputeBuffers& gpu_buffers,
+                           bool scalar_inputs_resident=false) {
     if (!compute || !compute->supportsDispatch() || grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || dt <= 0.0f) {
         return false;
     }
@@ -4200,8 +4300,11 @@ bool runGpuScalarAdvection(FluidSim::FluidGrid& grid,
         buffers[5] = gpu_buffers.scratch_scalar2;
         buffers[6] = gpu_buffers.gas_solid_mask;
 
-        bool field_ok = buffers[3].valid() && buffers[4].valid() &&
-                        compute->uploadBuffer(buffers[3], field.data(), field.size() * sizeof(float));
+        bool field_ok = buffers[3].valid() && buffers[4].valid();
+        if(field_ok && !scalar_inputs_resident) {
+            field_ok=compute->uploadBuffer(
+                buffers[3],field.data(),field.size()*sizeof(float));
+        }
         // Index of the buffer holding the final result.
         int result = 4;
         if (field_ok) {
@@ -5442,6 +5545,95 @@ const std::vector<SimulationGridDomainState>& ParticleSimulationSystem::gridDoma
     return grid_domain_states_;
 }
 
+std::vector<SimulationGridDomainState>
+ParticleSimulationSystem::captureGridDomainStatesForCache(
+    SimulationComputeContext& compute) const {
+    std::vector<SimulationGridDomainState> snapshot = grid_domain_states_;
+    const std::size_t count = std::min(
+        snapshot.size(), grid_domain_compute_buffers_.size());
+
+    for (std::size_t i = 0; i < count; ++i) {
+        auto& state = snapshot[i];
+        const auto& buffers = grid_domain_compute_buffers_[i];
+        if (!state.valid ||
+            state.type != SimulationDomainType::Gas ||
+            buffers.backend != ComputeBackendType::VulkanCompute ||
+            !buffers.gpu_resident_fields_valid) {
+            continue;
+        }
+
+        auto download = [&](ComputeBufferHandle handle,
+                            std::vector<float>& destination) {
+            return destination.empty() ||
+                   (handle.valid() &&
+                    compute.downloadBuffer(
+                        handle,
+                        destination.data(),
+                        destination.size() * sizeof(float)));
+        };
+
+        // Cache snapshots must own the authoritative GPU fields. Download into
+        // the COPY, not the live state, so the zero-copy simulation/render path
+        // remains resident and the next solve does not upload the snapshot back.
+        compute.beginTransferBatch();
+        bool ok =
+            download(buffers.vel_x, state.grid.vel_x) &&
+            download(buffers.vel_y, state.grid.vel_y) &&
+            download(buffers.vel_z, state.grid.vel_z) &&
+            download(buffers.density, state.grid.density) &&
+            download(buffers.temperature, state.grid.temperature) &&
+            download(buffers.fuel, state.grid.fuel) &&
+            download(buffers.interaction, state.grid.interaction);
+        ok = compute.endTransferBatch() && ok;
+        if (!ok) {
+            // Preserve the pre-existing snapshot as a safe fallback. Its
+            // occupied-content gate is left unchanged rather than publishing
+            // a partially downloaded mixture of frames.
+            snapshot[i] = grid_domain_states_[i];
+            continue;
+        }
+
+        state.active_density_cells = 0;
+        state.max_density = 0.0f;
+        state.active_density_min[0] = state.grid.nx;
+        state.active_density_min[1] = state.grid.ny;
+        state.active_density_min[2] = state.grid.nz;
+        state.active_density_max[0] =
+            state.active_density_max[1] =
+            state.active_density_max[2] = -1;
+        for (std::size_t cell = 0;
+             cell < state.grid.density.size();
+             ++cell) {
+            const float value = state.grid.density[cell];
+            if (value <= 1e-4f) continue;
+            ++state.active_density_cells;
+            state.max_density = std::max(state.max_density, value);
+            const int x = static_cast<int>(
+                cell % static_cast<std::size_t>(state.grid.nx));
+            const int y = static_cast<int>(
+                (cell / static_cast<std::size_t>(state.grid.nx)) %
+                static_cast<std::size_t>(state.grid.ny));
+            const int z = static_cast<int>(
+                cell /
+                (static_cast<std::size_t>(state.grid.nx) *
+                 static_cast<std::size_t>(state.grid.ny)));
+            state.active_density_min[0] =
+                std::min(state.active_density_min[0], x);
+            state.active_density_min[1] =
+                std::min(state.active_density_min[1], y);
+            state.active_density_min[2] =
+                std::min(state.active_density_min[2], z);
+            state.active_density_max[0] =
+                std::max(state.active_density_max[0], x);
+            state.active_density_max[1] =
+                std::max(state.active_density_max[1], y);
+            state.active_density_max[2] =
+                std::max(state.active_density_max[2], z);
+        }
+    }
+    return snapshot;
+}
+
 void sanitizeProjectedVelocity(FluidSim::FluidGrid& grid, float max_velocity) {
     const float limit = std::max(0.0f, max_velocity);
     auto sanitize = [limit](std::vector<float>& values) {
@@ -5668,6 +5860,7 @@ void ParticleSimulationSystem::resetGridDomainStates() {
     // must not remain visible to the RT bridge.
     for (auto& buffers : grid_domain_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
+        buffers.fluid_combustion_state_needs_reset = true;
     }
 }
 
@@ -5679,6 +5872,7 @@ void ParticleSimulationSystem::setGridDomainStates(const std::vector<SimulationG
     // live solve republishes these persistent buffers normally.
     for (auto& buffers : grid_domain_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
+        buffers.fluid_combustion_state_needs_reset = true;
     }
 }
 
@@ -6153,6 +6347,12 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         // the seed deferred so it applies on the next sim tick with a freshly
         // resized grid.
         if (domain.type == SimulationDomainType::Fluid && domain.fluid_pending_seed && state.valid) {
+            // Remember that this domain owns an authored initial liquid state.
+            // fluid_pending_seed is consumed below, so it cannot by itself tell
+            // a later timeline/cache reset that SeedBox must be replayed.
+            if (domain.fluid_replace_on_seed) {
+                domain.fluid_reseed_on_reset = true;
+            }
             if (domain.fluid_replace_on_seed) {
                 state.particles.clear();
                 state.foam.clear();   // drop stale whitewater with the old liquid
@@ -6318,11 +6518,21 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // Per-source-per-particle hash seed so jitter is deterministic but
             // not synchronized across sources.
             const uint32_t source_seed_base =
-                static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(&source) >> 4) * 2654435761u;
+                static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(&source) >> 4) *
+                    2654435761u;
+            // Include the lifetime emission serial. Using only the per-step p
+            // index respawned the exact same sample positions every frame; APIC
+            // reseed then trimmed the stacked particles and a continuous hose
+            // looked like a one-shot SeedBox event.
+            const uint32_t emission_serial_base =
+                static_cast<uint32_t>(std::max(0, source.total_emitted_particles));
 
             state.particles.reserve(state.particles.size() + static_cast<std::size_t>(emit_count));
             for (int p = 0; p < emit_count; ++p) {
-                const uint32_t s = source_seed_base ^ (static_cast<uint32_t>(p) * 2246822519u);
+                const uint32_t s =
+                    source_seed_base ^
+                    ((emission_serial_base + static_cast<uint32_t>(p)) *
+                     2246822519u);
                 const float u1 = hashUnitFloat(s);
                 const float u2 = hashUnitFloat(s ^ 0xdeadbeefu);
                 const float u3 = hashUnitFloat(s ^ 0x9e3779b9u);
@@ -6515,29 +6725,15 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
         const float velocity_blend =
             1.0f - std::exp(-std::max(0.0f, keyed.velocity_coupling) * time_scale);
 
-        const auto& domain =
-            grid_domains_[static_cast<std::size_t>(source.domain_index)];
-        if (source.source_mode != SimulationFlowSourceMode::MeshSurface &&
-            domain.backend == SimulationDomainBackend::GPU_Vulkan &&
-            static_cast<std::size_t>(source.domain_index) <
-                grid_domain_compute_buffers_.size() &&
-            runGpuGasInjection(grid,
-                               state.channels,
-                               source_center,
-                               source_radius,
-                               source.source_mode,
-                               source_half_extent,
-                               density_amount,
-                               temperature_amount,
-                               fuel_amount,
-                               keyed.velocity,
-                               velocity_blend,
-                               falloff,
-                               compute,
-                               grid_domain_compute_buffers_[
-                                   static_cast<std::size_t>(source.domain_index)])) {
-            continue;
-        }
+        // Keep the small authored-source deposit on the host for now. The gas
+        // solve uploads these freshly injected scalar/velocity fields below and
+        // then performs advection, combustion, forces and projection on Vulkan.
+        // The former direct-GPU shortcut returned here, after which the normal
+        // host publication uploaded the still-empty CPU arrays over the same
+        // buffers and silently erased point sources (notably the pilot flame).
+        // A future fully-resident source path must carry residency through the
+        // velocity and scalar upload gates; dispatching only this isolated stage
+        // is incorrect.
 
         auto sourceWeightAt = [&](const Vec3& sample_position) {
             float normalized_distance = 0.0f;
@@ -7369,6 +7565,24 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 break;
             }
         }
+        if (!has_source && i < grid_domains_.size() &&
+            grid_domains_[i].type == SimulationDomainType::Gas) {
+            const auto& gas_domain=grid_domains_[i];
+            for(const auto& candidate:grid_domains_) {
+                if(!candidate.enabled || !candidate.fluid_flammable ||
+                   candidate.type!=SimulationDomainType::Fluid) continue;
+                const Vec3 overlap_min=
+                    Vec3::max(candidate.bounds_min,gas_domain.bounds_min);
+                const Vec3 overlap_max=
+                    Vec3::min(candidate.bounds_max,gas_domain.bounds_max);
+                if(overlap_min.x<overlap_max.x &&
+                   overlap_min.y<overlap_max.y &&
+                   overlap_min.z<overlap_max.z) {
+                    has_source=true;
+                    break;
+                }
+            }
+        }
         const bool has_content = state.active_density_cells > 0 || state.max_density > 1e-5f;
         if (!has_source && !has_content && alive_count_ == 0) {
             continue;
@@ -7513,6 +7727,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         bool gas_turbulence_pre_run = false;
         bool gas_velocity_chain_resident = false;
         bool gas_collider_source_pre_run = false;
+        bool fluid_combustion_deposit_pre_run = false;
         bool gpu_velocity_post_ok = false;
         bool gpu_projection_ok = false;
         if (gpu_grid_ready) {
@@ -7540,6 +7755,29 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 }
                 context.compute->endTransferBatch();
             }
+            // Apply overlapping APIC-liquid surface combustion only after the
+            // host gas snapshot has been uploaded. This ordering prevents the
+            // normal publication upload from overwriting the GPU-only deposit
+            // and lets scalar advection/combustion consume it in this step.
+            for(std::size_t fluid_index=0;
+                fluid_index<grid_domains_.size();
+                ++fluid_index) {
+                if(fluid_index==i ||
+                   fluid_index>=grid_domain_states_.size() ||
+                   fluid_index>=grid_domain_compute_buffers_.size() ||
+                   !grid_domain_states_[fluid_index].valid) continue;
+                fluid_combustion_deposit_pre_run =
+                    runGpuFluidSurfaceCombustion(
+                    grid_domains_[fluid_index],
+                    grid_domain_states_[fluid_index].grid,
+                    grid_domain_compute_buffers_[fluid_index],
+                    grid_domains_[i],
+                    state.grid,
+                    *gpu_buffers,
+                    dt,
+                    context.compute) ||
+                    fluid_combustion_deposit_pre_run;
+            }
             gpu_velocity_advection_pre_run = runGpuVelocityAdvection(state.grid, params, dt, context.compute, *gpu_buffers);
             if (!gpu_velocity_advection_pre_run) {
                 static bool logged_gpu_velocity_fallback = false;
@@ -7550,7 +7788,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             }
         }
         if (gpu_velocity_advection_pre_run && (params.channel_density || params.channel_temperature || params.channel_fuel)) {
-            gpu_scalar_advection_ok = runGpuScalarAdvection(state.grid, params, dt, context.compute, *gpu_buffers);
+            gpu_scalar_advection_ok = runGpuScalarAdvection(
+                state.grid,params,dt,context.compute,*gpu_buffers,
+                fluid_combustion_deposit_pre_run);
             if (!gpu_scalar_advection_ok) {
                 static bool logged_gpu_advection_fallback = false;
                 if (!logged_gpu_advection_fallback) {
@@ -7744,6 +7984,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     std::string("Partial GPU on ") +
                     context.compute->backendName() +
                     ": one or more stages used CPU fallback (see Console)";
+            }
+            if(fluid_combustion_deposit_pre_run) {
+                state.gas_compute_status +=
+                    "; combustible liquid surface GPU";
             }
         }
     }
@@ -8612,6 +8856,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.scratch2_vel_z);
     destroy(buffers.fluid_mask);
     destroy(buffers.fluid_surface_columns);
+    destroy(buffers.fluid_combustion_state);
     destroy(buffers.gas_solid_mask);
     destroy(buffers.gas_solid_vel_x);
     destroy(buffers.gas_solid_vel_y);
@@ -8738,6 +8983,27 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         static_cast<std::size_t>(std::max(1, grid.nx)) *
             static_cast<std::size_t>(std::max(1, grid.nz)) * sizeof(uint32_t),
         usage);
+    {
+        const bool initialize_combustion_state =
+            !buffers.fluid_combustion_state.valid() ||
+            compute.getBufferSize(buffers.fluid_combustion_state) < cell_bytes * 2u;
+        ensureComputeBuffer(
+            compute, buffers.fluid_combustion_state,
+            "GridDomainFluidCombustionState", cell_bytes * 2u, usage);
+        if ((initialize_combustion_state ||
+             buffers.fluid_combustion_state_needs_reset) &&
+            buffers.fluid_combustion_state.valid()) {
+            std::vector<float> initial_state(cell_count * 2u, 0.0f);
+            std::fill(
+                initial_state.begin() + static_cast<std::ptrdiff_t>(cell_count),
+                initial_state.end(), -1.0f);
+            compute.uploadBuffer(
+                buffers.fluid_combustion_state,
+                initial_state.data(),
+                initial_state.size() * sizeof(float));
+            buffers.fluid_combustion_state_needs_reset = false;
+        }
+    }
     ensureComputeBuffer(compute, buffers.gas_solid_mask,  "GridDomainGasSolidMask", cell_bytes, usage);
     ensureComputeBuffer(compute, buffers.gas_solid_vel_x, "GridDomainGasSolidVelX", cell_bytes, usage);
     ensureComputeBuffer(compute, buffers.gas_solid_vel_y, "GridDomainGasSolidVelY", cell_bytes, usage);

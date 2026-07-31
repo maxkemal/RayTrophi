@@ -183,7 +183,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // (see the matching guard in handleEditorShortcuts and Main.cpp's SDL key handler).
     if ((ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) &&
         sel.hasSelection() && !ImGui::GetIO().WantTextInput &&
-        !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused) {
+        !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused &&
+        !anim_graph_focused && !timeline.panel_focused) {
         triggerDelete(ctx);
     }
 

@@ -71,10 +71,7 @@ bool reloadAddon(const std::string& module_name, std::string& error);
 void loadEnabledAddons();       ///< startup: register every persisted-enabled addon
 void unloadAllAddons() noexcept; ///< shutdown: unregister loaded addons before teardown
 
-// Faz 4b: draw every panel an addon registered via rt.ui.register_panel().
-// Call once per UI frame from the host (between ImGui::NewFrame and Render).
-// Each panel's Python draw callback runs here on the main thread; the rt.ui.*
-// widget calls are only valid inside that callback.
-void drawAddonPanels();
+// Faz 4b addon UI (rt.ui panels, regions, widgets) now lives in Api/RtUi.h —
+// include that instead of this header when you need drawAddonPanels()/drawRegion().
 
 } // namespace rtpython

@@ -121,9 +121,11 @@ def main():
                     result_str = result_str[:117] + "..."
                 print(f"  [{test_id}] {tag}: OK — {result_str}")
                 tests_passed += 1
+            return resp
         except Exception as e:
             print(f"  [{test_id}] {tag}: EXCEPTION — {e}")
             tests_failed += 1
+            return None
 
     print("─── IPC Smoke Tests ───────────────────────────────────────────")
 
@@ -301,6 +303,153 @@ def main():
     run_test("nodes.set_param",
              {"graph_type": "material", "graph_name": "__missing__", "node_id": 1, "pin_index": 0, "value": 0.5},
              "nodes.set_param(missing) → error", expect_error=True)
+
+    # Selection (Faz 5.5a)
+    run_test("select.clear", {}, "select.clear(initial)")
+    run_test("select.object", {"name": "IpcTestCube"}, "select.object(IpcTestCube)")
+    run_test("select.list", {}, "select.list(after select)")
+    run_test("select.deselect_object", {"name": "IpcTestCube"}, "select.deselect_object")
+    run_test("select.all_objects", {}, "select.all_objects")
+    run_test("select.clear", {}, "select.clear")
+    run_test("select.object", {"name": "DOES_NOT_EXIST"},
+             "select.object(missing) → error", expect_error=True)
+
+    # Material assets (Faz 5.5a)
+    run_test("material.list", {}, "material.list")
+    run_test("material.of_object", {"object_name": "IpcTestCube"}, "material.of_object")
+    created_material = run_test("material.create",
+                                {"type": "principled", "name": "IpcTestMaterial"},
+                                "material.create(principled)")
+    material_name = (created_material or {}).get("result") or "IpcTestMaterial"
+    run_test("material.info", {"name": material_name}, "material.info")
+    run_test("material.assign", {"object_name": "IpcTestCube",
+                                 "material_name": material_name}, "material.assign")
+    run_test("material.textures", {"material_name": material_name}, "material.textures")
+    run_test("material.clear_texture", {"material_name": material_name,
+                                        "slot": "base_color"}, "material.clear_texture")
+    run_test("material.set_texture", {"material_name": material_name,
+                                      "slot": "not_a_slot", "path": "nowhere.png"},
+             "material.set_texture(bad slot) → error", expect_error=True)
+
+    # Light parameters (Faz 5.5a). The default scene may have no light, so add
+    # one and read its index back rather than assuming index 0 exists. It is a
+    # SPOT light on purpose: set_direction and the spot_angle/spot_falloff
+    # params are rejected on a point light ("direction only applies to
+    # directional and spot lights"), which would read as a false failure here.
+    run_test("lights.add", {"type": "spot", "position": [2.0, 3.0, 4.0]}, "lights.add(spot)")
+    lights_response = run_test("lights.list", {}, "lights.list(after add)")
+    lights = (lights_response or {}).get("result") or []
+    if lights:
+        light_index = lights[-1].get("index", 0)
+        run_test("lights.get", {"index": light_index}, "lights.get")
+        run_test("lights.set_color", {"index": light_index, "color": [1.0, 0.8, 0.6]},
+                 "lights.set_color")
+        run_test("lights.set_intensity", {"index": light_index, "intensity": 2.5},
+                 "lights.set_intensity")
+        run_test("lights.set_direction", {"index": light_index, "direction": [0.0, -1.0, 0.0]},
+                 "lights.set_direction")
+        run_test("lights.set_param", {"index": light_index, "param": "spot_angle", "value": 35.0},
+                 "lights.set_param(spot_angle)")
+        run_test("lights.set_visible", {"index": light_index, "visible": True},
+                 "lights.set_visible")
+        run_test("lights.rename", {"index": light_index, "name": "IpcTestLight"},
+                 "lights.rename")
+        run_test("lights.delete", {"index": light_index}, "lights.delete")
+    else:
+        print("  [skip] lights.* parameter tests: no light in the scene")
+    run_test("lights.get", {"index": 999999}, "lights.get(bad index) → error",
+             expect_error=True)
+
+    # Node graph lifecycle + apply (Faz 5.5b / 5.5c). The graph is keyed by the
+    # material created above, which is what makes apply meaningful here.
+    run_test("nodes.graphs", {"graph_type": "material"}, "nodes.graphs(material)")
+    run_test("nodes.create_graph", {"graph_type": "material", "graph_name": material_name},
+             "nodes.create_graph")
+    run_test("nodes.apply", {"graph_type": "material", "graph_name": material_name},
+             "nodes.apply")
+    run_test("nodes.remove_graph", {"graph_type": "material", "graph_name": material_name},
+             "nodes.remove_graph")
+    run_test("nodes.apply", {"graph_type": "material", "graph_name": "__missing__"},
+             "nodes.apply(missing) → error", expect_error=True)
+
+    # Force fields (Faz 5.6a)
+    run_test("forcefield.types", {}, "forcefield.types")
+    run_test("forcefield.list", {}, "forcefield.list")
+    created_field = run_test("forcefield.create", {"type": "vortex", "name": "IpcVortex"},
+                             "forcefield.create(vortex)")
+    field_handle = str((created_field or {}).get("result", {}).get("id", "IpcVortex"))
+    run_test("forcefield.get", {"field": field_handle}, "forcefield.get(by id)")
+    run_test("forcefield.set_param", {"field": field_handle, "strength": 7.5,
+                                       "position": [1.0, 2.0, 3.0], "affects_cloth": False},
+             "forcefield.set_param")
+    run_test("forcefield.get", {"field": "IpcVortex"}, "forcefield.get(by name)")
+    run_test("forcefield.evaluate", {"position": [0.0, 0.0, 0.0], "time": 0.0},
+             "forcefield.evaluate")
+    run_test("forcefield.set_param", {"field": field_handle, "shape": "__nope__"},
+             "forcefield.set_param(bad shape) → error", expect_error=True)
+    run_test("forcefield.remove", {"field": field_handle}, "forcefield.remove")
+    run_test("forcefield.get", {"field": field_handle},
+             "forcefield.get(removed) → error", expect_error=True)
+
+    # Particle systems (Faz 5.6b)
+    run_test("particle.emitters", {}, "particle.emitters")
+    run_test("particle.add_emitter", {"name": "IpcEmitter", "rate_per_second": 48.0,
+                                       "speed": 3.0, "point": [0.0, 2.0, 0.0]},
+             "particle.add_emitter")
+    run_test("particle.get_emitter", {"emitter": "IpcEmitter"}, "particle.get_emitter(by name)")
+    run_test("particle.set_emitter", {"emitter": "IpcEmitter", "speed": 9.0,
+                                       "burst_count": 16}, "particle.set_emitter")
+    run_test("particle.set_emitter", {"emitter": "IpcEmitter", "lifetime_seconds": 0.0},
+             "particle.set_emitter(bad lifetime) → error", expect_error=True)
+    # An object-bound emitter with no live object is pruned by the scene, so the
+    # facade must reject the binding instead of handing back a vanishing emitter.
+    run_test("particle.set_emitter", {"emitter": "IpcEmitter", "source_mode": "object_origin"},
+             "particle.set_emitter(unbound object) → error", expect_error=True)
+    run_test("particle.set_emitter", {"emitter": "IpcEmitter", "source_mode": "object_origin",
+                                       "source_name": "__no_such_object__"},
+             "particle.set_emitter(missing object) → error", expect_error=True)
+    run_test("particle.set_emitter", {"emitter": "IpcEmitter", "source_mode": "Object Origin",
+                                       "source_name": "IpcTestCube"},
+             "particle.set_emitter(bound, spaced spelling)")
+    run_test("particle.get_emitter", {"emitter": "IpcEmitter"},
+             "particle.get_emitter(still there after bind)")
+    run_test("particle.set_emitter", {"emitter": "IpcEmitter", "source_mode": "point",
+                                       "source_name": ""}, "particle.set_emitter(unbind)")
+    run_test("particle.get_physics", {}, "particle.get_physics")
+    run_test("particle.set_physics", {"gravity_scale": 0.75}, "particle.set_physics")
+    run_test("particle.set_physics", {"mode": "__nope__"},
+             "particle.set_physics(bad mode) → error", expect_error=True)
+    run_test("particle.spawn", {"position": [0.0, 3.0, 0.0], "velocity": [0.0, 1.0, 0.0]},
+             "particle.spawn")
+    run_test("particle.stats", {}, "particle.stats")
+    run_test("particle.step", {"dt": 0.016}, "particle.step")
+    run_test("particle.clear", {}, "particle.clear")
+    run_test("particle.set_physics", {"gravity_scale": 1.0}, "particle.set_physics(restore)")
+    run_test("particle.remove_emitter", {"emitter": "IpcEmitter"}, "particle.remove_emitter")
+    run_test("particle.get_emitter", {"emitter": "IpcEmitter"},
+             "particle.get_emitter(removed) → error", expect_error=True)
+
+    # Skeletal playback (Faz 5.6c) — transport only; scenes without an animated
+    # character still exercise the surface through the negative cases.
+    chars_response = run_test("anim.characters", {}, "anim.characters")
+    anim_chars = (chars_response or {}).get("result") or []
+    run_test("anim.character", {"character": "__no_such_character__"},
+             "anim.character(missing) → error", expect_error=True)
+    run_test("anim.play", {"character": "__no_such_character__", "clip": "Idle"},
+             "anim.play(missing character) → error", expect_error=True)
+    if anim_chars:
+        anim_name = anim_chars[0]["name"]
+        run_test("anim.character", {"character": anim_name}, "anim.character")
+        run_test("anim.clips", {"character": anim_name}, "anim.clips")
+        run_test("anim.status", {"character": anim_name}, "anim.status")
+        run_test("anim.status", {"character": anim_name, "layer": 9},
+                 "anim.status(bad layer) → error", expect_error=True)
+        run_test("anim.play", {"character": anim_name, "clip": "__no_such_clip__"},
+                 "anim.play(unknown clip) → error", expect_error=True)
+        run_test("anim.set_paused", {"character": anim_name, "paused": False},
+                 "anim.set_paused")
+    else:
+        print("  [skip] anim.* character tests: no animated character in the scene")
 
     # Error cases
     run_test("scene.object_info", {"name": "DOES_NOT_EXIST"}, "info(missing) → error", expect_error=True)

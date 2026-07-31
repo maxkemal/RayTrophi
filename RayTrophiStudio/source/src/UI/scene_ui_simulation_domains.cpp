@@ -1102,6 +1102,52 @@ void drawSimulationDomainControls(
                     }
                     }
 
+                    if (ImGui::CollapsingHeader(
+                            "Combustible Liquid / Gas Coupling",
+                            ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::Checkbox(
+                            "Enable Flammable Surface##FluidFire",
+                            &domain.fluid_flammable);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Publishes only the exposed APIC free-surface band "
+                                "into overlapping Vulkan Gas domains. The liquid "
+                                "bulk remains incompressible and does not emit.");
+                        }
+                        if (domain.fluid_flammable) {
+                            ImGui::Checkbox(
+                                "Auto Ignite##FluidFire",
+                                &domain.fluid_auto_ignite);
+                            ImGui::DragFloat(
+                                "Ignition Temperature##FluidFire",
+                                &domain.fluid_ignition_temperature,
+                                0.01f,0.0f,100.0f,"%.3f");
+                            ImGui::DragFloat(
+                                "Evaporation / Burn Rate##FluidFire",
+                                &domain.fluid_evaporation_rate,
+                                0.01f,0.0f,100.0f,"%.3f");
+                            ImGui::DragFloat(
+                                "Surface Fuel Capacity##FluidFire",
+                                &domain.fluid_surface_fuel_capacity,
+                                0.05f,0.0f,1000.0f,"%.3f");
+                            ImGui::DragFloat(
+                                "Heat Release##FluidFire",
+                                &domain.fluid_combustion_heat_release,
+                                0.05f,0.0f,100.0f,"%.3f");
+                            ImGui::DragFloat(
+                                "Smoke Yield##FluidFire",
+                                &domain.fluid_combustion_smoke_yield,
+                                0.01f,0.0f,100.0f,"%.3f");
+                            ImGui::DragFloat(
+                                "Surface Cooling##FluidFire",
+                                &domain.fluid_surface_cooling,
+                                0.01f,0.0f,100.0f,"%.3f");
+                            ImGui::TextDisabled(
+                                "Vulkan APIC mask -> Gas fuel/heat/smoke; "
+                                "Gas temperature feeds ignition back.");
+                        }
+                    }
+
                     // Redistribution / Reseed settings
                     if (ImGui::CollapsingHeader("Dynamic Particle Reseeding (Reseed)", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();

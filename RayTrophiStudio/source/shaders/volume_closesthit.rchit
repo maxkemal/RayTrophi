@@ -1077,10 +1077,120 @@ float volumeExitDistance(VkVolumeInstance vol, vec3 worldPos, vec3 worldDir) {
     return max(min(min(tFar.x, tFar.y), tFar.z), 0.0);
 }
 
+bool volumeRayInterval(VkVolumeInstance vol,
+                       vec3 worldOrigin,
+                       vec3 worldDir,
+                       out float intervalNear,
+                       out float intervalFar) {
+    vec3 lp;
+    lp.x = vol.inv_transform[0] * worldOrigin.x + vol.inv_transform[1] * worldOrigin.y
+         + vol.inv_transform[2] * worldOrigin.z + vol.inv_transform[3];
+    lp.y = vol.inv_transform[4] * worldOrigin.x + vol.inv_transform[5] * worldOrigin.y
+         + vol.inv_transform[6] * worldOrigin.z + vol.inv_transform[7];
+    lp.z = vol.inv_transform[8] * worldOrigin.x + vol.inv_transform[9] * worldOrigin.y
+         + vol.inv_transform[10] * worldOrigin.z + vol.inv_transform[11];
+    vec3 ld;
+    ld.x = vol.inv_transform[0] * worldDir.x + vol.inv_transform[1] * worldDir.y
+         + vol.inv_transform[2] * worldDir.z;
+    ld.y = vol.inv_transform[4] * worldDir.x + vol.inv_transform[5] * worldDir.y
+         + vol.inv_transform[6] * worldDir.z;
+    ld.z = vol.inv_transform[8] * worldDir.x + vol.inv_transform[9] * worldDir.y
+         + vol.inv_transform[10] * worldDir.z;
+    const float DIR_EPS = 1e-8;
+    vec3 invDir = vec3(
+        abs(ld.x) > DIR_EPS ? 1.0 / ld.x : (ld.x >= 0.0 ? 1e20 : -1e20),
+        abs(ld.y) > DIR_EPS ? 1.0 / ld.y : (ld.y >= 0.0 ? 1e20 : -1e20),
+        abs(ld.z) > DIR_EPS ? 1.0 / ld.z : (ld.z >= 0.0 ? 1e20 : -1e20));
+    vec3 t0 = (vol.aabb_min - lp) * invDir;
+    vec3 t1 = (vol.aabb_max - lp) * invDir;
+    vec3 lo = min(t0, t1);
+    vec3 hi = max(t0, t1);
+    intervalNear = max(max(lo.x, lo.y), lo.z);
+    intervalFar = min(min(hi.x, hi.y), hi.z);
+    return intervalFar > max(intervalNear, 0.0);
+}
+
+// Find the nearest real liquid iso crossing, not merely its procedural AABB.
+// This is the Vulkan equivalent of OptiX's per-ray ordered VDB loop: gas is
+// integrated only up to the liquid boundary, then the path is handed to the
+// SurfaceSDF closest-hit instead of marching two complete overlapping boxes.
+float nearestSurfaceSDFCrossing(vec3 rayOrigin,
+                                vec3 rayDir,
+                                float rangeNear,
+                                float rangeFar,
+                                uint currentVolume,
+                                uint volumeCount) {
+    float nearestHit = rangeFar + 1.0;
+    uint count = min(volumeCount, 16u);
+    for (uint candidateIndex = 0u; candidateIndex < count; ++candidateIndex) {
+        if (candidateIndex == currentVolume) continue;
+        VkVolumeInstance surface = volumes.v[candidateIndex];
+        if (surface.is_active == 0 || surface.source_type != 4 ||
+            surface.volume_type != 2 || surface.vdb_grid_address == 0) {
+            continue;
+        }
+
+        float boxNear, boxFar;
+        if (!volumeRayInterval(surface, rayOrigin, rayDir, boxNear, boxFar)) continue;
+        float beginT = max(rangeNear, max(boxNear, 0.001));
+        float endT = min(rangeFar, boxFar);
+        if (endT <= beginT || beginT >= nearestHit) continue;
+
+        pnanovdb_buf_t surfaceBuf;
+        surfaceBuf.address = surface.vdb_grid_address;
+        pnanovdb_grid_handle_t gridH;
+        gridH.address.byte_offset = 0u;
+        pnanovdb_tree_handle_t treeH = pnanovdb_grid_get_tree(surfaceBuf, gridH);
+        pnanovdb_root_handle_t rootH = pnanovdb_tree_get_root(surfaceBuf, treeH);
+        pnanovdb_map_handle_t mapH = pnanovdb_grid_get_map(surfaceBuf, gridH);
+        pnanovdb_readaccessor_t acc;
+        pnanovdb_readaccessor_init(acc, rootH);
+
+        const float ISO = 0.5;
+        float span = endT - beginT;
+        int cap = clamp(surface.max_steps, 32, 512);
+        float fineStep = clamp(surface.step_size,
+                               surface.voxel_size * 0.1,
+                               surface.voxel_size * 0.5);
+        float step = max(0.001, max(fineStep, span / float(cap)));
+        int steps = min(int(ceil(span / step)) + 1, cap + 1);
+        float t0s = beginT;
+        float d0 = sampleDensityAcc(
+            surface, rayOrigin + rayDir * t0s, surfaceBuf, mapH, acc);
+        bool startedInside = d0 > ISO;
+        for (int s = 0; s < steps; ++s) {
+            float t1s = min(t0s + step, endT);
+            float d1 = sampleDensityAcc(
+                surface, rayOrigin + rayDir * t1s, surfaceBuf, mapH, acc);
+            bool crossed = startedInside
+                ? (d0 >= ISO && d1 < ISO)
+                : (d0 < ISO && d1 >= ISO);
+            if (crossed) {
+                float a = t0s;
+                float b = t1s;
+                for (int refine = 0; refine < 4; ++refine) {
+                    float mid = 0.5 * (a + b);
+                    float dm = sampleDensityAcc(
+                        surface, rayOrigin + rayDir * mid, surfaceBuf, mapH, acc);
+                    if ((dm > ISO) == startedInside) a = mid;
+                    else b = mid;
+                }
+                nearestHit = min(nearestHit, 0.5 * (a + b));
+                break;
+            }
+            t0s = t1s;
+            d0 = d1;
+            if (t0s >= endT) break;
+        }
+    }
+    return nearestHit <= rangeFar ? nearestHit : -1.0;
+}
+
 void main() {
     // Volume instance index from gl_InstanceCustomIndexEXT
     // (Set via TLASInstance::customIndex when building TLAS for volume objects)
     uint volIdx = gl_InstanceCustomIndexEXT;
+    payload.skipGasVolumes = false;
     uint volCount = uint(max(int(cam.pad0), 0));
     if (volIdx >= volCount) {
         payload.scattered = false;
@@ -1330,10 +1440,11 @@ void main() {
             const uint SOLID_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
                                    | gl_RayFlagsSkipClosestHitShaderEXT
                                    | gl_RayFlagsNoOpaqueEXT;
-            // Exclude volume AABBs (0x02) and transient simulation particles
-            // (0x04). Particles remain visible to primary rays, but must not
+            // Exclude gas/fog AABBs (0x02), transient simulation particles
+            // (0x04), and SurfaceSDF AABBs (0x08). Particles remain visible
+            // to primary rays, but must not
             // trigger the 1+6 solid-location probes for every gas ray.
-            const uint SOLID_MASK  = 0xF9;
+            const uint SOLID_MASK  = 0xF1;
             const uint VOLUME_SOLID_PROBE = 0xC17D5EEDu;
             shadowPayload = vec4(0.0, 0.0, 0.0, uintBitsToFloat(VOLUME_SOLID_PROBE));
             traceRayEXT(topLevelAS, SOLID_FLAGS, SOLID_MASK, 0, 1, 1,
@@ -1473,6 +1584,41 @@ void main() {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // Ordered gas -> liquid handoff for overlapping burning-fluid domains.
+    // Ordinary VDB/cloud volumes keep the original fast path.
+    float layeredSurfaceT = -1.0;
+    // ★Gate on "there is something in front of me", NOT on how the gas happens to be
+    // stored. This used to require source_type == 5 (live dense GPU gas), which silently
+    // excluded the SAME gas domain whenever it was replayed from a cache: restoring a
+    // frame calls setGridDomainStates(), which clears gpu_resident_fields_valid, so the
+    // domain publishes as a host NanoVDB volume (source_type 2) instead. With the handoff
+    // gated off, the gas marched its whole AABB and terminated the segment, and the
+    // SurfaceSDF volume overlapping it was never reached — "the gas renders, the water
+    // surface is gone", reproducible on cached playback only.
+    // Widening to NanoVDB volumes is safe: nearestSurfaceSDFCrossing skips every
+    // candidate that is not itself a SurfaceSDF (source_type 4), so with no liquid in
+    // the scene this is a ≤16-slot early-out loop and nothing changes. An ordinary VDB
+    // that genuinely overlaps a water surface WANTS this ordering too — that is the
+    // OptiX per-ray ordered-volume behaviour this path exists to match.
+    if ((vol.source_type == 5 || vol.source_type == 2) && volCount > 1u) {
+        layeredSurfaceT = nearestSurfaceSDFCrossing(
+            rayOrigin, rayDir, tNear, tFar, volIdx, volCount);
+        if (layeredSurfaceT > 0.0) {
+            if (layeredSurfaceT <= tNear + 0.003) {
+                payload.radiance = vec3(0.0);
+                payload.attenuation = vec3(1.0);
+                payload.scatterOrigin =
+                    rayOrigin + rayDir * max(tNear, layeredSurfaceT - 0.001);
+                payload.scatterDir = rayDir;
+                payload.scattered = true;
+                payload.skipGasVolumes = true;
+                payload.bounceType = BOUNCE_TRANSPARENT;
+                return;
+            }
+            tFar = min(tFar, layeredSurfaceT - 0.001);
+        }
+    }
+
     // SOLID SURFACE DETECTION inside the volume AABB
     // If a solid triangle exists between tNear and tFar, we must stop the march
     // just before it and signal raygen to fire the next bounce with
@@ -1506,10 +1652,11 @@ void main() {
             const uint PROBE_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
                                    | gl_RayFlagsSkipClosestHitShaderEXT
                                    | gl_RayFlagsNoOpaqueEXT;
-            // Real scene solids use bit 0x01. Exclude volume AABBs (0x02) and
-            // transient simulation particles (0x04); otherwise a particle-rich
+            // Real scene solids use bit 0x01. Exclude gas/fog AABBs (0x02),
+            // transient simulation particles (0x04), and SurfaceSDF AABBs
+            // (0x08); otherwise a particle-rich
             // gas preset turns each volume hit into up to six nested RT probes.
-            const uint PROBE_MASK  = 0xF9;
+            const uint PROBE_MASK  = 0xF1;
 
             // Initial check: any solid in [tNear, tFar]?
             const uint VOLUME_SOLID_PROBE = 0xC17D5EEDu;
@@ -2008,9 +2155,13 @@ void main() {
 
         // Set scattered = true with original direction to let the ray continue through
         // Ensure forward progress to avoid re-hitting the same boundary when camera is inside.
-        payload.scatterOrigin = rayOrigin + rayDir * (tFar + 0.002);
+        payload.scatterOrigin = layeredSurfaceT > 0.0
+            ? rayOrigin + rayDir * max(tNear, layeredSurfaceT - 0.0005)
+            : rayOrigin + rayDir * (tFar + 0.002);
         payload.scatterDir    = rayDir;
         payload.scattered     = (transmittanceLuma > 0.01); // Stop if fully absorbed
+        payload.skipGasVolumes =
+            layeredSurfaceT > 0.0 && payload.scattered;
         if (volumeOpacity <= 0.04 && volumeContribution <= 5e-4) {
             payload.bounceType = BOUNCE_TRANSPARENT;
         }

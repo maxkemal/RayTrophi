@@ -2946,6 +2946,9 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
     
     // --- KEYBOARD SHORTCUTS (lightweight, runs every frame) ---
     bool timeline_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    // Publish the claim so the three global Delete listeners stand down. RootAndChildWindows
+    // covers the graph editor canvas too — it lives inside this same window.
+    panel_focused = timeline_focused;
     ImGuiIO& io = ImGui::GetIO();
     
     // I key - Insert keyframe (global shortcut)
