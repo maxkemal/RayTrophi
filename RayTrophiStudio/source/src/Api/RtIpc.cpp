@@ -246,6 +246,203 @@ json vec3ToJson(const Vec3& v) {
     return json::array({v.x, v.y, v.z});
 }
 
+json materialInfoToJson(const rtapi::MaterialInfo& info) {
+    return json{{"id", info.id}, {"name", info.name}, {"type", info.type}};
+}
+
+// Force field (Faz 5.6a) <-> JSON. The key names match the Python dict exactly,
+// so a script ported from rt.forcefield to remote IPC keeps working verbatim.
+json forceFieldToJson(const rtapi::ForceFieldInfo& info) {
+    return json{
+        {"id", info.id}, {"name", info.name}, {"type", info.type},
+        {"shape", info.shape}, {"falloff", info.falloff},
+        {"enabled", info.enabled}, {"visible", info.visible},
+        {"position", vec3ToJson(info.position)}, {"rotation", vec3ToJson(info.rotation)},
+        {"scale", vec3ToJson(info.scale)}, {"direction", vec3ToJson(info.direction)},
+        {"axis", vec3ToJson(info.axis)},
+        {"strength", info.strength}, {"falloff_radius", info.falloff_radius},
+        {"inner_radius", info.inner_radius},
+        {"use_noise", info.use_noise}, {"noise_octaves", info.noise_octaves},
+        {"noise_seed", info.noise_seed}, {"noise_frequency", info.noise_frequency},
+        {"noise_lacunarity", info.noise_lacunarity},
+        {"noise_persistence", info.noise_persistence},
+        {"noise_amplitude", info.noise_amplitude}, {"noise_speed", info.noise_speed},
+        {"inward_force", info.inward_force}, {"upward_force", info.upward_force},
+        {"linear_drag", info.linear_drag}, {"quadratic_drag", info.quadratic_drag},
+        {"fluid_surface_drag", info.fluid_surface_drag},
+        {"fluid_drag_coupling", info.fluid_drag_coupling},
+        {"fluid_surface_depth", info.fluid_surface_depth},
+        {"fluid_curl_detail", info.fluid_curl_detail},
+        {"start_frame", info.start_frame}, {"end_frame", info.end_frame},
+        {"phase", info.phase},
+        {"affects_gas", info.affects_gas}, {"affects_particles", info.affects_particles},
+        {"affects_cloth", info.affects_cloth},
+        {"affects_rigidbody", info.affects_rigidbody},
+        {"affects_fluid", info.affects_fluid}};
+}
+
+// Skeletal animation (Faz 5.6c) <-> JSON.
+json animCharacterToJson(const rtapi::AnimCharacterInfo& info) {
+    return json{{"name", info.name}, {"has_animation", info.has_animation},
+                {"clip_count", info.clip_count}, {"bone_count", info.bone_count},
+                {"uses_graph", info.uses_graph},
+                {"graph_asset_key", info.graph_asset_key},
+                {"graph_follows_timeline", info.graph_follows_timeline},
+                {"root_motion", info.root_motion},
+                {"root_motion_bone", info.root_motion_bone},
+                {"visible", info.visible}};
+}
+
+json animPlaybackToJson(const rtapi::AnimPlaybackInfo& info) {
+    return json{{"clip", info.clip}, {"playing", info.playing},
+                {"paused", info.paused}, {"blending", info.blending},
+                {"time", info.time}, {"normalized_time", info.normalized_time},
+                {"layer", info.layer}};
+}
+
+// Particle emitter / solver settings (Faz 5.6b) <-> JSON. Key names match the
+// Python dicts so a script ports between rt.particle and remote IPC verbatim.
+json particleEmitterToJson(const rtapi::ParticleEmitterInfo& info) {
+    return json{
+        {"index", info.index}, {"name", info.name},
+        {"source_mode", info.source_mode}, {"spawn_mode", info.spawn_mode},
+        {"source_name", info.source_name}, {"enabled", info.enabled},
+        {"point", vec3ToJson(info.point)},
+        {"local_offset", vec3ToJson(info.local_offset)},
+        {"direction", vec3ToJson(info.direction)},
+        {"surface_offset", info.surface_offset},
+        {"rate_per_second", info.rate_per_second}, {"burst_count", info.burst_count},
+        {"speed", info.speed}, {"spread", info.spread},
+        {"lifetime_seconds", info.lifetime_seconds}, {"mass", info.mass},
+        {"start_size", info.start_size}, {"end_size", info.end_size},
+        {"size_jitter", info.size_jitter},
+        {"start_opacity", info.start_opacity}, {"end_opacity", info.end_opacity},
+        {"start_color", vec3ToJson(info.start_color)},
+        {"end_color", vec3ToJson(info.end_color)},
+        {"angular_velocity", info.angular_velocity},
+        {"angular_jitter", info.angular_jitter}, {"seed", info.seed}};
+}
+
+void applyParticleEmitterPatch(const json& patch, rtapi::ParticleEmitterInfo& info) {
+    auto str = [&](const char* key, std::string& target) {
+        if (patch.contains(key)) target = patch[key].get<std::string>();
+    };
+    auto flt = [&](const char* key, float& target) {
+        if (patch.contains(key)) target = patch[key].get<float>();
+    };
+    auto vector = [&](const char* key, Vec3& target) {
+        if (patch.contains(key)) target = requireVec3(patch, key);
+    };
+    str("name", info.name); str("source_mode", info.source_mode);
+    str("spawn_mode", info.spawn_mode); str("source_name", info.source_name);
+    if (patch.contains("enabled")) info.enabled = patch["enabled"].get<bool>();
+    vector("point", info.point); vector("local_offset", info.local_offset);
+    vector("direction", info.direction);
+    flt("surface_offset", info.surface_offset);
+    flt("rate_per_second", info.rate_per_second);
+    if (patch.contains("burst_count")) info.burst_count = patch["burst_count"].get<int>();
+    flt("speed", info.speed); flt("spread", info.spread);
+    flt("lifetime_seconds", info.lifetime_seconds); flt("mass", info.mass);
+    flt("start_size", info.start_size); flt("end_size", info.end_size);
+    flt("size_jitter", info.size_jitter);
+    flt("start_opacity", info.start_opacity); flt("end_opacity", info.end_opacity);
+    vector("start_color", info.start_color); vector("end_color", info.end_color);
+    flt("angular_velocity", info.angular_velocity);
+    flt("angular_jitter", info.angular_jitter);
+    if (patch.contains("seed")) info.seed = patch["seed"].get<unsigned int>();
+}
+
+json particlePhysicsToJson(const rtapi::ParticlePhysicsInfo& info) {
+    return json{
+        {"mode", info.mode}, {"quality", info.quality},
+        {"particle_radius", info.particle_radius},
+        {"self_collision_enabled", info.self_collision_enabled},
+        {"solver_iterations", info.solver_iterations},
+        {"max_neighbors_per_particle", info.max_neighbors_per_particle},
+        {"viscosity", info.viscosity}, {"cohesion", info.cohesion},
+        {"pressure_stiffness", info.pressure_stiffness},
+        {"rest_density", info.rest_density}, {"buoyancy", info.buoyancy},
+        {"gravity_scale", info.gravity_scale}, {"vorticity", info.vorticity},
+        {"grid_density_deposit", info.grid_density_deposit},
+        {"grid_temperature_deposit", info.grid_temperature_deposit},
+        {"grid_fuel_deposit", info.grid_fuel_deposit},
+        {"grid_deposit_fade_with_age", info.grid_deposit_fade_with_age}};
+}
+
+void applyParticlePhysicsPatch(const json& patch, rtapi::ParticlePhysicsInfo& info) {
+    auto str = [&](const char* key, std::string& target) {
+        if (patch.contains(key)) target = patch[key].get<std::string>();
+    };
+    auto flt = [&](const char* key, float& target) {
+        if (patch.contains(key)) target = patch[key].get<float>();
+    };
+    auto integer = [&](const char* key, int& target) {
+        if (patch.contains(key)) target = patch[key].get<int>();
+    };
+    auto boolean = [&](const char* key, bool& target) {
+        if (patch.contains(key)) target = patch[key].get<bool>();
+    };
+    str("mode", info.mode); str("quality", info.quality);
+    flt("particle_radius", info.particle_radius);
+    boolean("self_collision_enabled", info.self_collision_enabled);
+    integer("solver_iterations", info.solver_iterations);
+    integer("max_neighbors_per_particle", info.max_neighbors_per_particle);
+    flt("viscosity", info.viscosity); flt("cohesion", info.cohesion);
+    flt("pressure_stiffness", info.pressure_stiffness);
+    flt("rest_density", info.rest_density); flt("buoyancy", info.buoyancy);
+    flt("gravity_scale", info.gravity_scale); flt("vorticity", info.vorticity);
+    flt("grid_density_deposit", info.grid_density_deposit);
+    flt("grid_temperature_deposit", info.grid_temperature_deposit);
+    flt("grid_fuel_deposit", info.grid_fuel_deposit);
+    boolean("grid_deposit_fade_with_age", info.grid_deposit_fade_with_age);
+}
+
+void applyForceFieldPatch(const json& patch, rtapi::ForceFieldInfo& info) {
+    auto str = [&](const char* key, std::string& target) {
+        if (patch.contains(key)) target = patch[key].get<std::string>();
+    };
+    auto flt = [&](const char* key, float& target) {
+        if (patch.contains(key)) target = patch[key].get<float>();
+    };
+    auto integer = [&](const char* key, int& target) {
+        if (patch.contains(key)) target = patch[key].get<int>();
+    };
+    auto boolean = [&](const char* key, bool& target) {
+        if (patch.contains(key)) target = patch[key].get<bool>();
+    };
+    auto vector = [&](const char* key, Vec3& target) {
+        if (patch.contains(key)) target = requireVec3(patch, key);
+    };
+    str("name", info.name); str("type", info.type);
+    str("shape", info.shape); str("falloff", info.falloff);
+    boolean("enabled", info.enabled); boolean("visible", info.visible);
+    vector("position", info.position); vector("rotation", info.rotation);
+    vector("scale", info.scale); vector("direction", info.direction);
+    vector("axis", info.axis);
+    flt("strength", info.strength); flt("falloff_radius", info.falloff_radius);
+    flt("inner_radius", info.inner_radius);
+    boolean("use_noise", info.use_noise);
+    integer("noise_octaves", info.noise_octaves); integer("noise_seed", info.noise_seed);
+    flt("noise_frequency", info.noise_frequency);
+    flt("noise_lacunarity", info.noise_lacunarity);
+    flt("noise_persistence", info.noise_persistence);
+    flt("noise_amplitude", info.noise_amplitude);
+    flt("noise_speed", info.noise_speed);
+    flt("inward_force", info.inward_force); flt("upward_force", info.upward_force);
+    flt("linear_drag", info.linear_drag); flt("quadratic_drag", info.quadratic_drag);
+    boolean("fluid_surface_drag", info.fluid_surface_drag);
+    flt("fluid_drag_coupling", info.fluid_drag_coupling);
+    flt("fluid_surface_depth", info.fluid_surface_depth);
+    flt("fluid_curl_detail", info.fluid_curl_detail);
+    flt("start_frame", info.start_frame); flt("end_frame", info.end_frame);
+    flt("phase", info.phase);
+    boolean("affects_gas", info.affects_gas);
+    boolean("affects_particles", info.affects_particles);
+    boolean("affects_cloth", info.affects_cloth);
+    boolean("affects_rigidbody", info.affects_rigidbody);
+    boolean("affects_fluid", info.affects_fluid);
+}
+
 // Node parameter (Faz 5.1b) <-> JSON. Scalars map to JSON number/bool/string,
 // vectors to a JSON array, an unset default to null.
 json nodeParamToJson(const rtapi::NodeParamValue& v) {
@@ -545,6 +742,112 @@ json dispatchMethod(const std::string& method, const json& params) {
         }
     }
 
+    // ── Material assets (Faz 5.5a) ──────────────────────────────────────
+    if (method == "material.list") {
+        return enqueueQuery([](UIContext&) {
+            json result = json::array();
+            for (const rtapi::MaterialInfo& info : rtapi::listMaterials())
+                result.push_back(materialInfoToJson(info));
+            return result;
+        });
+    }
+    if (method == "material.info") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            rtapi::MaterialInfo info;
+            rtapi::Result r = rtapi::getMaterial(name, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return materialInfoToJson(info);
+        });
+    }
+    if (method == "material.create") {
+        std::string type = requireString(params, "type");
+        std::string name = params.value("name", "");
+        return enqueueQuery([type, name](UIContext&) {
+            std::string created;
+            rtapi::Result r = rtapi::createMaterial(type, name, created);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json(created);
+        });
+    }
+    if (method == "material.of_object") {
+        std::string obj = requireString(params, "object_name");
+        return enqueueQuery([obj](UIContext&) {
+            return json(rtapi::objectMaterials(obj));
+        });
+    }
+    if (method == "material.assign") {
+        std::string obj = requireString(params, "object_name");
+        std::string mat = requireString(params, "material_name");
+        return enqueueResult([obj, mat](UIContext&) {
+            return rtapi::assignMaterial(obj, mat);
+        });
+    }
+    if (method == "material.set_texture") {
+        std::string mat = requireString(params, "material_name");
+        std::string slot = requireString(params, "slot");
+        std::string path = requireString(params, "path");
+        return enqueueResult([mat, slot, path](UIContext&) {
+            return rtapi::setMaterialTexture(mat, slot, path);
+        });
+    }
+    if (method == "material.clear_texture") {
+        std::string mat = requireString(params, "material_name");
+        std::string slot = requireString(params, "slot");
+        return enqueueResult([mat, slot](UIContext&) {
+            return rtapi::clearMaterialTexture(mat, slot);
+        });
+    }
+    if (method == "material.textures") {
+        std::string mat = requireString(params, "material_name");
+        return enqueueQuery([mat](UIContext&) {
+            return json(rtapi::materialTextureSlots(mat));
+        });
+    }
+
+    // ── Selection (Faz 5.5a) ────────────────────────────────────────────
+    if (method == "select.list") {
+        return enqueueQuery([](UIContext&) {
+            json result = json::array();
+            for (const rtapi::SelectionItem& item : rtapi::listSelection()) {
+                result.push_back(json{{"type", item.type}, {"name", item.name},
+                                      {"index", item.index}, {"primary", item.primary}});
+            }
+            return result;
+        });
+    }
+    if (method == "select.object") {
+        std::string name = requireString(params, "name");
+        bool additive = params.value("additive", false);
+        return enqueueResult([name, additive](UIContext&) {
+            return rtapi::selectObject(name, additive);
+        });
+    }
+    if (method == "select.deselect_object") {
+        std::string name = requireString(params, "name");
+        return enqueueResult([name](UIContext&) {
+            return rtapi::deselectObject(name);
+        });
+    }
+    if (method == "select.light") {
+        int index = requireInt(params, "index");
+        bool additive = params.value("additive", false);
+        return enqueueResult([index, additive](UIContext&) {
+            return rtapi::selectLight(index, additive);
+        });
+    }
+    if (method == "select.all_objects") {
+        return enqueueQuery([](UIContext&) {
+            int count = 0;
+            rtapi::Result r = rtapi::selectAllObjects(count);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json(count);
+        });
+    }
+    if (method == "select.clear") {
+        return enqueueResult([](UIContext&) { return rtapi::clearSelection(); });
+    }
+
     // ── Lights ──────────────────────────────────────────────────────────
     if (method == "lights.list") {
         return enqueueQuery([](UIContext&) {
@@ -579,6 +882,66 @@ json dispatchMethod(const std::string& method, const json& params) {
         Vec3 pos = requireVec3(params, "position");
         return enqueueResult([index, pos](UIContext&) {
             return rtapi::setLightPosition(index, pos);
+        });
+    }
+    // Appearance / shape parameters (Faz 5.5a).
+    if (method == "lights.get") {
+        int index = requireInt(params, "index");
+        return enqueueQuery([index](UIContext&) {
+            rtapi::LightInfo info;
+            rtapi::Result r = rtapi::getLight(index, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"index", info.index}, {"name", info.name}, {"type", info.type},
+                        {"position", vec3ToJson(info.position)},
+                        {"direction", vec3ToJson(info.direction)},
+                        {"color", vec3ToJson(info.color)},
+                        {"intensity", info.intensity}, {"radius", info.radius},
+                        {"spot_angle", info.spot_angle}, {"spot_falloff", info.spot_falloff},
+                        {"width", info.width}, {"height", info.height},
+                        {"visible", info.visible}};
+        });
+    }
+    if (method == "lights.set_direction") {
+        int index = requireInt(params, "index");
+        Vec3 dir = requireVec3(params, "direction");
+        return enqueueResult([index, dir](UIContext&) {
+            return rtapi::setLightDirection(index, dir);
+        });
+    }
+    if (method == "lights.set_color") {
+        int index = requireInt(params, "index");
+        Vec3 color = requireVec3(params, "color");
+        return enqueueResult([index, color](UIContext&) {
+            return rtapi::setLightColor(index, color);
+        });
+    }
+    if (method == "lights.set_intensity") {
+        int index = requireInt(params, "index");
+        float value = requireFloat(params, "intensity");
+        return enqueueResult([index, value](UIContext&) {
+            return rtapi::setLightIntensity(index, value);
+        });
+    }
+    if (method == "lights.set_visible") {
+        int index = requireInt(params, "index");
+        bool visible = requireBool(params, "visible");
+        return enqueueResult([index, visible](UIContext&) {
+            return rtapi::setLightVisible(index, visible);
+        });
+    }
+    if (method == "lights.set_param") {
+        int index = requireInt(params, "index");
+        std::string param = requireString(params, "param");
+        float value = requireFloat(params, "value");
+        return enqueueResult([index, param, value](UIContext&) {
+            return rtapi::setLightParam(index, param, value);
+        });
+    }
+    if (method == "lights.rename") {
+        int index = requireInt(params, "index");
+        std::string name = requireString(params, "name");
+        return enqueueResult([index, name](UIContext&) {
+            return rtapi::renameLight(index, name);
         });
     }
 
@@ -1037,6 +1400,42 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::updateGasDomainSettings(domain, s);
         });
     }
+    if (method == "fluid.get_combustion") {
+        std::string domain=requireString(params,"domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::CombustibleFluidSettings s;
+            auto r=rtapi::getCombustibleFluidSettings(domain,s);
+            if(!r.ok) return json{{"__error",r.error}};
+            return json{{"enabled",s.enabled},
+                        {"auto_ignite",s.auto_ignite},
+                        {"ignition_temperature",s.ignition_temperature},
+                        {"evaporation_rate",s.evaporation_rate},
+                        {"surface_fuel_capacity",s.surface_fuel_capacity},
+                        {"heat_release",s.heat_release},
+                        {"smoke_yield",s.smoke_yield},
+                        {"surface_cooling",s.surface_cooling}};
+        });
+    }
+    if (method == "fluid.set_combustion") {
+        std::string domain=requireString(params,"domain");
+        return enqueueResult([domain,params](UIContext&) {
+            rtapi::CombustibleFluidSettings s;
+            auto r=rtapi::getCombustibleFluidSettings(domain,s);
+            if(!r.ok) return r;
+#define RT_FLUID_FIRE_JSON(name,type) \
+            if(params.contains(#name)) s.name=params.at(#name).get<type>()
+            RT_FLUID_FIRE_JSON(enabled,bool);
+            RT_FLUID_FIRE_JSON(auto_ignite,bool);
+            RT_FLUID_FIRE_JSON(ignition_temperature,float);
+            RT_FLUID_FIRE_JSON(evaporation_rate,float);
+            RT_FLUID_FIRE_JSON(surface_fuel_capacity,float);
+            RT_FLUID_FIRE_JSON(heat_release,float);
+            RT_FLUID_FIRE_JSON(smoke_yield,float);
+            RT_FLUID_FIRE_JSON(surface_cooling,float);
+#undef RT_FLUID_FIRE_JSON
+            return rtapi::updateCombustibleFluidSettings(domain,s);
+        });
+    }
 
     auto terrainInfoJson = [](const rtapi::TerrainInfo& info) {
         return json{{"id", info.id}, {"name", info.name},
@@ -1409,6 +1808,132 @@ json dispatchMethod(const std::string& method, const json& params) {
         });
     }
 
+    // ── Skeletal playback (Faz 5.6c) ────────────────────────────────────
+    if (method == "anim.characters") {
+        return enqueueQuery([](UIContext&) {
+            json result = json::array();
+            for (const rtapi::AnimCharacterInfo& info : rtapi::listAnimCharacters())
+                result.push_back(animCharacterToJson(info));
+            return result;
+        });
+    }
+    if (method == "anim.character") {
+        std::string character = requireString(params, "character");
+        return enqueueQuery([character](UIContext&) {
+            rtapi::AnimCharacterInfo info;
+            rtapi::Result r = rtapi::getAnimCharacter(character, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return animCharacterToJson(info);
+        });
+    }
+    if (method == "anim.clips") {
+        std::string character = requireString(params, "character");
+        return enqueueQuery([character](UIContext&) {
+            std::vector<rtapi::AnimClipInfo> clips;
+            rtapi::Result r = rtapi::listAnimClips(character, clips);
+            if (!r.ok) return json{{"__error", r.error}};
+            json result = json::array();
+            for (const rtapi::AnimClipInfo& clip : clips) {
+                result.push_back(json{{"name", clip.name},
+                                      {"duration_seconds", clip.duration_seconds},
+                                      {"ticks_per_second", clip.ticks_per_second},
+                                      {"loop", clip.loop},
+                                      {"start_frame", clip.start_frame},
+                                      {"end_frame", clip.end_frame}});
+            }
+            return result;
+        });
+    }
+    if (method == "anim.play") {
+        std::string character = requireString(params, "character");
+        std::string clip = requireString(params, "clip");
+        float blend = params.value("blend", 0.3f);
+        int layer = params.value("layer", 0);
+        return enqueueResult([character, clip, blend, layer](UIContext&) {
+            return rtapi::playAnimClip(character, clip, blend, layer);
+        });
+    }
+    if (method == "anim.stop") {
+        std::string character = requireString(params, "character");
+        float blend_out = params.value("blend_out", 0.3f);
+        int layer = params.value("layer", 0);
+        return enqueueResult([character, blend_out, layer](UIContext&) {
+            return rtapi::stopAnimation(character, blend_out, layer);
+        });
+    }
+    if (method == "anim.set_paused") {
+        std::string character = requireString(params, "character");
+        bool paused = params.value("paused", true);
+        return enqueueResult([character, paused](UIContext&) {
+            return rtapi::setAnimPaused(character, paused);
+        });
+    }
+    if (method == "anim.set_time") {
+        std::string character = requireString(params, "character");
+        float seconds = requireFloat(params, "seconds");
+        int layer = params.value("layer", 0);
+        return enqueueResult([character, seconds, layer](UIContext&) {
+            return rtapi::setAnimTime(character, seconds, layer);
+        });
+    }
+    if (method == "anim.set_speed") {
+        std::string character = requireString(params, "character");
+        float speed = requireFloat(params, "speed");
+        int layer = params.value("layer", 0);
+        return enqueueResult([character, speed, layer](UIContext&) {
+            return rtapi::setAnimSpeed(character, speed, layer);
+        });
+    }
+    if (method == "anim.set_loop") {
+        std::string character = requireString(params, "character");
+        bool loop = requireBool(params, "loop");
+        int layer = params.value("layer", 0);
+        return enqueueResult([character, loop, layer](UIContext&) {
+            return rtapi::setAnimLoop(character, loop, layer);
+        });
+    }
+    if (method == "anim.status") {
+        std::string character = requireString(params, "character");
+        int layer = params.value("layer", 0);
+        return enqueueQuery([character, layer](UIContext&) {
+            rtapi::AnimPlaybackInfo info;
+            rtapi::Result r = rtapi::getAnimPlayback(character, layer, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return animPlaybackToJson(info);
+        });
+    }
+    if (method == "anim.set_graph_param") {
+        std::string character = requireString(params, "character");
+        std::string name = requireString(params, "name");
+        if (!params.contains("value")) throw std::runtime_error("missing param: value");
+        if (params["value"].is_boolean()) {
+            bool value = params["value"].get<bool>();
+            return enqueueResult([character, name, value](UIContext&) {
+                return rtapi::setAnimGraphBool(character, name, value);
+            });
+        }
+        float value = params["value"].get<float>();
+        return enqueueResult([character, name, value](UIContext&) {
+            return rtapi::setAnimGraphFloat(character, name, value);
+        });
+    }
+    if (method == "anim.trigger_graph_param") {
+        std::string character = requireString(params, "character");
+        std::string name = requireString(params, "name");
+        return enqueueResult([character, name](UIContext&) {
+            return rtapi::triggerAnimGraphParam(character, name);
+        });
+    }
+    if (method == "anim.graph_status") {
+        std::string character = requireString(params, "character");
+        return enqueueQuery([character](UIContext&) {
+            rtapi::AnimPlaybackInfo info;
+            rtapi::Result r = rtapi::getAnimGraphPlayback(character, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return animPlaybackToJson(info);
+        });
+    }
+
     // ── Node graphs ─────────────────────────────────────────────────────
     if (method == "nodes.types") {
         return enqueueQuery([](UIContext&) {
@@ -1420,6 +1945,40 @@ json dispatchMethod(const std::string& method, const json& params) {
                 });
             }
             return result;
+        });
+    }
+    // Graph lifecycle + apply (Faz 5.5b / 5.5c).
+    if (method == "nodes.graphs") {
+        std::string gt = requireString(params, "graph_type");
+        return enqueueQuery([gt](UIContext&) {
+            return json(rtapi::listNodeGraphs(gt));
+        });
+    }
+    if (method == "nodes.create_graph") {
+        std::string gt = requireString(params, "graph_type");
+        std::string gn = requireString(params, "graph_name");
+        return enqueueResult([gt, gn](UIContext&) {
+            return rtapi::createNodeGraph(gt, gn);
+        });
+    }
+    if (method == "nodes.remove_graph") {
+        std::string gt = requireString(params, "graph_type");
+        std::string gn = requireString(params, "graph_name");
+        return enqueueResult([gt, gn](UIContext&) {
+            return rtapi::removeNodeGraph(gt, gn);
+        });
+    }
+    if (method == "nodes.apply") {
+        std::string gt = requireString(params, "graph_type");
+        std::string gn = requireString(params, "graph_name");
+        return enqueueQuery([gt, gn](UIContext&) {
+            rtapi::NodeGraphApplyInfo info;
+            rtapi::Result r = rtapi::applyNodeGraph(gt, gn, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            // warnings mirror the editor's diagnostics panel; a successful apply
+            // can still report per-pixel slots or an unbound Attribute name.
+            return json{{"ok", info.ok}, {"warnings", info.warnings},
+                        {"errors", info.errors}};
         });
     }
     if (method == "nodes.add") {
@@ -1554,6 +2113,173 @@ json dispatchMethod(const std::string& method, const json& params) {
         return enqueueResult([gt, gn, nid, property, value](UIContext&) {
             return rtapi::setNodeProperty(gt, gn, nid, property, value);
         });
+    }
+
+    // ── Force fields (Faz 5.6a) ─────────────────────────────────────────
+    // Same shape as the Python binding: the facade takes a whole struct, and
+    // forcefield.set_param turns a partial params object into a read-patch-write.
+    if (method == "forcefield.types") {
+        return enqueueQuery([](UIContext&) { return json(rtapi::forceFieldTypes()); });
+    }
+    if (method == "forcefield.list") {
+        return enqueueQuery([](UIContext&) {
+            json result = json::array();
+            for (const rtapi::ForceFieldInfo& info : rtapi::listForceFields())
+                result.push_back(forceFieldToJson(info));
+            return result;
+        });
+    }
+    if (method == "forcefield.get") {
+        std::string field = requireString(params, "field");
+        return enqueueQuery([field](UIContext&) {
+            rtapi::ForceFieldInfo info;
+            rtapi::Result r = rtapi::getForceField(field, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return forceFieldToJson(info);
+        });
+    }
+    if (method == "forcefield.create") {
+        std::string type = requireString(params, "type");
+        std::string name = params.value("name", "");
+        return enqueueQuery([type, name](UIContext&) {
+            rtapi::ForceFieldInfo info;
+            rtapi::Result r = rtapi::createForceField(type, name, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return forceFieldToJson(info);
+        });
+    }
+    if (method == "forcefield.remove") {
+        std::string field = requireString(params, "field");
+        return enqueueResult([field](UIContext&) { return rtapi::removeForceField(field); });
+    }
+    if (method == "forcefield.set_param") {
+        std::string field = requireString(params, "field");
+        json patch = params;
+        patch.erase("field");
+        return enqueueResult([field, patch](UIContext&) {
+            rtapi::ForceFieldInfo info;
+            rtapi::Result read = rtapi::getForceField(field, info);
+            if (!read.ok) return read;
+            applyForceFieldPatch(patch, info);
+            return rtapi::updateForceField(field, info);
+        });
+    }
+    if (method == "forcefield.evaluate") {
+        Vec3 position = requireVec3(params, "position");
+        float time = params.value("time", 0.0f);
+        Vec3 velocity(0.0f, 0.0f, 0.0f);
+        if (params.contains("velocity")) velocity = requireVec3(params, "velocity");
+        return enqueueQuery([position, time, velocity](UIContext&) {
+            Vec3 force;
+            rtapi::Result r = rtapi::evaluateForceFields(position, time, velocity, force);
+            if (!r.ok) return json{{"__error", r.error}};
+            return vec3ToJson(force);
+        });
+    }
+
+    // ── Particle systems (Faz 5.6b) ─────────────────────────────────────
+    if (method == "particle.emitters") {
+        return enqueueQuery([](UIContext&) {
+            json result = json::array();
+            for (const rtapi::ParticleEmitterInfo& info : rtapi::listParticleEmitters())
+                result.push_back(particleEmitterToJson(info));
+            return result;
+        });
+    }
+    if (method == "particle.get_emitter") {
+        std::string emitter = requireString(params, "emitter");
+        return enqueueQuery([emitter](UIContext&) {
+            rtapi::ParticleEmitterInfo info;
+            rtapi::Result r = rtapi::getParticleEmitter(emitter, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return particleEmitterToJson(info);
+        });
+    }
+    if (method == "particle.add_emitter") {
+        json patch = params;
+        return enqueueQuery([patch](UIContext&) {
+            rtapi::ParticleEmitterInfo info;   // facade defaults
+            applyParticleEmitterPatch(patch, info);
+            rtapi::ParticleEmitterInfo created;
+            rtapi::Result r = rtapi::addParticleEmitter(info, created);
+            if (!r.ok) return json{{"__error", r.error}};
+            return particleEmitterToJson(created);
+        });
+    }
+    if (method == "particle.set_emitter") {
+        std::string emitter = requireString(params, "emitter");
+        json patch = params;
+        patch.erase("emitter");
+        return enqueueResult([emitter, patch](UIContext&) {
+            rtapi::ParticleEmitterInfo info;
+            rtapi::Result read = rtapi::getParticleEmitter(emitter, info);
+            if (!read.ok) return read;
+            applyParticleEmitterPatch(patch, info);
+            return rtapi::updateParticleEmitter(emitter, info);
+        });
+    }
+    if (method == "particle.remove_emitter") {
+        std::string emitter = requireString(params, "emitter");
+        return enqueueResult([emitter](UIContext&) {
+            return rtapi::removeParticleEmitter(emitter);
+        });
+    }
+    if (method == "particle.clear_emitters") {
+        return enqueueResult([](UIContext&) { return rtapi::clearParticleEmitters(); });
+    }
+    if (method == "particle.get_physics") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::ParticlePhysicsInfo info;
+            rtapi::Result r = rtapi::getParticlePhysics(info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return particlePhysicsToJson(info);
+        });
+    }
+    if (method == "particle.set_physics") {
+        json patch = params;
+        return enqueueResult([patch](UIContext&) {
+            rtapi::ParticlePhysicsInfo info;
+            rtapi::Result read = rtapi::getParticlePhysics(info);
+            if (!read.ok) return read;
+            applyParticlePhysicsPatch(patch, info);
+            return rtapi::updateParticlePhysics(info);
+        });
+    }
+    if (method == "particle.stats") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::ParticleStatsInfo info;
+            rtapi::Result r = rtapi::getParticleStats(info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"alive_count", info.alive_count}, {"capacity", info.capacity},
+                        {"emitter_count", info.emitter_count},
+                        {"collider_count", info.collider_count},
+                        {"domain_count", info.domain_count},
+                        {"total_ms", info.total_ms}, {"emit_ms", info.emit_ms},
+                        {"integrate_ms", info.integrate_ms},
+                        {"self_collision_ms", info.self_collision_ms},
+                        {"grid_domain_ms", info.grid_domain_ms}};
+        });
+    }
+    if (method == "particle.spawn") {
+        Vec3 position = requireVec3(params, "position");
+        Vec3 velocity(0.0f, 0.0f, 0.0f);
+        if (params.contains("velocity")) velocity = requireVec3(params, "velocity");
+        float lifetime = params.value("lifetime_seconds", 5.0f);
+        float mass = params.value("mass", 1.0f);
+        float size = params.value("size", 0.05f);
+        return enqueueQuery([position, velocity, lifetime, mass, size](UIContext&) {
+            int index = -1;
+            rtapi::Result r = rtapi::spawnParticle(position, velocity, lifetime, mass, size, index);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json(index);
+        });
+    }
+    if (method == "particle.clear") {
+        return enqueueResult([](UIContext&) { return rtapi::clearParticles(); });
+    }
+    if (method == "particle.step") {
+        float dt = params.value("dt", 0.0166667f);
+        return enqueueResult([dt](UIContext&) { return rtapi::stepParticleSimulation(dt); });
     }
 
     // ── Script ──────────────────────────────────────────────────────────

@@ -396,6 +396,13 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 { "Flamethrower", SceneData::ParticleSystemPreset::Flamethrower,
                   "Fast directional Vulkan fuel jet with a narrow turbulent flame tongue.\n"
                   "Aim it at a collider configured with Ignite on Contact to test surface fire." },
+                { "Burning Fuel Spill", SceneData::ParticleSystemPreset::BurningFuelSpill,
+                  "Coupled Vulkan APIC oil surface plus Gas combustion domain.\n"
+                  "The exposed liquid surface owns finite fuel and feeds heat/smoke into the flame." },
+                { "Ignited Fuel Jet", SceneData::ParticleSystemPreset::IgnitedFuelJet,
+                  "Production Vulkan liquid-fire shot: a continuous amber fuel jet spreads over\n"
+                  "the floor, a short delayed pilot ignites it, then finite surface fuel sustains\n"
+                  "the layered SurfaceSDF + gas flame and smoke render." },
             };
             constexpr int kPresetCount = static_cast<int>(sizeof(kPresets) / sizeof(kPresets[0]));
             static int selected_preset = 0;

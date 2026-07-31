@@ -130,12 +130,10 @@ void main() {
             reportT = max(tNear, tFar - exitBias);
         }
 
-        // Bias iso-surface (source_type==4) volumes slightly back so a COINCIDENT
-        // fog volume (whitewater foam sharing the fluid domain AABB) is hit and
-        // marched FIRST — its white scattering is added before the surface
-        // refraction redirect. Without this the foam only casts a shadow on the
-        // water and never shows. The iso march range (volumeHitAttrib) is the
-        // unbiased tNear/tFar, so the surface still renders at the right place.
+        // Coincident participating media must be accumulated before a liquid
+        // redirect changes the path. SurfaceSDF is therefore slightly behind
+        // gas/fog at an equal AABB entry; the gas closest-hit clamps itself to
+        // the actual nearest SDF crossing and explicitly hands the ray over.
         if (volumes.v[volIdx].source_type == 4) {
             float isoBias = max(0.001, 0.0001 * max(tFar, 1.0));
             reportT = tNear + isoBias;

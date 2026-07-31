@@ -5118,6 +5118,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"seed_min", vec3ToJson(domain.fluid_seed_min)},
             {"seed_max", vec3ToJson(domain.fluid_seed_max)},
             {"seed_particles_per_cell", domain.fluid_seed_particles_per_cell},
+            {"reseed_on_reset", domain.fluid_reseed_on_reset},
             {"max_particles", domain.fluid_max_particles},
             {"replace_on_seed", domain.fluid_replace_on_seed},
             {"seed_mode", (int)domain.fluid_seed_mode},
@@ -5517,6 +5518,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             if (f.contains("seed_min")) domain.fluid_seed_min = jsonToVec3(f["seed_min"]);
             if (f.contains("seed_max")) domain.fluid_seed_max = jsonToVec3(f["seed_max"]);
             domain.fluid_seed_particles_per_cell = f.value("seed_particles_per_cell", domain.fluid_seed_particles_per_cell);
+            domain.fluid_reseed_on_reset = f.value("reseed_on_reset", domain.fluid_reseed_on_reset);
             domain.fluid_max_particles = f.value("max_particles", domain.fluid_max_particles);
             domain.fluid_replace_on_seed = f.value("replace_on_seed", domain.fluid_replace_on_seed);
             domain.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)f.value("seed_mode", (int)domain.fluid_seed_mode);

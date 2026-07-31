@@ -22,6 +22,7 @@
 */
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -146,6 +147,59 @@ Result setMaterialParam(const std::string& object_name, const std::string& param
                         const Vec3& value);
 
 // ---------------------------------------------------------------------------
+// Material assets (Faz 5.5a, implemented in RtApiMaterial.cpp). The functions
+// above edit parameters through an OBJECT; these manage the assets themselves,
+// which is what lets a script build a look from scratch. Materials are addressed
+// by name — MaterialManager keeps Material::materialName and its registry key
+// identical, so the name is a stable handle for the asset's lifetime.
+//
+// createMaterial may adjust the requested name to keep it unique; the name that
+// was actually registered comes back in out_name. assignMaterial replaces the
+// object's WHOLE material assignment (every slot), which is the useful primitive
+// for scripted look-building. Not undoable — bulk authoring, like mesh writes.
+//
+// Texture slots: base_color | roughness | metallic | normal | emission |
+// opacity | specular | transmission | height. Principled BSDF only.
+// ---------------------------------------------------------------------------
+struct MaterialInfo {
+    uint16_t id = 0;
+    std::string name;
+    std::string type;   // "principled" | "volumetric" | "other"
+};
+
+std::vector<MaterialInfo> listMaterials();
+Result getMaterial(const std::string& name, MaterialInfo& out);
+Result createMaterial(const std::string& type, const std::string& requested_name,
+                      std::string& out_name);
+std::vector<std::string> objectMaterials(const std::string& object_name);
+Result assignMaterial(const std::string& object_name, const std::string& material_name);
+Result setMaterialTexture(const std::string& material_name, const std::string& slot,
+                          const std::string& filepath);
+Result clearMaterialTexture(const std::string& material_name, const std::string& slot);
+std::vector<std::string> materialTextureSlots(const std::string& material_name);
+
+// ---------------------------------------------------------------------------
+// Selection (Faz 5.5a). Most editor operations are selection-driven, so this is
+// what lets a script drive those paths instead of duplicating them. NOT undoable
+// — selection is treated like viewport navigation, the same exception the camera
+// API takes. `index` is the object's index in scene.world.objects, or the light
+// index; `primary` marks the item the gizmo follows.
+// ---------------------------------------------------------------------------
+struct SelectionItem {
+    std::string type;   // "object"|"light"|"camera"|"vdb_volume"|"force_field"|...
+    std::string name;
+    int index = -1;
+    bool primary = false;
+};
+
+std::vector<SelectionItem> listSelection();
+Result selectObject(const std::string& name, bool additive = false);
+Result deselectObject(const std::string& name);
+Result selectLight(int index, bool additive = false);
+Result selectAllObjects(int& out_count);
+Result clearSelection();
+
+// ---------------------------------------------------------------------------
 // Lights (undoable via Add/Delete/TransformLightCommand). Lights are indexed
 // into scene.lights; index is stable until a light is added/removed.
 // type strings: "point" | "directional" | "spot" | "area".
@@ -158,12 +212,33 @@ struct LightInfo {
     std::string name;
     std::string type;
     Vec3 position;
+    Vec3 direction;                 // directional / spot only
+    Vec3 color = Vec3(1.0f);
+    float intensity = 1.0f;
+    float radius = 0.0f;            // soft-shadow / source radius
+    float spot_angle = 0.0f;        // spot only, degrees
+    float spot_falloff = 0.0f;      // spot only
+    float width = 0.0f;             // area only
+    float height = 0.0f;            // area only
+    bool visible = true;
 };
 
 std::vector<LightInfo> listLights();
+Result getLight(int index, LightInfo& out);
 Result addLight(const std::string& type, const Vec3& position, std::string& out_name);
 Result deleteLight(int index);
 Result setLightPosition(int index, const Vec3& position);
+
+// Geometric edits below reuse LightState + TransformLightCommand (the viewport
+// gizmo's own path); appearance edits use a sibling command. Both are undoable.
+// setLightParam accepts: radius | spot_angle | spot_falloff | width | height |
+// intensity (the last one forwards to setLightIntensity).
+Result setLightDirection(int index, const Vec3& direction);
+Result setLightParam(int index, const std::string& param, float value);
+Result setLightColor(int index, const Vec3& color);
+Result setLightIntensity(int index, float intensity);
+Result setLightVisible(int index, bool visible);
+Result renameLight(int index, const std::string& name);
 
 // ---------------------------------------------------------------------------
 // Mesh data (Faz 3a). Positions/normals are exposed in the mesh's local/bind
@@ -364,6 +439,88 @@ Result removeKeyframe(const std::string& object_name, int frame);
 std::vector<int> listKeyframes(const std::string& object_name);
 
 // ---------------------------------------------------------------------------
+// Skeletal animation playback (Faz 5.6c, implemented in RtApiAnim.cpp).
+//
+// ⚠️ SCOPE — this is deliberately the PLAYBACK + PARAMETER half only. Animation
+// node-graph TOPOLOGY (add/link/remove nodes, state machines, blend spaces) is
+// NOT exposed, because the layer underneath it is still moving:
+//   * three playback paths coexist (node graph, Ozz runtime, AnimationController)
+//     selected by useAnimGraph / preferOzzRuntime, and preferOzzRuntime is true;
+//   * the Ozz runtime is a declared future migration and today a stub
+//     (buildStubAnimationSet / IntegrationState::StubReady), so the pose and
+//     skeleton model can still change underneath a frozen API;
+//   * AnimationNodeGraph is NOT a NodeSystem::GraphBase — it owns its own node
+//     and link vectors, so rt.nodes cannot address it without either an
+//     invasive refactor or a second node-scripting dialect.
+// What IS exposed here keeps its meaning whichever runtime wins: characters,
+// clips, transport (play/stop/pause/time/speed/loop) and graph parameters.
+// Revisit topology once the runtime question is settled and AnimationNodeGraph
+// shares the common graph base.
+//
+// Characters are addressed by import name (ImportedModelContext::importName).
+// `layer` indexes the controller's animation layers (0..3); layer 0 is the base
+// layer. Not undoable — playback is transport state, like the timeline frame.
+// ---------------------------------------------------------------------------
+struct AnimCharacterInfo {
+    std::string name;                 // import name, the handle for every call
+    bool has_animation = false;
+    int clip_count = 0;
+    int bone_count = 0;               // weighted bones
+    bool uses_graph = false;          // node graph instead of the clip controller
+    std::string graph_asset_key;
+    bool graph_follows_timeline = false;
+    bool root_motion = false;
+    std::string root_motion_bone;     // empty = auto detect
+    bool visible = true;
+};
+
+struct AnimClipInfo {
+    std::string name;
+    float duration_seconds = 0.0f;
+    float ticks_per_second = 24.0f;
+    bool loop = true;
+    int start_frame = 0;
+    int end_frame = 0;
+};
+
+struct AnimPlaybackInfo {
+    std::string clip;
+    bool playing = false;
+    bool paused = false;
+    bool blending = false;
+    float time = 0.0f;                // seconds into the clip
+    float normalized_time = 0.0f;     // 0..1
+    int layer = 0;
+};
+
+// Characters this module can actually DRIVE — imports that own an AnimationController.
+// A static mesh import (cube, plane) also has an ImportedModelContext but no controller, and
+// listing those made the obvious loop over characters() fail on scenes with no animation.
+// getAnimCharacter() below is deliberately unfiltered: a name asked for by hand still answers.
+std::vector<AnimCharacterInfo> listAnimCharacters();
+Result getAnimCharacter(const std::string& character, AnimCharacterInfo& out);
+Result listAnimClips(const std::string& character, std::vector<AnimClipInfo>& out);
+
+Result playAnimClip(const std::string& character, const std::string& clip,
+                    float blend_seconds = 0.3f, int layer = 0);
+Result stopAnimation(const std::string& character, float blend_out_seconds = 0.3f,
+                     int layer = 0);
+Result setAnimPaused(const std::string& character, bool paused);
+Result setAnimTime(const std::string& character, float seconds, int layer = 0);
+Result setAnimSpeed(const std::string& character, float speed, int layer = 0);
+Result setAnimLoop(const std::string& character, bool loop, int layer = 0);
+Result getAnimPlayback(const std::string& character, int layer, AnimPlaybackInfo& out);
+
+// Graph parameters drive the character's animation node graph (its Parameter
+// nodes and state-machine transition conditions). They are only meaningful for
+// a character whose uses_graph is true; setting them on a clip-driven character
+// is reported rather than silently ignored.
+Result setAnimGraphFloat(const std::string& character, const std::string& name, float value);
+Result setAnimGraphBool(const std::string& character, const std::string& name, bool value);
+Result triggerAnimGraphParam(const std::string& character, const std::string& name);
+Result getAnimGraphPlayback(const std::string& character, AnimPlaybackInfo& out);
+
+// ---------------------------------------------------------------------------
 // Node graphs (Faz 3d). Builds material / geometry node graphs through the
 // shared NodeRegistry (typeId -> factory). graph_type is "material" (addressed
 // by material name) or "geometry" (addressed by object nodeName); the named
@@ -386,6 +543,36 @@ struct NodeDesc {
     int input_count = 0;
     int output_count = 0;
 };
+
+// Graph lifecycle (Faz 5.5b). A material graph is keyed by material name and is
+// seeded from that material the way the node editor seeds it; a geometry graph
+// is keyed by object nodeName and starts empty. Terrain graphs are owned by the
+// TerrainObject and are created by applyTerrainPreset instead.
+std::vector<std::string> listNodeGraphs(const std::string& graph_type);
+Result createNodeGraph(const std::string& graph_type, const std::string& graph_name);
+Result removeNodeGraph(const std::string& graph_type, const std::string& graph_name);
+
+// Applies a graph to what it drives — the step that closes the scripted
+// authoring loop (Faz 5.5c). This is NOT terrain's async evaluate: for a
+// material it is the editor's own Apply, i.e. fold the constant chains into the
+// material, publish the volume branch, compile the spatially-varying chains
+// into the per-pixel program, force the one-time geometry pass a Pointiness /
+// Attribute read needs, then re-upload material + program and reset
+// accumulation. Pushing the material to a device cannot substitute for the
+// compile. Geometry graphs run the Geo-DAG apply (swaps the object's mesh);
+// terrain graphs keep their async contract and stay with evaluateTerrain.
+//
+// `warnings` mirrors the editor's diagnostics panel — a successful apply can
+// still report that slots shade per-pixel, or that an Attribute name found no
+// free slot and compiled to 0.
+struct NodeGraphApplyInfo {
+    bool ok = false;
+    std::vector<std::string> warnings;
+    std::vector<std::string> errors;
+};
+
+Result applyNodeGraph(const std::string& graph_type, const std::string& graph_name,
+                      NodeGraphApplyInfo& out);
 
 std::vector<NodeTypeDesc> listNodeTypes();
 Result addNode(const std::string& graph_type, const std::string& graph_name,
@@ -549,6 +736,214 @@ Result setPhysicsGravity(Vec3 gravity);
 Result getPhysicsGravity(Vec3& out_gravity);
 
 // ---------------------------------------------------------------------------
+// Force fields (Faz 5.6a, implemented in RtApiForceField.cpp). One field drives
+// every simulation family at once — gas, particles, cloth, rigid bodies and the
+// APIC liquid — through Physics::ForceFieldManager, so this is the highest-
+// leverage sim surface a script can reach.
+//
+// Fields are addressed by ID or by name (`id_or_name`); the manager assigns the
+// ID and keeps it stable for the field's lifetime, while names are only uniqued
+// on create, so prefer the ID when a script holds a handle across edits.
+//
+// The write surface is deliberately ONE function: read with getForceField(),
+// modify the struct, write it back with updateForceField(). A field carries ~35
+// parameters and per-parameter setters would have meant ~35 entry points on
+// every layer (facade + binding + IPC dispatch + capability). The bindings turn
+// this into a kwargs patch, so from a script it still reads as a partial edit.
+//
+// NOT undoable — matches the force-field panel, which mutates the manager
+// directly. Every mutation runs the panel's own post-edit step: invalidate the
+// rigid-body cache and reset CPU + backend accumulation. Skipping that leaves a
+// stale simulation cache and a stale image, so a scripted edit would appear to
+// do nothing until the next unrelated scene change.
+//
+// evaluateForceFields() is a read-only probe of the combined field at a point —
+// the same evaluation the solvers run. It is what lets a script verify a field
+// does what it intends without stepping a simulation.
+// ---------------------------------------------------------------------------
+struct ForceFieldInfo {
+    int id = -1;
+    std::string name;
+    // wind | gravity | attractor | repeller | vortex | turbulence | curlnoise |
+    // drag | magnetic | directionalnoise
+    std::string type = "wind";
+    std::string shape = "sphere";     // infinite | sphere | box | cylinder | cone
+    // none | linear | smooth | sphere | inverse_square | exponential | custom
+    std::string falloff = "smooth";
+    bool enabled = true;
+    bool visible = true;              // viewport gizmo only, not a force switch
+
+    Vec3 position;
+    Vec3 rotation;                    // euler degrees
+    Vec3 scale = Vec3(1.0f, 1.0f, 1.0f);
+    Vec3 direction = Vec3(0.0f, -1.0f, 0.0f);   // wind / gravity
+    Vec3 axis = Vec3(0.0f, 1.0f, 0.0f);         // vortex
+
+    float strength = 1.0f;
+    float falloff_radius = 5.0f;      // outer radius where the force reaches 0
+    float inner_radius = 0.0f;        // inner radius at full strength
+
+    bool use_noise = false;
+    int noise_octaves = 4;
+    int noise_seed = 42;
+    float noise_frequency = 0.5f;
+    float noise_lacunarity = 2.0f;
+    float noise_persistence = 0.5f;
+    float noise_amplitude = 1.0f;
+    float noise_speed = 0.1f;
+
+    float inward_force = 0.0f;        // vortex: spiral pull toward the centre
+    float upward_force = 0.0f;        // vortex: lift along the axis (tornado)
+    float linear_drag = 0.1f;         // drag: F = -drag * v
+    float quadratic_drag = 0.0f;      // drag: F = -drag * v^2
+
+    // Wind -> APIC liquid coupling. With the drag model on, `strength` is read
+    // as the TARGET surface speed (m/s) rather than an acceleration, and only
+    // the horizontal band just below the free surface is pushed.
+    bool fluid_surface_drag = true;
+    float fluid_drag_coupling = 4.0f;
+    float fluid_surface_depth = 0.5f;
+    float fluid_curl_detail = 0.0f;
+
+    float start_frame = 0.0f;
+    float end_frame = -1.0f;          // -1 = never stops
+    float phase = 0.0f;
+
+    bool affects_gas = true;
+    bool affects_particles = true;
+    bool affects_cloth = true;
+    bool affects_rigidbody = true;
+    bool affects_fluid = true;
+};
+
+std::vector<std::string> forceFieldTypes();
+std::vector<ForceFieldInfo> listForceFields();
+Result getForceField(const std::string& id_or_name, ForceFieldInfo& out);
+// Seeds the per-type defaults the panel's "add field" menu uses (noise on for
+// turbulence/curl, a cylinder + spiral for vortex, linear drag for drag), so a
+// scripted field behaves like one created from the UI.
+Result createForceField(const std::string& type, const std::string& requested_name,
+                        ForceFieldInfo& out);
+Result removeForceField(const std::string& id_or_name);
+Result updateForceField(const std::string& id_or_name, const ForceFieldInfo& info);
+Result evaluateForceFields(Vec3 world_position, float time, Vec3 velocity, Vec3& out_force);
+
+// ---------------------------------------------------------------------------
+// Particle systems (Faz 5.6b, implemented in RtApiParticle.cpp). Emitters,
+// solver settings and live statistics for the discrete particle runtime.
+//
+// ⚠️ Particle COLLIDERS and grid domains are NOT here: they hang off the same
+// ParticleSimulationSystem and are already scripted as `simulation collider` /
+// fluid domain (RtApiFluid.cpp). Adding a second spelling of them would mean
+// two facades mutating one runtime.
+//
+// Emitters are addressed by INDEX or by name; the index is the position in the
+// runtime's emitter list and shifts when an earlier emitter is removed, exactly
+// like the panel's list. Names are not uniqued by the runtime, so a name lookup
+// returns the first match.
+//
+// Same one-write-function shape as force fields: read with getParticleEmitter(),
+// modify, write back with updateParticleEmitter(); the bindings expose it as a
+// kwargs/JSON patch. Not undoable (the panel edits the runtime directly).
+//
+// ★`burst_count` is one-shot but must NOT be zeroed to "consume" it — the
+// runtime tracks that separately so the burst survives serialization and
+// replays on rewind. A script that clears burst_count kills the effect on disk.
+// ---------------------------------------------------------------------------
+struct ParticleEmitterInfo {
+    int index = -1;
+    std::string name = "Particle Emitter";
+    std::string source_mode = "point";  // point | object_origin | force_field_origin
+    std::string spawn_mode = "center";  // center | object_aabb_surface | mesh_surface
+    std::string source_name;            // object / force field the emitter binds to
+    bool enabled = true;
+
+    Vec3 point = Vec3(0.0f, 1.0f, 0.0f);
+    Vec3 local_offset;
+    Vec3 direction = Vec3(0.0f, 1.0f, 0.0f);
+    float surface_offset = 0.02f;
+
+    float rate_per_second = 32.0f;
+    int burst_count = 0;                // one-shot; see the note above
+    float speed = 2.0f;
+    float spread = 0.35f;
+    float lifetime_seconds = 4.0f;
+    float mass = 1.0f;
+
+    // Visual attributes evolve linearly from birth to death.
+    float start_size = 0.06f;
+    float end_size = 0.02f;
+    float size_jitter = 0.0f;
+    float start_opacity = 1.0f;
+    float end_opacity = 0.0f;
+    Vec3 start_color = Vec3(1.0f, 0.85f, 0.5f);
+    Vec3 end_color = Vec3(1.0f, 0.25f, 0.08f);
+    float angular_velocity = 0.0f;
+    float angular_jitter = 0.0f;
+    unsigned int seed = 1;
+};
+
+// Solver settings are per particle SYSTEM, not per emitter.
+struct ParticlePhysicsInfo {
+    std::string mode = "spark";        // spark | granular | fluid | gas
+    std::string quality = "realtime";  // realtime | preview | offline
+    float particle_radius = 0.04f;
+    bool self_collision_enabled = false;
+    int solver_iterations = 1;
+    int max_neighbors_per_particle = 32;
+    float viscosity = 0.0f;
+    float cohesion = 0.0f;
+    float pressure_stiffness = 0.0f;
+    float rest_density = 1000.0f;
+    float buoyancy = 0.0f;
+    float gravity_scale = 1.0f;
+    float vorticity = 0.0f;
+    // Particle -> gas grid deposit, per second and per particle. This is what
+    // makes debris CARRY fire and smoke instead of being a decorative overlay;
+    // fuel deposit additionally needs the domain's Fuel channel + fire enabled.
+    float grid_density_deposit = 0.0f;
+    float grid_temperature_deposit = 0.0f;
+    float grid_fuel_deposit = 0.0f;
+    bool grid_deposit_fade_with_age = true;
+};
+
+// Counts are read live from the runtime, so they are correct the instant an
+// emitter is added. The timings are per-step measurements and stay zero until
+// the simulation has actually stepped.
+struct ParticleStatsInfo {
+    int alive_count = 0;
+    int capacity = 0;
+    int emitter_count = 0;
+    int collider_count = 0;
+    int domain_count = 0;
+    float total_ms = 0.0f;
+    float emit_ms = 0.0f;
+    float integrate_ms = 0.0f;
+    float self_collision_ms = 0.0f;
+    float grid_domain_ms = 0.0f;
+};
+
+std::vector<ParticleEmitterInfo> listParticleEmitters();
+Result getParticleEmitter(const std::string& index_or_name, ParticleEmitterInfo& out);
+Result addParticleEmitter(const ParticleEmitterInfo& info, ParticleEmitterInfo& out);
+Result removeParticleEmitter(const std::string& index_or_name);
+Result updateParticleEmitter(const std::string& index_or_name, const ParticleEmitterInfo& info);
+Result clearParticleEmitters();
+
+Result getParticlePhysics(ParticlePhysicsInfo& out);
+Result updateParticlePhysics(const ParticlePhysicsInfo& info);
+Result getParticleStats(ParticleStatsInfo& out);
+
+// Direct particle authoring / control. spawnParticle bypasses the emitters and
+// injects one particle; stepParticleSimulation advances only the particle
+// system (fluid/gas domains have their own step), and clearParticles drops the
+// live particles while keeping emitters and settings.
+Result spawnParticle(Vec3 position, Vec3 velocity, float lifetime_seconds, float mass,
+                     float size, int& out_index);
+Result clearParticles();
+Result stepParticleSimulation(float dt = 0.0166667f);
+
+// ---------------------------------------------------------------------------
 // Fluid Simulation Engine (Faz 5.3b). APIC liquid & grid domain simulation.
 // ---------------------------------------------------------------------------
 struct FluidDomainInfo {
@@ -593,6 +988,64 @@ struct GasDomainSettings {
     float turbulence_speed = 0.5f;
 };
 
+struct CombustibleFluidSettings {
+    bool enabled = false;
+    bool auto_ignite = false;
+    float ignition_temperature = 0.8f;
+    float evaporation_rate = 0.35f;
+    float surface_fuel_capacity = 4.0f;
+    float heat_release = 2.0f;
+    float smoke_yield = 0.45f;
+    float surface_cooling = 0.35f;
+};
+
+struct SimulationFlowSourceInfo {
+    std::string name;
+    std::string domain;
+    std::string source_mode = "point"; // point|object_bounds|mesh_surface
+    std::string source_object;
+    bool enabled = true;
+    Vec3 position = Vec3(0.0f, 1.0f, 0.0f);
+    Vec3 velocity = Vec3(0.0f, 1.0f, 0.0f);
+    float radius = 0.35f;
+    float velocity_coupling = 8.0f;
+    float density = 1.0f;
+    float temperature = 0.0f;
+    float fuel = 0.0f;
+    float falloff = 1.0f;
+    float fluid_particles_per_second = 1000.0f;
+    float fluid_velocity_spread = 0.15f;
+    bool fluid_emit_along_normal = false;
+    bool use_time_limit = false;
+    float start_time = 0.0f;
+    float end_time = 5.0f;
+    bool use_particle_limit = false;
+    int max_emitted_particles = 100000;
+};
+
+struct SimulationColliderInfo {
+    std::string name;
+    std::string source_mode = "plane"; // plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh
+    std::string source_object;
+    bool enabled = true;
+    float plane_y = 0.0f;
+    Vec3 sphere_center = Vec3(0.0f, 1.0f, 0.0f);
+    float sphere_radius = 1.0f;
+    Vec3 capsule_start = Vec3(0.0f);
+    Vec3 capsule_end = Vec3(0.0f, 2.0f, 0.0f);
+    float capsule_radius = 0.5f;
+    Vec3 bounds_min = Vec3(-1.0f);
+    Vec3 bounds_max = Vec3(1.0f);
+    float friction = 0.0f;
+    float restitution = 0.35f;
+    float thickness = 0.0f;
+    bool gas_interaction_enabled = false;
+    float gas_density_rate = 0.0f;
+    float gas_temperature_rate = 0.0f;
+    float gas_fuel_rate = 0.0f;
+    float gas_flame_rate = 0.0f;
+};
+
 Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_max,
                          float voxel_size, const std::string& type, FluidDomainInfo& out_info);
 Result removeFluidDomain(const std::string& domain_id_or_name);
@@ -608,6 +1061,24 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const bool* enabled = nullptr, const bool* visible = nullptr);
 Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSettings& out_settings);
 Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDomainSettings& settings);
+Result getCombustibleFluidSettings(const std::string& domain_id_or_name,
+                                   CombustibleFluidSettings& out_settings);
+Result updateCombustibleFluidSettings(const std::string& domain_id_or_name,
+                                      const CombustibleFluidSettings& settings);
+Result listSimulationFlowSources(std::vector<SimulationFlowSourceInfo>& out_sources);
+Result getSimulationFlowSource(const std::string& name, SimulationFlowSourceInfo& out_source);
+Result createSimulationFlowSource(const SimulationFlowSourceInfo& source,
+                                  SimulationFlowSourceInfo& out_source);
+Result updateSimulationFlowSource(const std::string& name,
+                                  const SimulationFlowSourceInfo& source);
+Result removeSimulationFlowSource(const std::string& name);
+Result listSimulationColliders(std::vector<SimulationColliderInfo>& out_colliders);
+Result getSimulationCollider(const std::string& name, SimulationColliderInfo& out_collider);
+Result createSimulationCollider(const SimulationColliderInfo& collider,
+                                SimulationColliderInfo& out_collider);
+Result updateSimulationCollider(const std::string& name,
+                                const SimulationColliderInfo& collider);
+Result removeSimulationCollider(const std::string& name);
 Result resetFluidSimulation();
 Result stepFluidSimulation(float dt = 0.0166667f);
 

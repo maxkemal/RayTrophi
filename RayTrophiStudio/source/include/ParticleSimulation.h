@@ -263,6 +263,22 @@ struct SimulationGridDomainDesc {
     std::size_t fluid_max_particles = 100000;
     bool fluid_replace_on_seed = true;
     bool fluid_pending_seed = false;
+    // Authored initial-state intent, kept separate from fluid_pending_seed
+    // (a one-tick runtime command). Once a replace seed is requested, timeline
+    // rewind/cache invalidation must reproduce it; continuous-flow domains leave
+    // this false and therefore restart empty.
+    bool fluid_reseed_on_reset = false;
+    // Optional APIC-liquid -> gas combustion coupling. The liquid remains an
+    // incompressible particle/SDF solve; only its GPU free-surface band becomes
+    // a thermally responsive fuel source for overlapping Gas domains.
+    bool  fluid_flammable = false;
+    bool  fluid_auto_ignite = false;
+    float fluid_ignition_temperature = 0.8f;
+    float fluid_evaporation_rate = 0.35f;
+    float fluid_surface_fuel_capacity = 4.0f;
+    float fluid_combustion_heat_release = 2.0f;
+    float fluid_combustion_smoke_yield = 0.45f;
+    float fluid_surface_cooling = 0.35f;
     // Seed strategy. SeedBox (default) keeps old projects' behaviour. FillLevel
     // ignores fluid_seed_min/max and instead fills the domain footprint from the
     // floor up to fluid_fill_level of the domain height, optionally inset from
@@ -478,6 +494,12 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle fluid_mask;
     // APIC Wind surface-drag: one ordered-float height per XZ grid column.
     ComputeBufferHandle fluid_surface_columns;
+    // Two float planes per fluid cell: thermally accumulated surface
+    // temperature followed by remaining combustible fuel. The fuel plane uses
+    // -1 as a lazy initialization marker so material edits/reset/resize are
+    // deterministic without a CPU readback.
+    ComputeBufferHandle fluid_combustion_state;
+    bool fluid_combustion_state_needs_reset = true;
     // Gas collider coupling (all GPU backends): cell-centred solid occupancy
     // (0=open, 1=solid) plus moving-wall linear velocity components.
     ComputeBufferHandle gas_solid_mask;
@@ -853,6 +875,8 @@ public:
     std::vector<SimulationGridDomainDesc>& gridDomains();
     const std::vector<SimulationGridDomainDesc>& gridDomains() const;
     const std::vector<SimulationGridDomainState>& gridDomainStates() const;
+    std::vector<SimulationGridDomainState> captureGridDomainStatesForCache(
+        SimulationComputeContext& compute) const;
     SimulationGasGpuFieldView gasGpuFieldView(
         std::size_t domain_index,
         const SimulationComputeContext& compute) const;

@@ -11,16 +11,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
-#include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
-
-#include "json.hpp"
 
 #ifdef _WIN32
 #include <cstdlib>
@@ -30,8 +25,10 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
-#include "imgui.h"      // Faz 4b: rt.ui immediate-mode widgets + addon panels
 #include "Api/RtApi.h"
+#include "Api/RtUi.h"   // Faz 4b: addon panels + regions (implementation in RtUi.cpp)
+#include "RtUiBindings.h"
+#include "RtPyCommon.h" // shared binding helpers + rtpy::registerSceneBindings
 
 namespace py = pybind11;
 
@@ -58,28 +55,9 @@ void appendConsoleLine(const std::string& text) {
     if (text.empty() || text.back() != '\n') appendConsoleOutput("\n");
 }
 
-void requireResult(const rtapi::Result& result) {
-    if (!result.ok) throw std::runtime_error(result.error);
-}
-
-// rt.ui panels (Faz 4b). Defined here — before PYBIND11_EMBEDDED_MODULE — so the
-// module's rt.ui bindings can see them (module code is global scope; an anonymous
-// namespace at file scope is visible there, an inner one under `namespace rtpython`
-// further down is not). Each panel holds a Python draw callback invoked once per
-// frame by drawAddonPanels(); g_addon_ui_drawing gates the immediate-mode widget
-// calls so rt.ui.button()/text()/... only run while a panel is being drawn.
-struct AddonPanel {
-    std::string title;
-    py::function draw;
-};
-std::map<int, AddonPanel> g_addon_panels;
-int  g_next_panel_id = 1;
-bool g_addon_ui_drawing = false;
-
-void requireAddonUiContext() {
-    if (!g_addon_ui_drawing)
-        throw std::runtime_error("rt.ui.* widgets are only valid inside a panel draw callback");
-}
+// requireResult / vec3ToPython / vec3FromPython now live in RtPyCommon.h so
+// RtPyScene.cpp can share them; they stay at global scope, so the unqualified
+// call sites below are unchanged.
 
 py::list matrixToPython(const Matrix4x4& matrix) {
     py::list rows;
@@ -102,16 +80,6 @@ Matrix4x4 matrixFromPython(const py::handle& value) {
         for (int col = 0; col < 4; ++col) matrix.m[row][col] = py::cast<float>(columns[col]);
     }
     return matrix;
-}
-
-py::tuple vec3ToPython(const Vec3& value) {
-    return py::make_tuple(value.x, value.y, value.z);
-}
-
-Vec3 vec3FromPython(const py::handle& value) {
-    py::sequence values = py::reinterpret_borrow<py::sequence>(value);
-    if (py::len(values) != 3) throw py::value_error("position must contain three values");
-    return Vec3(py::cast<float>(values[0]), py::cast<float>(values[1]), py::cast<float>(values[2]));
 }
 
 struct TransformProxy {
@@ -590,6 +558,334 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return vec3ToPython(g);
     });
 
+    // ── Force fields (Faz 5.6a) ─────────────────────────────────────────
+    // One field drives gas + particles + cloth + rigid bodies + APIC liquid.
+    // The facade takes a whole struct; set_param turns kwargs into a partial
+    // edit by reading the field first and writing back only what changed.
+    py::module_ forcefield = module.def_submodule(
+        "forcefield", "Universal force fields shared by every simulation family");
+
+    auto forceFieldToDict = [](const rtapi::ForceFieldInfo& info) -> py::dict {
+        py::dict d;
+        d["id"] = info.id;
+        d["name"] = info.name;
+        d["type"] = info.type;
+        d["shape"] = info.shape;
+        d["falloff"] = info.falloff;
+        d["enabled"] = info.enabled;
+        d["visible"] = info.visible;
+        d["position"] = vec3ToPython(info.position);
+        d["rotation"] = vec3ToPython(info.rotation);
+        d["scale"] = vec3ToPython(info.scale);
+        d["direction"] = vec3ToPython(info.direction);
+        d["axis"] = vec3ToPython(info.axis);
+        d["strength"] = info.strength;
+        d["falloff_radius"] = info.falloff_radius;
+        d["inner_radius"] = info.inner_radius;
+        d["use_noise"] = info.use_noise;
+        d["noise_octaves"] = info.noise_octaves;
+        d["noise_seed"] = info.noise_seed;
+        d["noise_frequency"] = info.noise_frequency;
+        d["noise_lacunarity"] = info.noise_lacunarity;
+        d["noise_persistence"] = info.noise_persistence;
+        d["noise_amplitude"] = info.noise_amplitude;
+        d["noise_speed"] = info.noise_speed;
+        d["inward_force"] = info.inward_force;
+        d["upward_force"] = info.upward_force;
+        d["linear_drag"] = info.linear_drag;
+        d["quadratic_drag"] = info.quadratic_drag;
+        d["fluid_surface_drag"] = info.fluid_surface_drag;
+        d["fluid_drag_coupling"] = info.fluid_drag_coupling;
+        d["fluid_surface_depth"] = info.fluid_surface_depth;
+        d["fluid_curl_detail"] = info.fluid_curl_detail;
+        d["start_frame"] = info.start_frame;
+        d["end_frame"] = info.end_frame;
+        d["phase"] = info.phase;
+        d["affects_gas"] = info.affects_gas;
+        d["affects_particles"] = info.affects_particles;
+        d["affects_cloth"] = info.affects_cloth;
+        d["affects_rigidbody"] = info.affects_rigidbody;
+        d["affects_fluid"] = info.affects_fluid;
+        return d;
+    };
+
+    forcefield.def("types", []() { return rtapi::forceFieldTypes(); });
+
+    forcefield.def("list", [forceFieldToDict]() -> py::list {
+        py::list out;
+        for (const rtapi::ForceFieldInfo& info : rtapi::listForceFields())
+            out.append(forceFieldToDict(info));
+        return out;
+    });
+
+    forcefield.def("get", [forceFieldToDict](const std::string& field) {
+        rtapi::ForceFieldInfo info;
+        requireResult(rtapi::getForceField(field, info));
+        return forceFieldToDict(info);
+    }, py::arg("field"));
+
+    forcefield.def("create", [forceFieldToDict](const std::string& type, const std::string& name) {
+        rtapi::ForceFieldInfo info;
+        requireResult(rtapi::createForceField(type, name, info));
+        return forceFieldToDict(info);
+    }, py::arg("type") = "wind", py::arg("name") = "");
+
+    forcefield.def("remove", [](const std::string& field) {
+        requireResult(rtapi::removeForceField(field));
+    }, py::arg("field"));
+
+    forcefield.def("set_param", [](const std::string& field, const py::kwargs& kwargs) {
+        rtapi::ForceFieldInfo info;
+        requireResult(rtapi::getForceField(field, info));
+        auto str = [&](const char* key, std::string& target) {
+            if (kwargs.contains(key)) target = py::cast<std::string>(kwargs[key]);
+        };
+        auto flt = [&](const char* key, float& target) {
+            if (kwargs.contains(key)) target = py::cast<float>(kwargs[key]);
+        };
+        auto integer = [&](const char* key, int& target) {
+            if (kwargs.contains(key)) target = py::cast<int>(kwargs[key]);
+        };
+        auto boolean = [&](const char* key, bool& target) {
+            if (kwargs.contains(key)) target = py::cast<bool>(kwargs[key]);
+        };
+        auto vector = [&](const char* key, Vec3& target) {
+            if (kwargs.contains(key)) target = vec3FromPython(kwargs[key]);
+        };
+        str("name", info.name); str("type", info.type);
+        str("shape", info.shape); str("falloff", info.falloff);
+        boolean("enabled", info.enabled); boolean("visible", info.visible);
+        vector("position", info.position); vector("rotation", info.rotation);
+        vector("scale", info.scale); vector("direction", info.direction);
+        vector("axis", info.axis);
+        flt("strength", info.strength); flt("falloff_radius", info.falloff_radius);
+        flt("inner_radius", info.inner_radius);
+        boolean("use_noise", info.use_noise);
+        integer("noise_octaves", info.noise_octaves); integer("noise_seed", info.noise_seed);
+        flt("noise_frequency", info.noise_frequency);
+        flt("noise_lacunarity", info.noise_lacunarity);
+        flt("noise_persistence", info.noise_persistence);
+        flt("noise_amplitude", info.noise_amplitude);
+        flt("noise_speed", info.noise_speed);
+        flt("inward_force", info.inward_force); flt("upward_force", info.upward_force);
+        flt("linear_drag", info.linear_drag); flt("quadratic_drag", info.quadratic_drag);
+        boolean("fluid_surface_drag", info.fluid_surface_drag);
+        flt("fluid_drag_coupling", info.fluid_drag_coupling);
+        flt("fluid_surface_depth", info.fluid_surface_depth);
+        flt("fluid_curl_detail", info.fluid_curl_detail);
+        flt("start_frame", info.start_frame); flt("end_frame", info.end_frame);
+        flt("phase", info.phase);
+        boolean("affects_gas", info.affects_gas);
+        boolean("affects_particles", info.affects_particles);
+        boolean("affects_cloth", info.affects_cloth);
+        boolean("affects_rigidbody", info.affects_rigidbody);
+        boolean("affects_fluid", info.affects_fluid);
+        requireResult(rtapi::updateForceField(field, info));
+    }, py::arg("field"));
+
+    forcefield.def("evaluate", [](const py::handle& position, float time,
+                                  const py::handle& velocity) -> py::tuple {
+        Vec3 force;
+        requireResult(rtapi::evaluateForceFields(vec3FromPython(position), time,
+                                                 vec3FromPython(velocity), force));
+        return vec3ToPython(force);
+    }, py::arg("position"), py::arg("time") = 0.0f,
+       py::arg("velocity") = py::make_tuple(0.0f, 0.0f, 0.0f));
+
+    // ── Particle systems (Faz 5.6b) ─────────────────────────────────────
+    // Emitters + solver settings + stats. Particle colliders and grid domains
+    // live on the SAME runtime and are scripted under rt.fluid, not here.
+    py::module_ particle = module.def_submodule(
+        "particle", "Particle emitters, solver settings and live statistics");
+
+    auto emitterToDict = [](const rtapi::ParticleEmitterInfo& info) -> py::dict {
+        py::dict d;
+        d["index"] = info.index;
+        d["name"] = info.name;
+        d["source_mode"] = info.source_mode;
+        d["spawn_mode"] = info.spawn_mode;
+        d["source_name"] = info.source_name;
+        d["enabled"] = info.enabled;
+        d["point"] = vec3ToPython(info.point);
+        d["local_offset"] = vec3ToPython(info.local_offset);
+        d["direction"] = vec3ToPython(info.direction);
+        d["surface_offset"] = info.surface_offset;
+        d["rate_per_second"] = info.rate_per_second;
+        d["burst_count"] = info.burst_count;
+        d["speed"] = info.speed;
+        d["spread"] = info.spread;
+        d["lifetime_seconds"] = info.lifetime_seconds;
+        d["mass"] = info.mass;
+        d["start_size"] = info.start_size;
+        d["end_size"] = info.end_size;
+        d["size_jitter"] = info.size_jitter;
+        d["start_opacity"] = info.start_opacity;
+        d["end_opacity"] = info.end_opacity;
+        d["start_color"] = vec3ToPython(info.start_color);
+        d["end_color"] = vec3ToPython(info.end_color);
+        d["angular_velocity"] = info.angular_velocity;
+        d["angular_jitter"] = info.angular_jitter;
+        d["seed"] = info.seed;
+        return d;
+    };
+
+    // Shared by add_emitter (patches a default desc) and set_emitter (patches
+    // the live one), so both accept exactly the same keyword set.
+    auto patchEmitter = [](const py::kwargs& kwargs, rtapi::ParticleEmitterInfo& info) {
+        auto str = [&](const char* key, std::string& target) {
+            if (kwargs.contains(key)) target = py::cast<std::string>(kwargs[key]);
+        };
+        auto flt = [&](const char* key, float& target) {
+            if (kwargs.contains(key)) target = py::cast<float>(kwargs[key]);
+        };
+        auto boolean = [&](const char* key, bool& target) {
+            if (kwargs.contains(key)) target = py::cast<bool>(kwargs[key]);
+        };
+        auto vector = [&](const char* key, Vec3& target) {
+            if (kwargs.contains(key)) target = vec3FromPython(kwargs[key]);
+        };
+        str("name", info.name); str("source_mode", info.source_mode);
+        str("spawn_mode", info.spawn_mode); str("source_name", info.source_name);
+        boolean("enabled", info.enabled);
+        vector("point", info.point); vector("local_offset", info.local_offset);
+        vector("direction", info.direction);
+        flt("surface_offset", info.surface_offset);
+        flt("rate_per_second", info.rate_per_second);
+        if (kwargs.contains("burst_count")) info.burst_count = py::cast<int>(kwargs["burst_count"]);
+        flt("speed", info.speed); flt("spread", info.spread);
+        flt("lifetime_seconds", info.lifetime_seconds); flt("mass", info.mass);
+        flt("start_size", info.start_size); flt("end_size", info.end_size);
+        flt("size_jitter", info.size_jitter);
+        flt("start_opacity", info.start_opacity); flt("end_opacity", info.end_opacity);
+        vector("start_color", info.start_color); vector("end_color", info.end_color);
+        flt("angular_velocity", info.angular_velocity);
+        flt("angular_jitter", info.angular_jitter);
+        if (kwargs.contains("seed"))
+            info.seed = py::cast<unsigned int>(kwargs["seed"]);
+    };
+
+    particle.def("emitters", [emitterToDict]() -> py::list {
+        py::list out;
+        for (const rtapi::ParticleEmitterInfo& info : rtapi::listParticleEmitters())
+            out.append(emitterToDict(info));
+        return out;
+    });
+
+    particle.def("get_emitter", [emitterToDict](const std::string& emitter) {
+        rtapi::ParticleEmitterInfo info;
+        requireResult(rtapi::getParticleEmitter(emitter, info));
+        return emitterToDict(info);
+    }, py::arg("emitter"));
+
+    particle.def("add_emitter", [emitterToDict, patchEmitter](const py::kwargs& kwargs) {
+        rtapi::ParticleEmitterInfo info;   // facade defaults
+        patchEmitter(kwargs, info);
+        rtapi::ParticleEmitterInfo created;
+        requireResult(rtapi::addParticleEmitter(info, created));
+        return emitterToDict(created);
+    });
+
+    particle.def("set_emitter", [patchEmitter](const std::string& emitter, const py::kwargs& kwargs) {
+        rtapi::ParticleEmitterInfo info;
+        requireResult(rtapi::getParticleEmitter(emitter, info));
+        patchEmitter(kwargs, info);
+        requireResult(rtapi::updateParticleEmitter(emitter, info));
+    }, py::arg("emitter"));
+
+    particle.def("remove_emitter", [](const std::string& emitter) {
+        requireResult(rtapi::removeParticleEmitter(emitter));
+    }, py::arg("emitter"));
+
+    particle.def("clear_emitters", []() { requireResult(rtapi::clearParticleEmitters()); });
+
+    particle.def("get_physics", []() -> py::dict {
+        rtapi::ParticlePhysicsInfo info;
+        requireResult(rtapi::getParticlePhysics(info));
+        py::dict d;
+        d["mode"] = info.mode;
+        d["quality"] = info.quality;
+        d["particle_radius"] = info.particle_radius;
+        d["self_collision_enabled"] = info.self_collision_enabled;
+        d["solver_iterations"] = info.solver_iterations;
+        d["max_neighbors_per_particle"] = info.max_neighbors_per_particle;
+        d["viscosity"] = info.viscosity;
+        d["cohesion"] = info.cohesion;
+        d["pressure_stiffness"] = info.pressure_stiffness;
+        d["rest_density"] = info.rest_density;
+        d["buoyancy"] = info.buoyancy;
+        d["gravity_scale"] = info.gravity_scale;
+        d["vorticity"] = info.vorticity;
+        d["grid_density_deposit"] = info.grid_density_deposit;
+        d["grid_temperature_deposit"] = info.grid_temperature_deposit;
+        d["grid_fuel_deposit"] = info.grid_fuel_deposit;
+        d["grid_deposit_fade_with_age"] = info.grid_deposit_fade_with_age;
+        return d;
+    });
+
+    particle.def("set_physics", [](const py::kwargs& kwargs) {
+        rtapi::ParticlePhysicsInfo info;
+        requireResult(rtapi::getParticlePhysics(info));
+        auto str = [&](const char* key, std::string& target) {
+            if (kwargs.contains(key)) target = py::cast<std::string>(kwargs[key]);
+        };
+        auto flt = [&](const char* key, float& target) {
+            if (kwargs.contains(key)) target = py::cast<float>(kwargs[key]);
+        };
+        auto integer = [&](const char* key, int& target) {
+            if (kwargs.contains(key)) target = py::cast<int>(kwargs[key]);
+        };
+        auto boolean = [&](const char* key, bool& target) {
+            if (kwargs.contains(key)) target = py::cast<bool>(kwargs[key]);
+        };
+        str("mode", info.mode); str("quality", info.quality);
+        flt("particle_radius", info.particle_radius);
+        boolean("self_collision_enabled", info.self_collision_enabled);
+        integer("solver_iterations", info.solver_iterations);
+        integer("max_neighbors_per_particle", info.max_neighbors_per_particle);
+        flt("viscosity", info.viscosity); flt("cohesion", info.cohesion);
+        flt("pressure_stiffness", info.pressure_stiffness);
+        flt("rest_density", info.rest_density); flt("buoyancy", info.buoyancy);
+        flt("gravity_scale", info.gravity_scale); flt("vorticity", info.vorticity);
+        flt("grid_density_deposit", info.grid_density_deposit);
+        flt("grid_temperature_deposit", info.grid_temperature_deposit);
+        flt("grid_fuel_deposit", info.grid_fuel_deposit);
+        boolean("grid_deposit_fade_with_age", info.grid_deposit_fade_with_age);
+        requireResult(rtapi::updateParticlePhysics(info));
+    });
+
+    particle.def("stats", []() -> py::dict {
+        rtapi::ParticleStatsInfo info;
+        requireResult(rtapi::getParticleStats(info));
+        py::dict d;
+        d["alive_count"] = info.alive_count;
+        d["capacity"] = info.capacity;
+        d["emitter_count"] = info.emitter_count;
+        d["collider_count"] = info.collider_count;
+        d["domain_count"] = info.domain_count;
+        d["total_ms"] = info.total_ms;
+        d["emit_ms"] = info.emit_ms;
+        d["integrate_ms"] = info.integrate_ms;
+        d["self_collision_ms"] = info.self_collision_ms;
+        d["grid_domain_ms"] = info.grid_domain_ms;
+        return d;
+    });
+
+    particle.def("spawn", [](const py::handle& position, const py::handle& velocity,
+                             float lifetime_seconds, float mass, float size) {
+        int index = -1;
+        requireResult(rtapi::spawnParticle(vec3FromPython(position), vec3FromPython(velocity),
+                                           lifetime_seconds, mass, size, index));
+        return index;
+    }, py::arg("position") = py::make_tuple(0.0f, 1.0f, 0.0f),
+       py::arg("velocity") = py::make_tuple(0.0f, 0.0f, 0.0f),
+       py::arg("lifetime_seconds") = 5.0f, py::arg("mass") = 1.0f, py::arg("size") = 0.05f);
+
+    particle.def("clear", []() { requireResult(rtapi::clearParticles()); });
+
+    particle.def("step", [](float dt) {
+        requireResult(rtapi::stepParticleSimulation(dt));
+    }, py::arg("dt") = 0.0166667f);
+
     // ── Fluid & Gas Simulation Engine (Faz 5.3b) ────────────────────────
     py::module_ fluid = module.def_submodule("fluid", "APIC liquid & fluid domain simulation");
     auto py_create_domain = [](const std::string& name, const py::tuple& domain_min, const py::tuple& domain_max, float voxel_size, const std::string& type) -> py::dict {
@@ -775,6 +1071,175 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 #undef RT_GAS_KW
         requireResult(rtapi::updateGasDomainSettings(domain, s));
     }, py::arg("domain"));
+
+    fluid.def("get_combustion", [](const std::string& domain) {
+        rtapi::CombustibleFluidSettings s;
+        requireResult(rtapi::getCombustibleFluidSettings(domain,s));
+        py::dict d;
+        d["enabled"]=s.enabled;
+        d["auto_ignite"]=s.auto_ignite;
+        d["ignition_temperature"]=s.ignition_temperature;
+        d["evaporation_rate"]=s.evaporation_rate;
+        d["surface_fuel_capacity"]=s.surface_fuel_capacity;
+        d["heat_release"]=s.heat_release;
+        d["smoke_yield"]=s.smoke_yield;
+        d["surface_cooling"]=s.surface_cooling;
+        return d;
+    },py::arg("domain"));
+    fluid.def("set_combustion", [](const std::string& domain,
+                                   const py::kwargs& kwargs) {
+        rtapi::CombustibleFluidSettings s;
+        requireResult(rtapi::getCombustibleFluidSettings(domain,s));
+#define RT_FLUID_FIRE_KW(name,type) \
+        if(kwargs.contains(#name)) s.name=py::cast<type>(kwargs[#name])
+        RT_FLUID_FIRE_KW(enabled,bool);
+        RT_FLUID_FIRE_KW(auto_ignite,bool);
+        RT_FLUID_FIRE_KW(ignition_temperature,float);
+        RT_FLUID_FIRE_KW(evaporation_rate,float);
+        RT_FLUID_FIRE_KW(surface_fuel_capacity,float);
+        RT_FLUID_FIRE_KW(heat_release,float);
+        RT_FLUID_FIRE_KW(smoke_yield,float);
+        RT_FLUID_FIRE_KW(surface_cooling,float);
+#undef RT_FLUID_FIRE_KW
+        requireResult(rtapi::updateCombustibleFluidSettings(domain,s));
+    },py::arg("domain"));
+
+    auto flow_to_dict = [](const rtapi::SimulationFlowSourceInfo& s) {
+        py::dict d;
+        d["name"] = s.name; d["domain"] = s.domain;
+        d["source_mode"] = s.source_mode; d["source_object"] = s.source_object;
+        d["enabled"] = s.enabled; d["position"] = vec3ToPython(s.position);
+        d["velocity"] = vec3ToPython(s.velocity); d["radius"] = s.radius;
+        d["velocity_coupling"] = s.velocity_coupling;
+        d["density"] = s.density; d["temperature"] = s.temperature;
+        d["fuel"] = s.fuel; d["falloff"] = s.falloff;
+        d["fluid_particles_per_second"] = s.fluid_particles_per_second;
+        d["fluid_velocity_spread"] = s.fluid_velocity_spread;
+        d["fluid_emit_along_normal"] = s.fluid_emit_along_normal;
+        d["use_time_limit"] = s.use_time_limit;
+        d["start_time"] = s.start_time; d["end_time"] = s.end_time;
+        d["use_particle_limit"] = s.use_particle_limit;
+        d["max_emitted_particles"] = s.max_emitted_particles;
+        return d;
+    };
+    auto apply_flow_kwargs = [](rtapi::SimulationFlowSourceInfo& s,
+                                const py::kwargs& kw) {
+#define RT_FLOW_KW(name,type) if (kw.contains(#name)) s.name = py::cast<type>(kw[#name])
+        RT_FLOW_KW(name, std::string); RT_FLOW_KW(domain, std::string);
+        RT_FLOW_KW(source_mode, std::string); RT_FLOW_KW(source_object, std::string);
+        RT_FLOW_KW(enabled, bool); RT_FLOW_KW(radius, float);
+        RT_FLOW_KW(velocity_coupling, float); RT_FLOW_KW(density, float);
+        RT_FLOW_KW(temperature, float); RT_FLOW_KW(fuel, float);
+        RT_FLOW_KW(falloff, float); RT_FLOW_KW(fluid_particles_per_second, float);
+        RT_FLOW_KW(fluid_velocity_spread, float);
+        RT_FLOW_KW(fluid_emit_along_normal, bool); RT_FLOW_KW(use_time_limit, bool);
+        RT_FLOW_KW(start_time, float); RT_FLOW_KW(end_time, float);
+        RT_FLOW_KW(use_particle_limit, bool); RT_FLOW_KW(max_emitted_particles, int);
+#undef RT_FLOW_KW
+        if (kw.contains("position")) s.position = vec3FromPython(kw["position"]);
+        if (kw.contains("velocity")) s.velocity = vec3FromPython(kw["velocity"]);
+    };
+    py::module_ flow_source = module.def_submodule(
+        "flow_source", "Gas scalar injection and APIC liquid flow emitters");
+    flow_source.def("list", [flow_to_dict] {
+        std::vector<rtapi::SimulationFlowSourceInfo> sources;
+        requireResult(rtapi::listSimulationFlowSources(sources));
+        py::list out; for (const auto& s : sources) out.append(flow_to_dict(s));
+        return out;
+    });
+    flow_source.def("get", [flow_to_dict](const std::string& name) {
+        rtapi::SimulationFlowSourceInfo s;
+        requireResult(rtapi::getSimulationFlowSource(name, s));
+        return flow_to_dict(s);
+    }, py::arg("name"));
+    flow_source.def("create", [flow_to_dict, apply_flow_kwargs](
+        const std::string& name, const std::string& domain, const py::kwargs& kw) {
+        rtapi::SimulationFlowSourceInfo s; s.name = name; s.domain = domain;
+        apply_flow_kwargs(s, kw);
+        rtapi::SimulationFlowSourceInfo created;
+        requireResult(rtapi::createSimulationFlowSource(s, created));
+        return flow_to_dict(created);
+    }, py::arg("name"), py::arg("domain"));
+    flow_source.def("update", [apply_flow_kwargs](
+        const std::string& name, const py::kwargs& kw) {
+        rtapi::SimulationFlowSourceInfo s;
+        requireResult(rtapi::getSimulationFlowSource(name, s));
+        apply_flow_kwargs(s, kw);
+        requireResult(rtapi::updateSimulationFlowSource(name, s));
+    }, py::arg("name"));
+    flow_source.def("remove", [](const std::string& name) {
+        requireResult(rtapi::removeSimulationFlowSource(name));
+    }, py::arg("name"));
+
+    auto collider_to_dict = [](const rtapi::SimulationColliderInfo& c) {
+        py::dict d;
+        d["name"] = c.name; d["source_mode"] = c.source_mode;
+        d["source_object"] = c.source_object; d["enabled"] = c.enabled;
+        d["plane_y"] = c.plane_y; d["sphere_center"] = vec3ToPython(c.sphere_center);
+        d["sphere_radius"] = c.sphere_radius;
+        d["capsule_start"] = vec3ToPython(c.capsule_start);
+        d["capsule_end"] = vec3ToPython(c.capsule_end);
+        d["capsule_radius"] = c.capsule_radius;
+        d["bounds_min"] = vec3ToPython(c.bounds_min);
+        d["bounds_max"] = vec3ToPython(c.bounds_max);
+        d["friction"] = c.friction; d["restitution"] = c.restitution;
+        d["thickness"] = c.thickness;
+        d["gas_interaction_enabled"] = c.gas_interaction_enabled;
+        d["gas_density_rate"] = c.gas_density_rate;
+        d["gas_temperature_rate"] = c.gas_temperature_rate;
+        d["gas_fuel_rate"] = c.gas_fuel_rate;
+        d["gas_flame_rate"] = c.gas_flame_rate;
+        return d;
+    };
+    auto apply_collider_kwargs = [](rtapi::SimulationColliderInfo& c,
+                                    const py::kwargs& kw) {
+#define RT_COLLIDER_KW(name,type) if (kw.contains(#name)) c.name = py::cast<type>(kw[#name])
+        RT_COLLIDER_KW(name, std::string); RT_COLLIDER_KW(source_mode, std::string);
+        RT_COLLIDER_KW(source_object, std::string); RT_COLLIDER_KW(enabled, bool);
+        RT_COLLIDER_KW(plane_y, float); RT_COLLIDER_KW(sphere_radius, float);
+        RT_COLLIDER_KW(capsule_radius, float); RT_COLLIDER_KW(friction, float);
+        RT_COLLIDER_KW(restitution, float); RT_COLLIDER_KW(thickness, float);
+        RT_COLLIDER_KW(gas_interaction_enabled, bool);
+        RT_COLLIDER_KW(gas_density_rate, float); RT_COLLIDER_KW(gas_temperature_rate, float);
+        RT_COLLIDER_KW(gas_fuel_rate, float); RT_COLLIDER_KW(gas_flame_rate, float);
+#undef RT_COLLIDER_KW
+        if (kw.contains("sphere_center")) c.sphere_center = vec3FromPython(kw["sphere_center"]);
+        if (kw.contains("capsule_start")) c.capsule_start = vec3FromPython(kw["capsule_start"]);
+        if (kw.contains("capsule_end")) c.capsule_end = vec3FromPython(kw["capsule_end"]);
+        if (kw.contains("bounds_min")) c.bounds_min = vec3FromPython(kw["bounds_min"]);
+        if (kw.contains("bounds_max")) c.bounds_max = vec3FromPython(kw["bounds_max"]);
+    };
+    py::module_ collider = module.def_submodule(
+        "collider", "Shared particle, APIC liquid and gas simulation colliders");
+    collider.def("list", [collider_to_dict] {
+        std::vector<rtapi::SimulationColliderInfo> colliders;
+        requireResult(rtapi::listSimulationColliders(colliders));
+        py::list out; for (const auto& c : colliders) out.append(collider_to_dict(c));
+        return out;
+    });
+    collider.def("get", [collider_to_dict](const std::string& name) {
+        rtapi::SimulationColliderInfo c;
+        requireResult(rtapi::getSimulationCollider(name, c));
+        return collider_to_dict(c);
+    }, py::arg("name"));
+    collider.def("create", [collider_to_dict, apply_collider_kwargs](
+        const std::string& name, const py::kwargs& kw) {
+        rtapi::SimulationColliderInfo c; c.name = name;
+        apply_collider_kwargs(c, kw);
+        rtapi::SimulationColliderInfo created;
+        requireResult(rtapi::createSimulationCollider(c, created));
+        return collider_to_dict(created);
+    }, py::arg("name"));
+    collider.def("update", [apply_collider_kwargs](
+        const std::string& name, const py::kwargs& kw) {
+        rtapi::SimulationColliderInfo c;
+        requireResult(rtapi::getSimulationCollider(name, c));
+        apply_collider_kwargs(c, kw);
+        requireResult(rtapi::updateSimulationCollider(name, c));
+    }, py::arg("name"));
+    collider.def("remove", [](const std::string& name) {
+        requireResult(rtapi::removeSimulationCollider(name));
+    }, py::arg("name"));
 
     py::module_ terrain = module.def_submodule("terrain", "Terrain creation, queries, and procedural operations");
     auto terrain_info_to_dict = [](const rtapi::TerrainInfo& info) -> py::dict {
@@ -1144,44 +1609,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::applySculptMaskOperation(object, operation, seed, undo));
     }, py::arg("object"), py::arg("operation"), py::arg("seed") = 1337, py::arg("undo") = true);
 
-    py::module_ materials = module.def_submodule("material", "Object material parameters");
-    materials.def("get", [](const std::string& object_name, const std::string& param) -> py::object {
-        rtapi::MaterialParamValue value;
-        requireResult(rtapi::getMaterialParam(object_name, param, value));
-        if (value.is_color) return vec3ToPython(value.color);
-        return py::float_(value.scalar);
-    }, py::arg("object_name"), py::arg("param"));
-    materials.def("set", [](const std::string& object_name, const std::string& param,
-                             const py::handle& value) {
-        if (PyFloat_Check(value.ptr()) || PyLong_Check(value.ptr())) {
-            requireResult(rtapi::setMaterialParam(object_name, param, py::cast<float>(value)));
-        } else {
-            requireResult(rtapi::setMaterialParam(object_name, param, vec3FromPython(value)));
-        }
-    }, py::arg("object_name"), py::arg("param"), py::arg("value"));
-
-    py::module_ lights = module.def_submodule("lights", "Scene light operations");
-    lights.def("list", [] {
-        py::list result;
-        for (const rtapi::LightInfo& info : rtapi::listLights()) {
-            py::dict item;
-            item["index"] = info.index;
-            item["name"] = info.name;
-            item["type"] = info.type;
-            item["position"] = vec3ToPython(info.position);
-            result.append(std::move(item));
-        }
-        return result;
-    });
-    lights.def("add", [](const std::string& type, const py::handle& position) {
-        std::string name;
-        requireResult(rtapi::addLight(type, vec3FromPython(position), name));
-        return name;
-    }, py::arg("type"), py::arg("position"));
-    lights.def("delete", [](int index) { requireResult(rtapi::deleteLight(index)); });
-    lights.def("set_position", [](int index, const py::handle& position) {
-        requireResult(rtapi::setLightPosition(index, vec3FromPython(position)));
-    });
+    // rt.select + rt.material + rt.lights live in RtPyScene.cpp (this TU was
+    // already at its size budget when the scene-core surface was expanded).
+    rtpy::registerSceneBindings(module);
 
     py::module_ anim = module.def_submodule("anim", "Keyframe animation (transform tracks)");
     anim.def("insert_key", [](const std::string& object_name, const std::string& channel,
@@ -1195,8 +1625,129 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return rtapi::listKeyframes(object_name);
     }, py::arg("object_name"));
 
+    // ── Skeletal playback (Faz 5.6c) ────────────────────────────────────
+    // Transport + graph parameters only; node-graph topology is deliberately
+    // not exposed while the animation runtime is still being decided.
+    auto characterToDict = [](const rtapi::AnimCharacterInfo& info) -> py::dict {
+        py::dict d;
+        d["name"] = info.name;
+        d["has_animation"] = info.has_animation;
+        d["clip_count"] = info.clip_count;
+        d["bone_count"] = info.bone_count;
+        d["uses_graph"] = info.uses_graph;
+        d["graph_asset_key"] = info.graph_asset_key;
+        d["graph_follows_timeline"] = info.graph_follows_timeline;
+        d["root_motion"] = info.root_motion;
+        d["root_motion_bone"] = info.root_motion_bone;
+        d["visible"] = info.visible;
+        return d;
+    };
+    auto playbackToDict = [](const rtapi::AnimPlaybackInfo& info) -> py::dict {
+        py::dict d;
+        d["clip"] = info.clip;
+        d["playing"] = info.playing;
+        d["paused"] = info.paused;
+        d["blending"] = info.blending;
+        d["time"] = info.time;
+        d["normalized_time"] = info.normalized_time;
+        d["layer"] = info.layer;
+        return d;
+    };
+
+    anim.def("characters", [characterToDict]() -> py::list {
+        py::list out;
+        for (const rtapi::AnimCharacterInfo& info : rtapi::listAnimCharacters())
+            out.append(characterToDict(info));
+        return out;
+    });
+    anim.def("character", [characterToDict](const std::string& character) {
+        rtapi::AnimCharacterInfo info;
+        requireResult(rtapi::getAnimCharacter(character, info));
+        return characterToDict(info);
+    }, py::arg("character"));
+    anim.def("clips", [](const std::string& character) -> py::list {
+        std::vector<rtapi::AnimClipInfo> clips;
+        requireResult(rtapi::listAnimClips(character, clips));
+        py::list out;
+        for (const rtapi::AnimClipInfo& clip : clips) {
+            py::dict d;
+            d["name"] = clip.name;
+            d["duration_seconds"] = clip.duration_seconds;
+            d["ticks_per_second"] = clip.ticks_per_second;
+            d["loop"] = clip.loop;
+            d["start_frame"] = clip.start_frame;
+            d["end_frame"] = clip.end_frame;
+            out.append(d);
+        }
+        return out;
+    }, py::arg("character"));
+    anim.def("play", [](const std::string& character, const std::string& clip,
+                        float blend, int layer) {
+        requireResult(rtapi::playAnimClip(character, clip, blend, layer));
+    }, py::arg("character"), py::arg("clip"), py::arg("blend") = 0.3f, py::arg("layer") = 0);
+    anim.def("stop", [](const std::string& character, float blend_out, int layer) {
+        requireResult(rtapi::stopAnimation(character, blend_out, layer));
+    }, py::arg("character"), py::arg("blend_out") = 0.3f, py::arg("layer") = 0);
+    anim.def("set_paused", [](const std::string& character, bool paused) {
+        requireResult(rtapi::setAnimPaused(character, paused));
+    }, py::arg("character"), py::arg("paused") = true);
+    anim.def("set_time", [](const std::string& character, float seconds, int layer) {
+        requireResult(rtapi::setAnimTime(character, seconds, layer));
+    }, py::arg("character"), py::arg("seconds"), py::arg("layer") = 0);
+    anim.def("set_speed", [](const std::string& character, float speed, int layer) {
+        requireResult(rtapi::setAnimSpeed(character, speed, layer));
+    }, py::arg("character"), py::arg("speed"), py::arg("layer") = 0);
+    anim.def("set_loop", [](const std::string& character, bool loop, int layer) {
+        requireResult(rtapi::setAnimLoop(character, loop, layer));
+    }, py::arg("character"), py::arg("loop"), py::arg("layer") = 0);
+    anim.def("status", [playbackToDict](const std::string& character, int layer) {
+        rtapi::AnimPlaybackInfo info;
+        requireResult(rtapi::getAnimPlayback(character, layer, info));
+        return playbackToDict(info);
+    }, py::arg("character"), py::arg("layer") = 0);
+    anim.def("set_graph_param", [](const std::string& character, const std::string& name,
+                                   const py::handle& value) {
+        if (py::isinstance<py::bool_>(value))
+            requireResult(rtapi::setAnimGraphBool(character, name, py::cast<bool>(value)));
+        else
+            requireResult(rtapi::setAnimGraphFloat(character, name, py::cast<float>(value)));
+    }, py::arg("character"), py::arg("name"), py::arg("value"));
+    anim.def("trigger_graph_param", [](const std::string& character, const std::string& name) {
+        requireResult(rtapi::triggerAnimGraphParam(character, name));
+    }, py::arg("character"), py::arg("name"));
+    anim.def("graph_status", [playbackToDict](const std::string& character) {
+        rtapi::AnimPlaybackInfo info;
+        requireResult(rtapi::getAnimGraphPlayback(character, info));
+        return playbackToDict(info);
+    }, py::arg("character"));
+
     py::module_ nodes = module.def_submodule("nodes",
         "Node graph construction (material / geometry / terrain graphs via NodeRegistry)");
+    nodes.def("graphs", [](const std::string& graph_type) {
+        return rtapi::listNodeGraphs(graph_type);
+    }, py::arg("graph_type"), "Existing graph names for material|geometry|terrain.");
+    nodes.def("create_graph", [](const std::string& graph_type, const std::string& graph_name) {
+        requireResult(rtapi::createNodeGraph(graph_type, graph_name));
+    }, py::arg("graph_type"), py::arg("graph_name"),
+       "Material graphs are keyed by material name and seeded from it; geometry "
+       "graphs are keyed by object name and start empty. Terrain graphs come from "
+       "rt.terrain.apply_preset.");
+    nodes.def("remove_graph", [](const std::string& graph_type, const std::string& graph_name) {
+        requireResult(rtapi::removeNodeGraph(graph_type, graph_name));
+    }, py::arg("graph_type"), py::arg("graph_name"));
+    nodes.def("apply", [](const std::string& graph_type, const std::string& graph_name) {
+        rtapi::NodeGraphApplyInfo info;
+        requireResult(rtapi::applyNodeGraph(graph_type, graph_name, info));
+        py::dict out;
+        out["ok"] = info.ok;
+        out["warnings"] = info.warnings;
+        out["errors"] = info.errors;
+        return out;
+    }, py::arg("graph_type"), py::arg("graph_name"),
+       "Applies a graph to what it drives (material: the editor's own Apply — fold, "
+       "publish, compile the per-pixel program, re-upload; geometry: Geo-DAG apply). "
+       "Terrain keeps its async contract: use rt.terrain.evaluate. Returns "
+       "{ok, warnings, errors} — warnings mirror the editor's diagnostics.");
     nodes.def("types", [] {
         py::list result;
         for (const rtapi::NodeTypeDesc& t : rtapi::listNodeTypes()) {
@@ -1507,46 +2058,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if (!rtpython::reloadAddon(module_name, err)) throw std::runtime_error(err);
     }, py::arg("module_name"));
 
-    // rt.ui (Faz 4b): addons register an immediate-mode panel; its draw callback
-    // runs each frame from drawAddonPanels(). The widget calls below are only valid
-    // inside such a callback (guarded by requireAddonUiContext()).
-    py::module_ ui = module.def_submodule("ui", "Addon panels & immediate-mode widgets (Faz 4b)");
-    ui.def("register_panel", [](const std::string& title, py::function draw) {
-        const int id = g_next_panel_id++;
-        g_addon_panels[id] = AddonPanel{ title, std::move(draw) };
-        return id;
-    }, py::arg("title"), py::arg("draw_callback"));
-    ui.def("unregister_panel", [](int panel_id) {
-        g_addon_panels.erase(panel_id);
-    }, py::arg("panel_id"));
-
-    ui.def("text", [](const std::string& s) {
-        requireAddonUiContext();
-        ImGui::TextUnformatted(s.c_str());
-    }, py::arg("text"));
-    ui.def("button", [](const std::string& label) {
-        requireAddonUiContext();
-        return ImGui::Button(label.c_str());
-    }, py::arg("label"));
-    ui.def("checkbox", [](const std::string& label, bool value) {
-        requireAddonUiContext();
-        ImGui::Checkbox(label.c_str(), &value);
-        return value;
-    }, py::arg("label"), py::arg("value"));
-    ui.def("slider_float", [](const std::string& label, float value, float v_min, float v_max) {
-        requireAddonUiContext();
-        ImGui::SliderFloat(label.c_str(), &value, v_min, v_max);
-        return value;
-    }, py::arg("label"), py::arg("value"), py::arg("v_min"), py::arg("v_max"));
-    ui.def("input_text", [](const std::string& label, const std::string& value) {
-        requireAddonUiContext();
-        char buf[1024];
-        std::snprintf(buf, sizeof(buf), "%s", value.c_str());
-        ImGui::InputText(label.c_str(), buf, sizeof(buf));
-        return std::string(buf);
-    }, py::arg("label"), py::arg("value"));
-    ui.def("separator", [] { requireAddonUiContext(); ImGui::Separator(); });
-    ui.def("same_line", [] { requireAddonUiContext(); ImGui::SameLine(); });
+    // rt.ui (Faz 4b): panels, regions and the immediate-mode widget surface.
+    // Implemented in RtUi.cpp — it is the only part of the Python layer that
+    // links against ImGui, and RtPython.cpp had outgrown its size budget.
+    rtui::registerBindings(module);
 
     module.def("undo", [] { requireResult(rtapi::undo()); });
     module.def("redo", [] { requireResult(rtapi::redo()); });
@@ -1610,7 +2125,7 @@ void shutdown() noexcept {
         // after this in Main.cpp) also clears the event callbacks, but a py::function
         // destructor needs the GIL — running it after the interpreter is gone would
         // fault. This makes unbind()'s clear a no-op.
-        g_addon_panels.clear();
+        rtui::clearPanels();
         rtapi::clearEventCallbacks();
         g_interpreter.reset();
     } catch (...) {
@@ -1705,245 +2220,8 @@ std::vector<std::string> getSubmodulePaths() {
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// Addons (Faz 4a). State lives in two in-memory sets mirrored to addon_state.json;
-// all functions run on the main thread with the GIL held (same as execute()).
-// ---------------------------------------------------------------------------
-namespace {
-
-std::set<std::string> g_enabled_addons;   // persisted enable set
-std::set<std::string> g_loaded_addons;    // register() called this session
-
-std::filesystem::path addonsDir() {
-    return std::filesystem::current_path() / "scripts" / "addons";
-}
-std::filesystem::path addonStatePath() {
-    return std::filesystem::current_path() / "addon_state.json";
-}
-
-void loadAddonState() {
-    g_enabled_addons.clear();
-    std::error_code ec;
-    const auto path = addonStatePath();
-    if (!std::filesystem::is_regular_file(path, ec)) return;
-    try {
-        std::ifstream in(path);
-        nlohmann::json j;
-        in >> j;
-        if (j.contains("enabled") && j["enabled"].is_array()) {
-            for (const auto& e : j["enabled"]) g_enabled_addons.insert(e.get<std::string>());
-        }
-    } catch (...) {
-        // Corrupt state file: start from an empty enabled set rather than crash.
-    }
-}
-
-void saveAddonState() {
-    try {
-        nlohmann::json j;
-        j["enabled"] = nlohmann::json::array();
-        for (const auto& n : g_enabled_addons) j["enabled"].push_back(n);
-        std::ofstream out(addonStatePath());
-        out << j.dump(2);
-    } catch (...) {
-    }
-}
-
-bool isAddonFolder(const std::filesystem::path& dir) {
-    std::error_code ec;
-    return std::filesystem::is_directory(dir, ec) &&
-           std::filesystem::is_regular_file(dir / "__init__.py", ec);
-}
-
-void ensureAddonsOnPath() {
-    py::module_ sys = py::module_::import("sys");
-    py::list path = sys.attr("path");
-    const std::string dir = addonsDir().string();
-    for (auto item : path) {
-        if (py::cast<std::string>(item) == dir) return;
-    }
-    path.insert(0, dir);
-}
-
-// import + register(); does not touch persisted state (callers own that).
-bool registerAddon(const std::string& name, std::string& error) {
-    try {
-        ensureAddonsOnPath();
-        py::module_ mod = py::module_::import(name.c_str());
-        if (py::hasattr(mod, "register")) mod.attr("register")();
-        g_loaded_addons.insert(name);
-        return true;
-    } catch (const py::error_already_set& e) {
-        error = e.what();
-        return false;
-    } catch (const std::exception& e) {
-        error = e.what();
-        return false;
-    }
-}
-
-bool unregisterAddon(const std::string& name, std::string& error) {
-    try {
-        if (g_loaded_addons.count(name)) {
-            py::module_ mod = py::module_::import(name.c_str());  // sys.modules cache hit
-            if (py::hasattr(mod, "unregister")) mod.attr("unregister")();
-            g_loaded_addons.erase(name);
-        }
-        return true;
-    } catch (const py::error_already_set& e) {
-        error = e.what();
-        return false;
-    } catch (const std::exception& e) {
-        error = e.what();
-        return false;
-    }
-}
-
-void readBlInfo(py::module_& mod, AddonInfo& info) {
-    if (!py::hasattr(mod, "bl_info")) return;
-    try {
-        py::dict bl = mod.attr("bl_info");
-        if (bl.contains("name"))        info.display_name = py::cast<std::string>(bl["name"]);
-        if (bl.contains("description")) info.description  = py::cast<std::string>(bl["description"]);
-        if (bl.contains("version"))     info.version      = py::cast<std::string>(py::str(bl["version"]));
-    } catch (...) {
-    }
-}
-
-} // namespace
-
-std::vector<AddonInfo> listAddons() {
-    std::vector<AddonInfo> result;
-    if (!g_interpreter) return result;
-    std::error_code ec;
-    const auto dir = addonsDir();
-    if (!std::filesystem::is_directory(dir, ec)) return result;
-
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (!isAddonFolder(entry.path())) continue;
-        const std::string name = entry.path().filename().string();
-        AddonInfo info;
-        info.module_name = name;
-        info.display_name = name;
-        info.enabled = g_enabled_addons.count(name) != 0;
-        info.loaded  = g_loaded_addons.count(name) != 0;
-        // Only read bl_info from already-loaded modules: importing an unloaded one
-        // would run its top-level code as a side effect. Its display name shows as
-        // the folder name until enabled.
-        if (info.loaded) {
-            try {
-                py::module_ mod = py::module_::import(name.c_str());
-                readBlInfo(mod, info);
-            } catch (...) {
-            }
-        }
-        result.push_back(std::move(info));
-    }
-    std::sort(result.begin(), result.end(),
-              [](const AddonInfo& a, const AddonInfo& b) { return a.module_name < b.module_name; });
-    return result;
-}
-
-bool enableAddon(const std::string& module_name, std::string& error) {
-    if (!g_interpreter) { error = "Python runtime is not initialized"; return false; }
-    if (!registerAddon(module_name, error)) return false;
-    g_enabled_addons.insert(module_name);
-    saveAddonState();
-    appendConsoleLine("Addon enabled: " + module_name);
-    return true;
-}
-
-bool disableAddon(const std::string& module_name, std::string& error) {
-    if (!g_interpreter) { error = "Python runtime is not initialized"; return false; }
-    if (!unregisterAddon(module_name, error)) return false;
-    g_enabled_addons.erase(module_name);
-    saveAddonState();
-    appendConsoleLine("Addon disabled: " + module_name);
-    return true;
-}
-
-bool reloadAddon(const std::string& module_name, std::string& error) {
-    if (!g_interpreter) { error = "Python runtime is not initialized"; return false; }
-    try {
-        std::string ignore;
-        unregisterAddon(module_name, ignore);  // best-effort; a fresh addon may not be loaded yet
-        ensureAddonsOnPath();
-        py::module_ importlib = py::module_::import("importlib");
-        py::module_ mod = py::module_::import(module_name.c_str());
-        importlib.attr("reload")(mod);
-        if (py::hasattr(mod, "register")) mod.attr("register")();
-        g_loaded_addons.insert(module_name);
-        appendConsoleLine("Addon reloaded: " + module_name);
-        return true;
-    } catch (const py::error_already_set& e) {
-        error = e.what();
-        return false;
-    }
-}
-
-void loadEnabledAddons() {
-    if (!g_interpreter) return;
-    loadAddonState();
-    if (g_enabled_addons.empty()) return;
-    ensureAddonsOnPath();
-    // Iterate a copy: registerAddon mutates g_loaded_addons (not g_enabled_addons,
-    // but copy anyway for clarity/safety against future changes).
-    const std::vector<std::string> names(g_enabled_addons.begin(), g_enabled_addons.end());
-    for (const auto& name : names) {
-        std::string err;
-        if (registerAddon(name, err)) {
-            appendConsoleLine("Addon loaded: " + name);
-        } else {
-            appendConsoleLine("Addon '" + name + "' failed to load: " + err);
-        }
-    }
-}
-
-void unloadAllAddons() noexcept {
-    if (!g_interpreter) return;
-    try {
-        const std::vector<std::string> names(g_loaded_addons.begin(), g_loaded_addons.end());
-        for (const auto& name : names) {
-            std::string err;
-            unregisterAddon(name, err);
-        }
-    } catch (...) {
-        // Teardown must never throw into renderer shutdown.
-    }
-}
-
-void drawAddonPanels() {
-    if (!g_interpreter || g_addon_panels.empty()) return;
-    py::gil_scoped_acquire gil;
-
-    // Snapshot ids: a draw callback may register/unregister panels, which would
-    // otherwise invalidate the map iterator mid-loop.
-    std::vector<int> ids;
-    ids.reserve(g_addon_panels.size());
-    for (const auto& [id, panel] : g_addon_panels) ids.push_back(id);
-
-    g_addon_ui_drawing = true;
-    std::vector<int> closed;
-    for (int id : ids) {
-        auto it = g_addon_panels.find(id);
-        if (it == g_addon_panels.end()) continue;  // unregistered by an earlier callback
-        bool open = true;
-        if (ImGui::Begin(it->second.title.c_str(), &open)) {
-            try {
-                it->second.draw();
-            } catch (const py::error_already_set& e) {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "panel draw error (see console)");
-                appendConsoleLine(e.what());
-            }
-        }
-        ImGui::End();
-        if (!open) closed.push_back(id);
-    }
-    g_addon_ui_drawing = false;
-
-    // Window close button removes the panel; the addon re-registers to show it again.
-    for (int id : closed) g_addon_panels.erase(id);
-}
+// Addon loader (Faz 4a) moved to Api/RtAddons.cpp — discovery, enable/disable,
+// reload and addon_state.json persistence. Declarations stay in Api/RtPython.h.
 
 std::vector<std::string> getModuleAttributes(const std::string& module_path) {
     std::vector<std::string> attrs;

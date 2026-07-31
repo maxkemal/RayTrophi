@@ -1863,6 +1863,12 @@ struct SceneData {
         // edits across frames (the previous code re-applied every frame, so
         // UI slider edits were instantly overwritten).
         std::vector<int>    domain_last_fluid_render_mode;
+        // Which shader instance the bridge last applied a render-mode preset to.
+        // The mode alone is not enough: a domain whose shader is (re)created while
+        // the mode is UNCHANGED — a fresh smoke preset from the lazy-init below, or a
+        // project reload — would never be tuned, because the mode-change gate does not
+        // fire. Identity, not equality: compared as a raw pointer, never dereferenced.
+        std::vector<const void*> domain_last_tuned_shader;
     };
 
     std::vector<ParticleSystemObject> particle_systems;
@@ -1991,6 +1997,7 @@ struct SceneData {
         const bool force_sync = force_simulation_render_sync_;
         simulation_render_updated = false;
 
+
         for (auto& system : particle_systems) {
             if (!system.runtime) {
                 destroyDomainVolumes(system);
@@ -2010,6 +2017,7 @@ struct SceneData {
             system.domain_sdf_signatures.resize(states.size(), 0);
             system.domain_vdb_upload_signatures.resize(states.size(), 0);
             system.domain_last_fluid_render_mode.resize(states.size(), -1);
+            system.domain_last_tuned_shader.resize(states.size(), nullptr);
             // Reused below to carry foam into the fluid-surface volume's
             // temperature channel (single-volume whitewater compositing).
             system.domain_foam_density.resize(states.size());
@@ -2065,6 +2073,23 @@ struct SceneData {
                     // Keep the last-uploaded buffers registered, but mark their
                     // content inactive for this empty/cache-miss frame. The slot
                     // reactivates naturally when a solved frame is published.
+                    // ★A frame that is NOT published must invalidate the upload gate.
+                    // The SurfaceSDF upload signature is derived from the particle
+                    // POSITIONS, so a fluid that is parked (paused, or sitting on a
+                    // restored cache frame) produces the identical signature forever.
+                    // If a single frame skips publication — and the surface route
+                    // uniquely can, because `renderable` demands !particles.empty()
+                    // where the gas route only needs active_density_cells — then on
+                    // the next frame upload_changed is FALSE, registerOrUpdateLiveVolume
+                    // is never called again, the volume stays out of the volume packet
+                    // and its SSBO slot stays is_active=0: a transparent surface, with
+                    // the nested gas domain still rendering perfectly beside it.
+                    // Recovery required a render-mode toggle (which clears these
+                    // signatures via removeDomainVolume) — exactly the workaround users
+                    // found. Clearing the gate here makes the next good frame republish.
+                    if (d < system.domain_vdb_upload_signatures.size()) {
+                        system.domain_vdb_upload_signatures[d] = 0;
+                    }
                     if (system.domain_vdb_ids[d] >= 0) {
                         // This early-out happens before the normal dense-field
                         // publication below. Clear the occupied-content gate or a
@@ -2099,7 +2124,26 @@ struct SceneData {
                 // live UI edits would be stomped by the preset every frame.
                 if (is_fluid_domain && domain_shader && d < system.domain_last_fluid_render_mode.size()) {
                     const int cur_mode = static_cast<int>(fluid_mode);
-                    if (cur_mode != system.domain_last_fluid_render_mode[d]) {
+                    const bool mode_changed =
+                        cur_mode != system.domain_last_fluid_render_mode[d];
+                    // ★A shader we have never tuned must be tuned even when the mode did
+                    // NOT change. The lazy init a few lines above hands a fresh SMOKE
+                    // preset to any domain whose shader is missing, and a smoke preset
+                    // carries quality.max_steps ~16 — far too few for an iso walk that has
+                    // to cross the whole domain. The walk then dies inside the medium and
+                    // the liquid renders as a solid BLACK body with a correctly-placed
+                    // surface: exactly the "black band where the fluid is" report.
+                    // The mode gate alone missed this because the mode was SurfaceSDF the
+                    // whole time; only the shader object was new. Toggling the render mode
+                    // by hand fixed it because that forced this same preset to re-apply —
+                    // which is why the workaround worked and pointed here.
+                    // Identity check, so this still fires at most once per shader instance
+                    // and never stomps the user's live slider edits on later frames.
+                    const bool shader_untuned =
+                        d >= system.domain_last_tuned_shader.size() ||
+                        system.domain_last_tuned_shader[d] !=
+                            static_cast<const void*>(domain_shader.get());
+                    if (mode_changed || shader_untuned) {
                         // Mid-flight mode change: the SurfaceSDF density-proxy
                         // layout is dramatically different (very thin sharp
                         // band, 0..1) from the splatted-particle density layout
@@ -2112,7 +2156,10 @@ struct SceneData {
                         // here and let the next sync iteration build a fresh
                         // upload + new scene volume from scratch. -1 sentinel
                         // means "first sight", no prior binding to clear.
-                        if (system.domain_last_fluid_render_mode[d] != -1) {
+                        // Only a genuine mid-flight MODE change invalidates the device
+                        // binding; re-tuning a newly created shader must not tear the
+                        // volume down (that would restart the upload every reload).
+                        if (mode_changed && system.domain_last_fluid_render_mode[d] != -1) {
                             removeDomainVolume(system, d);
                             if (d < system.domain_sdf_buffers.size()) {
                                 system.domain_sdf_buffers[d].clear();
@@ -2176,6 +2223,10 @@ struct SceneData {
                                 break;
                         }
                         system.domain_last_fluid_render_mode[d] = cur_mode;
+                        if (d < system.domain_last_tuned_shader.size()) {
+                            system.domain_last_tuned_shader[d] =
+                                static_cast<const void*>(domain_shader.get());
+                        }
                         g_gas_volumes_dirty = true;
                     }
                 }
@@ -2414,7 +2465,7 @@ struct SceneData {
                         foam_density.clear();
                         foam_density.shrink_to_fit();
                     }
-                    system.domain_vdb_ids[d] = mgr.registerOrUpdateLiveVolume(
+                    const int new_id = mgr.registerOrUpdateLiveVolume(
                         prev_id,
                         volume_name,
                         up_nx, up_ny, up_nz,
@@ -2422,10 +2473,22 @@ struct SceneData {
                         density_ptr,
                         up_temp,
                         nullptr);
-                    if (density_ptr_override &&
-                        d < system.domain_vdb_upload_signatures.size() &&
-                        system.domain_vdb_ids[d] >= 0) {
-                        system.domain_vdb_upload_signatures[d] = upload_sig;
+                    // ★registerOrUpdateLiveVolume returns -1 on ANY exception inside the
+                    // OpenVDB→NanoVDB conversion. Writing that -1 back would ORPHAN the
+                    // still-valid previous binding: the next call gets prev_id=-1 and
+                    // allocates a brand new volume entry, leaking the old one, while this
+                    // frame renders nothing. Keep the last good id and let the retry below
+                    // update it in place.
+                    if (new_id >= 0) {
+                        system.domain_vdb_ids[d] = new_id;
+                        if (density_ptr_override &&
+                            d < system.domain_vdb_upload_signatures.size()) {
+                            system.domain_vdb_upload_signatures[d] = upload_sig;
+                        }
+                    } else if (d < system.domain_vdb_upload_signatures.size()) {
+                        // Failed publication — clear the gate so the next frame retries
+                        // instead of believing this signature is already on the device.
+                        system.domain_vdb_upload_signatures[d] = 0;
                     }
                     simulation_render_updated = true;
                     // The host/GPU NanoVDB grid changed: force the backend volume
@@ -2435,6 +2498,11 @@ struct SceneData {
                 }
                 const int id = system.domain_vdb_ids[d];
                 if (id < 0) {
+                    // No device binding yet: same rule as the !renderable early-out —
+                    // never leave the upload gate claiming this frame was published.
+                    if (d < system.domain_vdb_upload_signatures.size()) {
+                        system.domain_vdb_upload_signatures[d] = 0;
+                    }
                     continue;
                 }
                 if (use_live_dense_gpu) {
@@ -2492,7 +2560,27 @@ struct SceneData {
                 // density is the same NanoVDB channel either way; the shader
                 // picks "fog raymarch" vs "isosurface walk + refraction" based
                 // on render_as_isosurface (mapped to source_type=4 downstream).
+                // ★The Vulkan TLAS bakes this flag into the INSTANCE MASK at build
+                // time (VulkanBackend.cpp: mask = render_as_isosurface ? 0x08 : 0x02),
+                // while source_type is refreshed in the SSBO every frame. If the flag
+                // flips without a TLAS rebuild the two disagree, and the gas closest-hit's
+                // skipGasVolumes handoff — which masks out 0x02 — then masks out the
+                // LIQUID as well: the gas hands the ray off and nothing is behind it, so
+                // the overlap region renders BLACK.
+                // This is why it depended on where the scene was authored: in Solid the
+                // RT rebuild is deferred (`!interactive_viewport_active`), so the flag
+                // could change with the mask left behind; authoring in Rendered rebuilt
+                // in the same breath and looked fine.
+                // A flag whose value lives in the acceleration structure must force the
+                // rebuild itself rather than trusting whoever set it to remember.
+                const bool iso_was = vol->render_as_isosurface;
                 vol->render_as_isosurface = fluid_surface_route;
+                if (iso_was != fluid_surface_route && !created) {
+                    g_geometry_dirty = true;
+                    g_vulkan_rebuild_pending = true;
+                    g_optix_rebuild_pending = true;
+                    g_gas_volumes_dirty = true;
+                }
                 if (fluid_surface_route && d < domains.size()) {
                     vol->render_isosurface_ior = domains[d].fluid_surface_ior;
                     vol->render_isosurface_roughness = domains[d].fluid_surface_roughness;
@@ -2538,6 +2626,8 @@ struct SceneData {
                 } else if (became_visible) {
                     g_gas_volumes_dirty = true;
                 }
+
+
             }
         }
 
@@ -4069,7 +4159,10 @@ struct SceneData {
         entry.clear();
         entry.reserve(particle_systems.size());
         for (auto& system : particle_systems) {
-            if (system.runtime) entry.push_back(system.runtime->gridDomainStates());
+            if (system.runtime) {
+                entry.push_back(system.runtime->captureGridDomainStatesForCache(
+                    simulation_world.compute()));
+            }
             else entry.emplace_back();
         }
         // Capture the discrete particle SoA in the SAME pass so a cached-frame
@@ -4265,7 +4358,7 @@ struct SceneData {
                 invalidateSimulationRenderBindings(system);
                 system.runtime->resetGridDomainStates();
                 system.runtime->clear();  // particles back to empty for a deterministic bake
-                // Re-arm standing-tank (FillLevel) fluid seeds and synchronize the
+                // Re-arm authored initial fluid seeds and synchronize the
                 // domain states NOW, so frame 0 already carries the full tank +
                 // correct grid metadata — exactly what the disk bake does
                 // (bakeSimulationToDisk). Without this the interactive play path
@@ -4275,7 +4368,8 @@ struct SceneData {
                 // wasn't built/raymarched until ~frame 2 (the reported bug).
                 for (auto& dom : system.runtime->gridDomains()) {
                     if (dom.type == RayTrophiSim::SimulationDomainType::Fluid &&
-                        dom.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel) {
+                        (dom.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
+                         dom.fluid_reseed_on_reset)) {
                         dom.fluid_pending_seed = true;
                     }
                 }
@@ -5261,6 +5355,14 @@ private:
         // g_gas_volumes_dirty (SSBO re-sync). Setting rebuild pending here caused a full
         // GPU TLAS rebuild on every cached frame restore (restoreSimFrame), i.e. every
         // single frame during timeline playback.
+        //
+        // ★DO NOT "optimise" the unbind away. Dropping the id to -1 is what makes the
+        // next registerOrUpdateLiveVolume call take the prev_id < 0 branch, and THAT is
+        // what forces do_update unconditionally — a guaranteed fresh upload for every
+        // restored frame. Replacing it with an upload-signature reset alone looks
+        // equivalent but is not: it leaves the upload subject to the density_ptr_override
+        // / stride conditions, and the surface then failed to appear even on the first
+        // cached frame (tried 2026-07-31, reverted).
         auto& mgr = VDBVolumeManager::getInstance();
         for (std::size_t d = 0; d < system.domain_vdb_ids.size(); ++d) {
             if (system.domain_vdb_ids[d] >= 0) {
@@ -5353,6 +5455,7 @@ private:
         system.domain_sdf_signatures.clear();
         system.domain_vdb_upload_signatures.clear();
         system.domain_last_fluid_render_mode.clear();
+        system.domain_last_tuned_shader.clear();
     }
 
     bool buildFluidDensityVolume(RayTrophiSim::Fluid::FluidObject& obj,
@@ -5724,554 +5827,18 @@ public:
     // Explosion is the general airburst; GroundBurst is the dirt-and-debris
     // ground detonation that climbs; Fireball is the slow fuel-rich mushroom.
     enum class ParticleSystemPreset {
-        Campfire = 0, Explosion = 1, Smoke = 2, GroundBurst = 3, Fireball = 4,
-        Flamethrower = 5
+        Campfire = 0,
+        Explosion = 1,
+        Smoke = 2,
+        GroundBurst = 3,
+        Fireball = 4,
+        Flamethrower = 5,
+        BurningFuelSpill = 6,
+        IgnitedFuelJet = 7
     };
 
-    ParticleSystemObject& addParticleSystemPreset(ParticleSystemPreset preset) {
-        const std::size_t systems_before = particle_systems.size();
-        const char* preset_name = "Particle System";
-        switch (preset) {
-            case ParticleSystemPreset::Campfire:    preset_name = "Campfire";     break;
-            case ParticleSystemPreset::Explosion:   preset_name = "Explosion";    break;
-            case ParticleSystemPreset::Smoke:       preset_name = "Smoke";        break;
-            case ParticleSystemPreset::GroundBurst: preset_name = "Ground Burst"; break;
-            case ParticleSystemPreset::Fireball:    preset_name = "Fireball";     break;
-            case ParticleSystemPreset::Flamethrower:preset_name = "Flamethrower"; break;
-        }
-        // This replaces the old policy that avoided
-        // spawning a brand-new system on every click — consecutive preset presses
-        // Each click now creates a fresh runtime; existing systems are untouched.
-        ParticleSystemObject& sys = addParticleSystemObject(preset_name);
-        auto rt = sys.runtime;
-        if (!rt) return sys;
-
-        // The new runtime starts empty. Scene-wide rigid-body proxy colliders
-        // installed by addParticleSystemObject are intentionally retained.
-        sys.render = ParticleRenderSettings{};
-        sys.name = std::string(preset_name) + " #" + std::to_string(sys.id);
-
-        switch (preset) {
-            case ParticleSystemPreset::Campfire: {
-                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
-                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
-                rt->setGravity(Vec3(0.0f, -1.6f, 0.0f));   // gentle: sparks rise then drift down
-                rt->setLinearDrag(0.5f);
-                RayTrophiSim::ParticleEmitterDesc e;
-                e.name = "Campfire Emitter";
-                e.point = Vec3(0.0f, 0.1f, 0.0f);
-                e.direction = Vec3(0.0f, 1.0f, 0.0f);
-                e.rate_per_second = 70.0f;
-                e.speed = 1.6f;
-                e.spread = 0.35f;
-                e.lifetime_seconds = 1.4f;
-                e.start_size = 0.08f;  e.end_size = 0.01f;  e.size_jitter = 0.5f;
-                e.start_opacity = 1.0f; e.end_opacity = 0.0f;
-                e.start_color = Vec3(1.0f, 0.8f, 0.35f); e.end_color = Vec3(0.9f, 0.15f, 0.03f);
-                e.angular_velocity = 2.0f; e.angular_jitter = 3.0f;
-                rt->addEmitter(e);
-
-                // Rising embers feed the plume they came from: a little fuel so
-                // they keep the flame alive as they drift, plus heat so the gas
-                // lifts around each one instead of ignoring them.
-                rt->physicsSettings().grid_density_deposit = 0.8f;
-                rt->physicsSettings().grid_temperature_deposit = 1.6f;
-                rt->physicsSettings().grid_fuel_deposit = 0.45f;
-
-                // Hybrid effect: sparks remain discrete RT particles while a
-                // co-located Vulkan gas domain supplies flame and smoke.
-                RayTrophiSim::SimulationGridDomainDesc dom;
-                dom.name = "Campfire Gas";
-                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
-                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
-                dom.gas_maccormack_advection = true;
-                dom.bounds_min = Vec3(-1.5f, 0.0f, -1.5f);
-                dom.bounds_max = Vec3(1.5f, 4.0f, 1.5f);
-                // voxel_size is the resolution authority: the domain sync
-                // recomputes resolution_* from extent/voxel_size whenever
-                // preserve_voxel_size_on_resize is set (the default), so writing
-                // resolution_* here would simply be overwritten on frame 1.
-                // 0.055 over 3x4x3 m -> ~55x73x55.
-                dom.voxel_size = 0.055f;
-                dom.channels |= static_cast<uint32_t>(
-                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
-                dom.fire_enabled = true;
-                dom.ignition_temperature = 0.2f;
-                dom.burn_rate = 2.4f;
-                dom.heat_release = 2.8f;
-                dom.smoke_generation = 0.7f;
-                dom.flame_dissipation = 2.4f;
-                dom.gas_buoyancy_heat = 1.4f;
-                dom.gas_buoyancy_density = 0.04f;
-                dom.gas_vorticity = 0.55f;
-                dom.fire_expansion = 0.02f;
-                dom.turbulence_strength = 0.52f;
-                dom.turbulence_scale = 2.0f;
-                dom.turbulence_octaves = 4;
-                dom.turbulence_persistence = 0.52f;
-                dom.shader = VolumeShader::createFirePreset();
-                rt->addGridDomain(dom);
-
-                RayTrophiSim::SimulationFlowSourceDesc fire;
-                fire.name = "Campfire Flame Source";
-                fire.domain_index = 0;
-                fire.position = e.point;
-                fire.radius = 0.32f;
-                fire.velocity = Vec3(0.0f, 1.1f, 0.0f);
-                fire.density = 0.35f;
-                fire.temperature = 1.2f;
-                fire.fuel = 1.5f;
-                fire.falloff = 1.5f;
-                rt->addFlowSource(fire);
-
-                sys.blend_mode = ParticleBlendMode::Additive;
-                sys.render.render_in_raytrace = true;
-                sys.render.shape = ParticleRenderShape::Sphere;
-                sys.render.emissive = true;
-                sys.render.base_color = Vec3(1.0f, 0.75f, 0.3f);
-                sys.render.color_end  = Vec3(1.0f, 0.2f, 0.05f);
-                sys.render.color_buckets = 10;
-                sys.render.emission_strength = 8.0f;
-                break;
-            }
-            case ParticleSystemPreset::Explosion: {
-                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
-                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
-                rt->setGravity(Vec3(0.0f, -9.81f, 0.0f));
-                rt->setLinearDrag(0.12f);
-                rt->setCollisionPlane(0.0f, true, 0.3f);   // debris bounces on the ground
-                RayTrophiSim::ParticleEmitterDesc e;
-                e.name = "Explosion Burst";
-                e.point = Vec3(0.0f, 1.0f, 0.0f);
-                e.direction = Vec3(0.0f, 1.0f, 0.0f);
-                e.rate_per_second = 0.0f;
-                e.burst_count = 400;
-                e.speed = 6.0f;
-                e.spread = 3.0f;          // near-omnidirectional
-                e.lifetime_seconds = 2.0f;
-                e.start_size = 0.1f;  e.end_size = 0.04f;  e.size_jitter = 0.6f;
-                e.start_opacity = 1.0f; e.end_opacity = 0.0f;
-                e.start_color = Vec3(1.0f, 0.9f, 0.5f); e.end_color = Vec3(0.3f, 0.08f, 0.02f);
-                e.angular_velocity = 4.0f; e.angular_jitter = 8.0f;
-                rt->addEmitter(e);
-
-                RayTrophiSim::ParticleEmitterDesc core = e;
-                core.name = "Explosion Fireball Core";
-                core.burst_count = 220;
-                core.speed = 2.2f;
-                core.spread = 2.8f;
-                core.lifetime_seconds = 0.7f;
-                core.start_size = 0.32f;
-                core.end_size = 0.05f;
-                core.size_jitter = 0.35f;
-                core.start_color = Vec3(1.0f, 0.95f, 0.65f);
-                core.end_color = Vec3(1.0f, 0.16f, 0.015f);
-                core.angular_velocity = 1.5f;
-                core.angular_jitter = 3.0f;
-                core.seed = 0x51f15e5du;
-                rt->addEmitter(core);
-
-                // THE point of the preset: the shrapnel is burning. Each piece
-                // drops fuel and heat into the gas along its arc, so the domain
-                // ignites where the debris flies and the fireball spreads WITH
-                // the scatter instead of being a static ball the debris exits.
-                rt->physicsSettings().grid_density_deposit = 2.2f;
-                rt->physicsSettings().grid_temperature_deposit = 6.0f;
-                rt->physicsSettings().grid_fuel_deposit = 2.8f;
-
-                // Short fuel/heat pulse drives a real volumetric blast; the
-                // discrete burst remains the hot debris/spark layer.
-                RayTrophiSim::SimulationGridDomainDesc dom;
-                dom.name = "Explosion Gas";
-                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
-                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
-                dom.gas_maccormack_advection = true;
-                dom.bounds_min = Vec3(-3.0f, 0.0f, -3.0f);
-                dom.bounds_max = Vec3(3.0f, 6.0f, 3.0f);
-                dom.voxel_size = 0.075f;   // 6 m box -> 80^3
-                dom.channels |= static_cast<uint32_t>(
-                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
-                dom.fire_enabled = true;
-                dom.ignition_temperature = 0.1f;
-                dom.burn_rate = 7.0f;
-                dom.heat_release = 5.0f;
-                dom.smoke_generation = 1.1f;
-                dom.flame_dissipation = 1.8f;
-                dom.fire_expansion = 0.85f;
-                dom.gas_buoyancy_heat = 0.35f;
-                dom.gas_buoyancy_density = 0.02f;
-                dom.gas_vorticity = 0.8f;
-                dom.turbulence_strength = 0.90f;
-                dom.turbulence_scale = 2.6f;
-                dom.turbulence_octaves = 5;
-                dom.turbulence_lacunarity = 2.1f;
-                dom.turbulence_persistence = 0.56f;
-                dom.turbulence_speed = 1.35f;
-                dom.shader = VolumeShader::createExplosionPreset();
-                rt->addGridDomain(dom);
-
-                RayTrophiSim::SimulationFlowSourceDesc blast;
-                blast.name = "Explosion Fuel Pulse";
-                blast.domain_index = 0;
-                blast.position = e.point;
-                blast.radius = 0.75f;
-                blast.velocity = Vec3(0.0f, 0.5f, 0.0f);
-                blast.density = 2.0f;
-                blast.temperature = 5.0f;
-                blast.fuel = 8.0f;
-                blast.falloff = 0.6f;
-                blast.use_time_limit = true;
-                blast.start_time = 0.0f;
-                blast.end_time = 0.12f;
-                rt->addFlowSource(blast);
-
-                sys.blend_mode = ParticleBlendMode::Additive;
-                sys.render.render_in_raytrace = true;
-                sys.render.shape = ParticleRenderShape::Tetra;  // chunky debris (or set SceneMeshes)
-                sys.render.emissive = true;
-                sys.render.base_color = Vec3(1.0f, 0.8f, 0.4f);
-                sys.render.color_end  = Vec3(0.25f, 0.06f, 0.02f);
-                sys.render.color_buckets = 8;
-                sys.render.emission_strength = 6.0f;
-                break;
-            }
-            case ParticleSystemPreset::Smoke: {
-                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Gas);
-                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Preview);
-                RayTrophiSim::SimulationGridDomainDesc dom;
-                dom.name = "Smoke Domain";
-                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
-                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
-                dom.gas_maccormack_advection = true;
-                dom.bounds_min = Vec3(-2.0f, 0.0f, -2.0f);
-                dom.bounds_max = Vec3(2.0f, 5.0f, 2.0f);
-                dom.voxel_size = 0.07f;    // 4x5x4 m -> ~57x71x57
-                dom.fire_enabled = false;                       // smoke only, no combustion
-                dom.gas_buoyancy_heat = 0.75f;
-                dom.gas_buoyancy_density = 0.035f;
-                dom.gas_vorticity = 0.48f;
-                dom.turbulence_strength = 0.42f;
-                dom.turbulence_scale = 1.45f;
-                dom.turbulence_octaves = 4;
-                dom.turbulence_persistence = 0.52f;
-                dom.shader = VolumeShader::createSmokePreset();
-                rt->addGridDomain(dom);
-                RayTrophiSim::SimulationFlowSourceDesc fs;
-                fs.name = "Smoke Source";
-                fs.position = Vec3(0.0f, 0.3f, 0.0f);
-                fs.velocity = Vec3(0.0f, 1.5f, 0.0f);
-                fs.radius = 0.35f;
-                fs.density = 1.0f;
-                fs.temperature = 0.4f;
-                rt->addFlowSource(fs);
-                sys.render.render_in_raytrace = false;          // volumetric, drawn by the VDB bridge
-                break;
-            }
-            case ParticleSystemPreset::GroundBurst: {
-                // Ground detonation: the floor clips the blast, so energy that
-                // would have gone downward is redirected outward and then up.
-                // Debris is thrown low and wide, drags burning fuel through the
-                // domain, and the column climbs behind it.
-                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
-                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
-                rt->setGravity(Vec3(0.0f, -9.81f, 0.0f));
-                rt->setLinearDrag(0.2f);
-                rt->setCollisionPlane(0.0f, true, 0.25f);   // dirt skips along the ground
-
-                // Low, wide shrapnel fan: spread stays under a hemisphere so the
-                // cone hugs the ground instead of firing straight up.
-                RayTrophiSim::ParticleEmitterDesc debris;
-                debris.name = "Ground Debris";
-                debris.point = Vec3(0.0f, 0.15f, 0.0f);
-                debris.direction = Vec3(0.0f, 1.0f, 0.0f);
-                debris.rate_per_second = 0.0f;
-                debris.burst_count = 380;
-                debris.speed = 7.5f;
-                debris.spread = 1.45f;
-                debris.lifetime_seconds = 2.6f;
-                debris.start_size = 0.09f; debris.end_size = 0.03f; debris.size_jitter = 0.7f;
-                debris.start_opacity = 1.0f; debris.end_opacity = 0.0f;
-                debris.start_color = Vec3(1.0f, 0.72f, 0.28f);
-                debris.end_color = Vec3(0.22f, 0.09f, 0.05f);
-                debris.angular_velocity = 5.0f; debris.angular_jitter = 9.0f;
-                rt->addEmitter(debris);
-
-                // Slow, heavy dirt that arcs and falls back: mass, not fire.
-                RayTrophiSim::ParticleEmitterDesc dirt = debris;
-                dirt.name = "Thrown Dirt";
-                dirt.burst_count = 260;
-                dirt.speed = 4.0f;
-                dirt.spread = 1.1f;
-                dirt.lifetime_seconds = 3.2f;
-                dirt.start_size = 0.13f; dirt.end_size = 0.09f; dirt.size_jitter = 0.8f;
-                dirt.start_color = Vec3(0.42f, 0.31f, 0.2f);
-                dirt.end_color = Vec3(0.2f, 0.15f, 0.1f);
-                dirt.seed = 0x6a17d17du;
-                rt->addEmitter(dirt);
-
-                rt->physicsSettings().grid_density_deposit = 3.0f;
-                rt->physicsSettings().grid_temperature_deposit = 5.0f;
-                rt->physicsSettings().grid_fuel_deposit = 2.2f;
-
-                RayTrophiSim::SimulationGridDomainDesc dom;
-                dom.name = "Ground Burst Gas";
-                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
-                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
-                dom.gas_maccormack_advection = true;
-                // Wide and shallow: a ground burst spreads before it climbs.
-                dom.bounds_min = Vec3(-4.0f, 0.0f, -4.0f);
-                dom.bounds_max = Vec3(4.0f, 6.0f, 4.0f);
-                dom.voxel_size = 0.095f;   // 8x6x8 m -> ~84x63x84
-                dom.channels |= static_cast<uint32_t>(
-                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
-                dom.fire_enabled = true;
-                dom.ignition_temperature = 0.12f;
-                dom.burn_rate = 6.0f;
-                dom.heat_release = 4.2f;
-                dom.smoke_generation = 1.6f;      // dirty, sooty ground blast
-                dom.flame_dissipation = 2.2f;
-                dom.fire_expansion = 0.65f;
-                dom.gas_buoyancy_heat = 0.5f;
-                dom.gas_buoyancy_density = 0.05f; // heavier, dirt-laden smoke
-                dom.gas_vorticity = 0.78f;
-                dom.turbulence_strength = 0.78f;
-                dom.turbulence_scale = 2.2f;
-                dom.turbulence_octaves = 4;
-                dom.turbulence_persistence = 0.55f;
-                dom.turbulence_speed = 1.2f;
-                dom.shader = VolumeShader::createExplosionPreset();
-                rt->addGridDomain(dom);
-
-                // Shallow, wide fuel disc right at the ground.
-                RayTrophiSim::SimulationFlowSourceDesc blast;
-                blast.name = "Ground Fuel Pulse";
-                blast.domain_index = 0;
-                blast.position = Vec3(0.0f, 0.12f, 0.0f);
-                blast.radius = 0.9f;
-                blast.velocity = Vec3(0.0f, 1.2f, 0.0f);
-                blast.density = 2.4f;
-                blast.temperature = 4.5f;
-                blast.fuel = 7.0f;
-                blast.falloff = 0.5f;
-                blast.use_time_limit = true;
-                blast.start_time = 0.0f;
-                blast.end_time = 0.1f;
-                rt->addFlowSource(blast);
-
-                sys.blend_mode = ParticleBlendMode::Additive;
-                sys.render.render_in_raytrace = true;
-                sys.render.shape = ParticleRenderShape::Tetra;
-                sys.render.emissive = true;
-                sys.render.base_color = Vec3(1.0f, 0.72f, 0.3f);
-                sys.render.color_end  = Vec3(0.2f, 0.08f, 0.03f);
-                sys.render.color_buckets = 8;
-                sys.render.emission_strength = 5.0f;
-                break;
-            }
-            case ParticleSystemPreset::Fireball: {
-                // Fuel-rich deflagration: little shrapnel, a long fuel burn and
-                // strong thermal lift, so the mass rolls upward into a mushroom
-                // instead of punching outward. The tall domain is the point.
-                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
-                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
-                rt->setGravity(Vec3(0.0f, -3.2f, 0.0f));   // embers loft
-                rt->setLinearDrag(0.55f);
-
-                RayTrophiSim::ParticleEmitterDesc embers;
-                embers.name = "Fireball Embers";
-                embers.point = Vec3(0.0f, 0.6f, 0.0f);
-                embers.direction = Vec3(0.0f, 1.0f, 0.0f);
-                embers.rate_per_second = 0.0f;
-                embers.burst_count = 180;
-                embers.speed = 3.0f;
-                embers.spread = 2.4f;
-                embers.lifetime_seconds = 3.0f;
-                embers.start_size = 0.11f; embers.end_size = 0.02f; embers.size_jitter = 0.55f;
-                embers.start_opacity = 1.0f; embers.end_opacity = 0.0f;
-                embers.start_color = Vec3(1.0f, 0.88f, 0.5f);
-                embers.end_color = Vec3(0.8f, 0.12f, 0.02f);
-                embers.angular_velocity = 2.0f; embers.angular_jitter = 4.0f;
-                rt->addEmitter(embers);
-
-                // Embers are the fuel carriers here: they keep re-igniting the
-                // rising column, which is what sustains a mushroom cap.
-                rt->physicsSettings().grid_density_deposit = 1.6f;
-                rt->physicsSettings().grid_temperature_deposit = 7.0f;
-                rt->physicsSettings().grid_fuel_deposit = 3.5f;
-
-                RayTrophiSim::SimulationGridDomainDesc dom;
-                dom.name = "Fireball Gas";
-                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
-                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
-                dom.gas_maccormack_advection = true;
-                dom.bounds_min = Vec3(-2.5f, 0.0f, -2.5f);
-                dom.bounds_max = Vec3(2.5f, 9.0f, 2.5f);   // tall: room to climb
-                dom.voxel_size = 0.085f;   // 5x9x5 m -> ~59x106x59
-                dom.channels |= static_cast<uint32_t>(
-                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
-                dom.fire_enabled = true;
-                dom.ignition_temperature = 0.15f;
-                dom.burn_rate = 3.2f;             // slower burn = longer flame life
-                dom.heat_release = 4.5f;
-                dom.smoke_generation = 1.3f;
-                dom.flame_dissipation = 1.2f;     // flame lingers
-                dom.fire_expansion = 0.35f;       // sustained roll without late pressure growth
-                dom.gas_buoyancy_heat = 1.8f;     // strong lift -> mushroom
-                dom.gas_buoyancy_density = 0.03f;
-                dom.gas_vorticity = 0.68f;        // curls the cap without injecting runaway energy
-                dom.turbulence_strength = 0.58f;
-                dom.turbulence_scale = 1.8f;
-                dom.turbulence_octaves = 4;
-                dom.turbulence_persistence = 0.54f;
-                dom.turbulence_speed = 0.9f;
-                dom.shader = VolumeShader::createExplosionPreset();
-                rt->addGridDomain(dom);
-
-                RayTrophiSim::SimulationFlowSourceDesc fuel;
-                fuel.name = "Fireball Fuel Charge";
-                fuel.domain_index = 0;
-                fuel.position = Vec3(0.0f, 0.6f, 0.0f);
-                fuel.radius = 0.8f;
-                fuel.velocity = Vec3(0.0f, 2.0f, 0.0f);
-                fuel.density = 1.4f;
-                fuel.temperature = 4.0f;
-                fuel.fuel = 10.0f;
-                fuel.falloff = 0.8f;
-                fuel.use_time_limit = true;
-                fuel.start_time = 0.0f;
-                fuel.end_time = 0.35f;            // long charge -> sustained roll
-                rt->addFlowSource(fuel);
-
-                sys.blend_mode = ParticleBlendMode::Additive;
-                sys.render.render_in_raytrace = true;
-                sys.render.shape = ParticleRenderShape::Sphere;
-                sys.render.emissive = true;
-                sys.render.base_color = Vec3(1.0f, 0.82f, 0.42f);
-                sys.render.color_end  = Vec3(0.6f, 0.1f, 0.02f);
-                sys.render.color_buckets = 10;
-                sys.render.emission_strength = 9.0f;
-                break;
-            }
-            case ParticleSystemPreset::Flamethrower: {
-                // Directional, fuel-rich jet. Low expansion keeps a coherent
-                // flame tongue while high source velocity carries ignition to
-                // collider surfaces several metres away.
-                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
-                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
-                rt->setGravity(Vec3(0.0f, -2.0f, 0.0f));
-                rt->setLinearDrag(0.35f);
-
-                RayTrophiSim::ParticleEmitterDesc sparks;
-                sparks.name = "Flamethrower Embers";
-                sparks.point = Vec3(0.0f, 1.0f, 0.0f);
-                sparks.direction = Vec3(1.0f, 0.05f, 0.0f);
-                sparks.rate_per_second = 180.0f;
-                sparks.speed = 11.0f;
-                sparks.spread = 0.16f;
-                sparks.lifetime_seconds = 1.1f;
-                sparks.start_size = 0.055f; sparks.end_size = 0.012f;
-                sparks.start_opacity = 1.0f; sparks.end_opacity = 0.0f;
-                sparks.start_color = Vec3(1.0f, 0.92f, 0.48f);
-                sparks.end_color = Vec3(1.0f, 0.12f, 0.01f);
-                sparks.seed = 0xf1a6e701u;
-                rt->addEmitter(sparks);
-                rt->physicsSettings().grid_density_deposit = 0.35f;
-                rt->physicsSettings().grid_temperature_deposit = 2.2f;
-                rt->physicsSettings().grid_fuel_deposit = 0.75f;
-
-                RayTrophiSim::SimulationGridDomainDesc dom;
-                dom.name = "Flamethrower Gas";
-                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
-                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
-                dom.gas_maccormack_advection = true;
-                dom.bounds_min = Vec3(-1.0f, -1.0f, -2.2f);
-                dom.bounds_max = Vec3(9.0f, 3.5f, 2.2f);
-                dom.voxel_size = 0.075f;
-                dom.channels |= static_cast<uint32_t>(
-                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
-                dom.fire_enabled = true;
-                dom.ignition_temperature = 0.18f;
-                dom.burn_rate = 4.8f;
-                dom.heat_release = 3.8f;
-                dom.smoke_generation = 0.48f;
-                dom.flame_dissipation = 2.0f;
-                dom.fire_expansion = 0.08f;
-                dom.gas_buoyancy_heat = 0.48f;
-                dom.gas_buoyancy_density = 0.015f;
-                dom.gas_vorticity = 0.46f;
-                dom.turbulence_strength = 0.62f;
-                dom.turbulence_scale = 3.1f;
-                dom.turbulence_octaves = 4;
-                dom.turbulence_persistence = 0.50f;
-                dom.turbulence_speed = 1.6f;
-                dom.shader = VolumeShader::createFirePreset();
-                // A flamethrower is a hot, optically thin gas jet, not a dense
-                // liquid sheet.  Keep this look local to the preset: large
-                // density/black absorption values collapse the mean free path
-                // and make every fuel-bearing voxel glow as an opaque ribbon.
-                dom.shader->name = "Flamethrower Fire";
-                dom.shader->density.multiplier = 1.65f;
-                dom.shader->density.cutoff_threshold = 0.018f;
-                dom.shader->density.edge_falloff = 0.08f;
-                dom.shader->scattering.color = Vec3(1.0f, 0.72f, 0.38f);
-                dom.shader->scattering.coefficient = 0.12f;
-                dom.shader->scattering.anisotropy = 0.18f;
-                dom.shader->scattering.multi_scatter = 0.08f;
-                dom.shader->absorption.color = Vec3(0.16f, 0.055f, 0.018f);
-                dom.shader->absorption.coefficient = 0.55f;
-                dom.shader->emission.blackbody_intensity = 9.0f;
-                dom.shader->emission.temperature_min = 850.0f;
-                dom.shader->emission.temperature_max = 1900.0f;
-                dom.shader->emission.color_ramp.enabled = true;
-                dom.shader->emission.color_ramp.stops = {
-                    {0.00f, Vec3(0.0f, 0.0f, 0.0f), 0.0f},
-                    {0.12f, Vec3(0.10f, 0.015f, 0.002f), 0.12f},
-                    {0.34f, Vec3(0.90f, 0.12f, 0.008f), 0.58f},
-                    {0.62f, Vec3(1.00f, 0.52f, 0.055f), 0.86f},
-                    {0.84f, Vec3(1.00f, 0.88f, 0.48f), 0.96f},
-                    {1.00f, Vec3(0.82f, 0.91f, 1.00f), 1.0f}
-                };
-                rt->addGridDomain(dom);
-
-                RayTrophiSim::SimulationFlowSourceDesc jet;
-                jet.name = "Flamethrower Fuel Jet";
-                jet.domain_index = 0;
-                jet.position = Vec3(0.0f, 1.0f, 0.0f);
-                jet.radius = 0.24f;
-                jet.velocity = Vec3(12.0f, 0.4f, 0.0f);
-                jet.velocity_coupling = 16.0f;
-                jet.density = 0.42f;
-                jet.temperature = 2.8f;
-                jet.fuel = 3.6f;
-                jet.falloff = 1.8f;
-                jet.use_time_limit = false;
-                rt->addFlowSource(jet);
-
-                sys.blend_mode = ParticleBlendMode::Additive;
-                sys.render.render_in_raytrace = true;
-                sys.render.shape = ParticleRenderShape::Sphere;
-                sys.render.emissive = true;
-                sys.render.base_color = Vec3(1.0f, 0.82f, 0.32f);
-                sys.render.color_end = Vec3(0.85f, 0.08f, 0.01f);
-                sys.render.color_buckets = 10;
-                sys.render.emission_strength = 7.0f;
-                break;
-            }
-        }
-
-        applyParticleSystemEnabledState(sys);
-        if (particle_systems.size() != systems_before + 1u) {
-            SCENE_LOG_ERROR(
-                "[ParticlePreset] Additive preset invariant failed: system count " +
-                std::to_string(systems_before) + " -> " +
-                std::to_string(particle_systems.size()) + ".");
-        } else {
-            SCENE_LOG_INFO(
-                "[ParticlePreset] Added '" + sys.name + "'; systems=" +
-                std::to_string(particle_systems.size()) + ".");
-        }
-        return sys;
-    }
+    ParticleSystemObject& addParticleSystemPreset(
+        ParticleSystemPreset preset);
 
     bool setActiveParticleSystemObject(std::size_t index) {
         if (index >= particle_systems.size()) {
@@ -7332,6 +6899,7 @@ public:
         erase_index(system.domain_sdf_signatures);
         erase_index(system.domain_vdb_upload_signatures);
         erase_index(system.domain_last_fluid_render_mode);
+        erase_index(system.domain_last_tuned_shader);
 
         // A live Vulkan-RT volume can read the solver's dense compute buffers
         // through published device addresses. Give the renderer a two-phase

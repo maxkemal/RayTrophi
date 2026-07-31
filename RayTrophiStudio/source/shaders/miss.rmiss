@@ -397,6 +397,7 @@ vec3 skyColor(vec3 dir) {
 // Main
 // ============================================================
 void main() {
+    payload.skipGasVolumes = false;
     vec3 dir = normalize(gl_WorldRayDirectionEXT);
 
     // ----------------------------------------------------------

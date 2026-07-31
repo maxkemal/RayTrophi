@@ -1723,7 +1723,11 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
                 if (g_animGraphUI.isCreatingLink && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     if (g_animGraphUI.linkStartPinId != pin.id && g_animGraphUI.linkStartIsOutput) {
                         // Connect: output -> input
+                        // A refused link just doesn't appear; say WHY for the one refusal
+                        // the user cannot see (a loop), otherwise it reads as a dead pin.
+                        const bool cycle = graph->wouldCreateCycle(g_animGraphUI.linkStartPinId, pin.id);
                         graph->connect(g_animGraphUI.linkStartPinId, pin.id);
+                        if (cycle) SCENE_LOG_WARN("[AnimGraph] Link refused: it would create a loop in the pose graph.");
                         markAnimGraphRuntimeStale(ctx.scene, g_animGraphUI.activeCharacter);
                     }
                     g_animGraphUI.isCreatingLink = false;
@@ -1755,7 +1759,9 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
                 if (g_animGraphUI.isCreatingLink && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     if (g_animGraphUI.linkStartPinId != pin.id && !g_animGraphUI.linkStartIsOutput) {
                         // Connect: output -> input (reverse direction)
+                        const bool cycle = graph->wouldCreateCycle(pin.id, g_animGraphUI.linkStartPinId);
                         graph->connect(pin.id, g_animGraphUI.linkStartPinId);
+                        if (cycle) SCENE_LOG_WARN("[AnimGraph] Link refused: it would create a loop in the pose graph.");
                         markAnimGraphRuntimeStale(ctx.scene, g_animGraphUI.activeCharacter);
                     }
                     g_animGraphUI.isCreatingLink = false;
@@ -2207,7 +2213,12 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
     }
     
     // ========== DELETE KEY - Remove Selected Nodes & Links ==========
-    if (ImGui::IsWindowHovered() && (!g_animGraphUI.selectedNodeIds.empty() || !g_animGraphUI.selectedLinkIds.empty())) {
+    // FOCUS, not hover: SceneUI::anim_graph_focused (which suppresses the global "delete the
+    // selected scene object" listeners) is a focus flag, so claiming Delete on mere hover let
+    // one keypress delete a node here AND the object in the viewport. Selecting a node already
+    // requires a click in this canvas, so focus is never the missing ingredient in practice.
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
+        (!g_animGraphUI.selectedNodeIds.empty() || !g_animGraphUI.selectedLinkIds.empty())) {
         if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) {
             
             // 1. Delete Explicitly Selected Links

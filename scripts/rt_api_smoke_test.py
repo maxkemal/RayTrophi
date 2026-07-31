@@ -225,6 +225,116 @@ except RuntimeError:
 assert raised, "rt.nodes.set_param on a missing graph must raise"
 print("[rt-smoke] node parameter API surface: OK")
 
+# ── 5.5b — Graph lifecycle + serialized property reflection ─────────────────
+# The reflection layer used to be hard-limited to terrain nodes. It now
+# dispatches on all three node families, so this walks a real material graph
+# end to end: create the asset, create its graph, list nodes, read properties
+# back, write one and read it again.
+_refl_mat = rt.material.create("principled", "ReflectMat")
+assert _refl_mat not in rt.nodes.graphs("material")
+rt.nodes.create_graph("material", _refl_mat)
+assert _refl_mat in rt.nodes.graphs("material"), rt.nodes.graphs("material")
+
+_gnodes = rt.nodes.list("material", _refl_mat)
+assert len(_gnodes) > 0, "a material graph seeded from its material must have nodes"
+
+# Find any node in the graph that exposes at least one scalar property. Before
+# this change every material node reported zero properties.
+_target, _props = None, []
+for _n in _gnodes:
+    _p = rt.nodes.list_properties("material", _refl_mat, _n["id"])
+    if _p:
+        _target, _props = _n, _p
+        break
+assert _target is not None, "no material node exposed serialized properties (reflection gate closed?)"
+
+# Round-trip a float property through get -> set -> get.
+_float_props = [p for p in _props if p["type"] == "float"]
+if _float_props:
+    _pname = _float_props[0]["name"]
+    _before = rt.nodes.get_property("material", _refl_mat, _target["id"], _pname)
+    _new = 0.375 if abs(_before - 0.375) > 1e-3 else 0.625
+    rt.nodes.set_property("material", _refl_mat, _target["id"], _pname, _new)
+    _after = rt.nodes.get_property("material", _refl_mat, _target["id"], _pname)
+    assert abs(_after - _new) < 1e-4, f"{_pname}: wrote {_new}, read {_after}"
+    print(f"[rt-smoke] material node reflection: OK ({_target['type_id']}.{_pname} round-trip)")
+else:
+    print(f"[rt-smoke] material node reflection: OK ({len(_props)} props, no float to round-trip)")
+
+# An unknown property must be rejected, not silently ignored.
+try:
+    rt.nodes.set_property("material", _refl_mat, _target["id"], "__no_such_prop__", 1.0)
+    raise AssertionError("unknown node property must raise")
+except RuntimeError:
+    pass
+
+# Geometry graphs are keyed by object name and start empty.
+_geo_obj = rt.scene.add_primitive("cube", name="ReflectGeoCube")
+rt.nodes.create_graph("geometry", _geo_obj)
+assert _geo_obj in rt.nodes.graphs("geometry")
+try:
+    rt.nodes.create_graph("geometry", "__no_such_object__")
+    raise AssertionError("geometry graph for a missing object must raise")
+except RuntimeError:
+    pass
+# Terrain graphs are owned by the terrain object, not creatable here.
+try:
+    rt.nodes.create_graph("terrain", "anything")
+    raise AssertionError("terrain graph creation must be refused")
+except RuntimeError:
+    pass
+
+print(f"[rt-smoke] node graph lifecycle: OK ({len(rt.nodes.types())} types registered)")
+
+# ── 5.5c — rt.nodes.apply closes the authoring loop ─────────────────────────
+# Building a graph is not enough: the material only picks up the graph when it
+# is APPLIED (fold constants into the material + compile the per-pixel program).
+# This is the editor's Apply, not terrain's async evaluate.
+_apply = rt.nodes.apply("material", _refl_mat)
+assert isinstance(_apply, dict) and _apply["ok"] is True, _apply
+assert isinstance(_apply["warnings"], list) and isinstance(_apply["errors"], list)
+
+# End-to-end proof: drive a material value THROUGH the graph. Write the property
+# on the node, apply, and read the material back through the object binding.
+# Uses its own object so this block stays independent of the rt.select section
+# further down the file.
+_apply_cube = rt.scene.add_primitive("cube", name="ApplyTestCube")
+rt.material.assign(_apply_cube, _refl_mat)
+_rough_node, _rough_prop = None, None
+for _n in rt.nodes.list("material", _refl_mat):
+    for _p in rt.nodes.list_properties("material", _refl_mat, _n["id"]):
+        if _p["name"] == "roughness" and _p["type"] == "float":
+            _rough_node, _rough_prop = _n["id"], _p["name"]
+            break
+    if _rough_node is not None:
+        break
+if _rough_node is not None:
+    rt.nodes.set_property("material", _refl_mat, _rough_node, _rough_prop, 0.137)
+    _res = rt.nodes.apply("material", _refl_mat)
+    assert _res["ok"] is True, _res
+    _mat_rough = rt.material.get(_apply_cube, "roughness")
+    assert abs(_mat_rough - 0.137) < 1e-3, \
+        f"graph roughness 0.137 did not reach the material (got {_mat_rough})"
+    print("[rt-smoke] rt.nodes.apply end-to-end: OK (graph value -> material)")
+else:
+    print("[rt-smoke] rt.nodes.apply: OK (no roughness node to drive end-to-end)")
+
+# Terrain keeps its async contract; geometry applies through the Geo-DAG path.
+try:
+    rt.nodes.apply("terrain", "anything")
+    raise AssertionError("terrain apply must redirect to rt.terrain.evaluate")
+except RuntimeError:
+    pass
+try:
+    rt.nodes.apply("material", "__no_such_graph__")
+    raise AssertionError("apply on a missing graph must raise")
+except RuntimeError:
+    pass
+
+rt.nodes.remove_graph("geometry", _geo_obj)
+assert _geo_obj not in rt.nodes.graphs("geometry")
+rt.nodes.remove_graph("material", _refl_mat)
+
 # ── 3b — Event callbacks (subscribe/unsubscribe surface) ────────────────────
 _fired = []
 cb_id = rt.on_frame_change(lambda f: _fired.append(f))
@@ -258,7 +368,121 @@ assert raised, "rt.ui.button outside a panel draw must raise"
 # Register + immediately unregister a throwaway panel (its draw never runs here).
 _pid = rt.ui.register_panel("__rt_smoke_panel__", lambda: None)
 assert isinstance(_pid, int)
+assert any(p["id"] == _pid and p["region"] == "" for p in rt.ui.list_panels())
+rt.ui.set_panel_visible(_pid, False)
+assert any(p["id"] == _pid and p["visible"] is False for p in rt.ui.list_panels())
 rt.ui.unregister_panel(_pid)
+assert all(p["id"] != _pid for p in rt.ui.list_panels())
+
+# 4b+ — regions: an addon mounts into an existing panel instead of a new window.
+_regions = rt.ui.regions()
+assert "properties.world" in _regions and "menu.view" in _regions
+_rid = rt.ui.register_region("properties.world", "__rt_smoke_region__", lambda: None)
+assert any(p["id"] == _rid and p["region"] == "properties.world" for p in rt.ui.list_panels())
+rt.ui.unregister_panel(_rid)
+# The widget guard covers the whole surface, not just button().
+for _fn, _args in (("text", ("x",)), ("collapsing_header", ("x",)), ("combo", ("x", 0, ["a"])),
+                   ("begin_table", ("x", 2)), ("push_style_var", ("alpha", 1.0)),
+                   ("begin_child", ("x",)), ("selectable", ("x",))):
+    try:
+        getattr(rt.ui, _fn)(*_args)
+        raise AssertionError(f"rt.ui.{_fn} outside a panel draw must raise")
+    except RuntimeError:
+        pass
+
+# 5.5d — container / style surface. These can only RUN inside a draw callback,
+# so here we assert the surface exists and that the name tables are sane.
+for _fn in ("begin_child", "end_child", "begin_table", "end_table", "table_setup_column",
+            "table_headers_row", "table_next_row", "table_next_column",
+            "begin_tab_bar", "end_tab_bar", "begin_tab_item", "end_tab_item",
+            "begin_list_box", "end_list_box", "selectable",
+            "open_popup", "begin_popup", "begin_popup_modal", "end_popup",
+            "close_current_popup", "push_style_color", "pop_style_color",
+            "push_style_var", "pop_style_var", "input_text_multiline",
+            "plot_lines", "plot_histogram", "is_key_pressed", "content_region_avail"):
+    assert callable(getattr(rt.ui, _fn, None)), f"rt.ui.{_fn} is missing"
+
+_style_colors = rt.ui.style_colors()
+_style_vars = rt.ui.style_vars()
+assert "button" in _style_colors and "window_bg" in _style_colors, _style_colors
+assert "frame_rounding" in _style_vars and "item_spacing" in _style_vars, _style_vars
+print(f"[rt-smoke] rt.ui panels + regions: OK ({len(_regions)} regions, "
+      f"{len(_style_colors)} style colors, {len(_style_vars)} style vars)")
+
+# ── 5.5a — rt.select ───────────────────────────────────────────────────────
+_sel_cube = rt.scene.add_primitive("cube", name="SelTestCube")
+rt.select.clear()
+assert rt.select.list() == []
+rt.select.object(_sel_cube)
+_sel = rt.select.list()
+assert any(s["name"] == _sel_cube and s["type"] == "object" for s in _sel), _sel
+assert any(s["primary"] for s in _sel), "one item must be primary"
+_all = rt.select.all()
+assert _all >= 1 and len(rt.select.list()) == _all
+rt.select.deselect(_sel_cube)
+assert all(s["name"] != _sel_cube for s in rt.select.list())
+rt.select.clear()
+try:
+    rt.select.object("__no_such_object__")
+    raise AssertionError("selecting a missing object must raise")
+except RuntimeError:
+    pass
+print(f"[rt-smoke] rt.select: OK (select_all saw {_all} objects)")
+
+# ── 5.5a — rt.material asset layer ─────────────────────────────────────────
+_mat = rt.material.create("principled", "SmokeMat")
+assert isinstance(_mat, str) and _mat
+assert any(m["name"] == _mat and m["type"] == "principled" for m in rt.material.list())
+assert rt.material.info(_mat)["name"] == _mat
+# A second create with the same requested name must not collide.
+_mat2 = rt.material.create("principled", "SmokeMat")
+assert _mat2 != _mat, "createMaterial must uniquify a taken name"
+rt.material.assign(_sel_cube, _mat)
+assert _mat in rt.material.of_object(_sel_cube), rt.material.of_object(_sel_cube)
+# Parameter get/set still route through the object.
+rt.material.set(_sel_cube, "roughness", 0.25)
+assert abs(rt.material.get(_sel_cube, "roughness") - 0.25) < 1e-4
+rt.material.set(_sel_cube, "base_color", (0.1, 0.6, 0.9))
+assert rt.material.textures(_mat) == [], "a fresh material has no textures"
+try:
+    rt.material.set_texture(_mat, "__no_such_slot__", "x.png")
+    raise AssertionError("unknown texture slot must raise")
+except RuntimeError:
+    pass
+print(f"[rt-smoke] rt.material assets: OK ({len(rt.material.list())} materials)")
+
+# ── 5.5a — rt.lights parameters ────────────────────────────────────────────
+_light_name = rt.lights.add("spot", (0.0, 4.0, 0.0))
+_li = [l for l in rt.lights.list() if l["name"] == _light_name]
+assert len(_li) == 1, _li
+_lidx = _li[0]["index"]
+rt.lights.set_color(_lidx, (1.0, 0.5, 0.25))
+rt.lights.set_intensity(_lidx, 3.5)
+rt.lights.set_direction(_lidx, (0.0, -1.0, 0.0))
+rt.lights.set_param(_lidx, "spot_angle", 30.0)
+_lg = rt.lights.get(_lidx)
+assert abs(_lg["intensity"] - 3.5) < 1e-4, _lg
+assert abs(_lg["spot_angle"] - 30.0) < 1e-3, _lg
+assert abs(_lg["color"][1] - 0.5) < 1e-4, _lg
+rt.lights.rename(_lidx, "SmokeSpot")
+assert rt.lights.get(_lidx)["name"] == "SmokeSpot"
+# A degenerate direction must be rejected rather than silently ignored.
+try:
+    rt.lights.set_direction(_lidx, (0.0, 0.0, 0.0))
+    raise AssertionError("zero-length direction must raise")
+except RuntimeError:
+    pass
+# spot_angle is meaningless on a point light.
+_pt_name = rt.lights.add("point", (0.0, 2.0, 0.0))
+_pidx = [l for l in rt.lights.list() if l["name"] == _pt_name][0]["index"]
+try:
+    rt.lights.set_param(_pidx, "spot_angle", 20.0)
+    raise AssertionError("spot_angle on a point light must raise")
+except RuntimeError:
+    pass
+rt.lights.delete(_pidx)
+print("[rt-smoke] rt.lights parameters: OK")
+
 # ── 5.2b — rt.modifiers surface check ──────────────────────────────────────
 assert hasattr(rt, "modifiers"), "rt.modifiers submodule must exist"
 mod_cube = rt.scene.add_primitive("cube", name="ModTestCube")
@@ -463,5 +687,287 @@ for sculpt_tool in ("draw", "smooth", "flatten", "stamp", "noise"):
                      use_mask=False, undo=False)
 rt.undo()  # Undo sculpt test sphere creation
 print("[rt-smoke] rt.sculpt deterministic strokes + mask: OK")
+
+# 5.6a - rt.forcefield: one field feeds every simulation family
+assert hasattr(rt, "forcefield"), "rt.forcefield submodule must exist"
+ff_types = rt.forcefield.types()
+assert "wind" in ff_types and "vortex" in ff_types and "curlnoise" in ff_types
+
+ff_before = len(rt.forcefield.list())
+vortex = rt.forcefield.create("vortex", "SmokeVortex")
+assert vortex["name"] == "SmokeVortex" and vortex["type"] == "vortex"
+# The panel's per-type defaults must be replayed, otherwise a scripted vortex
+# is a bare rotation with no spiral or lift.
+assert vortex["shape"] == "cylinder", "vortex must default to a cylinder shape"
+assert vortex["inward_force"] > 0.0 and vortex["upward_force"] > 0.0
+assert len(rt.forcefield.list()) == ff_before + 1
+
+# Same requested name twice must not collide.
+vortex2 = rt.forcefield.create("vortex", "SmokeVortex")
+assert vortex2["name"] != vortex["name"]
+assert vortex2["id"] != vortex["id"]
+rt.forcefield.remove(str(vortex2["id"]))
+
+# Turbulence and curl noise are dead without use_noise.
+turb = rt.forcefield.create("turbulence", "SmokeTurbulence")
+assert turb["use_noise"] is True
+
+# Partial edit through kwargs, read back by ID.
+rt.forcefield.set_param(str(vortex["id"]), strength=7.5, falloff_radius=12.0,
+                        position=(1.0, 2.0, 3.0), affects_cloth=False,
+                        falloff="inverse_square")
+edited = rt.forcefield.get(str(vortex["id"]))
+assert abs(edited["strength"] - 7.5) < 1e-4
+assert abs(edited["falloff_radius"] - 12.0) < 1e-4
+assert abs(edited["position"][1] - 2.0) < 1e-4
+assert edited["affects_cloth"] is False
+assert edited["falloff"] == "inverse_square"
+# An untouched field must survive a partial edit.
+assert edited["shape"] == "cylinder"
+assert edited["name"] == "SmokeVortex"
+
+# Spelling variants the panel uses must resolve to the same enum. The
+# multi-word cases matter most: a canonical name that contains "_" must still
+# match a caller who typed a space or a hyphen (and vice versa).
+rt.forcefield.set_param("SmokeTurbulence", type="Curl Noise")
+assert rt.forcefield.get("SmokeTurbulence")["type"] == "curlnoise"
+for spelling in ("inverse_square", "Inverse Square", "inverse-square", "InverseSquare"):
+    rt.forcefield.set_param("SmokeTurbulence", falloff="linear")
+    rt.forcefield.set_param("SmokeTurbulence", falloff=spelling)
+    assert rt.forcefield.get("SmokeTurbulence")["falloff"] == "inverse_square", spelling
+
+# Rejected edits must leave the field untouched, not half-applied.
+for bad in ({"type": "__nope__"}, {"shape": "__nope__"},
+            {"falloff": "__nope__"}, {"noise_octaves": 99}):
+    raised = False
+    try:
+        rt.forcefield.set_param("SmokeTurbulence", **bad)
+    except Exception:
+        raised = True
+    assert raised, "rt.forcefield.set_param must reject %r" % bad
+assert rt.forcefield.get("SmokeTurbulence")["type"] == "curlnoise"
+assert rt.forcefield.get("SmokeTurbulence")["noise_octaves"] <= 8
+
+# inner_radius may not exceed falloff_radius.
+raised = False
+try:
+    rt.forcefield.set_param("SmokeTurbulence", inner_radius=999.0)
+except Exception:
+    raised = True
+assert raised, "inner_radius > falloff_radius must be rejected"
+
+# evaluate() is the read-only probe: a strong wind must show up in the sum.
+wind = rt.forcefield.create("wind", "SmokeWind")
+rt.forcefield.set_param(str(wind["id"]), shape="infinite", strength=50.0,
+                        direction=(1.0, 0.0, 0.0), falloff="none")
+pushed = rt.forcefield.evaluate((0.0, 0.0, 0.0), 0.0)
+rt.forcefield.set_param(str(wind["id"]), enabled=False)
+calm = rt.forcefield.evaluate((0.0, 0.0, 0.0), 0.0)
+assert pushed != calm, "a disabled field must stop contributing force"
+
+for ff_name in ("SmokeVortex", "SmokeTurbulence", "SmokeWind"):
+    rt.forcefield.remove(ff_name)
+raised = False
+try:
+    rt.forcefield.get("SmokeVortex")
+except Exception:
+    raised = True
+assert raised, "a removed force field must not resolve"
+assert len(rt.forcefield.list()) == ff_before
+print("[rt-smoke] rt.forcefield lifecycle + patch + evaluate: OK")
+
+# 5.6b - rt.particle: emitters, solver settings, stats, direct spawn
+assert hasattr(rt, "particle"), "rt.particle submodule must exist"
+pt_emitters_before = len(rt.particle.emitters())
+
+em = rt.particle.add_emitter(name="SmokeEmitter", rate_per_second=64.0,
+                             speed=3.0, lifetime_seconds=2.0,
+                             point=(0.0, 2.0, 0.0), direction=(0.0, 1.0, 0.0))
+assert em["name"] == "SmokeEmitter"
+assert abs(em["rate_per_second"] - 64.0) < 1e-4
+assert em["index"] == pt_emitters_before
+assert len(rt.particle.emitters()) == pt_emitters_before + 1
+
+# Addressable by index AND by name.
+by_index = rt.particle.get_emitter(str(em["index"]))
+by_name = rt.particle.get_emitter("SmokeEmitter")
+assert by_index["name"] == by_name["name"] == "SmokeEmitter"
+
+# Partial edit must not disturb untouched fields.
+rt.particle.set_emitter("SmokeEmitter", speed=9.0, spread=0.5, burst_count=32)
+edited = rt.particle.get_emitter("SmokeEmitter")
+assert abs(edited["speed"] - 9.0) < 1e-4
+assert abs(edited["spread"] - 0.5) < 1e-4
+assert edited["burst_count"] == 32
+assert abs(edited["rate_per_second"] - 64.0) < 1e-4, "untouched field must survive"
+assert abs(edited["point"][1] - 2.0) < 1e-4
+
+# Rejected edits must leave the emitter untouched, not half-applied.
+for bad in ({"source_mode": "__nope__"}, {"spawn_mode": "__nope__"},
+            {"lifetime_seconds": 0.0}, {"mass": 0.0}, {"burst_count": -5}):
+    raised = False
+    try:
+        rt.particle.set_emitter("SmokeEmitter", **bad)
+    except Exception:
+        raised = True
+    assert raised, "rt.particle.set_emitter must reject %r" % bad
+assert abs(rt.particle.get_emitter("SmokeEmitter")["speed"] - 9.0) < 1e-4
+
+# An object-bound emitter MUST name a live object: the scene prunes one whose
+# object is missing, so accepting it would hand back an emitter that vanishes.
+# (An in-process script would not notice — the prune runs as scene maintenance
+# between frames, which is why this only showed up over IPC.)
+for bad in ({"source_mode": "object_origin"},
+            {"source_mode": "object_origin", "source_name": "__no_such_object__"},
+            {"source_mode": "force_field_origin", "source_name": ""}):
+    raised = False
+    try:
+        rt.particle.set_emitter("SmokeEmitter", **bad)
+    except Exception:
+        raised = True
+    assert raised, "unbound object emitter must be rejected: %r" % bad
+assert rt.particle.get_emitter("SmokeEmitter")["source_mode"] == "point"
+
+# Spelling variants (panel writes them with spaces, the API with underscores).
+pt_source = rt.scene.add_primitive("cube", name="SmokeEmitterSource", size=1.0)
+for spelling in ("object_origin", "Object Origin", "object-origin", "ObjectOrigin"):
+    rt.particle.set_emitter("SmokeEmitter", source_mode="point")
+    rt.particle.set_emitter("SmokeEmitter", source_mode=spelling, source_name=pt_source)
+    assert rt.particle.get_emitter("SmokeEmitter")["source_mode"] == "object_origin", spelling
+for spelling in ("object_aabb_surface", "Object AABB Surface", "ObjectAABBSurface"):
+    rt.particle.set_emitter("SmokeEmitter", spawn_mode="center")
+    rt.particle.set_emitter("SmokeEmitter", spawn_mode=spelling)
+    assert rt.particle.get_emitter("SmokeEmitter")["spawn_mode"] == "object_aabb_surface", spelling
+# Unbind before the source object goes away, or the prune takes the emitter too.
+rt.particle.set_emitter("SmokeEmitter", source_mode="point", source_name="")
+
+# Solver settings are per system, not per emitter.
+phys_before = rt.particle.get_physics()
+rt.particle.set_physics(mode="granular", particle_radius=0.08, gravity_scale=0.5,
+                        grid_fuel_deposit=0.25)
+phys = rt.particle.get_physics()
+assert phys["mode"] == "granular"
+assert abs(phys["particle_radius"] - 0.08) < 1e-4
+assert abs(phys["gravity_scale"] - 0.5) < 1e-4
+assert abs(phys["grid_fuel_deposit"] - 0.25) < 1e-4
+assert phys["quality"] == phys_before["quality"], "untouched setting must survive"
+for bad in ({"mode": "__nope__"}, {"quality": "__nope__"},
+            {"particle_radius": 0.0}, {"solver_iterations": 0},
+            {"max_neighbors_per_particle": 0}, {"rest_density": 0.0}):
+    raised = False
+    try:
+        rt.particle.set_physics(**bad)
+    except Exception:
+        raised = True
+    assert raised, "rt.particle.set_physics must reject %r" % bad
+assert rt.particle.get_physics()["mode"] == "granular"
+
+# Direct spawn bypasses the emitters; stats must see it.
+alive_before = rt.particle.stats()["alive_count"]
+spawn_index = rt.particle.spawn(position=(0.0, 3.0, 0.0), velocity=(0.0, 1.0, 0.0),
+                                lifetime_seconds=4.0)
+assert spawn_index >= 0
+stats = rt.particle.stats()
+assert stats["alive_count"] == alive_before + 1
+# Counts must be LIVE: the runtime only refreshes its own stats block inside
+# step(), so reading them from there would report 0 emitters right after an add.
+assert stats["emitter_count"] >= 1, "stats() counts must not wait for a step"
+assert stats["capacity"] >= stats["alive_count"]
+rt.particle.step(0.016)
+rt.particle.clear()
+assert rt.particle.stats()["alive_count"] == 0
+
+# Restore the solver settings this block changed, then drop the test emitter.
+rt.particle.set_physics(mode=phys_before["mode"],
+                        particle_radius=phys_before["particle_radius"],
+                        gravity_scale=phys_before["gravity_scale"],
+                        grid_fuel_deposit=phys_before["grid_fuel_deposit"])
+rt.particle.remove_emitter("SmokeEmitter")
+rt.scene.delete(pt_source)
+assert len(rt.particle.emitters()) == pt_emitters_before
+raised = False
+try:
+    rt.particle.get_emitter("SmokeEmitter")
+except Exception:
+    raised = True
+assert raised, "a removed emitter must not resolve"
+# clear_emitters wipes EVERY emitter, so only exercise it on a scene that had
+# none to begin with — a smoke test must not destroy the user's authoring.
+if pt_emitters_before == 0:
+    rt.particle.add_emitter(name="SmokeEmitterClear")
+    rt.particle.clear_emitters()
+    assert len(rt.particle.emitters()) == 0
+print("[rt-smoke] rt.particle emitters + physics + stats + spawn: OK")
+
+# 5.6c - rt.anim skeletal playback (transport + graph parameters only)
+for fn in ("characters", "character", "clips", "play", "stop", "set_paused",
+           "set_time", "set_speed", "set_loop", "status",
+           "set_graph_param", "trigger_graph_param", "graph_status"):
+    assert callable(getattr(rt.anim, fn)), "rt.anim.%s must exist" % fn
+
+# Negative checks work on any scene, animated or not.
+for call in (lambda: rt.anim.character("__no_such_character__"),
+             lambda: rt.anim.clips("__no_such_character__"),
+             lambda: rt.anim.play("__no_such_character__", "Idle"),
+             lambda: rt.anim.status("__no_such_character__")):
+    raised = False
+    try:
+        call()
+    except Exception:
+        raised = True
+    assert raised, "a missing character must raise"
+
+anim_chars = rt.anim.characters()
+if anim_chars:
+    ch = anim_chars[0]["name"]
+    info = rt.anim.character(ch)
+    assert info["name"] == ch
+    # ★These check the REASON, not just that something raised. characters() used to list
+    # static mesh imports too, so both of these raised "no animation controller" and passed
+    # while testing nothing — the real failure only surfaced later, on the first call that
+    # had no try/except around it. A bare `assert raised` hides the bug it is meant to catch.
+    #
+    # An out-of-range layer is silently ignored by the controller, so the facade
+    # must reject it rather than report a no-op edit as success.
+    for bad_layer in (-1, 4, 99):
+        err = ""
+        try:
+            rt.anim.status(ch, layer=bad_layer)
+        except Exception as e:
+            err = str(e)
+        assert "layer" in err, "layer %d must be rejected for BEING a bad layer, got: %r" % (bad_layer, err)
+    err = ""
+    try:
+        rt.anim.play(ch, "__no_such_clip__")
+    except Exception as e:
+        err = str(e)
+    assert "clip not found" in err, "an unknown clip must raise for THAT reason, got: %r" % err
+
+    clips = rt.anim.clips(ch)
+    if clips:
+        first = clips[0]["name"]
+        rt.anim.play(ch, first, blend=0.0)
+        status = rt.anim.status(ch)
+        assert status["clip"] == first
+        rt.anim.set_speed(ch, 0.5)
+        rt.anim.set_loop(ch, True)
+        rt.anim.set_time(ch, 0.0)
+        rt.anim.set_paused(ch, True)
+        assert rt.anim.status(ch)["paused"] is True
+        rt.anim.set_paused(ch, False)
+        rt.anim.set_speed(ch, 1.0)
+        rt.anim.stop(ch, blend_out=0.0)
+    # Graph parameters must be refused on a character that is not graph-driven,
+    # otherwise the value is stored where nothing will ever read it.
+    if not info["uses_graph"]:
+        raised = False
+        try:
+            rt.anim.set_graph_param(ch, "Speed", 1.0)
+        except Exception:
+            raised = True
+        assert raised, "graph param on a clip-driven character must be refused"
+    print("[rt-smoke] rt.anim playback: OK (%d character(s), '%s')" % (len(anim_chars), ch))
+else:
+    print("[rt-smoke] rt.anim surface: OK (no animated character in this scene)")
 
 print("[rt-smoke] PASS")

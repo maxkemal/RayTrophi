@@ -1526,6 +1526,12 @@ namespace AnimationGraph {
             return false;
         }
 
+        // A cycle here is a stack overflow at evaluation time, not a wrong pose. See the
+        // declaration in AnimationNodes.h.
+        if (wouldCreateCycle(outputPinId, inputPinId)) {
+            return false;
+        }
+
         for (const auto& existing : links) {
             if (existing.startPinId == outputPinId && existing.endPinId == inputPinId) {
                 return true;
@@ -1612,6 +1618,29 @@ namespace AnimationGraph {
         return nullptr;
     }
     
+    bool AnimationNodeGraph::wouldCreateCycle(uint32_t startPinId, uint32_t endPinId) {
+        AnimNodeBase* src = findNodeByPinId(startPinId);
+        AnimNodeBase* dst = findNodeByPinId(endPinId);
+        if (!src || !dst) return false;
+        if (src == dst) return true;   // self-link
+
+        // The link closes a loop exactly when `end`'s node already feeds `start`'s node,
+        // so walk UPSTREAM from start and see whether we reach end.
+        std::vector<AnimNodeBase*> stack{ src };
+        std::unordered_set<AnimNodeBase*> seen{ src };
+        while (!stack.empty()) {
+            AnimNodeBase* n = stack.back();
+            stack.pop_back();
+            if (n == dst) return true;
+            for (const auto& l : links) {
+                if (findNodeByPinId(l.endPinId) != n) continue;
+                AnimNodeBase* producer = findNodeByPinId(l.startPinId);
+                if (producer && seen.insert(producer).second) stack.push_back(producer);
+            }
+        }
+        return false;
+    }
+
     AnimNodeBase* AnimationNodeGraph::findNodeByPinId(uint32_t pinId) {
         for (auto& node : nodes) {
             for (auto& pin : node->inputs) {
@@ -1642,12 +1671,32 @@ namespace AnimationGraph {
     PoseData AnimationNodeGraph::evaluateNodePose(AnimNodeBase* node, AnimationEvalContext& ctx) {
         if (!node) return PoseData{};
 
+        // Re-entering a node that is still unwinding means the links form a loop. connect()
+        // refuses to create one, but loadFromJson() restores links directly, so a project
+        // saved before that guard can still open with a cycle. Bail with an empty pose —
+        // recursing would overflow the stack, and a Windows stack overflow takes the crash
+        // logger down with it, leaving no record of why.
+        if (!evalActiveNodes.insert(node->id).second) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                SCENE_LOG_WARN("[AnimGraph] Cycle detected in the animation node graph at node " +
+                               std::to_string(node->id) + " (" + node->name +
+                               "); that branch evaluates to an empty pose. Break the loop in the "
+                               "AnimGraph editor.");
+            }
+            return PoseData{};
+        }
+
         debugTrace.evaluatedNodeOrder.push_back(node->id);
         debugTrace.nodeEvalCounts[node->id]++;
-        return node->computePose(ctx);
+        PoseData result = node->computePose(ctx);
+        evalActiveNodes.erase(node->id);
+        return result;
     }
 
     void AnimationNodeGraph::beginEvaluationFrame() {
+        evalActiveNodes.clear();   // an exception thrown mid-evaluation would leave it dirty
         debugTrace.reset();
         debugTrace.evaluationSerial++;
         debugTrace.floatParamsSnapshot = evalContext.floatParams;

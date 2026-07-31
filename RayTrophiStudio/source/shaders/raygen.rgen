@@ -926,6 +926,7 @@ void main() {
     bool firstHitValid = false;
     bool causticGathered = false;   // photon-map gather fires once per path (Faz 2 / Dilim 2)
     payload.skipAABBs = false;
+    payload.skipGasVolumes = false;
     // Dispersion hero channel: reset once per PATH (not per bounce) so the exit
     // interface of a dispersive glass refracts with the same channel as the entry.
     // plMetaReset(0u) = no material, no primary hit, dispersion channel cleared.
@@ -950,6 +951,7 @@ void main() {
 
         // Consume skipAABBs flag set by previous bounce (volume solid detection)
         bool useSkipAABBs = payload.skipAABBs;
+        bool useSkipGasVolumes = payload.skipGasVolumes;
 
         payload.radiance      = vec3(0.0);
         payload.attenuation   = vec3(1.0);
@@ -958,6 +960,7 @@ void main() {
         payload.seed          = seed;
         payload.scattered     = false;
         payload.skipAABBs     = false;
+        payload.skipGasVolumes = false;
         payload.primaryARG    = 0u;
         payload.primaryABT    = 0u;
         payload.primaryNrm    = 0u;
@@ -977,7 +980,7 @@ void main() {
         traceRayEXT(
             topLevelAS,
             traceFlags,
-            0xFF,
+            useSkipGasVolumes ? 0xFD : 0xFF,
             0, 0, 0,
             rayOrigin,
             T_MIN,
@@ -1078,7 +1081,8 @@ void main() {
         // --- STOCHASTIC TRANSPARENCY BOUNCE PRESERVATION ---
         // If the ray passed straight through without altering radiance or attenuation (opacity cutout),
         // do NOT count it as a GI bounce. Keep bounce limit available for actual lighting.
-        if (!isTransparentPass && !payload.skipAABBs) {
+        if (!isTransparentPass && !payload.skipAABBs &&
+            !payload.skipGasVolumes) {
             if (payload.bounceType == BOUNCE_DIFFUSE) {
                 diffuseBounceCount++;
                 if (diffuseBounceCount > effectiveDiffuseBounces) break;

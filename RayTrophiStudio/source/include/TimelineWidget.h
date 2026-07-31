@@ -129,6 +129,15 @@ public:
     int getStartFrame() const { return start_frame; }
     int getEndFrame() const { return end_frame; }
     bool isPlaying() const { return is_playing; }
+
+    // Set each frame while the timeline window (dope sheet OR graph editor — they share
+    // one window) has keyboard focus. Both of those claim Delete/X for keyframe deletion,
+    // so the global "delete the selected scene object" listeners must stand down while it
+    // is set — otherwise one keypress deleted a key here AND the object in the viewport.
+    // Same contract as SceneUI::geometry_graph_focused and friends; see
+    // scene_ui.cpp::handleEditorShortcuts, scene_ui_hierarchy.cpp and Main.cpp's SDL handler.
+    bool panel_focused = false;
+
     std::string selected_track;
 
     // Force the next handleSelectionSync to re-apply selected_track from the live

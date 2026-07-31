@@ -3223,7 +3223,8 @@ int main(int argc, char* argv[]) try {
                     // claimed by NodeEditorUIV2 for node/link deletion (see scene_ui.cpp's
                     // handleEditorShortcuts for the matching guard on the other Delete listener).
                     if (!python_console_captures_input && !ImGui::GetIO().WantTextInput &&
-                        !ui.terrain_graph_focused && !ui.geometry_graph_focused && !ui.material_graph_focused) {
+                        !ui.terrain_graph_focused && !ui.geometry_graph_focused && !ui.material_graph_focused &&
+                        !ui.anim_graph_focused && !ui.timeline.panel_focused) {
                         ui.triggerDelete(ui_ctx);
                     }
                 }

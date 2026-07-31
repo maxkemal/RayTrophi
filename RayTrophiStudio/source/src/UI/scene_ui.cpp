@@ -72,6 +72,7 @@
 #include "SceneSerializer.h"
 #include "ProjectManager.h"  // Project system
 #include "Api/RtPython.h"
+#include "Api/RtUi.h"
 #include "Api/RtIpcPanel.h"
 #include "Api/RtApi.h"
 #include "MaterialManager.h"  // For material editing
@@ -2045,6 +2046,29 @@ static const char* poppablePropertyTabName(int tab)
     }
 }
 
+// rt.ui mount point for a Properties tab. Addons register against these ids via
+// rt.ui.register_region(); the list is mirrored by rtui::knownRegions().
+static const char* propertyTabRegionId(int tab)
+{
+    switch (tab) {
+        case 0:  return "properties.scene";
+        case 1:  return "properties.render";
+        case 2:  return "properties.terrain";
+        case 3:  return "properties.water";
+        case 4:  return "properties.volumetric";
+        case 5:  return "properties.simulation";
+        case 6:  return "properties.world";
+        case 7:  return "properties.modeling";
+        case 8:  return "properties.hair";
+        case 9:  return "properties.system";
+        case 10: return "properties.paint";
+        case 11: return "properties.scatter";
+        case 12: return "properties.stylize";
+        case 13: return "properties.sculpt";
+        default: return "";
+    }
+}
+
 // Renders a single tab's content. This is the single source of truth shared by the
 // main Properties switch and the torn-off windows (kept in lockstep with that switch).
 void SceneUI::drawPoppedTabContent(UIContext& ctx, int tab)
@@ -2075,6 +2099,7 @@ void SceneUI::drawPoppedTabContent(UIContext& ctx, int tab)
         case 13: drawSculptPanel(ctx); break;
         default: break;
     }
+    rtui::drawRegion(propertyTabRegionId(tab));  // addon-injected sections
 }
 
 // Hosts every currently popped tab as its own dockable/closable window. Closing a
@@ -3250,6 +3275,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             case 10: if (show_paint_tab) drawPaintPanel(ctx); break;
             case 8: if (show_hair_tab) drawHairTabContent(ctx); break;
         }
+        // Addon-injected sections. Mirrors the call in drawPoppedTabContent so a
+        // region shows in the docked panel and the torn-off window alike (the tab
+        // is drawn by exactly one of the two paths, never both).
+        if (!tab_is_popped)
+            rtui::drawRegion(propertyTabRegionId(active_properties_tab));
         UIWidgets::PopControlSurfaceStyle();
         ImGui::PopItemWidth();
 
@@ -3711,7 +3741,7 @@ void SceneUI::draw(UIContext& ctx)
     drawMainMenuBar(ctx);
     rtpython::drawConsole(&show_python_console);
     rtipc_panel::draw(&show_remote_ipc_panel);
-    rtpython::drawAddonPanels();  // Faz 4b: addon-registered rt.ui panels
+    rtui::drawAddonPanels();  // Faz 4b: addon-registered floating rt.ui panels
     handleEditorShortcuts(ctx);
 
     // Host the dockable layout (no-op when docking_enabled is false).
@@ -3944,7 +3974,8 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     // by NodeEditorUIV2 for node/link deletion — without this, deleting a node in the graph
     // also deleted the scene object the graph belongs to (same Delete keypress, two listeners).
     if (!io.WantTextInput && ctx.selection.hasSelection() &&
-        !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused) {
+        !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused &&
+        !anim_graph_focused && !timeline.panel_focused) {
         handleDeleteShortcut(ctx);
     }
 
@@ -4553,6 +4584,16 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     // ImGui::PopStyleColor(); // Removed hardcoded color push
     ImGui::PopStyleVar(2);
 
+    // Each Delete-claiming panel clears its own focus flag just before its Begin, so a hidden
+    // panel never gets the chance — and a panel closed WHILE focused (clicking its X) would
+    // leave the claim latched forever, silently killing Delete in the viewport. Clear here,
+    // above the early-out below, which is the one path that skips every panel at once.
+    if (!show_terrain_graph)   terrain_graph_focused  = false;
+    if (!show_geometry_graph)  geometry_graph_focused = false;
+    if (!show_material_graph)  material_graph_focused = false;
+    if (!show_anim_graph)      anim_graph_focused     = false;
+    if (!show_animation_panel) timeline.panel_focused = false;
+
     // ---------------- BOTTOM PANEL (Resizable) ----------------
     bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_material_graph || show_anim_graph || show_asset_browser);
     if (!show_bottom) return;
@@ -5050,6 +5091,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
 
         if (show_anim_graph) {
             bool open = true;
+            anim_graph_focused = false;  // re-armed below only if the window is actually focused this frame
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
             ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
@@ -5064,6 +5106,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 if (focus_bottom_panel_next_frame) {
                     ImGui::SetWindowFocus();
                 }
+                anim_graph_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
                 drawAnimationGraphPanel(ctx);
             }
             ImGui::End();

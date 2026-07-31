@@ -486,6 +486,7 @@ vec3 hair_bsdf_eval(
 
 void main()
 {
+    payload.skipGasVolumes = false;
     vec3 hitPoint = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     vec3 tangent  = normalize(hairAttrib.xyz);
     float vStrand = hairAttrib.w; // 0=root, 1=tip

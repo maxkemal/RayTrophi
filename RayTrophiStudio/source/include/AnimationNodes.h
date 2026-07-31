@@ -35,6 +35,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <unordered_set>
 #include <assimp/anim.h>  // For aiVectorKey, aiQuatKey
 #include <json.hpp>
 
@@ -901,6 +902,21 @@ namespace AnimationGraph {
         
         bool connect(uint32_t outputPinId, uint32_t inputPinId);
         bool disconnect(uint32_t linkId);
+
+        /**
+         * @brief Would linking these two pins close a loop?
+         *
+         * Pose evaluation is unguarded recursion (getInputPose -> evaluateNodePose ->
+         * computePose -> getInputPose), so a cycle is not a wrong result, it is a stack
+         * overflow — and a Windows stack overflow (0xC00000FD) is unrecoverable: the crash
+         * surfaces as an access violation inside the crash LOGGER with the real reason never
+         * written down. NodeSystem::GraphBase has carried this check since that exact crash;
+         * AnimationNodeGraph is a parallel hand-rolled implementation, so the fix never
+         * reached it. Same algorithm, kept in sync deliberately.
+         *
+         * Iterative + visited, so it stays safe even on a graph that already contains a cycle.
+         */
+        bool wouldCreateCycle(uint32_t startPinId, uint32_t endPinId);
         void removeNode(uint32_t nodeId);
         
         AnimNodeBase* findNodeById(uint32_t id);
@@ -976,6 +992,19 @@ namespace AnimationGraph {
         PoseData evaluate(float deltaTime, const BoneData& boneData);
         PoseData evaluateNodePose(AnimNodeBase* node, AnimationEvalContext& ctx);
         void beginEvaluationFrame();
+
+        /**
+         * Nodes currently ON the evaluation recursion stack. connect() refuses to close a
+         * loop, but loadFromJson() restores links directly without going through connect(),
+         * so a project saved before that guard existed can still open with a cycle in it.
+         * This is the second line of defence: re-entering a node that is already being
+         * evaluated returns an empty pose instead of recursing forever.
+         *
+         * Not a "seen this frame" set — a node legitimately evaluates twice per frame when
+         * two branches share an upstream (a diamond). Only re-entry while still unwinding
+         * is a cycle.
+         */
+        std::unordered_set<uint32_t> evalActiveNodes;
         void captureClipSnapshot(const AnimClipNode& node, const PoseData& pose);
         void captureStateMachineSnapshot(const StateMachineNode& node, const std::string& triggeredTransition = "");
         void setPlaybackPaused(bool paused);

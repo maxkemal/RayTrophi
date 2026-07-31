@@ -1,0 +1,112 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+
+// APIC liquid free-surface -> Gas combustion bridge.
+// One invocation owns one fluid cell, so its persistent temperature/fuel state
+// is race-free. Several fluid cells may map to one coarser gas cell; float
+// atomics make those deposits deterministic with respect to dispatch ordering.
+layout(local_size_x=256) in;
+
+// Post-step APIC density splat. This is the same current particle distribution
+// consumed by the liquid render bridge; unlike the pressure solver's transient
+// mask it remains valid after advect/reseed.
+layout(std430,binding=0) readonly buffer FluidDensity { float fluid_density[]; };
+layout(std430,binding=1) buffer FluidCombustionState { float surface_state[]; };
+layout(std430,binding=2) buffer GasDensity { float gas_density[]; };
+layout(std430,binding=3) buffer GasTemperature { float gas_temperature[]; };
+layout(std430,binding=4) buffer GasFuel { float gas_fuel[]; };
+layout(std430,binding=5) buffer GasInteraction { float gas_interaction[]; };
+
+layout(push_constant) uniform Push {
+    ivec4 fluid_dim;
+    ivec4 gas_dim;
+    vec4 fluid_origin_voxel;
+    vec4 gas_origin_voxel;
+    vec4 material0; // ignition, evaporation rate, fuel capacity, dt
+    vec4 material1; // heat release, smoke yield, cooling, auto ignite
+} pc;
+
+uint fluidIndex(ivec3 p) {
+    return uint(p.x + p.y*pc.fluid_dim.x +
+                p.z*pc.fluid_dim.x*pc.fluid_dim.y);
+}
+
+bool isFluid(ivec3 p) {
+    if (any(lessThan(p,ivec3(0))) ||
+        any(greaterThanEqual(p,pc.fluid_dim.xyz))) return false;
+    // Trilinear splatting spreads a surface particle over neighbouring cells,
+    // so a small positive threshold is required instead of the pressure mask's
+    // binary 0.5 test.
+    return fluid_density[fluidIndex(p)] > 0.02;
+}
+
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+    uint fluid_count=uint(pc.fluid_dim.x*pc.fluid_dim.y*pc.fluid_dim.z);
+    if(id>=fluid_count) return;
+
+    int xy=pc.fluid_dim.x*pc.fluid_dim.y;
+    ivec3 c=ivec3(int(id)%pc.fluid_dim.x,
+                  (int(id)/pc.fluid_dim.x)%pc.fluid_dim.y,
+                  int(id)/xy);
+    if(!isFluid(c)) {
+        surface_state[id]=0.0;
+        surface_state[fluid_count+id]=-1.0;
+        return;
+    }
+
+    // Combustible vapour leaves the free surface, but never through the lower
+    // face against the floor. APIC occupancy is not a watertight height field:
+    // splashes and thin/diagonal sheets can have an occupied cell directly
+    // above while still exposing a side to air. A +Y-only test therefore loses
+    // the whole source on common particle layouts. Accept the upper and four
+    // lateral air neighbours, deliberately excluding -Y; this finds real free
+    // surfaces without reviving the old underside/SDF-shell gas artifact.
+    bool surface =
+        !isFluid(c+ivec3( 0,1, 0)) ||
+        !isFluid(c+ivec3( 1,0, 0)) ||
+        !isFluid(c+ivec3(-1,0, 0)) ||
+        !isFluid(c+ivec3( 0,0, 1)) ||
+        !isFluid(c+ivec3( 0,0,-1));
+    if(!surface) return;
+
+    vec3 world=pc.fluid_origin_voxel.xyz+
+        (vec3(c)+vec3(0.5))*pc.fluid_origin_voxel.w;
+    ivec3 gc=ivec3(floor(
+        (world-pc.gas_origin_voxel.xyz)/pc.gas_origin_voxel.w));
+    if(any(lessThan(gc,ivec3(0))) ||
+       any(greaterThanEqual(gc,pc.gas_dim.xyz))) return;
+    uint gid=uint(gc.x+gc.y*pc.gas_dim.x+
+                  gc.z*pc.gas_dim.x*pc.gas_dim.y);
+
+    float dt=max(pc.material0.w,0.0);
+    float cooling=max(pc.material1.z,0.0);
+    float local_temperature=max(surface_state[id],0.0);
+    // Gas heats the liquid; cooling relaxes the surface back toward ambient.
+    local_temperature=max(
+        gas_temperature[gid],
+        local_temperature*exp(-cooling*dt));
+    surface_state[id]=local_temperature;
+
+    uint fuel_index=fluid_count+id;
+    float remaining=surface_state[fuel_index];
+    if(remaining<0.0) remaining=max(pc.material0.z,0.0);
+    bool ignited=pc.material1.w>0.5 ||
+                 local_temperature>=max(pc.material0.x,0.0);
+    if(!ignited || remaining<=0.0) {
+        surface_state[fuel_index]=remaining;
+        return;
+    }
+
+    float consumed=min(
+        remaining,max(pc.material0.y,0.0)*dt);
+    surface_state[fuel_index]=remaining-consumed;
+    if(consumed<=0.0) return;
+
+    atomicAdd(gas_fuel[gid],consumed);
+    atomicAdd(gas_temperature[gid],
+              consumed*max(pc.material1.x,0.0));
+    atomicAdd(gas_density[gid],
+              consumed*max(pc.material1.y,0.0));
+    atomicAdd(gas_interaction[gid],consumed);
+}

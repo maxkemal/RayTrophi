@@ -81,6 +81,7 @@ vec3 cosineSampleHemisphere(vec3 n, inout uint seed) {
 
 void main()
 {
+    payload.skipGasVolumes = false;
     uint matIdx = foamSpheres.s[uint(gl_PrimitiveID)].matId;
     Material mat = materials.m[matIdx];
 
