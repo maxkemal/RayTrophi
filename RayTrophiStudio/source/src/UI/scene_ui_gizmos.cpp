@@ -4139,6 +4139,19 @@ mesh_edit_changed_confirmed:
             sel.selected.rotation = Vec3(0.0f);
             sel.selected.scale = extent;
 
+            // ★The descriptor is NOT what gets drawn or simulated: for ManualBox
+            // both the viewport overlay and the RT volume read the runtime domain
+            // STATE (grid_domain_states[i].bounds_*), and that is written only by
+            // synchronizeGridDomains() — i.e. from a sim step. While the timeline
+            // is parked (the normal authoring case) no step ever runs, so the
+            // gizmo pivot moved and the box stayed exactly where it was.
+            // Sync now so state + grid origin follow the drag immediately.
+            auto& owner_system = ctx.scene.particle_systems[
+                static_cast<std::size_t>(sel.selected.particle_system_index)];
+            if (owner_system.runtime) {
+                owner_system.runtime->synchronizeGridDomainsNow();
+            }
+
             // Bounds drive both the solver allocation and the generated RT
             // volume. Invalidate them together; otherwise Vulkan keeps drawing
             // the previous domain-state bounds while the hierarchy proxy has
