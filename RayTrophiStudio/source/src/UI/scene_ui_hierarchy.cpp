@@ -1635,6 +1635,14 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                     domain.bounds_min = item.position - half_extent;
                                     domain.bounds_max = item.position + half_extent;
                                     domain.name = item.name.empty() ? domain.name : item.name;
+                                    // Same rule as the viewport gizmo: the ManualBox
+                                    // overlay and the RT volume read the runtime domain
+                                    // STATE, which only synchronizeGridDomains() writes.
+                                    // Without this the numbers change and nothing moves
+                                    // until the next sim step (never, while parked).
+                                    system.runtime->synchronizeGridDomainsNow();
+                                    ctx.scene.clearSimFrameCache();
+                                    ctx.scene.requestSimulationTimelineRenderResync();
                                 }
                             }
                         }

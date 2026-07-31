@@ -1192,8 +1192,32 @@ void main() {
     uint volIdx = gl_InstanceCustomIndexEXT;
     payload.skipGasVolumes = false;
     uint volCount = uint(max(int(cam.pad0), 0));
+    // ★BLACK BOX ROOT. volIdx is the TLAS customIndex, BAKED when the TLAS was
+    // built; volCount comes from the volume packet, refreshed every frame. They
+    // desync whenever the packet shrinks without a TLAS rebuild — and it does not
+    // merely shrink, it can go to ZERO: when every domain is dropped for a frame
+    // syncVDBVolumesToGPU takes the `vols.empty()` path and publishes count 0
+    // (VulkanBackend.cpp ~20077) while the TLAS still holds every volume instance.
+    // Then EVERY volume AABB fails this test at once. That is the cached-playback
+    // trigger: on a restored frame with no particles and no active density cells,
+    // the packet is genuinely empty. Live playback never empties it, which is
+    // exactly why the black box only shows up once a cache exists.
+    // Terminating here is what paints it black: `scattered = false` is TERMINAL in
+    // raygen — no sky, no geometry behind, zero radiance. Measured signature of
+    // this failure: transmission 1.0 everywhere (nothing absorbs), no first-hit
+    // normal, extinction_terminations 0, step_budget_exhausted ~0.
+    // Same rule as the is_active guard below, and as the comment in
+    // volume_intersection.rint: a volume with no content passes the ray THROUGH.
     if (volIdx >= volCount) {
-        payload.scattered = false;
+        vec3 passDir = normalize(gl_WorldRayDirectionEXT);
+        payload.radiance = vec3(0.0);
+        payload.attenuation = vec3(1.0);
+        payload.scatterOrigin =
+            gl_WorldRayOriginEXT + passDir * (max(volumeHitAttrib.y, gl_HitTEXT) + 0.002);
+        payload.scatterDir = passDir;
+        payload.scattered = true;
+        payload.skipAABBs = false;
+        payload.bounceType = BOUNCE_TRANSPARENT;
         return;
     }
     VkVolumeInstance vol = volumes.v[volIdx];
@@ -1226,7 +1250,16 @@ void main() {
     // Ensure valid march range
     tNear = max(tNear, 0.001);
     if (tFar <= tNear) {
-        payload.scattered = false;
+        // Degenerate interval (grazing hit / camera on the exit face). Same rule:
+        // never terminate the path on a volume box — pass through instead, or a
+        // sliver of black pixels traces the AABB silhouette.
+        payload.radiance = vec3(0.0);
+        payload.attenuation = vec3(1.0);
+        payload.scatterOrigin = rayOrigin + rayDir * (max(tFar, gl_HitTEXT) + 0.002);
+        payload.scatterDir = rayDir;
+        payload.scattered = true;
+        payload.skipAABBs = false;
+        payload.bounceType = BOUNCE_TRANSPARENT;
         return;
     }
 
@@ -1289,8 +1322,26 @@ void main() {
 
         float t      = tNear;
         float startD = sampleDensityAcc(vol, rayOrigin + rayDir * t, vdbBuf, vdbMapH, vdbAcc);
-        bool  startInside = startD > ISO_THRESH;
-        float prevD  = startD;
+        // ★Side test with hysteresis — the black-band candidate.
+        // A bare `startD > ISO_THRESH` is a coin flip whenever the walk BEGINS on
+        // the boundary, and on Vulkan that happens by construction: the gas
+        // closest-hit hands the ray over by restarting it a hair before the
+        // crossing it just found by bisection, so the first sample sits within
+        // rounding distance of 0.5. Land one ulp on the wrong side and the surface
+        // is shaded as an EXIT — the entry event never happens and Beer-Lambert is
+        // applied over the whole remaining depth, i.e. a correctly placed but
+        // pitch-black surface, flickering per pixel.
+        // OptiX uses the same naive test and stays clean precisely because it never
+        // restarts a ray at a boundary: one call walks the ordered volume list from
+        // the camera's t_enter. So this ambiguity is structurally Vulkan-only.
+        // "Inside" now means robustly inside (interior reads 1.0, ≫ 0.55); a start
+        // sitting ON the boundary is treated as just-outside-about-to-enter, which
+        // is exactly what a handoff means. prevD is pulled below the threshold too,
+        // otherwise the first step can't register the entering crossing and the
+        // surface would silently vanish instead.
+        const float ISO_HYST = 0.05;
+        bool  startInside = startD > ISO_THRESH + ISO_HYST;
+        float prevD  = startInside ? startD : min(startD, ISO_THRESH - 1e-4);
         float hitT   = -1.0;
 
         for (int s = 0; s < maxSteps; ++s) {
@@ -1591,16 +1642,24 @@ void main() {
     // stored. This used to require source_type == 5 (live dense GPU gas), which silently
     // excluded the SAME gas domain whenever it was replayed from a cache: restoring a
     // frame calls setGridDomainStates(), which clears gpu_resident_fields_valid, so the
-    // domain publishes as a host NanoVDB volume (source_type 2) instead. With the handoff
-    // gated off, the gas marched its whole AABB and terminated the segment, and the
-    // SurfaceSDF volume overlapping it was never reached — "the gas renders, the water
-    // surface is gone", reproducible on cached playback only.
-    // Widening to NanoVDB volumes is safe: nearestSurfaceSDFCrossing skips every
-    // candidate that is not itself a SurfaceSDF (source_type 4), so with no liquid in
-    // the scene this is a ≤16-slot early-out loop and nothing changes. An ordinary VDB
-    // that genuinely overlaps a water surface WANTS this ordering too — that is the
-    // OptiX per-ray ordered-volume behaviour this path exists to match.
-    if ((vol.source_type == 5 || vol.source_type == 2) && volCount > 1u) {
+    // domain publishes as a HOST NanoVDB volume instead. With the handoff gated off, the
+    // gas marched its whole AABB and terminated the segment, and the SurfaceSDF volume
+    // overlapping it was never reached — "the gas renders, the water surface is gone",
+    // reproducible on cached playback only.
+    // ★★An earlier attempt widened this to `source_type == 2` and changed NOTHING, because
+    // 2 is not a value source_type can hold. The producer is VolumetricRenderer.cpp:505-508
+    // — isosurface → 4, procedural → 3, everything else → 0 — and VulkanBackend.cpp:20204
+    // then promotes live dense gas to 5. `2` is the VOLUME_TYPE of a NanoVDB volume, a
+    // different field; that mixup is why the cached-playback bug survived the "fix".
+    // ★OptiX is the oracle here and it settles the question: use_live_dense_gpu requires
+    // !use_optix (scene_data.h:2356), so under OptiX the gas is ALWAYS host NanoVDB — and
+    // OptiX renders this exact scene correctly, live and cached. Host-NanoVDB gas over a
+    // liquid surface is therefore a configuration that MUST work.
+    // So state the gate as what it means: hand off unless I AM the liquid (4) or a
+    // procedural cloud (3). nearestSurfaceSDFCrossing skips every candidate that is not a
+    // SurfaceSDF, so with no liquid in the scene this is a ≤16-slot early-out loop. An
+    // ordinary VDB genuinely overlapping a water surface WANTS this ordering too.
+    if (vol.source_type != 4 && vol.source_type != 3 && volCount > 1u) {
         layeredSurfaceT = nearestSurfaceSDFCrossing(
             rayOrigin, rayDir, tNear, tFar, volIdx, volCount);
         if (layeredSurfaceT > 0.0) {
