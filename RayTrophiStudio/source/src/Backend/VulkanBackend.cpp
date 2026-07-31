@@ -9645,6 +9645,11 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
         }
         m_vdbTempBuffers.clear();
         m_orderedVDBInstances.clear();
+        // Legitimate teardown: the TLAS itself is being destroyed here, so the
+        // recorded slot count must go with it or the contract check would report a
+        // stale expectation. (Contrast with a per-frame empty packet, which must
+        // NOT touch the mapping — see the vols.empty() branch in syncVDBVolumesToGPU.)
+        m_tlasVolumeSlotCount = 0;
         m_volumeBlasIndex = UINT32_MAX;
         // Foam sphere BLAS lived in m_blasList (just cleared above) — drop the stale
         // index so the next updateGeometry() rebuilds it fresh and the motion hook
@@ -10024,7 +10029,11 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
     // Reset ordered VDB instance list — rebuilt below during TLAS construction.
     // SSBO index 0..N must match TLAS customIndex 0..N so shaders look up correct volumes.
+    // This is one of the only two places allowed to touch the mapping (the other is
+    // the teardown in rebuildAccelerationStructure); the recorded slot count is
+    // re-established at the end of this function, once the instances are final.
     m_orderedVDBInstances.clear();
+    m_tlasVolumeSlotCount = 0;
 
     // Enable batched BLAS build — all createBLAS calls below will be recorded
     // into a single command buffer instead of N separate GPU submissions.
@@ -10729,6 +10738,13 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     m_vkInstances = vkInstances; // Store for updates
     m_instanceSources = instanceSources;
     m_topology_dirty = true;
+    // Tripwire for the customIndex <-> volume-SSBO contract. Volume instances got
+    // their customIndex baked from m_orderedVDBInstances during the loop above, so
+    // right here the two agree by construction. Recording the count lets
+    // syncVDBVolumesToGPU notice if anything mutates the mapping afterwards —
+    // which is exactly the bug class that produced invisible/black volume boxes
+    // and, worse, SSBO slots built in packet order instead of TLAS order.
+    m_tlasVolumeSlotCount = (uint32_t)m_orderedVDBInstances.size();
 
     // Snapshot the number of mesh BLASes so clearHairGeometry() can safely remove
     // only hair BLASes later.  IMPORTANT: uploadHairToGPU() may have been called
@@ -20073,8 +20089,38 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         }
         m_vdbTempBuffers.clear();
         m_vdbTempUploadedVersions.clear();
-        m_orderedVDBInstances.clear();
-        m_device->updateVolumeBuffer(nullptr, 0, 0);
+        // ★INVARIANT: the SSBO length is defined by the TLAS mapping, NOT by how
+        // many volumes happen to carry content this frame. m_orderedVDBInstances
+        // mirrors the TLAS instance list and only updateGeometry() may rewrite it.
+        //
+        // This branch used to clear that mapping and publish count 0, which broke
+        // the invariant in two ways:
+        //  1. The TLAS still holds every volume instance, so each one's baked
+        //     customIndex is now >= volCount. The closest-hit's range guard then
+        //     fired for every volume box at once. (It passes the ray through today
+        //     rather than terminating it, so the symptom is invisible volumes
+        //     instead of black boxes — still wrong.)
+        //  2. Worse and quieter: with the mapping erased, the NEXT non-empty frame
+        //     took the "no geometry build yet" fallback below and built the SSBO in
+        //     PACKET order instead of TLAS order. Slot i then describes some other
+        //     volume than customIndex i — a coincident gas/liquid pair reads each
+        //     other's grid and shader parameters.
+        //
+        // A frame with no content is expressed the way the rest of the system
+        // expresses it: every slot present, every slot is_active = 0. The
+        // intersection shader rejects those AABBs before reportIntersectionEXT, so
+        // they cost nothing and reveal the scene behind them.
+        if (m_orderedVDBInstances.empty()) {
+            m_device->updateVolumeBuffer(nullptr, 0, 0);
+        } else {
+            std::vector<VulkanRT::VkVolumeInstance> inactive(m_orderedVDBInstances.size());
+            std::memset(inactive.data(), 0,
+                        inactive.size() * sizeof(VulkanRT::VkVolumeInstance));
+            m_device->updateVolumeBuffer(
+                inactive.data(),
+                inactive.size() * sizeof(VulkanRT::VkVolumeInstance),
+                (uint32_t)inactive.size());
+        }
         m_volumeTemporal.invalidate();
         return;
     }
@@ -20148,10 +20194,21 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             orderedVols.push_back(it != volByID.end() ? it->second : nullptr);
         }
     } else {
-        // Fallback: no geometry build yet, use input order
+        // Fallback: no TLAS volume instances exist yet (first sync of a session,
+        // before updateGeometry has ever run). Packet order is arbitrary but
+        // harmless HERE precisely because nothing indexes this buffer yet — there
+        // is no customIndex to disagree with. It is only safe under that condition,
+        // so nothing may clear m_orderedVDBInstances while the TLAS still holds
+        // volume instances; see the invariant note in the vols.empty() branch.
         for (const auto& v : vols) orderedVols.push_back(&v);
     }
-    if (orderedVols.empty()) { m_device->m_volumeCount = 0; return; }
+    // Never leave the published count disagreeing with the buffer contents: if
+    // there is nothing to publish, publish an empty buffer rather than only
+    // zeroing the count and leaving the previous frame's data resident.
+    if (orderedVols.empty()) {
+        m_device->updateVolumeBuffer(nullptr, 0, 0);
+        return;
+    }
 
     // Convert GpuVDBVolume (OptiX/CUDA struct) → VkVolumeInstance (Vulkan SSBO)
     std::vector<VulkanRT::VkVolumeInstance> instances(orderedVols.size());
@@ -20440,6 +20497,26 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 : ((dst.vdb_grid_address != 0) ? 2 : 1));
         dst.is_active = 1;
         dst.voxel_size = src.voxel_size;
+    }
+
+    // ★Contract check (see m_orderedVDBInstances in the header). The shader indexes
+    // this buffer with a customIndex baked at TLAS build time, so publishing a
+    // different number of slots than the TLAS was built with is always a bug — it
+    // makes volumes read each other's data or vanish. Report it once per change
+    // instead of letting it degrade into an intermittent, scene-dependent artifact
+    // that costs days to trace back here.
+    if (m_tlasVolumeSlotCount != 0 &&
+        (uint32_t)instances.size() != m_tlasVolumeSlotCount) {
+        static uint32_t s_lastReportedMismatch = 0;
+        const uint32_t signature =
+            m_tlasVolumeSlotCount * 65536u + (uint32_t)instances.size();
+        if (signature != s_lastReportedMismatch) {
+            s_lastReportedMismatch = signature;
+            VK_INFO() << "[Vulkan][VolumeSSBO] customIndex contract violated: TLAS was built with "
+                      << m_tlasVolumeSlotCount << " volume slots but "
+                      << instances.size() << " are being published. Volume slots no longer "
+                         "match gl_InstanceCustomIndexEXT." << std::endl;
+        }
     }
 
     m_device->updateVolumeBuffer(instances.data(),

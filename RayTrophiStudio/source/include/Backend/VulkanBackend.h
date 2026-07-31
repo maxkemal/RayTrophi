@@ -2127,7 +2127,16 @@ protected:
     std::unordered_map<int, uint32_t> m_vdbTempUploadedVersions;
     // VDB volumes in the ORDER they were added to the TLAS (customIndex 0,1,2...)
     // Guarantees SSBO layout matches gl_InstanceCustomIndexEXT lookups in the shader.
+    // ★CONTRACT: only updateGeometry()/rebuildAccelerationStructure() — the two
+    // places that (re)build the TLAS — may modify this. Every other code path must
+    // treat it as read-only truth, and a volume with no content for a frame is
+    // published as an is_active=0 SLOT, never removed from the array. Shrinking it
+    // desyncs the baked customIndex from the SSBO and silently makes slot i
+    // describe a different volume.
     std::vector<std::shared_ptr<Hittable>> m_orderedVDBInstances;
+    // Volume slot count recorded when the TLAS was last built; syncVDBVolumesToGPU
+    // compares against it to catch violations of the contract above.
+    uint32_t m_tlasVolumeSlotCount = 0;
     // Cached lights when device not yet ready
     std::vector<std::shared_ptr<Light>> m_cachedLights;
     // Cached world data when device not yet ready
