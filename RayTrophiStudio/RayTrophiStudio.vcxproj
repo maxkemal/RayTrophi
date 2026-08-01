@@ -444,6 +444,7 @@
     <ClInclude Include="source\include\Backend\OptixBackend.h" />
     <ClInclude Include="source\include\Backend\SceneTextureManager.h" />
     <ClInclude Include="source\include\Backend\VulkanBackend.h" />
+    <ClInclude Include="source\src\Backend\VulkanBackend_Internal.h" />
     <ClInclude Include="source\include\Backend\VulkanVolumeInstrumentation.h" />
     <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h" />
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp" />
@@ -1294,6 +1295,7 @@
     <ClCompile Include="source\src\Backend\SceneTextureManager.cpp" />
     <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp" />
     <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp" />
     <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp" />
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />

@@ -444,6 +444,9 @@
     <ClInclude Include="source\include\Backend\VulkanBackend.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\Backend\VulkanBackend_Internal.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -1007,6 +1010,9 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp">
