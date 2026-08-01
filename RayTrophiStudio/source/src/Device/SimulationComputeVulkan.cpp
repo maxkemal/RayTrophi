@@ -526,6 +526,7 @@ public:
              kernel == "sim_fluid_cg_zpby_dev" ||
              kernel == "sim_fluid_cg_jacobi_dot" ||
              kernel == "sim_fluid_cg_spmv_dot" ||
+             kernel == "sim_fluid_cg_spmv_dot_var" ||
              kernel == "sim_fluid_cg_axpy2_dev")) return false;
 
         auto pit = m_pipelines.find(kernel);
@@ -828,6 +829,20 @@ private:
             { "sim_fluid_p2g_normalize",            "sim_fluid_p2g_normalize.spv",         5, 36 },
             { "sim_fluid_density_clear",            "sim_fluid_density_clear.spv",         1, 36 },
             { "sim_fluid_density_splat",            "sim_fluid_density_splat.spv",         2, 36 },
+            // Whitewater spawn potentials. The bucket-grid bin replaces the serial
+            // CSR bin on the host; only INTEGER atomics are used, so these do not
+            // depend on the shaderAtomicFloat support the P2G/splat pair needs.
+            // FoamBinGpuConstants = 10 fields x 4 = 40; the clear kernel shares the
+            // struct and reads only its tail field, so both declare the full range.
+            // 2 buffers: bucket counters AND the expected[] potentials, because
+            // sim_foam_crit is slot-dispatched and no longer visits every particle.
+            { "sim_foam_bin_clear",                 "sim_foam_bin_clear.spv",              2, 40 },
+            { "sim_foam_bin_scatter",               "sim_foam_bin_scatter.spv",            3, 40 },
+            // FoamCritGpuConstants = 21 fields x 4 = 84.
+            { "sim_foam_crit",                      "sim_foam_crit.spv",                   5, 84 },
+            // FoamNeighGpuConstants = 11 fields x 4 = 44. Reads the same bins as
+            // sim_foam_crit but iterates foam, not fluid.
+            { "sim_foam_neigh",                     "sim_foam_neigh.spv",                  5, 44 },
             // FluidG2PGpuConstants = 17 fields x 4 = 68 (has use_solid_flip_limiter);
             // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
             { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                  10, 68 },
@@ -851,6 +866,14 @@ private:
             { "sim_fluid_cg_build_diag",            "sim_fluid_cg_build_diag.spv",         2, 52 },
             { "sim_fluid_cg_residual_init",         "sim_fluid_cg_residual_init.spv",      4, 52 },
             { "sim_fluid_cg_spmv",                  "sim_fluid_cg_spmv.spv",               4, 52 },
+            // Variational solid coupling: separate registrations because the
+            // registry binds a FIXED buffer count per kernel name and these carry
+            // the face-weight (+ solid-velocity) arrays on top of the plain set.
+            // Keeping them apart leaves the plain path byte-identical.
+            { "sim_fluid_divergence_var",           "sim_fluid_divergence_var.spv",       11, 52 },
+            { "sim_fluid_subtract_gradient_var",    "sim_fluid_subtract_gradient_var.spv",11, 52 },
+            { "sim_fluid_cg_build_diag_var",        "sim_fluid_cg_build_diag_var.spv",     5, 52 },
+            { "sim_fluid_cg_spmv_var",              "sim_fluid_cg_spmv_var.spv",           7, 52 },
             { "sim_fluid_cg_jacobi",                "sim_fluid_cg_jacobi.spv",             3, 52 },
             { "sim_fluid_cg_copy",                  "sim_fluid_cg_copy.spv",               2, 52 },
             { "sim_fluid_cg_axpy",                  "sim_fluid_cg_axpy.spv",               2, 52 },
@@ -870,6 +893,7 @@ private:
             // scalar loop from 9 to 6 dispatches+barriers per iteration.
             { "sim_fluid_cg_jacobi_dot",            "sim_fluid_cg_jacobi_dot.spv",         4, 52 },
             { "sim_fluid_cg_spmv_dot",              "sim_fluid_cg_spmv_dot.spv",           5, 52 },
+            { "sim_fluid_cg_spmv_dot_var",          "sim_fluid_cg_spmv_dot_var.spv",       8, 52 },
             { "sim_fluid_cg_axpy2_dev",             "sim_fluid_cg_axpy2_dev.spv",          5, 52 },
             { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          7, 28 },
             { "sim_grid_advect_velocity",           "sim_grid_advect_velocity.spv",       10, 24 },

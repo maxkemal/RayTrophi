@@ -3,8 +3,8 @@
 // stencil as sim_fluid_cg_spmv) AND partials[workgroup] = block sum of s*As
 // in DOUBLE, in one dispatch. Name and buffer order match the CUDA fused
 // kernel's plain form (search, mask, diag, As, partials); the variational
-// 8-buffer form is NOT ported — the host routes variational/GFM to the CPU
-// on Vulkan. Dispatched with dot_blocks groups (== cell_groups).
+// 8-buffer form lives in sim_fluid_cg_spmv_dot_var.comp, which the host selects
+// when face weights are present. Dispatched with dot_blocks groups (== cell_groups).
 // Requires shaderFloat64 (gated in the backend like sim_fluid_cg_dot).
 #version 450
 layout(local_size_x = 256) in;

@@ -1,0 +1,159 @@
+// sim_foam_crit.comp — Ihmsen whitewater spawn potentials, per fluid particle.
+//
+// This is the port of the single most expensive phase in the whitewater solver:
+// measured at 34.44 ms of 51.82 ms total CPU foam cost (66.5%), and it scales
+// with the FLUID particle count, not the foam count — so no foam budget knob
+// reduces it. Everything it reads (positions, velocities) is already resident on
+// the device for P2G/G2P, so this adds no transfer.
+//
+// Output `expected[p]` is the fractional spawn count for particle p this step.
+// The stochastic emit stays on the host for now: it costs 0.13 ms and keeping the
+// host RNG makes the GPU result bit-comparable against the CPU reference, which
+// is how this kernel gets validated before anything else moves.
+//
+// Math is a line-by-line port of stepFoam's phase 3 (FluidFoam.cpp) — same linear
+// falloff kernel, same trapped-air/wave-crest/kinetic-energy terms, same clamps.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   particle_count;
+    float origin_x; float origin_y; float origin_z;
+    float voxel_size;
+    float h;            // neighbour radius in world units
+    int   reach;        // cell radius covering h
+    int   max_per_cell;
+    float k_ta;         // trapped-air rate
+    float k_wc;         // wave-crest rate
+    float crest_cos;
+    float ta_min; float ta_max;
+    float wc_min; float wc_max;
+    float ke_min; float ke_max;
+    float dt;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Positions  { float pos_data[]; };
+layout(set = 0, binding = 1) readonly buffer Velocities { float vel_data[]; };
+layout(set = 0, binding = 2) readonly buffer Counts     { uint  counts[];   };
+layout(set = 0, binding = 3) readonly buffer Items      { uint  items[];    };
+layout(set = 0, binding = 4) buffer          Expected   { float expected[]; };
+
+// Byte-for-byte the host's clamp01 (FluidFoam.cpp), degenerate branch included —
+// hi <= lo must behave as a hard threshold, not as zero, or a domain configured
+// with a collapsed criterion range silently stops spawning foam on GPU only.
+float clamp01r(float v, float lo, float hi) {
+    if (hi <= lo) return v > lo ? 1.0 : 0.0;
+    return clamp((v - lo) / (hi - lo), 0.0, 1.0);
+}
+
+void main() {
+    // Dispatched over BUCKET SLOTS, not particles. Thread t owns slot
+    // (t % max_per_cell) of cell (t / max_per_cell), so the 256 threads of a
+    // workgroup cover 256/max_per_cell CONSECUTIVE cells — neighbouring cells whose
+    // gather neighbourhoods overlap almost completely. With one-thread-per-particle
+    // the mapping was emission order, i.e. spatially random: every lane pulled a
+    // different neighbourhood and the cache never hit. Cost of the change is idle
+    // lanes in cells holding fewer than max_per_cell particles; they exit after a
+    // single coalesced read of counts[].
+    //
+    // Consequence handled elsewhere: particles that never binned get no thread, so
+    // expected[] is zeroed by sim_foam_bin_clear instead of at the top here.
+    int slot = int(gl_GlobalInvocationID.x);
+    int nci  = slot / pc.max_per_cell;
+    int a    = slot - nci * pc.max_per_cell;
+    // Derived, not passed: FoamCritGpuConstants has no cell_count and growing a
+    // push-constant block means touching every shader that mirrors its prefix.
+    if (nci >= pc.nx * pc.ny * pc.nz) return;
+    if (uint(a) >= min(counts[nci], uint(pc.max_per_cell))) return;
+    int pi = int(items[uint(nci) * uint(pc.max_per_cell) + uint(a)]);
+    if (pi >= pc.particle_count) return;
+    if (pc.voxel_size <= 1e-6 || pc.h <= 1e-6) return;
+
+    vec3 xi = vec3(pos_data[pi * 3], pos_data[pi * 3 + 1], pos_data[pi * 3 + 2]);
+    if (isnan(xi.x) || isnan(xi.y) || isnan(xi.z)) return;
+    if (isinf(xi.x) || isinf(xi.y) || isinf(xi.z)) return;
+    vec3 vi = vec3(vel_data[pi * 3], vel_data[pi * 3 + 1], vel_data[pi * 3 + 2]);
+
+    float inv_h = 1.0 / pc.voxel_size;
+    // Cell indices come from the bin that placed this particle, so they are known
+    // in range; recomputing keeps the arithmetic identical to the host reference.
+    int ci = int(floor((xi.x - pc.origin_x) * inv_h));
+    int cj = int(floor((xi.y - pc.origin_y) * inv_h));
+    int ck = int(floor((xi.z - pc.origin_z) * inv_h));
+    if (ci < 0 || ci >= pc.nx || cj < 0 || cj >= pc.ny || ck < 0 || ck >= pc.nz) return;
+
+    int i0 = max(0, ci - pc.reach), i1 = min(pc.nx - 1, ci + pc.reach);
+    int j0 = max(0, cj - pc.reach), j1 = min(pc.ny - 1, cj + pc.reach);
+    int k0 = max(0, ck - pc.reach), k1 = min(pc.nz - 1, ck + pc.reach);
+
+    float h_sq = pc.h * pc.h;
+    float wsum = 0.0;
+    vec3  mean = vec3(0.0);
+    int   ncount = 0;
+    float ita = 0.0;
+
+    for (int kk = k0; kk <= k1; ++kk)
+    for (int jj = j0; jj <= j1; ++jj)
+    for (int ii = i0; ii <= i1; ++ii) {
+        // Cell-level reject — see sim_foam_neigh.comp for the reasoning. Exact:
+        // only cells whose CLOSEST point is already beyond h are skipped, and every
+        // particle in them would have failed d2 >= h_sq below. wsum/mean/ita are
+        // therefore bit-identical, which is what makes this safe to apply to a
+        // criterion that was validated against the CPU reference.
+        vec3 cmin = vec3(pc.origin_x, pc.origin_y, pc.origin_z) +
+                    vec3(ii, jj, kk) * pc.voxel_size;
+        vec3 cd = max(max(cmin - xi, xi - (cmin + vec3(pc.voxel_size))), vec3(0.0));
+        if (dot(cd, cd) >= h_sq) continue;
+
+        int nci = ii + jj * pc.nx + kk * pc.nx * pc.ny;
+        uint n = min(counts[nci], uint(pc.max_per_cell));
+        uint base = uint(nci) * uint(pc.max_per_cell);
+        for (uint a = 0u; a < n; ++a) {
+            int pj = int(items[base + a]);
+            if (pj == pi) continue;
+            vec3 xj = vec3(pos_data[pj * 3], pos_data[pj * 3 + 1], pos_data[pj * 3 + 2]);
+            vec3 xij = xi - xj;
+            float d2 = dot(xij, xij);
+            if (d2 >= h_sq) continue;
+            float d = sqrt(d2);
+            float W = 1.0 - d / pc.h;      // linear falloff
+            wsum += W;
+            mean += W * xj;
+            ++ncount;
+            // Trapped air: relative speed weighted by how convergent the pair is.
+            vec3 vj = vec3(vel_data[pj * 3], vel_data[pj * 3 + 1], vel_data[pj * 3 + 2]);
+            vec3 vij = vi - vj;
+            float sv = length(vij);
+            if (sv > 1e-5 && d > 1e-5) {
+                float cosvx = dot(vij, xij) / (sv * d);
+                ita += sv * (1.0 - cosvx) * W;
+            }
+        }
+    }
+
+    if (wsum < 1e-8 || ncount == 0) return;
+    mean *= (1.0 / wsum);
+
+    // Outward surface normal proxy = particle minus neighbour mean.
+    vec3  nrm = xi - mean;
+    float nlen = length(nrm);
+    float convexity = nlen / pc.h;
+
+    // Wave crest: convex AND moving along its own outward normal.
+    float ik = 0.0;
+    float vlen = length(vi);
+    if (vlen > 1e-5 && nlen > 1e-5) {
+        float cvn = dot(vi, nrm) / (vlen * nlen);
+        if (cvn > pc.crest_cos) ik = convexity;
+    }
+
+    float ek = 0.5 * vlen * vlen;
+
+    float Ita = clamp01r(ita, pc.ta_min, pc.ta_max);
+    float Ik  = clamp01r(ik,  pc.wc_min, pc.wc_max);
+    float Iek = clamp01r(ek,  pc.ke_min, pc.ke_max);
+
+    float rate = pc.k_ta * Ita + pc.k_wc * Ik;
+    expected[pi] = rate * Iek * pc.dt;
+}

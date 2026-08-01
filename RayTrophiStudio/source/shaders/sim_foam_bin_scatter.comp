@@ -1,0 +1,53 @@
+// sim_foam_bin_scatter.comp — bucket the FLUID particles by grid cell.
+//
+// GPU replacement for the serial CSR bin in FluidFoam.cpp (count / prefix-sum /
+// scatter over 100k particles). A prefix scan on the device needs several passes
+// and a sync; a fixed-capacity bucket grid needs neither, so cell c simply owns
+// items[c*max_per_cell .. +max_per_cell). Only INTEGER atomics are used here —
+// deliberately, because the float-atomic P2G path is documented as unreliable on
+// some drivers and this work must not inherit that risk.
+//
+// Cells that would exceed the cap drop the surplus and bump the overflow tally
+// at counts[cell_count]; the host reads it to verify the cap rather than trust it.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   particle_count;
+    float origin_x; float origin_y; float origin_z;
+    float voxel_size;
+    int   max_per_cell;
+    int   cell_count;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Positions { float pos_data[]; };
+layout(set = 0, binding = 1) buffer          Counts    { uint  counts[];   };
+layout(set = 0, binding = 2) buffer          Items     { uint  items[];    };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.particle_count || pc.voxel_size <= 1e-6) return;
+
+    vec3 p = vec3(pos_data[id * 3], pos_data[id * 3 + 1], pos_data[id * 3 + 2]);
+    // Matches the CPU bin exactly: non-finite or out-of-domain particles are not
+    // binned at all (they keep expected == 0 and never spawn foam).
+    if (isnan(p.x) || isnan(p.y) || isnan(p.z)) return;
+    if (isinf(p.x) || isinf(p.y) || isinf(p.z)) return;
+
+    float inv_h = 1.0 / pc.voxel_size;
+    int i = int(floor((p.x - pc.origin_x) * inv_h));
+    int j = int(floor((p.y - pc.origin_y) * inv_h));
+    int k = int(floor((p.z - pc.origin_z) * inv_h));
+    if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz) return;
+
+    int ci = i + j * pc.nx + k * pc.nx * pc.ny;
+    uint slot = atomicAdd(counts[ci], 1u);
+    if (slot >= uint(pc.max_per_cell)) {
+        // Undo nothing — the counter is allowed to run past the cap so the host
+        // can see HOW far over it went; only the store is skipped.
+        atomicAdd(counts[pc.cell_count], 1u);
+        return;
+    }
+    items[uint(ci) * uint(pc.max_per_cell) + slot] = uint(id);
+}

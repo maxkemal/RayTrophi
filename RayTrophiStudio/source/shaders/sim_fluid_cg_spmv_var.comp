@@ -1,0 +1,72 @@
+// sim_fluid_cg_spmv_var.comp
+// MGPCG As = A*s, VARIATIONAL branch. 1:1 port of the CUDA fluid_cg_spmv_kernel's
+// `c.variational && uw` case: the off-diagonal coefficient is the FACE WEIGHT,
+// not -1, so a partially blocked face couples its two cells proportionally.
+// Pairs with sim_fluid_cg_build_diag_var, which builds the matching diagonal —
+// the two must always be dispatched from the same branch or A is inconsistent
+// and CG converges to the wrong pressure.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Search { float s[]; };
+layout(set = 0, binding = 1) readonly buffer Mask   { float fluid_mask[]; };
+layout(set = 0, binding = 2) readonly buffer Diag   { float diag[]; };
+layout(set = 0, binding = 3) buffer OutAs           { float As[]; };
+layout(set = 0, binding = 4) readonly buffer UW     { float uw[]; };
+layout(set = 0, binding = 5) readonly buffer VW     { float vw[]; };
+layout(set = 0, binding = 6) readonly buffer WW     { float ww[]; };
+
+int vx_idx(int i, int j, int k) { return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
+int vy_idx(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*(pc.ny+1); }
+int vz_idx(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
+
+float fw_x(int i, int j, int k) {
+    if (i <= 0 || i >= pc.nx) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return uw[vx_idx(i, j, k)];
+}
+float fw_y(int i, int j, int k) {
+    if (j <= 0 || j >= pc.ny) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return vw[vy_idx(i, j, k)];
+}
+float fw_z(int i, int j, int k) {
+    if (k <= 0 || k >= pc.nz) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return ww[vz_idx(i, j, k)];
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx * pc.ny * pc.nz) return;
+    if (fluid_mask[id] < 0.5) { As[id] = 0.0; return; }
+
+    int i = id % pc.nx;
+    int j = (id / pc.nx) % pc.ny;
+    int k = id / (pc.nx * pc.ny);
+    float nsum = 0.0;
+    #define CG_SPMV_VAR(ni, nj, nk, fw) \
+        if ((ni) >= 0 && (ni) < pc.nx && (nj) >= 0 && (nj) < pc.ny && (nk) >= 0 && (nk) < pc.nz) { \
+            int _n = (ni) + (nj)*pc.nx + (nk)*pc.nx*pc.ny; \
+            if (fluid_mask[_n] > 0.5) nsum += (fw) * s[_n]; \
+        }
+    CG_SPMV_VAR(i - 1, j,     k,     fw_x(i,     j, k))
+    CG_SPMV_VAR(i + 1, j,     k,     fw_x(i + 1, j, k))
+    CG_SPMV_VAR(i,     j - 1, k,     fw_y(i, j,     k))
+    CG_SPMV_VAR(i,     j + 1, k,     fw_y(i, j + 1, k))
+    CG_SPMV_VAR(i,     j,     k - 1, fw_z(i, j, k    ))
+    CG_SPMV_VAR(i,     j,     k + 1, fw_z(i, j, k + 1))
+    #undef CG_SPMV_VAR
+    As[id] = diag[id] * s[id] - nsum;
+}

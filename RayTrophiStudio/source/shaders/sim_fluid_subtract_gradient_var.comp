@@ -1,0 +1,149 @@
+// sim_fluid_subtract_gradient_var.comp
+// Pressure-gradient subtraction, VARIATIONAL branch. 1:1 port of the CUDA
+// fluid_subtract_gradient_kernel with weights present and gfm_active == 0.
+//
+// Two differences from the plain shader, both consequences of fractional faces:
+//   - the "is this face closed?" test reads the WEIGHT array instead of a binary
+//     solid test, so a face is only clamped when it is essentially fully blocked;
+//   - a clamped face is set to the SOLID's velocity, not to zero. That is what
+//     makes a moving collider drag fluid along instead of stopping it dead.
+// GFM is deliberately not handled here: the host routes ghost-fluid domains to
+// the CPU, and porting two matrix changes at once would make a regression
+// impossible to attribute.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) buffer VelX { float vel_x[]; };
+layout(set = 0, binding = 1) buffer VelY { float vel_y[]; };
+layout(set = 0, binding = 2) buffer VelZ { float vel_z[]; };
+layout(set = 0, binding = 3) readonly buffer Pressure { float pressure[]; };
+layout(set = 0, binding = 4) readonly buffer Mask     { float fluid_mask[]; };
+layout(set = 0, binding = 5) readonly buffer UW       { float uw[]; };
+layout(set = 0, binding = 6) readonly buffer VW       { float vw[]; };
+layout(set = 0, binding = 7) readonly buffer WW       { float ww[]; };
+layout(set = 0, binding = 8) readonly buffer SVX      { float svx[]; };
+layout(set = 0, binding = 9) readonly buffer SVY      { float svy[]; };
+layout(set = 0, binding = 10) readonly buffer SVZ     { float svz[]; };
+
+int cell_id(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
+int vx_idx(int i, int j, int k)  { return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
+int vy_idx(int i, int j, int k)  { return i + j*pc.nx + k*pc.nx*(pc.ny+1); }
+int vz_idx(int i, int j, int k)  { return i + j*pc.nx + k*pc.nx*pc.ny; }
+
+float mask_at(int i, int j, int k) {
+    if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz)
+        return (pc.boundary == 0) ? 0.0 : -1.0;
+    return fluid_mask[cell_id(i, j, k)];
+}
+bool is_solid(int i, int j, int k) { return mask_at(i, j, k) < -0.5; }
+bool is_fluid(int i, int j, int k) { return mask_at(i, j, k) >  0.5; }
+
+float fw_x(int i, int j, int k) {
+    if (i <= 0 || i >= pc.nx) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return uw[vx_idx(i, j, k)];
+}
+float fw_y(int i, int j, int k) {
+    if (j <= 0 || j >= pc.ny) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return vw[vy_idx(i, j, k)];
+}
+float fw_z(int i, int j, int k) {
+    if (k <= 0 || k >= pc.nz) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return ww[vz_idx(i, j, k)];
+}
+
+float sv_x(int i, int j, int k) {
+    if (i - 1 >= 0 && is_solid(i - 1, j, k)) return svx[cell_id(i - 1, j, k)];
+    if (i < pc.nx && is_solid(i, j, k))      return svx[cell_id(i, j, k)];
+    return 0.0;
+}
+float sv_y(int i, int j, int k) {
+    if (j - 1 >= 0 && is_solid(i, j - 1, k)) return svy[cell_id(i, j - 1, k)];
+    if (j < pc.ny && is_solid(i, j, k))      return svy[cell_id(i, j, k)];
+    return 0.0;
+}
+float sv_z(int i, int j, int k) {
+    if (k - 1 >= 0 && is_solid(i, j, k - 1)) return svz[cell_id(i, j, k - 1)];
+    if (k < pc.nz && is_solid(i, j, k))      return svz[cell_id(i, j, k)];
+    return 0.0;
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int vx_count = (pc.nx + 1) * pc.ny * pc.nz;
+    int vy_count = pc.nx * (pc.ny + 1) * pc.nz;
+    int vz_count = pc.nx * pc.ny * (pc.nz + 1);
+    float h     = pc.voxel_size > 1e-6 ? pc.voxel_size : 1.0;
+    float scale = pc.dt / h;
+
+    if (id < vx_count) {
+        int plane = (pc.nx + 1) * pc.ny;
+        int k = id / plane;
+        int rem = id - k * plane;
+        int j = rem / (pc.nx + 1);
+        int i = rem - j * (pc.nx + 1);
+
+        if (fw_x(i, j, k) < 1e-6) {
+            vel_x[id] = sv_x(i, j, k);
+        } else {
+            bool lo_fluid = is_fluid(i - 1, j, k);
+            bool hi_fluid = is_fluid(i,     j, k);
+            if (lo_fluid || hi_fluid) {
+                float p_lo = lo_fluid ? pressure[cell_id(i - 1, j, k)] : 0.0;
+                float p_hi = hi_fluid ? pressure[cell_id(i,     j, k)] : 0.0;
+                vel_x[id] -= scale * (p_hi - p_lo);
+            }
+        }
+    }
+    if (id < vy_count) {
+        int plane = pc.nx * (pc.ny + 1);
+        int k = id / plane;
+        int rem = id - k * plane;
+        int j = rem / pc.nx;
+        int i = rem - j * pc.nx;
+
+        if (fw_y(i, j, k) < 1e-6) {
+            vel_y[id] = sv_y(i, j, k);
+        } else {
+            bool lo_fluid = is_fluid(i, j - 1, k);
+            bool hi_fluid = is_fluid(i, j,     k);
+            if (lo_fluid || hi_fluid) {
+                float p_lo = lo_fluid ? pressure[cell_id(i, j - 1, k)] : 0.0;
+                float p_hi = hi_fluid ? pressure[cell_id(i, j,     k)] : 0.0;
+                vel_y[id] -= scale * (p_hi - p_lo);
+            }
+        }
+    }
+    if (id < vz_count) {
+        int plane = pc.nx * pc.ny;
+        int k = id / plane;
+        int rem = id - k * plane;
+        int j = rem / pc.nx;
+        int i = rem - j * pc.nx;
+
+        if (fw_z(i, j, k) < 1e-6) {
+            vel_z[id] = sv_z(i, j, k);
+        } else {
+            bool lo_fluid = is_fluid(i, j, k - 1);
+            bool hi_fluid = is_fluid(i, j, k    );
+            if (lo_fluid || hi_fluid) {
+                float p_lo = lo_fluid ? pressure[cell_id(i, j, k - 1)] : 0.0;
+                float p_hi = hi_fluid ? pressure[cell_id(i, j, k    )] : 0.0;
+                vel_z[id] -= scale * (p_hi - p_lo);
+            }
+        }
+    }
+}

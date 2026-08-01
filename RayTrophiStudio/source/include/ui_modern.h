@@ -209,6 +209,45 @@ namespace UIWidgets {
         const char* overlay = nullptr,
         const ImVec4& barColor = ImVec4(0.3f, 0.6f, 1.0f, 1.0f));
 
+    // -------- PERFORMANS SAYAÇ BLOĞU --------
+    // Compact, copyable performance-counter block. Replaces hand-rolled
+    // ImGui::Columns dumps: rows stay aligned, timings get a share-of-total bar,
+    // and the whole block can be copied as plain text for a bug report — which is
+    // how these numbers actually travel. Stretch-sized, so it never widens a panel.
+    //
+    //   UIWidgets::PerfBlock b("Fluid Step", fs.total_ms);
+    //   b.Value("Particles", "%zu", count);
+    //   b.Time("P2G", fs.p2g_ms, fs.p2g_on_gpu ? "GPU" : "CPU");
+    //   b.Time("MGPCG iters", ...);         // indent for sub-steps
+    //   b.End();
+    class PerfBlock {
+    public:
+        // total_ms > 0 enables the proportional bars. Pass 0 to omit them.
+        PerfBlock(const char* id, float total_ms = 0.0f);
+        ~PerfBlock();
+
+        // Non-timing row (counts, modes, status strings).
+        void Value(const char* label, const char* fmt, ...);
+        // Timing row: value in ms, optional tag such as "GPU"/"CPU", and a bar
+        // showing its share of total_ms. indent nests sub-steps under a phase.
+        void Time(const char* label, float ms, const char* tag = nullptr, int indent = 0);
+        // Caption row that separates groups without opening a new header.
+        void Section(const char* caption);
+        // Emphasised row for a computed total (drawn brighter, no bar).
+        void Total(const char* label, float ms);
+        // Closes the table and draws the copy control. Safe to call twice; the
+        // destructor calls it if the caller forgot.
+        void End();
+
+    private:
+        void beginRow(const char* label, int indent);
+        std::string m_id;
+        std::string m_text;    // plain-text mirror for the clipboard
+        float       m_total = 0.0f;
+        bool        m_table = false;
+        bool        m_ended = false;
+    };
+
     // -------- LAYOUT YARDIMCILARI --------
 
     // Returns the ideal width for property items (sliders/inputs) in a panel

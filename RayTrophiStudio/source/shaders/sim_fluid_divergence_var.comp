@@ -1,0 +1,119 @@
+// sim_fluid_divergence_var.comp
+// Free-surface divergence, VARIATIONAL solid coupling. 1:1 port of the CUDA
+// fluid_divergence_kernel's `c.variational && uw` branch.
+//
+// Separate from sim_fluid_divergence.comp on purpose. The Vulkan kernel registry
+// binds a FIXED buffer count per kernel name, while CUDA picks its pointers from
+// the dispatch's buffer_count — so the variational form (11 buffers) cannot share
+// a registration with the plain one (5). Splitting also leaves the working plain
+// path untouched, which is what makes this port revertible.
+//
+// Physics: a MAC face is fractionally open. The open part carries the fluid
+// velocity, the closed part carries the SOLID's velocity — which is why a moving
+// collider pushes fluid instead of merely blocking it. For a static wall the
+// solid term is 0 and this reduces exactly to the plain branch's hard zeroing.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer VelX { float vel_x[]; };
+layout(set = 0, binding = 1) readonly buffer VelY { float vel_y[]; };
+layout(set = 0, binding = 2) readonly buffer VelZ { float vel_z[]; };
+layout(set = 0, binding = 3) readonly buffer Mask { float fluid_mask[]; };
+layout(set = 0, binding = 4) buffer Divergence    { float divergence[]; };
+layout(set = 0, binding = 5) readonly buffer UW   { float uw[]; };
+layout(set = 0, binding = 6) readonly buffer VW   { float vw[]; };
+layout(set = 0, binding = 7) readonly buffer WW   { float ww[]; };
+layout(set = 0, binding = 8) readonly buffer SVX  { float svx[]; };
+layout(set = 0, binding = 9) readonly buffer SVY  { float svy[]; };
+layout(set = 0, binding = 10) readonly buffer SVZ { float svz[]; };
+
+int  cell_id(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
+int  vx_idx(int i, int j, int k)  { return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
+int  vy_idx(int i, int j, int k)  { return i + j*pc.nx + k*pc.nx*(pc.ny+1); }
+int  vz_idx(int i, int j, int k)  { return i + j*pc.nx + k*pc.nx*pc.ny; }
+
+float mask_at(int i, int j, int k) {
+    if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz)
+        return (pc.boundary == 0) ? 0.0 : -1.0;
+    return fluid_mask[cell_id(i, j, k)];
+}
+bool is_solid(int i, int j, int k) { return mask_at(i, j, k) < -0.5; }
+
+// Fractional open weight of a MAC face. Domain-boundary faces follow the wall
+// mode (open = 1 Dirichlet, closed/periodic = 0 wall) rather than the array.
+float fw_x(int i, int j, int k) {
+    if (i <= 0 || i >= pc.nx) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return uw[vx_idx(i, j, k)];
+}
+float fw_y(int i, int j, int k) {
+    if (j <= 0 || j >= pc.ny) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return vw[vy_idx(i, j, k)];
+}
+float fw_z(int i, int j, int k) {
+    if (k <= 0 || k >= pc.nz) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return ww[vz_idx(i, j, k)];
+}
+
+// Solid normal velocity at a face: the SOLID-side cell's component, 0 when
+// neither adjacent cell is solid.
+float sv_x(int i, int j, int k) {
+    if (i - 1 >= 0 && is_solid(i - 1, j, k)) return svx[cell_id(i - 1, j, k)];
+    if (i < pc.nx && is_solid(i, j, k))      return svx[cell_id(i, j, k)];
+    return 0.0;
+}
+float sv_y(int i, int j, int k) {
+    if (j - 1 >= 0 && is_solid(i, j - 1, k)) return svy[cell_id(i, j - 1, k)];
+    if (j < pc.ny && is_solid(i, j, k))      return svy[cell_id(i, j, k)];
+    return 0.0;
+}
+float sv_z(int i, int j, int k) {
+    if (k - 1 >= 0 && is_solid(i, j, k - 1)) return svz[cell_id(i, j, k - 1)];
+    if (k < pc.nz && is_solid(i, j, k))      return svz[cell_id(i, j, k)];
+    return 0.0;
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx * pc.ny * pc.nz) return;
+
+    if (fluid_mask[id] < 0.5) { divergence[id] = 0.0; return; }
+
+    int i = id % pc.nx;
+    int j = (id / pc.nx) % pc.ny;
+    int k = id / (pc.nx * pc.ny);
+    float inv_h = pc.voxel_size > 1e-6 ? 1.0 / pc.voxel_size : 1.0;
+
+    float vx_lo = vel_x[vx_idx(i,     j, k)];
+    float vx_hi = vel_x[vx_idx(i + 1, j, k)];
+    float vy_lo = vel_y[vy_idx(i, j,     k)];
+    float vy_hi = vel_y[vy_idx(i, j + 1, k)];
+    float vz_lo = vel_z[vz_idx(i, j, k    )];
+    float vz_hi = vel_z[vz_idx(i, j, k + 1)];
+
+    float wxl = fw_x(i,     j, k), wxh = fw_x(i + 1, j, k);
+    float wyl = fw_y(i, j,     k), wyh = fw_y(i, j + 1, k);
+    float wzl = fw_z(i, j, k    ), wzh = fw_z(i, j, k + 1);
+
+    vx_lo = wxl * vx_lo + (1.0 - wxl) * sv_x(i,     j, k);
+    vx_hi = wxh * vx_hi + (1.0 - wxh) * sv_x(i + 1, j, k);
+    vy_lo = wyl * vy_lo + (1.0 - wyl) * sv_y(i, j,     k);
+    vy_hi = wyh * vy_hi + (1.0 - wyh) * sv_y(i, j + 1, k);
+    vz_lo = wzl * vz_lo + (1.0 - wzl) * sv_z(i, j, k    );
+    vz_hi = wzh * vz_hi + (1.0 - wzh) * sv_z(i, j, k + 1);
+
+    divergence[id] = ((vx_hi - vx_lo) + (vy_hi - vy_lo) + (vz_hi - vz_lo)) * inv_h;
+}

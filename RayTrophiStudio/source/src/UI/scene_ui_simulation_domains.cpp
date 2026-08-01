@@ -45,6 +45,10 @@ void drawSimulationDomainControls(
             desc.source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
             desc.bounds_min = center + Vec3(-2.5f, -2.5f, -2.5f);
             desc.bounds_max = center + Vec3(2.5f, 2.5f, 2.5f);
+            // Use the fastest solver the machine actually has. The descriptor
+            // default stays CPU for project-file compatibility; the choice is made
+            // here, where the runtime capabilities are known.
+            desc.backend = RayTrophiSim::defaultSimulationDomainBackend();
             scene.addSimulationGridDomain(desc);
             particles = scene.getParticleSimulationSystem();
             selected_domain_index = particles ? static_cast<int>(particles->gridDomains().size()) - 1 : -1;
@@ -318,10 +322,12 @@ void drawSimulationDomainControls(
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Selects which hardware execution unit running the simulation solver:\n\n"
                                       "1. CPU (Dense): Stable standard processor solver. Ideal for small-scale tests.\n"
-                                      "2. GPU (CUDA): Fully hardware-accelerated GPU compute. Recommended on NVIDIA.\n"
+                                      "2. GPU (CUDA): NVIDIA-only compute path. Somewhat faster than Vulkan.\n"
                                       "3. GPU (Vulkan Compute): Cross-vendor GPU compute solver (APIC fluid + MGPCG\n"
-                                      "   pressure). Produces the same results as CPU/CUDA; CUDA is currently the\n"
-                                      "   faster of the two GPU paths.");
+                                      "   pressure + whitewater). The primary GPU path and the one that runs\n"
+                                      "   everywhere; produces the same results as CPU/CUDA.\n\n"
+                                      "New domains default to Vulkan when this machine supports it, CUDA when it\n"
+                                      "does not, and CPU when neither is available.");
                 }
 
                 ImGui::Spacing();
@@ -2080,11 +2086,62 @@ void drawSimulationDomainControls(
                             if (selected_domain_index < static_cast<int>(fstates.size())) {
                                 const auto& fst = fstates[static_cast<std::size_t>(selected_domain_index)].foam_stats;
                                 ImGui::Spacing();
-                                ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f),
-                                    "Foam: %zu alive  (spray %zu / foam %zu / bubble %zu)",
-                                    fst.alive, fst.spray, fst.foam, fst.bubble);
-                                ImGui::TextDisabled("  +%zu spawned/step   gen %.2f ms   advect %.2f ms",
-                                    fst.spawned, fst.gen_ms, fst.advect_ms);
+                                // ★bin and classify were previously inside NEITHER
+                                // published timer, so the old line understated the
+                                // real per-step cost. foam_total is the honest one
+                                // and drives the bars, so the phase a GPU foam
+                                // solver must replace first is visible at a glance.
+                                const float foam_total =
+                                    fst.bin_ms + fst.advect_ms + fst.gen_ms +
+                                    fst.classify_ms + fst.crit_gpu_ms + fst.neigh_gpu_ms +
+                                    fst.gpu_exec_ms;
+                                const bool foam_any_gpu = fst.crit_on_gpu || fst.neigh_on_gpu;
+                                UIWidgets::PerfBlock fb("Foam", foam_total);
+                                fb.Value("Alive", "%zu", fst.alive);
+                                fb.Value("  spray / foam / bubble", "%zu / %zu / %zu",
+                                         fst.spray, fst.foam, fst.bubble);
+                                fb.Value("Spawned per step", "%zu", fst.spawned);
+                                fb.Total(foam_any_gpu ? "Total (CPU+GPU)" : "CPU total",
+                                         foam_total);
+                                if (fst.crit_on_gpu) {
+                                    fb.Time("crit dispatch+readback", fst.crit_gpu_ms, "GPU", 1);
+                                }
+                                if (fst.neigh_on_gpu) {
+                                    fb.Time("neighbour readback", fst.neigh_gpu_ms, "GPU", 1);
+                                }
+                                if (fst.gpu_exec_ms > 0.0f) {
+                                    fb.Time("kernel exec (bins+crit+neigh)",
+                                            fst.gpu_exec_ms, "GPU", 1);
+                                }
+                                fb.Time("bin (CSR, serial)", fst.bin_ms, nullptr, 1);
+                                fb.Time("advect", fst.advect_ms, nullptr, 1);
+                                fb.Time("  neighbour gather", fst.advect_neighbour_ms,
+                                        fst.neigh_on_gpu ? "GPU" : nullptr, 2);
+                                fb.Time("gen", fst.gen_ms, nullptr, 1);
+                                fb.Time("  crit", fst.crit_ms,
+                                        fst.crit_on_gpu ? "GPU" : "CPU", 2);
+                                fb.Time("  emit (serial RNG)", fst.emit_ms, nullptr, 2);
+                                fb.Time("classify", fst.classify_ms, nullptr, 1);
+                                fb.End();
+                                UIWidgets::HelpMarker(
+                                    "bin: CSR binning of the FLUID particles (fully serial)\n"
+                                    "crit: Ihmsen spawn potentials, parallel over fluid particles\n"
+                                    "emit: serial stochastic spawn (RNG)\n"
+                                    "classify: per-type tally over every live foam particle\n\n"
+                                    "neighbour gather: fluid-neighbour count per foam particle;\n"
+                                    "  it picks each particle's type (spray/foam/bubble).\n\n"
+                                    "gen = crit + emit. bin and classify are counted in CPU total\n"
+                                    "but were in neither of the previously reported timers.\n"
+                                    "crit scales with the FLUID particle count, not the foam count,\n"
+                                    "so lowering Max Foam does not reduce it. The gather scales with\n"
+                                    "the FOAM count, so Max Foam does bound that one.\n\n"
+                                    "Both run on GPU only while the domain solves on Vulkan; the CUDA\n"
+                                    "backend has no foam kernels, so foam stays on the host there.\n"
+                                    "When bin reads 0.00 the device produced both, so the host has\n"
+                                    "nothing left to look up.\n\n"
+                                    "kernel exec: the submit+fence that actually runs the four foam\n"
+                                    "kernels. It is the real GPU cost of whitewater — before it was\n"
+                                    "measured, that time was billed to Density -> NanoVDB.");
                             }
                             ImGui::Unindent();
                         }
@@ -2153,36 +2210,42 @@ void drawSimulationDomainControls(
                     } else {
                         ImGui::TextDisabled("Compute: CPU reference path");
                     }
-                    ImGui::Columns(2, "FluidStatsColumns", false);
-                    ImGui::TextDisabled("Particles");        ImGui::NextColumn();
-                    ImGui::TextDisabled("%zu", fs.particle_count); ImGui::NextColumn();
-                    ImGui::TextDisabled("Active fluid cells"); ImGui::NextColumn();
-                    ImGui::TextDisabled("%zu", fs.active_fluid_cells); ImGui::NextColumn();
-                    ImGui::TextDisabled("Step total");       ImGui::NextColumn();
-                    ImGui::TextDisabled("%.2f ms", fs.total_ms); ImGui::NextColumn();
-                    ImGui::TextDisabled("  P2G");            ImGui::NextColumn();
-                    ImGui::TextDisabled("%.2f ms (%s)", fs.p2g_ms, fs.p2g_on_gpu ? "GPU" : "CPU"); ImGui::NextColumn();
-                    ImGui::TextDisabled("  Pressure");       ImGui::NextColumn();
-                    ImGui::TextDisabled("%.2f ms (%s)", fs.pressure_ms, fs.pressure_on_gpu ? "GPU" : "CPU"); ImGui::NextColumn();
+                    // Bars are relative to the measured step total, so the
+                    // dominant phase is visible without reading every number.
+                    // fs.total_ms only covers the host-side Fluid::step call, so on
+                    // the GPU path it collapses to ~0 while the phases below still
+                    // report milliseconds — dividing by it printed shares in the
+                    // hundred-thousands of percent. Fall back to the sum of the
+                    // phases whenever it fails to account for them.
+                    const float phase_sum =
+                        fs.p2g_ms + fs.pressure_ms + fs.viscosity_ms +
+                        fs.g2p_ms + fs.advect_ms + fs.density_ms;
+                    const float step_total = std::max(fs.total_ms, phase_sum);
+                    UIWidgets::PerfBlock blk("Fluid Step", step_total);
+                    blk.Value("Particles", "%zu", fs.particle_count);
+                    blk.Value("Active fluid cells", "%zu", fs.active_fluid_cells);
+                    blk.Total("Step total", step_total);
+                    blk.Time("P2G", fs.p2g_ms, fs.p2g_on_gpu ? "GPU" : "CPU", 1);
+                    blk.Time("Pressure", fs.pressure_ms, fs.pressure_on_gpu ? "GPU" : "CPU", 1);
                     if (fs.pressure_on_gpu && fs.pressure_cg_max_iterations > 0) {
-                        ImGui::TextDisabled("    MGPCG precond"); ImGui::NextColumn();
-                        ImGui::TextDisabled("%s", fs.pressure_cg_multigrid ? "Layer B V-cycle" : "Layer A Jacobi"); ImGui::NextColumn();
-                        ImGui::TextDisabled("    MGPCG iters"); ImGui::NextColumn();
-                        ImGui::TextDisabled("%d / %d", fs.pressure_cg_iterations, fs.pressure_cg_max_iterations); ImGui::NextColumn();
-                        ImGui::TextDisabled("    MGPCG residual"); ImGui::NextColumn();
-                        ImGui::TextDisabled("%.2e", fs.pressure_cg_final_relative_residual); ImGui::NextColumn();
-                        ImGui::TextDisabled("    MGPCG dot sync"); ImGui::NextColumn();
-                        ImGui::TextDisabled("%.2f ms (%d)", fs.pressure_cg_dot_ms, fs.pressure_cg_dot_count); ImGui::NextColumn();
+                        blk.Value("    MGPCG precond", "%s",
+                                  fs.pressure_cg_multigrid ? "Layer B V-cycle" : "Layer A Jacobi");
+                        blk.Value("    MGPCG iters", "%d / %d",
+                                  fs.pressure_cg_iterations, fs.pressure_cg_max_iterations);
+                        blk.Value("    MGPCG residual", "%.2e",
+                                  fs.pressure_cg_final_relative_residual);
+                        char dot_tag[32];
+                        std::snprintf(dot_tag, sizeof(dot_tag), "%d", fs.pressure_cg_dot_count);
+                        blk.Time("    MGPCG dot sync", fs.pressure_cg_dot_ms, dot_tag, 2);
                     }
-                    ImGui::TextDisabled("  Viscosity");      ImGui::NextColumn();
-                    ImGui::TextDisabled("%.2f ms", fs.viscosity_ms); ImGui::NextColumn();
-                    ImGui::TextDisabled("  G2P");            ImGui::NextColumn();
-                    ImGui::TextDisabled("%.2f ms (%s)", fs.g2p_ms, fs.g2p_on_gpu ? "GPU" : "CPU"); ImGui::NextColumn();
-                    ImGui::TextDisabled("  Advect");         ImGui::NextColumn();
-                    ImGui::TextDisabled("%.2f ms (%d substeps)", fs.advect_ms, fs.advect_substeps); ImGui::NextColumn();
-                    ImGui::TextDisabled("  Density -> NanoVDB"); ImGui::NextColumn();
-                    ImGui::TextDisabled("%.2f ms (%s)", fs.density_ms, fs.density_on_gpu ? "GPU" : "CPU"); ImGui::NextColumn();
-                    ImGui::Columns(1);
+                    blk.Time("Viscosity", fs.viscosity_ms, nullptr, 1);
+                    blk.Time("G2P", fs.g2p_ms, fs.g2p_on_gpu ? "GPU" : "CPU", 1);
+                    char adv_tag[32];
+                    std::snprintf(adv_tag, sizeof(adv_tag), "%d substeps", fs.advect_substeps);
+                    blk.Time("Advect", fs.advect_ms, adv_tag, 1);
+                    blk.Time("Density -> NanoVDB", fs.density_ms,
+                             fs.density_on_gpu ? "GPU" : "CPU", 1);
+                    blk.End();
                 }
             }
         }
@@ -2486,8 +2549,21 @@ void drawSimulationDomainControls(
             for (auto& sys : scene.particle_systems) {
                 if (!sys.runtime) continue;
                 for (auto& d : sys.runtime->gridDomains()) {
-                    if (d.type == RayTrophiSim::SimulationDomainType::Fluid)
+                    // Only domains that OWN an authored initial state get re-seeded:
+                    // a resting tank (FillLevel) or one the user actually seeded
+                    // (fluid_reseed_on_reset, armed by Seed Fluid Now). Same
+                    // predicate the reset path uses in SceneData.
+                    //
+                    // Re-arming every fluid domain instead handed an emitter-fed
+                    // domain the DEFAULT seed AABB — the one synchronizeGridDomains
+                    // drops into the upper half of the bounds for the gizmo to have
+                    // something to show — so changing grid resolution while a hose
+                    // was running dumped a block of water into the tank.
+                    if (d.type == RayTrophiSim::SimulationDomainType::Fluid &&
+                        (d.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
+                         d.fluid_reseed_on_reset)) {
                         d.fluid_pending_seed = true;
+                    }
                 }
             }
             // Drain any in-flight GPU sim mutations before the reset clears state

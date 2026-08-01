@@ -1,0 +1,97 @@
+// sim_foam_neigh.comp — fluid-neighbour count per FOAM particle (submersion test).
+//
+// Second half of the whitewater GPU port. Once the generation criterion moved to
+// the device, the remaining cost collapsed onto this gather: measured at 11.35 ms
+// of 14.98 ms total (75.8%), i.e. 93% of the advect phase. Same shape as
+// sim_foam_crit — walk the (2*reach+1)^3 bucket neighbourhood — but it iterates
+// FOAM positions against the FLUID bucket grid, so it reuses the bins that
+// sim_foam_bin_scatter already built this step at no extra cost.
+//
+// The count decides each particle's type (spray / foam / bubble), which in turn
+// selects its integration rule, so this is not a stochastic quantity like the
+// spawn potential: a wrong count is a visibly wrong particle. The host therefore
+// only consumes a result whose foam array is provably the same one that was
+// uploaded (see topology_generation in FluidFoam.h).
+//
+// Math is a line-by-line port of countFluidNeighbours (FluidFoam.cpp).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   foam_count;
+    float origin_x; float origin_y; float origin_z;
+    float voxel_size;
+    float h;            // neighbour radius in world units
+    int   reach;        // cell radius covering h
+    int   max_per_cell;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer FoamPos    { float foam_pos[];   };
+layout(set = 0, binding = 1) readonly buffer FluidPos   { float fluid_pos[];  };
+layout(set = 0, binding = 2) readonly buffer Counts     { uint  counts[];     };
+layout(set = 0, binding = 3) readonly buffer Items      { uint  items[];      };
+layout(set = 0, binding = 4) buffer          OutCounts  { uint  neigh[];      };
+
+void main() {
+    // One thread per foam particle. The slot-dispatch trick that took sim_foam_crit
+    // from 20 to 12.10 ms was tried here too and measured 12.85 — no gain, against a
+    // certain cost of a second 16 MB bucket grid over the foam. It does not pay
+    // because foam is far more spread out than liquid (spray flies everywhere), so
+    // its cells hold 1-2 particles against the liquid's ~4 and the idle lanes eat
+    // the locality back. Don't re-attempt without changing that density first.
+    //
+    // The measurement that settled it: at under 10k foam particles kernel exec only
+    // fell from ~12.8 to ~9 ms, so this pass was never the expensive half — the
+    // fluid-side bins + criterion are.
+    int fi = int(gl_GlobalInvocationID.x);
+    if (fi >= pc.foam_count) return;
+    neigh[fi] = 0u;
+    if (pc.voxel_size <= 1e-6 || pc.h <= 1e-6) return;
+
+    vec3 x = vec3(foam_pos[fi * 3], foam_pos[fi * 3 + 1], foam_pos[fi * 3 + 2]);
+    if (isnan(x.x) || isnan(x.y) || isnan(x.z)) return;
+    if (isinf(x.x) || isinf(x.y) || isinf(x.z)) return;
+
+    float inv_h = 1.0 / pc.voxel_size;
+    int ci = int(floor((x.x - pc.origin_x) * inv_h));
+    int cj = int(floor((x.y - pc.origin_y) * inv_h));
+    int ck = int(floor((x.z - pc.origin_z) * inv_h));
+    // Host's cheap x-only reject, kept so the two paths agree exactly. Far-out y/z
+    // needs no test: the clamps below collapse the loop range to empty on their own.
+    if (ci < -pc.reach || ci > pc.nx + pc.reach) return;
+
+    int i0 = max(0, ci - pc.reach), i1 = min(pc.nx - 1, ci + pc.reach);
+    int j0 = max(0, cj - pc.reach), j1 = min(pc.ny - 1, cj + pc.reach);
+    int k0 = max(0, ck - pc.reach), k1 = min(pc.nz - 1, ck + pc.reach);
+
+    float h_sq = pc.h * pc.h;
+    uint  n = 0u;
+
+    for (int kk = k0; kk <= k1; ++kk)
+    for (int jj = j0; jj <= j1; ++jj)
+    for (int ii = i0; ii <= i1; ++ii) {
+        // Cell-level reject: closest point of this cell's box to x. reach is
+        // ceil(radius) so the scanned volume is a 5x5x5 CUBE (125 cells) while the
+        // radius only reaches a ~33-cell SPHERE — most of that cube cannot hold a
+        // neighbour at all. Skipping a cell here avoids up to max_per_cell random
+        // position reads. Exact: every particle this skips would have failed the
+        // d2 < h_sq test below, so results are unchanged.
+        vec3 cmin = vec3(pc.origin_x, pc.origin_y, pc.origin_z) +
+                    vec3(ii, jj, kk) * pc.voxel_size;
+        vec3 cd = max(max(cmin - x, x - (cmin + vec3(pc.voxel_size))), vec3(0.0));
+        if (dot(cd, cd) >= h_sq) continue;
+
+        int nci = ii + jj * pc.nx + kk * pc.nx * pc.ny;
+        uint cn = min(counts[nci], uint(pc.max_per_cell));
+        uint base = uint(nci) * uint(pc.max_per_cell);
+        for (uint a = 0u; a < cn; ++a) {
+            int pj = int(items[base + a]);
+            vec3 d = vec3(fluid_pos[pj * 3], fluid_pos[pj * 3 + 1], fluid_pos[pj * 3 + 2]) - x;
+            if (dot(d, d) < h_sq) ++n;
+        }
+    }
+
+    neigh[fi] = n;
+}
+

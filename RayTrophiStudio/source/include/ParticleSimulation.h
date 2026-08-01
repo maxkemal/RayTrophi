@@ -78,11 +78,20 @@ enum class SimulationDomainBackend {
     // UI shows "GPU Compute" — backend is transparent to the user.
     GPU_Compute   = 1,
     CPU_SparseVDB = 2,
-    // GPU_Vulkan: forces Vulkan even when CUDA is present (for testing).
+    // GPU_Vulkan: forces Vulkan even when CUDA is present. No longer a testing-only
+    // escape hatch — it is what new domains default to (defaultSimulationDomainBackend).
     GPU_Vulkan    = 3,
     // Legacy alias kept so old project files load correctly.
     GPU_CUDA      = GPU_Compute,
 };
+
+// Backend a newly created domain starts on, resolved from what this machine can
+// actually run: Vulkan compute first, CUDA only when Vulkan compute is missing,
+// CPU when neither answers. Vulkan leads on purpose — see the definition. The step
+// loop falls back to CPU on its own anyway, so handing this out is safe even on a
+// machine with no compute device. Defined out-of-line because it reads the runtime
+// capability globals.
+SimulationDomainBackend defaultSimulationDomainBackend();
 
 enum class SimulationGridDomainSourceMode {
     ManualBox,
@@ -489,6 +498,40 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle fluid_affine;
     ComputeBufferHandle foam_positions;
     SimulationGpuFoamRenderBuffer foam_render;
+    // Whitewater spawn-potential pass (GPU port of stepFoam's phase 3, which
+    // measured 66.5% of the whole CPU foam cost and scales with the FLUID
+    // particle count). foam_bin_counts holds one occupancy counter per cell plus
+    // a trailing OVERFLOW tally; foam_bin_items is the fixed-capacity bucket grid
+    // that replaces the host's serial CSR (no prefix scan, no extra sync).
+    ComputeBufferHandle foam_bin_counts;
+    ComputeBufferHandle foam_bin_items;
+    ComputeBufferHandle foam_expected;
+    int foam_bin_cell_capacity = 0;   // allocated max_per_cell
+    int foam_bin_cell_count = 0;      // allocated cell count
+    std::size_t foam_expected_capacity = 0;  // particles the expected buffer holds
+    // One-frame pipeline: a dispatch is in flight and its result is read at the
+    // START of the next step, by which time the GPU has long finished it. Reading
+    // it in the same step cost 17.29 ms of pure waiting — the kernel itself is
+    // ~1-2 ms of work and the transfer ~0.1 ms.
+    bool foam_expected_pending = false;
+    std::size_t foam_expected_pending_count = 0;
+    // Foam-side classification gather (sim_foam_neigh). Once the criterion moved to
+    // the device this became the dominant remaining cost — 11.35 ms of 14.98 ms —
+    // and it reuses the bucket grid above, so it only adds a foam-position upload.
+    // Dispatched at the END of a step over the final foam array and consumed at the
+    // start of the next, which is the only ordering where the indices still line up:
+    // nothing mutates foam in between. The generation stamp catches a cache scrub or
+    // reset landing in that gap, which a length check alone would miss.
+    ComputeBufferHandle foam_neigh;
+    std::size_t foam_positions_capacity = 0;
+    std::size_t foam_neigh_capacity = 0;
+    bool foam_neigh_pending = false;
+    std::size_t foam_neigh_pending_count = 0;
+    uint64_t foam_neigh_pending_generation = 0;
+    // Set by runGpuFoamCriteria once this step's bins are built. The neighbour pass
+    // reads those bins, so without a fresh build it must not run at all (stale bins
+    // would silently classify against last step's liquid, or a resized grid).
+    bool foam_bin_ready_this_step = false;
     // Float buffer (0.0f = air, 1.0f = fluid cell). Rebuilt from particle
     // positions every step before GPU pressure projection.
     ComputeBufferHandle fluid_mask;
