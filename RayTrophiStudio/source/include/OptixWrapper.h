@@ -74,11 +74,11 @@ public:
     void updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices = {}); // BLAS+TLAS update
     void updateTLASMatricesOnly(const std::vector<std::shared_ptr<Hittable>>& objects); // Transform-only update
     void refitSphereGroups(); // Foam point-sphere GAS in-place refit (motion path)
-    void launch(SDL_Surface* surface, SDL_Window* window, int w, int h);
-    void launch(int w, int h); // Overload for internal use (renderer)
-
-  
-    void launch_tile_based_progressive(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture);
+    // Rendering enters through OptixBackend, which drives this pair. The old
+    // SDL-surface launch overload and launch_tile_based_progressive were removed:
+    // the first only forwarded to launch(w, h) and had no callers left, the second
+    // never had a definition at all — it was a declaration nothing could link to.
+    void launch(int w, int h);
     void launch_random_pixel_mode_progressive(SDL_Surface* surface,
         SDL_Window* window,
         SDL_Renderer* renderer,
@@ -90,7 +90,6 @@ public:
     // Removed: applyOIDNDenoising - use Renderer::applyOIDNDenoising instead
   
    
-   // void launch(uchar4* output_buffer, int width, int height);
     bool trace(const Ray& ray, HitRecord& rec) const;
     void cleanup();
     void setCameraParams(const Camera& camera, float exposure_override = -1.0f);

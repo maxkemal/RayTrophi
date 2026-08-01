@@ -466,11 +466,6 @@ void OptixWrapper::launch(int w, int h) {
     OPTIX_CHECK(optixLaunch(pipeline, stream, d_params, sizeof(RayGenParams), &sbt, w, h, 1));
 }
 
-// Original signature for compatibility
-void OptixWrapper::launch(SDL_Surface* surface, SDL_Window* window, int w, int h) {
-    launch(w, h);
-}
-
 void OptixWrapper::downloadFramebuffer(uchar4* host_ptr, int width, int height) {
     if (!d_framebuffer || !host_ptr) return;
     CUDA_CHECK(cudaMemcpy(host_ptr, d_framebuffer, width * height * sizeof(uchar4), cudaMemcpyDeviceToHost));
