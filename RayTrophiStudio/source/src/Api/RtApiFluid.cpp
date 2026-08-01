@@ -38,12 +38,11 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
         RayTrophiSim::SimulationGridDomainDesc desc;
         desc.name = domain_name;
         desc.type = is_gas ? RayTrophiSim::SimulationDomainType::Gas : RayTrophiSim::SimulationDomainType::Fluid;
-        // Production gas prefers the backend-neutral GPU compute route. Scene
-        // synchronization selects CUDA first and Vulkan second, and retains
-        // the deterministic CPU fallback when neither GPU backend is usable.
-        if (is_gas) {
-            desc.backend = RayTrophiSim::SimulationDomainBackend::GPU_Compute;
-        }
+        // Both gas and liquid now start on the fastest solver the machine has —
+        // scripted domains should not be slower than panel-created ones. Scene
+        // synchronization selects CUDA first and Vulkan second, and retains the
+        // deterministic CPU fallback when neither GPU backend is usable.
+        desc.backend = RayTrophiSim::defaultSimulationDomainBackend();
         desc.boundary_mode = is_gas ? RayTrophiSim::SimulationGridDomainBoundaryMode::Open : RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
         desc.bounds_min = domain_min;
         desc.bounds_max = domain_max;

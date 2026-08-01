@@ -1,0 +1,67 @@
+// sim_fluid_cg_build_diag_var.comp
+// MGPCG A-matrix diagonal, VARIATIONAL branch. 1:1 port of the CUDA
+// fluid_cg_build_diag_kernel's `c.variational && uw` case.
+//
+// diag = sum of the 6 face open weights. Solid faces (~0) drop out of the
+// stencil; air faces (~1) are Dirichlet ghosts; fluid faces (~1) additionally
+// carry the -weight off-diagonal that sim_fluid_cg_spmv_var applies. Floored so
+// a fully enclosed cell cannot make the matrix singular.
+//
+// The plain branch counts non-solid neighbours as integers; this replaces that
+// count with the fractional area, which is the whole point of variational solid
+// coupling — a collider that cuts a cell in half is felt as a half-open face
+// instead of an all-or-nothing wall.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Mask { float fluid_mask[]; };
+layout(set = 0, binding = 1) buffer Diag          { float diag[]; };
+layout(set = 0, binding = 2) readonly buffer UW   { float uw[]; };
+layout(set = 0, binding = 3) readonly buffer VW   { float vw[]; };
+layout(set = 0, binding = 4) readonly buffer WW   { float ww[]; };
+
+int vx_idx(int i, int j, int k) { return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
+int vy_idx(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*(pc.ny+1); }
+int vz_idx(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
+
+float fw_x(int i, int j, int k) {
+    if (i <= 0 || i >= pc.nx) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return uw[vx_idx(i, j, k)];
+}
+float fw_y(int i, int j, int k) {
+    if (j <= 0 || j >= pc.ny) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return vw[vy_idx(i, j, k)];
+}
+float fw_z(int i, int j, int k) {
+    if (k <= 0 || k >= pc.nz) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return ww[vz_idx(i, j, k)];
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx * pc.ny * pc.nz) return;
+    if (fluid_mask[id] < 0.5) { diag[id] = 0.0; return; }
+
+    int i = id % pc.nx;
+    int j = (id / pc.nx) % pc.ny;
+    int k = id / (pc.nx * pc.ny);
+
+    float dg = fw_x(i,     j, k) + fw_x(i + 1, j, k)
+             + fw_y(i, j,     k) + fw_y(i, j + 1, k)
+             + fw_z(i, j, k    ) + fw_z(i, j, k + 1);
+    diag[id] = dg < 1e-6 ? 1.0 : dg;
+}

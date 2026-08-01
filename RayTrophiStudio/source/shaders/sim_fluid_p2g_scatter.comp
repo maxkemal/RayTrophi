@@ -1,11 +1,13 @@
 // sim_fluid_p2g_scatter.comp
 // APIC particle-to-grid scatter. Vec3 data = 3 tightly-packed floats (stride 12).
 //
-// NOTE: The Vulkan GPU fluid solve is EXPERIMENTAL / under development. The
-// float-atomic P2G accumulation is unreliable on some drivers (grid velocity
-// stays ~0 → no flow), and an integer fixed-point variant regressed to no flow
-// as well. Left on float atomics here; the UI marks the Vulkan backend as
-// test-only until this is resolved. CPU and CUDA backends are correct.
+// Vulkan is the primary GPU fluid path: it is the vendor-independent one, so it
+// is what gets exercised day to day. CUDA is somewhat faster where it exists,
+// but it is the alternate, not the reference.
+//
+// Accumulation is float atomics (GL_EXT_shader_atomic_float). An integer
+// fixed-point variant was tried and produced no flow; don't re-attempt it
+// without also revisiting the scale factor that made it collapse.
 #version 450
 #extension GL_EXT_shader_atomic_float : require
 layout(local_size_x = 256) in;

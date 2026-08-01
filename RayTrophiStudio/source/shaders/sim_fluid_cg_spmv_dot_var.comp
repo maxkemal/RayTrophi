@@ -1,0 +1,89 @@
+// sim_fluid_cg_spmv_dot_var.comp
+// MGPCG fused As = A*s AND partials[workgroup] = block sum of s*As in DOUBLE,
+// VARIATIONAL branch. Same stencil as sim_fluid_cg_spmv_var (face weights as
+// off-diagonals); this is the form the CG loop actually dispatches, since fusing
+// the dot removes one grid-wide pass per iteration.
+// Requires shaderFloat64, gated in the backend exactly like the plain variant.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Search { float s[]; };
+layout(set = 0, binding = 1) readonly buffer Mask   { float fluid_mask[]; };
+layout(set = 0, binding = 2) readonly buffer Diag   { float diag[]; };
+layout(set = 0, binding = 3) buffer OutAs           { float As[]; };
+layout(set = 0, binding = 4) buffer Partials        { double partials[]; };
+layout(set = 0, binding = 5) readonly buffer UW     { float uw[]; };
+layout(set = 0, binding = 6) readonly buffer VW     { float vw[]; };
+layout(set = 0, binding = 7) readonly buffer WW     { float ww[]; };
+
+shared double sdata[256];
+
+int vx_idx(int i, int j, int k) { return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
+int vy_idx(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*(pc.ny+1); }
+int vz_idx(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
+
+float fw_x(int i, int j, int k) {
+    if (i <= 0 || i >= pc.nx) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return uw[vx_idx(i, j, k)];
+}
+float fw_y(int i, int j, int k) {
+    if (j <= 0 || j >= pc.ny) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return vw[vy_idx(i, j, k)];
+}
+float fw_z(int i, int j, int k) {
+    if (k <= 0 || k >= pc.nz) return (pc.boundary == 0) ? 1.0 : 0.0;
+    return ww[vz_idx(i, j, k)];
+}
+
+void main() {
+    int  cell_count = pc.nx * pc.ny * pc.nz;
+    uint tid = gl_LocalInvocationID.x;
+    int  id  = int(gl_GlobalInvocationID.x);
+
+    double contrib = 0.0LF;
+    if (id < cell_count) {
+        float As_val = 0.0;
+        if (fluid_mask[id] > 0.5) {
+            int i = id % pc.nx;
+            int j = (id / pc.nx) % pc.ny;
+            int k = id / (pc.nx * pc.ny);
+            float nsum = 0.0;
+            #define CG_SPMV_DOT_VAR(ni, nj, nk, fw) \
+                if ((ni) >= 0 && (ni) < pc.nx && (nj) >= 0 && (nj) < pc.ny && (nk) >= 0 && (nk) < pc.nz) { \
+                    int _n = (ni) + (nj)*pc.nx + (nk)*pc.nx*pc.ny; \
+                    if (fluid_mask[_n] > 0.5) nsum += (fw) * s[_n]; \
+                }
+            CG_SPMV_DOT_VAR(i - 1, j,     k,     fw_x(i,     j, k))
+            CG_SPMV_DOT_VAR(i + 1, j,     k,     fw_x(i + 1, j, k))
+            CG_SPMV_DOT_VAR(i,     j - 1, k,     fw_y(i, j,     k))
+            CG_SPMV_DOT_VAR(i,     j + 1, k,     fw_y(i, j + 1, k))
+            CG_SPMV_DOT_VAR(i,     j,     k - 1, fw_z(i, j, k    ))
+            CG_SPMV_DOT_VAR(i,     j,     k + 1, fw_z(i, j, k + 1))
+            #undef CG_SPMV_DOT_VAR
+            As_val = diag[id] * s[id] - nsum;
+        }
+        As[id] = As_val;
+        contrib = double(s[id]) * double(As_val);
+    }
+    sdata[tid] = contrib;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        barrier();
+    }
+    if (tid == 0u) partials[gl_WorkGroupID.x] = sdata[0];
+}

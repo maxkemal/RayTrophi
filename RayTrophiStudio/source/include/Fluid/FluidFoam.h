@@ -66,7 +66,18 @@ struct FoamParticles {
     std::vector<float>   lifetime;   // remaining seconds (<= 0 → cull)
     std::vector<uint8_t> type;       // FoamType, set each step by classification
 
-    void   clear() { position.clear(); velocity.clear(); lifetime.clear(); type.clear(); }
+    // Bumped whenever the array is REPLACED wholesale (cache restore, sim reset) —
+    // clear() is the single chokepoint every such path goes through. Per-step
+    // emit()/removeSwap() deliberately leave it alone: they are the normal churn a
+    // consumer expects. The GPU neighbour pass dispatches over these positions at
+    // the end of a step and reads the counts back at the start of the next one,
+    // which is index-stable only because nothing touches foam in between. A scrub
+    // or reset landing in that gap swaps in an unrelated array of possibly the same
+    // length, so a count match alone cannot detect it — this can.
+    uint64_t topology_generation = 0;
+
+    void   clear() { position.clear(); velocity.clear(); lifetime.clear(); type.clear();
+                     ++topology_generation; }
     size_t size()  const { return position.size(); }
     bool   empty() const { return position.empty(); }
     void   reserve(size_t n) { position.reserve(n); velocity.reserve(n); lifetime.reserve(n); type.reserve(n); }
@@ -183,12 +194,53 @@ struct FoamStats {
     std::size_t bubble    = 0;
     float       gen_ms    = 0.0f;
     float       advect_ms = 0.0f;
+    // Sub-phase breakdown, added to decide what a GPU foam solver must replace
+    // first. gen_ms = crit_ms + emit_ms; bin_ms and classify_ms were previously
+    // inside NEITHER published timer, so the reported foam cost understated the
+    // real one.
+    float       bin_ms      = 0.0f; // CSR bin of the FLUID particles
+    float       crit_ms     = 0.0f; // Ihmsen potentials, parallel over fluid particles
+    float       emit_ms     = 0.0f; // serial stochastic spawn
+    float       classify_ms = 0.0f; // per-type tally over all live foam
+    // Part of advect_ms: the fluid-neighbour gather that classifies each foam
+    // particle. Same (2*reach+1)^3 cell walk the generation criterion does, so it
+    // is the prime suspect for advect's cost and needs its own number before
+    // anything is ported.
+    float       advect_neighbour_ms = 0.0f;
+    bool        crit_on_gpu  = false; // potentials came from sim_foam_crit
+    bool        neigh_on_gpu = false; // classification counts came from sim_foam_neigh
+    // Wall time the caller spent reading back the PREVIOUS step's neighbour counts.
+    // Same reason crit_gpu_ms exists: without it advect_neighbour_ms drops to ~0 on
+    // the GPU path and the block looks like the work evaporated.
+    float       neigh_gpu_ms = 0.0f;
+    // Wall time of the submit+fence that actually RUNS the four foam kernels (bins,
+    // criterion, neighbours). They record without downloading, so before this was
+    // measured their execution was billed to whichever later phase happened to
+    // force the flush — the density readback — and foam looked ~5x cheaper than it
+    // is. This is the real GPU cost of whitewater.
+    float       gpu_exec_ms  = 0.0f;
+    // Wall time of the GPU criterion pass INCLUDING its readback, measured by the
+    // caller. Without this the CPU crit_ms would drop to ~0 on the GPU path and
+    // the block would claim the work vanished instead of showing where it moved.
+    float       crit_gpu_ms  = 0.0f;
 };
 
 // Advance whitewater one step: generate from the liquid particles' Ihmsen
 // potentials, then classify + advect + age existing foam, culling the dead.
 // `grid` supplies the velocity field for foam advection; `gravity` and `dt`
 // drive spray/bubble dynamics. `seed` varies the per-step spawn jitter.
+// `precomputed_expected`, when non-null and sized >= fluid.size(), supplies the
+// per-particle spawn potentials from an external producer (the GPU sim_foam_crit
+// kernel) and makes stepFoam SKIP its own bin + criterion passes. Everything else
+// — the stochastic emit, advection, classification — is unchanged, so the host
+// RNG still drives spawning and a GPU run stays bit-comparable with a CPU run.
+// Passing null keeps the full CPU path, which is the reference the GPU kernel is
+// validated against.
+// `precomputed_neighbours`, when non-null and sized >= foam.size(), likewise
+// supplies the per-foam-particle fluid-neighbour count (sim_foam_neigh) and skips
+// the classification gather. Unlike the potentials this one is NOT stochastic — it
+// picks each particle's integration rule — so the caller must guarantee the counts
+// belong to exactly this array (see FoamParticles::topology_generation).
 void stepFoam(const FluidParticles& fluid,
               const FluidSim::FluidGrid& grid,
               FoamParticles& foam,
@@ -196,7 +248,9 @@ void stepFoam(const FluidParticles& fluid,
               const Vec3& gravity,
               float dt,
               uint32_t seed,
-              FoamStats* stats = nullptr);
+              FoamStats* stats = nullptr,
+              const float* precomputed_expected = nullptr,
+              const uint32_t* precomputed_neighbours = nullptr);
 
 // Trilinear-splat the foam particles into a per-cell density field (resized to
 // grid.getCellCount()) for the Volume render mode. Each particle deposits

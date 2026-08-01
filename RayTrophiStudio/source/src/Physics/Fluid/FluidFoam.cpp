@@ -44,7 +44,9 @@ void stepFoam(const FluidParticles& fluid,
               const Vec3& gravity,
               float dt,
               uint32_t seed,
-              FoamStats* stats)
+              FoamStats* stats,
+              const float* precomputed_expected,
+              const uint32_t* precomputed_neighbours)
 {
     using clock = std::chrono::steady_clock;
     if (stats) *stats = FoamStats{};
@@ -91,33 +93,48 @@ void stepFoam(const FluidParticles& fluid,
         // No source liquid: still advect/age existing foam below (it can persist).
     }
 
-    if (particle_cell.size() < fluid_count) particle_cell.assign(fluid_count, kInvalid);
-    else std::fill(particle_cell.begin(), particle_cell.begin() + fluid_count, kInvalid);
-    if (cell_count_per.size() < cell_count) cell_count_per.assign(cell_count, 0);
-    else std::fill(cell_count_per.begin(), cell_count_per.begin() + cell_count, 0);
+    // The bin exists to serve exactly two consumers: the classification gather
+    // (phase 2a) and the generation criterion (phase 3). When BOTH arrive
+    // precomputed from the device there is nothing left to look up, so building it
+    // would be 1.33 ms of pure waste — the GPU built its own bucket grid to produce
+    // them. Any single consumer still on the host keeps it alive.
+    const bool bin_needed = (precomputed_neighbours == nullptr) ||
+                            (precomputed_expected == nullptr);
 
-    for (std::size_t p = 0; p < fluid_count; ++p) {
-        const Vec3& wp = fluid.position[p];
-        if (!std::isfinite(wp.x) || !std::isfinite(wp.y) || !std::isfinite(wp.z)) continue;
-        const Vec3 local = (wp - origin) * inv_h;
-        const int i = static_cast<int>(std::floor(local.x));
-        const int j = static_cast<int>(std::floor(local.y));
-        const int k = static_cast<int>(std::floor(local.z));
-        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
-        const std::size_t ci = cellIndex(i, j, k);
-        particle_cell[p] = ci;
-        ++cell_count_per[ci];
+    const auto t_bin0 = clock::now();
+    if (bin_needed) {
+        if (particle_cell.size() < fluid_count) particle_cell.assign(fluid_count, kInvalid);
+        else std::fill(particle_cell.begin(), particle_cell.begin() + fluid_count, kInvalid);
+        if (cell_count_per.size() < cell_count) cell_count_per.assign(cell_count, 0);
+        else std::fill(cell_count_per.begin(), cell_count_per.begin() + cell_count, 0);
+
+        for (std::size_t p = 0; p < fluid_count; ++p) {
+            const Vec3& wp = fluid.position[p];
+            if (!std::isfinite(wp.x) || !std::isfinite(wp.y) || !std::isfinite(wp.z)) continue;
+            const Vec3 local = (wp - origin) * inv_h;
+            const int i = static_cast<int>(std::floor(local.x));
+            const int j = static_cast<int>(std::floor(local.y));
+            const int k = static_cast<int>(std::floor(local.z));
+            if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
+            const std::size_t ci = cellIndex(i, j, k);
+            particle_cell[p] = ci;
+            ++cell_count_per[ci];
+        }
+        cell_offset.assign(cell_count + 1, 0);
+        for (std::size_t c = 0; c < cell_count; ++c)
+            cell_offset[c + 1] = cell_offset[c] + static_cast<std::size_t>(cell_count_per[c]);
+        cell_csr.assign(cell_offset.back(), 0);
+        cursor.assign(cell_count, 0);
+        for (std::size_t p = 0; p < fluid_count; ++p) {
+            const std::size_t ci = particle_cell[p];
+            if (ci == kInvalid) continue;
+            cell_csr[cell_offset[ci] + cursor[ci]++] = p;
+        }
     }
-    cell_offset.assign(cell_count + 1, 0);
-    for (std::size_t c = 0; c < cell_count; ++c)
-        cell_offset[c + 1] = cell_offset[c] + static_cast<std::size_t>(cell_count_per[c]);
-    cell_csr.assign(cell_offset.back(), 0);
-    cursor.assign(cell_count, 0);
-    for (std::size_t p = 0; p < fluid_count; ++p) {
-        const std::size_t ci = particle_cell[p];
-        if (ci == kInvalid) continue;
-        cell_csr[cell_offset[ci] + cursor[ci]++] = p;
-    }
+    // Fully serial: three passes over every fluid particle plus a prefix sum over
+    // every cell. On GPU this becomes count/scan/scatter — the standard pattern the
+    // APIC P2G tile-bin already uses here.
+    if (stats) stats->bin_ms = std::chrono::duration<float, std::milli>(clock::now() - t_bin0).count();
 
     // Count fluid neighbours of a world point (submersion test for foam).
     auto countFluidNeighbours = [&](const Vec3& x) -> int {
@@ -178,6 +195,35 @@ void stepFoam(const FluidParticles& fluid,
             return grid.solid_vel[cellIndex(i, j, k)];
         };
 
+        // ── 2a. Fluid-neighbour count per foam particle ─────────────────────
+        // Split out of the main loop for two reasons: it is the same
+        // gather-over-(2*reach+1)^3-cells work that made the generation criterion
+        // the dominant cost, so it needs its own number instead of hiding inside
+        // advect_ms; and hoisting it creates exactly the seam a GPU producer plugs
+        // into, mirroring how `expected` was moved. Math is unchanged.
+        // The number came back at 11.35 ms of 14.98 ms total — 93% of advect — and
+        // sim_foam_neigh now fills this array instead.
+        static std::vector<int> neighbour_count;
+        if (neighbour_count.size() < foam_count) neighbour_count.resize(foam_count);
+        const auto t_nbr0 = clock::now();
+        if (precomputed_neighbours) {
+            // sim_foam_neigh already walked the buckets on the device. Widths differ
+            // (uint32 there, int here) so this still costs one pass, but a 100k copy
+            // is ~0.05 ms against the 11.35 ms gather it replaces.
+            for (std::size_t fi = 0; fi < foam_count; ++fi)
+                neighbour_count[fi] = static_cast<int>(precomputed_neighbours[fi]);
+        } else {
+#ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic, 512) num_threads(thread_cap)
+#endif
+        for (int64_t f = 0; f < static_cast<int64_t>(foam_count); ++f) {
+            const std::size_t fi = static_cast<std::size_t>(f);
+            neighbour_count[fi] = countFluidNeighbours(foam.position[fi]);
+        }
+        }
+        if (stats) stats->advect_neighbour_ms =
+            std::chrono::duration<float, std::milli>(clock::now() - t_nbr0).count();
+
 #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic, 512) num_threads(thread_cap)
 #endif
@@ -187,7 +233,7 @@ void stepFoam(const FluidParticles& fluid,
             const Vec3 p0 = x;
             Vec3 v = foam.velocity[fi];
 
-            const int neigh = countFluidNeighbours(x);
+            const int neigh = neighbour_count[fi];
             FoamType type;
             if      (neigh <= spray_max)  type = FoamType::Spray;
             else if (neigh >= bubble_min) type = FoamType::Bubble;
@@ -283,6 +329,15 @@ void stepFoam(const FluidParticles& fluid,
         static std::vector<float> expected;     // expected spawn count per particle
         if (expected.size() < fluid_count) expected.resize(fluid_count);
 
+        // The criterion pass is the expensive half of foam and the first part a GPU
+        // producer replaced here. The CSR bin above now disappears too, but only
+        // when the classification gather is ALSO precomputed — those two are its
+        // only consumers, and either one still on the host keeps it alive.
+        const float* expected_src = expected.data();
+        if (precomputed_expected) {
+            expected_src = precomputed_expected;
+        } else {
+
         const float k_ta = params.trapped_air_rate;
         const float k_wc = params.wave_crest_rate;
         const float crest_cos = params.crest_cos;
@@ -360,14 +415,19 @@ void stepFoam(const FluidParticles& fluid,
             expected[pi] = rate * Iek * dt;
         }
 
+        }  // end CPU criterion pass (skipped when a GPU producer supplied it)
+
+        if (stats) stats->crit_ms = std::chrono::duration<float, std::milli>(clock::now() - t_gen0).count();
+
         // ── 4. Serial stochastic emit (RNG can't run race-free in the parallel
         //       pass; this is cheap — only high-potential particles spawn). ──
+        const auto t_emit0 = clock::now();
         std::mt19937 rng(seed * 2654435761u + 12345u);
         std::uniform_real_distribution<float> u01(0.0f, 1.0f);
         const float jit = params.spawn_jitter_voxels * voxel;
         std::size_t spawned = 0;
         for (std::size_t pi = 0; pi < fluid_count; ++pi) {
-            float e = expected[pi];
+            float e = expected_src[pi];
             if (e <= 0.0f) continue;
             if (foam.size() >= params.max_foam) break;
             int n = static_cast<int>(e);
@@ -386,11 +446,16 @@ void stepFoam(const FluidParticles& fluid,
                 ++spawned;
             }
         }
-        if (stats) stats->spawned = spawned;
+        if (stats) {
+            stats->spawned = spawned;
+            stats->emit_ms =
+                std::chrono::duration<float, std::milli>(clock::now() - t_emit0).count();
+        }
     }
     if (stats) stats->gen_ms = std::chrono::duration<float, std::milli>(clock::now() - t_gen0).count();
 
     // ── 5. Stats ────────────────────────────────────────────────────────────
+    const auto t_classify0 = clock::now();
     if (stats) {
         stats->alive = foam.size();
         for (std::size_t i = 0; i < foam.size(); ++i) {
@@ -400,6 +465,8 @@ void stepFoam(const FluidParticles& fluid,
                 default:               ++stats->foam;   break;
             }
         }
+        stats->classify_ms =
+            std::chrono::duration<float, std::milli>(clock::now() - t_classify0).count();
     }
 }
 

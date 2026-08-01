@@ -561,7 +561,7 @@ bool        g_seq_save_denoise = false;
 // raster viewport cannot draw the NanoVDB surface). Updated once per frame.
 bool g_solid_viewport_active = false;
 bool g_sim_timeline_mode = true;  // true = timeline-driven (bake/scrub, idle when stopped); false = live free-run preview
-bool g_sim_use_gpu_solver = false; // experimental GPU simulation compute (CUDA today): grid solver + APIC fluid + NanoVDB bridge
+bool g_sim_use_gpu_solver = false; // GPU simulation compute (Vulkan, or CUDA where present): grid solver + APIC fluid + NanoVDB bridge
 bool g_gpu_subdivide_enabled = true; // GPU linear mesh subdivision (CPU fallback when unavailable / small mesh)
 RayTrophiSim::SimulationComputeVulkanContext g_vulkan_sim_compute_ctx{};
 std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild is happening // GPU OptiX geometry needs rebuild

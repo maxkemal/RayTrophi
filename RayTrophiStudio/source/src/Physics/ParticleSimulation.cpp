@@ -1421,6 +1421,63 @@ struct FluidDensitySplatGpuConstants {
     float particle_density = 1.0f;
 };
 
+// Whitewater spawn-potential pass. Two structs, because the bin kernels and the
+// criterion kernel take different ranges; both are mirrored field-for-field in
+// sim_foam_bin_*.comp / sim_foam_crit.comp (push constants match by OFFSET, so a
+// shader that declares a shorter prefix still has to declare the SAME prefix).
+struct FoamBinGpuConstants {
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+    int particle_count = 0;
+    float origin_x = 0.0f;
+    float origin_y = 0.0f;
+    float origin_z = 0.0f;
+    float voxel_size = 1.0f;
+    int max_per_cell = 0;
+    int cell_count = 0;
+};
+
+struct FoamCritGpuConstants {
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+    int particle_count = 0;
+    float origin_x = 0.0f;
+    float origin_y = 0.0f;
+    float origin_z = 0.0f;
+    float voxel_size = 1.0f;
+    float h = 0.0f;
+    int reach = 1;
+    int max_per_cell = 0;
+    float k_ta = 0.0f;
+    float k_wc = 0.0f;
+    float crest_cos = 0.0f;
+    float ta_min = 0.0f;
+    float ta_max = 1.0f;
+    float wc_min = 0.0f;
+    float wc_max = 1.0f;
+    float ke_min = 0.0f;
+    float ke_max = 1.0f;
+    float dt = 0.0f;
+};
+
+// sim_foam_neigh: same grid/bucket prefix as the criterion, minus every Ihmsen
+// coefficient (this kernel only counts). 11 fields x 4 = 44 bytes.
+struct FoamNeighGpuConstants {
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+    int foam_count = 0;
+    float origin_x = 0.0f;
+    float origin_y = 0.0f;
+    float origin_z = 0.0f;
+    float voxel_size = 1.0f;
+    float h = 0.0f;
+    int reach = 1;
+    int max_per_cell = 0;
+};
+
 struct FluidParticleIntegrateGpuConstants {
     int particle_count = 0;
     float dt = 0.0f;
@@ -2039,6 +2096,401 @@ bool runGpuFluidDensitySplat(SimulationGridDomainState& state,
     return ok;
 }
 
+// ── GPU whitewater spawn potentials (Ihmsen criteria) ───────────────────────
+// Replaces stepFoam's phase 3, measured at 66.5% of the entire CPU foam cost and
+// insensitive to any foam budget knob because it scales with the FLUID particle
+// count. Fills `expected_out` with one fractional spawn count per fluid particle;
+// the host still runs the stochastic emit, so the result stays directly
+// comparable against the CPU reference (which remains the oracle).
+//
+// Returns false on any allocation/dispatch failure — the caller then simply runs
+// the untouched CPU path, so this can never make foam disappear.
+bool runGpuFoamCriteria(SimulationGridDomainState& state,
+                        const Fluid::FoamParams& fparams,
+                        float dt,
+                        SimulationComputeContext* compute,
+                        SimulationGridDomainComputeBuffers& gpu_buffers,
+                        std::vector<float>& expected_out) {
+    auto& grid = state.grid;
+    const std::size_t particle_count = state.particles.size();
+    if (!compute || !compute->supportsDispatch() || particle_count == 0 ||
+        !fparams.enabled || dt <= 0.0f ||
+        (fparams.trapped_air_rate <= 0.0f && fparams.wave_crest_rate <= 0.0f) ||
+        grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || grid.voxel_size <= 0.0f) {
+        return false;
+    }
+
+    // Positions AND velocities: the criterion needs relative velocity, unlike the
+    // density splat which uploads positions only.
+    if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers,
+                                       /*upload_positions_only=*/false)) {
+        return false;
+    }
+
+    const std::size_t cell_count = static_cast<std::size_t>(grid.nx) *
+                                   static_cast<std::size_t>(grid.ny) *
+                                   static_cast<std::size_t>(grid.nz);
+    if (cell_count == 0) return false;
+
+    // Bucket capacity. A cell normally holds ~particles_per_cell particles; the
+    // 4x headroom is what lets us skip a prefix scan entirely. The kernel counts
+    // anything above the cap instead of silently biasing the result, and the
+    // tally below turns that into a visible warning rather than a mystery.
+    const int max_per_cell = 32;
+    const ComputeBufferUsage usage = ComputeBufferUsage::Storage |
+                                     ComputeBufferUsage::Upload |
+                                     ComputeBufferUsage::Download |
+                                     ComputeBufferUsage::ReadWrite;
+    const bool layout_changed =
+        gpu_buffers.foam_bin_cell_count != static_cast<int>(cell_count) ||
+        gpu_buffers.foam_bin_cell_capacity != max_per_cell;
+    if (layout_changed || !gpu_buffers.foam_bin_counts.valid()) {
+        if (gpu_buffers.foam_bin_counts.valid()) {
+            compute->destroyBuffer(gpu_buffers.foam_bin_counts);
+            gpu_buffers.foam_bin_counts = {};
+        }
+        if (gpu_buffers.foam_bin_items.valid()) {
+            compute->destroyBuffer(gpu_buffers.foam_bin_items);
+            gpu_buffers.foam_bin_items = {};
+        }
+        ComputeBufferDesc desc;
+        desc.usage = usage;
+        // +1 counter slot: the trailing overflow tally.
+        desc.debug_name = "FoamBinCounts";
+        desc.size_bytes = (cell_count + 1) * sizeof(uint32_t);
+        gpu_buffers.foam_bin_counts = compute->createBuffer(desc);
+        desc.debug_name = "FoamBinItems";
+        desc.size_bytes = cell_count * static_cast<std::size_t>(max_per_cell) *
+                          sizeof(uint32_t);
+        gpu_buffers.foam_bin_items = compute->createBuffer(desc);
+        gpu_buffers.foam_bin_cell_count = static_cast<int>(cell_count);
+        gpu_buffers.foam_bin_cell_capacity = max_per_cell;
+    }
+    if (!gpu_buffers.foam_bin_counts.valid() || !gpu_buffers.foam_bin_items.valid()) {
+        return false;
+    }
+
+    if (!gpu_buffers.foam_expected.valid() ||
+        gpu_buffers.foam_expected_capacity < particle_count) {
+        if (gpu_buffers.foam_expected.valid()) {
+            compute->destroyBuffer(gpu_buffers.foam_expected);
+            gpu_buffers.foam_expected = {};
+        }
+        // Grow with the same geometric headroom the particle streams use, so
+        // emitter-driven count changes do not reallocate every step.
+        std::size_t capacity = std::max<std::size_t>(particle_count, 4096u);
+        capacity += capacity / 2u;
+        ComputeBufferDesc desc;
+        desc.debug_name = "FoamExpected";
+        desc.size_bytes = capacity * sizeof(float);
+        desc.usage = usage;
+        gpu_buffers.foam_expected = compute->createBuffer(desc);
+        gpu_buffers.foam_expected_capacity =
+            gpu_buffers.foam_expected.valid() ? capacity : 0;
+        // The buffer the pending dispatch wrote into is gone.
+        gpu_buffers.foam_expected_pending = false;
+    }
+    if (!gpu_buffers.foam_expected.valid()) return false;
+
+    const int reach = std::max(1, static_cast<int>(
+        std::ceil(fparams.neighbor_radius_voxels)));
+
+    FoamBinGpuConstants bin_c;
+    bin_c.nx = grid.nx;
+    bin_c.ny = grid.ny;
+    bin_c.nz = grid.nz;
+    bin_c.particle_count = static_cast<int>(std::min<std::size_t>(
+        particle_count, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    bin_c.origin_x = grid.origin.x;
+    bin_c.origin_y = grid.origin.y;
+    bin_c.origin_z = grid.origin.z;
+    bin_c.voxel_size = grid.voxel_size;
+    bin_c.max_per_cell = max_per_cell;
+    bin_c.cell_count = static_cast<int>(cell_count);
+
+    // ── Read the PREVIOUS step's result before queueing this one ────────────
+    // Downloading right after the dispatch measured 17.29 ms, of which the kernel
+    // is ~1-2 ms and the 400 KB transfer ~0.1 ms: the rest was the host waiting
+    // for the whole pending fluid step to drain. Deferring the read by one step
+    // removes the wait entirely without shrinking the payload.
+    //
+    // The cost is that potentials are one step old, and that particle indices may
+    // have shifted (emitters append, culling compacts) so a few particles read a
+    // neighbour's potential. For a stochastic spawner emitting ~435 of 100k
+    // particles per step that is invisible; a stall on every step is not.
+    bool have_previous = false;
+    if (gpu_buffers.foam_expected_pending) {
+        const std::size_t prev = std::min(gpu_buffers.foam_expected_pending_count,
+                                          particle_count);
+        if (expected_out.size() < particle_count) expected_out.resize(particle_count);
+        // Particles that did not exist in the pending dispatch get no potential
+        // rather than a stale neighbour's.
+        if (prev < particle_count) {
+            std::fill(expected_out.begin() + static_cast<std::ptrdiff_t>(prev),
+                      expected_out.begin() + static_cast<std::ptrdiff_t>(particle_count),
+                      0.0f);
+        }
+        compute->beginTransferBatch();
+        bool read_ok = compute->downloadBuffer(gpu_buffers.foam_expected,
+                                               expected_out.data(),
+                                               prev * sizeof(float));
+        // Bucket overflow tally rides the same batch, so watching the cap costs
+        // no extra sync. Reported once — the cap is what buys us "no prefix scan",
+        // so a silent breach must not stay silent.
+        uint32_t overflow = 0;
+        static bool s_warned = false;
+        const bool ov_ok =
+            s_warned ? false
+                     : compute->downloadBuffer(
+                           gpu_buffers.foam_bin_counts, &overflow, sizeof(uint32_t),
+                           /*src_offset_bytes=*/cell_count * sizeof(uint32_t));
+        read_ok = compute->endTransferBatch() && read_ok;
+        if (ov_ok && overflow > 0u && !s_warned) {
+            s_warned = true;
+            SCENE_LOG_WARN("[FoamGPU] neighbour bucket cap (" +
+                           std::to_string(max_per_cell) +
+                           "/cell) exceeded by " + std::to_string(overflow) +
+                           " particles; spawn potentials will differ slightly from "
+                           "the CPU reference. Raise max_per_cell in runGpuFoamCriteria.");
+        }
+        have_previous = read_ok;
+        gpu_buffers.foam_expected_pending = false;
+    }
+
+    constexpr uint32_t threads = 256;
+    ComputeBufferHandle clear_buffers[2] = {
+        gpu_buffers.foam_bin_counts,
+        gpu_buffers.foam_expected
+    };
+    ComputeDispatch cmd;
+    cmd.kernel = "sim_foam_bin_clear";
+    cmd.buffers = clear_buffers;
+    cmd.buffer_count = 2;
+    cmd.constants = &bin_c;
+    cmd.constants_size = sizeof(bin_c);
+    // Clears two ranges of different length (cells+overflow, and particles), each
+    // bounded inside the kernel, so cover whichever is larger.
+    cmd.groups.groups_x =
+        (static_cast<uint32_t>(std::max(cell_count + 1, particle_count)) + threads - 1u) / threads;
+    bool ok = compute->dispatch(cmd);
+
+    ComputeBufferHandle scatter_buffers[3] = {
+        gpu_buffers.fluid_positions,
+        gpu_buffers.foam_bin_counts,
+        gpu_buffers.foam_bin_items
+    };
+    cmd.kernel = "sim_foam_bin_scatter";
+    cmd.buffers = scatter_buffers;
+    cmd.buffer_count = 3;
+    cmd.groups.groups_x =
+        (static_cast<uint32_t>(bin_c.particle_count) + threads - 1u) / threads;
+    ok = ok && compute->dispatch(cmd);
+
+    FoamCritGpuConstants crit_c;
+    crit_c.nx = grid.nx;
+    crit_c.ny = grid.ny;
+    crit_c.nz = grid.nz;
+    crit_c.particle_count = bin_c.particle_count;
+    crit_c.origin_x = grid.origin.x;
+    crit_c.origin_y = grid.origin.y;
+    crit_c.origin_z = grid.origin.z;
+    crit_c.voxel_size = grid.voxel_size;
+    crit_c.h = std::max(1e-4f, fparams.neighbor_radius_voxels * grid.voxel_size);
+    crit_c.reach = reach;
+    crit_c.max_per_cell = max_per_cell;
+    crit_c.k_ta = fparams.trapped_air_rate;
+    crit_c.k_wc = fparams.wave_crest_rate;
+    crit_c.crest_cos = fparams.crest_cos;
+    crit_c.ta_min = fparams.ta_min;
+    crit_c.ta_max = fparams.ta_max;
+    crit_c.wc_min = fparams.wc_min;
+    crit_c.wc_max = fparams.wc_max;
+    crit_c.ke_min = fparams.ke_min;
+    crit_c.ke_max = fparams.ke_max;
+    crit_c.dt = dt;
+
+    ComputeBufferHandle crit_buffers[5] = {
+        gpu_buffers.fluid_positions,
+        gpu_buffers.fluid_velocities,
+        gpu_buffers.foam_bin_counts,
+        gpu_buffers.foam_bin_items,
+        gpu_buffers.foam_expected
+    };
+    cmd.kernel = "sim_foam_crit";
+    cmd.buffers = crit_buffers;
+    cmd.buffer_count = 5;
+    cmd.constants = &crit_c;
+    cmd.constants_size = sizeof(crit_c);
+    // One thread per BUCKET SLOT, not per particle: consecutive lanes then land on
+    // consecutive cells and share a neighbourhood instead of scattering across the
+    // domain in emission order. Costs idle lanes in partly-filled cells — with
+    // ~4 particles per cell against a cap of 32 that is most of them, which is
+    // exactly what this measurement is meant to settle.
+    cmd.groups.groups_x =
+        (static_cast<uint32_t>(cell_count * static_cast<std::size_t>(max_per_cell)) +
+         threads - 1u) / threads;
+    ok = ok && compute->dispatch(cmd);
+    if (!ok) return have_previous;
+
+    // In flight; its result is collected at the top of the next call. No wait here
+    // — that wait was the whole 17.29 ms.
+    gpu_buffers.foam_expected_pending = true;
+    gpu_buffers.foam_expected_pending_count = particle_count;
+    // Bins are current for this step's liquid: the neighbour pass may now reuse
+    // them. Cleared by its dispatch so one build is never consumed twice.
+    gpu_buffers.foam_bin_ready_this_step = true;
+
+    // First step after a (re)start has nothing queued yet, so the caller runs the
+    // untouched CPU path for exactly one step.
+    return have_previous;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Foam classification gather (sim_foam_neigh), split into consume + dispatch.
+//
+// The criterion pass could dispatch and collect in one call because its result is
+// stochastic: reading a neighbour's spawn potential after an index shift is
+// invisible. This one is not — the count picks each particle's integration rule —
+// so it is pinned to the only window where foam indices are stable: dispatch after
+// stepFoam has finished mutating the array, consume before the next step touches
+// it. Nothing runs in between, so index i means the same particle on both sides.
+//
+// What can still slip in is a cache scrub or a sim reset. Those replace the array
+// wholesale, possibly at the same length, so the length check cannot see them —
+// FoamParticles::topology_generation can, and a mismatch drops the result and
+// spends one step on the CPU path rather than classifying against a dead array.
+//
+// The FOAM positions are not stale at all — end of step N is start of step N+1 —
+// but the bins they are measured against hold step N's liquid, so the submersion
+// test lags the fluid by one dt. For a count inside a ~2-voxel radius that is the
+// same order as the CPU path's own discretisation, and it is the price of not
+// stalling; a same-step readback here would cost the queue drain all over again.
+// ─────────────────────────────────────────────────────────────────────────────
+bool consumeGpuFoamNeighbours(const Fluid::FoamParticles& foam,
+                              SimulationComputeContext* compute,
+                              SimulationGridDomainComputeBuffers& gpu_buffers,
+                              std::vector<uint32_t>& neigh_out) {
+    if (!gpu_buffers.foam_neigh_pending) return false;
+    gpu_buffers.foam_neigh_pending = false;   // one dispatch, one read, always
+
+    if (!compute || !compute->supportsDispatch() || !gpu_buffers.foam_neigh.valid())
+        return false;
+
+    const std::size_t count = foam.size();
+    if (count == 0 ||
+        count != gpu_buffers.foam_neigh_pending_count ||
+        foam.topology_generation != gpu_buffers.foam_neigh_pending_generation) {
+        return false;
+    }
+
+    if (neigh_out.size() < count) neigh_out.resize(count);
+    return compute->downloadBuffer(gpu_buffers.foam_neigh, neigh_out.data(),
+                                   count * sizeof(uint32_t));
+}
+
+void dispatchGpuFoamNeighbours(SimulationGridDomainState& state,
+                               const Fluid::FoamParams& fparams,
+                               SimulationComputeContext* compute,
+                               SimulationGridDomainComputeBuffers& gpu_buffers) {
+    const bool bins_ready = gpu_buffers.foam_bin_ready_this_step;
+    gpu_buffers.foam_bin_ready_this_step = false;  // consumed either way
+
+    auto& grid = state.grid;
+    const std::size_t foam_count = state.foam.size();
+    if (!bins_ready || !compute || !compute->supportsDispatch() || foam_count == 0 ||
+        !fparams.enabled || grid.voxel_size <= 0.0f ||
+        grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
+        !gpu_buffers.foam_bin_counts.valid() || !gpu_buffers.foam_bin_items.valid() ||
+        !gpu_buffers.fluid_positions.valid()) {
+        return;
+    }
+
+    const ComputeBufferUsage usage = ComputeBufferUsage::Storage |
+                                     ComputeBufferUsage::Upload |
+                                     ComputeBufferUsage::Download |
+                                     ComputeBufferUsage::ReadWrite;
+    // Foam is hard-capped by max_foam, so after the first few steps this stops
+    // reallocating entirely; grow geometrically anyway so ramp-up does not
+    // destroy/recreate on every step.
+    if (!gpu_buffers.foam_positions.valid() ||
+        gpu_buffers.foam_positions_capacity < foam_count) {
+        if (gpu_buffers.foam_positions.valid()) {
+            compute->destroyBuffer(gpu_buffers.foam_positions);
+            gpu_buffers.foam_positions = {};
+        }
+        std::size_t capacity = std::max<std::size_t>(foam_count, 4096u);
+        capacity += capacity / 2u;
+        ComputeBufferDesc desc;
+        desc.debug_name = "FoamPositions";
+        desc.size_bytes = capacity * sizeof(Vec3);
+        desc.usage = usage;
+        gpu_buffers.foam_positions = compute->createBuffer(desc);
+        gpu_buffers.foam_positions_capacity =
+            gpu_buffers.foam_positions.valid() ? capacity : 0;
+    }
+    if (!gpu_buffers.foam_neigh.valid() ||
+        gpu_buffers.foam_neigh_capacity < foam_count) {
+        if (gpu_buffers.foam_neigh.valid()) {
+            compute->destroyBuffer(gpu_buffers.foam_neigh);
+            gpu_buffers.foam_neigh = {};
+        }
+        std::size_t capacity = std::max<std::size_t>(foam_count, 4096u);
+        capacity += capacity / 2u;
+        ComputeBufferDesc desc;
+        desc.debug_name = "FoamNeighbourCounts";
+        desc.size_bytes = capacity * sizeof(uint32_t);
+        desc.usage = usage;
+        gpu_buffers.foam_neigh = compute->createBuffer(desc);
+        gpu_buffers.foam_neigh_capacity =
+            gpu_buffers.foam_neigh.valid() ? capacity : 0;
+    }
+    if (!gpu_buffers.foam_positions.valid() || !gpu_buffers.foam_neigh.valid()) return;
+
+    if (!compute->uploadBuffer(gpu_buffers.foam_positions,
+                               state.foam.position.data(),
+                               foam_count * sizeof(Vec3))) {
+        return;
+    }
+
+    FoamNeighGpuConstants c;
+    c.nx = grid.nx;
+    c.ny = grid.ny;
+    c.nz = grid.nz;
+    c.foam_count = static_cast<int>(std::min<std::size_t>(
+        foam_count, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    c.origin_x = grid.origin.x;
+    c.origin_y = grid.origin.y;
+    c.origin_z = grid.origin.z;
+    c.voxel_size = grid.voxel_size;
+    c.h = std::max(1e-4f, fparams.neighbor_radius_voxels * grid.voxel_size);
+    c.reach = std::max(1, static_cast<int>(std::ceil(fparams.neighbor_radius_voxels)));
+    c.max_per_cell = gpu_buffers.foam_bin_cell_capacity;
+
+    constexpr uint32_t threads = 256;
+    ComputeBufferHandle buffers[5] = {
+        gpu_buffers.foam_positions,
+        gpu_buffers.fluid_positions,
+        gpu_buffers.foam_bin_counts,
+        gpu_buffers.foam_bin_items,
+        gpu_buffers.foam_neigh
+    };
+    ComputeDispatch cmd;
+    cmd.kernel = "sim_foam_neigh";
+    cmd.buffers = buffers;
+    cmd.buffer_count = 5;
+    cmd.constants = &c;
+    cmd.constants_size = sizeof(c);
+    // One thread per foam particle. Slot-dispatch was measured here and did not pay
+    // — see the kernel's header comment before trying it again.
+    cmd.groups.groups_x =
+        (static_cast<uint32_t>(c.foam_count) + threads - 1u) / threads;
+    if (!compute->dispatch(cmd)) return;
+
+    gpu_buffers.foam_neigh_pending = true;
+    gpu_buffers.foam_neigh_pending_count = foam_count;
+    gpu_buffers.foam_neigh_pending_generation = state.foam.topology_generation;
+}
+
 // GPU free-surface pressure projection (SOR variant).
 // Uploads the pre-computed fluid_mask (float, 0=air / 1=fluid), runs
 // divergence + SOR iterations + gradient subtraction, then downloads
@@ -2072,7 +2524,11 @@ bool runGpuFluidFreeSurfacePressure(SimulationGridDomainState& state,
     bool ok = compute->uploadBuffer(gpu_buffers.vel_x,    grid.vel_x.data(),    grid.vel_x.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.vel_y,    grid.vel_y.data(),    grid.vel_y.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.vel_z,    grid.vel_z.data(),    grid.vel_z.size() * sizeof(float)) &&
-              compute->uploadBuffer(gpu_buffers.fluid_mask, fluid_mask_cpu.data(), fluid_mask_cpu.size() * sizeof(float));
+              // cell_count, not the vector's size — see the same upload in
+              // runGpuFluidMGPCGPressure: the caller's mask scratch is grow-only, so
+              // after a larger domain it stays oversized and overflows this buffer.
+              compute->uploadBuffer(gpu_buffers.fluid_mask, fluid_mask_cpu.data(),
+                                    cell_count * sizeof(float));
     if (!ok) return false;
 
     // Zero pressure each step (no warm-start — free-surface topology changes).
@@ -2187,17 +2643,55 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         grid.divergence.size() != grid.getCellCount()) {
         return false;
     }
-    if (!gpu_buffers.vel_x.valid() || !gpu_buffers.vel_y.valid() ||
-        !gpu_buffers.vel_z.valid() || !gpu_buffers.pressure.valid() ||
-        !gpu_buffers.divergence.valid() || !gpu_buffers.fluid_mask.valid()) {
+    // Name the missing buffer once. At high resolution these are the allocations
+    // that fail first — the CG scratch alone is five full cell-sized float fields
+    // on top of the solver's own — and an invalid handle here used to return false
+    // into a caller that reported "(CPU)" without explaining anything.
+    auto reportMissing = [&](const char* which) {
+        // Keyed, not one-shot: a second domain (or a new project in the same
+        // session) failing on a different buffer must not be swallowed because an
+        // earlier one already reported.
+        const std::string key =
+            std::string(which) + "|" + std::to_string(grid.getCellCount());
+        static std::string last_key;
+        if (key != last_key) {
+            last_key = key;
+            SCENE_LOG_WARN("[SimCompute] GPU MGPCG pressure unavailable: " +
+                           std::string(which) + " buffer not allocated (cells=" +
+                           std::to_string(grid.getCellCount()) +
+                           "). Most likely out of VRAM at this resolution.");
+        }
         return false;
-    }
+    };
+    // Every other way out of this function used to be a bare `return false`, which
+    // is how a fallback with a known stage ("MGPCG pressure projection") still left
+    // no idea WHICH step inside it gave up. Keyed like reportMissing so a later
+    // domain or a new project in the same session is not swallowed.
+    auto bail = [&](const char* where) {
+        const std::string key =
+            std::string(where) + "|" + std::to_string(grid.getCellCount());
+        static std::string last_key;
+        if (key != last_key) {
+            last_key = key;
+            SCENE_LOG_WARN("[SimCompute] GPU MGPCG gave up at: " + std::string(where) +
+                           " (cells=" + std::to_string(grid.getCellCount()) + ")");
+        }
+        return false;
+    };
+
+    if (!gpu_buffers.vel_x.valid())      return reportMissing("vel_x");
+    if (!gpu_buffers.vel_y.valid())      return reportMissing("vel_y");
+    if (!gpu_buffers.vel_z.valid())      return reportMissing("vel_z");
+    if (!gpu_buffers.pressure.valid())   return reportMissing("pressure");
+    if (!gpu_buffers.divergence.valid()) return reportMissing("divergence");
+    if (!gpu_buffers.fluid_mask.valid()) return reportMissing("fluid_mask");
     // CG scratch missing → signal fallback to the SOR / CPU PCG path.
-    if (!gpu_buffers.cg_residual.valid() || !gpu_buffers.cg_z.valid() ||
-        !gpu_buffers.cg_search.valid()   || !gpu_buffers.cg_As.valid() ||
-        !gpu_buffers.cg_diag.valid()     || !gpu_buffers.cg_partials.valid()) {
-        return false;
-    }
+    if (!gpu_buffers.cg_residual.valid()) return reportMissing("cg_residual");
+    if (!gpu_buffers.cg_z.valid())        return reportMissing("cg_z");
+    if (!gpu_buffers.cg_search.valid())   return reportMissing("cg_search");
+    if (!gpu_buffers.cg_As.valid())       return reportMissing("cg_As");
+    if (!gpu_buffers.cg_diag.valid())     return reportMissing("cg_diag");
+    if (!gpu_buffers.cg_partials.valid()) return reportMissing("cg_partials");
 
     const uint32_t threads     = 256; // must match the device block size (256)
     const uint32_t cell_count  = static_cast<uint32_t>(grid.getCellCount());
@@ -2212,9 +2706,18 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     bool ok = compute->uploadBuffer(gpu_buffers.vel_x,      grid.vel_x.data(),      grid.vel_x.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.vel_y,      grid.vel_y.data(),      grid.vel_y.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.vel_z,      grid.vel_z.data(),      grid.vel_z.size() * sizeof(float)) &&
-              compute->uploadBuffer(gpu_buffers.fluid_mask, fluid_mask_cpu.data(),  fluid_mask_cpu.size() * sizeof(float));
+              // cell_count, NOT fluid_mask_cpu.size(): the caller's scratch vector is
+              // function-static and grow-only (buildFluidMaskFromParticles keeps the
+              // high-water mark to avoid reallocating every step). Run a 4.6M-cell
+              // domain, then open a new project with a 125k-cell one in the SAME
+              // session and the vector is still 4.6M long — uploading its full size
+              // into the correctly-sized 125k buffer overflows it, uploadBuffer
+              // returns false, and the whole pressure+G2P path silently drops to the
+              // CPU. Only the live cells are ever read by the kernels anyway.
+              compute->uploadBuffer(gpu_buffers.fluid_mask, fluid_mask_cpu.data(),
+                                    cell_count * sizeof(float));
     ok = compute->endTransferBatch() && ok;
-    if (!ok) return false;
+    if (!ok) return bail("velocity + fluid_mask upload");
     const float mg_upload_ms = elapsedMilliseconds(mg_upload_begin, SimulationClock::now());
 
     const bool is_variational = fluid_params.variational_solids &&
@@ -2264,7 +2767,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     if (is_gfm) {
         ok = ok && compute->uploadBuffer(gpu_buffers.var_fluid_phi, grid.fluid_phi.data(), grid.fluid_phi.size() * sizeof(float));
     }
-    if (!ok) return false;
+    if (!ok) return bail("variational weight / solid-velocity upload");
 
     GridProjectionGpuConstants c;
     c.nx         = grid.nx;
@@ -2308,7 +2811,9 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     // Both GPU backends now carry the fluid-mask-aware path that mirrors the
     // CPU free-surface solver: solid neighbours contribute zero flux, and later
     // gradient subtraction updates only fluid/air faces while zeroing true
-    // solid faces. (Vulkan: Faz 1 port — plain path only, see gate below.)
+    // solid faces. Vulkan now also carries the variational (fractional face
+    // weight) system through the *_var kernel variants; only GFM still routes
+    // to the CPU there.
     const bool use_cuda_fluid_projection =
         compute->backendType() == ComputeBackendType::CUDA ||
         compute->backendType() == ComputeBackendType::VulkanCompute;
@@ -2317,11 +2822,50 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     // the sim actually carries variational solid weights or a GFM level set,
     // the Vulkan kernels would silently solve the wrong (binary-solid) matrix —
     // fall back to the CPU PCG, which fully supports both.
-    if (compute->backendType() == ComputeBackendType::VulkanCompute &&
-        ((fluid_params.variational_solids && grid.u_weight.size() == grid.vel_x.size()) ||
-         (fluid_params.ghost_fluid_surface && grid.fluid_phi.size() == cell_count))) {
+    // Variational solid weights ARE implemented on Vulkan now, through the *_var
+    // kernel variants selected by varKernel() below. GFM is not: porting both
+    // matrix changes in one go would make any regression impossible to attribute,
+    // so ghost-fluid domains still take the CPU PCG.
+    if (compute->backendType() == ComputeBackendType::VulkanCompute && is_gfm) {
+        // A missing FEATURE, not a failure, and it costs the whole GPU
+        // pressure+G2P path — so it says so. This used to be a bare return, which
+        // is why a domain with the option merely switched on looked like the GPU
+        // had broken at high resolution.
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            SCENE_LOG_WARN(
+                "[SimCompute] Vulkan MGPCG does not implement the ghost-fluid "
+                "surface; pressure + G2P run on the CPU for this domain. Turn GFM "
+                "off to keep the solve on the GPU, or use the CUDA backend.");
+        }
         return false;
     }
+
+    // The domain WANTS variational coupling and the grid carries the weights, but
+    // the device buffers for them are missing. Solving anyway would quietly use the
+    // binary-solid matrix — a wrong answer that looks like a working GPU solve,
+    // which is worse than being slow. Hand it to the CPU instead.
+    if (fluid_params.variational_solids &&
+        grid.u_weight.size() == grid.vel_x.size() && !is_variational) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            SCENE_LOG_WARN("[SimCompute] variational solid weights requested but their "
+                           "GPU buffers are unavailable; falling back to the CPU PCG "
+                           "rather than solving the binary-solid system.");
+        }
+        return false;
+    }
+
+    // On Vulkan the variational system lives in separate kernels (the registry
+    // binds a fixed buffer count per name). CUDA keeps one name and switches on
+    // the dispatch's buffer_count, so it must NOT get the suffix.
+    const bool vulkan_variational =
+        is_variational && compute->backendType() == ComputeBackendType::VulkanCompute;
+    auto varKernel = [vulkan_variational](const char* plain, const char* var) {
+        return vulkan_variational ? var : plain;
+    };
     ComputeBufferHandle proj_bufs[5] = {
         gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
         gpu_buffers.pressure, gpu_buffers.divergence
@@ -2342,7 +2886,9 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     }
     const int div_buf_count = is_variational ? 11 : 5;
 
-    ok = dispatch1(use_cuda_fluid_projection ? "sim_fluid_divergence" : "sim_grid_divergence",
+    ok = dispatch1(use_cuda_fluid_projection
+                       ? varKernel("sim_fluid_divergence", "sim_fluid_divergence_var")
+                       : "sim_grid_divergence",
                    use_cuda_fluid_projection ? fluid_divergence_bufs : proj_bufs,
                    use_cuda_fluid_projection ? div_buf_count : 5,
                    cell_groups);
@@ -2363,13 +2909,15 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
             b[diag_buf_count] = gpu_buffers.var_fluid_phi;
             diag_buf_count++;
         }
-        ok = ok && dispatch1("sim_fluid_cg_build_diag", b, diag_buf_count, cell_groups);
+        ok = ok && dispatch1(varKernel("sim_fluid_cg_build_diag",
+                                       "sim_fluid_cg_build_diag_var"),
+                             b, diag_buf_count, cell_groups);
     }
     // r = -div*h*h/dt at fluid cells; pressure reset to 0.
     { ComputeBufferHandle b[4] = { gpu_buffers.divergence, gpu_buffers.fluid_mask,
                                    gpu_buffers.cg_residual, gpu_buffers.pressure };
       ok = ok && dispatch1("sim_fluid_cg_residual_init", b, 4, cell_groups); }
-    if (!ok) return false;
+    if (!ok) return bail("divergence / build_diag / residual_init dispatch");
 
     const bool use_cuda_fused_reductions = compute->backendType() == ComputeBackendType::CUDA;
 
@@ -2385,7 +2933,8 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     auto finishReduction = [&](const auto& dot_begin, double& out) -> bool {
         compute->synchronize();
         if (!compute->downloadBuffer(gpu_buffers.cg_partials, cg_partials_host.data(),
-                                     dot_blocks * sizeof(double))) return false;
+                                     dot_blocks * sizeof(double)))
+            return bail("cg_partials download");
         double sum = 0.0;
         for (uint32_t bi = 0; bi < dot_blocks; ++bi) sum += cg_partials_host[bi];
         out = sum;
@@ -2396,7 +2945,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     auto dotProduct = [&](ComputeBufferHandle x, ComputeBufferHandle y, double& out) -> bool {
         const auto dot_begin = SimulationClock::now();
         ComputeBufferHandle b[3] = { x, y, gpu_buffers.cg_partials };
-        if (!dispatch1("sim_fluid_cg_dot", b, 3, dot_blocks)) return false;
+        if (!dispatch1("sim_fluid_cg_dot", b, 3, dot_blocks)) return bail("cg_dot dispatch");
         return finishReduction(dot_begin, out);
     };
 
@@ -2562,11 +3111,13 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
             const auto dot_begin = SimulationClock::now();
             ComputeBufferHandle b[4] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag,
                                          gpu_buffers.cg_z, gpu_buffers.cg_partials };
-            if (!dispatch1("sim_fluid_cg_jacobi_dot", b, 4, dot_blocks)) return false;
+            if (!dispatch1("sim_fluid_cg_jacobi_dot", b, 4, dot_blocks))
+                return bail("cg_jacobi_dot dispatch");
             return finishReduction(dot_begin, out);
         }
         { ComputeBufferHandle b[3] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag, gpu_buffers.cg_z };
-          if (!dispatch1("sim_fluid_cg_jacobi", b, 3, cell_groups)) return false; }
+          if (!dispatch1("sim_fluid_cg_jacobi", b, 3, cell_groups))
+              return bail("cg_jacobi dispatch"); }
         return dotProduct(gpu_buffers.cg_residual, gpu_buffers.cg_z, out);
     };
     auto spmvAndDot = [&](double& out) -> bool {
@@ -2595,7 +3146,8 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                 b[6] = gpu_buffers.var_w_weight;
                 spmv_buf_count = 7;
             }
-            if (!dispatch1("sim_fluid_cg_spmv", b, spmv_buf_count, cell_groups)) return false;
+            if (!dispatch1(varKernel("sim_fluid_cg_spmv", "sim_fluid_cg_spmv_var"),
+                           b, spmv_buf_count, cell_groups)) return bail("cg_spmv dispatch");
         }
         return dotProduct(gpu_buffers.cg_search, gpu_buffers.cg_As, out);
     };
@@ -2614,14 +3166,20 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     // threads); the host only synchronizes + downloads 56 bytes every K
     // iterations for the convergence check. Fused kernels (spmv+dot,
     // jacobi+dot, paired axpy) keep it at 6 dispatches per iteration.
-    // Plain branch only: variational/GFM stay on the generic loop (Vulkan
-    // already CPU-fallbacks those upstream), and CUDA keeps the generic loop
-    // when the multigrid preconditioner is available — this branch is
-    // Jacobi-only and must not silently swap the preconditioner.
+    // GFM stays on the generic loop, and CUDA keeps the generic loop when the
+    // multigrid preconditioner is available — this branch is Jacobi-only and must
+    // not silently swap the preconditioner.
+    // Vulkan may now take this loop WITH variational weights: its fused spmv+dot
+    // dispatch below binds them and selects sim_fluid_cg_spmv_dot_var, and every
+    // other kernel here is matrix-free apart from `diag`, which is already the
+    // variational diagonal. That matters a lot: on the generic loop each dot costs
+    // a submit+fence, measured at 216.96 ms across 193 syncs on a 4.6M-cell domain
+    // — more than the arithmetic. CUDA keeps the old exclusion because its dispatch
+    // in this loop still binds the plain 5-buffer form.
     const bool device_scalar_cg =
-        gpu_buffers.cg_scalars.valid() && !is_variational && !is_gfm &&
+        gpu_buffers.cg_scalars.valid() && !is_gfm &&
         (compute->backendType() == ComputeBackendType::VulkanCompute ||
-         (compute->backendType() == ComputeBackendType::CUDA &&
+         (compute->backendType() == ComputeBackendType::CUDA && !is_variational &&
           (!fluid_params.pressure_multigrid_preconditioner ||
            gpu_buffers.mg_levels.empty())));
     if (device_scalar_cg) {
@@ -2645,10 +3203,19 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
             const int batch = std::min(kCheckEvery, max_iter_pre - done_iters);
             for (int k = 0; k < batch && ok; ++k) {
                 // As = A s + partials(s.As) fused ; alpha = sigma/sAs
-                { ComputeBufferHandle b[5] = { gpu_buffers.cg_search, gpu_buffers.fluid_mask,
+                { ComputeBufferHandle b[8] = { gpu_buffers.cg_search, gpu_buffers.fluid_mask,
                                                gpu_buffers.cg_diag, gpu_buffers.cg_As,
                                                gpu_buffers.cg_partials };
-                  ok = dispatch1("sim_fluid_cg_spmv_dot", b, 5, dot_blocks); }
+                  int n = 5;
+                  if (vulkan_variational) {
+                      b[5] = gpu_buffers.var_u_weight;
+                      b[6] = gpu_buffers.var_v_weight;
+                      b[7] = gpu_buffers.var_w_weight;
+                      n = 8;
+                  }
+                  ok = dispatch1(varKernel("sim_fluid_cg_spmv_dot",
+                                           "sim_fluid_cg_spmv_dot_var"),
+                                 b, n, dot_blocks); }
                 c.parity = 1; // op: sAs + alpha
                 { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
                   ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
@@ -2692,7 +3259,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
             if (sigma0_dev <= 0.0) break;                    // nothing to solve
             if (sigma_new_dev <= tol_pre * sigma0_dev) break; // converged
         }
-        if (!ok) return false;
+        if (!ok) return bail("device-scalar CG loop");
 
         if (mgpcg_stats) {
             mgpcg_stats->pressure_cg_iterations = done_iters;
@@ -2708,13 +3275,24 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
 
         // Subtract pressure gradient from velocity (shared tail below expects
         // the generic loop's locals — do it here and return directly).
-        ComputeBufferHandle vk_grad_bufs[5] = {
+        ComputeBufferHandle vk_grad_bufs[11] = {
             gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
             gpu_buffers.pressure, gpu_buffers.fluid_mask
         };
-        cmd.kernel          = "sim_fluid_subtract_gradient";
+        int vk_grad_count = 5;
+        if (vulkan_variational) {
+            vk_grad_bufs[5]  = gpu_buffers.var_u_weight;
+            vk_grad_bufs[6]  = gpu_buffers.var_v_weight;
+            vk_grad_bufs[7]  = gpu_buffers.var_w_weight;
+            vk_grad_bufs[8]  = gpu_buffers.var_svx;
+            vk_grad_bufs[9]  = gpu_buffers.var_svy;
+            vk_grad_bufs[10] = gpu_buffers.var_svz;
+            vk_grad_count = 11;
+        }
+        cmd.kernel          = varKernel("sim_fluid_subtract_gradient",
+                                        "sim_fluid_subtract_gradient_var");
         cmd.buffers         = vk_grad_bufs;
-        cmd.buffer_count    = 5;
+        cmd.buffer_count    = vk_grad_count;
         cmd.constants       = &c;
         cmd.constants_size  = sizeof(c);
         cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
@@ -2833,7 +3411,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     }
 
     cmd.kernel          = use_cuda_fluid_projection
-        ? "sim_fluid_subtract_gradient"
+        ? varKernel("sim_fluid_subtract_gradient", "sim_fluid_subtract_gradient_var")
         : "sim_grid_subtract_gradient";
     cmd.buffers         = use_cuda_fluid_projection ? fluid_gradient_bufs : proj_bufs;
     cmd.buffer_count    = use_cuda_fluid_projection ? grad_buf_count : 5;
@@ -7442,6 +8020,34 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                         // GPU pressure or G2P failed — fall through to the full
                         // CPU step below (re-runs boundary+viscosity+pressure+G2P
                         // from the post-Call-1 grid; g2p_on_gpu stays false).
+                        //
+                        // Say WHICH stage gave up. This path used to be silent, and
+                        // a silent fallback is indistinguishable from a slow GPU:
+                        // a 4M-cell domain reported Pressure and G2P as "(CPU)"
+                        // with no way to tell whether a buffer, the solver or the
+                        // G2P kernel was the one that quit. Every other fallback in
+                        // this file logs once; this one did not.
+                        // Keyed on stage+size rather than a one-shot bool. A plain
+                        // "log once per session" goes silent exactly when it is
+                        // needed most: run a big sim, then start a new project in
+                        // the SAME session and its fallback is invisible because
+                        // the first one already burned the flag.
+                        const char* stage = !upload_ok      ? "FLIP snapshot upload"
+                                          : !pressure_on_gpu ? "MGPCG pressure projection"
+                                                             : "G2P";
+                        const std::string key =
+                            std::string(stage) + "|" +
+                            std::to_string(state.grid.getCellCount());
+                        static std::string last_fluid_fallback_key;
+                        if (key != last_fluid_fallback_key) {
+                            last_fluid_fallback_key = key;
+                            SCENE_LOG_WARN(
+                                "[SimCompute] GPU fluid step fell back to CPU at: " +
+                                std::string(stage) +
+                                " (cells=" + std::to_string(state.grid.getCellCount()) +
+                                ", particles=" + std::to_string(state.particles.size()) +
+                                "). Pressure and G2P now run on the host for this domain.");
+                        }
                     }
                 }
             }
@@ -7485,8 +8091,83 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 const uint32_t foam_seed =
                     static_cast<uint32_t>(context.time_seconds * 600.0f) +
                     static_cast<uint32_t>(i) * 9176u + 1u;
+                // Spawn potentials on GPU when the domain is already solving there
+                // (positions/velocities are resident, so this adds no transfer but
+                // the readback). The emit RNG deliberately stays on the host: it
+                // costs 0.13 ms and keeping it makes the GPU result directly
+                // comparable with the CPU reference. Any failure falls through to
+                // the full CPU path — foam can never go missing because of this.
+                const float* gpu_expected = nullptr;
+                const uint32_t* gpu_neigh = nullptr;
+                float foam_crit_gpu_ms = 0.0f;
+                float foam_neigh_gpu_ms = 0.0f;
+                static thread_local std::vector<float> s_foam_expected;
+                static thread_local std::vector<uint32_t> s_foam_neigh;
+                const bool foam_gpu_available =
+                    fluid_gpu_requested && context.compute &&
+                    context.compute->supportsDispatch() &&
+                    i < grid_domain_compute_buffers_.size();
+                if (foam_gpu_available) {
+                    // Counts for the foam about to be classified were dispatched at
+                    // the end of the PREVIOUS step over this exact array. Read them
+                    // BEFORE queueing anything new: a readback drains the queue, so
+                    // doing it after runGpuFoamCriteria would make it wait on that
+                    // call's freshly submitted bin+crit work for no reason.
+                    const auto neigh_begin = SimulationClock::now();
+                    if (consumeGpuFoamNeighbours(state.foam, context.compute,
+                                                 grid_domain_compute_buffers_[i],
+                                                 s_foam_neigh)) {
+                        gpu_neigh = s_foam_neigh.data();
+                    }
+                    foam_neigh_gpu_ms =
+                        elapsedMilliseconds(neigh_begin, SimulationClock::now());
+
+                    const auto crit_begin = SimulationClock::now();
+                    if (runGpuFoamCriteria(state, fparams, dt, context.compute,
+                                           grid_domain_compute_buffers_[i],
+                                           s_foam_expected)) {
+                        gpu_expected = s_foam_expected.data();
+                    }
+                    foam_crit_gpu_ms =
+                        elapsedMilliseconds(crit_begin, SimulationClock::now());
+                }
                 Fluid::stepFoam(state.particles, state.grid, state.foam, fparams,
-                                fluid_params.gravity, dt, foam_seed, &state.foam_stats);
+                                fluid_params.gravity, dt, foam_seed, &state.foam_stats,
+                                gpu_expected, gpu_neigh);
+                // Queue the next step's counts over the array stepFoam just left
+                // behind — advected, culled and topped up. It stays untouched until
+                // the consume above runs again, which is what makes the indices line
+                // up. Silent no-op when the bins were not built this step.
+                float foam_gpu_exec_ms = 0.0f;
+                if (foam_gpu_available) {
+                    dispatchGpuFoamNeighbours(state, fparams, context.compute,
+                                              grid_domain_compute_buffers_[i]);
+                    // Flush the foam pipeline here instead of letting it ride along
+                    // with whatever downloads next.
+                    //
+                    // The Vulkan backend records dispatches and only submits when
+                    // something forces a fence. None of the four foam kernels
+                    // download in the step that queues them, so all of them — bins,
+                    // criterion, neighbours — were being submitted by the density
+                    // splat's readback, and their execution time was charged to
+                    // "Density -> NanoVDB". That row read 15.6 ms with foam on and
+                    // 1.5 ms with foam off: ~14 ms of foam work wearing someone
+                    // else's name, while the foam block advertised 3.00 ms.
+                    //
+                    // One extra submit costs ~0.3-1 ms of WDDM latency. That is the
+                    // price of the panel telling the truth about which phase to
+                    // optimise, and it is cheap next to the misread it prevents.
+                    const auto flush_begin = SimulationClock::now();
+                    context.compute->synchronize();
+                    foam_gpu_exec_ms =
+                        elapsedMilliseconds(flush_begin, SimulationClock::now());
+                }
+                // stepFoam resets the stats block, so these are written after it.
+                state.foam_stats.crit_on_gpu = (gpu_expected != nullptr);
+                state.foam_stats.crit_gpu_ms = foam_crit_gpu_ms;
+                state.foam_stats.neigh_on_gpu = (gpu_neigh != nullptr);
+                state.foam_stats.neigh_gpu_ms = foam_neigh_gpu_ms;
+                state.foam_stats.gpu_exec_ms = foam_gpu_exec_ms;
             }
 
             // ── GPU density splat ────────────────────────────────────────────
@@ -8814,8 +9495,23 @@ void ParticleSimulationSystem::ensureComputeBuffer(SimulationComputeContext& com
         return;
     }
 
-    if (compute.getBufferSize(handle) != size_bytes) {
-        if (!compute.resizeBuffer(handle, size_bytes)) {
+    const std::size_t current = compute.getBufferSize(handle);
+    // resizeBuffer only ever GROWS (a shrink is a silent no-op that still reports
+    // success), so without this a domain that drops from 4.6M cells to 125k keeps
+    // its peak allocation for the rest of the session — several hundred MB of VRAM
+    // held by a grid that no longer exists.
+    //
+    // Reallocate only on a LARGE shrink, and only above a floor. Adaptive domains
+    // resize constantly; matching every wobble exactly would destroy+recreate (and
+    // vkDeviceWaitIdle) on a hot path. Halving is a real structural change; small
+    // buffers are not worth the churn whatever the ratio.
+    constexpr std::size_t kShrinkFloorBytes = 1u << 20;   // 1 MB
+    const bool wants_shrink =
+        size_bytes < current && current >= kShrinkFloorBytes &&
+        size_bytes <= current / 2u;
+
+    if (size_bytes > current || wants_shrink) {
+        if (wants_shrink || !compute.resizeBuffer(handle, size_bytes)) {
             compute.destroyBuffer(handle);
             ComputeBufferDesc desc;
             desc.debug_name = name ? name : "ParticleBuffer";
@@ -8824,6 +9520,35 @@ void ParticleSimulationSystem::ensureComputeBuffer(SimulationComputeContext& com
             handle = compute.createBuffer(desc);
         }
     }
+}
+
+SimulationDomainBackend defaultSimulationDomainBackend() {
+    // Vulkan first, deliberately — not the fastest-first rule it looks like it
+    // should be. CUDA is somewhat quicker on the hardware that has it, but it runs
+    // on one vendor's cards, so a CUDA default means the path most users actually
+    // execute is the one least exercised during development, and a scene authored
+    // on an NVIDIA box solves through different code than the same scene opened
+    // anywhere else. Making Vulkan the default keeps the portable path honest and
+    // costs a modest amount of speed on NVIDIA, which is one dropdown away.
+    // NOT g_hasVulkanComputeSim on its own: that flag is only raised once a Vulkan
+    // compute backend has actually been constructed, which happens when a domain
+    // selects Vulkan. Asking it while choosing the backend FOR a new domain is
+    // circular — on an empty scene it is always false, so this fell through to CUDA
+    // every time. The honest capability signal is the context the Vulkan renderer
+    // fills at device creation, long before any domain exists. Float atomics are
+    // part of the requirement, not a detail: P2G scatter and the density splat are
+    // gated on them, so a device without them cannot solve fluid on Vulkan at all.
+    const auto& vk = g_vulkan_sim_compute_ctx;
+    const bool vulkan_compute_ready =
+        g_hasVulkanComputeSim ||
+        (vk.device != nullptr && vk.compute_queue != nullptr &&
+         vk.shader_atomic_float_enabled);
+    if (vulkan_compute_ready) return SimulationDomainBackend::GPU_Vulkan;
+    // GPU_Compute resolves to CUDA when present, Vulkan otherwise; reaching it here
+    // means Vulkan compute is unavailable, so it is the CUDA branch.
+    if (g_hasCUDA) return SimulationDomainBackend::GPU_Compute;
+    // Neither — and even then the step loop would have fallen back on its own.
+    return SimulationDomainBackend::CPU_Dense;
 }
 
 void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationComputeContext& compute,
@@ -8857,6 +9582,21 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.fluid_mask);
     destroy(buffers.fluid_surface_columns);
     destroy(buffers.fluid_combustion_state);
+    destroy(buffers.foam_bin_counts);
+    destroy(buffers.foam_bin_items);
+    destroy(buffers.foam_expected);
+    buffers.foam_bin_cell_count = 0;
+    buffers.foam_bin_cell_capacity = 0;
+    buffers.foam_expected_capacity = 0;
+    buffers.foam_expected_pending = false;
+    buffers.foam_expected_pending_count = 0;
+    destroy(buffers.foam_neigh);
+    buffers.foam_positions_capacity = 0;
+    buffers.foam_neigh_capacity = 0;
+    buffers.foam_neigh_pending = false;
+    buffers.foam_neigh_pending_count = 0;
+    buffers.foam_neigh_pending_generation = 0;
+    buffers.foam_bin_ready_this_step = false;
     destroy(buffers.gas_solid_mask);
     destroy(buffers.gas_solid_vel_x);
     destroy(buffers.gas_solid_vel_y);
@@ -9161,6 +9901,28 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     }
     if (!ok) {
         return false;
+    }
+
+    // The individual buffers above are each resized correctly, but DERIVED state
+    // is not: it describes a grid that no longer exists. resolution_* was already
+    // being written here and never read — this is the read.
+    //
+    // The deferred foam readbacks are the sharp case. Both were queued against the
+    // previous layout; their pending flags are keyed on element COUNTS, which a
+    // resolution change need not alter, so the next consume would happily accept a
+    // result computed for a different grid. Dropping them costs one CPU foam step.
+    if (buffers.resolution_x != grid.nx ||
+        buffers.resolution_y != grid.ny ||
+        buffers.resolution_z != grid.nz) {
+        buffers.foam_expected_pending = false;
+        buffers.foam_expected_pending_count = 0;
+        buffers.foam_neigh_pending = false;
+        buffers.foam_neigh_pending_count = 0;
+        buffers.foam_neigh_pending_generation = 0;
+        buffers.foam_bin_ready_this_step = false;
+        // Device-resident fields belong to the old grid; the RT bridge must not
+        // keep presenting them while the new layout fills in.
+        buffers.gpu_resident_fields_valid = false;
     }
 
     buffers.resolution_x = grid.nx;

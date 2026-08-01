@@ -1,0 +1,41 @@
+// sim_foam_bin_clear.comp — reset the foam neighbour-bucket occupancy counters.
+//
+// The bucket grid is a fixed-capacity alternative to a CSR bin: cell c owns
+// max_per_cell slots at items[c * max_per_cell]. That avoids a prefix scan (and
+// the multi-pass kernel + sync it would need) at the cost of a capacity bound.
+// The last counter slot is an OVERFLOW tally, not a cell: if a cell ever wants
+// more than max_per_cell particles the extras are dropped and counted here, so
+// the host can prove the cap is never hit rather than assuming it.
+#version 450
+layout(local_size_x = 256) in;
+
+// MUST mirror FoamBinGpuConstants field-for-field even though only cell_count is
+// read: push constants are matched by OFFSET, and cell_count is the last field.
+// Declaring a lone int here would read nx instead and clear the wrong range.
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   particle_count;
+    float origin_x; float origin_y; float origin_z;
+    float voxel_size;
+    int   max_per_cell;
+    int   cell_count;      // number of real cells; slot [cell_count] is the overflow tally
+} pc;
+
+layout(set = 0, binding = 0) buffer Counts { uint counts[]; };
+// A second per-particle range zeroed in the same pass, because the consumers of
+// these bins are dispatched over BUCKET SLOTS for locality: a particle that failed
+// to bin (outside the grid, non-finite) never gets a thread, so its output slot
+// would keep the previous step's value forever.
+//
+// Typed uint but used for both outputs — sim_foam_crit's float expected[] and
+// sim_foam_neigh's uint neigh[]. Zero is 0x00000000 either way, so one kernel
+// clears both. Only ever write 0u here; anything else would need the real type.
+layout(set = 0, binding = 1) buffer ClearOut { uint clear_out[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    // The two ranges differ in length, so this is dispatched over whichever is
+    // larger and each write is bounded on its own.
+    if (id <= pc.cell_count)    counts[id] = 0u;   // '<=': also clears the overflow slot
+    if (id <  pc.particle_count) clear_out[id] = 0u;
+}

@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <imgui_internal.h>
 #include <unordered_map>
+#include <cstdarg>   // PerfBlock::Value varargs
+#include <cstdio>    // vsnprintf / snprintf
 
 // ============================================================================
 // THEME MANAGER IMPLEMENTATION
@@ -597,6 +599,134 @@ bool DragFloatWithHelp(const char* label, float* value, float speed, float min, 
 
 void ColoredHeader(const char* text, const ImVec4& color) {
     ImGui::TextColored(color, "%s", text);
+}
+
+// ============================================================================
+// PERF BLOCK — compact, copyable performance counters
+// ============================================================================
+// Two columns, stretch-sized so the block adapts to the panel instead of forcing
+// it wider. Every row is mirrored into a plain-text buffer; the Copy control at
+// the end puts the whole block on the clipboard, because these numbers are only
+// useful once they can be pasted into a report.
+
+// Below this the block shows raw times only: no bars, no percentages.
+static constexpr float kMinTotalForShare = 0.01f;   // ms
+
+PerfBlock::PerfBlock(const char* id, float total_ms)
+    : m_id(id ? id : "perf"), m_total(total_ms) {
+    m_text = m_id + "\n";
+    // NoHostExtendX: the table never pushes the panel wider than it already is.
+    m_table = ImGui::BeginTable(
+        (m_id + "##perfblock").c_str(), 2,
+        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoHostExtendX |
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_PadOuterX);
+    if (m_table) {
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthStretch, 0.58f);
+        ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch, 0.42f);
+    }
+}
+
+PerfBlock::~PerfBlock() {
+    if (!m_ended) End();
+}
+
+void PerfBlock::beginRow(const char* label, int indent) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    if (indent > 0) ImGui::Indent(indent * 12.0f);
+    ImGui::TextDisabled("%s", label ? label : "");
+    if (indent > 0) ImGui::Unindent(indent * 12.0f);
+    ImGui::TableSetColumnIndex(1);
+}
+
+void PerfBlock::Value(const char* label, const char* fmt, ...) {
+    char buf[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt ? fmt : "", args);
+    va_end(args);
+    if (m_table) {
+        beginRow(label, 0);
+        ImGui::TextDisabled("%s", buf);
+    }
+    m_text += std::string(label ? label : "") + ": " + buf + "\n";
+}
+
+void PerfBlock::Time(const char* label, float ms, const char* tag, int indent) {
+    char buf[128];
+    if (tag && tag[0])
+        snprintf(buf, sizeof(buf), "%.2f ms (%s)", ms, tag);
+    else
+        snprintf(buf, sizeof(buf), "%.2f ms", ms);
+
+    if (m_table) {
+        beginRow(label, indent);
+        // Share-of-total bar drawn BEHIND the value text: spotting the dominant
+        // phase at a glance is the whole point of the block, and a background
+        // fill costs zero extra height — the block stays as compact as the plain
+        // number dump it replaces.
+        if (m_total > kMinTotalForShare && ms > 0.0f) {
+            const float frac = ImClamp(ms / m_total, 0.0f, 1.0f);
+            const float w = ImMax(24.0f, ImGui::GetContentRegionAvail().x);
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float h = ImGui::GetTextLineHeight();
+            // Warms up as a phase approaches "this IS the frame".
+            const ImVec4 col = frac > 0.5f ? ImVec4(1.00f, 0.45f, 0.25f, 0.30f)
+                             : frac > 0.2f ? ImVec4(0.95f, 0.78f, 0.30f, 0.26f)
+                                           : ImVec4(0.35f, 0.70f, 1.00f, 0.22f);
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                p, ImVec2(p.x + w * frac, p.y + h),
+                ImGui::ColorConvertFloat4ToU32(col), 2.0f);
+        }
+        ImGui::TextDisabled("%s", buf);
+    }
+    m_text += std::string(label ? label : "") + ": " + buf;
+    // Same threshold as the bar above. A total far below the rows it is supposed to
+    // contain is not a small total, it is the wrong number — printing 528299.9%
+    // rather than nothing is how that stayed unnoticed. Below 0.01 ms no share is
+    // meaningful anyway, since every row rounds to 0.00.
+    if (m_total > kMinTotalForShare) {
+        char pct[32];
+        snprintf(pct, sizeof(pct), "  [%.1f%%]", 100.0f * ms / m_total);
+        m_text += pct;
+    }
+    m_text += "\n";
+}
+
+void PerfBlock::Section(const char* caption) {
+    if (m_table) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextColored(ImVec4(0.62f, 0.78f, 0.95f, 1.0f), "%s", caption ? caption : "");
+        ImGui::TableSetColumnIndex(1);
+    }
+    m_text += std::string("-- ") + (caption ? caption : "") + " --\n";
+}
+
+void PerfBlock::Total(const char* label, float ms) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.2f ms", ms);
+    if (m_table) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextColored(ImVec4(0.90f, 0.90f, 0.95f, 1.0f), "%s", label ? label : "");
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextColored(ImVec4(0.90f, 0.90f, 0.95f, 1.0f), "%s", buf);
+    }
+    m_text += std::string(label ? label : "") + ": " + buf + "\n";
+}
+
+void PerfBlock::End() {
+    if (m_ended) return;
+    m_ended = true;
+    if (m_table) ImGui::EndTable();
+    const std::string btn = "Copy##" + m_id + "perfcopy";
+    if (ImGui::SmallButton(btn.c_str())) {
+        ImGui::SetClipboardText(m_text.c_str());
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Copy these counters to the clipboard as plain text.");
+    }
 }
 
 void Divider() {

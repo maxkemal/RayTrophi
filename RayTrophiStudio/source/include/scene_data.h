@@ -6932,6 +6932,9 @@ public:
         desc.name = node_name.empty() ? "Grid Domain" : node_name + " Domain";
         desc.source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
         desc.source_name.clear();
+        // Same rule as the panel's "Add Grid Domain": start on the fastest solver
+        // the machine actually has, not on the descriptor's compatibility default.
+        desc.backend = RayTrophiSim::defaultSimulationDomainBackend();
         Vec3 min_bound;
         Vec3 max_bound;
         if (resolveObjectBoundsForSimulation(node_name, min_bound, max_bound)) {

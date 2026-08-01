@@ -481,9 +481,10 @@ extern bool g_solid_viewport_active; // true in Solid/Matcap shading (not Render
 // stopped = frozen/idle → cheap). false = Live Update: continuous free-run
 // interactive preview (always simulating + resetting accumulation; heavier).
 extern bool g_sim_timeline_mode;
-// Experimental: route all simulation compute (grid solver, APIC fluid forces/P2G,
-// NanoVDB density bridge, ...) through the GPU backend. CUDA today, additional
-// backends later. Default off; CPU is the reference path.
+// Route all simulation compute (grid solver, APIC fluid forces/P2G, NanoVDB
+// density bridge, ...) through the GPU backend: Vulkan compute, or CUDA where
+// it is available. Default off here; new domains instead pick their backend at
+// creation time via defaultSimulationDomainBackend().
 extern bool g_sim_use_gpu_solver;
 // GPU mesh subdivision (Flat/linear path today). When true and the input is large
 // enough to amortize the GPU round-trip, MeshModifiers::SubdivideSubD runs the
