@@ -1764,6 +1764,13 @@ public:
 
         // Parent'ın global transform'u ile bu node'un local transform'unu birleştir
         Matrix4x4 currentAnimatedGlobalTransform = parentAnimatedGlobalTransform * nodeLocalTransform;
+        // KNOWN INCONSISTENCY (left as-is deliberately): the geometry path names
+        // nodes with resolveUniqueNodeName ("X", "X.001"), this store only with
+        // getUniqueName ("X" for both). Two same-named hierarchy nodes therefore
+        // collapse to one key here and the second overwrites the first. Fixing it
+        // means keying this store the way the geometry is keyed — but that also
+        // starts feeding transforms to ".001" groups nothing currently touches, so
+        // it needs its own test rather than riding along with an unrelated change.
         animatedGlobalTransformsStore[uniqueNodeName] = currentAnimatedGlobalTransform;
 
         // Çocuk düğümler için rekürsif olarak devam et

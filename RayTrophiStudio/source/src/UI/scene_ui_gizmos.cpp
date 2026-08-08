@@ -503,20 +503,29 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             const ImU32 src_col = src_selected ? IM_COL32(255, 180, 60, 245) : IM_COL32(255, 160, 40, 165);
             const float src_thick = src_selected ? 2.2f : 1.4f;
 
+            // Resolve through the SAME path the solver injects with, so a
+            // parented source is drawn where it actually emits instead of at
+            // the parent-local offset it is authored with.
+            const RayTrophiSim::SimulationFlowSourceFrame src_frame =
+                overlay_system.runtime->resolveFlowSourceFrame(
+                    src, timeline.getCurrentFrame());
+            const Vec3 src_position = src_frame.position;
+            const Vec3 src_velocity = src_frame.velocity;
+
             if (src.source_mode == RayTrophiSim::SimulationFlowSourceMode::Point) {
-                drawSphere(src.position, src.radius, src_col, src_selected ? 1.5f : 1.0f);
+                drawSphere(src_position, src.radius, src_col, src_selected ? 1.5f : 1.0f);
             }
 
-            const float speed = src.velocity.length();
+            const float speed = src_velocity.length();
             const bool per_point = src.fluid_emit_along_normal &&
                 src.source_mode == RayTrophiSim::SimulationFlowSourceMode::MeshSurface;
             if (speed > 1e-4f && !per_point) {
-                const Vec3 dir = src.velocity * (1.0f / speed);
+                const Vec3 dir = src_velocity * (1.0f / speed);
                 const float len = std::clamp(speed * 0.25f, 0.3f, 5.0f);
                 ImVec2 a, b;
                 float da = 0.0f, db = 0.0f;
-                if (projectPoint(src.position, a, da) &&
-                    projectPoint(src.position + dir * len, b, db)) {
+                if (projectPoint(src_position, a, da) &&
+                    projectPoint(src_position + dir * len, b, db)) {
                     draw_list->AddLine(a, b, src_col, src_thick);
                     ImVec2 d(b.x - a.x, b.y - a.y);
                     const float dl = std::sqrt(d.x * d.x + d.y * d.y);
@@ -613,9 +622,22 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
                 static_cast<int>(emitter_index);
         if (emitter.source_mode ==
             RayTrophiSim::ParticleEmitterSourceMode::Point) {
+            // Resolve through the SAME path the solver emits with — exactly as
+            // the flow-source overlay above does. `emitter.point` is authored in
+            // the PARENT's space once the emitter is parented, so projecting it
+            // raw pins this marker at the parent-local offset interpreted as
+            // world coordinates: an emitter offset by a few cm from its parent
+            // is drawn sitting on the world origin, and because this is an ImGui
+            // draw-list overlay it hangs in front of the whole scene with no
+            // depth test. That stray marker is not the emitter; the emitter is
+            // wherever its parent is.
+            const RayTrophiSim::ParticleEmitterFrame emitter_frame =
+                overlay_system.runtime->resolveParticleEmitterFrame(
+                    emitter, timeline.getCurrentFrame());
+            if (emitter_frame.parent_missing) continue;
             ImVec2 screen_pos;
             float depth = 0.0f;
-            if (projectPoint(emitter.point, screen_pos, depth)) {
+            if (projectPoint(emitter_frame.position, screen_pos, depth)) {
                 const ImU32 color = emitter.enabled
                     ? (point_selected
                         ? IM_COL32(255, 205, 75, 255)
@@ -4180,6 +4202,10 @@ mesh_edit_changed_confirmed:
             auto& owner_system = ctx.scene.particle_systems[
                 static_cast<std::size_t>(sel.selected.particle_system_index)];
             for (auto& flow : owner_system.runtime->flowSources()) {
+                // A parented source stores a parent-LOCAL offset, so it is
+                // neither comparable to a world position nor movable by a world
+                // delta — and it already follows its own object anyway.
+                if (!flow.parent_object.empty()) continue;
                 if ((flow.position - old_position).length_squared() <= 1e-8f) {
                     flow.position = flow.position + emitter_delta;
                 }
@@ -4658,6 +4684,9 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
             case Physics::ForceFieldType::Turbulence: symbol = "~"; break;
             case Physics::ForceFieldType::Attractor:  symbol = "+"; break;
             case Physics::ForceFieldType::Repeller:   symbol = "-"; break;
+            // No direction arrow: a Thermal field exerts no force, so drawing one
+            // would advertise a push that does not exist.
+            case Physics::ForceFieldType::Thermal:    symbol = "T"; break;
             default: break;
         }
 

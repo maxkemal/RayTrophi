@@ -1170,7 +1170,16 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
         auto& domains       = system.runtime->gridDomains();
 
         // Shrink parallel-indexed transient state if domains disappeared.
-        for (std::size_t d = states.size();
+        // ★ "Disappeared" must mean the DESCRIPTOR is gone, not that the runtime
+        //   state vector is momentarily short. resetGridDomainStates() clears and
+        //   re-resizes `states`, so keying teardown off it deleted and recreated
+        //   this instance group every time the sim reset — visible in the log as
+        //   back-to-back "Deleted group '[FluidDomParticles] …'" / "Created group
+        //   '[FluidDomParticles] …'". Same defect shape as the domain-volume
+        //   teardown in scene_data.h: identity churn under a baked TLAS.
+        const std::size_t live_domain_count =
+            (std::max)(states.size(), domains.size());
+        for (std::size_t d = live_domain_count;
              d < system.domain_particle_render_group_ids.size(); ++d) {
             const int gid = system.domain_particle_render_group_ids[d];
             if (gid >= 0) {
@@ -1179,8 +1188,8 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 structural_change = true;
             }
         }
-        system.domain_particle_render_group_ids.resize(states.size(), -1);
-        system.domain_particle_pool_capacities.resize(states.size(), 0);
+        system.domain_particle_render_group_ids.resize(live_domain_count, -1);
+        system.domain_particle_pool_capacities.resize(live_domain_count, 0);
 
         for (std::size_t d = 0; d < states.size(); ++d) {
             const auto& state  = states[d];
@@ -1400,13 +1409,17 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
         const auto& states  = system.runtime->gridDomainStates();
         auto& domains       = system.runtime->gridDomains();
 
-        for (std::size_t d = states.size();
+        // ★ Descriptor count, not the transient state count — see the identical
+        //   note on the particle groups above.
+        const std::size_t live_domain_count =
+            (std::max)(states.size(), domains.size());
+        for (std::size_t d = live_domain_count;
              d < system.domain_foam_render_group_ids.size(); ++d) {
             const int gid = system.domain_foam_render_group_ids[d];
             if (gid >= 0) { im.deleteGroup(gid); g_fluid_source_state.erase(gid); structural_change = true; }
         }
-        system.domain_foam_render_group_ids.resize(states.size(), -1);
-        system.domain_foam_pool_capacities.resize(states.size(), 0);
+        system.domain_foam_render_group_ids.resize(live_domain_count, -1);
+        system.domain_foam_pool_capacities.resize(live_domain_count, 0);
 
         for (std::size_t d = 0; d < states.size(); ++d) {
             const auto& state   = states[d];

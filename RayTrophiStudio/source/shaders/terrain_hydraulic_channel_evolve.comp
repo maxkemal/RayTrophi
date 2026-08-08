@@ -1,0 +1,70 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height; int iteration; int iterations;
+    float cellSize; float heightScale; float erosionRate; float depositionRate;
+    float widthScale; float depthScale; float dischargeResponse; float sedimentResponse;
+} pc;
+
+layout(set=0,binding=0) readonly buffer HeightIn { float heightIn[]; };
+layout(set=0,binding=1) readonly buffer Hardness { float hardness[]; };
+layout(set=0,binding=2) readonly buffer Mask { float maskField[]; };
+layout(set=0,binding=3) readonly buffer Discharge { float discharge[]; };
+layout(set=0,binding=4) readonly buffer SedimentIn { float sedimentIn[]; };
+layout(set=0,binding=5) readonly buffer DirectionX { float directionX[]; };
+layout(set=0,binding=6) readonly buffer DirectionY { float directionY[]; };
+layout(set=0,binding=7) writeonly buffer HeightDelta { float heightDelta[]; };
+layout(set=0,binding=8) writeonly buffer SedimentOut { float sedimentOut[]; };
+layout(set=0,binding=9) buffer ChannelWidth { float channelWidth[]; };
+layout(set=0,binding=10) writeonly buffer WaterDepth { float waterDepth[]; };
+layout(set=0,binding=11) writeonly buffer WaterLevel { float waterLevel[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint count = uint(pc.width * pc.height);
+    if (i >= count) return;
+    int x = int(i) % pc.width, y = int(i) / pc.width;
+    if (x <= 1 || x >= pc.width-2 || y <= 1 || y >= pc.height-2) {
+        heightDelta[i]=0.0; sedimentOut[i]=sedimentIn[i]; channelWidth[i]=0.0;
+        waterDepth[i]=0.0; waterLevel[i]=heightIn[i]; return;
+    }
+
+    float qRaw = 1.0 - exp(-max(discharge[i],0.0) * pc.dischargeResponse);
+    // Preserve the original discharge/sediment response, but reject spatially
+    // isolated residence-time spikes. A real channel has support on both sides
+    // of the current cell; a trapped single point (or two-cell pit loop) does not.
+    int connectedNeighbors = 0;
+    for (int oy=-1; oy<=1; ++oy) for (int ox=-1; ox<=1; ++ox) {
+        if (ox==0 && oy==0) continue;
+        int ni=(y+oy)*pc.width+(x+ox);
+        float neighborQ=1.0-exp(-max(discharge[ni],0.0)*pc.dischargeResponse);
+        if (neighborQ>0.010) ++connectedNeighbors;
+    }
+    float continuity = smoothstep(1.0,2.0,float(connectedNeighbors));
+    float channelSupport = smoothstep(0.010,0.045,qRaw) * continuity;
+    float q = qRaw * channelSupport;
+    float sed = max(sedimentIn[i],0.0);
+    float sedN = 1.0 - exp(-sed * pc.sedimentResponse);
+    vec2 dir = vec2(directionX[i], directionY[i]);
+    float dl = length(dir); dir = dl > 1e-6 ? dir/dl : vec2(0.0);
+    int nx = clamp(x + int(round(dir.x)), 0, pc.width-1);
+    int ny = clamp(y + int(round(dir.y)), 0, pc.height-1);
+    float slope = max((heightIn[i] - heightIn[ny*pc.width+nx]) * pc.heightScale /
+                      max(pc.cellSize,0.001), 0.0);
+    float authored = clamp(maskField[i],0.0,1.0);
+    float resistance = clamp(hardness[i],0.0,1.0);
+    float capacity = q * (0.08 + sqrt(max(slope,0.0))) * (1.0-resistance*0.92);
+    float erode = max(capacity-sedN,0.0) * pc.erosionRate * authored;
+    float deposit = max(sedN-capacity,0.0) * pc.depositionRate * authored * continuity;
+    float deltaMeters = clamp(deposit-erode, -pc.cellSize*0.12, pc.cellSize*0.08);
+    heightDelta[i] = deltaMeters / max(pc.heightScale,0.001);
+    sedimentOut[i] = max(0.0, sed + erode - deposit);
+
+    float width = pc.cellSize * (0.65 + 6.0*sqrt(q)) * pc.widthScale;
+    float depth = pc.cellSize * (0.04 + 0.72*pow(q,0.42)) * pc.depthScale;
+    channelWidth[i] = max(channelWidth[i], q > 0.015 ? width : 0.0);
+    waterDepth[i] = q > 0.015 ? depth : 0.0;
+    waterLevel[i] = heightIn[i] + deltaMeters/max(pc.heightScale,0.001) +
+        (q > 0.015 ? depth : 0.0)/max(pc.heightScale,0.001);
+}

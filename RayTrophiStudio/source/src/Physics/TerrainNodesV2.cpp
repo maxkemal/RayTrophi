@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file TerrainNodesV2.cpp
  * @brief Implementation of terrain nodes using V2 NodeSystem
  */
@@ -10,7 +10,6 @@
 #include "InstanceManager.h"
 #include "FoliageAssetLibrary.h"
 #include "RiverSpline.h"
-#include "TerrainFFT.h"  // FFT-accelerated noise with CUDA fallback
 #include "SnowComputeGPU.h"
 #include "globals.h"
 #include "stb_image.h"
@@ -27,7 +26,7 @@
 #include <deque>
 #include <functional>
 #include <unordered_set>
-#include "perlin.h" // For gradient noise
+#include "perlin.h" // Legacy gradient noise; terrain nodes use the landform substrate below
 #include <image_resample.h>
 #include <image_filters.h>
 
@@ -83,6 +82,33 @@ namespace TerrainNodesV2 {
         return repaired;
     }
 
+    // ------------------------------------------------------------------------
+    // Landform noise substrate
+    //
+    // Every procedural terrain node samples this core, so its statistics are a
+    // published contract rather than an implementation detail:
+    //
+    //   landformFbm        -> [0,1], mean 0.500, p0.5..p99.5 ~ 0.06..0.93
+    //   landformRidgedFbm  -> [0,1], mean ~0.38, crests reach 1.0
+    //   landformBillowFbm  -> [0,1], mean ~0.48, troughs reach 0.0
+    //
+    // Three properties matter for terrain quality and are deliberately built in:
+    //
+    // 1. Gradient noise with a quintic fade. Value noise with a cubic fade is
+    //    only C1, and its extrema sit on the integer lattice; both facts show up
+    //    as axis-aligned blobs and as creases in every curvature/normal-derived
+    //    mask downstream.
+    // 2. Per-octave rotation and offset. Scaling octaves about a shared origin
+    //    (the old `x *= 2.03`) leaves every band aligned to the same lattice and
+    //    pins a coherent artefact at the terrain centre, where world x/z are 0.
+    // 3. Energy normalisation (divide by sqrt(sum of squared amplitudes) rather
+    //    than by their sum). Amplitude then no longer depends on the octave
+    //    count, so adding detail bands adds detail instead of flattening the
+    //    landform that was already authored.
+    // ------------------------------------------------------------------------
+
+    static constexpr float kLandformBillowMean = 0.48f;
+
     static float landformHash(int x, int y, int seed) {
         uint32_t h = static_cast<uint32_t>(x) * 374761393u +
             static_cast<uint32_t>(y) * 668265263u + static_cast<uint32_t>(seed) * 2246822519u;
@@ -91,38 +117,259 @@ namespace TerrainNodesV2 {
         return static_cast<float>(h & 0x00ffffffu) / static_cast<float>(0x01000000u);
     }
 
-    static float landformValueNoise(float x, float y, int seed) {
-        const int ix = static_cast<int>(std::floor(x));
-        const int iy = static_cast<int>(std::floor(y));
-        float fx = x - static_cast<float>(ix);
-        float fy = y - static_cast<float>(iy);
-        fx = fx * fx * (3.0f - 2.0f * fx);
-        fy = fy * fy * (3.0f - 2.0f * fy);
-        const float a = landformHash(ix, iy, seed);
-        const float b = landformHash(ix + 1, iy, seed);
-        const float c = landformHash(ix, iy + 1, seed);
-        const float d = landformHash(ix + 1, iy + 1, seed);
-        const float ab = a + (b - a) * fx;
-        const float cd = c + (d - c) * fx;
-        return ab + (cd - ab) * fy;
+    static uint32_t landformGradientHash(int x, int y, int seed) {
+        uint32_t h = static_cast<uint32_t>(x) * 374761393u +
+            static_cast<uint32_t>(y) * 668265263u + static_cast<uint32_t>(seed) * 2246822519u;
+        h = (h ^ (h >> 13u)) * 1274126177u;
+        h ^= h >> 16u;
+        h *= 2654435761u;
+        return h ^ (h >> 15u);
+    }
+
+    static const float kLandformGradients[16][2] = {
+        { 1.000000f,  0.000000f}, { 0.923880f,  0.382683f},
+        { 0.707107f,  0.707107f}, { 0.382683f,  0.923880f},
+        { 0.000000f,  1.000000f}, {-0.382683f,  0.923880f},
+        {-0.707107f,  0.707107f}, {-0.923880f,  0.382683f},
+        {-1.000000f,  0.000000f}, {-0.923880f, -0.382683f},
+        {-0.707107f, -0.707107f}, {-0.382683f, -0.923880f},
+        { 0.000000f, -1.000000f}, { 0.382683f, -0.923880f},
+        { 0.707107f, -0.707107f}, { 0.923880f, -0.382683f}
+    };
+
+    // Signed gradient noise on a unit lattice. Practical range is [-1, 1] with
+    // std ~0.30; the 16-direction table keeps the field isotropic without the
+    // cost of deriving gradients from a permutation table.
+    static float landformGradientNoise(float x, float y, int seed) {
+        const float fx = std::floor(x), fy = std::floor(y);
+        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+        const float dx = x - fx, dy = y - fy;
+        // Quintic fade: zero first AND second derivative at the lattice, so
+        // slope and curvature masks stay free of grid-aligned seams.
+        const float u = dx * dx * dx * (dx * (dx * 6.0f - 15.0f) + 10.0f);
+        const float v = dy * dy * dy * (dy * (dy * 6.0f - 15.0f) + 10.0f);
+        auto corner = [&](int cx, int cy) {
+            const float* g = kLandformGradients[landformGradientHash(ix + cx, iy + cy, seed) & 15u];
+            return g[0] * (dx - static_cast<float>(cx)) + g[1] * (dy - static_cast<float>(cy));
+        };
+        const float a = corner(0, 0) + (corner(1, 0) - corner(0, 0)) * u;
+        const float b = corner(0, 1) + (corner(1, 1) - corner(0, 1)) * u;
+        return (a + (b - a) * v) * 1.4142135f;
+    }
+
+    // Same field, plus its analytic gradient. The derivative is what lets the
+    // fbm below know how steep the terrain already is at the coarser bands.
+    static float landformGradientNoiseD(float x, float y, int seed,
+                                        float& outDx, float& outDy) {
+        const float fx = std::floor(x), fy = std::floor(y);
+        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+        const float dx = x - fx, dy = y - fy;
+        const float u = dx * dx * dx * (dx * (dx * 6.0f - 15.0f) + 10.0f);
+        const float v = dy * dy * dy * (dy * (dy * 6.0f - 15.0f) + 10.0f);
+        const float du = 30.0f * dx * dx * (dx - 1.0f) * (dx - 1.0f);
+        const float dv = 30.0f * dy * dy * (dy - 1.0f) * (dy - 1.0f);
+        const float* ga = kLandformGradients[landformGradientHash(ix,     iy,     seed) & 15u];
+        const float* gb = kLandformGradients[landformGradientHash(ix + 1, iy,     seed) & 15u];
+        const float* gc = kLandformGradients[landformGradientHash(ix,     iy + 1, seed) & 15u];
+        const float* gd = kLandformGradients[landformGradientHash(ix + 1, iy + 1, seed) & 15u];
+        const float va = ga[0] * dx          + ga[1] * dy;
+        const float vb = gb[0] * (dx - 1.0f) + gb[1] * dy;
+        const float vc = gc[0] * dx          + gc[1] * (dy - 1.0f);
+        const float vd = gd[0] * (dx - 1.0f) + gd[1] * (dy - 1.0f);
+        const float k = va - vb - vc + vd;
+        outDx = (ga[0] + u * (gb[0] - ga[0]) + v * (gc[0] - ga[0]) +
+            u * v * (ga[0] - gb[0] - gc[0] + gd[0]) + du * ((vb - va) + v * k)) * 1.4142135f;
+        outDy = (ga[1] + u * (gb[1] - ga[1]) + v * (gc[1] - ga[1]) +
+            u * v * (ga[1] - gb[1] - gc[1] + gd[1]) + dv * ((vc - va) + u * k)) * 1.4142135f;
+        return (va + u * (vb - va) + v * (vc - va) + u * v * k) * 1.4142135f;
+    }
+
+    // 3-4-5 rotation plus an irrational-looking offset. Cheap, and it prevents
+    // successive octaves from sharing lattice nodes.
+    static inline void landformAdvanceOctave(float& x, float& y) {
+        const float rx = x * 0.8f - y * 0.6f + 1.7f;
+        const float ry = x * 0.6f + y * 0.8f + 9.2f;
+        x = rx * 2.0f;
+        y = ry * 2.0f;
+    }
+
+    // Smooth limiter. Keeps the fbm inside [-1,1] without the flat tops a hard
+    // clamp would stamp onto every summit.
+    static inline float landformSoftLimit(float value) {
+        return value / std::sqrt(1.0f + value * value * 0.42f);
+    }
+
+    static float landformSignedFbm(float x, float y, int seed, int octaves, float persistence) {
+        float value = 0.0f, amplitude = 1.0f, energy = 0.0f;
+        const int bands = clampValue(octaves, 1, 16);
+        for (int octave = 0; octave < bands; ++octave) {
+            value += landformGradientNoise(x, y, seed + octave * 1013) * amplitude;
+            energy += amplitude * amplitude;
+            amplitude *= persistence;
+            landformAdvanceOctave(x, y);
+        }
+        if (energy <= 1.0e-6f) return 0.0f;
+        return landformSoftLimit(value / std::sqrt(energy) * 1.45f);
     }
 
     static float landformFbm(float x, float y, int seed, int octaves, float persistence) {
-        float value = 0.0f, amplitude = 1.0f, weight = 0.0f;
-        for (int octave = 0; octave < octaves; ++octave) {
-            value += landformValueNoise(x, y, seed + octave * 1013) * amplitude;
+        return landformSignedFbm(x, y, seed, octaves, persistence) * 0.5f + 0.5f;
+    }
+
+    // Crest transform. The 1.60 fold spreads |noise| across [0,1]; without it the
+    // transform saturates near 1 almost everywhere and the ridge character is
+    // lost. Crests land on the zero set of the gradient noise, which is what
+    // gives continuous sinuous ridge lines rather than disconnected humps.
+    static inline float landformRidgeShape(float noise) {
+        const float folded = clampValue(std::abs(noise) * 1.60f, 0.0f, 1.0f);
+        return (1.0f - folded) * (1.0f - folded);
+    }
+
+    static float landformRidgedFbm(float x, float y, int seed, int octaves, float persistence) {
+        float value = 0.0f, amplitude = 1.0f, weight = 0.0f, feedback = 1.0f;
+        const int bands = clampValue(octaves, 1, 16);
+        for (int octave = 0; octave < bands; ++octave) {
+            float ridge = landformRidgeShape(landformGradientNoise(x, y, seed + octave * 1013));
+            if (octave > 0) ridge *= feedback;
+            feedback = clampValue(ridge * 1.8f, 0.0f, 1.0f);
+            value += ridge * amplitude;
             weight += amplitude;
             amplitude *= persistence;
-            x *= 2.03f;
-            y *= 2.03f;
+            landformAdvanceOctave(x, y);
         }
-        return weight > 1.0e-6f ? value / weight : 0.5f;
+        if (weight <= 1.0e-6f) return 0.0f;
+        return clampValue(value / weight * 1.15f, 0.0f, 1.0f);
+    }
+
+    // Derivative-damped fbm. Each octave is attenuated where the accumulated
+    // slope is already steep, which is a cheap stand-in for erosion: material
+    // does not pile onto a cliff face. The visible consequence is dendritic,
+    // branching ridge networks with broad valleys between them.
+    //
+    // Plain ridged noise cannot produce that shape. Its crests follow the zero
+    // set of a random field, and those are CLOSED curves - the result reads as
+    // dried mud crackle, a lattice of polygonal cells, no matter how it is
+    // masked or blended afterwards. `ridgeBlend` mixes in just enough crest
+    // sharpening for alpine character without restoring the polygons.
+    static float landformErodedFbm(float x, float y, int seed, int octaves,
+                                   float hurst, float damping, float ridgeBlend) {
+        const int bands = clampValue(octaves, 1, 16);
+        const float falloff = std::pow(2.0f, -(std::max)(hurst, 0.05f));
+        float sum = 0.0f, norm = 0.0f, amplitude = 1.0f;
+        float slopeX = 0.0f, slopeY = 0.0f;
+        for (int octave = 0; octave < bands; ++octave) {
+            float dx = 0.0f, dy = 0.0f;
+            const float n = landformGradientNoiseD(x, y, seed + octave * 1013, dx, dy);
+            slopeX += dx;
+            slopeY += dy;
+            const float damp = 1.0f /
+                (1.0f + (std::max)(damping, 0.0f) * (slopeX * slopeX + slopeY * slopeY));
+            float shaped = n;
+            if (ridgeBlend > 0.0f) {
+                const float folded = clampValue(std::abs(n) * 1.35f, 0.0f, 1.0f);
+                const float crest = (1.0f - folded) * 2.0f - 1.0f;
+                shaped = n * (1.0f - ridgeBlend) + crest * ridgeBlend;
+            }
+            sum += shaped * amplitude * damp;
+            norm += amplitude;
+            amplitude *= falloff;
+            landformAdvanceOctave(x, y);
+        }
+        return norm > 1.0e-6f ? sum / norm : 0.0f;
+    }
+
+    static float landformBillowFbm(float x, float y, int seed, int octaves, float persistence) {
+        float value = 0.0f, amplitude = 1.0f, weight = 0.0f;
+        const int bands = clampValue(octaves, 1, 16);
+        for (int octave = 0; octave < bands; ++octave) {
+            const float billow = clampValue(
+                std::abs(landformGradientNoise(x, y, seed + octave * 1013)) * 1.90f, 0.0f, 1.0f);
+            value += billow * amplitude;
+            weight += amplitude;
+            amplitude *= persistence;
+            landformAdvanceOctave(x, y);
+        }
+        if (weight <= 1.0e-6f) return 0.0f;
+        return clampValue(value / weight * 1.05f, 0.0f, 1.0f);
     }
 
     static float landformSmoothstep(float edge0, float edge1, float value) {
         if (edge1 <= edge0) return value >= edge1 ? 1.0f : 0.0f;
         const float t = clampValue((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
         return t * t * (3.0f - 2.0f * t);
+    }
+
+    // How many octaves a band starting at `wavelengthMeters` may use before its
+    // finest detail drops below what the grid can represent. Measured against
+    // the band's OWN starting wavelength — measuring a shared nominal feature
+    // size instead lets anisotropic or frequency-shifted layers alias while the
+    // guard reports success.
+    static int landformBandCount(float wavelengthMeters, float cellMeters,
+                                 float samplesPerWavelength, int requested) {
+        const float floorMeters = (std::max)(samplesPerWavelength, 2.0f) *
+            (std::max)(cellMeters, 1.0e-4f);
+        float wavelength = (std::max)(wavelengthMeters, 1.0e-4f);
+        int count = 1;
+        const int target = clampValue(requested, 1, 16);
+        while (count < target && wavelength * 0.5f >= floorMeters) {
+            wavelength *= 0.5f;
+            ++count;
+        }
+        return count;
+    }
+
+    // Lowering-only angle-of-repose relaxation, in metres. Droplet and thermal
+    // solvers stall on sub-cell needles; capping the base slope up front is what
+    // makes a downstream erosion node act on landforms instead of on noise.
+    static void landformLimitSlope(std::vector<float>& heightMeters, int w, int h,
+                                   float cellMeters, float degrees, int passes) {
+        if (w < 3 || h < 3 || degrees >= 89.0f || heightMeters.size() != static_cast<size_t>(w) * h)
+            return;
+        const float maxRise = (std::max)(cellMeters, 1.0e-4f) *
+            std::tan(clampValue(degrees, 1.0f, 89.0f) * 0.017453292519943295f);
+        std::vector<float> scratch(heightMeters.size());
+        for (int pass = 0; pass < passes; ++pass) {
+            scratch = heightMeters;
+            #pragma omp parallel for schedule(static)
+            for (int y = 1; y < h - 1; ++y) {
+                for (int x = 1; x < w - 1; ++x) {
+                    const size_t i = static_cast<size_t>(y) * w + x;
+                    const float ceiling = (std::min)({
+                        heightMeters[i - 1], heightMeters[i + 1],
+                        heightMeters[i - w], heightMeters[i + w] }) + maxRise;
+                    scratch[i] = (std::min)(heightMeters[i], ceiling);
+                }
+            }
+            heightMeters.swap(scratch);
+        }
+    }
+
+    // Rescale so the authored relief is the relief the artist actually gets.
+    // A normalised fbm never spans its own theoretical [0,1]: octaves must peak
+    // together for that, which is vanishingly rare. Fitting the realised
+    // distribution is what makes "Relief = 200 m" mean 200 m of terrain rather
+    // than the 20-50 m an unfitted composition delivers.
+    static void landformFitToUnitRange(std::vector<float>& values, float tailFraction) {
+        if (values.size() < 16) return;
+        std::vector<float> sorted;
+        sorted.reserve(values.size());
+        for (float value : values) if (std::isfinite(value)) sorted.push_back(value);
+        if (sorted.size() < 16) return;
+        const size_t tail = (std::max)(static_cast<size_t>(1), static_cast<size_t>(
+            static_cast<double>(sorted.size()) * clampValue(tailFraction, 0.0f, 0.05f)));
+        std::nth_element(sorted.begin(), sorted.begin() + tail, sorted.end());
+        const float low = sorted[tail];
+        std::nth_element(sorted.begin(), sorted.end() - tail - 1, sorted.end());
+        const float high = *(sorted.end() - tail - 1);
+        const float span = high - low;
+        if (!(span > 1.0e-6f)) return;
+        const float inverse = 1.0f / span;
+        const int count = static_cast<int>(values.size());
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < count; ++i) {
+            values[static_cast<size_t>(i)] =
+                clampValue((values[static_cast<size_t>(i)] - low) * inverse, 0.0f, 1.0f);
+        }
     }
 
     static NodeSystem::Image2DData buildPackedErosionMap(
@@ -407,295 +654,307 @@ namespace TerrainNodesV2 {
             ctx.addError(id, "No terrain context");
             return NodeSystem::PinValue{};
         }
-        
-        int w = tctx->width;
-        int h = tctx->height;
+
+        const int w = tctx->width;
+        const int h = tctx->height;
+        if (w < 2 || h < 2) {
+            ctx.addError(id, "Terrain resolution is too small to generate noise");
+            return NodeSystem::PinValue{};
+        }
+
         auto result = createHeightOutput(w, h);
-        
-        // Create Perlin generator seeded by node parameter so output is deterministic
-        Perlin perlin((unsigned int)seed);
-        
-        // ═══════════════════════════════════════════════════════════
-        // NOISE HELPER FUNCTIONS
-        // ═══════════════════════════════════════════════════════════
-        
-        // Seed-based hash function
-        auto hash = [this](float n) -> float {
-            float seeded = n + (float)seed * 17.31f;
-            float result = std::sin(seeded) * 43758.5453f;
-            return result - std::floor(result);
-        };
-        
-        // 2D hash for Voronoi
-        auto hash2 = [this](float x, float y) -> std::pair<float, float> {
-            float sx = x + (float)seed * 0.31f;
-            float sy = y + (float)seed * 0.47f;
-            float px = sx * 127.1f + sy * 311.7f;
-            float py = sx * 269.5f + sy * 183.3f;
-            float hx = std::sin(px) * 43758.5453f;
-            float hy = std::sin(py) * 43758.5453f;
-            return { hx - std::floor(hx), hy - std::floor(hy) };
-        };
-        
-        // Simple 2D value noise
-        auto noise2D = [&hash](float x, float y) -> float {
-            float px = std::floor(x);
-            float py = std::floor(y);
-            float fx = x - px;
-            float fy = y - py;
-            
-            // Smoothstep
-            fx = fx * fx * (3.0f - 2.0f * fx);
-            fy = fy * fy * (3.0f - 2.0f * fy);
-            
-            float n = px + py * 57.0f;
-            float a = hash(n);
-            float b = hash(n + 1.0f);
-            float c = hash(n + 57.0f);
-            float d = hash(n + 58.0f);
-            
-            return a + fx * (b - a) + fy * (c - a) + fx * fy * (a - b - c + d);
-        };
-        
-        // FBM (Fractional Brownian Motion)
-        auto fbm = [&noise2D, this](float x, float y) -> float {
-            float value = 0.0f;
-            float amp = 1.0f;
-            float freq = 1.0f;
-            float maxAmp = 0.0f;
-            
-            for (int i = 0; i < octaves; i++) {
-                value += noise2D(x * freq, y * freq) * amp;
-                maxAmp += amp;
-                amp *= persistance;
-                freq *= lacunarity;
-            }
-            return value / maxAmp;
+        auto macroOutput = createMaskOutput(w, h);
+        auto ridgeOutput = createMaskOutput(w, h);
+        auto valleyOutput = createMaskOutput(w, h);
+
+        const float terrainSize = (std::max)(tctx->scale_xz, 1.0f);
+        const float heightScale = (std::max)(std::abs(tctx->scale_y), 0.001f);
+        const float cellMeters = terrainSize / static_cast<float>((std::max)(w, h) - 1);
+        const float samplesPerBand = resolutionBandLimit
+            ? (std::max)(samplesPerDetail, 2.0f) : 2.0f;
+        const int requestedBands = clampValue(octaves, 1, 12);
+        const float rough = clampValue(terrainRoughness, 0.0f, 1.0f);
+        const float relief = (std::max)(reliefMeters, 0.0f);
+
+        // Feature Size is the world-space wavelength of the largest landform.
+        // The multifractal generates every finer band from it internally, so a
+        // single ladder anchored here replaces the old per-layer coordinate
+        // multipliers (0.40 ... 5.2) that made the control read 2.2-2.5x off.
+        const float feature = (std::max)(featureSizeMeters, cellMeters * 4.0f);
+        const float hurst = 1.05f - rough * 0.40f;
+        // Bands are limited against the shortest wavelength any layer reaches,
+        // anisotropic stretch included, rather than against a nominal figure.
+        const int bandCount = landformBandCount(feature / 1.6f, cellMeters,
+            samplesPerBand, requestedBands);
+        // Publish what the guard actually allowed, so the panel can show the gap
+        // between the authored band count and the resolvable one.
+        lastEffectiveBands = bandCount;
+        lastFinestBandMeters = (feature / 1.6f) /
+            std::pow(2.0f, static_cast<float>(bandCount - 1));
+        lastGroundWavelengthMeters = (std::max)(samplesPerBand, 2.0f) * cellMeters * 2.0f;
+        const float warpMeters = feature * clampValue(warp_strength, 0.0f, 1.0f);
+        const float angle = terrainDirection * 0.017453292519943295f;
+        const float rotCos = std::cos(angle), rotSin = std::sin(angle);
+
+        // Two-scale domain warp: a broad meander plus medium sinuosity. Applied
+        // before the range rotation so the warp travels with the landform.
+        auto warpedCoords = [&](int x, int y, float& outX, float& outZ) {
+            const float worldX = ((float)x / (float)(w - 1) - 0.5f) * terrainSize;
+            const float worldZ = ((float)y / (float)(h - 1) - 0.5f) * terrainSize;
+            const float broad = feature * 2.0f;
+            float px = worldX + landformSignedFbm(worldX / broad, worldZ / broad,
+                seed + 101, 3, 0.55f) * warpMeters * 0.42f;
+            float pz = worldZ + landformSignedFbm((worldX + broad * 1.7f) / broad,
+                (worldZ - broad * 0.9f) / broad, seed + 211, 3, 0.55f) * warpMeters * 0.42f;
+            const float medium = feature * 0.5f;
+            const float mx = px + landformSignedFbm(px / medium, pz / medium,
+                seed + 307, 3, 0.55f) * warpMeters * 0.10f;
+            const float mz = pz + landformSignedFbm((px + medium * 1.7f) / medium,
+                (pz - medium * 0.9f) / medium, seed + 517, 3, 0.55f) * warpMeters * 0.10f;
+            outX = (mx * rotCos + mz * rotSin) / feature;
+            outZ = (-mx * rotSin + mz * rotCos) / feature;
         };
 
-        // Signed gradient FBM for terrain height. The old "Perlin" path used
-        // Perlin::turb(), which folds every octave through abs(); that produces
-        // dense micro-ridges instead of a coherent base relief and gives
-        // hydraulic/fluvial solvers a field dominated by tiny pits. Honour the
-        // exposed persistence/lacunarity controls and remap once to [0, 1].
-        auto perlinFbm = [&perlin, this](float x, float y) -> float {
-            float value = 0.0f;
-            float amp = 1.0f;
-            float freq = 1.0f;
-            float maxAmp = 0.0f;
-            for (int i = 0; i < octaves; ++i) {
-                value += perlin.noise(Vec3(x * freq, y * freq, 0.0f)) * amp;
-                maxAmp += amp;
-                amp *= persistance;
-                freq *= lacunarity;
+        std::vector<float> field(static_cast<size_t>(w) * static_cast<size_t>(h), 0.0f);
+
+        if (terrainModel != TerrainNoiseModel::RawNoise) {
+            const float valleyAmount = clampValue(valleyStrength, 0.0f, 1.0f);
+            // Per-model erosion character. Orogenic dissects hard, Continental
+            // keeps broad low basins, Highlands is old, damped and rounded.
+            float mfScale = 1.0f, mfHurst = hurst, mfDamping = 0.13f, mfRidge = 0.55f;
+            int mfSeed = seed + 709;
+            if (terrainModel == TerrainNoiseModel::Continental) {
+                mfScale = 1.5f; mfHurst = hurst + 0.06f; mfDamping = 0.16f; mfRidge = 0.50f;
+            } else if (terrainModel == TerrainNoiseModel::Highlands) {
+                mfScale = 0.9f; mfHurst = hurst + 0.22f; mfDamping = 0.22f; mfRidge = 0.30f;
+                mfSeed = seed + 1301;
             }
-            const float signedValue = maxAmp > 1.0e-6f ? value / maxAmp : 0.0f;
-            return signedValue * 0.5f + 0.5f;
-        };
-        
-        // Voronoi/Worley noise
-        auto voronoi = [&hash2, this](float x, float y) -> float {
-            float ix = std::floor(x);
-            float iy = std::floor(y);
-            float fx = x - ix;
-            float fy = y - iy;
-            
-            float minDist = 10.0f;
-            
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dx = -1; dx <= 1; dx++) {
-                    auto hashResult = hash2(ix + dx, iy + dy);
-                    float hx = hashResult.first;
-                    float hy = hashResult.second;
-                    float px = dx + hx * jitter - fx;
-                    float py = dy + hy * jitter - fy;
-                    float dist = std::sqrt(px * px + py * py);
-                    minDist = (std::min)(minDist, dist);
+
+            // Pass 1: the eroded shape alone. It is fitted before composition
+            // because the terms below read it non-linearly (valley masks, the
+            // uplift product), and an unfitted range would drift with the band
+            // count and silently change every one of those constants.
+            std::vector<float> shapeField(field.size(), 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    float qx = 0.0f, qz = 0.0f;
+                    warpedCoords(x, y, qx, qz);
+                    shapeField[static_cast<size_t>(y) * w + x] = landformErodedFbm(
+                        qx * mfScale, qz * mfScale, mfSeed, bandCount,
+                        mfHurst, mfDamping, mfRidge);
                 }
             }
-            return minDist;
-        };
-        
-        // Voronoi FBM
-        auto voronoiFbm = [&voronoi, this](float x, float y) -> float {
-            float value = 0.0f;
-            float amp = 1.0f;
-            float freq = 1.0f;
-            float maxAmp = 0.0f;
-            
-            for (int i = 0; i < octaves; i++) {
-                value += voronoi(x * freq, y * freq) * amp;
-                maxAmp += amp;
-                amp *= persistance;
-                freq *= lacunarity;
+            landformFitToUnitRange(shapeField, 0.0005f);
+
+            // Pass 2: compose the model around the fitted shape.
+            const int broadBands = (std::min)(bandCount, 3);
+            const int plainBands = (std::min)(bandCount, 6);
+            #pragma omp parallel for schedule(static)
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t index = static_cast<size_t>(y) * w + x;
+                    float qx = 0.0f, qz = 0.0f;
+                    warpedCoords(x, y, qx, qz);
+                    const float shape = shapeField[index];
+
+                    float height = 0.0f, macro = 0.0f, valley = 0.0f, ridgeMask = shape;
+                    if (terrainModel == TerrainNoiseModel::Continental) {
+                        const float plain = landformSignedFbm(qx * 0.8f, qz * 0.8f,
+                            seed + 307, plainBands, 0.52f) * 0.5f + 0.5f;
+                        // Continuous upland weight, never a smoothstep mask: the
+                        // basin-to-upland transition must not have an edge.
+                        const float upland = clampValue(plain * 1.8f - 0.54f, 0.0f, 1.0f);
+                        height = plain * 0.78f + shape * upland * 0.72f;
+                        macro = upland;
+                        ridgeMask = shape * upland;
+                        valley = clampValue(1.0f - plain * 1.7f, 0.0f, 1.0f);
+                    } else if (terrainModel == TerrainNoiseModel::Highlands) {
+                        const float soft = landformBillowFbm(qx * 0.75f, qz * 0.75f,
+                            seed + 1103, broadBands, 0.5f);
+                        height = shape * 0.80f + soft * 0.34f;
+                        macro = clampValue(soft, 0.0f, 1.0f);
+                        valley = clampValue(1.0f - shape * 1.5f, 0.0f, 1.0f);
+                    } else {
+                        // Regional uplift scales the dissected relief and adds a
+                        // long-wavelength tilt, giving massifs and basins without
+                        // gating anything to zero.
+                        const float uplift = landformFbm(qx / 2.2f, qz / 2.2f,
+                            seed + 1301, broadBands, 0.55f);
+                        height = shape * (0.50f + uplift * 0.95f) + (uplift - 0.5f) * 0.55f;
+                        valley = clampValue(1.0f - shape * 1.7f, 0.0f, 1.0f);
+                        height -= valley * valleyAmount * 0.10f;
+                        macro = uplift;
+                    }
+
+                    field[index] = std::isfinite(height) ? height : 0.0f;
+                    (*macroOutput.data)[index] = clampValue(macro, 0.0f, 1.0f);
+                    (*ridgeOutput.data)[index] = clampValue(ridgeMask, 0.0f, 1.0f);
+                    (*valleyOutput.data)[index] = clampValue(valley, 0.0f, 1.0f);
+                }
             }
-            return value / maxAmp;
-        };
-        
-        // ═══════════════════════════════════════════════════════════
-        // GENERATE NOISE FOR EACH PIXEL
-        // ═══════════════════════════════════════════════════════════
-        
-        // Seed offset for variation
-        float seedOffsetX = (float)(seed % 1000) * 0.1f;
-        float seedOffsetY = (float)((seed / 1000) % 1000) * 0.1f + 100.0f;
-        
-        // New graphs author wavelength in world metres, so the same mountain
-        // feature keeps its physical size on a 1 km or 50 km terrain. Legacy
-        // graphs retain their original Scale*Frequency contract exactly.
-        const float spatialFrequency = heightMode == NoiseHeightMode::WorldMeters
-            ? (std::max)(1.0e-5f, tctx->scale_xz / (std::max)(featureSizeMeters, 1.0f))
-            : (std::max)(1.0e-5f, scale * frequency * 1000.0f);
-        
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                // Normalize to 0-1 range preserving aspect ratio
-                // Both coordinates use the same base scale for isotropic noise
-                float baseX = (float)x / (float)(std::max)(w, h);
-                float baseY = (float)y / (float)(std::max)(w, h);
-                
-                const float nx = baseX * spatialFrequency + seedOffsetX;
-                const float ny = baseY * spatialFrequency + seedOffsetY;
-                
-                float noiseValue = 0.0f;
-                
-                switch (noiseType) {
-                    case NoiseType::Perlin: {
-                        noiseValue = perlinFbm(nx, ny);
-                        break;
-                    }
-                    
-                    case NoiseType::Simplex: {
-                        // Hash-based FBM (similar to CPUCloudNoise)
-                        noiseValue = fbm(nx, ny);
-                        break;
-                    }
-                    
-                    case NoiseType::Voronoi: {
-                        // Worley/cell noise
-                        noiseValue = 1.0f - voronoiFbm(nx, ny);
-                        break;
-                    }
-                    
-                    case NoiseType::Ridge: {
-                        // Ridge noise: sharp mountain ridges
-                        float value = 0.0f;
-                        float amp = 1.0f;
-                        float freq = 1.0f;
-                        float maxAmp = 0.0f;
-                        float weight = 1.0f;
-                        
-                        for (int i = 0; i < octaves; i++) {
-                            Vec3 p(nx * freq, ny * freq, 0.0f);
-                            float n = perlin.noise(p);
-                            n = ridge_offset - std::abs(n);
-                            n = n * n; // Square for sharper ridges
-                            n *= weight;
-                            weight = clampValue(n * 2.0f, 0.0f, 1.0f);
-                            
-                            value += n * amp;
-                            maxAmp += amp;
-                            amp *= persistance;
-                            freq *= lacunarity;
-                        }
-                        noiseValue = value / maxAmp;
-                        break;
-                    }
-                    
-                    case NoiseType::Billow: {
-                        // Billow: soft, puffy hills
-                        float value = 0.0f;
-                        float amp = 1.0f;
-                        float freq = 1.0f;
-                        float maxAmp = 0.0f;
-                        
-                        for (int i = 0; i < octaves; i++) {
-                            Vec3 p(nx * freq, ny * freq, 0.0f);
-                            float n = perlin.noise(p);
-                            n = std::abs(n) * 2.0f - 1.0f;
-                            
-                            value += n * amp;
-                            maxAmp += amp;
-                            amp *= persistance;
-                            freq *= lacunarity;
-                        }
-                        noiseValue = (value / maxAmp + 1.0f) * 0.5f;
-                        break;
-                    }
-                    
-                    case NoiseType::Warped: {
-                        // Signed domain offsets avoid the directional drift of
-                        // the previous positive-only warp.
-                        const float warpX = (fbm(nx, ny) * 2.0f - 1.0f) * warp_strength * 5.0f;
-                        const float warpY = (fbm(nx + 5.2f, ny + 1.3f) * 2.0f - 1.0f) * warp_strength * 5.0f;
-                        noiseValue = perlinFbm(nx + warpX, ny + warpY);
-                        break;
-                    }
-                    
-                    // ═══════════════════════════════════════════════════════════
-                    // FFT-ACCELERATED NOISE TYPES
-                    // Uses TerrainFFT system: CUDA if available, CPU fallback otherwise
-                    // ═══════════════════════════════════════════════════════════
-                    
-                    case NoiseType::FFT_Ocean:
-                    case NoiseType::FFT_Ridge:
-                    case NoiseType::FFT_Billow:
-                    case NoiseType::FFT_Turb: {
-                        // For FFT types, we'll generate the full heightmap once
-                        // and then read from it. Since we're in a per-pixel loop,
-                        // we'll use CPU fallback noise here (similar algorithm)
-                        // The actual FFT generation happens in a separate code path
-                        
-                        // Use TerrainFFT CPU noise as these are compatible
-                        TerrainFFT::FFTNoiseParams fftParams;
-                        fftParams.seed = seed;
-                        fftParams.scale = scale;
-                        fftParams.frequency = frequency;
-                        fftParams.octaves = octaves;
-                        fftParams.persistence = persistance;
-                        fftParams.lacunarity = lacunarity;
-                        fftParams.ridgeOffset = ridge_offset;
-                        
-                        // Map noise type
-                        switch (noiseType) {
-                            case NoiseType::FFT_Ocean:
-                                noiseValue = TerrainFFT::CPUNoise::fbmNoise(nx, ny, octaves, persistance, lacunarity, seed);
-                                noiseValue = noiseValue * 0.5f + 0.5f;
-                                break;
-                            case NoiseType::FFT_Ridge:
-                                noiseValue = TerrainFFT::CPUNoise::ridgedNoise(nx, ny, octaves, persistance, lacunarity, ridge_offset, 2.0f, seed);
-                                break;
-                            case NoiseType::FFT_Billow:
-                                noiseValue = TerrainFFT::CPUNoise::billowNoise(nx, ny, octaves, persistance, lacunarity, seed);
-                                noiseValue = noiseValue * 0.5f + 0.5f;
-                                break;
-                            case NoiseType::FFT_Turb:
-                            default:
-                                noiseValue = TerrainFFT::CPUNoise::fbmNoise(nx, ny, octaves, persistance, lacunarity, seed);
-                                noiseValue = noiseValue * 0.5f + 0.5f;
-                                break;
-                        }
-                        break;
+        } else {
+            const int rawBands = landformBandCount(feature, cellMeters,
+                samplesPerBand, requestedBands);
+            const float persistence = clampValue(persistance, 0.05f, 0.95f);
+            const float cellJitter = clampValue(jitter, 0.0f, 1.0f);
+            const int noiseSeed = seed;
+
+            // Worley cells on the shared integer hash. The previous sin()-based
+            // hash repeated on a diagonal lattice and lost precision far from the
+            // origin, which is where the visible tiling came from.
+            auto worley = [noiseSeed, cellJitter](float x, float y) {
+                const float bx = std::floor(x), by = std::floor(y);
+                const int ix = static_cast<int>(bx), iy = static_cast<int>(by);
+                const float fx = x - bx, fy = y - by;
+                float nearest = 8.0f, second = 8.0f;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const uint32_t hx = landformGradientHash(ix + dx, iy + dy, noiseSeed);
+                        const uint32_t hy = landformGradientHash(ix + dx, iy + dy, noiseSeed + 7919);
+                        const float ox = static_cast<float>(hx & 0xffffu) / 65535.0f;
+                        const float oy = static_cast<float>(hy & 0xffffu) / 65535.0f;
+                        const float px = static_cast<float>(dx) + 0.5f + (ox - 0.5f) * cellJitter - fx;
+                        const float py = static_cast<float>(dy) + 0.5f + (oy - 0.5f) * cellJitter - fy;
+                        const float distance = std::sqrt(px * px + py * py);
+                        if (distance < nearest) { second = nearest; nearest = distance; }
+                        else if (distance < second) { second = distance; }
                     }
                 }
-                
-                // Erosion contracts consume a finite, non-negative heightfield.
-                // Keep every generator type in the same normalized range before
-                // applying authored amplitude; this prevents signed FFT valleys
-                // and over-range ridge offsets from destabilizing sediment caps.
-                if (!std::isfinite(noiseValue)) noiseValue = 0.0f;
-                const float normalizedNoise = clampValue(noiseValue, 0.0f, 1.0f);
-                if (heightMode == NoiseHeightMode::WorldMeters) {
-                    const float safeHeightScale = (std::max)(std::abs(tctx->scale_y), 0.001f);
-                    const float worldHeight = baseElevationMeters + normalizedNoise *
-                        (std::max)(0.0f, reliefMeters);
-                    (*result.data)[y * w + x] = worldHeight / safeHeightScale;
-                } else {
-                    (*result.data)[y * w + x] = normalizedNoise * (std::max)(0.0f, amplitude);
+                return second - nearest;
+            };
+
+            #pragma omp parallel for schedule(static)
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const size_t index = static_cast<size_t>(y) * w + x;
+                    const float worldX = ((float)x / (float)(w - 1) - 0.5f) * terrainSize;
+                    const float worldZ = ((float)y / (float)(h - 1) - 0.5f) * terrainSize;
+                    const float nx = worldX / feature;
+                    const float ny = worldZ / feature;
+
+                    float value = 0.0f;
+                    switch (noiseType) {
+                        case NoiseType::Voronoi: {
+                            float sum = 0.0f, amplitude = 1.0f, weight = 0.0f;
+                            float cx = nx, cy = ny;
+                            for (int octave = 0; octave < rawBands; ++octave) {
+                                sum += clampValue(worley(cx, cy) * 1.35f, 0.0f, 1.0f) * amplitude;
+                                weight += amplitude;
+                                amplitude *= persistence;
+                                cx = cx * 2.0f + 3.1f;
+                                cy = cy * 2.0f + 7.7f;
+                            }
+                            value = weight > 1.0e-6f ? sum / weight : 0.0f;
+                            break;
+                        }
+                        case NoiseType::Simplex: {
+                            // Turbulence: absolute-folded fbm. Creases sit at the
+                            // zero set, giving eroded badland character.
+                            value = std::abs(landformSignedFbm(nx, ny, seed + 31, rawBands, persistence));
+                            break;
+                        }
+                        case NoiseType::Ridge: {
+                            const float sharpen = clampValue(ridge_offset, 0.5f, 2.0f);
+                            value = std::pow(landformRidgedFbm(nx, ny, seed + 53,
+                                rawBands, persistence), sharpen);
+                            break;
+                        }
+                        case NoiseType::Billow: {
+                            value = landformBillowFbm(nx, ny, seed + 71, rawBands, persistence);
+                            break;
+                        }
+                        case NoiseType::Warped: {
+                            const float wx = landformSignedFbm(nx * 0.5f, ny * 0.5f,
+                                seed + 97, (std::min)(rawBands, 3), 0.55f) *
+                                clampValue(warp_strength, 0.0f, 1.0f) * 1.5f;
+                            const float wy = landformSignedFbm(nx * 0.5f + 5.2f, ny * 0.5f + 1.3f,
+                                seed + 131, (std::min)(rawBands, 3), 0.55f) *
+                                clampValue(warp_strength, 0.0f, 1.0f) * 1.5f;
+                            value = landformFbm(nx + wx, ny + wy, seed + 173, rawBands, persistence);
+                            break;
+                        }
+                        case NoiseType::Perlin:
+                        default: {
+                            value = landformFbm(nx, ny, seed + 17, rawBands, persistence);
+                            break;
+                        }
+                    }
+                    field[index] = std::isfinite(value) ? value : 0.0f;
                 }
             }
         }
-        
+
+        // Fit the realised distribution, not the theoretical one. A normalised
+        // fbm only reaches its own extremes when every octave peaks together, so
+        // an unfitted composition delivered roughly a quarter of the authored
+        // Relief. After this, Relief is metres of terrain, measured.
+        landformFitToUnitRange(field, 0.0005f);
+
+        // From here the field carries metres, so ground detail can be authored
+        // in metres too.
+        const int sampleCount = static_cast<int>(field.size());
+        const float ground = (std::max)(groundDetailMeters, 0.0f);
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < sampleCount; ++i) field[static_cast<size_t>(i)] *= relief;
+
+        // Ground detail is an ABSOLUTE amplitude at the finest wavelength the
+        // grid can carry, deliberately not a fraction of Relief. Expressed as a
+        // fraction it vanishes on tall terrain, which is exactly how the floor
+        // ended up featureless: a 0.07 coefficient of a 140 m relief still
+        // reads as nothing once the regional uplift scales it down.
+        if (ground > 0.0f) {
+            const float fineWavelength = (std::max)(samplesPerBand, 2.0f) * cellMeters * 2.0f;
+            const float fineScale = feature / (std::max)(fineWavelength, 1.0e-3f);
+            #pragma omp parallel for schedule(static)
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    float qx = 0.0f, qz = 0.0f;
+                    warpedCoords(x, y, qx, qz);
+                    field[static_cast<size_t>(y) * w + x] += landformSignedFbm(
+                        qx * fineScale, qz * fineScale, seed + 4409, 3, 0.5f) * ground;
+                }
+            }
+        }
+
+        // Angle-of-repose conditioning. Droplet and thermal solvers stall on
+        // sub-cell needles, so the base handed to them is slope-bounded first.
+        if (slopeLimitDegrees < 89.0f) {
+            landformLimitSlope(field, w, h, cellMeters, slopeLimitDegrees, 24);
+        }
+
+        // Refit so the authored Relief (plus the ground detail budget) is what
+        // the terrain actually spans after conditioning.
+        landformFitToUnitRange(field, 0.0f);
+        const float totalRelief = relief + ground;
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < sampleCount; ++i) {
+            const size_t index = static_cast<size_t>(i);
+            (*result.data)[index] =
+                (baseElevationMeters + field[index] * totalRelief) / heightScale;
+        }
+
+        // Raw generators have no geological interpretation of their own, so the
+        // auxiliary pins publish elevation bands rather than staying silently
+        // zero the way they used to whenever a terrain model was not selected.
+        if (terrainModel == TerrainNoiseModel::RawNoise) {
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < sampleCount; ++i) {
+                const size_t index = static_cast<size_t>(i);
+                const float normalized = field[index];
+                (*macroOutput.data)[index] = normalized;
+                (*ridgeOutput.data)[index] = landformSmoothstep(0.60f, 0.95f, normalized);
+                (*valleyOutput.data)[index] = 1.0f - landformSmoothstep(0.05f, 0.40f, normalized);
+            }
+        }
+
+        ctx.setCachedValue(id, 0, result);
+        ctx.setCachedValue(id, 1, macroOutput);
+        ctx.setCachedValue(id, 2, ridgeOutput);
+        ctx.setCachedValue(id, 3, valleyOutput);
+        if (outputIndex == 1) return NodeSystem::PinValue{macroOutput};
+        if (outputIndex == 2) return NodeSystem::PinValue{ridgeOutput};
+        if (outputIndex == 3) return NodeSystem::PinValue{valleyOutput};
         return result;
     }
 
@@ -714,73 +973,310 @@ namespace TerrainNodesV2 {
             return NodeSystem::PinValue{};
         }
 
-        auto heightOut = createHeightOutput(w, h);
-        auto upliftOut = createMaskOutput(w, h);
-        auto ridgeOut = createMaskOutput(w, h);
+        std::array<NodeSystem::Image2DData, 6> result = {
+            createHeightOutput(w, h), createMaskOutput(w, h), createMaskOutput(w, h),
+            createMaskOutput(w, h), createMaskOutput(w, h), createMaskOutput(w, h)
+        };
         const float terrainSize = std::isfinite(tctx->scale_xz)
             ? (std::max)(tctx->scale_xz, 1.0f) : 100.0f;
         const float heightScale = std::isfinite(tctx->scale_y)
             ? (std::max)(std::abs(tctx->scale_y), 0.001f) : 10.0f;
-        const float halfWidth = (std::max)(widthMeters / terrainSize * 0.5f, 1.0f / (std::max)(w, h));
-        const float halfLength = (std::max)(lengthFraction * 0.5f, 0.025f);
+        const float safeWidthMeters = (std::max)(widthMeters, 8.0f);
+        const float halfWidth = safeWidthMeters * 0.5f;
+        const float halfLength = (std::max)(lengthFraction * terrainSize * 0.5f, 25.0f);
         const float radians = direction * 0.017453292519943295f;
         const float cs = std::cos(radians), sn = std::sin(radians);
-        const float relief = reliefMeters / heightScale;
+        const float cellMeters = terrainSize / static_cast<float>((std::max)(w - 1, h - 1));
+        // Each band remains in metres. Four samples per wavelength prevent a
+        // resolution change from inventing unresolved high-frequency terrain.
+        const float macroScale = (std::max)(safeWidthMeters * 0.72f, 90.0f);
+        const float ridgeScale = (std::max)(safeWidthMeters * 0.18f, cellMeters * 4.0f);
+        const float detailScale = (std::max)(safeWidthMeters * 0.045f, cellMeters * 4.0f);
+        const float foothillScale = (std::max)(safeWidthMeters * 0.30f, cellMeters * 4.0f);
+        const auto safeOctaves = [cellMeters](float wavelength, int requested) {
+            return landformBandCount(wavelength, cellMeters, 4.0f, requested);
+        };
+        const int macroOctaves = safeOctaves(macroScale, 4);
+        const int ridgeOctaves = safeOctaves(ridgeScale, 5);
+        const int detailOctaves = safeOctaves(detailScale, 4);
+        const int foothillOctaves = safeOctaves(foothillScale, 4);
+        std::array<float, 6> branchRandomValues{};
+        for (int i = 0; i < 6; ++i) {
+            branchRandomValues[(size_t)i] = landformFbm(
+                (float)i * 3.17f, seed * 0.011f, seed + i * 97, 2, 0.5f);
+        }
+        std::array<float, 5> valleyRandomValues{};
+        for (int i = 0; i < 5; ++i) {
+            valleyRandomValues[(size_t)i] = landformFbm(
+                (float)i * 2.71f, seed * 0.023f, seed + 1201 + i * 67, 2, 0.5f);
+        }
+        constexpr int massifCount = 7;
+        std::array<float, massifCount> massifAnchors{};
+        std::array<float, massifCount> massifHeights{};
+        std::array<float, massifCount> massifAlongRadii{};
+        std::array<float, massifCount> massifAcrossRadii{};
+        for (int i = 0; i < massifCount; ++i) {
+            const float r0 = landformHash(i, seed + 2903, seed + 17);
+            const float r1 = landformHash(i, seed + 3011, seed + 31);
+            const float r2 = landformHash(i, seed + 3209, seed + 47);
+            const float t = massifCount > 1 ? (float)i / (massifCount - 1) : 0.5f;
+            massifAnchors[(size_t)i] = (-0.82f + t * 1.64f) * halfLength +
+                (r0 - 0.5f) * halfLength * 0.13f;
+            massifHeights[(size_t)i] = 0.62f + r1 * 0.46f;
+            massifAlongRadii[(size_t)i] = halfLength / (massifCount - 1) * (0.78f + r2 * 0.52f);
+            massifAcrossRadii[(size_t)i] = halfWidth * (0.48f + r0 * 0.30f);
+        }
+        std::vector<float> generatedMeters(static_cast<size_t>(w) * h, 0.0f);
 
         #pragma omp parallel for schedule(static)
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 const size_t index = static_cast<size_t>(y) * w + x;
-                const float px = static_cast<float>(x) / static_cast<float>(w - 1) - centerX;
-                const float py = static_cast<float>(y) / static_cast<float>(h - 1) - centerY;
-                const float along = px * cs + py * sn;
-                const float across = -px * sn + py * cs;
+                const float worldX = (static_cast<float>(x) / static_cast<float>(w - 1) - centerX) * terrainSize;
+                const float worldZ = (static_cast<float>(y) / static_cast<float>(h - 1) - centerY) * terrainSize;
+                const float along = worldX * cs + worldZ * sn;
+                const float across = -worldX * sn + worldZ * cs;
                 const float alongAbs = std::abs(along);
                 const float longitudinal = 1.0f - landformSmoothstep(halfLength * 0.72f, halfLength, alongAbs);
-                const float warpNoise = landformFbm(along * 7.0f + seed * 0.013f,
-                    seed * 0.007f, seed, 4, 0.55f) * 2.0f - 1.0f;
-                const float warpedAcross = across - warpNoise * halfWidth * warp * 1.8f;
+                const float warpMacro = landformFbm(along / macroScale + seed * 0.013f,
+                    seed * 0.007f, seed, macroOctaves, 0.55f) * 2.0f - 1.0f;
+                const float warpMedium = landformFbm(along / ridgeScale - seed * 0.009f,
+                    seed * 0.017f, seed + 59, (std::min)(3, ridgeOctaves), 0.52f) * 2.0f - 1.0f;
+                const float warpedAcross = across - (warpMacro * 0.78f + warpMedium * 0.22f) *
+                    halfWidth * warp * 1.45f;
                 const float normalizedDistance = std::abs(warpedAcross) / halfWidth;
-                float uplift = std::exp(-std::pow(normalizedDistance, ridgeSharpness)) * longitudinal;
-                float ridge = std::exp(-std::pow(normalizedDistance / 0.22f, 1.35f)) * longitudinal;
+                const float broadMass = std::exp(-std::pow(normalizedDistance,
+                    1.15f + massif * 1.35f));
+                const float ridgeCore = std::exp(-std::pow(normalizedDistance /
+                    (0.12f + 0.16f * (1.0f - massif)), ridgeSharpness));
+                const float foot = std::exp(-std::pow(normalizedDistance / 1.65f, 1.7f));
+                const float peakNoise = landformRidgedFbm(along / ridgeScale + seed * 0.021f,
+                    warpedAcross / (ridgeScale * 2.8f) - seed * 0.009f, seed + 131, ridgeOctaves, 0.53f);
+                // The broad envelope only locates the range. Its elevation must
+                // vary at massif scale or a long range becomes a raised mesa.
+                const float massifNoise = landformFbm(
+                    along / (macroScale * 0.72f) + seed * 0.0041f,
+                    warpedAcross / (macroScale * 1.65f) - seed * 0.0063f,
+                    seed + 271, macroOctaves, 0.56f);
+                const float summitChain = landformRidgedFbm(
+                    along / (macroScale * 0.42f) - seed * 0.0027f,
+                    warpedAcross / (macroScale * 2.4f) + seed * 0.0039f,
+                    seed + 389, (std::min)(3, macroOctaves), 0.54f);
+                const float crestVariation = clampValue(
+                    0.38f + massifNoise * 0.50f + summitChain * peakVariation * 0.38f,
+                    0.30f, 1.18f);
+                const float sideBias = clampValue(1.0f + asymmetry *
+                    (warpedAcross >= 0.0f ? 1.0f : -1.0f), 0.15f, 1.85f);
+                // Build the orogen from overlapping 2D massifs, not from one
+                // extruded ribbon. A smooth p-norm union retains individual
+                // summits and creates real saddles between them without max seams.
+                float massifPowerSum = 0.0f;
+                for (int massifIndex = 0; massifIndex < massifCount; ++massifIndex) {
+                    const float da = (along - massifAnchors[(size_t)massifIndex]) /
+                        (std::max)(massifAlongRadii[(size_t)massifIndex], cellMeters * 4.0f);
+                    const float dc = warpedAcross /
+                        (std::max)(massifAcrossRadii[(size_t)massifIndex], cellMeters * 4.0f);
+                    const float kernel = std::exp(-(da * da * 1.35f + dc * dc * 0.82f)) *
+                        massifHeights[(size_t)massifIndex];
+                    massifPowerSum += kernel * kernel * kernel;
+                }
+                const float massifChain = std::cbrt((std::max)(massifPowerSum, 0.0f));
+                float uplift = ((broadMass * (0.16f + massif * 0.12f) +
+                    massifChain * (0.62f + massif * 0.16f) * crestVariation) * sideBias +
+                    foot * foothills * 0.10f) * longitudinal;
+                float ridge = ridgeCore * longitudinal;
+                float branchUplift = 0.0f;
 
                 // Alternating side branches originate along the primary spine.
-                for (int branchIndex = 0; branchIndex < 4; ++branchIndex) {
-                    const float anchor = (-0.33f + branchIndex * 0.22f) * halfLength * 2.0f;
+                for (int branchIndex = 0; branchIndex < 6; ++branchIndex) {
+                    const float branchRandom = branchRandomValues[(size_t)branchIndex];
+                    const float anchor = (-0.42f + branchIndex * 0.168f +
+                        (branchRandom - 0.5f) * 0.07f) * halfLength * 2.0f;
                     const float branchAlong = along - anchor;
-                    const float branchLength = halfLength * (0.42f + 0.10f * (branchIndex & 1));
+                    const float branchLength = halfLength * (0.28f + branchRandom * 0.28f);
                     if (branchAlong <= 0.0f || branchAlong >= branchLength) continue;
-                    const float side = (branchIndex & 1) ? 1.0f : -1.0f;
-                    const float branchAxis = warpedAcross - side * branchAlong * 0.62f;
+                    const float side = ((branchIndex + (seed & 1)) & 1) ? 1.0f : -1.0f;
+                    const float branchAngle = 0.38f + branchRandom * 0.48f;
+                    const float branchAxis = warpedAcross - side * branchAlong * branchAngle;
                     const float branchEnd = std::sin(clampValue(branchAlong / branchLength, 0.0f, 1.0f) * 3.14159265f);
                     const float branchRidge = std::exp(-std::pow(std::abs(branchAxis) /
-                        (halfWidth * 0.24f), 1.45f)) * branchEnd * longitudinal * branches;
-                    uplift = (std::max)(uplift, branchRidge * 0.72f);
-                    ridge = (std::max)(ridge, branchRidge);
+                        (halfWidth * (0.18f + branchRandom * 0.12f)), 1.55f)) *
+                        branchEnd * longitudinal * branches;
+                    // Probabilistic/smooth union: intersecting ridges merge
+                    // without the hard crease generated by max(a,b).
+                    branchUplift = 1.0f - (1.0f - branchUplift) * (1.0f - clampValue(branchRidge, 0.0f, 1.0f));
+                    ridge = 1.0f - (1.0f - ridge) * (1.0f - clampValue(branchRidge, 0.0f, 1.0f));
                 }
 
-                const float surfaceNoise = landformFbm(px * 18.0f + seed * 0.01f,
-                    py * 18.0f - seed * 0.017f, seed + 47, 4, 0.52f) * 2.0f - 1.0f;
-                uplift = clampValue(uplift * (1.0f + surfaceNoise * detail), 0.0f, 1.0f);
+                // Distinct geological bands: ridged rock fabric for the range,
+                // anisotropic slope texture, and billow-dominated foothills.
+                // Rock fabric comes from the derivative-damped fbm, not from a
+                // ridged band. A ridged band at these scales lays closed crest
+                // cells over the flanks; combined with the strong anisotropy it
+                // previously carried, that read as vertical curtains combed down
+                // the slope. Directionality belongs to the range envelope above.
+                const float rockFabric = landformErodedFbm(
+                    along / ridgeScale + seed * 0.01f,
+                    warpedAcross / (ridgeScale * 0.88f) - seed * 0.017f,
+                    seed + 47, ridgeOctaves, 0.92f, 0.14f, 0.45f) * 0.5f + 0.5f;
+                const float slopeGrooves = landformErodedFbm(
+                    along / (detailScale * 1.35f) + seed * 0.031f,
+                    warpedAcross / detailScale, seed + 347, detailOctaves,
+                    0.88f, 0.10f, 0.55f) * 0.5f + 0.5f;
+                const float roundedFoot = landformBillowFbm(
+                    worldX / foothillScale, worldZ / foothillScale,
+                    seed + 719, foothillOctaves, 0.54f);
+                const float interior = clampValue(1.0f - normalizedDistance, 0.0f, 1.0f);
+
+                // Sinuous transverse catchments precondition broad valleys.
+                // Hydraulic erosion subsequently selects and matures them; this
+                // is a drainage likelihood field, not baked river carving.
+                float valleySeed = 0.0f;
+                const float drainageBend = (landformFbm(warpedAcross / macroScale,
+                    seed * 0.0031f, seed + 1601, 3, 0.53f) - 0.5f) * ridgeScale;
+                const float slopeReach = landformSmoothstep(0.04f, 0.18f, normalizedDistance) *
+                    (1.0f - landformSmoothstep(1.05f, 1.55f, normalizedDistance));
+                for (int valleyIndex = 0; valleyIndex < 5; ++valleyIndex) {
+                    const float vr = valleyRandomValues[(size_t)valleyIndex];
+                    const float anchor = (-0.40f + valleyIndex * 0.20f + (vr - 0.5f) * 0.08f) *
+                        halfLength * 2.0f;
+                    const float bend = drainageBend * (0.72f + valleyIndex * 0.11f);
+                    const float valleyWidth = (std::max)(ridgeScale * (0.34f + vr * 0.34f), cellMeters * 2.0f);
+                    const float distance = std::abs(along - anchor - bend);
+                    const float channel = std::exp(-std::pow(distance / valleyWidth, 1.65f));
+                    valleySeed = (std::max)(valleySeed, channel * slopeReach * longitudinal);
+                }
+
+                // Fine tributaries are a separate anisotropic field. They join
+                // the broad transverse catchments instead of appearing as five
+                // isolated brush strokes in the diagnostic preview.
+                const float tributaryRidges = landformRidgedFbm(
+                    along / (ridgeScale * 0.72f) + drainageBend / macroScale,
+                    warpedAcross / (ridgeScale * 1.65f), seed + 1877, ridgeOctaves, 0.52f);
+                const float tributaries = std::pow(clampValue(tributaryRidges, 0.0f, 1.0f), 3.4f) *
+                    slopeReach * longitudinal;
+                valleySeed = clampValue((std::max)(valleySeed, tributaries * 0.72f), 0.0f, 1.0f);
+
+                const float fractureA = landformRidgedFbm(
+                    (worldX + worldZ * 0.31f) / detailScale,
+                    (worldZ - worldX * 0.17f) / (detailScale * 3.2f), seed + 2081, (std::min)(3, detailOctaves), 0.50f);
+                const float fractureB = landformRidgedFbm(
+                    (worldX - worldZ * 0.24f) / (detailScale * 1.35f),
+                    (worldZ + worldX * 0.21f) / (detailScale * 3.8f), seed + 2371, (std::min)(3, detailOctaves), 0.50f);
+                const float fracture = clampValue(
+                    std::pow((std::max)(fractureA, fractureB), 3.2f) * interior * longitudinal,
+                    0.0f, 1.0f);
+                const float hardness = clampValue(0.34f + ridge * 0.42f +
+                    rockFabric * 0.24f - fracture * 0.36f - valleySeed * 0.18f, 0.0f, 1.0f);
                 const float rawMask = mask.isValid() ? (*mask.data)[index] : 1.0f;
                 const float authoredMask = std::isfinite(rawMask) ? clampValue(rawMask, 0.0f, 1.0f) : 0.0f;
                 const float rawBaseHeight = base.isValid() ? (*base.data)[index] : 0.0f;
                 const float baseHeight = std::isfinite(rawBaseHeight) ? rawBaseHeight : 0.0f;
-                (*heightOut.data)[index] = baseHeight + uplift * authoredMask * relief;
-                (*upliftOut.data)[index] = uplift * authoredMask;
-                (*ridgeOut.data)[index] = clampValue(ridge * authoredMask, 0.0f, 1.0f);
+                // Every spectral band owns a metre amplitude. Detail can no
+                // longer multiply the full mountain relief into vertical needles.
+                const float macroMeters = uplift * reliefMeters;
+                const float primaryRidgeMeters = ridgeCore * longitudinal *
+                    (0.12f + peakVariation * 0.13f) * reliefMeters * (0.38f + peakNoise * 0.62f);
+                const float branchMeters = branchUplift * reliefMeters * branches * 0.13f;
+                // Detail bands are centred on the substrate's published means, not
+                // on 0.5. A ridged field is bottom-heavy by construction; treating
+                // it as symmetric biases every fabric band downward.
+                // Both fabrics are now signed fields remapped to [0,1], so they
+                // are centred on 0.5 and carry the full authored amplitude.
+                const float rockMeters = (rockFabric - 0.5f) * reliefMeters * detail * 0.22f * interior;
+                const float grooveMeters = (slopeGrooves - 0.5f) * reliefMeters * detail * 0.09f * interior;
+                const float footMeters = (roundedFoot - kLandformBillowMean) * reliefMeters * foothills * 0.055f * foot;
+                const float valleyMeters = valleySeed * reliefMeters * (0.12f + branches * 0.10f);
+                const float displacementMeters = (std::max)(0.0f, macroMeters + primaryRidgeMeters +
+                    branchMeters + rockMeters + grooveMeters + footMeters - valleyMeters);
+                generatedMeters[index] = displacementMeters * authoredMask;
+                (*result[0].data)[index] = baseHeight + generatedMeters[index] / heightScale;
+                (*result[1].data)[index] = clampValue(displacementMeters /
+                    (std::max)(reliefMeters, 0.001f) * authoredMask, 0.0f, 1.0f);
+                (*result[2].data)[index] = clampValue((std::max)(ridge, rockFabric * interior * 0.62f) * authoredMask, 0.0f, 1.0f);
+                (*result[3].data)[index] = clampValue(valleySeed * authoredMask, 0.0f, 1.0f);
+                const float geologyInfluence = clampValue(authoredMask * longitudinal *
+                    (foot * 0.85f + interior * 0.15f), 0.0f, 1.0f);
+                (*result[4].data)[index] = clampValue(0.5f +
+                    (hardness - 0.5f) * geologyInfluence, 0.0f, 1.0f);
+                (*result[5].data)[index] = clampValue(fracture * authoredMask, 0.0f, 1.0f);
             }
         }
-        ctx.setCachedValue(id, 0, heightOut);
-        ctx.setCachedValue(id, 1, upliftOut);
-        ctx.setCachedValue(id, 2, ridgeOut);
-        if (outputIndex == 1) return NodeSystem::PinValue{upliftOut};
-        if (outputIndex == 2) return NodeSystem::PinValue{ridgeOut};
-        return NodeSystem::PinValue{heightOut};
+
+        // A heightfield cannot represent overhangs, but it can still receive a
+        // one-cell wall from combined spectral bands. Apply a short, lowering-
+        // only angle-of-repose pass to generated relief. It removes numerical
+        // needles without blurring valleys or modifying the authored base input.
+        const float slopeDegrees = 43.0f + (ridgeSharpness / 8.0f) * 12.0f;
+        landformLimitSlope(generatedMeters, w, h, cellMeters, slopeDegrees, 16);
+        #pragma omp parallel for schedule(static)
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t index = static_cast<size_t>(y) * w + x;
+                const float rawBaseHeight = base.isValid() ? (*base.data)[index] : 0.0f;
+                const float baseHeight = std::isfinite(rawBaseHeight) ? rawBaseHeight : 0.0f;
+                (*result[0].data)[index] = baseHeight + generatedMeters[index] / heightScale;
+            }
+        }
+        for (int i = 0; i < 6; ++i) ctx.setCachedValue(id, i, result[(size_t)i]);
+        return outputIndex >= 0 && outputIndex < 6
+            ? NodeSystem::PinValue{result[(size_t)outputIndex]}
+            : NodeSystem::PinValue{};
+    }
+
+    const char* MountainRangeNode::getPresetName(MountainLandformPreset value) {
+        switch (value) {
+            case MountainLandformPreset::AlpineChain: return "Alpine Chain";
+            case MountainLandformPreset::RoundedMassif: return "Rounded Massif";
+            case MountainLandformPreset::DesertRanges: return "Desert Ranges";
+            case MountainLandformPreset::CoastalMountains: return "Coastal Mountains";
+            case MountainLandformPreset::VolcanicHighlands: return "Volcanic Highlands";
+            case MountainLandformPreset::Custom: return "Custom";
+        }
+        return "Alpine Chain";
+    }
+
+    void MountainRangeNode::applyPreset(MountainLandformPreset value) {
+        preset = value;
+        switch (value) {
+            case MountainLandformPreset::AlpineChain:
+                lengthFraction = 1.05f; widthMeters = 420.0f; reliefMeters = 120.0f;
+                ridgeSharpness = 3.2f; warp = 0.32f; branches = 0.62f; detail = 0.24f;
+                massif = 0.46f; foothills = 0.38f; peakVariation = 0.58f; asymmetry = 0.12f;
+                break;
+            case MountainLandformPreset::RoundedMassif:
+                lengthFraction = 0.72f; widthMeters = 680.0f; reliefMeters = 76.0f;
+                ridgeSharpness = 1.45f; warp = 0.18f; branches = 0.28f; detail = 0.12f;
+                massif = 0.88f; foothills = 0.70f; peakVariation = 0.24f; asymmetry = 0.05f;
+                break;
+            case MountainLandformPreset::DesertRanges:
+                lengthFraction = 1.10f; widthMeters = 330.0f; reliefMeters = 62.0f;
+                ridgeSharpness = 2.5f; warp = 0.15f; branches = 0.36f; detail = 0.10f;
+                massif = 0.38f; foothills = 0.22f; peakVariation = 0.34f; asymmetry = 0.28f;
+                break;
+            case MountainLandformPreset::CoastalMountains:
+                lengthFraction = 1.20f; widthMeters = 390.0f; reliefMeters = 90.0f;
+                ridgeSharpness = 2.65f; warp = 0.42f; branches = 0.48f; detail = 0.20f;
+                massif = 0.52f; foothills = 0.32f; peakVariation = 0.45f; asymmetry = 0.46f;
+                break;
+            case MountainLandformPreset::VolcanicHighlands:
+                lengthFraction = 0.62f; widthMeters = 760.0f; reliefMeters = 105.0f;
+                ridgeSharpness = 1.75f; warp = 0.36f; branches = 0.18f; detail = 0.28f;
+                massif = 0.92f; foothills = 0.58f; peakVariation = 0.62f; asymmetry = 0.02f;
+                break;
+            case MountainLandformPreset::Custom:
+                break;
+        }
+        dirty = true;
     }
 
     void MountainRangeNode::drawContent() {
         bool edited = false;
+        int presetIndex = static_cast<int>(preset);
+        const char* presetNames[] = { "Alpine Chain", "Rounded Massif", "Desert Ranges",
+                                      "Coastal Mountains", "Volcanic Highlands", "Custom" };
+        if (ImGui::Combo("Landform", &presetIndex, presetNames, IM_ARRAYSIZE(presetNames)))
+            applyPreset(static_cast<MountainLandformPreset>(presetIndex));
         edited |= ImGui::DragInt("Seed", &seed, 1.0f);
         edited |= ImGui::SliderFloat("Direction", &direction, 0.0f, 360.0f, "%.0f deg");
         edited |= ImGui::SliderFloat("Center X", &centerX, 0.0f, 1.0f);
@@ -792,7 +1288,11 @@ namespace TerrainNodesV2 {
         edited |= ImGui::SliderFloat("Warp", &warp, 0.0f, 1.0f);
         edited |= ImGui::SliderFloat("Branches", &branches, 0.0f, 1.0f);
         edited |= ImGui::SliderFloat("Surface Detail", &detail, 0.0f, 1.0f);
-        if (edited) dirty = true;
+        edited |= ImGui::SliderFloat("Massif", &massif, 0.0f, 1.0f);
+        edited |= ImGui::SliderFloat("Foothills", &foothills, 0.0f, 1.0f);
+        edited |= ImGui::SliderFloat("Peak Variation", &peakVariation, 0.0f, 1.0f);
+        edited |= ImGui::SliderFloat("Side Asymmetry", &asymmetry, -1.0f, 1.0f);
+        if (edited) { preset = MountainLandformPreset::Custom; dirty = true; }
     }
 
     NodeSystem::PinValue BasinValleyNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
@@ -980,12 +1480,59 @@ namespace TerrainNodesV2 {
             terrain->hardnessMap = *hardnessInput.data;
         }
         
-        // Run erosion via TerrainManager
-        if (useGPU) {
-            mgr.hydraulicErosionGPU(terrain, params, mask);
+        // Run erosion via TerrainManager and collect products emitted by the
+        // solver itself. These remain valid even where erosion and deposition
+        // cancel in the final height field.
+        HydraulicErosionFields fields;
+        const auto solveStart = std::chrono::steady_clock::now();
+        if (multiPass) {
+            std::vector<HydraulicErosionParams> stages(3, params);
+            HydraulicErosionParams& conditioning = stages[0];
+            conditioning.iterations = (std::max)(1000, static_cast<int>(params.iterations * 0.45f));
+            conditioning.dropletLifetime = (std::max)(8, static_cast<int>(params.dropletLifetime * 0.75f));
+            conditioning.inertia *= 0.60f;
+            conditioning.erodeSpeed *= 0.45f;
+            conditioning.depositSpeed *= 0.70f;
+            conditioning.erosionRadius = (std::max)(1, params.erosionRadius - 1);
+            conditioning.initialWater *= 1.10f;
+            conditioning.seed = params.seed ^ 0x9E3779B9u;
+            conditioning.removeSpikes = false;
+            conditioning.fillPits = false;
+            conditioning.smoothSurface = false;
+
+            HydraulicErosionParams& incision = stages[1];
+            incision.seed = params.seed ^ 0x85EBCA6Bu;
+            incision.removeSpikes = false;
+            incision.fillPits = false;
+            incision.smoothSurface = false;
+
+            HydraulicErosionParams& maturation = stages[2];
+            maturation.iterations = (std::max)(1000, static_cast<int>(params.iterations * 0.35f));
+            maturation.dropletLifetime = (std::max)(8, static_cast<int>(params.dropletLifetime * 0.80f));
+            maturation.erodeSpeed *= 0.25f;
+            maturation.depositSpeed = (std::min)(1.0f, params.depositSpeed * 1.60f);
+            maturation.erosionRadius = (std::min)(32, params.erosionRadius + 1);
+            maturation.flatSettling *= 1.50f;
+            maturation.velocitySettling *= 1.40f;
+            maturation.evaporateSpeed = (std::min)(0.5f, params.evaporateSpeed * 1.25f);
+            maturation.seed = params.seed ^ 0xC2B2AE35u;
+
+            std::function<void(float)> progress;
+            if (!useGPU) progress = [&ctx](float f) { ctx.reportNodeProgress(f); };
+            mgr.hydraulicErosionMultiPass(terrain, stages, useGPU, mask, progress, &fields);
+        } else if (useGPU) {
+            mgr.hydraulicErosionGPU(terrain, params, mask, &fields);
         } else {
-            mgr.hydraulicErosion(terrain, params, mask, [&ctx](float f) { ctx.reportNodeProgress(f); });
+            mgr.hydraulicErosion(terrain, params, mask, [&ctx](float f) { ctx.reportNodeProgress(f); }, &fields);
         }
+        lastSolveMs = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - solveStart).count();
+        lastExecutedPasses = multiPass ? 3 : 1;
+        lastEroded = lastDeposited = lastDischarge = lastSedimentFlux = 0.0;
+        for (float value : fields.erosion) lastEroded += value;
+        for (float value : fields.deposition) lastDeposited += value;
+        for (float value : fields.discharge) lastDischarge += value;
+        for (float value : fields.sediment) lastSedimentFlux += value;
         
         // Create output using INPUT dimensions to propagate correctly
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
@@ -1004,67 +1551,260 @@ namespace TerrainNodesV2 {
             applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
         }
 
-        auto erosionMap = buildPackedErosionMap(
-            originalHeight,
-            *result.data,
-            inputHeight.width,
-            inputHeight.height,
-            nullptr,
-            terrain->hardnessMap.empty() ? nullptr : &terrain->hardnessMap,
-            mask.empty() ? nullptr : &mask);
+        const int w = inputHeight.width;
+        const int h = inputHeight.height;
+        const size_t pixelCount = static_cast<size_t>(w) * static_cast<size_t>(h);
+        auto normalizedField = [&](const std::vector<float>& source,
+                                   NodeSystem::ImageSemantic semantic) {
+            auto image = createMaskOutput(w, h);
+            image.semantic = semantic;
+            if (source.size() != pixelCount) return image;
+            float maxValue = 0.0f;
+            for (float v : source) if (std::isfinite(v)) maxValue = (std::max)(maxValue, v);
+            const float invMax = maxValue > 1e-12f ? 1.0f / maxValue : 0.0f;
+            for (size_t i = 0; i < pixelCount; ++i)
+                (*image.data)[i] = std::isfinite(source[i]) ? source[i] * invMax : 0.0f;
+            return image;
+        };
+
+        auto erosion = normalizedField(fields.erosion, NodeSystem::ImageSemantic::Mask);
+        auto deposition = normalizedField(fields.deposition, NodeSystem::ImageSemantic::Mask);
+        auto discharge = normalizedField(fields.discharge, NodeSystem::ImageSemantic::PhysicalScalar);
+        auto sediment = normalizedField(fields.sediment, NodeSystem::ImageSemantic::PhysicalScalar);
+        const auto physicalField = [&](const std::vector<float>& source,
+                                       NodeSystem::ImageSemantic semantic,
+                                       NodeSystem::ImageUnit unit) {
+            NodeSystem::Image2DData image;
+            image.width=w; image.height=h; image.channels=1;
+            image.semantic=semantic; image.unit=unit;
+            image.data=std::make_shared<std::vector<float>>(pixelCount,0.0f);
+            if (source.size()==pixelCount) *image.data=source;
+            return image;
+        };
+        auto channelWidth=physicalField(fields.channelWidth, NodeSystem::ImageSemantic::PhysicalScalar,
+                                        NodeSystem::ImageUnit::Meters);
+        auto waterDepth=physicalField(fields.waterDepth, NodeSystem::ImageSemantic::PhysicalScalar,
+                                      NodeSystem::ImageUnit::Meters);
+        auto waterLevel=physicalField(fields.waterLevel, NodeSystem::ImageSemantic::Height,
+                                      NodeSystem::ImageUnit::Unknown);
+
+        NodeSystem::Image2DData direction;
+        direction.width = w; direction.height = h; direction.channels = 2;
+        direction.semantic = NodeSystem::ImageSemantic::Direction;
+        direction.unit = NodeSystem::ImageUnit::Unitless;
+        direction.data = std::make_shared<std::vector<float>>(pixelCount * 2, 0.0f);
+        if (fields.directionX.size() == pixelCount && fields.directionY.size() == pixelCount) {
+            for (size_t i = 0; i < pixelCount; ++i) {
+                const float len = std::hypot(fields.directionX[i], fields.directionY[i]);
+                if (len > 1e-12f) {
+                    (*direction.data)[i * 2] = fields.directionX[i] / len;
+                    (*direction.data)[i * 2 + 1] = fields.directionY[i] / len;
+                }
+            }
+        }
+
+        NodeSystem::Image2DData erosionMap;
+        erosionMap.width = w; erosionMap.height = h; erosionMap.channels = 4;
+        erosionMap.semantic = NodeSystem::ImageSemantic::Mask;
+        erosionMap.data = std::make_shared<std::vector<float>>(pixelCount * 4, 0.0f);
+        for (size_t i = 0; i < pixelCount; ++i) {
+            (*erosionMap.data)[i * 4] = (*erosion.data)[i];
+            (*erosionMap.data)[i * 4 + 1] = (*deposition.data)[i];
+            (*erosionMap.data)[i * 4 + 2] = (*discharge.data)[i];
+            (*erosionMap.data)[i * 4 + 3] = (*sediment.data)[i];
+        }
         terrain->erosionMapRGBA = *erosionMap.data;
 
         ctx.setCachedValue(id, 0, result);
-        ctx.setCachedValue(id, 1, erosionMap);
-        return (outputIndex == 1) ? NodeSystem::PinValue{erosionMap} : NodeSystem::PinValue{result};
+        ctx.setCachedValue(id, 1, erosion);
+        ctx.setCachedValue(id, 2, deposition);
+        ctx.setCachedValue(id, 3, discharge);
+        ctx.setCachedValue(id, 4, sediment);
+        ctx.setCachedValue(id, 5, direction);
+        ctx.setCachedValue(id, 6, channelWidth);
+        ctx.setCachedValue(id, 7, waterDepth);
+        ctx.setCachedValue(id, 8, waterLevel);
+        switch (outputIndex) {
+            case 1: return NodeSystem::PinValue{erosion};
+            case 2: return NodeSystem::PinValue{deposition};
+            case 3: return NodeSystem::PinValue{discharge};
+            case 4: return NodeSystem::PinValue{sediment};
+            case 5: return NodeSystem::PinValue{direction};
+            case 6: return NodeSystem::PinValue{channelWidth};
+            case 7: return NodeSystem::PinValue{waterDepth};
+            case 8: return NodeSystem::PinValue{waterLevel};
+            default: return NodeSystem::PinValue{result};
+        }
+    }
+
+    const char* HydraulicErosionNode::getMultiPassPresetName(HydraulicMultiPassPreset preset) {
+        switch (preset) {
+            case HydraulicMultiPassPreset::Balanced: return "Balanced";
+            case HydraulicMultiPassPreset::Alpine: return "Alpine";
+            case HydraulicMultiPassPreset::Humid: return "Humid";
+            case HydraulicMultiPassPreset::Arid: return "Arid";
+            case HydraulicMultiPassPreset::Custom: return "Custom";
+        }
+        return "Balanced";
+    }
+
+    void HydraulicErosionNode::applyMultiPassPreset(HydraulicMultiPassPreset preset) {
+        multiPassPreset = preset;
+        if (preset == HydraulicMultiPassPreset::Custom) return;
+        params = HydraulicErosionParams();
+        switch (preset) {
+            case HydraulicMultiPassPreset::Alpine:
+                params.iterations = 90000; params.dropletLifetime = 112;
+                params.inertia = 0.15f; params.sedimentCapacity = 2.2f;
+                params.erodeSpeed = 0.075f; params.depositSpeed = 0.11f;
+                params.evaporateSpeed = 0.006f; params.erosionRadius = 3;
+                params.initialWater = 1.20f; params.velocitySettling = 1.20f;
+                break;
+            case HydraulicMultiPassPreset::Humid:
+                params.iterations = 110000; params.dropletLifetime = 128;
+                params.inertia = 0.10f; params.sedimentCapacity = 2.5f;
+                params.erodeSpeed = 0.070f; params.depositSpeed = 0.14f;
+                params.evaporateSpeed = 0.003f; params.erosionRadius = 3;
+                params.initialWater = 1.35f; params.flatSettling = 1.15f;
+                break;
+            case HydraulicMultiPassPreset::Arid:
+                params.iterations = 55000; params.dropletLifetime = 72;
+                params.inertia = 0.18f; params.sedimentCapacity = 1.6f;
+                params.erodeSpeed = 0.045f; params.depositSpeed = 0.20f;
+                params.evaporateSpeed = 0.025f; params.erosionRadius = 2;
+                params.initialWater = 0.75f; params.flatSettling = 1.35f;
+                break;
+            case HydraulicMultiPassPreset::Balanced:
+            case HydraulicMultiPassPreset::Custom:
+                break;
+        }
+        dirty = true;
     }
     
     void HydraulicErosionNode::drawContent() {
         if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
-        ImGui::TextDisabled("GPU uses Vulkan compute; CUDA/CPU remain fallbacks.");
-        
+        if (ImGui::Checkbox("Multi-Pass", &multiPass)) dirty = true;
+        if (multiPass) {
+            int presetIndex = static_cast<int>(multiPassPreset);
+            const char* presetNames[] = { "Balanced", "Alpine", "Humid", "Arid", "Custom" };
+            if (ImGui::Combo("Pass Preset", &presetIndex, presetNames, IM_ARRAYSIZE(presetNames))) {
+                applyMultiPassPreset(static_cast<HydraulicMultiPassPreset>(presetIndex));
+            }
+            ImGui::TextDisabled("Conditioning > Incision > Maturation (resident GPU)");
+        }
         ImGui::TextColored(
             useGPU ? ImVec4(0.4f, 0.7f, 1.0f, 1.0f) : ImVec4(0.4f, 1.0f, 0.7f, 1.0f),
-            useGPU ? "Mode: GPU Hydraulic Droplet Solver" : "Mode: CPU Hydraulic Droplet Solver");
-        if (ImGui::DragInt("Droplets", &params.iterations, 25000, 25000, 1000000, "%d hits")) dirty = true;
-        if (ImGui::DragInt("Lifetime", &params.dropletLifetime, 1, 16, 512)) dirty = true;
-        if (ImGui::DragFloat("Inertia", &params.inertia, 0.01f, 0.0f, 1.0f)) dirty = true;
-        if (ImGui::DragFloat("Capacity", &params.sedimentCapacity, 0.05f, 0.1f, 20.0f)) dirty = true;
-        if (ImGui::DragFloat("Erode Rate", &params.erodeSpeed, 0.01f, 0.01f, 2.0f)) dirty = true;
-        if (ImGui::DragFloat("Deposit Rate", &params.depositSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
-        if (ImGui::DragFloat("Evaporate", &params.evaporateSpeed, 0.001f, 0.0f, 0.2f)) dirty = true;
-        if (ImGui::DragFloat("Gravity", &params.gravity, 0.1f, 1.0f, 50.0f)) dirty = true;
-        if (ImGui::DragFloat("Min Slope", &params.minSlope, 0.001f, 0.0f, 0.1f, "%.4f")) dirty = true;
-        if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 15)) dirty = true;
-        int erosionSeed = static_cast<int>(params.seed);
-        if (ImGui::DragInt("Seed", &erosionSeed, 1.0f, 0, 2147483647)) {
-            params.seed = static_cast<unsigned int>((std::max)(erosionSeed, 0));
-            dirty = true;
+            useGPU ? "Vulkan droplet solver" : "CPU droplet solver");
+
+        if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::DragInt("Droplets", &params.iterations, 5000, 1000, 5000000, "%d")) dirty = true;
+            if (ImGui::DragInt("Max Lifetime", &params.dropletLifetime, 1, 1, 1024, "%d steps")) dirty = true;
+            int erosionSeed = static_cast<int>(params.seed);
+            if (ImGui::DragInt("Seed", &erosionSeed, 1.0f, 0, 2147483647)) {
+                params.seed = static_cast<unsigned int>((std::max)(erosionSeed, 0));
+                dirty = true;
+            }
         }
 
-        const char* boundaryModes[] = { "Preserve Height", "Open Outlet", "Sea Level" };
-        int boundaryMode = static_cast<int>(params.boundaryMode);
-        if (ImGui::Combo("Boundary", &boundaryMode, boundaryModes, 3)) {
-            params.boundaryMode = static_cast<ErosionBoundaryMode>(boundaryMode);
-            dirty = true;
+        if (ImGui::CollapsingHeader("Water Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::SliderFloat("Inertia", &params.inertia, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::DragFloat("Gravity", &params.gravity, 0.1f, 0.0f, 50.0f)) dirty = true;
+            if (ImGui::DragFloat("Initial Water", &params.initialWater, 0.01f, 0.01f, 10.0f)) dirty = true;
+            if (ImGui::DragFloat("Initial Speed", &params.initialSpeed, 0.01f, 0.01f, 10.0f)) dirty = true;
+            if (ImGui::DragFloat("Evaporation", &params.evaporateSpeed, 0.001f, 0.0f, 0.5f)) dirty = true;
+            if (ImGui::DragFloat("Minimum Slope", &params.minSlope, 0.0005f, 0.0f, 0.25f, "%.4f")) dirty = true;
         }
-        if (params.boundaryMode != ErosionBoundaryMode::Open) {
-            if (ImGui::DragInt("Boundary Width", &params.boundaryWidth, 1, 0, 512,
+
+        if (ImGui::CollapsingHeader("Sediment", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::DragFloat("Capacity", &params.sedimentCapacity, 0.05f, 0.0f, 20.0f)) dirty = true;
+            if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.0f, 2.0f)) dirty = true;
+            if (ImGui::DragFloat("Deposition Rate", &params.depositSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::DragFloat("Uphill Erosion", &params.uphillErosion, 0.01f, 0.0f, 2.0f)) dirty = true;
+            if (ImGui::DragFloat("Flat Settling", &params.flatSettling, 0.01f, 0.0f, 4.0f, "%.2fx")) dirty = true;
+            if (ImGui::DragFloat("Velocity Settling", &params.velocitySettling, 0.01f, 0.0f, 4.0f, "%.2fx")) dirty = true;
+        }
+
+        if (ImGui::CollapsingHeader("Channel Shape", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::DragInt("Erosion Radius", &params.erosionRadius, 1, 1, 32, "%d cells")) dirty = true;
+            if (ImGui::DragFloat("Stop Water", &params.minWater, 0.001f, 0.0f, 1.0f, "%.3f")) dirty = true;
+            if (ImGui::DragFloat("Stop Speed", &params.minSpeed, 0.001f, 0.0f, 1.0f, "%.3f")) dirty = true;
+        }
+
+        if (ImGui::CollapsingHeader("Channel Evolution", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::Checkbox("Mature River Channels", &params.channelEvolution)) dirty = true;
+            ImGui::BeginDisabled(!params.channelEvolution);
+            if (ImGui::SliderInt("Evolution Passes", &params.channelIterations, 0, 64)) dirty = true;
+            if (ImGui::SliderFloat("Bed Incision", &params.channelErosion, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::SliderFloat("Channel Deposition", &params.channelDeposition, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::SliderFloat("Width Scale", &params.channelWidthScale, 0.1f, 4.0f)) dirty = true;
+            if (ImGui::SliderFloat("Depth Scale", &params.channelDepthScale, 0.1f, 4.0f)) dirty = true;
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("Uses resident discharge/sediment; replaces a second Fluvial solve.");
+            if (ImGui::TreeNodeEx("Macro Valleys (Advanced)", ImGuiTreeNodeFlags_None)) {
+                if (ImGui::Checkbox("Enabled", &params.macroDrainage)) dirty = true;
+                ImGui::BeginDisabled(!params.macroDrainage);
+                // These are the only controls that produce trunk-valley
+                // hierarchy, and all three scale with the terrain, not with the
+                // solver. On a 10 km / 1000 m terrain the small-terrain defaults
+                // carve 17-73 m wide, 10 m deep channels everywhere - visually
+                // nothing, and no hierarchy at all.
+                if (ImGui::DragFloat("Feature Scale", &params.macroValleyScaleMeters, 2.0f, 20.0f, 6000.0f, "%.0f m")) dirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Trunk valley width scale. Roughly terrain size / 5."
+                    "Mature valleys reach about half this width.");
+                if (ImGui::DragFloat("Headwater Area", &params.macroHeadwaterAreaKm2, 0.001f, 0.0005f, 25.0f, "%.3f km2")) dirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Catchment area a channel needs before it incises."
+                    "Low values turn every gully into a channel and erase the"
+                    "trunk-and-tributary hierarchy. Raise it on large terrains.");
+                if (ImGui::DragFloat("Incision", &params.macroValleyDepthMeters, 0.25f, 0.0f, 500.0f, "%.1f m")) dirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Trunk valley depth in metres. Alpine terrain sits near"
+                    "15-25 percent of the total relief.");
+                if (ImGui::SliderFloat("Floor Shape", &params.macroValleyFloor, 0.0f, 1.0f)) dirty = true;
+                ImGui::EndDisabled();
+                ImGui::TreePop();
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Domain Boundary")) {
+            const char* boundaryModes[] = { "Preserve Height", "Open Outlet", "Sea Level" };
+            int boundaryMode = static_cast<int>(params.boundaryMode);
+            if (ImGui::Combo("Mode", &boundaryMode, boundaryModes, 3)) {
+                params.boundaryMode = static_cast<ErosionBoundaryMode>(boundaryMode);
+                dirty = true;
+            }
+            if (params.boundaryMode != ErosionBoundaryMode::Open &&
+                ImGui::DragInt("Width", &params.boundaryWidth, 1, 0, 512,
                     params.boundaryWidth == 0 ? "Auto" : "%d cells")) dirty = true;
-        }
-        if (params.boundaryMode == ErosionBoundaryMode::SeaLevel) {
-            if (ImGui::DragFloat("Sea Level", &params.boundaryLevel, 0.01f, -1000.0f, 1000.0f, "%.3f normalized")) dirty = true;
-        }
-
-        if (ImGui::Button(useGPU ? "Reset GPU Params" : "Reset CPU Params")) {
-            params = HydraulicErosionParams();
-            dirty = true;
+            if (params.boundaryMode == ErosionBoundaryMode::SeaLevel &&
+                ImGui::DragFloat("Sea Level", &params.boundaryLevel, 0.01f, -1000.0f, 1000.0f, "%.3f normalized")) dirty = true;
         }
 
-        ImGui::Separator();
-        ImGui::Text("Additional Output Falloff");
-        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
-        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::CollapsingHeader("Stabilization")) {
+            if (ImGui::Checkbox("Remove Spikes", &params.removeSpikes)) dirty = true;
+            if (ImGui::Checkbox("Fill Pits", &params.fillPits)) dirty = true;
+            if (ImGui::Checkbox("Smooth Surface", &params.smoothSurface)) dirty = true;
+        }
+
+        if (ImGui::CollapsingHeader("Output Falloff")) {
+            ImGui::TextDisabled("Applied after simulation to Height Out only.");
+            if (ImGui::DragFloat("Fade Width", &edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+            if (ImGui::SliderFloat("Fade Value", &edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
+        }
+
+        if (ImGui::CollapsingHeader("Last Evaluation")) {
+            ImGui::Text("Passes: %d", lastExecutedPasses);
+            ImGui::Text("Solve: %.2f ms", lastSolveMs);
+            ImGui::Text("Eroded: %.6g", lastEroded);
+            ImGui::Text("Deposited: %.6g", lastDeposited);
+            ImGui::Text("Discharge integral: %.6g", lastDischarge);
+            ImGui::Text("Sediment-flux integral: %.6g", lastSedimentFlux);
+            ImGui::TextDisabled("Integrals are solver-space values; field pins are normalized.");
+        }
+
+        ImGui::TextDisabled("Fields are normalized independently for graph use.");
+        if (ImGui::Button("Reset Hydraulic Defaults")) { params = HydraulicErosionParams(); dirty = true; }
     }
     
     NodeSystem::PinValue ThermalErosionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
@@ -1082,6 +1822,7 @@ namespace TerrainNodesV2 {
         
         TerrainObject* terrain = tctx->terrain;
         TerrainManager& mgr = TerrainManager::getInstance();
+        const std::vector<float> originalHeight = *inputHeight.data;
         
         // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
         float preserved_scale_xz = tctx->scale_xz;
@@ -1108,10 +1849,17 @@ namespace TerrainNodesV2 {
             mask = *maskInput.data;
         }
 
-        // NEW: Get optional Hardness input
+        // Hardness connected to this node is evaluation-local. Preserve any
+        // terrain-authored hardness and never retain a disconnected pin's last
+        // image as hidden node state.
+        const std::vector<float> preservedTerrainHardness = terrain->hardnessMap;
+        std::vector<float> evaluationHardness;
         auto hardnessInput = getHeightInput(2, ctx);
         if (hardnessInput.isValid() && hardnessInput.data->size() == terrain->heightmap.data.size()) {
-            terrain->hardnessMap = *hardnessInput.data;
+            evaluationHardness = *hardnessInput.data;
+            terrain->hardnessMap = evaluationHardness;
+        } else {
+            terrain->hardnessMap.clear();
         }
         
         if (useGPU) {
@@ -1128,10 +1876,110 @@ namespace TerrainNodesV2 {
             applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
         }
         
+        auto erosion = createMaskOutput(inputHeight.width, inputHeight.height);
+        auto deposition = createMaskOutput(inputHeight.width, inputHeight.height);
+        auto talus = createMaskOutput(inputHeight.width, inputHeight.height);
+        auto rockExposure = createMaskOutput(inputHeight.width, inputHeight.height);
+        const int w = inputHeight.width;
+        const int h = inputHeight.height;
+        const float cellSize = (std::max)(preserved_scale_xz / (std::max)(w, 1), 1e-5f);
+        const float heightScale = (std::max)(std::abs(preserved_scale_y), 1e-5f);
+        float maximumChange = 0.0f;
+        for (size_t i = 0; i < originalHeight.size(); ++i) {
+            maximumChange = (std::max)(maximumChange,
+                std::abs((*result.data)[i] - originalHeight[i]));
+        }
+        const float invMaximumChange = maximumChange > 1e-8f ? 1.0f / maximumChange : 0.0f;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t index = static_cast<size_t>(y) * w + x;
+                const float delta = (*result.data)[index] - originalHeight[index];
+                (*erosion.data)[index] = clampValue(-delta * invMaximumChange, 0.0f, 1.0f);
+                (*deposition.data)[index] = clampValue(delta * invMaximumChange, 0.0f, 1.0f);
+                const int xl = (std::max)(x - 1, 0), xr = (std::min)(x + 1, w - 1);
+                const int yu = (std::max)(y - 1, 0), yd = (std::min)(y + 1, h - 1);
+                const float dx = ((*result.data)[static_cast<size_t>(y) * w + xr] -
+                    (*result.data)[static_cast<size_t>(y) * w + xl]) * heightScale /
+                    ((std::max)(xr - xl, 1) * cellSize);
+                const float dz = ((*result.data)[static_cast<size_t>(yd) * w + x] -
+                    (*result.data)[static_cast<size_t>(yu) * w + x]) * heightScale /
+                    ((std::max)(yd - yu, 1) * cellSize);
+                const float slope = std::sqrt(dx * dx + dz * dz);
+                const float talusBand = 1.0f - clampValue(
+                    std::abs(slope - params.talusAngle) /
+                    (std::max)(params.talusAngle * 0.65f, 0.05f), 0.0f, 1.0f);
+                float debrisDetail = 1.0f;
+                if (params.fineDetail) {
+                    const int debrisCells = (std::max)(1, static_cast<int>(
+                        std::round(params.debrisSizeMeters / cellSize)));
+                    debrisDetail = 0.62f + 0.38f * landformHash(
+                        x / debrisCells, y / debrisCells, 9173);
+                }
+                (*talus.data)[index] = clampValue(talusBand *
+                    (0.35f + 0.65f * (*deposition.data)[index]) * debrisDetail, 0.0f, 1.0f);
+                const float hardness = evaluationHardness.size() == originalHeight.size()
+                    ? clampValue(evaluationHardness[index], 0.0f, 1.0f) : 0.5f;
+                (*rockExposure.data)[index] = clampValue(
+                    (*erosion.data)[index] * (0.35f + 0.65f * hardness), 0.0f, 1.0f);
+            }
+        }
+        ctx.setCachedValue(id, 0, result);
+        ctx.setCachedValue(id, 1, erosion);
+        ctx.setCachedValue(id, 2, deposition);
+        ctx.setCachedValue(id, 3, talus);
+        ctx.setCachedValue(id, 4, rockExposure);
+        terrain->hardnessMap = preservedTerrainHardness;
+        if (outputIndex == 1) return erosion;
+        if (outputIndex == 2) return deposition;
+        if (outputIndex == 3) return talus;
+        if (outputIndex == 4) return rockExposure;
         return result;
     }
     
+    const char* ThermalErosionNode::getPresetName(ThermalErosionPreset value) {
+        switch (value) {
+            case ThermalErosionPreset::Balanced: return "Balanced";
+            case ThermalErosionPreset::AlpineScree: return "Alpine Scree";
+            case ThermalErosionPreset::DesertRock: return "Desert Rock";
+            case ThermalErosionPreset::SoftSediment: return "Soft Sediment";
+            case ThermalErosionPreset::Custom: return "Custom";
+        }
+        return "Balanced";
+    }
+
+    void ThermalErosionNode::applyPreset(ThermalErosionPreset value) {
+        preset = value;
+        switch (value) {
+            case ThermalErosionPreset::Balanced:
+                params.iterations = 32; params.talusAngle = std::tan(31.0f * 0.0174532925f);
+                params.erosionAmount = 0.22f; params.anisotropy = 0.12f;
+                params.talusSettling = 0.85f; params.sedimentRemoval = 0.02f;
+                params.fineDetail = false; params.debrisSizeMeters = 1.2f; break;
+            case ThermalErosionPreset::AlpineScree:
+                params.iterations = 58; params.talusAngle = std::tan(36.0f * 0.0174532925f);
+                params.erosionAmount = 0.30f; params.anisotropy = 0.28f;
+                params.talusSettling = 1.18f; params.sedimentRemoval = 0.06f;
+                params.fineDetail = true; params.debrisSizeMeters = 2.4f; break;
+            case ThermalErosionPreset::DesertRock:
+                params.iterations = 42; params.talusAngle = std::tan(39.0f * 0.0174532925f);
+                params.erosionAmount = 0.18f; params.anisotropy = 0.62f;
+                params.talusSettling = 0.72f; params.sedimentRemoval = 0.18f;
+                params.fineDetail = true; params.debrisSizeMeters = 1.6f; break;
+            case ThermalErosionPreset::SoftSediment:
+                params.iterations = 70; params.talusAngle = std::tan(25.0f * 0.0174532925f);
+                params.erosionAmount = 0.34f; params.anisotropy = 0.05f;
+                params.talusSettling = 1.35f; params.sedimentRemoval = 0.0f;
+                params.fineDetail = false; params.debrisSizeMeters = 0.45f; break;
+            case ThermalErosionPreset::Custom: break;
+        }
+        dirty = true;
+    }
+
     void ThermalErosionNode::drawContent() {
+        int presetIndex = static_cast<int>(preset);
+        const char* presets[] = { "Balanced", "Alpine Scree", "Desert Rock", "Soft Sediment", "Custom" };
+        if (ImGui::Combo("Preset", &presetIndex, presets, IM_ARRAYSIZE(presets)))
+            applyPreset(static_cast<ThermalErosionPreset>(presetIndex));
         if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
         ImGui::TextDisabled("GPU uses Vulkan compute; CUDA/CPU remain fallbacks.");
         if (ImGui::DragInt("Iterations", &params.iterations, 1, 1, 500)) dirty = true;
@@ -1141,7 +1989,16 @@ namespace TerrainNodesV2 {
             params.talusAngle = std::tan(uiDegrees * 3.14159f / 180.0f);
             dirty = true;
         }
-        if (ImGui::DragFloat("Erosion Amount", &params.erosionAmount, 0.01f, 0.0f, 1.0f)) dirty = true;
+        bool physicalEdited = false;
+        physicalEdited |= ImGui::DragFloat("Erosion Amount", &params.erosionAmount, 0.01f, 0.0f, 1.0f);
+        physicalEdited |= ImGui::SliderFloat("Anisotropy", &params.anisotropy, 0.0f, 1.0f);
+        physicalEdited |= ImGui::SliderFloat("Stress Direction", &params.anisotropyDirection, 0.0f, 360.0f, "%.0f deg");
+        physicalEdited |= ImGui::SliderFloat("Talus Settling", &params.talusSettling, 0.0f, 2.0f);
+        physicalEdited |= ImGui::SliderFloat("Sediment Removal", &params.sedimentRemoval, 0.0f, 1.0f);
+        physicalEdited |= ImGui::Checkbox("Fine Debris", &params.fineDetail);
+        if (params.fineDetail)
+            physicalEdited |= ImGui::DragFloat("Debris Size", &params.debrisSizeMeters, 0.05f, 0.05f, 50.0f, "%.2f m");
+        if (physicalEdited) { preset = ThermalErosionPreset::Custom; dirty = true; }
 
         ImGui::Separator();
         ImGui::Text("Edge Falloff");
@@ -4239,9 +5096,18 @@ namespace TerrainNodesV2 {
                     ? clampValue((*hydraulicDepth.data)[channelIndex],
                                  safeMinimumDepth, safeMaximumDepth)
                     : fallbackDepth;
-                const float radius = width * 0.5f;
-                const float waterRadius = useHydraulicWidth
-                    ? radius / 1.12f : radius;
+                // A sampled height field cannot represent a channel narrower
+                // than roughly one cell diagonal. Stamping a sub-pixel disk at
+                // each D8 centre left diagonal channels as a dotted sequence.
+                // Use the smallest reconstructible footprint for the carve;
+                // authored/hydraulic water width itself remains unchanged.
+                const float authoredRadius = width * 0.5f;
+                const float minimumContinuousRadius = 0.55f *
+                    std::sqrt(cellX * cellX + cellZ * cellZ);
+                const float radius = (std::max)(authoredRadius, minimumContinuousRadius);
+                const float authoredWaterRadius = useHydraulicWidth
+                    ? authoredRadius / 1.12f : authoredRadius;
+                const float waterRadius = (std::max)(authoredWaterRadius, minimumContinuousRadius);
                 const int radiusX = (std::max)(1, static_cast<int>(std::ceil(radius / cellX)));
                 const int radiusZ = (std::max)(1, static_cast<int>(std::ceil(radius / cellZ)));
                 for (int oy = -radiusZ; oy <= radiusZ; ++oy) {
@@ -4406,10 +5272,26 @@ namespace TerrainNodesV2 {
                 candidate.fullPath.push_back(cursor);
                 cursor = parent[static_cast<size_t>(cursor)];
             }
+            // A visible river must terminate at a real outlet, a lake, or the
+            // terrain boundary. D8 flats can otherwise terminate in an
+            // unresolved interior sink and produce an apparently cut-off water
+            // ribbon in the middle of the landscape.
+            bool reachedLake = cursor >= 0 && cursor < count && lakeMask.isValid() &&
+                (*lakeMask.data)[static_cast<size_t>(cursor)] >= 0.5f;
+            bool reachedBoundary = false;
+            if (!candidate.fullPath.empty()) {
+                const int endpoint = candidate.fullPath.back();
+                const int endpointX = endpoint % w;
+                const int endpointY = endpoint / w;
+                reachedBoundary = endpointX == 0 || endpointX == w - 1 ||
+                    endpointY == 0 || endpointY == h - 1;
+            }
             // Likewise, an inlet ends at its final non-lake cell. Previously a
             // submerged endpoint plus Bezier width made short lakes look as if
             // one uninterrupted river ribbon continued underneath them.
-            if (candidate.fullPath.size() >= 2) candidates.push_back(std::move(candidate));
+            if (candidate.fullPath.size() >= 2 && (reachedLake || reachedBoundary)) {
+                candidates.push_back(std::move(candidate));
+            }
         }
 
         // The longest headwater-to-outlet route claims the main stem first.
@@ -4469,14 +5351,33 @@ namespace TerrainNodesV2 {
             }
             if (path.points.size() < 2) continue;
 
-            // Suppress D8 stair-steps before Bezier tangent generation. Endpoints
-            // remain exact so tributaries still meet their main stem.
+            // Corner-cut the extracted D8 polyline before Bezier tangent
+            // generation. Unlike repeatedly averaging the same samples this
+            // removes axis/diagonal circuit-board corners while retaining the
+            // exact source and confluence/outlet endpoints.
             for (int smoothingPass = 0; smoothingPass < 2 && path.points.size() > 2; ++smoothingPass) {
-                std::vector<PendingPoint> smoothed = path.points;
-                for (size_t i = 1; i + 1 < path.points.size(); ++i) {
-                    smoothed[i].x = (path.points[i - 1].x + path.points[i].x * 2.0f + path.points[i + 1].x) * 0.25f;
-                    smoothed[i].y = (path.points[i - 1].y + path.points[i].y * 2.0f + path.points[i + 1].y) * 0.25f;
+                std::vector<PendingPoint> smoothed;
+                smoothed.reserve(path.points.size() * 2);
+                smoothed.push_back(path.points.front());
+                for (size_t i = 0; i + 1 < path.points.size(); ++i) {
+                    PendingPoint q = path.points[i];
+                    PendingPoint r = path.points[i + 1];
+                    q.x = path.points[i].x * 0.75f + path.points[i + 1].x * 0.25f;
+                    q.y = path.points[i].y * 0.75f + path.points[i + 1].y * 0.25f;
+                    r.x = path.points[i].x * 0.25f + path.points[i + 1].x * 0.75f;
+                    r.y = path.points[i].y * 0.25f + path.points[i + 1].y * 0.75f;
+                    // River hydraulics are sparse channel fields: samples away
+                    // from the D8 centre are zero, so bilinear sampling a
+                    // smoothed XZ point would blend river stage/width/depth
+                    // toward zero and bury the water far below the terrain.
+                    // Keep each corner-cut point attached to its nearest real
+                    // channel sample while only smoothing its horizontal route.
+                    q.sourceIndex = path.points[i].sourceIndex;
+                    r.sourceIndex = path.points[i + 1].sourceIndex;
+                    smoothed.push_back(q);
+                    smoothed.push_back(r);
                 }
+                smoothed.push_back(path.points.back());
                 path.points.swap(smoothed);
             }
 
@@ -4908,7 +5809,7 @@ namespace TerrainNodesV2 {
         }
         // Keep new fields appended: serialized graphs map pins by index and the
         // original terrain/biome pin order must remain stable.
-        static const std::array<const char*, 30> names = {
+        static const std::array<const char*, 38> names = {
             "terrain.slope", "terrain.concavity", "terrain.convexity", "terrain.valley", "terrain.wetness",
             "biome.forest", "biome.grass", "biome.rock", "biome.alpine",
             "hydrology.accumulation", "hydrology.direction", "hydrology.basins",
@@ -4917,7 +5818,10 @@ namespace TerrainNodesV2 {
             "hydrology.lake_shoreline", "hydrology.lake_spill", "hydrology.lake_id",
             "hydrology.catchment_area", "hydrology.river_discharge", "hydrology.river_width",
             "hydrology.river_depth", "hydrology.river_speed", "hydrology.river_level",
-            "hydrology.river_froude", "hydrology.river_foam"
+            "hydrology.river_froude", "hydrology.river_foam",
+            "erosion.hydraulic", "erosion.deposition",
+            "hydrology.hydraulic_discharge", "erosion.sediment_flux",
+            "geology.hardness", "geology.permeability", "geology.fracture", "geology.id"
         };
         const size_t expected = static_cast<size_t>(tctx->terrain->heightmap.width) *
             tctx->terrain->heightmap.height;
@@ -7384,6 +8288,182 @@ namespace TerrainNodesV2 {
         if (ImGui::SliderFloat("Slope Loss", &slopeLoss, 0.0f, 2.0f)) dirty = true;
     }
 
+    NodeSystem::PinValue PlateTectonicsNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        const auto height = getHeightInput(0, ctx);
+        const auto mask = getHeightInput(1, ctx);
+        if (!height.isValid()) {
+            ctx.addError(id, "Plate Tectonics requires a height input");
+            return NodeSystem::PinValue{};
+        }
+        if (!sameImageExtent(mask, height.width, height.height)) {
+            ctx.addError(id, "Plate Tectonics Mask must match the height resolution");
+            return NodeSystem::PinValue{};
+        }
+
+        const int w = height.width, h = height.height;
+        const int count = clampValue(plateCount, 2, 24);
+        const TerrainMetricScale metric = resolveTerrainMetricScale(ctx, w);
+        const float heightScale = (std::max)(std::abs(metric.heightScale), 0.001f);
+        const float effectiveScale = (std::max)(plateScaleMeters, 10.0f);
+        std::vector<ImVec2> centers(static_cast<size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            const float cx = simpleNoise(i * 13 + 7, seed, seed + 31) - 0.5f;
+            const float cz = simpleNoise(i * 29 + 3, seed + 17, seed + 71) - 0.5f;
+            centers[static_cast<size_t>(i)] = ImVec2(cx * metric.worldScale, cz * metric.worldScale);
+        }
+        std::array<NodeSystem::Image2DData, 4> result = {
+            createHeightOutput(w, h), createMaskOutput(w, h),
+            createMaskOutput(w, h), createMaskOutput(w, h)
+        };
+        const float requestedReliefMeters = (std::max)(upliftMeters + riftDepthMeters, 0.0f);
+        const float slopeSafeWidth = requestedReliefMeters / std::tan(32.0f * 0.0174532925f);
+        const float envelopeWidth = (std::max)(boundaryWidthMeters * 5.0f,
+                                               (std::max)(slopeSafeWidth, 5.0f));
+        for (int y = 0; y < h; ++y) {
+            const float v = h > 1 ? static_cast<float>(y) / (h - 1) : 0.0f;
+            for (int x = 0; x < w; ++x) {
+                const float u = w > 1 ? static_cast<float>(x) / (w - 1) : 0.0f;
+                const size_t index = static_cast<size_t>(y) * w + x;
+                const float worldX = (u - 0.5f) * metric.worldScale;
+                const float worldZ = (v - 0.5f) * metric.worldScale;
+                // Domain warping prevents the straight Voronoi bisectors from
+                // becoming artificial polygon walls in the displaced terrain.
+                const float domainWarpScale = (std::max)(effectiveScale * 0.65f, 10.0f);
+                const float warpX = (landformFbm(worldX / domainWarpScale,
+                    worldZ / domainWarpScale, seed + 503, 3, 0.53f) - 0.5f) *
+                    boundaryWidthMeters * 2.5f;
+                const float warpZ = (landformFbm(worldX / domainWarpScale,
+                    worldZ / domainWarpScale, seed + 907, 3, 0.53f) - 0.5f) *
+                    boundaryWidthMeters * 2.5f;
+                const float sampleX = worldX + warpX;
+                const float sampleZ = worldZ + warpZ;
+                float nearest = FLT_MAX, second = FLT_MAX;
+                int nearestPlate = 0, secondPlate = 1;
+                for (int p = 0; p < count; ++p) {
+                    const ImVec2 c = centers[static_cast<size_t>(p)];
+                    const float dx = sampleX - c.x, dz = sampleZ - c.y;
+                    const float distance = std::sqrt(dx * dx + dz * dz);
+                    if (distance < nearest) {
+                        second = nearest; secondPlate = nearestPlate;
+                        nearest = distance; nearestPlate = p;
+                    } else if (distance < second) {
+                        second = distance; secondPlate = p;
+                    }
+                }
+                const float boundary = 1.0f - landformSmoothstep(
+                    0.0f, (std::max)(boundaryWidthMeters, 1.0f), second - nearest);
+                // Height deformation uses a much wider tectonic influence than
+                // the diagnostic boundary mask. This creates mountain belts and
+                // rift basins instead of extruded lines.
+                // A heightfield cannot represent an overhang. Guarantee that a
+                // requested vertical displacement is spread over enough world
+                // distance to enter erosion as a broad slope, not a one-cell
+                // wall. Boundary remains the sharp diagnostic/fracture field.
+                const float tectonicEnvelope = 1.0f - landformSmoothstep(
+                    0.0f, envelopeWidth, second - nearest);
+                const int pairKey = (std::min)(nearestPlate, secondPlate) * 97 +
+                                    (std::max)(nearestPlate, secondPlate) * 193;
+                const float convergence = simpleNoise(pairKey, seed + 101, seed + 211);
+                const float convergent = landformSmoothstep(0.46f, 0.62f, convergence);
+                const float divergent = 1.0f - landformSmoothstep(0.32f, 0.48f, convergence);
+                const float interior = (landformFbm(worldX / effectiveScale, worldZ / effectiveScale,
+                    seed + nearestPlate * 37, 4, 0.52f) - 0.5f) * 2.0f;
+                const float authoredMask = mask.isValid()
+                    ? clampValue((*mask.data)[index], 0.0f, 1.0f) : 1.0f;
+                const float uplift = clampValue(tectonicEnvelope * convergent +
+                    (0.5f + 0.5f * interior) * interiorWarp * (1.0f - boundary), 0.0f, 1.0f);
+                const float displacementMeters = uplift * upliftMeters -
+                    tectonicEnvelope * divergent * riftDepthMeters;
+                (*result[0].data)[index] = (*height.data)[index] +
+                    displacementMeters / heightScale * authoredMask;
+                (*result[1].data)[index] = uplift * authoredMask;
+                (*result[2].data)[index] = boundary * authoredMask;
+                (*result[3].data)[index] = count > 1
+                    ? static_cast<float>(nearestPlate) / static_cast<float>(count - 1) : 0.0f;
+            }
+        }
+        for (int i = 0; i < 4; ++i) ctx.setCachedValue(id, i, result[static_cast<size_t>(i)]);
+        return outputIndex >= 0 && outputIndex < 4
+            ? NodeSystem::PinValue{result[static_cast<size_t>(outputIndex)]} : NodeSystem::PinValue{};
+    }
+
+    void PlateTectonicsNode::drawContent() {
+        if (ImGui::Button("Reset Gentle Tectonics")) {
+            plateCount = 7; plateScaleMeters = 900.0f; upliftMeters = 18.0f;
+            riftDepthMeters = 6.0f; boundaryWidthMeters = 90.0f;
+            interiorWarp = 0.12f; seed = 271; dirty = true;
+        }
+        if (ImGui::DragInt("Plate Count", &plateCount, 1, 2, 24)) dirty = true;
+        if (ImGui::DragFloat("Plate Scale", &plateScaleMeters, 10.0f, 10.0f, 100000.0f, "%.0f m")) dirty = true;
+        if (ImGui::DragFloat("Uplift", &upliftMeters, 1.0f, 0.0f, 5000.0f, "%.0f m")) dirty = true;
+        if (ImGui::DragFloat("Rift Depth", &riftDepthMeters, 1.0f, 0.0f, 5000.0f, "%.0f m")) dirty = true;
+        if (ImGui::DragFloat("Boundary Width", &boundaryWidthMeters, 1.0f, 1.0f, 10000.0f, "%.0f m")) dirty = true;
+        if (ImGui::SliderFloat("Interior Warp", &interiorWarp, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragInt("Seed", &seed)) dirty = true;
+    }
+
+    NodeSystem::PinValue FoldNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        const auto height = getHeightInput(0, ctx);
+        const auto compression = getHeightInput(1, ctx);
+        if (!height.isValid()) {
+            ctx.addError(id, "Fold requires a height input");
+            return NodeSystem::PinValue{};
+        }
+        if (!sameImageExtent(compression, height.width, height.height)) {
+            ctx.addError(id, "Fold Compression must match the height resolution");
+            return NodeSystem::PinValue{};
+        }
+        const int w = height.width, h = height.height;
+        const TerrainMetricScale metric = resolveTerrainMetricScale(ctx, w);
+        const float heightScale = (std::max)(std::abs(metric.heightScale), 0.001f);
+        const float wavelength = (std::max)(wavelengthMeters, 1.0f);
+        const float angle = directionDegrees * 0.0174532925f;
+        std::array<NodeSystem::Image2DData, 3> result = {
+            createHeightOutput(w, h), createMaskOutput(w, h), createMaskOutput(w, h)
+        };
+        for (int y = 0; y < h; ++y) {
+            const float v = h > 1 ? static_cast<float>(y) / (h - 1) : 0.0f;
+            for (int x = 0; x < w; ++x) {
+                const float u = w > 1 ? static_cast<float>(x) / (w - 1) : 0.0f;
+                const size_t index = static_cast<size_t>(y) * w + x;
+                const float worldX = (u - 0.5f) * metric.worldScale;
+                const float worldZ = (v - 0.5f) * metric.worldScale;
+                const float projected = worldX * std::cos(angle) + worldZ * std::sin(angle);
+                const float warp = (landformFbm(worldX / (wavelength * 2.8f),
+                    worldZ / (wavelength * 2.8f), seed, 3, 0.55f) - 0.5f) * wavelength * pinch;
+                const float phase = (projected + warp) / wavelength * 6.283185307f;
+                const float sine = std::sin(phase);
+                const float shaped = clampValue(sine + asymmetry * (sine * sine - 0.5f), -1.0f, 1.0f);
+                const float amount = compression.isValid()
+                    ? clampValue((*compression.data)[index], 0.0f, 1.0f) : 1.0f;
+                const float foldMask = clampValue(std::abs(shaped) * amount, 0.0f, 1.0f);
+                const float hinge = std::pow(clampValue(1.0f - std::abs(std::cos(phase)), 0.0f, 1.0f), 2.0f);
+                (*result[0].data)[index] = (*height.data)[index] +
+                    shaped * amplitudeMeters / heightScale * amount;
+                (*result[1].data)[index] = foldMask;
+                (*result[2].data)[index] = clampValue(hinge * fractureStrength * amount, 0.0f, 1.0f);
+            }
+        }
+        for (int i = 0; i < 3; ++i) ctx.setCachedValue(id, i, result[static_cast<size_t>(i)]);
+        return outputIndex >= 0 && outputIndex < 3
+            ? NodeSystem::PinValue{result[static_cast<size_t>(outputIndex)]} : NodeSystem::PinValue{};
+    }
+
+    void FoldNode::drawContent() {
+        if (ImGui::Button("Reset Gentle Fold")) {
+            wavelengthMeters = 180.0f; amplitudeMeters = 6.0f;
+            directionDegrees = 35.0f; asymmetry = 0.25f; pinch = 0.35f;
+            fractureStrength = 0.55f; seed = 419; dirty = true;
+        }
+        if (ImGui::DragFloat("Wavelength", &wavelengthMeters, 1.0f, 1.0f, 100000.0f, "%.0f m")) dirty = true;
+        if (ImGui::DragFloat("Amplitude", &amplitudeMeters, 0.5f, 0.0f, 5000.0f, "%.1f m")) dirty = true;
+        if (ImGui::DragFloat("Direction", &directionDegrees, 1.0f, 0.0f, 360.0f, "%.0f deg")) dirty = true;
+        if (ImGui::SliderFloat("Asymmetry", &asymmetry, -0.95f, 0.95f)) dirty = true;
+        if (ImGui::SliderFloat("Pinch / Warp", &pinch, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::SliderFloat("Fracture", &fractureStrength, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragInt("Seed", &seed)) dirty = true;
+    }
+
     NodeSystem::PinValue LithologyNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
         const auto height = getHeightInput(0, ctx);
         const auto warp = getHeightInput(1, ctx);
@@ -7403,7 +8483,10 @@ namespace TerrainNodesV2 {
         const float dip = std::tan(dipDegrees * 0.0174532925f);
         const float thickness = (std::max)(layerThickness, 0.05f);
         const int count = clampValue(layerCount, 2, 32);
-        auto result = createMaskOutput(w, h);
+        std::array<NodeSystem::Image2DData, 4> result = {
+            createMaskOutput(w, h), createMaskOutput(w, h),
+            createMaskOutput(w, h), createMaskOutput(w, h)
+        };
 
         for (int y = 0; y < h; ++y) {
             const float v = h > 1 ? static_cast<float>(y) / (h - 1) : 0.0f;
@@ -7419,18 +8502,32 @@ namespace TerrainNodesV2 {
                 const float layerCoordinate = ((*height.data)[index] * metric.heightScale + projected * dip + warpOffset) / thickness;
                 const int rawLayer = static_cast<int>(std::floor(layerCoordinate));
                 const int layerIndex = ((rawLayer % count) + count) % count;
-                if (outputIndex == 1) {
-                    (*result.data)[index] = count > 1 ? static_cast<float>(layerIndex) / (count - 1) : 0.0f;
-                } else {
-                    const float alternating = (layerIndex & 1) ? 0.22f : 0.78f;
-                    const float randomLayer = simpleNoise(layerIndex, 0, seed);
-                    const float layerHardness = alternating * 0.72f + randomLayer * 0.28f;
-                    (*result.data)[index] = clampValue(baseHardness +
-                        (layerHardness - 0.5f) * hardnessContrast * 1.6f, 0.0f, 1.0f);
-                }
+                const float geologyId = count > 1 ? static_cast<float>(layerIndex) / (count - 1) : 0.0f;
+                const float alternating = (layerIndex & 1) ? 0.22f : 0.78f;
+                const float randomLayer = simpleNoise(layerIndex, 0, seed);
+                const float layerHardness = alternating * 0.72f + randomLayer * 0.28f;
+                const float hardness = clampValue(baseHardness +
+                    (layerHardness - 0.5f) * hardnessContrast * 1.6f, 0.0f, 1.0f);
+                const float layerPermeability = clampValue(basePermeability +
+                    ((1.0f - hardness) - 0.5f) * permeabilityContrast * 1.5f, 0.0f, 1.0f);
+                const float phase = layerCoordinate - std::floor(layerCoordinate);
+                const float boundaryDistance = (std::min)(phase, 1.0f - phase) * 2.0f;
+                const float layerBoundary = 1.0f - landformSmoothstep(0.0f, 0.22f, boundaryDistance);
+                const float fractureNoise = landformFbm(
+                    worldX / (std::max)(fractureScaleMeters, 0.1f),
+                    worldZ / (std::max)(fractureScaleMeters, 0.1f), seed + 811, 3, 0.55f);
+                const float fracture = clampValue(layerBoundary * 0.65f +
+                    clampValue((fractureNoise - (1.0f - fractureDensity)) * 3.0f, 0.0f, 1.0f), 0.0f, 1.0f);
+                (*result[0].data)[index] = hardness;
+                (*result[1].data)[index] = geologyId;
+                (*result[2].data)[index] = clampValue(layerPermeability + fracture * 0.28f, 0.0f, 1.0f);
+                (*result[3].data)[index] = fracture;
             }
         }
-        return result;
+        for (int i = 0; i < 4; ++i) ctx.setCachedValue(id, i, result[static_cast<size_t>(i)]);
+        return (outputIndex >= 0 && outputIndex < 4)
+            ? NodeSystem::PinValue{result[static_cast<size_t>(outputIndex)]}
+            : NodeSystem::PinValue{};
     }
 
     void LithologyNode::drawContent() {
@@ -7441,6 +8538,10 @@ namespace TerrainNodesV2 {
         if (ImGui::DragFloat("Dip", &dipDegrees, 0.25f, -75.0f, 75.0f, "%.1f deg")) dirty = true;
         if (ImGui::DragFloat("Azimuth", &dipAzimuth, 1.0f, 0.0f, 360.0f, "%.0f deg")) dirty = true;
         if (ImGui::SliderFloat("Warp", &warpStrength, 0.0f, 2.0f)) dirty = true;
+        if (ImGui::SliderFloat("Base Permeability", &basePermeability, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::SliderFloat("Permeability Contrast", &permeabilityContrast, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::SliderFloat("Fracture Density", &fractureDensity, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragFloat("Fracture Scale", &fractureScaleMeters, 0.25f, 0.1f, 10000.0f, "%.1f m")) dirty = true;
         if (ImGui::DragInt("Seed", &seed)) dirty = true;
     }
 
@@ -7463,7 +8564,10 @@ namespace TerrainNodesV2 {
         const float azimuth = dipAzimuth * 0.0174532925f;
         const float dip = std::tan(dipDegrees * 0.0174532925f);
         const float thickness = (std::max)(layerThickness, 0.05f);
-        NodeSystem::Image2DData result = outputIndex == 0 ? createHeightOutput(w, h) : createMaskOutput(w, h);
+        std::array<NodeSystem::Image2DData, 4> result = {
+            createHeightOutput(w, h), createMaskOutput(w, h),
+            createMaskOutput(w, h), createMaskOutput(w, h)
+        };
 
         for (int y = 0; y < h; ++y) {
             const float v = h > 1 ? static_cast<float>(y) / (h - 1) : 0.0f;
@@ -7479,16 +8583,26 @@ namespace TerrainNodesV2 {
                 generatedHardness = std::pow(clampValue(generatedHardness, 0.0f, 1.0f), edgeSharpness);
                 const float hardness = hardnessInput.isValid()
                     ? clampValue((*hardnessInput.data)[index], 0.0f, 1.0f) : generatedHardness;
-                if (outputIndex == 1) {
-                    (*result.data)[index] = hardness;
-                } else {
-                    const float amount = mask.isValid() ? clampValue((*mask.data)[index], 0.0f, 1.0f) : 1.0f;
-                    const float relief = (hardness - 0.5f) * 2.0f * reliefStrength * amount;
-                    (*result.data)[index] = clampValue((*height.data)[index] + relief, 0.0f, 1.0f);
-                }
+                const float amount = mask.isValid() ? clampValue((*mask.data)[index], 0.0f, 1.0f) : 1.0f;
+                const float relief = (hardness - 0.5f) * 2.0f * reliefStrength * amount;
+                const float boundaryDistance = (std::min)(phase, 1.0f - phase) * 2.0f;
+                const float fracture = (1.0f - landformSmoothstep(0.0f, 0.24f, boundaryDistance)) *
+                    boundaryFracture * amount;
+                // Height fields are not color masks. Plate uplift, imported
+                // DEMs and earlier erosion stages may legitimately exceed the
+                // normalized 0..1 interval; clamping here flattened all of that
+                // authored relief before Height Output received it.
+                (*result[0].data)[index] = (*height.data)[index] + relief;
+                (*result[1].data)[index] = hardness;
+                (*result[2].data)[index] = clampValue((1.0f - hardness) * 0.55f +
+                    fracture * permeabilityBoost, 0.0f, 1.0f);
+                (*result[3].data)[index] = clampValue(fracture, 0.0f, 1.0f);
             }
         }
-        return result;
+        for (int i = 0; i < 4; ++i) ctx.setCachedValue(id, i, result[static_cast<size_t>(i)]);
+        return (outputIndex >= 0 && outputIndex < 4)
+            ? NodeSystem::PinValue{result[static_cast<size_t>(outputIndex)]}
+            : NodeSystem::PinValue{};
     }
 
     void StrataNode::drawContent() {
@@ -7497,6 +8611,8 @@ namespace TerrainNodesV2 {
         if (ImGui::DragFloat("Azimuth", &dipAzimuth, 1.0f, 0.0f, 360.0f, "%.0f deg")) dirty = true;
         if (ImGui::SliderFloat("Relief", &reliefStrength, 0.0f, 0.25f)) dirty = true;
         if (ImGui::SliderFloat("Edge Sharpness", &edgeSharpness, 0.25f, 8.0f)) dirty = true;
+        if (ImGui::SliderFloat("Boundary Fracture", &boundaryFracture, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::SliderFloat("Permeability Boost", &permeabilityBoost, 0.0f, 1.0f)) dirty = true;
     }
 
     NodeSystem::PinValue SurfaceComposerNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
@@ -8834,10 +9950,6 @@ namespace TerrainNodesV2 {
         NodeSystem::AutoRegisterNode<ThermalErosionNode>     reg_ThermalErosion("TerrainV2.ThermalErosion");
         NodeSystem::AutoRegisterNode<FluvialErosionNode>     reg_FluvialErosion("TerrainV2.FluvialErosion");
         NodeSystem::AutoRegisterNode<WindErosionNode>        reg_WindErosion("TerrainV2.WindErosion");
-        NodeSystem::AutoRegisterNode<SedimentDepositionNode> reg_SedimentDeposition("TerrainV2.SedimentDeposition");
-        NodeSystem::AutoRegisterNode<AlluvialFanNode>        reg_AlluvialFan("TerrainV2.AlluvialFan");
-        NodeSystem::AutoRegisterNode<DeltaFormationNode>     reg_DeltaFormation("TerrainV2.DeltaFormation");
-        NodeSystem::AutoRegisterNode<ErosionWizardNode>      reg_ErosionWizard("TerrainV2.ErosionWizard");
         NodeSystem::AutoRegisterNode<HeightOutputNode>       reg_HeightOutput("TerrainV2.HeightOutput");
         NodeSystem::AutoRegisterNode<SplatOutputNode>        reg_SplatOutput("TerrainV2.SplatOutput");
         NodeSystem::AutoRegisterNode<HardnessOutputNode>     reg_HardnessOutput("TerrainV2.HardnessOutput");
@@ -8887,6 +9999,8 @@ namespace TerrainNodesV2 {
         NodeSystem::AutoRegisterNode<SoilDepthNode>          reg_SoilDepth("TerrainV2.SoilDepth");
         NodeSystem::AutoRegisterNode<LithologyNode>          reg_Lithology("TerrainV2.Lithology");
         NodeSystem::AutoRegisterNode<StrataNode>             reg_Strata("TerrainV2.Strata");
+        NodeSystem::AutoRegisterNode<PlateTectonicsNode>     reg_PlateTectonics("TerrainV2.PlateTectonics");
+        NodeSystem::AutoRegisterNode<FoldNode>               reg_Fold("TerrainV2.Fold");
         NodeSystem::AutoRegisterNode<SurfaceComposerNode>    reg_SurfaceComposer("TerrainV2.SurfaceComposer");
         NodeSystem::AutoRegisterNode<SnowClimateNode>       reg_SnowClimate("TerrainV2.SnowClimate");
         NodeSystem::AutoRegisterNode<ClimateNode>            reg_Climate("TerrainV2.Climate");
@@ -8972,12 +10086,6 @@ namespace TerrainNodesV2 {
             // Stacks and Anastomosing - TODO: implement later
             case NodeType::Stacks: break;
             case NodeType::Anastomosing: break;
-            // NEW: Sediment Deposition Nodes
-            case NodeType::SedimentDeposition: node = addNode<SedimentDepositionNode>(); break;
-            case NodeType::AlluvialFan: node = addNode<AlluvialFanNode>(); break;
-            case NodeType::DeltaFormation: node = addNode<DeltaFormationNode>(); break;
-            // NEW: Erosion Wizard
-            case NodeType::ErosionWizard: node = addNode<ErosionWizardNode>(); break;
             case NodeType::Resample: node = addNode<ResampleNode>(); break;
             case NodeType::ChannelExtract: node = addNode<ChannelExtractNode>(); break;
             case NodeType::SplatCompose: node = addNode<SplatComposeNode>(); break;
@@ -8988,6 +10096,8 @@ namespace TerrainNodesV2 {
             case NodeType::SoilDepth: node = addNode<SoilDepthNode>(); break;
             case NodeType::Lithology: node = addNode<LithologyNode>(); break;
             case NodeType::Strata: node = addNode<StrataNode>(); break;
+            case NodeType::PlateTectonics: node = addNode<PlateTectonicsNode>(); break;
+            case NodeType::Fold: node = addNode<FoldNode>(); break;
             case NodeType::SurfaceComposer: node = addNode<SurfaceComposerNode>(); break;
             case NodeType::SnowClimate: node = addNode<SnowClimateNode>(); break;
             case NodeType::Climate: node = addNode<ClimateNode>(); break;
@@ -9368,24 +10478,46 @@ namespace TerrainNodesV2 {
             return !group || group->publicationEnabled;
         };
 
-        // markDirtyDownstream() has already propagated the edit to every sink it
-        // can affect. Therefore sink dirtiness is the exact contract boundary;
-        // node type guesses for Flow/Slope/etc. are unnecessary and unsafe.
+        // Normally markDirtyDownstream() leaves every affected sink dirty.  A
+        // selected-node preview, however, may evaluate and clean part of that
+        // chain before the user presses Evaluate.  Classifying only the sink's
+        // dirty bit then incorrectly reports that a still-connected edit has no
+        // enabled consumer.  Walk the actual downstream graph from every dirty
+        // root instead; this also keeps genuinely unconnected editor nodes cheap.
+        std::queue<const NodeSystem::NodeBase*> pending;
+        std::unordered_set<uint32_t> visited;
         for (const auto& graphNode : nodes) {
-            if (!graphNode || !graphNode->dirty) continue;
-            const auto* terrainNode = dynamic_cast<const TerrainNodeBase*>(graphNode.get());
-            if (!terrainNode || !publicationAllowed(terrainNode)) continue;
-            const std::string type = terrainNode->getTypeId();
-            if (type == "TerrainV2.HeightOutput" ||
-                type == "TerrainV2.HardnessOutput" ||
-                type == "TerrainV2.TerrainFieldsOutput" ||
-                type == "TerrainV2.LakeBasin" ||
-                type == "TerrainV2.LakeSurfaceOutput" ||
-                type == "TerrainV2.RiverSplineOutput") {
-                return DirtyEvaluationImpact::GeometryOrScene;
+            if (graphNode && graphNode->dirty) pending.push(graphNode.get());
+        }
+
+        while (!pending.empty()) {
+            const NodeSystem::NodeBase* graphNode = pending.front();
+            pending.pop();
+            if (!graphNode || !visited.insert(graphNode->id).second) continue;
+
+            const auto* terrainNode = dynamic_cast<const TerrainNodeBase*>(graphNode);
+            if (terrainNode && publicationAllowed(terrainNode)) {
+                const std::string type = terrainNode->getTypeId();
+                if (type == "TerrainV2.HeightOutput" ||
+                    type == "TerrainV2.HardnessOutput" ||
+                    type == "TerrainV2.TerrainFieldsOutput" ||
+                    type == "TerrainV2.LakeBasin" ||
+                    type == "TerrainV2.LakeSurfaceOutput" ||
+                    type == "TerrainV2.RiverSplineOutput") {
+                    return DirtyEvaluationImpact::GeometryOrScene;
+                }
+                if (type == "TerrainV2.SplatOutput") materialOnlySinkDirty = true;
+                if (type == "TerrainV2.FoliageOutput") foliageOnlySinkDirty = true;
             }
-            if (type == "TerrainV2.SplatOutput") materialOnlySinkDirty = true;
-            if (type == "TerrainV2.FoliageOutput") foliageOnlySinkDirty = true;
+
+            for (const auto& output : graphNode->outputs) {
+                for (const auto& link : links) {
+                    if (link.startPinId != output.id) continue;
+                    if (const NodeSystem::NodeBase* consumer = getPinOwner(link.endPinId)) {
+                        pending.push(consumer);
+                    }
+                }
+            }
         }
         if (materialOnlySinkDirty && foliageOnlySinkDirty) {
             return DirtyEvaluationImpact::GeometryOrScene;
@@ -9567,7 +10699,13 @@ namespace TerrainNodesV2 {
     }
 
     void TerrainNodeGraphV2::evaluateTerrain(TerrainObject* terrain, SceneData& scene) {
-        if (!terrain) return;
+        evaluateTerrainAtResolution(terrain, scene, 0, 0);
+    }
+
+    bool TerrainNodeGraphV2::evaluateTerrainAtResolution(TerrainObject* terrain, SceneData& scene,
+                                                          int targetWidth, int targetHeight) {
+        if (!terrain) return false;
+        if (isEvaluatingAsync()) return false;
 
         if (previewActive_) {
             restoreCommittedTerrainData(terrain);
@@ -9575,6 +10713,10 @@ namespace TerrainNodesV2 {
         }
 
         TerrainContext tctx(terrain);
+        if (targetWidth >= 2 && targetHeight >= 2) {
+            tctx.width = targetWidth;
+            tctx.height = targetHeight;
+        }
         captureTerrainSceneSun(tctx, scene);
         auto evaluation = std::make_shared<NodeSystem::EvaluationContext>(this);
         evaluation->setDomainContext(&tctx);
@@ -9608,6 +10750,7 @@ namespace TerrainNodesV2 {
             cachedEvalContext_.reset();
             cachedTerrainCtx_.reset();
         }
+        return updated;
     }
 
     void TerrainNodeGraphV2::evaluateTerrainAsync(TerrainObject* terrain, SceneData& scene) {
@@ -10067,11 +11210,25 @@ namespace TerrainNodesV2 {
         TerrainAnalysisNode* analysis = nullptr;
         FlowMaskNode* flowMask = nullptr;
         SoilDepthNode* soilDepth = nullptr;
+        HydraulicErosionNode* hydraulic = nullptr;
         for (const auto& node : nodes) {
             if (!splatOutput) splatOutput = dynamic_cast<SplatOutputNode*>(node.get());
             if (!analysis) analysis = dynamic_cast<TerrainAnalysisNode*>(node.get());
             if (!flowMask) flowMask = dynamic_cast<FlowMaskNode*>(node.get());
             if (!soilDepth) soilDepth = dynamic_cast<SoilDepthNode*>(node.get());
+        }
+        {
+            std::vector<NodeSystem::NodeBase*> stack;
+            std::unordered_set<uint32_t> visited;
+            if (auto* owner = getPinOwner(baseHeightPin)) stack.push_back(owner);
+            while (!stack.empty() && !hydraulic) {
+                auto* current = stack.back(); stack.pop_back();
+                if (!current || !visited.insert(current->id).second) continue;
+                if ((hydraulic = dynamic_cast<HydraulicErosionNode*>(current))) break;
+                for (const auto& input : current->inputs)
+                    if (uint32_t source = sourcePinForInput(input.id))
+                        if (auto* upstream = getPinOwner(source)) stack.push_back(upstream);
+            }
         }
         // Prefer the composer that already owns the active splat branch.
         if (splatOutput && !splatOutput->inputs.empty()) {
@@ -10111,10 +11268,14 @@ namespace TerrainNodesV2 {
         addLink(baseHeightPin, analysis->inputs[0].id);
         addLink(baseHeightPin, flowMask->inputs[0].id);
         addLink(baseHeightPin, soilDepth->inputs[0].id);
-        addLink(flowMask->outputs[0].id, soilDepth->inputs[1].id);
+        const bool hasHydraulicFields = hydraulic && hydraulic->outputs.size() >= 5;
+        addLink(hasHydraulicFields ? hydraulic->outputs[2].id : flowMask->outputs[0].id,
+                soilDepth->inputs[1].id);
         addLink(soilDepth->outputs[0].id, composer->inputs[1].id);
-        addLink(flowMask->outputs[0].id, composer->inputs[2].id);
-        addLink(analysis->outputs[4].id, composer->inputs[3].id);
+        addLink(hasHydraulicFields ? hydraulic->outputs[3].id : flowMask->outputs[0].id,
+                composer->inputs[2].id);
+        addLink(hasHydraulicFields ? hydraulic->outputs[3].id : analysis->outputs[4].id,
+                composer->inputs[3].id);
         addLink(snow->outputs[1].id, composer->inputs[5].id);
         addLink(snow->outputs[2].id, composer->inputs[6].id);
         addLink(snow->outputs[3].id, composer->inputs[7].id);
@@ -10171,11 +11332,25 @@ namespace TerrainNodesV2 {
         SoilDepthNode* soilDepth = nullptr;
         SurfaceComposerNode* surfaceComposer = nullptr;
         SplatOutputNode* splatOutput = nullptr;
+        HydraulicErosionNode* hydraulic = nullptr;
         for (const auto& node : nodes) {
             if (!flowMask) flowMask = dynamic_cast<FlowMaskNode*>(node.get());
             if (!soilDepth) soilDepth = dynamic_cast<SoilDepthNode*>(node.get());
             if (!surfaceComposer) surfaceComposer = dynamic_cast<SurfaceComposerNode*>(node.get());
             if (!splatOutput) splatOutput = dynamic_cast<SplatOutputNode*>(node.get());
+        }
+        {
+            std::vector<NodeSystem::NodeBase*> stack;
+            std::unordered_set<uint32_t> visited;
+            if (auto* owner = getPinOwner(baseHeightPin)) stack.push_back(owner);
+            while (!stack.empty() && !hydraulic) {
+                auto* current = stack.back(); stack.pop_back();
+                if (!current || !visited.insert(current->id).second) continue;
+                if ((hydraulic = dynamic_cast<HydraulicErosionNode*>(current))) break;
+                for (const auto& input : current->inputs)
+                    if (uint32_t source = sourcePinForInput(input.id))
+                        if (auto* upstream = getPinOwner(source)) stack.push_back(upstream);
+            }
         }
         if (biome && biome->inputs.size() >= 5) {
             analysis = dynamic_cast<TerrainAnalysisNode*>(getPinOwner(sourcePinForInput(biome->inputs[1].id)));
@@ -10219,15 +11394,20 @@ namespace TerrainNodesV2 {
         addLink(baseHeightPin, biome->inputs[0].id);
         addLink(analysis->outputs[0].id, biome->inputs[1].id); // slope
         addLink(analysis->outputs[3].id, biome->inputs[2].id); // valley
-        addLink(analysis->outputs[4].id, biome->inputs[3].id); // wetness
+        const bool hasHydraulicFields = hydraulic && hydraulic->outputs.size() >= 5;
+        addLink(hasHydraulicFields ? hydraulic->outputs[3].id : analysis->outputs[4].id,
+                biome->inputs[3].id); // wetness / actual droplet discharge
         addLink(exposure->outputs[0].id, biome->inputs[4].id);
         addLink(baseHeightPin, flowMask->inputs[0].id);
         addLink(baseHeightPin, soilDepth->inputs[0].id);
-        addLink(flowMask->outputs[0].id, soilDepth->inputs[1].id);
+        addLink(hasHydraulicFields ? hydraulic->outputs[2].id : flowMask->outputs[0].id,
+                soilDepth->inputs[1].id);
         addLink(baseHeightPin, surfaceComposer->inputs[0].id);
         addLink(soilDepth->outputs[0].id, surfaceComposer->inputs[1].id);
-        addLink(flowMask->outputs[0].id, surfaceComposer->inputs[2].id);
-        addLink(analysis->outputs[4].id, surfaceComposer->inputs[3].id);
+        addLink(hasHydraulicFields ? hydraulic->outputs[3].id : flowMask->outputs[0].id,
+                surfaceComposer->inputs[2].id);
+        addLink(hasHydraulicFields ? hydraulic->outputs[3].id : analysis->outputs[4].id,
+                surfaceComposer->inputs[3].id);
         addLink(biome->outputs[1].id, surfaceComposer->inputs[8].id);
         addLink(biome->outputs[2].id, surfaceComposer->inputs[9].id);
         addLink(surfaceComposer->outputs[1].id, splatOutput->inputs[0].id);
@@ -10239,6 +11419,11 @@ namespace TerrainNodesV2 {
         for (int i = 0; i < 4; ++i) {
             addLink(biome->outputs[static_cast<size_t>(i)].id,
                     fields->inputs[static_cast<size_t>(i + 5)].id);
+        }
+        if (hasHydraulicFields && fields->inputs.size() >= 34) {
+            for (int i = 0; i < 4; ++i)
+                addLink(hydraulic->outputs[static_cast<size_t>(i + 1)].id,
+                        fields->inputs[static_cast<size_t>(i + 30)].id);
         }
         ensureTerrainLayerGroup(*this, "01 Analysis", IM_COL32(70, 105, 135, 90),
                                 {analysis, exposure, flowMask, soilDepth});
@@ -10360,6 +11545,98 @@ namespace TerrainNodesV2 {
         return true;
     }
 
+    bool TerrainNodeGraphV2::addGeologyFoundationSetup(float x, float y) {
+        bool migratedLegacyPlate = false;
+        HeightOutputNode* heightOutput = nullptr;
+        PlateTectonicsNode* plates = nullptr;
+        FoldNode* fold = nullptr;
+        LithologyNode* lithology = nullptr;
+        StrataNode* strata = nullptr;
+        TerrainFieldsOutputNode* fields = nullptr;
+        SurfaceComposerNode* composer = nullptr;
+        SplatOutputNode* splatOutput = nullptr;
+        for (const auto& node : nodes) {
+            if (!heightOutput) heightOutput = dynamic_cast<HeightOutputNode*>(node.get());
+            if (!plates) plates = dynamic_cast<PlateTectonicsNode*>(node.get());
+            if (!fold) fold = dynamic_cast<FoldNode*>(node.get());
+            if (!lithology) lithology = dynamic_cast<LithologyNode*>(node.get());
+            if (!strata) strata = dynamic_cast<StrataNode*>(node.get());
+            if (!fields) fields = dynamic_cast<TerrainFieldsOutputNode*>(node.get());
+            if (!composer) composer = dynamic_cast<SurfaceComposerNode*>(node.get());
+            if (!splatOutput) splatOutput = dynamic_cast<SplatOutputNode*>(node.get());
+        }
+        if (!heightOutput || heightOutput->inputs.empty()) return false;
+        const auto sourcePinForInput = [&](uint32_t inputPin) -> uint32_t {
+            for (const auto& link : links)
+                if (link.endPinId == inputPin) return link.startPinId;
+            return 0;
+        };
+        uint32_t baseHeightPin = sourcePinForInput(heightOutput->inputs[0].id);
+        if (baseHeightPin == 0) return false;
+
+        // Re-running the setup repairs the authored branch instead of stacking
+        // another geology solve on its own previous result. Older setup graphs
+        // placed a Voronoi Plate node before Fold; recover its original source
+        // while migrating that node out of the automatic geometry path.
+        if (strata && !strata->outputs.empty() && strata->outputs[0].id == baseHeightPin && fold) {
+            uint32_t existingBase = sourcePinForInput(fold->inputs[0].id);
+            if (plates && !plates->outputs.empty() && existingBase == plates->outputs[0].id) {
+                existingBase = sourcePinForInput(plates->inputs[0].id);
+                migratedLegacyPlate = true;
+            }
+            if (existingBase != 0) baseHeightPin = existingBase;
+        }
+        if (!fold) fold = dynamic_cast<FoldNode*>(addTerrainNode(NodeType::Fold, x + 240.0f, y));
+        if (!lithology) lithology = dynamic_cast<LithologyNode*>(
+            addTerrainNode(NodeType::Lithology, x + 480.0f, y));
+        if (!strata) strata = dynamic_cast<StrataNode*>(addTerrainNode(NodeType::Strata, x + 720.0f, y));
+        if (!fields) fields = dynamic_cast<TerrainFieldsOutputNode*>(
+            addTerrainNode(NodeType::TerrainFieldsOutput, x + 980.0f, y + 250.0f));
+        if (!composer) composer = dynamic_cast<SurfaceComposerNode*>(
+            addTerrainNode(NodeType::SurfaceComposer, x + 980.0f, y));
+        if (!splatOutput) splatOutput = dynamic_cast<SplatOutputNode*>(
+            addTerrainNode(NodeType::SplatOutput, x + 1220.0f, y));
+        if (!fold || !lithology || !strata || !fields || !composer || !splatOutput ||
+            fold->inputs.size() < 2 || fold->outputs.size() < 3 ||
+            lithology->inputs.size() < 2 || lithology->outputs.size() < 4 ||
+            strata->inputs.size() < 3 || strata->outputs.size() < 4 ||
+            fields->inputs.size() < 38 || composer->inputs.size() < 5 || composer->outputs.size() < 2 ||
+            splatOutput->inputs.empty()) return false;
+
+        addLink(baseHeightPin, fold->inputs[0].id);
+        // The automatic foundation is a continuous heightfield workflow. Do not
+        // gate Fold by the legacy Voronoi plate cells: their discrete ownership
+        // boundaries produced raised polygon blocks and erosion-hostile walls.
+        removeLinkToInput(fold->inputs[1].id);
+        addLink(fold->outputs[0].id, lithology->inputs[0].id);
+        addLink(fold->outputs[1].id, lithology->inputs[1].id);
+        addLink(fold->outputs[0].id, strata->inputs[0].id);
+        addLink(lithology->outputs[0].id, strata->inputs[1].id);
+        addLink(strata->outputs[0].id, heightOutput->inputs[0].id);
+
+        // LookDev consumes the final geological surface and resistance. Existing
+        // soil/flow/snow/biome authored inputs remain untouched.
+        addLink(strata->outputs[0].id, composer->inputs[0].id);
+        addLink(strata->outputs[1].id, composer->inputs[4].id);
+        addLink(composer->outputs[1].id, splatOutput->inputs[0].id);
+
+        // Stable shared geology contract: downstream erosion, biome and export
+        // nodes can consume these fields without knowing this setup's topology.
+        addLink(strata->outputs[1].id, fields->inputs[34].id);
+        addLink(strata->outputs[2].id, fields->inputs[35].id);
+        addLink(strata->outputs[3].id, fields->inputs[36].id);
+        addLink(lithology->outputs[1].id, fields->inputs[37].id);
+
+        if (migratedLegacyPlate && plates) removeNodeFromGroups(plates->id);
+        ensureTerrainLayerGroup(*this, "02 Geology", IM_COL32(150, 95, 65, 90),
+                                {fold, lithology, strata});
+        ensureTerrainLayerGroup(*this, "06 Outputs", IM_COL32(105, 90, 130, 90),
+                                {heightOutput, fields, composer, splatOutput});
+        layoutAutoManagedTerrainLayers(*this);
+        markAllDirty();
+        return true;
+    }
+
     bool TerrainNodeGraphV2::addRiverNetworkSetup(float x, float y) {
         // The guide watershed is a separate instance dedicated to Fluvial
         // Erosion's Flow Guide; it must stay on the un-eroded base height to
@@ -10380,6 +11657,8 @@ namespace TerrainNodesV2 {
         FlowMaskNode* flowMask = nullptr;
         SoilDepthNode* soilDepth = nullptr;
         SurfaceComposerNode* surfaceComposer = nullptr;
+        SplatOutputNode* splatOutput = nullptr;
+        HydraulicErosionNode* hydraulic = nullptr;
         for (const auto& node : nodes) {
             if (!heightOutput) heightOutput = dynamic_cast<HeightOutputNode*>(node.get());
             if (!easy) easy = dynamic_cast<RiverLakeEasyNode*>(node.get());
@@ -10401,6 +11680,7 @@ namespace TerrainNodesV2 {
             if (!flowMask) flowMask = dynamic_cast<FlowMaskNode*>(node.get());
             if (!soilDepth) soilDepth = dynamic_cast<SoilDepthNode*>(node.get());
             if (!surfaceComposer) surfaceComposer = dynamic_cast<SurfaceComposerNode*>(node.get());
+            if (!splatOutput) splatOutput = dynamic_cast<SplatOutputNode*>(node.get());
         }
         if (!heightOutput || heightOutput->inputs.empty()) return false;
 
@@ -10455,6 +11735,20 @@ namespace TerrainNodesV2 {
                 }
             }
             if (snowInputPin != 0) hydrologyGroundPin = snowInputPin;
+        }
+
+        {
+            std::vector<NodeSystem::NodeBase*> stack;
+            std::unordered_set<uint32_t> visited;
+            if (auto* owner = getPinOwner(hydrologyGroundPin)) stack.push_back(owner);
+            while (!stack.empty() && !hydraulic) {
+                auto* current = stack.back(); stack.pop_back();
+                if (!current || !visited.insert(current->id).second) continue;
+                if ((hydraulic = dynamic_cast<HydraulicErosionNode*>(current))) break;
+                for (const auto& input : current->inputs)
+                    if (uint32_t source = riverSourcePinForInput(input.id))
+                        if (auto* upstream = getPinOwner(source)) stack.push_back(upstream);
+            }
         }
 
         // If the authored branch already contains Fluvial Erosion, solve the
@@ -10516,6 +11810,10 @@ namespace TerrainNodesV2 {
             addTerrainNode(NodeType::FlowMask, x - 310.0f, y + 470.0f));
         if (!soilDepth) soilDepth = dynamic_cast<SoilDepthNode*>(
             addTerrainNode(NodeType::SoilDepth, x - 40.0f, y + 470.0f));
+        if (!surfaceComposer) surfaceComposer = dynamic_cast<SurfaceComposerNode*>(
+            addTerrainNode(NodeType::SurfaceComposer, x + 850.0f, y + 500.0f));
+        if (!splatOutput) splatOutput = dynamic_cast<SplatOutputNode*>(
+            addTerrainNode(NodeType::SplatOutput, x + 1120.0f, y + 500.0f));
         if (!easy || !watershed || !lakeBasin || !lakeSurfaceOutput || !network || !hydraulics || !splineOutput || !carve ||
             easy->inputs.size() < 2 || easy->outputs.size() < 2 ||
             watershed->inputs.size() < 2 || watershed->outputs.size() < 5 ||
@@ -10527,7 +11825,9 @@ namespace TerrainNodesV2 {
             !fields || fields->inputs.size() < 30 || !terrainAnalysis ||
             terrainAnalysis->inputs.empty() || terrainAnalysis->outputs.size() < 5 ||
             !flowMask || flowMask->inputs.empty() || flowMask->outputs.empty() ||
-            !soilDepth || soilDepth->inputs.size() < 2 || soilDepth->outputs.empty()) return false;
+            !soilDepth || soilDepth->inputs.size() < 2 || soilDepth->outputs.empty() ||
+            !surfaceComposer || surfaceComposer->inputs.size() < 10 || surfaceComposer->outputs.size() < 2 ||
+            !splatOutput || splatOutput->inputs.empty()) return false;
 
         // Hydrology must analyze the terrain the rivers will actually inhabit.
         // The MAIN watershed and every downstream hydrology consumer read the
@@ -10574,18 +11874,33 @@ namespace TerrainNodesV2 {
         addLink(watershed->outputs[1].id, network->inputs[0].id);
         addLink(watershed->outputs[2].id, network->inputs[1].id);
         addLink(watershed->outputs[4].id, network->inputs[2].id);
+        const bool hasHydraulicFields = hydraulic && hydraulic->outputs.size() >= 5;
         addLink(hydrologyGroundPin, terrainAnalysis->inputs[0].id);
         if (terrainAnalysis->inputs.size() >= 2) {
-            addLink(watershed->outputs[1].id, terrainAnalysis->inputs[1].id);
+            // River watershed stays authoritative for the river system. The
+            // local terrain wetness analysis benefits from droplet discharge.
+            addLink(hasHydraulicFields ? hydraulic->outputs[3].id : watershed->outputs[1].id,
+                    terrainAnalysis->inputs[1].id);
         }
         addLink(hydrologyGroundPin, flowMask->inputs[0].id);
         addLink(hydrologyGroundPin, soilDepth->inputs[0].id);
-        addLink(flowMask->outputs[0].id, soilDepth->inputs[1].id);
-        if (surfaceComposer && surfaceComposer->inputs.size() >= 10) {
-            addLink(soilDepth->outputs[0].id, surfaceComposer->inputs[1].id);
-            addLink(flowMask->outputs[0].id, surfaceComposer->inputs[2].id);
-            addLink(terrainAnalysis->outputs[4].id, surfaceComposer->inputs[3].id);
+        addLink(hasHydraulicFields ? hydraulic->outputs[2].id : flowMask->outputs[0].id,
+                soilDepth->inputs[1].id);
+        // Material output follows the final carved/snow-aware surface. The
+        // river-bed mask is the authoritative Flow layer, so river splats are
+        // present even without a Hydraulic Erosion node. Existing Snow/Ice/
+        // Meltwater connections (inputs 5..7) are deliberately preserved.
+        addLink(carve->outputs[0].id, surfaceComposer->inputs[0].id);
+        addLink(soilDepth->outputs[0].id, surfaceComposer->inputs[1].id);
+        addLink(carve->outputs[1].id, surfaceComposer->inputs[2].id);
+        addLink(hasHydraulicFields ? hydraulic->outputs[3].id : terrainAnalysis->outputs[4].id,
+                surfaceComposer->inputs[3].id);
+        if (hydrologySnow && hydrologySnow->outputs.size() >= 4) {
+            addLink(hydrologySnow->outputs[1].id, surfaceComposer->inputs[5].id);
+            addLink(hydrologySnow->outputs[2].id, surfaceComposer->inputs[6].id);
+            addLink(hydrologySnow->outputs[3].id, surfaceComposer->inputs[7].id);
         }
+        addLink(surfaceComposer->outputs[1].id, splatOutput->inputs[0].id);
         addLink(watershed->outputs[0].id, splineOutput->inputs[0].id);
         addLink(watershed->outputs[1].id, splineOutput->inputs[1].id);
         addLink(watershed->outputs[2].id, splineOutput->inputs[2].id);
@@ -10632,6 +11947,11 @@ namespace TerrainNodesV2 {
             addLink(hydraulics->outputs[static_cast<size_t>(i)].id,
                     fields->inputs[static_cast<size_t>(23 + i)].id);
         }
+        if (hasHydraulicFields && fields->inputs.size() >= 34) {
+            for (int i = 0; i < 4; ++i)
+                addLink(hydraulic->outputs[static_cast<size_t>(i + 1)].id,
+                        fields->inputs[static_cast<size_t>(i + 30)].id);
+        }
 
         easy->watershedNodeId = watershed->id;
         easy->lakeBasinNodeId = lakeBasin->id;
@@ -10648,12 +11968,159 @@ namespace TerrainNodesV2 {
         ensureTerrainLayerGroup(*this, "04 Lakes", IM_COL32(25, 135, 185, 90),
                                 {lakeBasin, lakeSurfaceOutput});
         ensureTerrainLayerGroup(*this, "06 Outputs", IM_COL32(105, 90, 130, 90),
-                                {heightOutput, fields, surfaceComposer});
+                                {heightOutput, fields, surfaceComposer, splatOutput});
         // The controller stays visible while expert nodes start folded away.
         // Expanding either layer exposes every original detailed control.
         for (auto& group : groups) {
             if (group.name == "03 River" || group.name == "04 Lakes") group.collapsed = true;
         }
+        layoutAutoManagedTerrainLayers(*this);
+        markAllDirty();
+        return true;
+    }
+
+    bool TerrainNodeGraphV2::removeRiverNetworkSetup(TerrainObject* terrain, SceneData& scene) {
+        RiverLakeEasyNode* easy = nullptr;
+        for (const auto& node : nodes) {
+            if ((easy = dynamic_cast<RiverLakeEasyNode*>(node.get()))) break;
+        }
+        if (!easy) return false;
+
+        auto* carve = dynamic_cast<RiverBedCarveNode*>(getNode(easy->carveNodeId));
+        auto* splineOutput = dynamic_cast<RiverSplineOutputNode*>(getNode(easy->splineOutputNodeId));
+        auto* lakeBasin = dynamic_cast<LakeBasinNode*>(getNode(easy->lakeBasinNodeId));
+        auto* lakeOutput = dynamic_cast<LakeSurfaceOutputNode*>(getNode(easy->lakeOutputNodeId));
+        const auto sourcePinForInput = [&](uint32_t inputPin) -> uint32_t {
+            for (const auto& link : links)
+                if (link.endPinId == inputPin) return link.startPinId;
+            return 0;
+        };
+
+        // Restore every consumer currently owned by RiverBedCarve to its
+        // pre-carve height source. This covers Height Output and a terminal Snow
+        // arrangement without assuming one fixed setup ordering.
+        if (carve && !carve->inputs.empty() && !carve->outputs.empty()) {
+            const uint32_t originalHeightPin = sourcePinForInput(carve->inputs[0].id);
+            if (originalHeightPin != 0) {
+                std::vector<uint32_t> consumers;
+                for (const auto& link : links)
+                    if (link.startPinId == carve->outputs[0].id) consumers.push_back(link.endPinId);
+                for (uint32_t inputPin : consumers) addLink(originalHeightPin, inputPin);
+            }
+        }
+
+        // Remove scene-side objects before deleting the authoring sinks; after
+        // node deletion there would be no owner left to perform this cleanup.
+        if (splineOutput) {
+            splineOutput->pendingPaths.clear();
+            splineOutput->applyGeneratedRivers(scene, terrain);
+        }
+        if (terrain && lakeBasin) {
+            terrain->waterBodies.erase(
+                std::remove_if(terrain->waterBodies.begin(), terrain->waterBodies.end(),
+                    [&](const WaterBodyData& body) {
+                        return body.sourceNodeId == static_cast<int>(lakeBasin->id);
+                    }),
+                terrain->waterBodies.end());
+        }
+        if (lakeOutput && terrain) lakeOutput->applyGeneratedLakes(scene, terrain);
+
+        std::unordered_set<uint32_t> ownedIds = {
+            easy->id, easy->watershedNodeId, easy->lakeBasinNodeId,
+            easy->lakeOutputNodeId, easy->networkNodeId, easy->hydraulicsNodeId,
+            easy->carveNodeId, easy->splineOutputNodeId
+        };
+        // The guide watershed is setup-private but intentionally not exposed by
+        // the compact controller's serialized IDs.
+        for (const auto& node : nodes) {
+            if (node && node->name == "Watershed (Erosion Guide)") ownedIds.insert(node->id);
+        }
+        ownedIds.erase(0);
+        for (uint32_t nodeId : ownedIds) removeNode(nodeId);
+
+        // Delete only empty auto-managed River/Lake frames. Shared Analysis and
+        // Outputs groups are deliberately retained for Snow/Biome/Geology.
+        std::vector<uint32_t> emptyGroups;
+        for (const auto& group : groups) {
+            if ((group.name == "03 River" || group.name == "04 Lakes") && group.nodeIds.empty())
+                emptyGroups.push_back(group.id);
+        }
+        for (uint32_t groupId : emptyGroups) deleteGroup(groupId);
+        layoutAutoManagedTerrainLayers(*this);
+        markAllDirty();
+        return true;
+    }
+
+    bool TerrainNodeGraphV2::removeSnowLayerSetup() {
+        SnowClimateNode* snow = nullptr;
+        for (const auto& node : nodes) {
+            if ((snow = dynamic_cast<SnowClimateNode*>(node.get()))) break;
+        }
+        if (!snow || snow->inputs.empty() || snow->outputs.empty()) return false;
+        uint32_t baseHeightPin = 0;
+        for (const auto& link : links)
+            if (link.endPinId == snow->inputs[0].id) { baseHeightPin = link.startPinId; break; }
+        if (baseHeightPin == 0) return false;
+
+        std::vector<uint32_t> heightConsumers;
+        for (const auto& link : links)
+            if (link.startPinId == snow->outputs[0].id) heightConsumers.push_back(link.endPinId);
+        for (uint32_t inputPin : heightConsumers) addLink(baseHeightPin, inputPin);
+        removeNode(snow->id);
+        std::vector<uint32_t> emptyGroups;
+        for (const auto& group : groups)
+            if (group.name == "05 Snow" && group.nodeIds.empty()) emptyGroups.push_back(group.id);
+        for (uint32_t groupId : emptyGroups) deleteGroup(groupId);
+        layoutAutoManagedTerrainLayers(*this);
+        markAllDirty();
+        return true;
+    }
+
+    bool TerrainNodeGraphV2::removeGeologyFoundationSetup() {
+        FoldNode* fold = nullptr;
+        LithologyNode* lithology = nullptr;
+        StrataNode* strata = nullptr;
+        for (const auto& node : nodes) {
+            if (!fold) fold = dynamic_cast<FoldNode*>(node.get());
+            if (!lithology) lithology = dynamic_cast<LithologyNode*>(node.get());
+            if (!strata) strata = dynamic_cast<StrataNode*>(node.get());
+        }
+        if (!fold || !strata || fold->inputs.empty() || fold->outputs.empty() || strata->outputs.empty())
+            return false;
+        uint32_t baseHeightPin = 0;
+        for (const auto& link : links)
+            if (link.endPinId == fold->inputs[0].id) { baseHeightPin = link.startPinId; break; }
+        if (baseHeightPin == 0) return false;
+
+        std::vector<uint32_t> heightConsumers;
+        for (const auto& link : links)
+            if (link.startPinId == strata->outputs[0].id) heightConsumers.push_back(link.endPinId);
+        for (uint32_t inputPin : heightConsumers) addLink(baseHeightPin, inputPin);
+        const uint32_t foldId = fold->id;
+        const uint32_t lithologyId = lithology ? lithology->id : 0;
+        const uint32_t strataId = strata->id;
+        removeNode(strataId);
+        if (lithologyId) removeNode(lithologyId);
+        removeNode(foldId);
+        std::vector<uint32_t> emptyGroups;
+        for (const auto& group : groups)
+            if (group.name == "02 Geology" && group.nodeIds.empty()) emptyGroups.push_back(group.id);
+        for (uint32_t groupId : emptyGroups) deleteGroup(groupId);
+        layoutAutoManagedTerrainLayers(*this);
+        markAllDirty();
+        return true;
+    }
+
+    bool TerrainNodeGraphV2::removeBiomeFieldsSetup() {
+        std::vector<uint32_t> biomeIds;
+        for (const auto& node : nodes)
+            if (dynamic_cast<BiomeComposerNode*>(node.get())) biomeIds.push_back(node->id);
+        if (biomeIds.empty()) return false;
+        for (uint32_t nodeId : biomeIds) removeNode(nodeId);
+        std::vector<uint32_t> emptyGroups;
+        for (const auto& group : groups)
+            if (group.name == "02 Biome" && group.nodeIds.empty()) emptyGroups.push_back(group.id);
+        for (uint32_t groupId : emptyGroups) deleteGroup(groupId);
         layoutAutoManagedTerrainLayers(*this);
         markAllDirty();
         return true;
@@ -10680,18 +12147,25 @@ namespace TerrainNodesV2 {
             return;
         }
 
-        noise->noiseType = NoiseType::Ridge;
-        noise->heightMode = NoiseHeightMode::LegacyAmplitude;
+        // Alpine valley: one orogenic belt across the tile, authored in metres so
+        // the erosion and snow stages below inherit real slopes and elevations.
+        noise->terrainModel = TerrainNoiseModel::Orogenic;
         noise->seed = 1847;
-        noise->scale = 0.75f;
-        noise->frequency = 0.012f;
-        noise->amplitude = 1.0f;
+        noise->featureSizeMeters = (std::max)(
+            terrain ? terrain->heightmap.scale_xz * 0.5f : 500.0f, 40.0f);
+        noise->baseElevationMeters = 0.0f;
+        noise->reliefMeters = (std::max)(
+            terrain ? terrain->heightmap.scale_xz * 0.18f : 180.0f, 20.0f);
         noise->octaves = 7;
-        noise->persistance = 0.52f;
-        noise->lacunarity = 2.15f;
-        noise->ridge_offset = 1.05f;
+        noise->terrainRoughness = 0.42f;
+        noise->terrainDirection = 28.0f;
+        noise->valleyStrength = 0.55f;
+        noise->warp_strength = 0.40f;
+        noise->slopeLimitDegrees = 62.0f;
 
         erosion->useGPU = true;
+        erosion->multiPass = true;
+        erosion->multiPassPreset = HydraulicMultiPassPreset::Alpine;
         erosion->params.iterations = 75000;
         erosion->params.dropletLifetime = 96;
         erosion->params.inertia = 0.12f;
@@ -10700,6 +12174,13 @@ namespace TerrainNodesV2 {
         erosion->params.depositSpeed = 0.12f;
         erosion->params.evaporateSpeed = 0.008f;
         erosion->params.erosionRadius = 3;
+        erosion->params.initialWater = 1.15f;
+        erosion->params.initialSpeed = 1.10f;
+        erosion->params.uphillErosion = 0.24f;
+        erosion->params.flatSettling = 0.82f;
+        erosion->params.velocitySettling = 1.18f;
+        erosion->params.minWater = 0.008f;
+        erosion->params.minSpeed = 0.008f;
 
         snow->applyPreset(SnowClimatePreset::AlpineBalanced);
         snow->snowLineFraction = 0.52f;
@@ -10732,7 +12213,11 @@ namespace TerrainNodesV2 {
         addLink(slope->outputs[0].id, grass->inputs[0].id);
         addLink(grass->outputs[0].id, composer->inputs[8].id);
         addLink(slope->outputs[0].id, composer->inputs[9].id);
-        addLink(flow->outputs[0].id, composer->inputs[2].id);
+        // Real droplet discharge drives the wet/flow material response. The
+        // analytical Flow Mask remains in the graph as a cheap inspectable
+        // fallback and is reused when other quick setups have no Hydraulic node.
+        addLink(erosion->outputs[3].id, composer->inputs[2].id);
+        addLink(erosion->outputs[3].id, composer->inputs[3].id);
         addLink(snow->outputs[1].id, composer->inputs[5].id);
         addLink(snow->outputs[2].id, composer->inputs[6].id);
         addLink(snow->outputs[3].id, composer->inputs[7].id);
@@ -10953,14 +12438,6 @@ namespace TerrainNodesV2 {
                     newNode = addTerrainNode(NodeType::Mesa, x, y);
                 } else if (typeId == "TerrainV2.Shear") {
                     newNode = addTerrainNode(NodeType::Shear, x, y);
-                } else if (typeId == "TerrainV2.SedimentDeposition") {
-                    newNode = addTerrainNode(NodeType::SedimentDeposition, x, y);
-                } else if (typeId == "TerrainV2.AlluvialFan") {
-                    newNode = addTerrainNode(NodeType::AlluvialFan, x, y);
-                } else if (typeId == "TerrainV2.DeltaFormation") {
-                    newNode = addTerrainNode(NodeType::DeltaFormation, x, y);
-                } else if (typeId == "TerrainV2.ErosionWizard") {
-                    newNode = addTerrainNode(NodeType::ErosionWizard, x, y);
                 } else if (typeId == "TerrainV2.Resample") {
                     newNode = addTerrainNode(NodeType::Resample, x, y);
                 } else if (typeId == "TerrainV2.ChannelExtract") {
@@ -10981,6 +12458,10 @@ namespace TerrainNodesV2 {
                     newNode = addTerrainNode(NodeType::Lithology, x, y);
                 } else if (typeId == "TerrainV2.Strata") {
                     newNode = addTerrainNode(NodeType::Strata, x, y);
+                } else if (typeId == "TerrainV2.PlateTectonics") {
+                    newNode = addTerrainNode(NodeType::PlateTectonics, x, y);
+                } else if (typeId == "TerrainV2.Fold") {
+                    newNode = addTerrainNode(NodeType::Fold, x, y);
                 } else if (typeId == "TerrainV2.SurfaceComposer") {
                     newNode = addTerrainNode(NodeType::SurfaceComposer, x, y);
                 } else if (typeId == "TerrainV2.SnowClimate") {

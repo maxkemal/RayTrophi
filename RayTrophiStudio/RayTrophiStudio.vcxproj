@@ -316,6 +316,9 @@
     <ClInclude Include="source\src\Device\CloudNoise.cuh" />
     <ClInclude Include="source\src\Device\fft_ocean.cuh" />
     <None Include="source\shaders\closesthit.rchit" />
+    <None Include="source\shaders\instance_prepare.comp" />
+    <None Include="source\shaders\foliage_scatter_parity.comp" />
+    <None Include="source\shaders\foliage_scatter_terrain_accept.comp" />
     <None Include="source\shaders\water_v3.glsl" />
     <None Include="source\shaders\miss.rmiss" />
     <None Include="source\shaders\raygen.rgen" />
@@ -362,6 +365,7 @@
     <ClInclude Include="source\include\DirectionalLight.h" />
     <ClInclude Include="source\include\EmbreeBVH.h" />
     <ClInclude Include="source\include\FoliageWindSystem.h" />
+    <ClInclude Include="source\include\GpuFoliageScatter.h" />
     <ClInclude Include="source\include\globals.h" />
     <ClInclude Include="source\include\Core\RenderStateManager.h" />
     <ClInclude Include="source\include\Hittable.h" />
@@ -401,6 +405,7 @@
     <ClInclude Include="source\include\MaterialNodesV2.h" />
     <ClInclude Include="source\include\MaterialProceduralMath.h" />
     <ClInclude Include="source\include\MaterialProgram.h" />
+    <ClInclude Include="source\include\MaterialStateField.h" />
     <ClInclude Include="source\include\MeshModifiers.h" />
     <ClInclude Include="source\include\MeshPointiness.h" />
     <ClInclude Include="source\include\Paint\IPaintSurfaceAdapter.h" />
@@ -1296,6 +1301,7 @@
     <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp" />
     <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp" />
     <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp" />
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
@@ -1332,6 +1338,7 @@
     <ClCompile Include="source\src\Scene\HittableList.cpp" />
     <ClCompile Include="source\src\UI\ImGuizmo.cpp" />
     <ClCompile Include="source\src\Scene\InstanceGroup.cpp" />
+    <ClCompile Include="source\src\Scene\GpuFoliageScatter.cpp" />
     <ClCompile Include="source\src\Scene\InstanceManager.cpp" />
     <ClCompile Include="source\src\Scene\Light.cpp" />
     <ClCompile Include="source\src\Core\Main.cpp" />
@@ -1424,6 +1431,7 @@
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp" />
     <ClCompile Include="source\src\Physics\FractureGenerator.cpp" />
     <ClCompile Include="source\src\Physics\GridFluidSolver.cpp" />
+    <ClCompile Include="source\src\Physics\MaterialStateField.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidLevelSet.cpp" />

@@ -27,13 +27,17 @@
 #include "EmbreeBVH.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"
+#include "Backend/OptixBackend.h"
 
 extern std::unique_ptr<Backend::IBackend> g_backend;
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern bool g_viewport_raster_rebuild_pending;
+extern bool g_viewport_raster_scatter_update_pending;
 extern bool g_optix_rebuild_pending;
+extern bool g_optix_scatter_refresh_pending;
 extern bool g_vulkan_rebuild_pending;
 extern bool g_vulkan_geometry_append_pending;
+extern bool g_vulkan_scatter_refresh_pending;
 extern bool g_geometry_dirty;
 extern std::atomic<uint64_t> g_scene_geometry_generation;
 
@@ -52,38 +56,66 @@ Backend::IBackend* getScatterRenderBackend(UIContext& ctx) {
 }
 
 bool scatterRenderBackendIsVulkan(UIContext& ctx) {
-    return dynamic_cast<Backend::VulkanBackendAdapter*>(getScatterRenderBackend(ctx)) != nullptr;
+    // Solid/Matcap is owned by the Vulkan viewport even when the dormant
+    // Rendered backend is CPU or OptiX.
+    if (g_solid_viewport_active &&
+        dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get()) != nullptr) {
+        return true;
+    }
+    if (Backend::IBackend* renderBackend = getScatterRenderBackend(ctx)) {
+        // The render backend is authoritative. A Vulkan Solid viewport may run
+        // alongside OptiX, whose current source-BLAS path still needs its CPU
+        // compatibility preparation.
+        return dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend) != nullptr;
+    }
+    if (dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get()) != nullptr) {
+        return true;
+    }
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr) != nullptr;
 }
 
 void rebuildScatterSceneMutation(UIContext& ctx, bool additive_only = false) {
-    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-    ctx.renderer.resetCPUAccumulation();
-
+    (void)additive_only;
     Backend::IBackend* renderBackend = getScatterRenderBackend(ctx);
-    const bool is_vulkan = dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend) != nullptr;
+    const bool is_vulkan = scatterRenderBackendIsVulkan(ctx);
+    const bool is_optix = dynamic_cast<Backend::OptixBackend*>(renderBackend) != nullptr;
+
+    // Vulkan consumes InstanceGroup directly. Rebuilding the CPU BVH here used
+    // to traverse the just-expanded facade tail and dominated large biome fills.
+    if (!is_vulkan && !is_optix) {
+        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        ctx.renderer.resetCPUAccumulation();
+    }
 
     if (renderBackend) {
-        if (is_vulkan && additive_only) {
-            // Defer to incremental TLAS append. Skip rebuildBackendGeometry — it would
-            // set g_vulkan_rebuild_pending and force the full destroy+rebuild path,
-            // erasing the win.
-            g_vulkan_geometry_append_pending = true;
+        if (is_vulkan) {
+            // Native InstanceGroup topology is refreshed below without tearing
+            // down resident BLASes. The legacy scene-object append path has
+            // nothing to append because Vulkan intentionally owns no facades.
+            g_vulkan_scatter_refresh_pending = true;
         } else {
-            ctx.renderer.rebuildBackendGeometry(ctx.scene);
+            g_optix_rebuild_pending = true;
         }
         renderBackend->resetAccumulation();
     }
+    // Solid is rendered by the Vulkan viewport even when the dormant Rendered
+    // backend is OptiX. Preserve the topology debt for that backend so returning
+    // to Rendered cannot expose its pre-stroke TLAS.
+    if (is_optix) {
+        g_optix_rebuild_pending = true;
+    }
 
     if (g_viewport_backend) {
-        g_viewport_raster_rebuild_pending = true;
+        if (is_vulkan) g_viewport_raster_scatter_update_pending = true;
+        else g_viewport_raster_rebuild_pending = true;
         g_viewport_backend->resetAccumulation();
     }
     // Increment geometry generation so raster viewport rebuilds mesh list
     g_geometry_dirty = true;
     g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
     if (is_vulkan) {
-        if (!additive_only) g_vulkan_rebuild_pending = true;
-    } else if (renderBackend) {
+        g_vulkan_scatter_refresh_pending = true;
+    } else if (is_optix) {
         g_optix_rebuild_pending = true;
     }
 }
@@ -422,6 +454,10 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
         ImGui::SliderFloat("Density", &active_group->brush_settings.density, 0.01f, 20.0f, "%.2f /sq.m");
 
         ImGui::Checkbox("Preview Circle", &scatter_brush.show_brush_preview);
+        ImGui::SameLine();
+        ImGui::Checkbox("Lazy Update", &scatter_brush.lazy_update);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "On: commit when the stroke ends. Off: update the active viewport after every dab.");
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -671,7 +707,8 @@ void SceneUI::syncNodeFoliageToScene(UIContext& ctx, TerrainObject* terrain,
                    " layers / " + std::to_string(totalInstances) + " instances.");
 }
 
-void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only) {
+void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only,
+                                   bool force_cpu_compat) {
     // 1. Compute Prefix for identification
     // 1. Compute Prefix for identification
     // NEW: Use Group ID to guarantee uniqueness regardless of name overlaps or renames
@@ -699,6 +736,16 @@ void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool cl
             return false;
         });
     objects.erase(it, objects.end());
+
+    // Vulkan RT and Vulkan raster both consume the canonical flat source meshes
+    // plus InstanceGroup::instances directly. Never expand that data back into
+    // one CPU HittableInstance facade per placement. Keeping this after cleanup
+    // also removes stale facades created by older projects/builds.
+    if (!force_cpu_compat && scatterRenderBackendIsVulkan(ctx)) {
+        group.active_hittables.clear();
+        group.gpu_dirty = true;
+        return;
+    }
     
     if (clear_only || group.instances.empty()) {
         return;
@@ -748,6 +795,7 @@ void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool cl
              }
              Vec3 mesh_center = (mesh_bbox_min + mesh_bbox_max) * 0.5f;
              mesh_center.y = mesh_bbox_min.y; // Pivot at Bottom-Center
+             source.mesh_center = mesh_center;
 
              // Create Centered Copies
              auto centered_tris = std::make_shared<std::vector<std::shared_ptr<Triangle>>>();
@@ -887,6 +935,14 @@ void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool cl
 
 void SceneUI::appendInstancesToScene(UIContext& ctx, InstanceGroup& group, size_t start_index) {
     if (start_index >= group.instances.size()) return;
+
+    // Native Vulkan instance paths read the appended TRS records from the group;
+    // there is no scene-object tail to maintain.
+    if (scatterRenderBackendIsVulkan(ctx)) {
+        group.active_hittables.clear();
+        group.gpu_dirty = true;
+        return;
+    }
     
     std::string instance_prefix = "_inst_gid" + std::to_string(group.id) + "_";
     auto& objects = ctx.scene.world.objects;
@@ -1097,6 +1153,8 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
         if (foliage_brush.mode == 0) { // ADD
             std::mt19937 rng(std::random_device{}());
             std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            std::vector<InstanceTransform> strokeBatch;
+            strokeBatch.reserve(static_cast<size_t>((std::max)(0, foliage_brush.density)));
             
             // Random point in circle
             for (int i = 0; i < foliage_brush.density; ++i) {
@@ -1126,19 +1184,19 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
                 // Basic slope check provided by generateRandomTransform logic if implemented? 
                 // Currently generateRandomTransform logic in InstanceGroup uses normal for alignment.
                 
-                group->addInstance(inst);
+                strokeBatch.push_back(inst);
                 
                 if (foliage_brush.lazy_update) {
                     // LAZY: Add to pending for visualization
                     foliage_brush.pending_instances.push_back(inst);
                     foliage_brush.pending_group_id = group->id;
-                } 
-                else {
-                    // REAL-TIME: Immediate Append
-                    size_t idx = group->instances.size() - 1;
-                    appendInstancesToScene(ctx, *group, idx);
-                    modified = true;
                 }
+            }
+            const size_t appendStart = group->instances.size();
+            group->addInstances(strokeBatch);
+            if (!foliage_brush.lazy_update && !strokeBatch.empty()) {
+                appendInstancesToScene(ctx, *group, appendStart);
+                modified = true;
             }
         }
         else { // REMOVE
@@ -1287,13 +1345,24 @@ void SceneUI::handleScatterBrush(UIContext& ctx) {
                 for(size_t i=before_count; i<after_count; i++) {
                     scatter_brush.pending_instances.push_back(group->instances[i]);
                 }
-                // DO NOT REBUILD HERE
+                if (!scatter_brush.lazy_update) {
+                    appendInstancesToScene(ctx, *group, before_count);
+                    rebuildScatterSceneMutation(ctx, /*additive_only=*/true);
+                    scatter_brush.pending_instances.clear();
+                    scatter_brush.pending_group_id = -1;
+                }
             }
         }
         else if (scatter_brush.brush_mode == 1) {
             // REMOVE mode (Still somewhat lazy - delay rebuild)
             size_t before = group->instances.size();
             group->removeInstancesInRadius(hit.point, scatter_brush.brush_radius);
+            if (!scatter_brush.lazy_update && group->instances.size() != before) {
+                syncInstancesToScene(ctx, *group, false);
+                rebuildScatterSceneMutation(ctx, /*additive_only=*/false);
+                scatter_brush.pending_instances.clear();
+                scatter_brush.pending_group_id = -1;
+            }
             // We don't visualize removal easily, just let it happen in data
             // Visual feedback will lag until release, maybe unacceptable?
             // For removal, maybe we DO want to rebuild? 

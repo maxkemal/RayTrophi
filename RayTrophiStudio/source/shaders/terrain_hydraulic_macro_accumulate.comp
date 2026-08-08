@@ -1,0 +1,21 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC { int width; int height; } pc;
+layout(set=0,binding=0) readonly buffer Weights { float weights[]; };
+layout(set=0,binding=1) readonly buffer FlowIn { float flowIn[]; };
+layout(set=0,binding=2) writeonly buffer FlowOut { float flowOut[]; };
+layout(set=0,binding=3) readonly buffer Mask { float maskField[]; };
+void main(){
+ uint ui=gl_GlobalInvocationID.x;if(ui>=uint(pc.width*pc.height))return;
+ int i=int(ui),x=i%pc.width,y=i/pc.width;
+ float authored=clamp(maskField[i],0.0,1.0);
+ float acc=authored;
+ const int dx[8]=int[8](-1,0,1,-1,1,-1,0,1);
+ const int dy[8]=int[8](-1,-1,-1,0,0,1,1,1);
+ for(int d=0;d<8;++d){int nx=x+dx[d],ny=y+dy[d];
+  if(nx<0||nx>=pc.width||ny<0||ny>=pc.height)continue;
+  int ni=ny*pc.width+nx,opp=7-d;
+  acc+=flowIn[ni]*weights[ni*8+opp]*authored;
+ }
+ flowOut[i]=acc;
+}

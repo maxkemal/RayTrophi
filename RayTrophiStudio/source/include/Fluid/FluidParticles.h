@@ -44,12 +44,18 @@ public:
     std::vector<Vec3>     velocity;   // world space, m/s
     std::vector<AffineC>  affine;     // APIC velocity gradient
     std::vector<uint32_t> flags;      // reserved (bit 0 = sleeping, etc.)
+    // Remaining material mass relative to the authored particle mass.  This
+    // is deliberately kept separate from position/velocity so combustion can
+    // evaporate or burn a liquid without changing APIC momentum until the
+    // hysteresis-based lifecycle pass safely compacts particles.
+    std::vector<float>    mass_fraction;
 
     void clear() {
         position.clear();
         velocity.clear();
         affine.clear();
         flags.clear();
+        mass_fraction.clear();
     }
 
     size_t size() const { return position.size(); }
@@ -60,6 +66,7 @@ public:
         velocity.reserve(n);
         affine.reserve(n);
         flags.reserve(n);
+        mass_fraction.reserve(n);
     }
 
     void emit(const Vec3& p, const Vec3& v) {
@@ -67,6 +74,7 @@ public:
         velocity.push_back(v);
         affine.emplace_back();
         flags.push_back(0u);
+        mass_fraction.push_back(1.0f);
     }
 
     // Remove particle i in O(1) via swap-with-back. Order is not preserved.
@@ -77,11 +85,13 @@ public:
             velocity[i] = velocity[last];
             affine[i]   = affine[last];
             flags[i]    = flags[last];
+            mass_fraction[i] = mass_fraction[last];
         }
         position.pop_back();
         velocity.pop_back();
         affine.pop_back();
         flags.pop_back();
+        mass_fraction.pop_back();
     }
 };
 

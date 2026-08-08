@@ -186,6 +186,7 @@ public:
         procedural_volume = false;
         vdb_volume_id = manager_id;
         vdb_sequence_id = -1;
+        awaiting_live_rebind = false;  // the rebind just happened
         voxel_size = voxel;
         setLocalBounds(Vec3(0.0f), world_max - world_min);
         setScale(Vec3(1.0f, 1.0f, 1.0f));
@@ -375,6 +376,23 @@ public:
     float voxel_size = 0.1f;
     float getVoxelSize() const { return voxel_size; }
     Vec3 pivot_offset = Vec3(0); // Persistent offset for pivot adjustments
+
+    // ★★ "Its content is being refreshed" is NOT "it does not exist".
+    //
+    // A live simulation volume has its id dropped to -1 on every cached-frame
+    // restore (invalidateSimulationRenderBindings) — that drop is deliberate,
+    // it is what forces the next registerOrUpdateLiveVolume to re-upload. But
+    // isLoaded() is defined as `vdb_volume_id >= 0`, so during that window the
+    // volume reads as absent, and updateGeometry drops every unloaded volume
+    // from the TLAS. A rebuild landing in that window (switching to Vulkan RT
+    // does exactly one) removes the liquid surface for good: slots are only
+    // created there, and nothing schedules another rebuild.
+    //
+    // This flag says "expect a rebind, keep the slot". The slot publishes as
+    // inactive (invisible, free) until the content returns, then activates
+    // with no geometry rebuild at all — which is what the invalidate comment
+    // always claimed happened.
+    bool awaiting_live_rebind = false;
 private:
     // VDB data reference
     int vdb_volume_id = -1;

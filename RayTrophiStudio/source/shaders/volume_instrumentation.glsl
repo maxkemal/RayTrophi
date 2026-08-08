@@ -28,6 +28,20 @@ bool volumeInstrumentationEnabled() {
     return volumeInstrumentation.enabled != 0u;
 }
 
+// Embedded-solid probe accounting. A surface standing INSIDE an active volume
+// box is only shaded because this probe finds it: on a hit the march is clamped
+// to the surface and the ray is handed to the triangle closesthit, and on a miss
+// the ray is advanced to the box exit instead — straight past that surface, into
+// whatever lies behind it. The two failures look identical on screen, so they
+// need separate counters: runs==0 means the gate suppressed the probe, runs>0
+// with hits==0 means the probe ran and did not see the geometry.
+// Occupies reserved2/reserved3, so the buffer layout is unchanged.
+void volumeRecordSolidProbe(bool foundSolid) {
+    if (!volumeInstrumentationEnabled()) return;
+    atomicAdd(volumeInstrumentation.reserved2, 1u);
+    if (foundSolid) atomicAdd(volumeInstrumentation.reserved3, 1u);
+}
+
 void volumeRecordRay(
     uint densityCount,
     uint emptyCount,

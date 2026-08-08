@@ -7,6 +7,7 @@
 #include "Fluid/FluidLevelSet.h"
 #include "Fluid/FluidFoam.h"
 #include "Fluid/FluidRenderMode.h"
+#include "GridFluidSolver.h"   // GridFluid::GasSolverStats (gas step telemetry)
 #include "VolumeShader.h"
 #include "SimulationWorld.h"
 
@@ -22,6 +23,7 @@
 #include <vector>
 #include <SurfaceMeshCache.h>
 #include "ColliderMeshBVH.h"
+#include "MaterialStateField.h"
 
 namespace RayTrophiSim {
 
@@ -120,6 +122,18 @@ enum class SimulationFlowSourceMode {
     Point,
     ObjectBounds,
     MeshSurface
+};
+
+// How a parented emission source (flow source OR particle emitter) interprets
+// its authored direction/velocity vector.
+//   Local — the vector lives in the parent's frame and rotates with it, so a
+//           nozzle keeps spraying out of its own muzzle as the prop turns.
+//   World — the vector stays a world direction regardless of parent rotation
+//           (matches the behaviour of an unparented source).
+// Ignored entirely when the source has no parent.
+enum class SimulationEmissionVelocitySpace : uint32_t {
+    Local = 0,
+    World = 1
 };
 
 enum class SimulationGridDomainChannelFlags : uint32_t {
@@ -281,6 +295,7 @@ struct SimulationGridDomainDesc {
     // incompressible particle/SDF solve; only its GPU free-surface band becomes
     // a thermally responsive fuel source for overlapping Gas domains.
     bool  fluid_flammable = false;
+    bool  fluid_extinguishing = false;
     bool  fluid_auto_ignite = false;
     float fluid_ignition_temperature = 0.8f;
     float fluid_evaporation_rate = 0.35f;
@@ -288,6 +303,8 @@ struct SimulationGridDomainDesc {
     float fluid_combustion_heat_release = 2.0f;
     float fluid_combustion_smoke_yield = 0.45f;
     float fluid_surface_cooling = 0.35f;
+    float fluid_cooling_power = 0.0f;
+    float fluid_oxygen_dilution = 0.0f;
     // Seed strategy. SeedBox (default) keeps old projects' behaviour. FillLevel
     // ignores fluid_seed_min/max and instead fills the domain footprint from the
     // floor up to fluid_fill_level of the domain height, optionally inset from
@@ -315,6 +332,20 @@ struct SimulationGridDomainDesc {
     // Gas motion belongs to the domain, not to the discrete-particle physics
     // preset. Hybrid effects (spark particles + fire grid) otherwise inherit
     // Spark's zero buoyancy and move only through combustion expansion.
+    // ── Thermal boundary override (Phase 4) ──────────────────────────────────
+    // A domain overrides the WORLD's ambient conditions inside its own box. Off
+    // by default, so a domain that says nothing simply inherits the world and no
+    // existing scene changes.
+    //
+    // ★ There is deliberately no per-domain `kelvin_per_unit`. That is the
+    // normalized<->Kelvin calibration, and the char mask quantizes surface
+    // temperature in absolute Kelvin — if two domains disagreed, the same object
+    // would report a different temperature and glow differently depending on
+    // which box it stood in. Ambient and oxygen are boundary conditions; the
+    // unit mapping is not one. See WorldThermalState in MaterialStateField.h.
+    bool  thermal_override_enabled = false;
+    float thermal_ambient_kelvin = 293.0f;
+    float thermal_oxygen = 1.0f;   // 0..1, throttles pyrolysis inside this box
     float gas_buoyancy_heat = 1.0f;
     float gas_buoyancy_density = 0.08f;
     float gas_vorticity = 0.35f;
@@ -390,6 +421,74 @@ struct SimulationGridDomainDesc {
     bool fluid_debug_overlay = false;
 };
 
+// Per-step telemetry for one Gas domain — the counterpart of
+// Fluid::APICSolverStats, which is what the Fluid panel reports. The gas step
+// is a hybrid: individual stages run on the device while the rest of the
+// operator chain stays in GridFluid::step on the host, so every stage carries
+// BOTH a time and where it ran. Without the flag a 0.00 ms row is ambiguous —
+// it can mean "ran on the GPU", "was skipped because the channel is off", or
+// "the stage is genuinely free at this resolution".
+//
+// All times are host wall time. The GPU rows are measured around the dispatch
+// call, so they include whatever submit/fence the host waited on — that is the
+// cost the frame actually pays, not the isolated kernel time.
+struct SimulationGasStats {
+    // False until a step ran. An idle domain (no source, no content) is skipped
+    // wholesale, and reporting the previous step's numbers as if they were
+    // current is how "the gas panel shows work but nothing moves" happens.
+    bool  stepped = false;
+
+    float total_ms = 0.0f;      // whole per-domain gas step, host wall time
+    float voxelize_ms = 0.0f;   // collider stamp into grid.solid + face weights
+    float analysis_ms = 0.0f;   // the post-step O(cells) field scan below
+
+    // Device stages, in execution order.
+    float gpu_collider_source_ms = 0.0f;   // collider Gas Interaction injection
+    float gpu_msf_ms = 0.0f;               // Material State Field thermal gather
+    float gpu_source_upload_ms = 0.0f;     // host scalar sources -> device
+    float gpu_fluid_combustion_ms = 0.0f;  // combustible liquid surface deposit
+    float gpu_velocity_advect_ms = 0.0f;
+    float gpu_scalar_advect_ms = 0.0f;
+    float gpu_combustion_ms = 0.0f;
+    float gpu_body_forces_ms = 0.0f;       // vel upload + buoyancy/fields/vorticity/turbulence + readback
+    float gpu_dissipation_ms = 0.0f;       // velocity loss + clamp
+    float gpu_pressure_ms = 0.0f;          // projection
+    float gpu_publish_ms = 0.0f;           // final scalar publication for the RT bridge
+    float gpu_majorant_ms = 0.0f;          // per-block density max for the RT empty-space skip
+
+    // Host operator chain that still had to run (stages the device covered are
+    // switched off inside it, so its rows are the true CPU residual).
+    GridFluid::GasSolverStats cpu;
+
+    // Where each stage ran this step. A false flag with a 0 ms CPU row means the
+    // stage did not run at all (channel off / feature disabled).
+    bool velocity_advect_on_gpu = false;
+    bool scalar_advect_on_gpu = false;
+    bool combustion_on_gpu = false;
+    bool buoyancy_on_gpu = false;
+    bool force_fields_on_gpu = false;
+    bool vorticity_on_gpu = false;
+    bool turbulence_on_gpu = false;
+    bool dissipation_on_gpu = false;
+    bool pressure_on_gpu = false;
+    bool fluid_combustion_on_gpu = false;
+
+    // ── Field measurements (post-step scan) ──────────────────────────────────
+    std::size_t cell_count = 0;
+    std::size_t active_fuel_cells = 0;   // fuel > 1e-4
+    std::size_t burning_cells = 0;       // flame/interaction field lit
+    std::size_t solid_cells = 0;         // collider-occupied cells
+    float max_temperature = 0.0f;
+    float total_density = 0.0f;          // smoke mass proxy (sum over cells)
+    float total_fuel = 0.0f;
+    float max_speed = 0.0f;              // max |v| over MAC faces, world units/s
+    // max_speed * dt / voxel_size. Above 1 the semi-Lagrangian trace jumps more
+    // than a cell per step: detail smears and the projection fights it.
+    float cfl = 0.0f;
+    // Dense host storage for this domain's channels (grid.* vectors).
+    std::size_t grid_memory_bytes = 0;
+};
+
 struct SimulationGridDomainState {
     // Mirror of the desc's type so consumers (renderer, timeline cache, UI)
     // can branch on type without holding a desc reference.
@@ -419,6 +518,7 @@ struct SimulationGridDomainState {
     bool gas_gpu_active = false;
     bool gas_gpu_partial = false;
     std::string gas_compute_status = "Not stepped";
+    SimulationGasStats gas_stats;
     // Fluid-only runtime state. Empty for Gas domains.
     Fluid::FluidParticles particles;
     Fluid::APICSolverStats fluid_stats;
@@ -459,6 +559,20 @@ struct SimulationGasGpuFieldView {
     uint64_t temperature_address = 0;
     uint64_t fuel_address = 0;
     uint64_t flame_address = 0;
+    // Per-block maximum density (kGasMajorantBlock^3 cells per entry). Lets the
+    // RT volume march skip empty blocks; a dense domain has no other
+    // empty-space acceleration. Zero when the majorant pass has not run, and
+    // the shader must then fall back to marching every step — a stale or
+    // missing majorant may never be treated as "empty".
+    uint64_t majorant_address = 0;
+    // Emitting-block list ([0] = count, [1..] = block indices) for volume
+    // emission NEE. Shares the majorant's block layout.
+    uint64_t emissive_list_address = 0;
+    int emissive_capacity = 0;
+    int majorant_dim_x = 0;
+    int majorant_dim_y = 0;
+    int majorant_dim_z = 0;
+    int majorant_block = 0;
     int resolution_x = 0;
     int resolution_y = 0;
     int resolution_z = 0;
@@ -472,6 +586,14 @@ struct SimulationGasGpuFieldView {
     }
 };
 
+// Cells per axis in one majorant block. Must match MAJORANT_BLOCK in
+// shaders/sim_gas_majorant.comp and the DDA in volume_closesthit.rchit.
+inline constexpr int kGasMajorantBlock = 8;
+// Emitting blocks the volume march can sample. Bounded because the list is
+// walked per scatter sample; overflow keeps the fire lit from a subset
+// rather than dropping it.
+inline constexpr int kGasEmissiveListCapacity = 4096;
+
 struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle vel_x;
     ComputeBufferHandle vel_y;
@@ -482,6 +604,19 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle interaction;
     ComputeBufferHandle pressure;
     ComputeBufferHandle divergence;
+    // Per-block density maximum consumed by the RT volume march. Sized from the
+    // block resolution, which is tracked separately from the cell resolution so
+    // a domain resize reallocates it instead of publishing a majorant that
+    // describes the old grid.
+    ComputeBufferHandle gas_majorant;
+    int gas_majorant_dim[3] = {0, 0, 0};
+    bool gas_majorant_valid = false;
+    // Compact list of emitting blocks: [0] = count, [1..] = block indices.
+    // Lets the RT volume march sample the fire directly instead of waiting for
+    // a random bounce to land in it. Device-resident end to end — the host
+    // never reads it, so producing it costs no sync.
+    ComputeBufferHandle gas_emissive_list;
+    bool gas_emissive_valid = false;
     ComputeBufferHandle scratch_vel_x;
     ComputeBufferHandle scratch_vel_y;
     ComputeBufferHandle scratch_vel_z;
@@ -496,6 +631,9 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle fluid_positions;
     ComputeBufferHandle fluid_velocities;
     ComputeBufferHandle fluid_affine;
+    // GPU mirror of FluidParticles::mass_fraction. Kept separate so existing
+    // APIC kernels retain their buffer ABI while lifecycle support is added.
+    ComputeBufferHandle fluid_mass_fraction;
     ComputeBufferHandle foam_positions;
     SimulationGpuFoamRenderBuffer foam_render;
     // Whitewater spawn-potential pass (GPU port of stepFoam's phase 3, which
@@ -554,11 +692,14 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle gas_source_fuel;
     ComputeBufferHandle gas_source_flame;
     ComputeBufferHandle gas_source_band;
-    ComputeBufferHandle gas_source_ignition;
-    ComputeBufferHandle gas_source_fuel_capacity;
-    ComputeBufferHandle gas_source_burn_rate;
-    // Two cell-sized planes: filtered surface temperature, then remaining fuel.
-    ComputeBufferHandle gas_surface_state;
+    // Material State Field scatter accumulators, one uint per cell. Fixed-point
+    // because GL_EXT_shader_atomic_float is optional and Vulkan is the primary
+    // backend — hardware independence outranks the convenience. Cleared by the
+    // resolve pass itself, so they need no separate zero-fill dispatch.
+    ComputeBufferHandle msf_accum_fuel;
+    ComputeBufferHandle msf_accum_density;
+    ComputeBufferHandle msf_accum_heat;
+    ComputeBufferHandle msf_accum_flame;
     // GPU MGPCG (Layer A: Jacobi-preconditioned CG) scratch. Solves the same
     // free-surface Poisson system as the SOR path; allocated lazily alongside
     // the cell buffers. cg_partials holds per-block double partial sums for the
@@ -608,6 +749,10 @@ struct SimulationFlowSourceDesc {
         bool has_fuel = false;
         bool has_falloff = false;
         bool has_velocity_coupling = false;
+        // Liquid emission rate. Keying this is what animates a hose valve —
+        // open at one frame, throttled at another — which is the whole point of
+        // a keyable flow source on a Fluid domain.
+        bool has_flow_rate = false;
         bool enabled = true;
         Vec3 position = Vec3(0.0f);
         Vec3 velocity = Vec3(0.0f);
@@ -617,6 +762,7 @@ struct SimulationFlowSourceDesc {
         float fuel = 0.0f;
         float falloff = 1.0f;
         float velocity_coupling = 8.0f;
+        float flow_rate = 1000.0f;
     };
     std::string name = "Flow Source";
     uint64_t timeline_uid = 0;
@@ -624,6 +770,38 @@ struct SimulationFlowSourceDesc {
     std::string source_name;
     int domain_index = 0;
     bool enabled = true;
+
+    // ── Object binding (parenting) ───────────────────────────────────────────
+    // Deliberately ORTHOGONAL to source_mode: a Point source and a MeshSurface
+    // source can both be parented. When `parent_object` names a scene node the
+    // source rides that node's transform every step, so it can be carried by a
+    // keyframed prop OR by a Jolt rigid body with no extra authoring — a lit
+    // match that is thrown and falls under physics keeps its flame on the tip.
+    //
+    // ★ Parenting REINTERPRETS `position` and `velocity` as parent-LOCAL rather
+    // than adding a second offset field. One field, one meaning, and the
+    // existing keyframe channels (Keyframe::position / ::velocity) keep working
+    // untouched — a keyed local offset animates the flame along the object.
+    // The consequence, which is the whole point: a parented source follows its
+    // object instead of staying nailed to the world coordinates it was authored
+    // at. The UI converts world -> local once at the moment of parenting so the
+    // source does not visibly jump.
+    std::string parent_object;
+    SimulationEmissionVelocitySpace velocity_space =
+        SimulationEmissionVelocitySpace::Local;
+    // Fraction of the parent's own velocity added to the emitted medium. Without
+    // it a waved match leaves its flame behind and a moving hose pours a
+    // vertical wall of liquid instead of an arc. 1 = fully carried.
+    float inherit_velocity = 1.0f;
+
+    // Runtime-only motion state — NEVER serialized, reset on rewind. The
+    // sentinel x < -9.99e9 means "no previous sample yet" so the first step
+    // after load/rewind/enable inherits ZERO instead of a huge bogus velocity
+    // measured from the origin.
+    Vec3 parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+    Vec3 parent_velocity = Vec3(0.0f);
+
+    // World space, or parent-local when `parent_object` is set (see above).
     Vec3 position = Vec3(0.0f, 1.0f, 0.0f);
     Vec3 velocity = Vec3(0.0f, 1.0f, 0.0f);
     // Per-second relaxation toward `velocity`. The source is a boundary/inflow
@@ -674,12 +852,34 @@ struct SimulationFlowSourceDesc {
 SimulationFlowSourceDesc::Keyframe evaluateSimulationFlowSource(
     const SimulationFlowSourceDesc& source, int frame);
 
+// A flow source's authored channels after keyframe evaluation AND object
+// parenting have BOTH been applied — i.e. exactly what the solver injects.
+// The viewport gizmo and the panel readout resolve through the same function,
+// so a parented source is drawn where it actually emits instead of at the local
+// offset it was authored with.
+struct SimulationFlowSourceFrame {
+    SimulationFlowSourceDesc::Keyframe keyed;
+    Vec3 position = Vec3(0.0f);   // world space
+    Vec3 velocity = Vec3(0.0f);   // world space, inherited motion folded in
+    bool parented = false;        // parent was named AND resolved this frame
+    // A parent was named but could not be resolved (renamed/deleted object).
+    // The solver skips such a source entirely rather than interpreting its
+    // parent-local offset as world coordinates — that would drop a flame at
+    // roughly the world origin, a ghost with no visible cause.
+    bool parent_missing = false;
+};
+
 struct ParticleSurfaceSample {
     Vec3 position = Vec3(0.0f);
     Vec3 normal = Vec3(0.0f, 1.0f, 0.0f);
 };
 
+// Sentinel emitter index: "no owning emitter" (scripted//API spawns, or an
+// emitter that has since been removed). Such particles use the system rates.
+inline constexpr uint16_t kNoEmitterIndex = 0xFFFFu;
+
 struct ParticleSpawnDesc {
+    uint16_t emitter_index = kNoEmitterIndex;
     Vec3 position = Vec3(0.0f, 0.0f, 0.0f);
     Vec3 velocity = Vec3(0.0f, 0.0f, 0.0f);
     float lifetime_seconds = 5.0f;
@@ -697,7 +897,43 @@ struct ParticleSpawnDesc {
 };
 
 struct ParticleEmitterDesc {
+    // Independently-keyable channels, mirroring SimulationFlowSourceDesc so the
+    // two emission families behave the same on the timeline. Before this, a
+    // particle emitter could only be switched on and off by hand: there was no
+    // way to say "the embers start at the frame the match catches".
+    struct Keyframe {
+        bool has_enabled = false;
+        bool has_rate = false;
+        bool has_speed = false;
+        bool has_spread = false;
+        bool has_point = false;
+        bool has_direction = false;
+        bool enabled = true;
+        float rate_per_second = 32.0f;
+        float speed = 2.0f;
+        float spread = 0.35f;
+        Vec3 point = Vec3(0.0f, 1.0f, 0.0f);
+        Vec3 direction = Vec3(0.0f, 1.0f, 0.0f);
+    };
+
     std::string name = "Particle Emitter";
+    uint64_t timeline_uid = 0;
+    std::map<int, Keyframe> keyframes;
+
+    // ── Object binding (parenting) ───────────────────────────────────────────
+    // Same contract as SimulationFlowSourceDesc: `point` and `direction` become
+    // parent-LOCAL while parented, and the emitter rides the object's full
+    // transform (rotation included) rather than the AABB centre that
+    // ParticleEmitterSourceMode::ObjectOrigin resolves. That AABB path cannot
+    // put sparks on a match TIP or turn them as the match turns.
+    std::string parent_object;
+    SimulationEmissionVelocitySpace velocity_space =
+        SimulationEmissionVelocitySpace::Local;
+    float inherit_velocity = 1.0f;
+    // Runtime-only motion state, never serialized. Sentinel x < -9.99e9.
+    Vec3 parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+    Vec3 parent_velocity = Vec3(0.0f);
+
     ParticleEmitterSourceMode source_mode = ParticleEmitterSourceMode::Point;
     ParticleEmitterSpawnMode spawn_mode = ParticleEmitterSpawnMode::Center;
     std::string source_name;
@@ -730,7 +966,31 @@ struct ParticleEmitterDesc {
     bool enabled = true;
     float accumulator = 0.0f;
     uint32_t seed = 1;
+
+    // ── Per-emitter particle -> gas deposit override ─────────────────────────
+    // The system-wide rates in ParticlePhysicsSettings stay the default. When
+    // this is on, particles born from THIS emitter use the rates below instead.
+    // That is what lets one system carry both igniting embers (fuel > 0) and
+    // inert smoke (fuel = 0) — the match scenario needs exactly that.
+    bool  override_grid_deposit = false;
+    float grid_density_deposit = 0.0f;
+    float grid_temperature_deposit = 0.0f;
+    float grid_fuel_deposit = 0.0f;
 };
+
+// Keyframe evaluation + object parenting for a particle emitter, resolved
+// through one function so the viewport gizmo, the panel and the spawner agree.
+struct ParticleEmitterFrame {
+    ParticleEmitterDesc::Keyframe keyed;
+    Vec3 position = Vec3(0.0f);            // world space
+    Vec3 direction = Vec3(0.0f, 1.0f, 0.0f); // world space, normalized-ish
+    Vec3 inherited_velocity = Vec3(0.0f);  // parent motion * inherit factor
+    bool parented = false;
+    bool parent_missing = false;           // named a parent that no longer exists
+};
+
+ParticleEmitterDesc::Keyframe evaluateParticleEmitter(
+    const ParticleEmitterDesc& emitter, int frame);
 
 struct ParticleColliderDesc {
     std::string name = "Particle Collider";
@@ -757,9 +1017,26 @@ struct ParticleColliderDesc {
     float gas_flame_rate = 0.0f;
     float gas_surface_band_voxels = 1.0f;
     bool gas_ignite_on_contact = false;
-    float gas_ignition_temperature = 0.8f;
-    float gas_surface_fuel_capacity = 4.0f;
-    float gas_surface_burn_rate = 0.75f;
+    // What this object is made of. Resolves through the built-in substance
+    // library; every burning/thermal number is DERIVED from real physical
+    // constants in Kelvin. See MaterialStateField.h for the unit decision and
+    // why AtmosphereParams.temperature is deliberately not the thermal authority.
+    std::string msf_substance = "Wood (Oak)";
+    // Per-object deviation from that substance. Defaults are a no-op, so an
+    // untouched collider behaves exactly as its substance says.
+    SubstanceOverride msf_override;
+    // UV-space char mask resolution. Elements ARE the texels of this mask, so
+    // this sets both the burn-mark detail and the simulation cost. 0 forces the
+    // blocky per-triangle fallback.
+    int msf_mask_resolution = 128;
+    // Whether this object gets a VISIBLE burn mark at all. Off means the mask is
+    // never built: no res*res texture, no per-texel elements, and the object
+    // falls back to blocky per-triangle thermal elements. It still heats, burns,
+    // releases fuel and can ignite its neighbours — it just does not carry a
+    // scorch texture. Worth turning off for anything that only needs to
+    // PARTICIPATE in the fire (a collider that blocks flow, an object that will
+    // be hidden or destroyed anyway), since the mask is the expensive part.
+    bool msf_generate_char_mask = true;
 
     // Advanced complex object settings
     int sdf_resolution_mode = 1;       // 0: Low (32^3), 1: Med (64^3), 2: High (128^3)
@@ -807,6 +1084,13 @@ struct ParticleSoABuffers {
     std::vector<float> lifetime_seconds;
     std::vector<float> inverse_mass;
     std::vector<uint8_t> alive;
+    // Which emitter spawned this particle, so the particle -> gas deposit can be
+    // authored PER EMITTER instead of only per system. Without it a system can
+    // only say "all my particles ignite" or "none do" — a lit match cannot have
+    // igniting embers and non-igniting smoke at once.
+    // kNoEmitterIndex (or a stale index after the emitter is removed) falls back
+    // to the system-wide rates, so this never becomes a dangling reference.
+    std::vector<uint16_t> emitter_index;
 
     // Visual attributes — current values written each step, consumed by renderers.
     std::vector<float> size;
@@ -846,6 +1130,17 @@ struct ParticleComputeBuffers {
 };
 
 struct ParticleSimulationStats {
+    // ── Particle -> gas deposit telemetry ────────────────────────────────────
+    // "I set a fuel deposit rate and no fire appeared" had four indistinguishable
+    // causes, all of them a silent zero. These make the break point observable;
+    // read them in order, like MaterialStateFieldBridgeStats.
+    //   landed             — deposits that reached at least one gas domain
+    //   dropped_no_domain  — particles flying where no gas box exists
+    //   dropped_no_channel — reached a domain that cannot hold Fuel
+    uint32_t grid_deposit_landed = 0;
+    uint32_t grid_deposit_dropped_no_domain = 0;
+    uint32_t grid_deposit_dropped_no_channel = 0;
+
     float total_ms = 0.0f;
     float emit_ms = 0.0f;
     float integrate_ms = 0.0f;
@@ -915,6 +1210,56 @@ public:
     void setColliderOBBResolver(std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)> resolver);
     void setColliderMeshResolver(std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> resolver);
 
+    // ── Material State Field ─────────────────────────────────────────────────
+    // Persistent per-object thermal/pyrolysis surface state — the sole owner of
+    // surface burning. Per-collider "Ignite on Contact" is the toggle; there is
+    // no separate system-wide enable any more.
+    // Stats require a device readback; ask for one only when something is
+    // actually going to look at the numbers (stats panel / debug view).
+    void requestMaterialStateFieldReadback() { material_state_fields_.requestReadback(); }
+    const MaterialStateFieldStats& materialStateFieldStats() const {
+        return material_state_fields_.stats();
+    }
+    void resetMaterialStateFields() { material_state_fields_.resetState(); }
+    // Clear one object's accumulated burn/heat damage. Keyed by the collider's
+    // source_name, the same key the field is stored under.
+    bool clearMaterialStateField(const std::string& object_key) {
+        return material_state_fields_.clearField(object_key);
+    }
+    // Read-only view for the render bridge (mask upload). The bridge needs the
+    // host mirror, which only exists after a requested readback.
+    const std::unordered_map<std::string, MaterialStateField>& materialStateFields() const {
+        return material_state_fields_.fields();
+    }
+    bool hasMaterialStateFields() const { return !material_state_fields_.fields().empty(); }
+    // ── MSF frame cache (Phase 4b) ───────────────────────────────────────────
+    // Burn/heat damage is per-object runtime state and does NOT live under a
+    // domain (Phase 4: an object outside every domain is still simulated), so it
+    // is cached alongside the grid states rather than inside them — the same
+    // parallel-map shape rigid/soft/particle snapshots already use.
+    std::vector<MaterialStateFieldSnapshot> captureMaterialStateFieldsForCache(
+        SimulationComputeContext& compute) {
+        return material_state_fields_.captureSnapshot(compute);
+    }
+    void restoreMaterialStateFields(
+        const std::vector<MaterialStateFieldSnapshot>& snapshot,
+        SimulationComputeContext& compute) {
+        material_state_fields_.restoreSnapshot(snapshot, compute);
+    }
+    // ── World thermal boundary conditions (Phase 4) ──────────────────────────
+    // Ambient temperature, the Kelvin calibration, convection and oxygen. This
+    // is what gives an object that is inside NO domain a defined temperature, so
+    // a burning log carried out of the smoke box cools toward the room instead of
+    // freezing mid-burn.
+    WorldThermalState& worldThermal() { return world_thermal_; }
+    const WorldThermalState& worldThermal() const { return world_thermal_; }
+    // Derived Kelvin <-> normalized mapping. Returned BY VALUE: the authoring
+    // values live on WorldThermalState and there must stay exactly one place
+    // that can be edited, or the two would drift.
+    MaterialTemperatureScale materialTemperatureScale() const {
+        return world_thermal_.scale();
+    }
+
     std::vector<SimulationGridDomainDesc>& gridDomains();
     const std::vector<SimulationGridDomainDesc>& gridDomains() const;
     const std::vector<SimulationGridDomainState>& gridDomainStates() const;
@@ -951,6 +1296,25 @@ public:
     void clearFlowSources();
     void setFlowSourceBoundsResolver(std::function<bool(const SimulationFlowSourceDesc&, Vec3&, Vec3&)> resolver);
     void setFlowSourceSurfaceSampler(std::function<bool(const SimulationFlowSourceDesc&, uint32_t, ParticleSurfaceSample&)> sampler);
+    /// Node-name -> current world matrix, used to parent a flow source to an
+    /// object. Kept separate from the bounds resolver on purpose: parenting
+    /// wants the object's TRANSFORM (which physics writes back into), not a
+    /// box derived from its geometry.
+    void setFlowSourceTransformResolver(std::function<bool(const std::string&, Matrix4x4&)> resolver);
+    /// Keyframe evaluation + parenting for a particle emitter. Const, like
+    /// resolveFlowSourceFrame — safe to call from UI as often as needed.
+    ParticleEmitterFrame resolveParticleEmitterFrame(
+        const ParticleEmitterDesc& emitter, int frame) const;
+    void advanceEmitterMotion(float dt, int frame);
+    /// Keyframe evaluation + object parenting in one place. Const: it never
+    /// touches the per-source motion state, so UI/gizmo callers can resolve a
+    /// source as often as they like without perturbing inherited velocity.
+    SimulationFlowSourceFrame resolveFlowSourceFrame(
+        const SimulationFlowSourceDesc& source, int frame) const;
+    /// Samples every parented source's world position for this step so
+    /// inherited velocity can be differenced. Must run before the injection
+    /// filters — see the definition.
+    void advanceFlowSourceMotion(float dt, int frame);
 
     std::size_t capacity() const;
     std::size_t aliveCount() const;
@@ -1045,8 +1409,12 @@ private:
     std::function<bool(const ParticleColliderDesc&, Vec3&, Vec3&)> collider_bounds_resolver_;
     std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)> collider_obb_resolver_;
     std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> collider_mesh_resolver_;
+    // Material State Field — persistent per-object surface burn state.
+    MaterialStateFieldSystem material_state_fields_;
+    WorldThermalState world_thermal_;
     std::function<bool(const SimulationGridDomainDesc&, Vec3&, Vec3&)> grid_domain_bounds_resolver_;
     std::function<bool(const SimulationFlowSourceDesc&, Vec3&, Vec3&)> flow_source_bounds_resolver_;
+    std::function<bool(const std::string&, Matrix4x4&)> flow_source_transform_resolver_;
     std::function<bool(const SimulationFlowSourceDesc&, uint32_t, ParticleSurfaceSample&)> flow_source_surface_sampler_;
     bool enabled_ = true;
     bool collision_plane_enabled_ = false;

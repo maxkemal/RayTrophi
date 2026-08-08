@@ -3605,6 +3605,14 @@ void SceneUI::draw(UIContext& ctx)
     // Apply project-scoped UI state after load finalization on the main thread.
     if (pending_project_ui_restore) {
         pending_project_ui_restore = false;
+        // Terrain graph evaluation can restore/create native InstanceGroups
+        // after the render backend's initial project sync. Publish an explicit
+        // debt on the main thread so dormant OptiX cannot retain an empty TLAS
+        // until the first paint mutation.
+        extern bool g_optix_rebuild_pending;
+        extern bool g_viewport_raster_scatter_update_pending;
+        g_optix_rebuild_pending = true;
+        g_viewport_raster_scatter_update_pending = true;
         if (!g_project.ui_layout_data.empty()) {
             // Disable auto-save to ini momentarily to avoid conflicts
             ImGui::GetIO().IniFilename = nullptr; 
@@ -3937,6 +3945,11 @@ void SceneUI::draw(UIContext& ctx)
     // Terrain Sculpting
     handleTerrainBrush(ctx);
     handleTerrainFoliageBrush(ctx);  // Foliage painting brush
+    if (auto* vkViewport = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
+        const bool foliageStrokeActive = ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+            (scatter_brush.enabled || foliage_brush.enabled);
+        vkViewport->setRasterScatterPaintActive(foliageStrokeActive);
+    }
     handleMeshSculpt(ctx);
     stepWetClayField(ctx);   // dynamic wet-clay: settle + dry the active wet region each frame
     handleMeshPaint(ctx);

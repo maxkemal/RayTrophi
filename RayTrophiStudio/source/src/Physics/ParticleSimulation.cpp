@@ -2,6 +2,9 @@
 
 #include "GridFluidSolver.h"
 #include "globals.h"
+// Thermal force fields are read here (and only here) to build the MSF ambient
+// pass's source list. MaterialStateField deliberately never sees this type.
+#include "ForceField.h"
 
 #include <algorithm>
 #include <atomic>
@@ -26,6 +29,7 @@ namespace {
 constexpr std::size_t kInvalidParticle = static_cast<std::size_t>(-1);
 using SimulationClock = std::chrono::steady_clock;
 std::atomic<uint64_t> g_next_flow_source_timeline_uid{1};
+std::atomic<uint64_t> g_next_emitter_timeline_uid{1};
 
 float elapsedMilliseconds(SimulationClock::time_point start, SimulationClock::time_point end) {
     return std::chrono::duration<float, std::milli>(end - start).count();
@@ -43,6 +47,7 @@ SimulationFlowSourceDesc::Keyframe captureFlowSourceKey(
     key.fuel = source.fuel;
     key.falloff = source.falloff;
     key.velocity_coupling = source.velocity_coupling;
+    key.flow_rate = source.fluid_particles_per_second;
     return key;
 }
 
@@ -80,6 +85,56 @@ SimulationFlowSourceDesc::Keyframe evaluateFlowSourceKey(
     sample([](const auto& k){ return k.has_fuel; }, [](const auto& k){ return k.fuel; }, result.fuel);
     sample([](const auto& k){ return k.has_falloff; }, [](const auto& k){ return k.falloff; }, result.falloff);
     sample([](const auto& k){ return k.has_velocity_coupling; }, [](const auto& k){ return k.velocity_coupling; }, result.velocity_coupling);
+    sample([](const auto& k){ return k.has_flow_rate; }, [](const auto& k){ return k.flow_rate; }, result.flow_rate);
+    return result;
+}
+
+ParticleEmitterDesc::Keyframe captureEmitterKey(const ParticleEmitterDesc& e) {
+    ParticleEmitterDesc::Keyframe key;
+    key.enabled = e.enabled;
+    key.rate_per_second = e.rate_per_second;
+    key.speed = e.speed;
+    key.spread = e.spread;
+    key.point = e.point;
+    key.direction = e.direction;
+    return key;
+}
+
+// Same independent-channel evaluation as evaluateFlowSourceKey: a channel is
+// only animated where it is actually keyed, and unkeyed channels keep the
+// desc's authored value.
+ParticleEmitterDesc::Keyframe evaluateEmitterKey(
+    const ParticleEmitterDesc& emitter,
+    int frame) {
+    ParticleEmitterDesc::Keyframe result = captureEmitterKey(emitter);
+    if (emitter.keyframes.empty()) return result;
+    auto sample = [&](auto has, auto value, auto& out, bool held = false) {
+        auto after = emitter.keyframes.end();
+        auto before = emitter.keyframes.end();
+        for (auto it = emitter.keyframes.begin(); it != emitter.keyframes.end(); ++it) {
+            if (!has(it->second)) continue;
+            if (it->first <= frame) before = it;
+            if (it->first >= frame) { after = it; break; }
+        }
+        if (before == emitter.keyframes.end()) before = after;
+        if (after == emitter.keyframes.end()) after = before;
+        if (before == emitter.keyframes.end()) return;
+        if (held || before == after) { out = value(before->second); return; }
+        const float t = std::clamp(
+            static_cast<float>(frame - before->first) /
+            static_cast<float>(after->first - before->first), 0.0f, 1.0f);
+        out = value(before->second) +
+              (value(after->second) - value(before->second)) * t;
+    };
+    // `enabled` is stepped, not interpolated: an emitter is on or off.
+    sample([](const auto& k){ return k.has_enabled; },
+           [](const auto& k){ return k.enabled ? 1.0f : 0.0f; },
+           result.enabled, true);
+    sample([](const auto& k){ return k.has_rate; }, [](const auto& k){ return k.rate_per_second; }, result.rate_per_second);
+    sample([](const auto& k){ return k.has_speed; }, [](const auto& k){ return k.speed; }, result.speed);
+    sample([](const auto& k){ return k.has_spread; }, [](const auto& k){ return k.spread; }, result.spread);
+    sample([](const auto& k){ return k.has_point; }, [](const auto& k){ return k.point; }, result.point);
+    sample([](const auto& k){ return k.has_direction; }, [](const auto& k){ return k.direction; }, result.direction);
     return result;
 }
 
@@ -182,18 +237,12 @@ inline void voxelizeCollidersIntoGrid(
     ensureGasSource(grid.solid_gas_fuel);
     ensureGasSource(grid.solid_gas_flame);
     ensureGasSource(grid.solid_gas_band);
-    ensureGasSource(grid.solid_gas_ignition);
-    ensureGasSource(grid.solid_gas_fuel_capacity);
-    ensureGasSource(grid.solid_gas_burn_rate);
     if (!track_gas_source && !grid.solid_gas_band.empty()) {
         std::vector<float>().swap(grid.solid_gas_density);
         std::vector<float>().swap(grid.solid_gas_temperature);
         std::vector<float>().swap(grid.solid_gas_fuel);
         std::vector<float>().swap(grid.solid_gas_flame);
         std::vector<float>().swap(grid.solid_gas_band);
-        std::vector<float>().swap(grid.solid_gas_ignition);
-        std::vector<float>().swap(grid.solid_gas_fuel_capacity);
-        std::vector<float>().swap(grid.solid_gas_burn_rate);
     }
 
     // ── Static-collider voxelization cache ───────────────────────────────────
@@ -231,9 +280,12 @@ inline void voxelizeCollidersIntoGrid(
         sig = hashF(sig, c.gas_flame_rate);
         sig = hashF(sig, c.gas_surface_band_voxels);
         sig = hashU(sig, c.gas_ignite_on_contact ? 1ull : 0ull);
-        sig = hashF(sig, c.gas_ignition_temperature);
-        sig = hashF(sig, c.gas_surface_fuel_capacity);
-        sig = hashF(sig, c.gas_surface_burn_rate);
+        for (char ch : c.msf_substance) sig = hashU(sig, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+        sig = hashU(sig, c.msf_override.override_ignition ? 1ull : 0ull);
+        sig = hashF(sig, c.msf_override.ignition_kelvin);
+        sig = hashF(sig, c.msf_override.burn_rate_scale);
+        sig = hashF(sig, c.msf_override.fuel_capacity_scale);
+        sig = hashU(sig, static_cast<uint64_t>(c.msf_mask_resolution));
         if (collider_velocities && ci < collider_velocities->size()) {
             const Vec3& v = (*collider_velocities)[ci];
             sig = hashF(sig, v.x); sig = hashF(sig, v.y); sig = hashF(sig, v.z);
@@ -281,7 +333,10 @@ inline void voxelizeCollidersIntoGrid(
             }
         }
     }
-    if (grid.collider_voxel_valid && grid.collider_voxel_sig == sig) {
+    // solid_cells_valid is in the condition so the cache can never hand a caller
+    // a mask without its compact list: a grid that arrived with a valid signature
+    // but no list (restored snapshot) restamps once and rebuilds both together.
+    if (grid.collider_voxel_valid && grid.solid_cells_valid && grid.collider_voxel_sig == sig) {
         return; // collider set unchanged — keep last step's solid mask, skip restamp
     }
     // From here the mask is (re)built to match this signature.
@@ -305,9 +360,6 @@ inline void voxelizeCollidersIntoGrid(
             std::fill(grid.solid_gas_fuel.begin(), grid.solid_gas_fuel.end(), 0.0f);
             std::fill(grid.solid_gas_flame.begin(), grid.solid_gas_flame.end(), 0.0f);
             std::fill(grid.solid_gas_band.begin(), grid.solid_gas_band.end(), 0.0f);
-            std::fill(grid.solid_gas_ignition.begin(), grid.solid_gas_ignition.end(), 0.0f);
-            std::fill(grid.solid_gas_fuel_capacity.begin(), grid.solid_gas_fuel_capacity.end(), 0.0f);
-            std::fill(grid.solid_gas_burn_rate.begin(), grid.solid_gas_burn_rate.end(), 0.0f);
         }
         grid.collider_track_dim[0] = nx; grid.collider_track_dim[1] = ny; grid.collider_track_dim[2] = nz;
         grid.collider_prev_lo[0] = 0; grid.collider_prev_lo[1] = 0; grid.collider_prev_lo[2] = 0;
@@ -328,9 +380,6 @@ inline void voxelizeCollidersIntoGrid(
                 grid.solid_gas_fuel[ci] = 0.0f;
                 grid.solid_gas_flame[ci] = 0.0f;
                 grid.solid_gas_band[ci] = 0.0f;
-                grid.solid_gas_ignition[ci] = 0.0f;
-                grid.solid_gas_fuel_capacity[ci] = 0.0f;
-                grid.solid_gas_burn_rate[ci] = 0.0f;
             }
         }
         // Last frame's footprint becomes prev (consumed by computeSolidFaceWeights
@@ -342,9 +391,24 @@ inline void voxelizeCollidersIntoGrid(
     // This frame's footprint, accumulated by markCell during stamping.
     int cur_lo[3] = { nx, ny, nz };
     int cur_hi[3] = { -1, -1, -1 };
+    // Compact solid-cell list, rebuilt only on a real restamp (the cache above
+    // returns early and keeps the previous list alongside the previous mask).
+    // Swept over the WHOLE grid rather than the footprint bbox on purpose: the
+    // list is what the per-step boundary enforcement trusts instead of solid[],
+    // so it must not inherit the dirty-region invariant. One byte-scan per
+    // restamp buys back three full face sweeps per step.
+    auto rebuildSolidCells = [&]() {
+        grid.solid_cells.clear();
+        const std::size_t cells = grid.solid.size();
+        for (std::size_t c = 0; c < cells; ++c) {
+            if (grid.solid[c]) grid.solid_cells.push_back(static_cast<uint32_t>(c));
+        }
+        grid.solid_cells_valid = true;
+    };
     auto storeCurFootprint = [&]() {
         grid.collider_cur_lo[0] = cur_lo[0]; grid.collider_cur_lo[1] = cur_lo[1]; grid.collider_cur_lo[2] = cur_lo[2];
         grid.collider_cur_hi[0] = cur_hi[0]; grid.collider_cur_hi[1] = cur_hi[1]; grid.collider_cur_hi[2] = cur_hi[2];
+        rebuildSolidCells();
     };
     if (colliders.empty()) { storeCurFootprint(); return; }
 
@@ -359,8 +423,6 @@ inline void voxelizeCollidersIntoGrid(
     Vec3 active_collider_center(0.0f, 0.0f, 0.0f);
     float active_gas_density = 0.0f, active_gas_temperature = 0.0f;
     float active_gas_fuel = 0.0f, active_gas_flame = 0.0f, active_gas_band = 0.0f;
-    float active_gas_ignition = 0.0f, active_gas_fuel_capacity = 0.0f;
-    float active_gas_burn_rate = 0.0f;
 
     auto cellCenter = [&](int i, int j, int k) {
         return grid.origin + Vec3((i + 0.5f) * h, (j + 0.5f) * h, (k + 0.5f) * h);
@@ -381,9 +443,6 @@ inline void voxelizeCollidersIntoGrid(
             grid.solid_gas_fuel[ci] = std::max(grid.solid_gas_fuel[ci], active_gas_fuel);
             grid.solid_gas_flame[ci] = std::max(grid.solid_gas_flame[ci], active_gas_flame);
             grid.solid_gas_band[ci] = std::max(grid.solid_gas_band[ci], active_gas_band);
-            grid.solid_gas_ignition[ci] = std::max(grid.solid_gas_ignition[ci], active_gas_ignition);
-            grid.solid_gas_fuel_capacity[ci] = std::max(grid.solid_gas_fuel_capacity[ci], active_gas_fuel_capacity);
-            grid.solid_gas_burn_rate[ci] = std::max(grid.solid_gas_burn_rate[ci], active_gas_burn_rate);
         }
         if (track_vel) {
             const Vec3 radius = cellCenter(i, j, k) - active_collider_center;
@@ -420,12 +479,6 @@ inline void voxelizeCollidersIntoGrid(
         active_gas_flame = c.gas_interaction_enabled ? std::max(0.0f, c.gas_flame_rate) : 0.0f;
         active_gas_band = c.gas_interaction_enabled
             ? std::clamp(c.gas_surface_band_voxels, 0.25f, 8.0f) : 0.0f;
-        active_gas_ignition = (c.gas_interaction_enabled && c.gas_ignite_on_contact)
-            ? std::max(1e-4f, c.gas_ignition_temperature) : 0.0f;
-        active_gas_fuel_capacity = (active_gas_ignition > 0.0f)
-            ? std::max(0.0f, c.gas_surface_fuel_capacity) : 0.0f;
-        active_gas_burn_rate = (active_gas_ignition > 0.0f)
-            ? std::max(0.0f, c.gas_surface_burn_rate) : 0.0f;
         active_collider_vel = (track_vel && collider_velocities && c_idx < collider_velocities->size())
                                   ? (*collider_velocities)[c_idx]
                                   : Vec3(0.0f, 0.0f, 0.0f);
@@ -1668,6 +1721,10 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
             compute->destroyBuffer(gpu_buffers.fluid_affine);
             gpu_buffers.fluid_affine = {};
         }
+        if (gpu_buffers.fluid_mass_fraction.valid()) {
+            compute->destroyBuffer(gpu_buffers.fluid_mass_fraction);
+            gpu_buffers.fluid_mass_fraction = {};
+        }
         ComputeBufferDesc desc;
         desc.debug_name = "FluidParticlePositions";
         desc.size_bytes = new_capacity * sizeof(Vec3);
@@ -1679,17 +1736,22 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
         desc.debug_name = "FluidParticleAffine";
         desc.size_bytes = new_capacity * sizeof(Fluid::AffineC);
         gpu_buffers.fluid_affine = compute->createBuffer(desc);
+        desc.debug_name = "FluidParticleMassFraction";
+        desc.size_bytes = new_capacity * sizeof(float);
+        gpu_buffers.fluid_mass_fraction = compute->createBuffer(desc);
         gpu_buffers.fluid_particle_capacity =
             (gpu_buffers.fluid_positions.valid() &&
              gpu_buffers.fluid_velocities.valid() &&
-             gpu_buffers.fluid_affine.valid())
+             gpu_buffers.fluid_affine.valid() &&
+             gpu_buffers.fluid_mass_fraction.valid())
                 ? new_capacity
                 : 0;
     }
 
     if (!gpu_buffers.fluid_positions.valid() ||
         !gpu_buffers.fluid_velocities.valid() ||
-        !gpu_buffers.fluid_affine.valid()) {
+        !gpu_buffers.fluid_affine.valid() ||
+        !gpu_buffers.fluid_mass_fraction.valid()) {
         return false;
     }
 
@@ -1708,7 +1770,10 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
                                    velocity_bytes) &&
              compute->uploadBuffer(gpu_buffers.fluid_affine,
                                    state.particles.affine.data(),
-                                   affine_bytes);
+                                   affine_bytes) &&
+             compute->uploadBuffer(gpu_buffers.fluid_mass_fraction,
+                                   state.particles.mass_fraction.data(),
+                                   particle_count * sizeof(float));
     }
     return compute->endTransferBatch() && ok;
 }
@@ -1831,7 +1896,12 @@ void buildFluidMaskFromParticles(const FluidSim::FluidGrid& grid,
         const int k = static_cast<int>(std::floor(gp.z));
         if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
         const std::size_t c = grid.cellIndex(i, j, k);
-        if (!grid.solid[c]) mask[c] += 1.0f; // accumulate count (air 0 → 1,2,…)
+        if (!grid.solid[c]) {
+            const float mass = p < particles.mass_fraction.size()
+                ? std::clamp(particles.mass_fraction[p], 0.0f, 1.0f)
+                : 1.0f;
+            if (mass > 0.02f) mask[c] += mass;
+        } // accumulate remaining liquid mass
     }
 }
 
@@ -1839,13 +1909,37 @@ void enforceGridSolidFaceBoundaries(FluidSim::FluidGrid& grid) {
     if (grid.solid.empty() || grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) {
         return;
     }
-    if (!std::any_of(grid.solid.begin(), grid.solid.end(), [](uint8_t value) { return value != 0; })) {
+    if (!grid.hasAnySolid()) {
         return;
     }
 
-    // Runs inside the (timed) GPU pressure path every substep when colliders
-    // exist — single-threaded it was a hidden multi-ms cost at high res. Each
-    // face write is independent; parallelize over k slabs.
+    // Sparse path: the faces to zero are exactly the six faces of every solid
+    // cell, and the voxelizer already hands us that cell list. Walking it turns
+    // an O(domain) sweep into an O(collider) one — a collider covers a percent
+    // or two of the domain, so the sweep below was overwhelmingly spent proving
+    // "not solid". Serial on purpose: at this size the parallel fork costs more
+    // than the writes.
+    if (grid.solid_cells_valid) {
+        const int nx = grid.nx, ny = grid.ny;
+        const std::size_t stride_y = static_cast<std::size_t>(nx);
+        const std::size_t stride_z = static_cast<std::size_t>(nx) * ny;
+        for (uint32_t cell : grid.solid_cells) {
+            const std::size_t c = cell;
+            const int i = static_cast<int>(c % stride_y);
+            const int j = static_cast<int>((c / stride_y) % ny);
+            const int k = static_cast<int>(c / stride_z);
+            grid.vel_x[grid.velXIndex(i, j, k)] = 0.0f;
+            grid.vel_x[grid.velXIndex(i + 1, j, k)] = 0.0f;
+            grid.vel_y[grid.velYIndex(i, j, k)] = 0.0f;
+            grid.vel_y[grid.velYIndex(i, j + 1, k)] = 0.0f;
+            grid.vel_z[grid.velZIndex(i, j, k)] = 0.0f;
+            grid.vel_z[grid.velZIndex(i, j, k + 1)] = 0.0f;
+        }
+        return;
+    }
+
+    // Dense fallback for a mask the voxelizer did not build (deserialized grid).
+    // Each face write is independent; parallelize over k slabs.
     #pragma omp parallel for schedule(static)
     for (int k = 0; k < grid.nz; ++k) {
         for (int j = 0; j < grid.ny; ++j) {
@@ -3713,10 +3807,7 @@ bool uploadGpuGasColliderFields(
             compute->uploadBuffer(buffers.gas_source_temperature, sourceData(grid.solid_gas_temperature), count * sizeof(float)) &&
             compute->uploadBuffer(buffers.gas_source_fuel, sourceData(grid.solid_gas_fuel), count * sizeof(float)) &&
             compute->uploadBuffer(buffers.gas_source_flame, sourceData(grid.solid_gas_flame), count * sizeof(float)) &&
-            compute->uploadBuffer(buffers.gas_source_band, sourceData(grid.solid_gas_band), count * sizeof(float)) &&
-            compute->uploadBuffer(buffers.gas_source_ignition, sourceData(grid.solid_gas_ignition), count * sizeof(float)) &&
-            compute->uploadBuffer(buffers.gas_source_fuel_capacity, sourceData(grid.solid_gas_fuel_capacity), count * sizeof(float)) &&
-            compute->uploadBuffer(buffers.gas_source_burn_rate, sourceData(grid.solid_gas_burn_rate), count * sizeof(float));
+            compute->uploadBuffer(buffers.gas_source_band, sourceData(grid.solid_gas_band), count * sizeof(float));
     }
     return compute->endTransferBatch() && ok;
 }
@@ -3898,9 +3989,7 @@ bool runGpuVelocityAdvection(FluidSim::FluidGrid& grid,
     const bool use_solid_mask =
         compute->backendType() == ComputeBackendType::VulkanCompute &&
         buffers[9].valid();
-    const bool domain_has_solid =
-        std::any_of(grid.solid.begin(), grid.solid.end(),
-                    [](uint8_t value) { return value != 0u; });
+    const bool domain_has_solid = grid.hasAnySolid();
 
     // The MacCormack second pass needs the non-aliasing scratch2 trio; without
     // it (allocation failure) fall back to plain semi-Lagrangian rather than
@@ -4095,6 +4184,100 @@ void applyCpuVelocityDissipationClamp(FluidSim::FluidGrid& grid,
     apply(grid.vel_z);
 }
 
+
+struct GasMajorantGpuConstants {
+    int nx; int ny; int nz;
+    int bx; int by; int bz;
+    int emissive_capacity = 0;
+    float emissive_threshold = 0.0f;
+};
+static_assert(sizeof(GasMajorantGpuConstants) == 32,
+              "sim_gas_majorant push constant range is registered as 32 bytes");
+
+// Reduce the device-resident density field to one maximum per
+// kGasMajorantBlock^3 block, so the RT volume march can skip empty blocks.
+//
+// Runs AFTER the final density publication of the step — the majorant must
+// describe exactly the field the renderer will sample this frame. Reducing an
+// earlier snapshot would let a block read "empty" while the published density
+// has smoke in it, and the skip would then erase that smoke from the image.
+bool runGpuGasMajorant(const FluidSim::FluidGrid& grid,
+                       SimulationComputeContext* compute,
+                       SimulationGridDomainComputeBuffers& gpu_buffers) {
+    gpu_buffers.gas_majorant_valid = false;
+    gpu_buffers.gas_emissive_valid = false;
+    if (!compute ||
+        compute->backendType() != ComputeBackendType::VulkanCompute ||
+        !compute->supportsDispatch() ||
+        !gpu_buffers.density.valid() ||
+        !gpu_buffers.gas_majorant.valid()) {
+        return false;
+    }
+    const int bx = gpu_buffers.gas_majorant_dim[0];
+    const int by = gpu_buffers.gas_majorant_dim[1];
+    const int bz = gpu_buffers.gas_majorant_dim[2];
+    if (bx <= 0 || by <= 0 || bz <= 0) return false;
+
+    // The emitter list is only meaningful with a temperature channel — emission
+    // is blackbody(T) * density, so without T there is nothing to importance
+    // sample and the list stays empty rather than lighting the scene from cold
+    // smoke.
+    const bool emissive_ok =
+        gpu_buffers.gas_emissive_list.valid() &&
+        gpu_buffers.temperature.valid() &&
+        grid.temperature.size() == static_cast<std::size_t>(grid.getCellCount());
+
+    GasMajorantGpuConstants constants;
+    constants.nx = grid.nx;
+    constants.ny = grid.ny;
+    constants.nz = grid.nz;
+    constants.bx = bx;
+    constants.by = by;
+    constants.bz = bz;
+    constants.emissive_capacity = emissive_ok ? kGasEmissiveListCapacity : 0;
+    // Simulation heat is normalized; the volume shader treats anything above
+    // ~20 as Kelvin. Well below either scale's floor, so a barely-warm block is
+    // still excluded while every visibly glowing one is kept.
+    constants.emissive_threshold = 0.05f;
+
+    // The kernel appends with an atomic on slot 0, so the count must start at 0
+    // every step. Four bytes, batched with nothing else — cheaper than a
+    // dedicated clear dispatch and it cannot race the append, which follows it
+    // in the same queue.
+    if (emissive_ok) {
+        const uint32_t zero = 0u;
+        compute->beginTransferBatch();
+        const bool cleared = compute->uploadBuffer(
+            gpu_buffers.gas_emissive_list, &zero, sizeof(uint32_t));
+        if (!compute->endTransferBatch() || !cleared) {
+            // A stale count would make the consumer read last step's emitters,
+            // which is worse than no emitter sampling at all.
+            constants.emissive_capacity = 0;
+        }
+    }
+
+    ComputeBufferHandle buffers[4] = {
+        gpu_buffers.density,
+        gpu_buffers.gas_majorant,
+        gpu_buffers.temperature,
+        gpu_buffers.gas_emissive_list.valid() ? gpu_buffers.gas_emissive_list
+                                              : gpu_buffers.gas_majorant
+    };
+    ComputeDispatch cmd;
+    cmd.kernel = "sim_gas_majorant";
+    cmd.buffers = buffers;
+    cmd.buffer_count = 4;
+    cmd.constants = &constants;
+    cmd.constants_size = sizeof(constants);
+    const uint32_t block_count =
+        static_cast<uint32_t>(bx) * static_cast<uint32_t>(by) *
+        static_cast<uint32_t>(bz);
+    cmd.groups.groups_x = (block_count + 63u) / 64u;
+    if (!compute->dispatch(cmd)) return false;
+    gpu_buffers.gas_majorant_valid = true;
+    gpu_buffers.gas_emissive_valid = (constants.emissive_capacity > 0);
+    return true;
+}
 
 bool runGpuCombustion(FluidSim::FluidGrid& grid,
                       const GridFluid::SolverParams& params,
@@ -4642,13 +4825,14 @@ static_assert(sizeof(FluidSurfaceCombustionGpuConstants)==96,
 bool runGpuFluidSurfaceCombustion(
     const SimulationGridDomainDesc& fluid_domain,
     const FluidSim::FluidGrid& fluid_grid,
+    Fluid::FluidParticles& fluid_particles,
     SimulationGridDomainComputeBuffers& fluid_buffers,
     const SimulationGridDomainDesc& gas_domain,
     const FluidSim::FluidGrid& gas_grid,
     SimulationGridDomainComputeBuffers& gas_buffers,
     float dt,
     SimulationComputeContext* compute) {
-    if (!fluid_domain.fluid_flammable ||
+    if ((!fluid_domain.fluid_flammable && !fluid_domain.fluid_extinguishing) ||
         fluid_domain.type != SimulationDomainType::Fluid ||
         gas_domain.type != SimulationDomainType::Gas ||
         !gas_domain.fire_enabled ||
@@ -4664,7 +4848,7 @@ bool runGpuFluidSurfaceCombustion(
     const Vec3 overlap_max=Vec3::min(fluid_domain.bounds_max,gas_domain.bounds_max);
     if(overlap_min.x>=overlap_max.x || overlap_min.y>=overlap_max.y ||
        overlap_min.z>=overlap_max.z) return false;
-    ComputeBufferHandle buffers[6]={
+    ComputeBufferHandle buffers[9]={
         // The post-step density splat is the authoritative liquid occupancy
         // used by the SDF/render bridge. The pressure fluid_mask is transient
         // solver scratch and can describe the pre-advect particle layout.
@@ -4673,7 +4857,10 @@ bool runGpuFluidSurfaceCombustion(
         gas_buffers.density,
         gas_buffers.temperature,
         gas_buffers.fuel,
-        gas_buffers.interaction};
+        gas_buffers.interaction,
+        gas_buffers.vel_x,
+        gas_buffers.vel_y,
+        gas_buffers.vel_z};
     for(const auto& handle:buffers) if(!handle.valid()) return false;
 
     FluidSurfaceCombustionGpuConstants pc;
@@ -4698,17 +4885,46 @@ bool runGpuFluidSurfaceCombustion(
     pc.material1[0]=std::max(0.0f,fluid_domain.fluid_combustion_heat_release);
     pc.material1[1]=std::max(0.0f,fluid_domain.fluid_combustion_smoke_yield);
     pc.material1[2]=std::max(0.0f,fluid_domain.fluid_surface_cooling);
-    pc.material1[3]=fluid_domain.fluid_auto_ignite?1.0f:0.0f;
+    pc.material1[3]=fluid_domain.fluid_extinguishing ? -1.0f :
+                    (fluid_domain.fluid_auto_ignite ? 1.0f : 0.0f);
 
     ComputeDispatch cmd;
     cmd.kernel="sim_fluid_surface_combustion";
     cmd.buffers=buffers;
-    cmd.buffer_count=6;
+    cmd.buffer_count=9;
     cmd.constants=&pc;
     cmd.constants_size=sizeof(pc);
     cmd.groups.groups_x=
         (static_cast<uint32_t>(fluid_grid.getCellCount())+255u)/256u;
-    return compute->dispatch(cmd);
+    if (!compute->dispatch(cmd)) return false;
+
+    // The GPU surface bridge owns the gas-side reaction. Mirror the consumed
+    // surface mass back to APIC particles on the host using the same gas
+    // temperature/contact test. This keeps the particle pool authoritative
+    // while avoiding a new particle-compaction ABI in the render path.
+    const float inv_gas_voxel = gas_grid.voxel_size > 1e-6f
+        ? 1.0f / gas_grid.voxel_size : 0.0f;
+    const float ignition = std::max(0.0f, fluid_domain.fluid_ignition_temperature);
+    const float rate = std::max(0.0f, fluid_domain.fluid_evaporation_rate);
+    if (inv_gas_voxel > 0.0f && !gas_grid.temperature.empty() && rate > 0.0f) {
+        for (std::size_t p = fluid_particles.size(); p-- > 0;) {
+            const Vec3 local = (fluid_particles.position[p] - gas_grid.origin) * inv_gas_voxel;
+            const int gx = static_cast<int>(std::floor(local.x));
+            const int gy = static_cast<int>(std::floor(local.y));
+            const int gz = static_cast<int>(std::floor(local.z));
+            if (gx < 0 || gx >= gas_grid.nx || gy < 0 || gy >= gas_grid.ny ||
+                gz < 0 || gz >= gas_grid.nz) continue;
+            const std::size_t gi = gas_grid.cellIndex(gx, gy, gz);
+            const float temperature = gas_grid.temperature[gi];
+            if (temperature < ignition) continue;
+            const float heat_factor = std::clamp(
+                (temperature - ignition) / std::max(ignition, 1.0f), 0.0f, 1.0f);
+            float& mass = fluid_particles.mass_fraction[p];
+            mass = std::clamp(mass - rate * heat_factor * dt, 0.0f, 1.0f);
+            if (mass <= 0.02f) fluid_particles.removeSwap(p);
+        }
+    }
+    return true;
 }
 
 bool runGpuColliderGasSource(FluidSim::FluidGrid& grid,
@@ -4719,11 +4935,10 @@ bool runGpuColliderGasSource(FluidSim::FluidGrid& grid,
     if (grid.solid_gas_band.size()!=grid.getCellCount()) return true;
     if (!compute || compute->backendType()!=ComputeBackendType::VulkanCompute ||
         !compute->supportsDispatch()) return false;
-    ComputeBufferHandle bufs[14]={
+    ComputeBufferHandle bufs[10]={
         b.density,b.temperature,b.fuel,b.interaction,b.gas_solid_mask,
         b.gas_source_density,b.gas_source_temperature,b.gas_source_fuel,
-        b.gas_source_flame,b.gas_source_band,b.gas_source_ignition,
-        b.gas_source_fuel_capacity,b.gas_source_burn_rate,b.gas_surface_state};
+        b.gas_source_flame,b.gas_source_band};
     for(const auto& h:bufs) if(!h.valid()) return false;
     compute->beginTransferBatch();
     bool ok=compute->uploadBuffer(bufs[0],grid.density.data(),grid.density.size()*sizeof(float)) &&
@@ -4735,7 +4950,7 @@ bool runGpuColliderGasSource(FluidSim::FluidGrid& grid,
     pc.nx=grid.nx;pc.ny=grid.ny;pc.nz=grid.nz;pc.dt=dt;
     pc.max_temperature=std::max(params.max_temperature,1.0f);
     ComputeDispatch cmd;cmd.kernel="sim_gas_collider_source";cmd.buffers=bufs;
-    cmd.buffer_count=14;cmd.constants=&pc;cmd.constants_size=sizeof(pc);
+    cmd.buffer_count=10;cmd.constants=&pc;cmd.constants_size=sizeof(pc);
     cmd.groups.groups_x=(static_cast<uint32_t>(grid.getCellCount())+255u)/256u;
     ok=compute->dispatch(cmd);compute->synchronize();if(!ok)return false;
     compute->beginTransferBatch();
@@ -5004,7 +5219,13 @@ Vec3 finiteDirectionOrUp(const Vec3& direction) {
     return length > 1e-5f ? direction * (1.0f / length) : Vec3(0.0f, 1.0f, 0.0f);
 }
 
-Vec3 emitterVelocity(const ParticleEmitterDesc& emitter, const Vec3& direction, uint32_t serial) {
+// speed/spread come from the caller (keyframe-evaluated) rather than from the
+// desc, so an animated rate/speed curve reaches the spawned particle.
+Vec3 emitterVelocity(const ParticleEmitterDesc& emitter,
+                     const Vec3& direction,
+                     uint32_t serial,
+                     float keyed_speed,
+                     float keyed_spread) {
     const Vec3 forward = finiteDirectionOrUp(direction);
     Vec3 tangent = Vec3::cross(forward, Vec3(0.0f, 1.0f, 0.0f));
     if (tangent.length() < 1e-5f) {
@@ -5015,9 +5236,9 @@ Vec3 emitterVelocity(const ParticleEmitterDesc& emitter, const Vec3& direction, 
 
     const float angle = 6.28318530718f * hashUnitFloat(emitter.seed ^ serial ^ 0x9e3779b9u);
     const float radius = std::sqrt(hashUnitFloat(emitter.seed + serial * 1664525u + 1013904223u));
-    const float spread = std::max(0.0f, emitter.spread);
+    const float spread = std::max(0.0f, keyed_spread);
     const Vec3 lateral = (tangent * std::cos(angle) + bitangent * std::sin(angle)) * (radius * spread);
-    return finiteDirectionOrUp(forward + lateral) * std::max(0.0f, emitter.speed);
+    return finiteDirectionOrUp(forward + lateral) * std::max(0.0f, keyed_speed);
 }
 
 bool sampleAABBSurface(const Vec3& bounds_min,
@@ -5811,6 +6032,11 @@ SimulationFlowSourceDesc::Keyframe evaluateSimulationFlowSource(
     return evaluateFlowSourceKey(source, frame);
 }
 
+ParticleEmitterDesc::Keyframe evaluateParticleEmitter(
+    const ParticleEmitterDesc& emitter, int frame) {
+    return evaluateEmitterKey(emitter, frame);
+}
+
 bool ParticleSimulationSystem::enabled() const {
     return enabled_ && (alive_count_ > 0 || hasActiveEmitters() || hasActiveGridSimulation());
 }
@@ -5860,11 +6086,20 @@ void ParticleSimulationSystem::clear() {
     for (auto& source : flow_sources_) {
         source.fluid_emit_accumulator = 0.0f;
         source.total_emitted_particles = 0;
+        // Re-arm the parent motion sampler. Without this a rewind measures the
+        // parent's velocity across the whole timeline jump and the first frame
+        // after rewind emits with an enormous inherited velocity.
+        source.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+        source.parent_velocity = Vec3(0.0f);
     }
     // Re-arm one-shot bursts so rewinding the timeline replays the explosion.
     for (auto& emitter : emitters_) {
         emitter.burst_consumed = false;
         emitter.accumulator = 0.0f;
+        // Same rewind hazard as flow sources: a stale previous position would
+        // be differenced across the whole timeline jump.
+        emitter.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+        emitter.parent_velocity = Vec3(0.0f);
     }
     // Rewind must also restart deterministic spawn sampling. The per-frame
     // runtime snapshot restores the corresponding serial when replay resumes
@@ -5963,6 +6198,8 @@ void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext&
         releaseGridDomainComputeBuffers(compute, buffers);
     }
     grid_domain_compute_buffers_.clear();
+
+    material_state_fields_.release(compute);
 }
 
 std::size_t ParticleSimulationSystem::spawn(const ParticleSpawnDesc& desc) {
@@ -5985,6 +6222,7 @@ std::size_t ParticleSimulationSystem::spawn(const ParticleSpawnDesc& desc) {
     buffers_.age_seconds[index] = 0.0f;
     buffers_.lifetime_seconds[index] = desc.lifetime_seconds;
     buffers_.inverse_mass[index] = safeInverseMass(desc.mass);
+    buffers_.emitter_index[index] = desc.emitter_index;
 
     buffers_.start_size[index] = desc.start_size;
     buffers_.end_size[index] = desc.end_size;
@@ -6040,6 +6278,22 @@ ParticleEmitterDesc& ParticleSimulationSystem::addEmitter(const ParticleEmitterD
     auto& emitter = emitters_.back();
     if (emitter.seed == 0u) {
         emitter.seed = static_cast<uint32_t>(emitters_.size() * 97u + 1u);
+    }
+    // Stable identity for the emitter's timeline track. Same allocator pattern
+    // as flow sources: a loaded project keeps its uid, and the counter is
+    // advanced past it so a later new emitter cannot collide with it.
+    if (emitter.timeline_uid == 0) {
+        emitter.timeline_uid =
+            g_next_emitter_timeline_uid.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        uint64_t expected =
+            g_next_emitter_timeline_uid.load(std::memory_order_relaxed);
+        while (expected <= emitter.timeline_uid &&
+               !g_next_emitter_timeline_uid.compare_exchange_weak(
+                   expected,
+                   emitter.timeline_uid + 1,
+                   std::memory_order_relaxed)) {
+        }
     }
     return emitter;
 }
@@ -6245,6 +6499,20 @@ SimulationGasGpuFieldView ParticleSimulationSystem::gasGpuFieldView(
         compute.bufferDeviceAddress(buffers.temperature);
     view.fuel_address = compute.bufferDeviceAddress(buffers.fuel);
     view.flame_address = compute.bufferDeviceAddress(buffers.interaction);
+    // Only publish the majorant when the pass filled it for THIS grid. A stale
+    // one would make the RT march skip blocks that are no longer empty.
+    if (buffers.gas_emissive_valid && buffers.gas_emissive_list.valid()) {
+        view.emissive_list_address =
+            compute.bufferDeviceAddress(buffers.gas_emissive_list);
+        view.emissive_capacity = kGasEmissiveListCapacity;
+    }
+    if (buffers.gas_majorant_valid && buffers.gas_majorant.valid()) {
+        view.majorant_address = compute.bufferDeviceAddress(buffers.gas_majorant);
+        view.majorant_dim_x = buffers.gas_majorant_dim[0];
+        view.majorant_dim_y = buffers.gas_majorant_dim[1];
+        view.majorant_dim_z = buffers.gas_majorant_dim[2];
+        view.majorant_block = kGasMajorantBlock;
+    }
     view.resolution_x = state.resolution_x;
     view.resolution_y = state.resolution_y;
     view.resolution_z = state.resolution_z;
@@ -6508,6 +6776,157 @@ void ParticleSimulationSystem::setFlowSourceSurfaceSampler(
     flow_source_surface_sampler_ = std::move(sampler);
 }
 
+void ParticleSimulationSystem::setFlowSourceTransformResolver(
+    std::function<bool(const std::string&, Matrix4x4&)> resolver) {
+    flow_source_transform_resolver_ = std::move(resolver);
+}
+
+SimulationFlowSourceFrame ParticleSimulationSystem::resolveFlowSourceFrame(
+    const SimulationFlowSourceDesc& source, int frame) const {
+    SimulationFlowSourceFrame out;
+    out.keyed = evaluateSimulationFlowSource(source, frame);
+    out.position = out.keyed.position;
+    out.velocity = out.keyed.velocity;
+    out.parented = false;
+
+    if (source.parent_object.empty()) {
+        return out;
+    }
+    if (!flow_source_transform_resolver_) {
+        // ★ A parent was asked for but this runtime was never handed a resolver.
+        // Falling through would treat the parent-LOCAL position as world
+        // coordinates and drop the source near the origin — the exact silent
+        // mislocation the parent_missing flag exists to prevent. Same verdict
+        // as an unresolvable name.
+        out.parent_missing = true;
+        return out;
+    }
+    Matrix4x4 parent_to_world;
+    if (!flow_source_transform_resolver_(source.parent_object, parent_to_world)) {
+        // Named a parent that no longer exists (renamed/deleted object). Its
+        // `position` is a parent-local offset, so there is no honest world
+        // placement to fall back to — treating the offset as world coordinates
+        // would strand the source near the origin. Report it and let the caller
+        // skip; the panel shows the unresolved name.
+        out.parent_missing = true;
+        return out;
+    }
+
+    out.parented = true;
+    // `position` is parent-local while parented — see SimulationFlowSourceDesc.
+    out.position = parent_to_world.transform_point(out.keyed.position);
+    if (source.velocity_space == SimulationEmissionVelocitySpace::Local) {
+        // transform_vector, NOT transform_point: emission direction must ignore
+        // the parent's translation, or a nozzle far from the origin would emit
+        // toward its own world position.
+        out.velocity = parent_to_world.transform_vector(out.keyed.velocity);
+    }
+    // Carry the parent's own motion. parent_velocity is measured once per step
+    // in advanceFlowSourceMotion(); reading it here keeps this function const
+    // and makes the gizmo show the same vector the solver injects.
+    if (source.inherit_velocity != 0.0f) {
+        out.velocity = out.velocity + source.parent_velocity * source.inherit_velocity;
+    }
+    return out;
+}
+
+ParticleEmitterFrame ParticleSimulationSystem::resolveParticleEmitterFrame(
+    const ParticleEmitterDesc& emitter, int frame) const {
+    ParticleEmitterFrame out;
+    out.keyed = evaluateEmitterKey(emitter, frame);
+    // Unparented: `point` is world, `local_offset` is the authored world nudge.
+    out.position = out.keyed.point + emitter.local_offset;
+    out.direction = out.keyed.direction;
+
+    if (emitter.parent_object.empty()) {
+        return out;
+    }
+    if (!flow_source_transform_resolver_) {
+        out.parent_missing = true;   // see resolveFlowSourceFrame
+        return out;
+    }
+    Matrix4x4 parent_to_world;
+    if (!flow_source_transform_resolver_(emitter.parent_object, parent_to_world)) {
+        out.parent_missing = true;
+        return out;
+    }
+    out.parented = true;
+    // Parented: `point` + `local_offset` are BOTH in the parent's space, so the
+    // offset rotates with the object instead of staying a world-axis nudge.
+    out.position =
+        parent_to_world.transform_point(out.keyed.point + emitter.local_offset);
+    if (emitter.velocity_space == SimulationEmissionVelocitySpace::Local) {
+        out.direction = parent_to_world.transform_vector(out.keyed.direction);
+    }
+    out.inherited_velocity = emitter.parent_velocity * emitter.inherit_velocity;
+    return out;
+}
+
+// Emitter counterpart of advanceFlowSourceMotion — same reasoning, same
+// sentinel, and likewise sampled for EVERY emitter including disabled ones.
+void ParticleSimulationSystem::advanceEmitterMotion(float dt, int frame) {
+    if (!flow_source_transform_resolver_) return;
+    const bool measurable = (dt > 1e-6f) && std::isfinite(dt);
+    for (auto& emitter : emitters_) {
+        if (emitter.parent_object.empty()) {
+            emitter.parent_velocity = Vec3(0.0f);
+            emitter.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+            continue;
+        }
+        Matrix4x4 parent_to_world;
+        if (!flow_source_transform_resolver_(emitter.parent_object, parent_to_world)) {
+            emitter.parent_velocity = Vec3(0.0f);
+            continue;
+        }
+        const ParticleEmitterDesc::Keyframe keyed = evaluateEmitterKey(emitter, frame);
+        const Vec3 world_position =
+            parent_to_world.transform_point(keyed.point + emitter.local_offset);
+        if (emitter.parent_prev_position.x > -9.99e9f && measurable) {
+            emitter.parent_velocity =
+                (world_position - emitter.parent_prev_position) * (1.0f / dt);
+        } else {
+            emitter.parent_velocity = Vec3(0.0f);
+        }
+        emitter.parent_prev_position = world_position;
+    }
+}
+
+// Sample every parented source's world position once per step and difference it
+// against the previous step to get the parent's velocity.
+//
+// ★ This runs BEFORE the injection loop's per-source `continue` filters, for
+// EVERY source including disabled ones. If motion were sampled inside that loop
+// instead, a source that is disabled (or whose domain is missing) for a stretch
+// of frames would keep a stale previous position and then measure one enormous
+// velocity on the frame it comes back — exactly the case the scenario hits when
+// a pilot flame is keyed off while its object keeps moving.
+void ParticleSimulationSystem::advanceFlowSourceMotion(float dt, int frame) {
+    if (!flow_source_transform_resolver_) return;
+    const bool measurable = (dt > 1e-6f) && std::isfinite(dt);
+    for (auto& source : flow_sources_) {
+        if (source.parent_object.empty()) {
+            source.parent_velocity = Vec3(0.0f);
+            source.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+            continue;
+        }
+        Matrix4x4 parent_to_world;
+        if (!flow_source_transform_resolver_(source.parent_object, parent_to_world)) {
+            source.parent_velocity = Vec3(0.0f);
+            continue;
+        }
+        const SimulationFlowSourceDesc::Keyframe keyed =
+            evaluateSimulationFlowSource(source, frame);
+        const Vec3 world_position = parent_to_world.transform_point(keyed.position);
+        if (source.parent_prev_position.x > -9.99e9f && measurable) {
+            source.parent_velocity =
+                (world_position - source.parent_prev_position) * (1.0f / dt);
+        } else {
+            source.parent_velocity = Vec3(0.0f);
+        }
+        source.parent_prev_position = world_position;
+    }
+}
+
 std::size_t ParticleSimulationSystem::capacity() const {
     return buffers_.alive.size();
 }
@@ -6665,6 +7084,13 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
     for (std::size_t i = 0; i < grid_domains_.size(); ++i) {
         auto& domain = grid_domains_[i];
         auto& state = grid_domain_states_[i];
+
+        // Do not re-derive coupling flags from the material preset here.
+        // These fields are editable domain overrides; doing that every sync
+        // made the Water preset's non-flammable default silently uncheck
+        // "Enable Flammable Surface" and prevented manual ignition tests.
+        // Preset constructors may initialize them, but live UI/project values
+        // must remain authoritative after synchronization.
 
         Vec3 bounds_min = domain.bounds_min;
         Vec3 bounds_max = domain.bounds_max;
@@ -6836,6 +7262,19 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         domain.resolution_z = res_z;
         domain.max_auto_resolution = max_auto_res;
 
+        // ★ Combustion needs the Fuel channel, but Fuel is NOT in
+        // defaultGridDomainChannels(). A gas domain with fire_enabled and no
+        // Fuel channel silently drops every fuel deposit and every fuel-bearing
+        // flow source — the domain looks configured for fire and simply never
+        // ignites. Provision it here, in the one place every domain passes
+        // through, so the requirement cannot be forgotten from the UI, from a
+        // preset, or from a script. Written back to the desc so the panel and
+        // the saved project agree with what the solver actually allocated.
+        if (domain.type != SimulationDomainType::Fluid && domain.fire_enabled) {
+            domain.channels |=
+                static_cast<uint32_t>(SimulationGridDomainChannelFlags::Fuel) |
+                static_cast<uint32_t>(SimulationGridDomainChannelFlags::Temperature);
+        }
         const uint32_t channels = domain.channels;
         // Liquid domains skip the combustion channels (temperature/fuel/
         // interaction) entirely — 3 floats/cell saved, which matters at high
@@ -6862,7 +7301,17 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         }
 
         state.type = domain.type;
-        state.domain_motion_delta = Vec3(0.0f, 0.0f, 0.0f);
+        // ★★ Do NOT clear the motion delta here. It is produced by this sync but
+        // CONSUMED by the fluid step, and the two do not run in lockstep: the
+        // domain gizmo calls synchronizeGridDomainsNow() on every drag frame so
+        // the viewport box follows the cursor. Clearing per sync meant the drag's
+        // delta was recorded and then wiped by the very next sync before any step
+        // could read it — the liquid was carried rigidly with the box (below) but
+        // never received the velocity impulse, so it never sloshed. Accumulate,
+        // and let the consumer clear it.
+        if (domain.type != SimulationDomainType::Fluid) {
+            state.domain_motion_delta = Vec3(0.0f, 0.0f, 0.0f);
+        }
 
         // Fluid seed AABB follows the domain's translation but NOT its resize.
         // We compare the corner deltas: if both corners shifted by the same
@@ -6879,7 +7328,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 if (diff_mag < 1e-4f && trans_mag > 1e-6f) {
                     domain.fluid_seed_min = domain.fluid_seed_min + delta_min;
                     domain.fluid_seed_max = domain.fluid_seed_max + delta_min;
-                    state.domain_motion_delta = delta_min;
+                    state.domain_motion_delta = state.domain_motion_delta + delta_min;
                     for (Vec3& p : state.particles.position) {
                         p = p + delta_min;
                     }
@@ -6997,9 +7446,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
     }
 
     const float time_scale = std::max(0.0f, dt);
+    // Parent motion first, unconditionally — see advanceFlowSourceMotion().
+    advanceFlowSourceMotion(dt, frame);
     for (auto& source : flow_sources_) {
-        const SimulationFlowSourceDesc::Keyframe keyed =
-            evaluateSimulationFlowSource(source, frame);
+        const SimulationFlowSourceFrame resolved = resolveFlowSourceFrame(source, frame);
+        const SimulationFlowSourceDesc::Keyframe& keyed = resolved.keyed;
+        if (resolved.parent_missing) continue;
         if (!keyed.enabled ||
             source.domain_index < 0 ||
             source.domain_index >= static_cast<int>(grid_domain_states_.size())) {
@@ -7023,7 +7475,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
         // max_particles.
         if (state.type == SimulationDomainType::Fluid) {
             const auto& fluid_domain = grid_domains_[static_cast<std::size_t>(source.domain_index)];
-            const float rate = std::max(0.0f, source.fluid_particles_per_second);
+            const float rate = std::max(0.0f, keyed.flow_rate);
             source.fluid_emit_accumulator += rate * std::max(0.0f, dt);
             int emit_count = static_cast<int>(source.fluid_emit_accumulator);
             if (emit_count <= 0) continue;
@@ -7054,10 +7506,16 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             }
             if (emit_count <= 0) continue;
 
-            // Resolve spawn volume for ObjectBounds; Point uses source.position
-            // + radius sphere; MeshSurface samples per-particle below.
-            Vec3 bounds_min = source.position - Vec3(source.radius);
-            Vec3 bounds_max = source.position + Vec3(source.radius);
+            // Emission frame: keyframe channels + object parenting already
+            // folded in. Using the resolved values (rather than the raw desc)
+            // is what lets a nozzle ride a moving hose and be keyed at once.
+            const Vec3  emit_origin = resolved.position;
+            const float emit_radius = std::max(1e-4f, keyed.radius);
+
+            // Resolve spawn volume for ObjectBounds; Point uses the resolved
+            // origin + radius sphere; MeshSurface samples per-particle below.
+            Vec3 bounds_min = emit_origin - Vec3(emit_radius);
+            Vec3 bounds_max = emit_origin + Vec3(emit_radius);
             if (source.source_mode == SimulationFlowSourceMode::ObjectBounds && flow_source_bounds_resolver_) {
                 Vec3 resolved_min, resolved_max;
                 if (flow_source_bounds_resolver_(source, resolved_min, resolved_max)) {
@@ -7080,7 +7538,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     const Vec3 ext = bounds_max - bounds_min;
                     spawn_volume = std::max(0.0f, ext.x) * std::max(0.0f, ext.y) * std::max(0.0f, ext.z);
                 } else {
-                    const float r = std::max(1e-4f, source.radius);
+                    const float r = emit_radius;
                     spawn_volume = (4.0f / 3.0f) * 3.14159265358979f * r * r * r;
                 }
                 const double spawn_cells = std::max(1.0, static_cast<double>(spawn_volume) / (h * h * h));
@@ -7121,10 +7579,10 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     if (flow_source_surface_sampler_(source, s, sample)) {
                         // Offset slightly along normal so particles spawn just
                         // off the surface, not embedded.
-                        spawn_pos = sample.position + sample.normal * std::max(0.001f, source.radius * 0.25f);
+                        spawn_pos = sample.position + sample.normal * std::max(0.001f, emit_radius * 0.25f);
                         spawn_normal = sample.normal;
                     } else {
-                        spawn_pos = source.position;
+                        spawn_pos = emit_origin;
                     }
                 } else if (source.source_mode == SimulationFlowSourceMode::ObjectBounds) {
                     spawn_pos.x = bounds_min.x + u1 * (bounds_max.x - bounds_min.x);
@@ -7138,14 +7596,14 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                         const float inv = 1.0f / std::sqrt(r2);
                         d = d * (inv * std::cbrt(hashUnitFloat(s ^ 0x68e31da4u)));
                     }
-                    spawn_pos = source.position + d * source.radius;
+                    spawn_pos = emit_origin + d * emit_radius;
                 }
                 // Break the laminar stream: an APIC liquid has nothing to
                 // disperse a column of identical-velocity particles mid-air, so
                 // without a per-particle perturbation the emitted mass falls as
                 // a coherent sheet/plate. Add random jitter scaled by the
                 // emission speed (0 spread => exact source.velocity, laminar).
-                Vec3 emit_vel = source.velocity;
+                Vec3 emit_vel = resolved.velocity;
                 // MeshSurface + emit-along-normal: redirect the emission speed
                 // along the local surface normal so the liquid sprays off the
                 // geometry instead of all moving in one global direction.
@@ -7153,7 +7611,10 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     source.source_mode == SimulationFlowSourceMode::MeshSurface) {
                     const float nlen = spawn_normal.length();
                     if (nlen > 1e-5f) {
-                        emit_vel = spawn_normal * (source.velocity.length() / nlen);
+                        // Speed comes from the resolved vector so a parented
+                        // nozzle still emits at its authored rate; only the
+                        // DIRECTION is taken from the surface.
+                        emit_vel = spawn_normal * (resolved.velocity.length() / nlen);
                     }
                 }
                 if (source.fluid_velocity_spread > 0.0f) {
@@ -7173,7 +7634,11 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             continue;
         }
 
-        Vec3 source_center = keyed.position;
+        // Parented sources emit at the resolved world point. ObjectBounds /
+        // MeshSurface modes overwrite this below from the bounds resolver —
+        // those modes ARE an object binding, so the geometry wins over a
+        // parent offset rather than the two fighting.
+        Vec3 source_center = resolved.position;
         float source_radius = std::max(0.001f, keyed.radius);
         Vec3 source_min = source_center - Vec3(source_radius);
         Vec3 source_max = source_center + Vec3(source_radius);
@@ -7393,7 +7858,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                         const float blend =
                             std::clamp(velocity_blend * sourceWeightAt(p), 0.0f, 1.0f);
                         float& value = grid.velXAt(x, y, z);
-                        value += (keyed.velocity.x - value) * blend;
+                        value += (resolved.velocity.x - value) * blend;
                     }
             #pragma omp parallel for collapse(2) schedule(static)
             for (int z = min_z; z <= max_z; ++z)
@@ -7406,7 +7871,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                         const float blend =
                             std::clamp(velocity_blend * sourceWeightAt(p), 0.0f, 1.0f);
                         float& value = grid.velYAt(x, y, z);
-                        value += (keyed.velocity.y - value) * blend;
+                        value += (resolved.velocity.y - value) * blend;
                     }
             #pragma omp parallel for collapse(2) schedule(static)
             for (int z = min_z; z <= std::min(grid.nz, max_z + 1); ++z)
@@ -7419,7 +7884,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                         const float blend =
                             std::clamp(velocity_blend * sourceWeightAt(p), 0.0f, 1.0f);
                         float& value = grid.velZAt(x, y, z);
-                        value += (keyed.velocity.z - value) * blend;
+                        value += (resolved.velocity.z - value) * blend;
                     }
         }
     }
@@ -7458,21 +7923,38 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
 
     // Sources and particles deposit into the grid before it is advanced.
     injectFlowSourcesIntoGridDomains(
-        dt, context.time_seconds, context.frame, context.compute);
+        // ★ timeline_frame, not frame: these resolve KEYFRAMES, and in Live
+        // Update `frame` is a free-running step counter (see SimulationContext).
+        dt, context.time_seconds, context.timeline_frame, context.compute);
 
     // Particle → gas deposit. Rates are per second, so the result no longer
     // depends on framerate the way the old per-step constants did.
     const float deposit_density_rate     = std::max(0.0f, physics_settings_.grid_density_deposit);
     const float deposit_temperature_rate = std::max(0.0f, physics_settings_.grid_temperature_deposit);
     const float deposit_fuel_rate        = std::max(0.0f, physics_settings_.grid_fuel_deposit);
-    const bool  deposit_any = (deposit_density_rate + deposit_temperature_rate + deposit_fuel_rate) > 0.0f;
+
+    // Resolve the per-emitter overrides ONCE (O(emitters)), not once per
+    // particle. Index 0..N-1 mirrors emitters_; particles carry the index.
+    struct DepositRates { float density; float temperature; float fuel; };
+    const DepositRates system_rates{
+        deposit_density_rate, deposit_temperature_rate, deposit_fuel_rate };
+    std::vector<DepositRates> emitter_rates(emitters_.size(), system_rates);
+    bool any_emitter_override = false;
+    for (std::size_t e = 0; e < emitters_.size(); ++e) {
+        if (!emitters_[e].override_grid_deposit) continue;
+        any_emitter_override = true;
+        emitter_rates[e] = DepositRates{
+            std::max(0.0f, emitters_[e].grid_density_deposit),
+            std::max(0.0f, emitters_[e].grid_temperature_deposit),
+            std::max(0.0f, emitters_[e].grid_fuel_deposit) };
+    }
+    const bool deposit_any =
+        (deposit_density_rate + deposit_temperature_rate + deposit_fuel_rate) > 0.0f ||
+        any_emitter_override;
 
     if (alive_count_ > 0 && deposit_any && std::isfinite(dt) && dt > 0.0f) {
         const float radius = std::max(physics_settings_.particle_radius, 0.001f);
         const float size_scale = std::max(1.0f, radius * 16.0f);
-        const float density_amount     = deposit_density_rate     * dt * size_scale;
-        const float temperature_amount = deposit_temperature_rate * dt;
-        const float fuel_amount        = deposit_fuel_rate        * dt;
         const bool  fade_with_age = physics_settings_.grid_deposit_fade_with_age;
 
         // A cache restore or a backend transition must never let a temporarily
@@ -7526,6 +8008,21 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 continue;
             }
 
+            // Per-emitter rates, falling back to the system values for a
+            // scripted spawn or an emitter that has since been removed.
+            const uint16_t owner =
+                particle < buffers_.emitter_index.size()
+                    ? buffers_.emitter_index[particle] : kNoEmitterIndex;
+            const DepositRates& rates =
+                (owner < emitter_rates.size()) ? emitter_rates[owner] : system_rates;
+            const float density_amount     = rates.density     * dt * size_scale;
+            const float temperature_amount = rates.temperature * dt;
+            const float fuel_amount        = rates.fuel        * dt;
+            if ((rates.density + rates.temperature + rates.fuel) <= 0.0f) {
+                continue;
+            }
+
+            bool landed_in_any_domain = false;
             for (auto& state : grid_domain_states_) {
                 if (!state.valid) {
                     continue;
@@ -7572,11 +8069,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 // Fuel is what lets flying debris IGNITE the gas it passes
                 // through — the difference between a decorative spark layer and
                 // an explosion whose fireball actually spreads with the shrapnel.
-                if (fuel_amount > 0.0f &&
-                    hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Fuel) &&
-                    grid.fuel.size() == grid.getCellCount()) {
-                    grid.fuel[cell] += fuel_amount * weight;
+                if (fuel_amount > 0.0f) {
+                    if (hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Fuel) &&
+                        grid.fuel.size() == grid.getCellCount()) {
+                        grid.fuel[cell] += fuel_amount * weight;
+                    } else {
+                        // ★ The silent gate: fuel was authored but the target
+                        // domain has no Fuel channel, so ignition can never
+                        // happen and nothing on screen says why. Count it.
+                        ++stats_.grid_deposit_dropped_no_channel;
+                    }
                 }
+                landed_in_any_domain = true;
                 if (hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Pressure) &&
                     cell < grid.pressure.size()) {
                     grid.pressure[cell] += density_amount * 0.25f * weight;
@@ -7605,6 +8109,15 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     addBounded(grid.velZAt(x, y, z),       impulse.z);
                     addBounded(grid.velZAt(x, y, z + 1),   impulse.z);
                 }
+            }
+            // Read these two counters in order when particle-carried fire does
+            // not appear: `no_domain` means the particles never fly through a
+            // gas box at all, `no_channel` means they do but it cannot hold
+            // fuel. Both used to be an indistinguishable "nothing happens".
+            if (landed_in_any_domain) {
+                ++stats_.grid_deposit_landed;
+            } else {
+                ++stats_.grid_deposit_dropped_no_domain;
             }
         }
     }
@@ -7733,6 +8246,123 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Material State Field — per-FRAME half (Phase 4)
+    //
+    // Syncing and ambient relaxation are properties of the scene, not of any one
+    // gas domain, so they run exactly once, before the domain loop. Two bugs
+    // this fixes, both invisible in a single-domain test scene:
+    //   - every object was re-synced (mesh resolve + upload) once per gas domain;
+    //   - every object was COOLED once per gas domain, including by domains it
+    //     was nowhere near, because the gather could not tell "buried" apart
+    //     from "not in this box at all".
+    //
+    // It also runs when there is no gas domain at all, which is the point of the
+    // world layer: an object inside no domain still has a defined temperature.
+    // ═══════════════════════════════════════════════════════════════════════
+    bool msf_fields_live = false;
+    if (collider_mesh_resolver_ && context.compute &&
+        context.compute->supportsDispatch()) {
+        material_state_fields_.beginSyncPass();
+        std::vector<SurfaceMeshTriangle> triangles;
+        for (const ParticleColliderDesc& collider : colliders_) {
+            if (!collider.enabled || !collider.gas_interaction_enabled) continue;
+            if (!collider.gas_ignite_on_contact) continue;
+            if (collider.source_name.empty()) continue;
+            triangles.clear();
+            uint64_t generation = 0;
+            if (!collider_mesh_resolver_(collider, triangles, generation)) continue;
+            if (triangles.empty()) continue;
+            // Substance + overrides travel WITH the field. They used to be
+            // captured from whichever collider came first and then applied to
+            // the whole domain, so a wooden crate next to an iron beam burned as
+            // if both were the first one's material.
+            // Resolution 0 is already the "no mask" contract inside syncField
+            // (blocky per-triangle elements, no texture), so the toggle needs no
+            // second code path — it just refuses to ask for a resolution.
+            material_state_fields_.syncField(collider.source_name, triangles,
+                                             generation,
+                                             collider.msf_generate_char_mask
+                                                 ? collider.msf_mask_resolution
+                                                 : 0,
+                                             collider.msf_substance,
+                                             collider.msf_override,
+                                             *context.compute);
+        }
+        // Asked of the system rather than tracked with a flag in the loop above:
+        // a collider can pass every gate and still fail to produce a field (bad
+        // UVs, buffer allocation failure), and gating the gas coupling on "we
+        // tried" instead of "it exists" is how a dispatch over a non-existent
+        // buffer gets attempted.
+        msf_fields_live = !material_state_fields_.fields().empty();
+
+        {
+            // Thermal force fields -> local heat sources. This is the only place
+            // that knows Physics::ForceField exists; MaterialStateField takes a
+            // plain POD list so the sim layer never depends on the scene layer.
+            std::vector<MaterialStateFieldSystem::ThermalSource> thermal_sources;
+            if (context.force_snapshot) {
+                for (const Physics::ForceField* field :
+                     context.force_snapshot->activeFields()) {
+                    if (!field || field->type != Physics::ForceFieldType::Thermal) continue;
+                    if (!(std::fabs(field->thermal_delta_kelvin) > 1e-3f)) continue;
+                    MaterialStateFieldSystem::ThermalSource src;
+                    src.position[0] = field->position.x;
+                    src.position[1] = field->position.y;
+                    src.position[2] = field->position.z;
+                    src.inner_radius = std::max(0.0f, field->inner_radius);
+                    src.falloff_radius =
+                        std::max(src.inner_radius + 1e-4f, field->falloff_radius);
+                    src.delta_kelvin = field->thermal_delta_kelvin;
+                    src.falloff_type = static_cast<int>(field->falloff_type);
+                    // Box/Cylinder/Cone heat sources fall back to the radial
+                    // profile in this phase. Stated rather than silently wrong:
+                    // a heat source is naturally radial, and honouring the box
+                    // shape needs the field's full local transform on the GPU.
+                    src.infinite =
+                        (field->shape == Physics::ForceFieldShape::Infinite) ? 1 : 0;
+                    thermal_sources.push_back(src);
+                }
+            }
+
+            // Domain ambient overrides, as world AABBs. Element-granular in the
+            // shader, because one object can straddle a domain wall.
+            std::vector<MaterialStateFieldSystem::AmbientZone> ambient_zones;
+            float ambient_ceiling = 10.0f;
+            for (std::size_t d = 0; d < grid_domain_states_.size(); ++d) {
+                if (!grid_domain_states_[d].valid) continue;
+                if (d >= grid_domains_.size()) continue;
+                const auto& domain = grid_domains_[d];
+                if (domain.type == SimulationDomainType::Gas) {
+                    ambient_ceiling =
+                        std::max(ambient_ceiling, domain.fire_max_temperature);
+                }
+                if (!domain.thermal_override_enabled) continue;
+                MaterialStateFieldSystem::AmbientZone zone;
+                const Vec3 mn = grid_domain_states_[d].bounds_min;
+                const Vec3 mx = grid_domain_states_[d].bounds_max;
+                zone.bounds_min[0] = mn.x; zone.bounds_min[1] = mn.y; zone.bounds_min[2] = mn.z;
+                zone.bounds_max[0] = mx.x; zone.bounds_max[1] = mx.y; zone.bounds_max[2] = mx.z;
+                zone.ambient_kelvin = domain.thermal_ambient_kelvin;
+                ambient_zones.push_back(zone);
+            }
+
+            // ★ Called unconditionally, not only when a field exists. It owns the
+            // MSF stats block for the frame, so skipping it would leave the panel
+            // showing the last frame that DID have a field — a deleted object
+            // would look like it was still burning.
+            //
+            // ★ BEFORE the domain loop, not after. The gather deposits gas heat
+            // onto the surface; relaxing toward ambient afterwards would undo
+            // part of it within the same step, and the object would sit at a
+            // temperature that depended on pass ordering rather than on physics.
+            material_state_fields_.stepAmbient(
+                *context.compute, world_thermal_,
+                thermal_sources, ambient_zones,
+                dt, ambient_ceiling);
+        }
+    }
+
     for (std::size_t i = 0; i < grid_domain_states_.size(); ++i) {
         auto& state = grid_domain_states_[i];
         if (!state.valid) {
@@ -7746,6 +8376,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         if (state.type == SimulationDomainType::Fluid) {
             if (state.particles.empty()) {
                 state.fluid_stats = Fluid::APICSolverStats{};
+                // Nothing to push, but the delta must not survive to ambush the
+                // first particles that arrive later.
+                state.domain_motion_delta = Vec3(0.0f, 0.0f, 0.0f);
                 continue;
             }
             auto fluid_params = (i < grid_domains_.size())
@@ -7772,10 +8405,25 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 std::abs(state.domain_motion_delta.x) +
                 std::abs(state.domain_motion_delta.y) +
                 std::abs(state.domain_motion_delta.z);
-            const Vec3 container_velocity_delta =
+            Vec3 container_velocity_delta =
                 (dt > 1e-6f && motion_coupling > 0.0f && motion_mag > 1e-7f)
                     ? state.domain_motion_delta * (motion_coupling / dt)
                     : Vec3(0.0f, 0.0f, 0.0f);
+            // The delta may have accumulated over many UI syncs since the last
+            // step (dragging the gizmo with the timeline parked). Dividing a
+            // whole drag by one step's dt would launch the liquid, so cap the
+            // impulse at the solver's own velocity ceiling — a big drag then
+            // reads as a hard slosh instead of an explosion.
+            {
+                const float impulse = container_velocity_delta.length();
+                const float ceiling = std::max(0.0f, fluid_params.max_velocity);
+                if (ceiling > 0.0f && impulse > ceiling) {
+                    container_velocity_delta = container_velocity_delta * (ceiling / impulse);
+                }
+            }
+            // Consumed: clear it so the next step does not re-apply the same
+            // motion. This is the ONLY place that clears it for a fluid domain.
+            state.domain_motion_delta = Vec3(0.0f, 0.0f, 0.0f);
             bool gpu_integrated_forces = false;
             // True once force fields have been evaluated on the CPU (force-field
             // branch below). The forces are then already baked into the particle
@@ -8233,6 +8881,28 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                         : ". Advect+reseed CPU fallback. ") +
                     forces_loc + ".";
             }
+
+            // ── Material State Field: liquid contact -> moisture (Phase 5) ────
+            // Placed at the very end of the fluid branch, after the density splat
+            // that this reads as liquid occupancy. Running it earlier would test
+            // against the PREVIOUS frame's water, which shows up as an object
+            // getting wet a frame after being submerged and — far worse — staying
+            // dry for the frame a splash actually reaches it.
+            //
+            // Per-FLUID-domain on purpose. Wetting is a monotonic source, so two
+            // overlapping tanks soaking the same plank is fine; the Phase 4
+            // cooling had to leave the per-domain loop precisely because a
+            // relaxation is not. Drying stays in the once-per-frame ambient pass.
+            if (msf_fields_live && context.compute &&
+                i < grid_domain_compute_buffers_.size()) {
+                material_state_fields_.stepWetting(
+                    *context.compute,
+                    grid_domain_compute_buffers_[i].density,
+                    state.grid.nx, state.grid.ny, state.grid.nz,
+                    state.grid.origin,
+                    state.grid.voxel_size,
+                    dt);
+            }
             continue;
         }
 
@@ -8266,8 +8936,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         }
         const bool has_content = state.active_density_cells > 0 || state.max_density > 1e-5f;
         if (!has_source && !has_content && alive_count_ == 0) {
+            // Nothing ran, so nothing may be reported. Leaving the previous
+            // step's timings in place makes an idle domain look like it is
+            // still solving, which is exactly the confusion the panel exists
+            // to remove.
+            state.gas_stats = SimulationGasStats{};
+            state.gas_compute_status =
+                "Idle: no flow source and no remaining content — solver skipped";
             continue;
         }
+        const auto gas_step_begin = SimulationClock::now();
+        state.gas_stats = SimulationGasStats{};
+        state.gas_stats.stepped = true;
 
         // Stamp the active collider set into grid.solid[] before the gas solver
         // runs, exactly like the Fluid path above, so GridFluid::step's solid
@@ -8288,10 +8968,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                 colliders_,
                                 collider_bounds_resolver_,
                                 collider_obb_resolver_);
-        const bool domain_has_solid =
-            state.grid.solid.size() == static_cast<std::size_t>(state.grid.getCellCount()) &&
-            std::any_of(state.grid.solid.begin(), state.grid.solid.end(),
-                        [](uint8_t s) { return s != 0u; });
+        state.gas_stats.voxelize_ms =
+            elapsedMilliseconds(gas_step_begin, SimulationClock::now());
+        const bool domain_has_solid = state.grid.hasAnySolid();
 
         GridFluid::SolverParams params = base_params;
         if (i < grid_domains_.size()) {
@@ -8411,9 +9090,19 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         bool fluid_combustion_deposit_pre_run = false;
         bool gpu_velocity_post_ok = false;
         bool gpu_projection_ok = false;
+        // Every device stage below is billed to exactly one row: the cursor moves
+        // with each mark, so time between marks can never be counted twice or
+        // silently disappear into a neighbouring stage.
+        auto gas_gpu_cursor = SimulationClock::now();
+        auto gas_gpu_mark = [&](float& sink) {
+            const auto now = SimulationClock::now();
+            sink += elapsedMilliseconds(gas_gpu_cursor, now);
+            gas_gpu_cursor = now;
+        };
         if (gpu_grid_ready) {
             gas_collider_source_pre_run =
                 runGpuColliderGasSource(state.grid, params, dt, context.compute, *gpu_buffers);
+            gas_gpu_mark(state.gas_stats.gpu_collider_source_ms);
             if (!gas_collider_source_pre_run &&
                 state.grid.solid_gas_band.size() == state.grid.getCellCount()) {
                 static bool logged_collider_source_failure = false;
@@ -8422,6 +9111,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     logged_collider_source_failure = true;
                 }
             }
+
             // Upload freshly injected flow sources (fuel, temp, density, vel) to GPU
             if (context.compute && context.compute->supportsDispatch()) {
                 context.compute->beginTransferBatch();
@@ -8435,6 +9125,49 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     context.compute->uploadBuffer(gpu_buffers->density, state.grid.density.data(), state.grid.density.size() * sizeof(float));
                 }
                 context.compute->endTransferBatch();
+            }
+            gas_gpu_mark(state.gas_stats.gpu_source_upload_ms);
+            // ── Material State Field: pyrolysis ──────────────────────────────
+            // MSF is the sole owner of surface burning since Phase 2b; the voxel
+            // surface_state path it used to shadow is gone. Placed AFTER the host
+            // gas snapshot upload above for the same reason the liquid surface
+            // combustion below is: the publication upload would otherwise
+            // overwrite this GPU-only deposit before anything could consume it.
+            //
+            // ★ Only the gas-coupled half runs here. Field syncing and the
+            // ambient relaxation were hoisted OUT of this loop in Phase 4: they
+            // are per-frame work, and running them per domain meant every extra
+            // gas box re-synced and re-cooled every object in the scene —
+            // including objects nowhere near that box.
+            if (msf_fields_live) {
+                MaterialStateFieldSystem::GasBinding gas;
+                gas.density = gpu_buffers->density;
+                gas.temperature = gpu_buffers->temperature;
+                gas.fuel = gpu_buffers->fuel;
+                gas.flame = gpu_buffers->interaction;
+                gas.solid_mask = gpu_buffers->gas_solid_mask;
+                gas.accum_fuel = gpu_buffers->msf_accum_fuel;
+                gas.accum_density = gpu_buffers->msf_accum_density;
+                gas.accum_heat = gpu_buffers->msf_accum_heat;
+                gas.accum_flame = gpu_buffers->msf_accum_flame;
+                // Oxygen is a boundary condition, so the domain overrides the
+                // world inside its own box. It can only throttle pyrolysis, never
+                // start it.
+                const float domain_oxygen =
+                    (i < grid_domains_.size() && grid_domains_[i].thermal_override_enabled)
+                        ? grid_domains_[i].thermal_oxygen
+                        : world_thermal_.oxygen_availability;
+                material_state_fields_.step(
+                    *context.compute, gas,
+                    state.grid.nx, state.grid.ny, state.grid.nz,
+                    state.grid.getCellCount(),
+                    state.grid.origin,
+                    state.grid.voxel_size,
+                    dt,
+                    std::max(params.max_temperature, 1.0f),
+                    world_thermal_.scale(),
+                    domain_oxygen);
+                gas_gpu_mark(state.gas_stats.gpu_msf_ms);
             }
             // Apply overlapping APIC-liquid surface combustion only after the
             // host gas snapshot has been uploaded. This ordering prevents the
@@ -8451,6 +9184,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     runGpuFluidSurfaceCombustion(
                     grid_domains_[fluid_index],
                     grid_domain_states_[fluid_index].grid,
+                    grid_domain_states_[fluid_index].particles,
                     grid_domain_compute_buffers_[fluid_index],
                     grid_domains_[i],
                     state.grid,
@@ -8459,7 +9193,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     context.compute) ||
                     fluid_combustion_deposit_pre_run;
             }
+            gas_gpu_mark(state.gas_stats.gpu_fluid_combustion_ms);
             gpu_velocity_advection_pre_run = runGpuVelocityAdvection(state.grid, params, dt, context.compute, *gpu_buffers);
+            gas_gpu_mark(state.gas_stats.gpu_velocity_advect_ms);
             if (!gpu_velocity_advection_pre_run) {
                 static bool logged_gpu_velocity_fallback = false;
                 if (!logged_gpu_velocity_fallback) {
@@ -8472,6 +9208,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             gpu_scalar_advection_ok = runGpuScalarAdvection(
                 state.grid,params,dt,context.compute,*gpu_buffers,
                 fluid_combustion_deposit_pre_run);
+            gas_gpu_mark(state.gas_stats.gpu_scalar_advect_ms);
             if (!gpu_scalar_advection_ok) {
                 static bool logged_gpu_advection_fallback = false;
                 if (!logged_gpu_advection_fallback) {
@@ -8484,8 +9221,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // buoyancy. Running these before scalar advection pins flames to their
         // emitters and advances heat on the wrong frame.
         if (gpu_grid_ready) {
+            gas_gpu_cursor = SimulationClock::now();
             gas_combustion_pre_run =
                 runGpuCombustion(state.grid, params, dt, context.compute, *gpu_buffers);
+            gas_gpu_mark(state.gas_stats.gpu_combustion_ms);
             // One host -> device velocity publication feeds every body-force
             // stage. The old path uploaded and read back the full MAC field
             // independently for buoyancy, external fields, vorticity and
@@ -8515,6 +9254,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     gas_turbulence_pre_run &&
                     downloadGpuGasVelocity(state.grid, context.compute, *gpu_buffers);
             }
+            // One row for the whole chain: buoyancy/fields/vorticity/turbulence
+            // share a single velocity upload+readback, so splitting them would
+            // report a transfer cost four times over.
+            gas_gpu_mark(state.gas_stats.gpu_body_forces_ms);
             if (!gas_velocity_chain_resident) {
                 // Host velocity is still the untouched post-advection
                 // checkpoint. Re-run all velocity forces on the CPU below
@@ -8541,16 +9284,20 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                    (grid_domains_[i].backend == SimulationDomainBackend::CPU_SparseVDB) &&
                                    !domain_has_solid;
         if (is_sparse_vdb) {
-            GridFluid::stepSparseVDB(state.grid, params, dt, context.force_snapshot, context.time_seconds);
+            GridFluid::stepSparseVDB(state.grid, params, dt, context.force_snapshot,
+                                     context.time_seconds, &state.gas_stats.cpu);
         } else {
-            GridFluid::step(state.grid, params, dt, context.force_snapshot, context.time_seconds);
+            GridFluid::step(state.grid, params, dt, context.force_snapshot,
+                            context.time_seconds, &state.gas_stats.cpu);
         }
         if (gpu_grid_ready) {
+            gas_gpu_cursor = SimulationClock::now();
             bool gas_post_velocity_resident = false;
             gpu_velocity_post_ok =
                 runGpuVelocityDissipationClamp(
                     state.grid, params, dt, context.compute, *gpu_buffers,
                     false, true);
+            gas_gpu_mark(state.gas_stats.gpu_dissipation_ms);
             if (!gpu_velocity_post_ok) {
                 static bool logged_gpu_velocity_post_fallback = false;
                 if (!logged_gpu_velocity_post_fallback) {
@@ -8558,6 +9305,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     logged_gpu_velocity_post_fallback = true;
                 }
                 applyCpuVelocityDissipationClamp(state.grid, params, dt);
+                // The host redo belongs to the CPU column, not to the device
+                // row whose dispatch just failed.
+                gas_gpu_mark(state.gas_stats.cpu.dissipation_ms);
             } else {
                 gas_post_velocity_resident = true;
             }
@@ -8565,6 +9315,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 runGpuPressureProjection(
                     state.grid, params, dt, context.compute, *gpu_buffers,
                     gas_post_velocity_resident);
+            gas_gpu_mark(state.gas_stats.gpu_pressure_ms);
             if (!gpu_projection_ok) {
                 static bool logged_gpu_projection_fallback = false;
                 if (!logged_gpu_projection_fallback) {
@@ -8581,6 +9332,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 GridFluid::SolverParams fallback_params = params;
                 fallback_params.skip_pressure_projection = false;
                 GridFluid::projectPressure(state.grid, fallback_params, dt);
+                gas_gpu_mark(state.gas_stats.cpu.pressure_ms);
+                state.gas_stats.cpu.pressure_iterations =
+                    std::max(1, params.pressure_iterations);
             }
             // The velocity limiter above runs before projection. Pressure can
             // generate a larger correction (or propagate a non-finite value),
@@ -8611,7 +9365,34 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             fields_published =
                 context.compute->endTransferBatch() && fields_published;
             gpu_buffers->gpu_resident_fields_valid = fields_published;
+            gas_gpu_mark(state.gas_stats.gpu_publish_ms);
+            // Empty-space acceleration for the RT march, reduced from the field
+            // that was just published. On failure gas_majorant_valid stays
+            // false and the renderer marches every step — slower, never wrong.
+            if (fields_published) {
+                runGpuGasMajorant(state.grid, context.compute, *gpu_buffers);
+                gas_gpu_mark(state.gas_stats.gpu_majorant_ms);
+            } else {
+                gpu_buffers->gas_majorant_valid = false;
+                gpu_buffers->gas_emissive_valid = false;
+            }
         }
+
+        // Where each stage ended up. These pair with the timings: a 0 ms row
+        // with the flag clear means the stage never ran, which is a different
+        // fact from "ran on the device".
+        state.gas_stats.velocity_advect_on_gpu = gpu_velocity_advection_pre_run;
+        state.gas_stats.scalar_advect_on_gpu = gpu_scalar_advection_ok;
+        state.gas_stats.combustion_on_gpu = gas_combustion_pre_run;
+        state.gas_stats.buoyancy_on_gpu = gas_buoyancy_pre_run;
+        state.gas_stats.force_fields_on_gpu = gas_force_fields_pre_run;
+        state.gas_stats.vorticity_on_gpu = gas_vorticity_pre_run;
+        state.gas_stats.turbulence_on_gpu = gas_turbulence_pre_run;
+        state.gas_stats.dissipation_on_gpu = gpu_velocity_post_ok;
+        state.gas_stats.pressure_on_gpu = gpu_projection_ok;
+        state.gas_stats.fluid_combustion_on_gpu = fluid_combustion_deposit_pre_run;
+        state.gas_stats.total_ms =
+            elapsedMilliseconds(gas_step_begin, SimulationClock::now());
 
         if (!is_gpu_backend) {
             state.gas_compute_status = "CPU dense solver";
@@ -8684,32 +9465,112 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         state.active_density_min[2] = state.grid.nz;
         state.active_density_max[0] = state.active_density_max[1] =
             state.active_density_max[2] = -1;
-        // Density-channel scan is a gas-only readback. Fluid domains don't
-        // touch grid.density; skip the O(cells) walk to avoid burning cycles.
-        if (state.type == SimulationDomainType::Gas &&
-            hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Density)) {
-            for (std::size_t cell = 0; cell < state.grid.density.size(); ++cell) {
-                const float value = state.grid.density[cell];
-                if (value > 1e-4f) {
-                    ++state.active_density_cells;
-                    state.max_density = std::max(state.max_density, value);
-                    const int x = static_cast<int>(cell % static_cast<std::size_t>(state.grid.nx));
-                    const int y = static_cast<int>(
-                        (cell / static_cast<std::size_t>(state.grid.nx)) %
-                        static_cast<std::size_t>(state.grid.ny));
-                    const int z = static_cast<int>(
-                        cell / (static_cast<std::size_t>(state.grid.nx) *
-                                static_cast<std::size_t>(state.grid.ny)));
-                    state.active_density_min[0] = std::min(state.active_density_min[0], x);
-                    state.active_density_min[1] = std::min(state.active_density_min[1], y);
-                    state.active_density_min[2] = std::min(state.active_density_min[2], z);
-                    state.active_density_max[0] = std::max(state.active_density_max[0], x);
-                    state.active_density_max[1] = std::max(state.active_density_max[1], y);
-                    state.active_density_max[2] = std::max(state.active_density_max[2], z);
+        // Gas-only field readback. Fluid domains don't touch grid.density; skip
+        // the O(cells) walk to avoid burning cycles.
+        //
+        // The density scan (which the RT bridge needs) and the panel counters
+        // share ONE pass. Each counter used to own its own walk, which turned a
+        // 4.6M-cell domain into seven separate streams over the same memory —
+        // telemetry that costs more than the stage it is measuring is telemetry
+        // nobody can leave on. The per-channel pointers are null when a channel
+        // is off, so a disabled channel is skipped rather than reported as zero.
+        const auto analysis_begin = SimulationClock::now();
+        const bool is_gas_state = (state.type == SimulationDomainType::Gas);
+        const std::size_t cells =
+            static_cast<std::size_t>(state.grid.getCellCount());
+        const bool want_density =
+            is_gas_state &&
+            hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Density) &&
+            state.grid.density.size() == cells;
+        // Panel counters are only produced for a domain that actually stepped;
+        // reporting last frame's fuel/CFL for an idle domain is worse than
+        // reporting nothing.
+        const bool want_counters = is_gas_state && state.gas_stats.stepped;
+        if (want_density || want_counters) {
+            const float* dens = want_density ? state.grid.density.data() : nullptr;
+            const float* temp = (want_counters && state.grid.temperature.size() == cells)
+                ? state.grid.temperature.data() : nullptr;
+            const float* fuel = (want_counters && state.grid.fuel.size() == cells)
+                ? state.grid.fuel.data() : nullptr;
+            // interaction[] is the bounded flame field: >0 means this cell is
+            // actively burning THIS step, which is not the same as "holds fuel".
+            const float* flame = (want_counters && state.grid.interaction.size() == cells)
+                ? state.grid.interaction.data() : nullptr;
+            const uint8_t* solid = (want_counters && state.grid.solid.size() == cells)
+                ? state.grid.solid.data() : nullptr;
+            const std::size_t row = static_cast<std::size_t>(state.grid.nx);
+            const std::size_t slab = row * static_cast<std::size_t>(state.grid.ny);
+            for (std::size_t cell = 0; cell < cells; ++cell) {
+                if (dens) {
+                    const float value = dens[cell];
+                    if (value > 1e-4f) {
+                        ++state.active_density_cells;
+                        state.max_density = std::max(state.max_density, value);
+                        const int x = static_cast<int>(cell % row);
+                        const int y = static_cast<int>((cell / row) %
+                                                       static_cast<std::size_t>(state.grid.ny));
+                        const int z = static_cast<int>(cell / slab);
+                        state.active_density_min[0] = std::min(state.active_density_min[0], x);
+                        state.active_density_min[1] = std::min(state.active_density_min[1], y);
+                        state.active_density_min[2] = std::min(state.active_density_min[2], z);
+                        state.active_density_max[0] = std::max(state.active_density_max[0], x);
+                        state.active_density_max[1] = std::max(state.active_density_max[1], y);
+                        state.active_density_max[2] = std::max(state.active_density_max[2], z);
+                    }
+                    state.gas_stats.total_density += value;
                 }
+                if (temp) {
+                    state.gas_stats.max_temperature =
+                        std::max(state.gas_stats.max_temperature, temp[cell]);
+                }
+                if (fuel && fuel[cell] > 1e-4f) {
+                    ++state.gas_stats.active_fuel_cells;
+                    state.gas_stats.total_fuel += fuel[cell];
+                }
+                if (flame && flame[cell] > 1e-3f) ++state.gas_stats.burning_cells;
+                if (solid && solid[cell] != 0u) ++state.gas_stats.solid_cells;
             }
         }
+        if (want_counters) {
+            state.gas_stats.cell_count = cells;
+            // Peak face speed for the CFL number. Three face arrays, so this is
+            // the one part that cannot ride the cell loop above.
+            float max_abs_face = 0.0f;
+            for (float v : state.grid.vel_x) max_abs_face = std::max(max_abs_face, std::abs(v));
+            for (float v : state.grid.vel_y) max_abs_face = std::max(max_abs_face, std::abs(v));
+            for (float v : state.grid.vel_z) max_abs_face = std::max(max_abs_face, std::abs(v));
+            state.gas_stats.max_speed = max_abs_face;
+            const float h = state.grid.voxel_size > 1e-6f ? state.grid.voxel_size : 1.0f;
+            state.gas_stats.cfl = max_abs_face * dt / h;
+            const std::size_t float_elements =
+                state.grid.density.size() + state.grid.temperature.size() +
+                state.grid.fuel.size() + state.grid.interaction.size() +
+                state.grid.pressure.size() + state.grid.divergence.size() +
+                state.grid.vel_x.size() + state.grid.vel_y.size() +
+                state.grid.vel_z.size();
+            state.gas_stats.grid_memory_bytes =
+                float_elements * sizeof(float) + state.grid.solid.size();
+            // Covers the density/bounds scan too, which the RT bridge needs and
+            // which ran before any of this existed — so the row is NOT all
+            // telemetry overhead, and reading it as such would overstate what
+            // turning the panel off could ever save.
+            state.gas_stats.analysis_ms =
+                elapsedMilliseconds(analysis_begin, SimulationClock::now());
+            // The scan runs after the step total was stamped, so fold it in —
+            // otherwise the rows would sum past a total that excludes them.
+            state.gas_stats.total_ms += state.gas_stats.analysis_ms;
+        }
         ++state.version;
+    }
+
+    // ★ ONE readback per frame, after every domain has stepped. It used to sit at
+    // the end of MaterialStateFieldSystem::step(), which runs per domain — so a
+    // two-domain scene stalled the pipeline twice and rebuilt every char mask
+    // twice for a single frame's worth of state. Just as importantly, a scene
+    // with no gas domain never reached it at all, and the stats panel read empty
+    // for an object that was perfectly well simulated by the ambient pass.
+    if (context.compute && material_state_fields_.readbackPending()) {
+        material_state_fields_.flushReadback(*context.compute);
     }
 }
 
@@ -9306,13 +10167,28 @@ void ParticleSimulationSystem::emitFromEmitters(const SimulationContext& context
         return;
     }
 
-    for (auto& emitter : emitters_) {
-        if (!emitter.enabled) {
+    // Parent motion first, unconditionally — see advanceFlowSourceMotion().
+    // ★ timeline_frame: both calls below evaluate keyframes. See SimulationContext.
+    advanceEmitterMotion(context.dt, context.timeline_frame);
+
+    for (std::size_t emitter_i = 0; emitter_i < emitters_.size(); ++emitter_i) {
+        auto& emitter = emitters_[emitter_i];
+        const ParticleEmitterFrame resolved =
+            resolveParticleEmitterFrame(emitter, context.timeline_frame);
+        // A named-but-missing parent stops emission instead of dumping
+        // particles at the world origin from a parent-local offset.
+        if (resolved.parent_missing) {
+            continue;
+        }
+        if (!resolved.keyed.enabled) {
             continue;
         }
 
-        Vec3 source_position = emitter.point + emitter.local_offset;
-        Vec3 source_direction = emitter.direction;
+        Vec3 source_position = resolved.position;
+        Vec3 source_direction = resolved.direction;
+        // ObjectOrigin / ForceFieldOrigin resolve their own placement. They are
+        // an object binding in their own right, so they win over a parent
+        // offset rather than the two fighting (same rule as flow sources).
         if (emitter_source_resolver_) {
             Vec3 resolved_position = source_position;
             Vec3 resolved_direction = source_direction;
@@ -9322,7 +10198,7 @@ void ParticleSimulationSystem::emitFromEmitters(const SimulationContext& context
             }
         }
 
-        emitter.accumulator += std::max(0.0f, emitter.rate_per_second) * context.dt;
+        emitter.accumulator += std::max(0.0f, resolved.keyed.rate_per_second) * context.dt;
         int spawn_count = static_cast<int>(std::floor(emitter.accumulator));
         if (spawn_count > 0) {
             emitter.accumulator -= static_cast<float>(spawn_count);
@@ -9367,8 +10243,15 @@ void ParticleSimulationSystem::emitFromEmitters(const SimulationContext& context
             }
 
             ParticleSpawnDesc desc;
+            desc.emitter_index = static_cast<uint16_t>(
+                emitter_i < 0xFFFEu ? emitter_i : kNoEmitterIndex);
             desc.position = spawn_position;
-            desc.velocity = emitterVelocity(emitter, spawn_direction, serial);
+            // Keyed speed/spread, plus the parent's own motion so particles
+            // launched from a moving object are carried instead of left behind.
+            desc.velocity =
+                emitterVelocity(emitter, spawn_direction, serial,
+                                resolved.keyed.speed, resolved.keyed.spread) +
+                resolved.inherited_velocity;
             desc.lifetime_seconds = emitter.lifetime_seconds;
             desc.mass = emitter.mass;
 
@@ -9401,6 +10284,7 @@ void ParticleSimulationSystem::resizeStorage(std::size_t capacity) {
     buffers_.lifetime_seconds.resize(capacity, 0.0f);
     buffers_.inverse_mass.resize(capacity, 0.0f);
     buffers_.alive.resize(capacity, 0u);
+    buffers_.emitter_index.resize(capacity, kNoEmitterIndex);
 
     buffers_.size.resize(capacity, 0.0f);
     buffers_.rotation.resize(capacity, 0.0f);
@@ -9597,6 +10481,13 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     buffers.foam_neigh_pending_count = 0;
     buffers.foam_neigh_pending_generation = 0;
     buffers.foam_bin_ready_this_step = false;
+    destroy(buffers.gas_majorant);
+    destroy(buffers.gas_emissive_list);
+    buffers.gas_emissive_valid = false;
+    buffers.gas_majorant_dim[0] = 0;
+    buffers.gas_majorant_dim[1] = 0;
+    buffers.gas_majorant_dim[2] = 0;
+    buffers.gas_majorant_valid = false;
     destroy(buffers.gas_solid_mask);
     destroy(buffers.gas_solid_vel_x);
     destroy(buffers.gas_solid_vel_y);
@@ -9606,10 +10497,10 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.gas_source_fuel);
     destroy(buffers.gas_source_flame);
     destroy(buffers.gas_source_band);
-    destroy(buffers.gas_source_ignition);
-    destroy(buffers.gas_source_fuel_capacity);
-    destroy(buffers.gas_source_burn_rate);
-    destroy(buffers.gas_surface_state);
+    destroy(buffers.msf_accum_fuel);
+    destroy(buffers.msf_accum_density);
+    destroy(buffers.msf_accum_heat);
+    destroy(buffers.msf_accum_flame);
     destroy(buffers.cg_residual);
     destroy(buffers.cg_z);
     destroy(buffers.cg_search);
@@ -9634,6 +10525,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.fluid_positions);
     destroy(buffers.fluid_velocities);
     destroy(buffers.fluid_affine);
+    destroy(buffers.fluid_mass_fraction);
     destroy(buffers.foam_positions);
     destroy(buffers.foam_render.spheres);
     buffers.foam_render = {};
@@ -9709,6 +10601,38 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     ensureComputeBuffer(compute, buffers.interaction, "GridDomainInteraction", cell_bytes, render_field_usage);
     ensureComputeBuffer(compute, buffers.pressure, "GridDomainPressure", cell_bytes, usage);
     ensureComputeBuffer(compute, buffers.divergence, "GridDomainDivergence", cell_bytes, usage);
+    {
+        // Majorant blocks. The buffer is grow-only like the rest, but the block
+        // DIMENSIONS are stored so the resolution the RT side is told about can
+        // never outlive the grid it was reduced from — a majorant addressed with
+        // the wrong block count would skip the wrong region of space, i.e. carve
+        // holes in the smoke rather than merely run slow.
+        const int bx = (grid.nx + kGasMajorantBlock - 1) / kGasMajorantBlock;
+        const int by = (grid.ny + kGasMajorantBlock - 1) / kGasMajorantBlock;
+        const int bz = (grid.nz + kGasMajorantBlock - 1) / kGasMajorantBlock;
+        const std::size_t block_bytes =
+            static_cast<std::size_t>(std::max(1, bx)) *
+            static_cast<std::size_t>(std::max(1, by)) *
+            static_cast<std::size_t>(std::max(1, bz)) * sizeof(float);
+        ensureComputeBuffer(compute, buffers.gas_majorant, "GridDomainGasMajorant",
+                            block_bytes, render_field_usage);
+        // +1 for the count in slot 0.
+        ensureComputeBuffer(compute, buffers.gas_emissive_list,
+                            "GridDomainGasEmissiveList",
+                            static_cast<std::size_t>(kGasEmissiveListCapacity + 1) *
+                                sizeof(uint32_t),
+                            render_field_usage);
+        if (buffers.gas_majorant_dim[0] != bx ||
+            buffers.gas_majorant_dim[1] != by ||
+            buffers.gas_majorant_dim[2] != bz) {
+            buffers.gas_majorant_dim[0] = bx;
+            buffers.gas_majorant_dim[1] = by;
+            buffers.gas_majorant_dim[2] = bz;
+            // Contents now describe a different block layout: unpublish until
+            // the next majorant pass refills it.
+            buffers.gas_majorant_valid = false;
+        }
+    }
     ensureComputeBuffer(compute, buffers.scratch_vel_x, "GridDomainScratchVelX", grid.vel_x.size() * sizeof(float), usage);
     ensureComputeBuffer(compute, buffers.scratch_vel_y, "GridDomainScratchVelY", grid.vel_y.size() * sizeof(float), usage);
     ensureComputeBuffer(compute, buffers.scratch_vel_z, "GridDomainScratchVelZ", grid.vel_z.size() * sizeof(float), usage);
@@ -9749,27 +10673,31 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     ensureComputeBuffer(compute, buffers.gas_solid_vel_y, "GridDomainGasSolidVelY", cell_bytes, usage);
     ensureComputeBuffer(compute, buffers.gas_solid_vel_z, "GridDomainGasSolidVelZ", cell_bytes, usage);
     if (!grid.solid_gas_band.empty()) {
-        const bool initialize_surface_state =
-            !buffers.gas_surface_state.valid() ||
-            compute.getBufferSize(buffers.gas_surface_state) < cell_bytes * 2u;
         ensureComputeBuffer(compute, buffers.gas_source_density, "GridDomainGasSourceDensity", cell_bytes, usage);
         ensureComputeBuffer(compute, buffers.gas_source_temperature, "GridDomainGasSourceTemperature", cell_bytes, usage);
         ensureComputeBuffer(compute, buffers.gas_source_fuel, "GridDomainGasSourceFuel", cell_bytes, usage);
         ensureComputeBuffer(compute, buffers.gas_source_flame, "GridDomainGasSourceFlame", cell_bytes, usage);
         ensureComputeBuffer(compute, buffers.gas_source_band, "GridDomainGasSourceBand", cell_bytes, usage);
-        ensureComputeBuffer(compute, buffers.gas_source_ignition, "GridDomainGasSourceIgnition", cell_bytes, usage);
-        ensureComputeBuffer(compute, buffers.gas_source_fuel_capacity, "GridDomainGasSourceFuelCapacity", cell_bytes, usage);
-        ensureComputeBuffer(compute, buffers.gas_source_burn_rate, "GridDomainGasSourceBurnRate", cell_bytes, usage);
-        ensureComputeBuffer(compute, buffers.gas_surface_state, "GridDomainGasSurfaceState", cell_bytes * 2u, usage);
-        if (initialize_surface_state && buffers.gas_surface_state.valid()) {
-            // Heat begins at zero; -1 marks fuel as not yet initialized from the
-            // collider material. The shader resets this marker when contact ends.
-            std::vector<float> initial_surface_state(cell_count * 2u, 0.0f);
-            std::fill(initial_surface_state.begin() + static_cast<std::ptrdiff_t>(cell_count),
-                      initial_surface_state.end(), -1.0f);
-            compute.uploadBuffer(buffers.gas_surface_state,
-                                 initial_surface_state.data(),
-                                 initial_surface_state.size() * sizeof(float));
+
+        // MSF scatter accumulators. Zero-filled on (re)allocation; after that the
+        // resolve pass clears them as it consumes them, so a stale deposit can
+        // never be applied twice.
+        const std::size_t accum_bytes = cell_count * sizeof(uint32_t);
+        const bool initialize_accum =
+            !buffers.msf_accum_fuel.valid() ||
+            compute.getBufferSize(buffers.msf_accum_fuel) < accum_bytes;
+        ensureComputeBuffer(compute, buffers.msf_accum_fuel, "GridDomainMsfAccumFuel", accum_bytes, usage);
+        ensureComputeBuffer(compute, buffers.msf_accum_density, "GridDomainMsfAccumDensity", accum_bytes, usage);
+        ensureComputeBuffer(compute, buffers.msf_accum_heat, "GridDomainMsfAccumHeat", accum_bytes, usage);
+        ensureComputeBuffer(compute, buffers.msf_accum_flame, "GridDomainMsfAccumFlame", accum_bytes, usage);
+        if (initialize_accum && buffers.msf_accum_fuel.valid()) {
+            // Sized by the live cell count, not the (grow-only) allocation.
+            const std::vector<uint32_t> zeros(cell_count, 0u);
+            const std::size_t zero_bytes = zeros.size() * sizeof(uint32_t);
+            compute.uploadBuffer(buffers.msf_accum_fuel, zeros.data(), zero_bytes);
+            compute.uploadBuffer(buffers.msf_accum_density, zeros.data(), zero_bytes);
+            compute.uploadBuffer(buffers.msf_accum_heat, zeros.data(), zero_bytes);
+            compute.uploadBuffer(buffers.msf_accum_flame, zeros.data(), zero_bytes);
         }
     }
 
@@ -9885,10 +10813,7 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
              buffers.gas_source_fuel.valid() &&
              buffers.gas_source_flame.valid() &&
              buffers.gas_source_band.valid() &&
-             buffers.gas_source_ignition.valid() &&
-             buffers.gas_source_fuel_capacity.valid() &&
-             buffers.gas_source_burn_rate.valid() &&
-             buffers.gas_surface_state.valid();
+             buffers.msf_accum_fuel.valid();
     }
     if (compute.backendType() == ComputeBackendType::CUDA) {
         ok = ok &&

@@ -1154,6 +1154,10 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
     g_animGraphUI.activeCharacter = "";
     g_animGraphUI = AnimGraphUIState();
     
+    // The scene is gone; edge-triggered diagnostics must not carry its state
+    // into the next one (that is what made the second comparison run look
+    // silent while hunting the domain-edge black band).
+    sceneLogOnChangeReset();
     SCENE_LOG_INFO("New project created. Subsystems and animation caches cleared.");
 }
 
@@ -2072,8 +2076,24 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             }
 
             if (!InstanceManager::getInstance().getGroups().empty()) {
-                if (progress_callback) progress_callback(77, "Building foliage BVH & instances...");
-                InstanceManager::getInstance().rebuildSceneObjects(scene);
+                Backend::BackendType backendType = Backend::BackendType::CPU_CUSTOM;
+                if (backend) {
+                    backendType = backend->getInfo().type;
+                }
+                const bool nativeFlatInstances =
+                    backendType == Backend::BackendType::VULKAN_RT ||
+                    backendType == Backend::BackendType::VULKAN_COMPUTE ||
+                    backendType == Backend::BackendType::OPTIX;
+                if (nativeFlatInstances) {
+                    if (progress_callback) progress_callback(77, "Loading flat foliage instances...");
+                    for (auto& group : InstanceManager::getInstance().getGroups()) {
+                        group.active_hittables.clear();
+                        group.gpu_dirty = true;
+                    }
+                } else {
+                    if (progress_callback) progress_callback(77, "Building foliage BVH & instances...");
+                    InstanceManager::getInstance().rebuildSceneObjects(scene);
+                }
             }
 
             // Mesh Modifiers System
@@ -3944,7 +3964,9 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     
     // Animation Sequencer Settings
     settings.animation_start_frame = j.value("animation_start_frame", 0);
-    settings.animation_end_frame = j.value("animation_end_frame", 100);
+    // Missing fields belong to legacy/incomplete files; authored values are
+    // preserved whenever the serialized key exists.
+    settings.animation_end_frame = j.value("animation_end_frame", 250);
     settings.animation_fps = j.value("animation_fps", 24);
     settings.animation_output_folder = j.value("animation_output_folder", "");
     
@@ -5003,6 +5025,32 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         e["enabled"] = emitter.enabled;
         e["seed"] = emitter.seed;
         e["burst_count"] = emitter.burst_count;
+        e["timeline_uid"] = emitter.timeline_uid;
+        e["parent_object"] = emitter.parent_object;
+        e["velocity_space"] = static_cast<int>(emitter.velocity_space);
+        e["inherit_velocity"] = emitter.inherit_velocity;
+        e["override_grid_deposit"] = emitter.override_grid_deposit;
+        e["grid_density_deposit"] = emitter.grid_density_deposit;
+        e["grid_temperature_deposit"] = emitter.grid_temperature_deposit;
+        e["grid_fuel_deposit"] = emitter.grid_fuel_deposit;
+        e["keyframes"] = json::array();
+        for (const auto& [frame, key] : emitter.keyframes) {
+            e["keyframes"].push_back({
+                {"frame", frame},
+                {"has_enabled", key.has_enabled},
+                {"has_rate", key.has_rate},
+                {"has_speed", key.has_speed},
+                {"has_spread", key.has_spread},
+                {"has_point", key.has_point},
+                {"has_direction", key.has_direction},
+                {"enabled", key.enabled},
+                {"rate_per_second", key.rate_per_second},
+                {"speed", key.speed},
+                {"spread", key.spread},
+                {"point", vec3ToJson(key.point)},
+                {"direction", vec3ToJson(key.direction)}
+            });
+        }
         return e;
     };
 
@@ -5030,9 +5078,13 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         c["gas_flame_rate"] = collider.gas_flame_rate;
         c["gas_surface_band_voxels"] = collider.gas_surface_band_voxels;
         c["gas_ignite_on_contact"] = collider.gas_ignite_on_contact;
-        c["gas_ignition_temperature"] = collider.gas_ignition_temperature;
-        c["gas_surface_fuel_capacity"] = collider.gas_surface_fuel_capacity;
-        c["gas_surface_burn_rate"] = collider.gas_surface_burn_rate;
+        c["msf_substance"] = collider.msf_substance;
+        c["msf_override_ignition"] = collider.msf_override.override_ignition;
+        c["msf_ignition_kelvin"] = collider.msf_override.ignition_kelvin;
+        c["msf_burn_rate_scale"] = collider.msf_override.burn_rate_scale;
+        c["msf_fuel_capacity_scale"] = collider.msf_override.fuel_capacity_scale;
+        c["msf_mask_resolution"] = collider.msf_mask_resolution;
+        c["msf_generate_char_mask"] = collider.msf_generate_char_mask;
         return c;
     };
 
@@ -5044,6 +5096,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["source_name"] = source.source_name;
         f["domain_index"] = source.domain_index;
         f["enabled"] = source.enabled;
+        f["parent_object"] = source.parent_object;
+        f["velocity_space"] = static_cast<int>(source.velocity_space);
+        f["inherit_velocity"] = source.inherit_velocity;
         f["position"] = vec3ToJson(source.position);
         f["velocity"] = vec3ToJson(source.velocity);
         f["velocity_coupling"] = source.velocity_coupling;
@@ -5073,6 +5128,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
                 {"has_fuel", key.has_fuel},
                 {"has_falloff", key.has_falloff},
                 {"has_velocity_coupling", key.has_velocity_coupling},
+                {"has_flow_rate", key.has_flow_rate},
+                {"flow_rate", key.flow_rate},
                 {"enabled", key.enabled},
                 {"position", vec3ToJson(key.position)},
                 {"velocity", vec3ToJson(key.velocity)},
@@ -5114,6 +5171,11 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["voxel_size"] = domain.voxel_size;
         d["padding"] = domain.padding;
         d["channels"] = domain.channels;
+        // Thermal boundary override (Phase 4). No kelvin_per_unit here on
+        // purpose — that is a global calibration, see WorldThermalState.
+        d["thermal_override_enabled"] = domain.thermal_override_enabled;
+        d["thermal_ambient_kelvin"] = domain.thermal_ambient_kelvin;
+        d["thermal_oxygen"] = domain.thermal_oxygen;
         d["fluid"] = {
             {"seed_min", vec3ToJson(domain.fluid_seed_min)},
             {"seed_max", vec3ToJson(domain.fluid_seed_max)},
@@ -5153,7 +5215,30 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell},
             {"internal_friction", domain.fluid_params.internal_friction},
             {"air_drag", domain.fluid_params.air_drag},
-            {"density_correction", domain.fluid_params.density_correction}
+            {"density_correction", domain.fluid_params.density_correction},
+            {"current_preset", static_cast<int>(domain.fluid_params.current_preset)},
+            {"chemistry_preset", static_cast<int>(domain.fluid_params.chemistry_preset)},
+            {"fuel_profile", {
+                {"flammable", domain.fluid_params.fuel_profile.flammable},
+                {"extinguishing", domain.fluid_params.fuel_profile.extinguishing},
+                {"flash_temperature", domain.fluid_params.fuel_profile.flash_temperature},
+                {"autoignition_temperature", domain.fluid_params.fuel_profile.autoignition_temperature},
+                {"vaporization_rate", domain.fluid_params.fuel_profile.vaporization_rate},
+                {"heat_capacity", domain.fluid_params.fuel_profile.heat_capacity},
+                {"latent_heat", domain.fluid_params.fuel_profile.latent_heat},
+                {"cooling_power", domain.fluid_params.fuel_profile.cooling_power},
+                {"oxygen_dilution", domain.fluid_params.fuel_profile.oxygen_dilution},
+                {"flame_persistence", domain.fluid_params.fuel_profile.flame_persistence}
+            }},
+            {"flammable", domain.fluid_flammable},
+            {"extinguishing", domain.fluid_extinguishing},
+            {"auto_ignite", domain.fluid_auto_ignite},
+            {"ignition_temperature", domain.fluid_ignition_temperature},
+            {"evaporation_rate", domain.fluid_evaporation_rate},
+            {"surface_fuel_capacity", domain.fluid_surface_fuel_capacity},
+            {"combustion_heat_release", domain.fluid_combustion_heat_release},
+            {"combustion_smoke_yield", domain.fluid_combustion_smoke_yield},
+            {"surface_cooling", domain.fluid_surface_cooling}
         };
 
         d["fluid_render_mode"] = static_cast<int>(domain.fluid_render_mode);
@@ -5258,8 +5343,18 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
 
     auto serializeRuntimeSettings = [](const RayTrophiSim::ParticleSimulationSystem& runtime) {
         const auto& physics = runtime.physicsSettings();
+        const auto& thermal = runtime.worldThermal();
         return json{
             {"gravity", vec3ToJson(runtime.gravity())},
+            // World thermal boundary conditions (Phase 4). Before this the
+            // Kelvin calibration was runtime-only and silently reset on every
+            // project load, so a scene tuned to ignite came back not igniting.
+            {"world_thermal", {
+                {"ambient_kelvin", thermal.ambient_kelvin},
+                {"kelvin_per_unit", thermal.kelvin_per_unit},
+                {"convection_coefficient", thermal.convection_coefficient},
+                {"oxygen_availability", thermal.oxygen_availability}
+            }},
             {"linear_drag", runtime.linearDrag()},
             {"collision_plane_enabled", runtime.collisionPlaneEnabled()},
             {"collision_plane_y", runtime.collisionPlaneY()},
@@ -5373,6 +5468,44 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         emitter.seed = item.value("seed", emitter.seed);
         emitter.accumulator = 0.0f;
         emitter.burst_count = item.value("burst_count", 0);
+        emitter.timeline_uid = item.value("timeline_uid", emitter.timeline_uid);
+        emitter.parent_object = item.value("parent_object", emitter.parent_object);
+        emitter.velocity_space =
+            static_cast<RayTrophiSim::SimulationEmissionVelocitySpace>(
+                item.value("velocity_space",
+                           static_cast<int>(emitter.velocity_space)));
+        emitter.inherit_velocity = item.value("inherit_velocity", emitter.inherit_velocity);
+        emitter.override_grid_deposit =
+            item.value("override_grid_deposit", emitter.override_grid_deposit);
+        emitter.grid_density_deposit =
+            item.value("grid_density_deposit", emitter.grid_density_deposit);
+        emitter.grid_temperature_deposit =
+            item.value("grid_temperature_deposit", emitter.grid_temperature_deposit);
+        emitter.grid_fuel_deposit =
+            item.value("grid_fuel_deposit", emitter.grid_fuel_deposit);
+        if (item.contains("keyframes") && item["keyframes"].is_array()) {
+            for (const auto& key_item : item["keyframes"]) {
+                if (!key_item.is_object()) continue;
+                const int frame = key_item.value("frame", 0);
+                RayTrophiSim::ParticleEmitterDesc::Keyframe key;
+                key.has_enabled = key_item.value("has_enabled", false);
+                key.has_rate = key_item.value("has_rate", false);
+                key.has_speed = key_item.value("has_speed", false);
+                key.has_spread = key_item.value("has_spread", false);
+                key.has_point = key_item.value("has_point", false);
+                key.has_direction = key_item.value("has_direction", false);
+                key.enabled = key_item.value("enabled", key.enabled);
+                key.rate_per_second = key_item.value("rate_per_second", key.rate_per_second);
+                key.speed = key_item.value("speed", key.speed);
+                key.spread = key_item.value("spread", key.spread);
+                if (key_item.contains("point")) key.point = jsonToVec3(key_item["point"]);
+                if (key_item.contains("direction")) key.direction = jsonToVec3(key_item["direction"]);
+                emitter.keyframes[frame] = key;
+            }
+        }
+        // Motion state is runtime-only — arm the sentinel (see the desc).
+        emitter.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+        emitter.parent_velocity = Vec3(0.0f);
         return emitter;
     };
 
@@ -5403,9 +5536,15 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         collider.gas_flame_rate = item.value("gas_flame_rate", collider.gas_flame_rate);
         collider.gas_surface_band_voxels = item.value("gas_surface_band_voxels", collider.gas_surface_band_voxels);
         collider.gas_ignite_on_contact = item.value("gas_ignite_on_contact", collider.gas_ignite_on_contact);
-        collider.gas_ignition_temperature = item.value("gas_ignition_temperature", collider.gas_ignition_temperature);
-        collider.gas_surface_fuel_capacity = item.value("gas_surface_fuel_capacity", collider.gas_surface_fuel_capacity);
-        collider.gas_surface_burn_rate = item.value("gas_surface_burn_rate", collider.gas_surface_burn_rate);
+        // Absent in projects saved before Phase 2 -> "Custom", which keeps the
+        // free floats authoritative and reproduces the old behaviour exactly.
+        collider.msf_substance = item.value("msf_substance", collider.msf_substance);
+        collider.msf_override.override_ignition = item.value("msf_override_ignition", collider.msf_override.override_ignition);
+        collider.msf_override.ignition_kelvin = item.value("msf_ignition_kelvin", collider.msf_override.ignition_kelvin);
+        collider.msf_override.burn_rate_scale = item.value("msf_burn_rate_scale", collider.msf_override.burn_rate_scale);
+        collider.msf_override.fuel_capacity_scale = item.value("msf_fuel_capacity_scale", collider.msf_override.fuel_capacity_scale);
+        collider.msf_mask_resolution = item.value("msf_mask_resolution", collider.msf_mask_resolution);
+        collider.msf_generate_char_mask = item.value("msf_generate_char_mask", collider.msf_generate_char_mask);
         return collider;
     };
 
@@ -5421,6 +5560,12 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.source_name = item.value("source_name", source.source_name);
         source.domain_index = item.value("domain_index", source.domain_index);
         source.enabled = item.value("enabled", source.enabled);
+        source.parent_object = item.value("parent_object", source.parent_object);
+        source.velocity_space =
+            static_cast<RayTrophiSim::SimulationEmissionVelocitySpace>(
+                item.value("velocity_space",
+                           static_cast<int>(source.velocity_space)));
+        source.inherit_velocity = item.value("inherit_velocity", source.inherit_velocity);
         if (item.contains("position")) source.position = jsonToVec3(item["position"]);
         if (item.contains("velocity")) source.velocity = jsonToVec3(item["velocity"]);
         source.velocity_coupling = item.value("velocity_coupling", source.velocity_coupling);
@@ -5468,11 +5613,18 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
                 key.velocity_coupling =
                     key_item.value("velocity_coupling",
                                    key.velocity_coupling);
+                key.has_flow_rate = key_item.value("has_flow_rate", false);
+                key.flow_rate = key_item.value("flow_rate", key.flow_rate);
                 source.keyframes[frame] = key;
             }
         }
         source.fluid_emit_accumulator = 0.0f;
         source.total_emitted_particles = 0;
+        // Motion state is runtime-only: arm the sentinel so the first step
+        // after load inherits zero rather than differencing against a
+        // default-constructed position.
+        source.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+        source.parent_velocity = Vec3(0.0f);
         return source;
     };
 
@@ -5513,6 +5665,11 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.voxel_size = item.value("voxel_size", domain.voxel_size);
         domain.padding = item.value("padding", domain.padding);
         domain.channels = item.value("channels", domain.channels);
+        domain.thermal_override_enabled =
+            item.value("thermal_override_enabled", domain.thermal_override_enabled);
+        domain.thermal_ambient_kelvin =
+            item.value("thermal_ambient_kelvin", domain.thermal_ambient_kelvin);
+        domain.thermal_oxygen = item.value("thermal_oxygen", domain.thermal_oxygen);
         if (item.contains("fluid") && item["fluid"].is_object()) {
             const auto& f = item["fluid"];
             if (f.contains("seed_min")) domain.fluid_seed_min = jsonToVec3(f["seed_min"]);
@@ -5557,6 +5714,39 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.internal_friction = f.value("internal_friction", domain.fluid_params.internal_friction);
             domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
             domain.fluid_params.density_correction = f.value("density_correction", domain.fluid_params.density_correction);
+            if (f.contains("current_preset")) {
+                domain.fluid_params.current_preset =
+                    static_cast<RayTrophiSim::Fluid::APICSolverParams::FluidPreset>(
+                        f.value("current_preset", static_cast<int>(domain.fluid_params.current_preset)));
+            }
+            if (f.contains("chemistry_preset")) {
+                domain.fluid_params.chemistry_preset =
+                    static_cast<RayTrophiSim::Fluid::FluidChemistryPreset>(
+                        f.value("chemistry_preset", static_cast<int>(domain.fluid_params.chemistry_preset)));
+            }
+            if (f.contains("fuel_profile")) {
+                const auto& fuel = f["fuel_profile"];
+                auto& profile = domain.fluid_params.fuel_profile;
+                profile.flammable = fuel.value("flammable", profile.flammable);
+                profile.extinguishing = fuel.value("extinguishing", profile.extinguishing);
+                profile.flash_temperature = fuel.value("flash_temperature", profile.flash_temperature);
+                profile.autoignition_temperature = fuel.value("autoignition_temperature", profile.autoignition_temperature);
+                profile.vaporization_rate = fuel.value("vaporization_rate", profile.vaporization_rate);
+                profile.heat_capacity = fuel.value("heat_capacity", profile.heat_capacity);
+                profile.latent_heat = fuel.value("latent_heat", profile.latent_heat);
+                profile.cooling_power = fuel.value("cooling_power", profile.cooling_power);
+                profile.oxygen_dilution = fuel.value("oxygen_dilution", profile.oxygen_dilution);
+                profile.flame_persistence = fuel.value("flame_persistence", profile.flame_persistence);
+            }
+            domain.fluid_flammable = f.value("flammable", domain.fluid_flammable);
+            domain.fluid_extinguishing = f.value("extinguishing", domain.fluid_extinguishing);
+            domain.fluid_auto_ignite = f.value("auto_ignite", domain.fluid_auto_ignite);
+            domain.fluid_ignition_temperature = f.value("ignition_temperature", domain.fluid_ignition_temperature);
+            domain.fluid_evaporation_rate = f.value("evaporation_rate", domain.fluid_evaporation_rate);
+            domain.fluid_surface_fuel_capacity = f.value("surface_fuel_capacity", domain.fluid_surface_fuel_capacity);
+            domain.fluid_combustion_heat_release = f.value("combustion_heat_release", domain.fluid_combustion_heat_release);
+            domain.fluid_combustion_smoke_yield = f.value("combustion_smoke_yield", domain.fluid_combustion_smoke_yield);
+            domain.fluid_surface_cooling = f.value("surface_cooling", domain.fluid_surface_cooling);
         }
 
         if (item.contains("fluid_render_mode")) domain.fluid_render_mode = static_cast<RayTrophiSim::Fluid::FluidRenderMode>(item["fluid_render_mode"].get<int>());
@@ -5697,6 +5887,16 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             physics.grid_deposit_fade_with_age =
                 p.value("grid_deposit_fade_with_age", physics.grid_deposit_fade_with_age);
             physics.vorticity = p.value("vorticity", physics.vorticity);
+        }
+        if (settings.contains("world_thermal") && settings["world_thermal"].is_object()) {
+            const auto& t = settings["world_thermal"];
+            auto& thermal = runtime.worldThermal();
+            thermal.ambient_kelvin = t.value("ambient_kelvin", thermal.ambient_kelvin);
+            thermal.kelvin_per_unit = t.value("kelvin_per_unit", thermal.kelvin_per_unit);
+            thermal.convection_coefficient =
+                t.value("convection_coefficient", thermal.convection_coefficient);
+            thermal.oxygen_availability =
+                t.value("oxygen_availability", thermal.oxygen_availability);
         }
     };
 

@@ -25,6 +25,8 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
+// Material State Field render-bridge telemetry (materialStateFieldBridgeStats).
+#include "MaterialStateField.h"
 #include <cstdlib>
 #include <array>
 #include <chrono>
@@ -261,6 +263,8 @@ bool refreshVulkanInstanceDataBinding(VulkanRT::VulkanDevice* device,
         VulkanRT::VkInstanceData d;
         d.materialIndex = vi.materialIndex;
         d.blasIndex = vi.blasIndex;
+        d.msfCharTex = vi.msfCharTex;
+        d.msfCharPacked = vi.msfCharPacked;
         instData.push_back(d);
     }
 
@@ -874,6 +878,10 @@ void VulkanDevice::shutdown() {
         if (m_tlasScratchBuffer.buffer) {
             destroyBuffer(m_tlasScratchBuffer);
         }
+        destroyBuffer(m_gpuTlasInstanceBuffer);
+        destroyBuffer(m_gpuTlasSourceBuffers[0]);
+        destroyBuffer(m_gpuTlasSourceBuffers[1]);
+        destroyInstancePreparePipeline();
 
         // Destroy RT pipeline
         if (m_rtPipeline) vkDestroyPipeline(m_device, m_rtPipeline, nullptr);
@@ -2954,6 +2962,109 @@ void VulkanDevice::updateTLAS(const std::vector<TLASInstance>& instances) {
     info.instances = instances;
     info.allowUpdate = true;
     createTLAS(info);
+}
+
+bool VulkanDevice::recordGpuTLASUpdate(VkCommandBuffer cmd, uint32_t frameSlot,
+                                       const std::vector<GpuTLASInstanceSource>& sources) {
+    if (cmd == VK_NULL_HANDLE || frameSlot >= kFrameSlotCount || sources.empty()) return false;
+    if (!instancePrepareReady()) return false;
+    if (!m_recordingGpuTlasBuild && !canUpdateTLAS(static_cast<uint32_t>(sources.size()))) return false;
+    const VkDeviceSize sourceBytes = sources.size() * sizeof(GpuTLASInstanceSource);
+    const VkDeviceSize outputBytes = sources.size() * sizeof(VkAccelerationStructureInstanceKHR);
+
+    auto& source = m_gpuTlasSourceBuffers[frameSlot];
+    if (!source.buffer || source.size < sourceBytes) {
+        if (source.buffer) destroyBuffer(source);
+        BufferCreateInfo ci{}; ci.size=sourceBytes; ci.usage=BufferUsage::STORAGE; ci.location=MemoryLocation::CPU_TO_GPU;
+        source=createBuffer(ci); m_instancePrepareBoundSources[frameSlot]=VK_NULL_HANDLE;
+    }
+    if (!m_gpuTlasInstanceBuffer.buffer || m_gpuTlasInstanceBuffer.size < outputBytes) {
+        if (m_gpuTlasInstanceBuffer.buffer) destroyBuffer(m_gpuTlasInstanceBuffer);
+        BufferCreateInfo ci{}; ci.size=outputBytes; ci.usage=BufferUsage::STORAGE|BufferUsage::ACCELERATION; ci.location=MemoryLocation::GPU_ONLY;
+        m_gpuTlasInstanceBuffer=createBuffer(ci); m_instancePrepareBoundOutputs[0]=m_instancePrepareBoundOutputs[1]=VK_NULL_HANDLE;
+        m_instancePrepareBoundSources[0]=m_instancePrepareBoundSources[1]=VK_NULL_HANDLE;
+    }
+    if (!source.buffer || !m_gpuTlasInstanceBuffer.buffer) return false;
+    uploadBuffer(source,sources.data(),sourceBytes);
+
+    if (m_instancePrepareDescSets[frameSlot]==VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool=m_instancePrepareDescPool; ai.descriptorSetCount=1; ai.pSetLayouts=&m_instancePrepareDescLayout;
+        if (vkAllocateDescriptorSets(m_device,&ai,&m_instancePrepareDescSets[frameSlot])!=VK_SUCCESS) return false;
+    }
+    if (m_instancePrepareBoundSources[frameSlot]!=source.buffer || m_instancePrepareBoundOutputs[frameSlot]!=m_gpuTlasInstanceBuffer.buffer) {
+        VkDescriptorBufferInfo bi[2]{{source.buffer,0,VK_WHOLE_SIZE},{m_gpuTlasInstanceBuffer.buffer,0,VK_WHOLE_SIZE}};
+        VkWriteDescriptorSet w[2]{};
+        for(uint32_t i=0;i<2;++i){w[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;w[i].dstSet=m_instancePrepareDescSets[frameSlot];w[i].dstBinding=i;w[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;w[i].descriptorCount=1;w[i].pBufferInfo=&bi[i];}
+        vkUpdateDescriptorSets(m_device,2,w,0,nullptr);
+        m_instancePrepareBoundSources[frameSlot]=source.buffer; m_instancePrepareBoundOutputs[frameSlot]=m_gpuTlasInstanceBuffer.buffer;
+    }
+
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,m_instancePreparePipeline);
+    vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,m_instancePreparePipelineLayout,0,1,&m_instancePrepareDescSets[frameSlot],0,nullptr);
+    uint32_t count=static_cast<uint32_t>(sources.size());
+    vkCmdPushConstants(cmd,m_instancePreparePipelineLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(count),&count);
+    vkCmdDispatch(cmd,(count+127u)/128u,1,1);
+    VkMemoryBarrier cb{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; cb.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT; cb.dstAccessMask=VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,0,1,&cb,0,nullptr,0,nullptr);
+
+    VkAccelerationStructureGeometryInstancesDataKHR id{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+    id.arrayOfPointers=VK_FALSE; id.data.deviceAddress=m_gpuTlasInstanceBuffer.deviceAddress;
+    VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    geom.geometryType=VK_GEOMETRY_TYPE_INSTANCES_KHR; geom.geometry.instances=id;
+    VkAccelerationStructureBuildGeometryInfoKHR build{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    build.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    build.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR|VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    build.mode=m_recordingGpuTlasBuild?VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR:VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    build.srcAccelerationStructure=m_recordingGpuTlasBuild?VK_NULL_HANDLE:m_tlas.accel; build.dstAccelerationStructure=m_tlas.accel;
+    build.geometryCount=1; build.pGeometries=&geom; build.scratchData.deviceAddress=m_tlasScratchBuffer.deviceAddress;
+    VkAccelerationStructureBuildRangeInfoKHR range{}; range.primitiveCount=count;
+    const VkAccelerationStructureBuildRangeInfoKHR* pr=&range;
+    fpCmdBuildAccelerationStructuresKHR(cmd,1,&build,&pr);
+    VkMemoryBarrier ab{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; ab.srcAccessMask=VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR; ab.dstAccessMask=VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,0,1,&ab,0,nullptr,0,nullptr);
+    return true;
+}
+
+bool VulkanDevice::createGpuTLAS(const std::vector<GpuTLASInstanceSource>& sources) {
+    if (!instancePrepareReady() || sources.empty() || !fpCreateAccelerationStructureKHR) return false;
+    const uint32_t count = static_cast<uint32_t>(sources.size());
+    VkAccelerationStructureGeometryInstancesDataKHR id{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+    VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR}; geom.geometryType=VK_GEOMETRY_TYPE_INSTANCES_KHR; geom.geometry.instances=id;
+    VkAccelerationStructureBuildGeometryInfoKHR build{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    build.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR; build.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR|VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    build.geometryCount=1; build.pGeometries=&geom;
+    VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    fpGetAccelerationStructureBuildSizesKHR(m_device,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&build,&count,&sizes);
+    if(m_tlas.accel){fpDestroyAccelerationStructureKHR(m_device,m_tlas.accel,nullptr);destroyBuffer(m_tlas.buffer);m_tlas={};}
+    BufferCreateInfo aci{};aci.size=sizes.accelerationStructureSize;aci.usage=BufferUsage::ACCELERATION|BufferUsage::STORAGE;aci.location=MemoryLocation::GPU_ONLY;
+    m_tlas.buffer=createBuffer(aci); if(!m_tlas.buffer.buffer)return false;
+    VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};ci.buffer=m_tlas.buffer.buffer;ci.size=sizes.accelerationStructureSize;ci.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    if (fpCreateAccelerationStructureKHR(m_device, &ci, nullptr, &m_tlas.accel) != VK_SUCCESS) {
+        destroyBuffer(m_tlas.buffer);
+        return false;
+    }
+    VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};ai.accelerationStructure=m_tlas.accel;
+    m_tlas.deviceAddress=fpGetAccelerationStructureDeviceAddressKHR(m_device,&ai);
+    const uint64_t align=m_capabilities.minScratchAlignment?m_capabilities.minScratchAlignment:128;
+    const uint64_t needed=(std::max)(sizes.buildScratchSize,sizes.updateScratchSize);
+    const uint64_t aligned=(needed+align-1)&~(align-1);
+    if(!m_tlasScratchBuffer.buffer||m_tlasScratchBuffer.size<aligned){if(m_tlasScratchBuffer.buffer)destroyBuffer(m_tlasScratchBuffer);BufferCreateInfo sci{};sci.size=aligned;sci.usage=BufferUsage::STORAGE;sci.location=MemoryLocation::GPU_ONLY;m_tlasScratchBuffer=createBuffer(sci);}
+    if (!m_tlasScratchBuffer.buffer) return false;
+    m_tlasInstanceCount = count;
+    m_tlasSupportsUpdate = true;
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return false;
+    m_recordingGpuTlasBuild = true;
+    const bool recorded = recordGpuTLASUpdate(cmd, 0, sources);
+    m_recordingGpuTlasBuild = false;
+    if (!recorded) {
+        endSingleTimeCommands(cmd);
+        return false;
+    }
+    endSingleTimeCommands(cmd);
+    if(m_rtDescriptorSet!=VK_NULL_HANDLE){VkWriteDescriptorSetAccelerationStructureKHR asw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};asw.accelerationStructureCount=1;asw.pAccelerationStructures=&m_tlas.accel;VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};w.dstSet=m_rtDescriptorSet;w.dstBinding=1;w.descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;w.descriptorCount=1;w.pNext=&asw;vkUpdateDescriptorSets(m_device,1,&w,0,nullptr);}
+    return true;
 }
 
 void VulkanDevice::traceRays(uint32_t w, uint32_t h, uint32_t d) {
@@ -7332,6 +7443,82 @@ VulkanBackendAdapter::~VulkanBackendAdapter() {
     shutdown();
 }
 
+bool VulkanBackendAdapter::refreshMaterialStateFieldInstances() {
+    // Counters ACCUMULATE here and are zeroed once per frame by the bridge. This
+    // runs from several upload sites per frame and some of them legitimately see
+    // an empty instance list — resetting on entry made the last such call win and
+    // report 0/0, hiding whatever the real calls found.
+    auto& tel = RayTrophiSim::materialStateFieldBridgeStats();
+    if (m_vkInstances.empty()) {
+        // Counted, not silently skipped: an empty instance list means the RT
+        // scene has not been built (raster preview, or a rebuild in flight), and
+        // that is a completely different fault from the resolver never running.
+        tel.instance_lists_empty += 1u;
+        return false;
+    }
+    tel.instance_lists_seen += 1u;
+    bool changed = false;
+    if (!m_msfMaskResolver) {
+        // No bridge installed: clear rather than leave whatever a previous scene
+        // left behind. A stale bindless index would sample an unrelated texture.
+        for (auto& vi : m_vkInstances) {
+            if (vi.msfCharTex == 0 && vi.msfCharPacked == 0) continue;
+            vi.msfCharTex = 0;
+            vi.msfCharPacked = 0;
+            changed = true;
+        }
+        return changed;
+    }
+    for (size_t i = 0; i < m_vkInstances.size(); ++i) {
+        uint32_t tex = 0, packed = 0;
+        std::string instName;
+        if (i < m_instanceSources.size() && m_instanceSources[i]) {
+            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+                instName = inst->node_name;
+            } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+                instName = tri->getNodeName();
+            } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+                instName = tm->nodeName;
+            }
+        }
+        if (instName.empty()) {
+            tel.instances_unnamed += 1u;
+        } else {
+            tel.instances_seen += 1u;
+            if (m_msfMaskResolver(instName, tex, packed)) {
+                tel.instances_bound += 1u;
+            } else if (tel.unmatched_example[0] == 0) {
+                // Record one unmatched name: MSF is keyed by the collider's
+                // source_name and instances by node name, and a mismatch there
+                // silently produces "nothing renders" with every other stat fine.
+                std::snprintf(tel.unmatched_example, sizeof(tel.unmatched_example),
+                              "%s", instName.c_str());
+            }
+        }
+        if (m_vkInstances[i].msfCharTex != tex ||
+            m_vkInstances[i].msfCharPacked != packed) {
+            m_vkInstances[i].msfCharTex = tex;
+            m_vkInstances[i].msfCharPacked = packed;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+void VulkanBackendAdapter::syncMaterialStateFieldBindings() {
+    if (!m_device || !m_device->isInitialized()) return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    if (!refreshMaterialStateFieldInstances()) return;
+
+    // The mask texture itself is updated in place every frame, so the bindless
+    // index is stable — this upload normally happens only when a field appears,
+    // disappears, or is resized. Drain first: the buffer being recreated is read
+    // by the closest-hit shader through the descriptor set of an in-flight trace.
+    drainInFlightTraces();
+    refreshVulkanInstanceDataBinding(m_device.get(), m_vkInstances);
+}
+
 bool VulkanBackendAdapter::initialize() {
     if (!m_device) {
         m_device = std::make_unique<VulkanRT::VulkanDevice>();
@@ -7421,6 +7608,7 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
     m_uploadedImages.clear();
     m_uploadedImageIDs.clear();
     m_textureIdToCacheKey.clear();
+    m_cacheKeyOwner.clear();
     m_nextTextureID = 1;
     ++m_textureCacheGeneration;
 }
@@ -8239,7 +8427,12 @@ bool VulkanBackendAdapter::refitIndexedSoloBLAS(uint32_t blasIndex) {
         return false;
     }
 
-    SCENE_LOG_INFO("[refitIndexedSoloBLAS] Uploading " + std::to_string(vCount) + " vertices for BLAS " + std::to_string(blasIndex));
+    // Edge-triggered: a keyframed mesh refits EVERY frame, and an unconditional
+    // log here cost a string build + logger mutex + file write per frame per
+    // animated mesh. Report only when the shape of the operation changes.
+    SCENE_LOG_ON_CHANGE("blasrefit." + std::to_string(blasIndex), (long long)vCount,
+        "[refitIndexedSoloBLAS] Uploading " + std::to_string(vCount) +
+        " vertices for BLAS " + std::to_string(blasIndex));
     std::vector<float> positions(vCount * 3);
     std::vector<float> normals(vCount * 3);
     for (size_t v = 0; v < vCount; ++v) {
@@ -8996,7 +9189,7 @@ bool VulkanBackendAdapter::refitFlatMeshBLAS(const std::string& nodeName) {
         return false;
     }
     if (m_vkInstances.empty() || m_instanceSources.empty()) {
-        SCENE_LOG_WARN("[refitFlatMeshBLAS] m_vkInstances or m_instanceSources empty");
+      //  SCENE_LOG_WARN("[refitFlatMeshBLAS] m_vkInstances or m_instanceSources empty");
         return false;
     }
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -9012,7 +9205,9 @@ bool VulkanBackendAdapter::refitFlatMeshBLAS(const std::string& nodeName) {
             SCENE_LOG_WARN("[refitFlatMeshBLAS] blasIndex not found in m_soloBlasIndexedMesh: " + std::to_string(blasIndex));
             return false;
         }
-        SCENE_LOG_INFO("[refitFlatMeshBLAS] Routing to refitIndexedSoloBLAS for node: " + nodeName);
+        // Same per-frame spam as the upload log below it — edge-trigger by node.
+        SCENE_LOG_ON_CHANGE("blasroute." + nodeName, (long long)blasIndex,
+            "[refitFlatMeshBLAS] Routing to refitIndexedSoloBLAS for node: " + nodeName);
         return refitIndexedSoloBLAS(blasIndex);
     }
     SCENE_LOG_WARN("[refitFlatMeshBLAS] No matching TriangleMesh instance found for name: " + nodeName);
@@ -9538,6 +9733,7 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
     m_rasterGeometryDirty = true;
     destroyAllRasterMeshes();
     m_rasterBuiltGeometryGeneration = 0; // Invalidate raster cache
+    m_rasterBuiltGenSource = "invalidated";
     m_geometryBuiltWithPointiness = false; // BLAS pointiness blocks die with the BLAS list below
     m_geometryBuiltWithAttributes = false; // ...and so do the named-attribute blocks
     m_envTexID = 0;
@@ -9647,6 +9843,11 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
         // stale expectation. (Contrast with a per-frame empty packet, which must
         // NOT touch the mapping — see the vols.empty() branch in syncVDBVolumesToGPU.)
         m_tlasVolumeSlotCount = 0;
+        // ★ MUST go with them: the cached slots hold device addresses into the
+        // NanoVDB buffers destroyed just above. Re-laying them into a new order
+        // would publish dangling addresses to the shader.
+        m_publishedVolumeByKey.clear();
+        m_publishedVolumeKeyOrder.clear();
         m_volumeBlasIndex = UINT32_MAX;
         // Foam sphere BLAS lived in m_blasList (just cleared above) — drop the stale
         // index so the next updateGeometry() rebuilds it fresh and the motion hook
@@ -9913,11 +10114,13 @@ void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& node
         }
 
         if (instanceDataChanged) {
+            // MSF mask indices must be current before this upload.
+            refreshMaterialStateFieldInstances();
             // Refresh instance SSBO (binding 5). The TLAS itself carries no
             // material data, so no AS update is needed for a binding change.
             std::vector<VulkanRT::VkInstanceData> instData;
             instData.reserve(m_vkInstances.size());
-            for (const auto& vi : m_vkInstances) { VulkanRT::VkInstanceData d; d.materialIndex = vi.materialIndex; d.blasIndex = vi.blasIndex; instData.push_back(d); }
+            for (const auto& vi : m_vkInstances) { VulkanRT::VkInstanceData d; d.materialIndex = vi.materialIndex; d.blasIndex = vi.blasIndex; d.msfCharTex = vi.msfCharTex; d.msfCharPacked = vi.msfCharPacked; instData.push_back(d); }
             if (!instData.empty()) {
                 if (m_device->m_instanceDataBuffer.buffer) m_device->destroyBuffer(m_device->m_instanceDataBuffer);
                 ::VulkanRT::BufferCreateInfo ci; ci.size = (uint64_t)instData.size() * sizeof(::VulkanRT::VkInstanceData); ci.usage = (::VulkanRT::BufferUsage)((uint32_t)::VulkanRT::BufferUsage::STORAGE | (uint32_t)::VulkanRT::BufferUsage::TRANSFER_DST); ci.location = ::VulkanRT::MemoryLocation::CPU_TO_GPU; ci.initialData = instData.data(); m_device->m_instanceDataBuffer = m_device->createBuffer(ci);
@@ -10031,6 +10234,12 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     // re-established at the end of this function, once the instances are final.
     m_orderedVDBInstances.clear();
     m_tlasVolumeSlotCount = 0;
+
+    // Set when a visible volume was passed over only because its grid was not
+    // ready at this instant. Slots are created here and nowhere else, so such a
+    // volume would otherwise stay unrenderable until some unrelated edit happened
+    // to rebuild the TLAS again. Checked at the end of this function.
+    bool volumeSkippedNotReady = false;
 
     // Enable batched BLAS build — all createBLAS calls below will be recorded
     // into a single command buffer instead of N separate GPU submissions.
@@ -10324,7 +10533,43 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         }
         // 5. Handle VDB Volumes — create AABB BLAS + TLAS instance for procedural hit group
         else if (auto vdb = std::dynamic_pointer_cast<VDBVolume>(obj)) {
-            if (!vdb->isLoaded() || !vdb->visible) return;
+            // ★★ A volume that exists but is not loaded THIS INSTANT must not be
+            // dropped silently and forgotten.
+            //
+            // Volume slots are created ONLY here: m_orderedVDBInstances is wiped
+            // at the top of this function and each surviving volume's TLAS
+            // customIndex is baked from its position in it. Per-frame uploads
+            // fill existing slots; they cannot create one. So a volume skipped
+            // here has no slot until the NEXT full TLAS rebuild, and nothing
+            // schedules one.
+            //
+            // The fluid SurfaceSDF regenerates its grid continuously, so it is
+            // periodically "not loaded" for a frame. Any unrelated geometry edit
+            // — adding or deleting an object, which rebuilds the TLAS — that
+            // lands on one of those frames evicts the liquid surface from the
+            // render for good. Toggling render mode to splat and back is the
+            // workaround users find, because that forces another rebuild at a
+            // moment when the grid happens to be ready.
+            //
+            // Record the miss so the rebuild can be retried once it is ready.
+            // A live simulation volume whose content is mid-refresh keeps its
+            // slot: it is expecting a rebind, not gone. The slot publishes as
+            // inactive until the grid returns, which costs nothing and cannot
+            // show another volume's data.
+            const bool slot_worthy = vdb->isLoaded() || vdb->awaiting_live_rebind;
+            // GATE 4 of 4 — no TLAS slot is created at all this rebuild.
+            SCENE_LOG_ON_CHANGE("volslot." + vdb->name,
+                (slot_worthy ? 4 : 0) + (vdb->isLoaded() ? 2 : 0) + (vdb->visible ? 1 : 0),
+                std::string("[VolumeGate 4/4] volume '") + vdb->name +
+                "' TLAS slot: loaded=" + (vdb->isLoaded() ? "1" : "0") +
+                " rebinding=" + (vdb->awaiting_live_rebind ? "1" : "0") +
+                " visible=" + (vdb->visible ? "1" : "0") +
+                (slot_worthy && vdb->visible ? " -> SLOT CREATED" : " -> NO SLOT"));
+            if (!slot_worthy) {
+                if (vdb->visible) volumeSkippedNotReady = true;
+                return;
+            }
+            if (!vdb->visible) return;
 
             // We create a shared AABB BLAS that covers the unit cube [-0.5, 0.5]^3.
             // The actual world-space bounds and scaling are applied via the TLAS instance transform.
@@ -10553,9 +10798,13 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     };
 
     const auto& instanceGroups = InstanceManager::getInstance().getGroups();
+    struct ScatterBlasEntry {
+        uint32_t blas = UINT32_MAX;
+        uint32_t material = 0;
+        Matrix4x4 sourceToScatter = Matrix4x4::identity();
+    };
     struct ScatterSourceMeta {
-        std::vector<uint32_t> blasBySource;
-        std::vector<uint32_t> materialBySource;
+        std::vector<std::vector<ScatterBlasEntry>> entriesBySource;
     };
     std::vector<ScatterSourceMeta> scatterMeta(instanceGroups.size());
     size_t totalScatterInstances = 0;
@@ -10565,11 +10814,34 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         if (group.instances.empty() || group.sources.empty()) continue;
 
         auto& meta = scatterMeta[gi];
-        meta.blasBySource.assign(group.sources.size(), UINT32_MAX);
-        meta.materialBySource.assign(group.sources.size(), 0);
+        meta.entriesBySource.resize(group.sources.size());
 
         for (size_t si = 0; si < group.sources.size(); ++si) {
             const auto& source = group.sources[si];
+            // Canonical flat sources already own indexed BLASes from the base
+            // world-object pass. Reuse them directly; one logical source may
+            // contain several material-sibling meshes.
+            if (!source.flat_meshes.empty()) {
+                for (const auto& mesh : source.flat_meshes) {
+                    if (!mesh || !mesh->geometry || mesh->geometry->indices.empty()) continue;
+                    const std::string meshKey = "[DirectMesh]-" + mesh->nodeName + "-" +
+                        std::to_string(reinterpret_cast<uintptr_t>(mesh.get()));
+                    const auto registryIt = m_meshRegistry.find(meshKey);
+                    if (registryIt == m_meshRegistry.end()) continue;
+                    ScatterBlasEntry entry;
+                    entry.blas = registryIt->second;
+                    if (const uint16_t* materials = mesh->geometry->get_material_ids()) {
+                        const uint32_t vertexIndex = mesh->geometry->indices[0];
+                        const uint16_t material = materials[vertexIndex];
+                        entry.material = material == MaterialManager::INVALID_MATERIAL_ID ? 0u : material;
+                    }
+                    const Matrix4x4 sourceWorld = mesh->transform ?
+                        mesh->transform->getFinal() : Matrix4x4::identity();
+                    entry.sourceToScatter = Matrix4x4::translation(-source.mesh_center) * sourceWorld;
+                    meta.entriesBySource[si].push_back(entry);
+                }
+                continue;
+            }
             const auto* triSource = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
             const auto& fallbackTriangles = source.triangles;
             const auto* triangles = (triSource && !triSource->empty()) ? triSource : &fallbackTriangles;
@@ -10605,30 +10877,27 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             }
             if (blasIndex == UINT32_MAX) continue;
 
-            meta.blasBySource[si] = blasIndex;
+            ScatterBlasEntry entry;
+            entry.blas = blasIndex;
             if (!triangles->empty() && (*triangles)[0]) {
                 uint16_t matId = (*triangles)[0]->getMaterialID();
-                meta.materialBySource[si] =
+                entry.material =
                     (matId == MaterialManager::INVALID_MATERIAL_ID) ? 0u : static_cast<uint32_t>(matId);
             }
+            meta.entriesBySource[si].push_back(entry);
         }
 
         for (const auto& inst : group.instances) {
             int srcIdx = inst.source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
-            if (srcIdx < static_cast<int>(meta.blasBySource.size()) &&
-                meta.blasBySource[srcIdx] != UINT32_MAX) {
-                ++totalScatterInstances;
+            if (srcIdx < static_cast<int>(meta.entriesBySource.size())) {
+                totalScatterInstances += meta.entriesBySource[srcIdx].size();
             }
         }
     }
 
     vkInstances.reserve(vkInstances.size() + totalScatterInstances);
     instanceSources.reserve(instanceSources.size() + totalScatterInstances);
-
-    unsigned scatterThreads = std::thread::hardware_concurrency();
-    if (scatterThreads == 0) scatterThreads = 4;
-    constexpr size_t kScatterParallelThreshold = 1024;
 
     for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
         const auto& group = instanceGroups[gi];
@@ -10641,24 +10910,21 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         // sphere GAS). BVH degradation from foam motion is handled by a per-frame
         // full TLAS rebuild in updateInstanceTransforms() (see foamPresent there).
         const auto& meta = scatterMeta[gi];
-        if (meta.blasBySource.empty()) continue;
+        if (meta.entriesBySource.empty()) continue;
 
-        std::vector<VulkanRT::TLASInstance> local(group.instances.size());
-        for (auto& vi : local) vi.blasIndex = UINT32_MAX;
-        auto fillRange = [&group, &meta, &local](size_t start, size_t end) {
-            for (size_t i = start; i < end; ++i) {
+        std::vector<VulkanRT::TLASInstance> local;
+        local.reserve(group.instances.size());
+        for (size_t i = 0; i < group.instances.size(); ++i) {
                 const auto& inst = group.instances[i];
                 int srcIdx = inst.source_index;
                 if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
-                if (srcIdx >= static_cast<int>(meta.blasBySource.size()) ||
-                    meta.blasBySource[srcIdx] == UINT32_MAX) {
-                    continue;
-                }
-
-                auto& vi = local[i];
-                vi.blasIndex = meta.blasBySource[srcIdx];
-                vi.transform = inst.toMatrix();
-                vi.materialIndex = meta.materialBySource[srcIdx];
+                if (srcIdx >= static_cast<int>(meta.entriesBySource.size())) continue;
+            for (const auto& entry : meta.entriesBySource[srcIdx]) {
+                if (entry.blas == UINT32_MAX) continue;
+                VulkanRT::TLASInstance vi;
+                vi.blasIndex = entry.blas;
+                vi.transform = inst.toMatrix() * entry.sourceToScatter;
+                vi.materialIndex = entry.material;
                 vi.customIndex = 0;
                 // Particle pools retain inactive slots to keep scatter indices
                 // stable. A zero-scale matrix is singular and invalid for Vulkan
@@ -10678,22 +10944,9 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                 vi.frontFaceCCW = true;
                 vi.scatterGroupId = group.id;
                 vi.scatterInstanceIndex = static_cast<uint32_t>(i);
+                vi.scatterSourceTransform = entry.sourceToScatter;
+                local.push_back(std::move(vi));
             }
-        };
-
-        if (group.instances.size() < kScatterParallelThreshold || scatterThreads < 2) {
-            fillRange(0, group.instances.size());
-        } else {
-            const size_t chunk = (group.instances.size() + scatterThreads - 1) / scatterThreads;
-            std::vector<std::future<void>> futures;
-            futures.reserve(scatterThreads);
-            for (unsigned t = 0; t < scatterThreads; ++t) {
-                const size_t s = t * chunk;
-                const size_t e = (std::min)(s + chunk, group.instances.size());
-                if (s >= e) break;
-                futures.push_back(std::async(std::launch::async, fillRange, s, e));
-            }
-            for (auto& f : futures) f.get();
         }
 
         for (auto& vi : local) {
@@ -10734,6 +10987,13 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
     m_vkInstances = vkInstances; // Store for updates
     m_instanceSources = instanceSources;
+    m_gpuInstanceCpuMirrorStale=false;
+    m_scatterTransformRevisions.clear();
+    for (const auto& group : instanceGroups) {
+        if (!group.instances.empty()) {
+            m_scatterTransformRevisions[group.id] = group.transform_revision;
+        }
+    }
     m_topology_dirty = true;
     // Tripwire for the customIndex <-> volume-SSBO contract. Volume instances got
     // their customIndex baked from m_orderedVDBInstances during the loop above, so
@@ -10742,6 +11002,56 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     // which is exactly the bug class that produced invisible/black volume boxes
     // and, worse, SSBO slots built in packet order instead of TLAS order.
     m_tlasVolumeSlotCount = (uint32_t)m_orderedVDBInstances.size();
+
+    // ★★ The mapping was just re-baked. Every customIndex above now points into
+    // a buffer that is still laid out for the PREVIOUS TLAS, and only some
+    // callers follow up with syncVDBVolumesToGPU — file animations, GPU
+    // skinning and the sim worker's light path do not. Re-lay the cached slots
+    // into the new order here, so the contract holds no matter who called us.
+    // A later real publish simply overwrites this with fresher data.
+    republishVolumeSlotsForTLASOrder();
+
+    // ★ Retry the rebuild once a passed-over volume has its grid. Without this a
+    // transiently-unready SurfaceSDF is evicted from the TLAS by any unrelated
+    // geometry edit and never returns on its own — the liquid surface simply
+    // stops rendering until the user toggles render mode. Re-arming the same
+    // pending flag the rest of the app uses keeps this on the existing rebuild
+    // path rather than inventing a second one; it costs one extra rebuild on the
+    // frame the grid lands, and the flag is only raised for volumes that are
+    // VISIBLE and merely not ready yet, so a hidden or absent volume cannot spin
+    // it forever.
+    if (!volumeSkippedNotReady) {
+        // ★ Rearm the budget only after a RUN of clean rebuilds, never on the
+        // first one. Now that the servicing sites consume the pending flag
+        // before doing the work, these retries genuinely fire — and a volume
+        // that alternates ready/not-ready (a fluid SurfaceSDF regenerates
+        // constantly) would reset the budget on every good frame and turn a
+        // bounded retry into a permanent full-TLAS-rebuild-every-other-frame.
+        constexpr uint32_t kCleanRunToRearm = 8;
+        if (++m_volumeNotReadyCleanRuns >= kCleanRunToRearm) {
+            m_volumeNotReadyRetries = 0;
+        }
+    } else {
+        m_volumeNotReadyCleanRuns = 0;
+        // A SurfaceSDF regenerates within a frame or two, so a handful of
+        // retries always covers the real case. Anything that stays unloaded
+        // past that is not "regenerating", it is broken, and re-arming forever
+        // would turn one missing volume into a permanent per-frame rebuild.
+        constexpr uint32_t kMaxVolumeNotReadyRetries = 8;
+        if (m_volumeNotReadyRetries < kMaxVolumeNotReadyRetries) {
+            ++m_volumeNotReadyRetries;
+            g_vulkan_rebuild_pending = true;
+        } else {
+            static bool s_reported = false;
+            if (!s_reported) {
+                s_reported = true;
+                VK_INFO() << "[Vulkan][VolumeSSBO] a visible volume stayed unloaded across "
+                          << kMaxVolumeNotReadyRetries << " geometry rebuilds; it has no TLAS "
+                             "slot and will not render until the next geometry change."
+                          << std::endl;
+            }
+        }
+    }
 
     // Snapshot the number of mesh BLASes so clearHairGeometry() can safely remove
     // only hair BLASes later.  IMPORTANT: uploadHairToGPU() may have been called
@@ -10757,12 +11067,28 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     std::vector<VulkanRT::TLASInstance> allInstances = m_vkInstances;
     for (const auto& hi : m_hairVkInstances) allInstances.push_back(hi);
 
+    std::vector<VulkanRT::GpuTLASInstanceSource> gpuBuildSources;
+    if(m_device->instancePrepareReady()&&!allInstances.empty()){
+        const auto prepStart=std::chrono::steady_clock::now();
+        std::unordered_map<int,const InstanceGroup*> groupsById;groupsById.reserve(instanceGroups.size());
+        for(const auto& g:instanceGroups)if(!g.instances.empty())groupsById.emplace(g.id,&g);
+        gpuBuildSources.resize(allInstances.size()); bool valid=true;
+        for(size_t i=0;i<allInstances.size()&&valid;++i){const auto& vi=allInstances[i];auto& out=gpuBuildSources[i];
+            if(vi.blasIndex>=m_device->m_blasList.size()){valid=false;break;}
+            for(uint32_t r=0;r<3;++r)for(uint32_t c=0;c<4;++c)out.data[r*4+c]=vi.transform.m[r][c];
+            uint32_t mask=vi.mask;
+            if(vi.scatterGroupId>=0&&vi.scatterInstanceIndex!=UINT32_MAX){auto it=groupsById.find(vi.scatterGroupId);if(it!=groupsById.end()&&vi.scatterInstanceIndex<it->second->instances.size()){const auto& tr=it->second->instances[vi.scatterInstanceIndex];const Matrix4x4 composed=tr.toMatrix()*vi.scatterSourceTransform;for(uint32_t r=0;r<3;++r)for(uint32_t c=0;c<4;++c)out.data[r*4+c]=composed.m[r][c];out.mode=0;mask=it->second->transient?0x04u:0xffu;}}
+            uint32_t flags=vi.frontFaceCCW?VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR:0u;if(vi.opacityOverride==1)flags|=VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;else if(vi.opacityOverride==2)flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+            out.metadata[0]=vi.customIndex;out.metadata[1]=mask;out.metadata[2]=vi.sbtRecordOffset;out.metadata[3]=flags;const uint64_t address=m_device->m_blasList[vi.blasIndex].deviceAddress;out.blasAddressLo=static_cast<uint32_t>(address);out.blasAddressHi=static_cast<uint32_t>(address>>32u);if(!address)valid=false;
+        }
+        if(!valid)gpuBuildSources.clear();
+        m_instancePreparationStats.instanceCount=static_cast<uint32_t>(allInstances.size());m_instancePreparationStats.uploadBytes=gpuBuildSources.size()*sizeof(VulkanRT::GpuTLASInstanceSource);m_instancePreparationStats.cpuPrepareMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-prepStart).count();
+    }
+
     if (!allInstances.empty()) {
-        VulkanRT::TLASCreateInfo tlasInfo;
-        tlasInfo.instances = allInstances;
-        // [VULKAN FIX] Use allowUpdate = true so that subsequent updateObjectTransform calls can refit.
-        tlasInfo.allowUpdate = true; 
-        m_device->createTLAS(tlasInfo);
+        bool gpuBuilt=!gpuBuildSources.empty()&&m_device->createGpuTLAS(gpuBuildSources);
+        if(gpuBuilt){m_instancePreparationStats.gpuPathAvailable=true;m_instancePreparationStats.gpuPathUsedLastFrame=true;m_instancePreparationStats.lastPath=1;++m_instancePreparationStats.gpuDispatches;}
+        else{VulkanRT::TLASCreateInfo tlasInfo;tlasInfo.instances=allInstances;tlasInfo.allowUpdate=true;m_device->createTLAS(tlasInfo);m_instancePreparationStats.gpuPathUsedLastFrame=false;m_instancePreparationStats.lastPath=0;++m_instancePreparationStats.cpuFallbacks;}
 
         // [CRASH GUARD] Re-enable ray tracing now that a valid TLAS exists.
         if (m_device->m_rtPipeline != VK_NULL_HANDLE) {
@@ -10772,6 +11098,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         // Upload shader-side BLAS/instance lookup buffers. These descriptors may
         // already exist after a previous render, so refresh bindings immediately.
         refreshVulkanGeometryDataBinding(m_device.get());
+        refreshMaterialStateFieldInstances();
         refreshVulkanInstanceDataBinding(m_device.get(), m_vkInstances);
         
         resetAccumulation();
@@ -11104,6 +11431,7 @@ bool VulkanBackendAdapter::tryAppendGeometryIncremental(const std::vector<std::s
     // New source meshes can append BLASes, so both geometry lookup (binding 4)
     // and per-instance lookup (binding 5) must grow together.
     refreshVulkanGeometryDataBinding(m_device.get());
+    refreshMaterialStateFieldInstances();
     refreshVulkanInstanceDataBinding(m_device.get(), m_vkInstances);
 
     // Refresh meshBlasCount snapshot — needed so clearHairGeometry() never walks into mesh BLASes.
@@ -11147,6 +11475,32 @@ uint32_t VulkanBackendAdapter::resolveTextureHandle(int64_t key, int textureType
             uint64_t cacheKey = (static_cast<uint64_t>(texCheck ? texCheck->m_uid : 0) << 2) |
                                 (forceLinear ? 1ull : 0ull) |
                                 (preferSingleChannel ? 2ull : 0ull);
+            // Tripwire: this cache key is the ONLY thing that maps a Texture to a
+            // bindless index, so two distinct Texture objects reaching the same key
+            // means one of them silently renders the other's image — a material
+            // channel wearing an unrelated texture, with every other stat looking
+            // healthy. Fires once per offending key; the flags live in the low two
+            // bits, so a repeat with different flags is a legitimate second entry
+            // and gets its own key.
+            // The recorded owner is a pointer kept ONLY for identity comparison
+            // plus a copy of its name — never dereferenced, because a Texture can
+            // be freed and a later one can collide from a different address.
+            if (texCheck) {
+                auto owner = m_cacheKeyOwner.find(cacheKey);
+                if (owner == m_cacheKeyOwner.end()) {
+                    m_cacheKeyOwner.emplace(cacheKey,
+                                            std::make_pair(static_cast<const void*>(texCheck),
+                                                           texCheck->name));
+                } else if (owner->second.first != static_cast<const void*>(texCheck)) {
+                    SCENE_LOG_ERROR("[Vulkan] Texture cache key collision: uid " +
+                                    std::to_string(texCheck->m_uid) + " claimed by '" +
+                                    texCheck->name + "' is already held by '" +
+                                    owner->second.second +
+                                    "'. One of them will render the other's image.");
+                    owner->second = std::make_pair(static_cast<const void*>(texCheck),
+                                                   texCheck->name);
+                }
+            }
             const bool needsDirtyRefresh = (texCheck && texCheck->vulkan_dirty);
             TextureHandle sceneHandle{};
             if (texCheck && texCheck->is_loaded() && m_sceneTextureManager && !needsDirtyRefresh) {
@@ -13798,7 +14152,62 @@ void VulkanBackendAdapter::setTime(float t, float dt) { m_currentTime = t; (void
 
 
 
-void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) { 
+bool VulkanBackendAdapter::queueGpuScatterInstanceUpdate(const std::unordered_set<int>& dirtyGroups) {
+    if (!m_device || !m_device->instancePrepareReady() || !m_device->hasTonemapPipeline() || dirtyGroups.empty()) return false;
+    const auto started=std::chrono::steady_clock::now();
+    const auto& groups=InstanceManager::getInstance().getGroups();
+    std::unordered_map<int,const InstanceGroup*> byId; byId.reserve(groups.size());
+    for(const auto& g:groups) if(!g.instances.empty()) byId.emplace(g.id,&g);
+    const size_t total=m_vkInstances.size()+m_hairVkInstances.size();
+    if (!m_device->canUpdateTLAS(static_cast<uint32_t>(total))) return false;
+    m_pendingGpuInstanceSources.clear(); m_pendingGpuInstanceSources.resize(total);
+    auto fill=[this,&byId](const VulkanRT::TLASInstance& vi,VulkanRT::GpuTLASInstanceSource& out){
+        if(vi.blasIndex>=m_device->m_blasList.size()) return false;
+        const Matrix4x4& m=vi.transform;
+        for(uint32_t r=0;r<3;++r) for(uint32_t c=0;c<4;++c) out.data[r*4+c]=m.m[r][c];
+        uint32_t desiredMask=vi.mask;
+        if(vi.scatterGroupId>=0 && vi.scatterInstanceIndex!=UINT32_MAX){
+            auto it=byId.find(vi.scatterGroupId);
+            if(it!=byId.end() && vi.scatterInstanceIndex<it->second->instances.size()){
+                const auto& tr=it->second->instances[vi.scatterInstanceIndex];
+                const Matrix4x4 composed = tr.toMatrix() * vi.scatterSourceTransform;
+                for(uint32_t r=0;r<3;++r) for(uint32_t c=0;c<4;++c) out.data[r*4+c]=composed.m[r][c];
+                out.mode=0;
+                desiredMask=it->second->transient?0x04u:0xffu;
+            }
+        }
+        uint32_t flags=vi.frontFaceCCW?VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR:0u;
+        if(vi.opacityOverride==1) flags|=VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+        else if(vi.opacityOverride==2) flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        out.metadata[0]=vi.customIndex; out.metadata[1]=desiredMask; out.metadata[2]=vi.sbtRecordOffset; out.metadata[3]=flags;
+        const uint64_t address=m_device->m_blasList[vi.blasIndex].deviceAddress;
+        out.blasAddressLo=static_cast<uint32_t>(address);
+        out.blasAddressHi=static_cast<uint32_t>(address>>32u);
+        return address!=0;
+    };
+    for(size_t i=0;i<m_vkInstances.size();++i) if(!fill(m_vkInstances[i],m_pendingGpuInstanceSources[i])) return false;
+    for(size_t i=0;i<m_hairVkInstances.size();++i) if(!fill(m_hairVkInstances[i],m_pendingGpuInstanceSources[m_vkInstances.size()+i])) return false;
+    m_gpuInstanceUpdatePending=true; m_gpuInstanceDirtyGroupCount=static_cast<uint32_t>(dirtyGroups.size());
+    m_instancePreparationStats.gpuPathAvailable=true; m_instancePreparationStats.gpuPathUsedLastFrame=true;
+    m_instancePreparationStats.lastPath=2;
+    m_instancePreparationStats.instanceCount=static_cast<uint32_t>(total);
+    m_instancePreparationStats.dirtyGroupCount=m_gpuInstanceDirtyGroupCount;
+    m_instancePreparationStats.uploadBytes=total*sizeof(VulkanRT::GpuTLASInstanceSource);
+    m_instancePreparationStats.cpuPrepareMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+    return true;
+}
+
+void VulkanBackendAdapter::recordGpuInstancePrepass(VkCommandBuffer cmd,uint32_t frameSlot){
+    if(!m_gpuInstanceUpdatePending||!m_device) return;
+    if(m_device->recordGpuTLASUpdate(cmd,frameSlot,m_pendingGpuInstanceSources)){
+        ++m_instancePreparationStats.gpuDispatches;
+        m_gpuInstanceUpdatePending=false;
+    }else{
+        ++m_instancePreparationStats.cpuFallbacks;
+    }
+}
+
+void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) {
     if (!m_device || !m_device->isInitialized()) return;
     if (objects.empty()) return;
 
@@ -13844,27 +14253,69 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
     const auto& scatterGroups = InstanceManager::getInstance().getGroups();
     std::unordered_map<int, const InstanceGroup*> scatterGroupsById;
+    std::unordered_set<int> dirtyScatterGroups;
     scatterGroupsById.reserve(scatterGroups.size());
+    dirtyScatterGroups.reserve(scatterGroups.size());
     for (const auto& group : scatterGroups) {
         if (!group.instances.empty()) {
             scatterGroupsById.emplace(group.id, &group);
+            const auto revisionIt = m_scatterTransformRevisions.find(group.id);
+            if (group.transient || revisionIt == m_scatterTransformRevisions.end() ||
+                revisionIt->second != group.transform_revision) {
+                dirtyScatterGroups.emplace(group.id);
+            }
         }
     }
 
-    auto applyScatterTransforms = [&scatterGroupsById](std::vector<VulkanRT::TLASInstance>& instances) {
+    // Fast biome path: when only scatter transforms moved, keep the CPU TLAS
+    // mirror untouched and let the async trace prepass generate native Vulkan
+    // instances directly from TRS. Ordinary scene-object motion still uses the
+    // conservative CPU path below. Foam deliberately keeps its full-build path
+    // because persistent refits degrade its highly chaotic BVH.
+    bool regularObjectChanged=false;
+    if(!dirtyScatterGroups.empty() && !foamPresent && !m_instance_sync_cache.empty()){
+        for(const auto& item:m_instance_sync_cache){
+            if(!item.representative_hittable||item.instance_id<0||item.instance_id>=static_cast<int>(m_vkInstances.size())) continue;
+            Matrix4x4 live; bool valid=false;
+            if(auto tri=std::dynamic_pointer_cast<Triangle>(item.representative_hittable)){live=tri->getTransformMatrix();valid=true;}
+            else if(auto inst=std::dynamic_pointer_cast<HittableInstance>(item.representative_hittable)){live=inst->transform;valid=true;}
+            else if(auto tm=std::dynamic_pointer_cast<TriangleMesh>(item.representative_hittable)){if(tm->transform){live=tm->transform->getFinal();valid=true;}}
+            if(valid && !(live==m_vkInstances[item.instance_id].transform)){regularObjectChanged=true;break;}
+        }
+        if(!regularObjectChanged && queueGpuScatterInstanceUpdate(dirtyScatterGroups)){
+            for(const int id:dirtyScatterGroups){auto it=scatterGroupsById.find(id);if(it!=scatterGroupsById.end())m_scatterTransformRevisions[id]=it->second->transform_revision;}
+            if(!m_rasterInstances.empty()&&shouldUseInteractiveViewport()) syncRasterInstanceTransforms(objects);
+            m_gpuInstanceCpuMirrorStale=true;
+            resetAccumulation();
+            return;
+        }
+    }
+    if(m_gpuInstanceCpuMirrorStale){
+        for(const auto& entry:scatterGroupsById) dirtyScatterGroups.emplace(entry.first);
+    }
+    if(!dirtyScatterGroups.empty()){
+        m_instancePreparationStats.gpuPathUsedLastFrame=false;
+        m_instancePreparationStats.lastPath=0;
+        m_instancePreparationStats.dirtyGroupCount=static_cast<uint32_t>(dirtyScatterGroups.size());
+        ++m_instancePreparationStats.cpuFallbacks;
+    }
+
+    auto applyScatterTransforms = [&scatterGroupsById, &dirtyScatterGroups](std::vector<VulkanRT::TLASInstance>& instances) {
+        if (dirtyScatterGroups.empty()) return;
         constexpr size_t kParallelThreshold = 2048;
         unsigned threads = std::thread::hardware_concurrency();
         if (threads == 0) threads = 4;
 
-        auto updateRange = [&instances, &scatterGroupsById](size_t start, size_t end) {
+        auto updateRange = [&instances, &scatterGroupsById, &dirtyScatterGroups](size_t start, size_t end) {
             for (size_t i = start; i < end; ++i) {
                 auto& vi = instances[i];
                 if (vi.scatterGroupId < 0 || vi.scatterInstanceIndex == UINT32_MAX) continue;
+                if (dirtyScatterGroups.find(vi.scatterGroupId) == dirtyScatterGroups.end()) continue;
                 auto groupIt = scatterGroupsById.find(vi.scatterGroupId);
                 if (groupIt == scatterGroupsById.end()) continue;
                 const auto* group = groupIt->second;
                 if (vi.scatterInstanceIndex >= group->instances.size()) continue;
-                vi.transform = group->instances[vi.scatterInstanceIndex].toMatrix();
+                vi.transform = group->instances[vi.scatterInstanceIndex].toMatrix() * vi.scatterSourceTransform;
                 if (isUsableTLASInstanceTransform(vi.transform)) {
                     vi.mask = group->transient ? 0x04 : 0xFF;
                 } else {
@@ -13894,10 +14345,20 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
         for (auto& f : futures) f.get();
     };
 
+    auto commitScatterRevisions = [this, &scatterGroupsById, &dirtyScatterGroups]() {
+        for (const int groupId : dirtyScatterGroups) {
+            const auto it = scatterGroupsById.find(groupId);
+            if (it != scatterGroupsById.end()) {
+                m_scatterTransformRevisions[groupId] = it->second->transform_revision;
+            }
+        }
+    };
+
     if (m_instance_sync_cache.empty() || m_instanceSources.size() != m_vkInstances.size()) {
         // Fallback to a conservative rebuild of full TLAS if mapping missing
         std::vector<VulkanRT::TLASInstance> updatedInstances = m_vkInstances;
         applyScatterTransforms(updatedInstances);
+        commitScatterRevisions();
         // Try to rebuild order by scanning objects (fallback behavior)
         for (const auto& obj : objects) {
             if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
@@ -13940,6 +14401,8 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
         if (transform_changed || data_changed) {
             m_vkInstances = updatedInstances;
+            m_gpuInstanceCpuMirrorStale=false;
+            m_gpuInstanceUpdatePending=false;
 
             // [VULKAN] Wait for device to finish any pending ray tracing before modifying AS
             m_device->waitIdle();
@@ -13948,8 +14411,10 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
             if (data_changed) {
                 // update instance SSBO (Binding 5)
+                // MSF mask indices must be current before this upload.
+                refreshMaterialStateFieldInstances();
                 std::vector<VulkanRT::VkInstanceData> instData;
-                for (const auto& vi : m_vkInstances) { VulkanRT::VkInstanceData d; d.materialIndex = vi.materialIndex; d.blasIndex = vi.blasIndex; instData.push_back(d); }
+                for (const auto& vi : m_vkInstances) { VulkanRT::VkInstanceData d; d.materialIndex = vi.materialIndex; d.blasIndex = vi.blasIndex; d.msfCharTex = vi.msfCharTex; d.msfCharPacked = vi.msfCharPacked; instData.push_back(d); }
                 if (m_device->m_instanceDataBuffer.buffer) m_device->destroyBuffer(m_device->m_instanceDataBuffer);
                 ::VulkanRT::BufferCreateInfo ci; ci.size = (uint64_t)instData.size() * sizeof(::VulkanRT::VkInstanceData); ci.usage = (::VulkanRT::BufferUsage)((uint32_t)::VulkanRT::BufferUsage::STORAGE | (uint32_t)::VulkanRT::BufferUsage::TRANSFER_DST); ci.location = ::VulkanRT::MemoryLocation::CPU_TO_GPU; ci.initialData = instData.data(); m_device->m_instanceDataBuffer = m_device->createBuffer(ci);
                 if (m_device->m_rtDescriptorSet != VK_NULL_HANDLE) { VkDescriptorBufferInfo instInfo{}; instInfo.buffer = m_device->m_instanceDataBuffer.buffer; instInfo.offset = 0; instInfo.range = VK_WHOLE_SIZE; VkWriteDescriptorSet w5{}; w5.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w5.dstSet = m_device->m_rtDescriptorSet; w5.dstBinding = 5; w5.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w5.descriptorCount = 1; w5.pBufferInfo = &instInfo; vkUpdateDescriptorSets(m_device->m_device, 1, &w5, 0, nullptr); }
@@ -13966,6 +14431,7 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
     // Use cached mapping for efficient per-instance transform update
     std::vector<VulkanRT::TLASInstance> updated = m_vkInstances;
     applyScatterTransforms(updated);
+    commitScatterRevisions();
     for (const auto& item : m_instance_sync_cache) {
         if (!item.representative_hittable) continue;
         Matrix4x4 m;
@@ -14015,6 +14481,8 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
     if (transform_changed || data_changed) {
         m_vkInstances = updated;
+        m_gpuInstanceCpuMirrorStale=false;
+        m_gpuInstanceUpdatePending=false;
 
         // [VULKAN] Must wait idle before modifying AS that is actively being traced
         m_device->waitIdle();
@@ -14027,8 +14495,10 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
         if (data_changed) {
             // update instance SSBO (Binding 5)
+            // MSF mask indices must be current before this upload.
+            refreshMaterialStateFieldInstances();
             std::vector<VulkanRT::VkInstanceData> instData;
-            for (const auto& vi : m_vkInstances) { VulkanRT::VkInstanceData d; d.materialIndex = vi.materialIndex; d.blasIndex = vi.blasIndex; instData.push_back(d); }
+            for (const auto& vi : m_vkInstances) { VulkanRT::VkInstanceData d; d.materialIndex = vi.materialIndex; d.blasIndex = vi.blasIndex; d.msfCharTex = vi.msfCharTex; d.msfCharPacked = vi.msfCharPacked; instData.push_back(d); }
             if (m_device->m_instanceDataBuffer.buffer) m_device->destroyBuffer(m_device->m_instanceDataBuffer);
             ::VulkanRT::BufferCreateInfo ci; ci.size = (uint64_t)instData.size() * sizeof(::VulkanRT::VkInstanceData); ci.usage = (::VulkanRT::BufferUsage)((uint32_t)::VulkanRT::BufferUsage::STORAGE | (uint32_t)::VulkanRT::BufferUsage::TRANSFER_DST); ci.location = ::VulkanRT::MemoryLocation::CPU_TO_GPU; ci.initialData = instData.data(); m_device->m_instanceDataBuffer = m_device->createBuffer(ci);
             if (m_device->m_rtDescriptorSet != VK_NULL_HANDLE) { VkDescriptorBufferInfo instInfo{}; instInfo.buffer = m_device->m_instanceDataBuffer.buffer; instInfo.offset = 0; instInfo.range = VK_WHOLE_SIZE; VkWriteDescriptorSet w5{}; w5.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w5.dstSet = m_device->m_rtDescriptorSet; w5.dstBinding = 5; w5.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w5.descriptorCount = 1; w5.pBufferInfo = &instInfo; vkUpdateDescriptorSets(m_device->m_device, 1, &w5, 0, nullptr); }
@@ -14301,6 +14771,267 @@ void VulkanBackendAdapter::buildRasterGeometry(const std::vector<std::shared_ptr
     buildRasterGeometryImpl(objects);
 }
 
+void VulkanBackendAdapter::setRasterScatterPaintActive(bool active) {
+    if (m_rasterScatterPaintActive == active) return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_rasterScatterPaintActive = active;
+    if (!active) {
+        // Reclassify once at stroke commit. During the stroke existing hints
+        // remain stable and newly appended instances stay on the proxy path.
+        for (auto& instance : m_rasterInstances) {
+            if (instance.scatterGroupId >= 0) instance.scatterLodHint = -1;
+        }
+        for (auto& entry : m_rasterMeshes) {
+            if (entry.second.isScatterGroup || entry.second.isScatterProxy)
+                entry.second.visibleInstancesDirty = true;
+        }
+    }
+}
+
+bool VulkanBackendAdapter::refreshRasterScatterInstances() {
+    if (!m_device || !m_device->isInitialized() || m_rasterMeshes.empty()) return false;
+    const auto started = std::chrono::steady_clock::now();
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Instance buffers may still be referenced by the previous raster frame.
+    // This is one synchronization point, without destroying/re-uploading mesh data.
+    m_device->waitIdle();
+
+    auto lodKey = [](const RasterInstance& instance) {
+        // Transform-based identity survives erase compaction, unlike the dense
+        // scatterInstanceIndex which shifts when brush removal closes gaps.
+        return std::to_string(instance.scatterGroupId) + ":" + instance.meshKey + ":" +
+            std::to_string(instance.transform.m[0][3]) + ":" +
+            std::to_string(instance.transform.m[1][3]) + ":" +
+            std::to_string(instance.transform.m[2][3]);
+    };
+    std::unordered_map<std::string, int8_t> previousLod;
+    if (m_rasterScatterPaintActive) {
+        previousLod.reserve(m_rasterInstances.size());
+        for (const auto& instance : m_rasterInstances) {
+            if (instance.scatterGroupId < 0 || instance.scatterLodHint < 0) continue;
+            previousLod.emplace(lodKey(instance), instance.scatterLodHint);
+        }
+    }
+
+    m_rasterInstances.erase(
+        std::remove_if(m_rasterInstances.begin(), m_rasterInstances.end(),
+            [](const RasterInstance& instance) { return instance.scatterGroupId >= 0; }),
+        m_rasterInstances.end());
+
+    const auto& groups = InstanceManager::getInstance().getGroups();
+    size_t scatterCount = 0;
+    for (const auto& group : groups) scatterCount += group.instances.size();
+    m_rasterInstances.reserve(m_rasterInstances.size() + scatterCount);
+
+    for (const auto& group : groups) {
+        if (group.instances.empty() || group.sources.empty()) continue;
+        struct RasterSourceEntry { std::string meshKey; Matrix4x4 sourceToScatter = Matrix4x4::identity(); };
+        std::vector<std::vector<RasterSourceEntry>> sourceEntries(group.sources.size());
+        for (size_t sourceIndex = 0; sourceIndex < group.sources.size(); ++sourceIndex) {
+            const auto& source = group.sources[sourceIndex];
+            if (!source.flat_meshes.empty()) {
+                for (const auto& flatMesh : source.flat_meshes) {
+                    if (!flatMesh) continue;
+                    const std::string meshKey = "[Raster-Solo]-" + flatMesh->nodeName + "#mesh=" +
+                        std::to_string(reinterpret_cast<uintptr_t>(flatMesh.get()));
+                    if (m_rasterMeshes.find(meshKey) == m_rasterMeshes.end()) return false;
+                    const Matrix4x4 sourceWorld = flatMesh->transform ?
+                        flatMesh->transform->getFinal() : Matrix4x4::identity();
+                    sourceEntries[sourceIndex].push_back({meshKey,
+                        Matrix4x4::translation(-source.mesh_center) * sourceWorld});
+                }
+                continue;
+            }
+            const std::string prefix = "[Raster-Group]-" + std::to_string(group.id) + "-" +
+                std::to_string(sourceIndex) + "-";
+            for (const auto& entry : m_rasterMeshes) {
+                if (entry.first.rfind(prefix, 0) == 0) {
+                    sourceEntries[sourceIndex].push_back({entry.first, Matrix4x4::identity()});
+                    break;
+                }
+            }
+            if (sourceEntries[sourceIndex].empty() && group.sources[sourceIndex].sourceTriangleCount() > 0)
+                return false;
+        }
+
+        const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
+        for (size_t instanceIndex = 0; instanceIndex < group.instances.size(); ++instanceIndex) {
+            const auto& transform = group.instances[instanceIndex];
+            int sourceIndex = transform.source_index;
+            if (sourceIndex < 0 || sourceIndex >= static_cast<int>(sourceEntries.size())) sourceIndex = 0;
+            if (sourceIndex >= static_cast<int>(sourceEntries.size())) continue;
+            for (const auto& sourceEntry : sourceEntries[sourceIndex]) {
+                RasterInstance instance;
+                instance.meshKey = sourceEntry.meshKey;
+                instance.nodeName = nodePrefix + std::to_string(instanceIndex);
+                instance.transform = transform.toMatrix() * sourceEntry.sourceToScatter;
+                instance.mask = 0xFF;
+                instance.scatterGroupId = group.id;
+                instance.scatterInstanceIndex = static_cast<uint32_t>(instanceIndex);
+                instance.scatterSourceTransform = sourceEntry.sourceToScatter;
+                if (m_rasterScatterPaintActive) {
+                    const auto oldLod = previousLod.find(lodKey(instance));
+                    instance.scatterLodHint = oldLod != previousLod.end() ? oldLod->second : 1;
+                }
+                const auto bbox = m_rasterMeshBBoxes.find(instance.meshKey);
+                if (bbox != m_rasterMeshBBoxes.end()) {
+                    instance.localBBox = bbox->second;
+                    updateRasterInstanceWorldBBox(instance);
+                }
+                m_rasterInstances.push_back(std::move(instance));
+            }
+        }
+    }
+
+    for (auto& entry : m_rasterMeshes) entry.second.instanceIndices.clear();
+    for (uint32_t index = 0; index < static_cast<uint32_t>(m_rasterInstances.size()); ++index) {
+        const auto mesh = m_rasterMeshes.find(m_rasterInstances[index].meshKey);
+        if (mesh != m_rasterMeshes.end()) mesh->second.instanceIndices.push_back(index);
+    }
+    uint64_t uploadBytes = 0;
+    for (auto& entry : m_rasterMeshes) {
+        uploadRasterInstanceBuffer(entry.second);
+        uploadBytes += static_cast<uint64_t>(entry.second.instanceIndices.size()) * 16u * sizeof(float);
+    }
+
+    m_rasterNodeIndexInstanceCount = 0;
+    m_rasterGeometryDirty = false;
+    // Do NOT stamp m_rasterBuiltGeometryGeneration here. This refresh rebuilds ONLY
+    // the scatter instances; every base raster mesh is left exactly as the last full
+    // build produced it. Stamping the current generation claimed "a full raster build
+    // exists for this generation", so the next buildRasterGeometry() early-outed and
+    // silently dropped whatever else changed in the same generation — an imported
+    // object never appeared in Solid until an unrelated path forced a rebuild.
+    // The token means "generation of the last FULL build"; only a full build writes it.
+    m_interactiveViewport.dirty = true;
+    m_hasPresentedRenderedFrame = false;
+    m_lastCameraHash = 0;
+    m_instancePreparationStats.gpuPathAvailable = true;
+    m_instancePreparationStats.gpuPathUsedLastFrame = true;
+    m_instancePreparationStats.lastPath = 3;
+    m_instancePreparationStats.instanceCount = static_cast<uint32_t>(m_rasterInstances.size());
+    m_instancePreparationStats.uploadBytes = uploadBytes;
+    m_instancePreparationStats.cpuPrepareMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return true;
+}
+
+bool VulkanBackendAdapter::refreshRtScatterInstances() {
+    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT() ||
+        m_meshRegistry.empty() || m_instanceSources.size() != m_vkInstances.size()) return false;
+    const auto started = std::chrono::steady_clock::now();
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_device->waitIdle();
+
+    std::vector<VulkanRT::TLASInstance> retainedInstances;
+    std::vector<std::shared_ptr<Hittable>> retainedSources;
+    retainedInstances.reserve(m_vkInstances.size());
+    retainedSources.reserve(m_instanceSources.size());
+    for (size_t index = 0; index < m_vkInstances.size(); ++index) {
+        if (m_vkInstances[index].scatterGroupId >= 0) continue;
+        retainedInstances.push_back(m_vkInstances[index]);
+        retainedSources.push_back(m_instanceSources[index]);
+    }
+
+    struct SourceEntry {
+        uint32_t blas = UINT32_MAX;
+        uint32_t material = 0;
+        Matrix4x4 sourceToScatter = Matrix4x4::identity();
+    };
+    const auto& groups = InstanceManager::getInstance().getGroups();
+    for (const auto& group : groups) {
+        if (group.instances.empty() || group.sources.empty()) continue;
+        std::vector<std::vector<SourceEntry>> entries(group.sources.size());
+        for (size_t sourceIndex = 0; sourceIndex < group.sources.size(); ++sourceIndex) {
+            const auto& source = group.sources[sourceIndex];
+            if (!source.flat_meshes.empty()) {
+                for (const auto& mesh : source.flat_meshes) {
+                    if (!mesh || !mesh->geometry || mesh->geometry->indices.empty()) continue;
+                    const std::string key = "[DirectMesh]-" + mesh->nodeName + "-" +
+                        std::to_string(reinterpret_cast<uintptr_t>(mesh.get()));
+                    const auto found = m_meshRegistry.find(key);
+                    if (found == m_meshRegistry.end()) return false;
+                    SourceEntry entry;
+                    entry.blas = found->second;
+                    if (const uint16_t* materials = mesh->geometry->get_material_ids()) {
+                        const uint16_t material = materials[mesh->geometry->indices[0]];
+                        entry.material = material == MaterialManager::INVALID_MATERIAL_ID ? 0u : material;
+                    }
+                    const Matrix4x4 sourceWorld = mesh->transform ?
+                        mesh->transform->getFinal() : Matrix4x4::identity();
+                    entry.sourceToScatter = Matrix4x4::translation(-source.mesh_center) * sourceWorld;
+                    entries[sourceIndex].push_back(entry);
+                }
+            } else {
+                const auto* triangles = source.centered_triangles_ptr && !source.centered_triangles_ptr->empty()
+                    ? source.centered_triangles_ptr.get() : &source.triangles;
+                if (!triangles || triangles->empty()) continue;
+                const std::string key = "[InstGroup]-" + std::to_string(group.id) + "-" +
+                    std::to_string(sourceIndex) + "-" +
+                    std::to_string(reinterpret_cast<uintptr_t>(triangles)) + "-tris-" +
+                    std::to_string(triangles->size());
+                const auto found = m_meshRegistry.find(key);
+                if (found == m_meshRegistry.end()) return false;
+                SourceEntry entry;
+                entry.blas = found->second;
+                if ((*triangles)[0]) {
+                    const uint16_t material = (*triangles)[0]->getMaterialID();
+                    entry.material = material == MaterialManager::INVALID_MATERIAL_ID ? 0u : material;
+                }
+                entries[sourceIndex].push_back(entry);
+            }
+        }
+
+        for (size_t instanceIndex = 0; instanceIndex < group.instances.size(); ++instanceIndex) {
+            const auto& transform = group.instances[instanceIndex];
+            int sourceIndex = transform.source_index;
+            if (sourceIndex < 0 || sourceIndex >= static_cast<int>(entries.size())) sourceIndex = 0;
+            if (sourceIndex >= static_cast<int>(entries.size())) continue;
+            for (const auto& entry : entries[sourceIndex]) {
+                VulkanRT::TLASInstance instance;
+                instance.blasIndex = entry.blas;
+                instance.transform = transform.toMatrix() * entry.sourceToScatter;
+                instance.materialIndex = entry.material;
+                instance.mask = group.transient ? 0x04 : 0xFF;
+                instance.frontFaceCCW = true;
+                instance.scatterGroupId = group.id;
+                instance.scatterInstanceIndex = static_cast<uint32_t>(instanceIndex);
+                instance.scatterSourceTransform = entry.sourceToScatter;
+                retainedInstances.push_back(std::move(instance));
+                retainedSources.push_back(nullptr);
+            }
+        }
+    }
+
+    m_vkInstances = std::move(retainedInstances);
+    m_instanceSources = std::move(retainedSources);
+    std::vector<VulkanRT::TLASInstance> merged = m_vkInstances;
+    merged.insert(merged.end(), m_hairVkInstances.begin(), m_hairVkInstances.end());
+    VulkanRT::TLASCreateInfo createInfo;
+    createInfo.instances = merged;
+    createInfo.allowUpdate = true;
+    m_device->createTLAS(createInfo);
+    if (m_device->m_rtPipeline != VK_NULL_HANDLE) m_device->m_rtPipelineReady = true;
+    refreshVulkanGeometryDataBinding(m_device.get());
+    refreshMaterialStateFieldInstances();
+    refreshVulkanInstanceDataBinding(m_device.get(), m_vkInstances);
+    m_scatterTransformRevisions.clear();
+    for (const auto& group : groups) {
+        if (!group.instances.empty()) m_scatterTransformRevisions[group.id] = group.transform_revision;
+    }
+    m_gpuInstanceCpuMirrorStale = false;
+    m_topology_dirty = false;
+    m_instancePreparationStats.gpuPathAvailable = m_device->instancePrepareReady();
+    m_instancePreparationStats.gpuPathUsedLastFrame = true;
+    m_instancePreparationStats.lastPath = 1;
+    m_instancePreparationStats.instanceCount = static_cast<uint32_t>(merged.size());
+    m_instancePreparationStats.uploadBytes = merged.size() * sizeof(VulkanRT::TLASInstance);
+    m_instancePreparationStats.cpuPrepareMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    resetAccumulation();
+    return true;
+}
+
 void VulkanBackendAdapter::syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) {
     syncRasterInstanceTransformsImpl(objects);
 }
@@ -14428,12 +15159,16 @@ bool VulkanBackendAdapter::cloneRtObjectByNodeName(
     for (const auto& h : m_hairVkInstances) merged.push_back(h);
     m_device->updateTLAS(merged);
 
+    // MSF mask indices must be current before this upload.
+    refreshMaterialStateFieldInstances();
     std::vector<VulkanRT::VkInstanceData> instData;
     instData.reserve(m_vkInstances.size());
     for (const auto& vi : m_vkInstances) {
         VulkanRT::VkInstanceData d;
         d.materialIndex = vi.materialIndex;
         d.blasIndex = vi.blasIndex;
+        d.msfCharTex = vi.msfCharTex;
+        d.msfCharPacked = vi.msfCharPacked;
         instData.push_back(d);
     }
     if (m_device->m_instanceDataBuffer.buffer) {
@@ -15551,9 +16286,11 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
             : 1.0;
         const uint64_t adaptiveBudget = static_cast<uint64_t>(
             baseBudgetMillions * 1000.0 * 1000.0 * resolutionScale * rasterQualityScale * feedbackScale);
-        m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
-        if (!allowAdaptiveRasterBudget) {
-            m_rasterScatterBudgetScale = 1.0f;
+        if (!m_rasterScatterPaintActive) {
+            m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
+            if (!allowAdaptiveRasterBudget) {
+                m_rasterScatterBudgetScale = 1.0f;
+            }
         }
     }
 
@@ -16650,6 +17387,14 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
                 SCENE_LOG_ERROR("[Vulkan] Failed to create Hair Expand compute pipeline — using CPU hair path.");
             }
         }
+        if (std::filesystem::exists(shaderDir + "/instance_prepare.spv")) {
+            std::vector<std::uint32_t> instanceSPV = loadSPV(shaderDir + "/instance_prepare.spv");
+            if (m_device->createInstancePreparePipeline(instanceSPV)) {
+                SCENE_LOG_INFO("[Vulkan] GPU TLAS instance preparation pipeline ready.");
+            } else {
+                SCENE_LOG_WARN("[Vulkan] instance_prepare.spv failed; CPU TLAS fallback remains active.");
+            }
+        }
 
         // Load Tonemap Compute Shader (optional — when present, render path skips the
         // per-frame CPU Reinhard+sRGB loop and reads back 1/4 the bytes).
@@ -16878,6 +17623,25 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     // pad0 repurposed as active volume count — closesthit.rchit reads int(cam.pad0) to loop over
     // the VolumeBuffer SSBO (binding 9) for volumetric shadow transmittance computation.
     pushConst.pad0 = float(m_device->m_volumeCount);
+    // ★ This is the EXACT pair the shader's black-mask guard compares. volIdx comes
+    // from the TLAS customIndex (range [0, m_tlasVolumeSlotCount)); volCount is the
+    // value written right here. When volCount < slot count, every volume whose baked
+    // customIndex sits above the published count fails `volIdx >= volCount` and its
+    // AABB passes the ray straight to the far side of the box — the box contents
+    // (including a fluid SDF surface inside it) are skipped, which reads on screen as
+    // a hard-edged black mask occluding what it actually skipped over.
+    // The existing [VolumeSSBO] count tripwire checks instances.size() at PUBLISH
+    // time and is skipped entirely when m_tlasVolumeSlotCount == 0; this one checks
+    // the value the SHADER receives, on the frame it receives it.
+    if (m_tlasVolumeSlotCount != 0 &&
+        m_device->m_volumeCount < m_tlasVolumeSlotCount) {
+        SCENE_LOG_ON_CHANGE("volguard.count",
+            (long long)m_tlasVolumeSlotCount * 65536ll + (long long)m_device->m_volumeCount,
+            "[VolumeGuard] shader volCount=" + std::to_string(m_device->m_volumeCount) +
+            " < TLAS volume slots=" + std::to_string(m_tlasVolumeSlotCount) +
+            " — volumes with customIndex >= volCount will pass rays through their whole "
+            "AABB (black mask over skipped contents).");
+    }
 
     // Keep water time on the same deterministic timeline contract as CPU/OptiX.
     // Falling back to wall-clock time makes Vulkan RT water drift out of phase
@@ -17176,14 +17940,21 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             // trace command buffer (see recordHairPrepass), so those updates ride the
             // ping-pong fence instead of a separate vkDeviceWaitIdle.
             std::function<void(VkCommandBuffer)> hairPrepass;
-            if (hairGpuPrepassPending()) {
+            const bool needsHairPrepass=hairGpuPrepassPending();
+            const bool needsInstancePrepass=m_gpuInstanceUpdatePending;
+            if (needsHairPrepass) {
                 // The hair BLAS is single-copy, so the OTHER slot's in-flight trace must
                 // finish before we overwrite it this frame. Waiting the consume slot
                 // here (it is the only other in-flight slot) costs the GPU-GPU cross-slot
                 // overlap on hair-dirty frames only; the CPU-GPU overlap (guide prep vs GPU
                 // work) is untouched, and static frames keep full ping-pong.
                 if (m_tonemappedSlotInFlight[consumeSlot]) m_device->waitFrameSlot(consumeSlot);
-                hairPrepass = [this](VkCommandBuffer cmd) { recordHairPrepass(cmd); };
+            }
+            if(needsHairPrepass||needsInstancePrepass){
+                hairPrepass=[this,submitSlot,needsHairPrepass,needsInstancePrepass](VkCommandBuffer cmd){
+                    if(needsHairPrepass) recordHairPrepass(cmd);
+                    if(needsInstancePrepass) recordGpuInstancePrepass(cmd,submitSlot);
+                };
             }
 
             // 1. Submit current frame's work asynchronously (no host wait).
@@ -18383,595 +19154,9 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     resetAccumulation();
 }
 
-void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vols) {
-    if (!m_device) return;
-    // Sequence playback can upload a new NanoVDB frame while the viewport
-    // render thread is traversing the previous frame's device address. Match
-    // material-program updates and serialize the complete VDB resource update
-    // against renderProgressiveImpl.
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    bool gridUploadSynchronized = false;
-    bool volumeContentChanged = false;
-    auto synchronizeGridUpload = [&]() {
-        if (!gridUploadSynchronized) {
-            // CPU_TO_GPU NanoVDB buffers expose stable device addresses and are
-            // read directly by the RT shader. Rewriting one while an earlier
-            // dispatch is still traversing it can expose a partially updated
-            // tree to the driver. One queue-idle covers all density/temperature
-            // uploads in this synchronization batch.
-            m_device->waitIdle();
-            gridUploadSynchronized = true;
-        }
-    };
-    if (vols.empty()) {
-        // No active volumes: release any stale cached VDB buffers immediately.
-        if (!m_vdbBuffers.empty() || !m_vdbTempBuffers.empty()) {
-            m_device->waitIdle();
-        }
-        for (auto& [id, buf] : m_vdbBuffers) {
-            (void)id;
-            if (buf.buffer) m_device->destroyBuffer(buf);
-        }
-        m_vdbBuffers.clear();
-        m_vdbUploadedVersions.clear();
-        for (auto& [id, buf] : m_vdbTempBuffers) {
-            (void)id;
-            if (buf.buffer) m_device->destroyBuffer(buf);
-        }
-        m_vdbTempBuffers.clear();
-        m_vdbTempUploadedVersions.clear();
-        // ★INVARIANT: the SSBO length is defined by the TLAS mapping, NOT by how
-        // many volumes happen to carry content this frame. m_orderedVDBInstances
-        // mirrors the TLAS instance list and only updateGeometry() may rewrite it.
-        //
-        // This branch used to clear that mapping and publish count 0, which broke
-        // the invariant in two ways:
-        //  1. The TLAS still holds every volume instance, so each one's baked
-        //     customIndex is now >= volCount. The closest-hit's range guard then
-        //     fired for every volume box at once. (It passes the ray through today
-        //     rather than terminating it, so the symptom is invisible volumes
-        //     instead of black boxes — still wrong.)
-        //  2. Worse and quieter: with the mapping erased, the NEXT non-empty frame
-        //     took the "no geometry build yet" fallback below and built the SSBO in
-        //     PACKET order instead of TLAS order. Slot i then describes some other
-        //     volume than customIndex i — a coincident gas/liquid pair reads each
-        //     other's grid and shader parameters.
-        //
-        // A frame with no content is expressed the way the rest of the system
-        // expresses it: every slot present, every slot is_active = 0. The
-        // intersection shader rejects those AABBs before reportIntersectionEXT, so
-        // they cost nothing and reveal the scene behind them.
-        if (m_orderedVDBInstances.empty()) {
-            m_device->updateVolumeBuffer(nullptr, 0, 0);
-        } else {
-            std::vector<VulkanRT::VkVolumeInstance> inactive(m_orderedVDBInstances.size());
-            std::memset(inactive.data(), 0,
-                        inactive.size() * sizeof(VulkanRT::VkVolumeInstance));
-            m_device->updateVolumeBuffer(
-                inactive.data(),
-                inactive.size() * sizeof(VulkanRT::VkVolumeInstance),
-                (uint32_t)inactive.size());
-        }
-        m_volumeTemporal.invalidate();
-        return;
-    }
-
-    // Build id->source map for fast O(1) lookup. Procedural volumes do not have
-    // stable VDB ids (sky cloud uses -1), so keep them out of the id map; a
-    // shared -1 key can corrupt the TLAS customIndex -> SSBO slot mapping when
-    // Nishita sky clouds coexist with live grid-domain volumes.
-    std::unordered_map<int, const GpuVDBVolume*> volByID;
-    std::vector<const GpuVDBVolume*> proceduralVols;
-    proceduralVols.reserve(vols.size());
-    for (const auto& v : vols) {
-        if (v.vdb_id >= 0) {
-            volByID[v.vdb_id] = &v;
-        } else if (v.source_type == 3) {
-            proceduralVols.push_back(&v);
-        }
-    }
-
-    // Release cached buffers for volumes that no longer exist in the scene.
-    bool destroyedAny = false;
-    for (auto it = m_vdbBuffers.begin(); it != m_vdbBuffers.end(); ) {
-        if (volByID.find(it->first) == volByID.end()) {
-            if (!destroyedAny) {
-                m_device->waitIdle();
-                destroyedAny = true;
-            }
-            if (it->second.buffer) m_device->destroyBuffer(it->second);
-            m_vdbUploadedVersions.erase(it->first);
-            it = m_vdbBuffers.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (auto it = m_vdbTempBuffers.begin(); it != m_vdbTempBuffers.end(); ) {
-        if (volByID.find(it->first) == volByID.end()) {
-            if (!destroyedAny) {
-                m_device->waitIdle();
-                destroyedAny = true;
-            }
-            if (it->second.buffer) m_device->destroyBuffer(it->second);
-            m_vdbTempUploadedVersions.erase(it->first);
-            it = m_vdbTempBuffers.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    // ORDERING FIX: SSBO slot i must correspond to the unified volume with TLAS customIndex==i.
-    // After updateGeometry(), m_orderedVDBInstances records VDBs in TLAS traversal order.
-    // If BVH reorders them vs. scene.vdb_volumes, this ensures shader lookups are correct.
-    std::vector<const GpuVDBVolume*> orderedVols;
-    if (!m_orderedVDBInstances.empty()) {
-        std::size_t proceduralIndex = 0;
-        for (const auto& hittable : m_orderedVDBInstances) {
-            auto vdb = std::dynamic_pointer_cast<VDBVolume>(hittable);
-            int volume_id = -1;
-            if (vdb) {
-                volume_id = vdb->getVDBVolumeID();
-                if (volume_id < 0 && vdb->isProceduralVolume()) {
-                    orderedVols.push_back(proceduralIndex < proceduralVols.size()
-                        ? proceduralVols[proceduralIndex++]
-                        : nullptr);
-                    continue;
-                }
-            } else if (auto gas = std::dynamic_pointer_cast<GasVolume>(hittable)) {
-                volume_id = gas->live_vdb_id;
-            }
-            if (volume_id < 0 && !(vdb && vdb->isProceduralVolume())) { orderedVols.push_back(nullptr); continue; }
-            auto it = volByID.find(volume_id);
-            orderedVols.push_back(it != volByID.end() ? it->second : nullptr);
-        }
-    } else {
-        // Fallback: no TLAS volume instances exist yet (first sync of a session,
-        // before updateGeometry has ever run). Packet order is arbitrary but
-        // harmless HERE precisely because nothing indexes this buffer yet — there
-        // is no customIndex to disagree with. It is only safe under that condition,
-        // so nothing may clear m_orderedVDBInstances while the TLAS still holds
-        // volume instances; see the invariant note in the vols.empty() branch.
-        for (const auto& v : vols) orderedVols.push_back(&v);
-    }
-    // Never leave the published count disagreeing with the buffer contents: if
-    // there is nothing to publish, publish an empty buffer rather than only
-    // zeroing the count and leaving the previous frame's data resident.
-    if (orderedVols.empty()) {
-        m_device->updateVolumeBuffer(nullptr, 0, 0);
-        return;
-    }
-
-    // Convert GpuVDBVolume (OptiX/CUDA struct) → VkVolumeInstance (Vulkan SSBO)
-    std::vector<VulkanRT::VkVolumeInstance> instances(orderedVols.size());
-    auto& vdbManager = VDBVolumeManager::getInstance();
-    auto hostGridLease = vdbManager.lockHostGridAccess();
-    for (size_t i = 0; i < orderedVols.size(); i++) {
-        auto& dst = instances[i];
-        memset(&dst, 0, sizeof(dst));
-        dst.is_active = 0;
-        if (!orderedVols[i]) continue; // deleted/missing → leave inactive slot
-        const auto& src = *orderedVols[i];
-        const bool liveDenseGas =
-            src.dense_fields_valid != 0 &&
-            src.dense_density_address != 0 &&
-            src.dense_resolution_x > 0 &&
-            src.dense_resolution_y > 0 &&
-            src.dense_resolution_z > 0;
-
-        // Copy original transforms directly (preserves rotation)
-        for (int i = 0; i < 12; ++i) {
-            dst.transform[i]     = src.transform[i];
-            dst.inv_transform[i] = src.inv_transform[i];
-        }
-        
-        // Pivot offset for OptiX parity
-        dst.pivot_offset[0] = src.pivot_offset[0];
-        dst.pivot_offset[1] = src.pivot_offset[1];
-        dst.pivot_offset[2] = src.pivot_offset[2];
-        dst.source_type = src.source_type;
-        // Isosurface IOR (source_type==4) rides _ext_reserved[0], roughness
-        // rides _ext_reserved[1] — keeps the 512-byte VkVolumeInstance layout
-        // unchanged (reserved tail slots).
-        dst._ext_reserved[0] = (src.ior > 1.0f) ? src.ior : 1.33f;
-        dst._ext_reserved[1] = src.surface_roughness;
-        dst._ext_reserved[2] = src.surface_foam;
-        // Particle-foam look for the SurfaceSDF single-volume path (temperature
-        // channel): tint in [3..5], extinction multiplier in [6].
-        dst._ext_reserved[3] = src.foam_color.x;
-        dst._ext_reserved[4] = src.foam_color.y;
-        dst._ext_reserved[5] = src.foam_color.z;
-        dst._ext_reserved[6] = src.foam_opacity;
-        dst._ext_reserved[7] = src.density_noise_enabled ? 1.0f : 0.0f;
-        dst._ext_reserved[8] = src.density_noise_scale;
-        dst._ext_reserved[9] = src.density_noise_strength;
-        dst._ext_reserved[10] = static_cast<float>(src.density_noise_detail);
-        dst._ext_reserved[11] = static_cast<float>(src.density_noise_seed);
-        if (liveDenseGas) {
-            // source_type 5 reuses the volume ABI's reserved slots:
-            // [0..2] dense resolution, [3..5] dense world/grid origin.
-            dst.source_type = 5;
-            dst._ext_reserved[0] = static_cast<float>(src.dense_resolution_x);
-            dst._ext_reserved[1] = static_cast<float>(src.dense_resolution_y);
-            dst._ext_reserved[2] = static_cast<float>(src.dense_resolution_z);
-            // Dense simulation metadata is published in world space, whereas
-            // closest-hit samples after applying inv_transform.
-            dst._ext_reserved[3] =
-                src.inv_transform[0] * src.dense_origin.x +
-                src.inv_transform[1] * src.dense_origin.y +
-                src.inv_transform[2] * src.dense_origin.z +
-                src.inv_transform[3];
-            dst._ext_reserved[4] =
-                src.inv_transform[4] * src.dense_origin.x +
-                src.inv_transform[5] * src.dense_origin.y +
-                src.inv_transform[6] * src.dense_origin.z +
-                src.inv_transform[7];
-            dst._ext_reserved[5] =
-                src.inv_transform[8] * src.dense_origin.x +
-                src.inv_transform[9] * src.dense_origin.y +
-                src.inv_transform[10] * src.dense_origin.z +
-                src.inv_transform[11];
-        }
-        // Surface SDF owns slot 6 for foam opacity. Other volume types reuse
-        // that otherwise-free slot for the authored minimum emission
-        // temperature, avoiding a VkVolumeInstance ABI/size change.
-        if (dst.source_type != 4) {
-            dst._ext_reserved[6] = src.emission_pad;
-        }
-        dst.cloud_coverage = src.cloud_coverage;
-        dst.cloud_detail = src.cloud_detail;
-        dst.cloud_erosion = src.cloud_erosion;
-        dst.cloud_base_scale = src.cloud_base_scale;
-        dst.cloud_edge_fade = src.cloud_edge_fade;
-        dst.cloud_offset_x = src.cloud_offset_x;
-        dst.cloud_offset_z = src.cloud_offset_z;
-        dst.cloud_seed = src.cloud_seed;
-
-        // VDB native (original file) world-space AABB — used by the shader to remap
-        // localPos [-0.5,0.5] → VDB world space before NanoVDB index lookup.
-        // Must be local_bbox (not world_bbox) so gizmo moves don't corrupt the mapping.
-        dst.aabb_min[0] = src.local_bbox_min.x; dst.aabb_min[1] = src.local_bbox_min.y; dst.aabb_min[2] = src.local_bbox_min.z;
-        dst.aabb_max[0] = src.local_bbox_max.x; dst.aabb_max[1] = src.local_bbox_max.y; dst.aabb_max[2] = src.local_bbox_max.z;
-
-        // Density
-        dst.density_multiplier = src.density_multiplier;
-        dst.density_remap_low = src.density_remap_low;
-        dst.density_remap_high = src.density_remap_high;
-        dst.noise_scale = 1.0f;
-        // Apply the authored density cutoff consistently on dense Vulkan,
-        // NanoVDB Vulkan, OptiX and CPU. A Vulkan-only 1e-5 override retained a
-        // broad low-density absorption skirt which ended abruptly at the active
-        // AABB/topology boundary and looked like an aerial-perspective shadow.
-        dst._reserved[0] =
-            (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
-        // 0 means no graph; otherwise material-table index + 1. Stored as an
-        // exact float (material counts are tiny relative to float integer range)
-        // to preserve the fixed 512-byte volume ABI.
-        dst._reserved[1] = src.material_program_index >= 0
-            ? static_cast<float>(src.material_program_index + 1) : 0.0f;
-        dst.shadow_stride = std::max(1, std::min(src.shadow_stride, 16));
-        // Sync NanoVDB Host Buffer to Vulkan Device Buffer
-        dst.volume_type = liveDenseGas ? 4 : 2;
-        dst.vdb_grid_address =
-            liveDenseGas ? src.dense_density_address : 0;
-        dst.vdb_temp_address =
-            liveDenseGas ? src.dense_temperature_address : 0;
-        
-        int vdb_id = src.vdb_id;
-        if (!liveDenseGas && vdb_id >= 0) {
-            void* hostGrid = vdbManager.getHostGrid(vdb_id);
-            const size_t gridSize = vdbManager.getHostGridSize(vdb_id);
-            const uint32_t currentVersion =
-                vdbManager.getContentVersion(vdb_id);
-
-            if (hostGrid && gridSize > 0) {
-                auto it = m_vdbBuffers.find(vdb_id);
-                bool needsUpload = false;
-                
-                // Over-allocate by 50% to absorb frame-to-frame NanoVDB growth.
-                // CPU_TO_GPU (host-visible, device-local BAR) memory lets uploadBuffer
-                // use vkMapMemory + memcpy directly — no staging buffer, no command
-                // buffer submit, no vkWaitForFences. This eliminates the per-frame
-                // GPU stall that was blocking fluid sim playback. NanoVDB data changes
-                // every frame anyway, so device-local-only has no advantage here.
-                const size_t allocSize = gridSize + (gridSize / 2);
-                if (it == m_vdbBuffers.end() || it->second.size < gridSize) {
-                    if (it != m_vdbBuffers.end()) {
-                        m_device->waitIdle();
-                        m_device->destroyBuffer(it->second);
-                    }
-                    VulkanRT::BufferCreateInfo ci;
-                    ci.size = allocSize;
-                    ci.usage = (VulkanRT::BufferUsage)(
-                        (uint32_t)VulkanRT::BufferUsage::STORAGE |
-                        (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
-                        0x0100 /* VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT - custom */);
-                    ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
-                    VulkanRT::BufferHandle buf = m_device->createBuffer(ci);
-                    m_vdbBuffers[vdb_id] = buf;
-                    it = m_vdbBuffers.find(vdb_id);
-                    needsUpload = true;
-                }
-                
-                auto versionIt = m_vdbUploadedVersions.find(vdb_id);
-                if (versionIt == m_vdbUploadedVersions.end() ||
-                    versionIt->second != currentVersion) {
-                    needsUpload = true;
-                    volumeContentChanged = true;
-                }
-                if (it != m_vdbBuffers.end() && it->second.buffer) {
-                    if (needsUpload) {
-                        synchronizeGridUpload();
-                        m_device->uploadBuffer(it->second, hostGrid, gridSize);
-                        m_vdbUploadedVersions[vdb_id] = currentVersion;
-                    }
-                    dst.vdb_grid_address = it->second.deviceAddress;
-                }
-            }
-
-            // Upload temperature NanoVDB grid for blackbody/color-ramp emission (mode 2)
-            void* hostTempGrid =
-                vdbManager.getHostTemperatureGrid(vdb_id);
-            const size_t tempGridSize =
-                vdbManager.getHostTemperatureGridSize(vdb_id);
-            if (hostTempGrid && tempGridSize > 0) {
-                auto it2 = m_vdbTempBuffers.find(vdb_id);
-                bool needsTempUpload = false;
-                
-                const size_t allocTempSize = tempGridSize + (tempGridSize / 2);
-                if (it2 == m_vdbTempBuffers.end() || it2->second.size < tempGridSize) {
-                    if (it2 != m_vdbTempBuffers.end()) {
-                        m_device->waitIdle();
-                        m_device->destroyBuffer(it2->second);
-                    }
-                    VulkanRT::BufferCreateInfo ci2;
-                    ci2.size = allocTempSize;
-                    ci2.usage = (VulkanRT::BufferUsage)(
-                        (uint32_t)VulkanRT::BufferUsage::STORAGE |
-                        (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
-                        0x0100);
-                    ci2.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
-                    m_vdbTempBuffers[vdb_id] = m_device->createBuffer(ci2);
-                    it2 = m_vdbTempBuffers.find(vdb_id);
-                    needsTempUpload = true;
-                }
-                
-                // Check temperature version
-                auto tempVersionIt = m_vdbTempUploadedVersions.find(vdb_id);
-                if (tempVersionIt == m_vdbTempUploadedVersions.end() || tempVersionIt->second != currentVersion) {
-                    needsTempUpload = true;
-                }
-                
-                if (it2 != m_vdbTempBuffers.end() && it2->second.buffer) {
-                    if (needsTempUpload) {
-                        synchronizeGridUpload();
-                        m_device->uploadBuffer(
-                            it2->second, hostTempGrid, tempGridSize);
-                        m_vdbTempUploadedVersions[vdb_id] = currentVersion;
-                    }
-                    dst.vdb_temp_address = it2->second.deviceAddress;
-                }
-            } else {
-                // The new sequence frame has no temperature channel. Do not
-                // retain a device address from the previous frame.
-                auto staleTemp = m_vdbTempBuffers.find(vdb_id);
-                if (staleTemp != m_vdbTempBuffers.end()) {
-                    synchronizeGridUpload();
-                    if (staleTemp->second.buffer)
-                        m_device->destroyBuffer(staleTemp->second);
-                    m_vdbTempBuffers.erase(staleTemp);
-                }
-                m_vdbTempUploadedVersions.erase(vdb_id);
-            }
-            if (dst.vdb_temp_address == 0) {
-                const auto existingTemp = m_vdbTempBuffers.find(vdb_id);
-                if (existingTemp != m_vdbTempBuffers.end() &&
-                    existingTemp->second.buffer) {
-                    dst.vdb_temp_address = existingTemp->second.deviceAddress;
-                }
-            }
-        }
-
-        // Scattering
-        dst.scatter_color[0] = src.scatter_color.x;
-        dst.scatter_color[1] = src.scatter_color.y;
-        dst.scatter_color[2] = src.scatter_color.z;
-        dst.scatter_coefficient = src.scatter_coefficient;
-        dst.scatter_anisotropy = src.scatter_anisotropy;
-        dst.scatter_anisotropy_back = src.scatter_anisotropy_back;
-        dst.scatter_lobe_mix = src.scatter_lobe_mix;
-        dst.scatter_multi = src.scatter_multi;
-
-        // Absorption
-        dst.absorption_color[0] = src.absorption_color.x;
-        dst.absorption_color[1] = src.absorption_color.y;
-        dst.absorption_color[2] = src.absorption_color.z;
-        dst.absorption_coefficient = src.absorption_coefficient;
-
-        // Emission
-        dst.emission_color[0] = src.emission_color.x;
-        dst.emission_color[1] = src.emission_color.y;
-        dst.emission_color[2] = src.emission_color.z;
-        dst.emission_intensity = src.emission_intensity;
-
-        // Emission mode + blackbody/color-ramp (matches shader extension block)
-        dst.emission_mode       = src.emission_mode;
-        dst.temperature_scale   = src.temperature_scale;
-        dst.blackbody_intensity = src.blackbody_intensity;
-        dst.max_temperature     = src.max_temperature;
-        dst.color_ramp_enabled  = src.color_ramp_enabled;
-        dst.ramp_stop_count     = std::min(src.ramp_stop_count, 8);
-        for (int j = 0; j < dst.ramp_stop_count; ++j) {
-            dst.ramp_positions[j] = src.ramp_positions[j];
-            dst.ramp_colors_r[j]  = src.ramp_colors[j].x;
-            dst.ramp_colors_g[j]  = src.ramp_colors[j].y;
-            dst.ramp_colors_b[j]  = src.ramp_colors[j].z;
-        }
-        // OptiX parity: if temperature grid is missing in blackbody/channel mode,
-        // fall back to density grid as a scalar source for ramp/blackbody mapping.
-        if (dst.vdb_temp_address == 0 && dst.vdb_grid_address != 0 && dst.emission_mode >= 2) {
-            dst.vdb_temp_address = dst.vdb_grid_address;
-        }
-
-        // Ray march
-        dst.step_size = src.step_size;
-        dst.max_steps = src.max_steps;
-        dst.shadow_steps = src.shadow_steps;
-        dst.shadow_strength = src.shadow_strength;
-
-        // Flags
-        // volume_type = 3 is an explicit procedural cloud source. Otherwise use
-        // NanoVDB when uploaded, with the existing procedural-noise fallback.
-        dst.volume_type = liveDenseGas
-            ? 4
-            : ((src.source_type == 3)
-                ? 3
-                : ((dst.vdb_grid_address != 0) ? 2 : 1));
-        dst.is_active = 1;
-        dst.voxel_size = src.voxel_size;
-    }
-
-    // ★Contract check (see m_orderedVDBInstances in the header). The shader indexes
-    // this buffer with a customIndex baked at TLAS build time, so publishing a
-    // different number of slots than the TLAS was built with is always a bug — it
-    // makes volumes read each other's data or vanish. Report it once per change
-    // instead of letting it degrade into an intermittent, scene-dependent artifact
-    // that costs days to trace back here.
-    if (m_tlasVolumeSlotCount != 0 &&
-        (uint32_t)instances.size() != m_tlasVolumeSlotCount) {
-        static uint32_t s_lastReportedMismatch = 0;
-        const uint32_t signature =
-            m_tlasVolumeSlotCount * 65536u + (uint32_t)instances.size();
-        if (signature != s_lastReportedMismatch) {
-            s_lastReportedMismatch = signature;
-            VK_INFO() << "[Vulkan][VolumeSSBO] customIndex contract violated: TLAS was built with "
-                      << m_tlasVolumeSlotCount << " volume slots but "
-                      << instances.size() << " are being published. Volume slots no longer "
-                         "match gl_InstanceCustomIndexEXT." << std::endl;
-        }
-    }
-
-    m_device->updateVolumeBuffer(instances.data(),
-                                  instances.size() * sizeof(VulkanRT::VkVolumeInstance),
-                                  (uint32_t)instances.size());
-
-    // ── TLAS transform refresh ──────────────────────────────────────────────
-    // When a unified volume is moved with the gizmo, setTransform() updates the C++ object
-    // but the TLAS AABB instance transform remains stale.  Fix: recompute the
-    // scale+translate transform from the current worldBounds for every volume
-    // instance found in m_instanceSources and push an updateTLAS call.
-    {
-        bool tlas_changed = false;
-        for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
-            Vec3 worldMin;
-            Vec3 worldMax;
-            if (auto vdb = std::dynamic_pointer_cast<VDBVolume>(m_instanceSources[i])) {
-                AABB wb = vdb->getWorldBounds();
-                worldMin = wb.min;
-                worldMax = wb.max;
-            } else if (auto gas = std::dynamic_pointer_cast<GasVolume>(m_instanceSources[i])) {
-                gas->getWorldBounds(worldMin, worldMax);
-            } else {
-                continue;
-            }
-            Vec3 center = (worldMin + worldMax) * 0.5f;
-            Vec3 sz(worldMax.x - worldMin.x, worldMax.y - worldMin.y, worldMax.z - worldMin.z);
-            if (sz.x < 1e-4f) sz.x = 1e-4f;
-            if (sz.y < 1e-4f) sz.y = 1e-4f;
-            if (sz.z < 1e-4f) sz.z = 1e-4f;
-            Matrix4x4 newT = Matrix4x4::translation(center) * Matrix4x4::scaling(sz);
-            if (!(newT == m_vkInstances[i].transform)) {
-                m_vkInstances[i].transform = newT;
-                tlas_changed = true;
-            }
-        }
-        if (tlas_changed) {
-            m_device->waitIdle();
-            auto merged = m_vkInstances;
-            for (const auto& h : m_hairVkInstances) merged.push_back(h);
-            m_device->updateTLAS(merged);
-        }
-    }
-
-    // VK_INFO() << "[VulkanBackendAdapter] Uploaded " << instances.size() << " VDB volume(s) to Vulkan SSBO." << std::endl;
-    // Accumulation reset alone does not invalidate the separate volume
-    // temporal ping-pong history. A sequence frame may keep the same object
-    // and screen position while density/emission changes completely; accepting
-    // that history leaves bright flame cores behind. Reject history exactly
-    // when NanoVDB content changes, then allow it to rebuild over subsequent
-    // samples of the same sequence frame.
-    if (volumeContentChanged) {
-        m_volumeTemporal.invalidate();
-    }
-    resetAccumulation();
-}
-
-void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vols) {
-    // Gas volumes use similar conversion — for now, handled as basic homogeneous volumes
-    if (!m_device || vols.empty()) return;
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-
-    std::vector<VulkanRT::VkVolumeInstance> instances(vols.size());
-    for (size_t i = 0; i < vols.size(); i++) {
-        const auto& src = vols[i];
-        auto& dst = instances[i];
-        memset(&dst, 0, sizeof(dst));
-
-        for (int i = 0; i < 12; ++i) {
-            dst.transform[i]     = src.transform[i];
-            dst.inv_transform[i] = src.inv_transform[i];
-        }
-        
-        // GasVolume does not have pivot tracking, default to 0
-        dst.pivot_offset[0] = 0.0f;
-        dst.pivot_offset[1] = 0.0f;
-        dst.pivot_offset[2] = 0.0f;
-
-        // Use local bounding box for accurate containment check of localPos
-        dst.aabb_min[0] = src.local_bbox_min.x; dst.aabb_min[1] = src.local_bbox_min.y; dst.aabb_min[2] = src.local_bbox_min.z;
-        dst.aabb_max[0] = src.local_bbox_max.x; dst.aabb_max[1] = src.local_bbox_max.y; dst.aabb_max[2] = src.local_bbox_max.z;
-
-        dst.density_multiplier = src.density_multiplier;
-        dst.density_remap_low = src.density_remap_low;
-        dst.density_remap_high = src.density_remap_high;
-        dst.noise_scale = 1.0f;
-        dst._reserved[0] = (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
-        dst._reserved[1] = src.emission_pad;
-
-        dst.scatter_color[0] = src.scatter_color.x;
-        dst.scatter_color[1] = src.scatter_color.y;
-        dst.scatter_color[2] = src.scatter_color.z;
-        dst.scatter_coefficient = src.scatter_coefficient;
-        dst.scatter_anisotropy = src.scatter_anisotropy;
-
-        dst.absorption_color[0] = src.absorption_color.x;
-        dst.absorption_color[1] = src.absorption_color.y;
-        dst.absorption_color[2] = src.absorption_color.z;
-        dst.absorption_coefficient = src.absorption_coefficient;
-
-        dst.emission_color[0] = src.emission_color.x;
-        dst.emission_color[1] = src.emission_color.y;
-        dst.emission_color[2] = src.emission_color.z;
-        dst.emission_intensity = src.emission_intensity;
-
-        dst.step_size = src.step_size;
-        dst.max_steps = src.max_steps;
-        dst.shadow_steps = src.shadow_steps;
-        dst.shadow_strength = src.shadow_strength;
-
-        dst.volume_type = 0; // Homogeneous
-        dst.is_active = 1;
-        dst.voxel_size = src.step_size; // GpuGasVolume has no voxel_size; approximate with step_size
-    }
-
-    // Append to existing volume buffer (after VDB volumes)
-    // For now, only gas volumes if no VDB volumes exist
-    if (m_device->m_volumeCount == 0) {
-        m_device->updateVolumeBuffer(instances.data(),
-                                      instances.size() * sizeof(VulkanRT::VkVolumeInstance),
-                                      (uint32_t)instances.size());
-    }
-    resetAccumulation();
-}
+// Volume table upload moved to VulkanBackend_Volumes.cpp
+// (updateVDBVolumes / updateGasVolumes). Declarations stay in
+// Backend/VulkanBackend.h; this file keeps no forwarder.
 
 // Utility
 void VulkanBackendAdapter::waitForCompletion() { m_device->waitIdle(); }
@@ -18985,6 +19170,12 @@ VulkanBackendAdapter::getVolumePerformanceStats(bool synchronize) {
         m_device->waitIdle();
     }
     return m_volumeInstrumentation.read(*m_device);
+}
+
+VulkanRT::InstancePreparationStats VulkanBackendAdapter::getInstancePreparationStats() const {
+    auto stats=m_instancePreparationStats;
+    stats.gpuPathAvailable=m_device&&m_device->instancePrepareReady()&&m_device->hasTonemapPipeline();
+    return stats;
 }
 
 void VulkanBackendAdapter::resetVolumePerformanceStats(bool enabled) {

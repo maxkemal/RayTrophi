@@ -1,81 +1,58 @@
-// terrain_thermal_hardness.comp
-// Vulkan port of thermalErosionWithHardnessKernel (erosion_kernels.cu). Same as
-// terrain_thermal.comp but with hardness-modulated talus angle + erosion rate.
-// Note: uses the CUDA hardness kernel's own clamp constants (min heightScale 0.1,
-// min cellSize 0.01) which differ slightly from terrain_thermal.comp's — this is
-// an existing inconsistency in the original CUDA code, preserved here for 1:1
-// parity during migration (see project_terrain_erosion_gpu_migration memory).
+// Race-free thermal weathering with lithology/hardness resistance.
 #version 450
-#extension GL_EXT_shader_atomic_float : require
 layout(local_size_x = 256) in;
 
 layout(push_constant) uniform PC {
     int mapWidth; int mapHeight;
     float talusAngle; float erosionAmount;
     float cellSize; float heightScale;
+    uint hasMask;
+    float anisotropy; float directionX; float directionY;
+    float talusSettling; float sedimentRemoval;
 } pc;
 
-layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
-layout(set = 0, binding = 1) readonly buffer Hardness { float hardnessMap[]; };
+layout(set = 0, binding = 0) readonly buffer HeightIn { float heightIn[]; };
+layout(set = 0, binding = 1) writeonly buffer HeightOut { float heightOut[]; };
+layout(set = 0, binding = 2) readonly buffer Hardness { float hardnessMap[]; };
+layout(set = 0, binding = 3) readonly buffer Mask { float maskMap[]; };
 
 void main() {
     int id = int(gl_GlobalInvocationID.x);
     int total = pc.mapWidth * pc.mapHeight;
     if (id >= total) return;
-
     int x = id % pc.mapWidth;
     int y = id / pc.mapWidth;
-    if (x <= 0 || x >= pc.mapWidth - 1 || y <= 0 || y >= pc.mapHeight - 1) return;
-
-    int idx = id;
-    float h = heightmap[idx];
-    float hardness = hardnessMap[idx];
-    float effectiveTalus = pc.talusAngle + hardness * 0.3;
-
-    float safeHeightScale = max(0.1, pc.heightScale);
-    float invCellSize = 1.0 / max(0.01, pc.cellSize);
-    float slopeScale = safeHeightScale * invCellSize;
+    float center = heightIn[id];
+    if (x <= 0 || x >= pc.mapWidth - 1 || y <= 0 || y >= pc.mapHeight - 1) {
+        heightOut[id] = center;
+        return;
+    }
 
     const int dxs[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
     const int dys[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
-    const float dists[8] = float[8](1.414, 1.0, 1.414, 1.0, 1.0, 1.414, 1.0, 1.414);
-
-    float diffs[8];
-    int nIdxs[8];
-    float totalExcess = 0.0;
-    int neighborCount = 0;
-
-    for (int d = 0; d < 8; d++) {
-        int nx = x + dxs[d];
-        int ny = y + dys[d];
-        nIdxs[d] = ny * pc.mapWidth + nx;
-
-        float diff = h - heightmap[nIdxs[d]];
-        float slope = diff * slopeScale / dists[d];
-
-        if (slope > effectiveTalus) {
-            float excess = (slope - effectiveTalus) * dists[d] * pc.cellSize / safeHeightScale;
-            diffs[d] = excess;
-            totalExcess += excess;
-            neighborCount++;
-        } else {
-            diffs[d] = 0.0;
-        }
+    const float distances[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                        1.0, 1.41421356, 1.0, 1.41421356);
+    float safeHeightScale = max(abs(pc.heightScale), 0.001);
+    float safeCellSize = max(pc.cellSize, 0.001);
+    float delta = 0.0;
+    for (int d = 0; d < 8; ++d) {
+        int neighbor = (y + dys[d]) * pc.mapWidth + x + dxs[d];
+        float other = heightIn[neighbor];
+        float signedSlope = (center - other) * safeHeightScale /
+            (safeCellSize * distances[d]);
+        int source = signedSlope > 0.0 ? id : neighbor;
+        float hardness = clamp(hardnessMap[source], 0.0, 1.0);
+        float effectiveTalus = pc.talusAngle + hardness * 0.3;
+        float excess = abs(signedSlope) - effectiveTalus;
+        if (excess <= 0.0) continue;
+        float transfer = excess * safeCellSize * distances[d] / safeHeightScale *
+            pc.erosionAmount * 0.0625 * (1.0 - hardness * 0.7);
+        float alignment = abs((float(dxs[d]) * pc.directionX +
+            float(dys[d]) * pc.directionY) / distances[d]);
+        transfer *= mix(1.0, 0.35 + 0.65 * alignment, clamp(pc.anisotropy, 0.0, 1.0));
+        transfer *= clamp(pc.talusSettling, 0.0, 2.0);
+        if (pc.hasMask != 0u) transfer *= clamp(maskMap[source], 0.0, 1.0);
+        delta += signedSlope > 0.0 ? -transfer : transfer * (1.0 - clamp(pc.sedimentRemoval, 0.0, 1.0));
     }
-
-    if (totalExcess > 0.0 && neighborCount > 0) {
-        float totalMove = totalExcess * 0.5 * pc.erosionAmount;
-        totalMove = min(totalMove, 0.05);
-        if (totalMove > h) totalMove = h * 0.9;
-        totalMove *= (1.0 - hardness * 0.7);
-
-        atomicAdd(heightmap[idx], -totalMove);
-
-        for (int d = 0; d < 8; d++) {
-            if (diffs[d] > 0.0) {
-                float weight = diffs[d] / totalExcess;
-                atomicAdd(heightmap[nIdxs[d]], totalMove * weight);
-            }
-        }
-    }
+    heightOut[id] = center + delta;
 }

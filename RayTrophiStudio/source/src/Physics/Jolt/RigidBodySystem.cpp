@@ -720,6 +720,7 @@ void RigidBodySystem::step(const SimulationContext& ctx) {
         Matrix4x4 D = Bt * rb.initial_body_xf.inverse();
         rigid_baker_(rb.source_name, D);
         rb.last_written_pivot = D * rb.initial_pivot;  // P(t) for bookkeeping only
+        rb.last_rigid_delta = D;                       // the pose-tracking authority
         rb.has_written = true;
     }
 }
@@ -749,6 +750,7 @@ void RigidBodySystem::resetRuntime(bool restore_rest_pose) {
             rb.created = false;
             rb.handle = JoltIntegration::kInvalidBody;
             rb.has_written = false;
+            rb.last_rigid_delta = Matrix4x4::identity();  // back at rest
             rb.rest_captured = false;    // force fresh rest capture on next create
             rb.smoothed_fluid_vel = Vec3(0.0f, 0.0f, 0.0f);
             rb.fluid_vel_primed = false;
@@ -846,6 +848,7 @@ bool RigidBodySystem::restoreFrameState(const std::vector<RigidBodyFrameState>& 
             const Matrix4x4 D = s->body_xf * rb.initial_body_xf.inverse();
             rigid_baker_(rb.source_name, D);
             rb.last_written_pivot = D * rb.initial_pivot;
+            rb.last_rigid_delta = D;
             rb.has_written = true;
         }
     }
@@ -895,6 +898,7 @@ RigidBodyObject::RigidBodyObject(const RigidBodyObject& other) {
     initial_pivot = other.initial_pivot;
     rest_half_extents = other.rest_half_extents;
     last_written_pivot = other.last_written_pivot;
+    last_rigid_delta = other.last_rigid_delta;
     has_written = other.has_written;
     smoothed_fluid_vel = other.smoothed_fluid_vel;
     fluid_vel_primed = other.fluid_vel_primed;
@@ -960,6 +964,7 @@ RigidBodyObject& RigidBodyObject::operator=(const RigidBodyObject& other) {
         initial_pivot = other.initial_pivot;
         rest_half_extents = other.rest_half_extents;
         last_written_pivot = other.last_written_pivot;
+        last_rigid_delta = other.last_rigid_delta;
         has_written = other.has_written;
         smoothed_fluid_vel = other.smoothed_fluid_vel;
         fluid_vel_primed = other.fluid_vel_primed;

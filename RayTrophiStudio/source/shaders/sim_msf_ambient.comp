@@ -1,0 +1,145 @@
+#version 450
+// Material State Field — ambient / boundary-condition pass (Phase 4).
+//
+// One invocation per surface element. Resolves the element's LOCAL ambient
+// temperature and relaxes its surface temperature toward it. Nothing else: no
+// gas exchange, no pyrolysis, no writes outside the element's own state.
+//
+// WHY THIS IS A SEPARATE PASS
+// ---------------------------
+// Passive cooling used to live in sim_msf_gather, which runs once per GAS
+// DOMAIN. Two consequences, both wrong:
+//   - an object was cooled once per domain, so adding a second smoke box halved
+//     how hot anything could get;
+//   - a domain the object was not even inside cooled it just as hard, because
+//     "no open cell nearby" and "not in this box at all" took the same branch.
+// This pass runs ONCE per frame and does not need a gas domain to exist at all,
+// which is the point: a burning log carried out of the smoke box must cool
+// toward the room rather than freeze or reset.
+//
+// LAYERING (plan doc A.6):  World -> Domain override -> Thermal field -> MSF.
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    ivec4 counts;   // element_count, source_count, zone_count, unused
+    vec4  params;   // dt, relax_rate, world_ambient_K, inv_kelvin_per_unit
+    vec4  params2;  // max_temperature, dry_rate, boil_normalized, unused
+} pc;
+
+layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
+// Two vec4 per element; only [2i+0].x (temperature) is touched here. char, fuel
+// and mass loss are deliberately left alone — ambient conditions never un-burn
+// anything, which is the whole reason MSF exists.
+layout(set=0, binding=1)          buffer State   { vec4 state[]; };
+
+// Thermal force fields, 32 B each.
+//   a: xyz = world position, w = inner_radius
+//   b: x = falloff_radius, y = delta_kelvin, z = falloff_type, w = infinite
+struct ThermalSource { vec4 a; vec4 b; };
+layout(set=0, binding=2) readonly buffer Sources { ThermalSource sources[]; };
+
+// Domain ambient overrides as world AABBs, 32 B each.
+//   a: xyz = bounds_min, w = ambient_kelvin
+//   b: xyz = bounds_max, w = reserved
+struct AmbientZone { vec4 a; vec4 b; };
+layout(set=0, binding=3) readonly buffer Zones { AmbientZone zones[]; };
+
+// Mirrors Physics::FalloffType / ForceField::calculateFalloff on the host. Kept
+// in the same order so the UI's falloff combo means the same thing for a heat
+// source as it does for a force.
+float falloffAt(float dist, float inner, float outer, int mode) {
+    if (dist <= inner) return 1.0;
+    if (dist >= outer) return 0.0;
+    float span = max(outer - inner, 1e-5);
+    float t = (dist - inner) / span;
+    if (mode == 0) return 1.0;                       // None
+    if (mode == 1) return 1.0 - t;                   // Linear
+    if (mode == 2) return 1.0 - t * t * (3.0 - 2.0 * t); // Smooth
+    if (mode == 3) return sqrt(max(0.0, 1.0 - t * t));   // Sphere
+    if (mode == 4) {                                 // InverseSquare
+        float r = max(inner + t * span, 0.01);
+        float ref = max(inner, 0.01);
+        return (ref * ref) / (r * r);
+    }
+    if (mode == 5) return exp(-3.0 * t);             // Exponential
+    return 1.0 - t;                                  // Custom -> linear
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.counts.x)) return;
+
+    vec3 p = centers[id].xyz;
+
+    // 1. World ambient is the floor: it is defined everywhere, which is what
+    //    makes an object outside every domain still a physical object.
+    float ambient_k = pc.params.z;
+
+    // 2. Domain override, if this element is inside one. Last match wins — the
+    //    test is per ELEMENT, not per object, because one object can genuinely
+    //    straddle a domain boundary and half of it really is in the hot box.
+    int zone_count = pc.counts.z;
+    for (int i = 0; i < zone_count; ++i) {
+        vec3 lo = zones[i].a.xyz;
+        vec3 hi = zones[i].b.xyz;
+        if (all(greaterThanEqual(p, lo)) && all(lessThanEqual(p, hi))) {
+            ambient_k = zones[i].a.w;
+        }
+    }
+
+    // 3. Thermal fields stack ON TOP of ambient rather than replacing it: two
+    //    burners under the same plate should be hotter than one, and a field is
+    //    a heat SOURCE, not a thermostat.
+    int source_count = pc.counts.y;
+    for (int i = 0; i < source_count; ++i) {
+        vec4 a = sources[i].a;
+        vec4 b = sources[i].b;
+        float w = 1.0;
+        if (b.w < 0.5) {
+            w = falloffAt(length(p - a.xyz), a.w, b.x, int(b.z));
+            if (w <= 0.0) continue;
+        }
+        ambient_k += b.y * w;
+    }
+
+    // Kelvin -> normalized. Normalized 0 is DEFINED as the world ambient, so an
+    // untouched scene relaxes to exactly 0 and nothing changes for it.
+    float ambient = (ambient_k - pc.params.z) * pc.params.w;
+
+    vec4 st = state[id * 2u];
+
+    // Exponential relaxation, not a linear subtract. The old
+    // `max(0, T - rate*dt)` could only ever cool toward zero: with a non-zero
+    // ambient it would drive the surface straight past the room temperature and
+    // pin it at absolute-ambient, and it could never WARM an object sitting in a
+    // Thermal field. Relaxation also cannot overshoot at any timestep.
+    float k = max(0.0, pc.params.y);
+    st.x = ambient + (st.x - ambient) * exp(-k * pc.params.x);
+
+    // A cold zone may legitimately sit below the world ambient, so the floor is
+    // the local ambient rather than 0 — clamping at 0 would silently make every
+    // freezer as warm as the room.
+    st.x = clamp(st.x, min(ambient, 0.0), pc.params2.x);
+
+    // ── Drying (Phase 5) ─────────────────────────────────────────────────────
+    // ★ The ONLY place moisture is removed. sim_msf_wet adds it, the gather only
+    // reads it. A sink split between the per-frame pass and the per-domain gather
+    // would evaporate once per gas domain — the same shape as the double-cooling
+    // bug Phase 4 had to unpick, and just as invisible in a one-domain scene.
+    if (st.w > 0.0) {
+        // Drying accelerates sharply with the surface's own temperature: a plank
+        // held next to a fire dries in seconds, one in a cold room takes far
+        // longer. Normalized against water's boiling point so the curve means the
+        // same thing at any domain calibration.
+        float boil = max(pc.params2.z, 1e-4);
+        float heat = max(st.x, 0.0) / boil;
+        // 1 at ambient, 10x once the surface is at boiling point. Linear in
+        // temperature rather than exponential: this is bulk evaporation from a
+        // wet surface, not a reaction rate, and an exponential made a merely warm
+        // object flash dry.
+        float accel = 1.0 + 9.0 * clamp(heat, 0.0, 1.0);
+        st.w = max(0.0, st.w - max(pc.params2.y, 0.0) * accel * pc.params.x);
+    }
+
+    state[id * 2u] = st;
+}

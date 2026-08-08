@@ -27,6 +27,11 @@ layout(push_constant) uniform CameraPC {
 struct VkInstanceData {
     uint materialIndex;
     uint blasIndex;
+    // Material State Field mask (burn/heat) for this instance; 0 = none.
+    // KEEP BYTE-IDENTICAL with VulkanRT::VkInstanceData and with the copies in
+    // the other shaders reading binding 5 — a divergence reads as garbage.
+    uint msfCharTex;
+    uint msfCharPacked;   // char_color RGB (low 24), molten emission (high 8)
 };
 
 // Geometry buffer reference types for UV lookup

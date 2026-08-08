@@ -73,9 +73,28 @@ void main() {
     if(any(isnan(p)) || any(isnan(v))) return;
 
     ivec3 cc=ivec3(floor((p-vec3(pc.origin_x,pc.origin_y,pc.origin_z))/pc.voxel_size));
-    if(inside(cc) && mask[cellIndex(cc)]>=0.0 && mask[cellIndex(cc)]<float(max(1,pc.air_threshold))) {
-        float speed=length(v);
-        if(speed>1e-4) v*=1.0/(1.0+max(0.0,pc.air_drag)*speed*pc.dt);
+    // ★★ Spray is ISOLATION, not local thinness. Must match the CPU reference in
+    // APICFluidSolver.cpp (air-drag stage) — a sheet of liquid one cell deep is
+    // sparse per cell but is NOT airborne, and dragging it made a spill stop
+    // following a moving container and scatter. Only a droplet whose whole 3x3x3
+    // neighbourhood is nearly empty gets drag. The cheap per-cell test stays as
+    // an early-out so bulk fluid never pays for the 27 taps.
+    int airThreshold=max(1,pc.air_threshold);
+    if(inside(cc) && mask[cellIndex(cc)]>=0.0 && mask[cellIndex(cc)]<float(airThreshold)) {
+        int isolation=max(4,airThreshold+2);
+        float neighbourhood=0.0;
+        for(int dk=-1;dk<=1;++dk)
+        for(int dj=-1;dj<=1;++dj)
+        for(int di=-1;di<=1;++di) {
+            ivec3 nc=cc+ivec3(di,dj,dk);
+            if(!inside(nc)) continue;
+            float m=mask[cellIndex(nc)];
+            if(m>0.0) neighbourhood+=m;
+        }
+        if(neighbourhood<float(isolation)) {
+            float speed=length(v);
+            if(speed>1e-4) v*=1.0/(1.0+max(0.0,pc.air_drag)*speed*pc.dt);
+        }
     }
     v*=clamp(pc.velocity_damping,0.0,1.0);
     float speed=length(v);

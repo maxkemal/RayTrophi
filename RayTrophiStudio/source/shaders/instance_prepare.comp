@@ -1,0 +1,62 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 128) in;
+
+struct Source {
+    vec4 data0;
+    vec4 data1;
+    vec4 data2;
+    uvec4 metadata;
+    uvec2 blasAddress;
+    uint mode;
+    uint reserved;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer Sources { Source src[]; };
+// VkAccelerationStructureInstanceKHR is exactly four uvec4 words (64 bytes).
+layout(set = 0, binding = 1, std430) writeonly buffer Instances { uvec4 dst[]; };
+
+layout(push_constant) uniform PC { uint count; } pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    Source s = src[i];
+    vec4 r0 = s.data0;
+    vec4 r1 = s.data1;
+    vec4 r2 = s.data2;
+    uint mask = s.metadata.y & 0xffu;
+
+    if (s.mode == 1u) {
+        vec3 a = radians(s.data1.xyz);
+        vec3 c = cos(a), n = sin(a);
+        r0 = vec4((c.y*c.z) * s.data2.x,
+                  (c.z*n.x*n.y - c.x*n.z) * s.data2.y,
+                  (n.x*n.z + c.x*c.z*n.y) * s.data2.z, s.data0.x);
+        r1 = vec4((c.y*n.z) * s.data2.x,
+                  (c.x*c.z + n.x*n.y*n.z) * s.data2.y,
+                  (c.x*n.y*n.z - c.z*n.x) * s.data2.z, s.data0.y);
+        r2 = vec4((c.y*n.x*n.z - c.z*n.y) * s.data2.x,
+                  (c.y*c.z*n.x + n.y*n.z) * s.data2.y,
+                  (c.x*c.y) * s.data2.z, s.data0.z);
+    }
+
+    bool finiteTransform = !any(isnan(r0)) && !any(isinf(r0)) &&
+                           !any(isnan(r1)) && !any(isinf(r1)) &&
+                           !any(isnan(r2)) && !any(isinf(r2));
+    float det = dot(cross(r0.xyz, r1.xyz), r2.xyz);
+    if (!finiteTransform || isnan(det) || isinf(det) || abs(det) < 1e-12) {
+        r0 = vec4(1,0,0,0); r1 = vec4(0,1,0,0); r2 = vec4(0,0,1,0);
+        mask = 0u;
+    }
+
+    uint base = i * 4u;
+    dst[base + 0u] = floatBitsToUint(r0);
+    dst[base + 1u] = floatBitsToUint(r1);
+    dst[base + 2u] = floatBitsToUint(r2);
+    uint customMask = (s.metadata.x & 0x00ffffffu) | (mask << 24u);
+    uint sbtFlags = (s.metadata.z & 0x00ffffffu) | ((s.metadata.w & 0xffu) << 24u);
+    dst[base + 3u] = uvec4(customMask, sbtFlags,
+                           s.blasAddress.x, s.blasAddress.y);
+}

@@ -88,7 +88,7 @@ public:
     float previewPanX = 0.0f;
     float previewPanY = 0.0f;
     bool isPanningPreview = false;
-    bool autoPreviewSelectedNode = true;
+    bool autoPreviewSelectedNode = false;
     uint32_t pendingAutoPreviewNodeId = 0;
     double pendingAutoPreviewSince = 0.0;
     std::string setupStatus;
@@ -112,10 +112,7 @@ public:
                 {NodeType::HydraulicErosion, "Hydraulic"},
                 {NodeType::ThermalErosion, "Thermal"},
                 {NodeType::FluvialErosion, "Fluvial"},
-                {NodeType::WindErosion, "Wind"},
-                {NodeType::SedimentDeposition, "Sediment Deposit"},
-                {NodeType::AlluvialFan, "Alluvial Fan"},
-                {NodeType::DeltaFormation, "Delta Formation"}
+                {NodeType::WindErosion, "Wind"}
             }},
             {"Filter", ImVec4(0.4f, 0.6f, 0.8f, 1.0f), {
                 {NodeType::Smooth, "Smooth"},
@@ -195,6 +192,8 @@ public:
                 {NodeType::Fault, "Fault Line"},
                 {NodeType::Mesa, "Mesa / Plateau"},
                 {NodeType::Shear, "Shear Zone"},
+                {NodeType::PlateTectonics, "Plate Tectonics"},
+                {NodeType::Fold, "Fold / Compression"},
                 {NodeType::Lithology, "Lithology"},
                 {NodeType::Strata, "Strata"}
             }}
@@ -685,12 +684,6 @@ public:
         }
         
         if (!isMaskNode || maskOutputIndex < 0) return;
-        
-        // Skip preview for heavy nodes (Wizard)
-        if (terrainNode->terrainNodeType == TerrainNodesV2::NodeType::ErosionWizard) {
-            ImGui::TextDisabled("Preview disabled for heavy node");
-            return;
-        }
         
         ImGui::Spacing();
         ImGui::Separator();
@@ -1625,6 +1618,53 @@ private:
                 }
                 setupStatusUntil = ImGui::GetTime() + 4.0;
             }
+            if (ImGui::MenuItem("Add Geological Foundation")) {
+                if (graph.addGeologyFoundationSetup()) {
+                    frameAllNodes(graph);
+                    setupStatus = "Geology ready: folds, lithology, strata and reusable fields";
+                    ProjectManager::getInstance().markModified();
+                } else {
+                    setupStatus = "Geology setup needs a connected Height Output";
+                }
+                setupStatusUntil = ImGui::GetTime() + 4.0;
+            }
+            if (ImGui::BeginMenu("Remove Setup")) {
+                if (ImGui::MenuItem("River & Lake")) {
+                    if (graph.removeRiverNetworkSetup(terrain, ctx.scene)) {
+                        frameAllNodes(graph);
+                        setupStatus = "River & Lake removed; original height path restored";
+                        ProjectManager::getInstance().markModified();
+                    } else {
+                        setupStatus = "No managed River & Lake setup found";
+                    }
+                    setupStatusUntil = ImGui::GetTime() + 4.0;
+                }
+                if (ImGui::MenuItem("Snow Layer")) {
+                    if (graph.removeSnowLayerSetup()) {
+                        frameAllNodes(graph);
+                        setupStatus = "Snow layer removed; original height path restored";
+                        ProjectManager::getInstance().markModified();
+                    } else setupStatus = "No managed Snow setup found";
+                    setupStatusUntil = ImGui::GetTime() + 4.0;
+                }
+                if (ImGui::MenuItem("Biome Fields")) {
+                    if (graph.removeBiomeFieldsSetup()) {
+                        frameAllNodes(graph);
+                        setupStatus = "Biome fields removed; shared analysis preserved";
+                        ProjectManager::getInstance().markModified();
+                    } else setupStatus = "No managed Biome Fields setup found";
+                    setupStatusUntil = ImGui::GetTime() + 4.0;
+                }
+                if (ImGui::MenuItem("Geological Foundation")) {
+                    if (graph.removeGeologyFoundationSetup()) {
+                        frameAllNodes(graph);
+                        setupStatus = "Geology removed; original height path restored";
+                        ProjectManager::getInstance().markModified();
+                    } else setupStatus = "No managed Geology setup found";
+                    setupStatusUntil = ImGui::GetTime() + 4.0;
+                }
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("Add Biome Fields")) {
                 auto addBiomePreset = [&](const char* label, BiomeClimatePreset preset) {
                     if (!ImGui::MenuItem(label)) return;
@@ -1902,11 +1942,14 @@ private:
                     }
                     setupStatus = "Foliage layer settings applied without terrain rebuild";
                     setupStatusUntil = ImGui::GetTime() + 3.0;
-                } else if (graph.hasEvaluationCache() &&
-                           dirtyImpact == TerrainNodeGraphV2::DirtyEvaluationImpact::None) {
-                    setupStatus = "No enabled output depends on the edited node";
-                    setupStatusUntil = ImGui::GetTime() + 3.0;
                 } else {
+                    // Dirty-impact classification is an optimization selector,
+                    // not an authority to reject a full evaluation. Preview
+                    // pulls and cached inspector evaluations can legitimately
+                    // clean the tracked dirty roots before this button is
+                    // pressed, yielding None even for a directly connected
+                    // Noise -> Height Output chain. The evaluator already owns
+                    // cache validation and cheaply skips unaffected branches.
                     graph.evaluateTerrainAsync(terrain, ctx.scene);
                 }
             }

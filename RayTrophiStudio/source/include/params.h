@@ -262,6 +262,16 @@ struct GpuVDBVolume {
     int dense_resolution_z;
     int dense_fields_valid;
     float3 dense_origin;
+    // Per-block density maximum for the Vulkan RT empty-space skip
+    // (dense_majorant_block^3 cells per entry). 0 = unavailable, and the shader
+    // must then march every step — a missing majorant may never be read as
+    // "empty" or the skip erases real smoke.
+    uint64_t dense_majorant_address;
+    int dense_majorant_dim[3];
+    int dense_majorant_block;
+    // Emitting-block list for volume emission NEE (0 = none).
+    uint64_t dense_emissive_list_address;
+    int dense_emissive_capacity;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -765,7 +765,7 @@ struct ForceFieldInfo {
     int id = -1;
     std::string name;
     // wind | gravity | attractor | repeller | vortex | turbulence | curlnoise |
-    // drag | magnetic | directionalnoise
+    // drag | magnetic | directionalnoise | thermal
     std::string type = "wind";
     std::string shape = "sphere";     // infinite | sphere | box | cylinder | cone
     // none | linear | smooth | sphere | inverse_square | exponential | custom
@@ -796,6 +796,11 @@ struct ForceFieldInfo {
     float upward_force = 0.0f;        // vortex: lift along the axis (tornado)
     float linear_drag = 0.1f;         // drag: F = -drag * v
     float quadratic_drag = 0.0f;      // drag: F = -drag * v^2
+
+    // thermal: Kelvin added on top of the local ambient at the core, attenuated
+    // by the falloff. A Thermal field exerts no force at all — it drives Material
+    // State Field surface heating (ignition, char, incandescence) only.
+    float thermal_delta_kelvin = 600.0f;
 
     // Wind -> APIC liquid coupling. With the drag model on, `strength` is read
     // as the TARGET surface speed (m/s) rather than an acceleration, and only
@@ -881,6 +886,21 @@ struct ParticleEmitterInfo {
     float angular_velocity = 0.0f;
     float angular_jitter = 0.0f;
     unsigned int seed = 1;
+
+    // Object binding. When set, `point`/`local_offset`/`direction` are
+    // parent-LOCAL and the emitter rides the object's full transform —
+    // including motion produced by rigid-body physics.
+    std::string parent_object;
+    std::string velocity_space = "local"; // local|world
+    float inherit_velocity = 1.0f;
+
+    // Per-emitter particle -> gas deposit. Off by default, in which case the
+    // system-wide rates apply. Fuel is what lets a flying particle IGNITE the
+    // gas it passes through.
+    bool  override_grid_deposit = false;
+    float grid_density_deposit = 0.0f;
+    float grid_temperature_deposit = 0.0f;
+    float grid_fuel_deposit = 0.0f;
 };
 
 // Solver settings are per particle SYSTEM, not per emitter.
@@ -929,6 +949,22 @@ Result addParticleEmitter(const ParticleEmitterInfo& info, ParticleEmitterInfo& 
 Result removeParticleEmitter(const std::string& index_or_name);
 Result updateParticleEmitter(const std::string& index_or_name, const ParticleEmitterInfo& info);
 Result clearParticleEmitters();
+
+// Particle SYSTEMS, not particles. Every other simulation call is scoped to the
+// active system; these two are the only way to see and remove what lives in the
+// others (a UI preset always creates its own).
+struct ParticleSystemInfo {
+    int index = -1;
+    uint32_t id = 0;
+    std::string name;
+    bool active = false;
+    int domain_count = 0;
+    int flow_source_count = 0;
+    int emitter_count = 0;
+    int collider_count = 0;
+};
+Result listParticleSystems(std::vector<ParticleSystemInfo>& out);
+Result clearParticleSystems();
 
 Result getParticlePhysics(ParticlePhysicsInfo& out);
 Result updateParticlePhysics(const ParticlePhysicsInfo& info);
@@ -989,6 +1025,7 @@ struct GasDomainSettings {
 };
 
 struct CombustibleFluidSettings {
+    std::string chemistry_preset = "inert";
     bool enabled = false;
     bool auto_ignite = false;
     float ignition_temperature = 0.8f;
@@ -1005,6 +1042,10 @@ struct SimulationFlowSourceInfo {
     std::string source_mode = "point"; // point|object_bounds|mesh_surface
     std::string source_object;
     bool enabled = true;
+    // Object binding. When set, `position`/`velocity` are parent-LOCAL.
+    std::string parent_object;
+    std::string velocity_space = "local"; // local|world
+    float inherit_velocity = 1.0f;
     Vec3 position = Vec3(0.0f, 1.0f, 0.0f);
     Vec3 velocity = Vec3(0.0f, 1.0f, 0.0f);
     float radius = 0.35f;
@@ -1044,12 +1085,49 @@ struct SimulationColliderInfo {
     float gas_temperature_rate = 0.0f;
     float gas_fuel_rate = 0.0f;
     float gas_flame_rate = 0.0f;
+    // ── Material State Field (thermo-chemistry) ──────────────────────────────
+    // What this object is made of. Drives pyrolysis/ignition/charring from real
+    // physical constants; see MaterialStateField.h. This is how "the crate in
+    // the room catches fire from the burning floor" is authored.
+    std::string msf_substance = "Wood (Oak)";
+    bool  msf_override_ignition = false;
+    float msf_ignition_kelvin = 573.0f;
+    float msf_burn_rate_scale = 1.0f;
+    float msf_fuel_capacity_scale = 1.0f;
+    int   msf_mask_resolution = 128;
+    bool  msf_generate_char_mask = true;
 };
+
+// Per-domain volume appearance. Separated from GasDomainSettings because it is
+// a LOOK, not a solver setting — and because a fire domain rendered with the
+// default smoke preset has no blackbody emission at all, so it simulates fire
+// correctly and shows flat grey. Scripts need to be able to fix that.
+struct GasShaderSettings {
+    std::string preset = "fire";   // fire|smoke  (applied first, then overrides)
+    float density_multiplier = 1.0f;
+    float density_cutoff = 0.01f;
+    float blackbody_intensity = 5.0f;
+    float temperature_min = 800.0f;   // Kelvin
+    float temperature_max = 1900.0f;  // Kelvin
+    float scattering_coefficient = 0.15f;
+    float absorption_coefficient = 0.5f;
+};
+
+Result getGasShaderSettings(const std::string& domain_id_or_name,
+                            GasShaderSettings& out_settings);
+Result updateGasShaderSettings(const std::string& domain_id_or_name,
+                               const GasShaderSettings& settings);
+// Names in the built-in substance library, for scripts and UI pickers.
+Result listMaterialSubstances(std::vector<std::string>& out_names);
 
 Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_max,
                          float voxel_size, const std::string& type, FluidDomainInfo& out_info);
 Result removeFluidDomain(const std::string& domain_id_or_name);
 Result getFluidDomain(const std::string& domain_id_or_name, FluidDomainInfo& out_info);
+// Enumerate every simulation grid domain (liquid AND gas) across all particle
+// systems. Without this a script can only address domains whose names it
+// authored itself, so it can never clean up what a UI preset left behind.
+Result listFluidDomains(std::vector<FluidDomainInfo>& out_domains);
 Result seedFluidParticles(const std::string& domain_id_or_name, Vec3 seed_min, Vec3 seed_max,
                            int particles_per_cell = 4, bool replace = true);
 Result clearFluidParticles(const std::string& domain_id_or_name);
@@ -1065,6 +1143,37 @@ Result getCombustibleFluidSettings(const std::string& domain_id_or_name,
                                    CombustibleFluidSettings& out_settings);
 Result updateCombustibleFluidSettings(const std::string& domain_id_or_name,
                                       const CombustibleFluidSettings& settings);
+// One timeline key on a flow source. Only the channels whose has_* flag is set
+// are written, so two calls can key different channels on the same frame — the
+// same independent-channel model the panel's diamond buttons author.
+struct SimulationFlowSourceKey {
+    int frame = 0;
+    bool has_enabled = false;           bool  enabled = true;
+    bool has_position = false;          Vec3  position;
+    bool has_velocity = false;          Vec3  velocity;
+    bool has_radius = false;            float radius = 0.35f;
+    bool has_density = false;           float density = 1.0f;
+    bool has_temperature = false;       float temperature = 0.0f;
+    bool has_fuel = false;              float fuel = 0.0f;
+    bool has_falloff = false;           float falloff = 1.0f;
+    bool has_velocity_coupling = false; float velocity_coupling = 8.0f;
+    bool has_flow_rate = false;         float flow_rate = 1000.0f;
+};
+Result keySimulationFlowSource(const std::string& name, const SimulationFlowSourceKey& key);
+Result clearSimulationFlowSourceKey(const std::string& name, int frame);
+
+struct ParticleEmitterKey {
+    int frame = 0;
+    bool has_enabled = false;   bool  enabled = true;
+    bool has_rate = false;      float rate_per_second = 32.0f;
+    bool has_speed = false;     float speed = 2.0f;
+    bool has_spread = false;    float spread = 0.35f;
+    bool has_point = false;     Vec3  point;
+    bool has_direction = false; Vec3  direction;
+};
+Result keyParticleEmitter(const std::string& name, const ParticleEmitterKey& key);
+Result clearParticleEmitterKey(const std::string& name, int frame);
+
 Result listSimulationFlowSources(std::vector<SimulationFlowSourceInfo>& out_sources);
 Result getSimulationFlowSource(const std::string& name, SimulationFlowSourceInfo& out_source);
 Result createSimulationFlowSource(const SimulationFlowSourceInfo& source,

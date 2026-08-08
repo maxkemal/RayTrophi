@@ -269,6 +269,7 @@ json forceFieldToJson(const rtapi::ForceFieldInfo& info) {
         {"noise_amplitude", info.noise_amplitude}, {"noise_speed", info.noise_speed},
         {"inward_force", info.inward_force}, {"upward_force", info.upward_force},
         {"linear_drag", info.linear_drag}, {"quadratic_drag", info.quadratic_drag},
+        {"thermal_delta_kelvin", info.thermal_delta_kelvin},
         {"fluid_surface_drag", info.fluid_surface_drag},
         {"fluid_drag_coupling", info.fluid_drag_coupling},
         {"fluid_surface_depth", info.fluid_surface_depth},
@@ -430,6 +431,7 @@ void applyForceFieldPatch(const json& patch, rtapi::ForceFieldInfo& info) {
     flt("noise_speed", info.noise_speed);
     flt("inward_force", info.inward_force); flt("upward_force", info.upward_force);
     flt("linear_drag", info.linear_drag); flt("quadratic_drag", info.quadratic_drag);
+    flt("thermal_delta_kelvin", info.thermal_delta_kelvin);
     boolean("fluid_surface_drag", info.fluid_surface_drag);
     flt("fluid_drag_coupling", info.fluid_drag_coupling);
     flt("fluid_surface_depth", info.fluid_surface_depth);
@@ -1286,6 +1288,28 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"visible", info.visible}};
         });
     }
+    // ".list" in the name is what classifies this as Read in RtIpcSecurity —
+    // keep the suffix if this method is ever renamed.
+    if (method == "fluid.list_domains" || method == "gas.list_domains") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::FluidDomainInfo> domains;
+            rtapi::Result r = rtapi::listFluidDomains(domains);
+            if (!r.ok) return json{{"__error", r.error}};
+            json arr = json::array();
+            for (const auto& info : domains) {
+                arr.push_back(json{
+                    {"id", info.id}, {"name", info.name}, {"type", info.type},
+                    {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
+                    {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
+                    {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
+                    {"render_mode", info.render_mode}, {"backend", info.backend},
+                    {"boundary", info.boundary}, {"preset", info.preset},
+                    {"viscosity", info.viscosity}, {"enabled", info.enabled},
+                    {"visible", info.visible}});
+            }
+            return json{{"domains", arr}};
+        });
+    }
     if (method == "fluid.seed") {
         std::string domain = requireString(params, "domain");
         Vec3 smin = optionalVec3(params, "seed_min", Vec3(-0.5f, 1.0f, -0.5f));
@@ -1400,13 +1424,60 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::updateGasDomainSettings(domain, s);
         });
     }
+    if (method == "gas.get_shader") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::GasShaderSettings s;
+            auto r = rtapi::getGasShaderSettings(domain, s);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            return nlohmann::json{
+                {"ok", true},
+                {"preset", s.preset},
+                {"density_multiplier", s.density_multiplier},
+                {"density_cutoff", s.density_cutoff},
+                {"blackbody_intensity", s.blackbody_intensity},
+                {"temperature_min", s.temperature_min},
+                {"temperature_max", s.temperature_max},
+                {"scattering_coefficient", s.scattering_coefficient},
+                {"absorption_coefficient", s.absorption_coefficient}};
+        });
+    }
+    if (method == "gas.set_shader") {
+        std::string domain = requireString(params, "domain");
+        return enqueueResult([domain, params](UIContext&) {
+            rtapi::GasShaderSettings s;
+            auto r = rtapi::getGasShaderSettings(domain, s);
+            if (!r.ok) return r;
+            if (!params.contains("preset")) s.preset.clear();
+#define RT_GASSHADER_JSON(name, type) if (params.contains(#name)) s.name = params.at(#name).get<type>()
+            RT_GASSHADER_JSON(preset, std::string);
+            RT_GASSHADER_JSON(density_multiplier, float);
+            RT_GASSHADER_JSON(density_cutoff, float);
+            RT_GASSHADER_JSON(blackbody_intensity, float);
+            RT_GASSHADER_JSON(temperature_min, float);
+            RT_GASSHADER_JSON(temperature_max, float);
+            RT_GASSHADER_JSON(scattering_coefficient, float);
+            RT_GASSHADER_JSON(absorption_coefficient, float);
+#undef RT_GASSHADER_JSON
+            return rtapi::updateGasShaderSettings(domain, s);
+        });
+    }
+    if (method == "msf.substances") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<std::string> names;
+            auto r = rtapi::listMaterialSubstances(names);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            return nlohmann::json{{"ok", true}, {"substances", names}};
+        });
+    }
     if (method == "fluid.get_combustion") {
         std::string domain=requireString(params,"domain");
         return enqueueQuery([domain](UIContext&) {
             rtapi::CombustibleFluidSettings s;
             auto r=rtapi::getCombustibleFluidSettings(domain,s);
             if(!r.ok) return json{{"__error",r.error}};
-            return json{{"enabled",s.enabled},
+            return json{{"chemistry_preset",s.chemistry_preset},
+                        {"enabled",s.enabled},
                         {"auto_ignite",s.auto_ignite},
                         {"ignition_temperature",s.ignition_temperature},
                         {"evaporation_rate",s.evaporation_rate},
@@ -1425,6 +1496,7 @@ json dispatchMethod(const std::string& method, const json& params) {
 #define RT_FLUID_FIRE_JSON(name,type) \
             if(params.contains(#name)) s.name=params.at(#name).get<type>()
             RT_FLUID_FIRE_JSON(enabled,bool);
+            if(params.contains("chemistry_preset")) s.chemistry_preset=params.at("chemistry_preset").get<std::string>();
             RT_FLUID_FIRE_JSON(auto_ignite,bool);
             RT_FLUID_FIRE_JSON(ignition_temperature,float);
             RT_FLUID_FIRE_JSON(evaporation_rate,float);
@@ -2226,6 +2298,27 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "particle.clear_emitters") {
         return enqueueResult([](UIContext&) { return rtapi::clearParticleEmitters(); });
+    }
+    // ".list" in the name is what classifies this as Read in RtIpcSecurity.
+    if (method == "particle.list_systems") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::ParticleSystemInfo> systems;
+            rtapi::Result r = rtapi::listParticleSystems(systems);
+            if (!r.ok) return json{{"__error", r.error}};
+            json arr = json::array();
+            for (const auto& s : systems) {
+                arr.push_back(json{
+                    {"index", s.index}, {"id", s.id}, {"name", s.name},
+                    {"active", s.active}, {"domain_count", s.domain_count},
+                    {"flow_source_count", s.flow_source_count},
+                    {"emitter_count", s.emitter_count},
+                    {"collider_count", s.collider_count}});
+            }
+            return json{{"systems", arr}};
+        });
+    }
+    if (method == "particle.clear_systems") {
+        return enqueueResult([](UIContext&) { return rtapi::clearParticleSystems(); });
     }
     if (method == "particle.get_physics") {
         return enqueueQuery([](UIContext&) {

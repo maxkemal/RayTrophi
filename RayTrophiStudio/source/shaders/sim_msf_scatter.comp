@@ -1,0 +1,82 @@
+#version 450
+// Material State Field — scatter half. One invocation per surface element.
+//
+// Deposits the pyrolysis vapour computed by sim_msf_gather into the nearest OPEN
+// gas cell. Several elements routinely land in the same cell (a coarse domain, or
+// simply a dense mesh), so the deposit MUST be summed atomically.
+//
+// WHY FIXED-POINT UINT AND NOT atomicAdd(float):
+// GL_EXT_shader_atomic_float is an optional extension — plenty of otherwise
+// capable Vulkan drivers do not expose it, and Vulkan is this renderer's PRIMARY
+// backend, so hardware independence outranks the convenience. uint atomicAdd is
+// core GLSL and works everywhere. sim_msf_resolve converts the accumulators back
+// to float and folds them into the gas fields.
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    ivec4 dim;           // nx, ny, nz, element_count
+    vec4  origin_voxel;  // xyz = grid origin (world), w = voxel size
+    vec4  yield;         // smoke_per_mass, heat_per_mass, flame_level, fixed_point_scale
+} pc;
+
+layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };
+layout(set=0, binding=1) readonly buffer State   { vec4 state[]; };
+layout(set=0, binding=2) readonly buffer Solid   { float solid[]; };
+// Fixed-point accumulators, one entry per cell. Cleared by sim_msf_resolve after
+// it consumes them, so they never need a separate clear dispatch.
+layout(set=0, binding=3) buffer AccumFuel    { uint accum_fuel[]; };
+layout(set=0, binding=4) buffer AccumDensity { uint accum_density[]; };
+layout(set=0, binding=5) buffer AccumHeat    { uint accum_heat[]; };
+layout(set=0, binding=6) buffer AccumFlame   { uint accum_flame[]; };
+
+uint idx(ivec3 p) { return uint(p.x + p.y * pc.dim.x + p.z * pc.dim.x * pc.dim.y); }
+bool inside(ivec3 p) {
+    return all(greaterThanEqual(p, ivec3(0))) && all(lessThan(p, pc.dim.xyz));
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.dim.w)) return;
+
+    float released = state[id * 2u + 1u].x;
+    if (released <= 0.0) return;
+
+    float h = pc.origin_voxel.w;
+    if (h <= 0.0) return;
+    ivec3 p = ivec3(floor((centers[id].xyz - pc.origin_voxel.xyz) / h));
+
+    // Same open-cell search as the gather pass, so mass is deposited exactly
+    // where the heat was read from. Any divergence here would let a surface burn
+    // against one cell and vent into another.
+    const ivec3 dirs[6] = ivec3[6](ivec3(1,0,0), ivec3(-1,0,0),
+                                   ivec3(0,1,0), ivec3(0,-1,0),
+                                   ivec3(0,0,1), ivec3(0,0,-1));
+    int target = -1;
+    if (inside(p) && solid[idx(p)] <= 0.5) {
+        target = int(idx(p));
+    } else {
+        for (int step = 1; step <= 3 && target < 0; ++step) {
+            for (int d = 0; d < 6; ++d) {
+                ivec3 q = p + dirs[d] * step;
+                if (!inside(q)) continue;
+                uint s = idx(q);
+                if (solid[s] <= 0.5) { target = int(s); break; }
+            }
+        }
+    }
+    if (target < 0) return;  // buried: the mass is consumed but vents nowhere
+
+    float scale = max(pc.yield.w, 1.0);
+    uint t = uint(target);
+    // ★ ROUND, do not truncate. uint() truncates, and a per-texel deposit is
+    // small enough that truncation is not noise but a systematic one-sided loss:
+    // every element loses up to a whole unit, every step. With the old scale the
+    // smoke deposit floored to ZERO outright at higher mask resolutions, so the
+    // surface charred while venting nothing and no flame was ever fed.
+    atomicAdd(accum_fuel[t],    uint(released * scale + 0.5));
+    atomicAdd(accum_density[t], uint(released * pc.yield.x * scale + 0.5));
+    atomicAdd(accum_heat[t],    uint(released * pc.yield.y * scale + 0.5));
+    // Flame is a level, not a quantity — max, not sum, or overlapping elements
+    // would stack into an unbounded value.
+    atomicMax(accum_flame[t],   uint(clamp(pc.yield.z, 0.0, 1.0) * scale + 0.5));
+}

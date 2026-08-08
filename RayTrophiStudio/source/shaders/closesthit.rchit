@@ -199,6 +199,11 @@ struct VkGeometryData {
 struct VkInstanceData {
     uint materialIndex;
     uint blasIndex;
+    // Material State Field mask (burn/heat) for this instance; 0 = none.
+    // KEEP BYTE-IDENTICAL with VulkanRT::VkInstanceData and with the copies in
+    // the other shaders reading binding 5 — a divergence reads as garbage.
+    uint msfCharTex;
+    uint msfCharPacked;   // char_color RGB (low 24), molten emission (high 8)
 };
 
 layout(set = 0, binding = 2, scalar) readonly buffer MaterialBuffer  { Material     m[]; } materials;
@@ -381,6 +386,17 @@ struct VkVolumeInstance {
     float cloud_offset_z;
     float cloud_seed;
     float _ext_reserved[12];
+    // Appended acceleration block — MUST match VkVolumeInstance in
+    // include/Backend/vulkan_volume_types.h (576 bytes). Every shader that
+    // declares this struct carries the same tail: the SSBO stride is
+    // per-declaration, so one stale copy shifts every instance after the first.
+    uint64_t majorant_address;   // per-block density max for live dense gas (0 = none)
+    float    majorant_dim[3];    // block-grid resolution
+    float    majorant_block;     // cells per block edge
+    uint64_t flame_address;      // combustion reaction field for live dense gas (0 = none)
+    uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
+    float    emissive_capacity;
+    float    _accel_reserved[5];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -3489,7 +3505,69 @@ void main() {
     if (albedoTexID > 0 && (mpWritten & MP_SLOT_BASECOLOR) == 0u) {
         albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], materialUV).rgb;
     }
-    
+
+    // ── Material State Field: burn / heat ─────────────────────────────────────
+    // Per-INSTANCE, so two objects sharing a material char independently. The
+    // mask is R = char (0..1), G = surface temperature normalized against the
+    // domain ceiling. Applied AFTER the base-colour texture and after the
+    // material program, because burning is a state of the surface, not another
+    // material input — a charred plank is black whatever its texture says.
+    //
+    // ★ Sampled with rawUV, NOT hitUV and NOT materialUV.
+    //   - materialUV would apply the material's scale/offset and slide the burn
+    //     mark off the part that actually burned.
+    //   - hitUV is already V-FLIPPED for Vulkan (see rawUV above). The mask is
+    //     rasterized on the host in the mesh's own, unflipped UV space, so
+    //     sampling with hitUV mirrors the mark vertically — it lands on the
+    //     opposite side of every UV island from where the surface really burned.
+    if (inst.msfCharTex > 0u) {
+        vec2 msf = texture(materialTextures[nonuniformEXT(int(inst.msfCharTex))], rawUV).rg;
+        float charAmt = clamp(msf.x, 0.0, 1.0);
+        float heat    = clamp(msf.y, 0.0, 1.0);
+
+        if (charAmt > 0.0) {
+            vec3 charColor = vec3(float((inst.msfCharPacked      ) & 0xFFu),
+                                  float((inst.msfCharPacked >>  8) & 0xFFu),
+                                  float((inst.msfCharPacked >> 16) & 0xFFu)) * (1.0 / 255.0);
+            albedo = mix(albedo, charColor, charAmt);
+            // Char is porous soot: it scatters wide and kills specular. Without
+            // this a "burnt" surface keeps a clean highlight and reads as black
+            // paint rather than as charcoal.
+            roughness = mix(roughness, 1.0, charAmt * 0.85);
+            metallic  = mix(metallic, 0.0, charAmt);
+        }
+
+        // Blackbody glow, thresholded in ABSOLUTE KELVIN.
+        //
+        // msf.y carries temperature quantized against a fixed 3000 K range
+        // (MaterialStateField::kMaskKelvinRange) — NOT against the domain's
+        // max_temperature. Keep the two constants in sync.
+        //
+        // The threshold is the Draper point (~798 K), the temperature at which a
+        // heated surface first becomes visibly red. It is a real physical
+        // constant, which is the point: a normalized threshold made glow depend
+        // on a solver slider, and at the default ceiling a genuinely hot 717 K
+        // surface quantized below it and never lit up at all.
+        const float kMaskKelvinRange = 3000.0;
+        const float kDraperKelvin    = 798.0;
+        float kelvin = heat * kMaskKelvinRange;
+        float moltenScale = float((inst.msfCharPacked >> 24) & 0xFFu) * (1.0 / 32.0);
+        if (moltenScale > 0.0 && kelvin > kDraperKelvin) {
+            // Normalize the visible incandescent band: Draper -> 2400 K covers
+            // dull red through white-hot, which is the whole range that reads.
+            float g = clamp((kelvin - kDraperKelvin) / (2400.0 - kDraperKelvin),
+                            0.0, 1.0);
+            g = g * g * g;
+            // Red -> orange -> white-hot, matching the volume blackbody ramp.
+            vec3 glow = mix(vec3(1.0, 0.16, 0.02),
+                            mix(vec3(1.0, 0.55, 0.10), vec3(1.0, 0.95, 0.85),
+                                clamp((g - 0.5) * 2.0, 0.0, 1.0)),
+                            clamp(g * 2.0, 0.0, 1.0));
+            emColor = mix(emColor, glow, clamp(g, 0.0, 1.0));
+            emStrength = max(emStrength, g * moltenScale);
+        }
+    }
+
     // ----------------------------------------------------------------
     // OPACITY: resolved in the ANY-HIT now (shadow_anyhit.rahit camera-mode
     // branch). Camera/bounce/photon rays are traced WITHOUT OpaqueEXT, so

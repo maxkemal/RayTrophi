@@ -398,6 +398,13 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
                 live_data->dense_resolution[0] > 0 &&
                 live_data->dense_resolution[1] > 0 &&
                 live_data->dense_resolution[2] > 0;
+            gv.dense_majorant_address = live_data->dense_majorant_address;
+            gv.dense_majorant_dim[0] = live_data->dense_majorant_dim[0];
+            gv.dense_majorant_dim[1] = live_data->dense_majorant_dim[1];
+            gv.dense_majorant_dim[2] = live_data->dense_majorant_dim[2];
+            gv.dense_majorant_block = live_data->dense_majorant_block;
+            gv.dense_emissive_list_address = live_data->dense_emissive_list_address;
+            gv.dense_emissive_capacity = live_data->dense_emissive_capacity;
         }
         const bool proceduralVolume = vdb->isProceduralVolume();
         
@@ -414,7 +421,16 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.temperature_grid = proceduralVolume ? nullptr : mgr.getGPUTemperatureGrid(gv.vdb_id);
 
         // Allow Vulkan path: density_grid is null (no CUDA), but host grid exists for Vulkan upload
-        if (!proceduralVolume && !gv.density_grid && !mgr.getHostGrid(gv.vdb_id)) continue;
+        const bool no_grid_at_all =
+            !proceduralVolume && !gv.density_grid && !mgr.getHostGrid(gv.vdb_id);
+        // GATE 3 of 4 — the volume has a TLAS slot but is being left OUT of this
+        // frame's packet, which publishes its slot as inactive (invisible).
+        SCENE_LOG_ON_CHANGE("volpacket." + vdb->name, no_grid_at_all ? 0 : 1,
+            std::string("[VolumeGate 3/4] volume '") + vdb->name + "' (id=" +
+            std::to_string(gv.vdb_id) + ") " +
+            (no_grid_at_all ? "DROPPED from packet: no host grid and no CUDA grid"
+                            : "back in packet"));
+        if (no_grid_at_all) continue;
 
         Matrix4x4 m = vdb->getTransform();
         Matrix4x4 inv = vdb->getInverseTransform();

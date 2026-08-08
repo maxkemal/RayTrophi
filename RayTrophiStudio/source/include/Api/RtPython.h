@@ -9,6 +9,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 namespace rtpython {
 
@@ -59,12 +60,19 @@ struct AddonInfo {
     std::string display_name;   ///< bl_info["name"], else module_name
     std::string description;
     std::string version;
+    std::string author;
+    std::string category;
+    std::string location;
+    std::string warning;
+    std::vector<std::pair<std::string, std::string>> settings;
     bool enabled = false;       ///< persisted enable state
     bool loaded = false;        ///< register() has run this session
     std::string error;          ///< last import/register error, if any
 };
 
 std::vector<AddonInfo> listAddons();
+bool installAddon(const std::string& source_path, std::string& module_name, std::string& error);
+bool removeAddon(const std::string& module_name, std::string& error);
 bool enableAddon(const std::string& module_name, std::string& error);
 bool disableAddon(const std::string& module_name, std::string& error);
 bool reloadAddon(const std::string& module_name, std::string& error);

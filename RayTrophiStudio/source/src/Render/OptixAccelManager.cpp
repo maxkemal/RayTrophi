@@ -2547,6 +2547,15 @@ void OptixAccelManager::cleanup() {
     
 }
 
+void OptixAccelManager::removeScatterInstances() {
+    for (int i = 0; i < static_cast<int>(instances.size()); ++i) {
+        if (instances[i].blas_id >= 0 && instances[i].scatter_group_id >= 0) {
+            removeInstance(i);
+        }
+    }
+}
+
+
 void OptixAccelManager::clearInstances() {
     instances.clear();
     free_instance_slots.clear();

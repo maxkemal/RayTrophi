@@ -1,0 +1,25 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height; int radius; int horizontal;
+} pc;
+layout(set = 0, binding = 0) readonly buffer Source { float sourceField[]; };
+layout(set = 0, binding = 1) writeonly buffer Destination { float destinationField[]; };
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui), x = i % pc.width, y = i / pc.width;
+    int radius = clamp(pc.radius, 1, 32);
+    float sum = 0.0, weightSum = 0.0;
+    for (int offset = -radius; offset <= radius; ++offset) {
+        int sx = pc.horizontal != 0 ? clamp(x + offset, 0, pc.width - 1) : x;
+        int sy = pc.horizontal != 0 ? y : clamp(y + offset, 0, pc.height - 1);
+        float t = 1.0 - abs(float(offset)) / float(radius + 1);
+        float weight = t * t * (3.0 - 2.0 * t);
+        sum += sourceField[sy * pc.width + sx] * weight;
+        weightSum += weight;
+    }
+    destinationField[i] = weightSum > 1e-8 ? sum / weightSum : 0.0;
+}

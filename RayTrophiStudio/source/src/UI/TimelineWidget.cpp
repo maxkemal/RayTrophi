@@ -496,6 +496,11 @@ static void addAnimGraphTrackTree(std::vector<TimelineTrack>& tracks,
 // ============================================================================
 void TimelineWidget::draw(UIContext& ctx) {
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.46f, 0.86f, 0.92f, 1.0f));
+    // RenderSettings is the serialized source of truth. Adopt it before
+    // drawing so a reopened project does not get overwritten by the widget's
+    // constructor defaults.
+    start_frame = ctx.render_settings.animation_start_frame;
+    end_frame = std::max(ctx.render_settings.animation_end_frame, start_frame);
     // ANIMATION RENDER SYNC: When animation render is active, 
     // timeline should FOLLOW the render frame, not control it
     if (ctx.is_animation_mode && rendering_in_progress) {
@@ -580,7 +585,14 @@ void TimelineWidget::draw(UIContext& ctx) {
     else
         drawTimelineCanvas(ctx, avail_width, canvas_height);
     ImGui::EndChild();
-    
+
+    // The timeline range is persisted in RenderSettings. Keep the widget's
+    // legacy local range mirrored back after the user edits Start/End; without
+    // this, the visible value changed but project serialization saved the old
+    // default (100).
+    ctx.render_settings.animation_start_frame = start_frame;
+    ctx.render_settings.animation_end_frame = std::max(end_frame, start_frame);
+
     ImGui::EndChild();
     
     // --- PLAYBACK UPDATE ---

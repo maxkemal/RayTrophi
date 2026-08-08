@@ -2592,9 +2592,11 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             : 1.0;
         const uint64_t adaptiveBudget = static_cast<uint64_t>(
             baseBudgetMillions * 1000.0 * 1000.0 * resolutionScale * rasterQualityScale * feedbackScale);
-        m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
-        if (!allowAdaptiveRasterBudget) {
-            m_rasterScatterBudgetScale = 1.0f;
+        if (!m_rasterScatterPaintActive) {
+            m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
+            if (!allowAdaptiveRasterBudget) {
+                m_rasterScatterBudgetScale = 1.0f;
+            }
         }
     }
 
@@ -3373,7 +3375,8 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     static auto s_lastDiagLog = std::chrono::steady_clock::time_point{};
     const auto frameEnd = std::chrono::steady_clock::now();
     const double frameMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
-    if (::render_settings.raster_viewport_quality_preset == ::RasterViewportQualityPreset::Auto) {
+    if (!m_rasterScatterPaintActive &&
+        ::render_settings.raster_viewport_quality_preset == ::RasterViewportQualityPreset::Auto) {
         if (frameMs > 120.0) {
             m_rasterScatterBudgetScale = (std::max)(0.35f, m_rasterScatterBudgetScale * 0.55f);
         } else if (frameMs > 60.0) {
@@ -3383,7 +3386,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         } else if (frameMs < 20.0) {
             m_rasterScatterBudgetScale = (std::min)(1.0f, m_rasterScatterBudgetScale * 1.04f);
         }
-    } else {
+    } else if (!m_rasterScatterPaintActive) {
         m_rasterScatterBudgetScale = 1.0f;
     }
     const bool visibleTriangleCliff =
@@ -4102,12 +4105,17 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         const uint64_t curGen = g_scene_geometry_generation.load(std::memory_order_acquire);
         const uint64_t prevGen = m_rasterBuiltGeometryGeneration;
         if (!m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == curGen) {
-          /*  SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry early-out: cache valid. gen=" +
-                           std::to_string(curGen) + " meshes=" + std::to_string(m_rasterMeshes.size()) +
-                           " objects=" + std::to_string(objects.size()));*/
+            // Naming the stamper is what made this cache's one real failure findable:
+            // a PARTIAL refresh had written the token, so this early-out silently
+            // dropped a full rebuild. Keep the attribution in the log.
+            SCENE_LOG_INFO(std::string("[ViewportRaster] buildRasterGeometry early-out: gen=") +
+                           std::to_string(curGen) + " stampedBy=" + m_rasterBuiltGenSource +
+                           " meshes=" + std::to_string(m_rasterMeshes.size()) +
+                           " objects=" + std::to_string(objects.size()));
             m_rasterGeometryDirty = false;
             return;
         }
+        (void)prevGen;
        /* SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry starting: gen " +
                        std::to_string(prevGen) + " -> " + std::to_string(curGen) +
                        " objects=" + std::to_string(objects.size()) +
@@ -5075,7 +5083,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
     // nodeName concatenation + vector reallocation.
     // ============================================================================
     struct GroupSrcMeta {
-        std::vector<std::string> meshKeyBySrc;  // indexed by srcIdx; empty = invalid source
+        struct Entry { std::string meshKey; Matrix4x4 sourceToScatter = Matrix4x4::identity(); };
+        std::vector<std::vector<Entry>> entriesBySrc;
     };
     std::vector<GroupSrcMeta> groupMeta(instanceGroups.size());
 
@@ -5084,10 +5093,25 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         const auto& group = instanceGroups[gi];
         if (group.instances.empty() || group.sources.empty()) continue;
         auto& meta = groupMeta[gi];
-        meta.meshKeyBySrc.resize(group.sources.size());
+        meta.entriesBySrc.resize(group.sources.size());
 
         for (size_t si = 0; si < group.sources.size(); ++si) {
             const auto& source = group.sources[si];
+            if (!source.flat_meshes.empty()) {
+                for (const auto& mesh : source.flat_meshes) {
+                    if (!mesh) continue;
+                    const std::string nodeName = mesh->nodeName.empty() ? "flat_scatter_source" : mesh->nodeName;
+                    const std::string meshKey = "[Raster-Solo]-" + nodeName + "#mesh=" +
+                        std::to_string(reinterpret_cast<uintptr_t>(mesh.get()));
+                    auto rasterMeshIt = m_rasterMeshes.find(meshKey);
+                    if (rasterMeshIt == m_rasterMeshes.end()) continue;
+                    rasterMeshIt->second.isScatterGroup = true;
+                    const Matrix4x4 sourceWorld = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
+                    meta.entriesBySrc[si].push_back({meshKey,
+                        Matrix4x4::translation(-source.mesh_center) * sourceWorld});
+                }
+                continue;
+            }
             const auto* triSource = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
             if ((!triSource || triSource->empty()) && source.triangles.empty()) continue;
 
@@ -5109,16 +5133,14 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                 rasterMeshIt->second.isScatterGroup = true;
                 ensureScatterProxyMesh(meshKey, triSource ? triSource : &source.triangles);
             }
-            meta.meshKeyBySrc[si] = std::move(meshKey);
+            meta.entriesBySrc[si].push_back({std::move(meshKey), Matrix4x4::identity()});
         }
 
         for (const auto& inst : group.instances) {
             int srcIdx = inst.source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
-            if (srcIdx < static_cast<int>(meta.meshKeyBySrc.size()) &&
-                !meta.meshKeyBySrc[srcIdx].empty()) {
-                ++totalValidScatterInstances;
-            }
+            if (srcIdx < static_cast<int>(meta.entriesBySrc.size()))
+                totalValidScatterInstances += meta.entriesBySrc[srcIdx].size();
         }
     }
 
@@ -5131,29 +5153,39 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
     for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
         const auto& group = instanceGroups[gi];
         if (group.instances.empty() || group.sources.empty()) continue;
-        const auto& meshKeyBySrc = groupMeta[gi].meshKeyBySrc;
-        if (meshKeyBySrc.empty()) continue;
+        const auto& entriesBySrc = groupMeta[gi].entriesBySrc;
+        if (entriesBySrc.empty()) continue;
 
         const size_t count = group.instances.size();
-        std::vector<RasterInstance> localInstances(count);
+        std::vector<size_t> offsets(count + 1, 0);
+        for (size_t i = 0; i < count; ++i) {
+            int srcIdx = group.instances[i].source_index;
+            if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
+            offsets[i + 1] = offsets[i] +
+                (srcIdx < static_cast<int>(entriesBySrc.size()) ? entriesBySrc[srcIdx].size() : 0);
+        }
+        std::vector<RasterInstance> localInstances(offsets.back());
 
-        auto fillRange = [&group, &meshKeyBySrc, &localInstances](size_t start, size_t end) {
+        auto fillRange = [&group, &entriesBySrc, &offsets, &localInstances](size_t start, size_t end) {
             const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
             for (size_t i = start; i < end; ++i) {
                 const auto& inst = group.instances[i];
                 int srcIdx = inst.source_index;
                 if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
-                if (srcIdx >= static_cast<int>(meshKeyBySrc.size()) ||
-                    meshKeyBySrc[srcIdx].empty()) {
+                if (srcIdx >= static_cast<int>(entriesBySrc.size())) {
                     continue;  // invalid src — leave default-constructed (meshKey stays empty)
                 }
-                auto& ri = localInstances[i];
-                ri.meshKey = meshKeyBySrc[srcIdx];
-                ri.nodeName = nodePrefix + std::to_string(i);
-                ri.transform = inst.toMatrix();
-                ri.mask = 0xFF;
-                ri.scatterGroupId = group.id;
-                ri.scatterInstanceIndex = static_cast<uint32_t>(i);
+                for (size_t part = 0; part < entriesBySrc[srcIdx].size(); ++part) {
+                    const auto& entry = entriesBySrc[srcIdx][part];
+                    auto& ri = localInstances[offsets[i] + part];
+                    ri.meshKey = entry.meshKey;
+                    ri.nodeName = nodePrefix + std::to_string(i);
+                    ri.transform = inst.toMatrix() * entry.sourceToScatter;
+                    ri.mask = 0xFF;
+                    ri.scatterGroupId = group.id;
+                    ri.scatterInstanceIndex = static_cast<uint32_t>(i);
+                    ri.scatterSourceTransform = entry.sourceToScatter;
+                }
             }
         };
 
@@ -5230,6 +5262,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
     {
         extern std::atomic<uint64_t> g_scene_geometry_generation;
         m_rasterBuiltGeometryGeneration = g_scene_geometry_generation.load(std::memory_order_acquire);
+        m_rasterBuiltGenSource = "VulkanViewportBackend::buildRasterGeometry";
         const auto rasterBuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - rasterBuildStart).count();
         SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry done: gen=" +

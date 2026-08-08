@@ -423,7 +423,21 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
     }
 
     std::vector<uint32_t> proxyInstanceIndices;
-    if (mesh.isScatterGroup) {
+    if (mesh.isScatterGroup && m_rasterScatterPaintActive && !mesh.proxyMeshKey.empty()) {
+        std::vector<uint32_t> fullInstances;
+        fullInstances.reserve(visibleInstanceIndices.size());
+        proxyInstanceIndices.reserve(visibleInstanceIndices.size());
+        for (uint32_t instanceIndex : visibleInstanceIndices) {
+            if (instanceIndex >= m_rasterInstances.size()) continue;
+            auto& instance = m_rasterInstances[instanceIndex];
+            if (instance.scatterLodHint == 0) fullInstances.push_back(instanceIndex);
+            else {
+                instance.scatterLodHint = 1;
+                proxyInstanceIndices.push_back(instanceIndex);
+            }
+        }
+        visibleInstanceIndices = std::move(fullInstances);
+    } else if (mesh.isScatterGroup) {
         const uint64_t trianglesPerInstance = (mesh.indexBuffer.buffer && mesh.indexCount > 0)
             ? (static_cast<uint64_t>(mesh.indexCount) / 3ull)
             : (static_cast<uint64_t>(mesh.vertexCount) / 3ull);
@@ -472,6 +486,17 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
                     }
                 }
             }
+        }
+    }
+
+    if (mesh.isScatterGroup) {
+        for (uint32_t instanceIndex : visibleInstanceIndices) {
+            if (instanceIndex < m_rasterInstances.size())
+                m_rasterInstances[instanceIndex].scatterLodHint = 0;
+        }
+        for (uint32_t instanceIndex : proxyInstanceIndices) {
+            if (instanceIndex < m_rasterInstances.size())
+                m_rasterInstances[instanceIndex].scatterLodHint = 1;
         }
     }
 
@@ -596,6 +621,10 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         extern std::atomic<uint64_t> g_scene_geometry_generation;
         const uint64_t curGen = g_scene_geometry_generation.load(std::memory_order_acquire);
         if (!m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == curGen) {
+            SCENE_LOG_INFO(std::string("[Vulkan] Raster build early-out: gen=") +
+                           std::to_string(curGen) + " stampedBy=" + m_rasterBuiltGenSource +
+                           " meshes=" + std::to_string(m_rasterMeshes.size()) +
+                           " objects=" + std::to_string(objects.size()));
             m_rasterGeometryDirty = false;
             return;
         }
@@ -973,7 +1002,8 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
     const auto& instanceGroups = InstanceManager::getInstance().getGroups();
 
     struct GroupSrcMeta {
-        std::vector<std::string> meshKeyBySrc;  // indexed by srcIdx; empty = invalid source
+        struct Entry { std::string meshKey; Matrix4x4 sourceToScatter = Matrix4x4::identity(); };
+        std::vector<std::vector<Entry>> entriesBySrc;
     };
     std::vector<GroupSrcMeta> groupMeta(instanceGroups.size());
 
@@ -982,10 +1012,25 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         const auto& group = instanceGroups[gi];
         if (group.instances.empty() || group.sources.empty()) continue;
         auto& meta = groupMeta[gi];
-        meta.meshKeyBySrc.resize(group.sources.size());
+        meta.entriesBySrc.resize(group.sources.size());
 
         for (size_t si = 0; si < group.sources.size(); ++si) {
             const auto& source = group.sources[si];
+            if (!source.flat_meshes.empty()) {
+                for (const auto& mesh : source.flat_meshes) {
+                    if (!mesh) continue;
+                    const std::string meshKey = "[Raster-Solo]-" + mesh->nodeName + "#mesh=" +
+                        std::to_string(reinterpret_cast<uintptr_t>(mesh.get()));
+                    if (m_rasterMeshes.find(meshKey) == m_rasterMeshes.end()) continue;
+                    GroupSrcMeta::Entry entry;
+                    entry.meshKey = meshKey;
+                    const Matrix4x4 sourceWorld = mesh->transform ?
+                        mesh->transform->getFinal() : Matrix4x4::identity();
+                    entry.sourceToScatter = Matrix4x4::translation(-source.mesh_center) * sourceWorld;
+                    meta.entriesBySrc[si].push_back(std::move(entry));
+                }
+                continue;
+            }
             const auto* triSource = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
             if ((!triSource || triSource->empty()) && source.triangles.empty()) continue;
 
@@ -1001,15 +1046,14 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
                           "-" + std::to_string(srcPtr) + "-" + std::to_string(source.triangles.size());
                 ensureRasterMeshForTriangles(meshKey, source.triangles);
             }
-            meta.meshKeyBySrc[si] = std::move(meshKey);
+            meta.entriesBySrc[si].push_back({std::move(meshKey), Matrix4x4::identity()});
         }
 
         for (const auto& inst : group.instances) {
             int srcIdx = inst.source_index;
             if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
-            if (srcIdx < static_cast<int>(meta.meshKeyBySrc.size()) &&
-                !meta.meshKeyBySrc[srcIdx].empty()) {
-                ++totalValidScatterInstances;
+            if (srcIdx < static_cast<int>(meta.entriesBySrc.size())) {
+                totalValidScatterInstances += meta.entriesBySrc[srcIdx].size();
             }
         }
     }
@@ -1023,45 +1067,29 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
     for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
         const auto& group = instanceGroups[gi];
         if (group.instances.empty() || group.sources.empty()) continue;
-        const auto& meshKeyBySrc = groupMeta[gi].meshKeyBySrc;
-        if (meshKeyBySrc.empty()) continue;
+        const auto& entriesBySrc = groupMeta[gi].entriesBySrc;
+        if (entriesBySrc.empty()) continue;
 
         const size_t count = group.instances.size();
-        std::vector<RasterInstance> localInstances(count);
-
-        auto fillRange = [&group, &meshKeyBySrc, &localInstances](size_t start, size_t end) {
-            const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
-            for (size_t i = start; i < end; ++i) {
-                const auto& inst = group.instances[i];
-                int srcIdx = inst.source_index;
-                if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
-                if (srcIdx >= static_cast<int>(meshKeyBySrc.size()) ||
-                    meshKeyBySrc[srcIdx].empty()) {
-                    continue;
-                }
-                auto& ri = localInstances[i];
-                ri.meshKey = meshKeyBySrc[srcIdx];
+        std::vector<RasterInstance> localInstances;
+        localInstances.reserve(count);
+        const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
+        for (size_t i = 0; i < count; ++i) {
+            const auto& inst = group.instances[i];
+            int srcIdx = inst.source_index;
+            if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
+            if (srcIdx >= static_cast<int>(entriesBySrc.size())) continue;
+            for (const auto& entry : entriesBySrc[srcIdx]) {
+                RasterInstance ri;
+                ri.meshKey = entry.meshKey;
                 ri.nodeName = nodePrefix + std::to_string(i);
-                ri.transform = inst.toMatrix();
+                ri.transform = inst.toMatrix() * entry.sourceToScatter;
                 ri.mask = 0xFF;
                 ri.scatterGroupId = group.id;
                 ri.scatterInstanceIndex = static_cast<uint32_t>(i);
+                ri.scatterSourceTransform = entry.sourceToScatter;
+                localInstances.push_back(std::move(ri));
             }
-        };
-
-        if (count < kParallelThreshold || num_threads < 2) {
-            fillRange(0, count);
-        } else {
-            const size_t chunk = (count + num_threads - 1) / num_threads;
-            std::vector<std::future<void>> futures;
-            futures.reserve(num_threads);
-            for (unsigned t = 0; t < num_threads; ++t) {
-                const size_t s = t * chunk;
-                const size_t e = std::min(s + chunk, count);
-                if (s >= e) break;
-                futures.push_back(std::async(std::launch::async, fillRange, s, e));
-            }
-            for (auto& f : futures) f.get();
         }
 
         for (auto& ri : localInstances) {
@@ -1119,6 +1147,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
     {
         extern std::atomic<uint64_t> g_scene_geometry_generation;
         m_rasterBuiltGeometryGeneration = g_scene_geometry_generation.load(std::memory_order_acquire);
+        m_rasterBuiltGenSource = "buildRasterGeometryImpl";
     }
 
     SCENE_LOG_INFO("[Vulkan] Raster geometry built: " + std::to_string(m_rasterMeshes.size()) +
@@ -1209,7 +1238,8 @@ void VulkanBackendAdapter::syncRasterInstanceTransformsImpl(const std::vector<st
                 if (groupIt != scatterGroupsById.end()) {
                     const auto* group = groupIt->second;
                     if (ri.scatterInstanceIndex < group->instances.size()) {
-                        newTransform = group->instances[ri.scatterInstanceIndex].toMatrix();
+                        newTransform = group->instances[ri.scatterInstanceIndex].toMatrix() *
+                            ri.scatterSourceTransform;
                         hasTransform = true;
                     }
                 }

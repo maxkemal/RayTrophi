@@ -129,7 +129,15 @@ struct SimulationContext {
     float dt = 0.0f;
     float fixed_dt = 1.0f / 60.0f;
     float time_seconds = 0.0f;
+    // Sim step counter. Monotonic, and in Live Update it advances once per UI
+    // frame — it is NOT the playhead. Use it for step bookkeeping only.
     int frame = 0;
+    // ★ The playhead. Keyframes are authored in TIMELINE frames, so anything
+    // that EVALUATES a key (flow sources, particle emitters) must read this and
+    // never `frame`. In Timeline mode the two are identical; in Live Update the
+    // playhead is parked while `frame` races at 60-144 Hz, which consumes a
+    // whole authored key curve in a second or two.
+    int timeline_frame = 0;
     int substep_index = 0;
     int substep_count = 1;
     SimulationBackend backend = SimulationBackend::CUDA;
@@ -183,6 +191,11 @@ public:
     int getMaxSubsteps() const;
 
     void resetTime(float time_seconds = 0.0f, int frame = 0);
+    // Publish the playhead for keyframe evaluation. Timeline paths pass the frame
+    // they are simulating; the Live Update free-run passes the parked playhead,
+    // which is the whole point of keeping this separate from frame_.
+    void setTimelineFrame(int frame) { timeline_frame_ = std::max(0, frame); }
+    int getTimelineFrame() const { return timeline_frame_; }
     void clearSystems();
 
     void addSystem(std::shared_ptr<ISimulationSystem> system);
@@ -217,6 +230,7 @@ private:
     float accumulator_ = 0.0f;
     float time_seconds_ = 0.0f;
     int frame_ = 0;
+    int timeline_frame_ = 0;
     int max_substeps_ = 8;
     bool systems_dirty_ = false;
     SimulationWorldStats stats_;

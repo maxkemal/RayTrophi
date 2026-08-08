@@ -92,6 +92,22 @@ std::string openFileDialog() {
     return "";
 }
 
+std::string openAddonDialog() {
+#ifdef _WIN32
+    wchar_t filename[MAX_PATH] = L"";
+    OPENFILENAMEW ofn = { 0 };
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = L"RayTrophi Addons\0*.py;*.zip\0Python Script\0*.py\0ZIP Package\0*.zip\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = L"Install Addon";
+    ofn.hwndOwner = GetActiveWindow();
+    if (GetOpenFileNameW(&ofn)) return wstring_to_utf8(filename);
+#endif
+    return "";
+}
+
 std::string saveFileDialog() {
 #ifdef _WIN32
     wchar_t filename[MAX_PATH] = L"";
@@ -698,6 +714,19 @@ void drawConsole(bool* open) {
                 // Addons (Faz 4a): enable/disable/reload discovered addons. The
                 // enabled state persists across launches (addon_state.json).
                 if (ImGui::CollapsingHeader("Addons")) {
+                    static std::string pending_remove;
+                    if (ImGui::Button("Install Addon...")) {
+                        const std::string path = openAddonDialog();
+                        if (!path.empty()) {
+                            std::string installed, err;
+                            if (!installAddon(path, installed, err))
+                                appendConsoleText("Addon install error: " + err + "\n");
+                            else
+                                appendConsoleText("Installed '" + installed + "'. Enable it when ready.\n");
+                        }
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled(".py or .zip");
                     const std::vector<AddonInfo> addons = listAddons();
                     if (addons.empty()) {
                         ImGui::TextDisabled("None in scripts/addons/");
@@ -722,6 +751,45 @@ void drawConsole(bool* open) {
                                 if (!reloadAddon(a.module_name, err))
                                     appendConsoleText("Addon reload error: " + err + "\n");
                             }
+                        }
+                        ImGui::SameLine();
+                        const bool details = ImGui::SmallButton("Details");
+                        if (details) ImGui::OpenPopup("Addon Details");
+                        if (ImGui::BeginPopup("Addon Details")) {
+                            ImGui::TextUnformatted(label.c_str());
+                            ImGui::Separator();
+                            if (!a.description.empty()) ImGui::TextWrapped("%s", a.description.c_str());
+                            if (!a.version.empty()) ImGui::Text("Version: %s", a.version.c_str());
+                            if (!a.author.empty()) ImGui::Text("Author: %s", a.author.c_str());
+                            if (!a.category.empty()) ImGui::Text("Category: %s", a.category.c_str());
+                            if (!a.location.empty()) ImGui::TextWrapped("Location: %s", a.location.c_str());
+                            if (!a.warning.empty()) ImGui::TextColored(ImVec4(1.0f, .65f, .2f, 1.0f), "%s", a.warning.c_str());
+                            ImGui::TextDisabled("Module: %s", a.module_name.c_str());
+                            if (!a.settings.empty()) {
+                                ImGui::SeparatorText("Settings");
+                                for (const auto& setting : a.settings)
+                                    ImGui::BulletText("%s: %s", setting.first.c_str(), setting.second.c_str());
+                            } else {
+                                ImGui::TextDisabled("No addon settings exposed");
+                            }
+                            ImGui::Separator();
+                            if (ImGui::Button("Remove...")) {
+                                pending_remove = a.module_name;
+                                ImGui::OpenPopup("Confirm Remove");
+                            }
+                            if (ImGui::BeginPopupModal("Confirm Remove", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                                ImGui::TextWrapped("Remove '%s' from scripts/addons? This cannot be undone.", pending_remove.c_str());
+                                if (ImGui::Button("Remove", ImVec2(120, 0))) {
+                                    std::string err;
+                                    if (!removeAddon(pending_remove, err)) appendConsoleText("Addon remove error: " + err + "\n");
+                                    pending_remove.clear();
+                                    ImGui::CloseCurrentPopup();
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Cancel", ImVec2(120, 0))) { pending_remove.clear(); ImGui::CloseCurrentPopup(); }
+                                ImGui::EndPopup();
+                            }
+                            ImGui::EndPopup();
                         }
                         ImGui::PopID();
                     }

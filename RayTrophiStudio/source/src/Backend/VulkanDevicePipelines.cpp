@@ -332,6 +332,44 @@ void VulkanDevice::destroyHairExpandPipeline() {
     m_hairExpandDescBuffers[0] = m_hairExpandDescBuffers[1] = m_hairExpandDescBuffers[2] = VK_NULL_HANDLE;
 }
 
+bool VulkanDevice::createInstancePreparePipeline(const std::vector<uint32_t>& spv) {
+    if (spv.empty()) return false;
+    destroyInstancePreparePipeline();
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
+    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pi.poolSizeCount = 1; pi.pPoolSizes = &ps; pi.maxSets = 2;
+    if (vkCreateDescriptorPool(m_device, &pi, nullptr, &m_instancePrepareDescPool) != VK_SUCCESS) return false;
+    VkDescriptorSetLayoutBinding b[2]{};
+    for (uint32_t i=0;i<2;++i) { b[i].binding=i; b[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; b[i].descriptorCount=1; b[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT; }
+    VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    li.bindingCount=2; li.pBindings=b;
+    if (vkCreateDescriptorSetLayout(m_device,&li,nullptr,&m_instancePrepareDescLayout)!=VK_SUCCESS) { destroyInstancePreparePipeline(); return false; }
+    VkPushConstantRange pc{VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(uint32_t)};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount=1; pli.pSetLayouts=&m_instancePrepareDescLayout; pli.pushConstantRangeCount=1; pli.pPushConstantRanges=&pc;
+    if (vkCreatePipelineLayout(m_device,&pli,nullptr,&m_instancePreparePipelineLayout)!=VK_SUCCESS) { destroyInstancePreparePipeline(); return false; }
+    VkShaderModuleCreateInfo si{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO}; si.codeSize=spv.size()*4; si.pCode=spv.data();
+    VkShaderModule sm=VK_NULL_HANDLE;
+    if (vkCreateShaderModule(m_device,&si,nullptr,&sm)!=VK_SUCCESS) { destroyInstancePreparePipeline(); return false; }
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO}; ci.layout=m_instancePreparePipelineLayout;
+    ci.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}; ci.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module=sm; ci.stage.pName="main";
+    VkResult result=vkCreateComputePipelines(m_device,VK_NULL_HANDLE,1,&ci,nullptr,&m_instancePreparePipeline);
+    vkDestroyShaderModule(m_device,sm,nullptr);
+    if (result!=VK_SUCCESS) { destroyInstancePreparePipeline(); return false; }
+    return true;
+}
+
+void VulkanDevice::destroyInstancePreparePipeline() {
+    if (m_instancePreparePipeline) vkDestroyPipeline(m_device,m_instancePreparePipeline,nullptr);
+    if (m_instancePreparePipelineLayout) vkDestroyPipelineLayout(m_device,m_instancePreparePipelineLayout,nullptr);
+    if (m_instancePrepareDescLayout) vkDestroyDescriptorSetLayout(m_device,m_instancePrepareDescLayout,nullptr);
+    if (m_instancePrepareDescPool) vkDestroyDescriptorPool(m_device,m_instancePrepareDescPool,nullptr);
+    m_instancePreparePipeline=VK_NULL_HANDLE; m_instancePreparePipelineLayout=VK_NULL_HANDLE;
+    m_instancePrepareDescLayout=VK_NULL_HANDLE; m_instancePrepareDescPool=VK_NULL_HANDLE;
+    for (uint32_t i=0;i<2;++i) { m_instancePrepareDescSets[i]=VK_NULL_HANDLE; m_instancePrepareBoundSources[i]=VK_NULL_HANDLE; }
+    m_instancePrepareBoundOutputs[0]=m_instancePrepareBoundOutputs[1]=VK_NULL_HANDLE;
+}
+
 bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV) {
     if (computeSPV.empty()) return false;
 

@@ -186,7 +186,7 @@ struct RenderSettings {
     bool animation_render_locked = false;  // Lock viewport/camera during animation render
     bool save_image_requested = false;
     int animation_start_frame = 0;
-    int animation_end_frame = 100;      // Default to 100 frames (sensible default)
+    int animation_end_frame = 250;      // Default for new scenes; serialized scenes keep their authored value
     int animation_current_frame = 0;
     int animation_total_frames = 0;     // For progress tracking
     std::string animation_output_folder = "";
@@ -239,6 +239,19 @@ struct LogEntry {
 #define SCENE_LOG_INFO(msg) g_sceneLog.add(msg, LogLevel::Info)
 #define SCENE_LOG_WARN(msg) g_sceneLog.add(msg, LogLevel::Warning)
 #define SCENE_LOG_ERROR(msg) g_sceneLog.add(msg, LogLevel::Error)
+
+// ★ Edge-triggered diagnostic. Reports only when the state recorded under `key`
+// CHANGES, so a gate evaluated every frame can say "I started dropping this" and
+// "I stopped" without flooding the log. Built for the volume-slot gates: four
+// different gates can drop a volume and all four produce the same observation
+// (an empty slot), so the only way to tell them apart is to have each one say so
+// at the moment it changes its mind.
+void sceneLogOnChange(const std::string& key, long long state, const std::string& msg);
+// Drop all recorded states — call whenever the scene is replaced, or the next
+// scene's gates stay silent because their state "did not change" since the
+// previous one.
+void sceneLogOnChangeReset();
+#define SCENE_LOG_ON_CHANGE(key, state, msg) sceneLogOnChange((key), (state), (msg))
 
 class UILogger {
 public:

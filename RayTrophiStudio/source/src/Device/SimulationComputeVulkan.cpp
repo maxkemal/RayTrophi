@@ -913,7 +913,31 @@ private:
             { "sim_gas_vorticity_force",            "sim_gas_vorticity_force.spv",         11, 28 },
             { "sim_gas_turbulence_cell",            "sim_gas_turbulence_cell.spv",          7, 96 },
             { "sim_gas_turbulence_gather",          "sim_gas_turbulence_gather.spv",        9, 96 },
-            { "sim_gas_collider_source",            "sim_gas_collider_source.spv",         14, 20 },
+            // Plain collider emission only — pyrolysis moved to sim_msf_* in
+            // Phase 2b, which dropped the 4 material/surface-state bindings.
+            { "sim_gas_collider_source",            "sim_gas_collider_source.spv",         10, 20 },
+            // Material State Field, three passes. gather integrates per-element
+            // state (4 SSBO, 64B); scatter atomically deposits released mass into
+            // per-cell fixed-point accumulators (7 SSBO, 48B); resolve folds those
+            // into the gas fields and clears them (8 SSBO, 32B).
+            // 80B since Phase 5: material2 carries water's boiling point in
+            // normalized units, which is what pins a wet surface's temperature.
+            { "sim_msf_gather",                     "sim_msf_gather.spv",                   4, 80 },
+            { "sim_msf_scatter",                    "sim_msf_scatter.spv",                  7, 48 },
+            { "sim_msf_resolve",                    "sim_msf_resolve.spv",                  8, 32 },
+            // Ambient / boundary-condition pass (Phase 4). Runs once per frame
+            // outside the domain loop, so it needs no gas bindings at all:
+            // centers + state + thermal sources + domain ambient zones (4 SSBO,
+            // 48B). This is what gives an object outside every domain a defined
+            // temperature.
+            { "sim_msf_ambient",                    "sim_msf_ambient.spv",                  4, 48 },
+            // Liquid contact -> moisture (Phase 5). Runs per FLUID domain, reads
+            // that domain's density splat as liquid occupancy: centers + state +
+            // occupancy (3 SSBO, 48B). Pure source; drying is the ambient pass's.
+            { "sim_msf_wet",                        "sim_msf_wet.spv",                      3, 48 },
+            // Block-max majorant for the live dense gas RT path. 2 SSBO
+            // (density in, per-block max out) + 32B push constant.
+            { "sim_gas_majorant",                   "sim_gas_majorant.spv",                 4, 32 },
             // Mesh subdivision (linear 1->4). 2 SSBO (in/out tris) + 16B push-const.
             { "subdivide_linear",                   "subdivide_linear.spv",                2, 16 },
             // Catmull-Clark GPU refine (Phase 3b): per-level sparse stencil apply (5 SSBO:
@@ -932,8 +956,10 @@ private:
             // ThermalErosionParamsGPU  (no ptrs) = 6 fields x 4 bytes = 24
             // PostProcessParamsGPU     (no ptrs) = 7 fields x 4 bytes = 28
             // StreamPowerParamsGPU     (no ptrs) = 9 fields x 4 bytes = 36
-            { "terrain_thermal",                    "terrain_thermal.spv",                 1, 24 },
-            { "terrain_thermal_hardness",           "terrain_thermal_hardness.spv",        2, 24 },
+            { "terrain_thermal",                    "terrain_thermal.spv",                 3, 48 },
+            { "terrain_thermal_hardness",           "terrain_thermal_hardness.spv",        4, 48 },
+            { "terrain_thermal_flux",               "terrain_thermal_flux.spv",            4, 52 },
+            { "terrain_thermal_apply",              "terrain_thermal_apply.spv",           3, 52 },
             { "terrain_stream_power",               "terrain_stream_power.spv",            5, 36 },
             { "terrain_apply_stream_power",         "terrain_apply_stream_power.spv",      2, 36 },
             { "terrain_pit_fill",                   "terrain_pit_fill.spv",                1, 28 },
@@ -951,8 +977,19 @@ private:
             { "terrain_wind",                       "terrain_wind.spv",                    1, 40 },
             // Monte-Carlo droplet hydraulic erosion (replaces the pipe-model attempt for
             // the "Hydraulic" node — user found droplet's organic channel character
-            // clearly better). 18 fields x 4 bytes = 72.
-            { "terrain_hydraulic_droplet",          "terrain_hydraulic_droplet.spv",        3, 72 },
+            // clearly better). 26 fields x 4 bytes = 104.
+            { "terrain_hydraulic_droplet",          "terrain_hydraulic_droplet.spv",       11, 108 },
+            { "terrain_erosion_claim_clear",        "terrain_erosion_claim_clear.spv",      1, 8 },
+            { "terrain_erosion_gather",             "terrain_erosion_gather.spv",           2, 16 },
+            { "terrain_erosion_gather_apply",       "terrain_erosion_gather_apply.spv",     4, 8 },
+            { "terrain_hydraulic_channel_evolve",   "terrain_hydraulic_channel_evolve.spv", 12, 48 },
+            { "terrain_hydraulic_channel_apply",    "terrain_hydraulic_channel_apply.spv",   4, 8 },
+            { "terrain_hydraulic_route_init",       "terrain_hydraulic_route_init.spv",      4, 20 },
+            { "terrain_hydraulic_discharge_route",  "terrain_hydraulic_discharge_route.spv", 6, 16 },
+            { "terrain_hydraulic_macro_downsample", "terrain_hydraulic_macro_downsample.spv", 6, 16 },
+            { "terrain_hydraulic_macro_carve",      "terrain_hydraulic_macro_carve.spv",      3, 32 },
+            { "terrain_hydraulic_macro_apply",      "terrain_hydraulic_macro_apply.spv",      7, 20 },
+            { "terrain_hydraulic_macro_accumulate", "terrain_hydraulic_macro_accumulate.spv", 4, 8 },
             // Device-resident particle runoff: height/material plus persistent scalar
             // discharge and XY channel-direction memory.  All share 112-byte constants.
             { "terrain_fluvial_runoff",             "terrain_fluvial_runoff.spv",           9, 112 },
@@ -964,6 +1001,10 @@ private:
             { "terrain_flow_fill",                  "terrain_flow_fill.spv",               3, 16 },
             { "terrain_flow_weights",                "terrain_flow_weights.spv",             2, 12 },
             { "terrain_flow_accumulate",             "terrain_flow_accumulate.spv",          3, 8  },
+            // Phase 1 GPU foliage parity kernel. Surface producers (terrain/mesh)
+            // share these include/exclude semantics and deterministic candidate RNG.
+            { "foliage_scatter_parity",              "foliage_scatter_parity.spv",           2, 48 },
+            { "foliage_scatter_terrain_accept",      "foliage_scatter_terrain_accept.spv",   7, 16 },
             // Snow Layer's coupled Jacobi passes. Fourteen persistent scalar
             // fields keep the entire settle/melt/runoff/geometry solve on the
             // device; 88-byte constants select the current pass and physical

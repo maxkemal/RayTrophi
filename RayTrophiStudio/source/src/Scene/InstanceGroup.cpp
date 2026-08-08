@@ -1,5 +1,6 @@
 ﻿#include "InstanceGroup.h"
 #include "Triangle.h"
+#include "GpuFoliageScatter.h"
 #include "TriangleMesh.h"
 #include "HittableInstance.h" // Added for wind update
 #include "TerrainSystem.h"
@@ -8,7 +9,9 @@
 #include <random>
 #include <algorithm>
 #include <map>
+#include <unordered_map>
 #include <cmath>
+#include <chrono>
 #include "globals.h" // For SCENE_LOG_INFO
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -36,12 +39,20 @@ void ScatterSource::computeCenter() {
         Vec3 bboxMax(-1e9f, -1e9f, -1e9f);
         bool hasBounds = false;
         for (const auto& mesh : flat_meshes) {
-            if (!mesh) continue;
-            AABB bounds;
-            if (!mesh->bounding_box(0.0f, 0.0f, bounds)) continue;
-            bboxMin = Vec3::min(bboxMin, bounds.min);
-            bboxMax = Vec3::max(bboxMax, bounds.max);
-            hasBounds = true;
+            if (!mesh || !mesh->geometry) continue;
+            const Vec3* positions = mesh->geometry->get_positions_orig();
+            if (!positions) positions = mesh->geometry->get_positions();
+            if (!positions) continue;
+            if (mesh->transform) mesh->transform->updateFinal();
+            const Matrix4x4 sourceWorld = mesh->transform ?
+                mesh->transform->getFinal() : Matrix4x4::identity();
+            const size_t vertexCount = mesh->geometry->get_vertex_count();
+            for (size_t vertex = 0; vertex < vertexCount; ++vertex) {
+                const Vec3 world = sourceWorld.transform_point(positions[vertex]);
+                bboxMin = Vec3::min(bboxMin, world);
+                bboxMax = Vec3::max(bboxMax, world);
+                hasBounds = true;
+            }
         }
         if (hasBounds) {
             mesh_center = (bboxMin + bboxMax) * 0.5f;
@@ -129,7 +140,16 @@ Matrix4x4 InstanceTransform::toMatrix() const {
 void InstanceGroup::addInstance(const InstanceTransform& transform) {
     instances.push_back(transform);
     initial_instances.push_back(transform); // Store Rest Pose
-    gpu_dirty = true;
+    markTransformsDirty();
+}
+
+void InstanceGroup::addInstances(const std::vector<InstanceTransform>& transforms) {
+    if (transforms.empty()) return;
+    instances.reserve(instances.size() + transforms.size());
+    initial_instances.reserve(initial_instances.size() + transforms.size());
+    instances.insert(instances.end(), transforms.begin(), transforms.end());
+    initial_instances.insert(initial_instances.end(), transforms.begin(), transforms.end());
+    markTransformsDirty();
 }
 
 void InstanceGroup::removeInstancesInRadius(const Vec3& center, float radius) {
@@ -158,7 +178,7 @@ void InstanceGroup::removeInstancesInRadius(const Vec3& center, float radius) {
     if (write_idx < instances.size()) {
         instances.resize(write_idx);
         if (has_initial) initial_instances.resize(write_idx);
-        gpu_dirty = true;
+        markTransformsDirty();
     }
 }
 
@@ -166,7 +186,7 @@ void InstanceGroup::clearInstances() {
     instances.clear();
     initial_instances.clear();
     tlas_instance_ids.clear();
-    gpu_dirty = true;
+    markTransformsDirty();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -326,6 +346,12 @@ int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
     if (!terrain || terrain->heightmap.width < 3 || terrain->heightmap.height < 3 ||
         terrain->heightmap.data.empty() || brush_settings.target_count <= 0) return 0;
 
+    // Evaluate the large terrain/mask candidate set on Vulkan compute. A false
+    // completion flag keeps the established CPU implementation as fallback.
+    bool gpuCompleted = false;
+    const int gpuSpawned = FoliageGPU::scatterFillTerrainGPU(*this, terrain, gpuCompleted);
+    if (gpuCompleted) return gpuSpawned;
+
     const int width = terrain->heightmap.width;
     const int height = terrain->heightmap.height;
     const float terrainScale = terrain->heightmap.scale_xz;
@@ -383,10 +409,32 @@ int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
     const float minDistanceSq = brush_settings.min_distance * brush_settings.min_distance;
     const bool checkOverlap = brush_settings.min_distance > 0.01f;
     const float cellSize = brush_settings.min_distance > 0.1f ? brush_settings.min_distance : 1.0f;
-    std::map<std::pair<int, int>, std::vector<Vec3>> occupied;
+    // A tree map made every accepted/rejected overlap probe O(log N) and became
+    // dominant on biome-sized fills. Pack the signed cell pair into one stable
+    // 64-bit key so the same 3x3 lookup is average O(1).
+    auto cellKey = [](int x, int z) -> uint64_t {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32u) |
+               static_cast<uint32_t>(z);
+    };
+    std::unordered_map<uint64_t, std::vector<Vec3>> occupied;
     const int target = brush_settings.target_count;
     const int maxAttempts = target * 100;
     int spawned = 0;
+    if (checkOverlap) occupied.reserve(static_cast<size_t>(target));
+
+    // This is a batch operation. Avoid geometric vector growth and one dirty
+    // revision increment per instance; publish a single revision on completion.
+    instances.reserve(instances.size() + static_cast<size_t>(target));
+    initial_instances.reserve(initial_instances.size() + static_cast<size_t>(target));
+
+    const bool hasTerrainTransform = terrain->transform != nullptr;
+    Matrix4x4 terrainFinal;
+    Matrix4x4 terrainNormal;
+    if (hasTerrainTransform) {
+        terrain->transform->updateFinal();
+        terrainFinal = terrain->transform->final;
+        terrainNormal = terrain->transform->getNormalTransform();
+    }
 
     for (int attempt = 0; spawned < target && attempt < maxAttempts; ++attempt) {
         const float u = dist01(rng);
@@ -462,10 +510,9 @@ int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
         Vec3 worldPosition(u * terrainScale, localHeight, v * terrainScale);
         Vec3 worldNormal(-dx, 1.0f, -dz);
         worldNormal = worldNormal.normalize();
-        if (terrain->transform) {
-            terrain->transform->updateFinal();
-            worldPosition = terrain->transform->final.transform_point(worldPosition);
-            worldNormal = terrain->transform->getNormalTransform().transform_vector(worldNormal).normalize();
+        if (hasTerrainTransform) {
+            worldPosition = terrainFinal.transform_point(worldPosition);
+            worldNormal = terrainNormal.transform_vector(worldNormal).normalize();
         }
 
         if (checkOverlap) {
@@ -474,7 +521,7 @@ int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
             bool collision = false;
             for (int ox = -1; ox <= 1 && !collision; ++ox) {
                 for (int oz = -1; oz <= 1 && !collision; ++oz) {
-                    const auto it = occupied.find({cellKeyX + ox, cellKeyZ + oz});
+                    const auto it = occupied.find(cellKey(cellKeyX + ox, cellKeyZ + oz));
                     if (it == occupied.end()) continue;
                     for (const Vec3& point : it->second) {
                         if ((point - worldPosition).length_squared() < minDistanceSq) {
@@ -485,7 +532,7 @@ int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
                 }
             }
             if (collision) continue;
-            occupied[{cellKeyX, cellKeyZ}].push_back(worldPosition);
+            occupied[cellKey(cellKeyX, cellKeyZ)].push_back(worldPosition);
         }
 
         InstanceTransform instance = generateRandomTransform(worldPosition, worldNormal);
@@ -495,9 +542,11 @@ int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
             const float factor = 1.0f - brush_settings.scale_mask_influence * (1.0f - scaleField);
             instance.scale = instance.scale * factor;
         }
-        addInstance(instance);
+        instances.push_back(instance);
+        initial_instances.push_back(instance);
         ++spawned;
     }
+    if (spawned > 0) markTransformsDirty();
     return spawned;
 }
 

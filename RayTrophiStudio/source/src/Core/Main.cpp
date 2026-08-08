@@ -540,7 +540,10 @@ bool g_vulkan_device_cc_refit_pending = false; // Slice 4: device-resident CC po
 bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
 bool g_geometry_deform_pending = false; // Physics body baked new verts — refit only those nodes in place on the active path (raster/OptiX/Vulkan) + CPU Embree refit (vs full rebuild)
 bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
+bool g_viewport_raster_scatter_update_pending = false; // Foliage-only instance-table refresh
+bool g_vulkan_scatter_refresh_pending = false; // InstanceGroup topology only; preserve BLASes
 bool g_optix_rebuild_pending = false;
+bool g_optix_scatter_refresh_pending = false;
 bool g_particle_cpu_geometry_dirty = false; // Particle bridge changed; CPU-active path re-expands particles into the BVH
 
 // ── Viewport-driven sequence save ───────────────────────────────────────────
@@ -675,6 +678,134 @@ ColorProcessor color_processor(image_width, image_height);
 // VulkanBackendAdapter serves both RT render and raster viewport, so fall back
 // to g_backend in that case. Without this fallback, material preview mode on
 // Vulkan RT never tazelenmez and paint strokes appear frozen.
+
+// ── Material State Field -> Vulkan render bridge ─────────────────────────────
+// Uploads each burning object's char/heat mask and installs the per-instance
+// resolver the backend calls while building its instance SSBO.
+//
+// KNOWN COST: the mask lives on the GPU (that is the whole point of MSF), but it
+// has to reach a sampled VkImage on the RT side, and the two live in different
+// contexts. So this path reads the state back and re-uploads. It is throttled to
+// objects that actually changed, and the price is visible in the panel's
+// "readback" row rather than hidden. A compute-writes-the-image path that skips
+// the round trip is the follow-up, not a silent assumption.
+static void syncMaterialStateFieldMasks(SceneData& scene,
+                                        Backend::VulkanBackendAdapter* vulkanBackend) {
+    if (!vulkanBackend) return;
+
+    struct MaskSlot {
+        int64_t handle = 0;
+        uint64_t revision = ~0ull;
+        int resolution = 0;
+    };
+    static std::unordered_map<std::string, MaskSlot> s_slots;
+    // Resolved bindless indices handed to the backend. Rebuilt every frame so a
+    // deleted object cannot keep a stale index alive.
+    static std::unordered_map<std::string, std::pair<uint32_t, uint32_t>> s_resolved;
+    s_resolved.clear();
+
+    // Single per-frame reset point for the whole bridge chain, including the
+    // counters the backend accumulates into from its several upload sites.
+    auto& tel = RayTrophiSim::materialStateFieldBridgeStats();
+    tel.fields_seen = 0; tel.masks_ready = 0;
+    tel.textures_live = 0; tel.indices_resolved = 0;
+    tel.instances_seen = 0; tel.instances_bound = 0;
+    tel.instances_unnamed = 0;
+    tel.unmatched_example[0] = 0;
+    tel.instance_lists_seen = 0;
+    tel.instance_lists_empty = 0;
+
+    bool anyField = false;
+    for (auto& system : scene.particle_systems) {
+        if (!system.runtime || !system.runtime->hasMaterialStateFields()) continue;
+        anyField = true;
+        // The host mirror only exists after a readback; ask for the next one.
+        system.runtime->requestMaterialStateFieldReadback();
+
+        for (const auto& entry : system.runtime->materialStateFields()) {
+            const auto& field = entry.second;
+            tel.fields_seen += 1u;
+            if (field.mask_resolution <= 0 || field.char_mask.empty()) continue;
+            tel.masks_ready += 1u;
+
+            MaskSlot& slot = s_slots[entry.first];
+            const bool sizeChanged = slot.resolution != field.mask_resolution;
+            if (slot.handle != 0 && sizeChanged) {
+                vulkanBackend->destroyTexture(slot.handle);
+                slot.handle = 0;
+            }
+            if (slot.handle == 0) {
+                slot.handle = vulkanBackend->uploadTexture2D(
+                    field.char_mask.data(),
+                    static_cast<uint32_t>(field.mask_resolution),
+                    static_cast<uint32_t>(field.mask_resolution),
+                    static_cast<uint32_t>(RayTrophiSim::MaterialStateField::kMaskChannels),
+                    /*sRGB=*/false);
+                slot.resolution = field.mask_resolution;
+                slot.revision = field.mask_revision;
+            } else if (slot.revision != field.mask_revision) {
+                // In-place: recreating the VkImage every frame would thrash the
+                // allocator and force a descriptor rewrite (the same reason the
+                // paint pipeline updates in place per dab).
+                if (!vulkanBackend->updateTexture2DInPlace(
+                        slot.handle, field.char_mask.data(),
+                        static_cast<uint32_t>(field.mask_resolution),
+                        static_cast<uint32_t>(field.mask_resolution),
+                        static_cast<uint32_t>(RayTrophiSim::MaterialStateField::kMaskChannels),
+                        /*sRGB=*/false)) {
+                    vulkanBackend->destroyTexture(slot.handle);
+                    slot.handle = 0;
+                    continue;
+                }
+                slot.revision = field.mask_revision;
+            }
+            if (slot.handle == 0) continue;
+            tel.textures_live += 1u;
+
+            const uint32_t bindless = vulkanBackend->resolveTextureHandle(
+                slot.handle, /*textureType=*/0, /*forceLinear=*/true);
+            if (bindless == 0u) continue;
+            tel.indices_resolved += 1u;
+            tel.last_index = bindless;
+
+            // char colour + molten emission come from the substance the object is
+            // made of, so the shader needs no substance table of its own.
+            const auto& profile = RayTrophiSim::findSubstance(field.substance_name);
+            auto q = [](float v) -> uint32_t {
+                return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+            };
+            const uint32_t packed =
+                 q(profile.char_color[0])        |
+                (q(profile.char_color[1]) <<  8) |
+                (q(profile.char_color[2]) << 16) |
+                (static_cast<uint32_t>(std::clamp(profile.molten_emission * 32.0f,
+                                                  0.0f, 255.0f)) << 24);
+            s_resolved[entry.first] = { bindless, packed };
+        }
+    }
+
+    if (!anyField && s_slots.empty()) {
+        vulkanBackend->setMaterialStateFieldMaskResolver(nullptr);
+    } else {
+        vulkanBackend->setMaterialStateFieldMaskResolver(
+            [](const std::string& name, uint32_t& tex, uint32_t& packed) -> bool {
+                auto it = s_resolved.find(name);
+                if (it == s_resolved.end()) return false;
+                tex = it->second.first;
+                packed = it->second.second;
+                return true;
+            });
+    }
+
+    // Push the resolved indices into the instance SSBO. Every other refresh site
+    // in the backend is event driven (scene rebuild, material assignment, hair
+    // append) and none of them fires again once the sim is running — but a field
+    // is only born after the sim runs. So without this per-frame call the
+    // resolver was installed and never consulted, and the shader read index 0.
+    // The call is a no-op past the frame the index changes.
+    vulkanBackend->syncMaterialStateFieldBindings();
+}
+
 static void syncMaterialBufferToViewportBackend(SceneData& scene, Renderer& renderer) {
     if (g_viewport_backend) {
         renderer.updateBackendMaterials(scene, g_viewport_backend.get());
@@ -3797,10 +3928,14 @@ int main(int argc, char* argv[]) try {
         }
 
         bool timeline_drives_wind = false;
-        for (const auto& group : InstanceManager::getInstance().getGroups()) {
-            if (group.wind_settings.enabled && !group.instances.empty()) {
-                timeline_drives_wind = true;
-                break;
+        const bool sceneLoadActive = ui.scene_loading.load(std::memory_order_acquire) ||
+            g_scene_loading_in_progress.load(std::memory_order_acquire);
+        if (!sceneLoadActive) {
+            for (const auto& group : InstanceManager::getInstance().getGroups()) {
+                if (group.wind_settings.enabled && !group.instances.empty()) {
+                    timeline_drives_wind = true;
+                    break;
+                }
             }
         }
 
@@ -3809,16 +3944,18 @@ int main(int argc, char* argv[]) try {
         // a volume graph could read a permanently-zero Time value and its Wind
         // advection appeared ineffective.
         bool timeline_drives_material_time = false;
-        for (const auto& material : MaterialManager::getInstance().getAllMaterials()) {
-            const MaterialNodesV2::MaterialProgram* program = nullptr;
-            if (material && material->type() == MaterialType::PrincipledBSDF) {
-                program = static_cast<PrincipledBSDF*>(material.get())->proceduralProgram.get();
-            } else if (material && material->type() == MaterialType::Volumetric) {
-                program = static_cast<Volumetric*>(material.get())->proceduralProgram.get();
+        if (!sceneLoadActive) {
+            for (const auto& material : MaterialManager::getInstance().getAllMaterials()) {
+                const MaterialNodesV2::MaterialProgram* program = nullptr;
+                if (material && material->type() == MaterialType::PrincipledBSDF) {
+                    program = static_cast<PrincipledBSDF*>(material.get())->proceduralProgram.get();
+                } else if (material && material->type() == MaterialType::Volumetric) {
+                    program = static_cast<Volumetric*>(material.get())->proceduralProgram.get();
+                }
+                if (program && program->active && program->usesTime)
+                    timeline_drives_material_time = true;
+                if (timeline_drives_material_time) break;
             }
-            if (program && program->active && program->usesTime)
-                timeline_drives_material_time = true;
-            if (timeline_drives_material_time) break;
         }
 
         const bool timeline_has_runtime_work =
@@ -3827,7 +3964,7 @@ int main(int argc, char* argv[]) try {
             timeline_drives_water ||
             timeline_drives_wind ||
             timeline_drives_material_time ||
-            !scene.animationDataList.empty();
+            (!sceneLoadActive && !scene.animationDataList.empty());
         
         // =========================================================================
         // EARLY SCENE LOADING GUARD
@@ -4222,6 +4359,25 @@ int main(int argc, char* argv[]) try {
         // even for SurfaceSDF fluids, since the raster viewport can't draw the volume.
         g_solid_viewport_active = isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
         ui.draw(ui_ctx);
+
+        // Vulkan consumes native InstanceGroup data. CPU/OptiX retain the
+        // compatibility batch until the native OptiX topology path is proven
+        // transactional for every flat/multi-material source.
+        if (!g_solid_viewport_active && !render_settings.use_vulkan) {
+            bool materializedScatter = false;
+            for (auto& group : InstanceManager::getInstance().getGroups()) {
+                if (group.transient || group.instances.empty()) continue;
+                if (group.active_hittables.size() == group.instances.size()) continue;
+                SceneUI::syncInstancesToScene(ui_ctx, group, false, true);
+                materializedScatter = true;
+            }
+            if (materializedScatter) {
+                if (render_settings.use_optix) g_optix_rebuild_pending = true;
+                else g_bvh_rebuild_pending = true;
+                g_geometry_dirty = true;
+                start_render = true;
+            }
+        }
         render_settings.stylize_enabled =
             ray_renderer.stylizeMode.enabled && ui.viewport_settings.shading_mode == 2;
         const bool viewport_transform_dragging = ui.is_dragging;
@@ -4588,8 +4744,8 @@ int main(int argc, char* argv[]) try {
                             anim_end_frame = scene.animationDataList[0]->endFrame;
                             SCENE_LOG_INFO("Frame range auto-detected from animation file: " + std::to_string(anim_start_frame) + " - " + std::to_string(anim_end_frame));
                         } else {
-                            anim_end_frame = 100; // Default fallback
-                            SCENE_LOG_WARN("No frame range set, using default 0-100");
+                            anim_end_frame = 250; // Default fallback for a new/empty timeline
+                            SCENE_LOG_WARN("No frame range set, using default 0-250");
                         }
                     }
                     
@@ -4763,12 +4919,35 @@ int main(int argc, char* argv[]) try {
                     if (g_backend &&
                         g_needs_optix_sync.load(std::memory_order_acquire) &&
                         pendingBackendSceneSync &&
+                        !g_optix_rebuilding &&
+                        !g_optix_rebuild_in_progress.load(std::memory_order_acquire) &&
+                        !(backendIsOptix && g_optix_rebuild_pending) &&
                         !render_settings.backend_changed &&
                         !ui_ctx.render_settings.backend_changed &&
                         (backendIsOptix || backendIsVulkan) &&
                         activeViewportBackend == g_backend.get()) {
                         (void)syncActiveRenderBackendScene();
                     }
+
+                    // Material State Field bridge. Deliberately OUTSIDE every dirty
+                    // gate: the burn/heat mask changes on each simulated step and
+                    // belongs to the sim runtime, not to the scene, so none of the
+                    // g_*_dirty flags above ever describe it. It used to hang off
+                    // the world-dirty gate, which closes as soon as the world stops
+                    // changing — that is, precisely while an object is burning.
+                    if (auto* msfBackend =
+                            dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
+                        syncMaterialStateFieldMasks(scene, msfBackend);
+                    }
+                    // Phase 6c: melt slump. Deliberately driven from the same
+                    // per-frame, sim-state-driven point as the mask upload rather
+                    // than from a step site: a timeline scrub restores `melt`
+                    // WITHOUT stepping, and geometry hung off a step site would
+                    // stay un-melted until playback resumed — the same trap the
+                    // mask hit in Phase 3c/4b. Both halves of "show this frame's
+                    // melt" now happen together, so shading and shape agree.
+                    scene.applyMeltDisplacement();
+
                     if (ui.viewport_settings.shading_mode != 2 &&
                         !vulkanRasterActive &&
                         !backendSupportsRequestedViewport) {
@@ -5094,6 +5273,22 @@ int main(int argc, char* argv[]) try {
 
                                 auto* vkRenderBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
                                 if (vkRenderBackend != nullptr) {
+                                    // Timeline marker for the volume-gate capture:
+                                    // every gate line after this one belongs to the
+                                    // switch into Vulkan RT.
+                                    static int s_switchCount = 0;
+                                    SCENE_LOG_ON_CHANGE("viewport.toRendered", ++s_switchCount,
+                                        "[VolumeGate ==] SWITCHING to Vulkan RT (Rendered), "
+                                        "geometryChanged=" + std::string(geometryChangedSinceSolid ? "1" : "0"));
+                                    // ★ CONSUME BEFORE SERVICING — this is the
+                                    // transition the SDF bug is reported on
+                                    // ("switching to Vulkan RT"). updateGeometry
+                                    // and syncVDBVolumesToGPU below re-raise this
+                                    // flag when a volume was skipped mid-regen;
+                                    // the old unconditional clear at the end of
+                                    // the block cancelled that retry at exactly
+                                    // the moment it was needed.
+                                    g_vulkan_rebuild_pending = false;
                                     if (geometryChangedSinceSolid) {
                                         // Geometry changed while in Solid mode — full sync needed
                                         vkRenderBackend->rebuildAccelerationStructure();
@@ -5130,7 +5325,6 @@ int main(int argc, char* argv[]) try {
                                     auto wd = ray_renderer.world.getGPUData();
                                     syncVulkanWorldWithAtmosphere(vkRenderBackend, wd);
                                     vkRenderBackend->resetAccumulation();
-                                    g_vulkan_rebuild_pending = false;
                                     g_camera_dirty = true;
                                     g_lights_dirty = true;
                                     g_world_dirty = true;
@@ -6364,6 +6558,18 @@ int main(int argc, char* argv[]) try {
         const bool active_vulkan_raster_backend =
             (rasterViewportBackend != nullptr);
 
+        // An OptiX backend can stay resident and dormant while Solid owns the
+        // viewport. Crossing back to Rendered is therefore not necessarily a
+        // backend switch and used to miss native InstanceGroups restored or
+        // edited during Solid. Pay only the TLAS-only scatter refresh here.
+        static bool s_prev_interactive_viewport_active = interactive_viewport_active;
+        if (s_prev_interactive_viewport_active && !interactive_viewport_active &&
+            active_optix_backend) {
+            g_optix_rebuild_pending = true;
+        }
+        s_prev_interactive_viewport_active = interactive_viewport_active;
+
+
         // Tell the physics write-back to use the cheap per-mesh refit path whenever
         // the ACTIVE path supports an in-place per-node refit: raster Solid/Matcap
         // (updateRasterMeshFromTriangles), OptiX or Vulkan RT rendered
@@ -6418,9 +6624,9 @@ int main(int argc, char* argv[]) try {
         if (!active_vulkan_render_backend && g_vulkan_rebuild_pending) {
             g_vulkan_rebuild_pending = false;
         }
-        if (!active_vulkan_raster_backend && g_viewport_raster_rebuild_pending) {
-            g_viewport_raster_rebuild_pending = false;
-        }
+        // Keep the raster request across project-load/backend transition frames.
+        // The viewport may become active a frame later; clearing it here made
+        // Solid intermittently miss its initial native foliage upload.
 
         if (g_mesh_cache_dirty) {
             ui.rebuildMeshCache(scene.world.objects);
@@ -6590,6 +6796,21 @@ int main(int argc, char* argv[]) try {
             }
         }
         
+        // Scatter topology-only OptiX path: retain source BLAS/SBT/materials.
+        if (g_optix_scatter_refresh_pending && active_optix_backend && g_hasOptix &&
+            !interactive_viewport_active && !skip_backend_for_anim && !g_optix_rebuilding) {
+            auto* optixBackend = dynamic_cast<Backend::OptixBackend*>(g_backend.get());
+            const bool refreshed = optixBackend && optixBackend->refreshScatterInstances();
+            g_optix_scatter_refresh_pending = false;
+            if (refreshed) {
+                g_geometry_dirty = false;
+                start_render = true;
+                g_camera_dirty = true;
+            } else {
+                g_optix_rebuild_pending = true;
+            }
+        }
+
         // -----------------------------------------------------------------
         // ASYNC OPTIX REBUILD (Non-blocking)
         // -----------------------------------------------------------------
@@ -6637,6 +6858,10 @@ int main(int argc, char* argv[]) try {
                     g_lights_dirty = true;
                     g_world_dirty = true;
                     g_needs_optix_sync.store(true, std::memory_order_release);
+                    // The snapshot rebuild just consumed the topology dirty
+                    // state. Leaving this set lets the central scene-sync path
+                    // immediately launch a second full cleanup/rebuild.
+                    g_geometry_dirty = false;
                     
                     start_render = true;
                 } catch (const std::exception& e) {
@@ -6657,8 +6882,22 @@ int main(int argc, char* argv[]) try {
             g_optix_rebuild_pending = false; // Redirected
         }
 
+        if (g_viewport_raster_scatter_update_pending && active_vulkan_raster_backend && g_hasVulkan && !skip_backend_for_anim) {
+            if (auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(rasterViewportBackend)) {
+                const bool refreshed = vkBackend->refreshRasterScatterInstances();
+                g_viewport_raster_scatter_update_pending = false;
+                if (!refreshed) {
+                    g_viewport_raster_rebuild_pending = true;
+                } else {
+                    vkBackend->resetAccumulation();
+                    start_render = true;
+                    g_camera_dirty = true;
+                }
+            }
+        }
+
         if (g_viewport_raster_rebuild_pending && active_vulkan_raster_backend && g_hasVulkan && !skip_backend_for_anim) {
-            if (auto* vkBackend = rasterViewportBackend) {
+            if (auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(rasterViewportBackend)) {
                 ui.addViewportMessage("Updating Solid View...", 1.0f);
                 vkBackend->buildRasterGeometry(scene.world.objects);
                 applyPendingDeleteVisibilityToBackend(scene, vkBackend);
@@ -6681,6 +6920,21 @@ int main(int argc, char* argv[]) try {
         // (sharing already-uploaded source BLASes), refit the TLAS in-place. Falling back
         // to the full destroy+rebuild block below would re-upload every BLAS and texture
         // in the scene — pure waste when a single asset got scattered.
+        if (g_vulkan_scatter_refresh_pending && active_vulkan_render_backend && g_hasVulkan &&
+            !interactive_viewport_active && !skip_backend_for_anim) {
+            auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+            const bool refreshed = vkBackend && vkBackend->refreshRtScatterInstances();
+            g_vulkan_scatter_refresh_pending = false;
+            if (refreshed) {
+                g_vulkan_geometry_append_pending = false;
+                g_geometry_dirty = false;
+                start_render = true;
+                g_camera_dirty = true;
+            } else {
+                g_vulkan_rebuild_pending = true;
+            }
+        }
+
         if (g_vulkan_geometry_append_pending && active_vulkan_render_backend && g_hasVulkan && !interactive_viewport_active && !skip_backend_for_anim) {
             if (g_backend) {
                 auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
@@ -6788,6 +7042,12 @@ int main(int argc, char* argv[]) try {
         if (g_vulkan_rebuild_pending && active_vulkan_render_backend && g_hasVulkan && !interactive_viewport_active && !skip_backend_for_anim) {
             if (g_backend) {
                 ui.addViewportMessage("Rebuilding Vulkan Geometry...", 2.0f);
+                // ★ CONSUME BEFORE SERVICING. updateGeometry / syncVDBVolumesToGPU
+                // below raise this flag again when a volume was skipped because its
+                // grid was still regenerating. Clearing at the END of the block (as
+                // this did) eats that retry, which is why a fluid SurfaceSDF renders
+                // on the rebuild frame and is removed on the next publish.
+                g_vulkan_rebuild_pending = false;
 
                 // [VULKAN FIX] Clear mesh registry to ensure dynamic meshes (terrain) are re-uploaded
                 g_backend->rebuildAccelerationStructure();
@@ -6804,7 +7064,6 @@ int main(int argc, char* argv[]) try {
                 syncWorldDataToBackend(g_backend.get());
                 applyPendingDeleteVisibilityToBackend(scene, g_backend.get());
                 g_backend->resetAccumulation();
-                g_vulkan_rebuild_pending = false;
                 start_render = true;
 
                 g_camera_dirty = true;

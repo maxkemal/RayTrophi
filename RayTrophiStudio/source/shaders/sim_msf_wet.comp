@@ -1,0 +1,92 @@
+#version 450
+// Material State Field — liquid contact -> moisture (Phase 5, wetting half).
+//
+// One invocation per surface element. Where the element sits inside a liquid
+// domain's occupied cells, its `moisture` channel rises toward saturation.
+// Nothing else is touched: this pass is a pure SOURCE.
+//
+// ★ WHY PER-DOMAIN IS CORRECT HERE, when the Phase 4 cooling had to be moved out
+// of the per-domain gather: wetting is monotonic. Two overlapping water tanks
+// both soaking the same plank is physically fine — it is still wet. A RELAXATION
+// applied once per domain is not fine, because it silently scales with domain
+// count. Source vs. relaxation is the rule; this is not an exception to it.
+//
+// Moisture is removed in exactly one place, sim_msf_ambient. Splitting
+// evaporation across passes is how the double-cooling bug happened.
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    ivec4 dim;           // fluid nx, ny, nz, element_count
+    vec4  origin_voxel;  // fluid grid origin xyz, w = voxel size
+    vec4  params;        // absorbency, dt, liquid_threshold, unused
+} pc;
+
+layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
+// Two vec4 per element; only [2i+0].w (moisture) is written here.
+layout(set=0, binding=1)          buffer State   { vec4 state[]; };
+// The fluid domain's post-step density splat — the same buffer the SDF/render
+// bridge treats as authoritative liquid occupancy. The pressure solver's
+// fluid_mask is deliberately NOT used: it is transient scratch and can describe
+// the pre-advect particle layout.
+layout(set=0, binding=2) readonly buffer Liquid  { float liquid[]; };
+
+uint idx(ivec3 p) { return uint(p.x + p.y * pc.dim.x + p.z * pc.dim.x * pc.dim.y); }
+bool inside(ivec3 p) {
+    return all(greaterThanEqual(p, ivec3(0))) && all(lessThan(p, pc.dim.xyz));
+}
+
+// Trilinear occupancy. Filtered rather than nearest for the same reason the gas
+// gather is: elements are texels, so many share a cell, and a nearest read makes
+// wetting an all-or-nothing per-voxel decision that reads as blocky patches
+// belonging to the world grid instead of to the surface.
+float sampleLiquid(vec3 local) {
+    vec3 f = local - vec3(0.5);
+    ivec3 b = ivec3(floor(f));
+    vec3 t = f - vec3(b);
+    float acc = 0.0, wsum = 0.0;
+    for (int k = 0; k < 2; ++k)
+    for (int j = 0; j < 2; ++j)
+    for (int i = 0; i < 2; ++i) {
+        ivec3 q = b + ivec3(i, j, k);
+        if (!inside(q)) continue;
+        float w = (i == 0 ? 1.0 - t.x : t.x) *
+                  (j == 0 ? 1.0 - t.y : t.y) *
+                  (k == 0 ? 1.0 - t.z : t.z);
+        acc += liquid[idx(q)] * w;
+        wsum += w;
+    }
+    return wsum > 1e-6 ? acc / wsum : 0.0;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.dim.w)) return;
+
+    float h = pc.origin_voxel.w;
+    if (h <= 0.0) return;
+
+    vec3 local = (centers[id].xyz - pc.origin_voxel.xyz) / h;
+    ivec3 p = ivec3(floor(local));
+    // Outside this liquid domain entirely: leave the state alone. Same rule as
+    // the gas gather — a domain may only speak for what is inside it, and drying
+    // belongs to the ambient pass regardless.
+    if (any(lessThan(p, ivec3(0))) || any(greaterThanEqual(p, pc.dim.xyz))) return;
+
+    float occupancy = sampleLiquid(local);
+    float threshold = pc.params.z;
+    if (occupancy <= threshold) return;
+
+    // Above the threshold, approach saturation exponentially. Exponential rather
+    // than linear so a surface sitting in water converges to fully wet instead of
+    // overshooting at large timesteps, and so absorbency reads as a RATE (how
+    // quickly this material soaks) rather than as a per-frame increment.
+    //
+    // The occupancy above the threshold modulates the rate: a surface deep in the
+    // tank wets faster than one being brushed by the edge of a splash.
+    float wetness = clamp((occupancy - threshold) / max(1.0 - threshold, 1e-4), 0.0, 1.0);
+    float rate = max(pc.params.x, 0.0) * wetness;
+
+    vec4 st = state[id * 2u];
+    st.w = mix(1.0, st.w, exp(-rate * pc.params.y));
+    state[id * 2u] = st;
+}

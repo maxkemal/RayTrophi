@@ -35,6 +35,7 @@ public:
     uint32_t uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) override;
     void updateMeshTransform(uint32_t meshHandle, const Matrix4x4& transform) override;
     void rebuildAccelerationStructure() override;
+    bool refreshScatterInstances();
     void showAllInstances() override;
     void updateSceneGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) override;
     bool updateFlatMeshBLAS(const std::string& nodeName, const TriangleMesh* mesh) override;

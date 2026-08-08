@@ -67,6 +67,18 @@ Vec3 SimulationForceFieldSnapshot::evaluateAt(const Vec3& world_pos,
 uint32_t SimulationForceFieldSnapshot::affectMaskForField(const Physics::ForceField& field) {
     uint32_t mask = 0u;
 
+    // ★ A Thermal field is not a force. Zeroing its mask here is the ONE place
+    // that has to know: every velocity consumer, CPU (evaluateAt below) and GPU
+    // (sim_force_fields.glsl and sim_fluid_particle_forces.comp both test
+    // `affect_mask & system_mask`), already skips a field whose mask misses. So
+    // no solver and no shader needed a new type case, and a Thermal field cannot
+    // accidentally blow smoke around because someone left "Affects Gas" ticked.
+    //
+    // It still appears in activeFields(), which is where MSF reads it from.
+    if (field.type == Physics::ForceFieldType::Thermal) {
+        return 0u;
+    }
+
     if (field.affects_gas) {
         mask |= toSimulationSystemMask(SimulationSystemKind::Gas);
     }
@@ -188,6 +200,9 @@ void SimulationWorld::resetTime(float time_seconds, int frame) {
     accumulator_ = 0.0f;
     time_seconds_ = std::max(0.0f, time_seconds);
     frame_ = std::max(0, frame);
+    // Timeline paths reset to the frame they are about to simulate, so the
+    // playhead follows here by default. The Live Update branch overrides it.
+    timeline_frame_ = frame_;
     stats_.substeps_last_advance = 0;
     stats_.simulated_time_seconds = time_seconds_;
 }
@@ -309,6 +324,7 @@ SimulationContext SimulationWorld::makeContext(float dt, int substep_index, int 
     context.fixed_dt = fixed_dt_;
     context.time_seconds = time_seconds_;
     context.frame = frame_;
+    context.timeline_frame = timeline_frame_;
     context.substep_index = substep_index;
     context.substep_count = substep_count;
     context.backend = backend_;

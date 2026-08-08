@@ -75,6 +75,25 @@ inline std::string softFramePath(const std::string& dir, int frame) {
     return (fs::path(dir) / buf).string();
 }
 
+inline std::string rigidFramePath(const std::string& dir, int frame) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "rigid_f%06d.rtfc", frame);
+    return (fs::path(dir) / buf).string();
+}
+
+// Row-major, component-wise for the same reason as writeVec3: never depend on
+// the class's in-memory padding or on it staying a plain float[4][4].
+inline void writeMatrix4x4(std::ostream& os, const Matrix4x4& m) {
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) writePod(os, m.m[r][c]);
+}
+inline bool readMatrix4x4(std::istream& is, Matrix4x4& m) {
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            if (!readPod(is, m.m[r][c])) return false;
+    return true;
+}
+
 inline void writeString(std::ostream& os, const std::string& s) {
     const uint32_t n = static_cast<uint32_t>(s.size());
     writePod(os, n);
@@ -152,11 +171,76 @@ bool readSoftFrame(const std::string& cache_dir, int frame,
     return true;
 }
 
+// ── Dynamic rigid body frames ────────────────────────────────────────────────
+// Unlike the grid/soft caches these carry VELOCITIES as well as poses, because
+// a rigid body is resumed from here (advanceRigidTimelineToFrame continues from
+// a restored frame), not merely displayed. Restoring pose alone would leave a
+// falling body with zero velocity and it would drop from rest on the next step.
+std::string rigidFrameFilePath(const std::string& cache_dir, int frame) {
+    return rigidFramePath(cache_dir, frame);
+}
+
+bool rigidFrameExists(const std::string& cache_dir, int frame) {
+    std::error_code ec;
+    return fs::exists(rigidFramePath(cache_dir, frame), ec);
+}
+
+bool writeRigidFrame(const std::string& cache_dir, int frame,
+                     const std::vector<RigidBodyFrameState>& bodies) {
+    std::error_code ec;
+    fs::create_directories(cache_dir, ec);
+
+    std::ofstream os(rigidFramePath(cache_dir, frame), std::ios::binary | std::ios::trunc);
+    if (!os) return false;
+
+    writePod(os, kMagic);
+    writePod(os, kVersion);
+    writePod(os, static_cast<uint32_t>(bodies.size()));
+    for (const auto& b : bodies) {
+        writeString(os, b.source_name);
+        writeMatrix4x4(os, b.pivot);
+        writeMatrix4x4(os, b.body_xf);
+        writeVec3(os, b.lin_vel);
+        writeVec3(os, b.ang_vel);
+        writePod(os, static_cast<uint8_t>(b.valid ? 1u : 0u));
+    }
+    return static_cast<bool>(os);
+}
+
+bool readRigidFrame(const std::string& cache_dir, int frame,
+                    std::vector<RigidBodyFrameState>& out_bodies) {
+    out_bodies.clear();
+    std::ifstream is(rigidFramePath(cache_dir, frame), std::ios::binary);
+    if (!is) return false;
+
+    uint32_t magic = 0, version = 0, count = 0;
+    if (!readPod(is, magic) || !readPod(is, version) || !readPod(is, count)) return false;
+    if (magic != kMagic || version != kVersion) return false;
+
+    out_bodies.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        RigidBodyFrameState b;
+        uint8_t valid = 0;
+        if (!readString(is, b.source_name) ||
+            !readMatrix4x4(is, b.pivot) ||
+            !readMatrix4x4(is, b.body_xf) ||
+            !readVec3(is, b.lin_vel) ||
+            !readVec3(is, b.ang_vel) ||
+            !readPod(is, valid)) {
+            return false;
+        }
+        b.valid = (valid != 0u);
+        out_bodies.push_back(std::move(b));
+    }
+    return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Write
 // ─────────────────────────────────────────────────────────────────────────────
 bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame,
-                      const std::vector<SimulationGridDomainState>& domains) {
+                      const std::vector<SimulationGridDomainState>& domains,
+                      const std::vector<MaterialStateFieldSnapshot>& msf) {
     std::error_code ec;
     fs::create_directories(cache_dir, ec);
 
@@ -211,6 +295,23 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         }
     }
 
+    // ── Material State Field (v2) ────────────────────────────────────────────
+    // Named channels rather than the runtime's packed stride: the stride carries
+    // per-step scratch and a reserved slot, and binding the file format to it
+    // would invalidate every cache the day a scratch slot is added.
+    writePod(os, static_cast<uint32_t>(msf.size()));
+    for (const auto& f : msf) {
+        writeString(os, f.object_key);
+        writePod(os, static_cast<int32_t>(f.mask_resolution));
+        writePod(os, f.element_count);
+        writeFloatArray(os, f.temperature);
+        writeFloatArray(os, f.fuel);
+        writeFloatArray(os, f.charred);
+        writeFloatArray(os, f.moisture);
+        writeFloatArray(os, f.melt);
+        writeFloatArray(os, f.mass_loss);
+    }
+
     return static_cast<bool>(os);
 }
 
@@ -218,7 +319,9 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
 // Read
 // ─────────────────────────────────────────────────────────────────────────────
 bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame,
-                     std::vector<SimulationGridDomainState>& out_domains) {
+                     std::vector<SimulationGridDomainState>& out_domains,
+                     std::vector<MaterialStateFieldSnapshot>& out_msf) {
+    out_msf.clear();
     std::ifstream is(framePath(cache_dir, system_id, frame), std::ios::binary);
     if (!is) return false;
 
@@ -304,6 +407,29 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.foam.velocity.assign(static_cast<size_t>(fcount), Vec3(0.0f));
 
         if (!is) return false;
+    }
+
+    // ── Material State Field (v2) ────────────────────────────────────────────
+    uint32_t msf_count = 0;
+    if (!readPod(is, msf_count)) return false;
+    out_msf.reserve(msf_count);
+    for (uint32_t i = 0; i < msf_count; ++i) {
+        MaterialStateFieldSnapshot f;
+        int32_t res = 0;
+        if (!readString(is, f.object_key)) return false;
+        if (!readPod(is, res)) return false;
+        if (!readPod(is, f.element_count)) return false;
+        f.mask_resolution = static_cast<int>(res);
+        if (!readFloatArray(is, f.temperature)) return false;
+        if (!readFloatArray(is, f.fuel))        return false;
+        if (!readFloatArray(is, f.charred))     return false;
+        if (!readFloatArray(is, f.moisture))    return false;
+        if (!readFloatArray(is, f.melt))        return false;
+        if (!readFloatArray(is, f.mass_loss))   return false;
+        // A truncated/inconsistent entry is dropped rather than returning false:
+        // losing one object's burn marks is recoverable, refusing the whole frame
+        // would drop a perfectly good fluid/gas bake with it.
+        if (f.valid()) out_msf.push_back(std::move(f));
     }
 
     return true;

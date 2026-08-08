@@ -1,0 +1,36 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int width; int height;
+    float terrainSize; float featureScale; float headwaterAreaKm2;
+    float depthMeters; float floorShape; float heightScale;
+} pc;
+layout(set=0,binding=0) readonly buffer Accumulated { float accumulated[]; };
+layout(set=0,binding=1) writeonly buffer Delta { float macroDelta[]; };
+layout(set=0,binding=2) writeonly buffer ChannelWidth { float macroWidth[]; };
+
+void main() {
+    uint ui=gl_GlobalInvocationID.x;
+    if(ui>=uint(pc.width*pc.height)) return;
+    int x=int(ui)%pc.width, y=int(ui)/pc.width;
+    float macroCell=pc.terrainSize/float(max(pc.width,pc.height));
+    float cellAreaKm2=macroCell*macroCell*1.0e-6;
+    int searchRadius=clamp(int(ceil(pc.featureScale/max(macroCell,0.001)*0.55)),1,20);
+    float best=0.0, bestWidth=0.0;
+    for(int oy=-searchRadius;oy<=searchRadius;++oy) for(int ox=-searchRadius;ox<=searchRadius;++ox) {
+        int sx=x+ox, sy=y+oy;
+        if(sx<1||sy<1||sx>=pc.width-1||sy>=pc.height-1) continue;
+        float area=max(accumulated[sy*pc.width+sx],0.0)*cellAreaKm2;
+        float support=smoothstep(pc.headwaterAreaKm2,pc.headwaterAreaKm2*5.0,area);
+        if(support<=0.0) continue;
+        float maturity=clamp(log2(max(area/pc.headwaterAreaKm2,1.0))/6.0,0.0,1.0);
+        float width=pc.featureScale*mix(0.12,0.52,sqrt(maturity));
+        float distanceMeters=length(vec2(ox,oy))*macroCell;
+        float radial=clamp(1.0-distanceMeters/max(width,macroCell),0.0,1.0);
+        radial=pow(radial,mix(2.4,0.62,clamp(pc.floorShape,0.0,1.0)));
+        float influence=support*radial*mix(0.45,1.0,maturity);
+        if(influence>best){best=influence;bestWidth=width;}
+    }
+    macroDelta[ui]=-pc.depthMeters*best/max(pc.heightScale,0.001);
+    macroWidth[ui]=best>0.01?bestWidth:0.0;
+}

@@ -382,6 +382,9 @@ public:
     // Update instance transform (fast - only TLAS rebuild needed)
     void updateInstanceTransform(int instance_id, const float transform[12]);
     void setInstanceScatterBinding(int instance_id, int group_id, uint32_t instance_index);
+    // Drops only InstanceGroup-backed mesh instances. Source BLASes and every
+    // ordinary scene instance remain resident so brush edits only rebuild TLAS.
+    void removeScatterInstances();
     
     // Remove instance (marks for removal, call compactInstances to clean up)
     void removeInstance(int instance_id);

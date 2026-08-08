@@ -3458,6 +3458,18 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                 extern bool g_optix_rebuild_pending;
                 extern bool g_vulkan_rebuild_pending;
                 extern bool g_gpu_refit_pending;
+                // ★ CONSUME BEFORE SERVICING, never after.
+                //
+                // updateGeometry / syncVDBVolumesToGPU below can RAISE a rebuild
+                // request of their own: a volume whose grid was still
+                // regenerating gets skipped and asks to be retried. Clearing the
+                // flag after the work destroys exactly that retry, so the retry
+                // mechanism never fires anywhere. Clear the request we are about
+                // to service first; anything raised while servicing survives to
+                // the next frame.
+                g_optix_rebuild_pending = false;
+                g_vulkan_rebuild_pending = false;
+                g_gpu_refit_pending = false;
                 if (sim_structural_change) {
                     // Pool grew / new bridge group: rebuild the TLAS so it
                     // incorporates the InstanceManager particle/foam groups plus
@@ -3494,11 +3506,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                     // Particle motion only: cheap TLAS refit (no BLAS rebuild).
                     m_backend->updateInstanceTransforms(scene.world.objects);
                 }
-                // The worker consumed these flags; clear them so the post-render
-                // UI loop doesn't re-process a stale pending rebuild.
-                g_optix_rebuild_pending = false;
-                g_vulkan_rebuild_pending = false;
-                g_gpu_refit_pending = false;
+                // (Flags were consumed above, before the work ran.)
             }
 
             // 2. Set Scene Params

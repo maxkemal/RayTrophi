@@ -39,7 +39,34 @@ class SimulationForceFieldSnapshot;
 
 namespace Fluid {
 
+enum class FluidChemistryPreset : int {
+    Inert = 0,
+    Water,
+    Gasoline,
+    Alcohol,
+    Oil,
+    Custom
+};
+
+// Material-level phase/combustion description.  The APIC solver does not
+// require these fields for ordinary liquids; keeping them here makes water,
+// oil, honey and future fuels self-describing without forcing every domain to
+// allocate gas channels.
+struct FluidFuelProfile {
+    bool flammable = false;
+    bool extinguishing = false;
+    float flash_temperature = 0.0f;
+    float autoignition_temperature = 0.0f;
+    float vaporization_rate = 0.0f;
+    float heat_capacity = 1.0f;
+    float latent_heat = 0.0f;
+    float cooling_power = 0.0f;
+    float oxygen_dilution = 0.0f;
+    float flame_persistence = 0.0f;
+};
+
 struct APICSolverParams {
+    enum class FluidPreset : int;
     Vec3  gravity = Vec3(0.0f, -9.81f, 0.0f);
 
     // Particles per cell when seeding a fluid region. APIC is stable down to
@@ -137,6 +164,60 @@ struct APICSolverParams {
     int   viscosity_iterations = 1;
     float affine_damping = 0.98f;
     float max_affine = 80.0f;
+
+    FluidFuelProfile fuel_profile;
+    FluidChemistryPreset chemistry_preset = FluidChemistryPreset::Inert;
+
+    void applyChemistryProfile(FluidChemistryPreset preset) {
+        chemistry_preset = preset;
+        fuel_profile = {};
+        switch (preset) {
+            case FluidChemistryPreset::Gasoline:
+                fuel_profile.flammable = true;
+                fuel_profile.flash_temperature = 0.35f;
+                fuel_profile.autoignition_temperature = 0.80f;
+                fuel_profile.vaporization_rate = 0.85f;
+                fuel_profile.heat_capacity = 1.7f;
+                fuel_profile.latent_heat = 0.9f;
+                fuel_profile.flame_persistence = 0.55f;
+                break;
+            case FluidChemistryPreset::Alcohol:
+                fuel_profile.flammable = true;
+                fuel_profile.flash_temperature = 0.28f;
+                fuel_profile.autoignition_temperature = 0.72f;
+                fuel_profile.vaporization_rate = 1.20f;
+                fuel_profile.heat_capacity = 2.4f;
+                fuel_profile.latent_heat = 0.85f;
+                fuel_profile.flame_persistence = 0.35f;
+                break;
+            case FluidChemistryPreset::Oil:
+                fuel_profile.flammable = true;
+                fuel_profile.flash_temperature = 0.65f;
+                fuel_profile.autoignition_temperature = 1.10f;
+                fuel_profile.vaporization_rate = 0.28f;
+                fuel_profile.heat_capacity = 1.7f;
+                fuel_profile.latent_heat = 1.2f;
+                fuel_profile.flame_persistence = 0.90f;
+                break;
+            case FluidChemistryPreset::Water:
+                fuel_profile.extinguishing = true;
+                fuel_profile.heat_capacity = 4.18f;
+                fuel_profile.latent_heat = 2.26f;
+                fuel_profile.cooling_power = 1.0f;
+                fuel_profile.oxygen_dilution = 0.35f;
+                break;
+            case FluidChemistryPreset::Custom:
+            default:
+                break;
+        }
+    }
+
+    // Backward-compatible bridge: old Oil fluid presets retain oil chemistry.
+    void applyFuelProfile(FluidPreset preset) {
+        applyChemistryProfile(preset == FluidPreset::Oil
+            ? FluidChemistryPreset::Oil
+            : FluidChemistryPreset::Inert);
+    }
 
     // CPU reference path controls. Thread count 0 means automatic.
     int   cpu_threads = 0;
@@ -282,6 +363,7 @@ struct APICSolverParams {
                 return; // leave fields untouched
         }
         current_preset = preset;
+        applyFuelProfile(preset);
     }
 };
 

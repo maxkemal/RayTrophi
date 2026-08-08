@@ -46,16 +46,69 @@ struct HydraulicErosionParams {
     float evaporateSpeed = 0.01f;  // Evaporation rate
     float gravity = 9.8f;          // Gravitational acceleration
     int erosionRadius = 2;         // Default channel width
+    float initialWater = 1.0f;     // Water carried by a newly spawned droplet
+    float initialSpeed = 1.0f;     // Initial droplet velocity
+    float uphillErosion = 0.3f;    // Momentum-driven erosion while climbing a cell
+    float flatSettling = 1.0f;     // Multiplier for low-slope sediment settling
+    float velocitySettling = 1.0f; // Multiplier for deceleration-driven settling
+    float minWater = 0.01f;        // Droplet termination water threshold
+    float minSpeed = 0.01f;        // Droplet termination velocity threshold
+    bool removeSpikes = true;
+    bool fillPits = true;
+    bool smoothSurface = true;
     unsigned int seed = 1337u;     // Deterministic CPU/GPU droplet distribution
     ErosionBoundaryMode boundaryMode = ErosionBoundaryMode::Preserve;
     int boundaryWidth = 0;         // Cells; 0 selects a resolution-aware width
     float boundaryLevel = 0.0f;    // Normalized height used by SeaLevel mode
+    bool channelEvolution = true;  // Mature accumulated runoff without a second Fluvial solve
+    int channelIterations = 12;    // Race-free grid transport/evolution passes
+    float channelErosion = 0.18f;  // Bed incision response to accumulated discharge
+    float channelDeposition = 0.22f; // Low-energy sediment settling
+    float channelWidthScale = 1.0f;  // Hydraulic geometry width multiplier
+    float channelDepthScale = 1.0f;  // Hydraulic geometry depth multiplier
+    bool macroDrainage = true;
+    float macroValleyScaleMeters = 140.0f;
+    float macroHeadwaterAreaKm2 = 0.012f;
+    float macroValleyDepthMeters = 10.0f;
+    float macroValleyFloor = 0.35f;
+};
+
+// Optional transient products emitted by the hydraulic solver. These are
+// accumulated by the simulation itself (not reconstructed from height deltas).
+struct HydraulicErosionFields {
+    int width = 0;
+    int height = 0;
+    std::vector<float> erosion;
+    std::vector<float> deposition;
+    std::vector<float> discharge;
+    std::vector<float> sediment;
+    std::vector<float> directionX;
+    std::vector<float> directionY;
+    std::vector<float> channelWidth;
+    std::vector<float> waterDepth;
+    std::vector<float> waterLevel;
+
+    void reset(int w, int h) {
+        width = w; height = h;
+        const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+        erosion.assign(n, 0.0f); deposition.assign(n, 0.0f);
+        discharge.assign(n, 0.0f); sediment.assign(n, 0.0f);
+        directionX.assign(n, 0.0f); directionY.assign(n, 0.0f);
+        channelWidth.assign(n, 0.0f); waterDepth.assign(n, 0.0f);
+        waterLevel.assign(n, 0.0f);
+    }
 };
 
 struct ThermalErosionParams {
     int iterations = 50;          // Moderate default
     float talusAngle = 0.5f;       // ~27 degrees
     float erosionAmount = 0.3f;    // Less aggressive
+    float anisotropy = 0.0f;       // Directional thermal stress (0 isotropic)
+    float anisotropyDirection = 0.0f; // Degrees in terrain XZ
+    float talusSettling = 1.0f;    // Mobility of unstable debris
+    float sedimentRemoval = 0.0f;  // Fraction of transported mass leaving domain
+    bool fineDetail = false;
+    float debrisSizeMeters = 1.0f;
 };
 
 class TerrainManager {
@@ -138,7 +191,7 @@ public:
     // tens of seconds at default iteration counts on a background evaluate
     // thread — without this, the node-editor progress bar shows no movement for
     // the whole duration a single erosion node is running.
-    void hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
+    void hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr, HydraulicErosionFields* fields = nullptr);
     void hydraulicErosionAdvanced(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
     void fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& params,
                         const std::vector<float>& mask = {},
@@ -147,7 +200,12 @@ public:
     void fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params,
                            const std::vector<float>& mask = {},
                            const std::vector<float>& flowGuide = {});
-    void hydraulicErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    void hydraulicErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {}, HydraulicErosionFields* fields = nullptr);
+    void hydraulicErosionMultiPass(TerrainObject* terrain,
+                                   const std::vector<HydraulicErosionParams>& stages,
+                                   bool useGPU, const std::vector<float>& mask = {},
+                                   const std::function<void(float)>& progressCallback = nullptr,
+                                   HydraulicErosionFields* fields = nullptr);
     void thermalErosionGPU(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {});
     void thermalErosion(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
 

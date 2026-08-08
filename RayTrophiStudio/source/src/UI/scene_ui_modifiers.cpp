@@ -7296,11 +7296,27 @@ bool SceneUI::evaluateGeometryGraph(UIContext& ctx, const std::string& objectNam
     }
     ctx.scene.world.objects = std::move(remainingObjects);
 
-    // 4.5 Instance side effects (ScatterInstancesNode): rebuild InstanceManager's
-    // scene objects AFTER world.objects is finalized but BEFORE the BVH/backend
-    // rebuilds below, so freshly scattered instances are included in them.
+    // 4.5 Instance side effects (ScatterInstancesNode).
+    // Vulkan and OptiX consume the flat source meshes + InstanceGroup TRS arrays directly;
+    // expanding tens of thousands of instances into one HittableInstance facade
+    // each is redundant and used to dominate foliage evaluation. CPU/OptiX keep
+    // the legacy expansion because their scene/BVH paths still consume objects.
     if (gctx.instancesDirty) {
-        InstanceManager::getInstance().rebuildSceneObjects(ctx.scene);
+        const Backend::BackendType backendType = ctx.backend_ptr
+            ? ctx.backend_ptr->getInfo().type
+            : Backend::BackendType::CPU_CUSTOM;
+        const bool nativeFlatInstances =
+            backendType == Backend::BackendType::VULKAN_RT ||
+            backendType == Backend::BackendType::VULKAN_COMPUTE ||
+            backendType == Backend::BackendType::OPTIX;
+        if (nativeFlatInstances) {
+            for (auto& group : InstanceManager::getInstance().getGroups()) {
+                group.active_hittables.clear();
+                group.gpu_dirty = true;
+            }
+        } else {
+            InstanceManager::getInstance().rebuildSceneObjects(ctx.scene);
+        }
     }
 
     // 5. Rebuild — mirrors replaceEvaluatedMesh's structural-change flag sequence.

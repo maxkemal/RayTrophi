@@ -302,6 +302,11 @@ void OptixBackend::rebuildAccelerationStructure() {
     m_optix->rebuildTLAS();
 }
 
+bool OptixBackend::refreshScatterInstances() {
+    return m_optix && m_optix->refreshScatterInstances();
+}
+
+
 void OptixBackend::showAllInstances() {
     m_optix->showAllInstances();
 }

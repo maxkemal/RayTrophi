@@ -44,7 +44,11 @@ namespace RayTrophiSim {
 namespace SimCache {
 
 constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
-constexpr uint32_t kVersion = 1u;
+// 2: per-system frames carry the Material State Field block (burn/heat surface
+//    damage). An older cache is simply rejected by the reader and the caller
+//    falls back to resimulation — the project has not shipped, so carrying a
+//    v1 reader would be maintenance for nobody.
+constexpr uint32_t kVersion = 2u;
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.
 std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int frame);
@@ -52,17 +56,30 @@ std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int 
 // True if a frame file for (system_id, frame) exists in cache_dir.
 bool frameExists(const std::string& cache_dir, uint32_t system_id, int frame);
 
-// Write one system's domain states (render-only fields) for `frame`.
-// Creates cache_dir if needed. Returns false on any I/O failure.
+// Write one system's domain states (render-only fields) for `frame`, plus its
+// Material State Field damage. Creates cache_dir if needed. Returns false on any
+// I/O failure.
+//
+// ★ MSF is a SIBLING of the domain list, not a member of it. Burn damage is
+// per-object and an object outside every domain is still simulated, so it cannot
+// be folded into SimulationGridDomainState without losing exactly the objects
+// the world thermal layer exists to cover.
+//
+// ★ It is also the one thing in this cache that is NOT re-derivable. Everything
+// else here is a render representation the sim would rebuild anyway; burn damage
+// is permanent, path-dependent state, so a frame replayed without it shows
+// pristine geometry inside a fully simulated fire.
 bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame,
-                      const std::vector<SimulationGridDomainState>& domains);
+                      const std::vector<SimulationGridDomainState>& domains,
+                      const std::vector<MaterialStateFieldSnapshot>& msf);
 
 // Read one system's domain states back (render-only) for `frame`. Reconstructs
 // grid metadata + present scalar fields + particles/foam; velocity & affine are
 // left zero-sized-safe (resized to match counts, value 0). Returns false if the
 // file is missing / corrupt / version-mismatched.
 bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame,
-                     std::vector<SimulationGridDomainState>& out_domains);
+                     std::vector<SimulationGridDomainState>& out_domains,
+                     std::vector<MaterialStateFieldSnapshot>& out_msf);
 
 // ── Soft / cloth bodies ──────────────────────────────────────────────────────
 // Soft-body deformation is mesh-resident (not a pose), so it is baked as one file
