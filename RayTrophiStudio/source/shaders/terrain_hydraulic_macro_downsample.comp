@@ -1,0 +1,32 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int fullWidth; int fullHeight; int macroWidth; int macroHeight;
+} pc;
+layout(set=0,binding=0) readonly buffer FullHeight { float fullHeight[]; };
+layout(set=0,binding=1) readonly buffer FullMask { float fullMask[]; };
+layout(set=0,binding=2) readonly buffer FullHardness { float fullHardness[]; };
+layout(set=0,binding=3) writeonly buffer MacroHeight { float macroHeight[]; };
+layout(set=0,binding=4) writeonly buffer MacroMask { float macroMask[]; };
+layout(set=0,binding=5) writeonly buffer MacroHardness { float macroHardness[]; };
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.macroWidth * pc.macroHeight)) return;
+    int mx = int(ui) % pc.macroWidth, my = int(ui) / pc.macroWidth;
+    vec2 lo = vec2(mx, my) / vec2(pc.macroWidth, pc.macroHeight);
+    vec2 hi = vec2(mx + 1, my + 1) / vec2(pc.macroWidth, pc.macroHeight);
+    float hs = 0.0, ms = 0.0, rs = 0.0;
+    const int taps = 4;
+    for (int ty=0; ty<taps; ++ty) for (int tx=0; tx<taps; ++tx) {
+        vec2 uv = mix(lo, hi, (vec2(tx,ty)+0.5)/float(taps));
+        int x = clamp(int(uv.x * pc.fullWidth), 0, pc.fullWidth-1);
+        int y = clamp(int(uv.y * pc.fullHeight), 0, pc.fullHeight-1);
+        int i = y * pc.fullWidth + x;
+        hs += fullHeight[i]; ms += clamp(fullMask[i],0.0,1.0);
+        rs += clamp(fullHardness[i],0.0,1.0);
+    }
+    macroHeight[ui] = hs / 16.0;
+    macroMask[ui] = ms / 16.0;
+    macroHardness[ui] = rs / 16.0;
+}

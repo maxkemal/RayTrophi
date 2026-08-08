@@ -1,4 +1,4 @@
-/*
+﻿/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          Api/RtApiFluid.cpp
@@ -12,10 +12,102 @@
 #include "Fluid/FluidSimulationSystem.h"
 #include "Fluid/APICFluidSolver.h"
 #include "ParticleSimulation.h"
+#include "MaterialStateField.h"
+#include "VolumeShader.h"
 #include <algorithm>
 #include <cctype>
 
 namespace rtapi {
+
+namespace {
+
+// Locate a Gas domain descriptor by id or name. Shared by the shader accessors
+// below; mirrors the lookup updateGasDomainSettings performs.
+RayTrophiSim::SimulationGridDomainDesc* findGasDomainDesc(
+    const std::string& domain_id_or_name, Result& out_error) {
+    if (!g_ctx) { out_error = notBound(); return nullptr; }
+    FluidDomainInfo info;
+    Result found = getFluidDomain(domain_id_or_name, info);
+    if (!found.ok) { out_error = found; return nullptr; }
+    auto& domains = g_ctx->scene.ensureParticleSimulationSystem().gridDomains();
+    auto it = std::find_if(domains.begin(), domains.end(),
+        [&info](const auto& d) { return d.name == info.name; });
+    if (it == domains.end() || it->type != RayTrophiSim::SimulationDomainType::Gas) {
+        out_error = Result::fail("gas domain not found: " + domain_id_or_name);
+        return nullptr;
+    }
+    out_error = Result::success();
+    return &(*it);
+}
+
+} // namespace
+
+Result listMaterialSubstances(std::vector<std::string>& out_names) {
+    out_names.clear();
+    for (const auto& profile : RayTrophiSim::substanceLibrary()) {
+        out_names.push_back(profile.name);
+    }
+    return Result::success();
+}
+
+Result getGasShaderSettings(const std::string& domain_id_or_name,
+                            GasShaderSettings& out_settings) {
+    Result error;
+    auto* domain = findGasDomainDesc(domain_id_or_name, error);
+    if (!domain) return error;
+    if (!domain->shader) {
+        // Not an error: the render bridge creates the shader lazily on the
+        // first sync. Report the defaults the domain's intent will produce.
+        out_settings = GasShaderSettings{};
+        out_settings.preset = domain->fire_enabled ? "fire" : "smoke";
+        return Result::success();
+    }
+    const auto& s = *domain->shader;
+    out_settings.preset = domain->fire_enabled ? "fire" : "smoke";
+    out_settings.density_multiplier = s.density.multiplier;
+    out_settings.density_cutoff = s.density.cutoff_threshold;
+    out_settings.blackbody_intensity = s.emission.blackbody_intensity;
+    out_settings.temperature_min = s.emission.temperature_min;
+    out_settings.temperature_max = s.emission.temperature_max;
+    out_settings.scattering_coefficient = s.scattering.coefficient;
+    out_settings.absorption_coefficient = s.absorption.coefficient;
+    return Result::success();
+}
+
+Result updateGasShaderSettings(const std::string& domain_id_or_name,
+                               const GasShaderSettings& settings) {
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    Result error;
+    auto* domain = findGasDomainDesc(domain_id_or_name, error);
+    if (!domain) return error;
+
+    std::string preset = settings.preset;
+    std::transform(preset.begin(), preset.end(), preset.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (preset == "fire") {
+        domain->shader = VolumeShader::createFirePreset();
+    } else if (preset == "smoke") {
+        domain->shader = VolumeShader::createSmokePreset();
+    } else if (!preset.empty()) {
+        return Result::fail("unknown gas shader preset: " + settings.preset);
+    } else if (!domain->shader) {
+        domain->shader = domain->fire_enabled ? VolumeShader::createFirePreset()
+                                              : VolumeShader::createSmokePreset();
+    }
+    auto& s = *domain->shader;
+    s.density.multiplier = std::max(0.0f, settings.density_multiplier);
+    s.density.cutoff_threshold = std::max(0.0f, settings.density_cutoff);
+    s.emission.blackbody_intensity = std::max(0.0f, settings.blackbody_intensity);
+    // A zero-width or inverted range maps every temperature to the same colour,
+    // which reads as "emission is broken". Keep the pair ordered and separated.
+    s.emission.temperature_min = std::max(0.0f, settings.temperature_min);
+    s.emission.temperature_max =
+        std::max(s.emission.temperature_min + 1.0f, settings.temperature_max);
+    s.scattering.coefficient = std::max(0.0f, settings.scattering_coefficient);
+    s.absorption.coefficient = std::max(0.0f, settings.absorption_coefficient);
+    g_gas_volumes_dirty = true;
+    return Result::success();
+}
 
 Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_max,
                          float voxel_size, const std::string& type, rtapi::FluidDomainInfo& out_info) {
@@ -62,7 +154,42 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
         if (voxel_size > 0.001f) grid_dom->voxel_size = voxel_size;
     }
 
-    // 2. Ensure low-level FluidObject exists
+    // ★ A GAS domain gets NO legacy FluidObject.
+    //
+    // FluidObject is the pre-grid-domain APIC LIQUID container (particles, seed
+    // box, level set). Creating one for gas left a ghost that nothing simulated
+    // but that syncFluidRenderVolumes still walked EVERY FRAME: it built a
+    // density volume from the ghost's grid, found it empty, and called
+    // destroyFluidRenderVolume — which unconditionally raises g_geometry_dirty +
+    // g_vulkan_rebuild_pending. That is a full TLAS rebuild per frame, and it is
+    // exactly why a scripted gas domain churned while a panel-created one (grid
+    // domain only) did not. The grid domain is the authority; getFluidDomain
+    // resolves gas domains from it directly.
+    if (is_gas) {
+        if (!grid_dom) return Result::fail("failed to create gas domain: " + domain_name);
+        out_info.id = 0;
+        out_info.name = grid_dom->name;
+        out_info.type = "gas";
+        out_info.domain_min = grid_dom->bounds_min;
+        out_info.domain_max = grid_dom->bounds_max;
+        out_info.voxel_size = grid_dom->voxel_size;
+        out_info.particle_count = 0;
+        out_info.render_mode = "volume";
+        out_info.boundary =
+            (grid_dom->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
+            (grid_dom->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
+        out_info.preset = "custom";
+        out_info.viscosity = 0.0f;
+        out_info.backend =
+            (grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
+            (grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
+            (grid_dom->backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
+        out_info.enabled = grid_dom->enabled;
+        out_info.visible = true;
+        return Result::success();
+    }
+
+    // 2. Ensure low-level FluidObject exists (liquid domains only)
     auto existing = g_ctx->scene.findFluidObjectByName(domain_name);
     RayTrophiSim::Fluid::FluidObject* obj = existing;
     if (!obj) {
@@ -118,7 +245,36 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
     } catch (...) {}
 
     if (!obj) obj = g_ctx->scene.findFluidObjectByName(domain_id_or_name);
-    if (!obj) return Result::fail("fluid domain not found: " + domain_id_or_name);
+    if (!obj) {
+        // Gas domains own no FluidObject (see createFluidDomain). Resolve them
+        // from the grid-domain list, which is the authority for both types.
+        auto& p_sys_gas = g_ctx->scene.ensureParticleSimulationSystem();
+        for (const auto& d : p_sys_gas.gridDomains()) {
+            if (d.name != domain_id_or_name) continue;
+            out_info = FluidDomainInfo{};
+            out_info.id = 0;
+            out_info.name = d.name;
+            out_info.type = (d.type == RayTrophiSim::SimulationDomainType::Gas) ? "gas" : "fluid";
+            out_info.domain_min = d.bounds_min;
+            out_info.domain_max = d.bounds_max;
+            out_info.voxel_size = d.voxel_size;
+            out_info.particle_count = 0;
+            out_info.render_mode = "volume";
+            out_info.boundary =
+                (d.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
+                (d.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
+            out_info.preset = "custom";
+            out_info.viscosity = 0.0f;
+            out_info.backend =
+                (d.backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
+                (d.backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
+                (d.backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
+            out_info.enabled = d.enabled;
+            out_info.visible = true;
+            return Result::success();
+        }
+        return Result::fail("fluid domain not found: " + domain_id_or_name);
+    }
 
     RayTrophiSim::SimulationGridDomainDesc* grid_dom = nullptr;
     auto& p_sys_get = g_ctx->scene.ensureParticleSimulationSystem();
@@ -152,6 +308,64 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
     return Result::success();
 }
 
+Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
+    if (!g_ctx) return notBound();
+    out_domains.clear();
+
+    // The grid-domain list is the authority for BOTH types (a gas domain owns no
+    // FluidObject at all). Walk every particle system, not just the active one —
+    // presets and imported scenes can leave a second system behind, and a domain
+    // the caller cannot see is a domain it cannot delete.
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (!system.runtime) continue;
+        for (const auto& d : system.runtime->gridDomains()) {
+            FluidDomainInfo info;
+            info.name = d.name;
+            info.type = (d.type == RayTrophiSim::SimulationDomainType::Gas) ? "gas" : "fluid";
+            info.domain_min = d.bounds_min;
+            info.domain_max = d.bounds_max;
+            info.voxel_size = d.voxel_size;
+            info.boundary =
+                (d.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
+                (d.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
+            info.backend =
+                (d.backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
+                (d.backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
+                (d.backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
+            info.enabled = d.enabled;
+            info.visible = true;
+            info.render_mode = "volume";
+            info.preset = "custom";
+            info.viscosity = 0.0f;
+            info.particle_count = 0;
+
+            // Liquid domains additionally carry a legacy FluidObject; take the
+            // id/preset/viscosity from it so the entry matches what fluid.get
+            // reports for the same name.
+            if (d.type != RayTrophiSim::SimulationDomainType::Gas) {
+                if (auto* obj = g_ctx->scene.findFluidObjectByName(d.name)) {
+                    info.id = obj->id;
+                    info.particle_count = obj->particles.size();
+                    info.viscosity = obj->params.viscosity;
+                    info.visible = obj->visible;
+                    info.render_mode =
+                        (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
+                        (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+                    info.preset =
+                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Water) ? "water" :
+                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Oil) ? "oil" :
+                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Mud) ? "mud" :
+                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Honey) ? "honey" :
+                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Lava) ? "lava" :
+                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Sand) ? "sand" : "custom";
+                }
+            }
+            out_domains.push_back(std::move(info));
+        }
+    }
+    return Result::success();
+}
+
 Result removeFluidDomain(const std::string& domain_id_or_name) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
@@ -173,7 +387,10 @@ Result removeFluidDomain(const std::string& domain_id_or_name) {
             }
         }
     }
-    const bool object_removed = g_ctx->scene.removeFluidObject(info.id);
+    // Gas domains report id 0 because they own no FluidObject; do not hand that
+    // to removeFluidObject, which would be a lookup for an unrelated object.
+    const bool object_removed =
+        (info.type == "gas") ? false : g_ctx->scene.removeFluidObject(info.id);
     if (!grid_removed && !object_removed)
         return Result::fail("failed to remove fluid domain: " + info.name);
     return Result::success();
@@ -434,6 +651,14 @@ Result getCombustibleFluidSettings(
        it->type!=RayTrophiSim::SimulationDomainType::Fluid)
         return Result::fail("fluid domain not found: "+domain_id_or_name);
     out.enabled=it->fluid_flammable;
+    switch (it->fluid_params.chemistry_preset) {
+        case RayTrophiSim::Fluid::FluidChemistryPreset::Water: out.chemistry_preset="water"; break;
+        case RayTrophiSim::Fluid::FluidChemistryPreset::Gasoline: out.chemistry_preset="gasoline"; break;
+        case RayTrophiSim::Fluid::FluidChemistryPreset::Alcohol: out.chemistry_preset="alcohol"; break;
+        case RayTrophiSim::Fluid::FluidChemistryPreset::Oil: out.chemistry_preset="oil"; break;
+        case RayTrophiSim::Fluid::FluidChemistryPreset::Custom: out.chemistry_preset="custom"; break;
+        default: out.chemistry_preset="inert"; break;
+    }
     out.auto_ignite=it->fluid_auto_ignite;
     out.ignition_temperature=it->fluid_ignition_temperature;
     out.evaporation_rate=it->fluid_evaporation_rate;
@@ -459,7 +684,23 @@ Result updateCombustibleFluidSettings(
     if(it==domains.end() ||
        it->type!=RayTrophiSim::SimulationDomainType::Fluid)
         return Result::fail("fluid domain not found: "+domain_id_or_name);
-    it->fluid_flammable=s.enabled;
+    std::string chemistry = s.chemistry_preset;
+    std::transform(chemistry.begin(), chemistry.end(), chemistry.begin(),
+                   [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    if (chemistry == "water") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Water);
+    else if (chemistry == "gasoline") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Gasoline);
+    else if (chemistry == "alcohol") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Alcohol);
+    else if (chemistry == "oil") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Oil);
+    else if (chemistry == "custom") it->fluid_params.chemistry_preset=RayTrophiSim::Fluid::FluidChemistryPreset::Custom;
+    else it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Inert);
+    // The chemistry profile owns the physical interaction mode.  In particular,
+    // water must enter the extinguishing path even when the legacy `enabled`
+    // flag is used by an older script.
+    const auto& profile = it->fluid_params.fuel_profile;
+    it->fluid_extinguishing = profile.extinguishing;
+    it->fluid_flammable = s.enabled && !profile.extinguishing;
+    it->fluid_cooling_power = profile.cooling_power;
+    it->fluid_oxygen_dilution = profile.oxygen_dilution;
     it->fluid_auto_ignite=s.auto_ignite;
     it->fluid_ignition_temperature=std::max(0.0f,s.ignition_temperature);
     it->fluid_evaporation_rate=std::max(0.0f,s.evaporation_rate);
@@ -531,6 +772,11 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     out.source_mode = flowModeToString(source.source_mode);
     out.source_object = source.source_name;
     out.enabled = source.enabled;
+    out.parent_object = source.parent_object;
+    out.velocity_space =
+        (source.velocity_space == RayTrophiSim::SimulationEmissionVelocitySpace::World)
+            ? "world" : "local";
+    out.inherit_velocity = source.inherit_velocity;
     out.position = source.position;
     out.velocity = source.velocity;
     out.radius = source.radius;
@@ -562,6 +808,18 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     if (!mode_ok) return Result::fail("unknown flow source_mode: " + info.source_mode);
     out.source_name = info.source_object;
     out.enabled = info.enabled;
+    out.parent_object = info.parent_object;
+    {
+        const std::string space = lowerCopy(info.velocity_space);
+        if (space == "world") {
+            out.velocity_space = RayTrophiSim::SimulationEmissionVelocitySpace::World;
+        } else if (space.empty() || space == "local") {
+            out.velocity_space = RayTrophiSim::SimulationEmissionVelocitySpace::Local;
+        } else {
+            return Result::fail("unknown flow velocity_space: " + info.velocity_space);
+        }
+    }
+    out.inherit_velocity = info.inherit_velocity;
     out.position = info.position;
     out.velocity = info.velocity;
     out.radius = std::max(0.001f, info.radius);
@@ -632,6 +890,13 @@ SimulationColliderInfo colliderInfoFromDesc(const RayTrophiSim::ParticleCollider
     out.gas_temperature_rate = c.gas_temperature_rate;
     out.gas_fuel_rate = c.gas_fuel_rate;
     out.gas_flame_rate = c.gas_flame_rate;
+    out.msf_substance = c.msf_substance;
+    out.msf_override_ignition = c.msf_override.override_ignition;
+    out.msf_ignition_kelvin = c.msf_override.ignition_kelvin;
+    out.msf_burn_rate_scale = c.msf_override.burn_rate_scale;
+    out.msf_fuel_capacity_scale = c.msf_override.fuel_capacity_scale;
+    out.msf_mask_resolution = c.msf_mask_resolution;
+    out.msf_generate_char_mask = c.msf_generate_char_mask;
     return out;
 }
 
@@ -659,6 +924,22 @@ Result colliderDescFromInfo(const SimulationColliderInfo& info,
     out.gas_temperature_rate = std::max(0.0f, info.gas_temperature_rate);
     out.gas_fuel_rate = std::max(0.0f, info.gas_fuel_rate);
     out.gas_flame_rate = std::max(0.0f, info.gas_flame_rate);
+    if (!info.msf_substance.empty()) {
+        // Validate against the library rather than storing an unknown name that
+        // would silently degrade to the "Custom" profile at simulation time.
+        bool known = false;
+        for (const auto& profile : RayTrophiSim::substanceLibrary()) {
+            if (profile.name == info.msf_substance) { known = true; break; }
+        }
+        if (!known) return Result::fail("unknown msf_substance: " + info.msf_substance);
+        out.msf_substance = info.msf_substance;
+    }
+    out.msf_override.override_ignition = info.msf_override_ignition;
+    out.msf_override.ignition_kelvin = std::max(0.0f, info.msf_ignition_kelvin);
+    out.msf_override.burn_rate_scale = std::max(0.0f, info.msf_burn_rate_scale);
+    out.msf_override.fuel_capacity_scale = std::max(0.0f, info.msf_fuel_capacity_scale);
+    out.msf_mask_resolution = std::clamp(info.msf_mask_resolution, 0, 4096);
+    out.msf_generate_char_mask = info.msf_generate_char_mask;
     return Result::success();
 }
 
@@ -713,7 +994,52 @@ Result updateSimulationFlowSource(const std::string& name,
     Result converted = flowDescFromInfo(info, runtime, desc);
     if (!converted.ok) return converted;
     desc.timeline_uid = it->timeline_uid;
+    // Keys are animation, not configuration: a property update must not wipe
+    // them. This whole-desc assignment silently discarded the keyframe map
+    // before flow sources on Fluid domains were keyable and nobody noticed.
+    desc.keyframes = it->keyframes;
     *it = std::move(desc);
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result keySimulationFlowSource(const std::string& name,
+                               const SimulationFlowSourceKey& key) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    auto& runtime = scriptSimulationRuntime();
+    auto it = std::find_if(runtime.flowSources().begin(), runtime.flowSources().end(),
+        [&name](const auto& source) { return source.name == name; });
+    if (it == runtime.flowSources().end()) return Result::fail("flow source not found: " + name);
+
+    // Merge into any key already at this frame so two calls can key different
+    // channels on the same frame without erasing each other.
+    auto& stored = it->keyframes[key.frame];
+    if (key.has_enabled)  { stored.has_enabled = true;  stored.enabled = key.enabled; }
+    if (key.has_position) { stored.has_position = true; stored.position = key.position; }
+    if (key.has_velocity) { stored.has_velocity = true; stored.velocity = key.velocity; }
+    if (key.has_radius)   { stored.has_radius = true;   stored.radius = std::max(0.001f, key.radius); }
+    if (key.has_density)  { stored.has_density = true;  stored.density = std::max(0.0f, key.density); }
+    if (key.has_temperature) { stored.has_temperature = true; stored.temperature = std::max(0.0f, key.temperature); }
+    if (key.has_fuel)     { stored.has_fuel = true;     stored.fuel = std::max(0.0f, key.fuel); }
+    if (key.has_falloff)  { stored.has_falloff = true;  stored.falloff = std::max(0.0f, key.falloff); }
+    if (key.has_velocity_coupling) {
+        stored.has_velocity_coupling = true;
+        stored.velocity_coupling = std::max(0.0f, key.velocity_coupling);
+    }
+    if (key.has_flow_rate) { stored.has_flow_rate = true; stored.flow_rate = std::max(0.0f, key.flow_rate); }
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result clearSimulationFlowSourceKey(const std::string& name, int frame) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    auto& runtime = scriptSimulationRuntime();
+    auto it = std::find_if(runtime.flowSources().begin(), runtime.flowSources().end(),
+        [&name](const auto& source) { return source.name == name; });
+    if (it == runtime.flowSources().end()) return Result::fail("flow source not found: " + name);
+    it->keyframes.erase(frame);
     invalidateScriptSimulation();
     return Result::success();
 }

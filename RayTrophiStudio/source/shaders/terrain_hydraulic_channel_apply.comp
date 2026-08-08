@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC { int width; int height; } pc;
+layout(set=0,binding=0) buffer Height { float heightField[]; };
+layout(set=0,binding=1) readonly buffer Delta { float deltaField[]; };
+layout(set=0,binding=2) buffer Erosion { float erosionField[]; };
+layout(set=0,binding=3) buffer Deposition { float depositionField[]; };
+void main() {
+    uint i=gl_GlobalInvocationID.x;
+    if (i>=uint(pc.width*pc.height)) return;
+    float d=deltaField[i];
+    heightField[i]+=d;
+    if (d<0.0) erosionField[i]+=-d; else depositionField[i]+=d;
+}

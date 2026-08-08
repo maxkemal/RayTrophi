@@ -59,6 +59,7 @@ const TypeName kTypes[] = {
     { ForceFieldType::Drag,             "drag" },
     { ForceFieldType::Magnetic,         "magnetic" },
     { ForceFieldType::DirectionalNoise, "directionalnoise" },
+    { ForceFieldType::Thermal,          "thermal" },
 };
 
 struct ShapeName { ForceFieldShape shape; const char* name; };
@@ -217,6 +218,7 @@ ForceFieldInfo infoFromField(const ForceField& field) {
     info.upward_force = field.upward_force;
     info.linear_drag = field.linear_drag;
     info.quadratic_drag = field.quadratic_drag;
+    info.thermal_delta_kelvin = field.thermal_delta_kelvin;
     info.fluid_surface_drag = field.fluid_surface_drag;
     info.fluid_drag_coupling = field.fluid_drag_coupling;
     info.fluid_surface_depth = field.fluid_surface_depth;
@@ -279,6 +281,7 @@ Result applyInfoToField(const ForceFieldInfo& info, ForceField& field) {
     field.upward_force = info.upward_force;
     field.linear_drag = info.linear_drag;
     field.quadratic_drag = info.quadratic_drag;
+    field.thermal_delta_kelvin = info.thermal_delta_kelvin;
     field.fluid_surface_drag = info.fluid_surface_drag;
     field.fluid_drag_coupling = info.fluid_drag_coupling;
     field.fluid_surface_depth = info.fluid_surface_depth;
@@ -350,6 +353,18 @@ Result createForceField(const std::string& type, const std::string& requested_na
         case ForceFieldType::Drag:
             field->shape = ForceFieldShape::Sphere;
             field->linear_drag = 0.5f;
+            break;
+        case ForceFieldType::Thermal:
+            field->shape = ForceFieldShape::Sphere;
+            field->falloff_radius = 2.0f;
+            field->thermal_delta_kelvin = 600.0f;
+            // Thermal exerts no force; the snapshot zeroes its affect mask
+            // anyway, but leaving these ticked reads as if it pushed gas around.
+            field->affects_gas = false;
+            field->affects_particles = false;
+            field->affects_cloth = false;
+            field->affects_rigidbody = false;
+            field->affects_fluid = false;
             break;
         default:
             break;

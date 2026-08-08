@@ -29,9 +29,11 @@
 #include <thread>
 #include <chrono>
 #include <unordered_set>
+#include <unordered_map>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -103,6 +105,79 @@ static void ResetTerrainBackendAccumulation(UIContext& ctx) {
     if (viewportBackend && viewportBackend != renderBackend) {
         viewportBackend->resetAccumulation();
     }
+}
+
+static std::vector<float> ResampleTerrainScalarField(const std::vector<float>& source,
+                                                      int sourceWidth, int sourceHeight,
+                                                      int targetWidth, int targetHeight,
+                                                      int channels = 1) {
+    if (sourceWidth < 1 || sourceHeight < 1 || targetWidth < 1 || targetHeight < 1 || channels < 1 ||
+        source.size() != static_cast<size_t>(sourceWidth) * sourceHeight * channels) return {};
+    std::vector<float> result(static_cast<size_t>(targetWidth) * targetHeight * channels);
+    for (int y = 0; y < targetHeight; ++y) {
+        const float sy = targetHeight > 1 ? (float)y * (sourceHeight - 1) / (targetHeight - 1) : 0.0f;
+        const int y0 = (int)sy, y1 = (std::min)(y0 + 1, sourceHeight - 1);
+        const float fy = sy - y0;
+        for (int x = 0; x < targetWidth; ++x) {
+            const float sx = targetWidth > 1 ? (float)x * (sourceWidth - 1) / (targetWidth - 1) : 0.0f;
+            const int x0 = (int)sx, x1 = (std::min)(x0 + 1, sourceWidth - 1);
+            const float fx = sx - x0;
+            for (int c = 0; c < channels; ++c) {
+                const auto sample = [&](int px, int py) {
+                    return source[(static_cast<size_t>(py) * sourceWidth + px) * channels + c];
+                };
+                const float a = sample(x0, y0) + (sample(x1, y0) - sample(x0, y0)) * fx;
+                const float b = sample(x0, y1) + (sample(x1, y1) - sample(x0, y1)) * fx;
+                result[(static_cast<size_t>(y) * targetWidth + x) * channels + c] = a + (b - a) * fy;
+            }
+        }
+    }
+    return result;
+}
+
+static bool ResampleTerrainCurrentState(TerrainObject* terrain, SceneData& scene,
+                                        int targetWidth, int targetHeight) {
+    if (!terrain || targetWidth < 2 || targetHeight < 2) return false;
+    const int oldWidth = terrain->heightmap.width;
+    const int oldHeight = terrain->heightmap.height;
+    auto height = ResampleTerrainScalarField(terrain->heightmap.data, oldWidth, oldHeight,
+                                             targetWidth, targetHeight);
+    if (height.empty()) return false;
+
+    auto original = ResampleTerrainScalarField(terrain->original_heightmap_data, oldWidth, oldHeight,
+                                               targetWidth, targetHeight);
+    auto hardness = ResampleTerrainScalarField(terrain->hardnessMap, oldWidth, oldHeight,
+                                               targetWidth, targetHeight);
+    auto flow = ResampleTerrainScalarField(terrain->flowMap, oldWidth, oldHeight,
+                                           targetWidth, targetHeight);
+    auto erosion = ResampleTerrainScalarField(terrain->erosionMapRGBA, oldWidth, oldHeight,
+                                              targetWidth, targetHeight, 4);
+
+    terrain->heightmap.width = targetWidth;
+    terrain->heightmap.height = targetHeight;
+    terrain->heightmap.data = std::move(height);
+    // Resample Current establishes a new authored baseline; later graph
+    // evaluation must not feed the pre-resize grid back into the terrain.
+    terrain->original_heightmap_data = original.empty()
+        ? terrain->heightmap.data : std::move(original);
+    terrain->hardnessMap = std::move(hardness);
+    terrain->flowMap = std::move(flow);
+    terrain->erosionMapRGBA = std::move(erosion);
+
+    for (auto it = terrain->analysisFields.begin(); it != terrain->analysisFields.end();) {
+        if (!it->second) { it = terrain->analysisFields.erase(it); continue; }
+        auto resized = ResampleTerrainScalarField(*it->second, oldWidth, oldHeight,
+                                                  targetWidth, targetHeight);
+        if (resized.empty()) it = terrain->analysisFields.erase(it);
+        else { *it->second = std::move(resized); ++it; }
+    }
+
+    TerrainManager::getInstance().resizeSplatMap(terrain);
+    TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
+    terrain->dirty_mesh = false;
+    terrain->dirty_region.clear();
+    if (terrain->nodeGraph) terrain->nodeGraph->markAllDirty();
+    return true;
 }
 
 static void SyncTerrainMaterialState(UIContext& ctx) {
@@ -349,6 +424,96 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
     if (terrain_brush.active_terrain_id != -1) {
         auto* t = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
         if (t) {
+            if (UIWidgets::BeginSection("Terrain Resolution", ImVec4(0.45f, 0.78f, 1.0f, 1.0f), true)) {
+                static std::unordered_map<int, int> requestedResolution;
+                static std::unordered_map<int, int> observedResolution;
+                static std::unordered_map<int, std::string> resolutionStatus;
+                int& requested = requestedResolution[t->id];
+                int& observed = observedResolution[t->id];
+                if (requested < 64 || (observed >= 64 && requested == observed && observed != t->heightmap.width))
+                    requested = (std::max)(64, t->heightmap.width);
+                observed = t->heightmap.width;
+
+                ImGui::Text("Current: %d x %d", t->heightmap.width, t->heightmap.height);
+                ImGui::SetNextItemWidth(160.0f);
+                ImGui::DragInt("Target", &requested, 1.0f, 64, 8192, "%d");
+                requested = (std::clamp)(requested, 64, 8192);
+
+                const uint64_t vertices = static_cast<uint64_t>(requested) * requested;
+                const uint64_t triangles = requested > 1
+                    ? 2ull * static_cast<uint64_t>(requested - 1) * (requested - 1) : 0ull;
+                const double cellMeters = t->heightmap.scale_xz / (double)(std::max)(1, requested - 1);
+                const uint64_t splatPixels = static_cast<uint64_t>((std::max)(512, requested)) *
+                                             (std::max)(512, requested);
+                const double baseMiB = (vertices * sizeof(float) + splatPixels * sizeof(CompactVec4)) /
+                                       (1024.0 * 1024.0);
+                ImGui::TextDisabled("Cell %.3f m | %.2f M vertices | %.2f M triangles",
+                                    cellMeters, vertices / 1000000.0, triangles / 1000000.0);
+                ImGui::TextDisabled("Base height + splat CPU data: ~%.1f MiB", baseMiB);
+
+                const bool changed = requested != t->heightmap.width || requested != t->heightmap.height;
+                const bool graphBusy = t->nodeGraph && t->nodeGraph->isEvaluatingAsync();
+                ImGui::BeginDisabled(!changed || graphBusy || !t->nodeGraph);
+                if (UIWidgets::PrimaryButton("Rebuild Procedural", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+                    const int oldWidth = t->heightmap.width, oldHeight = t->heightmap.height;
+                    const auto oldHeightData = t->heightmap.data;
+                    const auto oldOriginal = t->original_heightmap_data;
+                    const auto oldHardness = t->hardnessMap;
+                    const auto oldFlow = t->flowMap;
+                    const auto oldErosion = t->erosionMapRGBA;
+                    try {
+                        const bool rebuilt = t->nodeGraph->evaluateTerrainAtResolution(
+                            t, ctx.scene, requested, requested);
+                        if (!rebuilt) {
+                            t->heightmap.width = oldWidth; t->heightmap.height = oldHeight;
+                            t->heightmap.data = oldHeightData; t->original_heightmap_data = oldOriginal;
+                            t->hardnessMap = oldHardness; t->flowMap = oldFlow; t->erosionMapRGBA = oldErosion;
+                            TerrainManager::getInstance().resizeSplatMap(t);
+                            TerrainManager::getInstance().rebuildTerrainMesh(ctx.scene, t);
+                            resolutionStatus[t->id] = "Graph produced no valid height output; terrain restored.";
+                        } else {
+                            requested = t->heightmap.width;
+                            resolutionStatus[t->id] = "Procedural terrain rebuilt.";
+                        }
+                    } catch (const std::exception& e) {
+                        t->heightmap.width = oldWidth; t->heightmap.height = oldHeight;
+                        t->heightmap.data = oldHeightData; t->original_heightmap_data = oldOriginal;
+                        t->hardnessMap = oldHardness; t->flowMap = oldFlow; t->erosionMapRGBA = oldErosion;
+                        TerrainManager::getInstance().resizeSplatMap(t);
+                        TerrainManager::getInstance().rebuildTerrainMesh(ctx.scene, t);
+                        resolutionStatus[t->id] = std::string("Rebuild failed: ") + e.what();
+                    }
+                    selectManagedMesh(ctx, t->flatMesh);
+                    ctx.renderer.resetCPUAccumulation();
+                    ScheduleTerrainTopologyRebuild(ctx);
+                    ResetTerrainBackendAccumulation(ctx);
+                }
+                ImGui::EndDisabled();
+                UIWidgets::HelpMarker("Re-evaluates procedural sources at the target grid. File and authored Terrain inputs keep their native source contract.");
+
+                ImGui::BeginDisabled(!changed || graphBusy);
+                if (ImGui::Button("Resample Current", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+                    if (ResampleTerrainCurrentState(t, ctx.scene, requested, requested)) {
+                        selectManagedMesh(ctx, t->flatMesh);
+                        ctx.renderer.resetCPUAccumulation();
+                        ScheduleTerrainTopologyRebuild(ctx);
+                        ResetTerrainBackendAccumulation(ctx);
+                        resolutionStatus[t->id] = "Current terrain and maps resampled.";
+                    } else {
+                        resolutionStatus[t->id] = "Resample failed: current height data is invalid.";
+                    }
+                }
+                ImGui::EndDisabled();
+                UIWidgets::HelpMarker("Preserves the visible terrain by bilinearly resampling height, splat, hardness, flow, erosion and analysis fields. This becomes the new authored baseline.");
+
+                const auto statusIt = resolutionStatus.find(t->id);
+                if (statusIt != resolutionStatus.end() && !statusIt->second.empty())
+                    ImGui::TextWrapped("%s", statusIt->second.c_str());
+                if (graphBusy) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "Terrain graph is evaluating...");
+                UIWidgets::EndSection();
+            }
+
+            ImGui::Spacing();
             if (UIWidgets::BeginSection("Mesh Quality", ImVec4(0.6f, 1.0f, 0.8f, 1.0f), true)) {
                 // Normal Quality Dropdown
                 // Normal Quality Dropdown
@@ -1678,9 +1843,12 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             g_bvh_rebuild_pending = true;
                         }
 
-                        // Ensure CPU BVH + backend geometry are rebuilt so Solid/raster backends see new instances
-                        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                        ctx.renderer.resetCPUAccumulation();
+                        // Vulkan RT/Solid consume InstanceGroup directly. Building the
+                        // CPU BVH here reintroduced the facade-era cost after every fill.
+                        if (!hasVulkanViewportPath) {
+                            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                            ctx.renderer.resetCPUAccumulation();
+                        }
                         if (Backend::IBackend* renderBackend = GetTerrainRenderBackend(ctx)) {
                             ctx.renderer.rebuildBackendGeometry(ctx.scene);
                             renderBackend->resetAccumulation();
@@ -1735,8 +1903,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             if (TerrainRenderBackendIsVulkan(ctx)) g_vulkan_rebuild_pending = true;
                             else if (GetTerrainRenderBackend(ctx)) g_optix_rebuild_pending = true;
                          }
-                         // Ensure BVH/backend geometry rebuilt for solid view
-                         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                         // Vulkan backends consume the group directly; no CPU BVH
+                         // rebuild is required for an empty group.
+                         if (!hasVulkanViewportPath_clear) {
+                             ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                         }
                          if (Backend::IBackend* renderBackend_clear = GetTerrainRenderBackend(ctx)) {
                              ctx.renderer.rebuildBackendGeometry(ctx.scene);
                              renderBackend_clear->resetAccumulation();
@@ -1881,9 +2052,12 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         else if (GetTerrainRenderBackend(ctx)) g_optix_rebuild_pending = true;
                     }
 
-                    // Rebuild BVH and backend geometry so Solid (raster/CPU) updates immediately
-                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                    ctx.renderer.resetCPUAccumulation();
+                    // CPU backends still need their scene BVH. Vulkan RT/Solid
+                    // rebuild from InstanceManager and must not pay this cost.
+                    if (!hasVulkanViewportPath_del) {
+                        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                        ctx.renderer.resetCPUAccumulation();
+                    }
                     if (Backend::IBackend* renderBackend_del = GetTerrainRenderBackend(ctx)) {
                         ctx.renderer.rebuildBackendGeometry(ctx.scene);
                         renderBackend_del->resetAccumulation();

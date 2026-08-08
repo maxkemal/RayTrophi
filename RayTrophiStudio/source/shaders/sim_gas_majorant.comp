@@ -1,0 +1,94 @@
+// Block-max (majorant) grid for live dense gas domains.
+//
+// One thread per BLOCK, not per cell. Each thread reduces a
+// MAJORANT_BLOCK^3 neighbourhood of the density field to its maximum, so the
+// Vulkan RT volume shader can skip a whole block whenever that maximum is
+// below the authored density cutoff. Without it, a live gas domain has no
+// empty-space acceleration at all — the NanoVDB hierarchy skip in
+// volume_closesthit.rchit is gated on volume_type == 2, which a dense domain
+// never is, so every ray pays for every step through a mostly empty box.
+//
+// The reduction is INCLUSIVE of one extra cell on each far face. A ray leaving
+// a block samples with trilinear reconstruction, which reaches one cell past
+// the block boundary; taking the max over the open range alone would let a
+// block report "empty" while its interpolated edge still carries density, and
+// the skip would eat a thin surface layer of smoke.
+#version 450
+layout(local_size_x = 64) in;
+
+// Must match kGasMajorantBlock on the host (ParticleSimulation.cpp).
+#define MAJORANT_BLOCK 8
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;      // density grid resolution (cells)
+    int bx; int by; int bz;      // majorant grid resolution (blocks)
+    int  emissive_capacity;      // max entries the emissive list can hold
+    float emissive_threshold;    // block max temperature above which it emits
+} pc;
+
+layout(set=0,binding=0) readonly buffer Density  { float density[]; };
+layout(set=0,binding=1) writeonly buffer Majorant { float majorant[]; };
+layout(set=0,binding=2) readonly buffer Temperature { float temperature[]; };
+// Compact list of blocks that emit. [0] = count (host clears it to 0 before the
+// dispatch), [1..] = block indices. Built here rather than on the host because
+// the fields live on the device: pulling them back to pick emitters would cost
+// a full sync every step, and the volume shader can read this list directly.
+layout(set=0,binding=3) buffer EmissiveList { uint emissive[]; };
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    uint blockCount = uint(pc.bx * pc.by * pc.bz);
+    if (id >= blockCount) return;
+
+    int bxi = int(id) % pc.bx;
+    int byi = (int(id) / pc.bx) % pc.by;
+    int bzi = int(id) / (pc.bx * pc.by);
+
+    int x0 = bxi * MAJORANT_BLOCK;
+    int y0 = byi * MAJORANT_BLOCK;
+    int z0 = bzi * MAJORANT_BLOCK;
+    // +1 for the trilinear overlap described above; clamped to the grid.
+    int x1 = min(x0 + MAJORANT_BLOCK, pc.nx - 1);
+    int y1 = min(y0 + MAJORANT_BLOCK, pc.ny - 1);
+    int z1 = min(z0 + MAJORANT_BLOCK, pc.nz - 1);
+
+    float m = 0.0;
+    // Emitted power proxy for this block: the emission the volume shader
+    // computes is blackbody(T) * density, so the block's contribution as a light
+    // scales with the SUM of T*density, not with either alone. A hot but empty
+    // block emits nothing and must not enter the list.
+    float emissivePower = 0.0;
+    float hottest = 0.0;
+    int xyStride = pc.nx * pc.ny;
+    bool hasTemperature = temperature.length() > 0;
+    for (int z = z0; z <= z1; ++z) {
+        for (int y = y0; y <= y1; ++y) {
+            int rowBase = y * pc.nx + z * xyStride;
+            for (int x = x0; x <= x1; ++x) {
+                int c = rowBase + x;
+                float d = density[c];
+                m = max(m, d);
+                if (hasTemperature) {
+                    float t = temperature[c];
+                    hottest = max(hottest, t);
+                    emissivePower += max(t, 0.0) * max(d, 0.0);
+                }
+            }
+        }
+    }
+    majorant[id] = m;
+
+    // Append to the emitter list. The count lives in slot 0 and the host clears
+    // it before each dispatch, so no readback is needed to know the length --
+    // the consuming shader reads it from the same buffer.
+    if (pc.emissive_capacity > 0 && emissivePower > 0.0 &&
+        hottest > pc.emissive_threshold) {
+        uint slot = atomicAdd(emissive[0], 1u);
+        if (slot < uint(pc.emissive_capacity)) {
+            emissive[1u + slot] = id;
+        }
+        // Overflow is deliberate and silent-but-bounded: the count keeps
+        // climbing past capacity so the consumer can tell it is sampling a
+        // subset, while the writes stop at the allocated end.
+    }
+}

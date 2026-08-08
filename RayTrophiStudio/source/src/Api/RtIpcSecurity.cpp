@@ -233,7 +233,10 @@ uint32_t requiredCapabilities(const std::string& method) {
         method == "forcefield.evaluate" || method == "particle.stats" ||
         method == "particle.emitters" || method == "anim.characters" ||
         method == "anim.character" || method == "anim.clips" ||
-        method == "anim.graph_status")
+        method == "anim.graph_status" ||
+        // Substance library enumeration: read-only, and its name matches none
+        // of the ".get"/".list" substring heuristics below.
+        method == "msf.substances")
         return Read;
     const bool read_method = method == "version" || method == "project.path" ||
         method == "undo_description" || method == "redo_description" ||
@@ -251,7 +254,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     static const char* namespaces[] = {
         "scene.", "select.", "material.", "lights.", "timeline.", "camera.",
         "world.", "post.", "anim.", "nodes.", "modifiers.",
-        "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "terrain.",
+        "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.",
         "hair.", "paint.", "sculpt.", "project.", "undo", "redo"
     };
     for (const char* prefix : namespaces)

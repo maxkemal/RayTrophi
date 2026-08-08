@@ -1,0 +1,52 @@
+// CPU-parity thermal pass 1: compute eight outgoing talus fluxes per cell.
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float talusAngle; float erosionAmount;
+    float cellSize; float heightScale;
+    uint hasMask; uint hasHardness;
+    float anisotropy; float directionX; float directionY;
+    float talusSettling; float sedimentRemoval;
+} pc;
+layout(set=0,binding=0) readonly buffer Height { float heightIn[]; };
+layout(set=0,binding=1) readonly buffer Hardness { float hardnessMap[]; };
+layout(set=0,binding=2) readonly buffer Mask { float maskMap[]; };
+layout(set=0,binding=3) writeonly buffer Flux { float flux[]; };
+
+void main() {
+    int id=int(gl_GlobalInvocationID.x), total=pc.mapWidth*pc.mapHeight;
+    if(id>=total) return;
+    for(int d=0;d<8;++d) flux[id*8+d]=0.0;
+    int x=id%pc.mapWidth, y=id/pc.mapWidth;
+    if(x<=0||x>=pc.mapWidth-1||y<=0||y>=pc.mapHeight-1) return;
+    const int dx[8]=int[8](-1,0,1,-1,1,-1,0,1);
+    const int dy[8]=int[8](-1,-1,-1,0,0,1,1,1);
+    const float invDist[8]=float[8](0.70710678,1.0,0.70710678,1.0,1.0,0.70710678,1.0,0.70710678);
+    float hs=max(abs(pc.heightScale),0.001), cs=max(pc.cellSize,0.001);
+    float hard=pc.hasHardness!=0u?clamp(hardnessMap[id],0.0,1.0):0.0;
+    float effectiveTalus=pc.talusAngle+hard*0.3;
+    float excess[8]; float totalExcess=0.0;
+    for(int d=0;d<8;++d){
+        int n=(y+dy[d])*pc.mapWidth+x+dx[d];
+        float slope=(heightIn[id]-heightIn[n])*hs/cs*invDist[d];
+        // A real talus front has a finite transition zone because mixed grain
+        // sizes do not all share one exact angle of repose. A hard comparison
+        // produced a visible contour where transport stopped abruptly. Fade
+        // mobility through a narrow band without changing the authored angle.
+        float transition=max(effectiveTalus*0.18,0.015);
+        float aboveOnset=slope-(effectiveTalus-transition);
+        float mobility=smoothstep(0.0,transition*2.0,aboveOnset);
+        float e=max(aboveOnset,0.0)*mobility*cs/hs/invDist[d];
+        float align=abs((float(dx[d])*pc.directionX+float(dy[d])*pc.directionY)*invDist[d]);
+        float stress=mix(1.0,0.35+0.65*align,clamp(pc.anisotropy,0.0,1.0));
+        excess[d]=e*stress; totalExcess+=excess[d];
+    }
+    if(totalExcess<=1e-9) return;
+    float move=totalExcess*0.5*pc.erosionAmount*clamp(pc.talusSettling,0.0,2.0);
+    move=min(move,0.05);
+    if(move>heightIn[id]) move=max(heightIn[id]*0.9,0.0);
+    move*=1.0-hard*0.7;
+    if(pc.hasMask!=0u) move*=clamp(maskMap[id],0.0,1.0);
+    for(int d=0;d<8;++d) if(excess[d]>0.0) flux[id*8+d]=move*excess[d]/totalExcess;
+}

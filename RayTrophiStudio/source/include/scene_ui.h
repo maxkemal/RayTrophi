@@ -193,7 +193,8 @@ public:
     static bool shouldApplySpecialVDBOrientation(const std::string& source_hint);
     static void applyVDBImportOrientation(class VDBVolume& vdb, int orientation_preset, const std::string& source_hint = "");
 
-    static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only);
+    static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only,
+                                     bool force_cpu_compat = false);
     static void syncNodeFoliageToScene(UIContext& ctx, TerrainObject* terrain,
                                        const std::vector<int>& groupIds);
     static void syncVDBVolumesToGPU(UIContext& ctx);
@@ -876,6 +877,7 @@ public:
          float brush_strength = 1.0f;    // Density multiplier
          int brush_mode = 0;             // 0=Add, 1=Remove, 2=Adjust
          bool show_brush_preview = true; // Show brush circle in viewport
+         bool lazy_update = false;       // Vulkan default: update each dab
          std::string target_surface_name; // Which mesh to paint on (empty = any)
          
          // Lazy Update Logic
@@ -1170,7 +1172,7 @@ public:
         int density = 3;                // Instances per stroke
         int mode = 0;                   // 0=Add, 1=Remove     
         bool show_preview = true;       // Show brush circle in viewport
-        bool lazy_update = true;       // If true, waits for mouse release to spawn instances (Better for weak GPUs)
+        bool lazy_update = false;      // Vulkan default: realtime; CPU/OptiX may opt into lazy
         
         // Lazy Update Logic
         std::vector<InstanceTransform> pending_instances; 

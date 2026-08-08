@@ -61,7 +61,18 @@ enum class ForceFieldType {
     // Special Forces
     Magnetic,          ///< Follows magnetic field lines
     DirectionalNoise,  ///< Noise applied along a direction
-    
+
+    // Non-force field. A heat source is spatially a scalar-valued field with a
+    // position, a shape and a falloff — structurally identical to every entry
+    // above — so it lives here rather than in a parallel "thermal field" system
+    // that would need its own gizmo, panel, serialization, script binding, IPC
+    // dispatch and capability entry. See plan doc A.6.
+    //
+    // ★ It exerts NO force. SimulationForceFieldSnapshot gives it an affect mask
+    // of 0, which keeps every velocity solver (CPU and GPU, all of which already
+    // test that mask) from ever seeing it — no shader had to change.
+    Thermal,           ///< Local ambient temperature offset, in Kelvin
+
     COUNT
 };
 
@@ -205,6 +216,19 @@ public:
     // ─────────────────────────────────────────────────────────────────────────
     float linear_drag = 0.1f;              ///< Linear velocity damping: F = -drag * v
     float quadratic_drag = 0.0f;           ///< Quadratic damping: F = -drag * v²
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Thermal-specific (Thermal type only)
+    // ─────────────────────────────────────────────────────────────────────────
+    // Kelvin ADDED on top of the local ambient at full strength, then attenuated
+    // by the usual falloff. Additive rather than absolute so two burners under
+    // one plate are hotter than one; a field is a heat source, not a thermostat.
+    // Negative values are legal and make a cold sink.
+    //
+    // Deliberately NOT `strength`: that slider is an acceleration everywhere else
+    // in this class, and its UI range (-1000..1000) and tooltip would be a lie for
+    // a temperature. Substance thresholds are authored in Kelvin; so is this.
+    float thermal_delta_kelvin = 600.0f;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Fluid wind coupling (Wind type only, APIC liquid)

@@ -1,0 +1,30 @@
+// CPU-parity thermal pass 2: gather neighbour flux without atomic races.
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float talusAngle; float erosionAmount;
+    float cellSize; float heightScale;
+    uint hasMask; uint hasHardness;
+    float anisotropy; float directionX; float directionY;
+    float talusSettling; float sedimentRemoval;
+} pc;
+layout(set=0,binding=0) readonly buffer Height { float heightIn[]; };
+layout(set=0,binding=1) readonly buffer Flux { float flux[]; };
+layout(set=0,binding=2) writeonly buffer Output { float heightOut[]; };
+void main(){
+    int id=int(gl_GlobalInvocationID.x), total=pc.mapWidth*pc.mapHeight;
+    if(id>=total) return;
+    int x=id%pc.mapWidth,y=id/pc.mapWidth;
+    if(x<=0||x>=pc.mapWidth-1||y<=0||y>=pc.mapHeight-1){heightOut[id]=heightIn[id];return;}
+    const int dx[8]=int[8](-1,0,1,-1,1,-1,0,1);
+    const int dy[8]=int[8](-1,-1,-1,0,0,1,1,1);
+    const int opposite[8]=int[8](7,6,5,4,3,2,1,0);
+    float outgoing=0.0,incoming=0.0;
+    for(int d=0;d<8;++d){
+        outgoing+=flux[id*8+d];
+        int n=(y+dy[d])*pc.mapWidth+x+dx[d];
+        incoming+=flux[n*8+opposite[d]];
+    }
+    heightOut[id]=heightIn[id]-outgoing+incoming*(1.0-clamp(pc.sedimentRemoval,0.0,1.0));
+}

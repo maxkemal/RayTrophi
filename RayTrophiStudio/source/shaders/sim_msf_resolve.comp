@@ -1,0 +1,44 @@
+#version 450
+// Material State Field — resolve half. One invocation per gas cell.
+//
+// Converts the fixed-point accumulators written by sim_msf_scatter back to float
+// and folds them into the gas fields, then clears them. Clearing here means the
+// accumulators never need a separate zero-fill dispatch, and it guarantees a
+// frame's deposit can never be counted twice.
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    ivec4 dim;       // nx, ny, nz, cell_count
+    vec4  params;    // fixed_point_scale, max_temperature, unused, unused
+} pc;
+
+layout(set=0, binding=0) buffer Density     { float density[]; };
+layout(set=0, binding=1) buffer Temperature { float temperature[]; };
+layout(set=0, binding=2) buffer Fuel        { float fuel[]; };
+layout(set=0, binding=3) buffer Interaction { float flame[]; };
+layout(set=0, binding=4) buffer AccumFuel    { uint accum_fuel[]; };
+layout(set=0, binding=5) buffer AccumDensity { uint accum_density[]; };
+layout(set=0, binding=6) buffer AccumHeat    { uint accum_heat[]; };
+layout(set=0, binding=7) buffer AccumFlame   { uint accum_flame[]; };
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.dim.w)) return;
+
+    uint f = accum_fuel[id];
+    uint d = accum_density[id];
+    uint h = accum_heat[id];
+    uint fl = accum_flame[id];
+    if ((f | d | h | fl) == 0u) return;
+
+    float inv = 1.0 / max(pc.params.x, 1.0);
+    fuel[id]        = max(0.0, fuel[id] + float(f) * inv);
+    density[id]     = max(0.0, density[id] + float(d) * inv);
+    temperature[id] = clamp(temperature[id] + float(h) * inv, 0.0, pc.params.y);
+    flame[id]       = max(flame[id], float(fl) * inv);
+
+    accum_fuel[id] = 0u;
+    accum_density[id] = 0u;
+    accum_heat[id] = 0u;
+    accum_flame[id] = 0u;
+}

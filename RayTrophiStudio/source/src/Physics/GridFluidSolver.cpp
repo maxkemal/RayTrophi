@@ -13,6 +13,7 @@
 #include "CurlNoise.h"       // Physics::Noise::curlFBM_animated
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -706,6 +707,58 @@ void enforceSolidBoundaries(FluidGrid& grid) {
     auto solidVel = [&](int i, int j, int k) -> Vec3 {
         return has_vel ? grid.solid_vel[grid.cellIndex(i, j, k)] : Vec3(0.0f, 0.0f, 0.0f);
     };
+
+    // ── Sparse path: walk the collider's cells, not the domain ───────────────
+    // Only faces adjacent to a solid cell are written, and a collider covers a
+    // percent or two of a domain — so the dense triple sweep below spent >98% of
+    // its time proving "not solid". The voxelizer hands us the compact cell list;
+    // when it is present this loop touches the same faces and writes the same
+    // values, because the per-face formula is symmetric in the two adjacent cells
+    // (a solid|solid face gets the same average whichever side visits it).
+    if (grid.solid_cells_valid) {
+        if (grid.solid_cells.empty()) return;
+        const std::size_t stride_y = static_cast<std::size_t>(nx);
+        const std::size_t stride_z = static_cast<std::size_t>(nx) * ny;
+        const uint8_t* solid = grid.solid.data();
+        for (uint32_t cell : grid.solid_cells) {
+            const std::size_t c = cell;
+            const int i = static_cast<int>(c % stride_y);
+            const int j = static_cast<int>((c / stride_y) % ny);
+            const int k = static_cast<int>(c / stride_z);
+            const Vec3 sv = has_vel ? grid.solid_vel[c] : Vec3(0.0f, 0.0f, 0.0f);
+            // X faces i and i+1.
+            {
+                const bool nL = (i > 0) && solid[c - 1] != 0u;
+                grid.velXAt(i, j, k) =
+                    nL ? 0.5f * (solidVel(i - 1, j, k).x + sv.x) : sv.x;
+                const bool nR = (i + 1 < nx) && solid[c + 1] != 0u;
+                grid.velXAt(i + 1, j, k) =
+                    nR ? 0.5f * (sv.x + solidVel(i + 1, j, k).x) : sv.x;
+            }
+            // Y faces j and j+1.
+            {
+                const bool nD = (j > 0) && solid[c - stride_y] != 0u;
+                grid.velYAt(i, j, k) =
+                    nD ? 0.5f * (solidVel(i, j - 1, k).y + sv.y) : sv.y;
+                const bool nU = (j + 1 < ny) && solid[c + stride_y] != 0u;
+                grid.velYAt(i, j + 1, k) =
+                    nU ? 0.5f * (sv.y + solidVel(i, j + 1, k).y) : sv.y;
+            }
+            // Z faces k and k+1.
+            {
+                const bool nB = (k > 0) && solid[c - stride_z] != 0u;
+                grid.velZAt(i, j, k) =
+                    nB ? 0.5f * (solidVel(i, j, k - 1).z + sv.z) : sv.z;
+                const bool nF = (k + 1 < nz) && solid[c + stride_z] != 0u;
+                grid.velZAt(i, j, k + 1) =
+                    nF ? 0.5f * (sv.z + solidVel(i, j, k + 1).z) : sv.z;
+            }
+        }
+        return;
+    }
+
+    // Dense fallback: the reference sweep, for a grid whose solid mask did not
+    // come from the voxelizer (deserialized snapshot, hand-built test grid).
     // X faces: face (i,j,k) borders cells (i-1) and (i).
     for (int k = 0; k < nz; ++k)
         for (int j = 0; j < ny; ++j)
@@ -754,6 +807,15 @@ void clearSolidScalars(FluidGrid& grid, const SolverParams& params) {
     const bool clr_t = params.channel_temperature && grid.temperature.size() == cells;
     const bool clr_f = params.channel_fuel        && grid.fuel.size()        == cells;
     if (!clr_d && !clr_t && !clr_f) return;
+    if (grid.solid_cells_valid) {
+        for (uint32_t cell : grid.solid_cells) {
+            const std::size_t c = cell;
+            if (clr_d) grid.density[c]     = 0.0f;
+            if (clr_t) grid.temperature[c] = 0.0f;
+            if (clr_f) grid.fuel[c]        = 0.0f;
+        }
+        return;
+    }
     for (std::size_t c = 0; c < cells; ++c) {
         if (!grid.solid[c]) continue;
         if (clr_d) grid.density[c]     = 0.0f;
@@ -983,14 +1045,30 @@ void step(FluidGrid& grid,
           const SolverParams& params,
           float dt,
           const SimulationForceFieldSnapshot* forces,
-          float time_seconds) {
+          float time_seconds,
+          GasSolverStats* stats) {
+    if (stats) *stats = GasSolverStats{};
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || dt <= 0.0f) {
         return;
     }
 
+    // Stage timing. Each probe is one steady_clock read against a stage that is
+    // at least a full O(cells) sweep, and it collapses to a predictable null
+    // check when the caller passed no sink.
+    using Clock = std::chrono::steady_clock;
+    const auto step_begin = Clock::now();
+    auto mark = [&](Clock::time_point& cursor, float* sink) {
+        if (!stats) return;
+        const auto now = Clock::now();
+        *sink += std::chrono::duration<float, std::milli>(now - cursor).count();
+        cursor = now;
+    };
+    Clock::time_point cursor = step_begin;
+
     // 1) Transport.
     if (params.channel_velocity && !params.skip_velocity_advection) {
         advectVelocity(grid, params, dt);
+        mark(cursor, stats ? &stats->advect_velocity_ms : nullptr);
     }
     if (params.channel_density && !params.skip_scalar_advection) {
         advectScalar(grid, params, grid.density, 0.0f, dt);
@@ -1001,34 +1079,42 @@ void step(FluidGrid& grid,
     if (params.channel_fuel && !params.skip_scalar_advection) {
         advectScalar(grid, params, grid.fuel, 0.0f, dt);
     }
+    mark(cursor, stats ? &stats->advect_scalar_ms : nullptr);
 
     setWallBcs(grid, params.boundary);
     // Collider coupling: stop scalar content from advecting into solids, and pin
     // the velocity at solid faces (no-op when the domain has no colliders).
     clearSolidScalars(grid, params);
     if (params.channel_velocity) enforceSolidBoundaries(grid);
+    mark(cursor, stats ? &stats->boundary_ms : nullptr);
 
     // 2) Combustion: burn fuel -> heat + smoke (before buoyancy so released heat
     // lifts this step). Opt-in; no-op when fire is disabled.
     if (!params.skip_combustion) {
         processCombustion(grid, params, dt);
+        mark(cursor, stats ? &stats->combustion_ms : nullptr);
     }
 
     // 3) Body forces.
     if (params.channel_velocity) {
         if (!params.skip_buoyancy) {
             addBuoyancy(grid, params, dt);
+            mark(cursor, stats ? &stats->buoyancy_ms : nullptr);
         }
         if (!params.skip_force_fields) {
             addForceFields(grid, dt, forces, time_seconds);
+            mark(cursor, stats ? &stats->force_fields_ms : nullptr);
         }
         if (!params.skip_vorticity) {
             vorticityConfinement(grid, params, dt);
+            mark(cursor, stats ? &stats->vorticity_ms : nullptr);
         }
         if (!params.skip_turbulence) {
             curlNoiseTurbulence(grid, params, dt, time_seconds);
+            mark(cursor, stats ? &stats->turbulence_ms : nullptr);
         }
     }
+    cursor = Clock::now();
 
     // 4) Dissipation.
     if (params.channel_density) {
@@ -1040,6 +1126,7 @@ void step(FluidGrid& grid,
     if (params.channel_fuel) {
         dissipate(grid.fuel, params.fuel_dissipation, dt);
     }
+    mark(cursor, stats ? &stats->dissipation_ms : nullptr);
 
     // 5) Make the velocity field incompressible.
     if (params.channel_velocity) {
@@ -1048,13 +1135,23 @@ void step(FluidGrid& grid,
             dissipate(grid.vel_y, params.velocity_dissipation, dt);
             dissipate(grid.vel_z, params.velocity_dissipation, dt);
             clampVelocity(grid, params.max_velocity);
+            mark(cursor, stats ? &stats->dissipation_ms : nullptr);
         }
         // Re-pin solid faces after the body forces / dissipation perturbed them,
         // so the projection's divergence sees the true (possibly moving) solid
         // velocity and the result stays incompressible around the collider.
-        enforceSolidBoundaries(grid);
+        // Only the LOCAL projection needs this pre-pin: when it is skipped (an
+        // external GPU path owns projection) the trailing re-pin below writes the
+        // same faces the same values with nothing reading velocity in between,
+        // so this call would be a third full boundary pass for nothing.
+        if (!params.skip_pressure_projection) {
+            enforceSolidBoundaries(grid);
+            mark(cursor, stats ? &stats->boundary_ms : nullptr);
+        }
         if (!params.skip_pressure_projection) {
             project(grid, params, dt);
+            mark(cursor, stats ? &stats->pressure_ms : nullptr);
+            if (stats) stats->pressure_iterations = std::max(1, params.pressure_iterations);
         }
         // Projection itself can create a velocity spike even when the
         // pre-projection field was CFL-clamped (especially around strong local
@@ -1063,6 +1160,12 @@ void step(FluidGrid& grid,
         clampVelocity(grid, params.max_velocity);
         setWallBcs(grid, params.boundary);
         enforceSolidBoundaries(grid);
+        mark(cursor, stats ? &stats->boundary_ms : nullptr);
+    }
+
+    if (stats) {
+        stats->total_ms =
+            std::chrono::duration<float, std::milli>(Clock::now() - step_begin).count();
     }
 }
 
@@ -1070,14 +1173,29 @@ void stepSparseVDB(FluidGrid& grid,
                    const SolverParams& params,
                    float dt,
                    const SimulationForceFieldSnapshot* forces,
-                   float time_seconds) {
+                   float time_seconds,
+                   GasSolverStats* stats) {
 #ifdef OPENVDB_ENABLED
+    if (stats) *stats = GasSolverStats{};
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || dt <= 0.0f) {
         return;
     }
+    // The sparse path fuses transport/forces/projection over the active
+    // topology instead of running the dense operator chain, so it reports one
+    // honest total plus the two stages that keep their own identity here.
+    // Splitting the fused loops further would need probes inside them.
+    using SparseClock = std::chrono::steady_clock;
+    const auto sparse_begin = SparseClock::now();
 
     // 1) First run combustion (processCombustion) on the dense grid to utilize all existing features.
     processCombustion(grid, params, dt);
+    if (stats) {
+        stats->sparse_vdb = true;
+        stats->combustion_ms =
+            std::chrono::duration<float, std::milli>(
+                SparseClock::now() - sparse_begin).count();
+        stats->pressure_iterations = std::max(1, params.pressure_iterations);
+    }
 
     // 2) Create sparse OpenVDB grids
     openvdb::FloatGrid::Ptr density_vdb = openvdb::FloatGrid::create(0.0f);
@@ -1303,9 +1421,15 @@ void stepSparseVDB(FluidGrid& grid,
         // Enforce wall BCs on the dense field (cheap; matches the dense path).
         setWallBcs(grid, params.boundary);
     }
+    if (stats) {
+        stats->total_ms =
+            std::chrono::duration<float, std::milli>(
+                SparseClock::now() - sparse_begin).count();
+    }
 #else
-    // Fallback if OpenVDB not enabled
-    step(grid, params, dt, forces, time_seconds);
+    // Fallback if OpenVDB not enabled. The dense step fills `stats` itself, so
+    // the panel reports the operator chain that actually ran, not a sparse one.
+    step(grid, params, dt, forces, time_seconds, stats);
 #endif
 }
 

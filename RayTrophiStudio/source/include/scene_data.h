@@ -120,6 +120,11 @@ struct SceneData {
     // Lightweight transform-only collider path. Local bounds are rebuilt only
     // when topology changes; animation then costs one matrix fetch + 8 points.
     mutable std::unordered_map<std::string, SimulationLocalBounds> simulation_local_bounds_;
+    // node name -> the scene object that owns it, for
+    // resolveObjectTransformForSimulation. Handle only, never a matrix: parented
+    // emitters must see live motion. weak_ptr so a deleted object simply misses.
+    mutable std::unordered_map<std::string, std::weak_ptr<Hittable>>
+        simulation_transform_lookup_;
     // Last sim-source pose matrix actually pushed onto each object by
     // applySimSourceObjectPosesForFrame. Lets that pass be a cheap no-op when the
     // evaluated pose is unchanged (so it can be called every idle UI frame to keep
@@ -720,6 +725,13 @@ struct SceneData {
     // kind==Rigid guards and the soft frame/disk caches never see rigid nodes. Only
     // tris + rest_local_pos/nrm are populated (rigid needs no welding/Jolt seed).
     std::unordered_map<std::string, SoftWeldCache> rigid_bake_cache_;
+    // Phase 6c: weld topology for MELTING objects. Separate map for the same
+    // reason rigid_bake_cache_ is separate — a melting object is not a soft body
+    // and must never be seen as one by the soft freeze/reset/frame-cache paths.
+    std::unordered_map<std::string, SoftWeldCache> melt_weld_cache_;
+    // Nodes currently displaced by melt. Used only to decide whether a field that
+    // has cooled to melt == 0 still needs one final write to put it back at rest.
+    std::unordered_map<std::string, uint8_t> melt_displaced_;
 
     // ── Per-mesh deform refit (all backends) ─────────────────────────────────
     // A simulated body (rigid / soft / fracture shard) bakes new verts into its
@@ -1718,6 +1730,8 @@ struct SceneData {
         // rest or replay a stale deformed frame onto the now-frozen mesh.
         rigid_bake_cache_.erase(node);
         soft_weld_cache_.erase(node);
+        melt_weld_cache_.erase(node);
+        melt_displaced_.erase(node);
         for (auto& kv : soft_frame_cache_) kv.second.erase(node);
 
         if (rigid_body_system) rigid_body_system->setBodies(&rigid_bodies);
@@ -1904,6 +1918,14 @@ struct SceneData {
     // fluid frame (which diverges from the cached fluid). Cleared with the fluid
     // cache in clearSimFrameCache().
     std::map<int, std::vector<RayTrophiSim::RigidBodyFrameState>> rigid_frame_cache_;
+    // Material State Field (burn/heat surface damage) is frame-cached in the same
+    // lockstep. It is per-OBJECT runtime state, not per-domain: Phase 4 settled
+    // that an object outside every domain is still simulated, so MSF cannot be
+    // folded into SimulationGridDomainState and rides alongside it instead.
+    // Outer vector is per particle system, matching sim_frame_cache_.
+    // Cleared with the fluid cache in clearSimFrameCache().
+    std::map<int, std::vector<std::vector<RayTrophiSim::MaterialStateFieldSnapshot>>>
+        msf_frame_cache_;
     // Soft/cloth bodies are frame-cached alongside the fluid+rigid caches: the
     // deformed UNIQUE world vertices per soft node per frame (captured post-step in
     // captureSimFrame, scattered back to the mesh on replay in restoreSimFrame). The
@@ -1988,7 +2010,21 @@ struct SceneData {
         // mutates world.objects. Doing either while a backend is tearing down /
         // rebuilding GPU state poisons the CUDA context (hangs / error 700) — the
         // same hazard the viewport denoiser guards against. Skip; resume next frame.
-        if (g_optix_rebuild_in_progress.load() || g_viewport_rebuild_in_progress.load()) {
+        const bool sync_blocked =
+            g_optix_rebuild_in_progress.load() || g_viewport_rebuild_in_progress.load();
+        // ★ A silent early-out is indistinguishable from "the loop ran and found
+        // nothing", and every gate below lives INSIDE the loop — so a skip here
+        // reads in the capture as though the producer agreed there was nothing to
+        // do. Say it out loud; this is the switch-into-Vulkan-RT window.
+        SCENE_LOG_ON_CHANGE("simrendersync.blocked", sync_blocked ? 1 : 0,
+            std::string("[VolumeGate -1] syncSimulationRenderVolumes ") +
+            (sync_blocked
+                ? std::string("SKIPPED (optix_rebuild=") +
+                  (g_optix_rebuild_in_progress.load() ? "1" : "0") +
+                  " viewport_rebuild=" +
+                  (g_viewport_rebuild_in_progress.load() ? "1" : "0") + ")"
+                : std::string("running again")));
+        if (sync_blocked) {
             return;
         }
 
@@ -2007,20 +2043,51 @@ struct SceneData {
             const auto& states = system.runtime->gridDomainStates();
             auto& domains = system.runtime->gridDomains();  // per-domain shader lives here
             // Drop volumes for domains that no longer exist.
-            for (std::size_t d = states.size(); d < system.domain_vdb_ids.size(); ++d) {
+            //
+            // ★★★ ASK THE DESCRIPTORS, NOT THE RUNTIME STATE.
+            //
+            // `states` is transient: resetGridDomainStates() clears and re-resizes
+            // it, and synchronizeGridDomains() rebuilds it, so between a sim reset
+            // and the next sync it can be shorter than — or empty relative to —
+            // the domain DESCRIPTORS while every one of those domains still
+            // exists. Treating it as the "does this domain exist" authority
+            // unloaded every live volume for that one frame. The next frame
+            // re-registered them, and registerOrUpdateLiveVolume then MISSES on
+            // findVolumeIndex and hands out a BRAND NEW id
+            // (VDBVolumeManager.cpp:488-497).
+            //
+            // Measured consequence: volume slot keys marching 42 → 43 → 44 → 46 →
+            // 48 across consecutive publishes, a continuous
+            // "[VolumeSSBO] volume slot ORDER changed" storm, and an identity
+            // cache that can never hit — while the TLAS customIndex stayed baked
+            // against the old order. That is volumes reading each other's slots,
+            // i.e. the black band at the domain edge and its cost blow-up.
+            //
+            // A genuine deletion does NOT rely on this loop: removeSimulationGridDomain
+            // erases the descriptor, the state and the volume together at its own
+            // call site. So requiring BOTH lists to agree the domain is gone costs
+            // nothing and removes the transient window entirely.
+            const std::size_t live_domain_count =
+                (std::max)(states.size(), domains.size());
+            for (std::size_t d = live_domain_count; d < system.domain_vdb_ids.size(); ++d) {
                 removeDomainVolume(system, d);
             }
-            system.domain_vdb_ids.resize(states.size(), -1);
-            system.domain_volumes.resize(states.size());
-            system.domain_sdf_buffers.resize(states.size());
-            system.domain_sdf_stats.resize(states.size());
-            system.domain_sdf_signatures.resize(states.size(), 0);
-            system.domain_vdb_upload_signatures.resize(states.size(), 0);
-            system.domain_last_fluid_render_mode.resize(states.size(), -1);
-            system.domain_last_tuned_shader.resize(states.size(), nullptr);
+            system.domain_vdb_ids.resize(live_domain_count, -1);
+            system.domain_volumes.resize(live_domain_count);
+            system.domain_sdf_buffers.resize(live_domain_count);
+            system.domain_sdf_stats.resize(live_domain_count);
+            system.domain_sdf_signatures.resize(live_domain_count, 0);
+            // ★ Same length as the arrays above. These are all per-domain
+            // parallel arrays and removeSimulationGridDomain erases them at one
+            // shared index, so letting some track the transient state count and
+            // others the descriptor count reintroduces exactly the skew this
+            // block just removed.
+            system.domain_vdb_upload_signatures.resize(live_domain_count, 0);
+            system.domain_last_fluid_render_mode.resize(live_domain_count, -1);
+            system.domain_last_tuned_shader.resize(live_domain_count, nullptr);
             // Reused below to carry foam into the fluid-surface volume's
             // temperature channel (single-volume whitewater compositing).
-            system.domain_foam_density.resize(states.size());
+            system.domain_foam_density.resize(live_domain_count);
 
             for (std::size_t d = 0; d < states.size(); ++d) {
                 const auto& state = states[d];
@@ -2033,10 +2100,37 @@ struct SceneData {
                 // must tear its contribution down or the two paths fight.
                 const bool is_fluid_domain =
                     state.type == RayTrophiSim::SimulationDomainType::Fluid;
-                const RayTrophiSim::Fluid::FluidRenderMode fluid_mode =
+                RayTrophiSim::Fluid::FluidRenderMode fluid_mode =
                     (is_fluid_domain && d < domains.size())
                         ? domains[d].fluid_render_mode
                         : RayTrophiSim::Fluid::FluidRenderMode::Volume;
+                // ★★ `Volume` is a DEAD configuration for a liquid domain, and it
+                // is the struct default (ParticleSimulation.h), so any domain
+                // created without an explicit render mode — a scripted one, for
+                // instance — lands in it.
+                //
+                // In that state fluid_surface_route is false, so no SDF is ever
+                // built, and `renderable` falls through to active_density_cells>0
+                // which a fluid domain never splats. The volume object is then
+                // never created, no gate downstream ever sees it, and the liquid
+                // is simply absent with nothing reporting a failure.
+                //
+                // The UI already treats Volume as invalid (its combo offers only
+                // Particles / SurfaceSDF) and used to REPAIR it by writing
+                // SurfaceSDF while drawing the panel — which is why the surface
+                // appeared only after opening the fluid panel or round-tripping
+                // the render mode. Panel visibility must not be what fixes scene
+                // data: normalise it here, where the mode is consumed.
+                if (is_fluid_domain && d < domains.size() &&
+                    fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::Volume) {
+                    fluid_mode = RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
+                    domains[d].fluid_render_mode = fluid_mode;
+                    SCENE_LOG_ON_CHANGE(
+                        "domainmode." + system.name + ".D" + std::to_string(d), 1,
+                        std::string("[VolumeGate 0a] domain '") + system.name + " D" +
+                        std::to_string(d) + "' had the invalid liquid render mode "
+                        "'Volume'; normalised to SurfaceSDF.");
+                }
                 const bool fluid_skip_volume =
                     is_fluid_domain &&
                     fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles;
@@ -2062,6 +2156,38 @@ struct SceneData {
                     (fluid_surface_route
                         ? !state.particles.empty()
                         : state.active_density_cells > 0);
+
+                // ★ GATE 0 — the domain producer. This is the decision that
+                // determines whether the domain volume exists at all, upstream
+                // of every other gate; if it says no, gates 3/4 never even see
+                // the volume and stay silent, which reads as "nothing happened".
+                SCENE_LOG_ON_CHANGE(
+                    "domainvol." + system.name + ".D" + std::to_string(d),
+                    (renderable ? 1 : 0) + (fluid_surface_route ? 2 : 0) +
+                        (fluid_skip_volume ? 4 : 0) + (is_fluid_domain ? 8 : 0),
+                    std::string("[VolumeGate 0] domain '") + system.name + " D" +
+                    std::to_string(d) + "' " + (renderable ? "RENDERABLE" : "NOT renderable") +
+                    " | fluid=" + (is_fluid_domain ? "1" : "0") +
+                    " route=" + (fluid_skip_volume ? "Particles"
+                                 : (fluid_surface_route ? "SurfaceSDF" : "Volume")) +
+                    " render_enabled=" + (domain_render_enabled ? "1" : "0") +
+                    " sys_visible=" + (system.visible ? "1" : "0") +
+                    " valid=" + (state.valid ? "1" : "0") +
+                    " has_density=" + (has_density ? "1" : "0") +
+                    " res=" + std::to_string(state.grid.nx) + "x" +
+                        std::to_string(state.grid.ny) + "x" + std::to_string(state.grid.nz) +
+                    // ★ Geometry of the domain itself. The black-band repro is
+                    // decided at domain CREATION (a solid inside it at that
+                    // moment triggers it; deleting the solid afterwards does
+                    // not cure it), so the first thing to compare between a
+                    // triggering and a clean run is whether the domain box came
+                    // out the same size and in the same place at all.
+                    " voxel=" + std::to_string(state.grid.voxel_size) +
+                    " origin=(" + std::to_string(state.grid.origin.x) + "," +
+                        std::to_string(state.grid.origin.y) + "," +
+                        std::to_string(state.grid.origin.z) + ")" +
+                    " particles=" + std::to_string(state.particles.size()) +
+                    " active_cells=" + std::to_string(state.active_density_cells));
 
                 if (!renderable) {
                     // Keep the VDB registered and visible so the TLAS customIndex→SSBO
@@ -2113,8 +2239,18 @@ struct SceneData {
 
                 // Each domain owns its volume shader (created lazily, editable in
                 // the domain panel, serialized with the domain).
+                bool shader_created_for_missing_domain = false;
                 if (d < domains.size() && !domains[d].shader) {
-                    domains[d].shader = VolumeShader::createSmokePreset();
+                    // ★ Follow the domain's INTENT. The smoke preset has no
+                    // blackbody emission, so a fire domain that fell back to it
+                    // rendered its temperature field as flat grey smoke — the
+                    // fire was simulating correctly and simply could not be
+                    // seen. Presets always set a shader explicitly; this path is
+                    // what a UI- or script-created domain lands on.
+                    domains[d].shader = domains[d].fire_enabled
+                        ? VolumeShader::createFirePreset()
+                        : VolumeShader::createSmokePreset();
+                    shader_created_for_missing_domain = true;
                 }
                 std::shared_ptr<VolumeShader> domain_shader =
                     (d < domains.size()) ? domains[d].shader : nullptr;
@@ -2124,7 +2260,10 @@ struct SceneData {
                 // live UI edits would be stomped by the preset every frame.
                 if (is_fluid_domain && domain_shader && d < system.domain_last_fluid_render_mode.size()) {
                     const int cur_mode = static_cast<int>(fluid_mode);
+                    const bool had_previous_render_mode =
+                        system.domain_last_fluid_render_mode[d] != -1;
                     const bool mode_changed =
+                        had_previous_render_mode &&
                         cur_mode != system.domain_last_fluid_render_mode[d];
                     // ★A shader we have never tuned must be tuned even when the mode did
                     // NOT change. The lazy init a few lines above hands a fresh SMOKE
@@ -2143,7 +2282,12 @@ struct SceneData {
                         d >= system.domain_last_tuned_shader.size() ||
                         system.domain_last_tuned_shader[d] !=
                             static_cast<const void*>(domain_shader.get());
-                    if (mode_changed || shader_untuned) {
+                    // A shader restored from a project is already authored;
+                    // its density/scattering values must survive the first
+                    // post-load sync. Only auto-created shaders receive the
+                    // mode defaults on first sight.
+                    if (mode_changed ||
+                        (shader_untuned && shader_created_for_missing_domain)) {
                         // Mid-flight mode change: the SurfaceSDF density-proxy
                         // layout is dramatically different (very thin sharp
                         // band, 0..1) from the splatted-particle density layout
@@ -2269,10 +2413,19 @@ struct SceneData {
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.anisotropy_max_stretch));
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(lsp.anisotropy_neighbor_min));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.position_smoothing));
-                    for (const auto& p : state.particles.position) {
+                    for (std::size_t particle_index = 0;
+                         particle_index < state.particles.position.size(); ++particle_index) {
+                        const auto& p = state.particles.position[particle_index];
                         sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.x));
                         sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.y));
                         sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.z));
+                        // Mass fraction changes the rendered level-set radius and
+                        // density mask, so it must invalidate the cached SDF too.
+                        if (particle_index < state.particles.mass_fraction.size()) {
+                            sdf_sig = hash_combine_local(
+                                sdf_sig,
+                                quantize_local(state.particles.mass_fraction[particle_index]));
+                        }
                     }
 
                     const bool needs_sdf_rebuild =
@@ -2523,6 +2676,15 @@ struct SceneData {
                         state.active_density_cells > 0,
                         state.active_density_min,
                         state.active_density_max);
+                    mgr.setLiveDenseMajorant(
+                        id,
+                        dense_gpu_view.majorant_address,
+                        dense_gpu_view.majorant_dim_x,
+                        dense_gpu_view.majorant_dim_y,
+                        dense_gpu_view.majorant_dim_z,
+                        dense_gpu_view.majorant_block,
+                        dense_gpu_view.emissive_list_address,
+                        dense_gpu_view.emissive_capacity);
                     simulation_render_updated = true;
                     g_gas_volumes_dirty = true;
                 } else {
@@ -2745,6 +2907,7 @@ struct SceneData {
         rigid_frame_cache_.clear();  // rigid is cached in lockstep; never outlive the fluid cache
         soft_frame_cache_.clear();   // soft deformation cache, same lockstep
         particle_frame_cache_.clear(); // discrete particle SoA, same lockstep
+        msf_frame_cache_.clear();    // burn/heat surface damage, same lockstep
     }
 
     // Live source-object pivot (frame-0 spawn pose) for a rigid body. Returns
@@ -2902,6 +3065,33 @@ struct SceneData {
                 h = mix(h, qf(c.gas_fuel_rate));
                 h = mix(h, qf(c.gas_flame_rate));
                 h = mix(h, qf(c.gas_surface_band_voxels));
+                // Substance selection changes the derived ignition/fuel/burn
+                // values, so a cache baked as "Wood" must not replay as "Iron".
+                for (char ch : c.msf_substance) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, c.msf_override.override_ignition ? 1ull : 0ull);
+                h = mix(h, qf(c.msf_override.ignition_kelvin));
+                h = mix(h, qf(c.msf_override.burn_rate_scale));
+                h = mix(h, qf(c.msf_override.fuel_capacity_scale));
+                h = mix(h, static_cast<uint64_t>(c.msf_mask_resolution));
+                h = mix(h, c.msf_generate_char_mask ? 1ull : 0ull);
+            }
+            // World thermal boundary conditions (Phase 4). Ambient, the Kelvin
+            // calibration, convection and oxygen all change how much an object
+            // heats and how fast it burns, so a cache baked in a cold draughty
+            // room must not replay as one baked in a sealed hot one.
+            {
+                const auto& wt = s.runtime->worldThermal();
+                h = mix(h, qf(wt.ambient_kelvin));
+                h = mix(h, qf(wt.kelvin_per_unit));
+                h = mix(h, qf(wt.convection_coefficient));
+                h = mix(h, qf(wt.oxygen_availability));
+            }
+            // Per-domain ambient/oxygen override, for the same reason.
+            for (const auto& d : s.runtime->gridDomains()) {
+                h = mix(h, d.thermal_override_enabled ? 1ull : 0ull);
+                if (!d.thermal_override_enabled) continue;
+                h = mix(h, qf(d.thermal_ambient_kelvin));
+                h = mix(h, qf(d.thermal_oxygen));
             }
             h = mix(h, s.runtime->flowSources().size());
             // Flow sources are domain-owned emitters. Hash their authored
@@ -2960,6 +3150,22 @@ struct SceneData {
         // invalidates the (expensive) fluid bake.
         h = mix(h, force_field_manager.force_fields.size());
         for (const auto& ff : force_field_manager.force_fields) {
+            // ★ A Thermal field never "affects fluid" — it exerts no force at all
+            // (its affect mask is zeroed in SimulationForceFieldSnapshot). It DOES
+            // drive surface heating and therefore pyrolysis, so it has to be
+            // hashed on its own terms or moving a burner would replay a stale
+            // burn. This is exactly the trap the affects_fluid gate was written
+            // to avoid in the other direction.
+            if (ff && ff->type == Physics::ForceFieldType::Thermal) {
+                h = mix(h, ff->enabled ? 1ull : 0ull);
+                h = mix(h, static_cast<uint64_t>(ff->shape));
+                h = mix(h, static_cast<uint64_t>(ff->falloff_type));
+                h = mix(h, qf(ff->thermal_delta_kelvin));
+                h = mix(h, qf(ff->position.x)); h = mix(h, qf(ff->position.y)); h = mix(h, qf(ff->position.z));
+                h = mix(h, qf(ff->falloff_radius)); h = mix(h, qf(ff->inner_radius));
+                h = mix(h, qf(ff->start_frame)); h = mix(h, qf(ff->end_frame));
+                continue;
+            }
             if (!ff || !ff->affects_fluid) { h = mix(h, 0); continue; }
             h = mix(h, ff->enabled ? 1ull : 0ull);
             h = mix(h, static_cast<uint64_t>(ff->type));
@@ -3101,6 +3307,33 @@ struct SceneData {
                 h = mix(h, qf(c.gas_fuel_rate));
                 h = mix(h, qf(c.gas_flame_rate));
                 h = mix(h, qf(c.gas_surface_band_voxels));
+                // Substance selection changes the derived ignition/fuel/burn
+                // values, so a cache baked as "Wood" must not replay as "Iron".
+                for (char ch : c.msf_substance) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, c.msf_override.override_ignition ? 1ull : 0ull);
+                h = mix(h, qf(c.msf_override.ignition_kelvin));
+                h = mix(h, qf(c.msf_override.burn_rate_scale));
+                h = mix(h, qf(c.msf_override.fuel_capacity_scale));
+                h = mix(h, static_cast<uint64_t>(c.msf_mask_resolution));
+                h = mix(h, c.msf_generate_char_mask ? 1ull : 0ull);
+            }
+            // World thermal boundary conditions (Phase 4). Ambient, the Kelvin
+            // calibration, convection and oxygen all change how much an object
+            // heats and how fast it burns, so a cache baked in a cold draughty
+            // room must not replay as one baked in a sealed hot one.
+            {
+                const auto& wt = s.runtime->worldThermal();
+                h = mix(h, qf(wt.ambient_kelvin));
+                h = mix(h, qf(wt.kelvin_per_unit));
+                h = mix(h, qf(wt.convection_coefficient));
+                h = mix(h, qf(wt.oxygen_availability));
+            }
+            // Per-domain ambient/oxygen override, for the same reason.
+            for (const auto& d : s.runtime->gridDomains()) {
+                h = mix(h, d.thermal_override_enabled ? 1ull : 0ull);
+                if (!d.thermal_override_enabled) continue;
+                h = mix(h, qf(d.thermal_ambient_kelvin));
+                h = mix(h, qf(d.thermal_oxygen));
             }
             h = mix(h, s.runtime->flowSources().size());
             // Keep the general simulation-cache signature sensitive to the
@@ -3430,6 +3663,14 @@ struct SceneData {
                 bytes += snap.buffers.position_x.size() * 80;  // ~20 float columns + flags
         for (const auto& f : rigid_frame_cache_)
             bytes += f.second.size() * sizeof(RayTrophiSim::RigidBodyFrameState);
+        // MSF is six float channels per surface ELEMENT, and elements are the
+        // texels of the char mask — a single 128x128 mask is ~6k elements, i.e.
+        // ~150 KB per object per frame. That balloons faster than anything else
+        // here, so it belongs in the "bake to disk" nudge rather than hiding.
+        for (const auto& f : msf_frame_cache_)
+            for (const auto& per_system : f.second)
+                for (const auto& snap : per_system)
+                    bytes += static_cast<std::size_t>(snap.element_count) * 6u * sizeof(float);
         return bytes;
     }
     int cachedSimFrameCount() const { return static_cast<int>(sim_frame_cache_.size()); }
@@ -3446,6 +3687,16 @@ struct SceneData {
     // (where the body was never live-created, so no cache exists yet). Returns false
     // if the mesh isn't available or is degenerate.
     bool rebuildSoftWeldCache(const std::string& node) {
+        return rebuildWeldCache(node, soft_weld_cache_);
+    }
+
+    // ★ The cache map is a PARAMETER so Phase 6c can weld a melting object without
+    // filing it under soft_weld_cache_. A non-soft node living in that map would
+    // be seen by the soft body's freeze/reset/frame-cache paths as a soft body —
+    // the same reason rigid_bake_cache_ was kept separate. Same welder, separate
+    // ledger.
+    bool rebuildWeldCache(const std::string& node,
+                          std::unordered_map<std::string, SoftWeldCache>& cache_map) {
         if (node.empty()) return false;
 
         extern std::atomic<uint64_t> g_scene_geometry_generation;
@@ -3469,8 +3720,8 @@ struct SceneData {
             const Vec3* Po = g->get_attribute_data<Vec3>("P_orig");
             if (!Po) return false;
 
-            auto it = soft_weld_cache_.find(node);
-            const bool have_rest = (it != soft_weld_cache_.end() &&
+            auto it = cache_map.find(node);
+            const bool have_rest = (it != cache_map.end() &&
                                     it->second.flat_mesh == fm &&
                                     it->second.flat_rest_pos.size() == vc &&
                                     it->second.flat_soa_to_unique.size() == vc &&
@@ -3531,7 +3782,7 @@ struct SceneData {
             }
             cache.unique_count = cache.rest_world_unique.size();
             const bool ok = cache.unique_count >= 3;
-            soft_weld_cache_[node] = std::move(cache);
+            cache_map[node] = std::move(cache);
             return ok;
         }
 
@@ -3541,8 +3792,8 @@ struct SceneData {
             if (tri && tri->getNodeName() == node) current_tri_count++;
         }
 
-        auto it = soft_weld_cache_.find(node);
-        const bool have_rest = (it != soft_weld_cache_.end() &&
+        auto it = cache_map.find(node);
+        const bool have_rest = (it != cache_map.end() &&
                                 !it->second.rest_local_pos.empty() &&
                                 it->second.tris.size() == current_tri_count);
         if (have_rest && it->second.geometry_generation == current_gen) {
@@ -3619,7 +3870,7 @@ struct SceneData {
         }
         cache.unique_count = cache.rest_world_unique.size();
         const bool ok = cache.unique_count >= 3;
-        soft_weld_cache_[node] = std::move(cache);
+        cache_map[node] = std::move(cache);
         return ok;
     }
 
@@ -3661,7 +3912,17 @@ struct SceneData {
     void applySoftDeformedVerts(const std::string& node, const std::vector<Vec3>& world_verts) {
         auto it = soft_weld_cache_.find(node);
         if (it == soft_weld_cache_.end()) return;
-        SoftWeldCache& cache = it->second;
+        applyDeformedVertsToCache(it->second, node, world_verts);
+    }
+
+    // Write welded world vertices back onto a mesh: positions (world + local),
+    // area-weighted SMOOTH normals accumulated on the welded topology, and the
+    // geometry-dirty flag. Split out of applySoftDeformedVerts so Phase 6c melt
+    // displacement reuses the exact same writer instead of copying it — two
+    // writers would be two places for the local/world or normal handling to drift.
+    void applyDeformedVertsToCache(SoftWeldCache& cache,
+                                   const std::string& node,
+                                   const std::vector<Vec3>& world_verts) {
         if (world_verts.size() != cache.unique_count) return;  // stale topology
 
         // Flat (direct SoA) soft body: the solver deforms the WELDED unique verts; scatter each one
@@ -3778,6 +4039,133 @@ struct SceneData {
             }
         }
         markBodyGeometryDirty(node);
+    }
+
+    // ── Phase 6c: melt geometry (slump) ──────────────────────────────────────
+    //
+    // ★ The displacement is DERIVED from `melt`, never accumulated. That single
+    // choice pays for itself three times over:
+    //   - `melt` is monotonic (Phase 6b only ever raises it), so a derived
+    //     displacement is monotonic too — melting still reads as irreversible.
+    //   - `melt` is already in the Phase 4b frame cache, so scrubbing the timeline
+    //     replays the geometry for free. No new cache, no new serialization.
+    //   - Clear Damage sets melt to 0 and the mesh returns to rest by itself.
+    // Accumulating into the live vertices would have needed all three built by
+    // hand, and would have compounded every frame the sim ran at a different dt.
+    //
+    // ★ SCOPE, stated plainly: this is SLUMP, not flow. Vertices sink under
+    // gravity and flatten against the rest bounding box's floor; there is no
+    // lateral spreading and volume is NOT conserved. A puddle that widens as it
+    // sinks needs the wet-clay flow core and is the next slice.
+    void applyMeltDisplacement() {
+        for (auto& system : particle_systems) {
+            if (!system.runtime || !system.runtime->hasMaterialStateFields()) continue;
+            for (const auto& entry : system.runtime->materialStateFields()) {
+                applyMeltDisplacementToNode(entry.first, entry.second);
+            }
+        }
+    }
+
+    void applyMeltDisplacementToNode(const std::string& node,
+                                     const RayTrophiSim::MaterialStateField& field) {
+        if (node.empty()) return;
+        // ★ Two writers to one mesh would fight every frame, each overwriting the
+        // other's result. A soft body already owns its vertices; melt defers.
+        if (soft_weld_cache_.count(node) != 0) return;
+
+        const bool was_displaced = melt_displaced_.count(node) != 0;
+        float peak_melt = 0.0f;
+        for (float m : field.melt_texel) peak_melt = std::max(peak_melt, m);
+        // Nothing melted and nothing to put back: the common case, and it must
+        // cost no more than this scan.
+        if (peak_melt <= 0.0f && !was_displaced) return;
+        // No UV layout: Phase 6a can answer no query for this object, so there is
+        // nothing to displace FROM. Leaving the mesh alone is the honest outcome.
+        if (field.mask_resolution <= 0) return;
+
+        if (!rebuildWeldCache(node, melt_weld_cache_)) return;
+        auto cit = melt_weld_cache_.find(node);
+        if (cit == melt_weld_cache_.end()) return;
+        SoftWeldCache& cache = cit->second;
+        const std::size_t uc = cache.unique_count;
+        if (uc < 3 || cache.rest_world_unique.size() != uc) return;
+
+        // ── Melt per UNIQUE vertex ────────────────────────────────────────────
+        // ★★ THE trap of this phase: a UV seam is exactly where one spatial vertex
+        // carries two different UVs. Sampling per SoA vertex and displacing each
+        // one by its own answer tears the mesh open along every seam. So sample
+        // per SoA vertex (each has its own UV, which is the point) and REDUCE to
+        // the unique vertex with max — the same rule the texel scatter uses at a
+        // seam, so the two agree.
+        std::vector<float> melt_unique(uc, 0.0f);
+        bool sampled_any = false;
+
+        if (cache.flat_mesh && cache.flat_mesh->geometry &&
+            cache.flat_soa_to_unique.size() == cache.flat_mesh->geometry->get_vertex_count()) {
+            const DNA::GeometryDetail* g = cache.flat_mesh->geometry.get();
+            const Vec2* uv = g->get_uvs();
+            if (!uv) return;  // welded, but unwrapped: same "cannot displace" case
+            const std::size_t vc = g->get_vertex_count();
+            for (std::size_t v = 0; v < vc; ++v) {
+                const uint32_t u = cache.flat_soa_to_unique[v];
+                if (u >= uc) continue;
+                float m = 0.0f;
+                if (!RayTrophiSim::MaterialStateFieldSystem::sampleMeltAtUV(field, uv[v].x, uv[v].y, m))
+                    continue;
+                melt_unique[u] = std::max(melt_unique[u], m);
+                sampled_any = true;
+            }
+        } else {
+            std::size_t corner = 0;
+            for (const auto& tri : cache.tris) {
+                if (!tri) { corner += 3; continue; }
+                const auto uvs = tri->getUVCoordinates();
+                const Vec2 c_uv[3] = { std::get<0>(uvs), std::get<1>(uvs), std::get<2>(uvs) };
+                for (int i = 0; i < 3; ++i, ++corner) {
+                    if (corner >= cache.corner_unique.size()) break;
+                    const uint32_t u = cache.corner_unique[corner];
+                    if (u >= uc) continue;
+                    float m = 0.0f;
+                    if (!RayTrophiSim::MaterialStateFieldSystem::sampleMeltAtUV(
+                            field, c_uv[i].x, c_uv[i].y, m)) continue;
+                    melt_unique[u] = std::max(melt_unique[u], m);
+                    sampled_any = true;
+                }
+            }
+        }
+        if (!sampled_any && !was_displaced) return;
+
+        // ── Slump ─────────────────────────────────────────────────────────────
+        // Sag scales with the object's own size so the same substance behaves the
+        // same on a coffee cup and on a cathedral, and with (1 - melt_viscosity)
+        // so the substance library's authored viscosity finally does something.
+        // No new UI parameter, and therefore no script/IPC parity surface.
+        const RayTrophiSim::SubstanceProfile& prof =
+            RayTrophiSim::findSubstance(field.substance_name);
+        float rest_min_y = cache.rest_world_unique[0].y;
+        float rest_max_y = rest_min_y;
+        for (const Vec3& p : cache.rest_world_unique) {
+            rest_min_y = std::min(rest_min_y, p.y);
+            rest_max_y = std::max(rest_max_y, p.y);
+        }
+        const float height = std::max(1.0e-4f, rest_max_y - rest_min_y);
+        const float viscosity = std::clamp(prof.melt_viscosity, 0.0f, 1.0f);
+        const float max_sag = height * 0.25f * (1.0f - viscosity);
+
+        std::vector<Vec3> displaced = cache.rest_world_unique;
+        for (std::size_t u = 0; u < uc; ++u) {
+            const float m = std::clamp(melt_unique[u], 0.0f, 1.0f);
+            if (m <= 0.0f) continue;
+            // ★ Clamped at the rest bounding box floor, not allowed to fall
+            // forever. Without pooling this is an approximation of the surface the
+            // object rests on, and it is what makes a melting shape FLATTEN
+            // instead of sinking through the ground.
+            displaced[u].y = std::max(rest_min_y, displaced[u].y - m * max_sag);
+        }
+
+        applyDeformedVertsToCache(cache, node, displaced);
+        if (peak_melt > 0.0f) melt_displaced_[node] = 1u;
+        else melt_displaced_.erase(node);
     }
 
     // Cache the rest-pose LOCAL verts/normals of a RIGID body's source mesh (called
@@ -4003,6 +4391,8 @@ struct SceneData {
         // now-clean rest mesh, not from stale deformed geometry.
         soft_weld_cache_.erase(node);
         rigid_bake_cache_.erase(node);
+        melt_weld_cache_.erase(node);
+        melt_displaced_.erase(node);
     }
 
     // Route a body's per-frame geometry change to the cheapest correct refresh.
@@ -4181,6 +4571,21 @@ struct SceneData {
                 psnap.emplace_back();
             }
         }
+        // Burn/heat surface damage, same pass. Without this a scrub or loop-back
+        // silently un-burned every object: MSF is permanent by design and there
+        // is no other path that reproduces it, so an uncached frame replayed as
+        // pristine geometry with a fully-simulated fire around it.
+        auto& msnap = msf_frame_cache_[frame];
+        msnap.clear();
+        msnap.reserve(particle_systems.size());
+        for (auto& system : particle_systems) {
+            if (system.runtime) {
+                msnap.push_back(system.runtime->captureMaterialStateFieldsForCache(
+                    simulation_world.compute()));
+            } else {
+                msnap.emplace_back();
+            }
+        }
         // Capture the rigid bodies in the SAME pass so replay restores them in
         // lockstep with this fluid frame (see rigid_frame_cache_).
         captureRigidFrame(frame);
@@ -4201,10 +4606,25 @@ struct SceneData {
     bool restoreRigidFrame(int frame) {
         if (!rigid_body_system) return false;
         auto it = rigid_frame_cache_.find(frame);
-        if (it == rigid_frame_cache_.end()) return false;
-        if (!rigid_body_system->restoreFrameState(it->second)) return false;
-        rigid_timeline_frame_ = frame;
-        return true;
+        if (it != rigid_frame_cache_.end()) {
+            if (!rigid_body_system->restoreFrameState(it->second)) return false;
+            rigid_timeline_frame_ = frame;
+            return true;
+        }
+        // RAM cache misses on every reopened project and after any cache reset,
+        // and the fallback below this is a capped catch-up re-sim that neither
+        // matches the baked run nor arrives on the frame being displayed. The
+        // on-disk bake has the answer — use it before resorting to re-simulating.
+        if (sim_cache_valid_ && !sim_cache_dir_.empty() &&
+            frame >= sim_cache_start_frame_ && frame <= sim_cache_end_frame_) {
+            std::vector<RayTrophiSim::RigidBodyFrameState> disk;
+            if (RayTrophiSim::SimCache::readRigidFrame(sim_cache_dir_, frame, disk) &&
+                rigid_body_system->restoreFrameState(disk)) {
+                rigid_timeline_frame_ = frame;
+                return true;
+            }
+        }
+        return false;
     }
 
     // Bring the rigid timeline to `frame`: replay it from the cache when present
@@ -4222,9 +4642,11 @@ struct SceneData {
     }
 
     bool restoreSimFrame(int frame, float fixed_dt = 1.0f / 24.0f) {
-        // Rigid bodies aren't frame-cached yet (Faz 5); the start is the only frame
-        // we can faithfully reconstruct, so reset them to their initial pose there.
-        // (A loop-back / scrub to frame 0 thus puts a fallen body back at the top.)
+        // Frame 0 is reconstructed from the rest pose rather than from a cache
+        // entry: it is the one frame that is exactly reproducible, and resetting
+        // here is what makes a loop-back put a fallen body back at the top.
+        // (Rigid frames ARE cached now — RAM in lockstep with the fluid cache,
+        // and on disk beside it; see restoreRigidFrame.)
         if (frame <= 0 && rigid_body_system) { rigid_body_system->resetRuntime(); resetFractureToIntact(); }
         // Soft/cloth deformation is mesh-resident and cached per frame; replay it so
         // a cached-frame scrub/loop shows the cloth's shape instead of a frozen mesh.
@@ -4237,6 +4659,9 @@ struct SceneData {
             auto pit = particle_frame_cache_.find(frame);
             const bool have_particles =
                 (pit != particle_frame_cache_.end() && pit->second.size() == particle_systems.size());
+            auto mit = msf_frame_cache_.find(frame);
+            const bool have_msf =
+                (mit != msf_frame_cache_.end() && mit->second.size() == particle_systems.size());
             for (std::size_t i = 0; i < particle_systems.size(); ++i) {
                 if (particle_systems[i].runtime) {
                     particle_systems[i].runtime->setGridDomainStates(it->second[i]);
@@ -4244,6 +4669,10 @@ struct SceneData {
                         particle_systems[i].runtime->restoreSoA(
                             pit->second[i].buffers, pit->second[i].alive_count);
                         particle_systems[i].runtime->restoreRuntimeState(pit->second[i].runtime);
+                    }
+                    if (have_msf) {
+                        particle_systems[i].runtime->restoreMaterialStateFields(
+                            mit->second[i], simulation_world.compute());
                     }
                     invalidateSimulationRenderBindings(particle_systems[i]);
                 }
@@ -4276,9 +4705,15 @@ struct SceneData {
             if (!particle_systems[i].runtime) continue;
             if (sim_cache_valid_system_ids_.count(particle_systems[i].id) > 0) {
                 std::vector<RayTrophiSim::SimulationGridDomainState> loaded;
+                std::vector<RayTrophiSim::MaterialStateFieldSnapshot> loaded_msf;
                 if (RayTrophiSim::SimCache::readSystemFrame(
-                        sim_cache_dir_, particle_systems[i].id, frame, loaded)) {
+                        sim_cache_dir_, particle_systems[i].id, frame, loaded, loaded_msf)) {
                     particle_systems[i].runtime->setGridDomainStates(loaded);
+                    // Burn/heat damage rides alongside the grid states; without
+                    // this a disk-replayed frame shows pristine geometry inside a
+                    // fully simulated fire.
+                    particle_systems[i].runtime->restoreMaterialStateFields(
+                        loaded_msf, simulation_world.compute());
                     invalidateSimulationRenderBindings(particle_systems[i]);
                 } else {
                     particle_systems[i].runtime->resetGridDomainStates();
@@ -4301,6 +4736,17 @@ struct SceneData {
                 applySoftDeformedVerts(b.name, b.vertices);
             }
         }
+        // Rigid bodies come from the SAME frame on disk, before the source-object
+        // poses are applied — a body restored here is the authority for its own
+        // object's pose, and anything parented to it (flow sources, emitters)
+        // resolves against this frame rather than against wherever a capped
+        // catch-up re-sim happened to leave the body.
+        std::vector<RayTrophiSim::RigidBodyFrameState> rigid;
+        if (rigid_body_system &&
+            RayTrophiSim::SimCache::readRigidFrame(sim_cache_dir_, frame, rigid) &&
+            rigid_body_system->restoreFrameState(rigid)) {
+            rigid_timeline_frame_ = frame;
+        }
         simulation_world.resetTime(static_cast<float>(frame) * fixed_dt, frame);
         // Disk cache stores simulation fields, not source-object transforms.
         // Keep collider/emitter/domain bindings on the exact restored frame.
@@ -4317,6 +4763,7 @@ struct SceneData {
         ctx.fixed_dt = fixed_dt;
         ctx.time_seconds = static_cast<float>(frame) * fixed_dt;
         ctx.frame = frame;
+        ctx.timeline_frame = frame;
         ctx.substep_index = 0;
         ctx.substep_count = 1;
 
@@ -4669,6 +5116,13 @@ struct SceneData {
             sim_timeline_frame_ = -1;  // detached from the baked timeline
             rigid_timeline_frame_ = -1;
             syncSimulationWorld();
+            // ★ The sim's own frame counter advances once per UI frame here, so
+            // it runs at 60-144 Hz while the playhead stands still. Anything that
+            // evaluates a keyframe against it burns through an authored curve in
+            // a second or two — a hose keyed to pour from frame 18 to 150 empties
+            // itself almost instantly, and a source keyed to fade out is already
+            // past its last key. Keys belong to the PLAYHEAD, so publish it.
+            simulation_world.setTimelineFrame(tl_frame);
             simulation_world.stepOnce(realtime_dt);
             processFractureImpacts();  // live preview: shatter on impact
             syncSimulationRenderVolumes();
@@ -4767,6 +5221,11 @@ struct SceneData {
                     // tracks the animated geometry instead of freezing at one pose.
                     applySimSourceObjectPosesForFrame(sim_timeline_frame_ + 1);
                     syncSimulationWorld();
+                    // Keys are evaluated against the frame being stepped INTO —
+                    // the same one the source poses above were just set to. The
+                    // world's own frame_ counter is not that number: it only ever
+                    // gets re-anchored by resetTime, so it drifts across scrubs.
+                    simulation_world.setTimelineFrame(sim_timeline_frame_ + 1);
                     simulation_world.stepOnce(fixed_dt);
                     processFractureImpacts();  // shatter on impact above threshold
                     ++sim_timeline_frame_;
@@ -4869,6 +5328,7 @@ struct SceneData {
             // collider stays frozen at the render frame's pose for the whole bake.
             applySimSourceObjectPosesForFrame(sim_timeline_frame_ + 1);
             syncSimulationWorld();
+            simulation_world.setTimelineFrame(sim_timeline_frame_ + 1);
             simulation_world.stepOnce(fixed_dt);
             processFractureImpacts();  // shatter on impact above threshold
             ++sim_timeline_frame_;
@@ -4918,6 +5378,7 @@ struct SceneData {
         for (int f = 0; f <= end_frame; ++f) {
             if (f > 0) {
                 syncSimulationWorld();
+                simulation_world.setTimelineFrame(f);
                 simulation_world.stepOnce(dt);
                 sim_timeline_frame_ = f;
                 rigid_timeline_frame_ = f;
@@ -5074,6 +5535,7 @@ struct SceneData {
             // new world verts (static colliders stay memoized and cheap).
             applySimSourceObjectPosesForFrame(sim_bake_cur_);
             syncSimulationWorld();
+            simulation_world.setTimelineFrame(sim_bake_cur_);
             simulation_world.stepOnce(sim_bake_dt_);
             sim_timeline_frame_ = sim_bake_cur_;
             rigid_timeline_frame_ = sim_bake_cur_;
@@ -5110,13 +5572,40 @@ private:
         bool ok = true;
         for (auto& sys : particle_systems) {
             if (!sys.runtime) continue;
+            // Burn/heat damage is captured in the SAME call as the grid states:
+            // it is the one thing in this cache that the sim cannot re-derive on
+            // load, so a frame written without it bakes a fire with nothing burnt.
+            const auto msf = sys.runtime->captureMaterialStateFieldsForCache(
+                simulation_world.compute());
             if (!RayTrophiSim::SimCache::writeSystemFrame(
-                    sim_bake_dir_, sys.id, f, sys.runtime->gridDomainStates())) {
+                    sim_bake_dir_, sys.id, f, sys.runtime->gridDomainStates(), msf)) {
                 ok = false;
             }
         }
         if (!writeSoftBodiesBakeFrame_(f)) ok = false;
+        if (!writeRigidBodiesBakeFrame_(f)) ok = false;
         return ok;
+    }
+
+    // ★ Rigid motion belongs in the bake exactly like the grid domains do.
+    //
+    // It used to be the one moving thing in the scene with no on-disk frame: the
+    // disk replay path restored the grid/soft frames and then RE-SIMULATED Jolt
+    // to catch up (syncRigidToFrame -> advanceRigidTimelineToFrame). Two things
+    // then go wrong every play/reset:
+    //   • the re-sim is capped at max_steps per UI tick, so the rigid timeline
+    //     lags the fluid frame being displayed — anything parented to a body
+    //     (a flame on a falling match) reads a DIFFERENT frame's pose than the
+    //     fire it is supposed to be lighting;
+    //   • Jolt re-simulated against restored-but-not-resumable fluid state does
+    //     not reproduce the run that was baked, so the result changes run to run.
+    // Writing the frame makes rigid replay a lookup, same as everything else.
+    bool writeRigidBodiesBakeFrame_(int f) {
+        if (!rigid_body_system || rigid_bodies.empty()) return true;
+        std::vector<RayTrophiSim::RigidBodyFrameState> bodies;
+        rigid_body_system->captureFrameState(bodies);
+        if (bodies.empty()) return true;
+        return RayTrophiSim::SimCache::writeRigidFrame(sim_bake_dir_, f, bodies);
     }
 
     // Write every soft body's deformed world vertices for frame f (alongside the
@@ -5375,6 +5864,14 @@ private:
                 // Keep visible=true so the TLAS customIndex→SSBO slot mapping stays
                 // intact. The volume will re-upload density on next sync without
                 // triggering a became_visible rebuild cycle.
+                //
+                // ★ visible=true alone did NOT keep the mapping intact: with the id
+                // at -1 the volume reads as !isLoaded(), and updateGeometry drops
+                // unloaded volumes from the TLAS entirely. Any rebuild landing in
+                // this window — switching to Vulkan RT performs one — deleted the
+                // liquid surface permanently. Mark the rebind as expected so the
+                // slot survives the window it was always assumed to survive.
+                system.domain_volumes[d]->awaiting_live_rebind = true;
             }
             if (d < system.domain_vdb_upload_signatures.size()) {
                 system.domain_vdb_upload_signatures[d] = 0;
@@ -5527,8 +6024,19 @@ private:
         obj.ensureGrid();
         const auto& grid = obj.grid;
         active_cells = 0;
-        if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
-            grid.voxel_size <= 0.0f || obj.particles.empty()) {
+        const bool bad_grid = (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
+                               grid.voxel_size <= 0.0f);
+        const bool no_particles = obj.particles.empty();
+        // Which of the three causes stopped the surface — the caller's gate can
+        // only report "built=0", and the three have completely different fixes.
+        SCENE_LOG_ON_CHANGE("fluidsurf.cause." + obj.name,
+            (bad_grid ? 1 : 0) + (no_particles ? 2 : 0),
+            std::string("[VolumeGate 1a] fluid '") + obj.name + "' surface input: grid=" +
+            std::to_string(grid.nx) + "x" + std::to_string(grid.ny) + "x" +
+            std::to_string(grid.nz) + " voxel=" + std::to_string(grid.voxel_size) +
+            " particles=" + std::to_string(obj.particles.size()) +
+            (bad_grid ? " -> BAD GRID" : (no_particles ? " -> NO PARTICLES" : " -> ok")));
+        if (bad_grid || no_particles) {
             binding.density.clear();
             obj.sdf.clear();
             return false;
@@ -5536,6 +6044,10 @@ private:
 
         const bool built = RayTrophiSim::Fluid::buildLevelSet(
             obj.particles, grid, obj.level_set_params, obj.sdf, &obj.level_set_stats);
+        SCENE_LOG_ON_CHANGE("fluidsurf.levelset." + obj.name, built ? 1 : 0,
+            std::string("[VolumeGate 1b] fluid '") + obj.name + "' buildLevelSet " +
+            (built ? "succeeded again" : "FAILED with " +
+                     std::to_string(obj.particles.size()) + " particles"));
         if (!built) {
             binding.density.clear();
             return false;
@@ -5592,6 +6104,16 @@ private:
                 : buildFluidDensityVolume(obj, binding, active_cells);
             const bool renderable = obj.visible && obj.enabled && built;
 
+            // GATE 1 of 4 — the producer refused to build a surface at all.
+            SCENE_LOG_ON_CHANGE("fluidvol.build." + obj.name, renderable ? 1 : 0,
+                std::string("[VolumeGate 1/4] fluid '") + obj.name + "' surface " +
+                (renderable ? "BUILT again"
+                            : std::string("NOT built (visible=") +
+                              (obj.visible ? "1" : "0") + " enabled=" +
+                              (obj.enabled ? "1" : "0") + " built=" +
+                              (built ? "1" : "0") + " cells=" +
+                              std::to_string(active_cells) + ")"));
+
             if (!renderable) {
                 destroyFluidRenderVolume(obj.id);
                 continue;
@@ -5619,6 +6141,22 @@ private:
                 const int   up_ny    = refined_upload ? ls.eff_ny : grid.ny;
                 const int   up_nz    = refined_upload ? ls.eff_nz : grid.nz;
                 const float up_voxel = refined_upload ? ls.eff_voxel : grid.voxel_size;
+                // ★★ Was this volume without a live grid until now?
+                //
+                // The rebuild flags below fire only on `created` — the one frame
+                // the VDBVolume OBJECT is made. But the object can outlive its
+                // GRID: a backend switch drops the live volume registration while
+                // the object stays in world.objects, and the SurfaceSDF is
+                // rebuilt continuously anyway. On the frames in between, the
+                // volume has a TLAS slot but no content, and the SSBO publish
+                // writes it as an inactive (invisible) slot.
+                //
+                // Nothing then republishes when the grid comes back, because the
+                // per-frame publishes are gated on animation flags a regenerating
+                // fluid never raises — so the surface renders on the rebuild
+                // frame and disappears on the next publish, permanently. Treat
+                // "grid (re)appeared" exactly like "object created".
+                const bool live_grid_returned = (binding.vdb_id < 0);
                 binding.vdb_id = mgr.registerOrUpdateLiveVolume(
                     binding.vdb_id,
                     obj.name + " [Fluid NanoVDB]",
@@ -5629,6 +6167,24 @@ private:
                     nullptr);
                 simulation_render_updated = true;
                 g_gas_volumes_dirty = true;
+                // GATE 2 of 4 — registration itself failed, so the object keeps a
+                // stale id the manager no longer knows about.
+                SCENE_LOG_ON_CHANGE("fluidvol.register." + obj.name,
+                    binding.vdb_id >= 0 ? 1 : 0,
+                    std::string("[VolumeGate 2/4] fluid '") + obj.name +
+                    (binding.vdb_id >= 0
+                        ? std::string("' registered live grid id=") + std::to_string(binding.vdb_id)
+                        : std::string("' registerOrUpdateLiveVolume FAILED (id=-1)")));
+                // The grid just came back on an existing volume. Only a Vulkan
+                // geometry rebuild runs updateGeometry + syncVDBVolumesToGPU as
+                // one publication, so it is the only thing that can turn the
+                // slot back on; g_gas_volumes_dirty above drives the legacy gas
+                // path and never touches this SSBO.
+                if (live_grid_returned && binding.vdb_id >= 0) {
+                    g_geometry_dirty = true;
+                    g_vulkan_rebuild_pending = true;
+                    g_optix_rebuild_pending = true;
+                }
             }
 
             if (binding.vdb_id < 0) {
@@ -5729,6 +6285,15 @@ private:
 
         auto& mgr = VDBVolumeManager::getInstance();
         FluidRenderBinding& binding = it->second;
+        // ★ Only a binding that actually HELD something is a scene change.
+        //
+        // syncFluidRenderVolumes reaches this through
+        // `fluid_render_bindings[obj.id]`, and operator[] INSERTS. An empty
+        // domain therefore ran insert -> build fails -> destroy every frame, and
+        // the unconditional dirty flags below turned that into a full TLAS
+        // rebuild on every single frame for as long as the domain stayed empty.
+        // Nothing was torn down; there was nothing there to tear down.
+        const bool had_content = (binding.vdb_id >= 0) || static_cast<bool>(binding.volume);
         if (binding.vdb_id >= 0) {
             mgr.unloadVDB(binding.vdb_id);
             binding.vdb_id = -1;
@@ -5744,6 +6309,9 @@ private:
             binding.volume.reset();
         }
         fluid_render_bindings.erase(it);
+        if (!had_content) {
+            return;
+        }
         g_geometry_dirty = true;
         g_vulkan_rebuild_pending = true;
         g_optix_rebuild_pending = true;
@@ -6294,27 +6862,120 @@ public:
         return true;
     }
 
-    bool resolveObjectBoundsForSimulation(const std::string& node_name, Vec3& out_min, Vec3& out_max) const {
-        RayTrophiSim::ParticleColliderOBB lightweight;
-        if (resolveLightweightObjectOBBForSimulation(node_name, lightweight)) {
-            const Vec3& mn = lightweight.local_bounds_min;
-            const Vec3& mx = lightweight.local_bounds_max;
-            const Vec3 corners[8] = {
-                Vec3(mn.x, mn.y, mn.z), Vec3(mx.x, mn.y, mn.z),
-                Vec3(mn.x, mx.y, mn.z), Vec3(mx.x, mx.y, mn.z),
-                Vec3(mn.x, mn.y, mx.z), Vec3(mx.x, mn.y, mx.z),
-                Vec3(mn.x, mx.y, mx.z), Vec3(mx.x, mx.y, mx.z)
-            };
-            out_min = Vec3(std::numeric_limits<float>::max());
-            out_max = Vec3(-std::numeric_limits<float>::max());
-            for (const Vec3& corner : corners) {
-                const Vec3 world_corner =
-                    lightweight.local_to_world.transform_point(corner);
-                out_min = Vec3::min(out_min, world_corner);
-                out_max = Vec3::max(out_max, world_corner);
-            }
-            return true;
+    // ★ Bounds come from the SAME authority as the OBB: the live world-space
+    // surface cache. The "lightweight" local-bounds × transform-handle shortcut
+    // that used to short-circuit this is gone — see resolveObjectOBBForSimulation
+    // for why it silently regressed rotated colliders.
+    // Current world matrix of a scene node, for parenting a simulation flow
+    // source to an object.
+    //
+    // ★ This deliberately returns the object's TRANSFORM and not a box derived
+    // from its geometry — the opposite choice from resolveObjectOBBForSimulation
+    // below, and for a different job. That function needs an oriented box that
+    // always matches the RENDERED triangles (see its regression guard). A parent
+    // needs a stable frame with a fixed origin: an offset like "the match's tip"
+    // must stay put in local space, and a mesh-derived frame would drift with
+    // topology and give no usable pivot at all.
+    // ★ PERF: the LOOKUP is memoized, the MATRIX never is. A parented emitter is
+    // resolved several times per step (motion sampling + frame resolve, per
+    // source, plus the viewport gizmo), and each miss used to be a full linear
+    // scan of world.objects with a dynamic_pointer_cast per entry. Caching the
+    // matrix instead would be wrong — the whole point is that the parent MOVES,
+    // including under physics — so we cache only the object handle and re-read
+    // its live transform every call. A stale/renamed/deleted entry is detected
+    // by the expiry + name re-check below and falls back to a fresh scan.
+    bool resolveObjectTransformForSimulation(const std::string& node_name,
+                                             Matrix4x4& out_matrix) const {
+        if (node_name.empty()) return false;
+
+        // ★★ A Jolt-driven object's motion is NOT in its transform handle.
+        //
+        // RigidBodySystem deliberately BAKES the rigid delta into the mesh
+        // vertices instead of moving the handle, because moving the handle of an
+        // imported/non-TRS mesh corrupted it in the renderer. So for a falling
+        // rigid body `transform->getFinal()` stays frozen at the SPAWN pose, and
+        // a parented emitter read from it burns at the spot the object STARTED
+        // — the object visibly falls while its flame stays behind.
+        //
+        // ★ Do NOT reach for last_written_pivot to fix that. It is the delta
+        // composed onto initial_pivot, and initial_pivot is getPivotMatrix() —
+        // the authored PIVOT POINT, not the object's world transform. It is
+        // identity for objects that were never given a pivot, which drops the
+        // parented source at the WORLD ORIGIN and lets it fall from there: a
+        // flame burning in the middle of the floor, forever, no matter where the
+        // object it is parented to actually is. (The gizmo hit this same trap.)
+        //
+        // The frozen handle IS the spawn pose, so the live world pose is simply
+        // the rigid delta applied to it. Resolve the handle first, then compose.
+        const Matrix4x4* rigid_delta = nullptr;
+        for (const auto& rb : rigid_bodies) {
+            if (rb.source_name != node_name) continue;
+            if (rb.has_written) rigid_delta = &rb.last_rigid_delta;
+            break;
         }
+        auto finish = [&](bool found) {
+            if (found && rigid_delta) out_matrix = (*rigid_delta) * out_matrix;
+            return found;
+        };
+
+        auto readMatrix = [&](const std::shared_ptr<Hittable>& obj) -> bool {
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                if (tri->getNodeName() != node_name) return false;
+                out_matrix = tri->getTransformMatrix();
+                return true;
+            }
+            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                if (inst->node_name != node_name) return false;
+                out_matrix = inst->transform;
+                return true;
+            }
+            if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                if (tm->nodeName != node_name) return false;
+                out_matrix = tm->transform ? tm->transform->getFinal()
+                                           : Matrix4x4::identity();
+                return true;
+            }
+            return false;
+        };
+
+        const auto cached = simulation_transform_lookup_.find(node_name);
+        if (cached != simulation_transform_lookup_.end()) {
+            if (auto obj = cached->second.lock()) {
+                if (readMatrix(obj)) return finish(true);   // still the right object
+            }
+            simulation_transform_lookup_.erase(cached);  // gone or renamed
+        }
+
+        for (const auto& obj : world.objects) {
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                if (tri->getNodeName() == node_name) {
+                    out_matrix = tri->getTransformMatrix();
+                    simulation_transform_lookup_[node_name] = obj;
+                    return finish(true);
+                }
+            }
+        }
+        for (const auto& obj : world.objects) {
+            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                if (inst->node_name == node_name) {
+                    out_matrix = inst->transform;
+                    simulation_transform_lookup_[node_name] = obj;
+                    return finish(true);
+                }
+            }
+            if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                if (tm->nodeName == node_name) {
+                    out_matrix = tm->transform ? tm->transform->getFinal()
+                                               : Matrix4x4::identity();
+                    simulation_transform_lookup_[node_name] = obj;
+                    return finish(true);
+                }
+            }
+        }
+        return false;
+    }
+
+    bool resolveObjectBoundsForSimulation(const std::string& node_name, Vec3& out_min, Vec3& out_max) const {
         const auto* surface_cache = getSurfaceMeshCacheForObject(node_name);
         if (!surface_cache) {
             return false;
@@ -6324,11 +6985,27 @@ public:
         return true;
     }
 
+    // ★ REGRESSION GUARD — do NOT put a transform-handle shortcut in front of
+    // this again.
+    //
+    // A "lightweight" path (local bounds from getOriginalVertexPosition × the
+    // transform handle) was added later and short-circuited this function. It
+    // reintroduced the exact bug the world-vertex derivation below was written to
+    // fix: the collider box came out ground-aligned, so it was correct only while
+    // the object was parallel to the ground and wrong (huge) at steep angles.
+    // Symptom: "collider obje rotate olunca particle collider'ı yanlış görüyor".
+    //
+    // The reason the shortcut cannot work is stated below: live vertex positions
+    // are rotated by paths that leave the transform handle out of sync, so
+    // handle × original verts and the rendered geometry disagree. The surface
+    // cache is the only representation that is always current (for flat meshes it
+    // rebuilds world positions from P_orig × getFinal() itself).
+    //
+    // Cost is covered by the per-epoch memo in getSurfaceMeshCacheForObject: an
+    // object rebuilds at most once per geometry epoch, which is what actually
+    // removed the resolver cost — not the shortcut.
     bool resolveObjectOBBForSimulation(const std::string& node_name,
                                        RayTrophiSim::ParticleColliderOBB& out_obb) const {
-        if (resolveLightweightObjectOBBForSimulation(node_name, out_obb)) {
-            return true;
-        }
         const auto* surface_cache = getSurfaceMeshCacheForObject(node_name);
         if (!surface_cache) {
             return false;
@@ -6536,6 +7213,10 @@ public:
                         return false;
                     }
                     return resolveObjectBoundsForSimulation(source.source_name, out_min, out_max);
+                });
+            runtime.setFlowSourceTransformResolver(
+                [this](const std::string& node_name, Matrix4x4& out_matrix) {
+                    return resolveObjectTransformForSimulation(node_name, out_matrix);
                 });
             runtime.setFlowSourceSurfaceSampler(
                 [this](const RayTrophiSim::SimulationFlowSourceDesc& source,
@@ -7274,6 +7955,8 @@ public:
         last_sim_pose_applied_.clear();
         soft_weld_cache_.clear();
         rigid_bake_cache_.clear();
+        melt_weld_cache_.clear();
+        melt_displaced_.clear();
         editor_pending_delete_object_names.clear();
         
         // Clear per-model animator caches BEFORE clearing the vector
@@ -7366,6 +8049,8 @@ public:
         base_mesh_cache.clear();
         soft_weld_cache_.clear();   // holds shared_ptr<Triangle> into the old scene
         rigid_bake_cache_.clear();  // ditto (rigid render-bake rest cache)
+        melt_weld_cache_.clear();   // ditto (Phase 6c melt slump rest cache)
+        melt_displaced_.clear();
         soft_frame_cache_.clear();
         invalidateSurfaceMeshCache();
 

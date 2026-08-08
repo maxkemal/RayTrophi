@@ -378,7 +378,7 @@ void InstanceManager::rebuildAllTLAS(OptixWrapper* optix) {
 
 void InstanceManager::markAllDirty() {
     for (auto& group : groups) {
-        group.gpu_dirty = true;
+        group.markTransformsDirty();
     }
 }
 
@@ -1346,6 +1346,7 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
 
             Vec3 mesh_center = (mesh_bbox_min + mesh_bbox_max) * 0.5f;
             mesh_center.y = mesh_bbox_min.y; // Pivot at Bottom-Center (Crucial for foliage)
+            source.mesh_center = mesh_center;
 
             auto centered_tris = std::make_shared<std::vector<std::shared_ptr<Triangle>>>();
             centered_tris->reserve(source.triangles.size());

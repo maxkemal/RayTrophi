@@ -1,4 +1,4 @@
-/*
+﻿/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          VulkanBackend.h
@@ -23,6 +23,7 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <cstdint>
+#include <limits>
 
 #include "vulkan_material_types.h"
 #include "vulkan_volume_types.h"
@@ -33,6 +34,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <mutex>
 #include "Backend/IBackend.h"
@@ -306,6 +308,7 @@ struct TLASInstance {
     uint32_t sbtRecordOffset = 0;       // SBT hit group offset (0=triangle, 1=volume procedural)
     int scatterGroupId = -1;            // Direct InstanceManager lookup for expanded scatter groups
     uint32_t scatterInstanceIndex = UINT32_MAX;
+    Matrix4x4 scatterSourceTransform = Matrix4x4::identity(); // flat source pivot/world adjustment
     // Per-instance opacity override: 0 = respect the BLAS geometry flag,
     // 1 = FORCE_OPAQUE, 2 = FORCE_NO_OPAQUE. Lets a material edit that flips
     // opaque<->transmissive take effect with only a TLAS refresh — the
@@ -313,11 +316,54 @@ struct TLASInstance {
     // otherwise need a full BLAS rebuild (the "glass shadow only wakes up on
     // backend switch" bug).
     uint8_t opacityOverride = 0;
+    // Material State Field (burn/heat) mask for THIS instance. Per-instance and
+    // not per-material on purpose: MSF state belongs to an object, while a
+    // material is shared, so a material-level slot would smear one crate's burn
+    // marks onto every other crate using the same material.
+    // 0 = this instance has no MSF.
+    uint32_t msfCharTex = 0;
+    // char_color RGB in the low 24 bits, molten emission strength in the high 8.
+    uint32_t msfCharPacked = 0;
 };
 
 struct VkInstanceData {
     uint32_t materialIndex;
     uint32_t blasIndex;
+    // Mirrors TLASInstance above. KEEP BYTE-IDENTICAL with `VkInstanceData` in
+    // closesthit.rchit, raygen.rgen AND shadow_anyhit.rahit — all three read the
+    // same SSBO (binding 5) and a divergence reads as garbage, not as an error.
+    // Defaulted on purpose: this struct is filled field-by-field at several
+    // sites, and a site that forgets the MSF pair must write ZERO (= no mask)
+    // rather than stack garbage, which would sample a random bindless texture.
+    uint32_t msfCharTex = 0;
+    uint32_t msfCharPacked = 0;
+};
+
+// Compute input for GPU-side VkAccelerationStructureInstanceKHR generation.
+// 80-byte std430-friendly ABI; data is a union: mode 0 consumes three matrix
+// rows, mode 1 consumes position/rotation/scale. metadata = customIndex, mask,
+// sbtRecordOffset, flags; blasAddress is the referenced BLAS device address.
+struct alignas(16) GpuTLASInstanceSource {
+    float data[12]{};
+    uint32_t metadata[4]{};
+    uint32_t blasAddressLo = 0;
+    uint32_t blasAddressHi = 0;
+    uint32_t mode = 0;
+    uint32_t reserved = 0;
+};
+static_assert(sizeof(GpuTLASInstanceSource) == 80,
+              "GpuTLASInstanceSource must match instance_prepare.comp");
+
+struct InstancePreparationStats {
+    bool gpuPathAvailable = false;
+    bool gpuPathUsedLastFrame = false;
+    uint32_t lastPath = 0; // 0 idle/CPU, 1 GPU BUILD, 2 GPU UPDATE, 3 GPU RASTER
+    uint32_t instanceCount = 0;
+    uint32_t dirtyGroupCount = 0;
+    uint64_t uploadBytes = 0;
+    double cpuPrepareMs = 0.0;
+    uint64_t gpuDispatches = 0;
+    uint64_t cpuFallbacks = 0;
 };
 
 struct TLASCreateInfo {
@@ -589,6 +635,12 @@ public:
     // create, scratch, descriptor update) still happens inline. externalCmd=NULL keeps the
     // original self-contained behaviour.
     void createTLAS(const TLASCreateInfo& info, VkCommandBuffer externalCmd = VK_NULL_HANDLE);
+    bool createInstancePreparePipeline(const std::vector<uint32_t>& computeSPV);
+    void destroyInstancePreparePipeline();
+    bool instancePrepareReady() const { return m_instancePreparePipeline != VK_NULL_HANDLE; }
+    bool recordGpuTLASUpdate(VkCommandBuffer cmd, uint32_t frameSlot,
+                             const std::vector<GpuTLASInstanceSource>& sources);
+    bool createGpuTLAS(const std::vector<GpuTLASInstanceSource>& sources);
     // True when createTLAS(instanceCount, allowUpdate=true) would take its in-place
     // MODE_UPDATE branch. When false it takes the destroy + recreate branch instead, which
     // also rewrites RT descriptor binding 1 — both are ILLEGAL to do while recording into a
@@ -893,6 +945,8 @@ public:
     VulkanRT::BufferHandle m_instanceDataBuffer; // SSBO containing VkInstanceData for each TLAS instance
     VulkanRT::BufferHandle m_tlasInstanceBuffer; // Buffer containing VkAccelerationStructureInstanceKHR for TLAS building
     VulkanRT::BufferHandle m_tlasScratchBuffer;  // Persistent TLAS build/update scratch (reused across frames; grows on demand)
+    VulkanRT::BufferHandle m_gpuTlasInstanceBuffer;
+    VulkanRT::BufferHandle m_gpuTlasSourceBuffers[2];
     VulkanRT::BufferHandle m_worldBuffer; // SSBO containing complete Nishita parameters
     VulkanRT::BufferHandle m_volumeBuffer; // SSBO containing VkVolumeInstance array (binding 9)
     VulkanRT::BufferHandle m_terrainLayerBuffer; // SSBO containing VkTerrainLayerData array (binding 12)
@@ -927,6 +981,14 @@ public:
     AccelStructHandle m_tlas;
     uint32_t m_tlasInstanceCount = 0;
     bool m_tlasSupportsUpdate = false;
+    bool m_recordingGpuTlasBuild = false;
+    VkPipeline m_instancePreparePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_instancePreparePipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_instancePrepareDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_instancePrepareDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_instancePrepareDescSets[2]{};
+    VkBuffer m_instancePrepareBoundSources[2]{};
+    VkBuffer m_instancePrepareBoundOutputs[2]{};
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     bool m_rtPipelineReady = false;
     bool m_hasVolumeShaders = false; // Whether pipeline includes volume procedural hit group
@@ -1582,6 +1644,23 @@ private:
     void regenerateMipChainAfterPartialUpdate(VkCommandBuffer cmd, const VulkanRT::ImageHandle& img);
 
 public:
+    // Material State Field bridge: the scene layer installs a resolver that maps
+    // an object name to its burn/heat mask (bindless index + packed char colour
+    // and molten emission). Kept here rather than next to the member it writes,
+    // so the member block's access specifier stays untouched.
+    void setMaterialStateFieldMaskResolver(
+        std::function<bool(const std::string&, uint32_t&, uint32_t&)> resolver) {
+        m_msfMaskResolver = std::move(resolver);
+    }
+
+    // Per-frame entry point for the bridge. The other refresh call sites are all
+    // event driven (scene rebuild, material assignment, hair append) and none of
+    // them fire again once a simulation starts — but an MSF field only comes into
+    // existence after the sim runs, i.e. long after the last such event. Without
+    // this the resolver is installed and never consulted. Cheap in the steady
+    // state: it re-resolves names but only re-uploads the instance SSBO when a
+    // mask index or packed colour actually changed.
+    void syncMaterialStateFieldBindings();
 
     // ========================================================================
     // IBackend - Rendering
@@ -1626,6 +1705,9 @@ public:
                                  const std::shared_ptr<Hittable>& representativeSource,
                                  const Matrix4x4& transform);
     void buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects);
+    bool refreshRasterScatterInstances();
+    bool refreshRtScatterInstances();
+    void setRasterScatterPaintActive(bool active);
     void syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects);
     void syncRasterSkinnedVertices(const std::vector<std::shared_ptr<Hittable>>& objects,
                                    const std::vector<Matrix4x4>& boneMatrices);
@@ -1673,6 +1755,7 @@ public:
     void resetAccumulation() override;
     VulkanRT::VolumePerformanceStats getVolumePerformanceStats(bool synchronize = true);
     void resetVolumePerformanceStats(bool enabled = true);
+    VulkanRT::InstancePreparationStats getInstancePreparationStats() const;
     float getMillisecondsPerSample() const override;
 
     // ========================================================================
@@ -2074,6 +2157,98 @@ protected:
     std::vector<std::shared_ptr<Hittable>> m_lastObjects;
     // Instance source pointers for fast sync (parallel to m_vkInstances)
     std::vector<std::shared_ptr<Hittable>> m_instanceSources;
+
+    // ── Material State Field bridge ──────────────────────────────────────────
+    // The backend must not know about the simulation runtime, so the scene layer
+    // hands it a resolver instead: object name -> (bindless mask index, packed
+    // char colour + molten emission). Returning false means "no MSF on this
+    // object", which clears the instance's fields rather than leaving stale ones.
+    std::function<bool(const std::string&, uint32_t&, uint32_t&)> m_msfMaskResolver;
+    // Fills msfCharTex/msfCharPacked on every entry of m_vkInstances from the
+    // resolver. Runs as ONE pass over the instance list rather than at each of
+    // the several construction sites, so a new construction site cannot silently
+    // miss it. Must run before the instance SSBO is uploaded. Returns true when
+    // any instance's mask fields changed, so the per-frame path can skip the
+    // buffer recreate + descriptor rewrite on the overwhelmingly common no-op.
+    bool refreshMaterialStateFieldInstances();
+    std::unordered_map<int64_t, VulkanRT::ImageHandle> m_uploadedImages;
+    mutable std::recursive_mutex m_mutex;
+    std::shared_ptr<SceneTextureManager> m_sceneTextureManager;
+    struct RasterMeshBuffer {
+        struct CullingChunk {
+            AABB worldBBox;
+            std::vector<uint32_t> instanceIndices;
+        };
+
+        VulkanRT::BufferHandle vertexBuffer;   // float3 positions (GPU_ONLY)
+        VulkanRT::BufferHandle normalBuffer;   // float3 normals  (GPU_ONLY)
+        VulkanRT::BufferHandle uvBuffer;       // float2 UVs (GPU_ONLY) — for MaterialPreview
+        VulkanRT::BufferHandle matIdBuffer;    // uint32 per-vertex materialID — for MaterialPreview
+        VulkanRT::BufferHandle indexBuffer;     // uint32 indices (optional)
+        VulkanRT::BufferHandle instanceBuffer;  // per-instance model matrices
+        VulkanRT::BufferHandle baseVertexBuffer;
+        VulkanRT::BufferHandle baseNormalBuffer;
+        VulkanRT::BufferHandle boneIndexBuffer;
+        VulkanRT::BufferHandle boneWeightBuffer;
+        VulkanRT::BufferHandle persistentBoneMatsBuffer;
+        VkDescriptorSet skinningDescSet = VK_NULL_HANDLE;
+        uint64_t persistentBoneMatsBufSize = 0;
+        uint32_t vertexCount = 0;
+        uint32_t indexCount = 0;
+        uint32_t instanceCount = 0;
+        bool hasSkinning = false;
+        bool isScatterGroup = false;
+        bool isScatterProxy = false;
+        std::string proxyMeshKey;
+        std::vector<uint32_t> instanceIndices;  // indices into m_rasterInstances
+        std::vector<CullingChunk> cullingChunks;
+        std::vector<uint32_t> visibleInstanceIndicesCache;
+        bool visibleInstancesDirty = true;
+        uint64_t lastVisibleFrustumRevision = 0;
+        uint64_t lastScatterTriangleBudget = 0;
+        // CPU shadow copy for dirty-range detection during sculpt
+        std::vector<float> cpuPositions;
+        std::vector<float> cpuNormals;
+        std::vector<uint32_t> cpuMatIds;
+    };
+    struct SelectionOutlineDrawItem {
+        const RasterMeshBuffer* mesh = nullptr;
+        VkDeviceSize instanceByteOffset = 0;
+        float maskValue = 1.0f; // 1.0 = primary selection tier, 0.5 = secondary
+    };
+    // ── Raster mesh buffers (lightweight, BLAS/TLAS-independent) ────────────
+
+
+    struct RasterInstance {
+        std::string meshKey;       // key into m_rasterMeshes
+        std::string nodeName;      // for transform sync lookup
+        Matrix4x4 transform;
+        AABB localBBox;            // local-space bounding box (from source mesh)
+        AABB worldBBox;            // world-space AABB (localBBox transformed)
+        uint8_t mask = 0xFF;       // visibility
+        int scatterGroupId = -1;   // direct InstanceManager lookup for large scatter groups
+        uint32_t scatterInstanceIndex = UINT32_MAX;
+        Matrix4x4 scatterSourceTransform = Matrix4x4::identity();
+        int8_t scatterLodHint = -1; // -1=reclassify, 0=full, 1=proxy during paint
+    };
+    std::unordered_map<std::string, RasterMeshBuffer> m_rasterMeshes;
+    std::vector<RasterInstance> m_rasterInstances;
+    std::vector<VulkanRT::VkGpuMaterial> m_cachedGpuMaterials;
+    std::unordered_map<std::string, std::vector<uint32_t>> m_rasterNodeIndex;
+    std::unordered_map<std::string, std::vector<uint32_t>> m_rtNodeIndex;
+    size_t m_rasterNodeIndexInstanceCount = 0;
+    size_t m_rtNodeIndexInstanceCount = 0;
+    bool m_rasterGeometryDirty = true;  // force initial build
+
+    // Generation counter: last g_scene_geometry_generation value seen when
+    // raster geometry was built.  Allows skipping redundant rebuilds on
+    // Rendered→Solid transitions when scene geometry hasn't changed.
+    uint64_t m_rasterBuiltGeometryGeneration = 0;
+    // Attribution for the token above: which code path last wrote it. Only a FULL
+    // raster build may write it; this string is logged by the early-out so a cache
+    // that wrongly claims to be current names its writer instead of hiding.
+    const char* m_rasterBuiltGenSource = "init";
+private:
     // Solo-mesh BLAS build-order triangle pointers (blasIndex -> ordered tris).
     // Captured during full geometry build so the interactive sculpt/edit refit
     // (updateMeshBLASPartial) can upload vertex positions in the EXACT slot order
@@ -2095,18 +2270,34 @@ protected:
     bool refitIndexedSoloBLAS(uint32_t blasIndex);
     struct InstanceTransformCache { int instance_id; std::shared_ptr<Hittable> representative_hittable; };
     std::vector<InstanceTransformCache> m_instance_sync_cache;
+    // Last scatter transform generation consumed by the Vulkan TLAS. Static
+    // biome groups therefore cost O(groups), rather than O(all instances), per sync.
+    std::unordered_map<int, uint64_t> m_scatterTransformRevisions;
+    std::vector<VulkanRT::GpuTLASInstanceSource> m_pendingGpuInstanceSources;
+    VulkanRT::InstancePreparationStats m_instancePreparationStats;
+    bool m_gpuInstanceUpdatePending = false;
+    bool m_gpuInstanceCpuMirrorStale = false;
+    uint32_t m_gpuInstanceDirtyGroupCount = 0;
+    bool queueGpuScatterInstanceUpdate(const std::unordered_set<int>& dirtyGroups);
+    void recordGpuInstancePrepass(VkCommandBuffer cmd, uint32_t frameSlot);
     bool m_topology_dirty = false; // set when instances/BLAS list changes
     // Lifetime sentinel shared with destroyFn lambdas stored in SceneTextureManager.
     // Set to false before container teardown so lambdas that outlive this backend
     // skip the container-erase step and only destroy GPU handles.
     std::shared_ptr<bool> m_containerAlive = std::make_shared<bool>(true);
     // Uploaded textures (map from opaque handle/key -> ImageHandle)
-    std::unordered_map<int64_t, VulkanRT::ImageHandle> m_uploadedImages;
+    public:
     std::unordered_map<uint64_t, int64_t> m_uploadedImageIDs;     // cacheKey (pointer+flags) -> textureId
     std::unordered_map<int64_t, uint64_t> m_textureIdToCacheKey;  // reverse: textureId -> cacheKey (O(1) eviction cleanup)
+    // Diagnostic only: cacheKey -> (owning Texture address, its name at claim time).
+    // The address is kept for identity comparison and is NEVER dereferenced — a
+    // Texture can die and a later one can collide from a different address. Lets
+    // resolveTextureHandle report two textures landing on one bindless slot, which
+    // otherwise shows up only as a material silently wearing another's image.
+    std::unordered_map<uint64_t, std::pair<const void*, std::string>> m_cacheKeyOwner;
     int64_t m_nextTextureID = 1;
     uint64_t m_textureCacheGeneration = 1;
-    std::shared_ptr<SceneTextureManager> m_sceneTextureManager;
+   
     uint64_t m_textureUploadBytes = 0;
     uint32_t m_textureUploadCount = 0;
     uint32_t m_textureUploadBC4Count = 0;
@@ -2137,6 +2328,64 @@ protected:
     // Volume slot count recorded when the TLAS was last built; syncVDBVolumesToGPU
     // compares against it to catch violations of the contract above.
     uint32_t m_tlasVolumeSlotCount = 0;
+    // Consecutive geometry rebuilds that passed over a visible-but-unloaded
+    // volume and re-armed the rebuild flag to try again. Bounded, because a
+    // volume that never loads (missing file, failed grid) would otherwise
+    // request a rebuild every single frame — a far worse fault than the one the
+    // retry exists to fix. Reset whenever a rebuild completes with no misses.
+    uint32_t m_volumeNotReadyRetries = 0;
+    // Same idea one layer down: a volume that HAS a TLAS slot but whose content
+    // was missing from this frame's packet. Bounded so a genuinely deleted
+    // volume cannot keep requesting republishes.
+    uint32_t m_volumeContentGapRetries = 0;
+    // Consecutive clean passes seen for each of the two counters above. The
+    // retry budget is rearmed only after a RUN of them, so a volume that
+    // alternates present/missing (a continuously regenerating fluid surface)
+    // cannot hold the budget open and rebuild forever.
+    uint32_t m_volumeNotReadyCleanRuns = 0;
+    uint32_t m_volumeContentGapCleanRuns = 0;
+
+    // ★★ Last published volume slot contents, keyed by volume identity rather
+    // than by slot index. updateGeometry REBUILDS m_orderedVDBInstances, which
+    // re-bakes every customIndex — and several call sites run updateGeometry
+    // without a following syncVDBVolumesToGPU (file animations, skinning, the
+    // sim worker's light path). Those frames leave the SSBO ordered for the
+    // PREVIOUS TLAS, so a volume reads another volume's data: the reported
+    // black slab filling a fluid domain. Keeping the data by identity lets the
+    // backend re-lay the buffer into the new order by itself, with no scene
+    // access and nothing for a call site to forget.
+    std::unordered_map<int, VulkanRT::VkVolumeInstance> m_publishedVolumeByKey;
+    std::vector<int> m_publishedVolumeKeyOrder;
+    // Volume identity for each entry of m_orderedVDBInstances, in TLAS order.
+    // A backend-local serial per volume OBJECT; kNoVolumeKey for a null entry.
+    //
+    // ★★ This used to be the VDB volume id (VDBVolume::getVDBVolumeID /
+    // GasVolume::live_vdb_id). That is a RESOURCE HANDLE, not an identity, and it
+    // churns BY DESIGN: invalidateSimulationRenderBindings (scene_data.h) unloads
+    // the grid and drops the id to -1 on every sim rebind so the next
+    // registerOrUpdateLiveVolume takes the prev_id < 0 branch and forces a fresh
+    // upload. Re-registration then hands back a NEW id for the very same volume.
+    // Keyed on that, m_publishedVolumeByKey filled up under the OLD ids, so after a
+    // TLAS re-bake republishVolumeSlotsForTLASOrder looked up the NEW ids, missed,
+    // and published an INACTIVE slot for a volume that actually had content.
+    // Observed as `[VolumeSSBO] volume slot ORDER changed: [51,INT_MIN] -> [52,53]`
+    // on exactly the frame the fluid reached the domain floor and the bindings were
+    // invalidated. Same root cause family as the volume-identity churn that
+    // produced the domain-edge black band: never derive identity from transient
+    // runtime state.
+    static constexpr int kNoVolumeKey = (std::numeric_limits<int>::min)();
+    std::vector<int> computeOrderedVolumeKeys() const;
+    // Stable per-object volume key. The weak_ptr is the guard that makes the raw
+    // address safe to use as the map key: a destroyed volume's address can be
+    // handed to a new allocation, and without the identity check that new volume
+    // would silently inherit the dead one's cached SSBO slot.
+    int stableVolumeKey(const std::shared_ptr<Hittable>& instance) const;
+    mutable std::unordered_map<const void*,
+                               std::pair<int, std::weak_ptr<Hittable>>> m_volumeStableKeys;
+    mutable int m_nextVolumeStableKey = 1;
+    // Re-lay the cached slots into the current TLAS order. No-op when the order
+    // is unchanged or nothing has been published yet.
+    void republishVolumeSlotsForTLASOrder();
     // Cached lights when device not yet ready
     std::vector<std::shared_ptr<Light>> m_cachedLights;
     // Cached world data when device not yet ready
@@ -2184,69 +2433,9 @@ protected:
     // can destroy and remove only the hair BLASes without touching mesh BLASes.
     uint32_t m_meshBlasCount = 0;
 
-    // ── Raster mesh buffers (lightweight, BLAS/TLAS-independent) ────────────
-    struct RasterMeshBuffer {
-        struct CullingChunk {
-            AABB worldBBox;
-            std::vector<uint32_t> instanceIndices;
-        };
 
-        VulkanRT::BufferHandle vertexBuffer;   // float3 positions (GPU_ONLY)
-        VulkanRT::BufferHandle normalBuffer;   // float3 normals  (GPU_ONLY)
-        VulkanRT::BufferHandle uvBuffer;       // float2 UVs (GPU_ONLY) — for MaterialPreview
-        VulkanRT::BufferHandle matIdBuffer;    // uint32 per-vertex materialID — for MaterialPreview
-        VulkanRT::BufferHandle indexBuffer;     // uint32 indices (optional)
-        VulkanRT::BufferHandle instanceBuffer;  // per-instance model matrices
-        VulkanRT::BufferHandle baseVertexBuffer;
-        VulkanRT::BufferHandle baseNormalBuffer;
-        VulkanRT::BufferHandle boneIndexBuffer;
-        VulkanRT::BufferHandle boneWeightBuffer;
-        VulkanRT::BufferHandle persistentBoneMatsBuffer;
-        VkDescriptorSet skinningDescSet = VK_NULL_HANDLE;
-        uint64_t persistentBoneMatsBufSize = 0;
-        uint32_t vertexCount = 0;
-        uint32_t indexCount = 0;
-        uint32_t instanceCount = 0;
-        bool hasSkinning = false;
-        bool isScatterGroup = false;
-        bool isScatterProxy = false;
-        std::string proxyMeshKey;
-        std::vector<uint32_t> instanceIndices;  // indices into m_rasterInstances
-        std::vector<CullingChunk> cullingChunks;
-        std::vector<uint32_t> visibleInstanceIndicesCache;
-        bool visibleInstancesDirty = true;
-        uint64_t lastVisibleFrustumRevision = 0;
-        uint64_t lastScatterTriangleBudget = 0;
-        // CPU shadow copy for dirty-range detection during sculpt
-        std::vector<float> cpuPositions;
-        std::vector<float> cpuNormals;
-        std::vector<uint32_t> cpuMatIds;
-    };
 
-    struct RasterInstance {
-        std::string meshKey;       // key into m_rasterMeshes
-        std::string nodeName;      // for transform sync lookup
-        Matrix4x4 transform;
-        AABB localBBox;            // local-space bounding box (from source mesh)
-        AABB worldBBox;            // world-space AABB (localBBox transformed)
-        uint8_t mask = 0xFF;       // visibility
-        int scatterGroupId = -1;   // direct InstanceManager lookup for large scatter groups
-        uint32_t scatterInstanceIndex = UINT32_MAX;
-    };
-
-    std::unordered_map<std::string, RasterMeshBuffer> m_rasterMeshes;
-    std::vector<RasterInstance> m_rasterInstances;
-    std::vector<VulkanRT::VkGpuMaterial> m_cachedGpuMaterials;
-    std::unordered_map<std::string, std::vector<uint32_t>> m_rasterNodeIndex;
-    std::unordered_map<std::string, std::vector<uint32_t>> m_rtNodeIndex;
-    size_t m_rasterNodeIndexInstanceCount = 0;
-    size_t m_rtNodeIndexInstanceCount = 0;
-    bool m_rasterGeometryDirty = true;  // force initial build
-
-    // Generation counter: last g_scene_geometry_generation value seen when
-    // raster geometry was built.  Allows skipping redundant rebuilds on
-    // Rendered→Solid transitions when scene geometry hasn't changed.
-    uint64_t m_rasterBuiltGeometryGeneration = 0;
+   
 
     // True once a BLAS has been uploaded WITH the per-vertex pointiness block. The node
     // editor reads it back (geometryHasPointiness) to decide whether a graph that newly
@@ -2270,6 +2459,7 @@ protected:
     float m_rasterMinChunkScreenRadiusPixels = 2.0f;
     uint64_t m_rasterScatterTriangleBudget = 96ull * 1000ull * 1000ull;
     float m_rasterScatterBudgetScale = 1.0f;
+    bool m_rasterScatterPaintActive = false;
     void extractFrustumPlanes(const Matrix4x4& viewProj);
     bool isAABBInFrustum(const AABB& box) const;
     bool isAABBFullyInsideFrustum(const AABB& box) const;
@@ -2281,11 +2471,7 @@ protected:
 
     // Selection outline internals shared by the raster-mode composite path
     // and the Rendered-mode mask readback. Caller must hold m_mutex.
-    struct SelectionOutlineDrawItem {
-        const RasterMeshBuffer* mesh = nullptr;
-        VkDeviceSize instanceByteOffset = 0;
-        float maskValue = 1.0f; // 1.0 = primary selection tier, 0.5 = secondary
-    };
+   
     // Resolves node names against m_rasterInstances and uploads one matrix
     // per matched instance into selectionInstanceBuffer (must run before
     // command recording starts — the upload submits its own transfer).
@@ -2313,7 +2499,7 @@ protected:
     void beginBatchedTextureUpload();
     void endBatchedTextureUpload();
 
-    mutable std::recursive_mutex m_mutex;
+    
 };
 
 } // namespace Backend

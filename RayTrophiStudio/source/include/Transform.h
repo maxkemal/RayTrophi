@@ -72,6 +72,15 @@ public:
         updateNormalTransform();
     }
 
+    // KNOWN PRECISION ISSUE (left as-is deliberately): the pivot branches below
+    // route through decompose() → composeBaseMatrix(). decompose models a matrix as
+    // pure T*R*S, so it cannot represent shear and it round-trips the rotation
+    // through Euler degrees — the pair is a LOSSY identity, and the error grows as
+    // the matrix's scale shrinks (the rotation basis is divided by the column
+    // lengths, clamped at 1e-8). Both pivot branches are algebraically no-ops,
+    // (base * T(p)) * T(-p) == base, so they could keep `base` exactly and use
+    // decompose only to refresh the gizmo components. Not changed here: this class
+    // is on every object's path and the change needs its own gizmo/pivot test pass.
     void setBase(const Matrix4x4& baseTransform) {
         if (pivot_offset.length_squared() < 1e-12f) {
             // IMPORTANT:

@@ -634,6 +634,10 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                              g_materials_dirty = true;
                              g_gas_volumes_dirty = true;
                              g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+                             // The raster viewport rebuild is NOT requested here: the
+                             // scene_loading_done finalize block in Main.cpp already sets
+                             // g_viewport_raster_rebuild_pending for every interactive
+                             // shading mode, and scene_loading_done is set right below.
                          }
 
                          if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();

@@ -185,6 +185,17 @@ struct VkVolumeInstance {
     // [6] is Surface-SDF foam opacity for source_type 4, otherwise authored
     // minimum emission temperature. [7..11] carry density-noise parameters.
     float _ext_reserved[12];
+    // Appended acceleration block — MUST match VkVolumeInstance in
+    // include/Backend/vulkan_volume_types.h (576 bytes). Every shader that
+    // declares this struct carries the same tail: the SSBO stride is
+    // per-declaration, so one stale copy shifts every instance after the first.
+    uint64_t majorant_address;   // per-block density max for live dense gas (0 = none)
+    float    majorant_dim[3];    // block-grid resolution
+    float    majorant_block;     // cells per block edge
+    uint64_t flame_address;      // combustion reaction field for live dense gas (0 = none)
+    uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
+    float    emissive_capacity;
+    float    _accel_reserved[5];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -282,6 +293,119 @@ float gpu_powder_effect(float density, float cos_theta) {
     float powder = 1.0 - exp(-density * 2.0);
     float forward_bias = 0.5 + 0.5 * max(0.0, cos_theta);
     return powder * forward_bias;
+}
+
+// ============================================================
+// Scene light sampling for volumes
+// ============================================================
+// The volume march used to treat every non-directional light as a bare point
+// light: no cone, no shape. A spot in smoke therefore lit a sphere instead of a
+// shaft — the one shot gas simulation exists for. These mirror the surface
+// shader's sample_light_direction_gl / spot_light_falloff_gl so a light behaves
+// the same whether it hits a wall or the smoke in front of it.
+//
+// LightData::position.w = type: 0 point, 1 directional, 2 area, 3 spot.
+
+float volSpotFalloff(LightData light, vec3 wi) {
+    // wi points FROM the shading position TOWARD the light, matching the
+    // surface version's convention (it negates before the cone test).
+    float cosTheta = dot(-wi, normalize(light.direction.xyz));
+    float inner = light.params.z;
+    float outer = light.direction.w;
+    if (cosTheta < outer) return 0.0;
+    if (cosTheta > inner) return 1.0;
+    float t = (cosTheta - outer) / (inner - outer + 1e-6);
+    return t * t;
+}
+
+// Direction, distance and geometric attenuation from a march sample toward a
+// light. `attenuation` EXCLUDES the 1/r^2 term for positional lights: that term
+// is integrated analytically over the march segment by volSegmentInvSqAverage
+// below, because point-sampling it once per step is what makes light shafts
+// depend on where the step boundary happened to land.
+// Returns false when the light cannot contribute (behind the cone, degenerate).
+bool volSampleLight(LightData light, vec3 pos, float ru, float rv,
+                    out vec3 wi, out float dist, out float attenuation,
+                    out bool inverseSquare) {
+    int type = int(light.position.w + 0.5);
+    attenuation = 1.0;
+    inverseSquare = true;
+    if (type == 1) {
+        // Directional: no falloff, no closest approach.
+        wi = normalize(light.direction.xyz);
+        dist = 1e6;
+        inverseSquare = false;
+        return true;
+    }
+    if (type == 2) {
+        // Area: stratified-enough single sample on the rectangle. Sampling the
+        // shape (rather than its centre) is what gives soft shadow edges inside
+        // the medium instead of a hard point-light core.
+        float uOff = (ru - 0.5) * light.params.y;
+        float vOff = (rv - 0.5) * light.params.z;
+        vec3 lightSample = light.position.xyz +
+                           light.area_u.xyz * uOff + light.area_v.xyz * vOff;
+        vec3 L = lightSample - pos;
+        dist = length(L);
+        if (dist < 1e-4) return false;
+        wi = L / dist;
+        vec3 lightNormal = normalize(cross(light.area_u.xyz, light.area_v.xyz));
+        // Emission is one-sided on the surface path; keep that here or a quad
+        // light would glow into the medium behind it.
+        float cosLight = max(dot(-wi, lightNormal), 0.0);
+        if (cosLight <= 0.0) return false;
+        attenuation = cosLight;
+        return true;
+    }
+    // Point (0) and spot (3).
+    vec3 L = light.position.xyz - pos;
+    dist = length(L);
+    if (dist < 1e-4) return false;
+    wi = L / dist;
+    if (type == 3) {
+        float falloff = volSpotFalloff(light, wi);
+        if (falloff < 1e-4) return false;
+        attenuation = falloff;
+    }
+    return true;
+}
+
+// Average of 1/r^2 over the march segment [t0, t1] for a light at `lightPos`,
+// i.e. (1/dt) * integral of dt' / |rayOrigin + rayDir*t' - lightPos|^2.
+//
+// This is the equiangular integral in closed form:
+//   integral dt / (h^2 + (t - tc)^2) = (1/h) * atan((t - tc)/h)
+// with tc the closest-approach parameter and h the perpendicular distance from
+// the light to the ray line. A ray marcher cannot use equiangular DISTANCE
+// sampling (its sample positions are fixed), but it can integrate the term that
+// makes those samples inadequate — and 1/r^2 is that term. A light passing
+// close to the ray no longer produces a result that depends on step size:
+// point-sampling the falloff at the segment start either misses the peak
+// entirely or lands on it and blows the segment up, which is why coarse steps
+// gave banded, flickering shafts.
+//
+// The phase function and shadow transmittance are still evaluated once per
+// segment. They vary smoothly; the singularity lives in 1/r^2.
+float volSegmentInvSqAverage(vec3 rayOrigin, vec3 rayDir, vec3 lightPos,
+                             float t0, float t1) {
+    float dt = t1 - t0;
+    if (dt <= 1e-9) return 0.0;
+    vec3 toLight = lightPos - rayOrigin;
+    float tc = dot(toLight, rayDir);              // closest approach along the ray
+    float h2 = max(dot(toLight, toLight) - tc * tc, 0.0);
+    float h = sqrt(h2);
+    if (h < 1e-4) {
+        // Ray passes (numerically) through the light: the integral is
+        // 1/(t0-tc) - 1/(t1-tc), which still diverges if the segment contains
+        // tc. Clamp with a small radius so a light sitting exactly on the ray
+        // produces a bright but finite sample instead of an inf that poisons
+        // the whole accumulation buffer.
+        h = 1e-4;
+        h2 = h * h;
+    }
+    float a0 = atan((t0 - tc) / h);
+    float a1 = atan((t1 - tc) / h);
+    return (a1 - a0) / (h * dt);
 }
 
 // ============================================================
@@ -550,6 +674,89 @@ float sampleDenseGasFloat(uint64_t address, VkVolumeInstance vol, vec3 localPos)
     return mix(z0, z1, f.z);
 }
 
+layout(buffer_reference, std430, buffer_reference_align = 4)
+readonly buffer DenseGasMajorantGrid {
+    float blocks[];
+};
+
+// [0] = emitter count (may exceed capacity; the producer keeps counting so the
+// overflow is visible), [1..] = block indices into the majorant grid.
+layout(buffer_reference, std430, buffer_reference_align = 4)
+readonly buffer DenseGasEmissiveList {
+    uint entries[];
+};
+
+// Empty-space skip for LIVE DENSE gas (volume_type 4 / source_type 5), which
+// has no NanoVDB hierarchy to walk: a dense domain is a solid box of cells and
+// the march used to pay for every step of it even when the smoke occupied a
+// corner. sim_gas_majorant.comp reduces the density field to one maximum per
+// 8^3 block; a block whose maximum is at or below the authored cutoff cannot
+// contribute, so the ray jumps straight to that block's exit.
+//
+// Returns the distance to advance along `worldDir`, or 0 when the current block
+// has content (or no majorant is published — then this must return 0 so the
+// caller marches normally; treating a missing majorant as empty would delete
+// the smoke rather than merely slow the render down).
+//
+// The reduction already covers one cell past each far face, so trilinear
+// reconstruction at the boundary of a skipped block still reads zero.
+float denseGasEmptyBlockStep(VkVolumeInstance vol, vec3 worldPos, vec3 worldDir,
+                             float cutoff) {
+    if (vol.majorant_address == 0 || vol.majorant_block < 1.0) return 0.0;
+
+    ivec3 bdim = ivec3(vol.majorant_dim[0] + 0.5,
+                       vol.majorant_dim[1] + 0.5,
+                       vol.majorant_dim[2] + 0.5);
+    if (any(lessThanEqual(bdim, ivec3(0)))) return 0.0;
+
+    // Same object-space mapping the dense sampler uses, so a block index here
+    // addresses exactly the cells sampleDenseGasFloat would read.
+    vec3 localPos;
+    localPos.x = vol.inv_transform[0]*worldPos.x + vol.inv_transform[1]*worldPos.y + vol.inv_transform[2]*worldPos.z + vol.inv_transform[3];
+    localPos.y = vol.inv_transform[4]*worldPos.x + vol.inv_transform[5]*worldPos.y + vol.inv_transform[6]*worldPos.z + vol.inv_transform[7];
+    localPos.z = vol.inv_transform[8]*worldPos.x + vol.inv_transform[9]*worldPos.y + vol.inv_transform[10]*worldPos.z + vol.inv_transform[11];
+    vec3 localDir;
+    localDir.x = vol.inv_transform[0]*worldDir.x + vol.inv_transform[1]*worldDir.y + vol.inv_transform[2]*worldDir.z;
+    localDir.y = vol.inv_transform[4]*worldDir.x + vol.inv_transform[5]*worldDir.y + vol.inv_transform[6]*worldDir.z;
+    localDir.z = vol.inv_transform[8]*worldDir.x + vol.inv_transform[9]*worldDir.y + vol.inv_transform[10]*worldDir.z;
+
+    float voxelSize = max(vol.voxel_size, 1e-6);
+    vec3 gridOrigin = vec3(vol._ext_reserved[3], vol._ext_reserved[4], vol._ext_reserved[5]);
+    float blockWorld = vol.majorant_block * voxelSize;   // block edge in object units
+    vec3 blockPos = (localPos - gridOrigin) / blockWorld;
+    ivec3 b = ivec3(floor(blockPos));
+    if (any(lessThan(b, ivec3(0))) || any(greaterThanEqual(b, bdim))) return 0.0;
+
+    DenseGasMajorantGrid mg = DenseGasMajorantGrid(vol.majorant_address);
+    int bi = b.x + b.y * bdim.x + b.z * bdim.x * bdim.y;
+    // The stored maximum is RAW grid density. sampleDensityAcc rejects on the
+    // REMAPPED value before applying density_multiplier, so remap the block
+    // maximum the same way and compare the same quantity — multiplying here
+    // would reject blocks the sampler would have kept (or worse, skip blocks it
+    // would have shaded) whenever the multiplier is not 1.
+    float blockMax = mg.blocks[bi];
+    float remapped = max((blockMax - vol.density_remap_low) /
+                         max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    if (remapped > cutoff) return 0.0;   // block has content — march it
+
+    // Slab exit of this block, in object units (== world units for a rigid
+    // transform; a scaled volume errs on the short side, which only costs a
+    // redundant sample).
+    vec3 bmin = gridOrigin + vec3(b) * blockWorld;
+    vec3 bmax = bmin + vec3(blockWorld);
+    float tExit = 1e30;
+    for (int axis = 0; axis < 3; ++axis) {
+        float d = localDir[axis];
+        if (abs(d) < 1e-9) continue;
+        float bound = d > 0.0 ? bmax[axis] : bmin[axis];
+        tExit = min(tExit, (bound - localPos[axis]) / d);
+    }
+    if (tExit >= 1e29 || tExit <= 0.0) return 0.0;
+    // Land just inside the next block so the following iteration cannot pick
+    // this same block again and stall the march.
+    return tExit + blockWorld * 0.01;
+}
+
 // Conservative NanoVDB hierarchy skip. Leaf voxels cannot be skipped at this
 // hierarchy level, so avoid the second is_active lookup when dim <= 1.
 // Inactive coarse tiles advance to one voxel before their exit so trilinear
@@ -741,6 +948,27 @@ float sampleTemperature(VkVolumeInstance vol, vec3 worldPos) {
     return sampleNanoVDBFloatTrilinear(vol.vdb_temp_address, localPos);
 }
 
+// Combustion reaction rate (GridFluid's bounded `interaction` field) at a world
+// position. Live dense gas only. Uses exactly the transform + pivot chain
+// sampleTemperature applies, so the reaction lines up with the temperature it
+// modulates instead of being offset by the pivot on a moved domain.
+float sampleFlame(VkVolumeInstance vol, vec3 worldPos) {
+    if (vol.flame_address == 0) return 0.0;
+    if (!(vol.volume_type == 4 && vol.source_type == 5)) return 0.0;
+    vec3 localPos;
+    localPos.x = vol.inv_transform[0]*worldPos.x + vol.inv_transform[1]*worldPos.y
+               + vol.inv_transform[2]*worldPos.z + vol.inv_transform[3];
+    localPos.y = vol.inv_transform[4]*worldPos.x + vol.inv_transform[5]*worldPos.y
+               + vol.inv_transform[6]*worldPos.z + vol.inv_transform[7];
+    localPos.z = vol.inv_transform[8]*worldPos.x + vol.inv_transform[9]*worldPos.y
+               + vol.inv_transform[10]*worldPos.z + vol.inv_transform[11];
+    if (any(lessThan(localPos, vol.aabb_min)) || any(greaterThan(localPos, vol.aabb_max))) return 0.0;
+    localPos.x -= vol.pivot_offset[0];
+    localPos.y -= vol.pivot_offset[1];
+    localPos.z -= vol.pivot_offset[2];
+    return clamp(sampleDenseGasFloat(vol.flame_address, vol, localPos), 0.0, 1.0);
+}
+
 float applyMaterialDensityNoise(VkVolumeInstance vol, vec3 localPos, float density) {
     if (vol._ext_reserved[7] < 0.5 || density <= 0.0) return density;
     vec3 extent = max(vol.aabb_max - vol.aabb_min, vec3(1e-5));
@@ -929,6 +1157,12 @@ float lightMarchAcc(
     uint shadowMatIndex = vol._reserved[1] > 0.5 ? uint(vol._reserved[1] - 1.0) : 0u;
     bool allowSparseTraversal = buf.address != 0 &&
         (vol._reserved[1] <= 0.5 || matProgramOffset(shadowMatIndex) == MATPROG_NONE);
+    // Same Volume-Graph rule as the sparse path: a program may synthesize
+    // density where the source field is empty, so the block skip is only valid
+    // for unmodified density.
+    bool allowDenseBlockSkip = vol.majorant_address != 0 &&
+        (vol._reserved[1] <= 0.5 || matProgramOffset(shadowMatIndex) == MATPROG_NONE);
+    float denseBlockCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
     // maxDist is the chord from this scatter point to the volume boundary.
     // Integrate the whole chord; half-length marching over-lights the far side
     // of dense gas and erases the rolling self-shadow detail.
@@ -959,6 +1193,20 @@ float lightMarchAcc(
            densitySamples < steps &&
            traversalIters < maxTraversalIters) {
         vec3 samplePos = pos + lightDir * distanceAlongRay;
+        // Live dense gas: same block-majorant skip the primary march uses. The
+        // shadow chord crosses the domain just like a camera ray does, so an
+        // empty region cost a full sample budget here too — and this march runs
+        // once per light per (strided) step, so it is the more expensive of the
+        // two places to walk through nothing.
+        if (vol.volume_type == 4 && vol.source_type == 5 && allowDenseBlockSkip) {
+            float denseSkip = denseGasEmptyBlockStep(
+                vol, samplePos, lightDir, denseBlockCutoff);
+            if (denseSkip > stepSize * 1.01) {
+                distanceAlongRay += min(denseSkip, marchLength - distanceAlongRay);
+                traversalIters++;
+                continue;
+            }
+        }
         if (allowSparseTraversal) {
             uint shadowSkipKind = 0u;
             float sparseStep = nanoEmptyTileStep(
@@ -1514,7 +1762,17 @@ void main() {
                 payload.attenuation *= foam_T;
                 // Continue straight to the solid; skip volume AABBs so the
                 // triangle closesthit fires on the next trace.
-                payload.scatterOrigin = rayOrigin + rayDir * max(solidT - 0.01, tNear);
+                // ★ Re-trace from the ORIGINAL origin, with no step-back epsilon.
+                // A fixed 0.01 offset is an absolute length applied to a distance
+                // that scales with the scene: where it fails to land in FRONT of
+                // the surface, the re-traced ray strikes the BACK face, closesthit
+                // face-forwards the normal, and the wall shades as if lit from
+                // inside — flipped normals in the debug view, black in beauty, and
+                // only ever inside an active volume. No epsilon is needed: the ray
+                // reached this volume because nothing was closer than the box, and
+                // skipAABBs now removes the box, so the nearest hit from the same
+                // origin IS that surface, at its true distance and true facing.
+                payload.scatterOrigin = rayOrigin;
                 payload.scatterDir    = rayDir;
                 payload.skipAABBs     = true;
                 payload.scattered     = true;
@@ -1695,15 +1953,48 @@ void main() {
         bool needSolidProbe = true;
         float marchDistProbe = max(tFar - tNear, 0.0);
         float sigmaTCoeff = max(vol.scatter_coefficient + vol.absorption_coefficient, 0.0);
-        if (sigmaTCoeff > EPSILON && marchDistProbe > 1e-4) {
+        // ★ Never gate the CAMERA segment. When the gate is wrong here the cost is
+        // not a dimmer surface, it is a MISSING one: solidT stays -1, the march is
+        // never clamped, the triangle's closesthit never fires, and the viewer
+        // looks straight through the wall to whatever stands behind it. The
+        // estimate below cannot be made safe for this case either — it multiplies
+        // the sampled density by the FULL box traversal, so a large domain drives
+        // tauEst up regardless of how close to the entry the surface actually sits,
+        // and a surface a few centimetres inside a big smoke box is declared
+        // invisible. One probe per primary ray is a bounded, predictable cost; on
+        // secondary bounces a genuinely thick medium really does hide what is
+        // behind it, so the gate keeps earning its keep there.
+        bool primarySegment = (payload.primaryMeta & PL_PRIMARY_DONE) == 0u;
+        if (!primarySegment && sigmaTCoeff > EPSILON && marchDistProbe > 1e-4) {
             float tA = tNear + min(0.05 * marchDistProbe, 0.25);
             float tB = tNear + 0.5 * marchDistProbe;
             float dA = sampleDensityAcc(vol, rayOrigin + rayDir * tA, vdbBuf, vdbMapH, vdbAcc);
             float dB = sampleDensityAcc(vol, rayOrigin + rayDir * tB, vdbBuf, vdbMapH, vdbAcc);
-            float dAvg = max(0.0, 0.4 * dA + 0.6 * dB);
-            float tauEst = dAvg * sigmaTCoeff * marchDistProbe;
+            // ★★ CONSERVATIVE, not representative.
+            //
+            // Skipping this probe does not merely omit a cheap detail: solidT
+            // stays -1, so tFar is never clamped to the surface, the march runs
+            // the full AABB INCLUDING the part behind the solid, and the
+            // scatter continuation that lets the triangle's closesthit fire
+            // never happens. The surface is not dimmed — it is never shaded at
+            // all, and the volume closes over it as an opaque blob.
+            //
+            // So the estimate must err toward PROBING. Averaging two taps let a
+            // flame's dense core speak for the whole ray: raise scatter or
+            // absorption a little, tauEst crosses the gate, and every surface
+            // behind that part of the fire vanishes at once — the reported
+            // "past a threshold it goes fully opaque", and only in the areas
+            // that happen to have geometry behind them. Take the MINIMUM
+            // instead: a ray is only declared hopeless when it is thick
+            // everywhere it was sampled, not merely thick somewhere.
+            float dMin = max(0.0, min(dA, dB));
+            float tauEst = dMin * sigmaTCoeff * marchDistProbe;
             float transEst = exp(-tauEst);
-            float probeThreshold = cameraInsideVolume ? 0.08 : 0.03;
+            // And the gate itself was far too loose. At 3% transmittance a lit
+            // floor behind the fire is plainly visible, so dropping it was a
+            // visible error, not an invisible optimisation. Only skip once the
+            // surface could contribute less than a few thousandths.
+            float probeThreshold = cameraInsideVolume ? 0.006 : 0.003;
             needSolidProbe = (transEst > probeThreshold);
         }
 
@@ -1722,6 +2013,7 @@ void main() {
             shadowPayload = vec4(0.0, 0.0, 0.0, uintBitsToFloat(VOLUME_SOLID_PROBE));
             traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
                         rayOrigin, max(1e-4, tNear - 0.002), rayDir, tFar + 0.002, 1);
+            volumeRecordSolidProbe(shadowPayload.w < 0.5);
             if (shadowPayload.w < 0.5) {
                 solidT = shadowPayload.x;
                 // Clamp march to just before the solid
@@ -1729,7 +2021,8 @@ void main() {
                 // If the solid is essentially at or before the entry point, skip AABBs on next bounce
                 if (tFar <= tNear) {
                     payload.radiance = vec3(0.0);
-                    payload.scatterOrigin = rayOrigin + rayDir * max(solidT - 0.01, tNear);
+                    // No step-back epsilon — see the note at the first solid handoff.
+                    payload.scatterOrigin = rayOrigin;
                     payload.scatterDir = rayDir;
                     payload.scattered = true;
                     payload.skipAABBs = true;
@@ -1785,9 +2078,124 @@ void main() {
     bool cachedSunShadowValid = false;
     float cachedAmbientShadow = 1.0;
     bool cachedAmbientShadowValid = false;
+
+    // ── Scene-light subset for this ray ───────────────────────────────────────
+    // At most two lights are evaluated per volume sample. The old code took
+    // lights 0 and 1 by index while still weighting by lightCount/2, so from the
+    // third light onward the scene was lit by the WRONG lights at inflated
+    // energy — a five-light rig scaled lights 0-1 by 2.5x and never sampled the
+    // other three at all.
+    //
+    // Two distinct lights are drawn uniformly WITHOUT replacement, which gives
+    // each light probability 2/N and therefore weight N/2 — the same constant as
+    // before, now attached to an estimator that is actually unbiased.
+    //
+    // The draw is RAY-CONSTANT, not per step, and that is deliberate: the
+    // shadow-transmittance cache below is keyed on the slot (0/1) and reused for
+    // up to `shadow_stride` steps. Re-drawing per step would silently pair one
+    // light's radiance with another light's cached visibility.
+    int   sampledLightCount = int(min(cam.lightCount, 2u));
+    int   sampledLight0 = 0;
+    int   sampledLight1 = 0;
+    float lightWeight = 1.0;
+    if (cam.lightCount > 0u) {
+        int nLights = int(cam.lightCount);
+        sampledLight0 = clamp(int(floor(rnd(payload.seed) * float(nLights))), 0, nLights - 1);
+        if (nLights > 1) {
+            // Offset draw over the remaining N-1 lights keeps the pair distinct
+            // without a rejection loop.
+            int offset = clamp(int(floor(rnd(payload.seed) * float(nLights - 1))), 0, nLights - 2);
+            sampledLight1 = (sampledLight0 + 1 + offset) % nLights;
+        }
+        lightWeight = float(nLights) / float(sampledLightCount);
+    }
     // Must match sampleSkyAmbient(): this is the representative direction of
     // the sky hemisphere whose radiance is used as the ambient source.
     vec3 ambientLightDir = normalize(vec3(0.0, 1.0, 0.0) * 0.55 + rayDir * 0.45);
+
+    // Exactly the rejection threshold sampleDensityAcc applies to the remapped
+    // density. The block skip must use the SAME test, or it discards space the
+    // sampler would have shaded.
+    float denseSkipCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
+
+    // ── Volume emission NEE: pick one emitting block for this ray ─────────────
+    // Fire already lights the smoke, but only when a scattered ray happens to
+    // land inside it — that is the noise. Aiming a sample straight at a burning
+    // block turns the same energy into a converged image instead of fireflies.
+    //
+    // The emitter is chosen ONCE PER RAY and its radiance evaluated once, for the
+    // same reason the scene-light pair is: the transmittance toward it is cached
+    // across strided steps, so a per-step re-pick would pair one emitter's
+    // radiance with another's visibility. Variance is resolved across samples.
+    vec3  emitterPos = vec3(0.0);
+    vec3  emitterRadiance = vec3(0.0);
+    bool  hasEmitter = false;
+    float cachedEmitterShadow = 1.0;
+    bool  cachedEmitterShadowValid = false;
+    if (vol.emissive_list_address != 0 && vol.emissive_capacity >= 1.0 &&
+        vol.majorant_address != 0 && vol.emission_mode >= 2) {
+        DenseGasEmissiveList elist = DenseGasEmissiveList(vol.emissive_list_address);
+        uint emitterCount = elist.entries[0];
+        // The producer keeps counting past capacity so the overflow is visible;
+        // only the stored prefix may be indexed.
+        uint usable = min(emitterCount, uint(vol.emissive_capacity));
+        if (usable > 0u) {
+            uint pick = uint(floor(rnd(payload.seed) * float(usable)));
+            pick = min(pick, usable - 1u);
+            uint blockIndex = elist.entries[1u + pick];
+
+            ivec3 bdim = ivec3(vol.majorant_dim[0] + 0.5,
+                               vol.majorant_dim[1] + 0.5,
+                               vol.majorant_dim[2] + 0.5);
+            if (bdim.x > 0 && bdim.y > 0 && bdim.z > 0) {
+                ivec3 b = ivec3(int(blockIndex) % bdim.x,
+                                (int(blockIndex) / bdim.x) % bdim.y,
+                                int(blockIndex) / (bdim.x * bdim.y));
+                float blockWorld = vol.majorant_block * max(vol.voxel_size, 1e-6);
+                vec3 gridOrigin = vec3(vol._ext_reserved[3], vol._ext_reserved[4],
+                                       vol._ext_reserved[5]);
+                // Jitter inside the block so a coarse block grid does not read as
+                // a lattice of point lights.
+                vec3 jitterUVW = vec3(rnd(payload.seed), rnd(payload.seed), rnd(payload.seed));
+                vec3 localEmitter = gridOrigin + (vec3(b) + jitterUVW) * blockWorld;
+                emitterPos.x = vol.transform[0]*localEmitter.x + vol.transform[1]*localEmitter.y
+                             + vol.transform[2]*localEmitter.z + vol.transform[3];
+                emitterPos.y = vol.transform[4]*localEmitter.x + vol.transform[5]*localEmitter.y
+                             + vol.transform[6]*localEmitter.z + vol.transform[7];
+                emitterPos.z = vol.transform[8]*localEmitter.x + vol.transform[9]*localEmitter.y
+                             + vol.transform[10]*localEmitter.z + vol.transform[11];
+
+                float ed = sampleDensityAcc(vol, emitterPos, vdbBuf, vdbMapH, vdbAcc);
+                float et = sampleTemperature(vol, emitterPos);
+                if (ed > 0.0 && et > 0.0) {
+                    float rangeMin = max(vol._ext_reserved[6], 0.0);
+                    float rangeMax = (vol.max_temperature > rangeMin + 1.0)
+                        ? vol.max_temperature : (rangeMin + 1500.0);
+                    float eKelvin = (et > 20.0)
+                        ? clamp(et, rangeMin, rangeMax)
+                        : mix(rangeMin, rangeMax, clamp(et, 0.0, 1.0));
+                    vec3 eColor;
+                    if (vol.color_ramp_enabled != 0 && vol.ramp_stop_count > 0) {
+                        float tr = clamp((eKelvin - rangeMin) / max(rangeMax - rangeMin, 1.0), 0.0, 1.0);
+                        eColor = sampleColorRamp(vol, clamp(tr * vol.temperature_scale, 0.0, 1.0));
+                    } else {
+                        eColor = blackbodyToRGB(eKelvin * vol.temperature_scale);
+                    }
+                    vec3 eEmis = eColor * ed * vol.blackbody_intensity;
+                    float eReaction = sampleFlame(vol, emitterPos);
+                    eEmis *= (1.0 + eReaction);   // matches the march's reaction boost
+                    // Radiant intensity of the block: emission per unit length
+                    // (sigma_t * emis, the march's source term) times the block
+                    // volume it stands for. Uniform pick over `usable` emitters
+                    // makes the estimator weight `usable`.
+                    float eSigmaT = ed * (vol.scatter_coefficient + vol.absorption_coefficient);
+                    float blockVolume = blockWorld * blockWorld * blockWorld;
+                    emitterRadiance = eEmis * eSigmaT * blockVolume * float(usable);
+                    hasEmitter = any(greaterThan(emitterRadiance, vec3(1e-6)));
+                }
+            }
+        }
+    }
 
     // Jitter first sample to reduce banding. Mix in ray state so horizon rays do
     // not share coherent step planes across neighboring pixels.
@@ -1800,6 +2208,23 @@ void main() {
     uint measuredDensityLeafSegments = 0u;
     while (t < tFar && step < maxSteps) {
         vec3  samplePos = rayOrigin + rayDir * t;
+
+        // Live dense gas: block-majorant skip. Same safety rule as the NanoVDB
+        // branch below — a Volume Graph may synthesize density where the source
+        // field has none, so skipping is only valid for unmodified density.
+        if (vol.volume_type == 4 && vol.source_type == 5 &&
+            volumeProgram == MATPROG_NONE) {
+            float denseSkip = denseGasEmptyBlockStep(
+                vol, samplePos, rayDir, denseSkipCutoff);
+            if (denseSkip > baseStep * 1.01) {
+                int skippedSegments = max(1, int(floor(denseSkip / baseStep)));
+                measuredEmptySegments += uint(skippedSegments);
+                measuredTopologySegments += uint(skippedSegments);
+                step += skippedSegments;
+                t = tNear + (float(step) + rayJitter) * baseStep;
+                continue;
+            }
+        }
 
         // A Volume Graph may synthesize density in inactive source voxels.
         // Hierarchy skipping is therefore safe only for legacy/baked density.
@@ -1947,8 +2372,30 @@ void main() {
                     // Scale then provides the intentional artistic offset.
                     e_color = blackbodyToRGB(authoredKelvin * vol.temperature_scale);
                 }
-                emis = clampVolumeRadiance(
-                    e_color * density * vol.blackbody_intensity, 64.0);
+                // ── Combustion reaction boost ───────────────────────────────
+                // Temperature alone cannot tell a flame from the hot smoke
+                // sitting above it: both are hot, so the whole plume glows and
+                // the fire reads as luminous smoke rather than as a flame with
+                // a core. The gas solver already knows the difference — its
+                // bounded `interaction` field is the burn RATE, nonzero only
+                // where fuel is being consumed THIS step.
+                //
+                // Applied as an ADDITION on top of the existing temperature
+                // emission, not as a mask over it. Masking would be the more
+                // physical answer (smoke that has stopped burning should go
+                // dark) but it would also silently re-light every existing
+                // scene; the reaction zone becoming a distinct, brighter source
+                // is the signal that was missing, and it cannot dim anything.
+                // Kept density-coupled, so empty cells never emit.
+                vec3 baseEmission = e_color * density * vol.blackbody_intensity;
+                vec3 reactionEmission = vec3(0.0);
+                if (vol.flame_address != 0) {
+                    float reaction = sampleFlame(vol, samplePos);
+                    if (reaction > 0.0) {
+                        reactionEmission = baseEmission * reaction;
+                    }
+                }
+                emis = clampVolumeRadiance(baseEmission + reactionEmission, 64.0);
             }
         }
         
@@ -1962,30 +2409,50 @@ void main() {
             // away from the OptiX sky-cloud path.
             bool useSceneLights = !(worldData.w.mode == 2 && (vol.volume_type == 3 || vol.source_type == 3));
             if (useSceneLights && cam.lightCount > 0u) {
-                int maxLightsToSample = min(int(cam.lightCount), 2);
-                float lightWeight = float(cam.lightCount) / float(maxLightsToSample);
-                for (int ls = 0; ls < maxLightsToSample; ls++) {
-                    int li = min(ls, int(cam.lightCount) - 1);
+                for (int ls = 0; ls < sampledLightCount; ls++) {
+                    int li = (ls == 0) ? sampledLight0 : sampledLight1;
                     LightData light = lights.l[li];
                     int lightType = int(light.position.w + 0.5);
 
-                    vec3 lightDir;
+                    vec3  lightDir;
                     float lightDist;
                     float lightAtten = 1.0;
-                    
-                    if (lightType == 1) {
-                        // Directional light
-                        lightDir = normalize(light.direction.xyz);
-                        lightDist = 1e6;
-                    } else {
-                        // Point/spot/area light
-                        vec3 toLight = light.position.xyz - samplePos;
-                        lightDist = length(toLight);
-                        if (lightDist < EPSILON) continue;
-                        lightDir = toLight / lightDist;
-                        lightAtten = 1.0 / (lightDist * lightDist);
+                    bool  lightInverseSquare = true;
+                    // Only an area light consumes randoms: point/spot/directional
+                    // are delta sources, and drawing for them would churn the RNG
+                    // stream every step for nothing.
+                    //
+                    // The area sample varies per step while the shadow-march
+                    // result is cached across `shadow_stride` steps, so a cached
+                    // transmittance can belong to a slightly different point on
+                    // the light. The offset is bounded by the light's own extent
+                    // and decorrelates the noise; pinning the sample per ray
+                    // instead would trade that for visible banding.
+                    float ru = 0.5, rv = 0.5;
+                    if (lightType == 2) {
+                        ru = rnd(payload.seed);
+                        rv = rnd(payload.seed);
                     }
-                    
+                    if (!volSampleLight(light, samplePos, ru, rv,
+                                        lightDir, lightDist, lightAtten,
+                                        lightInverseSquare)) {
+                        continue;   // outside the cone / behind an area light
+                    }
+                    if (lightInverseSquare) {
+                        // Analytic 1/r^2 across the whole segment instead of a
+                        // point sample at its start. Without this the width and
+                        // brightness of a light shaft track the step size rather
+                        // than the light.
+                        //
+                        // Area lights sample a point on the shape, so their
+                        // closest-approach geometry is that sample's, not the
+                        // light origin's — reconstruct the sampled position from
+                        // the direction and distance already returned.
+                        vec3 sampledLightPos = samplePos + lightDir * lightDist;
+                        lightAtten *= volSegmentInvSqAverage(
+                            rayOrigin, rayDir, sampledLightPos, t, t + dt);
+                    }
+
                     // Phase function evaluation
                     float cosTheta = dot(rayDir, lightDir);
                     float phase = dualLobeHG(cosTheta, stepAnisotropy,
@@ -2031,6 +2498,40 @@ void main() {
                 }
             }
             
+            // ── Fire (volume emission) NEE ──────────────────────────────
+            // Same estimator shape as a scene light: analytic 1/r^2 across the
+            // segment, phase toward the emitter, and the medium's own
+            // transmittance in between. Without this the fire only reaches the
+            // surrounding smoke through random bounces, which is exactly the
+            // noise the user sees.
+            if (hasEmitter) {
+                vec3 toEmitter = emitterPos - samplePos;
+                float emitterDist = length(toEmitter);
+                if (emitterDist > 1e-3) {
+                    vec3 emitterDir = toEmitter / emitterDist;
+                    float ePhase = dualLobeHG(dot(rayDir, emitterDir), stepAnisotropy,
+                                              vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                    vec3 eAlbedoRGB = vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
+                    ePhase = mix(ePhase, 1.0 / (4.0 * PI),
+                                 clamp(stepMultiScatter *
+                                       dot(eAlbedoRGB, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0));
+                    // Strided like the other shadow terms; the emitter is
+                    // ray-constant so the cached value stays valid for it.
+                    if (!cachedEmitterShadowValid || (step % shadowStride) == 0) {
+                        cachedEmitterShadow = lightMarchAcc(
+                            vol, samplePos, emitterDir,
+                            min(emitterDist, max(baseStep,
+                                volumeExitDistance(vol, samplePos, emitterDir))),
+                            vdbBuf, vdbMapH, vdbAcc, -1.0);
+                        cachedEmitterShadowValid = true;
+                    }
+                    float eFalloff = volSegmentInvSqAverage(
+                        rayOrigin, rayDir, emitterPos, t, t + dt);
+                    inscatter += emitterRadiance * eFalloff * ePhase
+                               * cachedEmitterShadow * stepScatterColor * eAlbedoRGB;
+                }
+            }
+
             // Sun/sky light contribution (if Nishita sky active)
             if (worldData.w.mode == 2) {
                 vec3 sunDir = normalize(worldData.w.sunDir);
@@ -2164,7 +2665,9 @@ void main() {
             measuredDensityLeafSegments,
             VOLUME_MARCH_COMPLETED);
         payload.attenuation  *= transmittance;
-        payload.scatterOrigin = rayOrigin + rayDir * (solidT - 0.01);
+        // No step-back epsilon — see the note at the first solid handoff. This was
+        // the site the camera ray actually goes through for a gas domain.
+        payload.scatterOrigin = rayOrigin;
         payload.scatterDir    = rayDir;
         payload.scattered     = true;
         payload.skipAABBs     = true;

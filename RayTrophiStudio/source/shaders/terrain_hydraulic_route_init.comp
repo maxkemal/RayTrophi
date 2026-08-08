@@ -1,0 +1,30 @@
+#version 450
+layout(local_size_x=256) in;
+layout(push_constant) uniform PC {
+    int width; int height; float rainfallScale; float cellSize; float heightScale;
+} pc;
+layout(set=0,binding=0) readonly buffer Source { float sourceFlow[]; };
+layout(set=0,binding=1) writeonly buffer Current { float currentFlow[]; };
+layout(set=0,binding=2) writeonly buffer Accumulated { float accumulatedFlow[]; };
+layout(set=0,binding=3) readonly buffer Height { float heightField[]; };
+void main(){uint i=gl_GlobalInvocationID.x;if(i>=uint(pc.width*pc.height))return;
+ int x=int(i)%pc.width,y=int(i)/pc.width;
+ float runoffSupport=0.0;
+ if(x>0&&x<pc.width-1&&y>0&&y<pc.height-1){
+  float h=heightField[i],maxDrop=0.0;
+  for(int oy=-1;oy<=1;++oy)for(int ox=-1;ox<=1;++ox){if(ox==0&&oy==0)continue;
+   float nh=heightField[(y+oy)*pc.width+x+ox];
+   float distanceScale=(ox!=0&&oy!=0)?1.41421356:1.0;
+   maxDrop=max(maxDrop,(h-nh)*pc.heightScale/(max(pc.cellSize,0.001)*distanceScale));
+  }
+  // Local rain starts runoff on catchment slopes. Plains receive water only
+  // through routed upstream discharge, preventing fields of tiny flatland cuts.
+  runoffSupport=smoothstep(0.008,0.055,maxDrop);
+ }
+ // A macro-catchment channel may already carry substantial upstream water on
+ // a locally flat valley floor. Preserve that coherent source while tiny
+ // isolated droplet hits on plains still require local slope support.
+ float sourceSupport=smoothstep(25.0,75.0,max(sourceFlow[i],0.0));
+ float flowSupport=max(runoffSupport,sourceSupport);
+ float q=max(sourceFlow[i],0.0)*mix(1.0,pc.rainfallScale,runoffSupport)*flowSupport;
+ currentFlow[i]=q;accumulatedFlow[i]=q;}

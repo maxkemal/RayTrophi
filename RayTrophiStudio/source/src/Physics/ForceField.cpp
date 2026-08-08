@@ -133,6 +133,11 @@ Vec3 ForceField::evaluate(const Vec3& world_pos, float time, const Vec3& velocit
         case ForceFieldType::DirectionalNoise:
             force = evaluateDirectionalNoise(world_pos, time);
             break;
+        case ForceFieldType::Thermal:
+            // A heat source exerts no force. Stated explicitly rather than left
+            // to `default:` so a future type added below cannot silently inherit
+            // "returns nothing" as if that were intentional.
+            break;
         default:
             break;
     }
@@ -370,6 +375,9 @@ nlohmann::json ForceField::toJson() const {
     j["linear_drag"] = linear_drag;
     j["quadratic_drag"] = quadratic_drag;
 
+    // Thermal
+    j["thermal_delta_kelvin"] = thermal_delta_kelvin;
+
     // Fluid wind coupling
     j["fluid_surface_drag"] = fluid_surface_drag;
     j["fluid_drag_coupling"] = fluid_drag_coupling;
@@ -434,6 +442,8 @@ void ForceField::fromJson(const nlohmann::json& j) {
     if (j.contains("linear_drag")) linear_drag = j["linear_drag"];
     if (j.contains("quadratic_drag")) quadratic_drag = j["quadratic_drag"];
 
+    if (j.contains("thermal_delta_kelvin")) thermal_delta_kelvin = j["thermal_delta_kelvin"];
+
     if (j.contains("fluid_surface_drag")) fluid_surface_drag = j["fluid_surface_drag"];
     if (j.contains("fluid_drag_coupling")) fluid_drag_coupling = j["fluid_drag_coupling"];
     if (j.contains("fluid_surface_depth")) fluid_surface_depth = j["fluid_surface_depth"];
@@ -466,6 +476,7 @@ const char* ForceField::getTypeName(ForceFieldType t) {
         case ForceFieldType::Drag: return "Drag";
         case ForceFieldType::Magnetic: return "Magnetic";
         case ForceFieldType::DirectionalNoise: return "Directional Noise";
+        case ForceFieldType::Thermal: return "Thermal";
         default: return "Unknown";
     }
 }
@@ -504,6 +515,7 @@ const char* ForceField::getIconName() const {
         case ForceFieldType::Turbulence: return "icon_turbulence";
         case ForceFieldType::CurlNoise: return "icon_curl";
         case ForceFieldType::Drag: return "icon_drag";
+        case ForceFieldType::Thermal: return "icon_thermal";
         default: return "icon_force";
     }
 }

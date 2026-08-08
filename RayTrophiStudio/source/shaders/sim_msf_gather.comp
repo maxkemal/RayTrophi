@@ -1,0 +1,214 @@
+#version 450
+// Material State Field — thermal / pyrolysis integration (gather half).
+//
+// One invocation per surface element (triangle centroid). Reads the gas
+// temperature of the nearest OPEN cell, integrates the element's persistent
+// state, and records how much combustible mass it released this step. It never
+// touches the gas itself — sim_msf_scatter does that, because several elements
+// can land in the same cell and the sum needs atomics.
+//
+// MSF is now the sole owner of pyrolysis; the voxel surface_state path is gone.
+// See docs/NODE_SIMULATION_ARCHITECTURE_PLAN.md (Faz 2b).
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    ivec4 dim;           // nx, ny, nz, element_count
+    vec4  origin_voxel;  // xyz = grid origin (world), w = voxel size
+    vec4  material0;     // ignition_T, fuel_capacity, burn_rate, thermal_response
+    vec4  material1;     // (reserved, was cooling_rate), char_rate, dt, max_temperature
+    vec4  material2;     // boil_normalized, melt_normalized, melt_rate, unused
+} pc;
+
+layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
+// Two vec4 per element:
+//   [2i+0] x=temperature y=fuel_remaining z=char w=moisture
+//   [2i+1] x=released_this_step y=melt z=mass_loss w=reserved
+// Slot [2i+1] is what sim_msf_scatter consumes. melt/mass_loss are written by
+// later phases; they are allocated now so the stride never changes again.
+layout(set=0, binding=1)          buffer State   { vec4 state[]; };
+layout(set=0, binding=2) readonly buffer GasTemperature { float gas_t[]; };
+layout(set=0, binding=3) readonly buffer Solid          { float solid[]; };
+
+uint idx(ivec3 p) { return uint(p.x + p.y * pc.dim.x + p.z * pc.dim.x * pc.dim.y); }
+bool inside(ivec3 p) {
+    return all(greaterThanEqual(p, ivec3(0))) && all(lessThan(p, pc.dim.xyz));
+}
+
+// Solid-aware trilinear sample of the gas temperature.
+//
+// WHY FILTERED: elements are texels, so many of them share one voxel. Reading
+// the NEAREST cell gives every texel in that voxel the identical temperature and
+// makes ignition an all-or-nothing per-voxel decision — the burn mark then breaks
+// up into isolated specks that snap on and off at voxel boundaries, and the
+// pattern reads as belonging to the world grid instead of to the surface.
+// Interpolating gives neighbouring texels a smooth gradient, so the mark grows as
+// a connected patch that follows the flame.
+//
+// Solid cells are EXCLUDED from the filter rather than contributing zero: they
+// hold no gas, and averaging their zero in would cool every sample near a wall —
+// which is exactly where the surface being simulated lives.
+float sampleGasFiltered(vec3 local) {
+    vec3 f = local - vec3(0.5);        // cell centres sit at integer + 0.5
+    ivec3 b = ivec3(floor(f));
+    vec3 t = f - vec3(b);
+    float acc = 0.0, wsum = 0.0;
+    for (int k = 0; k < 2; ++k)
+    for (int j = 0; j < 2; ++j)
+    for (int i = 0; i < 2; ++i) {
+        ivec3 q = b + ivec3(i, j, k);
+        if (!inside(q)) continue;
+        uint s = idx(q);
+        if (solid[s] > 0.5) continue;
+        float w = (i == 0 ? 1.0 - t.x : t.x) *
+                  (j == 0 ? 1.0 - t.y : t.y) *
+                  (k == 0 ? 1.0 - t.z : t.z);
+        acc += gas_t[s] * w;
+        wsum += w;
+    }
+    return wsum > 1e-6 ? acc / wsum : -1.0;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.dim.w)) return;
+
+    float h = pc.origin_voxel.w;
+    if (h <= 0.0) return;
+
+    vec3 local = (centers[id].xyz - pc.origin_voxel.xyz) / h;
+    ivec3 p = ivec3(floor(local));
+
+    // ★ OUTSIDE THIS DOMAIN: leave the state completely alone.
+    //
+    // This pass runs once per gas domain, over EVERY element of every MSF object
+    // in the scene. An element standing in domain A is still walked by domain B's
+    // dispatch, and before Phase 4 it fell into the cooling branch below — so a
+    // second smoke box anywhere in the scene quietly cooled everything twice and
+    // capped how hot anything could get. Invisible in a one-domain test scene,
+    // which is exactly why it survived this long.
+    //
+    // Ambient relaxation for these elements belongs to sim_msf_ambient, which
+    // runs once per frame and knows about the world, not about this box.
+    if (any(lessThan(p, ivec3(0))) || any(greaterThanEqual(p, pc.dim.xyz))) return;
+
+    // Filtered first: this is what makes the burn mark a connected patch rather
+    // than per-voxel speckle.
+    float gas = sampleGasFiltered(local);
+
+    // The element sits ON the surface, so its own cell is often flagged solid and
+    // the filter can come back empty. Then walk outward for the nearest open cell
+    // — that is still the gas the surface exchanges heat with. The search radius
+    // is deliberately short: a surface more than a few voxels from any open cell
+    // is buried, not exposed.
+    if (gas < 0.0) {
+        const ivec3 dirs[6] = ivec3[6](ivec3(1,0,0), ivec3(-1,0,0),
+                                       ivec3(0,1,0), ivec3(0,-1,0),
+                                       ivec3(0,0,1), ivec3(0,0,-1));
+        for (int step = 1; step <= 3 && gas < 0.0; ++step) {
+            for (int d = 0; d < 6; ++d) {
+                ivec3 q = p + dirs[d] * step;
+                if (!inside(q)) continue;
+                uint s = idx(q);
+                if (solid[s] <= 0.5) gas = max(gas, gas_t[s]);
+            }
+        }
+    }
+
+    vec4 st = state[id * 2u];
+    vec4 aux = state[id * 2u + 1u];
+    aux.x = 0.0;  // released this step; scatter reads it, so it must not persist
+    float dt = pc.material1.z;
+
+    if (gas < 0.0) {
+        // Inside the domain but buried: no open cell within reach, so there is no
+        // gas to exchange heat with this step. Char and remaining fuel are KEPT —
+        // that is the deliberate difference from the old voxel path, which reset
+        // its remaining-material plane the moment contact was lost and so
+        // silently un-burned an animated object.
+        //
+        // No cooling here either: sim_msf_ambient owns relaxation, and doing it
+        // in both places would cool a buried surface at double rate.
+        state[id * 2u] = st;
+        state[id * 2u + 1u] = aux;
+        return;
+    }
+
+    // First-order thermal inertia: follows the gas but neither ignites from a
+    // single-frame spike nor stores energy forever.
+    float transfer = 1.0 - exp(-pc.material0.w * dt);
+    st.x = mix(st.x, gas, transfer);
+    st.x = min(st.x, pc.material1.w);
+
+    // ── Moisture gate (Phase 5) ──────────────────────────────────────────────
+    // ★ This is the physical reason wet things do not burn, not an arbitrary
+    // "if wet then skip" rule: the water has to boil off first, and while it does
+    // it pins the surface at water's boiling point. All the incoming heat goes
+    // into the phase change, so the surface simply cannot reach its ignition
+    // temperature until it is dry.
+    //
+    // Written as a clamp rather than as an ignition-threshold offset because it
+    // is the TEMPERATURE that is really held down — which is also what the render
+    // bridge reads for incandescence. A wet iron bar in a furnace must not glow.
+    //
+    // The moisture itself is consumed by the ambient pass (the single sink), and
+    // the surface's now-elevated temperature is what makes it dry fast there.
+    float moisture = st.w;
+    if (moisture > 0.0) {
+        // Blend rather than a hard clamp: a nearly-dry surface should be allowed
+        // to start climbing again instead of snapping free at exactly 0.
+        float boil = pc.material2.x;
+        float wetness = clamp(moisture, 0.0, 1.0);
+        st.x = mix(st.x, min(st.x, boil), wetness);
+    }
+
+    // ── Melting (Phase 6b) ───────────────────────────────────────────────────
+    // ★ Deliberately the SAME SHAPE as the moisture gate above, because it is the
+    // same physics: a first-order phase change absorbs energy at a fixed
+    // temperature. Water boiling pins the surface at 373 K; iron melting pins it
+    // at 1811 K. Writing them differently would have been two models of one law.
+    //
+    // ★ The overshoot is measured BEFORE the pin, from the temperature the gas
+    // exchange just produced. Measuring it after would pin the surface exactly at
+    // the melt point, make the overshoot zero, and stall melting forever at 50% —
+    // a self-cancelling loop that looks like "melting just stops".
+    float melt_over = st.x - pc.material2.y;
+    if (melt_over > 0.0 && aux.y < 1.0 && pc.material2.z > 0.0) {
+        aux.y = clamp(aux.y + melt_over * pc.material2.z * dt, 0.0, 1.0);
+    }
+    if (aux.y > 0.0 && aux.y < 1.0) {
+        // Latent heat: while there is still solid left to melt, the incoming
+        // energy goes into the phase change instead of into temperature. Released
+        // progressively so a fully molten surface is free to superheat — that is
+        // what lets molten iron keep climbing toward its boiling point.
+        st.x = mix(pc.material2.y, st.x, aux.y);
+    }
+
+    // Pyrolysis is suppressed by the same factor. Without this a surface sitting
+    // exactly at the boiling point with an ignition point below it (paper ignites
+    // at 506 K, water boils at 373 K — but a low kelvin_per_unit can invert that
+    // in normalized space) would char while visibly soaked.
+    if (moisture < 1.0 && st.x >= pc.material0.x && st.y > 0.0) {
+        // ★ Burn rate and capacity are per unit AREA. Elements are texels, so
+        // their count depends on the mask resolution — without the area factor
+        // the same object would consume mass (and vent smoke) faster simply for
+        // having a finer mask.
+        float area = max(centers[id].w, 1e-8);
+        // Damp the burn rate by remaining wetness so extinguishing is gradual
+        // rather than a switch: a fire hosed down should die back over a moment,
+        // and a barely-damp surface should smoulder rather than stop dead.
+        float burned = min(st.y, pc.material0.z * area * dt * (1.0 - moisture));
+        st.y -= burned;
+        // Normalized by this element's own capacity so char saturates exactly as
+        // the last of its combustible mass goes, at any resolution.
+        float capacity = max(pc.material0.y * area, 1e-8);
+        st.z = clamp(st.z + burned * pc.material1.y / capacity, 0.0, 1.0);
+        // Pyrolysis vapour handed to the scatter pass. The gas domain's regular
+        // combustion step then consumes it, so heat and smoke stay domain-driven
+        // exactly as they were under the old voxel path.
+        aux.x = burned;
+        aux.z += burned;  // cumulative mass loss (Phase 7 shrink/ash)
+    }
+
+    state[id * 2u] = st;
+    state[id * 2u + 1u] = aux;
+}

@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -41,6 +41,54 @@
 #include <functional>
 
 namespace ForceFieldUI {
+
+// ── Selection bridge: scene object <-> collider row ─────────────────────────
+// A collider is bound to a scene object by `source_name`, so keeping the two
+// selections in step needs a node NAME on both sides. SelectableItem::name is a
+// display label and is not guaranteed to be the node name, so derive it from
+// the selected object itself (the same thing the gizmo code does), covering both
+// the Triangle facade and the flat TriangleMesh.
+inline std::string selectedObjectNodeName(const UIContext& ui_ctx) {
+    const auto& sel = ui_ctx.selection.selected;
+    if (sel.type != SelectableType::Object) return std::string();
+    if (sel.mesh_object && !sel.mesh_object->nodeName.empty()) {
+        return sel.mesh_object->nodeName;
+    }
+    if (sel.object && !sel.object->getNodeName().empty()) {
+        return sel.object->getNodeName();
+    }
+    return std::string();
+}
+
+// Selects the scene object carrying `node_name`. Flat meshes are checked first:
+// they are the canonical selection identity, and picking the Triangle facade for
+// a flat mesh would select a single face's proxy instead of the object.
+inline bool selectSceneObjectByNodeName(UIContext& ui_ctx,
+                                        SceneData& scene,
+                                        const std::string& node_name) {
+    if (node_name.empty()) return false;
+    int index = 0;
+    for (const auto& obj : scene.world.objects) {
+        if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (tm->nodeName == node_name) {
+                ui_ctx.selection.selectObject(tm, index, node_name);
+                return true;
+            }
+        }
+        ++index;
+    }
+    index = 0;
+    for (const auto& obj : scene.world.objects) {
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            if (tri->getNodeName() == node_name) {
+                ui_ctx.selection.selectObject(tri, index, node_name);
+                return true;
+            }
+        }
+        ++index;
+    }
+    return false;
+}
 
 void drawSimulationDomainControls(
     SceneUI& ui,
@@ -847,8 +895,156 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Emitter Configuration:");
                 
+                // ── Timeline keys (mirrors the flow-source panel) ────────────
+                const int emit_key_frame = timeline ? timeline->getCurrentFrame() : 0;
+                // ★ NO playhead write-back here. rate_per_second (and the other
+                // emitter fields) feed the simulation cache signature, so a
+                // panel that rewrote the descriptor every UI frame would
+                // invalidate the cache and re-run frame 0 continuously — the
+                // emitter respawning forever at the first frame. The keys drive
+                // the SOLVER; the panel shows the authored values. Read the
+                // evaluated numbers off the timeline, not from these fields.
+                if (!emitter.keyframes.empty()) {
+                    const auto preview =
+                        RayTrophiSim::evaluateParticleEmitter(emitter, emit_key_frame);
+                    ImGui::TextDisabled(
+                        "Keyed @ frame %d: rate %.1f | speed %.2f | %s",
+                        emit_key_frame, preview.rate_per_second, preview.speed,
+                        preview.enabled ? "on" : "off");
+                }
+                auto emitKeyButton = [&](const char* id, bool keyed) {
+                    ImGui::PushID(id);
+                    const float s = ImGui::GetFrameHeight();
+                    const ImVec2 pos = ImGui::GetCursorScreenPos();
+                    const bool clicked = ImGui::InvisibleButton("emit_key", ImVec2(s, s));
+                    ImU32 fill = keyed ? IM_COL32(255, 200, 0, 255) : IM_COL32(40, 40, 40, 255);
+                    const ImU32 edge = ImGui::IsItemHovered()
+                        ? IM_COL32(255, 255, 255, 255) : IM_COL32(180, 180, 180, 255);
+                    if (ImGui::IsItemHovered() && !keyed) fill = IM_COL32(70, 70, 70, 255);
+                    const float cx = pos.x + s * 0.5f, cy = pos.y + s * 0.5f, r = s * 0.22f;
+                    const ImVec2 pts[4] = { {cx, cy-r}, {cx+r, cy}, {cx, cy+r}, {cx-r, cy} };
+                    ImGui::GetWindowDrawList()->AddConvexPolyFilled(pts, 4, fill);
+                    ImGui::GetWindowDrawList()->AddPolyline(pts, 4, edge, ImDrawFlags_Closed, 1.0f);
+                    ImGui::PopID();
+                    return clicked;
+                };
+                auto emitKeyed = [&](auto has_property) {
+                    const auto it = emitter.keyframes.find(emit_key_frame);
+                    return it != emitter.keyframes.end() && has_property(it->second);
+                };
+                auto emitInsertKey = [&](auto set_property) {
+                    set_property(emitter.keyframes[emit_key_frame]);
+                    scene.clearSimFrameCache();
+                    scene.requestSimulationTimelineRenderResync();
+                };
+                auto emitRemoveKey = [&](auto clear_property) {
+                    auto it = emitter.keyframes.find(emit_key_frame);
+                    if (it == emitter.keyframes.end()) return;
+                    clear_property(it->second);
+                    const auto& k = it->second;
+                    if (!(k.has_enabled || k.has_rate || k.has_speed ||
+                          k.has_spread || k.has_point || k.has_direction)) {
+                        emitter.keyframes.erase(it);
+                    }
+                    scene.clearSimFrameCache();
+                    scene.requestSimulationTimelineRenderResync();
+                };
+                auto emitUpdateKey = [&](auto update_property) {
+                    if (!ImGui::IsItemEdited()) return;
+                    auto it = emitter.keyframes.find(emit_key_frame);
+                    if (it == emitter.keyframes.end()) return;
+                    update_property(it->second);
+                    scene.clearSimFrameCache();
+                    scene.requestSimulationTimelineRenderResync();
+                };
+
+                {
+                    const bool keyed = emitKeyed([](const auto& k){ return k.has_enabled; });
+                    if (emitKeyButton("enabled", keyed)) {
+                        if (keyed) emitRemoveKey([](auto& k){ k.has_enabled = false; });
+                        else emitInsertKey([&](auto& k){ k.has_enabled = true; k.enabled = emitter.enabled; });
+                    }
+                    ImGui::SameLine();
+                }
                 ImGui::Checkbox("Emitter Enabled", &emitter.enabled);
+                emitUpdateKey([&](auto& k){ if (k.has_enabled) k.enabled = emitter.enabled; });
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Key this to start the embers exactly at the frame something catches fire.");
+                }
                 ImGui::TextDisabled("Source Binding: %s", emitter.source_name.empty() ? "Point Coordinate" : emitter.source_name.c_str());
+
+                // ── Object binding (parenting) ───────────────────────────────
+                if (emitter.parent_object.empty()) {
+                    const bool can_parent = !selected_object_name_for_actions.empty();
+                    if (!can_parent) ImGui::BeginDisabled();
+                    if (ImGui::Button("Parent Emitter To Selected Object##EmitParent", ImVec2(-1, 24))) {
+                        Matrix4x4 parent_to_world;
+                        if (scene.resolveObjectTransformForSimulation(
+                                selected_object_name_for_actions, parent_to_world)) {
+                            const Matrix4x4 inv = parent_to_world.inverse();
+                            // World -> local so the emitter does not jump.
+                            emitter.point = inv.transform_point(emitter.point);
+                            emitter.local_offset = inv.transform_vector(emitter.local_offset);
+                            if (emitter.velocity_space ==
+                                RayTrophiSim::SimulationEmissionVelocitySpace::Local) {
+                                emitter.direction = inv.transform_vector(emitter.direction);
+                            }
+                            emitter.parent_object = selected_object_name_for_actions;
+                            emitter.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+                            emitter.parent_velocity = Vec3(0.0f);
+                            scene.clearSimFrameCache();
+                        }
+                    }
+                    if (!can_parent) ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Ride the object's full transform, including rotation and any\n"
+                                          "motion produced by rigid-body physics. Position and direction\n"
+                                          "then become parent-local.");
+                    }
+                } else {
+                    Matrix4x4 probe;
+                    if (scene.resolveObjectTransformForSimulation(emitter.parent_object, probe)) {
+                        ImGui::TextColored(ImVec4(0.5f, 0.85f, 1.0f, 1.0f),
+                                           "Parented To: %s", emitter.parent_object.c_str());
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                                           "Parent NOT FOUND: %s (emitter inactive)",
+                                           emitter.parent_object.c_str());
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Unparent##EmitUnparent")) {
+                        Matrix4x4 parent_to_world;
+                        if (scene.resolveObjectTransformForSimulation(
+                                emitter.parent_object, parent_to_world)) {
+                            emitter.point = parent_to_world.transform_point(emitter.point);
+                            emitter.local_offset = parent_to_world.transform_vector(emitter.local_offset);
+                            if (emitter.velocity_space ==
+                                RayTrophiSim::SimulationEmissionVelocitySpace::Local) {
+                                emitter.direction = parent_to_world.transform_vector(emitter.direction);
+                            }
+                        }
+                        emitter.parent_object.clear();
+                        emitter.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+                        emitter.parent_velocity = Vec3(0.0f);
+                        scene.clearSimFrameCache();
+                    }
+                    int space_idx = static_cast<int>(emitter.velocity_space);
+                    const char* space_labels[] = { "Local (rotates with parent)", "World (fixed direction)" };
+                    if (ImGui::Combo("Direction Space##EmitVelSpace", &space_idx,
+                                     space_labels, IM_ARRAYSIZE(space_labels))) {
+                        emitter.velocity_space =
+                            static_cast<RayTrophiSim::SimulationEmissionVelocitySpace>(space_idx);
+                        scene.clearSimFrameCache();
+                    }
+                    ImGui::DragFloat("Inherit Parent Velocity##EmitInherit",
+                                     &emitter.inherit_velocity, 0.02f, 0.0f, 4.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("How much of the parent's motion the particles are launched with.\n"
+                                          "0 leaves the sparks hanging behind a waved match.");
+                    }
+                    const Vec3 pv = emitter.parent_velocity;
+                    ImGui::TextDisabled("Parent speed: %.2f m/s", pv.length());
+                }
                 const bool has_gas_domain = std::any_of(
                     particles->gridDomains().begin(),
                     particles->gridDomains().end(),
@@ -859,9 +1055,41 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 if (has_gas_domain) {
                     ImGui::TextColored(
                         ImVec4(0.45f, 0.8f, 1.0f, 1.0f),
-                        "Gas coupling: particle trails deposit density/velocity into overlapping gas domains.");
-                    ImGui::TextDisabled(
-                        "Fuel and heat are authored by Flow Sources; particle-emitter channel mapping is not yet per-emitter.");
+                        "Gas coupling: particles deposit into every overlapping gas domain they fly through.");
+                    ImGui::Checkbox("Override Deposit Rates For This Emitter##EmitDepOv",
+                                    &emitter.override_grid_deposit);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Off: this emitter uses the system-wide rates in the Physics tab.\n"
+                                          "On: only THIS emitter's particles use the rates below — which is\n"
+                                          "how one system can carry igniting embers and inert smoke at once.");
+                    }
+                    if (emitter.override_grid_deposit) {
+                        ImGui::Indent();
+                        ImGui::DragFloat("Density Deposit / Sec##EmitDepD",
+                                         &emitter.grid_density_deposit, 0.05f, 0.0f, 100.0f, "%.2f");
+                        ImGui::DragFloat("Temperature Deposit / Sec##EmitDepT",
+                                         &emitter.grid_temperature_deposit, 0.05f, 0.0f, 100.0f, "%.2f");
+                        ImGui::DragFloat("Fuel Deposit / Sec##EmitDepF",
+                                         &emitter.grid_fuel_deposit, 0.05f, 0.0f, 100.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Fuel is what lets a flying particle IGNITE the gas it passes\n"
+                                              "through. Needs a gas domain with Fire enabled — the Fuel channel\n"
+                                              "is then provisioned automatically.");
+                        }
+                        ImGui::Unindent();
+                    }
+                    // ★ Read these in order when particle-carried fire does not
+                    // appear. Before this row all four failure modes looked
+                    // identical from the outside: nothing happens.
+                    const auto& pstats = particles->stats();
+                    ImGui::TextDisabled("Deposits: %u landed | %u no domain | %u no fuel channel",
+                                        pstats.grid_deposit_landed,
+                                        pstats.grid_deposit_dropped_no_domain,
+                                        pstats.grid_deposit_dropped_no_channel);
+                    if (pstats.grid_deposit_dropped_no_channel > 0) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                                           "Fuel deposited into a domain with no Fuel channel — enable Fire on it.");
+                    }
                 } else {
                     ImGui::TextDisabled(
                         "Particle-only emitter. Add a Gas Domain + Flow Source for volumetric smoke/fire.");
@@ -876,12 +1104,39 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     ImGui::SetTooltip("Sets whether particles sprout from the source pivot point, surface shell bounds, or fine mesh geometry faces.");
                 }
 
+                {
+                    const bool keyed = emitKeyed([](const auto& k){ return k.has_rate; });
+                    if (emitKeyButton("rate", keyed)) {
+                        if (keyed) emitRemoveKey([](auto& k){ k.has_rate = false; });
+                        else emitInsertKey([&](auto& k){ k.has_rate = true; k.rate_per_second = emitter.rate_per_second; });
+                    }
+                    ImGui::SameLine();
+                }
                 ImGui::DragFloat("Spawn Rate / Sec", &emitter.rate_per_second, 1.0f, 0.0f, 100000.0f, "%.1f");
+                emitUpdateKey([&](auto& k){ if (k.has_rate) k.rate_per_second = emitter.rate_per_second; });
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Number of particles injected per second.");
                 }
+                {
+                    const bool keyed = emitKeyed([](const auto& k){ return k.has_speed; });
+                    if (emitKeyButton("speed", keyed)) {
+                        if (keyed) emitRemoveKey([](auto& k){ k.has_speed = false; });
+                        else emitInsertKey([&](auto& k){ k.has_speed = true; k.speed = emitter.speed; });
+                    }
+                    ImGui::SameLine();
+                }
                 ImGui::DragFloat("Initial Speed", &emitter.speed, 0.05f, 0.0f, 1000.0f, "%.2f");
+                emitUpdateKey([&](auto& k){ if (k.has_speed) k.speed = emitter.speed; });
+                {
+                    const bool keyed = emitKeyed([](const auto& k){ return k.has_spread; });
+                    if (emitKeyButton("spread", keyed)) {
+                        if (keyed) emitRemoveKey([](auto& k){ k.has_spread = false; });
+                        else emitInsertKey([&](auto& k){ k.has_spread = true; k.spread = emitter.spread; });
+                    }
+                    ImGui::SameLine();
+                }
                 ImGui::DragFloat("Velocity Spread", &emitter.spread, 0.01f, 0.0f, 10.0f, "%.2f");
+                emitUpdateKey([&](auto& k){ if (k.has_spread) k.spread = emitter.spread; });
                 if (emitter.spawn_mode == RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface ||
                     emitter.spawn_mode == RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface) {
                     ImGui::DragFloat("Surface Offset", &emitter.surface_offset, 0.005f, 0.0f, 100.0f, "%.3f");
@@ -891,10 +1146,27 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     ImGui::SetTooltip("Duration in seconds before a particle is automatically culled.");
                 }
                 ImGui::DragFloat("Particle Mass", &emitter.mass, 0.05f, 0.0f, 1000.0f, "%.2f");
+                {
+                    const bool keyed = emitKeyed([](const auto& k){ return k.has_direction; });
+                    if (emitKeyButton("direction", keyed)) {
+                        if (keyed) emitRemoveKey([](auto& k){ k.has_direction = false; });
+                        else emitInsertKey([&](auto& k){ k.has_direction = true; k.direction = emitter.direction; });
+                    }
+                    ImGui::SameLine();
+                }
                 ImGui::DragFloat3("Spit Direction", &emitter.direction.x, 0.05f, -100.0f, 100.0f, "%.2f");
+                emitUpdateKey([&](auto& k){ if (k.has_direction) k.direction = emitter.direction; });
                 if (emitter.source_mode == RayTrophiSim::ParticleEmitterSourceMode::Point) {
-                    ImGui::DragFloat3("World Position", &emitter.point.x, 0.05f,
-                                      -10000.0f, 10000.0f, "%.2f");
+                    const bool keyed = emitKeyed([](const auto& k){ return k.has_point; });
+                    if (emitKeyButton("point", keyed)) {
+                        if (keyed) emitRemoveKey([](auto& k){ k.has_point = false; });
+                        else emitInsertKey([&](auto& k){ k.has_point = true; k.point = emitter.point; });
+                    }
+                    ImGui::SameLine();
+                    ImGui::DragFloat3(emitter.parent_object.empty() ? "World Position"
+                                                                    : "Local Position",
+                                      &emitter.point.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                    emitUpdateKey([&](auto& k){ if (k.has_point) k.point = emitter.point; });
                 }
                 ImGui::DragFloat3("Local Pivot Offset", &emitter.local_offset.x, 0.05f, -1000.0f, 1000.0f, "%.2f");
 
@@ -2300,6 +2572,55 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         }
         if (selected_collider_index_global < 0) selected_collider_index_global = 0;
 
+        // ── Two-way selection sync: viewport <-> collider list ──────────────
+        // A collider has no selectable identity of its own; it is bound to a
+        // scene object by source_name. So "selecting a collider" means selecting
+        // that object, and the two lists drifting apart meant the panel could be
+        // editing one collider while the gizmo was on a different object.
+        //
+        // Sync on CHANGE only, on both sides. Forcing it every frame would make
+        // one side authoritative: driving the list from the viewport each frame
+        // would snap the list back the instant the user clicked a different row.
+        {
+            const std::string viewport_node = selectedObjectNodeName(ui_ctx);
+
+            static std::string s_last_viewport_node;
+            static int s_last_list_index = -1;
+
+            const auto findColliderFor = [&](const std::string& node) -> int {
+                if (node.empty()) return -1;
+                for (int i = 0; i < static_cast<int>(colliders.size()); ++i) {
+                    if (colliders[i].source_name == node) return i;
+                }
+                return -1;
+            };
+
+            if (viewport_node != s_last_viewport_node) {
+                // Viewport moved: follow it, but only when the newly selected
+                // object actually owns a collider. Selecting an unrelated object
+                // must not clear or randomize the panel's row.
+                s_last_viewport_node = viewport_node;
+                const int match = findColliderFor(viewport_node);
+                if (match >= 0) {
+                    selected_collider_index_global = match;
+                    s_last_list_index = match;
+                }
+            } else if (selected_collider_index_global != s_last_list_index) {
+                // List moved: select the collider's source object so the gizmo
+                // and every other object-driven panel agree with this one.
+                s_last_list_index = selected_collider_index_global;
+                if (selected_collider_index_global >= 0 &&
+                    selected_collider_index_global < static_cast<int>(colliders.size())) {
+                    const std::string& node =
+                        colliders[static_cast<std::size_t>(selected_collider_index_global)].source_name;
+                    if (!node.empty() && node != viewport_node) {
+                        selectSceneObjectByNodeName(ui_ctx, scene, node);
+                        s_last_viewport_node = node;
+                    }
+                }
+            }
+        }
+
         ImGui::Spacing();
         int collider_to_remove = -1;
         if (colliders.empty()) {
@@ -2511,9 +2832,472 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             ImGui::DragFloat("Surface Band (Voxels)##CollTab", &c.gas_surface_band_voxels, 0.05f, 0.25f, 8.0f, "%.2f");
             ImGui::Checkbox("Ignite on Contact##CollTab", &c.gas_ignite_on_contact);
             ImGui::BeginDisabled(!c.gas_ignite_on_contact);
-            ImGui::DragFloat("Ignition Temperature##CollTab", &c.gas_ignition_temperature, 0.01f, 0.0f, 100.0f, "%.3f");
-            ImGui::DragFloat("Surface Fuel Capacity##CollTab", &c.gas_surface_fuel_capacity, 0.05f, 0.0f, 100.0f, "%.2f");
-            ImGui::DragFloat("Surface Burn Rate##CollTab", &c.gas_surface_burn_rate, 0.01f, 0.0f, 20.0f, "%.3f");
+
+            // ── Material State Field ──────────────────────────────────────────
+            // Persistent per-object burn state, and the sole owner of pyrolysis
+            // since the voxel surface_state path was removed.
+            ImGui::Separator();
+            {
+                auto& runtime = scene.ensureParticleSimulationSystem();
+                {
+                    // Every burning/thermal number is derived from this choice;
+                    // there are no free-float overrides any more.
+                    const auto& library = RayTrophiSim::substanceLibrary();
+                    if (ImGui::BeginCombo("Substance##CollTabMsf", c.msf_substance.c_str())) {
+                        for (const auto& profile : library) {
+                            const bool selected = (c.msf_substance == profile.name);
+                            if (ImGui::Selectable(profile.name.c_str(), selected)) {
+                                c.msf_substance = profile.name;
+                            }
+                            if (selected) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                    // By value: the authoring numbers live on WorldThermalState
+                    // (below) and this is the derived mapping, so there is only
+                    // ever one thing to edit.
+                    auto& world_thermal = runtime.worldThermal();
+                    const auto scale = world_thermal.scale();
+                    {
+                        const auto& profile = RayTrophiSim::findSubstance(c.msf_substance);
+                        // Show BOTH units: the Kelvin the user reasons about and
+                        // the normalized value the solver actually compares
+                        // against, so a mis-scaled domain is visible rather than
+                        // silently making everything ignite (or never ignite).
+                        if (profile.combustible) {
+                            ImGui::Text("ignites %.0f K  (%.2f normalized)",
+                                        profile.ignition_kelvin,
+                                        scale.toNormalized(profile.ignition_kelvin));
+                        } else {
+                            ImGui::TextDisabled("non-combustible (heats, never chars)");
+                        }
+                        if (profile.meltable) {
+                            ImGui::Text("melts %.0f K  (%.2f normalized)  [Phase 6]",
+                                        profile.melt_kelvin,
+                                        scale.toNormalized(profile.melt_kelvin));
+                        }
+                        // Absorbency decides whether a liquid domain can wet this
+                        // at all. Stated up front so "I poured water on it and
+                        // nothing happened" is answered by the material, not
+                        // chased through the fluid solver.
+                        if (profile.absorbency > 0.0f) {
+                            ImGui::Text("absorbs water (%.2f) — wet surface is held "
+                                        "at %.0f K and cannot ignite",
+                                        profile.absorbency,
+                                        RayTrophiSim::kWaterBoilingKelvin);
+                        } else {
+                            ImGui::TextDisabled("non-absorbent (water runs off; never wets)");
+                        }
+                    }
+
+                    // ── Per-object override ──────────────────────────────────
+                    // The substance library holds what a material physically IS;
+                    // this is where one particular object deviates ("this paper
+                    // is thinner, it catches sooner"). It must NOT be done with
+                    // the domain scale below — that is a calibration, so nudging
+                    // it moves every material in the scene at once.
+                    auto& ov = c.msf_override;
+                    const auto& profile_ref = RayTrophiSim::findSubstance(c.msf_substance);
+                    ImGui::BeginDisabled(!profile_ref.combustible);
+                    if (ImGui::Checkbox("Override Ignition##CollTabMsf", &ov.override_ignition)) {
+                        // Seed the field from the substance so enabling the
+                        // override never jumps the value.
+                        if (ov.override_ignition) ov.ignition_kelvin = profile_ref.ignition_kelvin;
+                    }
+                    ImGui::BeginDisabled(!ov.override_ignition);
+                    if (ImGui::DragFloat("Ignition (K)##CollTabMsfOv", &ov.ignition_kelvin,
+                                         1.0f, 273.0f, 4000.0f, "%.0f")) {
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("= %.2f norm", scale.toNormalized(ov.ignition_kelvin));
+                    ImGui::EndDisabled();
+                    ImGui::DragFloat("Burn Rate x##CollTabMsf", &ov.burn_rate_scale,
+                                     0.01f, 0.0f, 10.0f, "%.2f");
+                    ImGui::DragFloat("Fuel Capacity x##CollTabMsf", &ov.fuel_capacity_scale,
+                                     0.01f, 0.0f, 10.0f, "%.2f");
+                    ImGui::EndDisabled();
+                    if (!profile_ref.combustible && !ov.isDefault()) {
+                        // Loud rather than silent: the values are stored but the
+                        // substance ignores them, and a stale override that does
+                        // nothing is exactly the kind of thing that reads as a bug.
+                        ImGui::TextDisabled("(overrides ignored — substance is non-combustible)");
+                    }
+
+                    ImGui::Checkbox("Generate Burn Mark##CollTabMsfMask",
+                                    &c.msf_generate_char_mask);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "OFF: this object still heats, burns, releases fuel and can\n"
+                            "ignite its neighbours — it just carries no scorch texture.\n"
+                            "The mask is the expensive part (a res x res texture plus one\n"
+                            "simulation element per texel), so turn it off for anything\n"
+                            "that only needs to take part in the fire.");
+                    }
+                    ImGui::BeginDisabled(!c.msf_generate_char_mask);
+                    ImGui::DragInt("Char Mask Res##CollTabMsf", &c.msf_mask_resolution,
+                                   8.0f, 0, 1024);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "UV-space resolution of the burn mark. MSF samples ARE the\n"
+                            "texels of this mask, so it sets both detail and cost.\n"
+                            "0 = blocky per-triangle fallback (also used automatically\n"
+                            "when the mesh has no usable UVs).\n"
+                            "Total combustible mass is per unit AREA, so changing this\n"
+                            "sharpens the mark without making the object burn longer.");
+                    }
+                    ImGui::EndDisabled();
+
+                    // ── Damage control ───────────────────────────────────────
+                    // Burn damage is deliberately PERMANENT and lives on the
+                    // object, not on the material or its UV set — that is the
+                    // whole point of MSF. So the only way to undo it is an
+                    // explicit clear; there is no material parameter to reset
+                    // and no texture to delete.
+                    // Clearing changes what the surface LOOKS like while nothing
+                    // else in the scene moved, so no other path invalidates the
+                    // accumulated image — without this the object stays visibly
+                    // burnt until something unrelated happens to retrigger a
+                    // render.
+                    const auto wakeViewport = [&]() {
+                        ui_ctx.renderer.resetCPUAccumulation();
+                        if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                        ui_ctx.start_render = true;
+                    };
+
+                    ImGui::Separator();
+                    if (ImGui::Button("Clear Damage##CollTabMsf")) {
+                        runtime.clearMaterialStateField(c.source_name);
+                        wakeViewport();
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Wipes THIS object's accumulated char, heat and burnt\n"
+                            "fuel, and restores it to pristine. Damage is per-object\n"
+                            "and persistent by design — it is not stored in the\n"
+                            "material or a UV texture, so nothing else clears it.");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear All Damage##CollTabMsf")) {
+                        runtime.resetMaterialStateFields();
+                        wakeViewport();
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Same, for every object in the scene.");
+                    }
+
+                    // ── World thermal boundary conditions ────────────────────
+                    // These are the SCENE's, not this collider's. They sit here
+                    // because this is the only panel that reasons in Kelvin, and
+                    // they are clearly labelled as global so a per-object problem
+                    // is never "fixed" by moving one of them.
+                    ImGui::Separator();
+                    ImGui::TextDisabled("World thermal (affects the WHOLE scene)");
+                    ImGui::DragFloat("Ambient (K)##CollTabMsf", &world_thermal.ambient_kelvin,
+                                     1.0f, 0.0f, 2000.0f, "%.0f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "What the room is at. Defined EVERYWHERE, including\n"
+                            "outside every simulation domain — that is what lets a\n"
+                            "burning object carried out of the smoke box keep cooling\n"
+                            "like a real object instead of freezing mid-burn.\n"
+                            "Normalized 0 is defined as this temperature.\n\n"
+                            "A domain can override it inside its own bounds\n"
+                            "(Domain panel -> Thermal Override).");
+                    }
+                    ImGui::DragFloat("Kelvin per unit##CollTabMsf", &world_thermal.kelvin_per_unit,
+                                     1.0f, 1.0f, 5000.0f, "%.0f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Maps the solver's normalized temperature to Kelvin.\n"
+                            "This is a CALIBRATION, not an artistic control — it moves\n"
+                            "every material at once. To make one object catch sooner,\n"
+                            "use Override Ignition above.\n\n"
+                            "Deliberately has no per-domain override: the burn mask\n"
+                            "quantizes glow in absolute Kelvin, so if two domains\n"
+                            "disagreed the same object would glow differently\n"
+                            "depending on which box it was standing in.\n\n"
+                            "Default 293 K + 350 K/unit puts wood's real ignition\n"
+                            "point (573 K) at 0.8 normalized, and iron's melting\n"
+                            "point (1811 K) at 4.34 — a useful span for one domain.");
+                    }
+                    ImGui::DragFloat("Convection x##CollTabMsf",
+                                     &world_thermal.convection_coefficient,
+                                     0.01f, 0.0f, 10.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Scales every substance's passive cooling toward ambient.\n"
+                            "1 = the material constant as authored, higher = a draughty\n"
+                            "room, 0 = a perfect thermos (nothing ever cools).\n\n"
+                            "Turn this DOWN if a surface never reaches its ignition or\n"
+                            "melting point: it is losing heat as fast as the flame\n"
+                            "delivers it.");
+                    }
+                    ImGui::DragFloat("Oxygen##CollTabMsf",
+                                     &world_thermal.oxygen_availability,
+                                     0.01f, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "0..1. Throttles pyrolysis burn rate. 0 smothers fire\n"
+                            "entirely — seal the box and it goes out.\n"
+                            "It can only slow burning down, never start it: a\n"
+                            "non-combustible substance ignores this completely.");
+                    }
+                    ImGui::Separator();
+
+                    // The numbers need a device readback, so ask for one only
+                    // while this panel is actually visible.
+                    runtime.requestMaterialStateFieldReadback();
+                    const auto& st = runtime.materialStateFieldStats();
+                    const auto& tel = RayTrophiSim::materialStateFieldBridgeStats();
+                    // Same PerfBlock the fluid/gas panels use: scrolls with the
+                    // panel instead of running off under the status bar, and
+                    // carries the copy control so these numbers can be pasted
+                    // straight into a bug report.
+                    {
+                        UIWidgets::PerfBlock blk("Material State Field",
+                                                 st.readback_ms + st.dispatch_ms +
+                                                 st.ambient_ms + st.wetting_ms);
+                        blk.Section("Simulation");
+                        blk.Value("Objects / elements", "%u / %u",
+                                  st.field_count, st.element_count);
+                        // The ambient pass runs once per frame outside the domain
+                        // loop, so a scene with no gas domain still shows work
+                        // here. `ambient` reading "off" while fields exist means
+                        // the boundary layer never dispatched — that is a
+                        // different fault from "nothing is hot".
+                        blk.Value("Ambient pass", "%s  |  %u thermal fields, "
+                                                  "%u domain overrides",
+                                  st.ambient_stepped ? "on" : "OFF",
+                                  st.thermal_sources, st.ambient_zones);
+                        blk.Value("  world ambient", "%.0f K  (convection x%.2f, "
+                                                     "oxygen %.2f)",
+                                  world_thermal.ambient_kelvin,
+                                  world_thermal.convection_coefficient,
+                                  world_thermal.oxygen_availability);
+                        // ★ Per-object row. The stats above are the sum over every
+                        // field, so with two colliders they cannot answer "is it
+                        // THIS one that stopped burning" — which is exactly the
+                        // question a multi-object scene raises.
+                        // ★ EVERYTHING below is for the SELECTED object only.
+                        // These used to be the sum over every field, which in a
+                        // two-material scene reported the paper's temperature
+                        // under the heading "Iron" — and then compared it against
+                        // iron's melting point. A per-object state is worthless if
+                        // it is only ever read in aggregate.
+                        {
+                            const auto& all = runtime.materialStateFields();
+                            auto it = all.find(c.source_name);
+                            if (it == all.end()) {
+                                blk.Value("This object", "NO FIELD  (\"%s\")",
+                                          c.source_name.c_str());
+                            } else {
+                                const auto& f = it->second;
+                                blk.Value("This object", "%s  |  %zu elements",
+                                          f.substance_name.c_str(), f.elementCount());
+                                if (f.mask_resolution > 0) {
+                                    blk.Value("  mask", "%dx%d  rev %llu  %s",
+                                              f.mask_resolution, f.mask_resolution,
+                                              (unsigned long long)f.mask_revision,
+                                              f.char_mask.empty() ? "EMPTY" : "ready");
+                                } else {
+                                    blk.Value("  mask", "none (no usable UVs -> "
+                                                        "per-triangle fallback)");
+                                }
+
+                                // Fold this field's host mirror. It is only as
+                                // fresh as the last readback, which the bridge
+                                // requests every frame while this panel is open.
+                                constexpr std::size_t kStride =
+                                    RayTrophiSim::MaterialStateField::kStateStride;
+                                const std::size_t n = std::min(
+                                    f.elementCount(), f.state.size() / kStride);
+                                float t_max = 0.0f, c_max = 0.0f, w_max = 0.0f, m_max = 0.0f;
+                                double t_sum = 0.0, c_sum = 0.0, fuel_sum = 0.0,
+                                       w_sum = 0.0, m_sum = 0.0;
+                                uint32_t burning = 0, wet = 0, melting = 0, molten = 0;
+                                for (std::size_t i = 0; i < n; ++i) {
+                                    const float t  = f.state[i * kStride + 0u];
+                                    const float fu = f.state[i * kStride + 1u];
+                                    const float ch = f.state[i * kStride + 2u];
+                                    const float mo = f.state[i * kStride + 3u];
+                                    const float ml = f.state[i * kStride + 5u];
+                                    m_max = std::max(m_max, ml);
+                                    m_sum += ml;
+                                    if (ml >= 1.0f) ++molten;
+                                    else if (ml > 0.0f) ++melting;
+                                    t_max = std::max(t_max, t);
+                                    c_max = std::max(c_max, ch);
+                                    w_max = std::max(w_max, mo);
+                                    t_sum += t; c_sum += ch; w_sum += mo;
+                                    fuel_sum += std::max(0.0f, fu);
+                                    // Wet elements are NOT burning — the solver
+                                    // suppresses pyrolysis while moisture remains,
+                                    // and a panel that disagreed with the shader
+                                    // about what is on fire would be worse than no
+                                    // panel at all.
+                                    if (mo > 0.05f) ++wet;
+                                    else if (fu > 0.0f && ch > 0.0f) ++burning;
+                                }
+                                const float inv_n = n ? 1.0f / static_cast<float>(n) : 0.0f;
+                                const float peak = scale.toKelvin(t_max);
+
+                                blk.Value("  burning elements", "%u", burning);
+                                // Kelvin, not normalized units: the substance layer
+                                // is authored in Kelvin, so a normalized readout
+                                // cannot be compared against what matters.
+                                blk.Value("  surface T  max / mean", "%.0f K / %.0f K",
+                                          peak,
+                                          scale.toKelvin(
+                                              static_cast<float>(t_sum) * inv_n));
+
+                                const auto& prof = RayTrophiSim::findSubstance(c.msf_substance);
+                                // Name the next physical threshold this surface is
+                                // heading for, so "not melting/glowing" can be told
+                                // apart from "not hot enough yet".
+                                if (prof.meltable) {
+                                    blk.Value("    vs melting point", "%.0f K  (%.0f%% there)",
+                                              prof.melt_kelvin,
+                                              prof.melt_kelvin > 0.0f
+                                                  ? 100.0f * peak / prof.melt_kelvin : 0.0f);
+                                    // Melt fraction sits right under the melting
+                                    // point it is driven by, so "52% of the way
+                                    // there" and "actually melting" can never be
+                                    // confused for one another.
+                                    blk.Value("    melt  max / mean", "%.3f / %.3f",
+                                              m_max, static_cast<float>(m_sum) * inv_n);
+                                    if (melting > 0 || molten > 0) {
+                                        blk.Value("      phase change",
+                                                  "%u melting (latent heat pins T at "
+                                                  "%.0f K), %u fully molten",
+                                                  melting, prof.melt_kelvin, molten);
+                                    }
+                                }
+                                if (prof.combustible) {
+                                    blk.Value("    vs ignition point", "%.0f K",
+                                              prof.ignition_kelvin);
+                                } else {
+                                    blk.Value("    combustion", "non-combustible "
+                                              "(never chars, heats only)");
+                                }
+                                blk.Value("    vs visible glow", "798 K (Draper) - %s",
+                                          peak > 798.0f ? "GLOWING" : "below");
+                                blk.Value("  char  max / mean", "%.3f / %.3f",
+                                          c_max, static_cast<float>(c_sum) * inv_n);
+                                blk.Value("  fuel remaining", "%.2f",
+                                          static_cast<float>(fuel_sum));
+                                // Moisture next to the burn rows, because "why
+                                // won't this catch fire" is answered here more
+                                // often than anywhere else.
+                                blk.Value("  moisture  max / mean", "%.3f / %.3f  "
+                                          "(%u wet elements)",
+                                          w_max, static_cast<float>(w_sum) * inv_n, wet);
+                                if (w_max > 0.05f) {
+                                    blk.Value("    burning", "SUPPRESSED — surface is "
+                                              "pinned at %.0f K until it dries",
+                                              RayTrophiSim::kWaterBoilingKelvin);
+                                }
+                                if (!(prof.absorbency > 0.0f)) {
+                                    blk.Value("    absorbency", "0 — water runs off "
+                                              "this substance, it never wets");
+                                }
+                            }
+                        }
+                        // Scene totals, kept separate and clearly labelled so they
+                        // are never mistaken for the selected object's numbers.
+                        blk.Section("All objects (scene totals)");
+                        blk.Value("Burning elements", "%u", st.burning_count);
+                        blk.Value("Surface T  max / mean", "%.0f K / %.0f K",
+                                  scale.toKelvin(st.max_temperature),
+                                  scale.toKelvin(st.mean_temperature));
+                        // max next to mean is the proof that char is SPATIAL: a
+                        // localized burn drives max toward 1 while mean stays low.
+                        // With per-triangle sampling the two tracked together.
+                        blk.Value("Char  max / mean", "%.3f / %.3f",
+                                  st.max_char, st.mean_char);
+                        blk.Value("Fuel remaining", "%.2f", st.fuel_remaining);
+                        blk.Value("Moisture  max / mean", "%.3f / %.3f  (%u wet)",
+                                  st.max_moisture, st.mean_moisture, st.wet_elements);
+                        // 0 liquid domains with a wet object means the moisture
+                        // came from somewhere else (a cached frame), which is a
+                        // different situation from "the water never reached it".
+                        blk.Value("Wetting liquid domains", "%u", st.wetting_domains);
+                        blk.Value("Melt  max / mean", "%.3f / %.3f  (%u melting, %u molten)",
+                                  st.max_melt, st.mean_melt,
+                                  st.melting_elements, st.molten_elements);
+                        // Geometry is deliberately untouched: melt is state only
+                        // until the vertex mapping lands. Said here so a molten
+                        // reading with a rigid mesh reads as scope, not as a bug.
+                        if (st.max_melt > 0.0f) {
+                            // Says SLUMP, not "melting", on purpose: the mesh sinks
+                            // and flattens but does not spread sideways and does not
+                            // conserve volume. Naming the limit here stops a correct
+                            // result from being read as a broken one.
+                            blk.Value("  geometry", "slumping under gravity "
+                                      "(no lateral flow / pooling yet)");
+                        }
+                        // Phase 6a: whether a vertex query can REACH the melt.
+                        // Separate from the melt values because "nothing melted"
+                        // and "melted but unreachable through UV" are different
+                        // faults with different fixes.
+                        if (st.lookup_texels_total > 0u) {
+                            const float pct = 100.0f *
+                                static_cast<float>(st.lookup_texels_covered) /
+                                static_cast<float>(st.lookup_texels_total);
+                            blk.Value("  melt lookup (UV)", "%u / %u texels reachable (%.0f%%)",
+                                      st.lookup_texels_covered, st.lookup_texels_total, pct);
+                        }
+                        if (st.lookup_fields_no_uv > 0u) {
+                            blk.Value("  NOT displaceable", "%u object(s) have no usable UV "
+                                      "layout — unwrap them to melt geometry",
+                                      st.lookup_fields_no_uv);
+                        }
+
+                        // Read the FIRST zero: that is where "char accumulates but
+                        // nothing looks burnt" breaks.
+                        blk.Section("Render bridge (first zero = break point)");
+                        blk.Value("Fields seen", "%u", tel.fields_seen);
+                        blk.Value("Masks ready (readback done)", "%u", tel.masks_ready);
+                        blk.Value("Textures uploaded", "%u", tel.textures_live);
+                        blk.Value("Bindless indices", "%u  (last = %u)",
+                                  tel.indices_resolved, tel.last_index);
+                        blk.Value("Instance lists walked", "%u", tel.instance_lists_seen);
+                        if (tel.instance_lists_seen == 0u && tel.instance_lists_empty > 0u) {
+                            // Names the actual state instead of leaving a bare 0
+                            // that reads as "the bridge is broken".
+                            blk.Value("  ...but list was EMPTY", "%ux  (RT scene not "
+                                      "built — raster preview, or rebuild in flight)",
+                                      tel.instance_lists_empty);
+                        }
+                        blk.Value("Instances named / unnamed", "%u / %u",
+                                  tel.instances_seen, tel.instances_unnamed);
+                        blk.Value("Instances bound", "%u", tel.instances_bound);
+                        if (tel.instances_bound == 0u && tel.unmatched_example[0] != 0) {
+                            blk.Value("Unmatched instance", "\"%s\"", tel.unmatched_example);
+                        }
+
+                        blk.Section("Cost");
+                        // Billed separately because they scale differently: the
+                        // ambient pass is once per frame, the dispatch row is once
+                        // per gas domain.
+                        blk.Time("ambient (world/domain/thermal/dry)", st.ambient_ms, "GPU", 1);
+                        blk.Time("wetting (per liquid domain)", st.wetting_ms, "GPU", 1);
+                        blk.Time("dispatch (gather+scatter+resolve)", st.dispatch_ms, "GPU", 1);
+                        blk.Time("mask readback", st.readback_ms, "CPU", 1);
+                        blk.End();
+                    }
+                    if (!st.stepped && st.ambient_stepped) {
+                        // Not an error any more: with the world thermal layer an
+                        // object outside every gas domain is still simulated, it
+                        // just exchanges heat with the room instead of with gas.
+                        ImGui::TextDisabled("(ambient only — no gas domain is currently "
+                                            "exchanging heat with this surface)");
+                    } else if (!st.stepped && !st.ambient_stepped) {
+                        ImGui::TextDisabled("(no field stepped — needs 'Ignite on Contact' "
+                                            "with a mesh object; gas coupling also needs "
+                                            "a GPU gas domain)");
+                    }
+                }
+            }
             ImGui::EndDisabled();
             ImGui::EndDisabled();
             ImGui::EndTabItem();
@@ -2536,26 +3320,44 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         }
     };
 
+    // ★ Dropping the force-field selection is a SECTION-CHANGE action, not a
+    // per-frame one. Clearing it every frame meant a force field picked in the
+    // VIEWPORT was wiped on the very next UI frame while any of these sections
+    // was open — the selection looked like it was being refused.
+    //
+    // Phase 4 made that unliveable: positioning a Thermal field next to an object
+    // while watching its surface temperature means having the Colliders section
+    // open and the field selected at the same time, which this made impossible.
+    //
+    // Same rule as the panels that must not write `selected` unconditionally: a
+    // panel may react to a transition, but it may not hold the selection hostage
+    // for as long as it happens to be visible.
+    static int last_simulation_section = -1;
+    const bool section_changed = (simulation_section != last_simulation_section);
+    last_simulation_section = simulation_section;
+
     if (simulation_section == 1) {
         drawParticleControls();
         return;
     }
     if (simulation_section == 2) {
-        clearForceFieldSelection();
+        if (section_changed) clearForceFieldSelection();
         drawSimulationDomainControls(
             ui, ui_ctx, scene, timeline, selected_domain_index,
             drainSimulationMutationBackends,
+            // Still passed through: the domain panel calls it on a real event
+            // (picking a domain), which is a legitimate one-shot clear.
             clearForceFieldSelection,
             [&]() { drawSimBakeControls(); });
         return;
     }
     if (simulation_section == 3) {
-        clearForceFieldSelection();
+        if (section_changed) clearForceFieldSelection();
         drawColliderControls();
         return;
     }
     if (simulation_section == 4) {
-        clearForceFieldSelection();
+        if (section_changed) clearForceFieldSelection();
         drawRigidBodyControls();
         return;
     }
@@ -2619,6 +3421,23 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         field->shape = Physics::ForceFieldShape::Sphere;
                         field->linear_drag = 0.5f;
                         break;
+                    case Physics::ForceFieldType::Thermal:
+                        field->shape = Physics::ForceFieldShape::Sphere;
+                        field->falloff_radius = 2.0f;
+                        // 600 K over ambient clears wood's ignition point (573 K)
+                        // near the core but not paper's from across the room, so a
+                        // freshly created field does something visible without
+                        // setting the whole scene alight.
+                        field->thermal_delta_kelvin = 600.0f;
+                        // Every affect mask is ignored for Thermal (the snapshot
+                        // zeroes it), but leaving them ticked would read as if the
+                        // field were pushing gas around.
+                        field->affects_gas = false;
+                        field->affects_particles = false;
+                        field->affects_cloth = false;
+                        field->affects_rigidbody = false;
+                        field->affects_fluid = false;
+                        break;
                     default:
                         break;
                 }
@@ -2647,7 +3466,11 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         ImGui::TextColored(ImVec4(0.56f, 0.90f, 0.47f, 1.0f), "Turbulence & Noise");
         drawFieldItem({5, "Turbulence Field", UIWidgets::IconType::Noise, IM_COL32(150, 255, 180, 255)});
         drawFieldItem({6, "Curl Noise Field", UIWidgets::IconType::Noise, IM_COL32(120, 255, 220, 255)});
-        
+
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.30f, 1.0f), "Thermal");
+        drawFieldItem({10, "Thermal Field", UIWidgets::IconType::Physics, IM_COL32(255, 140, 80, 255)});
+
         ImGui::EndPopup();
     }
 
@@ -2820,9 +3643,12 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
     // Group 2: Dynamics & Shape Settings
     if (ImGui::BeginTabItem("Dynamics")) {
 
-    const char* types[] = { 
-        "Wind Field", "Gravity Field", "Attractor Field", "Repeller Field", 
-        "Vortex Field", "Turbulence Field", "Curl Noise Field", "Drag Field", "Magnetic Field", "Directional Noise"
+    // Order must match Physics::ForceFieldType exactly — the combo writes the
+    // index straight back as the enum.
+    const char* types[] = {
+        "Wind Field", "Gravity Field", "Attractor Field", "Repeller Field",
+        "Vortex Field", "Turbulence Field", "Curl Noise Field", "Drag Field", "Magnetic Field", "Directional Noise",
+        "Thermal Field"
     };
     int current_type = static_cast<int>(field->type);
     if (ImGui::Combo("Force Type##FFType", &current_type, types, IM_ARRAYSIZE(types))) {
@@ -2839,12 +3665,44 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Limits the volumetric boundary shape within which this force field is active.");
     }
-
-    if (ImGui::DragFloat("Force Strength##FFStrength", &field->strength, 0.1f, -1000.0f, 1000.0f, "%.2f")) ff_changed = true;
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Luminance or speed acceleration strength applied to affected particles/smoke.");
+    if (field->type == Physics::ForceFieldType::Thermal &&
+        field->shape != Physics::ForceFieldShape::Infinite &&
+        field->shape != Physics::ForceFieldShape::Sphere) {
+        // Said out loud rather than quietly ignored. Honouring the box/cylinder
+        // shape needs the field's full local transform on the GPU side of the
+        // ambient pass; a heat source is naturally radial, so that is deferred.
+        ImGui::TextDisabled("(thermal uses a radial profile — box/cylinder/cone "
+                            "fall back to the falloff radius)");
     }
-    
+
+    // A Thermal field exerts no force at all, so the acceleration slider is not
+    // just irrelevant for it — showing it would invite tuning a number nothing
+    // reads. The temperature offset takes its place.
+    const bool is_thermal = field->type == Physics::ForceFieldType::Thermal;
+    if (is_thermal) {
+        if (ImGui::DragFloat("Temperature Offset (K)##FFThermalK",
+                             &field->thermal_delta_kelvin, 5.0f, -2000.0f, 5000.0f, "%.0f")) {
+            ff_changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Kelvin ADDED on top of the local ambient at full strength, then\n"
+                "attenuated by the falloff below. Additive, not absolute: two\n"
+                "burners under one plate are hotter than one, and a negative value\n"
+                "makes a cold sink.\n\n"
+                "Drives Material State Field surfaces (heating, ignition, glow).\n"
+                "It exerts NO force — it will not blow smoke or push particles.\n\n"
+                "For reference: wood ignites at 573 K, paper 506 K, visible red\n"
+                "glow (Draper point) starts at 798 K, iron melts at 1811 K.");
+        }
+        ImGui::TextDisabled("ambient %+0.0f K at the core", field->thermal_delta_kelvin);
+    } else {
+        if (ImGui::DragFloat("Force Strength##FFStrength", &field->strength, 0.1f, -1000.0f, 1000.0f, "%.2f")) ff_changed = true;
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Luminance or speed acceleration strength applied to affected particles/smoke.");
+        }
+    }
+
     // Direction for directional wind/gravity/magnetic
     if (field->type == Physics::ForceFieldType::Wind || 
         field->type == Physics::ForceFieldType::Gravity ||
@@ -2969,11 +3827,25 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
     if (ImGui::DragFloat("Phase Velocity##FFTimePhase", &field->phase, 0.01f, 0.0f, 100.0f, "%.2f")) ff_changed = true;
     
     ImGui::Separator();
+    // ★ A Thermal field exerts no force, so its affect mask is zeroed wholesale
+    // in SimulationForceFieldSnapshot and NONE of these boxes does anything.
+    // Leaving them live reads as "you configured it wrong" when a thermal field
+    // appears not to work — which is exactly how it was first misread.
+    const bool affects_meaningful = field->type != Physics::ForceFieldType::Thermal;
     ImGui::TextDisabled("Affected Targets:");
+    ImGui::BeginDisabled(!affects_meaningful);
     if (ImGui::Checkbox("Gas/Smoke##FFAffectGas", &field->affects_gas)) ff_changed = true; ImGui::SameLine(120);
     if (ImGui::Checkbox("Particles##FFAffectPart", &field->affects_particles)) ff_changed = true; ImGui::SameLine(240);
     if (ImGui::Checkbox("Cloth##FFAffectCloth", &field->affects_cloth)) ff_changed = true; ImGui::SameLine(360);
     if (ImGui::Checkbox("Rigid Bodies##FFAffectRigid", &field->affects_rigidbody)) ff_changed = true;
+    ImGui::EndDisabled();
+    if (!affects_meaningful) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
+                           "A Thermal field exerts no force — these do nothing.");
+        ImGui::TextDisabled("It heats object surfaces (Material State Field) only.\n"
+                            "Targets are chosen by the object: any collider with\n"
+                            "'Ignite on Contact' enabled is heated by this field.");
+    }
         ImGui::EndTabItem();
     }
 

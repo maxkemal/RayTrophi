@@ -131,6 +131,14 @@ public:
     std::vector<Vec3>    solid_vel; // linear velocity of the solid in each solid cell
                                     // (moving colliders); 0 elsewhere. Cell-centered,
                                     // size == solid. Read by advect for momentum transfer.
+    // Compact list of the cell indices where solid[] != 0, rebuilt by the collider
+    // voxelizer whenever it actually restamps the mask. A collider typically
+    // occupies ~1% of a domain, so the per-step boundary enforcement iterates this
+    // list instead of sweeping every cell/face. Purely derived: any consumer must
+    // treat solid_cells_valid == false as "unknown" and fall back to the dense
+    // sweep over solid[] (that is what a deserialized or hand-built grid gets).
+    std::vector<uint32_t> solid_cells;
+    bool solid_cells_valid = false;
     // Lazy, opt-in per-solid-cell gas source rates (density, heat, fuel, flame).
     // Populated only when a collider enables Gas Interaction.
     std::vector<float> solid_gas_density;
@@ -138,9 +146,6 @@ public:
     std::vector<float> solid_gas_fuel;
     std::vector<float> solid_gas_flame;
     std::vector<float> solid_gas_band;
-    std::vector<float> solid_gas_ignition;
-    std::vector<float> solid_gas_fuel_capacity;
-    std::vector<float> solid_gas_burn_rate;
 
     // Variational solid coupling: fractional MAC-FACE open weights (Batty 2007),
     // quantized 0..255 (255 = fully open to fluid, 0 = fully blocked by a solid).
@@ -234,6 +239,10 @@ public:
         pressure.assign(cell_count, 0.0f);
         divergence.assign(cell_count, 0.0f);
         solid.assign(cell_count, 0);
+        // Derived from solid[], so a fresh (all-fluid) mask invalidates it until
+        // the voxelizer rebuilds it.
+        std::vector<uint32_t>().swap(solid_cells);
+        solid_cells_valid = false;
         // Lazy fields carry layout-dependent indexing too. Release them so
         // their respective builders recreate them for the new dimensions.
         std::vector<Vec3>().swap(solid_vel);
@@ -242,9 +251,6 @@ public:
         std::vector<float>().swap(solid_gas_fuel);
         std::vector<float>().swap(solid_gas_flame);
         std::vector<float>().swap(solid_gas_band);
-        std::vector<float>().swap(solid_gas_ignition);
-        std::vector<float>().swap(solid_gas_fuel_capacity);
-        std::vector<float>().swap(solid_gas_burn_rate);
         std::vector<uint8_t>().swap(u_weight);
         std::vector<uint8_t>().swap(v_weight);
         std::vector<uint8_t>().swap(w_weight);
@@ -551,6 +557,15 @@ public:
     float& velZAt(int i, int j, int k) { return vel_z[velZIndex(i, j, k)]; }
     float velZAt(int i, int j, int k) const { return vel_z[velZIndex(i, j, k)]; }
     
+    // True when at least one cell carries a collider. Answers from the compact
+    // list when the voxelizer built it, so the per-step "does this domain have
+    // solids?" question costs O(1) instead of a full mask scan.
+    bool hasAnySolid() const {
+        if (solid.size() != static_cast<size_t>(nx) * ny * nz || solid.empty()) return false;
+        if (solid_cells_valid) return !solid_cells.empty();
+        return std::any_of(solid.begin(), solid.end(), [](uint8_t s) { return s != 0u; });
+    }
+
     bool isSolid(int i, int j, int k) const {
         if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return true;
         return solid[cellIndex(i, j, k)] != 0;

@@ -27,6 +27,7 @@
 #include "json.hpp"
 #include <unordered_map>
 #include <unordered_set>
+#include <cmath>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -212,7 +213,10 @@ namespace TerrainNodesV2 {
         // Primary macro-landform synthesis. Appended for serialized enum stability.
         MountainRange,
         BasinValley,
-        TerrainDetail
+        TerrainDetail,
+        // Tectonic geology. Appended for serialized enum stability.
+        PlateTectonics,
+        Fold
     };
 
     // ============================================================================
@@ -600,105 +604,173 @@ namespace TerrainNodesV2 {
     // NOISE GENERATOR
     // ============================================================================
     
-    enum class NoiseType { 
-        Perlin,      // Gradient FBM noise
-        Voronoi,     // Worley cell noise
-        Simplex,     // Hash-based FBM
+    enum class NoiseType {
+        Perlin,      // Fractal gradient FBM
+        Voronoi,     // Worley cell walls
+        Simplex,     // Turbulence (absolute-folded FBM)
         Ridge,       // Ridge/mountain chains
         Billow,      // Soft rolling hills
         Warped,      // Domain-warped organic
-        // FFT-accelerated noise types (uses CUDA if available, CPU fallback otherwise)
-        FFT_Ocean,   // Phillips spectrum - ocean-like terrain
-        FFT_Ridge,   // FFT-based sharp mountain ridges
-        FFT_Billow,  // FFT-based soft hills
-        FFT_Turb     // FFT-based turbulence
+        // Serialized names retained for graph compatibility. These currently
+        // use deterministic spectral-style CPU patterns, not a Fourier solver.
+        FFT_Ocean,
+        FFT_Ridge,
+        FFT_Billow,
+        FFT_Turb
     };
 
-    enum class NoiseHeightMode {
-        LegacyAmplitude = 0, // Existing graphs: raw 0..1 noise multiplied by Amplitude.
-        WorldMeters = 1      // Base elevation and relief are authored in world metres.
-    };
-    
+    enum class TerrainNoiseModel { RawNoise = 0, Continental, Orogenic, Highlands };
+
     class NoiseGeneratorNode : public TerrainNodeBase {
     public:
         NoiseType noiseType = NoiseType::Perlin;
         int seed = 1337;
-        float scale = 0.1f;            // Terrain-appropriate scale
-        float frequency = 0.01f;       // Detail frequency
-        float amplitude = 1.0f;       // Reasonable height range
-        NoiseHeightMode heightMode = NoiseHeightMode::WorldMeters;
-        float featureSizeMeters = 500.0f;
+        // Height is authored in world metres, always. Feature Size is the
+        // wavelength of the largest landform and Relief is the peak-to-trough
+        // range the node actually delivers; the generator fits its realised
+        // distribution to that range instead of assuming a normalised FBM ever
+        // reaches its own theoretical extremes.
+        float featureSizeMeters = 600.0f;
         float baseElevationMeters = 0.0f;
-        float reliefMeters = 100.0f;
-        int octaves = 6;
+        float reliefMeters = 140.0f;
+        // Absolute metre amplitude of the finest band. Kept independent of
+        // Relief on purpose: as a fraction it disappears on tall terrain, which
+        // is how the valley floors ended up featureless.
+        float groundDetailMeters = 1.5f;
+        int octaves = 10;
         float persistance = 0.5f;
-        float lacunarity = 2.0f;
         float jitter = 1.0f;           // Voronoi specific
-        float warp_strength = 0.3f;    // Domain warp intensity
-        float ridge_offset = 1.0f;     // Ridge noise offset
-        
+        float warp_strength = 0.35f;   // Domain warp intensity
+        float ridge_offset = 1.0f;     // Ridge crest sharpening exponent
+        bool resolutionBandLimit = true;
+        float samplesPerDetail = 3.0f;
+        // Angle-of-repose ceiling for the generated relief. This is a needle
+        // remover, not a terrain shaper: the multifractal base already sits
+        // around 20 deg mean slope, so 60 clips only the extreme tail. Setting
+        // it near the terrain's own mean slope terraces the result instead.
+        // 90 disables the pass.
+        float slopeLimitDegrees = 60.0f;
+        TerrainNoiseModel terrainModel = TerrainNoiseModel::Orogenic;
+        float terrainRoughness = 0.45f;
+        // Diagnostics published by compute() for the panel. The resolution guard
+        // silently drops bands the grid cannot carry, so "Detail Bands 12" can
+        // mean 7; without this readout that gap is invisible and the control
+        // looks broken. Not serialized, not authored.
+        int lastEffectiveBands = 0;
+        float lastFinestBandMeters = 0.0f;
+        float lastGroundWavelengthMeters = 0.0f;
+        float terrainDirection = 25.0f;
+        float valleyStrength = 0.35f;
+
         NoiseGeneratorNode() {
             name = "Noise Generator";
             terrainNodeType = NodeType::NoiseGenerator;
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Macro", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Ridge", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Valley", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             
-            metadata.displayName = "Noise Generator";
+            metadata.displayName = "Terrain Noise Generator";
             metadata.category = "Input";
             metadata.headerColor = IM_COL32(50, 150, 125, 255);
             headerColor = ImVec4(0.2f, 0.6f, 0.5f, 1.0f);
         }
         
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
-        
+
         void drawContent() override {
-            const char* noiseNames[] = { 
-                "Perlin", "Voronoi", "Simplex", "Ridge", "Billow", "Warped",
-                // FFT types
-                "FFT Ocean", "FFT Ridge", "FFT Billow", "FFT Turb"
-            };
-            int noiseIdx = (int)noiseType;
-            if (ImGui::Combo("Type", &noiseIdx, noiseNames, 10)) {
-                noiseType = (NoiseType)noiseIdx;
+            const char* terrainModels[] = { "Raw Noise", "Continental", "Orogenic Mountains", "Eroded Highlands" };
+            int modelIndex = static_cast<int>(terrainModel);
+            if (ImGui::Combo("Terrain Model", &modelIndex, terrainModels, IM_ARRAYSIZE(terrainModels))) {
+                terrainModel = static_cast<TerrainNoiseModel>(modelIndex);
                 dirty = true;
             }
-            
-            // Show FFT status for FFT types
-            if (noiseIdx >= 6) {
-                // FFT type selected - show CUDA status
-                ImGui::TextDisabled("Uses CUDA if available");
+            if (terrainModel == TerrainNoiseModel::RawNoise) {
+                const char* noiseNames[] = {
+                    "Fractal (fBm)", "Voronoi Cells", "Turbulence", "Ridged", "Billow", "Domain Warped"
+                };
+                int noiseIdx = (int)noiseType;
+                if (ImGui::Combo("Type", &noiseIdx, noiseNames, 6)) {
+                    noiseType = (NoiseType)noiseIdx;
+                    dirty = true;
+                }
             }
-            
             if (ImGui::DragInt("Seed", &seed)) dirty = true;
-            const char* heightModes[] = { "Legacy Amplitude", "World Metres" };
-            int heightModeIndex = static_cast<int>(heightMode);
-            if (ImGui::Combo("Height Units", &heightModeIndex, heightModes, 2)) {
-                heightMode = static_cast<NoiseHeightMode>(heightModeIndex);
-                dirty = true;
+            if (ImGui::DragFloat("Feature Size", &featureSizeMeters, 5.0f, 4.0f, 100000.0f, "%.0f m")) dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "World-space wavelength of the largest landform.\n"
+                "Aim for roughly terrain size / 2 to / 20; above the terrain size\n"
+                "the whole tile falls inside one landform and reads as a single blob.");
+            if (ImGui::DragFloat("Base Elevation", &baseElevationMeters, 1.0f, -10000.0f, 10000.0f, "%.1f m")) dirty = true;
+            if (ImGui::DragFloat("Relief", &reliefMeters, 1.0f, 0.0f, 20000.0f, "%.1f m")) dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Peak-to-trough range of this node in world metres.\n"
+                "The generated distribution is fitted to it, so the value is delivered, not approximated.");
+            if (ImGui::DragFloat("Ground Detail", &groundDetailMeters, 0.05f, 0.0f, 50.0f, "%.2f m")) dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Amplitude of the finest band, in absolute metres.\n"
+                "Independent of Relief on purpose: as a fraction it vanishes on tall\n"
+                "terrain and the valley floors read as featureless. 0 disables it.");
+            if (lastGroundWavelengthMeters > 0.0f && groundDetailMeters > 0.0f) {
+                // Amplitude alone says nothing; what the eye reads is amplitude
+                // against the wavelength it sits on. Past ~25 deg this band stops
+                // being ground texture and becomes sandpaper over the landforms.
+                const float groundSlope = std::atan(groundDetailMeters /
+                    (lastGroundWavelengthMeters * 0.5f)) * 57.2957795f;
+                const bool harsh = groundSlope > 25.0f;
+                ImGui::TextColored(harsh ? ImVec4(0.95f, 0.78f, 0.35f, 1.0f)
+                                         : ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
+                    "  %.0f m wavelength -> %.0f deg texture", lastGroundWavelengthMeters, groundSlope);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Local slope this band adds. Above ~25 deg it reads as uniform\n"
+                    "roughness and hides the larger landforms underneath.");
             }
-            if (heightMode == NoiseHeightMode::WorldMeters) {
-                if (ImGui::DragFloat("Feature Size", &featureSizeMeters, 5.0f, 1.0f, 100000.0f, "%.0f m")) dirty = true;
-                if (ImGui::DragFloat("Base Elevation", &baseElevationMeters, 1.0f, -10000.0f, 10000.0f, "%.1f m")) dirty = true;
-                if (ImGui::DragFloat("Relief", &reliefMeters, 1.0f, 0.0f, 20000.0f, "%.1f m")) dirty = true;
-            } else {
-                if (ImGui::DragFloat("Scale", &scale, 0.1f, 0.1f, 10.0f)) dirty = true;
-                if (ImGui::DragFloat("Frequency", &frequency, 0.0001f, 0.0001f, 0.1f, "%.4f")) dirty = true;
-                if (ImGui::DragFloat("Amplitude", &amplitude, 1.0f, 0.0f, 1000.0f)) dirty = true;
+            if (ImGui::SliderFloat("Roughness", &terrainRoughness, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Hurst exponent of the multifractal.\n"
+                "Low gives smooth, broadly dissected relief; high gives fine, hairy ruggedness.");
+            if (ImGui::SliderFloat("Warp", &warp_strength, 0.0f, 1.0f)) dirty = true;
+            if (terrainModel == TerrainNoiseModel::Orogenic) {
+                if (ImGui::SliderFloat("Direction", &terrainDirection, 0.0f, 360.0f, "%.0f deg")) dirty = true;
+                if (ImGui::SliderFloat("Valley Strength", &valleyStrength, 0.0f, 1.0f)) dirty = true;
             }
-            if (ImGui::DragInt("Octaves", &octaves, 1, 1, 12)) dirty = true;
-            if (ImGui::DragFloat("Persistance", &persistance, 0.01f, 0.0f, 1.0f)) dirty = true;
-            if (ImGui::DragFloat("Lacunarity", &lacunarity, 0.1f, 1.0f, 4.0f)) dirty = true;
-            
-            // Type-specific parameters
+            if (ImGui::DragInt("Detail Bands", &octaves, 1, 1, 12)) dirty = true;
+            if (lastEffectiveBands > 0) {
+                if (lastEffectiveBands < octaves) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.35f, 1.0f),
+                        "  using %d of %d - grid limit, finest %.0f m",
+                        lastEffectiveBands, octaves, lastFinestBandMeters);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                        "The grid cannot represent finer bands at this resolution.\n"
+                        "Raise terrain resolution, lower Samples / Detail, or reduce Feature Size.");
+                } else {
+                    ImGui::TextDisabled("  using %d bands, finest %.0f m",
+                        lastEffectiveBands, lastFinestBandMeters);
+                }
+            }
+            if (ImGui::DragFloat("Slope Limit", &slopeLimitDegrees, 0.5f, 25.0f, 90.0f, "%.0f deg")) dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Angle-of-repose ceiling. Removes sub-cell needles that stall droplet\n"
+                "and thermal solvers. Keep it well above the terrain's own mean slope\n"
+                "(~20 deg) or it terraces the relief. 90 disables the pass.");
+            if (ImGui::Checkbox("Resolution-safe Detail", &resolutionBandLimit)) dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Drops bands finer than the terrain grid can represent.\n"
+                "Each layer is measured against its own finest wavelength, including anisotropic stretch.");
+            if (resolutionBandLimit && ImGui::DragFloat("Samples / Detail", &samplesPerDetail, 0.25f, 2.0f, 12.0f, "%.1f cells")) dirty = true;
+
+            if (terrainModel != TerrainNoiseModel::RawNoise) return;
+            if (ImGui::DragFloat("Persistence", &persistance, 0.01f, 0.05f, 0.95f)) dirty = true;
             if (noiseType == NoiseType::Voronoi) {
-                if (ImGui::DragFloat("Jitter", &jitter, 0.01f, 0.0f, 2.0f)) dirty = true;
+                if (ImGui::DragFloat("Jitter", &jitter, 0.01f, 0.0f, 1.0f)) dirty = true;
             }
-            if (noiseType == NoiseType::Ridge || noiseType == NoiseType::FFT_Ridge) {
-                if (ImGui::DragFloat("Ridge Offset", &ridge_offset, 0.01f, 0.5f, 2.0f)) dirty = true;
-            }
-            if (noiseType == NoiseType::Warped) {
-                if (ImGui::DragFloat("Warp Strength", &warp_strength, 0.01f, 0.0f, 1.0f)) dirty = true;
+            if (noiseType == NoiseType::Ridge) {
+                if (ImGui::DragFloat("Crest Sharpness", &ridge_offset, 0.01f, 0.5f, 2.0f)) dirty = true;
             }
         }
         
@@ -709,42 +781,55 @@ namespace TerrainNodesV2 {
             TerrainNodeBase::serializeToJson(j);
             j["noiseType"] = static_cast<int>(noiseType);
             j["seed"] = seed;
-            j["scale"] = scale;
-            j["frequency"] = frequency;
-            j["amplitude"] = amplitude;
-            j["heightMode"] = static_cast<int>(heightMode);
             j["featureSizeMeters"] = featureSizeMeters;
             j["baseElevationMeters"] = baseElevationMeters;
             j["reliefMeters"] = reliefMeters;
+            j["groundDetailMeters"] = groundDetailMeters;
             j["octaves"] = octaves;
             j["persistance"] = persistance;
-            j["lacunarity"] = lacunarity;
             j["jitter"] = jitter;
             j["warp_strength"] = warp_strength;
             j["ridge_offset"] = ridge_offset;
+            j["resolutionBandLimit"] = resolutionBandLimit;
+            j["samplesPerDetail"] = samplesPerDetail;
+            j["slopeLimitDegrees"] = slopeLimitDegrees;
+            j["terrainModel"] = static_cast<int>(terrainModel);
+            j["terrainRoughness"] = terrainRoughness;
+            j["terrainDirection"] = terrainDirection;
+            j["valleyStrength"] = valleyStrength;
         }
         
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
-            if (j.contains("noiseType")) noiseType = static_cast<NoiseType>(j["noiseType"].get<int>());
+            if (j.contains("noiseType")) {
+                int storedType = j["noiseType"].get<int>();
+                // The former FFT-labelled modes were CPU procedural variants.
+                // Migrate them to their honest base equivalents on load.
+                if (storedType == static_cast<int>(NoiseType::FFT_Ocean) ||
+                    storedType == static_cast<int>(NoiseType::FFT_Turb)) storedType = static_cast<int>(NoiseType::Perlin);
+                else if (storedType == static_cast<int>(NoiseType::FFT_Ridge)) storedType = static_cast<int>(NoiseType::Ridge);
+                else if (storedType == static_cast<int>(NoiseType::FFT_Billow)) storedType = static_cast<int>(NoiseType::Billow);
+                noiseType = static_cast<NoiseType>(clampValue(storedType, 0, 5));
+            }
             if (j.contains("seed")) seed = j["seed"].get<int>();
-            if (j.contains("scale")) scale = j["scale"].get<float>();
-            if (j.contains("frequency")) frequency = j["frequency"].get<float>();
-            if (j.contains("amplitude")) amplitude = j["amplitude"].get<float>();
-            // Graphs saved before the explicit height contract retain their exact
-            // raw-amplitude behaviour. Newly created nodes default to metres.
-            heightMode = j.contains("heightMode")
-                ? static_cast<NoiseHeightMode>(clampValue(j["heightMode"].get<int>(), 0, 1))
-                : NoiseHeightMode::LegacyAmplitude;
-            featureSizeMeters = j.value("featureSizeMeters", featureSizeMeters);
+            featureSizeMeters = (std::max)(j.value("featureSizeMeters", featureSizeMeters), 1.0f);
             baseElevationMeters = j.value("baseElevationMeters", baseElevationMeters);
-            reliefMeters = j.value("reliefMeters", reliefMeters);
-            if (j.contains("octaves")) octaves = j["octaves"].get<int>();
-            if (j.contains("persistance")) persistance = j["persistance"].get<float>();
-            if (j.contains("lacunarity")) lacunarity = j["lacunarity"].get<float>();
-            if (j.contains("jitter")) jitter = j["jitter"].get<float>();
-            if (j.contains("warp_strength")) warp_strength = j["warp_strength"].get<float>();
-            if (j.contains("ridge_offset")) ridge_offset = j["ridge_offset"].get<float>();
+            reliefMeters = (std::max)(j.value("reliefMeters", reliefMeters), 0.0f);
+            groundDetailMeters = clampValue(j.value("groundDetailMeters", groundDetailMeters), 0.0f, 50.0f);
+            if (j.contains("octaves")) octaves = clampValue(j["octaves"].get<int>(), 1, 12);
+            persistance = clampValue(j.value("persistance", persistance), 0.05f, 0.95f);
+            jitter = clampValue(j.value("jitter", jitter), 0.0f, 1.0f);
+            warp_strength = clampValue(j.value("warp_strength", warp_strength), 0.0f, 1.0f);
+            ridge_offset = clampValue(j.value("ridge_offset", ridge_offset), 0.5f, 2.0f);
+            resolutionBandLimit = j.value("resolutionBandLimit", resolutionBandLimit);
+            samplesPerDetail = clampValue(j.value("samplesPerDetail", samplesPerDetail), 2.0f, 12.0f);
+            slopeLimitDegrees = clampValue(j.value("slopeLimitDegrees", slopeLimitDegrees), 25.0f, 90.0f);
+            terrainModel = j.contains("terrainModel")
+                ? static_cast<TerrainNoiseModel>(clampValue(j["terrainModel"].get<int>(), 0, 3))
+                : TerrainNoiseModel::RawNoise;
+            terrainRoughness = clampValue(j.value("terrainRoughness", terrainRoughness), 0.0f, 1.0f);
+            terrainDirection = j.value("terrainDirection", terrainDirection);
+            valleyStrength = clampValue(j.value("valleyStrength", valleyStrength), 0.0f, 1.0f);
         }
     };
 
@@ -752,18 +837,28 @@ namespace TerrainNodesV2 {
     // PRIMARY LANDFORM GENERATORS
     // ============================================================================
 
+    enum class MountainLandformPreset {
+        AlpineChain = 0, RoundedMassif, DesertRanges,
+        CoastalMountains, VolcanicHighlands, Custom
+    };
+
     class MountainRangeNode : public TerrainNodeBase {
     public:
+        MountainLandformPreset preset = MountainLandformPreset::AlpineChain;
         int seed = 4201;
         float direction = 25.0f;
         float centerX = 0.5f, centerY = 0.5f;
-        float lengthFraction = 0.9f;
-        float widthMeters = 260.0f;
-        float reliefMeters = 650.0f;
-        float ridgeSharpness = 2.2f;
-        float warp = 0.22f;
-        float branches = 0.35f;
-        float detail = 0.18f;
+        float lengthFraction = 1.05f;
+        float widthMeters = 420.0f;
+        float reliefMeters = 120.0f;
+        float ridgeSharpness = 3.2f;
+        float warp = 0.32f;
+        float branches = 0.62f;
+        float detail = 0.24f;
+        float massif = 0.46f;
+        float foothills = 0.38f;
+        float peakVariation = 0.58f;
+        float asymmetry = 0.12f;
 
         MountainRangeNode() {
             name = "Mountain Range";
@@ -778,25 +873,40 @@ namespace TerrainNodesV2 {
                 "Uplift", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Ridge", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            // Appended outputs preserve serialized pin indices used by existing
+            // projects while exposing the geological fields needed downstream.
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Valley Seed", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Fracture", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             metadata.displayName = "Mountain Range / Orogeny";
             metadata.category = "Landform";
-            metadata.description = "Directional, branching macro-scale mountain uplift";
+            metadata.description = "Metre-scaled orogeny with catchments, ridge hierarchy and geological detail";
             metadata.headerColor = IM_COL32(155, 105, 72, 255);
             headerColor = ImVec4(0.61f, 0.41f, 0.28f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
+        void applyPreset(MountainLandformPreset value);
+        static const char* getPresetName(MountainLandformPreset value);
         std::string getTypeId() const override { return "TerrainV2.MountainRange"; }
         void serializeToJson(nlohmann::json& j) const override {
             TerrainNodeBase::serializeToJson(j);
+            j["landformPreset"] = static_cast<int>(preset);
             j["seed"] = seed; j["direction"] = direction;
             j["centerX"] = centerX; j["centerY"] = centerY;
             j["lengthFraction"] = lengthFraction; j["widthMeters"] = widthMeters;
             j["reliefMeters"] = reliefMeters; j["ridgeSharpness"] = ridgeSharpness;
             j["warp"] = warp; j["branches"] = branches; j["detail"] = detail;
+            j["massif"] = massif; j["foothills"] = foothills;
+            j["peakVariation"] = peakVariation; j["asymmetry"] = asymmetry;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
+            preset = static_cast<MountainLandformPreset>(
+                clampValue(j.value("landformPreset", static_cast<int>(preset)), 0, 5));
             seed = j.value("seed", seed); direction = j.value("direction", direction);
             centerX = clampValue(j.value("centerX", centerX), 0.0f, 1.0f);
             centerY = clampValue(j.value("centerY", centerY), 0.0f, 1.0f);
@@ -807,6 +917,13 @@ namespace TerrainNodesV2 {
             warp = clampValue(j.value("warp", warp), 0.0f, 1.0f);
             branches = clampValue(j.value("branches", branches), 0.0f, 1.0f);
             detail = clampValue(j.value("detail", detail), 0.0f, 1.0f);
+            massif = clampValue(j.value("massif", massif), 0.0f, 1.0f);
+            foothills = clampValue(j.value("foothills", foothills), 0.0f, 1.0f);
+            peakVariation = clampValue(j.value("peakVariation", peakVariation), 0.0f, 1.0f);
+            asymmetry = clampValue(j.value("asymmetry", asymmetry), -1.0f, 1.0f);
+            // Named presets are authoritative; only Custom preserves authored
+            // scalar values. This also migrates the former 10x relief presets.
+            if (preset != MountainLandformPreset::Custom) applyPreset(preset);
         }
     };
 
@@ -918,10 +1035,26 @@ namespace TerrainNodesV2 {
     // EROSION NODES
     // ============================================================================
     
+    enum class HydraulicMultiPassPreset {
+        Balanced = 0,
+        Alpine,
+        Humid,
+        Arid,
+        Custom
+    };
+
     class HydraulicErosionNode : public TerrainNodeBase {
     public:
         HydraulicErosionParams params;
         bool useGPU = true;
+        bool multiPass = true;
+        HydraulicMultiPassPreset multiPassPreset = HydraulicMultiPassPreset::Balanced;
+        double lastEroded = 0.0;
+        double lastDeposited = 0.0;
+        double lastDischarge = 0.0;
+        double lastSedimentFlux = 0.0;
+        float lastSolveMs = 0.0f;
+        int lastExecutedPasses = 0;
         
         // Edge Falloff Settings
         float edgeFalloffWidth = 0.0f;
@@ -941,7 +1074,23 @@ namespace TerrainNodesV2 {
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Erosion Map", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
+                "Erosion", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Deposition", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Discharge", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Sediment Flux", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction, 2));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Channel Width", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::Meters));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Water Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::Meters));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Water Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             
             metadata.displayName = "Hydraulic Erosion";
             metadata.category = "Erosion";
@@ -951,11 +1100,15 @@ namespace TerrainNodesV2 {
         
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
+        void applyMultiPassPreset(HydraulicMultiPassPreset preset);
+        static const char* getMultiPassPresetName(HydraulicMultiPassPreset preset);
         std::string getTypeId() const override { return "TerrainV2.HydraulicErosion"; }
 
         void serializeToJson(nlohmann::json& j) const override {
             TerrainNodeBase::serializeToJson(j);
             j["useGPU"] = useGPU;
+            j["multiPass"] = multiPass;
+            j["multiPassPreset"] = static_cast<int>(multiPassPreset);
             j["params"] = {
                 {"iterations", params.iterations},
                 {"dropletLifetime", params.dropletLifetime},
@@ -967,10 +1120,31 @@ namespace TerrainNodesV2 {
                 {"evaporateSpeed", params.evaporateSpeed},
                 {"gravity", params.gravity},
                 {"erosionRadius", params.erosionRadius},
+                {"initialWater", params.initialWater},
+                {"initialSpeed", params.initialSpeed},
+                {"uphillErosion", params.uphillErosion},
+                {"flatSettling", params.flatSettling},
+                {"velocitySettling", params.velocitySettling},
+                {"minWater", params.minWater},
+                {"minSpeed", params.minSpeed},
+                {"removeSpikes", params.removeSpikes},
+                {"fillPits", params.fillPits},
+                {"smoothSurface", params.smoothSurface},
                 {"seed", params.seed},
                 {"boundaryMode", static_cast<int>(params.boundaryMode)},
                 {"boundaryWidth", params.boundaryWidth},
-                {"boundaryLevel", params.boundaryLevel}
+                {"boundaryLevel", params.boundaryLevel},
+                {"channelEvolution", params.channelEvolution},
+                {"channelIterations", params.channelIterations},
+                {"channelErosion", params.channelErosion},
+                {"channelDeposition", params.channelDeposition},
+                {"channelWidthScale", params.channelWidthScale},
+                {"channelDepthScale", params.channelDepthScale},
+                {"macroDrainage", params.macroDrainage},
+                {"macroValleyScaleMeters", params.macroValleyScaleMeters},
+                {"macroHeadwaterAreaKm2", params.macroHeadwaterAreaKm2},
+                {"macroValleyDepthMeters", params.macroValleyDepthMeters},
+                {"macroValleyFloor", params.macroValleyFloor}
             };
             j["edgeFalloffWidth"] = edgeFalloffWidth;
             j["edgeFalloffValue"] = edgeFalloffValue;
@@ -979,6 +1153,9 @@ namespace TerrainNodesV2 {
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
             if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
+            multiPass = j.value("multiPass", multiPass);
+            multiPassPreset = static_cast<HydraulicMultiPassPreset>(
+                clampValue(j.value("multiPassPreset", static_cast<int>(multiPassPreset)), 0, 4));
             if (j.contains("params")) {
                 const auto& p = j["params"];
                 params.iterations = p.value("iterations", params.iterations);
@@ -991,20 +1168,46 @@ namespace TerrainNodesV2 {
                 params.evaporateSpeed = p.value("evaporateSpeed", params.evaporateSpeed);
                 params.gravity = p.value("gravity", params.gravity);
                 params.erosionRadius = p.value("erosionRadius", params.erosionRadius);
+                params.initialWater = p.value("initialWater", params.initialWater);
+                params.initialSpeed = p.value("initialSpeed", params.initialSpeed);
+                params.uphillErosion = p.value("uphillErosion", params.uphillErosion);
+                params.flatSettling = p.value("flatSettling", params.flatSettling);
+                params.velocitySettling = p.value("velocitySettling", params.velocitySettling);
+                params.minWater = p.value("minWater", params.minWater);
+                params.minSpeed = p.value("minSpeed", params.minSpeed);
+                params.removeSpikes = p.value("removeSpikes", params.removeSpikes);
+                params.fillPits = p.value("fillPits", params.fillPits);
+                params.smoothSurface = p.value("smoothSurface", params.smoothSurface);
                 params.seed = p.value("seed", params.seed);
                 params.boundaryMode = static_cast<ErosionBoundaryMode>(
                     clampValue(p.value("boundaryMode", static_cast<int>(params.boundaryMode)), 0, 2));
                 params.boundaryWidth = clampValue(p.value("boundaryWidth", params.boundaryWidth), 0, 512);
                 params.boundaryLevel = p.value("boundaryLevel", params.boundaryLevel);
+                params.channelEvolution = p.value("channelEvolution", params.channelEvolution);
+                params.channelIterations = clampValue(p.value("channelIterations", params.channelIterations), 0, 128);
+                params.channelErosion = clampValue(p.value("channelErosion", params.channelErosion), 0.0f, 2.0f);
+                params.channelDeposition = clampValue(p.value("channelDeposition", params.channelDeposition), 0.0f, 2.0f);
+                params.channelWidthScale = clampValue(p.value("channelWidthScale", params.channelWidthScale), 0.01f, 20.0f);
+                params.channelDepthScale = clampValue(p.value("channelDepthScale", params.channelDepthScale), 0.01f, 20.0f);
+                params.macroDrainage = p.value("macroDrainage", params.macroDrainage);
+                params.macroValleyScaleMeters = clampValue(p.value("macroValleyScaleMeters", params.macroValleyScaleMeters), 20.0f, 6000.0f);
+                params.macroHeadwaterAreaKm2 = clampValue(p.value("macroHeadwaterAreaKm2", params.macroHeadwaterAreaKm2), 0.0005f, 25.0f);
+                params.macroValleyDepthMeters = clampValue(p.value("macroValleyDepthMeters", params.macroValleyDepthMeters), 0.0f, 500.0f);
+                params.macroValleyFloor = clampValue(p.value("macroValleyFloor", params.macroValleyFloor), 0.0f, 1.0f);
             }
             if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
             if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
         }
     };
 
+    enum class ThermalErosionPreset {
+        Balanced = 0, AlpineScree, DesertRock, SoftSediment, Custom
+    };
+
     class ThermalErosionNode : public TerrainNodeBase {
     public:
         ThermalErosionParams params;
+        ThermalErosionPreset preset = ThermalErosionPreset::Balanced;
         bool useGPU = true;
         
         // Edge Falloff Settings
@@ -1026,6 +1229,16 @@ namespace TerrainNodesV2 {
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            // Append-only output contract: keep Height Out at index 0 for
+            // serialized graph stability.
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Erosion", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Deposition", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Talus", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Rock Exposure", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             
             metadata.displayName = "Thermal Erosion";
             metadata.category = "Erosion";
@@ -1035,15 +1248,24 @@ namespace TerrainNodesV2 {
         
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
+        void applyPreset(ThermalErosionPreset value);
+        static const char* getPresetName(ThermalErosionPreset value);
         std::string getTypeId() const override { return "TerrainV2.ThermalErosion"; }
 
         void serializeToJson(nlohmann::json& j) const override {
             TerrainNodeBase::serializeToJson(j);
             j["useGPU"] = useGPU;
+            j["preset"] = static_cast<int>(preset);
             j["params"] = {
                 {"iterations", params.iterations},
                 {"talusAngle", params.talusAngle},
-                {"erosionAmount", params.erosionAmount}
+                {"erosionAmount", params.erosionAmount},
+                {"anisotropy", params.anisotropy},
+                {"anisotropyDirection", params.anisotropyDirection},
+                {"talusSettling", params.talusSettling},
+                {"sedimentRemoval", params.sedimentRemoval},
+                {"fineDetail", params.fineDetail},
+                {"debrisSizeMeters", params.debrisSizeMeters}
             };
             j["edgeFalloffWidth"] = edgeFalloffWidth;
             j["edgeFalloffValue"] = edgeFalloffValue;
@@ -1052,11 +1274,19 @@ namespace TerrainNodesV2 {
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
             if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
+            preset = static_cast<ThermalErosionPreset>(
+                clampValue(j.value("preset", static_cast<int>(preset)), 0, 4));
             if (j.contains("params")) {
                 const auto& p = j["params"];
                 params.iterations = p.value("iterations", params.iterations);
                 params.talusAngle = p.value("talusAngle", params.talusAngle);
                 params.erosionAmount = p.value("erosionAmount", params.erosionAmount);
+                params.anisotropy = clampValue(p.value("anisotropy", params.anisotropy), 0.0f, 1.0f);
+                params.anisotropyDirection = p.value("anisotropyDirection", params.anisotropyDirection);
+                params.talusSettling = clampValue(p.value("talusSettling", params.talusSettling), 0.0f, 2.0f);
+                params.sedimentRemoval = clampValue(p.value("sedimentRemoval", params.sedimentRemoval), 0.0f, 1.0f);
+                params.fineDetail = p.value("fineDetail", params.fineDetail);
+                params.debrisSizeMeters = (std::max)(p.value("debrisSizeMeters", params.debrisSizeMeters), 0.01f);
             }
             if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
             if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
@@ -3677,7 +3907,11 @@ namespace TerrainNodesV2 {
                                           "Lake Mask", "Lake Depth", "Lake Level", "Lake Shoreline",
                                           "Lake Spill Points", "Lake IDs", "Catchment Area",
                                           "River Discharge", "River Width", "River Water Depth", "River Flow Speed",
-                                          "River Water Level", "River Froude", "River Foam Potential"}) {
+                                          "River Water Level", "River Froude", "River Foam Potential",
+                                          "Hydraulic Erosion", "Hydraulic Deposition",
+                                          "Hydraulic Discharge", "Hydraulic Sediment Flux",
+                                          "Geology Hardness", "Geology Permeability",
+                                          "Geology Fracture", "Geology ID"}) {
                 inputs.push_back(NodeSystem::Pin::createInput(
                     inputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             }
@@ -3703,6 +3937,8 @@ namespace TerrainNodesV2 {
                              NodeSystem::ImageUnit::MetersPerSecond);
             setFieldContract(27, NodeSystem::ImageSemantic::Height);
             setFieldContract(28, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Unitless);
+            setFieldContract(32, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Unitless);
+            setFieldContract(33, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Unitless);
             metadata.displayName = "Terrain Fields Output";
             metadata.category = "Output";
             metadata.description = "Publishes terrain, biome and hydrology fields for downstream systems";
@@ -4020,6 +4256,10 @@ namespace TerrainNodesV2 {
         float dipDegrees = 8.0f;
         float dipAzimuth = 35.0f;
         float warpStrength = 0.35f;
+        float basePermeability = 0.35f;
+        float permeabilityContrast = 0.55f;
+        float fractureDensity = 0.30f;
+        float fractureScaleMeters = 18.0f;
         int seed = 137;
 
         LithologyNode() {
@@ -4033,6 +4273,10 @@ namespace TerrainNodesV2 {
                 "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Geology ID", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Permeability", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Fracture", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             metadata.displayName = "Lithology";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(150, 100, 72, 255);
@@ -4048,6 +4292,10 @@ namespace TerrainNodesV2 {
             j["baseHardness"] = baseHardness; j["hardnessContrast"] = hardnessContrast;
             j["dipDegrees"] = dipDegrees; j["dipAzimuth"] = dipAzimuth;
             j["warpStrength"] = warpStrength; j["seed"] = seed;
+            j["basePermeability"] = basePermeability;
+            j["permeabilityContrast"] = permeabilityContrast;
+            j["fractureDensity"] = fractureDensity;
+            j["fractureScaleMeters"] = fractureScaleMeters;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
@@ -4058,6 +4306,117 @@ namespace TerrainNodesV2 {
             dipDegrees = clampValue(j.value("dipDegrees", dipDegrees), -75.0f, 75.0f);
             dipAzimuth = j.value("dipAzimuth", dipAzimuth);
             warpStrength = clampValue(j.value("warpStrength", warpStrength), 0.0f, 2.0f);
+            basePermeability = clampValue(j.value("basePermeability", basePermeability), 0.0f, 1.0f);
+            permeabilityContrast = clampValue(j.value("permeabilityContrast", permeabilityContrast), 0.0f, 1.0f);
+            fractureDensity = clampValue(j.value("fractureDensity", fractureDensity), 0.0f, 1.0f);
+            fractureScaleMeters = (std::max)(j.value("fractureScaleMeters", fractureScaleMeters), 0.1f);
+            seed = j.value("seed", seed);
+        }
+    };
+
+    class PlateTectonicsNode : public TerrainNodeBase {
+    public:
+        int plateCount = 7;
+        float plateScaleMeters = 900.0f;
+        float upliftMeters = 18.0f;
+        float riftDepthMeters = 6.0f;
+        float boundaryWidthMeters = 90.0f;
+        float interiorWarp = 0.12f;
+        int seed = 271;
+
+        PlateTectonicsNode() {
+            name = "Plate Tectonics";
+            terrainNodeType = NodeType::PlateTectonics;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Macro", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Ridge", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Valley", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Uplift", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Plate Boundary", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Crust ID", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Plate Tectonics";
+            metadata.category = "Geology";
+            metadata.headerColor = IM_COL32(135, 82, 62, 255);
+            headerColor = ImVec4(0.53f, 0.32f, 0.24f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.PlateTectonics"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["plateCount"] = plateCount; j["plateScaleMeters"] = plateScaleMeters;
+            j["upliftMeters"] = upliftMeters; j["riftDepthMeters"] = riftDepthMeters;
+            j["boundaryWidthMeters"] = boundaryWidthMeters; j["interiorWarp"] = interiorWarp;
+            j["seed"] = seed;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            plateCount = clampValue(j.value("plateCount", plateCount), 2, 24);
+            plateScaleMeters = (std::max)(j.value("plateScaleMeters", plateScaleMeters), 10.0f);
+            upliftMeters = clampValue(j.value("upliftMeters", upliftMeters), 0.0f, 5000.0f);
+            riftDepthMeters = clampValue(j.value("riftDepthMeters", riftDepthMeters), 0.0f, 5000.0f);
+            boundaryWidthMeters = (std::max)(j.value("boundaryWidthMeters", boundaryWidthMeters), 1.0f);
+            interiorWarp = clampValue(j.value("interiorWarp", interiorWarp), 0.0f, 1.0f);
+            seed = j.value("seed", seed);
+        }
+    };
+
+    class FoldNode : public TerrainNodeBase {
+    public:
+        float wavelengthMeters = 180.0f;
+        float amplitudeMeters = 6.0f;
+        float directionDegrees = 35.0f;
+        float asymmetry = 0.25f;
+        float pinch = 0.35f;
+        float fractureStrength = 0.55f;
+        int seed = 419;
+
+        FoldNode() {
+            name = "Fold";
+            terrainNodeType = NodeType::Fold;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Compression", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Fold", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Fracture", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Fold / Compression";
+            metadata.category = "Geology";
+            metadata.headerColor = IM_COL32(155, 92, 66, 255);
+            headerColor = ImVec4(0.61f, 0.36f, 0.26f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Fold"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["wavelengthMeters"] = wavelengthMeters; j["amplitudeMeters"] = amplitudeMeters;
+            j["directionDegrees"] = directionDegrees; j["asymmetry"] = asymmetry;
+            j["pinch"] = pinch; j["fractureStrength"] = fractureStrength; j["seed"] = seed;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            wavelengthMeters = (std::max)(j.value("wavelengthMeters", wavelengthMeters), 1.0f);
+            amplitudeMeters = clampValue(j.value("amplitudeMeters", amplitudeMeters), 0.0f, 5000.0f);
+            directionDegrees = j.value("directionDegrees", directionDegrees);
+            asymmetry = clampValue(j.value("asymmetry", asymmetry), -0.95f, 0.95f);
+            pinch = clampValue(j.value("pinch", pinch), 0.0f, 1.0f);
+            fractureStrength = clampValue(j.value("fractureStrength", fractureStrength), 0.0f, 1.0f);
             seed = j.value("seed", seed);
         }
     };
@@ -4069,6 +4428,8 @@ namespace TerrainNodesV2 {
         float dipAzimuth = 35.0f;
         float reliefStrength = 0.015f;
         float edgeSharpness = 2.0f;
+        float boundaryFracture = 0.65f;
+        float permeabilityBoost = 0.35f;
 
         StrataNode() {
             name = "Strata";
@@ -4083,6 +4444,10 @@ namespace TerrainNodesV2 {
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Permeability", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Fracture", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             metadata.displayName = "Strata";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(165, 110, 70, 255);
@@ -4097,6 +4462,8 @@ namespace TerrainNodesV2 {
             j["layerThickness"] = layerThickness; j["dipDegrees"] = dipDegrees;
             j["dipAzimuth"] = dipAzimuth; j["reliefStrength"] = reliefStrength;
             j["edgeSharpness"] = edgeSharpness;
+            j["boundaryFracture"] = boundaryFracture;
+            j["permeabilityBoost"] = permeabilityBoost;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
@@ -4105,6 +4472,8 @@ namespace TerrainNodesV2 {
             dipAzimuth = j.value("dipAzimuth", dipAzimuth);
             reliefStrength = clampValue(j.value("reliefStrength", reliefStrength), 0.0f, 0.25f);
             edgeSharpness = clampValue(j.value("edgeSharpness", edgeSharpness), 0.25f, 8.0f);
+            boundaryFracture = clampValue(j.value("boundaryFracture", boundaryFracture), 0.0f, 1.0f);
+            permeabilityBoost = clampValue(j.value("permeabilityBoost", permeabilityBoost), 0.0f, 1.0f);
         }
     };
 
@@ -4601,6 +4970,13 @@ namespace TerrainNodesV2 {
         // which run before the UI is interactive and don't need backgrounding)
         void evaluateTerrain(TerrainObject* terrain, struct ::SceneData& scene);
 
+        // Explicit Terrain Object resolution change. The requested dimensions
+        // seed procedural sources (Noise, etc.) without silently changing the
+        // normal graph evaluation contract. File/Terrain sources may retain
+        // their authored native resolution.
+        bool evaluateTerrainAtResolution(TerrainObject* terrain, struct ::SceneData& scene,
+                                         int targetWidth, int targetHeight);
+
         // ========================================================================
         // ASYNC EVALUATION (interactive "Evaluate" button path)
         // ========================================================================
@@ -4720,12 +5096,14 @@ namespace TerrainNodesV2 {
         // Surface Composer/Splat Output chain. Existing grass/rock/flow inputs
         // on the composer are preserved.
         bool addSnowLayerSetup(float x = 520.0f, float y = 120.0f);
+        bool removeSnowLayerSetup();
 
         // Non-destructive biome authoring helper. Reuses an existing analysis,
         // exposure, composer and fields-output chain when present, otherwise
         // creates and wires the missing nodes from the active Height Output source.
         bool addBiomeFieldsSetup(BiomeClimatePreset preset,
                                  float x = 520.0f, float y = 120.0f);
+        bool removeBiomeFieldsSetup();
 
         // Adds four independent biome-driven foliage layers (forest, grass,
         // rock and alpine), grouped under one Foliage Set and output sink.
@@ -4735,6 +5113,12 @@ namespace TerrainNodesV2 {
         // The Height Output connection is not replaced; the new branch publishes
         // a watershed, vector river network and owned RiverSpline sink.
         bool addRiverNetworkSetup(float x = 520.0f, float y = 520.0f);
+        bool removeRiverNetworkSetup(TerrainObject* terrain, struct ::SceneData& scene);
+
+        // Inserts a continuous heightfield geology foundation before the active
+        // Height Output and publishes reusable fields for erosion/materials.
+        bool addGeologyFoundationSetup(float x = 420.0f, float y = 320.0f);
+        bool removeGeologyFoundationSetup();
 
         // Destructive example/template graph built from the same public nodes
         // artists use manually. Intended as a learnable starting point.

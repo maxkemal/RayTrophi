@@ -1,4 +1,4 @@
-#include "TerrainManager.h"
+﻿#include "TerrainManager.h"
 #include "scene_data.h"
 #include "Triangle.h" // Added for explicit type visibility
 #include "Hittable.h" // Added for explicit type visibility
@@ -1981,8 +1981,9 @@ static int recommendedEdgeFadeWidth(const TerrainObject* terrain) {
     if (!terrain) return 5;
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
-    // ~3-5% of terrain size, minimum 5 cells, maximum 20 cells
-    return std::clamp(std::min(w, h) / 25, 5, 20);
+    // Four percent of the domain. The old hard 20-cell ceiling formed a moat
+    // just inside the preserved strip on high-resolution procedural terrains.
+    return std::clamp((std::min)(w, h) / 25, 8, 128);
 }
 
 // Public/member compatibility wrapper used by the rest of TerrainManager.
@@ -1994,7 +1995,7 @@ int TerrainManager::getEdgeFadeWidth(TerrainObject* terrain) {
 // EROSION SYSTEM
 // ===========================================================================
 
-void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask, const std::function<void(float)>& progressCallback) {
+void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask, const std::function<void(float)>& progressCallback, HydraulicErosionFields* fields) {
     if (!terrain) return;
     
     int w = terrain->heightmap.width;
@@ -2003,11 +2004,103 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     float cellSize = terrain->heightmap.scale_xz / w;
     bool hasHardness = !terrain->hardnessMap.empty() && terrain->hardnessMap.size() == (size_t)(w * h);
     bool hasMask = !mask.empty() && mask.size() == (size_t)(w * h);
+    if (fields) fields->reset(w, h);
     
     // EDGE PRESERVATION: Save original heights before erosion
     std::vector<float> originalHeights = data;
     int fadeWidth = p.boundaryWidth > 0 ? p.boundaryWidth : getEdgeFadeWidth(terrain);
     fadeWidth = std::clamp(fadeWidth, 1, std::max(1, std::min(w, h) / 2));
+
+    // CPU parity for the Vulkan macro-catchment stage. A descending D8 pass
+    // accumulates contributing area on the same physically sized coarse grid;
+    // the resulting broad incision is bilinearly returned to the authored grid.
+    if (p.macroDrainage && p.macroValleyDepthMeters > 0.0f && w > 2 && h > 2) {
+        const float terrainSize = (std::max)(terrain->heightmap.scale_xz, 1.0f);
+        const float featureScale = std::clamp(p.macroValleyScaleMeters, 20.0f, terrainSize * 0.75f);
+        const float targetMacroCell = (std::max)(featureScale / 10.0f, terrainSize / 384.0f);
+        const int mw = std::clamp((int)std::ceil(terrainSize / targetMacroCell), 64, 384);
+        const int mh = mw, mn = mw * mh;
+        const float macroCell = terrainSize / (float)mw;
+        const float cellAreaKm2 = macroCell * macroCell * 1.0e-6f;
+        const float heightScale = (std::max)(terrain->heightmap.scale_y, 0.001f);
+        std::vector<float> macroHeight((size_t)mn, 0.0f), macroMask((size_t)mn, 1.0f);
+        std::vector<float> macroHardness((size_t)mn, 0.0f), accumulated((size_t)mn, 0.0f);
+        std::vector<float> macroDelta((size_t)mn, 0.0f), macroWidth((size_t)mn, 0.0f);
+        for (int my=0; my<mh; ++my) for (int mx=0; mx<mw; ++mx) {
+            float hs=0.0f, ms=0.0f, rs=0.0f;
+            for (int ty=0; ty<4; ++ty) for (int tx=0; tx<4; ++tx) {
+                const float u=(mx+(tx+0.5f)/4.0f)/(float)mw;
+                const float v=(my+(ty+0.5f)/4.0f)/(float)mh;
+                const int sx=std::clamp((int)(u*w),0,w-1), sy=std::clamp((int)(v*h),0,h-1);
+                const int si=sy*w+sx; hs+=data[si];
+                ms+=hasMask?std::clamp(mask[si],0.0f,1.0f):1.0f;
+                rs+=hasHardness?std::clamp(terrain->hardnessMap[si],0.0f,1.0f):0.0f;
+            }
+            const int mi=my*mw+mx; macroHeight[mi]=hs/16.0f;
+            macroMask[mi]=ms/16.0f; macroHardness[mi]=rs/16.0f;
+        }
+        // Priority-flood conditions closed depressions to their spill level.
+        // MFD accumulation below then represents an actual catchment DAG rather
+        // than trapping water in arbitrary flatland minima.
+        std::vector<float> filled=macroHeight;
+        std::vector<uint8_t> visited((size_t)mn,0u);
+        using FloodCell=std::pair<float,int>;
+        std::priority_queue<FloodCell,std::vector<FloodCell>,std::greater<FloodCell>> flood;
+        auto seedFlood=[&](int i){if(!visited[i]){visited[i]=1u;flood.push({filled[i],i});}};
+        for(int x=0;x<mw;++x){seedFlood(x);seedFlood((mh-1)*mw+x);}
+        for(int y=1;y<mh-1;++y){seedFlood(y*mw);seedFlood(y*mw+mw-1);}
+        while(!flood.empty()){const auto [level,i]=flood.top();flood.pop();const int x=i%mw,y=i/mw;
+            for(int oy=-1;oy<=1;++oy)for(int ox=-1;ox<=1;++ox){if(!ox&&!oy)continue;
+                const int nx=x+ox,ny=y+oy;if(nx<0||ny<0||nx>=mw||ny>=mh)continue;
+                const int ni=ny*mw+nx;if(visited[ni])continue;visited[ni]=1u;
+                filled[ni]=(std::max)(macroHeight[ni],level+1.0e-5f);flood.push({filled[ni],ni});}}
+        std::vector<int> order((size_t)mn);
+        for(int i=0;i<mn;++i){order[(size_t)i]=i;accumulated[i]=macroMask[i];}
+        std::sort(order.begin(),order.end(),[&](int a,int b){return filled[a]>filled[b];});
+        for(int i:order){const int x=i%mw,y=i/mw;float powers[8]{},sum=0.0f;int d=0;
+            for(int oy=-1;oy<=1;++oy)for(int ox=-1;ox<=1;++ox){if(!ox&&!oy)continue;
+                const int nx=x+ox,ny=y+oy;if(nx<0||ny<0||nx>=mw||ny>=mh){++d;continue;}
+                const float distance=(ox&&oy)?1.41421356f:1.0f;
+                const float slope=(filled[i]-filled[ny*mw+nx])/(distance*macroCell);
+                powers[d]=slope>0.0f?std::pow(slope,1.5f):0.0f;sum+=powers[d];++d;}
+            if(sum<=1.0e-12f)continue;d=0;
+            for(int oy=-1;oy<=1;++oy)for(int ox=-1;ox<=1;++ox){if(!ox&&!oy)continue;
+                const int nx=x+ox,ny=y+oy;if(nx>=0&&ny>=0&&nx<mw&&ny<mh&&powers[d]>0.0f)
+                    accumulated[ny*mw+nx]+=accumulated[i]*(powers[d]/sum);++d;}}
+        const int searchRadius=std::clamp((int)std::ceil(featureScale/(std::max)(macroCell,0.001f)*0.55f),1,20);
+        for(int y=0;y<mh;++y)for(int x=0;x<mw;++x){const int i=y*mw+x;float best=0.0f,bestW=0.0f;
+            for(int oy=-searchRadius;oy<=searchRadius;++oy)for(int ox=-searchRadius;ox<=searchRadius;++ox){
+                const int sx=x+ox,sy=y+oy;if(sx<1||sy<1||sx>=mw-1||sy>=mh-1)continue;
+                const float area=accumulated[sy*mw+sx]*cellAreaKm2;
+                float st=std::clamp((area-p.macroHeadwaterAreaKm2)/
+                    (std::max)(p.macroHeadwaterAreaKm2*4.0f,1.0e-6f),0.0f,1.0f);
+                st=st*st*(3.0f-2.0f*st);if(st<=0.0f)continue;
+                const float maturity=std::clamp(std::log2((std::max)(area/p.macroHeadwaterAreaKm2,1.0f))/6.0f,0.0f,1.0f);
+                const float width=featureScale*(0.12f+(0.52f-0.12f)*std::sqrt(maturity));
+                float radial=std::clamp(1.0f-std::sqrt((float)(ox*ox+oy*oy))*macroCell/
+                    (std::max)(width,macroCell),0.0f,1.0f);
+                radial=std::pow(radial,2.4f+(0.62f-2.4f)*std::clamp(p.macroValleyFloor,0.0f,1.0f));
+                const float influence=st*radial*(0.45f+0.55f*maturity);
+                if(influence>best){best=influence;bestW=width;}}
+            macroDelta[i]=-p.macroValleyDepthMeters*best/heightScale;macroWidth[i]=best>0.01f?bestW:0.0f;
+        }
+        auto sampleMacro=[&](const std::vector<float>& values,float px,float py){
+            px=std::clamp(px,0.0f,(float)(mw-1));py=std::clamp(py,0.0f,(float)(mh-1));
+            const int x0=(std::min)((int)px,mw-2),y0=(std::min)((int)py,mh-2);
+            const float tx=px-x0,ty=py-y0;return
+                (values[y0*mw+x0]*(1.0f-tx)+values[y0*mw+x0+1]*tx)*(1.0f-ty)+
+                (values[(y0+1)*mw+x0]*(1.0f-tx)+values[(y0+1)*mw+x0+1]*tx)*ty;};
+        for(int y=0;y<h;++y)for(int x=0;x<w;++x){const int i=y*w+x;
+            const float px=((x+0.5f)/(float)w)*(mw-1),py=((y+0.5f)/(float)h)*(mh-1);
+            const float authored=hasMask?std::clamp(mask[i],0.0f,1.0f):1.0f;
+            const float resistance=hasHardness?std::clamp(terrain->hardnessMap[i],0.0f,1.0f):0.0f;
+            const float delta=sampleMacro(macroDelta,px,py)*authored*(1.0f-resistance*0.92f);
+            const float width=sampleMacro(macroWidth,px,py)*authored;
+            data[i]+=delta;if(fields){fields->erosion[i]+=-delta;
+                fields->channelWidth[i]=(std::max)(fields->channelWidth[i],width);
+                fields->discharge[i]+=std::clamp(width/(std::max)(featureScale,0.001f),0.0f,1.0f)*400.0f;}
+        }
+    }
     
     std::mt19937 gen(p.seed);
     std::uniform_real_distribution<float> distrib(0.0f, 1.0f);
@@ -2063,12 +2156,32 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
         data[y0 * w + x1] += change * tx * (1.0f - ty);
         data[y1 * w + x0] += change * (1.0f - tx) * ty;
         data[y1 * w + x1] += change * tx * ty;
+        if (fields) {
+            auto& field = change >= 0.0f ? fields->deposition : fields->erosion;
+            const float amount = std::abs(change);
+            field[y0 * w + x0] += amount * (1.0f - tx) * (1.0f - ty);
+            field[y0 * w + x1] += amount * tx * (1.0f - ty);
+            field[y1 * w + x0] += amount * (1.0f - tx) * ty;
+            field[y1 * w + x1] += amount * tx * ty;
+        }
     };
 
     auto erodeWithBrush = [&](float x, float y, float amount) {
         if (amount <= 0.0f) return;
         if (p.erosionRadius <= 1) {
             updateHeight(x, y, -amount);
+            return;
+        }
+        if (p.erosionRadius == 2) {
+            // The compact radius-2 disk is a pathological atomic-scatter case
+            // on the Vulkan path at very high droplet counts. Express the same
+            // conserved small footprint as four bilinear taps; this avoids the
+            // unstable dynamic normalization while remaining smooth/sub-cell.
+            const float tap = -amount * 0.25f;
+            updateHeight(x - 0.5f, y, tap);
+            updateHeight(x + 0.5f, y, tap);
+            updateHeight(x, y - 0.5f, tap);
+            updateHeight(x, y + 0.5f, tap);
             return;
         }
 
@@ -2102,7 +2215,9 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
                 if (dist > (float)p.erosionRadius) continue;
                 float t = 1.0f - dist / std::max(1.0f, (float)p.erosionRadius);
                 float weight = t * t * (3.0f - 2.0f * t);
-                data[iy * w + ix] -= amount * (weight / weightSum);
+                const float removed = amount * (weight / weightSum);
+                data[iy * w + ix] -= removed;
+                if (fields) fields->erosion[iy * w + ix] += removed;
             }
         }
     };
@@ -2111,15 +2226,20 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     // runs up to hundreds of thousands of times, and a std::function call per
     // droplet would be measurable overhead for no visible UI benefit.
     const int progressStep = std::max(1, p.iterations / 100);
+    const int spawnMargin = p.boundaryMode == ErosionBoundaryMode::Open
+        ? 2 : std::clamp((std::max)(p.erosionRadius + 2, fadeWidth / 2), 2,
+                         (std::max)(2, (std::min)(w, h) / 3));
     for (int iter = 0; iter < p.iterations; iter++) {
         if (progressCallback && (iter % progressStep) == 0) {
             progressCallback(static_cast<float>(iter) / static_cast<float>(p.iterations));
         }
-        float posX = distrib(gen) * (w - 1);
-        float posY = distrib(gen) * (h - 1);
+        float posX = static_cast<float>(spawnMargin) + distrib(gen) *
+            (std::max)(1.0f, static_cast<float>(w - 1 - spawnMargin * 2));
+        float posY = static_cast<float>(spawnMargin) + distrib(gen) *
+            (std::max)(1.0f, static_cast<float>(h - 1 - spawnMargin * 2));
         float dirX = 0.0f, dirY = 0.0f;
-        float speed = 1.0f;
-        float water = 1.0f;
+        float speed = p.initialSpeed;
+        float water = p.initialWater;
         float sediment = 0.0f;
         float invCellSize = 1.0f / std::max(0.001f, cellSize);
         const float heightScale = std::max(0.001f, terrain->heightmap.scale_y);
@@ -2180,11 +2300,19 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             float flatness = 1.0f - std::min(1.0f, downhillSlope / std::max(p.minSlope * 8.0f, 0.001f));
             float speedBeforePhysics = speed;
 
+            if (fields) {
+                const float discharge = (std::max)(0.0f, water * speed);
+                fields->discharge[gridIdx] += discharge;
+                fields->sediment[gridIdx] += (std::max)(0.0f, sediment) * discharge;
+                fields->directionX[gridIdx] += dirX * discharge;
+                fields->directionY[gridIdx] += dirY * discharge;
+            }
+
             if (deltaHeight > 0) {
                 if (speed > 0.5f && sediment < capacity) {
                     // Limit by the local uphill step, never by absolute elevation.
                     // Adding a constant base height must not change erosion.
-                    float erodeAmount = deltaHeight * 0.3f;
+                    float erodeAmount = deltaHeight * p.uphillErosion;
                     erodeAmount *= hardnessFactor * maskValue;
                     erodeWithBrush(newPosX, newPosY, erodeAmount);
                     sediment += erodeAmount;
@@ -2212,7 +2340,7 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
 
             if (deltaHeight <= 0.0f && sediment > 0.0f && flatness > 0.0f) {
                 float slowFactor = 1.0f - std::min(speed, 1.0f);
-                float settlingRate = (0.04f + p.depositSpeed * 0.25f) * flatness * (0.35f + 0.65f * slowFactor);
+                float settlingRate = (0.04f + p.depositSpeed * 0.25f) * p.flatSettling * flatness * (0.35f + 0.65f * slowFactor);
                 float settlingAmount = std::min(sediment, sediment * settlingRate);
                 if (settlingAmount > 1e-6f) {
                     updateHeight(posX, posY, settlingAmount);
@@ -2226,7 +2354,9 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             if (deltaHeight <= 0.0f && sediment > 0.0f) {
                 float speedDrop = std::max(0.0f, speedBeforePhysics - speed);
                 float speedDropNorm = std::min(1.0f, speedDrop / std::max(speedBeforePhysics + 1e-4f, 0.25f));
-                float transitionSettling = sediment * speedDropNorm * (0.12f + 0.38f * flatness) * (0.4f + 0.6f * (1.0f - water));
+                const float dryness = 1.0f - std::clamp(water / (std::max)(p.initialWater, 1e-4f), 0.0f, 1.0f);
+                float transitionSettling = sediment * speedDropNorm * (0.12f + 0.38f * flatness) *
+                    (0.4f + 0.6f * dryness) * p.velocitySettling;
                 if (transitionSettling > 1e-6f) {
                     updateHeight(posX, posY, transitionSettling);
                     sediment -= transitionSettling;
@@ -2236,7 +2366,7 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             posX = newPosX;
             posY = newPosY;
             
-            if (water < 0.01f || speed < 0.01f) {
+            if (water < p.minWater || speed < p.minSpeed) {
                 if (sediment > 0.0f) {
                     updateHeight(posX, posY, sediment);
                 }
@@ -2245,14 +2375,15 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
         }
     }
     
-    // POST-EROSION: Spike removal pass (gentle thermal smoothing)
-    // This eliminates any remaining isolated spikes
-    std::vector<float> smoothed = data;
-    #pragma omp parallel for
-    for (int y = 1; y < h - 1; y++) {
-        for (int x = 1; x < w - 1; x++) {
-            int idx = y * w + x;
-            float hC = data[idx];
+    std::vector<float> smoothed;
+    if (p.removeSpikes) {
+        // Remove isolated numerical peaks created by concurrent/local updates.
+        smoothed = data;
+        #pragma omp parallel for
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                float hC = data[idx];
             
             // Check if this is a local maximum (spike)
             float hL = data[idx - 1];
@@ -2262,21 +2393,21 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             float avgNeighbor = (hL + hR + hU + hD) * 0.25f;
             
             // If significantly higher than neighbors, smooth it
-            if (hC > avgNeighbor + cellSize * 0.1f) {
-                smoothed[idx] = avgNeighbor * 0.3f + hC * 0.7f;
+                if (hC > avgNeighbor + cellSize * 0.1f) {
+                    smoothed[idx] = avgNeighbor * 0.3f + hC * 0.7f;
+                }
             }
         }
+        data = smoothed;
     }
-    data = smoothed;
-    
-    // POST-EROSION: Pit filling pass (eliminates micro-ponds that cause black triangles)
-    // Same as spike removal but for local minima
-    smoothed = data;
-    #pragma omp parallel for
-    for (int y = 1; y < h - 1; y++) {
-        for (int x = 1; x < w - 1; x++) {
-            int idx = y * w + x;
-            float hC = data[idx];
+
+    if (p.fillPits) {
+        smoothed = data;
+        #pragma omp parallel for
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                float hC = data[idx];
             
             // Check if this is a local minimum (pit)
             float hL = data[idx - 1];
@@ -2287,13 +2418,29 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             float avgNeighbor = (hL + hR + hU + hD) * 0.25f;
             
             // If significantly lower than neighbors (pit), fill it up
-            if (hC < minNeighbor - cellSize * 0.05f) {
-                // Fill to average of neighbors to eliminate the pit
-                smoothed[idx] = avgNeighbor * 0.5f + hC * 0.5f;
+                if (hC < minNeighbor - cellSize * 0.05f) {
+                    smoothed[idx] = avgNeighbor * 0.5f + hC * 0.5f;
+                }
             }
         }
+        data = smoothed;
     }
-    data = smoothed;
+
+    if (p.smoothSurface) {
+        smoothed = data;
+        #pragma omp parallel for
+        for (int y = 1; y < h - 1; ++y) {
+            for (int x = 1; x < w - 1; ++x) {
+                const int idx = y * w + x;
+                float sum = data[idx] * 2.0f;
+                for (int oy = -1; oy <= 1; ++oy)
+                    for (int ox = -1; ox <= 1; ++ox)
+                        if (ox != 0 || oy != 0) sum += data[(y + oy) * w + x + ox];
+                smoothed[idx] = sum * 0.1f;
+            }
+        }
+        data = smoothed;
+    }
     
     // Boundary policy is geometric, not an implicit pull toward height zero.
     if (p.boundaryMode == ErosionBoundaryMode::Preserve) {
@@ -2322,6 +2469,9 @@ void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosion
     const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
     const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
     const float distWeight[8] = {0.707f, 1.0f, 0.707f, 1.0f, 1.0f, 0.707f, 1.0f, 0.707f}; // 1/sqrt(2) for diagonals
+    const float stressRadians = p.anisotropyDirection * 3.14159265f / 180.0f;
+    const float stressX = std::cos(stressRadians);
+    const float stressY = std::sin(stressRadians);
 
     for (int iter = 0; iter < p.iterations; iter++) {
         if (progressCallback) {
@@ -2362,8 +2512,12 @@ void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosion
                     
                     if (slope > effectiveTalus) {
                         float excess = (slope - effectiveTalus) * distWeight[d] * (terrain->heightmap.scale_xz / (float)w) / safeHeightScale;
-                        diffs[d] = excess;
-                        totalExcess += excess;
+                        const float alignment = std::abs(
+                            (dx[d] * stressX + dy[d] * stressY) * distWeight[d]);
+                        const float stressWeight = 1.0f - TerrainNodesV2::clampValue(p.anisotropy, 0.0f, 1.0f) +
+                            TerrainNodesV2::clampValue(p.anisotropy, 0.0f, 1.0f) * (0.35f + 0.65f * alignment);
+                        diffs[d] = excess * stressWeight;
+                        totalExcess += diffs[d];
                         neighborCount++;
                     } else {
                         diffs[d] = 0.0f;
@@ -2372,7 +2526,8 @@ void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosion
                 
                 // Distribute material proportionally to all steep neighbors
                 if (totalExcess > 0.0f && neighborCount > 0) {
-                    float totalMove = totalExcess * 0.5f * p.erosionAmount;
+                    float totalMove = totalExcess * 0.5f * p.erosionAmount *
+                        TerrainNodesV2::clampValue(p.talusSettling, 0.0f, 2.0f);
                     
                     // STABILITY CAP: Never move more than 1/4 of total height or small constant
                     totalMove = fminf(totalMove, 0.05f);
@@ -2394,7 +2549,8 @@ void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosion
                     for (int d = 0; d < 8; d++) {
                         if (diffs[d] > 0.0f) {
                             float weight = diffs[d] / totalExcess;
-                            data[nIdxs[d]] += totalMove * weight;
+                            data[nIdxs[d]] += totalMove * weight *
+                                (1.0f - TerrainNodesV2::clampValue(p.sedimentRemoval, 0.0f, 1.0f));
                         }
                     }
                 }
@@ -3970,12 +4126,14 @@ void TerrainManager::initCuda() {
 // enough to trip a TDR), synchronizing every batch — with realistic droplet counts
 // (tens of thousands to ~1M) that's only a handful of dispatches, nowhere near the
 // 512-descriptor-set cap that bit the pipe-model's per-substep loop.
-static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicErosionParams& p,
-                                      const std::vector<float>& mask) {
+static bool hydraulicErosionGpuVulkan(TerrainObject* terrain,
+                                      const HydraulicErosionParams* stages, size_t stageCount,
+                                      const std::vector<float>& mask, HydraulicErosionFields* fields) {
     using namespace RayTrophiSim;
     std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
     ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
-    if (!backend) return false;
+    if (!backend || !stages || stageCount == 0) return false;
+    const HydraulicErosionParams& p = stages[stageCount - 1];
 
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
@@ -3993,23 +4151,18 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
         uint32_t seed, seedOffset;
         uint32_t hasHardness, hasMask;
         uint32_t dropletCount;
+        float initialWater, initialSpeed;
+        float uphillErosion, flatSettling;
+        float velocitySettling, minWater, minSpeed;
+        int spawnMargin;
+        float maxCellErosionPerBatch;
     } gpuOps{};
-    static_assert(sizeof(DropletPushConstants) == 72, "must match terrain_hydraulic_droplet.comp push_constant size");
+    static_assert(sizeof(DropletPushConstants) == 108, "must match terrain_hydraulic_droplet.comp push_constant size");
 
     gpuOps.mapWidth = w;
     gpuOps.mapHeight = h;
-    gpuOps.brushRadius = p.erosionRadius;
-    gpuOps.dropletLifetime = p.dropletLifetime;
-    gpuOps.inertia = p.inertia;
-    gpuOps.sedimentCapacity = p.sedimentCapacity;
-    gpuOps.minSlope = p.minSlope;
-    gpuOps.erodeSpeed = p.erodeSpeed;
-    gpuOps.depositSpeed = p.depositSpeed;
-    gpuOps.evaporateSpeed = p.evaporateSpeed;
-    gpuOps.gravity = p.gravity;
     gpuOps.cellSize = (float)terrain->heightmap.scale_xz / (float)w;
     gpuOps.heightScale = (float)terrain->heightmap.scale_y;
-    gpuOps.seed = p.seed;
     gpuOps.hasHardness = hasHardness ? 1u : 0u;
     gpuOps.hasMask = hasMask ? 1u : 0u;
 
@@ -4017,13 +4170,67 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
     ComputeBufferHandle hHeight = backend->createBuffer(d);
     ComputeBufferHandle hHardness = backend->createBuffer(d);
     ComputeBufferHandle hMask = backend->createBuffer(d);
+    ComputeBufferHandle hErosion = backend->createBuffer(d);
+    ComputeBufferHandle hDeposition = backend->createBuffer(d);
+    ComputeBufferHandle hDischarge = backend->createBuffer(d);
+    ComputeBufferHandle hSediment = backend->createBuffer(d);
+    ComputeBufferHandle hDirectionX = backend->createBuffer(d);
+    ComputeBufferHandle hDirectionY = backend->createBuffer(d);
+    ComputeBufferHandle hErosionClaim = backend->createBuffer(d);
+    ComputeBufferHandle hBrushCenterErosion = backend->createBuffer(d);
+    ComputeBufferHandle hBrushGatherTemp = backend->createBuffer(d);
+    ComputeBufferHandle hBrushGathered = backend->createBuffer(d);
+    ComputeBufferHandle hChannelDelta = backend->createBuffer(d);
+    ComputeBufferHandle hSedimentNext = backend->createBuffer(d);
+    ComputeBufferHandle hChannelWidth = backend->createBuffer(d);
+    ComputeBufferHandle hWaterDepth = backend->createBuffer(d);
+    ComputeBufferHandle hWaterLevel = backend->createBuffer(d);
+    ComputeBufferHandle hRouteCurrent = backend->createBuffer(d);
+    ComputeBufferHandle hRouteNext = backend->createBuffer(d);
+    ComputeBufferHandle hRouteAccumulated = backend->createBuffer(d);
+    ComputeBufferHandle hMacroHeight{}, hMacroMask{}, hMacroHardness{};
+    ComputeBufferHandle hMacroCurrent{}, hMacroNext{};
+    ComputeBufferHandle hMacroDelta{}, hMacroChannelWidth{};
+    ComputeBufferHandle hMacroWeights{};
     auto cleanup = [&]() {
         if (hHeight.valid())   backend->destroyBuffer(hHeight);
         if (hHardness.valid()) backend->destroyBuffer(hHardness);
         if (hMask.valid())     backend->destroyBuffer(hMask);
+        if (hErosion.valid()) backend->destroyBuffer(hErosion);
+        if (hDeposition.valid()) backend->destroyBuffer(hDeposition);
+        if (hDischarge.valid()) backend->destroyBuffer(hDischarge);
+        if (hSediment.valid()) backend->destroyBuffer(hSediment);
+        if (hDirectionX.valid()) backend->destroyBuffer(hDirectionX);
+        if (hDirectionY.valid()) backend->destroyBuffer(hDirectionY);
+        if (hErosionClaim.valid()) backend->destroyBuffer(hErosionClaim);
+        if (hBrushCenterErosion.valid()) backend->destroyBuffer(hBrushCenterErosion);
+        if (hBrushGatherTemp.valid()) backend->destroyBuffer(hBrushGatherTemp);
+        if (hBrushGathered.valid()) backend->destroyBuffer(hBrushGathered);
+        if (hChannelDelta.valid()) backend->destroyBuffer(hChannelDelta);
+        if (hSedimentNext.valid()) backend->destroyBuffer(hSedimentNext);
+        if (hChannelWidth.valid()) backend->destroyBuffer(hChannelWidth);
+        if (hWaterDepth.valid()) backend->destroyBuffer(hWaterDepth);
+        if (hWaterLevel.valid()) backend->destroyBuffer(hWaterLevel);
+        if (hRouteCurrent.valid()) backend->destroyBuffer(hRouteCurrent);
+        if (hRouteNext.valid()) backend->destroyBuffer(hRouteNext);
+        if (hRouteAccumulated.valid()) backend->destroyBuffer(hRouteAccumulated);
+        if (hMacroHeight.valid()) backend->destroyBuffer(hMacroHeight);
+        if (hMacroMask.valid()) backend->destroyBuffer(hMacroMask);
+        if (hMacroHardness.valid()) backend->destroyBuffer(hMacroHardness);
+        if (hMacroCurrent.valid()) backend->destroyBuffer(hMacroCurrent);
+        if (hMacroNext.valid()) backend->destroyBuffer(hMacroNext);
+        if (hMacroDelta.valid()) backend->destroyBuffer(hMacroDelta);
+        if (hMacroChannelWidth.valid()) backend->destroyBuffer(hMacroChannelWidth);
+        if (hMacroWeights.valid()) backend->destroyBuffer(hMacroWeights);
     };
 
-    bool ok = hHeight.valid() && hHardness.valid() && hMask.valid();
+    bool ok = hHeight.valid() && hHardness.valid() && hMask.valid() &&
+        hErosion.valid() && hDeposition.valid() && hDischarge.valid() &&
+        hSediment.valid() && hDirectionX.valid() && hDirectionY.valid() && hErosionClaim.valid() &&
+        hBrushCenterErosion.valid() && hBrushGatherTemp.valid() && hBrushGathered.valid() &&
+        hChannelDelta.valid() && hSedimentNext.valid() && hChannelWidth.valid() &&
+        hWaterDepth.valid() && hWaterLevel.valid();
+    ok = ok && hRouteCurrent.valid() && hRouteNext.valid() && hRouteAccumulated.valid();
     if (ok) ok = backend->uploadBuffer(hHeight, terrain->heightmap.data.data(), mapSize);
     if (ok) {
         if (hasHardness) ok = backend->uploadBuffer(hHardness, terrain->hardnessMap.data(), mapSize);
@@ -4033,31 +4240,301 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
         if (hasMask) ok = backend->uploadBuffer(hMask, mask.data(), mapSize);
         else { std::vector<float> ones(numPixels, 1.0f); ok = backend->uploadBuffer(hMask, ones.data(), mapSize); }
     }
+    if (ok) {
+        std::vector<float> zeros(numPixels, 0.0f);
+        ok = backend->uploadBuffer(hErosion, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hDeposition, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hDischarge, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hSediment, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hDirectionX, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hDirectionY, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hChannelDelta, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hSedimentNext, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hChannelWidth, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hWaterDepth, zeros.data(), mapSize) &&
+             backend->uploadBuffer(hWaterLevel, zeros.data(), mapSize);
+    }
     if (!ok) { cleanup(); return false; }
 
-    // Batch config matches the CUDA host loop (batchSize=256000, blockSize=128 there;
-    // 256 here to match this codebase's compute-shader convention).
-    constexpr int kBatchSize = 256000;
-    int dropletsProcessed = 0;
-    uint32_t seedOffset = 0;
-    while (ok && dropletsProcessed < p.iterations) {
-        int currentBatch = std::min(kBatchSize, p.iterations - dropletsProcessed);
-        gpuOps.seedOffset = seedOffset;
-        gpuOps.dropletCount = (uint32_t)currentBatch;
-
-        ComputeBufferHandle bufs[3] = { hHeight, hHardness, hMask };
-        ComputeDispatch cmd;
-        cmd.kernel = "terrain_hydraulic_droplet";
-        cmd.groups.groups_x = (uint32_t)((currentBatch + 255) / 256);
-        cmd.buffers = bufs;
-        cmd.buffer_count = 3;
-        cmd.constants = &gpuOps;
-        cmd.constants_size = sizeof(gpuOps);
-        ok = backend->dispatch(cmd);
+    // Resolution-independent catchment solve. The low-resolution grid carries
+    // physical cell area, so a 4K and an 8K build select the same major valleys.
+    // Its broad delta is committed before droplets add fine gullies.
+    if (ok && p.macroDrainage && p.macroValleyDepthMeters > 0.0f) {
+        const float terrainSize = (std::max)(terrain->heightmap.scale_xz, 1.0f);
+        const float featureScale = std::clamp(p.macroValleyScaleMeters, 20.0f, terrainSize * 0.75f);
+        const float targetMacroCell = (std::max)(featureScale / 10.0f, terrainSize / 384.0f);
+        const int macroWidth = std::clamp((int)std::ceil(terrainSize / targetMacroCell), 64, 384);
+        const int macroHeight = macroWidth;
+        const int macroPixels = macroWidth * macroHeight;
+        const size_t macroMapSize = (size_t)macroPixels * sizeof(float);
+        ComputeBufferDesc md; md.size_bytes = macroMapSize;
+        ComputeBufferDesc weightsDesc; weightsDesc.size_bytes = macroMapSize * 8u;
+        hMacroHeight = backend->createBuffer(md); hMacroMask = backend->createBuffer(md);
+        hMacroHardness = backend->createBuffer(md); hMacroCurrent = backend->createBuffer(md);
+        hMacroNext = backend->createBuffer(md);
+        hMacroDelta = backend->createBuffer(md); hMacroChannelWidth = backend->createBuffer(md);
+        hMacroWeights = backend->createBuffer(weightsDesc);
+        ok = hMacroHeight.valid() && hMacroMask.valid() && hMacroHardness.valid() &&
+             hMacroCurrent.valid() && hMacroNext.valid() &&
+             hMacroDelta.valid() && hMacroChannelWidth.valid() && hMacroWeights.valid();
+        struct MacroDownsamplePc { int fullWidth, fullHeight, macroWidth, macroHeight; };
+        MacroDownsamplePc downPc{w,h,macroWidth,macroHeight};
+        const uint32_t macroGroups = (uint32_t)((macroPixels + 255) / 256);
+        if (ok) {
+            ComputeBufferHandle downBufs[6] = {hHeight,hMask,hHardness,
+                hMacroHeight,hMacroMask,hMacroHardness};
+            ComputeDispatch cmd; cmd.kernel="terrain_hydraulic_macro_downsample";
+            cmd.groups.groups_x=macroGroups; cmd.buffers=downBufs; cmd.buffer_count=6;
+            cmd.constants=&downPc; cmd.constants_size=sizeof(downPc); ok=backend->dispatch(cmd);
+        }
+        // Condition depressions first, then build multiple-flow-direction
+        // weights. Unlike the former nearest-neighbor route this lets minor
+        // slope runoff merge progressively into a catchment-scale trunk.
+        std::vector<float> macroInfinity((size_t)macroPixels, 1.0e18f);
+        if (ok) {
+            ok=backend->uploadBuffer(hMacroCurrent,macroInfinity.data(),macroMapSize)&&
+               backend->uploadBuffer(hMacroNext,macroInfinity.data(),macroMapSize);
+        }
+        struct FillPc { int mapWidth,mapHeight; float eps,noiseAmplitude; };
+        FillPc fillPc{macroWidth,macroHeight,1.0e-5f,0.0f};
+        const int fillPasses=std::clamp(macroWidth*2,96,512);
+        for(int pass=0;ok&&pass<fillPasses;++pass){
+            ComputeBufferHandle fillBufs[3]={hMacroHeight,hMacroCurrent,hMacroNext};
+            ComputeDispatch cmd;cmd.kernel="terrain_flow_fill";cmd.groups.groups_x=macroGroups;
+            cmd.buffers=fillBufs;cmd.buffer_count=3;cmd.constants=&fillPc;
+            cmd.constants_size=sizeof(fillPc);ok=backend->dispatch(cmd);
+            if(ok)backend->synchronize();
+            std::swap(hMacroCurrent,hMacroNext);
+        }
+        struct WeightsPc { int mapWidth,mapHeight; float cellSize; };
+        WeightsPc weightsPc{macroWidth,macroHeight,terrainSize/(float)macroWidth};
+        if(ok){ComputeBufferHandle weightBufs[2]={hMacroCurrent,hMacroWeights};
+            ComputeDispatch cmd;cmd.kernel="terrain_flow_weights";cmd.groups.groups_x=macroGroups;
+            cmd.buffers=weightBufs;cmd.buffer_count=2;cmd.constants=&weightsPc;
+            cmd.constants_size=sizeof(weightsPc);ok=backend->dispatch(cmd);}
+        if(ok){std::vector<float> macroRain((size_t)macroPixels,1.0f);
+            ok=backend->uploadBuffer(hMacroCurrent,macroRain.data(),macroMapSize)&&
+               backend->uploadBuffer(hMacroNext,macroRain.data(),macroMapSize);}
+        struct AccumPc { int width,height; } accumPc{macroWidth,macroHeight};
+        const int accumulationPasses=std::clamp(macroWidth*2,96,512);
+        for(int pass=0;ok&&pass<accumulationPasses;++pass){
+            ComputeBufferHandle accumBufs[4]={hMacroWeights,hMacroCurrent,hMacroNext,hMacroMask};
+            ComputeDispatch cmd;cmd.kernel="terrain_hydraulic_macro_accumulate";
+            cmd.groups.groups_x=macroGroups;cmd.buffers=accumBufs;cmd.buffer_count=4;
+            cmd.constants=&accumPc;cmd.constants_size=sizeof(accumPc);ok=backend->dispatch(cmd);
+            if(ok)backend->synchronize();std::swap(hMacroCurrent,hMacroNext);
+        }
+        struct MacroCarvePc {
+            int width,height;
+            float terrainSize,featureScale,headwaterAreaKm2,depthMeters,floorShape,heightScale;
+        } carvePc{macroWidth,macroHeight,terrainSize,featureScale,
+            p.macroHeadwaterAreaKm2,p.macroValleyDepthMeters,p.macroValleyFloor,
+            (float)terrain->heightmap.scale_y};
+        static_assert(sizeof(MacroCarvePc)==32,"must match terrain_hydraulic_macro_carve.comp");
+        if (ok) {
+            ComputeBufferHandle carveBufs[3]={hMacroCurrent,hMacroDelta,hMacroChannelWidth};
+            ComputeDispatch cmd; cmd.kernel="terrain_hydraulic_macro_carve";
+            cmd.groups.groups_x=macroGroups; cmd.buffers=carveBufs;
+            cmd.buffer_count=3; cmd.constants=&carvePc; cmd.constants_size=sizeof(carvePc);
+            ok=backend->dispatch(cmd);
+        }
+        if (ok) {
+            struct MacroApplyPc { int fullWidth,fullHeight,macroWidth,macroHeight; float featureScale; };
+            MacroApplyPc applyPc{w,h,macroWidth,macroHeight,featureScale};
+            ComputeBufferHandle applyBufs[7]={hMask,hHardness,hMacroDelta,hMacroChannelWidth,
+                hChannelDelta,hChannelWidth,hDischarge};
+            ComputeDispatch cmd; cmd.kernel="terrain_hydraulic_macro_apply";
+            cmd.groups.groups_x=(uint32_t)((numPixels+255)/256); cmd.buffers=applyBufs;
+            cmd.buffer_count=7; cmd.constants=&applyPc; cmd.constants_size=sizeof(applyPc);
+            ok=backend->dispatch(cmd);
+        }
+        if (ok) {
+            struct ApplyPc { int width,height; } applyPc{w,h};
+            ComputeBufferHandle applyBufs[4]={hHeight,hChannelDelta,hErosion,hDeposition};
+            ComputeDispatch cmd; cmd.kernel="terrain_hydraulic_channel_apply";
+            cmd.groups.groups_x=(uint32_t)((numPixels+255)/256); cmd.buffers=applyBufs;
+            cmd.buffer_count=4; cmd.constants=&applyPc; cmd.constants_size=sizeof(applyPc);
+            ok=backend->dispatch(cmd);
+        }
         if (ok) backend->synchronize();
+    }
 
-        seedOffset += (uint32_t)currentBatch;
-        dropletsProcessed += currentBatch;
+    // Bound one submission by approximate particle-step work. A fixed 256K
+    // batch monopolized the compute queue for too long at 400+ lifetime and
+    // made viewport/render work appear hung. Gather removed radius-squared
+    // scatter cost; this adaptive cap supplies predictable scheduling points.
+    constexpr int kTargetStepsPerBatch = 16 * 1024 * 1024;
+    uint64_t totalDropletsProcessed = 0;
+    for (size_t stageIndex = 0; ok && stageIndex < stageCount; ++stageIndex) {
+        const HydraulicErosionParams& stage = stages[stageIndex];
+        gpuOps.brushRadius = stage.erosionRadius;
+        gpuOps.dropletLifetime = stage.dropletLifetime;
+        gpuOps.inertia = stage.inertia;
+        gpuOps.sedimentCapacity = stage.sedimentCapacity;
+        gpuOps.minSlope = stage.minSlope;
+        gpuOps.erodeSpeed = stage.erodeSpeed;
+        gpuOps.depositSpeed = stage.depositSpeed;
+        gpuOps.evaporateSpeed = stage.evaporateSpeed;
+        gpuOps.gravity = stage.gravity;
+        gpuOps.seed = stage.seed;
+        gpuOps.initialWater = stage.initialWater;
+        gpuOps.initialSpeed = stage.initialSpeed;
+        gpuOps.uphillErosion = stage.uphillErosion;
+        gpuOps.flatSettling = stage.flatSettling;
+        gpuOps.velocitySettling = stage.velocitySettling;
+        gpuOps.minWater = stage.minWater;
+        gpuOps.minSpeed = stage.minSpeed;
+        // Per-batch physical erosion allowance. This closes the stale-read
+        // atomic scatter hole for every brush radius while allowing later
+        // batches to continue from the newly committed surface.
+        gpuOps.maxCellErosionPerBatch =
+            (std::max)(0.02f, gpuOps.cellSize * 0.5f) /
+            (std::max)(gpuOps.heightScale, 0.001f);
+        const int stageFadeWidth = stage.boundaryWidth > 0
+            ? stage.boundaryWidth : recommendedEdgeFadeWidth(terrain);
+        gpuOps.spawnMargin = stage.boundaryMode == ErosionBoundaryMode::Open
+            ? 2 : std::clamp((std::max)(stage.erosionRadius + 2, stageFadeWidth / 2), 2,
+                             (std::max)(2, (std::min)(w, h) / 3));
+
+        int dropletsProcessed = 0;
+        uint32_t seedOffset = 0;
+        const int stageBatchSize = std::clamp(
+            kTargetStepsPerBatch / (std::max)(stage.dropletLifetime, 1),
+            16384, 65536);
+        while (ok && dropletsProcessed < stage.iterations) {
+            int currentBatch = (std::min)(stageBatchSize, stage.iterations - dropletsProcessed);
+            gpuOps.seedOffset = seedOffset;
+            gpuOps.dropletCount = (uint32_t)currentBatch;
+
+            struct ClaimClearPc { int width, height; } clearPc{w,h};
+            ComputeBufferHandle clearBufs[1] = {hErosionClaim};
+            ComputeDispatch clearCmd;
+            clearCmd.kernel = "terrain_erosion_claim_clear";
+            clearCmd.groups.groups_x = (uint32_t)((numPixels + 255) / 256);
+            clearCmd.buffers = clearBufs;
+            clearCmd.buffer_count = 1;
+            clearCmd.constants = &clearPc;
+            clearCmd.constants_size = sizeof(clearPc);
+            ok = backend->dispatch(clearCmd);
+            clearBufs[0] = hBrushCenterErosion;
+            if (ok) ok = backend->dispatch(clearCmd);
+
+            ComputeBufferHandle bufs[11] = { hHeight, hHardness, hMask, hErosion,
+                hDeposition, hDischarge, hSediment, hDirectionX, hDirectionY,
+                hErosionClaim, hBrushCenterErosion };
+            ComputeDispatch cmd;
+            cmd.kernel = "terrain_hydraulic_droplet";
+            cmd.groups.groups_x = (uint32_t)((currentBatch + 255) / 256);
+            cmd.buffers = bufs;
+            cmd.buffer_count = 11;
+            cmd.constants = &gpuOps;
+            cmd.constants_size = sizeof(gpuOps);
+            if (ok) ok = backend->dispatch(cmd);
+
+            if (ok && stage.erosionRadius > 1) {
+                struct GatherPc { int width, height, radius, horizontal; } gatherPc{
+                    w, h, std::clamp(stage.erosionRadius, 1, 32), 1};
+                ComputeBufferHandle gatherBufs[2] = {hBrushCenterErosion, hBrushGatherTemp};
+                ComputeDispatch gatherCmd;
+                gatherCmd.kernel = "terrain_erosion_gather";
+                gatherCmd.groups.groups_x = (uint32_t)((numPixels + 255) / 256);
+                gatherCmd.buffers = gatherBufs;
+                gatherCmd.buffer_count = 2;
+                gatherCmd.constants = &gatherPc;
+                gatherCmd.constants_size = sizeof(gatherPc);
+                ok = backend->dispatch(gatherCmd);
+                gatherPc.horizontal = 0;
+                gatherBufs[0] = hBrushGatherTemp;
+                gatherBufs[1] = hBrushGathered;
+                if (ok) ok = backend->dispatch(gatherCmd);
+
+                struct GatherApplyPc { int width, height; } applyPc{w,h};
+                ComputeBufferHandle applyBufs[4] = {
+                    hHeight, hErosion, hBrushCenterErosion, hBrushGathered};
+                ComputeDispatch applyCmd;
+                applyCmd.kernel = "terrain_erosion_gather_apply";
+                applyCmd.groups.groups_x = (uint32_t)((numPixels + 255) / 256);
+                applyCmd.buffers = applyBufs;
+                applyCmd.buffer_count = 4;
+                applyCmd.constants = &applyPc;
+                applyCmd.constants_size = sizeof(applyPc);
+                if (ok) ok = backend->dispatch(applyCmd);
+            }
+            if (ok) backend->synchronize();
+
+            seedOffset += (uint32_t)currentBatch;
+            dropletsProcessed += currentBatch;
+            totalDropletsProcessed += static_cast<uint64_t>(currentBatch);
+        }
+    }
+
+    // Route transient droplet discharge downstream and accumulate tributaries.
+    // This is an O(cells * passes) continuation solve, so mature lowland rivers
+    // no longer require millions of additional droplets.
+    if (ok && p.channelEvolution && p.channelIterations > 0) {
+        struct RouteInitPc {
+            int width, height; float rainfallScale, cellSize, heightScale;
+        } initPc{};
+        initPc.width=w; initPc.height=h;
+        // Treat droplet count as solver sampling density, not as rainfall volume.
+        // Roughly 0.8 samples/cell is the reference at which lowland channels were
+        // already continuous; lower counts receive bounded statistical compensation.
+        const double referenceSamples=(std::max)(1.0,double(numPixels)*0.8);
+        initPc.rainfallScale=(float)std::clamp(referenceSamples/
+            (std::max)(1.0,double(totalDropletsProcessed)),1.0,4.0);
+        initPc.cellSize=gpuOps.cellSize;
+        initPc.heightScale=gpuOps.heightScale;
+        const uint32_t routeGroups=(uint32_t)((numPixels+255)/256);
+        ComputeBufferHandle initBufs[4]={hDischarge,hRouteCurrent,hRouteAccumulated,hHeight};
+        ComputeDispatch initCmd; initCmd.kernel="terrain_hydraulic_route_init";
+        initCmd.groups.groups_x=routeGroups; initCmd.buffers=initBufs; initCmd.buffer_count=4;
+        initCmd.constants=&initPc; initCmd.constants_size=sizeof(initPc); ok=backend->dispatch(initCmd);
+        struct RoutePc { int width,height; float retention,minFlow; } routePc{w,h,0.985f,1.0e-5f};
+        const int routePasses=std::clamp(p.channelIterations*2,8,96);
+        for(int pass=0;ok&&pass<routePasses;++pass){
+            ComputeBufferHandle routeBufs[6]={hRouteCurrent,hRouteNext,hRouteAccumulated,
+                hDirectionX,hDirectionY,hHeight};
+            ComputeDispatch routeCmd; routeCmd.kernel="terrain_hydraulic_discharge_route";
+            routeCmd.groups.groups_x=routeGroups; routeCmd.buffers=routeBufs; routeCmd.buffer_count=6;
+            routeCmd.constants=&routePc; routeCmd.constants_size=sizeof(routePc); ok=backend->dispatch(routeCmd);
+            if(ok)backend->synchronize(); std::swap(hRouteCurrent,hRouteNext);
+        }
+    }
+
+    // Mature the droplet-produced runoff in-place while every hydraulic field
+    // is still device resident. This replaces the former second Fluvial solve.
+    if (ok && p.channelEvolution && p.channelIterations > 0) {
+        struct ChannelPc {
+            int width, height, iteration, iterations;
+            float cellSize, heightScale, erosionRate, depositionRate;
+            float widthScale, depthScale, dischargeResponse, sedimentResponse;
+        } channelPc{};
+        static_assert(sizeof(ChannelPc) == 48, "must match terrain_hydraulic_channel_evolve.comp");
+        channelPc.width=w; channelPc.height=h; channelPc.iterations=p.channelIterations;
+        channelPc.cellSize=gpuOps.cellSize; channelPc.heightScale=gpuOps.heightScale;
+        channelPc.erosionRate=p.channelErosion; channelPc.depositionRate=p.channelDeposition;
+        channelPc.widthScale=p.channelWidthScale; channelPc.depthScale=p.channelDepthScale;
+        channelPc.dischargeResponse=0.0025f; channelPc.sedimentResponse=0.0035f;
+        struct ApplyPc { int width, height; } applyPc{w,h};
+        const uint32_t channelGroups=(uint32_t)((numPixels+255)/256);
+        for (int iteration=0; ok && iteration<p.channelIterations; ++iteration) {
+            channelPc.iteration=iteration;
+            ComputeBufferHandle evolveBufs[12]={hHeight,hHardness,hMask,hRouteAccumulated,hSediment,
+                hDirectionX,hDirectionY,hChannelDelta,hSedimentNext,hChannelWidth,hWaterDepth,hWaterLevel};
+            ComputeDispatch evolveCmd; evolveCmd.kernel="terrain_hydraulic_channel_evolve";
+            evolveCmd.groups.groups_x=channelGroups; evolveCmd.buffers=evolveBufs;
+            evolveCmd.buffer_count=12; evolveCmd.constants=&channelPc;
+            evolveCmd.constants_size=sizeof(channelPc); ok=backend->dispatch(evolveCmd);
+            if (ok) {
+                ComputeBufferHandle applyBufs[4]={hHeight,hChannelDelta,hErosion,hDeposition};
+                ComputeDispatch applyCmd; applyCmd.kernel="terrain_hydraulic_channel_apply";
+                applyCmd.groups.groups_x=channelGroups; applyCmd.buffers=applyBufs;
+                applyCmd.buffer_count=4; applyCmd.constants=&applyPc;
+                applyCmd.constants_size=sizeof(applyPc); ok=backend->dispatch(applyCmd);
+            }
+            if (ok) backend->synchronize();
+            std::swap(hSediment,hSedimentNext);
+        }
     }
 
     // Post-processing: repair isolated numerical artifacts, smooth, then apply
@@ -4075,17 +4552,19 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
         postParams.edgeFadeWidth = p.boundaryWidth > 0 ? p.boundaryWidth : recommendedEdgeFadeWidth(terrain);
         postParams.edgeFadeWidth = std::clamp(postParams.edgeFadeWidth, 1, std::max(1, std::min(w, h) / 2));
 
-        ComputeBufferHandle spikeBufs[1] = { hHeight };
-        ComputeDispatch spikeCmd;
-        spikeCmd.kernel = "terrain_spike_removal";
-        spikeCmd.groups.groups_x = groups;
-        spikeCmd.buffers = spikeBufs;
-        spikeCmd.buffer_count = 1;
-        spikeCmd.constants = &postParams;
-        spikeCmd.constants_size = sizeof(postParams);
-        ok = backend->dispatch(spikeCmd);
+        if (p.removeSpikes) {
+            ComputeBufferHandle spikeBufs[1] = { hHeight };
+            ComputeDispatch spikeCmd;
+            spikeCmd.kernel = "terrain_spike_removal";
+            spikeCmd.groups.groups_x = groups;
+            spikeCmd.buffers = spikeBufs;
+            spikeCmd.buffer_count = 1;
+            spikeCmd.constants = &postParams;
+            spikeCmd.constants_size = sizeof(postParams);
+            ok = backend->dispatch(spikeCmd);
+        }
 
-        if (ok) {
+        if (ok && p.fillPits) {
             ComputeBufferHandle pitBufs[1] = { hHeight };
             ComputeDispatch pitCmd;
             pitCmd.kernel = "terrain_pit_fill";
@@ -4097,7 +4576,7 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
             ok = backend->dispatch(pitCmd);
         }
 
-        if (ok) {
+        if (ok && p.smoothSurface) {
             struct SmoothPushConstants { int width, height; } smoothPc{ w, h };
             static_assert(sizeof(SmoothPushConstants) == 8, "must match terrain_smooth.comp push_constant size");
             ComputeBufferHandle smoothBufs[1] = { hHeight };
@@ -4131,6 +4610,19 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
     if (ok) {
         backend->synchronize();
         ok = backend->downloadBuffer(hHeight, terrain->heightmap.data.data(), mapSize);
+        if (ok && fields) {
+            fields->reset(w, h);
+            ok = backend->downloadBuffer(hErosion, fields->erosion.data(), mapSize) &&
+                 backend->downloadBuffer(hDeposition, fields->deposition.data(), mapSize) &&
+                 backend->downloadBuffer(p.channelEvolution ? hRouteAccumulated : hDischarge,
+                                         fields->discharge.data(), mapSize) &&
+                 backend->downloadBuffer(hSediment, fields->sediment.data(), mapSize) &&
+                 backend->downloadBuffer(hDirectionX, fields->directionX.data(), mapSize) &&
+                 backend->downloadBuffer(hDirectionY, fields->directionY.data(), mapSize) &&
+                 backend->downloadBuffer(hChannelWidth, fields->channelWidth.data(), mapSize) &&
+                 backend->downloadBuffer(hWaterDepth, fields->waterDepth.data(), mapSize) &&
+                 backend->downloadBuffer(hWaterLevel, fields->waterLevel.data(), mapSize);
+        }
         if (ok && p.boundaryMode == ErosionBoundaryMode::SeaLevel) {
             const int boundaryWidth = p.boundaryWidth > 0 ? p.boundaryWidth : recommendedEdgeFadeWidth(terrain);
             blendTerrainEdgesToLevel(terrain->heightmap.data, w, h, boundaryWidth, p.boundaryLevel);
@@ -4145,13 +4637,21 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicEro
     return ok;
 }
 
-void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask) {
+void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask, HydraulicErosionFields* fields) {
     if (!terrain) return;
 
-    if (hydraulicErosionGpuVulkan(terrain, params, mask)) {
+    if (hydraulicErosionGpuVulkan(terrain, &params, 1, mask, fields)) {
         updateTerrainMesh(terrain);
         terrain->dirty_mesh = true;
         SCENE_LOG_INFO("[GPU Erosion] Droplet hydraulic erosion complete (Vulkan compute).");
+        return;
+    }
+
+    // CUDA's legacy kernel only returns height. When field products were
+    // requested, preserve their physical meaning by using the instrumented CPU
+    // solver instead of fabricating maps from the final height difference.
+    if (fields) {
+        hydraulicErosion(terrain, params, mask, nullptr, fields);
         return;
     }
 
@@ -4382,11 +4882,62 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     SCENE_LOG_INFO("[GPU Erosion] Complete with post-processing!");
 }
 
+void TerrainManager::hydraulicErosionMultiPass(
+    TerrainObject* terrain, const std::vector<HydraulicErosionParams>& stages,
+    bool useGPU, const std::vector<float>& mask,
+    const std::function<void(float)>& progressCallback, HydraulicErosionFields* fields) {
+    if (!terrain || stages.empty()) return;
+
+    if (useGPU && hydraulicErosionGpuVulkan(terrain, stages.data(), stages.size(), mask, fields)) {
+        updateTerrainMesh(terrain);
+        terrain->dirty_mesh = true;
+        SCENE_LOG_INFO("[GPU Erosion] Resident multi-pass hydraulic erosion complete (" +
+                       std::to_string(stages.size()) + " stages).");
+        return;
+    }
+
+    HydraulicErosionFields aggregate;
+    HydraulicErosionFields current;
+    aggregate.reset(terrain->heightmap.width, terrain->heightmap.height);
+    for (size_t stageIndex = 0; stageIndex < stages.size(); ++stageIndex) {
+        HydraulicErosionParams stage = stages[stageIndex];
+        // Stabilization is a terminal operation; intermediate smoothing would
+        // erase the channels the next stage is meant to mature.
+        if (stageIndex + 1 < stages.size()) {
+            stage.removeSpikes = false;
+            stage.fillPits = false;
+            stage.smoothSurface = false;
+        }
+        std::function<void(float)> stageProgress;
+        if (progressCallback) {
+            stageProgress = [&, stageIndex](float f) {
+                progressCallback((static_cast<float>(stageIndex) + f) /
+                                 static_cast<float>(stages.size()));
+            };
+        }
+        hydraulicErosion(terrain, stage, mask, stageProgress,
+                         fields ? &current : nullptr);
+        if (fields) {
+            const size_t count = aggregate.erosion.size();
+            for (size_t i = 0; i < count; ++i) {
+                aggregate.erosion[i] += current.erosion[i];
+                aggregate.deposition[i] += current.deposition[i];
+                aggregate.discharge[i] += current.discharge[i];
+                aggregate.sediment[i] += current.sediment[i];
+                aggregate.directionX[i] += current.directionX[i];
+                aggregate.directionY[i] += current.directionY[i];
+            }
+        }
+    }
+    if (fields) *fields = std::move(aggregate);
+}
+
 // Tries the Vulkan compute path for thermal erosion (works on any GPU vendor,
 // no CUDA required). Returns false if the shared Vulkan compute backend is
 // unavailable or any step fails, leaving `terrain` untouched so the caller can
 // fall back to the CUDA/CPU path.
-static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosionParams& p) {
+static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosionParams& p,
+                                    const std::vector<float>& mask) {
     using namespace RayTrophiSim;
     std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
     ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
@@ -4397,6 +4948,7 @@ static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosion
     int numPixels = w * h;
     size_t mapSize = (size_t)numPixels * sizeof(float);
     bool hasHardness = terrain->hardnessMap.size() == (size_t)numPixels;
+    bool hasMask = mask.size() == (size_t)numPixels;
 
     // NOTE: intentionally NOT TerrainPhysics::ThermalErosionParamsGPU — that struct
     // carries a trailing bool + pointer (for the CUDA hardness map arg) whose size/
@@ -4407,6 +4959,9 @@ static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosion
         int mapWidth, mapHeight;
         float talusAngle, erosionAmount;
         float cellSize, heightScale;
+        uint32_t hasMask, hasHardness;
+        float anisotropy, directionX, directionY;
+        float talusSettling, sedimentRemoval;
     } gpuOps{};
     gpuOps.mapWidth = w;
     gpuOps.mapHeight = h;
@@ -4414,19 +4969,40 @@ static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosion
     gpuOps.erosionAmount = p.erosionAmount;
     gpuOps.cellSize = (float)terrain->heightmap.scale_xz / (float)w;
     gpuOps.heightScale = (float)terrain->heightmap.scale_y;
-    static_assert(sizeof(ThermalPushConstants) == 24, "must match terrain_thermal[_hardness].comp push_constant size");
+    gpuOps.hasMask = hasMask ? 1u : 0u;
+    gpuOps.hasHardness = hasHardness ? 1u : 0u;
+    gpuOps.anisotropy = std::clamp(p.anisotropy, 0.0f, 1.0f);
+    const float stressRadians = p.anisotropyDirection * 3.14159265f / 180.0f;
+    gpuOps.directionX = std::cos(stressRadians);
+    gpuOps.directionY = std::sin(stressRadians);
+    gpuOps.talusSettling = std::clamp(p.talusSettling, 0.0f, 2.0f);
+    gpuOps.sedimentRemoval = std::clamp(p.sedimentRemoval, 0.0f, 1.0f);
+    static_assert(sizeof(ThermalPushConstants) == 52, "must match terrain_thermal_flux/apply.comp push_constant size");
 
     ComputeBufferDesc d; d.size_bytes = mapSize;
-    ComputeBufferHandle hHeight = backend->createBuffer(d);
+    ComputeBufferDesc fluxDesc; fluxDesc.size_bytes = mapSize * 8u;
+    ComputeBufferHandle hHeightA = backend->createBuffer(d);
+    ComputeBufferHandle hHeightB = backend->createBuffer(d);
     ComputeBufferHandle hHardness = hasHardness ? backend->createBuffer(d) : ComputeBufferHandle{};
+    ComputeBufferHandle hMask = backend->createBuffer(d);
+    ComputeBufferHandle hFlux = backend->createBuffer(fluxDesc);
     auto cleanup = [&]() {
-        if (hHeight.valid()) backend->destroyBuffer(hHeight);
+        if (hHeightA.valid()) backend->destroyBuffer(hHeightA);
+        if (hHeightB.valid()) backend->destroyBuffer(hHeightB);
         if (hHardness.valid()) backend->destroyBuffer(hHardness);
+        if (hMask.valid()) backend->destroyBuffer(hMask);
+        if (hFlux.valid()) backend->destroyBuffer(hFlux);
     };
 
-    bool ok = hHeight.valid() && (!hasHardness || hHardness.valid());
-    if (ok) ok = backend->uploadBuffer(hHeight, terrain->heightmap.data.data(), mapSize);
+    bool ok = hHeightA.valid() && hHeightB.valid() && hMask.valid() && hFlux.valid() &&
+        (!hasHardness || hHardness.valid());
+    if (ok) ok = backend->uploadBuffer(hHeightA, terrain->heightmap.data.data(), mapSize) &&
+                 backend->uploadBuffer(hHeightB, terrain->heightmap.data.data(), mapSize);
     if (ok && hasHardness) ok = backend->uploadBuffer(hHardness, terrain->hardnessMap.data(), mapSize);
+    if (ok) {
+        if (hasMask) ok = backend->uploadBuffer(hMask, mask.data(), mapSize);
+        else { std::vector<float> ones(numPixels, 1.0f); ok = backend->uploadBuffer(hMask, ones.data(), mapSize); }
+    }
     if (!ok) { cleanup(); return false; }
 
     const uint32_t groups = (uint32_t)((numPixels + 255) / 256);
@@ -4437,24 +5013,27 @@ static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosion
     // bails out to the CUDA/CPU fallback with no visible error. See
     // project_terrain_erosion_gpu_migration memory.
     constexpr int kSyncBatch = 128;
+    ComputeBufferHandle hRead = hHeightA;
+    ComputeBufferHandle hWrite = hHeightB;
     for (int i = 0; i < p.iterations && ok; ++i) {
         ComputeDispatch cmd;
         cmd.groups.groups_x = groups;
         cmd.constants = &gpuOps;
         cmd.constants_size = sizeof(gpuOps);
-        if (hasHardness) {
-            ComputeBufferHandle bufs[2] = { hHeight, hHardness };
-            cmd.kernel = "terrain_thermal_hardness";
-            cmd.buffers = bufs;
-            cmd.buffer_count = 2;
-            ok = backend->dispatch(cmd);
-        } else {
-            ComputeBufferHandle bufs[1] = { hHeight };
-            cmd.kernel = "terrain_thermal";
-            cmd.buffers = bufs;
-            cmd.buffer_count = 1;
+        ComputeBufferHandle fluxBufs[4] = { hRead,
+            hasHardness ? hHardness : hMask, hMask, hFlux };
+        cmd.kernel = "terrain_thermal_flux";
+        cmd.buffers = fluxBufs;
+        cmd.buffer_count = 4;
+        ok = backend->dispatch(cmd);
+        if (ok) {
+            ComputeBufferHandle applyBufs[3] = { hRead, hFlux, hWrite };
+            cmd.kernel = "terrain_thermal_apply";
+            cmd.buffers = applyBufs;
+            cmd.buffer_count = 3;
             ok = backend->dispatch(cmd);
         }
+        if (ok) std::swap(hRead, hWrite);
         if (ok && (i % kSyncBatch) == (kSyncBatch - 1)) backend->synchronize();
     }
 
@@ -4469,7 +5048,7 @@ static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosion
         postParams.spikeThreshold = cellSize * 0.1f;
         postParams.edgeFadeWidth = std::max(3, w / 40);
 
-        ComputeBufferHandle bufs[1] = { hHeight };
+        ComputeBufferHandle bufs[1] = { hRead };
         ComputeDispatch cmd;
         cmd.kernel = "terrain_pit_fill";
         cmd.groups.groups_x = groups;
@@ -4482,7 +5061,7 @@ static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosion
 
     if (ok) {
         backend->synchronize();
-        ok = backend->downloadBuffer(hHeight, terrain->heightmap.data.data(), mapSize);
+        ok = backend->downloadBuffer(hRead, terrain->heightmap.data.data(), mapSize);
     }
 
     if (!ok) {
@@ -4495,10 +5074,17 @@ static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosion
 void TerrainManager::thermalErosionGPU(TerrainObject* terrain, const ThermalErosionParams& p, const std::vector<float>& mask) {
     if (!terrain) return;
 
-    if (thermalErosionGpuVulkan(terrain, p)) {
+    if (thermalErosionGpuVulkan(terrain, p, mask)) {
         updateTerrainMesh(terrain);
         terrain->dirty_mesh = true;
         SCENE_LOG_INFO("[GPU Thermal] Completed " + std::to_string(p.iterations) + " iterations (Vulkan compute).");
+        return;
+    }
+
+    // Legacy CUDA thermal kernels have no mask binding. Preserve semantic
+    // parity instead of silently eroding outside the authored selection.
+    if (!mask.empty()) {
+        thermalErosion(terrain, p, mask);
         return;
     }
 

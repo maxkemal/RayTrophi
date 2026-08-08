@@ -1,4 +1,7 @@
 ﻿#include "globals.h"
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 // Include new node system to verify compilation
 #include "NodeSystemV2.h"
@@ -86,6 +89,49 @@ std::atomic<bool> g_vulkan_trim_recreate_requested = false;
 
 RenderSettings render_settings;  // Uses default values from header
 UILogger g_sceneLog; // global logger’ın tanımı burada
+
+namespace {
+std::mutex& sceneLogOnChangeMutex() {
+    static std::mutex m;
+    return m;
+}
+std::unordered_map<std::string, long long>& sceneLogOnChangeStates() {
+    static std::unordered_map<std::string, long long> s;
+    return s;
+}
+}
+
+void sceneLogOnChangeReset() {
+    // ★ The recorded states MUST be dropped when the scene is replaced.
+    //
+    // Two runs of the same script in one session (new project in between) were
+    // compared to find the black-band trigger, and the second run's gate lines
+    // were simply MISSING — not because the gates did not fire, but because the
+    // state carried over from the first run and nothing had "changed". An
+    // edge-triggered diagnostic silently reports nothing across a scene reset,
+    // which is exactly the ambiguity this whole mechanism exists to remove.
+    std::lock_guard<std::mutex> lock(sceneLogOnChangeMutex());
+    sceneLogOnChangeStates().clear();
+}
+
+void sceneLogOnChange(const std::string& key, long long state, const std::string& msg) {
+    std::mutex& s_mutex = sceneLogOnChangeMutex();
+    std::unordered_map<std::string, long long>& s_states = sceneLogOnChangeStates();
+    {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        auto it = s_states.find(key);
+        if (it != s_states.end() && it->second == state) return;
+        s_states[key] = state;
+    }
+    // Deliberately goes to SceneLog.txt only. A separate append-only file was
+    // used briefly while chasing the disappearing fluid surface, because
+    // SceneLog.txt is truncated on every launch and relaunching after a repro
+    // destroyed the evidence. That is a capture workflow, not a permanent
+    // need: an unrotated file nobody reads only grows. If a future
+    // investigation needs cross-session capture, copy SceneLog.txt before
+    // relaunching.
+    SCENE_LOG_WARN(msg);
+}
 
 
 

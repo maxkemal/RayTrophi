@@ -198,6 +198,13 @@ json emitterToJson(const RayTrophiSim::ParticleEmitterDesc& e) {
     j["angular_jitter"] = e.angular_jitter;
     j["enabled"] = e.enabled;
     j["seed"] = e.seed;
+    j["parent_object"] = e.parent_object;
+    j["velocity_space"] = (int)e.velocity_space;
+    j["inherit_velocity"] = e.inherit_velocity;
+    j["override_grid_deposit"] = e.override_grid_deposit;
+    j["grid_density_deposit"] = e.grid_density_deposit;
+    j["grid_temperature_deposit"] = e.grid_temperature_deposit;
+    j["grid_fuel_deposit"] = e.grid_fuel_deposit;
     return j;
 }
 
@@ -228,6 +235,14 @@ RayTrophiSim::ParticleEmitterDesc jsonToEmitter(const json& j) {
     if (j.contains("angular_jitter")) e.angular_jitter = j["angular_jitter"];
     if (j.contains("enabled")) e.enabled = j["enabled"];
     if (j.contains("seed")) e.seed = j["seed"];
+    if (j.contains("parent_object")) e.parent_object = j["parent_object"];
+    if (j.contains("velocity_space"))
+        e.velocity_space = (RayTrophiSim::SimulationEmissionVelocitySpace)j["velocity_space"];
+    if (j.contains("inherit_velocity")) e.inherit_velocity = j["inherit_velocity"];
+    if (j.contains("override_grid_deposit")) e.override_grid_deposit = j["override_grid_deposit"];
+    if (j.contains("grid_density_deposit")) e.grid_density_deposit = j["grid_density_deposit"];
+    if (j.contains("grid_temperature_deposit")) e.grid_temperature_deposit = j["grid_temperature_deposit"];
+    if (j.contains("grid_fuel_deposit")) e.grid_fuel_deposit = j["grid_fuel_deposit"];
     return e;
 }
 
@@ -256,9 +271,13 @@ json colliderToJson(const RayTrophiSim::ParticleColliderDesc& c) {
     j["gas_flame_rate"] = c.gas_flame_rate;
     j["gas_surface_band_voxels"] = c.gas_surface_band_voxels;
     j["gas_ignite_on_contact"] = c.gas_ignite_on_contact;
-    j["gas_ignition_temperature"] = c.gas_ignition_temperature;
-    j["gas_surface_fuel_capacity"] = c.gas_surface_fuel_capacity;
-    j["gas_surface_burn_rate"] = c.gas_surface_burn_rate;
+    j["msf_substance"] = c.msf_substance;
+    j["msf_override_ignition"] = c.msf_override.override_ignition;
+    j["msf_ignition_kelvin"] = c.msf_override.ignition_kelvin;
+    j["msf_burn_rate_scale"] = c.msf_override.burn_rate_scale;
+    j["msf_fuel_capacity_scale"] = c.msf_override.fuel_capacity_scale;
+    j["msf_mask_resolution"] = c.msf_mask_resolution;
+    j["msf_generate_char_mask"] = c.msf_generate_char_mask;
     j["sdf_resolution_mode"] = c.sdf_resolution_mode;
     j["decimation_ratio"] = c.decimation_ratio;
     j["draw_wireframe"] = c.draw_wireframe;
@@ -292,9 +311,13 @@ RayTrophiSim::ParticleColliderDesc jsonToCollider(const json& j) {
     if (j.contains("gas_flame_rate")) c.gas_flame_rate = j["gas_flame_rate"];
     if (j.contains("gas_surface_band_voxels")) c.gas_surface_band_voxels = j["gas_surface_band_voxels"];
     if (j.contains("gas_ignite_on_contact")) c.gas_ignite_on_contact = j["gas_ignite_on_contact"];
-    if (j.contains("gas_ignition_temperature")) c.gas_ignition_temperature = j["gas_ignition_temperature"];
-    if (j.contains("gas_surface_fuel_capacity")) c.gas_surface_fuel_capacity = j["gas_surface_fuel_capacity"];
-    if (j.contains("gas_surface_burn_rate")) c.gas_surface_burn_rate = j["gas_surface_burn_rate"];
+    if (j.contains("msf_substance")) c.msf_substance = j["msf_substance"];
+    if (j.contains("msf_override_ignition")) c.msf_override.override_ignition = j["msf_override_ignition"];
+    if (j.contains("msf_ignition_kelvin")) c.msf_override.ignition_kelvin = j["msf_ignition_kelvin"];
+    if (j.contains("msf_burn_rate_scale")) c.msf_override.burn_rate_scale = j["msf_burn_rate_scale"];
+    if (j.contains("msf_fuel_capacity_scale")) c.msf_override.fuel_capacity_scale = j["msf_fuel_capacity_scale"];
+    if (j.contains("msf_mask_resolution")) c.msf_mask_resolution = j["msf_mask_resolution"];
+    if (j.contains("msf_generate_char_mask")) c.msf_generate_char_mask = j["msf_generate_char_mask"];
     if (j.contains("sdf_resolution_mode")) c.sdf_resolution_mode = j["sdf_resolution_mode"];
     if (j.contains("decimation_ratio")) c.decimation_ratio = j["decimation_ratio"];
     if (j.contains("draw_wireframe")) c.draw_wireframe = j["draw_wireframe"];
@@ -328,6 +351,9 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["adaptive_lock_floor"] = d.adaptive_lock_floor;
     j["adaptive_floor_y"] = d.adaptive_floor_y;
     j["channels"] = d.channels;
+    j["thermal_override_enabled"] = d.thermal_override_enabled;
+    j["thermal_ambient_kelvin"] = d.thermal_ambient_kelvin;
+    j["thermal_oxygen"] = d.thermal_oxygen;
 
     // APICSolverParams
     j["fluid_params"]["gravity"] = vec3ToJson(d.fluid_params.gravity);
@@ -363,6 +389,20 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["max_affine"] = d.fluid_params.max_affine;
     j["fluid_params"]["cpu_threads"] = d.fluid_params.cpu_threads;
     j["fluid_params"]["parallel_particle_threshold"] = d.fluid_params.parallel_particle_threshold;
+    j["fluid_params"]["fuel_profile"] = {
+        {"flammable", d.fluid_params.fuel_profile.flammable},
+        {"extinguishing", d.fluid_params.fuel_profile.extinguishing},
+        {"flash_temperature", d.fluid_params.fuel_profile.flash_temperature},
+        {"autoignition_temperature", d.fluid_params.fuel_profile.autoignition_temperature},
+        {"vaporization_rate", d.fluid_params.fuel_profile.vaporization_rate},
+        {"heat_capacity", d.fluid_params.fuel_profile.heat_capacity},
+        {"latent_heat", d.fluid_params.fuel_profile.latent_heat},
+        {"cooling_power", d.fluid_params.fuel_profile.cooling_power},
+        {"oxygen_dilution", d.fluid_params.fuel_profile.oxygen_dilution},
+        {"flame_persistence", d.fluid_params.fuel_profile.flame_persistence}
+    };
+    j["fluid_params"]["chemistry_preset"] =
+        static_cast<int>(d.fluid_params.chemistry_preset);
 
     j["fluid_seed_min"] = vec3ToJson(d.fluid_seed_min);
     j["fluid_seed_max"] = vec3ToJson(d.fluid_seed_max);
@@ -374,6 +414,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_seed_mode"] = (int)d.fluid_seed_mode;
     j["fluid_fill_level"] = d.fluid_fill_level;
     j["fluid_flammable"] = d.fluid_flammable;
+    j["fluid_extinguishing"] = d.fluid_extinguishing;
     j["fluid_auto_ignite"] = d.fluid_auto_ignite;
     j["fluid_ignition_temperature"] = d.fluid_ignition_temperature;
     j["fluid_evaporation_rate"] = d.fluid_evaporation_rate;
@@ -381,6 +422,8 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_combustion_heat_release"] = d.fluid_combustion_heat_release;
     j["fluid_combustion_smoke_yield"] = d.fluid_combustion_smoke_yield;
     j["fluid_surface_cooling"] = d.fluid_surface_cooling;
+    j["fluid_cooling_power"] = d.fluid_cooling_power;
+    j["fluid_oxygen_dilution"] = d.fluid_oxygen_dilution;
     j["fluid_fill_wall_margin"] = d.fluid_fill_wall_margin;
     j["fluid_render_mode"] = (int)d.fluid_render_mode;
     j["fluid_particle_color"] = vec3ToJson(d.fluid_particle_color);
@@ -488,6 +531,9 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("adaptive_lock_floor")) d.adaptive_lock_floor = j["adaptive_lock_floor"];
     if (j.contains("adaptive_floor_y")) d.adaptive_floor_y = j["adaptive_floor_y"];
     if (j.contains("channels")) d.channels = j["channels"];
+    if (j.contains("thermal_override_enabled")) d.thermal_override_enabled = j["thermal_override_enabled"];
+    if (j.contains("thermal_ambient_kelvin")) d.thermal_ambient_kelvin = j["thermal_ambient_kelvin"];
+    if (j.contains("thermal_oxygen")) d.thermal_oxygen = j["thermal_oxygen"];
 
     // APICSolverParams
     if (j.contains("fluid_params")) {
@@ -525,6 +571,25 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("max_affine")) d.fluid_params.max_affine = fp["max_affine"];
         if (fp.contains("cpu_threads")) d.fluid_params.cpu_threads = fp["cpu_threads"];
         if (fp.contains("parallel_particle_threshold")) d.fluid_params.parallel_particle_threshold = fp["parallel_particle_threshold"];
+        if (fp.contains("fuel_profile")) {
+            const auto& fuel = fp["fuel_profile"];
+            auto& profile = d.fluid_params.fuel_profile;
+            profile.flammable = fuel.value("flammable", profile.flammable);
+            profile.extinguishing = fuel.value("extinguishing", profile.extinguishing);
+            profile.flash_temperature = fuel.value("flash_temperature", profile.flash_temperature);
+            profile.autoignition_temperature = fuel.value("autoignition_temperature", profile.autoignition_temperature);
+            profile.vaporization_rate = fuel.value("vaporization_rate", profile.vaporization_rate);
+            profile.heat_capacity = fuel.value("heat_capacity", profile.heat_capacity);
+            profile.latent_heat = fuel.value("latent_heat", profile.latent_heat);
+            profile.cooling_power = fuel.value("cooling_power", profile.cooling_power);
+            profile.oxygen_dilution = fuel.value("oxygen_dilution", profile.oxygen_dilution);
+            profile.flame_persistence = fuel.value("flame_persistence", profile.flame_persistence);
+        }
+        if (fp.contains("chemistry_preset")) {
+            d.fluid_params.chemistry_preset =
+                static_cast<RayTrophiSim::Fluid::FluidChemistryPreset>(
+                    fp.value("chemistry_preset", static_cast<int>(d.fluid_params.chemistry_preset)));
+        }
     }
 
     if (j.contains("fluid_seed_min")) d.fluid_seed_min = jsonToVec3(j["fluid_seed_min"]);
@@ -537,6 +602,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_seed_mode")) d.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)(int)j["fluid_seed_mode"];
     if (j.contains("fluid_fill_level")) d.fluid_fill_level = j["fluid_fill_level"];
     if (j.contains("fluid_flammable")) d.fluid_flammable = j["fluid_flammable"];
+    if (j.contains("fluid_extinguishing")) d.fluid_extinguishing = j["fluid_extinguishing"];
     if (j.contains("fluid_auto_ignite")) d.fluid_auto_ignite = j["fluid_auto_ignite"];
     if (j.contains("fluid_ignition_temperature")) d.fluid_ignition_temperature = j["fluid_ignition_temperature"];
     if (j.contains("fluid_evaporation_rate")) d.fluid_evaporation_rate = j["fluid_evaporation_rate"];
@@ -544,6 +610,8 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_combustion_heat_release")) d.fluid_combustion_heat_release = j["fluid_combustion_heat_release"];
     if (j.contains("fluid_combustion_smoke_yield")) d.fluid_combustion_smoke_yield = j["fluid_combustion_smoke_yield"];
     if (j.contains("fluid_surface_cooling")) d.fluid_surface_cooling = j["fluid_surface_cooling"];
+    if (j.contains("fluid_cooling_power")) d.fluid_cooling_power = j["fluid_cooling_power"];
+    if (j.contains("fluid_oxygen_dilution")) d.fluid_oxygen_dilution = j["fluid_oxygen_dilution"];
     if (j.contains("fluid_fill_wall_margin")) d.fluid_fill_wall_margin = j["fluid_fill_wall_margin"];
     if (j.contains("fluid_render_mode")) d.fluid_render_mode = (RayTrophiSim::Fluid::FluidRenderMode)j["fluid_render_mode"];
     if (j.contains("fluid_particle_color")) d.fluid_particle_color = jsonToVec3(j["fluid_particle_color"]);
@@ -650,6 +718,9 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["source_name"] = fs.source_name;
     j["domain_index"] = fs.domain_index;
     j["enabled"] = fs.enabled;
+    j["parent_object"] = fs.parent_object;
+    j["velocity_space"] = (int)fs.velocity_space;
+    j["inherit_velocity"] = fs.inherit_velocity;
     j["position"] = vec3ToJson(fs.position);
     j["velocity"] = vec3ToJson(fs.velocity);
     j["radius"] = fs.radius;
@@ -675,6 +746,10 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("source_name")) fs.source_name = j["source_name"];
     if (j.contains("domain_index")) fs.domain_index = j["domain_index"];
     if (j.contains("enabled")) fs.enabled = j["enabled"];
+    if (j.contains("parent_object")) fs.parent_object = j["parent_object"];
+    if (j.contains("velocity_space"))
+        fs.velocity_space = (RayTrophiSim::SimulationEmissionVelocitySpace)j["velocity_space"];
+    if (j.contains("inherit_velocity")) fs.inherit_velocity = j["inherit_velocity"];
     if (j.contains("position")) fs.position = jsonToVec3(j["position"]);
     if (j.contains("velocity")) fs.velocity = jsonToVec3(j["velocity"]);
     if (j.contains("radius")) fs.radius = j["radius"];
@@ -892,6 +967,15 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
             sj["runtime"]["physics_settings"]["buoyancy"] = ps.buoyancy;
             sj["runtime"]["physics_settings"]["gravity_scale"] = ps.gravity_scale;
             sj["runtime"]["physics_settings"]["vorticity"] = ps.vorticity;
+
+            // World thermal boundary conditions (Phase 4). Must be written here
+            // AND in ProjectManager — this project has two serializers and a
+            // field added to only one of them loads back as its default.
+            const auto& wt = system.runtime->worldThermal();
+            sj["runtime"]["world_thermal"]["ambient_kelvin"] = wt.ambient_kelvin;
+            sj["runtime"]["world_thermal"]["kelvin_per_unit"] = wt.kelvin_per_unit;
+            sj["runtime"]["world_thermal"]["convection_coefficient"] = wt.convection_coefficient;
+            sj["runtime"]["world_thermal"]["oxygen_availability"] = wt.oxygen_availability;
 
             // Emitters
             sj["runtime"]["emitters"] = json::array();
@@ -1134,7 +1218,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         settings.persistent_tonemap = tonemap;
         
         // Animation Sequencer Settings
-        int64_t anim_start = 0, anim_end = 100, anim_fps = 24;
+        int64_t anim_start = 0, anim_end = 250, anim_fps = 24;
         std::string_view anim_out_sv;
         if (!s["animation_start_frame"].get(anim_start)) settings.animation_start_frame = (int)anim_start;
         if (!s["animation_end_frame"].get(anim_end)) settings.animation_end_frame = (int)anim_end;
@@ -1377,6 +1461,16 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                     if (psj.contains("buoyancy")) ps.buoyancy = psj["buoyancy"];
                     if (psj.contains("gravity_scale")) ps.gravity_scale = psj["gravity_scale"];
                     if (psj.contains("vorticity")) ps.vorticity = psj["vorticity"];
+                }
+
+                // World Thermal (Phase 4)
+                if (rtj.contains("world_thermal")) {
+                    const auto& wtj = rtj["world_thermal"];
+                    auto& wt = system.runtime->worldThermal();
+                    if (wtj.contains("ambient_kelvin")) wt.ambient_kelvin = wtj["ambient_kelvin"];
+                    if (wtj.contains("kelvin_per_unit")) wt.kelvin_per_unit = wtj["kelvin_per_unit"];
+                    if (wtj.contains("convection_coefficient")) wt.convection_coefficient = wtj["convection_coefficient"];
+                    if (wtj.contains("oxygen_availability")) wt.oxygen_availability = wtj["oxygen_availability"];
                 }
 
                 // Emitters

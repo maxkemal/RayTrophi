@@ -114,10 +114,40 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     // types [6] stores authored minimum emission temperature. [7..11] =
     // bounded Material Graph density-noise program.
     float _ext_reserved[12];
+
+    // ═══════════════════════════ ACCELERATION (64 bytes) ════════════════════
+    // Appended at the END so every existing offset is untouched. GROWING this
+    // struct means EVERY shader that declares VkVolumeInstance must be updated
+    // in the same commit — the SSBO stride is per-declaration, so one stale copy
+    // shifts every instance after the first and the volume table silently reads
+    // garbage. Current declarations: volume_closesthit.rchit, closesthit.rchit,
+    // raygen.rgen, volume_intersection.rint.
+    //
+    // Per-block maximum density for live dense gas (source_type 5). The RT march
+    // skips a whole block when its maximum is below the density cutoff; a dense
+    // domain has no other empty-space acceleration, since the NanoVDB hierarchy
+    // skip only applies to volume_type 2. Address 0 = unavailable, and the
+    // shader must then march every step: a missing majorant may never be read as
+    // "empty", or the skip erases real smoke.
+    uint64_t majorant_address;
+    float    majorant_dim[3];     // block-grid resolution
+    float    majorant_block;      // cells per block edge (kGasMajorantBlock)
+    // Combustion reaction field (GridFluid's bounded `interaction` channel) for
+    // live dense gas. Temperature alone cannot separate a flame from the hot
+    // smoke above it — both are hot — so without this the fire core has no
+    // distinct emission. 0 when the domain publishes no flame grid.
+    uint64_t flame_address;
+    // Emitting-block list for volume emission NEE: [0] = count, [1..] = block
+    // indices into the majorant grid. Lets a scatter sample aim straight at the
+    // fire instead of waiting for a random bounce to land in it.
+    uint64_t emissive_list_address;
+    float    emissive_capacity;   // entries the list can hold (0 = unavailable)
+    // Headroom for the next pass (velocity grid for volume motion blur).
+    float    _accel_reserved[5];
 };
 
-// Compile-time size check (512 bytes = 8 cache lines)
-static_assert(sizeof(VkVolumeInstance) == 512, "VkVolumeInstance must be 512 bytes");
+// Compile-time size check (576 bytes = 9 cache lines)
+static_assert(sizeof(VkVolumeInstance) == 576, "VkVolumeInstance must be 576 bytes");
 
 /**
  * @struct VkVolumeParams

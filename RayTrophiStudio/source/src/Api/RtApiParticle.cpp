@@ -165,6 +165,15 @@ ParticleEmitterInfo infoFromEmitter(const ParticleEmitterDesc& desc, int index) 
     info.angular_velocity = desc.angular_velocity;
     info.angular_jitter = desc.angular_jitter;
     info.seed = desc.seed;
+    info.parent_object = desc.parent_object;
+    info.velocity_space =
+        (desc.velocity_space == RayTrophiSim::SimulationEmissionVelocitySpace::World)
+            ? "world" : "local";
+    info.inherit_velocity = desc.inherit_velocity;
+    info.override_grid_deposit = desc.override_grid_deposit;
+    info.grid_density_deposit = desc.grid_density_deposit;
+    info.grid_temperature_deposit = desc.grid_temperature_deposit;
+    info.grid_fuel_deposit = desc.grid_fuel_deposit;
     return info;
 }
 
@@ -234,6 +243,26 @@ Result applyInfoToEmitter(const ParticleEmitterInfo& info, ParticleEmitterDesc& 
     desc.angular_velocity = info.angular_velocity;
     desc.angular_jitter = info.angular_jitter;
     desc.seed = info.seed;
+    desc.parent_object = info.parent_object;
+    {
+        // Validated before anything is written, like the enums above, so a bad
+        // value cannot leave the emitter half-applied.
+        std::string space = info.velocity_space;
+        std::transform(space.begin(), space.end(), space.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (space == "world") {
+            desc.velocity_space = RayTrophiSim::SimulationEmissionVelocitySpace::World;
+        } else if (space.empty() || space == "local") {
+            desc.velocity_space = RayTrophiSim::SimulationEmissionVelocitySpace::Local;
+        } else {
+            return Result::fail("unknown emitter velocity_space: " + info.velocity_space);
+        }
+    }
+    desc.inherit_velocity = info.inherit_velocity;
+    desc.override_grid_deposit = info.override_grid_deposit;
+    desc.grid_density_deposit = std::max(0.0f, info.grid_density_deposit);
+    desc.grid_temperature_deposit = std::max(0.0f, info.grid_temperature_deposit);
+    desc.grid_fuel_deposit = std::max(0.0f, info.grid_fuel_deposit);
     return Result::success();
 }
 
@@ -293,10 +322,74 @@ Result updateParticleEmitter(const std::string& index_or_name, const ParticleEmi
     return Result::success();
 }
 
+Result keyParticleEmitter(const std::string& index_or_name, const ParticleEmitterKey& key) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    std::size_t index = 0;
+    if (Result r = resolveEmitterIndex(index_or_name, index); !r) return r;
+    auto& emitter = scriptSimulationRuntime().emitters()[index];
+    // Merge, so several calls can key different channels on one frame.
+    auto& stored = emitter.keyframes[key.frame];
+    if (key.has_enabled)   { stored.has_enabled = true;   stored.enabled = key.enabled; }
+    if (key.has_rate)      { stored.has_rate = true;      stored.rate_per_second = std::max(0.0f, key.rate_per_second); }
+    if (key.has_speed)     { stored.has_speed = true;     stored.speed = std::max(0.0f, key.speed); }
+    if (key.has_spread)    { stored.has_spread = true;    stored.spread = std::max(0.0f, key.spread); }
+    if (key.has_point)     { stored.has_point = true;     stored.point = key.point; }
+    if (key.has_direction) { stored.has_direction = true; stored.direction = key.direction; }
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result clearParticleEmitterKey(const std::string& index_or_name, int frame) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    std::size_t index = 0;
+    if (Result r = resolveEmitterIndex(index_or_name, index); !r) return r;
+    scriptSimulationRuntime().emitters()[index].keyframes.erase(frame);
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
 Result clearParticleEmitters() {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     g_ctx->scene.clearParticleEmitters();
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result listParticleSystems(std::vector<ParticleSystemInfo>& out) {
+    if (!g_ctx) return notBound();
+    out.clear();
+    for (std::size_t i = 0; i < g_ctx->scene.particle_systems.size(); ++i) {
+        const auto& sys = g_ctx->scene.particle_systems[i];
+        ParticleSystemInfo info;
+        info.index = static_cast<int>(i);
+        info.id = sys.id;
+        info.name = sys.name;
+        info.active = (static_cast<int>(i) == g_ctx->scene.active_particle_system_index);
+        if (sys.runtime) {
+            info.domain_count = static_cast<int>(sys.runtime->gridDomains().size());
+            info.flow_source_count = static_cast<int>(sys.runtime->flowSources().size());
+            info.emitter_count = static_cast<int>(sys.runtime->emitters().size());
+            info.collider_count = static_cast<int>(sys.runtime->colliders().size());
+        }
+        out.push_back(std::move(info));
+    }
+    return Result::success();
+}
+
+// ★ Every other simulation facade (flow sources, emitters, colliders, keys)
+// reaches the runtime through scriptSimulationRuntime(), which is the ACTIVE
+// particle system and nothing else. A UI preset creates its OWN system, so
+// anything it left behind in a non-active system is invisible to list() and
+// unreachable by remove() — there is literally no scripted way to delete it.
+// This is that way: it wipes every system scene-wide, and the next add
+// re-creates a clean one.
+Result clearParticleSystems() {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    g_ctx->scene.clearParticleSystemObjects();
     invalidateScriptSimulation();
     return Result::success();
 }

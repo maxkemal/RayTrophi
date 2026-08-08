@@ -14,6 +14,7 @@
 #include <cuda_runtime.h>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include "Vec3.h"
 #include "Ray.h"
 #include "Hittable.h"
@@ -141,6 +142,9 @@ public:
     void setAccelManagerStatusCallback(std::function<void(const std::string&, int)> callback);
     // Rebuild TLAS only (call after transform updates)
     void rebuildTLAS();
+    // Refreshes native foliage instances while preserving BLAS/SBT allocations.
+    // Returns false when a source BLAS is not resident and a full rebuild is required.
+    bool refreshScatterInstances();
     // Build scene using TLAS/BLAS structure (new method - replaces buildFromData for TLAS mode)
   
     bool isUsingTLAS() const { return use_tlas_mode; }
@@ -284,6 +288,10 @@ public:
     bool downloadStylizePositionBuffer(std::vector<float>& position);
 
 private:
+    // Scene rebuilds can be requested by both the central dirty-state sync and
+    // the deferred OptiX rebuild path. Serialize ownership of scene CUDA
+    // allocations so cleanup cannot free the same event/buffer concurrently.
+    std::recursive_mutex scene_resource_mutex_;
     // Hair rendering members
     OptixTraversableHandle m_hairHandle = 0;
     CUdeviceptr m_d_hairVertices = 0;

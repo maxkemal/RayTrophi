@@ -1,0 +1,46 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int fullWidth; int fullHeight; int macroWidth; int macroHeight;
+    float featureScale;
+} pc;
+layout(set=0,binding=0) readonly buffer FullMask { float fullMask[]; };
+layout(set=0,binding=1) readonly buffer FullHardness { float fullHardness[]; };
+layout(set=0,binding=2) readonly buffer MacroDelta { float macroDelta[]; };
+layout(set=0,binding=3) readonly buffer MacroWidth { float macroWidth[]; };
+layout(set=0,binding=4) writeonly buffer FullDelta { float fullDelta[]; };
+layout(set=0,binding=5) buffer FullChannelWidth { float fullChannelWidth[]; };
+layout(set=0,binding=6) buffer FullDischarge { float fullDischarge[]; };
+
+float sampleDelta(vec2 p) {
+    ivec2 a=ivec2(floor(p)); vec2 f=fract(p);
+    a=clamp(a,ivec2(0),ivec2(pc.macroWidth-2,pc.macroHeight-2));
+    float v00=macroDelta[a.y*pc.macroWidth+a.x];
+    float v10=macroDelta[a.y*pc.macroWidth+a.x+1];
+    float v01=macroDelta[(a.y+1)*pc.macroWidth+a.x];
+    float v11=macroDelta[(a.y+1)*pc.macroWidth+a.x+1];
+    return mix(mix(v00,v10,f.x),mix(v01,v11,f.x),f.y);
+}
+float sampleWidth(vec2 p) {
+    ivec2 a=ivec2(floor(p)); vec2 f=fract(p);
+    a=clamp(a,ivec2(0),ivec2(pc.macroWidth-2,pc.macroHeight-2));
+    float v00=macroWidth[a.y*pc.macroWidth+a.x];
+    float v10=macroWidth[a.y*pc.macroWidth+a.x+1];
+    float v01=macroWidth[(a.y+1)*pc.macroWidth+a.x];
+    float v11=macroWidth[(a.y+1)*pc.macroWidth+a.x+1];
+    return mix(mix(v00,v10,f.x),mix(v01,v11,f.x),f.y);
+}
+void main(){
+    uint ui=gl_GlobalInvocationID.x;
+    if(ui>=uint(pc.fullWidth*pc.fullHeight))return;
+    int x=int(ui)%pc.fullWidth,y=int(ui)/pc.fullWidth;
+    vec2 p=(vec2(x,y)+0.5)/vec2(pc.fullWidth,pc.fullHeight)*
+        vec2(pc.macroWidth-1,pc.macroHeight-1);
+    float authored=clamp(fullMask[ui],0.0,1.0);
+    float resistance=clamp(fullHardness[ui],0.0,1.0);
+    float material=authored*(1.0-resistance*0.92);
+    float width=sampleWidth(p)*authored;
+    fullDelta[ui]=sampleDelta(p)*material;
+    fullChannelWidth[ui]=max(fullChannelWidth[ui],width);
+    fullDischarge[ui]+=clamp(width/max(pc.featureScale,0.001),0.0,1.0)*400.0;
+}

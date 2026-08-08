@@ -846,6 +846,47 @@ void drawSimulationDomainControls(
                     }
                     }
 
+                    // ── Thermal boundary override ────────────────────────────
+                    // The world defines ambient everywhere; a domain may override
+                    // it inside its own bounds. Off by default, so a domain that
+                    // says nothing simply inherits the world.
+                    if (ImGui::CollapsingHeader("Thermal Override (Material State Field)")) {
+                        ImGui::Spacing();
+                        ImGui::Checkbox("Override World Ambient Inside This Domain##DomThermal",
+                                        &domain.thermal_override_enabled);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Boundary conditions for object surface heating inside this\n"
+                                "domain's box. Affects the Material State Field (heating,\n"
+                                "ignition, char, glow) — NOT the gas solve itself.\n\n"
+                                "Off: this domain inherits the world's ambient and oxygen.");
+                        }
+                        ImGui::BeginDisabled(!domain.thermal_override_enabled);
+                        ImGui::DragFloat("Ambient (K)##DomThermalK",
+                                         &domain.thermal_ambient_kelvin, 1.0f, 0.0f, 3000.0f, "%.0f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Ambient temperature a surface relaxes toward while it is\n"
+                                "inside this box. Tested per surface ELEMENT, so an object\n"
+                                "half in and half out is genuinely half-heated.");
+                        }
+                        ImGui::DragFloat("Oxygen##DomThermalO2",
+                                         &domain.thermal_oxygen, 0.01f, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "0..1. Throttles pyrolysis burn rate inside this domain.\n"
+                                "0 smothers fire entirely. It can only slow burning down,\n"
+                                "never start it.");
+                        }
+                        ImGui::EndDisabled();
+                        // Said explicitly because its absence is a design decision,
+                        // not an oversight, and someone WILL look for it here.
+                        ImGui::TextDisabled("Kelvin-per-unit is global on purpose — the burn\n"
+                                            "mask quantizes glow in absolute Kelvin, so a\n"
+                                            "per-domain mapping would make the same object\n"
+                                            "glow differently in different boxes.");
+                    }
+
                     // Procedural turbulence (divergence-free curl-noise detail).
                     if (ImGui::CollapsingHeader("Turbulence (Procedural Detail)")) {
                         ImGui::Spacing();
@@ -1111,9 +1152,46 @@ void drawSimulationDomainControls(
                     if (ImGui::CollapsingHeader(
                             "Combustible Liquid / Gas Coupling",
                             ImGuiTreeNodeFlags_DefaultOpen)) {
+                        using ChemistryPreset = RayTrophiSim::Fluid::FluidChemistryPreset;
+                        static const char* chemistry_labels[] = {
+                            "Inert", "Water", "Gasoline", "Alcohol", "Oil", "Custom"
+                        };
+                        int chemistry_index = static_cast<int>(
+                            domain.fluid_params.chemistry_preset);
+                        chemistry_index = std::clamp(chemistry_index, 0, 5);
+                        ImGui::SetNextItemWidth(180.0f);
+                        if (ImGui::Combo("Chemistry Preset##FluidChemistry",
+                                         &chemistry_index, chemistry_labels, 6)) {
+                            const auto chosen = static_cast<ChemistryPreset>(chemistry_index);
+                            domain.fluid_params.applyChemistryProfile(chosen);
+                            const auto& chemistry = domain.fluid_params.fuel_profile;
+                            domain.fluid_flammable = chemistry.flammable;
+                            domain.fluid_extinguishing = chemistry.extinguishing;
+                            domain.fluid_ignition_temperature = chemistry.flash_temperature;
+                            domain.fluid_evaporation_rate = chemistry.vaporization_rate;
+                            domain.fluid_cooling_power = chemistry.cooling_power;
+                            domain.fluid_oxygen_dilution = chemistry.oxygen_dilution;
+                            if (chemistry.extinguishing) {
+                                domain.fluid_surface_cooling = std::max(
+                                    domain.fluid_surface_cooling,
+                                    chemistry.cooling_power);
+                            }
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Chemical behavior is independent from the physical fluid preset.\n"
+                                "Use Oil physics + Gasoline chemistry for a fast fuel jet,\n"
+                                "or Water chemistry to cool and extinguish overlapping gas fire.");
+                        }
                         ImGui::Checkbox(
                             "Enable Flammable Surface##FluidFire",
                             &domain.fluid_flammable);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                            "Exposes the liquid free surface to overlapping Vulkan Gas domains.\n"
+                            "The liquid bulk remains incompressible; only the surface exchanges heat and vapor.");
+                        if (domain.fluid_extinguishing) {
+                            ImGui::TextDisabled("Extinguishing liquid active");
+                        }
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip(
                                 "Publishes only the exposed APIC free-surface band "
@@ -1124,30 +1202,48 @@ void drawSimulationDomainControls(
                             ImGui::Checkbox(
                                 "Auto Ignite##FluidFire",
                                 &domain.fluid_auto_ignite);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Ignites the authored liquid vapor immediately when it reaches the\n"
+                                "surface threshold. Disable this to require a pilot/flame contact.");
                             ImGui::DragFloat(
                                 "Ignition Temperature##FluidFire",
                                 &domain.fluid_ignition_temperature,
                                 0.01f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Normalized flash/ignition threshold of the liquid surface.\n"
+                                "Lower values make gasoline/alcohol vapor ignite more readily.");
                             ImGui::DragFloat(
                                 "Evaporation / Burn Rate##FluidFire",
                                 &domain.fluid_evaporation_rate,
                                 0.01f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Rate at which exposed liquid becomes fuel vapor.\n"
+                                "Higher values make gasoline/alcohol spread and ignite faster.");
                             ImGui::DragFloat(
                                 "Surface Fuel Capacity##FluidFire",
                                 &domain.fluid_surface_fuel_capacity,
                                 0.05f,0.0f,1000.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Maximum combustible material stored by an exposed surface cell.\n"
+                                "This controls available fuel duration, not liquid viscosity.");
                             ImGui::DragFloat(
                                 "Heat Release##FluidFire",
                                 &domain.fluid_combustion_heat_release,
                                 0.05f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Heat added to the gas per unit of vapor consumed by combustion.");
                             ImGui::DragFloat(
                                 "Smoke Yield##FluidFire",
                                 &domain.fluid_combustion_smoke_yield,
                                 0.01f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Smoke/density generated by burning liquid vapor.");
                             ImGui::DragFloat(
                                 "Surface Cooling##FluidFire",
                                 &domain.fluid_surface_cooling,
                                 0.01f,0.0f,100.0f,"%.3f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Relaxes the liquid surface temperature toward ambient between hot contacts.");
                             ImGui::TextDisabled(
                                 "Vulkan APIC mask -> Gas fuel/heat/smoke; "
                                 "Gas temperature feeds ignition back.");
@@ -1285,7 +1381,9 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip(
                             "ON: timeline scrub selects an authoring frame without running the gas solve.\n"
                             "Slider edits remain staged until you click a diamond; use this to create a\n"
-                            "different second key. OFF: fields follow interpolated keys and simulation playback.");
+                            "different second key. OFF: the solve runs normally.\n"
+                            "The sliders always show the AUTHORED value; the interpolated value at the\n"
+                            "playhead is shown read-only under each source.");
                     }
                     ImGui::SameLine();
                     ImGui::TextDisabled(
@@ -1307,22 +1405,35 @@ void drawSimulationDomainControls(
 
                     const int flow_key_frame =
                         timeline ? timeline->getCurrentFrame() : 0;
-                    if (!is_fluid_domain &&
-                        !scene.simulationKeyAuthoringMode() &&
-                        !source.keyframes.empty()) {
+                    // ★★ NO PLAYHEAD WRITE-BACK. This used to mirror the evaluated
+                    // key values into the DESCRIPTOR so the widgets below showed
+                    // the animated value. Those same fields feed the simulation
+                    // config signature, so the mirror silently re-authored the
+                    // scene once per UI frame.
+                    //
+                    // For fluid that respawned frame 0 forever. For gas the cost
+                    // was worse and took longer to see: while the playhead sits
+                    // on a stretch where a key is actually INTERPOLATING (a
+                    // temperature ramping down between two keys), the mirrored
+                    // value differs every single frame, the signature changes,
+                    // the sim is declared stale and a rewind-to-start is
+                    // requested — playback snaps back to frame 0 mid-shot, with
+                    // the frame number it happens at being wherever the ramp is.
+                    // Constant stretches look fine, which is why this reads as an
+                    // intermittent bug tied to having the panel open.
+                    //
+                    // The descriptor is the AUTHORED value and nothing may write
+                    // it but the user. The keyed value is displayed read-only
+                    // below, and the viewport gizmo resolves the real emission
+                    // pose through resolveFlowSourceFrame (same as the solver).
+                    if (!source.keyframes.empty()) {
                         const auto preview =
                             RayTrophiSim::evaluateSimulationFlowSource(
                                 source, flow_key_frame);
-                        source.enabled = preview.enabled;
-                        source.position = preview.position;
-                        source.velocity = preview.velocity;
-                        source.radius = preview.radius;
-                        source.density = preview.density;
-                        source.temperature = preview.temperature;
-                        source.fuel = preview.fuel;
-                        source.falloff = preview.falloff;
-                        source.velocity_coupling =
-                            preview.velocity_coupling;
+                        ImGui::TextDisabled(
+                            "Keyed @ frame %d: %s | temp %.2f | fuel %.2f | radius %.2f",
+                            flow_key_frame, preview.enabled ? "on" : "off",
+                            preview.temperature, preview.fuel, preview.radius);
                     }
                     auto flowKeyButton = [&](const char* id, bool keyed) {
                         ImGui::PushID(id);
@@ -1389,7 +1500,7 @@ void drawSimulationDomainControls(
                             k.has_velocity || k.has_radius ||
                             k.has_density || k.has_temperature ||
                             k.has_fuel || k.has_falloff ||
-                            k.has_velocity_coupling;
+                            k.has_velocity_coupling || k.has_flow_rate;
                         const std::string track_name =
                             "Simulation Flow " +
                             std::to_string(source.timeline_uid);
@@ -1478,9 +1589,22 @@ void drawSimulationDomainControls(
                     source.radius = std::max(0.001f, source.radius);
 
                     if (is_fluid_domain) {
+                        const bool rate_keyed = keyedFlowProperty([](const auto& k){ return k.has_flow_rate; });
+                        if (flowKeyButton("flow_rate", rate_keyed)) {
+                            if (rate_keyed) removeFlowPropertyKey([](auto& k){ k.has_flow_rate = false; });
+                            else insertFlowPropertyKey([&](auto& k){
+                                k.has_flow_rate = true;
+                                k.flow_rate = source.fluid_particles_per_second;
+                            });
+                        }
+                        ImGui::SameLine();
                         ImGui::DragFloat("Injected Particles / Sec", &source.fluid_particles_per_second, 10.0f, 0.0f, 1000000.0f, "%.0f");
+                        updateCurrentFlowKey([&](auto& k) {
+                            if (k.has_flow_rate) k.flow_rate = source.fluid_particles_per_second;
+                        });
                         if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Flow rate of liquid particles spawned per second.");
+                            ImGui::SetTooltip("Flow rate of liquid particles spawned per second.\n"
+                                              "Key this to animate a valve — open at one frame, throttled at another.");
                         }
                         source.fluid_particles_per_second = std::max(0.0f, source.fluid_particles_per_second);
                     } else {
@@ -1608,12 +1732,125 @@ void drawSimulationDomainControls(
                             }
                             ImGui::SameLine();
                         }
-                        ImGui::DragFloat3("World Coordinates Position", &source.position.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                        ImGui::DragFloat3(source.parent_object.empty()
+                                              ? "World Coordinates Position"
+                                              : "Local Offset From Parent",
+                                          &source.position.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
                         updateCurrentFlowKey([&](auto& k) {
                             if (k.has_position) k.position = source.position;
                         });
+                        if (ImGui::IsItemHovered() && !source.parent_object.empty()) {
+                            ImGui::SetTooltip("Offset in the parent object's local space.\n"
+                                              "This is what puts a flame on a match's TIP rather than\n"
+                                              "at the centre of its bounding box.");
+                        }
                     } else {
                         ImGui::TextDisabled("Linked Scene Mesh: %s", source.source_name.empty() ? "None" : source.source_name.c_str());
+                    }
+
+                    // ── Object binding (parenting) ───────────────────────────
+                    // Orthogonal to Emitter Geometry Type: the source rides the
+                    // parent's transform whether it is keyframed or driven by
+                    // rigid-body physics. ObjectBounds/MeshSurface resolve their
+                    // centre from the linked mesh, so parenting only changes the
+                    // emission point for Point sources — but the inherited
+                    // velocity applies to every mode.
+                    ImGui::Spacing();
+                    if (source.parent_object.empty()) {
+                        const bool can_parent =
+                            ui_ctx.selection.selected.type == SelectableType::Object &&
+                            ui_ctx.selection.selected.object != nullptr &&
+                            !ui_ctx.selection.selected.object->getNodeName().empty();
+                        if (!can_parent) ImGui::BeginDisabled();
+                        if (ImGui::Button("Parent To Selected Object##FlowParent", ImVec2(-1, 24))) {
+                            const std::string node =
+                                ui_ctx.selection.selected.object->getNodeName();
+                            Matrix4x4 parent_to_world;
+                            if (scene.resolveObjectTransformForSimulation(node, parent_to_world)) {
+                                // Convert the authored world position into the
+                                // parent's space so the source does not jump the
+                                // instant it is parented.
+                                source.position =
+                                    parent_to_world.inverse().transform_point(source.position);
+                                if (source.velocity_space ==
+                                    RayTrophiSim::SimulationEmissionVelocitySpace::Local) {
+                                    source.velocity =
+                                        parent_to_world.inverse().transform_vector(source.velocity);
+                                }
+                                source.parent_object = node;
+                                source.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+                                source.parent_velocity = Vec3(0.0f);
+                                scene.clearSimFrameCache();
+                                scene.requestSimulationTimelineRenderResync();
+                            }
+                        }
+                        if (!can_parent) ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Bind this source to the selected object. It then follows\n"
+                                              "that object every frame — including motion produced by\n"
+                                              "rigid-body physics, not just keyframes.");
+                        }
+                    } else {
+                        Matrix4x4 parent_probe;
+                        const bool parent_found =
+                            scene.resolveObjectTransformForSimulation(
+                                source.parent_object, parent_probe);
+                        if (parent_found) {
+                            ImGui::TextColored(ImVec4(0.5f, 0.85f, 1.0f, 1.0f),
+                                               "Parented To: %s", source.parent_object.c_str());
+                        } else {
+                            // The solver skips an unresolvable parent, so say so
+                            // here instead of leaving a silently dead source.
+                            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                                               "Parent NOT FOUND: %s (source inactive)",
+                                               source.parent_object.c_str());
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Unparent##FlowUnparent")) {
+                            Matrix4x4 parent_to_world;
+                            if (scene.resolveObjectTransformForSimulation(
+                                    source.parent_object, parent_to_world)) {
+                                // Bake the current world placement back so the
+                                // source stays exactly where it is on release.
+                                source.position = parent_to_world.transform_point(source.position);
+                                if (source.velocity_space ==
+                                    RayTrophiSim::SimulationEmissionVelocitySpace::Local) {
+                                    source.velocity = parent_to_world.transform_vector(source.velocity);
+                                }
+                            }
+                            source.parent_object.clear();
+                            source.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+                            source.parent_velocity = Vec3(0.0f);
+                            scene.clearSimFrameCache();
+                            scene.requestSimulationTimelineRenderResync();
+                        }
+
+                        int space_idx = static_cast<int>(source.velocity_space);
+                        const char* space_labels[] = { "Local (rotates with parent)", "World (fixed direction)" };
+                        if (ImGui::Combo("Velocity Space##FlowVelSpace", &space_idx,
+                                         space_labels, IM_ARRAYSIZE(space_labels))) {
+                            source.velocity_space =
+                                static_cast<RayTrophiSim::SimulationEmissionVelocitySpace>(space_idx);
+                            scene.clearSimFrameCache();
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Local: the emission direction turns with the object, so a\n"
+                                              "nozzle keeps spraying out of its own muzzle.\n"
+                                              "World: the direction stays fixed no matter how it rotates.");
+                        }
+
+                        ImGui::DragFloat("Inherit Parent Velocity##FlowInherit",
+                                         &source.inherit_velocity, 0.02f, 0.0f, 4.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("How much of the parent's own motion is carried into the\n"
+                                              "emitted medium. 0 leaves the flame behind a waved match and\n"
+                                              "makes a moving hose pour a vertical wall instead of an arc.");
+                        }
+                        if (ImGui::IsItemEdited()) scene.clearSimFrameCache();
+
+                        const Vec3 pv = source.parent_velocity;
+                        ImGui::TextDisabled("Parent speed: %.2f m/s  (%.2f, %.2f, %.2f)",
+                                            pv.length(), pv.x, pv.y, pv.z);
                     }
 
                     ImGui::Spacing();
@@ -1710,7 +1947,11 @@ void drawSimulationDomainControls(
                     if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
                         current_mode_idx = 1;
                     } else if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Volume) {
-                        domain.fluid_render_mode = RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
+                        // Display only — do NOT write. Drawing a panel must never
+                        // repair scene data: this assignment was the real reason a
+                        // scripted liquid rendered only after its panel had been
+                        // opened. syncSimulationRenderVolumes now normalises the
+                        // invalid 'Volume' liquid mode where it is consumed.
                         current_mode_idx = 1;
                     }
                     const char* fluid_render_modes[] = { "Splat Spheres (Fast Preview)", "Smooth Glassy Surface (Level Set SDF)" };
@@ -2181,7 +2422,7 @@ void drawSimulationDomainControls(
         // Detailed live solver step stats drawn beautifully at the bottom
         {
             if (!is_fluid_domain && ImGui::CollapsingHeader(
-                    "Gas Compute Status##DomainGasComputeStats",
+                    "Gas Step Stats##DomainGasComputeStats",
                     ImGuiTreeNodeFlags_DefaultOpen)) {
                 const auto& states = particles->gridDomainStates();
                 if (selected_domain_index >= 0 &&
@@ -2193,8 +2434,148 @@ void drawSimulationDomainControls(
                         : (st.gas_gpu_active && !st.gas_gpu_partial
                             ? ImVec4(0.45f, 0.95f, 0.55f, 1.0f)
                             : ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
-                    ImGui::TextColored(color, "%s",
+                    ImGui::TextColored(color, "Compute: %s",
                                        st.gas_compute_status.c_str());
+
+                    const auto& gs = st.gas_stats;
+                    if (!st.valid || !gs.stepped) {
+                        ImGui::TextDisabled(
+                            "No step ran for this domain in the last frame, so "
+                            "there is nothing to time.");
+                    } else {
+                    const auto& cpu = gs.cpu;
+                    // Same guard as the fluid block: the measured total can be
+                    // smaller than the rows it is supposed to contain (a stage
+                    // whose cost lands in a submit the host never waited on), and
+                    // dividing by it would print nonsense shares. Fall back to
+                    // the sum of the rows whenever it fails to account for them.
+                    const float gpu_sum =
+                        gs.gpu_collider_source_ms + gs.gpu_source_upload_ms +
+                        gs.gpu_fluid_combustion_ms + gs.gpu_velocity_advect_ms +
+                        gs.gpu_scalar_advect_ms + gs.gpu_combustion_ms +
+                        gs.gpu_body_forces_ms + gs.gpu_dissipation_ms +
+                        gs.gpu_pressure_ms + gs.gpu_publish_ms + gs.gpu_majorant_ms;
+                    const float phase_sum =
+                        gs.voxelize_ms + gs.analysis_ms + gpu_sum + cpu.total_ms;
+                    const float step_total = std::max(gs.total_ms, phase_sum);
+                    const bool any_gpu = gpu_sum > 0.0f;
+
+                    UIWidgets::PerfBlock blk("Gas Step", step_total);
+                    blk.Value("Resolution", "%dx%dx%d  (%zu cells)",
+                              st.resolution_x, st.resolution_y, st.resolution_z,
+                              gs.cell_count);
+                    const double occupancy = gs.cell_count > 0
+                        ? 100.0 * static_cast<double>(st.active_density_cells) /
+                          static_cast<double>(gs.cell_count)
+                        : 0.0;
+                    blk.Value("Active smoke cells", "%zu  (%.1f%% of grid)",
+                              st.active_density_cells, occupancy);
+                    blk.Value("Max / total density", "%.3f / %.1f",
+                              st.max_density, gs.total_density);
+                    blk.Value("Max temperature", "%.3f", gs.max_temperature);
+                    if (gs.active_fuel_cells > 0 || gs.burning_cells > 0) {
+                        blk.Value("Fuel cells / total fuel", "%zu / %.2f",
+                                  gs.active_fuel_cells, gs.total_fuel);
+                        blk.Value("Burning cells", "%zu", gs.burning_cells);
+                    }
+                    if (gs.solid_cells > 0) {
+                        blk.Value("Collider cells", "%zu  (%.1f%% blocked)",
+                                  gs.solid_cells,
+                                  gs.cell_count > 0
+                                      ? 100.0 * static_cast<double>(gs.solid_cells) /
+                                        static_cast<double>(gs.cell_count)
+                                      : 0.0);
+                    }
+                    blk.Value("Max speed", "%.2f u/s", gs.max_speed);
+                    // Above 1 the semi-Lagrangian trace crosses more than one
+                    // cell per step. It stays stable (unconditionally so), but
+                    // detail smears — and that reads as "the solver is soft",
+                    // not as "the timestep is too coarse", unless it is stated.
+                    blk.Value("CFL (max)", gs.cfl > 1.0f ? "%.2f  (> 1: detail smears)" : "%.2f",
+                              gs.cfl);
+                    blk.Value("Dense grid memory", "%.1f MB",
+                              static_cast<double>(gs.grid_memory_bytes) / (1024.0 * 1024.0));
+
+                    blk.Total(any_gpu ? "Step total (CPU+GPU)" : "Step total",
+                              step_total);
+                    if (gpu_sum > 0.0f) {
+                        blk.Section("Device stages");
+                        if (gs.gpu_collider_source_ms > 0.0f)
+                            blk.Time("collider gas source", gs.gpu_collider_source_ms, "GPU", 1);
+                        if (gs.gpu_msf_ms > 0.0f)
+                            blk.Time("material state field (thermal)", gs.gpu_msf_ms, "GPU", 1);
+                        if (gs.gpu_source_upload_ms > 0.0f)
+                            blk.Time("source upload (host -> device)", gs.gpu_source_upload_ms, "GPU", 1);
+                        if (gs.fluid_combustion_on_gpu || gs.gpu_fluid_combustion_ms > 0.0f)
+                            blk.Time("liquid surface combustion", gs.gpu_fluid_combustion_ms, "GPU", 1);
+                        blk.Time("velocity advection", gs.gpu_velocity_advect_ms,
+                                 gs.velocity_advect_on_gpu ? "GPU" : "CPU", 1);
+                        blk.Time("scalar advection", gs.gpu_scalar_advect_ms,
+                                 gs.scalar_advect_on_gpu ? "GPU" : "CPU", 1);
+                        blk.Time("combustion", gs.gpu_combustion_ms,
+                                 gs.combustion_on_gpu ? "GPU" : "CPU", 1);
+                        // The chain is all-or-nothing: if any link fails the
+                        // solver clears every flag and the host redoes all four
+                        // forces from the same post-advection checkpoint. A CPU
+                        // tag with a non-zero time above therefore means device
+                        // work was done and then discarded — worth seeing.
+                        const bool forces_all_gpu =
+                            gs.buoyancy_on_gpu && gs.force_fields_on_gpu &&
+                            gs.vorticity_on_gpu && gs.turbulence_on_gpu;
+                        blk.Time("body forces (buoyancy+fields+vort+turb)",
+                                 gs.gpu_body_forces_ms,
+                                 forces_all_gpu ? "GPU" : "CPU redo", 1);
+                        blk.Time("velocity dissipation + clamp", gs.gpu_dissipation_ms,
+                                 gs.dissipation_on_gpu ? "GPU" : "CPU", 1);
+                        blk.Time("pressure projection", gs.gpu_pressure_ms,
+                                 gs.pressure_on_gpu ? "GPU" : "CPU", 1);
+                        blk.Time("field publication (RT bridge)", gs.gpu_publish_ms, "GPU", 1);
+                        blk.Time("majorant (RT empty-space skip)", gs.gpu_majorant_ms, "GPU", 1);
+                    }
+                    blk.Section(gs.cpu.sparse_vdb ? "Host solver (sparse VDB)"
+                                                  : "Host solver (dense)");
+                    blk.Time("GridFluid::step", cpu.total_ms, "CPU", 1);
+                    blk.Time("velocity advection", cpu.advect_velocity_ms, nullptr, 2);
+                    blk.Time("scalar advection", cpu.advect_scalar_ms, nullptr, 2);
+                    blk.Time("boundaries + solids", cpu.boundary_ms, nullptr, 2);
+                    blk.Time("combustion", cpu.combustion_ms, nullptr, 2);
+                    blk.Time("buoyancy", cpu.buoyancy_ms, nullptr, 2);
+                    blk.Time("force fields", cpu.force_fields_ms, nullptr, 2);
+                    blk.Time("vorticity", cpu.vorticity_ms, nullptr, 2);
+                    blk.Time("turbulence", cpu.turbulence_ms, nullptr, 2);
+                    blk.Time("dissipation", cpu.dissipation_ms, nullptr, 2);
+                    if (cpu.pressure_iterations > 0) {
+                        char sor_tag[32];
+                        std::snprintf(sor_tag, sizeof(sor_tag), "%d sweeps",
+                                      cpu.pressure_iterations);
+                        blk.Time("pressure (SOR)", cpu.pressure_ms, sor_tag, 2);
+                    } else {
+                        blk.Time("pressure (SOR)", cpu.pressure_ms, nullptr, 2);
+                    }
+                    blk.Section("Host overhead");
+                    blk.Time("collider voxelize + face weights", gs.voxelize_ms, "CPU", 1);
+                    blk.Time("field analysis scan", gs.analysis_ms, "CPU", 1);
+                    blk.End();
+                    UIWidgets::HelpMarker(
+                        "Device rows are measured around the dispatch, so they include "
+                        "whatever submit/fence the host waited on — the cost the frame "
+                        "really pays, not isolated kernel time.\n\n"
+                        "A stage runs in EITHER column. A 0.00 ms host row under a GPU "
+                        "tag above means the device covered it; 0.00 in both columns "
+                        "means the stage never ran (channel off, or the feature is "
+                        "disabled — vorticity/turbulence early-out at 0 strength).\n\n"
+                        "body forces is one row because buoyancy, force fields, "
+                        "vorticity and turbulence share a single velocity upload and "
+                        "readback; splitting them would count that transfer four times.\n\n"
+                        "field analysis is one pass over the cells producing the counters "
+                        "above, plus the three face passes for max speed. It also covers "
+                        "the density/bounds scan the renderer needs anyway, so it is not "
+                        "all telemetry overhead — but it runs every step and is billed "
+                        "here rather than hidden inside the total.\n\n"
+                        "CFL = max face speed * dt / voxel size. Over 1 the advection "
+                        "trace jumps more than a cell per step: stable, but smeared. "
+                        "Lower the timestep or raise the resolution.");
+                    }
                 }
             }
             if (is_fluid_domain && ImGui::CollapsingHeader("Fluid Step Stats##DomainFluidStats", ImGuiTreeNodeFlags_DefaultOpen)) {

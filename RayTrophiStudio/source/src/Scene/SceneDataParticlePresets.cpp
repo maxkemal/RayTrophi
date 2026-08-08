@@ -641,8 +641,12 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 liquid.fluid_surface_foam = 0.0f;
                 liquid.fluid_foam_params.enabled = false;
                 liquid.fluid_flammable = true;
+                // The pilot is the ignition source for this preset.  Keep
+                // auto-ignite off, but use the same low normalized threshold
+                // as the gas pilot so a short-lived pilot can actually hand
+                // heat back to the liquid surface.
                 liquid.fluid_auto_ignite = false;
-                liquid.fluid_ignition_temperature = 0.58f;
+                liquid.fluid_ignition_temperature = 0.35f;
                 liquid.fluid_evaporation_rate = 0.28f;
                 liquid.fluid_surface_fuel_capacity = 4.5f;
                 liquid.fluid_combustion_heat_release = 2.25f;
@@ -734,16 +738,19 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 pilot.name = "Fuel Jet Pilot" + suffix;
                 pilot.domain_index = gas_index;
                 pilot.position = Vec3(1.35f, 0.28f, 0.0f);
-                pilot.radius = 0.38f;
+                // Cover the nozzle/floor contact band.  A narrow pilot could
+                // heat a gas cell beside the exposed liquid surface while
+                // never touching the surface cell sampled by the coupling.
+                pilot.radius = 0.65f;
                 pilot.velocity = Vec3(0.0f, 0.85f, 0.0f);
                 pilot.velocity_coupling = 12.0f;
                 pilot.density = 0.16f;
-                pilot.temperature = 5.0f;
+                pilot.temperature = 8.0f;
                 pilot.fuel = 2.2f;
                 pilot.falloff = 1.35f;
                 pilot.use_time_limit = true;
-                pilot.start_time = 0.85f;
-                pilot.end_time = 2.35f;
+                pilot.start_time = 0.45f;
+                pilot.end_time = 4.0f;
                 rt->addFlowSource(pilot);
 
                 // The coupled SurfaceSDF and gas domain are the final render.

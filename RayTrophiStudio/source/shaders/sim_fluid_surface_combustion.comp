@@ -16,6 +16,11 @@ layout(std430,binding=2) buffer GasDensity { float gas_density[]; };
 layout(std430,binding=3) buffer GasTemperature { float gas_temperature[]; };
 layout(std430,binding=4) buffer GasFuel { float gas_fuel[]; };
 layout(std430,binding=5) buffer GasInteraction { float gas_interaction[]; };
+// Gas MAC velocity.  The liquid surface uses the local gas speed only for
+// convective heat transfer; momentum coupling remains in the APIC force path.
+layout(std430,binding=6) readonly buffer GasVelocityX { float gas_vel_x[]; };
+layout(std430,binding=7) readonly buffer GasVelocityY { float gas_vel_y[]; };
+layout(std430,binding=8) readonly buffer GasVelocityZ { float gas_vel_z[]; };
 
 layout(push_constant) uniform Push {
     ivec4 fluid_dim;
@@ -38,6 +43,31 @@ bool isFluid(ivec3 p) {
     // so a small positive threshold is required instead of the pressure mask's
     // binary 0.5 test.
     return fluid_density[fluidIndex(p)] > 0.02;
+}
+
+uint gasVelXIndex(ivec3 p) {
+    return uint(p.x + p.y*(pc.gas_dim.x+1) +
+                p.z*(pc.gas_dim.x+1)*pc.gas_dim.y);
+}
+
+uint gasVelYIndex(ivec3 p) {
+    return uint(p.x + p.y*pc.gas_dim.x +
+                p.z*pc.gas_dim.x*(pc.gas_dim.y+1));
+}
+
+uint gasVelZIndex(ivec3 p) {
+    return uint(p.x + p.y*pc.gas_dim.x +
+                p.z*pc.gas_dim.x*pc.gas_dim.y);
+}
+
+float gasCellSpeed(ivec3 p) {
+    float vx=0.5*(gas_vel_x[gasVelXIndex(ivec3(p.x,p.y,p.z))] +
+                  gas_vel_x[gasVelXIndex(ivec3(p.x+1,p.y,p.z))]);
+    float vy=0.5*(gas_vel_y[gasVelYIndex(ivec3(p.x,p.y,p.z))] +
+                  gas_vel_y[gasVelYIndex(ivec3(p.x,p.y+1,p.z))]);
+    float vz=0.5*(gas_vel_z[gasVelZIndex(ivec3(p.x,p.y,p.z))] +
+                  gas_vel_z[gasVelZIndex(ivec3(p.x,p.y,p.z+1))]);
+    return length(vec3(vx,vy,vz));
 }
 
 void main() {
@@ -82,15 +112,52 @@ void main() {
     float dt=max(pc.material0.w,0.0);
     float cooling=max(pc.material1.z,0.0);
     float local_temperature=max(surface_state[id],0.0);
-    // Gas heats the liquid; cooling relaxes the surface back toward ambient.
-    local_temperature=max(
-        gas_temperature[gid],
-        local_temperature*exp(-cooling*dt));
-    surface_state[id]=local_temperature;
-
+    // Forced convection: a moving hot gas transfers heat to the liquid
+    // surface more effectively than a stationary hot cell.  This is a
+    // deliberately bounded contribution; wind still transports temperature
+    // through scalar advection, while this term models interface heat flux.
+    float contact_speed=gasCellSpeed(gc);
+    float convective_heat=gas_temperature[gid] *
+        clamp(0.08 + 0.025*contact_speed, 0.08, 0.65);
     uint fuel_index=fluid_count+id;
     float remaining=surface_state[fuel_index];
     if(remaining<0.0) remaining=max(pc.material0.z,0.0);
+
+    // Extinguishing liquids (water-like materials) remove heat and flame
+    // memory at the interface. The negative auto-ignite flag is a compact
+    // backwards-compatible encoding in the existing push constant ABI.
+    if (pc.material1.w < -0.5) {
+        float quench = clamp(max(pc.material0.z, 0.0) * dt, 0.0, 0.9);
+        gas_temperature[gid] = max(0.0, gas_temperature[gid] * (1.0 - quench));
+        gas_fuel[gid] = max(0.0, gas_fuel[gid] * (1.0 - quench * 0.35));
+        gas_interaction[gid] = max(0.0, gas_interaction[gid] * (1.0 - quench));
+        surface_state[id] = max(0.0, local_temperature * (1.0 - quench));
+        surface_state[fuel_index] = remaining;
+        return;
+    }
+    // Gas heats the liquid; cooling relaxes the surface back toward ambient.
+    local_temperature=max(
+        gas_temperature[gid] + convective_heat,
+        local_temperature*exp(-cooling*dt));
+    surface_state[id]=local_temperature;
+
+    // Flashing liquids produce fuel vapor before the liquid surface itself is
+    // considered ignited. This is essential for gasoline/alcohol: the gas
+    // phase must accumulate and mix with the pilot before sustained burning.
+    float flash_start=max(0.0, pc.material0.x * 0.65);
+    float vapor_factor=clamp(
+        (local_temperature-flash_start) /
+        max(pc.material0.x-flash_start, 0.05), 0.0, 1.0);
+    if (local_temperature >= flash_start && remaining > 0.0) {
+        float vaporized=min(remaining,
+            max(pc.material0.y, 0.0) * dt * vapor_factor);
+        remaining -= vaporized;
+        surface_state[fuel_index]=remaining;
+        if (vaporized > 0.0) {
+            atomicAdd(gas_fuel[gid], vaporized);
+        }
+    }
+
     bool ignited=pc.material1.w>0.5 ||
                  local_temperature>=max(pc.material0.x,0.0);
     if(!ignited || remaining<=0.0) {

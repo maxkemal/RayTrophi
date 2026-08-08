@@ -16,6 +16,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cstdint>
 
 class Triangle;
 class TriangleMesh;
@@ -192,6 +193,15 @@ struct InstanceGroup {
     int blas_id = -1;                           // GPU BLAS index
     std::vector<int> tlas_instance_ids;         // TLAS instance IDs for each instance
     bool gpu_dirty = true;                      // Needs GPU sync
+    // Monotonic transform generation for RT backends. Unlike gpu_dirty this is
+    // never consumed/cleared by another backend, so Vulkan can cheaply skip
+    // unchanged biome groups during TLAS transform synchronization.
+    uint64_t transform_revision = 1;
+    void markTransformsDirty() {
+        ++transform_revision;
+        if (transform_revision == 0) transform_revision = 1;
+        gpu_dirty = true;
+    }
     
     // Brush Settings (stored per-group for different foliage types)
     struct BrushSettings {
@@ -311,6 +321,7 @@ struct InstanceGroup {
     
     // Operations
     void addInstance(const InstanceTransform& transform);
+    void addInstances(const std::vector<InstanceTransform>& transforms);
     void removeInstancesInRadius(const Vec3& center, float radius);
     void clearInstances();
 

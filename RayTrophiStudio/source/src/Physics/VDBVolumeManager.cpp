@@ -1025,6 +1025,28 @@ void VDBVolumeManager::setLiveDenseGpuFields(
     }
 }
 
+void VDBVolumeManager::setLiveDenseMajorant(int volume_id,
+                                            uint64_t majorant_address,
+                                            int dim_x, int dim_y, int dim_z,
+                                            int block_size,
+                                            uint64_t emissive_list_address,
+                                            int emissive_capacity) {
+    VDBVolumeData* volume = getVolume(volume_id);
+    if (!volume) return;
+    const bool usable = majorant_address != 0 && block_size > 0 &&
+                        dim_x > 0 && dim_y > 0 && dim_z > 0;
+    volume->dense_majorant_address = usable ? majorant_address : 0;
+    volume->dense_majorant_dim[0] = usable ? dim_x : 0;
+    volume->dense_majorant_dim[1] = usable ? dim_y : 0;
+    volume->dense_majorant_dim[2] = usable ? dim_z : 0;
+    volume->dense_majorant_block = usable ? block_size : 0;
+    // The emitter list is independent: the majorant can be valid while the
+    // domain has no temperature channel and therefore no emitters.
+    const bool emissiveUsable = emissive_list_address != 0 && emissive_capacity > 0;
+    volume->dense_emissive_list_address = emissiveUsable ? emissive_list_address : 0;
+    volume->dense_emissive_capacity = emissiveUsable ? emissive_capacity : 0;
+}
+
 void VDBVolumeManager::clearLiveDenseGpuFields(int volume_id) {
     VDBVolumeData* volume = getVolume(volume_id);
     if (!volume) return;
@@ -1032,6 +1054,13 @@ void VDBVolumeManager::clearLiveDenseGpuFields(int volume_id) {
     volume->dense_temperature_address = 0;
     volume->dense_fuel_address = 0;
     volume->dense_flame_address = 0;
+    volume->dense_majorant_address = 0;
+    volume->dense_majorant_dim[0] = 0;
+    volume->dense_majorant_dim[1] = 0;
+    volume->dense_majorant_dim[2] = 0;
+    volume->dense_majorant_block = 0;
+    volume->dense_emissive_list_address = 0;
+    volume->dense_emissive_capacity = 0;
     volume->dense_resolution[0] = 0;
     volume->dense_resolution[1] = 0;
     volume->dense_resolution[2] = 0;

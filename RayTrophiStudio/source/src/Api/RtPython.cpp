@@ -594,6 +594,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["upward_force"] = info.upward_force;
         d["linear_drag"] = info.linear_drag;
         d["quadratic_drag"] = info.quadratic_drag;
+        d["thermal_delta_kelvin"] = info.thermal_delta_kelvin;
         d["fluid_surface_drag"] = info.fluid_surface_drag;
         d["fluid_drag_coupling"] = info.fluid_drag_coupling;
         d["fluid_surface_depth"] = info.fluid_surface_depth;
@@ -669,6 +670,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         flt("noise_speed", info.noise_speed);
         flt("inward_force", info.inward_force); flt("upward_force", info.upward_force);
         flt("linear_drag", info.linear_drag); flt("quadratic_drag", info.quadratic_drag);
+        flt("thermal_delta_kelvin", info.thermal_delta_kelvin);
         boolean("fluid_surface_drag", info.fluid_surface_drag);
         flt("fluid_drag_coupling", info.fluid_drag_coupling);
         flt("fluid_surface_depth", info.fluid_surface_depth);
@@ -726,6 +728,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["angular_velocity"] = info.angular_velocity;
         d["angular_jitter"] = info.angular_jitter;
         d["seed"] = info.seed;
+        d["parent_object"] = info.parent_object;
+        d["velocity_space"] = info.velocity_space;
+        d["inherit_velocity"] = info.inherit_velocity;
+        d["override_grid_deposit"] = info.override_grid_deposit;
+        d["grid_density_deposit"] = info.grid_density_deposit;
+        d["grid_temperature_deposit"] = info.grid_temperature_deposit;
+        d["grid_fuel_deposit"] = info.grid_fuel_deposit;
         return d;
     };
 
@@ -762,6 +771,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         flt("angular_jitter", info.angular_jitter);
         if (kwargs.contains("seed"))
             info.seed = py::cast<unsigned int>(kwargs["seed"]);
+        str("parent_object", info.parent_object);
+        str("velocity_space", info.velocity_space);
+        flt("inherit_velocity", info.inherit_velocity);
+        boolean("override_grid_deposit", info.override_grid_deposit);
+        flt("grid_density_deposit", info.grid_density_deposit);
+        flt("grid_temperature_deposit", info.grid_temperature_deposit);
+        flt("grid_fuel_deposit", info.grid_fuel_deposit);
     };
 
     particle.def("emitters", [emitterToDict]() -> py::list {
@@ -792,11 +808,52 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::updateParticleEmitter(emitter, info));
     }, py::arg("emitter"));
 
+    // Timeline keys. Only the channels actually passed are keyed, so
+    //   rt.particle.key_emitter("Embers", 120, enabled=False)
+    // keys ONLY the switch and leaves rate/speed free to be keyed separately.
+    particle.def("key_emitter", [](const std::string& emitter, int frame,
+                                   const py::kwargs& kw) {
+        rtapi::ParticleEmitterKey key;
+        key.frame = frame;
+        if (kw.contains("enabled")) { key.has_enabled = true; key.enabled = py::cast<bool>(kw["enabled"]); }
+        if (kw.contains("rate_per_second")) { key.has_rate = true; key.rate_per_second = py::cast<float>(kw["rate_per_second"]); }
+        if (kw.contains("speed")) { key.has_speed = true; key.speed = py::cast<float>(kw["speed"]); }
+        if (kw.contains("spread")) { key.has_spread = true; key.spread = py::cast<float>(kw["spread"]); }
+        if (kw.contains("point")) { key.has_point = true; key.point = vec3FromPython(kw["point"]); }
+        if (kw.contains("direction")) { key.has_direction = true; key.direction = vec3FromPython(kw["direction"]); }
+        requireResult(rtapi::keyParticleEmitter(emitter, key));
+    }, py::arg("emitter"), py::arg("frame"));
+    particle.def("clear_emitter_key", [](const std::string& emitter, int frame) {
+        requireResult(rtapi::clearParticleEmitterKey(emitter, frame));
+    }, py::arg("emitter"), py::arg("frame"));
     particle.def("remove_emitter", [](const std::string& emitter) {
         requireResult(rtapi::removeParticleEmitter(emitter));
     }, py::arg("emitter"));
 
     particle.def("clear_emitters", []() { requireResult(rtapi::clearParticleEmitters()); });
+
+    // Systems, not particles. clear_emitters/flow_source.remove/collider.remove
+    // only ever touch the ACTIVE system; these reach the rest.
+    particle.def("list_systems", []() -> py::list {
+        std::vector<rtapi::ParticleSystemInfo> systems;
+        requireResult(rtapi::listParticleSystems(systems));
+        py::list out;
+        for (const auto& s : systems) {
+            py::dict d;
+            d["index"] = s.index;
+            d["id"] = s.id;
+            d["name"] = s.name;
+            d["active"] = s.active;
+            d["domain_count"] = s.domain_count;
+            d["flow_source_count"] = s.flow_source_count;
+            d["emitter_count"] = s.emitter_count;
+            d["collider_count"] = s.collider_count;
+            out.append(d);
+        }
+        return out;
+    });
+
+    particle.def("clear_systems", []() { requireResult(rtapi::clearParticleSystems()); });
 
     particle.def("get_physics", []() -> py::dict {
         rtapi::ParticlePhysicsInfo info;
@@ -923,6 +980,33 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     fluid.def("remove_domain", [](const std::string& domain) {
         requireResult(rtapi::removeFluidDomain(domain));
     }, py::arg("domain"));
+
+    // Enumerates liquid AND gas domains — a script that only knows the names it
+    // authored itself cannot tear down what a UI preset created.
+    fluid.def("list_domains", []() -> py::list {
+        std::vector<rtapi::FluidDomainInfo> domains;
+        requireResult(rtapi::listFluidDomains(domains));
+        py::list out;
+        for (const auto& info : domains) {
+            py::dict d;
+            d["id"] = info.id;
+            d["name"] = info.name;
+            d["type"] = info.type;
+            d["domain_min"] = vec3ToPython(info.domain_min);
+            d["domain_max"] = vec3ToPython(info.domain_max);
+            d["voxel_size"] = info.voxel_size;
+            d["particle_count"] = info.particle_count;
+            d["render_mode"] = info.render_mode;
+            d["backend"] = info.backend;
+            d["boundary"] = info.boundary;
+            d["preset"] = info.preset;
+            d["viscosity"] = info.viscosity;
+            d["enabled"] = info.enabled;
+            d["visible"] = info.visible;
+            out.append(d);
+        }
+        return out;
+    });
 
     fluid.def("get", [](const std::string& domain) -> py::dict {
         rtapi::FluidDomainInfo info;
@@ -1072,10 +1156,49 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::updateGasDomainSettings(domain, s));
     }, py::arg("domain"));
 
+    // Volume appearance. Without this a script could enable fire and still get
+    // flat grey smoke, because the default shader has no blackbody emission.
+    auto gas_shader_to_dict = [](const rtapi::GasShaderSettings& s) {
+        py::dict d;
+        d["preset"] = s.preset;
+        d["density_multiplier"] = s.density_multiplier;
+        d["density_cutoff"] = s.density_cutoff;
+        d["blackbody_intensity"] = s.blackbody_intensity;
+        d["temperature_min"] = s.temperature_min;
+        d["temperature_max"] = s.temperature_max;
+        d["scattering_coefficient"] = s.scattering_coefficient;
+        d["absorption_coefficient"] = s.absorption_coefficient;
+        return d;
+    };
+    gas.def("get_shader", [gas_shader_to_dict](const std::string& domain) {
+        rtapi::GasShaderSettings s;
+        requireResult(rtapi::getGasShaderSettings(domain, s));
+        return gas_shader_to_dict(s);
+    }, py::arg("domain"));
+    gas.def("set_shader", [](const std::string& domain, const py::kwargs& kwargs) {
+        rtapi::GasShaderSettings s;
+        requireResult(rtapi::getGasShaderSettings(domain, s));
+        // An omitted preset keeps the current look and only applies the
+        // individual overrides below; passing one re-bases from that preset.
+        if (!kwargs.contains("preset")) s.preset.clear();
+#define RT_GASSHADER_KW(name, type) if (kwargs.contains(#name)) s.name = py::cast<type>(kwargs[#name])
+        RT_GASSHADER_KW(preset, std::string);
+        RT_GASSHADER_KW(density_multiplier, float);
+        RT_GASSHADER_KW(density_cutoff, float);
+        RT_GASSHADER_KW(blackbody_intensity, float);
+        RT_GASSHADER_KW(temperature_min, float);
+        RT_GASSHADER_KW(temperature_max, float);
+        RT_GASSHADER_KW(scattering_coefficient, float);
+        RT_GASSHADER_KW(absorption_coefficient, float);
+#undef RT_GASSHADER_KW
+        requireResult(rtapi::updateGasShaderSettings(domain, s));
+    }, py::arg("domain"));
+
     fluid.def("get_combustion", [](const std::string& domain) {
         rtapi::CombustibleFluidSettings s;
         requireResult(rtapi::getCombustibleFluidSettings(domain,s));
         py::dict d;
+        d["chemistry_preset"] = s.chemistry_preset;
         d["enabled"]=s.enabled;
         d["auto_ignite"]=s.auto_ignite;
         d["ignition_temperature"]=s.ignition_temperature;
@@ -1093,6 +1216,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 #define RT_FLUID_FIRE_KW(name,type) \
         if(kwargs.contains(#name)) s.name=py::cast<type>(kwargs[#name])
         RT_FLUID_FIRE_KW(enabled,bool);
+        if(kwargs.contains("chemistry_preset")) s.chemistry_preset=py::cast<std::string>(kwargs["chemistry_preset"]);
         RT_FLUID_FIRE_KW(auto_ignite,bool);
         RT_FLUID_FIRE_KW(ignition_temperature,float);
         RT_FLUID_FIRE_KW(evaporation_rate,float);
@@ -1108,7 +1232,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         py::dict d;
         d["name"] = s.name; d["domain"] = s.domain;
         d["source_mode"] = s.source_mode; d["source_object"] = s.source_object;
-        d["enabled"] = s.enabled; d["position"] = vec3ToPython(s.position);
+        d["enabled"] = s.enabled; d["parent_object"] = s.parent_object;
+        d["velocity_space"] = s.velocity_space;
+        d["inherit_velocity"] = s.inherit_velocity;
+        d["position"] = vec3ToPython(s.position);
         d["velocity"] = vec3ToPython(s.velocity); d["radius"] = s.radius;
         d["velocity_coupling"] = s.velocity_coupling;
         d["density"] = s.density; d["temperature"] = s.temperature;
@@ -1128,6 +1255,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FLOW_KW(name, std::string); RT_FLOW_KW(domain, std::string);
         RT_FLOW_KW(source_mode, std::string); RT_FLOW_KW(source_object, std::string);
         RT_FLOW_KW(enabled, bool); RT_FLOW_KW(radius, float);
+        RT_FLOW_KW(parent_object, std::string); RT_FLOW_KW(velocity_space, std::string);
+        RT_FLOW_KW(inherit_velocity, float);
         RT_FLOW_KW(velocity_coupling, float); RT_FLOW_KW(density, float);
         RT_FLOW_KW(temperature, float); RT_FLOW_KW(fuel, float);
         RT_FLOW_KW(falloff, float); RT_FLOW_KW(fluid_particles_per_second, float);
@@ -1170,6 +1299,27 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     flow_source.def("remove", [](const std::string& name) {
         requireResult(rtapi::removeSimulationFlowSource(name));
     }, py::arg("name"));
+    // Timeline keys — only the channels actually passed are keyed. `flow_rate`
+    // is the liquid emission rate, i.e. the hose valve.
+    flow_source.def("key", [](const std::string& name, int frame,
+                              const py::kwargs& kw) {
+        rtapi::SimulationFlowSourceKey key;
+        key.frame = frame;
+        if (kw.contains("enabled")) { key.has_enabled = true; key.enabled = py::cast<bool>(kw["enabled"]); }
+        if (kw.contains("position")) { key.has_position = true; key.position = vec3FromPython(kw["position"]); }
+        if (kw.contains("velocity")) { key.has_velocity = true; key.velocity = vec3FromPython(kw["velocity"]); }
+        if (kw.contains("radius")) { key.has_radius = true; key.radius = py::cast<float>(kw["radius"]); }
+        if (kw.contains("density")) { key.has_density = true; key.density = py::cast<float>(kw["density"]); }
+        if (kw.contains("temperature")) { key.has_temperature = true; key.temperature = py::cast<float>(kw["temperature"]); }
+        if (kw.contains("fuel")) { key.has_fuel = true; key.fuel = py::cast<float>(kw["fuel"]); }
+        if (kw.contains("falloff")) { key.has_falloff = true; key.falloff = py::cast<float>(kw["falloff"]); }
+        if (kw.contains("velocity_coupling")) { key.has_velocity_coupling = true; key.velocity_coupling = py::cast<float>(kw["velocity_coupling"]); }
+        if (kw.contains("flow_rate")) { key.has_flow_rate = true; key.flow_rate = py::cast<float>(kw["flow_rate"]); }
+        requireResult(rtapi::keySimulationFlowSource(name, key));
+    }, py::arg("name"), py::arg("frame"));
+    flow_source.def("clear_key", [](const std::string& name, int frame) {
+        requireResult(rtapi::clearSimulationFlowSourceKey(name, frame));
+    }, py::arg("name"), py::arg("frame"));
 
     auto collider_to_dict = [](const rtapi::SimulationColliderInfo& c) {
         py::dict d;
@@ -1189,6 +1339,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["gas_temperature_rate"] = c.gas_temperature_rate;
         d["gas_fuel_rate"] = c.gas_fuel_rate;
         d["gas_flame_rate"] = c.gas_flame_rate;
+        d["msf_substance"] = c.msf_substance;
+        d["msf_override_ignition"] = c.msf_override_ignition;
+        d["msf_ignition_kelvin"] = c.msf_ignition_kelvin;
+        d["msf_burn_rate_scale"] = c.msf_burn_rate_scale;
+        d["msf_fuel_capacity_scale"] = c.msf_fuel_capacity_scale;
+        d["msf_mask_resolution"] = c.msf_mask_resolution;
+        d["msf_generate_char_mask"] = c.msf_generate_char_mask;
         return d;
     };
     auto apply_collider_kwargs = [](rtapi::SimulationColliderInfo& c,
@@ -1202,6 +1359,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_COLLIDER_KW(gas_interaction_enabled, bool);
         RT_COLLIDER_KW(gas_density_rate, float); RT_COLLIDER_KW(gas_temperature_rate, float);
         RT_COLLIDER_KW(gas_fuel_rate, float); RT_COLLIDER_KW(gas_flame_rate, float);
+        RT_COLLIDER_KW(msf_substance, std::string);
+        RT_COLLIDER_KW(msf_override_ignition, bool);
+        RT_COLLIDER_KW(msf_ignition_kelvin, float);
+        RT_COLLIDER_KW(msf_burn_rate_scale, float);
+        RT_COLLIDER_KW(msf_fuel_capacity_scale, float);
+        RT_COLLIDER_KW(msf_mask_resolution, int);
+        RT_COLLIDER_KW(msf_generate_char_mask, bool);
 #undef RT_COLLIDER_KW
         if (kw.contains("sphere_center")) c.sphere_center = vec3FromPython(kw["sphere_center"]);
         if (kw.contains("capsule_start")) c.capsule_start = vec3FromPython(kw["capsule_start"]);
@@ -1240,6 +1404,18 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     collider.def("remove", [](const std::string& name) {
         requireResult(rtapi::removeSimulationCollider(name));
     }, py::arg("name"));
+
+    // Material State Field: what scene objects are MADE of. Substance names are
+    // assigned on the collider that represents the object, because MSF is keyed
+    // by the collider's source object.
+    py::module_ msf = module.def_submodule(
+        "msf", "Material State Field: substances, ignition and charring");
+    msf.def("substances", [] {
+        std::vector<std::string> names;
+        requireResult(rtapi::listMaterialSubstances(names));
+        py::list out; for (const auto& n : names) out.append(n);
+        return out;
+    }, "Names accepted by collider(msf_substance=...)");
 
     py::module_ terrain = module.def_submodule("terrain", "Terrain creation, queries, and procedural operations");
     auto terrain_info_to_dict = [](const rtapi::TerrainInfo& info) -> py::dict {

@@ -7,6 +7,7 @@
 #include <chrono> // Süre ölçmek için
 #include <unordered_map> // Gereken başlık
 #include <algorithm>    // std::min ve std::max için
+#include <unordered_set>
 #include <cstring>      // memcpy for camera hash
 #include <cmath>        // std::isfinite for hair validation
 #include <set>          // for unique_nodes in TLAS building
@@ -152,6 +153,7 @@ OptixWrapper::OptixWrapper()
    // initialize();
 }
 void OptixWrapper::partialCleanup() {
+    std::lock_guard<std::recursive_mutex> sceneLock(scene_resource_mutex_);
     // Sadece buildFromData'da oluşturulan kaynakları temizle
     // stream ve context gibi önemli yapılar korunur
     bool freedAny = false;
@@ -332,6 +334,7 @@ void OptixWrapper::partialCleanup() {
 }
 
 void OptixWrapper::clearScene() {
+    std::lock_guard<std::recursive_mutex> sceneLock(scene_resource_mutex_);
     // Keep core initialization (context/stream/pipeline) alive, but fully drop scene-owned GPU data.
     if (accel_manager) {
         accel_manager->cleanup();
@@ -3142,6 +3145,7 @@ void gatherFoamSpheres(const InstanceGroup& group, size_t type,
 
 void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                                       const std::vector<std::shared_ptr<Hittable>>& objects) {
+    std::lock_guard<std::recursive_mutex> sceneLock(scene_resource_mutex_);
     // Block render while rebuilding
     extern std::atomic<bool> g_optix_rebuild_in_progress;
     g_optix_rebuild_in_progress.store(true, std::memory_order_release);
@@ -3671,7 +3675,6 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     const auto& instanceGroups = InstanceManager::getInstance().getGroups();
     for (const auto& group : instanceGroups) {
         if (group.instances.empty() || group.sources.empty()) continue;
-
         // Point-sphere (foam): one analytic sphere GAS per source + ONE identity
         // TLAS instance each — NOT one instance per particle. Skips the triangle
         // BLAS path entirely.
@@ -4075,6 +4078,122 @@ void OptixWrapper::rebuildTLAS() {
     // Reset accumulation since geometry changed
     resetAccumulation();
 }
+
+bool OptixWrapper::refreshScatterInstances() {
+    if (!accel_manager || !use_tlas_mode) return false;
+
+    struct BindingEntry {
+        int blasId = -1;
+        Matrix4x4 sourceToScatter = Matrix4x4::identity();
+    };
+    struct SourceBinding { std::vector<BindingEntry> entries; };
+    std::vector<std::vector<SourceBinding>> bindings;
+    const auto& scatterGroups = InstanceManager::getInstance().getGroups();
+    bindings.resize(scatterGroups.size());
+
+    // Resolve everything before mutating the live TLAS. Missing BLAS means the
+    // source geometry really changed and the conservative rebuild must own it.
+    for (size_t gi = 0; gi < scatterGroups.size(); ++gi) {
+        const auto& group = scatterGroups[gi];
+        if (group.point_sphere_mode || group.instances.empty()) continue;
+        bindings[gi].resize(group.sources.size());
+        for (size_t si = 0; si < group.sources.size(); ++si) {
+            const auto& source = group.sources[si];
+            if (!source.flat_meshes.empty()) {
+                for (const auto& mesh : source.flat_meshes) {
+                    if (!mesh || !mesh->geometry) continue;
+                    const auto* geo = mesh->geometry.get();
+                    const uint16_t* materialIds = geo->get_material_ids();
+                    const auto& indices = geo->indices;
+                    const size_t vertexCount = geo->get_vertex_count();
+                    std::unordered_set<int> materials;
+                    for (size_t face = 0; face + 2 < indices.size(); face += 3) {
+                        const uint32_t vertex = indices[face];
+                        materials.insert((materialIds && vertex < vertexCount) ?
+                            static_cast<int>(materialIds[vertex]) : 0);
+                    }
+                    const bool skinned = mesh->hasSkinWeights();
+                    const std::string name = mesh->nodeName.empty() ? "flat_mesh" : mesh->nodeName;
+                    const Matrix4x4 sourceWorld = mesh->transform ?
+                        mesh->transform->getFinal() : Matrix4x4::identity();
+                    const Matrix4x4 sourceToScatter =
+                        Matrix4x4::translation(-source.mesh_center) * sourceWorld;
+                    for (int material : materials) {
+                        const int blasId = accel_manager->findBLAS(name, material, skinned);
+                        if (blasId < 0) return false;
+                        bindings[gi][si].entries.push_back({blasId, sourceToScatter});
+                    }
+                }
+                if (bindings[gi][si].entries.empty()) return false;
+                continue;
+            }
+            const auto* centered = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
+            const auto* tris = (centered && !centered->empty()) ? centered : &source.triangles;
+            if (!tris || tris->empty()) return false;
+            std::unordered_set<std::string> seen;
+            for (const auto& triPtr : *tris) {
+                Triangle* tri = triPtr.get();
+                if (!tri) continue;
+                std::string name = tri->getNodeName();
+                if (name.empty()) name = "inst_group_source";
+                int mat = tri->getMaterialID();
+                if (mat == MaterialManager::INVALID_MATERIAL_ID) mat = 0;
+                const bool skinned = triangleHasEffectiveSkinData(tri);
+                const std::string key = name + "#" + std::to_string(mat) + (skinned ? "#s" : "#r");
+                if (!seen.insert(key).second) continue;
+                const int blasId = accel_manager->findBLAS(name, mat, skinned);
+                if (blasId < 0) return false;
+                bindings[gi][si].entries.push_back({blasId, Matrix4x4::identity()});
+            }
+            if (bindings[gi][si].entries.empty()) return false;
+        }
+    }
+
+    accel_manager->removeScatterInstances();
+    // IDs of ordinary objects do not move; remove only stale scatter entries.
+    for (auto it = node_to_instance.begin(); it != node_to_instance.end();) {
+        auto& ids = it->second;
+        ids.erase(std::remove_if(ids.begin(), ids.end(), [&](int id) {
+            const auto& all = accel_manager->getInstances();
+            return id < 0 || id >= static_cast<int>(all.size()) || all[id].blas_id < 0;
+        }), ids.end());
+        if (ids.empty()) it = node_to_instance.erase(it); else ++it;
+    }
+    for (auto it = instance_to_node.begin(); it != instance_to_node.end();) {
+        const auto& all = accel_manager->getInstances();
+        if (it->first < 0 || it->first >= static_cast<int>(all.size()) || all[it->first].blas_id < 0)
+            it = instance_to_node.erase(it);
+        else ++it;
+    }
+
+    for (size_t gi = 0; gi < scatterGroups.size(); ++gi) {
+        const auto& group = scatterGroups[gi];
+        if (group.point_sphere_mode || group.instances.empty() || group.sources.empty()) continue;
+        const std::string nodeName = group.name.empty() ? ("ScatterGroup_" + std::to_string(group.id)) : group.name;
+        for (size_t ii = 0; ii < group.instances.size(); ++ii) {
+            int si = group.instances[ii].source_index;
+            if (si < 0 || si >= static_cast<int>(bindings[gi].size())) si = 0;
+            if (si >= static_cast<int>(bindings[gi].size())) continue;
+            for (const auto& entry : bindings[gi][si].entries) {
+                const int blasId = entry.blasId;
+                Matrix4x4 m = group.instances[ii].toMatrix() * entry.sourceToScatter;
+                float t[12] = {m.m[0][0],m.m[0][1],m.m[0][2],m.m[0][3], m.m[1][0],m.m[1][1],m.m[1][2],m.m[1][3], m.m[2][0],m.m[2][1],m.m[2][2],m.m[2][3]};
+                const MeshBLAS* blas = accel_manager->getBLAS(blasId);
+                if (!blas) return false;
+                int id = accel_manager->addInstance(blasId, t, blas->material_id, InstanceType::Mesh, nodeName, nullptr);
+                if (id < 0) return false;
+                accel_manager->setInstanceScatterBinding(id, group.id, static_cast<uint32_t>(ii));
+                node_to_instance[nodeName].push_back(id);
+                instance_to_node[id] = nodeName;
+            }
+        }
+    }
+    accel_manager->buildTLAS();
+    traversable_handle = accel_manager->getTraversableHandle();
+    resetAccumulation();
+    return traversable_handle != 0 || accel_manager->getInstanceCount() == 0;
+}
+
 
 void OptixWrapper::updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) {
     extern std::atomic<bool> g_optix_rebuild_in_progress;

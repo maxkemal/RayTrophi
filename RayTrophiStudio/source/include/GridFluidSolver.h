@@ -122,21 +122,50 @@ struct SolverParams {
     float expansion = 0.0f;
 };
 
+/// Per-stage host wall time (ms) of one GridFluid::step, so the gas panel can
+/// show WHICH operator costs the frame instead of a single lump.
+///
+/// A stage the caller skipped (its `skip_*` flag is set because a GPU path
+/// already ran it) stays at 0. A zero row therefore means "did not run on the
+/// CPU this step", never "ran and was free" — the reader needs the caller's
+/// per-stage GPU/CPU flags to tell those apart, which is why the domain-level
+/// stats carry both.
+struct GasSolverStats {
+    float total_ms = 0.0f;
+    float advect_velocity_ms = 0.0f;
+    float advect_scalar_ms = 0.0f;   // density + temperature + fuel
+    float boundary_ms = 0.0f;        // wall BCs + solid scalars/faces, both calls
+    float combustion_ms = 0.0f;
+    float buoyancy_ms = 0.0f;
+    float force_fields_ms = 0.0f;
+    float vorticity_ms = 0.0f;
+    float turbulence_ms = 0.0f;
+    float dissipation_ms = 0.0f;     // scalar + velocity loss and clamp
+    float pressure_ms = 0.0f;
+    // Relaxation sweeps the projection was authorized to run this step. 0 when
+    // pressure ran elsewhere (GPU) or the velocity channel is off.
+    int   pressure_iterations = 0;
+    bool  sparse_vdb = false;
+};
+
 /// @brief Advance one fluid step in place on @p grid.
 /// @param forces optional shared force-field snapshot (evaluated as Gas kind).
 /// @param time_seconds simulation time, for force-field noise animation.
+/// @param stats optional per-stage timing sink; fully overwritten when given.
 void step(FluidSim::FluidGrid& grid,
           const SolverParams& params,
           float dt,
           const SimulationForceFieldSnapshot* forces = nullptr,
-          float time_seconds = 0.0f);
+          float time_seconds = 0.0f,
+          GasSolverStats* stats = nullptr);
 
 /// @brief Advance one fluid step using Sparse OpenVDB in place on @p grid.
 void stepSparseVDB(FluidSim::FluidGrid& grid,
                    const SolverParams& params,
                    float dt,
                    const SimulationForceFieldSnapshot* forces = nullptr,
-                   float time_seconds = 0.0f);
+                   float time_seconds = 0.0f,
+                   GasSolverStats* stats = nullptr);
 
 /// @brief Run only the pressure projection stage in place on @p grid.
 void projectPressure(FluidSim::FluidGrid& grid,

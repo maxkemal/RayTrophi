@@ -1,0 +1,104 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+// Synthetic/evaluated candidate values. Terrain and mesh producer kernels feed
+// these same semantic lanes into evaluateCandidate(), keeping mask behaviour
+// independent of the surface representation.
+struct CandidateValues {
+    vec4 includeValues; // density, splatInclude, brushFalloff, scaleMask
+    vec4 rejectValues;  // exclusionField, exclusionSplat, height, slopeDegrees
+    vec4 terrainValues; // curvature, directionWeight, edgeDistanceUV, finite(0/1)
+    uvec4 ids;          // candidateId, seed, flags, reserved
+};
+
+struct Decision {
+    uint accepted;
+    uint rejectionMask;
+    uint candidateId;
+    uint reserved;
+};
+
+layout(set=0,binding=0,std430) readonly buffer Candidates { CandidateValues candidates[]; };
+layout(set=0,binding=1,std430) writeonly buffer Decisions { Decision decisions[]; };
+
+layout(push_constant) uniform PC {
+    uint count;
+    float heightMin;
+    float heightMax;
+    float slopeMax;
+    float curvatureMin;
+    float curvatureMax;
+    float exclusionThreshold;
+    float directionInfluence;
+    uint allowFlags; // bit 0 ridge, bit 1 flat, bit 2 gully
+    uint pad0;
+    uint pad1;
+    uint pad2;
+} pc;
+
+const uint REJECT_NON_FINITE       = 1u << 0;
+const uint REJECT_EDGE             = 1u << 1;
+const uint REJECT_HEIGHT           = 1u << 2;
+const uint REJECT_SLOPE            = 1u << 3;
+const uint REJECT_CURVATURE        = 1u << 4;
+const uint REJECT_DIRECTION        = 1u << 5;
+const uint REJECT_EXCLUSION_FIELD  = 1u << 6;
+const uint REJECT_EXCLUSION_SPLAT  = 1u << 7;
+const uint REJECT_DENSITY          = 1u << 8;
+
+uint hash32(uint value) {
+    value ^= value >> 16u;
+    value *= 0x7feb352du;
+    value ^= value >> 15u;
+    value *= 0x846ca68bu;
+    value ^= value >> 16u;
+    return value;
+}
+
+float random01(uint seed, uint candidateId, uint stream) {
+    uint bits = hash32(seed ^ hash32(candidateId + 0x9e3779b9u * (stream + 1u)));
+    return float(bits >> 8u) * (1.0 / 16777216.0);
+}
+
+Decision evaluateCandidate(CandidateValues c) {
+    Decision result = Decision(0u, 0u, c.ids.x,
+                               hash32(c.ids.y ^ hash32(c.ids.x + 0x9e3779b9u * 14u)));
+    float includeWeight = clamp(c.includeValues.x, 0.0, 1.0) *
+                          clamp(c.includeValues.y, 0.0, 1.0) *
+                          clamp(c.includeValues.z, 0.0, 1.0);
+
+    if (c.terrainValues.w < 0.5) result.rejectionMask |= REJECT_NON_FINITE;
+    if (c.terrainValues.z < 0.0) result.rejectionMask |= REJECT_EDGE;
+    if (c.rejectValues.z < pc.heightMin || c.rejectValues.z > pc.heightMax)
+        result.rejectionMask |= REJECT_HEIGHT;
+    if (c.rejectValues.w > pc.slopeMax) result.rejectionMask |= REJECT_SLOPE;
+
+    bool ridge = c.terrainValues.x < pc.curvatureMin;
+    bool gully = c.terrainValues.x > pc.curvatureMax;
+    bool flatRegion = !ridge && !gully;
+    if ((ridge && (pc.allowFlags & 1u) == 0u) ||
+        (flatRegion && (pc.allowFlags & 2u) == 0u) ||
+        (gully && (pc.allowFlags & 4u) == 0u))
+        result.rejectionMask |= REJECT_CURVATURE;
+
+    float directionProbability = mix(1.0, clamp(c.terrainValues.y, 0.0, 1.0),
+                                     clamp(pc.directionInfluence, 0.0, 1.0));
+    if (random01(c.ids.y, c.ids.x, 1u) > directionProbability)
+        result.rejectionMask |= REJECT_DIRECTION;
+    if (c.rejectValues.x >= pc.exclusionThreshold)
+        result.rejectionMask |= REJECT_EXCLUSION_FIELD;
+    if (c.rejectValues.y >= pc.exclusionThreshold)
+        result.rejectionMask |= REJECT_EXCLUSION_SPLAT;
+    if (random01(c.ids.y, c.ids.x, 0u) > includeWeight)
+        result.rejectionMask |= REJECT_DENSITY;
+
+    result.accepted = result.rejectionMask == 0u ? 1u : 0u;
+    return result;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    decisions[i] = evaluateCandidate(candidates[i]);
+}

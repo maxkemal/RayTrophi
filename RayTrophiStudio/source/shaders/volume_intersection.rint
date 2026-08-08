@@ -70,6 +70,17 @@ struct VkVolumeInstance {
     float cloud_offset_z;
     float cloud_seed;
     float _ext_reserved[12];
+    // Appended acceleration block — MUST match VkVolumeInstance in
+    // include/Backend/vulkan_volume_types.h (576 bytes). Every shader that
+    // declares this struct carries the same tail: the SSBO stride is
+    // per-declaration, so one stale copy shifts every instance after the first.
+    uint64_t majorant_address;   // per-block density max for live dense gas (0 = none)
+    float    majorant_dim[3];    // block-grid resolution
+    float    majorant_block;     // cells per block edge
+    uint64_t flame_address;      // combustion reaction field for live dense gas (0 = none)
+    uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
+    float    emissive_capacity;
+    float    _accel_reserved[5];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;

@@ -465,6 +465,9 @@
     <ClInclude Include="source\include\FoliageWindSystem.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\GpuFoliageScatter.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\TextureCompression.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -536,6 +539,15 @@
       <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
     <None Include="source\shaders\closesthit.rchit">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\instance_prepare.comp">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\foliage_scatter_parity.comp">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\foliage_scatter_terrain_accept.comp">
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
     <None Include="source\shaders\water_v3.glsl">
@@ -901,6 +913,9 @@
     <ClCompile Include="source\src\Scene\InstanceGroup.cpp">
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Scene\GpuFoliageScatter.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Scene\InstanceManager.cpp">
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
@@ -1013,6 +1028,9 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp">

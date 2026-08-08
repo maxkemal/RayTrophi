@@ -289,6 +289,11 @@ bool buildLevelSet(const FluidParticles& particles,
 
     const float inv_h = 1.0f / voxel;
     for (std::size_t p = 0; p < particle_count; ++p) {
+        // Depleted fuel particles remain in the stable APIC pool until the
+        // lifecycle compaction pass. Do not let an already evaporated slot
+        // keep the rendered SurfaceSDF artificially thick.
+        if (p < particles.mass_fraction.size() &&
+            particles.mass_fraction[p] <= 0.02f) continue;
         const Vec3& wp = particles.position[p];
         if (!std::isfinite(wp.x) || !std::isfinite(wp.y) || !std::isfinite(wp.z)) continue;
         const Vec3 local = (wp - origin) * inv_h;
@@ -525,6 +530,7 @@ bool buildLevelSet(const FluidParticles& particles,
                 const int k1 = std::min(nz - 1, k + reach);
 
                 float acc_w = 0.0f;
+                float acc_mass = 0.0f;
                 Vec3  acc_p(0.0f, 0.0f, 0.0f);
 
                 for (int kk = k0; kk <= k1; ++kk) {
@@ -544,7 +550,11 @@ bool buildLevelSet(const FluidParticles& particles,
                                     if (q2 >= 1.0f) continue;
                                     const float t = 1.0f - q2;
                                     const float w = t * t * t;
+                                    const float mass = pa < particles.mass_fraction.size()
+                                        ? std::clamp(particles.mass_fraction[pa], 0.0f, 1.0f)
+                                        : 1.0f;
                                     acc_w += w;
+                                    acc_mass += w * mass;
                                     acc_p.x += w * xt.x;
                                     acc_p.y += w * xt.y;
                                     acc_p.z += w * xt.z;
@@ -557,7 +567,11 @@ bool buildLevelSet(const FluidParticles& particles,
                                     // support, derivative is well-behaved.
                                     const float t = 1.0f - d2 / kernel_R_sq;
                                     const float w = t * t * t;
+                                    const float mass = pa < particles.mass_fraction.size()
+                                        ? std::clamp(particles.mass_fraction[pa], 0.0f, 1.0f)
+                                        : 1.0f;
                                     acc_w += w;
+                                    acc_mass += w * mass;
                                     acc_p.x += w * pp.x;
                                     acc_p.y += w * pp.y;
                                     acc_p.z += w * pp.z;
@@ -572,7 +586,9 @@ bool buildLevelSet(const FluidParticles& particles,
                     const float inv_w = 1.0f / acc_w;
                     const Vec3 x_bar(acc_p.x * inv_w, acc_p.y * inv_w, acc_p.z * inv_w);
                     const float dlen = std::sqrt(lengthSq(p_c - x_bar));
-                    const float phi = dlen - particle_r;
+                    const float mean_mass = std::clamp(acc_mass / std::max(acc_w, 1.0e-12f), 0.0f, 1.0f);
+                    const float mass_radius = particle_r * std::cbrt(std::max(mean_mass, 0.02f));
+                    const float phi = dlen - mass_radius;
                     // Clamp to narrow band so far interior cells still report
                     // a finite distance the iso-walker can step through.
                     const float phi_clamped = std::min(narrow_band, std::max(-narrow_band, phi));

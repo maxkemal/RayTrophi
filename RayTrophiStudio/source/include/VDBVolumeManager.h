@@ -60,6 +60,16 @@ struct VDBVolumeData {
     uint64_t dense_temperature_address = 0;
     uint64_t dense_fuel_address = 0;
     uint64_t dense_flame_address = 0;
+    // Per-block density maximum (dense_majorant_block^3 cells per entry) for the
+    // RT empty-space skip. 0 = not available; the renderer must then march every
+    // step rather than assume any block is empty.
+    uint64_t dense_majorant_address = 0;
+    int dense_majorant_dim[3] = {0, 0, 0};
+    int dense_majorant_block = 0;
+    // Emitting-block list for volume emission NEE ([0] = count, [1..] = block
+    // indices). Shares the majorant block layout.
+    uint64_t dense_emissive_list_address = 0;
+    int dense_emissive_capacity = 0;
     int dense_resolution[3] = {0, 0, 0};
     float dense_origin[3] = {0.0f, 0.0f, 0.0f};
     float dense_voxel_size = 0.0f;
@@ -163,6 +173,17 @@ public:
                                bool content_active,
                                const int active_min[3],
                                const int active_max[3]);
+    // Block-max acceleration for the live dense RT march. Kept OUT of
+    // setLiveDenseGpuFields because it has a different lifetime: the fields are
+    // published every step, the majorant only when its pass actually ran for the
+    // current grid. Passing 0 clears it, which makes the renderer fall back to
+    // marching every step.
+    void setLiveDenseMajorant(int volume_id,
+                              uint64_t majorant_address,
+                              int dim_x, int dim_y, int dim_z,
+                              int block_size,
+                              uint64_t emissive_list_address = 0,
+                              int emissive_capacity = 0);
     void clearLiveDenseGpuFields(int volume_id);
     // Toggle only the content gate while preserving persistent Vulkan buffer
     // addresses and the stable TLAS/SSBO binding.

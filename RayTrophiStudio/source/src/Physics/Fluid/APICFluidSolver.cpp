@@ -1897,6 +1897,35 @@ static void redistributeParticles(FluidParticles& parts,
     const int  min_per = std::clamp(params.reseed_min_per_cell, 1, target);
     const int  max_per = std::max(target + 1, params.reseed_max_per_cell);
 
+    // ★★ Reseed CREATES particles (parts.emit below); it does not move them.
+    // Topping a starved cell from 1 up to `target` invents 7 particles' worth of
+    // liquid. That is fine for the drift it was written to correct — INTERIOR
+    // cells whose sample count wandered — but catastrophic at a free surface.
+    //
+    // A spreading sheet (a spill hitting the floor, a jet flattening out) is a
+    // moving frontier of cells holding 1-2 particles, each with a healthy
+    // neighbour behind it. Every step that whole frontier is amplified 4-8x, the
+    // now-denser sheet spreads further, and a new frontier appears. The result
+    // is exponential growth that is bounded by nothing but max_particles: the
+    // liquid looks like it "suddenly dumps its entire budget" a moment after it
+    // lands, and lowering the emitter's rate changes nothing because the emitter
+    // is not what is producing the particles.
+    //
+    // The primary guard is GEOMETRIC and lives in the loop: a surface cell is
+    // lifted only to `min_per`, never to the bulk `target`. That alone bounds a
+    // spreading film at ~min_per particles per wetted cell — a finite number set
+    // by the floor area — instead of letting the frontier reach full bulk
+    // density, push further, and compound.
+    const std::size_t count_before_reseed = parts.size();
+    // A second, deliberately GENEROUS backstop: no single step may create more
+    // than a quarter of the existing liquid. This must not bite during normal
+    // operation — the loop walks cells in scan order, so a budget that runs out
+    // mid-frame leaves the cells it never reached below the air threshold, which
+    // is the very starvation that made the surface behave as spray. It exists
+    // only so a pathological configuration cannot explode inside one frame.
+    std::size_t reseed_budget =
+        std::max<std::size_t>(2048u, count_before_reseed / 4u);
+
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     const float h = grid.voxel_size;
     const float invH = 1.0f / h;
@@ -2014,16 +2043,62 @@ static void redistributeParticles(FluidParticles& parts,
 
                 // If this is an isolated spray cell (fewer than min_per + 2 particles in 3x3x3 neighborhood)
                 // and has no healthy neighbors, bypass reseeding (treat as isolated spray to preserve mass!).
+                // NOTE: this only catches DETACHED droplets. A spreading sheet
+                // always has healthy neighbours behind it, so it sails straight
+                // through — which is exactly the runaway case the surface test
+                // below exists to stop.
                 if (neighborhood_sum < std::max(4, min_per + 2) && !has_healthy_neighbor) {
                     continue;
                 }
+
+                // ★ Free-surface test: a face neighbour that is in-bounds, not
+                // solid and EMPTY means this cell borders air, so it is surface,
+                // not interior. Out-of-bounds and solid neighbours are walls, not
+                // air — a cell resting on the floor is still interior.
+                bool borders_air = false;
+                const int face[6][3] = { {-1,0,0}, {1,0,0}, {0,-1,0},
+                                         {0,1,0},  {0,0,-1}, {0,0,1} };
+                for (const auto& f : face) {
+                    const int ni = i + f[0], nj = j + f[1], nk = k + f[2];
+                    if (ni < 0 || ni >= nx || nj < 0 || nj >= ny ||
+                        nk < 0 || nk >= nz) {
+                        continue;                       // wall
+                    }
+                    const std::size_t nc = grid.cellIndex(ni, nj, nk);
+                    if (grid.solid[nc]) continue;       // wall
+                    if (cell_count_buf[nc] == 0) { borders_air = true; break; }
+                }
+
+                // ★★ Surface cells are never topped up. Every particle this
+                // function emits is INVENTED liquid (P2G is unit-mass and never
+                // reads mass_fraction, so there is no way to split instead), and
+                // at a free surface a low count is the truth: a sheet one cell
+                // deep really does hold a couple of particles per cell. Filling
+                // those cells is what made a spill gain mass the moment it
+                // landed — drops hit the floor, spread into fresh cells, and
+                // each fresh cell was inflated to bulk density.
+                //
+                // Interior cells are a different question and keep the original
+                // behaviour: they are enclosed, they cannot form an expanding
+                // frontier, and a count that has drifted there really is drift.
+                //
+                // ★ This is only safe because the air-drag stage no longer keys
+                // off `reseed_min_per_cell`. It used to, so starving the surface
+                // also classified the whole outer layer as spray — the two
+                // faults hid each other. Air drag now tests ISOLATION (3x3x3
+                // neighbourhood) instead; keep them decoupled.
+                if (borders_air) continue;
 
                 const int need = target - count;
                 if (parts.size() >= params.max_particles) {
                     continue;
                 }
-                const int actual_need = std::min<int>(need, static_cast<int>(params.max_particles - parts.size()));
+                if (reseed_budget == 0u) continue;
+                const int actual_need = std::min<int>(
+                    std::min<int>(need, static_cast<int>(params.max_particles - parts.size())),
+                    static_cast<int>(reseed_budget));
                 if (actual_need <= 0) continue;
+                reseed_budget -= static_cast<std::size_t>(actual_need);
 
                 const Vec3 cell_min = grid.origin + Vec3(static_cast<float>(i) * h,
                                                           static_cast<float>(j) * h,
@@ -2354,7 +2429,42 @@ void step(FluidParticles& particles,
             const int k = static_cast<int>(std::floor(gp.z));
             if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
             const int count = air_cell_count_buf[grid.cellIndex(i, j, k)];
-            if (count >= air_threshold) continue; // bulk fluid — skip air drag
+            if (count >= air_threshold) continue; // dense cell — certainly bulk
+
+            // ★★ A sparse CELL is not the same thing as a detached DROPLET.
+            //
+            // This used to drag every particle whose own cell held fewer than
+            // air_threshold particles. A thin sheet of liquid lying on the floor
+            // is exactly that — one cell deep, a couple of particles per cell —
+            // so the entire spread of a spill was being treated as airborne
+            // spray and given quadratic drag. It stopped following a moving
+            // container and visibly scattered. Reseed used to hide this by
+            // pumping every sparse cell up to the bulk target, which is how the
+            // liquid gained mass on impact; the two faults were propping each
+            // other up.
+            //
+            // Spray is defined by ISOLATION, not by local thinness: sum the
+            // 3x3x3 neighbourhood, and only drag a particle whose neighbourhood
+            // is also nearly empty. A film has plenty of in-plane neighbours; a
+            // droplet flying through air has none. Only reached by particles
+            // that already failed the cheap test above, so the 27 taps cost
+            // nothing on bulk fluid.
+            const int isolation_threshold = std::max(4, air_threshold + 2);
+            int neighbourhood = 0;
+            for (int dk = -1; dk <= 1 && neighbourhood < isolation_threshold; ++dk) {
+                const int nk2 = k + dk;
+                if (nk2 < 0 || nk2 >= nz) continue;
+                for (int dj = -1; dj <= 1 && neighbourhood < isolation_threshold; ++dj) {
+                    const int nj2 = j + dj;
+                    if (nj2 < 0 || nj2 >= ny) continue;
+                    for (int di = -1; di <= 1; ++di) {
+                        const int ni2 = i + di;
+                        if (ni2 < 0 || ni2 >= nx) continue;
+                        neighbourhood += air_cell_count_buf[grid.cellIndex(ni2, nj2, nk2)];
+                    }
+                }
+            }
+            if (neighbourhood >= isolation_threshold) continue; // sheet/film — bulk
 
             Vec3& v = particles.velocity[pi];
             const float speed_sq = v.x * v.x + v.y * v.y + v.z * v.z;

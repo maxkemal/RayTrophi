@@ -184,7 +184,7 @@ static bool applyCpuWindToGroup(
     }
 
     if (group_changed) {
-        group.gpu_dirty = true;
+        group.markTransformsDirty();
     }
     return group_changed;
 }

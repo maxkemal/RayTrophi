@@ -207,6 +207,14 @@ struct RigidBodyObject {
     Matrix4x4 initial_pivot = Matrix4x4::identity();    // P0: object REST pose (spawn point)
     Vec3 rest_half_extents = Vec3(0.5f, 0.5f, 0.5f);    // shape dims captured at rest (reused on shape/param change)
     Matrix4x4 last_written_pivot = Matrix4x4::identity(); // last pose the sim pushed onto the object
+    // ★ The rigid delta D = B(t)*inv(B0) that was last baked into the mesh, i.e.
+    // the object's motion since spawn. This — NOT last_written_pivot — is what
+    // anything tracking the object's live world pose must use. last_written_pivot
+    // is D composed onto initial_pivot, and initial_pivot is getPivotMatrix(),
+    // the authored PIVOT POINT, which is not the object's world transform (it is
+    // identity for many objects and far from the geometry on imported meshes).
+    // Compose this onto the object's own (unchanged) spawn transform instead.
+    Matrix4x4 last_rigid_delta = Matrix4x4::identity();
     bool has_written = false;                            // sim has pushed at least one pose
     // Temporally-smoothed fluid velocity used for drag (per-body average of the
     // submerged sample points, EMA-filtered + speed-clamped). Decouples drag from
