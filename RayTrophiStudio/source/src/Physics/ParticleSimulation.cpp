@@ -4844,6 +4844,20 @@ bool runGpuFluidSurfaceCombustion(
         !(dt>0.0f) || !std::isfinite(dt)) {
         return false;
     }
+    if (fluid_domain.fluid_flammable && !fluid_domain.fluid_extinguishing &&
+        !fluid_particles.empty()) {
+        bool any_combustible = false;
+        for (std::size_t p = 0; p < fluid_particles.size(); ++p) {
+            const bool tagged = p < fluid_particles.substance_tag.size() &&
+                                fluid_particles.substance_tag[p] != 0u;
+            if (!tagged || p >= fluid_particles.combustible_fraction.size() ||
+                fluid_particles.combustible_fraction[p] > 0.0f) {
+                any_combustible = true;
+                break;
+            }
+        }
+        if (!any_combustible) return false;
+    }
     const Vec3 overlap_min=Vec3::max(fluid_domain.bounds_min,gas_domain.bounds_min);
     const Vec3 overlap_max=Vec3::min(fluid_domain.bounds_max,gas_domain.bounds_max);
     if(overlap_min.x>=overlap_max.x || overlap_min.y>=overlap_max.y ||
@@ -4908,6 +4922,17 @@ bool runGpuFluidSurfaceCombustion(
     const float rate = std::max(0.0f, fluid_domain.fluid_evaporation_rate);
     if (inv_gas_voxel > 0.0f && !gas_grid.temperature.empty() && rate > 0.0f) {
         for (std::size_t p = fluid_particles.size(); p-- > 0;) {
+            // Untagged legacy/seed/flow particles inherit the authored domain
+            // chemistry. Only a tagged material-transfer particle overrides it;
+            // otherwise adding the sidecar would silently make every existing
+            // gasoline/oil scene non-flammable (their default sidecar is zero).
+            const bool tagged = p < fluid_particles.substance_tag.size() &&
+                                fluid_particles.substance_tag[p] != 0u;
+            const float combustible = tagged &&
+                p < fluid_particles.combustible_fraction.size()
+                ? std::clamp(fluid_particles.combustible_fraction[p], 0.0f, 1.0f)
+                : 1.0f;
+            if (!(combustible > 0.0f)) continue;
             const Vec3 local = (fluid_particles.position[p] - gas_grid.origin) * inv_gas_voxel;
             const int gx = static_cast<int>(std::floor(local.x));
             const int gy = static_cast<int>(std::floor(local.y));
@@ -4920,7 +4945,8 @@ bool runGpuFluidSurfaceCombustion(
             const float heat_factor = std::clamp(
                 (temperature - ignition) / std::max(ignition, 1.0f), 0.0f, 1.0f);
             float& mass = fluid_particles.mass_fraction[p];
-            mass = std::clamp(mass - rate * heat_factor * dt, 0.0f, 1.0f);
+            mass = std::clamp(
+                mass - rate * heat_factor * combustible * dt, 0.0f, 1.0f);
             if (mass <= 0.02f) fluid_particles.removeSwap(p);
         }
     }
@@ -6038,7 +6064,25 @@ ParticleEmitterDesc::Keyframe evaluateParticleEmitter(
 }
 
 bool ParticleSimulationSystem::enabled() const {
-    return enabled_ && (alive_count_ > 0 || hasActiveEmitters() || hasActiveGridSimulation());
+    if (!enabled_) return false;
+    if (alive_count_ > 0 || hasActiveEmitters() || hasActiveGridSimulation())
+        return true;
+
+    // MSF is object-owned and intentionally advances even without particles,
+    // flow sources or active gas cells: ambient cooling, thermal force fields
+    // and persistent damage all exist outside a domain. The old activity gate
+    // prevented step() from ever reaching the MSF sync pass in exactly that
+    // scene, so a scripted collider could be fully configured yet never acquire
+    // a field. Keep the runtime scheduled while an MSF-authoring collider exists
+    // or while a previously-created field still needs ambient/cache upkeep.
+    if (hasMaterialStateFields()) return true;
+    for (const ParticleColliderDesc& collider : colliders_) {
+        if (collider.enabled && collider.gas_interaction_enabled &&
+            collider.gas_ignite_on_contact && !collider.source_name.empty()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool ParticleSimulationSystem::hasActiveGridSimulation() const {
@@ -7902,6 +7946,22 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
     }
 
     const float dt = context.dt;
+    const bool automatic_molten_transfer =
+        std::any_of(colliders_.begin(), colliders_.end(), [](const auto& c) {
+            return c.enabled && c.msf_auto_transfer;
+        });
+    if (automatic_molten_transfer) {
+        automatic_molten_readback_seconds_ += std::max(dt, 0.0f);
+    } else {
+        automatic_molten_readback_seconds_ = 0.0f;
+    }
+    // GPU MSF readback is intentionally throttled. It is telemetry-sized but
+    // still creates a Vulkan synchronization point; doing it every frame made
+    // an otherwise idle automatic-transfer scene unnecessarily expensive.
+    if (automatic_molten_readback_seconds_ >= 0.20f) {
+        material_state_fields_.requestReadback();
+        automatic_molten_readback_seconds_ = 0.0f;
+    }
     synchronizeGridDomains();
     if (context.compute) {
         while (grid_domain_compute_buffers_.size() > grid_domain_states_.size()) {
@@ -9571,6 +9631,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
     // for an object that was perfectly well simulated by the ambient pass.
     if (context.compute && material_state_fields_.readbackPending()) {
         material_state_fields_.flushReadback(*context.compute);
+    }
+    if (context.compute) {
+        queueAutomaticMoltenMassTransfers(dt);
+        processMoltenMassTransfers(*context.compute);
     }
 }
 

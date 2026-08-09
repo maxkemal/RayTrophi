@@ -380,7 +380,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 # The project intentionally disables C++ exceptions broadly, but pybind11's
 # Python exception translation requires them in the binding TU only.
 if(MSVC)
-    set_source_files_properties(source/src/Api/RtPython.cpp PROPERTIES COMPILE_OPTIONS "/EHsc")
+    set_source_files_properties(
+        source/src/Api/RtPython.cpp
+        source/src/Api/RtPythonFracture.cpp
+        source/src/Api/RtPythonPressure.cpp
+        source/src/Api/RtPythonDebris.cpp
+        source/src/Api/RtPythonMassTransfer.cpp
+        PROPERTIES COMPILE_OPTIONS "/EHsc")
 endif()
 
 target_link_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/lib")

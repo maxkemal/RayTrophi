@@ -29,6 +29,10 @@
 #include "Api/RtUi.h"   // Faz 4b: addon panels + regions (implementation in RtUi.cpp)
 #include "RtUiBindings.h"
 #include "RtPyCommon.h" // shared binding helpers + rtpy::registerSceneBindings
+#include "RtPythonFracture.h"
+#include "RtPythonPressure.h"
+#include "RtPythonDebris.h"
+#include "RtPythonMassTransfer.h"
 
 namespace py = pybind11;
 
@@ -450,6 +454,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     // ── Physics Engine (Faz 5.3a) ────────────────────────────────────────
     py::module_ physics = module.def_submodule("physics", "Rigid body, soft body, and cloth physics");
+    rtpy::registerFractureBindings(physics);
+    py::module_ debris = module.def_submodule("debris", "Budgeted ash and small debris LOD");
+    rtpy::registerDebrisBindings(debris);
+    rtpy::registerMassTransferBindings(module);
     physics.def("get", [](const std::string& object_name) -> py::dict {
         rtapi::PhysicsBodyInfo info;
         requireResult(rtapi::getPhysicsBody(object_name, info));
@@ -1094,6 +1102,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     gas.attr("set_param") = fluid.attr("set_param");
     gas.attr("reset") = fluid.attr("reset");
     gas.attr("step") = fluid.attr("step");
+    rtpy::registerPressureBindings(gas);
 
     auto gas_settings_to_dict = [](const rtapi::GasDomainSettings& s) {
         py::dict d;
@@ -1334,11 +1343,15 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["bounds_max"] = vec3ToPython(c.bounds_max);
         d["friction"] = c.friction; d["restitution"] = c.restitution;
         d["thickness"] = c.thickness;
+        d["sdf_resolution_mode"] = c.sdf_resolution_mode;
+        d["sdf_ready"] = c.sdf_ready;
+        d["sdf_resolution"] = c.sdf_resolution;
         d["gas_interaction_enabled"] = c.gas_interaction_enabled;
         d["gas_density_rate"] = c.gas_density_rate;
         d["gas_temperature_rate"] = c.gas_temperature_rate;
         d["gas_fuel_rate"] = c.gas_fuel_rate;
         d["gas_flame_rate"] = c.gas_flame_rate;
+        d["gas_ignite_on_contact"] = c.gas_ignite_on_contact;
         d["msf_substance"] = c.msf_substance;
         d["msf_override_ignition"] = c.msf_override_ignition;
         d["msf_ignition_kelvin"] = c.msf_ignition_kelvin;
@@ -1346,6 +1359,19 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["msf_fuel_capacity_scale"] = c.msf_fuel_capacity_scale;
         d["msf_mask_resolution"] = c.msf_mask_resolution;
         d["msf_generate_char_mask"] = c.msf_generate_char_mask;
+        d["msf_auto_transfer"] = c.msf_auto_transfer;
+        d["msf_transfer_domain"] = c.msf_transfer_domain;
+        d["msf_transfer_rate_kg_s"] = c.msf_transfer_rate_kg_s;
+        d["msf_transfer_min_mass_kg"] = c.msf_transfer_min_mass_kg;
+        d["msf_transfer_particles_per_kg"] = c.msf_transfer_particles_per_kg;
+        d["msf_transfer_max_batch_particles"] = c.msf_transfer_max_batch_particles;
+        d["msf_transfer_velocity"] = vec3ToPython(c.msf_transfer_velocity);
+        d["msf_melt_flow_enabled"] = c.msf_melt_flow_enabled;
+        d["msf_melt_height_loss"] = c.msf_melt_height_loss;
+        d["msf_melt_spread"] = c.msf_melt_spread;
+        d["msf_melt_sdf_refresh"] = c.msf_melt_sdf_refresh;
+        d["msf_melt_sdf_revision_interval"] = c.msf_melt_sdf_revision_interval;
+        d["msf_melt_sdf_change_threshold"] = c.msf_melt_sdf_change_threshold;
         return d;
     };
     auto apply_collider_kwargs = [](rtapi::SimulationColliderInfo& c,
@@ -1359,6 +1385,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_COLLIDER_KW(gas_interaction_enabled, bool);
         RT_COLLIDER_KW(gas_density_rate, float); RT_COLLIDER_KW(gas_temperature_rate, float);
         RT_COLLIDER_KW(gas_fuel_rate, float); RT_COLLIDER_KW(gas_flame_rate, float);
+        RT_COLLIDER_KW(gas_ignite_on_contact, bool);
         RT_COLLIDER_KW(msf_substance, std::string);
         RT_COLLIDER_KW(msf_override_ignition, bool);
         RT_COLLIDER_KW(msf_ignition_kelvin, float);
@@ -1366,6 +1393,21 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_COLLIDER_KW(msf_fuel_capacity_scale, float);
         RT_COLLIDER_KW(msf_mask_resolution, int);
         RT_COLLIDER_KW(msf_generate_char_mask, bool);
+        RT_COLLIDER_KW(msf_auto_transfer, bool);
+        RT_COLLIDER_KW(msf_transfer_domain, std::string);
+        RT_COLLIDER_KW(msf_transfer_rate_kg_s, float);
+        RT_COLLIDER_KW(msf_transfer_min_mass_kg, float);
+        RT_COLLIDER_KW(msf_transfer_particles_per_kg, float);
+        RT_COLLIDER_KW(msf_transfer_max_batch_particles, uint32_t);
+        RT_COLLIDER_KW(msf_melt_flow_enabled, bool);
+        RT_COLLIDER_KW(msf_melt_height_loss, float);
+        RT_COLLIDER_KW(msf_melt_spread, float);
+        RT_COLLIDER_KW(msf_melt_sdf_refresh, bool);
+        RT_COLLIDER_KW(msf_melt_sdf_revision_interval, uint32_t);
+        RT_COLLIDER_KW(msf_melt_sdf_change_threshold, float);
+        if (kw.contains("msf_transfer_velocity"))
+            c.msf_transfer_velocity = vec3FromPython(kw["msf_transfer_velocity"]);
+        RT_COLLIDER_KW(sdf_resolution_mode, int);
 #undef RT_COLLIDER_KW
         if (kw.contains("sphere_center")) c.sphere_center = vec3FromPython(kw["sphere_center"]);
         if (kw.contains("capsule_start")) c.capsule_start = vec3FromPython(kw["capsule_start"]);
@@ -1404,6 +1446,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     collider.def("remove", [](const std::string& name) {
         requireResult(rtapi::removeSimulationCollider(name));
     }, py::arg("name"));
+    collider.def("rebuild_sdf", [](const std::string& name) {
+        requireResult(rtapi::rebuildSimulationColliderSDF(name));
+    }, py::arg("name"), "Force an asynchronous rebuild of a mesh_sdf collider");
 
     // Material State Field: what scene objects are MADE of. Substance names are
     // assigned on the collider that represents the object, because MSF is keyed
@@ -1416,6 +1461,36 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         py::list out; for (const auto& n : names) out.append(n);
         return out;
     }, "Names accepted by collider(msf_substance=...)");
+    msf.def("fields", [] {
+        std::vector<rtapi::MaterialFieldInfo> fields;
+        requireResult(rtapi::listMaterialFields(fields));
+        py::list out;
+        for (const auto& f : fields) {
+            py::dict d;
+            d["object_key"] = f.object_key;
+            d["substance"] = f.substance;
+            d["topology_generation"] = f.topology_generation;
+            d["content_generation"] = f.content_generation;
+            d["element_count"] = f.element_count;
+            d["mask_resolution"] = f.mask_resolution;
+            d["centers_dirty"] = f.centers_dirty;
+            d["mean_integrity"] = f.mean_integrity;
+            d["minimum_integrity"] = f.minimum_integrity;
+            d["mass_loss"] = f.mass_loss;
+            d["initial_mass"] = f.initial_mass;
+            d["solid_mass"] = f.solid_mass;
+            d["pyrolyzed_mass"] = f.pyrolyzed_mass;
+            d["molten_reservoir_mass"] = f.molten_reservoir_mass;
+            d["transferred_mass"] = f.transferred_mass;
+            d["mass_conservation_error"] = f.mass_conservation_error;
+            d["domain"] = "surface_uv";
+            py::list semantics;
+            for (const auto& semantic : f.semantics) semantics.append(semantic);
+            d["semantics"] = semantics;
+            out.append(std::move(d));
+        }
+        return out;
+    }, "Read-only metadata for live Material State Fields");
 
     py::module_ terrain = module.def_submodule("terrain", "Terrain creation, queries, and procedural operations");
     auto terrain_info_to_dict = [](const rtapi::TerrainInfo& info) -> py::dict {

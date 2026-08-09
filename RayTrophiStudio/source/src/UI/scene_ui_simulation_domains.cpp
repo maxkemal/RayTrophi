@@ -1098,10 +1098,10 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip("Couples domain coordinate translation to fluid velocity. Allows creating sloshing liquids inside a moving cup.");
                     }
 
-                    fp_edited |= ImGui::DragFloat("Viscosity Strength", &fp.viscosity, 0.01f,  0.0f, 30.0f, "%.2f");
+                    fp_edited |= ImGui::DragFloat("Viscosity Strength", &fp.viscosity, 0.05f,  0.0f, 200.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Fluid thickness and flow resistance (Laplacian velocity diffusion).\n"
-                                          "0 = water, ~3 = oil, ~10 = mud, ~20 = honey, ~30 = lava.");
+                                          "0 = water, ~3 = oil, ~10 = mud, ~20-50 = honey/plastic, 50+ = very slow melt.");
                     }
                     ImGui::SameLine();
                     ImGui::SetNextItemWidth(120.0f);
@@ -1154,14 +1154,14 @@ void drawSimulationDomainControls(
                             ImGuiTreeNodeFlags_DefaultOpen)) {
                         using ChemistryPreset = RayTrophiSim::Fluid::FluidChemistryPreset;
                         static const char* chemistry_labels[] = {
-                            "Inert", "Water", "Gasoline", "Alcohol", "Oil", "Custom"
+                            "Inert", "Water", "Gasoline", "Alcohol", "Oil", "Custom", "Plastic", "Wax"
                         };
                         int chemistry_index = static_cast<int>(
                             domain.fluid_params.chemistry_preset);
-                        chemistry_index = std::clamp(chemistry_index, 0, 5);
+                        chemistry_index = std::clamp(chemistry_index, 0, 7);
                         ImGui::SetNextItemWidth(180.0f);
                         if (ImGui::Combo("Chemistry Preset##FluidChemistry",
-                                         &chemistry_index, chemistry_labels, 6)) {
+                                         &chemistry_index, chemistry_labels, 8)) {
                             const auto chosen = static_cast<ChemistryPreset>(chemistry_index);
                             domain.fluid_params.applyChemistryProfile(chosen);
                             const auto& chemistry = domain.fluid_params.fuel_profile;
@@ -2978,4 +2978,3 @@ void drawSimulationDomainControls(
 }
 
 } // namespace ForceFieldUI
-

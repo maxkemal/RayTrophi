@@ -48,7 +48,7 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 //    damage). An older cache is simply rejected by the reader and the caller
 //    falls back to resimulation — the project has not shipped, so carrying a
 //    v1 reader would be maintenance for nobody.
-constexpr uint32_t kVersion = 2u;
+constexpr uint32_t kVersion = 3u;
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.
 std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int frame);

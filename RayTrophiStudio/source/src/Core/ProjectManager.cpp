@@ -17,6 +17,7 @@
 #include "WaterSystem.h"
 #include "MeshModifiers.h"
 #include "Paint/PaintLayerStack.h"
+#include "AshDebrisSerialization.h"
 #include "json.hpp"
 #include "simdjson.h"
 #include <fstream>
@@ -54,6 +55,7 @@
 #include "stb_image_write.h"
 #include "stb_image.h"
 #include "ColorProcessingParams.h"
+#include "ThermalFractureSerialization.h"
 
 // Helper for stbi_write_to_func
 namespace {
@@ -4842,6 +4844,7 @@ json ProjectManager::serializeRigidBodies(const SceneData& scene) {
         b["soft_self_collision"] = rb.getSoftSelfCollision();
         b["force_field_enabled"] = rb.force_field_enabled;
         b["force_field_scale"] = rb.force_field_scale;
+        RayTrophiSim::serializeThermalFracture(rb, b);
         // Cloth/soft pin regions (world-space spheres).
         if (!rb.getSoftPins().empty()) {
             json pins = json::array();
@@ -4934,6 +4937,7 @@ void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
         rb.setSoftSelfCollision(item.value("soft_self_collision", rb.getSoftSelfCollision()));
         rb.force_field_enabled = item.value("force_field_enabled", rb.force_field_enabled);
         rb.force_field_scale = item.value("force_field_scale", rb.force_field_scale);
+        RayTrophiSim::deserializeThermalFracture(item, rb);
         if (item.contains("soft_pins") && item["soft_pins"].is_array()) {
             auto& pins = rb.getSoftPinsMut();
             pins.clear();
@@ -4997,6 +5001,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
     root["systems"] = json::array();
     root["emitters"] = json::array();
     root["colliders"] = json::array();
+    root["ash_debris"] = RayTrophiSim::serializeAshDebris(scene.ashDebrisSystem());
 
     auto serializeEmitter = [](const RayTrophiSim::ParticleEmitterDesc& emitter) {
         json e;
@@ -5085,6 +5090,19 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         c["msf_fuel_capacity_scale"] = collider.msf_override.fuel_capacity_scale;
         c["msf_mask_resolution"] = collider.msf_mask_resolution;
         c["msf_generate_char_mask"] = collider.msf_generate_char_mask;
+        c["msf_auto_transfer"] = collider.msf_auto_transfer;
+        c["msf_transfer_domain"] = collider.msf_transfer_domain;
+        c["msf_transfer_rate_kg_s"] = collider.msf_transfer_rate_kg_s;
+        c["msf_transfer_min_mass_kg"] = collider.msf_transfer_min_mass_kg;
+        c["msf_transfer_particles_per_kg"] = collider.msf_transfer_particles_per_kg;
+        c["msf_transfer_max_batch_particles"] = collider.msf_transfer_max_batch_particles;
+        c["msf_transfer_velocity"] = vec3ToJson(collider.msf_transfer_velocity);
+        c["msf_melt_flow_enabled"] = collider.msf_melt_flow_enabled;
+        c["msf_melt_height_loss"] = collider.msf_melt_height_loss;
+        c["msf_melt_spread"] = collider.msf_melt_spread;
+        c["msf_melt_sdf_refresh"] = collider.msf_melt_sdf_refresh;
+        c["msf_melt_sdf_revision_interval"] = collider.msf_melt_sdf_revision_interval;
+        c["msf_melt_sdf_change_threshold"] = collider.msf_melt_sdf_change_threshold;
         return c;
     };
 
@@ -5436,6 +5454,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
     if (!j.is_object()) {
         return;
     }
+    RayTrophiSim::deserializeAshDebris(j, scene.ashDebrisSystem());
 
     auto parseEmitter = [](const json& item) {
         RayTrophiSim::ParticleEmitterDesc emitter;
@@ -5545,6 +5564,22 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         collider.msf_override.fuel_capacity_scale = item.value("msf_fuel_capacity_scale", collider.msf_override.fuel_capacity_scale);
         collider.msf_mask_resolution = item.value("msf_mask_resolution", collider.msf_mask_resolution);
         collider.msf_generate_char_mask = item.value("msf_generate_char_mask", collider.msf_generate_char_mask);
+        collider.msf_auto_transfer = item.value("msf_auto_transfer", collider.msf_auto_transfer);
+        collider.msf_transfer_domain = item.value("msf_transfer_domain", collider.msf_transfer_domain);
+        collider.msf_transfer_rate_kg_s = item.value("msf_transfer_rate_kg_s", collider.msf_transfer_rate_kg_s);
+        collider.msf_transfer_min_mass_kg = item.value("msf_transfer_min_mass_kg", collider.msf_transfer_min_mass_kg);
+        collider.msf_transfer_particles_per_kg = item.value("msf_transfer_particles_per_kg", collider.msf_transfer_particles_per_kg);
+        collider.msf_transfer_max_batch_particles = item.value("msf_transfer_max_batch_particles", collider.msf_transfer_max_batch_particles);
+        if (item.contains("msf_transfer_velocity"))
+            collider.msf_transfer_velocity = jsonToVec3(item["msf_transfer_velocity"]);
+        collider.msf_melt_flow_enabled = item.value("msf_melt_flow_enabled", collider.msf_melt_flow_enabled);
+        collider.msf_melt_height_loss = item.value("msf_melt_height_loss", collider.msf_melt_height_loss);
+        collider.msf_melt_spread = item.value("msf_melt_spread", collider.msf_melt_spread);
+        collider.msf_melt_sdf_refresh = item.value("msf_melt_sdf_refresh", collider.msf_melt_sdf_refresh);
+        collider.msf_melt_sdf_revision_interval = std::clamp<uint32_t>(item.value(
+            "msf_melt_sdf_revision_interval", collider.msf_melt_sdf_revision_interval), 1u, 60u);
+        collider.msf_melt_sdf_change_threshold = std::clamp(item.value(
+            "msf_melt_sdf_change_threshold", collider.msf_melt_sdf_change_threshold), 0.001f, 0.25f);
         return collider;
     };
 

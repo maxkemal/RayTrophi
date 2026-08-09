@@ -31,6 +31,7 @@
 
 #include "SimulationCompute.h"
 #include "SurfaceMeshCache.h"
+#include "SurfaceField.h"
 
 namespace RayTrophiSim {
 
@@ -266,6 +267,10 @@ struct MaterialSubstance {
     // overshoot per second. Derived from latent_heat_fusion — a high latent heat
     // means more energy has to go in before the same fraction melts.
     float melt_rate            = 0.0f;
+    // Total transferable surface mass per square metre. Combustibles use their
+    // authored fuel capacity; meltable non-combustibles use a documented 1 mm
+    // surface-shell mass (density * 0.001 m).
+    float mass_capacity        = 0.0f;
 
     static MaterialSubstance fromProfile(const SubstanceProfile& profile,
                                          const MaterialTemperatureScale& scale,
@@ -319,6 +324,28 @@ struct MaterialStateFieldStats {
     uint32_t lookup_fields_no_uv   = 0;  // fell back to centroids: cannot displace
 };
 
+// Sparse CPU-side bridge consumed by fracture/Jolt. Derived from the latest
+// requested MSF readback; Jolt never sees or samples the full surface field.
+struct MaterialIntegritySummary {
+    bool valid = false;
+    float mean_integrity = 1.0f;
+    float minimum_integrity = 1.0f;
+    float remaining_support_ratio = 1.0f;
+    Vec3 weakest_world_position = Vec3(0.0f, 0.0f, 0.0f);
+    float total_mass_loss = 0.0f;
+    uint64_t content_generation = 0;
+};
+
+struct MaterialMassBudgetSummary {
+    bool valid = false;
+    float initial_mass = 0.0f;
+    float solid_mass = 0.0f;
+    float pyrolyzed_mass = 0.0f;
+    float molten_reservoir_mass = 0.0f;
+    float transferred_mass = 0.0f;
+    float conservation_error = 0.0f;
+};
+
 // One object's surface state.
 //
 // SAMPLING (Phase 3a): elements are TEXELS of the object's UV space, not
@@ -359,9 +386,7 @@ public:
     //
     // state layout, 8 floats (2 vec4) per element:
     //   [0..3] temperature, fuel_remaining, char, moisture
-    //   [4..7] released_this_step, melt, mass_loss, reserved
-    // melt/mass_loss are consumed by later phases; the stride is sized for them
-    // now so it never has to change again (and with it every shader).
+    //   [4..7] released_this_step, melt, mass_loss, transferred_mass
     static constexpr std::size_t kStateStride = 8u;
 
     std::vector<float> centers;  // 4 floats per element: xyz world, w = area
@@ -370,11 +395,12 @@ public:
     // UV-space mask. `mask_resolution` is 0 when this field fell back to
     // triangle-centroid sampling (no usable UVs); `texel_index` then stays empty
     // and there is no mask to composite.
-    // The mask is what the renderer consumes. Two channels in ONE texture on
-    // purpose: char (blackening) and normalized surface temperature (blackbody
-    // glow) are always sampled together, so a second upload would double the
-    // per-frame cost for nothing.
-    static constexpr std::size_t kMaskChannels = 2;  // R = char, G = temperature
+    // The mask is what the renderer consumes. One RGBA texture keeps every
+    // derived visual channel on the same UV/sample/revision path:
+    // R=char, G=temperature, B=mass-loss fraction, A=integrity.
+    // B/A are complements today, but keeping the explicit integrity channel
+    // leaves room for pressure/contact damage to diverge from chemistry later.
+    static constexpr std::size_t kMaskChannels = 4;
     // ★ G is quantized against an ABSOLUTE Kelvin range, not the domain's
     // max_temperature. Incandescence is physics: iron glows at ~800 K whatever
     // the solver's ceiling happens to be. Quantizing against the ceiling made the
@@ -412,6 +438,7 @@ public:
     // Both arrays are res*res, rebuilt beside char_mask on readback. NOT cached to
     // disk: derived from `state`, like char_mask (see MaterialStateFieldSnapshot).
     std::vector<float>   melt_texel;    // 0 where uncovered
+    std::vector<float>   local_mass_texel; // solid + untransferred molten fraction
     std::vector<uint8_t> melt_covered;  // 1 where at least one element wrote it
 
     ComputeBufferHandle gpu_centers;
@@ -424,6 +451,7 @@ public:
     std::size_t elementCount() const { return centers.size() / 4u; }
 
     bool centers_dirty = true;  // world positions changed (moving/animated object)
+    bool state_dirty = false;   // host reset must replace the device-authoritative state
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -454,12 +482,14 @@ struct MaterialStateFieldSnapshot {
     std::vector<float> moisture;   // Phase 5
     std::vector<float> melt;       // Phase 6
     std::vector<float> mass_loss;  // Phase 7
+    std::vector<float> transferred_mass; // Phase 6 APIC debit ledger
 
     bool valid() const {
         const std::size_t n = element_count;
         return n > 0 && temperature.size() == n && fuel.size() == n &&
                charred.size() == n && moisture.size() == n &&
-               melt.size() == n && mass_loss.size() == n;
+               melt.size() == n && mass_loss.size() == n &&
+               transferred_mass.size() == n;
     }
 };
 
@@ -651,6 +681,8 @@ public:
     // lookup vertically and lands on the far side of every UV island.
     static bool sampleMeltAtUV(const MaterialStateField& field,
                                float u, float v, float& out_melt);
+    static bool sampleLocalMassAtUV(const MaterialStateField& field,
+                                    float u, float v, float& out_fraction);
 
     // Convenience for one-off queries. Per-vertex loops should look the field up
     // ONCE with findField() and call sampleMeltAtUV directly — this does a hash
@@ -661,6 +693,14 @@ public:
         auto it = fields_.find(object_key);
         return it == fields_.end() ? nullptr : &it->second;
     }
+
+    static MaterialIntegritySummary summarizeIntegrity(
+        const MaterialStateField& field);
+    static MaterialMassBudgetSummary summarizeMassBudget(
+        const MaterialStateField& field);
+    bool consumeMoltenMass(const std::string& object_key, float requested_mass,
+                           SimulationComputeContext& compute,
+                           float& out_consumed_mass);
 
 private:
     bool ensureBuffers(SimulationComputeContext& compute, MaterialStateField& field);

@@ -316,13 +316,16 @@ struct TLASInstance {
     // otherwise need a full BLAS rebuild (the "glass shadow only wakes up on
     // backend switch" bug).
     uint8_t opacityOverride = 0;
+    // Paper MSF coverage erosion needs any-hit even when its base material and
+    // BLAS are opaque. Kept separate so material edits cannot clear it.
+    bool msfForceNoOpaque = false;
     // Material State Field (burn/heat) mask for THIS instance. Per-instance and
     // not per-material on purpose: MSF state belongs to an object, while a
     // material is shared, so a material-level slot would smear one crate's burn
     // marks onto every other crate using the same material.
     // 0 = this instance has no MSF.
     uint32_t msfCharTex = 0;
-    // char_color RGB in the low 24 bits, molten emission strength in the high 8.
+    // char_color RGB in low 24; high byte = 6-bit molten emission + erosion flags.
     uint32_t msfCharPacked = 0;
 };
 

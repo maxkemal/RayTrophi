@@ -3828,7 +3828,11 @@ void SceneUI::draw(UIContext& ctx)
         // queue; the old race eventually presented as a pause-independent TDR
         // during particle-driven explosions.
         Backend::IBackend* simulationRenderBackend = getSceneUiRenderBackend(ctx);
-        if ((live_mode || timeline.isPlaying()) &&
+        const int requested_sim_frame = timeline.getCurrentFrame();
+        const int resident_sim_frame = ctx.scene.simulationTimelineFrame();
+        const bool paused_frame_replace = !live_mode && !timeline.isPlaying() &&
+            resident_sim_frame >= 0 && requested_sim_frame != resident_sim_frame;
+        if ((live_mode || timeline.isPlaying() || paused_frame_replace) &&
             dynamic_cast<Backend::VulkanBackendAdapter*>(
                 simulationRenderBackend) != nullptr) {
             simulationRenderBackend->waitForCompletion();

@@ -2253,6 +2253,22 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
 
     if (m_inBatchedBLASBuild && m_batchBLASCmd) {
         // ── Batched mode: reuse single shared scratch buffer, record into batch cmd ──
+        // A Solid viewport can simulate for hundreds of frames without touching
+        // the inactive RT scene. Returning to Rendered then rebuilds every dirty
+        // BLAS at once. One giant submission can exceed Windows' TDR watchdog even
+        // though the exact same scene is stable when Vulkan RT is active from the
+        // first frame. Fragment the batch into bounded submissions; each fragment
+        // is completed before the shared scratch buffer and final TLAS are used.
+        constexpr uint32_t kMaxBLASBuildsPerSubmission = 4u;
+        if (m_batchBLASInCurrentCmd >= kMaxBLASBuildsPerSubmission) {
+            endSingleTimeCommands(m_batchBLASCmd);
+            m_batchBLASCmd = beginSingleTimeCommands();
+            if (m_batchBLASCmd == VK_NULL_HANDLE) {
+                if (m_batchScratchBuffer.buffer) destroyBuffer(m_batchScratchBuffer);
+                return UINT32_MAX;
+            }
+            m_batchBLASInCurrentCmd = 0;
+        }
         if (alignedScratchSize > m_batchScratchBuffer.size) {
             // Scratch buffer too small — flush pending builds, then resize
             if (m_batchScratchBuffer.buffer && m_batchBLASInCurrentCmd > 0) {
@@ -2609,7 +2625,7 @@ void VulkanDevice::endBatchedBLASBuild() {
 
     if (m_batchBLASCount > 0) {
         VK_INFO() << "[VulkanDevice] Batched BLAS build complete: "
-                  << m_batchBLASCount << " structures in single submit" << std::endl;
+                  << m_batchBLASCount << " structures in bounded submissions" << std::endl;
     }
 
     m_batchBLASCmd = VK_NULL_HANDLE;
@@ -2796,8 +2812,8 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         dst.mask = transformUsable ? src.mask : 0;
         dst.instanceShaderBindingTableRecordOffset = src.sbtRecordOffset;
         dst.flags = src.frontFaceCCW ? VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR : 0;
-        if (src.opacityOverride == 1)      dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-        else if (src.opacityOverride == 2) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        if (src.msfForceNoOpaque || src.opacityOverride == 2) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        else if (src.opacityOverride == 1) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
         dst.accelerationStructureReference = m_blasList[src.blasIndex].deviceAddress;
 
         vkInstances.push_back(dst);
@@ -7462,9 +7478,10 @@ bool VulkanBackendAdapter::refreshMaterialStateFieldInstances() {
         // No bridge installed: clear rather than leave whatever a previous scene
         // left behind. A stale bindless index would sample an unrelated texture.
         for (auto& vi : m_vkInstances) {
-            if (vi.msfCharTex == 0 && vi.msfCharPacked == 0) continue;
+            if (vi.msfCharTex == 0 && vi.msfCharPacked == 0 && !vi.msfForceNoOpaque) continue;
             vi.msfCharTex = 0;
             vi.msfCharPacked = 0;
+            vi.msfForceNoOpaque = false;
             changed = true;
         }
         return changed;
@@ -7495,10 +7512,13 @@ bool VulkanBackendAdapter::refreshMaterialStateFieldInstances() {
                               "%s", instName.c_str());
             }
         }
+        const bool forceNoOpaque = tex != 0u && ((packed >> 24u) & 0x80u) != 0u;
         if (m_vkInstances[i].msfCharTex != tex ||
-            m_vkInstances[i].msfCharPacked != packed) {
+            m_vkInstances[i].msfCharPacked != packed ||
+            m_vkInstances[i].msfForceNoOpaque != forceNoOpaque) {
             m_vkInstances[i].msfCharTex = tex;
             m_vkInstances[i].msfCharPacked = packed;
+            m_vkInstances[i].msfForceNoOpaque = forceNoOpaque;
             changed = true;
         }
     }
@@ -7516,6 +7536,12 @@ void VulkanBackendAdapter::syncMaterialStateFieldBindings() {
     // disappears, or is resized. Drain first: the buffer being recreated is read
     // by the closest-hit shader through the descriptor set of an in-flight trace.
     drainInFlightTraces();
+    // The instance SSBO carries the mask, while the TLAS carries the any-hit
+    // eligibility needed by paper coverage erosion. Updating an existing TLAS
+    // is a refit and happens only when a field appears/disappears or changes kind.
+    auto merged = m_vkInstances;
+    for (const auto& h : m_hairVkInstances) merged.push_back(h);
+    if (!merged.empty()) m_device->updateTLAS(merged);
     refreshVulkanInstanceDataBinding(m_device.get(), m_vkInstances);
 }
 
@@ -11078,7 +11104,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             for(uint32_t r=0;r<3;++r)for(uint32_t c=0;c<4;++c)out.data[r*4+c]=vi.transform.m[r][c];
             uint32_t mask=vi.mask;
             if(vi.scatterGroupId>=0&&vi.scatterInstanceIndex!=UINT32_MAX){auto it=groupsById.find(vi.scatterGroupId);if(it!=groupsById.end()&&vi.scatterInstanceIndex<it->second->instances.size()){const auto& tr=it->second->instances[vi.scatterInstanceIndex];const Matrix4x4 composed=tr.toMatrix()*vi.scatterSourceTransform;for(uint32_t r=0;r<3;++r)for(uint32_t c=0;c<4;++c)out.data[r*4+c]=composed.m[r][c];out.mode=0;mask=it->second->transient?0x04u:0xffu;}}
-            uint32_t flags=vi.frontFaceCCW?VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR:0u;if(vi.opacityOverride==1)flags|=VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;else if(vi.opacityOverride==2)flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+            uint32_t flags=vi.frontFaceCCW?VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR:0u;if(vi.msfForceNoOpaque||vi.opacityOverride==2)flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;else if(vi.opacityOverride==1)flags|=VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
             out.metadata[0]=vi.customIndex;out.metadata[1]=mask;out.metadata[2]=vi.sbtRecordOffset;out.metadata[3]=flags;const uint64_t address=m_device->m_blasList[vi.blasIndex].deviceAddress;out.blasAddressLo=static_cast<uint32_t>(address);out.blasAddressHi=static_cast<uint32_t>(address>>32u);if(!address)valid=false;
         }
         if(!valid)gpuBuildSources.clear();
@@ -14177,8 +14203,8 @@ bool VulkanBackendAdapter::queueGpuScatterInstanceUpdate(const std::unordered_se
             }
         }
         uint32_t flags=vi.frontFaceCCW?VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR:0u;
-        if(vi.opacityOverride==1) flags|=VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-        else if(vi.opacityOverride==2) flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        if(vi.msfForceNoOpaque||vi.opacityOverride==2) flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        else if(vi.opacityOverride==1) flags|=VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
         out.metadata[0]=vi.customIndex; out.metadata[1]=desiredMask; out.metadata[2]=vi.sbtRecordOffset; out.metadata[3]=flags;
         const uint64_t address=m_device->m_blasList[vi.blasIndex].deviceAddress;
         out.blasAddressLo=static_cast<uint32_t>(address);

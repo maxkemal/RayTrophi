@@ -1200,16 +1200,15 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             // can't draw the SurfaceSDF NanoVDB volume, so spheres are the live proxy
             // there. In Rendered mode + SurfaceSDF this stays false (the volume renders
             // instead) and the gate below tears the sphere group down.
-            const bool wants = enable_rt_geometry &&
+            const bool render_eligible = enable_rt_geometry &&
                 system.visible && system.enabled && state.valid && is_fluid &&
                 d < domains.size() &&
                 (domains[d].fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
-                 g_solid_viewport_active) &&
-                !state.particles.empty();
+                 g_solid_viewport_active);
 
             int& group_id = system.domain_particle_render_group_ids[d];
 
-            if (!wants) {
+            if (!render_eligible) {
                 if (group_id >= 0) {
                     if (InstanceGroup* g = im.getGroup(group_id)) {
                         if (!g->instances.empty()) structural_change = true;
@@ -1218,6 +1217,28 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     g_fluid_source_state.erase(group_id);
                     group_id = -1;
                     system.domain_particle_pool_capacities[d] = 0;
+                }
+                continue;
+            }
+
+            // A rewind commonly lands on a frame before the first molten/APIC
+            // particle exists. Keep an already-created RT pool alive and merely
+            // hide its instances. Deleting it here and recreating it one frame
+            // later forces a full BLAS/TLAS structural rebuild exactly while the
+            // melted source mesh and SurfaceSDF bindings are also being restored.
+            // That three-way transition was a repeatable Vulkan TDR trigger.
+            if (state.particles.empty()) {
+                InstanceGroup* existing = (group_id >= 0) ? im.getGroup(group_id) : nullptr;
+                if (!existing) continue;
+                bool had_visible = false;
+                for (auto& tr : existing->instances) {
+                    if (tr.scale.x != 0.0f || tr.scale.y != 0.0f || tr.scale.z != 0.0f)
+                        had_visible = true;
+                    tr.scale = Vec3(0.0f, 0.0f, 0.0f);
+                }
+                if (had_visible) {
+                    existing->gpu_dirty = true;
+                    motion_change = true;
                 }
                 continue;
             }

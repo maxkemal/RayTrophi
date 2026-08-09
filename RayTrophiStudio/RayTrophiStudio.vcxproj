@@ -406,6 +406,9 @@
     <ClInclude Include="source\include\MaterialProceduralMath.h" />
     <ClInclude Include="source\include\MaterialProgram.h" />
     <ClInclude Include="source\include\MaterialStateField.h" />
+    <ClInclude Include="source\include\MaterialDamagePattern.h" />
+    <ClInclude Include="source\include\MeltSurfaceFlow.h" />
+    <ClInclude Include="source\include\SurfaceField.h" />
     <ClInclude Include="source\include\MeshModifiers.h" />
     <ClInclude Include="source\include\MeshPointiness.h" />
     <ClInclude Include="source\include\Paint\IPaintSurfaceAdapter.h" />
@@ -1362,6 +1365,22 @@
     <ClCompile Include="source\src\Api\RtApi.cpp" />
     <ClCompile Include="source\src\Api\RtApiModifiers.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluid.cpp" />
+    <ClCompile Include="source\src\Api\RtApiFracture.cpp" />
+    <ClCompile Include="source\src\Api\RtApiDebris.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMassTransfer.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcFracture.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonFracture.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonPressure.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonDebris.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonMassTransfer.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiForceField.cpp" />
     <ClCompile Include="source\src\Api\RtApiParticle.cpp" />
     <ClCompile Include="source\src\Api\RtApiAnim.cpp" />
@@ -1432,6 +1451,18 @@
     <ClCompile Include="source\src\Physics\FractureGenerator.cpp" />
     <ClCompile Include="source\src\Physics\GridFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\MaterialStateField.cpp" />
+    <ClCompile Include="source\src\Physics\MaterialDamagePattern.cpp" />
+    <ClCompile Include="source\src\Physics\MeltSurfaceFlow.cpp" />
+    <ClCompile Include="source\src\Physics\MaterialMassBudget.cpp" />
+    <ClCompile Include="source\src\Physics\MoltenMassTransfer.cpp" />
+    <ClCompile Include="source\src\Physics\SurfaceField.cpp" />
+    <ClCompile Include="source\src\Physics\ThermalFractureBridge.cpp" />
+    <ClCompile Include="source\src\Physics\ThermalFractureSerialization.cpp" />
+    <ClCompile Include="source\src\Physics\GasStructuralImpulseBridge.cpp" />
+    <ClCompile Include="source\src\Physics\GasPressurePulse.cpp" />
+    <ClCompile Include="source\src\Physics\AshDebrisSystem.cpp" />
+    <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp" />
+    <ClCompile Include="source\src\Physics\FractureSourceAdapter.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidLevelSet.cpp" />

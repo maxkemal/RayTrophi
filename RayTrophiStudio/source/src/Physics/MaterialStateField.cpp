@@ -15,6 +15,7 @@
 * ─────────────────────────────────────────────────────────────────────────────
 */
 #include "MaterialStateField.h"
+#include "MaterialDamagePattern.h"
 
 #include <algorithm>
 #include <chrono>
@@ -490,6 +491,7 @@ MaterialSubstance MaterialSubstance::fromProfile(const SubstanceProfile& profile
         out.burn_rate =
             std::max(0.0f, profile.burn_rate * std::max(0.0f, overrides.burn_rate_scale));
         out.char_rate = std::max(0.0f, profile.char_rate);
+        out.mass_capacity = out.fuel_capacity;
     } else {
         // Non-combustible: no fuel at all, and combustion overrides are ignored
         // outright — scaling a burn rate must never make iron burn. It still
@@ -498,6 +500,8 @@ MaterialSubstance MaterialSubstance::fromProfile(const SubstanceProfile& profile
         out.fuel_capacity = 0.0f;
         out.burn_rate = 0.0f;
         out.char_rate = 0.0f;
+        out.mass_capacity = profile.meltable
+            ? std::max(0.0f, profile.density * 0.001f) : 0.0f;
     }
     return out;
 }
@@ -537,6 +541,8 @@ bool MaterialStateFieldSystem::syncField(const std::string& object_key,
     // SET changing: a different count, or a different mask resolution. A re-pose
     // keeps both, so the state carries and only the world positions are refreshed.
     const bool rebuild = field.object_key != object_key ||
+                         (!field.substance_name.empty() &&
+                          field.substance_name != substance_name) ||
                          field.mask_resolution != resolution ||
                          field.elementCount() != element_count;
 
@@ -589,11 +595,12 @@ bool MaterialStateFieldSystem::syncField(const std::string& object_key,
     }
     field.centers_dirty = false;
 
-    if (rebuild) {
+    if (rebuild || field.state_dirty) {
         if (!compute.uploadBuffer(field.gpu_state, field.state.data(),
                                   field.state.size() * sizeof(float))) {
             return false;
         }
+        field.state_dirty = false;
     }
 
     // ── Claim a parked cache snapshot ────────────────────────────────────────
@@ -762,6 +769,7 @@ bool MaterialStateFieldSystem::step(SimulationComputeContext& compute,
         // above anything reachable, so the shader needs no separate flag.
         pc.material2[1] = substance.melt_normalized;
         pc.material2[2] = substance.melt_rate;
+        pc.material2[3] = substance.mass_capacity;
         pc.material1[2] = dt;
         pc.material1[3] = std::max(1.0f, max_temperature);
 
@@ -1091,8 +1099,10 @@ void MaterialStateFieldSystem::scatterCharMask(MaterialStateField& field,
     // geometry would melt somewhere the shading did not, which is precisely the
     // failure the UV routing exists to make impossible.
     if (field.melt_texel.size() != texels) field.melt_texel.assign(texels, 0.0f);
+    if (field.local_mass_texel.size() != texels) field.local_mass_texel.assign(texels, 1.0f);
     if (field.melt_covered.size() != texels) field.melt_covered.assign(texels, 0u);
     std::fill(field.melt_texel.begin(), field.melt_texel.end(), 0.0f);
+    std::fill(field.local_mass_texel.begin(), field.local_mass_texel.end(), 1.0f);
     std::fill(field.melt_covered.begin(), field.melt_covered.end(), uint8_t{0});
 
     constexpr std::size_t kStride = MaterialStateField::kStateStride;
@@ -1104,6 +1114,8 @@ void MaterialStateFieldSystem::scatterCharMask(MaterialStateField& field,
     // slider, and with the default ceiling a 717 K surface quantized to 0.12 —
     // under the shader's glow threshold, so nothing ever lit up.
     const float inv_kelvin_range = 1.0f / MaterialStateField::kMaskKelvinRange;
+    const MaterialSubstance substance = MaterialSubstance::fromProfile(
+        findSubstance(field.substance_name), scale, field.overrides);
 
     auto quantize = [](float v) -> uint8_t {
         return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
@@ -1112,19 +1124,40 @@ void MaterialStateFieldSystem::scatterCharMask(MaterialStateField& field,
     for (std::size_t i = 0; i < element_count; ++i) {
         const uint32_t texel = field.texel_index[i];
         if (texel >= texels) continue;
-        const uint8_t charred = quantize(field.state[i * kStride + 2u]);
+        const uint8_t charred = quantize(applyMaterialDamagePattern(
+            field.substance_name, texel, res, field.state[i * kStride + 2u]));
         const float kelvin = scale.toKelvin(field.state[i * kStride + 0u]);
         const uint8_t heat = quantize(kelvin * inv_kelvin_range);
+        const float area = std::max(field.centers[i * 4u + 3u], 1e-8f);
+        const float initial_mass = std::max(substance.mass_capacity * area, 1e-8f);
+        const float loss_fraction = std::clamp(
+            field.state[i * kStride + 6u] / initial_mass, 0.0f, 1.0f);
+        const uint8_t mass_loss = quantize(applyMaterialDamagePattern(
+            field.substance_name, texel, res, loss_fraction));
         const std::size_t o = static_cast<std::size_t>(texel) * MaterialStateField::kMaskChannels;
         // max, not overwrite: two triangles can map to the same texel across a UV
         // seam, and the burnt/hotter one must win rather than whichever came last.
         field.char_mask[o + 0u] = std::max(field.char_mask[o + 0u], charred);
         field.char_mask[o + 1u] = std::max(field.char_mask[o + 1u], heat);
+        field.char_mask[o + 2u] = std::max(field.char_mask[o + 2u], mass_loss);
+        // Integrity is derived from the winning (largest) loss at this texel.
+        // Writing the complement also distinguishes a pristine covered texel
+        // (A=255) from an uncovered texel (A=0).
+        field.char_mask[o + 3u] = static_cast<uint8_t>(255u - field.char_mask[o + 2u]);
         // Max for the same reason as above: across a UV seam the MORE melted
         // element must win, so a vertex on the seam sinks with its neighbours
         // instead of staying pinned to whichever element was rasterized last.
-        field.melt_texel[texel] = std::max(field.melt_texel[texel],
-                                           field.state[i * kStride + 5u]);
+        // Transferring reservoir mass must not make the source look solid again.
+        // The geometric phase history is local molten + already-transferred
+        // molten; transferred mass separately reduces local_mass_texel below.
+        const float geometric_melt = std::clamp(
+            field.state[i * kStride + 5u] +
+            field.state[i * kStride + 7u] / initial_mass, 0.0f, 1.0f);
+        field.melt_texel[texel] = std::max(field.melt_texel[texel], geometric_melt);
+        const float local_mass = std::clamp(1.0f -
+            (field.state[i * kStride + 6u] + field.state[i * kStride + 7u]) /
+                initial_mass, 0.0f, 1.0f);
+        field.local_mass_texel[texel] = std::min(field.local_mass_texel[texel], local_mass);
         field.melt_covered[texel] = 1u;
     }
 
@@ -1136,16 +1169,19 @@ void MaterialStateFieldSystem::scatterCharMask(MaterialStateField& field,
     // reading melt = 0 on a surface the renderer is already showing as molten.
     std::vector<uint8_t> dilated = field.char_mask;
     std::vector<float>   dilated_melt = field.melt_texel;
+    std::vector<float>   dilated_local_mass = field.local_mass_texel;
     std::vector<uint8_t> dilated_cover = field.melt_covered;
     for (int y = 0; y < res; ++y) {
         for (int x = 0; x < res; ++x) {
             const std::size_t t = static_cast<std::size_t>(y) * res + x;
             const std::size_t o = t * MaterialStateField::kMaskChannels;
-            const bool mask_empty = (field.char_mask[o] == 0u && field.char_mask[o + 1u] == 0u);
+            const bool mask_empty = (field.char_mask[o] == 0u && field.char_mask[o + 1u] == 0u &&
+                                     field.char_mask[o + 2u] == 0u && field.char_mask[o + 3u] == 0u);
             const bool cover_empty = (field.melt_covered[t] == 0u);
             if (!mask_empty && !cover_empty) continue;
-            uint8_t best_char = 0u, best_heat = 0u, best_cover = 0u;
+            uint8_t best_char = 0u, best_heat = 0u, best_loss = 0u, best_cover = 0u;
             float best_melt = 0.0f;
+            float best_local_mass = 1.0f;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     const int nx = x + dx, ny = y + dy;
@@ -1154,24 +1190,31 @@ void MaterialStateFieldSystem::scatterCharMask(MaterialStateField& field,
                     const std::size_t n = nt * MaterialStateField::kMaskChannels;
                     best_char = std::max(best_char, field.char_mask[n]);
                     best_heat = std::max(best_heat, field.char_mask[n + 1u]);
+                    best_loss = std::max(best_loss, field.char_mask[n + 2u]);
                     if (field.melt_covered[nt] != 0u) {
                         best_cover = 1u;
                         best_melt = std::max(best_melt, field.melt_texel[nt]);
+                        best_local_mass = std::min(best_local_mass, field.local_mass_texel[nt]);
                     }
                 }
             }
             if (mask_empty) {
                 dilated[o] = best_char;
                 dilated[o + 1u] = best_heat;
+                dilated[o + 2u] = best_loss;
+                dilated[o + 3u] = best_loss == 0u
+                    ? 0u : static_cast<uint8_t>(255u - best_loss);
             }
             if (cover_empty) {
                 dilated_melt[t] = best_melt;
+                dilated_local_mass[t] = best_local_mass;
                 dilated_cover[t] = best_cover;
             }
         }
     }
     field.char_mask.swap(dilated);
     field.melt_texel.swap(dilated_melt);
+    field.local_mass_texel.swap(dilated_local_mass);
     field.melt_covered.swap(dilated_cover);
     field.mask_revision += 1u;
 }
@@ -1207,6 +1250,66 @@ bool MaterialStateFieldSystem::sampleMelt(const std::string& object_key,
                                           float u, float v, float& out_melt) const {
     const MaterialStateField* field = findField(object_key);
     return field ? sampleMeltAtUV(*field, u, v, out_melt) : false;
+}
+
+bool MaterialStateFieldSystem::sampleLocalMassAtUV(const MaterialStateField& field,
+                                                    float u, float v, float& out_fraction) {
+    const int res = field.mask_resolution;
+    if (res <= 0 || field.local_mass_texel.empty()) return false;
+    u -= std::floor(u); v -= std::floor(v);
+    const int x = std::clamp(static_cast<int>(u * res), 0, res - 1);
+    const int y = std::clamp(static_cast<int>(v * res), 0, res - 1);
+    const std::size_t t = static_cast<std::size_t>(y) * res + x;
+    if (t >= field.melt_covered.size() || field.melt_covered[t] == 0u ||
+        t >= field.local_mass_texel.size()) return false;
+    out_fraction = field.local_mass_texel[t];
+    return true;
+}
+
+MaterialIntegritySummary MaterialStateFieldSystem::summarizeIntegrity(
+    const MaterialStateField& field) {
+    MaterialIntegritySummary out;
+    const std::size_t count = std::min(
+        field.elementCount(), field.state.size() / MaterialStateField::kStateStride);
+    if (count == 0u || field.centers.size() < count * 4u) return out;
+
+    const auto& profile = findSubstance(field.substance_name);
+    const float fuel_capacity = profile.combustible
+        ? std::max(0.0f, profile.fuel_capacity *
+            std::max(0.0f, field.overrides.fuel_capacity_scale))
+        : 0.0f;
+    double weighted_integrity = 0.0;
+    double total_area = 0.0;
+    double supported_area = 0.0;
+    float weakest = 1.0f;
+    Vec3 weakest_position(0.0f, 0.0f, 0.0f);
+    float total_loss = 0.0f;
+    for (std::size_t i = 0; i < count; ++i) {
+        const float area = std::max(field.centers[i * 4u + 3u], 1e-8f);
+        const float capacity = std::max(fuel_capacity * area, 1e-8f);
+        const float loss = std::max(
+            field.state[i * MaterialStateField::kStateStride + 6u], 0.0f);
+        const float integrity = std::clamp(1.0f - loss / capacity, 0.0f, 1.0f);
+        weighted_integrity += static_cast<double>(integrity) * area;
+        total_area += area;
+        if (integrity > 0.25f) supported_area += area;
+        total_loss += loss;
+        if (i == 0u || integrity < weakest) {
+            weakest = integrity;
+            weakest_position = Vec3(field.centers[i * 4u + 0u],
+                                    field.centers[i * 4u + 1u],
+                                    field.centers[i * 4u + 2u]);
+        }
+    }
+    out.valid = total_area > 0.0;
+    if (!out.valid) return out;
+    out.mean_integrity = static_cast<float>(weighted_integrity / total_area);
+    out.minimum_integrity = weakest;
+    out.remaining_support_ratio = static_cast<float>(supported_area / total_area);
+    out.weakest_world_position = weakest_position;
+    out.total_mass_loss = total_loss;
+    out.content_generation = field.mask_revision;
+    return out;
 }
 
 bool MaterialStateFieldSystem::refreshHostState(SimulationComputeContext& compute,
@@ -1253,6 +1356,7 @@ std::vector<MaterialStateFieldSnapshot> MaterialStateFieldSystem::captureSnapsho
         snap.temperature.resize(n); snap.fuel.resize(n);
         snap.charred.resize(n);     snap.moisture.resize(n);
         snap.melt.resize(n);        snap.mass_loss.resize(n);
+        snap.transferred_mass.resize(n);
         for (std::size_t i = 0; i < n; ++i) {
             const float* s = &field.state[i * kStride];
             snap.temperature[i] = s[0];
@@ -1264,6 +1368,7 @@ std::vector<MaterialStateFieldSnapshot> MaterialStateFieldSystem::captureSnapsho
             // within the same frame.
             snap.melt[i]        = s[5];
             snap.mass_loss[i]   = s[6];
+            snap.transferred_mass[i] = s[7];
         }
         out.push_back(std::move(snap));
     }
@@ -1288,6 +1393,7 @@ bool MaterialStateFieldSystem::applySnapshot(const MaterialStateFieldSnapshot& s
         s[4] = 0.0f;                  // released_this_step: per-step scratch
         s[5] = snap.melt[i];
         s[6] = snap.mass_loss[i];
+        s[7] = snap.transferred_mass[i];
     }
     if (field.gpu_state.valid()) {
         compute.uploadBuffer(field.gpu_state, field.state.data(),
@@ -1397,6 +1503,7 @@ void MaterialStateFieldSystem::clearField(MaterialStateField& field) {
         field.state[i * MaterialStateField::kStateStride + 1u] = -1.0f;
     }
     field.centers_dirty = true;
+    field.state_dirty = true;
 
     // The mask is what the RENDERER consumes, and it is only rebuilt by
     // scatterCharMask on a readback. Zeroing the state alone would leave the
@@ -1405,16 +1512,21 @@ void MaterialStateFieldSystem::clearField(MaterialStateField& field) {
     // skips the re-upload as unchanged.
     if (!field.char_mask.empty()) {
         std::fill(field.char_mask.begin(), field.char_mask.end(), uint8_t{0});
-        field.mask_revision += 1u;
     }
+    // Revision belongs to the whole derived surface state, not only to the
+    // optional char texture. Melt geometry also keys its applied stamp from it;
+    // with burn marks disabled, Clear Damage otherwise left the old deformation.
+    field.mask_revision += 1u;
     // ★ The melt lookup is cleared with the same urgency and for the same reason:
     // it is read by geometry, and leaving it hot would keep the surface displaced
     // after a Clear Damage until some later readback happened to land. `covered`
     // is NOT cleared — it describes the UV layout, not the damage.
     std::fill(field.melt_texel.begin(), field.melt_texel.end(), 0.0f);
+    std::fill(field.local_mass_texel.begin(), field.local_mass_texel.end(), 1.0f);
 }
 
 bool MaterialStateFieldSystem::clearField(const std::string& object_key) {
+    pending_restore_.erase(object_key);
     auto it = fields_.find(object_key);
     if (it == fields_.end()) return false;
     clearField(it->second);

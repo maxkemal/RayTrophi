@@ -23,6 +23,7 @@
 #include "SimulationComputeVulkanContext.h"
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 // Global atomics to track and cancel active background SDF bakes during scene destruction/clearance.
 inline std::atomic<bool> g_cancel_sdf_bakes{false};
@@ -30,6 +31,9 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidSimulationSystem.h"
 #include "RigidBodySystem.h"
+#include "StructuralImpulse.h"
+#include "AshDebrisSystem.h"
+#include "MeltSurfaceFlow.h"
 #include "Core/RenderStateManager.h"
 #include "globals.h"
 #include "SurfaceMeshCache.h"
@@ -732,6 +736,39 @@ struct SceneData {
     // Nodes currently displaced by melt. Used only to decide whether a field that
     // has cooled to melt == 0 still needs one final write to put it back at rest.
     std::unordered_map<std::string, uint8_t> melt_displaced_;
+    struct MeltSdfRefreshStamp {
+        uint64_t revision = 0;
+        float mean_melt = 0.0f;
+        bool displaced = false;
+    };
+    std::unordered_map<std::string, MeltSdfRefreshStamp> melt_sdf_refresh_stamp_;
+    struct PendingSdfBake {
+        std::string node_name;
+        std::shared_ptr<RayTrophiSim::ParticleSimulationSystem> runtime;
+        std::shared_ptr<std::vector<float>> grid;
+        Vec3 origin;
+        Vec3 extents;
+        int nx = 0, ny = 0, nz = 0;
+        std::shared_ptr<std::atomic<uint64_t>> serial;
+        std::shared_ptr<std::atomic<bool>> busy;
+        uint64_t request_serial = 0;
+    };
+    std::mutex pending_sdf_bakes_mutex_;
+    std::vector<PendingSdfBake> pending_sdf_bakes_;
+    struct MeltAppliedStamp {
+        uint64_t topology = 0;
+        uint64_t content = 0;
+    };
+    // The render loop calls applyMeltDisplacement every frame so timeline
+    // restores are visible while paused. Do not rewrite identical vertices:
+    // that would dirty/refit BLAS every frame and permanently reset both Vulkan
+    // and OptiX accumulation even though the simulation state is stationary.
+    std::unordered_map<std::string, MeltAppliedStamp> melt_applied_stamp_;
+    uint32_t fracture_summary_tick_ = 0;
+    uint64_t structural_impulse_sequence_ = 0;
+    std::vector<RayTrophiSim::StructuralImpulseEvent> structural_impulse_events_;
+    RayTrophiSim::StructuralImpulseStats structural_impulse_stats_;
+    RayTrophiSim::AshDebrisSystem ash_debris_system_;
 
     // ── Per-mesh deform refit (all backends) ─────────────────────────────────
     // A simulated body (rigid / soft / fracture shard) bakes new verts into its
@@ -1532,7 +1569,10 @@ struct SceneData {
     // hit on any one shatters them all. Shape = Mesh → ConvexHull once dynamic.
     void makeFractureGroupBreakable(const std::string& group,
                                     const std::vector<std::string>& shard_nodes,
-                                    float threshold) {
+                                    float threshold,
+                                    bool integrity_weakening = true,
+                                    float integrity_exponent = 1.5f,
+                                    float minimum_threshold_scale = 0.15f) {
         if (shard_nodes.empty()) return;
         ensureRigidBodySystem();
         for (const auto& node : shard_nodes) {
@@ -1542,6 +1582,10 @@ struct SceneData {
             rb->broken = false;
             rb->setFractureGroup(group);
             rb->setBreakImpulse(threshold);
+            rb->setIntegrityWeakening(integrity_weakening);
+            rb->setIntegrityExponent(std::max(integrity_exponent, 0.01f));
+            rb->setMinimumThresholdScale(
+                std::clamp(minimum_threshold_scale, 0.0f, 1.0f));
             rb->shape = RayTrophiSim::RigidBodyShape::Mesh;   // convex hull when broken
             rb->motion_type = RayTrophiSim::RigidBodyMotionType::Static;
             rb->dynamic = false;
@@ -1594,31 +1638,31 @@ struct SceneData {
                            Vec3(0.0f, 0.0f, 0.0f), strength);
     }
 
+    RayTrophiSim::MaterialIntegritySummary fractureIntegritySummary(
+        const std::string& group) const;
+    bool applyFractureImpulse(const std::string& group,
+                              const Vec3& point,
+                              const Vec3& direction,
+                              float impulse);
+
     // After a sim step: read the contact events and shatter any breakable group
     // whose shard took an impact above its threshold. No-op without breakables.
-    void processFractureImpacts() {
-        if (!rigid_body_system || !rigid_body_system->contactEventsEnabled()) return;
-        const auto& events = rigid_body_system->contactEvents();
-        if (events.empty()) return;
-        auto findBreakable = [&](const std::string& src) -> RayTrophiSim::RigidBodyObject* {
-            if (src.empty()) return nullptr;
-            for (auto& rb : rigid_bodies)
-                if (rb.getBreakable() && !rb.broken && rb.source_name == src) return &rb;
-            return nullptr;
-        };
-        for (const auto& ev : events) {
-            RayTrophiSim::RigidBodyObject* hit = findBreakable(ev.source_a);
-            Vec3 dir = ev.normal;
-            if (!hit) { hit = findBreakable(ev.source_b); dir = ev.normal * -1.0f; }
-            if (!hit || ev.impulse < hit->getBreakImpulse()) continue;
-            const float strength = std::max(2.0f, ev.impulse * 0.5f);
-            breakFractureGroup(hit->getFractureGroup(), ev.point, dir, strength);
-        }
+    void processFractureImpacts();
+    void queueStructuralImpulse(RayTrophiSim::StructuralImpulseEvent event);
+    void processStructuralImpulseEvents();
+    const RayTrophiSim::StructuralImpulseStats& structuralImpulseStats() const {
+        return structural_impulse_stats_;
+    }
+    RayTrophiSim::AshDebrisSystem& ashDebrisSystem() { return ash_debris_system_; }
+    const RayTrophiSim::AshDebrisSystem& ashDebrisSystem() const {
+        return ash_debris_system_;
     }
 
     // Reset every breakable group back to intact (Static, unbroken) — called on a
     // rewind to frame 0 so a replay re-derives the shatter deterministically.
     void resetFractureToIntact() {
+        fracture_summary_tick_ = 0;
+        structural_impulse_events_.clear();
         bool any = false;
         for (auto& rb : rigid_bodies) {
             if (!rb.getBreakable()) continue;
@@ -1732,6 +1776,8 @@ struct SceneData {
         soft_weld_cache_.erase(node);
         melt_weld_cache_.erase(node);
         melt_displaced_.erase(node);
+        melt_sdf_refresh_stamp_.erase(node);
+        melt_applied_stamp_.erase(node);
         for (auto& kv : soft_frame_cache_) kv.second.erase(node);
 
         if (rigid_body_system) rigid_body_system->setBodies(&rigid_bodies);
@@ -1899,6 +1945,7 @@ struct SceneData {
     uint64_t sim_render_frame_counter = 0;
     bool simulation_render_updated = false;  // a live volume's content changed this step
     bool force_simulation_render_sync_ = false;
+    bool preserve_script_simulation_preview_ = false;
     // Authoring gate for Flow Source keyframes. While enabled, timeline scrub
     // moves the playhead without restoring/resimulating expensive gas state;
     // the UI keeps staged slider values until the user commits a diamond key.
@@ -2910,6 +2957,31 @@ struct SceneData {
         msf_frame_cache_.clear();    // burn/heat surface damage, same lockstep
     }
 
+    // Remove damage history without throwing away costly gas/fluid/rigid frame
+    // caches. An empty object key means every MSF snapshot. Disk snapshots cannot
+    // be edited safely in place, so detach the bake binding; otherwise a later RAM
+    // cache miss would stream the cleared damage back from disk.
+    void clearMaterialDamageHistory(const std::string& object_key = std::string()) {
+        if (object_key.empty()) {
+            msf_frame_cache_.clear();
+            melt_applied_stamp_.clear();
+        } else {
+            for (auto& frame : msf_frame_cache_) {
+                for (auto& system_snapshots : frame.second) {
+                    system_snapshots.erase(std::remove_if(
+                        system_snapshots.begin(), system_snapshots.end(),
+                        [&](const auto& snapshot) {
+                            return snapshot.object_key == object_key;
+                        }), system_snapshots.end());
+                }
+            }
+            melt_applied_stamp_.erase(object_key);
+        }
+        sim_cache_valid_ = false;
+        sim_cache_dir_.clear();
+        sim_cache_valid_system_ids_.clear();
+    }
+
     // Live source-object pivot (frame-0 spawn pose) for a rigid body. Returns
     // false if the bound scene object can't be resolved yet. Used by the config
     // signatures to detect REPOSITIONING (moving the object without editing any
@@ -3073,6 +3145,21 @@ struct SceneData {
                 h = mix(h, qf(c.msf_override.burn_rate_scale));
                 h = mix(h, qf(c.msf_override.fuel_capacity_scale));
                 h = mix(h, static_cast<uint64_t>(c.msf_mask_resolution));
+                h = mix(h, c.msf_auto_transfer ? 1ull : 0ull);
+                for (char ch : c.msf_transfer_domain) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, qf(c.msf_transfer_rate_kg_s));
+                h = mix(h, qf(c.msf_transfer_min_mass_kg));
+                h = mix(h, qf(c.msf_transfer_particles_per_kg));
+                h = mix(h, c.msf_transfer_max_batch_particles);
+                h = mix(h, c.msf_melt_flow_enabled ? 1ull : 0ull);
+                h = mix(h, qf(c.msf_melt_height_loss));
+                h = mix(h, qf(c.msf_melt_spread));
+                h = mix(h, c.msf_melt_sdf_refresh ? 1ull : 0ull);
+                h = mix(h, c.msf_melt_sdf_revision_interval);
+                h = mix(h, qf(c.msf_melt_sdf_change_threshold));
+                h = mix(h, qf(c.msf_transfer_velocity.x));
+                h = mix(h, qf(c.msf_transfer_velocity.y));
+                h = mix(h, qf(c.msf_transfer_velocity.z));
                 h = mix(h, c.msf_generate_char_mask ? 1ull : 0ull);
             }
             // World thermal boundary conditions (Phase 4). Ambient, the Kelvin
@@ -3315,6 +3402,21 @@ struct SceneData {
                 h = mix(h, qf(c.msf_override.burn_rate_scale));
                 h = mix(h, qf(c.msf_override.fuel_capacity_scale));
                 h = mix(h, static_cast<uint64_t>(c.msf_mask_resolution));
+                h = mix(h, c.msf_auto_transfer ? 1ull : 0ull);
+                for (char ch : c.msf_transfer_domain) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, qf(c.msf_transfer_rate_kg_s));
+                h = mix(h, qf(c.msf_transfer_min_mass_kg));
+                h = mix(h, qf(c.msf_transfer_particles_per_kg));
+                h = mix(h, c.msf_transfer_max_batch_particles);
+                h = mix(h, c.msf_melt_flow_enabled ? 1ull : 0ull);
+                h = mix(h, qf(c.msf_melt_height_loss));
+                h = mix(h, qf(c.msf_melt_spread));
+                h = mix(h, c.msf_melt_sdf_refresh ? 1ull : 0ull);
+                h = mix(h, c.msf_melt_sdf_revision_interval);
+                h = mix(h, qf(c.msf_melt_sdf_change_threshold));
+                h = mix(h, qf(c.msf_transfer_velocity.x));
+                h = mix(h, qf(c.msf_transfer_velocity.y));
+                h = mix(h, qf(c.msf_transfer_velocity.z));
                 h = mix(h, c.msf_generate_char_mask ? 1ull : 0ull);
             }
             // World thermal boundary conditions (Phase 4). Ambient, the Kelvin
@@ -3425,6 +3527,9 @@ struct SceneData {
             if (rb.getBreakable()) {
                 h = mix(h, 0xB4EAC0DEull);  // stable "breakable, authored static" marker
                 h = mix(h, qf(rb.getBreakImpulse()));
+                h = mix(h, rb.getIntegrityWeakening() ? 1ull : 0ull);
+                h = mix(h, qf(rb.getIntegrityExponent()));
+                h = mix(h, qf(rb.getMinimumThresholdScale()));
                 for (char c : rb.getFractureGroup()) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
             } else {
                 h = mix(h, static_cast<uint64_t>(rb.motion_type));
@@ -3674,6 +3779,9 @@ struct SceneData {
         return bytes;
     }
     int cachedSimFrameCount() const { return static_cast<int>(sim_frame_cache_.size()); }
+    // The UI uses this only to decide whether a paused timeline scrub is about
+    // to replace GPU-visible simulation buffers. It is not a second playhead.
+    int simulationTimelineFrame() const { return sim_timeline_frame_; }
 
     // Scatter the solver's UNIQUE deformed world vertices back onto every triangle
     // corner of a soft body's mesh. The GPU BLAS reads LOCAL vertices
@@ -4054,31 +4162,43 @@ struct SceneData {
     // hand, and would have compounded every frame the sim ran at a different dt.
     //
     // ★ SCOPE, stated plainly: this is SLUMP, not flow. Vertices sink under
-    // gravity and flatten against the rest bounding box's floor; there is no
-    // lateral spreading and volume is NOT conserved. A puddle that widens as it
-    // sinks needs the wet-clay flow core and is the next slice.
+    // gravity, diffuses only through connected triangle neighbours and widens
+    // laterally as height is lost. It conserves the surface envelope only
+    // approximately; topology loss and detached liquid belong to the APIC bridge.
     void applyMeltDisplacement() {
         for (auto& system : particle_systems) {
             if (!system.runtime || !system.runtime->hasMaterialStateFields()) continue;
             for (const auto& entry : system.runtime->materialStateFields()) {
-                applyMeltDisplacementToNode(entry.first, entry.second);
+                applyMeltDisplacementToNode(entry.first, entry.second, system.runtime);
             }
         }
     }
 
     void applyMeltDisplacementToNode(const std::string& node,
-                                     const RayTrophiSim::MaterialStateField& field) {
+                                     const RayTrophiSim::MaterialStateField& field,
+                                     const std::shared_ptr<RayTrophiSim::ParticleSimulationSystem>& runtime) {
+        if (!runtime) return;
         if (node.empty()) return;
         // ★ Two writers to one mesh would fight every frame, each overwriting the
         // other's result. A soft body already owns its vertices; melt defers.
         if (soft_weld_cache_.count(node) != 0) return;
+
+        const auto stamp_it = melt_applied_stamp_.find(node);
+        if (stamp_it != melt_applied_stamp_.end() &&
+            stamp_it->second.topology == field.topology_generation &&
+            stamp_it->second.content == field.mask_revision) {
+            return;
+        }
 
         const bool was_displaced = melt_displaced_.count(node) != 0;
         float peak_melt = 0.0f;
         for (float m : field.melt_texel) peak_melt = std::max(peak_melt, m);
         // Nothing melted and nothing to put back: the common case, and it must
         // cost no more than this scan.
-        if (peak_melt <= 0.0f && !was_displaced) return;
+        if (peak_melt <= 0.0f && !was_displaced) {
+            melt_applied_stamp_[node] = { field.topology_generation, field.mask_revision };
+            return;
+        }
         // No UV layout: Phase 6a can answer no query for this object, so there is
         // nothing to displace FROM. Leaving the mesh alone is the honest outcome.
         if (field.mask_resolution <= 0) return;
@@ -4098,6 +4218,7 @@ struct SceneData {
         // the unique vertex with max — the same rule the texel scatter uses at a
         // seam, so the two agree.
         std::vector<float> melt_unique(uc, 0.0f);
+        std::vector<float> local_mass_unique(uc, 1.0f);
         bool sampled_any = false;
 
         if (cache.flat_mesh && cache.flat_mesh->geometry &&
@@ -4110,9 +4231,13 @@ struct SceneData {
                 const uint32_t u = cache.flat_soa_to_unique[v];
                 if (u >= uc) continue;
                 float m = 0.0f;
-                if (!RayTrophiSim::MaterialStateFieldSystem::sampleMeltAtUV(field, uv[v].x, uv[v].y, m))
-                    continue;
+                if (!RayTrophiSim::MaterialStateFieldSystem::sampleMeltAtUV(
+                        field, uv[v].x, uv[v].y, m)) continue;
                 melt_unique[u] = std::max(melt_unique[u], m);
+                float local_mass = 1.0f;
+                if (RayTrophiSim::MaterialStateFieldSystem::sampleLocalMassAtUV(
+                        field, uv[v].x, uv[v].y, local_mass))
+                    local_mass_unique[u] = std::min(local_mass_unique[u], local_mass);
                 sampled_any = true;
             }
         } else {
@@ -4129,6 +4254,10 @@ struct SceneData {
                     if (!RayTrophiSim::MaterialStateFieldSystem::sampleMeltAtUV(
                             field, c_uv[i].x, c_uv[i].y, m)) continue;
                     melt_unique[u] = std::max(melt_unique[u], m);
+                    float local_mass = 1.0f;
+                    if (RayTrophiSim::MaterialStateFieldSystem::sampleLocalMassAtUV(
+                            field, c_uv[i].x, c_uv[i].y, local_mass))
+                        local_mass_unique[u] = std::min(local_mass_unique[u], local_mass);
                     sampled_any = true;
                 }
             }
@@ -4142,16 +4271,12 @@ struct SceneData {
         // No new UI parameter, and therefore no script/IPC parity surface.
         const RayTrophiSim::SubstanceProfile& prof =
             RayTrophiSim::findSubstance(field.substance_name);
-        float rest_min_y = cache.rest_world_unique[0].y;
-        float rest_max_y = rest_min_y;
-        for (const Vec3& p : cache.rest_world_unique) {
-            rest_min_y = std::min(rest_min_y, p.y);
-            rest_max_y = std::max(rest_max_y, p.y);
+        RayTrophiSim::ParticleColliderDesc* authoring = nullptr;
+        for (auto& collider : runtime->colliders()) {
+            if (collider.source_name == node) { authoring = &collider; break; }
         }
-        const float height = std::max(1.0e-4f, rest_max_y - rest_min_y);
-        const float viscosity = std::clamp(prof.melt_viscosity, 0.0f, 1.0f);
-        const float max_sag = height * 0.25f * (1.0f - viscosity);
-
+        if (authoring && !authoring->msf_melt_flow_enabled) return;
+        #if 0 // Replaced by connected MeltSurfaceFlow below.
         std::vector<Vec3> displaced = cache.rest_world_unique;
         for (std::size_t u = 0; u < uc; ++u) {
             const float m = std::clamp(melt_unique[u], 0.0f, 1.0f);
@@ -4163,9 +4288,47 @@ struct SceneData {
             displaced[u].y = std::max(rest_min_y, displaced[u].y - m * max_sag);
         }
 
+        #endif
+        std::vector<Vec3> displaced;
+        RayTrophiSim::MeltSurfaceFlowSettings flow_settings;
+        flow_settings.viscosity = prof.melt_viscosity;
+        if (authoring) {
+            flow_settings.maximum_height_loss = authoring->msf_melt_height_loss;
+            flow_settings.maximum_lateral_gain = authoring->msf_melt_spread;
+        }
+        if (!RayTrophiSim::solveMeltSurfaceFlow(cache.rest_world_unique,
+                cache.corner_unique, melt_unique, local_mass_unique,
+                flow_settings, displaced)) return;
         applyDeformedVertsToCache(cache, node, displaced);
         if (peak_melt > 0.0f) melt_displaced_[node] = 1u;
         else melt_displaced_.erase(node);
+        melt_applied_stamp_[node] = { field.topology_generation, field.mask_revision };
+
+        // The render mesh above is live geometry, while an ObjectMeshSDF is a
+        // cooked snapshot. Refresh only after meaningful thermal change and a
+        // revision interval; otherwise a melting object would start an expensive
+        // 3D cook every readback/frame. Reset-to-rest is always allowed through.
+        if (authoring && authoring->source_mode ==
+                RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF &&
+            authoring->msf_melt_sdf_refresh) {
+            float mean_melt = 0.0f;
+            for (float m : melt_unique) mean_melt += std::clamp(m, 0.0f, 1.0f);
+            mean_melt /= std::max<std::size_t>(1u, melt_unique.size());
+            auto& refresh = melt_sdf_refresh_stamp_[node];
+            const bool now_displaced = peak_melt > 0.0f;
+            const uint64_t interval = std::max<uint32_t>(1u,
+                authoring->msf_melt_sdf_revision_interval);
+            const bool interval_due = field.mask_revision >= refresh.revision + interval;
+            const bool shape_due = std::abs(mean_melt - refresh.mean_melt) >=
+                std::max(0.001f, authoring->msf_melt_sdf_change_threshold);
+            const bool restoring = refresh.displaced && !now_displaced;
+            if ((restoring || (interval_due && shape_due))) {
+                invalidateSurfaceMeshCache(node);
+                if (rebuildSDFColliderAsync(*authoring, runtime, true)) {
+                    refresh = { field.mask_revision, mean_melt, now_displaced };
+                }
+            }
+        }
     }
 
     // Cache the rest-pose LOCAL verts/normals of a RIGID body's source mesh (called
@@ -4393,6 +4556,8 @@ struct SceneData {
         rigid_bake_cache_.erase(node);
         melt_weld_cache_.erase(node);
         melt_displaced_.erase(node);
+        melt_sdf_refresh_stamp_.erase(node);
+        melt_applied_stamp_.erase(node);
     }
 
     // Route a body's per-frame geometry change to the cheapest correct refresh.
@@ -4853,6 +5018,14 @@ struct SceneData {
         force_simulation_render_sync_ = true;
     }
 
+    // A script can deliberately author a setup and then advance its live runtime
+    // with rt.fluid.step(). The first UI tick must publish that resulting state,
+    // not interpret the preceding authoring edits as a request to restore frame
+    // zero and erase it. Consumed once by updateSimulationTimeline().
+    void preserveScriptSimulationPreview() {
+        preserve_script_simulation_preview_ = true;
+    }
+
     void setSimulationKeyAuthoringMode(bool enabled) {
         if (simulation_key_authoring_mode_ == enabled) return;
         simulation_key_authoring_mode_ = enabled;
@@ -5039,8 +5212,21 @@ struct SceneData {
     void updateSimulationTimeline(int tl_frame, bool playing, float realtime_dt, float fps, bool live_mode,
                                   bool ui_editing = false) {
         if (tl_frame < 0) tl_frame = 0;
+        publishCompletedSdfBakes();
         syncFlowSourceKeysFromTimeline();
         simulation_render_updated = false;
+        if (preserve_script_simulation_preview_) {
+            preserve_script_simulation_preview_ = false;
+            last_sim_config_sig_ = computeSimConfigSignature();
+            last_fluid_coupling_sig_ = computeFluidCouplingSignature();
+            force_simulation_render_sync_ = false;
+            sim_cache_valid_ = false;
+            sim_timeline_frame_ = tl_frame;
+            rigid_timeline_frame_ = tl_frame;
+            syncSimulationRenderVolumes();
+            simulation_render_updated = true;
+            return;
+        }
         const bool force_resync = force_simulation_render_sync_;
         if (simulation_key_authoring_mode_ && !playing) {
             // Key editing and simulation playback are intentionally separated:
@@ -7379,12 +7565,25 @@ public:
     // SDF to the wrong system — or none — and the collider would silently fail to
     // block fluid after reload. (The SDF voxel grid itself is intentionally not
     // serialized; it is deterministically rebuilt here from the source mesh.)
-    void rebuildSDFColliderAsync(RayTrophiSim::ParticleColliderDesc& desc,
-                                 std::shared_ptr<RayTrophiSim::ParticleSimulationSystem> target_runtime = nullptr) {
+    bool rebuildSDFColliderAsync(RayTrophiSim::ParticleColliderDesc& desc,
+                                 std::shared_ptr<RayTrophiSim::ParticleSimulationSystem> target_runtime = nullptr,
+                                 bool coalesce = false) {
         if (desc.source_mode != RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF ||
             desc.source_name.empty()) {
-            return;
+            return false;
         }
+        if (!desc.sdf_bake_serial) desc.sdf_bake_serial = std::make_shared<std::atomic<uint64_t>>(0u);
+        if (!desc.sdf_bake_busy) desc.sdf_bake_busy = std::make_shared<std::atomic<bool>>(false);
+        auto bake_serial = desc.sdf_bake_serial;
+        auto bake_busy = desc.sdf_bake_busy;
+        if (coalesce) {
+            bool expected = false;
+            if (!bake_busy->compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+                return false;
+        } else {
+            bake_busy->store(true, std::memory_order_release);
+        }
+        const uint64_t request_serial = bake_serial->fetch_add(1u, std::memory_order_acq_rel) + 1u;
 
         std::string node_name = desc.source_name;
         int res_mode = desc.sdf_resolution_mode;
@@ -7396,12 +7595,14 @@ public:
 
         const auto* surface_cache = getSurfaceMeshCacheForObject(node_name);
         if (!surface_cache || surface_cache->empty()) {
-            return;
+            bake_busy->store(false, std::memory_order_release);
+            return false;
         }
 
         RayTrophiSim::ParticleColliderOBB obb;
         if (!resolveObjectOBBForSimulation(node_name, obb)) {
-            return;
+            bake_busy->store(false, std::memory_order_release);
+            return false;
         }
 
         Matrix4x4 world_to_local = obb.local_to_world.inverse();
@@ -7432,7 +7633,8 @@ public:
 
         g_active_sdf_bakes.fetch_add(1, std::memory_order_acquire);
 
-        std::thread([this, node_name, triangles, bmin, bmax, N, result_vec, target_runtime]() {
+        std::thread([this, node_name, triangles, bmin, bmax, N, result_vec, target_runtime,
+                     bake_serial, bake_busy, request_serial]() {
             Vec3 size = bmax - bmin;
             Vec3 pad = size * 0.15f;
             Vec3 origin = bmin - pad;
@@ -7490,28 +7692,63 @@ public:
             }
 
             if (g_cancel_sdf_bakes.load(std::memory_order_relaxed)) {
+                if (bake_serial->load(std::memory_order_acquire) == request_serial)
+                    bake_busy->store(false, std::memory_order_release);
                 g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
                 return;
             }
 
-            auto p_sys = target_runtime ? target_runtime : this->getParticleSimulationSystem();
+            // A later manual/automatic request owns publication. Discarding an
+            // old result prevents a slow 128^3 cook restoring stale geometry.
+            if (bake_serial->load(std::memory_order_acquire) != request_serial) {
+                g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
+                return;
+            }
+
+            // Never mutate the live collider from this detached worker. Timeline
+            // restore/step reads it on the main thread and concurrent shared_ptr /
+            // dimension writes are a real data race. Queue an immutable result;
+            // updateSimulationTimeline publishes it at its safe tick boundary.
+            {
+                std::lock_guard<std::mutex> lock(pending_sdf_bakes_mutex_);
+                pending_sdf_bakes_.push_back(PendingSdfBake{
+                    node_name, target_runtime, result_vec, origin, extents,
+                    nx, ny, nz, bake_serial, bake_busy, request_serial
+                });
+            }
+            g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
+        }).detach();
+        return true;
+    }
+
+    void publishCompletedSdfBakes() {
+        std::vector<PendingSdfBake> ready;
+        {
+            std::lock_guard<std::mutex> lock(pending_sdf_bakes_mutex_);
+            ready.swap(pending_sdf_bakes_);
+        }
+        for (auto& bake : ready) {
+            if (!bake.serial || bake.serial->load(std::memory_order_acquire) !=
+                    bake.request_serial) {
+                continue;
+            }
+            auto p_sys = bake.runtime ? bake.runtime : getParticleSimulationSystem();
             if (p_sys) {
-                auto& list = p_sys->colliders();
-                for (auto& coll : list) {
+                for (auto& coll : p_sys->colliders()) {
                     if (coll.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF &&
-                        coll.source_name == node_name) {
-                        coll.sdf_grid_data = result_vec;
-                        coll.sdf_origin = origin;
-                        coll.sdf_extents = extents;
-                        coll.sdf_nx = nx;
-                        coll.sdf_ny = ny;
-                        coll.sdf_nz = nz;
+                        coll.source_name == bake.node_name) {
+                        coll.sdf_grid_data = std::move(bake.grid);
+                        coll.sdf_origin = bake.origin;
+                        coll.sdf_extents = bake.extents;
+                        coll.sdf_nx = bake.nx;
+                        coll.sdf_ny = bake.ny;
+                        coll.sdf_nz = bake.nz;
                         break;
                     }
                 }
             }
-            g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
-        }).detach();
+            if (bake.busy) bake.busy->store(false, std::memory_order_release);
+        }
     }
 
     RayTrophiSim::ParticleColliderDesc& addParticleProxyColliderFromObject(const std::string& node_name) {
@@ -7933,6 +8170,10 @@ public:
         while (g_active_sdf_bakes.load(std::memory_order_acquire) > 0) {
             std::this_thread::yield();
         }
+        {
+            std::lock_guard<std::mutex> lock(pending_sdf_bakes_mutex_);
+            pending_sdf_bakes_.clear();
+        }
         g_cancel_sdf_bakes.store(false, std::memory_order_release); // reset for subsequent projects
 
         syncSimulationWorld();
@@ -7957,6 +8198,9 @@ public:
         rigid_bake_cache_.clear();
         melt_weld_cache_.clear();
         melt_displaced_.clear();
+        melt_sdf_refresh_stamp_.clear();
+        melt_applied_stamp_.clear();
+        fracture_summary_tick_ = 0;
         editor_pending_delete_object_names.clear();
         
         // Clear per-model animator caches BEFORE clearing the vector
@@ -8051,6 +8295,9 @@ public:
         rigid_bake_cache_.clear();  // ditto (rigid render-bake rest cache)
         melt_weld_cache_.clear();   // ditto (Phase 6c melt slump rest cache)
         melt_displaced_.clear();
+        melt_sdf_refresh_stamp_.clear();
+        melt_applied_stamp_.clear();
+        fracture_summary_tick_ = 0;
         soft_frame_cache_.clear();
         invalidateSurfaceMeshCache();
 

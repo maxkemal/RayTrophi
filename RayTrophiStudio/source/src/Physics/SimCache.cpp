@@ -310,6 +310,7 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         writeFloatArray(os, f.moisture);
         writeFloatArray(os, f.melt);
         writeFloatArray(os, f.mass_loss);
+        writeFloatArray(os, f.transferred_mass);
     }
 
     return static_cast<bool>(os);
@@ -389,6 +390,10 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.particles.velocity.assign(static_cast<size_t>(pcount), Vec3(0.0f));
         d.particles.affine.assign(static_cast<size_t>(pcount), Fluid::AffineC{});
         d.particles.flags.assign(static_cast<size_t>(pcount), 0u);
+        d.particles.mass_fraction.assign(static_cast<size_t>(pcount), 1.0f);
+        d.particles.temperature.assign(static_cast<size_t>(pcount), 0.0f);
+        d.particles.combustible_fraction.assign(static_cast<size_t>(pcount), 0.0f);
+        d.particles.substance_tag.assign(static_cast<size_t>(pcount), 0u);
 
         // Foam — position + type + lifetime restored; velocity zeroed.
         uint64_t fcount = 0;
@@ -426,6 +431,7 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         if (!readFloatArray(is, f.moisture))    return false;
         if (!readFloatArray(is, f.melt))        return false;
         if (!readFloatArray(is, f.mass_loss))   return false;
+        if (!readFloatArray(is, f.transferred_mass)) return false;
         // A truncated/inconsistent entry is dropped rather than returning false:
         // losing one object's burn marks is recoverable, refusing the whole frame
         // would drop a perfectly good fluid/gas bake with it.

@@ -735,6 +735,71 @@ Result stepPhysicsSimulation(float dt = 0.0166667f);
 Result setPhysicsGravity(Vec3 gravity);
 Result getPhysicsGravity(Vec3& out_gravity);
 
+struct FractureGroupInfo {
+    std::string group;
+    int shard_count = 0;
+    int broken_count = 0;
+    float base_break_impulse = 0.0f;
+    float effective_break_impulse = 0.0f;
+    bool integrity_weakening = true;
+    float integrity_exponent = 1.5f;
+    float minimum_threshold_scale = 0.15f;
+    float mean_integrity = 1.0f;
+    float minimum_integrity = 1.0f;
+    float remaining_support_ratio = 1.0f;
+};
+
+Result makePhysicsFractureGroup(const std::string& group,
+                                const std::vector<std::string>& shard_objects,
+                                float break_impulse,
+                                bool integrity_weakening,
+                                float integrity_exponent,
+                                float minimum_threshold_scale,
+                                FractureGroupInfo& out_info);
+Result getPhysicsFractureGroup(const std::string& group,
+                               FractureGroupInfo& out_info);
+Result breakPhysicsFractureGroup(const std::string& group, float strength);
+Result applyPhysicsFractureImpulse(const std::string& group, Vec3 point,
+                                   Vec3 direction, float impulse,
+                                   bool& out_triggered);
+
+struct StructuralImpulseInfo {
+    uint64_t queued = 0;
+    uint64_t consumed = 0;
+    uint64_t affected_groups = 0;
+    uint64_t fractured_groups = 0;
+    float last_peak_pressure_kpa = 0.0f;
+    float last_max_impulse = 0.0f;
+};
+Result emitGasPressurePulse(const std::string& domain, Vec3 center,
+                            float radius, float peak_pressure_kpa,
+                            float duration_seconds, float coupling,
+                            uint64_t& out_sequence);
+Result getStructuralImpulseInfo(StructuralImpulseInfo& out_info);
+
+struct AshDebrisInfo {
+    bool enabled = true;
+    uint64_t max_particles = 4096;
+    float particles_per_kg = 120.0f;
+    float near_distance = 12.0f;
+    float far_lod_scale = 0.25f;
+    float lifetime_seconds = 5.0f;
+    uint64_t alive_particles = 0;
+    uint64_t events = 0;
+    uint64_t requested_particles = 0;
+    uint64_t spawned_particles = 0;
+    uint64_t lod_reduced_particles = 0;
+    uint64_t budget_rejected_particles = 0;
+    float accepted_mass_kg = 0.0f;
+};
+Result configureAshDebris(bool enabled, uint64_t max_particles,
+                          float particles_per_kg, float near_distance,
+                          float far_lod_scale, float lifetime_seconds);
+Result emitAshDebris(Vec3 center, Vec3 velocity, float mass_kg,
+                     float camera_distance, uint32_t seed,
+                     uint64_t& out_spawned);
+Result getAshDebrisInfo(AshDebrisInfo& out_info);
+
 // ---------------------------------------------------------------------------
 // Force fields (Faz 5.6a, implemented in RtApiForceField.cpp). One field drives
 // every simulation family at once — gas, particles, cloth, rigid bodies and the
@@ -1080,11 +1145,15 @@ struct SimulationColliderInfo {
     float friction = 0.0f;
     float restitution = 0.35f;
     float thickness = 0.0f;
+    int sdf_resolution_mode = 1; // 0=32^3, 1=64^3, 2=128^3
+    bool sdf_ready = false;      // read-only asynchronous cook status
+    int sdf_resolution = 0;      // read-only cooked cubic resolution
     bool gas_interaction_enabled = false;
     float gas_density_rate = 0.0f;
     float gas_temperature_rate = 0.0f;
     float gas_fuel_rate = 0.0f;
     float gas_flame_rate = 0.0f;
+    bool gas_ignite_on_contact = false;
     // ── Material State Field (thermo-chemistry) ──────────────────────────────
     // What this object is made of. Drives pyrolysis/ignition/charring from real
     // physical constants; see MaterialStateField.h. This is how "the crate in
@@ -1096,6 +1165,19 @@ struct SimulationColliderInfo {
     float msf_fuel_capacity_scale = 1.0f;
     int   msf_mask_resolution = 128;
     bool  msf_generate_char_mask = true;
+    bool  msf_auto_transfer = false;
+    std::string msf_transfer_domain;
+    float msf_transfer_rate_kg_s = 0.10f;
+    float msf_transfer_min_mass_kg = 0.01f;
+    float msf_transfer_particles_per_kg = 2048.0f;
+    uint32_t msf_transfer_max_batch_particles = 256u;
+    Vec3 msf_transfer_velocity = Vec3(0.0f, -0.1f, 0.0f);
+    bool msf_melt_flow_enabled = true;
+    float msf_melt_height_loss = 0.85f;
+    float msf_melt_spread = 1.50f;
+    bool msf_melt_sdf_refresh = true;
+    uint32_t msf_melt_sdf_revision_interval = 4u;
+    float msf_melt_sdf_change_threshold = 0.025f;
 };
 
 // Per-domain volume appearance. Separated from GasDomainSettings because it is
@@ -1119,6 +1201,46 @@ Result updateGasShaderSettings(const std::string& domain_id_or_name,
                                const GasShaderSettings& settings);
 // Names in the built-in substance library, for scripts and UI pickers.
 Result listMaterialSubstances(std::vector<std::string>& out_names);
+
+struct MaterialFieldInfo {
+    std::string object_key;
+    std::string substance;
+    uint64_t topology_generation = 0;
+    uint64_t content_generation = 0;
+    uint32_t element_count = 0;
+    int mask_resolution = 0;
+    bool centers_dirty = false;
+    float mean_integrity = 1.0f;
+    float minimum_integrity = 1.0f;
+    float mass_loss = 0.0f;
+    float initial_mass = 0.0f;
+    float solid_mass = 0.0f;
+    float pyrolyzed_mass = 0.0f;
+    float molten_reservoir_mass = 0.0f;
+    float transferred_mass = 0.0f;
+    float mass_conservation_error = 0.0f;
+    std::vector<std::string> semantics;
+};
+
+// Read-only Phase-0 field-contract view used by scripts and diagnostics.
+Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields);
+
+struct MoltenMassTransferInfo {
+    uint64_t queued = 0, completed = 0;
+    uint64_t deferred_no_domain = 0, deferred_no_capacity = 0;
+    float requested_mass = 0.0f, transferred_mass = 0.0f;
+    uint64_t spawned_particles = 0;
+    std::string last_object, last_domain, last_substance;
+    float last_temperature_kelvin = 0.0f;
+    float last_combustible_fraction = 0.0f;
+    uint64_t live_tagged_particles = 0;
+    float mean_remaining_mass_fraction = 0.0f;
+};
+Result queueMoltenMassTransfer(const std::string& object_key,
+                               const std::string& preferred_domain,
+                               float mass_kg, float particles_per_kg,
+                               Vec3 velocity, uint64_t& out_sequence);
+Result getMoltenMassTransferInfo(MoltenMassTransferInfo& out);
 
 Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_max,
                          float voxel_size, const std::string& type, FluidDomainInfo& out_info);
@@ -1188,6 +1310,7 @@ Result createSimulationCollider(const SimulationColliderInfo& collider,
 Result updateSimulationCollider(const std::string& name,
                                 const SimulationColliderInfo& collider);
 Result removeSimulationCollider(const std::string& name);
+Result rebuildSimulationColliderSDF(const std::string& name);
 Result resetFluidSimulation();
 Result stepFluidSimulation(float dt = 0.0166667f);
 

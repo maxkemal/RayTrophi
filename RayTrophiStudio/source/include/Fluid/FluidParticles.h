@@ -49,6 +49,9 @@ public:
     // evaporate or burn a liquid without changing APIC momentum until the
     // hysteresis-based lifecycle pass safely compacts particles.
     std::vector<float>    mass_fraction;
+    std::vector<float>    temperature;
+    std::vector<float>    combustible_fraction;
+    std::vector<uint32_t> substance_tag;
 
     void clear() {
         position.clear();
@@ -56,6 +59,9 @@ public:
         affine.clear();
         flags.clear();
         mass_fraction.clear();
+        temperature.clear();
+        combustible_fraction.clear();
+        substance_tag.clear();
     }
 
     size_t size() const { return position.size(); }
@@ -67,14 +73,21 @@ public:
         affine.reserve(n);
         flags.reserve(n);
         mass_fraction.reserve(n);
+        temperature.reserve(n);
+        combustible_fraction.reserve(n);
+        substance_tag.reserve(n);
     }
 
-    void emit(const Vec3& p, const Vec3& v) {
+    void emit(const Vec3& p, const Vec3& v, float temp = 0.0f,
+              float combustible = 0.0f, uint32_t material = 0u) {
         position.push_back(p);
         velocity.push_back(v);
         affine.emplace_back();
         flags.push_back(0u);
         mass_fraction.push_back(1.0f);
+        temperature.push_back(temp);
+        combustible_fraction.push_back(combustible);
+        substance_tag.push_back(material);
     }
 
     // Remove particle i in O(1) via swap-with-back. Order is not preserved.
@@ -86,12 +99,18 @@ public:
             affine[i]   = affine[last];
             flags[i]    = flags[last];
             mass_fraction[i] = mass_fraction[last];
+            temperature[i] = temperature[last];
+            combustible_fraction[i] = combustible_fraction[last];
+            substance_tag[i] = substance_tag[last];
         }
         position.pop_back();
         velocity.pop_back();
         affine.pop_back();
         flags.pop_back();
         mass_fraction.pop_back();
+        temperature.pop_back();
+        combustible_fraction.pop_back();
+        substance_tag.pop_back();
     }
 };
 
