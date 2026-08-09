@@ -16,13 +16,13 @@ layout(push_constant) uniform PC {
     vec4  origin_voxel;  // xyz = grid origin (world), w = voxel size
     vec4  material0;     // ignition_T, fuel_capacity, burn_rate, thermal_response
     vec4  material1;     // (reserved, was cooling_rate), char_rate, dt, max_temperature
-    vec4  material2;     // boil_normalized, melt_normalized, melt_rate, unused
+    vec4  material2;     // boil_normalized, melt_normalized, melt_rate, mass_capacity
 } pc;
 
 layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
 // Two vec4 per element:
 //   [2i+0] x=temperature y=fuel_remaining z=char w=moisture
-//   [2i+1] x=released_this_step y=melt z=mass_loss w=reserved
+//   [2i+1] x=released_this_step y=melt z=mass_loss w=transferred_mass
 // Slot [2i+1] is what sim_msf_scatter consumes. melt/mass_loss are written by
 // later phases; they are allocated now so the stride never changes again.
 layout(set=0, binding=1)          buffer State   { vec4 state[]; };
@@ -171,9 +171,17 @@ void main() {
     // exchange just produced. Measuring it after would pin the surface exactly at
     // the melt point, make the overshoot zero, and stall melting forever at 50% —
     // a self-cancelling loop that looks like "melting just stops".
+    float area = max(centers[id].w, 1e-8);
+    float capacity = max(pc.material2.w * area, 1e-8);
+    float burned_total = clamp(aux.z, 0.0, capacity);
+    float transferred_total = clamp(aux.w, 0.0, capacity - burned_total);
+    float max_melt_fraction = clamp(
+        1.0 - (burned_total + transferred_total) / capacity, 0.0, 1.0);
+    aux.y = min(aux.y, max_melt_fraction);
     float melt_over = st.x - pc.material2.y;
     if (melt_over > 0.0 && aux.y < 1.0 && pc.material2.z > 0.0) {
-        aux.y = clamp(aux.y + melt_over * pc.material2.z * dt, 0.0, 1.0);
+        aux.y = clamp(aux.y + melt_over * pc.material2.z * dt,
+                      0.0, max_melt_fraction);
     }
     if (aux.y > 0.0 && aux.y < 1.0) {
         // Latent heat: while there is still solid left to melt, the incoming
@@ -182,6 +190,8 @@ void main() {
         // what lets molten iron keep climbing toward its boiling point.
         st.x = mix(pc.material2.y, st.x, aux.y);
     }
+    float molten_mass = clamp(aux.y, 0.0, 1.0) * capacity;
+    st.y = min(st.y, max(capacity - burned_total - transferred_total - molten_mass, 0.0));
 
     // Pyrolysis is suppressed by the same factor. Without this a surface sitting
     // exactly at the boiling point with an ignition point below it (paper ignites
@@ -192,21 +202,23 @@ void main() {
         // their count depends on the mask resolution — without the area factor
         // the same object would consume mass (and vent smoke) faster simply for
         // having a finer mask.
-        float area = max(centers[id].w, 1e-8);
+        float solid_available = max(
+            capacity - burned_total - transferred_total - molten_mass, 0.0);
         // Damp the burn rate by remaining wetness so extinguishing is gradual
         // rather than a switch: a fire hosed down should die back over a moment,
         // and a barely-damp surface should smoulder rather than stop dead.
-        float burned = min(st.y, pc.material0.z * area * dt * (1.0 - moisture));
-        st.y -= burned;
+        float burned = min(solid_available,
+                           pc.material0.z * area * dt * (1.0 - moisture));
+        burned_total += burned;
+        st.y = max(capacity - burned_total - transferred_total - molten_mass, 0.0);
         // Normalized by this element's own capacity so char saturates exactly as
         // the last of its combustible mass goes, at any resolution.
-        float capacity = max(pc.material0.y * area, 1e-8);
         st.z = clamp(st.z + burned * pc.material1.y / capacity, 0.0, 1.0);
         // Pyrolysis vapour handed to the scatter pass. The gas domain's regular
         // combustion step then consumes it, so heat and smoke stay domain-driven
         // exactly as they were under the old voxel path.
         aux.x = burned;
-        aux.z += burned;  // cumulative mass loss (Phase 7 shrink/ash)
+        aux.z = burned_total;  // cumulative pyrolysis mass loss
     }
 
     state[id * 2u] = st;

@@ -31,7 +31,7 @@ struct VkInstanceData {
     // KEEP BYTE-IDENTICAL with VulkanRT::VkInstanceData and with the copies in
     // the other shaders reading binding 5 — a divergence reads as garbage.
     uint msfCharTex;
-    uint msfCharPacked;   // char_color RGB (low 24), molten emission (high 8)
+    uint msfCharPacked;   // char RGB (low 24), 6-bit emission + erosion flags (high 8)
 };
 
 // Geometry buffer reference types for UV lookup
@@ -167,9 +167,12 @@ void main() {
         Material cmat = materials.m[camMatIndex];
         float alpha = cmat.opacity;
         int aTexID = int(cmat.opacity_tex);
-        if (aTexID > 0) {
+        bool paperErosion = (((inst.msfCharPacked >> 24) & 0x80u) != 0u) &&
+                            inst.msfCharTex > 0u;
+        if (aTexID > 0 || paperErosion) {
             vec3 abary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
             vec2 auv = vec2(0.5);
+            vec2 rawAuv = vec2(0.5);
             if (geo.uvAddr != 0) {
                 uint a0, a1, a2;
                 if (geo.indexAddr != 0) {
@@ -184,13 +187,24 @@ void main() {
                 }
                 UVBuffer2 auvBuf = UVBuffer2(geo.uvAddr);
                 auv = auvBuf.u[a0] * abary.x + auvBuf.u[a1] * abary.y + auvBuf.u[a2] * abary.z;
+                rawAuv = auv;
                 auv.y = 1.0 - auv.y;   // V-flip — matches closesthit texture sampling
                 auv = applyMaterialUVTransform(cmat, auv);
             }
             // Bit 8 of flags: RGBA texture, opacity in .a; clear: grayscale mask in .r
-            alpha *= ((cmat.flags & 256u) != 0u)
-                ? textureLod(materialTextures[nonuniformEXT(aTexID)], auv, 0.0).a
-                : textureLod(materialTextures[nonuniformEXT(aTexID)], auv, 0.0).r;
+            if (aTexID > 0) {
+                alpha *= ((cmat.flags & 256u) != 0u)
+                    ? textureLod(materialTextures[nonuniformEXT(aTexID)], auv, 0.0).a
+                    : textureLod(materialTextures[nonuniformEXT(aTexID)], auv, 0.0).r;
+            }
+            if (paperErosion) {
+                float loss = textureLod(materialTextures[nonuniformEXT(int(inst.msfCharTex))],
+                                        rawAuv, 0.0).b;
+                float fibre = 0.5 + 0.25 * sin(rawAuv.x * 181.0) +
+                              0.25 * sin(rawAuv.y * 137.0 + rawAuv.x * 19.0);
+                alpha *= 1.0 - smoothstep(0.58 + fibre * 0.18,
+                                          0.88 + fibre * 0.08, loss);
+            }
         }
         if (alpha >= 0.99) return;              // opaque enough — accept the hit
         if (alpha < 0.1) ignoreIntersectionEXT; // closesthit parity: <0.1 snaps to fully transparent
@@ -303,6 +317,7 @@ void main() {
     // Compute interpolated UV (needed for any texture lookup below)
     vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
     vec2 hitUV = vec2(0.5, 0.5);
+    vec2 rawHitUV = vec2(0.5, 0.5);
     
     // Triangle indices (shared by the UV lookup and the glass face-normal below)
     uint ui0, ui1, ui2;
@@ -320,6 +335,7 @@ void main() {
     if (geo.uvAddr != 0) {
         UVBuffer2 uvBuf = UVBuffer2(geo.uvAddr);
         hitUV = uvBuf.u[ui0] * bary.x + uvBuf.u[ui1] * bary.y + uvBuf.u[ui2] * bary.z;
+        rawHitUV = hitUV;
         // Vulkan shader coordinate origin differs; flip V to match closesthit / texture upload
         hitUV.y = 1.0 - hitUV.y;
         hitUV = applyMaterialUVTransform(mat, hitUV);
@@ -391,6 +407,15 @@ void main() {
             : textureLod(materialTextures[nonuniformEXT(opacityTexID)], hitUV, 0.0).r;
         // Texture modulates the uniform material opacity
         maskValue = texOpacity * mat.opacity;
+    }
+
+    if ((((inst.msfCharPacked >> 24) & 0x80u) != 0u) && inst.msfCharTex > 0u) {
+        float loss = textureLod(materialTextures[nonuniformEXT(int(inst.msfCharTex))],
+                                rawHitUV, 0.0).b;
+        float fibre = 0.5 + 0.25 * sin(rawHitUV.x * 181.0) +
+                      0.25 * sin(rawHitUV.y * 137.0 + rawHitUV.x * 19.0);
+        maskValue *= 1.0 - smoothstep(0.58 + fibre * 0.18,
+                                     0.88 + fibre * 0.08, loss);
     }
 
     // --- Fast paths for fully transparent / fully opaque ---

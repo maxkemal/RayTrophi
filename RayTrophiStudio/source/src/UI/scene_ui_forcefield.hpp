@@ -29,6 +29,9 @@
 #include "PrincipledBSDF.h"
 #include "Material.h"
 #include "TimelineWidget.h"
+#include "scene_ui_debris.hpp"
+#include "scene_ui_material_mass.hpp"
+#include "scene_ui_molten_transfer.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -2847,7 +2850,16 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         for (const auto& profile : library) {
                             const bool selected = (c.msf_substance == profile.name);
                             if (ImGui::Selectable(profile.name.c_str(), selected)) {
-                                c.msf_substance = profile.name;
+                                if (c.msf_substance != profile.name) {
+                                    if (!c.source_name.empty()) {
+                                        runtime.clearMaterialStateField(c.source_name);
+                                        scene.clearMaterialDamageHistory(c.source_name);
+                                    }
+                                    c.msf_substance = profile.name;
+                                    ui_ctx.renderer.resetCPUAccumulation();
+                                    if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                                    ui_ctx.start_render = true;
+                                }
                             }
                             if (selected) ImGui::SetItemDefaultFocus();
                         }
@@ -2947,6 +2959,8 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     }
                     ImGui::EndDisabled();
 
+                    MoltenTransferUI::draw(scene, runtime, c);
+
                     // ── Damage control ───────────────────────────────────────
                     // Burn damage is deliberately PERMANENT and lives on the
                     // object, not on the material or its UV set — that is the
@@ -2966,7 +2980,10 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
 
                     ImGui::Separator();
                     if (ImGui::Button("Clear Damage##CollTabMsf")) {
-                        runtime.clearMaterialStateField(c.source_name);
+                        if (!c.source_name.empty()) {
+                            runtime.clearMaterialStateField(c.source_name);
+                            scene.clearMaterialDamageHistory(c.source_name);
+                        }
                         wakeViewport();
                     }
                     if (ImGui::IsItemHovered()) {
@@ -2979,6 +2996,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     ImGui::SameLine();
                     if (ImGui::Button("Clear All Damage##CollTabMsf")) {
                         runtime.resetMaterialStateFields();
+                        scene.clearMaterialDamageHistory();
                         wakeViewport();
                     }
                     if (ImGui::IsItemHovered()) {
@@ -3042,6 +3060,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                             "It can only slow burning down, never start it: a\n"
                             "non-combustible substance ignores this completely.");
                     }
+                    DebrisUI::drawSceneControls(scene);
                     ImGui::Separator();
 
                     // The numbers need a device readback, so ask for one only
@@ -3185,6 +3204,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                           c_max, static_cast<float>(c_sum) * inv_n);
                                 blk.Value("  fuel remaining", "%.2f",
                                           static_cast<float>(fuel_sum));
+                                MaterialMassUI::drawBudget(blk, f);
                                 // Moisture next to the burn rows, because "why
                                 // won't this catch fire" is answered here more
                                 // often than anywhere else.
@@ -3228,12 +3248,8 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         // until the vertex mapping lands. Said here so a molten
                         // reading with a rigid mesh reads as scope, not as a bug.
                         if (st.max_melt > 0.0f) {
-                            // Says SLUMP, not "melting", on purpose: the mesh sinks
-                            // and flattens but does not spread sideways and does not
-                            // conserve volume. Naming the limit here stops a correct
-                            // result from being read as a broken one.
-                            blk.Value("  geometry", "slumping under gravity "
-                                      "(no lateral flow / pooling yet)");
+                            blk.Value("  geometry", "connected surface flow "
+                                      "(volume-aware / viscosity-scaled)");
                         }
                         // Phase 6a: whether a vertex query can REACH the melt.
                         // Separate from the melt values because "nothing melted"

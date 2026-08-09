@@ -236,7 +236,7 @@ uint32_t requiredCapabilities(const std::string& method) {
         method == "anim.graph_status" ||
         // Substance library enumeration: read-only, and its name matches none
         // of the ".get"/".list" substring heuristics below.
-        method == "msf.substances")
+        method == "msf.substances" || method == "msf.fields")
         return Read;
     const bool read_method = method == "version" || method == "project.path" ||
         method == "undo_description" || method == "redo_description" ||

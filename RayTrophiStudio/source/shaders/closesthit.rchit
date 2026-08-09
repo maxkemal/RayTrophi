@@ -3508,8 +3508,8 @@ void main() {
 
     // ── Material State Field: burn / heat ─────────────────────────────────────
     // Per-INSTANCE, so two objects sharing a material char independently. The
-    // mask is R = char (0..1), G = surface temperature normalized against the
-    // domain ceiling. Applied AFTER the base-colour texture and after the
+    // mask is R=char, G=absolute temperature, B=mass loss, A=integrity.
+    // Applied AFTER the base-colour texture and after the
     // material program, because burning is a state of the surface, not another
     // material input — a charred plank is black whatever its texture says.
     //
@@ -3521,9 +3521,11 @@ void main() {
     //     sampling with hitUV mirrors the mark vertically — it lands on the
     //     opposite side of every UV island from where the surface really burned.
     if (inst.msfCharTex > 0u) {
-        vec2 msf = texture(materialTextures[nonuniformEXT(int(inst.msfCharTex))], rawUV).rg;
+        vec4 msf = texture(materialTextures[nonuniformEXT(int(inst.msfCharTex))], rawUV);
         float charAmt = clamp(msf.x, 0.0, 1.0);
         float heat    = clamp(msf.y, 0.0, 1.0);
+        float massLoss = clamp(msf.z, 0.0, 1.0);
+        uint msfFlags = (inst.msfCharPacked >> 24) & 0xC0u;
 
         if (charAmt > 0.0) {
             vec3 charColor = vec3(float((inst.msfCharPacked      ) & 0xFFu),
@@ -3535,6 +3537,21 @@ void main() {
             // paint rather than as charcoal.
             roughness = mix(roughness, 1.0, charAmt * 0.85);
             metallic  = mix(metallic, 0.0, charAmt);
+        }
+
+        // Wood keeps its topology until a later fracture phase, but its damaged
+        // surface can still read as split fibres: two deterministic UV ridges
+        // expose a pale/black crack edge as integrity falls. Paper holes are
+        // handled in any-hit; shade their surviving rim here.
+        if ((msfFlags & 0x40u) != 0u && massLoss > 0.0) {
+            float grain = abs(sin(rawUV.x * 173.0 + sin(rawUV.y * 31.0) * 2.4));
+            float crack = smoothstep(0.985 - massLoss * 0.18, 1.0, grain) * massLoss;
+            albedo = mix(albedo, vec3(0.018, 0.012, 0.008), crack);
+            roughness = mix(roughness, 1.0, crack);
+        } else if ((msfFlags & 0x80u) != 0u && massLoss > 0.0) {
+            float rim = smoothstep(0.25, 0.75, massLoss) * (1.0 - smoothstep(0.82, 1.0, massLoss));
+            albedo = mix(albedo, vec3(0.025, 0.012, 0.006), rim);
+            roughness = mix(roughness, 1.0, rim);
         }
 
         // Blackbody glow, thresholded in ABSOLUTE KELVIN.
@@ -3551,7 +3568,7 @@ void main() {
         const float kMaskKelvinRange = 3000.0;
         const float kDraperKelvin    = 798.0;
         float kelvin = heat * kMaskKelvinRange;
-        float moltenScale = float((inst.msfCharPacked >> 24) & 0xFFu) * (1.0 / 32.0);
+        float moltenScale = float((inst.msfCharPacked >> 24) & 0x3Fu) * (1.0 / 8.0);
         if (moltenScale > 0.0 && kelvin > kDraperKelvin) {
             // Normalize the visible incandescent band: Draper -> 2400 K covers
             // dull red through white-hot, which is the whole range that reads.

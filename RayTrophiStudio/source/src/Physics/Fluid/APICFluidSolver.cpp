@@ -1939,6 +1939,7 @@ static void redistributeParticles(FluidParticles& parts,
     static std::vector<int> particle_cell_buf;
     static std::vector<int> cell_count_buf;
     static std::vector<int> cell_cursor_buf;
+    static std::vector<int> cell_seed_particle_buf;
     static std::vector<uint8_t> remove_mask_buf;
 
     particle_cell_buf.assign(parts.size(), -1);
@@ -1946,6 +1947,8 @@ static void redistributeParticles(FluidParticles& parts,
     else std::fill(cell_count_buf.begin(), cell_count_buf.begin() + total, 0);
     if (cell_cursor_buf.size() < total) cell_cursor_buf.assign(total, 0);
     else std::fill(cell_cursor_buf.begin(), cell_cursor_buf.begin() + total, 0);
+    if (cell_seed_particle_buf.size() < total) cell_seed_particle_buf.assign(total, -1);
+    else std::fill(cell_seed_particle_buf.begin(), cell_seed_particle_buf.begin() + total, -1);
     remove_mask_buf.assign(parts.size(), 0u);
 
     for (std::size_t pi = 0; pi < parts.size(); ++pi) {
@@ -1957,6 +1960,8 @@ static void redistributeParticles(FluidParticles& parts,
         const std::size_t c = grid.cellIndex(i, j, k);
         if (grid.solid[c]) continue; // particle is inside a solid; wall path handles it
         particle_cell_buf[static_cast<int>(pi)] = static_cast<int>(c);
+        if (cell_seed_particle_buf[c] < 0)
+            cell_seed_particle_buf[c] = static_cast<int>(pi);
         ++cell_count_buf[c];
     }
 
@@ -1994,6 +1999,10 @@ static void redistributeParticles(FluidParticles& parts,
                 parts.velocity[write] = parts.velocity[pi];
                 parts.affine[write]   = parts.affine[pi];
                 parts.flags[write]    = parts.flags[pi];
+                parts.mass_fraction[write] = parts.mass_fraction[pi];
+                parts.temperature[write] = parts.temperature[pi];
+                parts.combustible_fraction[write] = parts.combustible_fraction[pi];
+                parts.substance_tag[write] = parts.substance_tag[pi];
             }
             ++write;
         }
@@ -2001,6 +2010,25 @@ static void redistributeParticles(FluidParticles& parts,
         parts.velocity.resize(write);
         parts.affine.resize(write);
         parts.flags.resize(write);
+        parts.mass_fraction.resize(write);
+        parts.temperature.resize(write);
+        parts.combustible_fraction.resize(write);
+        parts.substance_tag.resize(write);
+    }
+
+    // Compaction changes particle indices. Rebuild the per-cell chemistry donor
+    // map before any reseed emits children; using the pre-compaction index can
+    // copy an unrelated substance or read past the shortened sidecars.
+    std::fill(cell_seed_particle_buf.begin(), cell_seed_particle_buf.begin() + total, -1);
+    for (std::size_t pi = 0; pi < parts.size(); ++pi) {
+        const Vec3 gp = (parts.position[pi] - grid.origin) * invH;
+        const int i = static_cast<int>(std::floor(gp.x));
+        const int j = static_cast<int>(std::floor(gp.y));
+        const int k = static_cast<int>(std::floor(gp.z));
+        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
+        const std::size_t c = grid.cellIndex(i, j, k);
+        if (!grid.solid[c] && cell_seed_particle_buf[c] < 0)
+            cell_seed_particle_buf[c] = static_cast<int>(pi);
     }
 
     // 4. Top up starved fluid cells. An empty cell (count == 0) is treated
@@ -2106,7 +2134,17 @@ static void redistributeParticles(FluidParticles& parts,
                 for (int n = 0; n < actual_need; ++n) {
                     const Vec3 p = cell_min + Vec3(dist01(rng), dist01(rng), dist01(rng)) * h;
                     const Vec3 v = grid.sampleVelocity(p);
-                    parts.emit(p, v);
+                    const int parent = cell_seed_particle_buf[c];
+                    const float temperature = parent >= 0 &&
+                        static_cast<std::size_t>(parent) < parts.temperature.size()
+                        ? parts.temperature[static_cast<std::size_t>(parent)] : 0.0f;
+                    const float combustible = parent >= 0 &&
+                        static_cast<std::size_t>(parent) < parts.combustible_fraction.size()
+                        ? parts.combustible_fraction[static_cast<std::size_t>(parent)] : 0.0f;
+                    const uint32_t substance = parent >= 0 &&
+                        static_cast<std::size_t>(parent) < parts.substance_tag.size()
+                        ? parts.substance_tag[static_cast<std::size_t>(parent)] : 0u;
+                    parts.emit(p, v, temperature, combustible, substance);
                 }
             }
         }

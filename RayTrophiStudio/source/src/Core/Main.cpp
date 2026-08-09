@@ -774,12 +774,20 @@ static void syncMaterialStateFieldMasks(SceneData& scene,
             auto q = [](float v) -> uint32_t {
                 return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
             };
+            // High byte: low six bits are molten emission in 1/8 steps; the
+            // top two bits select the cheap erosion model. Keeping this packed
+            // avoids growing the instance/shader ABI.
+            const bool paperErosion = field.substance_name == "Paper";
+            const bool woodErosion = field.substance_name.rfind("Wood", 0u) == 0u;
+            const uint32_t renderFlags = (paperErosion ? 0x80u : 0u) |
+                                         (woodErosion ? 0x40u : 0u);
+            const uint32_t emission = static_cast<uint32_t>(std::clamp(
+                profile.molten_emission * 8.0f, 0.0f, 63.0f));
             const uint32_t packed =
                  q(profile.char_color[0])        |
                 (q(profile.char_color[1]) <<  8) |
                 (q(profile.char_color[2]) << 16) |
-                (static_cast<uint32_t>(std::clamp(profile.molten_emission * 32.0f,
-                                                  0.0f, 255.0f)) << 24);
+                ((renderFlags | emission) << 24);
             s_resolved[entry.first] = { bindless, packed };
         }
     }
@@ -4939,7 +4947,7 @@ int main(int argc, char* argv[]) try {
                             dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
                         syncMaterialStateFieldMasks(scene, msfBackend);
                     }
-                    // Phase 6c: melt slump. Deliberately driven from the same
+                    // Phase 6c: connected melt surface flow. Driven from the same
                     // per-frame, sim-state-driven point as the mask upload rather
                     // than from a step site: a timeline scrub restores `melt`
                     // WITHOUT stepping, and geometry hung off a step site would

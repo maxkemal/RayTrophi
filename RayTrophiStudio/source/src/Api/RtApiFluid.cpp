@@ -50,6 +50,58 @@ Result listMaterialSubstances(std::vector<std::string>& out_names) {
     return Result::success();
 }
 
+Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields) {
+    if (!g_ctx) return notBound();
+    out_fields.clear();
+    auto& runtime = scriptSimulationRuntime();
+    // Integrity/mass-loss live on the device during simulation. Request the
+    // next scheduler step's readback before exposing the current host snapshot;
+    // repeated script polling then observes a coherent completed generation
+    // instead of reading the creation-time all-ones integrity forever.
+    runtime.requestMaterialStateFieldReadback();
+    const auto& fields = runtime.materialStateFields();
+    out_fields.reserve(fields.size());
+    for (const auto& entry : fields) {
+        const auto& field = entry.second;
+        MaterialFieldInfo info;
+        info.object_key = field.object_key;
+        info.substance = field.substance_name;
+        info.topology_generation = field.topology_generation;
+        info.content_generation = field.mask_revision;
+        info.element_count = static_cast<uint32_t>(field.elementCount());
+        info.mask_resolution = field.mask_resolution;
+        info.centers_dirty = field.centers_dirty;
+        const auto integrity =
+            RayTrophiSim::MaterialStateFieldSystem::summarizeIntegrity(field);
+        if (integrity.valid) {
+            info.mean_integrity = integrity.mean_integrity;
+            info.minimum_integrity = integrity.minimum_integrity;
+            info.mass_loss = integrity.total_mass_loss;
+        }
+        const auto budget =
+            RayTrophiSim::MaterialStateFieldSystem::summarizeMassBudget(field);
+        if (budget.valid) {
+            info.initial_mass = budget.initial_mass;
+            info.solid_mass = budget.solid_mass;
+            info.pyrolyzed_mass = budget.pyrolyzed_mass;
+            info.molten_reservoir_mass = budget.molten_reservoir_mass;
+            info.transferred_mass = budget.transferred_mass;
+            info.mass_conservation_error = budget.conservation_error;
+        }
+        info.semantics = {
+            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Temperature),
+            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Moisture),
+            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::FuelRemaining),
+            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Char),
+            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Melt),
+            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::MassLoss),
+            RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Integrity)
+        };
+        out_fields.push_back(std::move(info));
+    }
+    return Result::success();
+}
+
 Result getGasShaderSettings(const std::string& domain_id_or_name,
                             GasShaderSettings& out_settings) {
     Result error;
@@ -305,6 +357,20 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
     out_info.enabled = obj->enabled;
     out_info.visible = obj->visible;
+    // The grid descriptor is the live APIC authority. Automatic molten
+    // transfer may specialize an empty domain without mutating the legacy
+    // editor mirror, so report those live values when available.
+    if (grid_dom) {
+        out_info.render_mode =
+            (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
+            (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+        out_info.viscosity = grid_dom->fluid_params.viscosity;
+        const auto& states = p_sys_get.gridDomainStates();
+        const auto& domains = p_sys_get.gridDomains();
+        const std::size_t index = static_cast<std::size_t>(grid_dom - domains.data());
+        if (index < states.size() && states[index].valid)
+            out_info.particle_count = states[index].particles.size();
+    }
     return Result::success();
 }
 
@@ -476,16 +542,21 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
     for (auto& fo : g_ctx->scene.fluid_objects) {
         if (fo.id == info.id) { obj = &fo; break; }
     }
-    if (!obj) return Result::fail("fluid domain not found");
-
-    if (domain_min) { obj->domain_min = *domain_min; obj->grid_dirty = true; }
-    if (domain_max) { obj->domain_max = *domain_max; obj->grid_dirty = true; }
-    if (voxel_size && *voxel_size > 0.001f) { obj->voxel_size = *voxel_size; obj->grid_dirty = true; }
 
     auto& p_sys_upd = g_ctx->scene.ensureParticleSimulationSystem();
     RayTrophiSim::SimulationGridDomainDesc* grid_dom = nullptr;
     for (auto& d : p_sys_upd.gridDomains()) {
-        if (d.name == obj->name) { grid_dom = &d; break; }
+        if (d.name == info.name) { grid_dom = &d; break; }
+    }
+    if (!obj && !grid_dom) return Result::fail("fluid domain not found");
+
+    if (obj) {
+        if (domain_min) { obj->domain_min = *domain_min; obj->grid_dirty = true; }
+        if (domain_max) { obj->domain_max = *domain_max; obj->grid_dirty = true; }
+        if (voxel_size && *voxel_size > 0.001f) {
+            obj->voxel_size = *voxel_size;
+            obj->grid_dirty = true;
+        }
     }
     if (grid_dom) {
         if (domain_min) grid_dom->bounds_min = *domain_min;
@@ -496,12 +567,17 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
     if (render_mode) {
         std::string rm = *render_mode;
         std::transform(rm.begin(), rm.end(), rm.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        if (rm == "surface") obj->render_mode = RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
-        else if (rm == "particles") obj->render_mode = RayTrophiSim::Fluid::FluidRenderMode::Particles;
-        else obj->render_mode = RayTrophiSim::Fluid::FluidRenderMode::Volume;
+        const auto grid_mode = rm == "surface"
+            ? RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF
+            : (rm == "particles" ? RayTrophiSim::Fluid::FluidRenderMode::Particles
+                                  : RayTrophiSim::Fluid::FluidRenderMode::Volume);
+        if (grid_dom) grid_dom->fluid_render_mode = grid_mode;
+        if (obj) {
+            obj->render_mode = grid_mode;
+        }
     }
 
-    if (preset) {
+    if (preset && obj) {
         std::string p = *preset;
         std::transform(p.begin(), p.end(), p.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
         if (p == "water") obj->params.applyPreset(RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Water);
@@ -515,12 +591,19 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
     if (boundary) {
         std::string b = *boundary;
         std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        if (b == "open") obj->params.boundary = RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open;
-        else if (b == "periodic") obj->params.boundary = RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic;
-        else obj->params.boundary = RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Closed;
+        const auto grid_boundary = b == "open"
+            ? RayTrophiSim::SimulationGridDomainBoundaryMode::Open
+            : (b == "periodic" ? RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic
+                                : RayTrophiSim::SimulationGridDomainBoundaryMode::Closed);
+        if (grid_dom) grid_dom->boundary_mode = grid_boundary;
+        if (obj) {
+            if (b == "open") obj->params.boundary = RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open;
+            else if (b == "periodic") obj->params.boundary = RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic;
+            else obj->params.boundary = RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Closed;
+        }
     }
 
-    if (viscosity) {
+    if (viscosity && obj) {
         obj->params.viscosity = std::max(0.0f, *viscosity);
     }
 
@@ -539,11 +622,11 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (grid_dom) grid_dom->backend = be;
     }
 
-    if (enabled) obj->enabled = *enabled;
-    if (visible) obj->visible = *visible;
+    if (obj && enabled) obj->enabled = *enabled;
+    if (obj && visible) obj->visible = *visible;
     if (grid_dom && enabled) grid_dom->enabled = *enabled;
 
-    obj->ensureGrid();
+    if (obj) obj->ensureGrid();
     return Result::success();
 }
 
@@ -656,6 +739,8 @@ Result getCombustibleFluidSettings(
         case RayTrophiSim::Fluid::FluidChemistryPreset::Gasoline: out.chemistry_preset="gasoline"; break;
         case RayTrophiSim::Fluid::FluidChemistryPreset::Alcohol: out.chemistry_preset="alcohol"; break;
         case RayTrophiSim::Fluid::FluidChemistryPreset::Oil: out.chemistry_preset="oil"; break;
+        case RayTrophiSim::Fluid::FluidChemistryPreset::Plastic: out.chemistry_preset="plastic"; break;
+        case RayTrophiSim::Fluid::FluidChemistryPreset::Wax: out.chemistry_preset="wax"; break;
         case RayTrophiSim::Fluid::FluidChemistryPreset::Custom: out.chemistry_preset="custom"; break;
         default: out.chemistry_preset="inert"; break;
     }
@@ -691,6 +776,8 @@ Result updateCombustibleFluidSettings(
     else if (chemistry == "gasoline") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Gasoline);
     else if (chemistry == "alcohol") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Alcohol);
     else if (chemistry == "oil") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Oil);
+    else if (chemistry == "plastic") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Plastic);
+    else if (chemistry == "wax") it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Wax);
     else if (chemistry == "custom") it->fluid_params.chemistry_preset=RayTrophiSim::Fluid::FluidChemistryPreset::Custom;
     else it->fluid_params.applyChemistryProfile(RayTrophiSim::Fluid::FluidChemistryPreset::Inert);
     // The chemistry profile owns the physical interaction mode.  In particular,
@@ -885,11 +972,15 @@ SimulationColliderInfo colliderInfoFromDesc(const RayTrophiSim::ParticleCollider
     out.friction = c.friction;
     out.restitution = c.restitution;
     out.thickness = c.thickness;
+    out.sdf_resolution_mode = c.sdf_resolution_mode;
+    out.sdf_ready = c.sdf_grid_data && !c.sdf_grid_data->empty();
+    out.sdf_resolution = c.sdf_nx;
     out.gas_interaction_enabled = c.gas_interaction_enabled;
     out.gas_density_rate = c.gas_density_rate;
     out.gas_temperature_rate = c.gas_temperature_rate;
     out.gas_fuel_rate = c.gas_fuel_rate;
     out.gas_flame_rate = c.gas_flame_rate;
+    out.gas_ignite_on_contact = c.gas_ignite_on_contact;
     out.msf_substance = c.msf_substance;
     out.msf_override_ignition = c.msf_override.override_ignition;
     out.msf_ignition_kelvin = c.msf_override.ignition_kelvin;
@@ -897,6 +988,19 @@ SimulationColliderInfo colliderInfoFromDesc(const RayTrophiSim::ParticleCollider
     out.msf_fuel_capacity_scale = c.msf_override.fuel_capacity_scale;
     out.msf_mask_resolution = c.msf_mask_resolution;
     out.msf_generate_char_mask = c.msf_generate_char_mask;
+    out.msf_auto_transfer = c.msf_auto_transfer;
+    out.msf_transfer_domain = c.msf_transfer_domain;
+    out.msf_transfer_rate_kg_s = c.msf_transfer_rate_kg_s;
+    out.msf_transfer_min_mass_kg = c.msf_transfer_min_mass_kg;
+    out.msf_transfer_particles_per_kg = c.msf_transfer_particles_per_kg;
+    out.msf_transfer_max_batch_particles = c.msf_transfer_max_batch_particles;
+    out.msf_transfer_velocity = c.msf_transfer_velocity;
+    out.msf_melt_flow_enabled = c.msf_melt_flow_enabled;
+    out.msf_melt_height_loss = c.msf_melt_height_loss;
+    out.msf_melt_spread = c.msf_melt_spread;
+    out.msf_melt_sdf_refresh = c.msf_melt_sdf_refresh;
+    out.msf_melt_sdf_revision_interval = c.msf_melt_sdf_revision_interval;
+    out.msf_melt_sdf_change_threshold = c.msf_melt_sdf_change_threshold;
     return out;
 }
 
@@ -919,11 +1023,13 @@ Result colliderDescFromInfo(const SimulationColliderInfo& info,
     out.friction = std::clamp(info.friction, 0.0f, 1.0f);
     out.restitution = std::clamp(info.restitution, 0.0f, 1.0f);
     out.thickness = std::max(0.0f, info.thickness);
+    out.sdf_resolution_mode = std::clamp(info.sdf_resolution_mode, 0, 2);
     out.gas_interaction_enabled = info.gas_interaction_enabled;
     out.gas_density_rate = std::max(0.0f, info.gas_density_rate);
     out.gas_temperature_rate = std::max(0.0f, info.gas_temperature_rate);
     out.gas_fuel_rate = std::max(0.0f, info.gas_fuel_rate);
     out.gas_flame_rate = std::max(0.0f, info.gas_flame_rate);
+    out.gas_ignite_on_contact = info.gas_ignite_on_contact;
     if (!info.msf_substance.empty()) {
         // Validate against the library rather than storing an unknown name that
         // would silently degrade to the "Custom" profile at simulation time.
@@ -940,6 +1046,23 @@ Result colliderDescFromInfo(const SimulationColliderInfo& info,
     out.msf_override.fuel_capacity_scale = std::max(0.0f, info.msf_fuel_capacity_scale);
     out.msf_mask_resolution = std::clamp(info.msf_mask_resolution, 0, 4096);
     out.msf_generate_char_mask = info.msf_generate_char_mask;
+    out.msf_auto_transfer = info.msf_auto_transfer;
+    out.msf_transfer_domain = info.msf_transfer_domain;
+    out.msf_transfer_rate_kg_s = std::max(0.0f, info.msf_transfer_rate_kg_s);
+    out.msf_transfer_min_mass_kg = std::max(0.0f, info.msf_transfer_min_mass_kg);
+    out.msf_transfer_particles_per_kg = std::clamp(
+        info.msf_transfer_particles_per_kg, 1.0f, 100000.0f);
+    out.msf_transfer_max_batch_particles = std::clamp(
+        info.msf_transfer_max_batch_particles, 1u, 4096u);
+    out.msf_transfer_velocity = info.msf_transfer_velocity;
+    out.msf_melt_flow_enabled = info.msf_melt_flow_enabled;
+    out.msf_melt_height_loss = std::clamp(info.msf_melt_height_loss, 0.0f, 0.92f);
+    out.msf_melt_spread = std::clamp(info.msf_melt_spread, 0.0f, 2.5f);
+    out.msf_melt_sdf_refresh = info.msf_melt_sdf_refresh;
+    out.msf_melt_sdf_revision_interval = std::clamp<uint32_t>(
+        info.msf_melt_sdf_revision_interval, 1u, 60u);
+    out.msf_melt_sdf_change_threshold = std::clamp(
+        info.msf_melt_sdf_change_threshold, 0.001f, 0.25f);
     return Result::success();
 }
 
@@ -1090,6 +1213,10 @@ Result createSimulationCollider(const SimulationColliderInfo& info,
     auto& created = runtime.addCollider(desc);
     out = colliderInfoFromDesc(created);
     invalidateScriptSimulation();
+    // UI creation starts the asynchronous SDF cook immediately. Scripted
+    // creation must use the same path; invalidating the timeline alone never
+    // populates sdf_grid_data, so mesh_sdf silently behaved like no collider.
+    g_ctx->scene.rebuildSDFColliderAsync(created);
     return Result::success();
 }
 
@@ -1106,6 +1233,23 @@ Result updateSimulationCollider(const std::string& name,
     Result converted = colliderDescFromInfo(info, desc);
     if (!converted.ok) return converted;
     *it = std::move(desc);
+    invalidateScriptSimulation();
+    g_ctx->scene.rebuildSDFColliderAsync(*it);
+    return Result::success();
+}
+
+Result rebuildSimulationColliderSDF(const std::string& name) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    auto& colliders = scriptSimulationRuntime().colliders();
+    auto it = std::find_if(colliders.begin(), colliders.end(),
+        [&name](const auto& collider) { return collider.name == name; });
+    if (it == colliders.end()) return Result::fail("simulation collider not found: " + name);
+    if (it->source_mode != RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF)
+        return Result::fail("simulation collider is not mesh_sdf: " + name);
+    it->sdf_grid_data.reset();
+    it->sdf_nx = it->sdf_ny = it->sdf_nz = 0;
+    g_ctx->scene.rebuildSDFColliderAsync(*it);
     invalidateScriptSimulation();
     return Result::success();
 }
@@ -1140,12 +1284,25 @@ Result stepFluidSimulation(float dt) {
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (dt <= 0.0f) dt = 0.0166667f;
 
-    g_ctx->scene.ensureFluidSimulationSystem();
-    if (g_ctx->scene.fluid_simulation_system) {
-        RayTrophiSim::SimulationContext simCtx = g_ctx->scene.simulation_world.makeContext(dt, 0, 1);
-        simCtx.dt = dt;
-        g_ctx->scene.fluid_simulation_system->step(simCtx);
-    }
+    // Script-authored APIC/gas domains live on ParticleSimulationSystem, while
+    // legacy FluidObject instances live on FluidSimulationSystem. Both are
+    // registered with SimulationWorld. Calling only the legacy system here left
+    // every scripted gas domain, MSF gather and coupling stage completely
+    // unstepped even though rt.fluid.step() returned success. Use the same
+    // one-shot scheduler path as the main timeline so system ordering, force
+    // snapshots and all registered runtimes are exercised exactly once.
+    g_ctx->scene.syncSimulationWorld();
+    // Scripts panel runs while the timeline is commonly paused. stepOnce()
+    // intentionally honours that global mode and would otherwise return before
+    // executing any system, despite this API being an explicit manual-step
+    // request. Temporarily unpause only for this call and restore the user's
+    // timeline state immediately afterwards.
+    const auto previousMode = g_ctx->scene.simulation_world.getMode();
+    if (previousMode == RayTrophiSim::SimulationMode::Paused)
+        g_ctx->scene.simulation_world.setMode(RayTrophiSim::SimulationMode::Realtime);
+    g_ctx->scene.simulation_world.stepOnce(dt);
+    if (previousMode == RayTrophiSim::SimulationMode::Paused)
+        g_ctx->scene.simulation_world.setMode(previousMode);
     return Result::success();
 }
 

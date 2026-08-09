@@ -12,6 +12,7 @@
 #include "SimulationWorld.h"
 
 #include <memory>
+#include <atomic>
 
 #include <algorithm>
 #include <cmath>
@@ -1037,6 +1038,24 @@ struct ParticleColliderDesc {
     // PARTICIPATE in the fire (a collider that blocks flow, an object that will
     // be hidden or destroyed anyway), since the mask is the expensive part.
     bool msf_generate_char_mask = true;
+    // Opt-in automatic molten-reservoir -> APIC bridge. Disabled by default:
+    // enabling it adds one MSF readback per simulated frame for this workflow.
+    bool msf_auto_transfer = false;
+    std::string msf_transfer_domain;
+    float msf_transfer_rate_kg_s = 0.10f;
+    float msf_transfer_min_mass_kg = 0.01f;
+    float msf_transfer_particles_per_kg = 2048.0f;
+    uint32_t msf_transfer_max_batch_particles = 256u;
+    Vec3 msf_transfer_velocity = Vec3(0.0f, -0.1f, 0.0f);
+    bool msf_melt_flow_enabled = true;
+    float msf_melt_height_loss = 0.85f;
+    float msf_melt_spread = 1.50f;
+    // Keep a mesh-SDF collider close to the visibly melted surface without
+    // cooking a 3D field every render frame. mask_revision is advanced by the
+    // thermal readback, so this interval remains idle while simulation is idle.
+    bool msf_melt_sdf_refresh = true;
+    uint32_t msf_melt_sdf_revision_interval = 4u;
+    float msf_melt_sdf_change_threshold = 0.025f;
 
     // Advanced complex object settings
     int sdf_resolution_mode = 1;       // 0: Low (32^3), 1: Med (64^3), 2: High (128^3)
@@ -1053,6 +1072,13 @@ struct ParticleColliderDesc {
     int sdf_nx = 0;
     int sdf_ny = 0;
     int sdf_nz = 0;
+    // Runtime-only bake guards. Copies of a collider intentionally share these
+    // tokens: an older detached cook may finish, but can never publish over a
+    // newer request. The busy flag coalesces automatic melt refreshes.
+    std::shared_ptr<std::atomic<uint64_t>> sdf_bake_serial =
+        std::make_shared<std::atomic<uint64_t>>(0u);
+    std::shared_ptr<std::atomic<bool>> sdf_bake_busy =
+        std::make_shared<std::atomic<bool>>(false);
 
     // Local mesh cache for ConvexDecomp / BVH
     std::shared_ptr<std::vector<SurfaceMeshTriangle>> local_triangles_cache;
@@ -1154,6 +1180,32 @@ struct ParticleSimulationStats {
     std::size_t domain_count = 0;
 };
 
+struct MoltenMassTransferRequest {
+    uint64_t sequence = 0;
+    std::string object_key;
+    std::string preferred_domain;
+    float requested_mass = 0.0f;
+    float particles_per_kg = 32.0f;
+    Vec3 velocity = Vec3(0.0f);
+    uint32_t max_batch_particles = 0u;
+    bool configure_domain_chemistry = false;
+};
+
+struct MoltenMassTransferStats {
+    uint64_t queued = 0;
+    uint64_t completed = 0;
+    uint64_t deferred_no_domain = 0;
+    uint64_t deferred_no_capacity = 0;
+    float requested_mass = 0.0f;
+    float transferred_mass = 0.0f;
+    uint64_t spawned_particles = 0;
+    std::string last_object;
+    std::string last_domain;
+    std::string last_substance;
+    float last_temperature_kelvin = 0.0f;
+    float last_combustible_fraction = 0.0f;
+};
+
 // Runtime-only counters that are required to continue a simulation from a
 // timeline snapshot. Particle/grid data alone is not sufficient: restoring a
 // cached frame while leaving these counters in their rewind state re-arms burst
@@ -1232,6 +1284,10 @@ public:
         return material_state_fields_.fields();
     }
     bool hasMaterialStateFields() const { return !material_state_fields_.fields().empty(); }
+    uint64_t queueMoltenMassTransfer(const MoltenMassTransferRequest& request);
+    const MoltenMassTransferStats& moltenMassTransferStats() const {
+        return molten_mass_transfer_stats_;
+    }
     // ── MSF frame cache (Phase 4b) ───────────────────────────────────────────
     // Burn/heat damage is per-object runtime state and does NOT live under a
     // domain (Phase 4: an object outside every domain is still simulated), so it
@@ -1281,6 +1337,8 @@ public:
     /// seeds, etc.) without waiting for the next sim tick. Needed when the
     /// timeline is stopped so UI actions like "Seed Fluid" apply right away.
     void synchronizeGridDomainsNow();
+    bool injectGasPressurePulse(const std::string& domain, const Vec3& center,
+                                float radius, float peak_pressure_kpa);
 
     /// @brief Export a Gas grid domain's live fields to an OpenVDB (.vdb) file.
     /// Writes density / temperature / fuel / flame FloatGrids (channel-aware)
@@ -1376,6 +1434,8 @@ private:
                                         const FluidSim::FluidGrid& grid);
     void releaseGridDomainComputeBuffers(SimulationComputeContext& compute,
                                          SimulationGridDomainComputeBuffers& buffers);
+    void processMoltenMassTransfers(SimulationComputeContext& compute);
+    void queueAutomaticMoltenMassTransfers(float dt);
 
     // GPU MGPCG (Layer A) correctness self-test. Builds a synthetic free-surface
     // pressure problem on a small grid, solves it with the GPU Jacobi-PCG path,
@@ -1411,6 +1471,10 @@ private:
     std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> collider_mesh_resolver_;
     // Material State Field — persistent per-object surface burn state.
     MaterialStateFieldSystem material_state_fields_;
+    std::vector<MoltenMassTransferRequest> molten_mass_transfer_queue_;
+    MoltenMassTransferStats molten_mass_transfer_stats_;
+    uint64_t next_molten_mass_transfer_sequence_ = 1;
+    float automatic_molten_readback_seconds_ = 0.0f;
     WorldThermalState world_thermal_;
     std::function<bool(const SimulationGridDomainDesc&, Vec3&, Vec3&)> grid_domain_bounds_resolver_;
     std::function<bool(const SimulationFlowSourceDesc&, Vec3&, Vec3&)> flow_source_bounds_resolver_;

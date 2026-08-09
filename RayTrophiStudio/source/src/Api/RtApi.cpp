@@ -2248,6 +2248,8 @@ Result stepPhysicsSimulation(float dt) {
         RayTrophiSim::SimulationContext simCtx = g_ctx->scene.simulation_world.makeContext(dt, 0, 1);
         simCtx.dt = dt;
         g_ctx->scene.rigid_body_system->step(simCtx);
+        g_ctx->scene.processFractureImpacts();
+        g_ctx->scene.processStructuralImpulseEvents();
     }
     return Result::success();
 }

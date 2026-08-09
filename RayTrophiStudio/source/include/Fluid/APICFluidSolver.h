@@ -45,7 +45,9 @@ enum class FluidChemistryPreset : int {
     Gasoline,
     Alcohol,
     Oil,
-    Custom
+    Custom,
+    Plastic,
+    Wax
 };
 
 // Material-level phase/combustion description.  The APIC solver does not
@@ -198,6 +200,24 @@ struct APICSolverParams {
                 fuel_profile.heat_capacity = 1.7f;
                 fuel_profile.latent_heat = 1.2f;
                 fuel_profile.flame_persistence = 0.90f;
+                break;
+            case FluidChemistryPreset::Plastic:
+                fuel_profile.flammable = true;
+                fuel_profile.flash_temperature = 0.92f;
+                fuel_profile.autoignition_temperature = 1.10f;
+                fuel_profile.vaporization_rate = 0.18f;
+                fuel_profile.heat_capacity = 1.9f;
+                fuel_profile.latent_heat = 1.35f;
+                fuel_profile.flame_persistence = 1.10f;
+                break;
+            case FluidChemistryPreset::Wax:
+                fuel_profile.flammable = true;
+                fuel_profile.flash_temperature = 0.66f;
+                fuel_profile.autoignition_temperature = 0.88f;
+                fuel_profile.vaporization_rate = 0.12f;
+                fuel_profile.heat_capacity = 2.1f;
+                fuel_profile.latent_heat = 1.45f;
+                fuel_profile.flame_persistence = 0.95f;
                 break;
             case FluidChemistryPreset::Water:
                 fuel_profile.extinguishing = true;

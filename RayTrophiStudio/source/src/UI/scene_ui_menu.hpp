@@ -41,6 +41,7 @@
 #include <scene_ui_gas.hpp>
 #include "perlin.h"
 #include "FractureGenerator.h"  // Convex Voronoi pre-fracture (destruction Faz 1)
+#include "FractureSourceAdapter.h"
 #include "MeshModifiers.h"      // facadesToFlatMesh (add-object-flat collapse)
 #include "TriangleMesh.h"       // complete type for shared_ptr<TriangleMesh>→shared_ptr<Hittable> upcast
 // extern bool show_controls_window; // Assume defined elsewhere
@@ -1376,14 +1377,17 @@ void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
     uint16_t src_mat = 0xFFFF;
     auto& parked = fracture_parked_originals_[node];
     if (parked.empty()) {
+        RayTrophiSim::gatherFractureSource(
+            ctx.scene.world.objects, node, src, src_mat);
+        if (src.empty()) {
+            fracture_parked_originals_.erase(node);
+            addViewportMessage("Fracture: '" + node + "' has no geometry.");
+            return;
+        }
         std::vector<std::shared_ptr<Hittable>> keep;
         keep.reserve(ctx.scene.world.objects.size());
         for (auto& o : ctx.scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(o);
-            if (tri && tri->getNodeName() == node) {
-                src.push_back({tri->getVertexPosition(0), tri->getVertexPosition(1),
-                               tri->getVertexPosition(2)});
-                if (src_mat == 0xFFFF) src_mat = tri->getMaterialID();
+            if (RayTrophiSim::isFractureSourceObject(o, node)) {
                 parked.push_back(o);
             } else {
                 keep.push_back(o);
@@ -1391,16 +1395,10 @@ void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
         }
         ctx.scene.world.objects.swap(keep);
     } else {
-        for (auto& o : parked) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(o);
-            if (!tri) continue;
-            src.push_back({tri->getVertexPosition(0), tri->getVertexPosition(1),
-                           tri->getVertexPosition(2)});
-            if (src_mat == 0xFFFF) src_mat = tri->getMaterialID();
-        }
+        RayTrophiSim::gatherFractureSource(parked, node, src, src_mat);
     }
     if (src.empty()) {
-        fracture_parked_originals_.erase(node);
+        unfractureMesh(ctx, node);
         addViewportMessage("Fracture: '" + node + "' has no geometry.");
         return;
     }

@@ -1,5 +1,9 @@
 # Node Tabanlı Simülasyon Mimarisi ve Madde/Termodinamik Katmanı — Karar Planı
 
+> Yanma, erime, kütle aktarımı ve termal/patlama parçalanmasının paint, sculpt,
+> terrain ve fizik tarafından yeniden kullanılabilen ortak veri sözleşmesiyle
+> uygulanma sırası için bkz. [Material Transformation, Mass Transfer and Fracture Roadmap](material_transformation_fracture_roadmap.md).
+
 ## Amaç
 
 Mevcut Fluid, Gas, Foam, Vulkan ve shader altyapısını koruyarak iki katman
@@ -747,7 +751,9 @@ Sahne katmanı backend'e bir **çözücü callback** verecek
 
 ### MSF tarafı — YAZILDI
 
-Maske artık **iki kanallı unorm8**: R = char, G = normalize yüzey sıcaklığı.
+Maske artık **dört kanallı unorm8**: R = char, G = mutlak yüzey sıcaklığı,
+B = normalize kütle kaybı, A = türetilmiş integrity. Tek texture/revision yolu
+char, kızarma ve ucuz görsel erozyonu aynı UV örneklemesinde tutar.
 Tek texture bilinçli: ikisi her zaman birlikte örnekleniyor, ayrı upload
 per-frame maliyeti boşuna ikiye katlardı. `mask_revision` ile değişmeyen maske
 yeniden yüklenmiyor. Sıcaklık, domain tavanına göre nicemlendiği için o değer

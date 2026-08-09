@@ -25,6 +25,7 @@
 #include "RtIpcSession.h"
 #include "RtIpcAudit.h"
 #include "RtIpcTransport.h"
+#include "RtIpcFracture.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1255,6 +1256,13 @@ json dispatchMethod(const std::string& method, const json& params) {
         Vec3 g = requireVec3(params, "gravity");
         return enqueueResult([g](UIContext&) { return rtapi::setPhysicsGravity(g); });
     }
+    json fracture_result;
+    if (dispatchFractureIpc(
+            method, params,
+            [](RtIpcFractureQuery query) { return enqueueQuery(std::move(query)); },
+            fracture_result)) {
+        return fracture_result;
+    }
 
     // ── Fluid Simulation Engine (Faz 5.3b) ──────────────────────────────
     if (method == "fluid.create_domain" || method == "gas.create_domain") {
@@ -1468,6 +1476,36 @@ json dispatchMethod(const std::string& method, const json& params) {
             auto r = rtapi::listMaterialSubstances(names);
             if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
             return nlohmann::json{{"ok", true}, {"substances", names}};
+        });
+    }
+    if (method == "msf.fields") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::MaterialFieldInfo> fields;
+            auto r = rtapi::listMaterialFields(fields);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            nlohmann::json rows = nlohmann::json::array();
+            for (const auto& f : fields) {
+                rows.push_back({
+                    {"object_key", f.object_key},
+                    {"substance", f.substance},
+                    {"topology_generation", f.topology_generation},
+                    {"content_generation", f.content_generation},
+                    {"element_count", f.element_count},
+                    {"mask_resolution", f.mask_resolution},
+                    {"centers_dirty", f.centers_dirty},
+                    {"mean_integrity", f.mean_integrity},
+                    {"minimum_integrity", f.minimum_integrity},
+                    {"mass_loss", f.mass_loss},
+                    {"initial_mass", f.initial_mass},
+                    {"solid_mass", f.solid_mass},
+                    {"pyrolyzed_mass", f.pyrolyzed_mass},
+                    {"molten_reservoir_mass", f.molten_reservoir_mass},
+                    {"mass_conservation_error", f.mass_conservation_error},
+                    {"domain", "surface_uv"},
+                    {"semantics", f.semantics}
+                });
+            }
+            return nlohmann::json{{"ok", true}, {"fields", std::move(rows)}};
         });
     }
     if (method == "fluid.get_combustion") {

@@ -93,6 +93,9 @@ struct FractureComponent {
     bool  breakable = false;
     float break_impulse = 5.0f;   // impact impulse (kg·m/s) that triggers a break
     std::string fracture_group;         // shards of one source share this id (= source node)
+    bool integrity_weakening = true;
+    float integrity_exponent = 1.5f;
+    float minimum_threshold_scale = 0.15f;
 };
 
 struct RigidBodyObject {
@@ -195,6 +198,12 @@ struct RigidBodyObject {
     inline void setBreakImpulse(float val) { ensureFracture(); fracture->break_impulse = val; }
     inline std::string getFractureGroup() const { return fracture ? fracture->fracture_group : ""; }
     inline void setFractureGroup(const std::string& val) { ensureFracture(); fracture->fracture_group = val; }
+    inline bool getIntegrityWeakening() const { return fracture ? fracture->integrity_weakening : true; }
+    inline void setIntegrityWeakening(bool val) { ensureFracture(); fracture->integrity_weakening = val; }
+    inline float getIntegrityExponent() const { return fracture ? fracture->integrity_exponent : 1.5f; }
+    inline void setIntegrityExponent(float val) { ensureFracture(); fracture->integrity_exponent = val; }
+    inline float getMinimumThresholdScale() const { return fracture ? fracture->minimum_threshold_scale : 0.15f; }
+    inline void setMinimumThresholdScale(float val) { ensureFracture(); fracture->minimum_threshold_scale = val; }
 
     // ---- runtime state (not serialized) ----
     bool broken = false;                                    // group has shattered (now dynamic)

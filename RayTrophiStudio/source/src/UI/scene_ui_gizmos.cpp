@@ -20,6 +20,7 @@
 #include "Api/RtApi.h"
 #include "scene_ui_gas.hpp"  // For GasUI::selected_gas_volume
 #include "scene_ui_forcefield.hpp"
+#include "scene_ui_fluid_billboards.hpp"
 #include "Backend/IViewportBackend.h"
 #include <Backend/VulkanBackend.h>
 #include <Backend/OptixBackend.h>
@@ -1084,6 +1085,9 @@ void SceneUI::uploadParticleBillboards(UIContext& ctx) {
         }
         if (drawn >= kMaxBillboards) break;
     }
+
+    FluidBillboardUI::appendGridDomainParticles(
+        ctx.scene, right, up, alphaData, drawn, kMaxBillboards);
 
     const uint32_t addCount   = static_cast<uint32_t>(addData.size() / 9);
     const uint32_t alphaCount = static_cast<uint32_t>(alphaData.size() / 9);
