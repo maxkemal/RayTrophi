@@ -44,6 +44,9 @@ rt.gas.set_settings(GAS, fire_enabled=True, ignition_temperature=0.22,
                     fire_max_temperature=9.0)
 rt.collider.create(
     COLLIDER, source_mode="obb", source_object=plastic,
+    # The object remains an active MSF/gas collider, but its own transferred
+    # APIC liquid must not be sealed inside the undeformed collision volume.
+    fluid_collision_enabled=False,
     gas_interaction_enabled=True, gas_temperature_rate=1.0,
     gas_ignite_on_contact=True, msf_substance="Plastic (PE)",
     msf_mask_resolution=72,

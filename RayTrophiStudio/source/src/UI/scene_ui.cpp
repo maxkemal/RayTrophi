@@ -3828,21 +3828,38 @@ void SceneUI::draw(UIContext& ctx)
         // queue; the old race eventually presented as a pause-independent TDR
         // during particle-driven explosions.
         Backend::IBackend* simulationRenderBackend = getSceneUiRenderBackend(ctx);
+        const bool simulation_playing = timeline.isPlaying();
+        static bool previous_simulation_playing = false;
+        const bool play_to_pause_edge = previous_simulation_playing && !simulation_playing;
         const int requested_sim_frame = timeline.getCurrentFrame();
         const int resident_sim_frame = ctx.scene.simulationTimelineFrame();
-        const bool paused_frame_replace = !live_mode && !timeline.isPlaying() &&
+        const bool paused_frame_replace = !live_mode && !simulation_playing &&
             resident_sim_frame >= 0 && requested_sim_frame != resident_sim_frame;
-        if ((live_mode || timeline.isPlaying() || paused_frame_replace) &&
+        if ((live_mode || simulation_playing || paused_frame_replace || play_to_pause_edge) &&
             dynamic_cast<Backend::VulkanBackendAdapter*>(
                 simulationRenderBackend) != nullptr) {
             simulationRenderBackend->waitForCompletion();
         }
+        previous_simulation_playing = simulation_playing;
         // Timeline mode (default): play bakes into the cache, scrub restores, a
         // stopped timeline stays frozen. Live mode: continuous free-run preview.
         // ui_editing: while a widget is held (slider drag, etc.) the sim-config
         // signature changes every tick. Pass this so the cache invalidation is
         // deferred until the edit settles (no per-tick re-bake-from-0 thrash).
         const bool ui_editing = ImGui::IsAnyItemActive();
+        // Timeline Start/End only changes the playback window. It must never
+        // invalidate a settled melt/fluid state or jump a heavy RT scene to
+        // frame zero merely because the generic ImGui settle gate just closed.
+        static int previous_timeline_start = timeline.getStartFrame();
+        static int previous_timeline_end = timeline.getEndFrame();
+        const bool timeline_range_changed =
+            timeline.getStartFrame() != previous_timeline_start ||
+            timeline.getEndFrame() != previous_timeline_end;
+        if (timeline_range_changed) {
+            ctx.scene.preserveSimulationForTimelineRangeEdit();
+            previous_timeline_start = timeline.getStartFrame();
+            previous_timeline_end = timeline.getEndFrame();
+        }
         ctx.scene.updateSimulationTimeline(timeline.getCurrentFrame(), timeline.isPlaying(), rt_dt, 24.0f, live_mode, ui_editing);
         // A fluid-affecting edit rewinds the sim to frame 0 instead of auto-resimming
         // up to a high parked frame; move the playhead to start so the cost of the
@@ -3850,6 +3867,13 @@ void SceneUI::draw(UIContext& ctx)
         // HUD toast at the moment it happens — far more noticeable than a static
         // panel note, and it tells the user why the playhead just jumped.
         if (ctx.scene.consumeSimRewindRequest()) {
+            // This rewind request is generated after the earlier frame-change
+            // check. Fence before frame-zero restores mutate RT-visible geometry.
+            if (dynamic_cast<Backend::VulkanBackendAdapter*>(
+                    simulationRenderBackend) != nullptr) {
+                simulationRenderBackend->waitForCompletion();
+            }
+            ctx.scene.deferMeltDisplacementOnce();
             timeline.setCurrentFrame(timeline.getStartFrame());
             addViewportMessage("Sim changed - cache reset, rewound to start. Press Play to re-bake.",
                                4.0f, ImVec4(1.00f, 0.62f, 0.10f, 1.00f));

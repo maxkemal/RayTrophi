@@ -998,6 +998,10 @@ struct ParticleColliderDesc {
     ParticleColliderSourceMode source_mode = ParticleColliderSourceMode::PlaneY;
     std::string source_name;
     bool enabled = true;
+    // Keep the collider available to MSF/gas authoring while optionally
+    // excluding it from APIC liquid solid-mask generation. This is useful for
+    // melt-source objects whose newly transferred liquid must leave the source.
+    bool fluid_collision_enabled = true;
     float plane_y = 0.0f;
     Vec3 sphere_center = Vec3(0.0f, 1.0f, 0.0f);
     float sphere_radius = 1.0f;
@@ -1053,7 +1057,9 @@ struct ParticleColliderDesc {
     // Keep a mesh-SDF collider close to the visibly melted surface without
     // cooking a 3D field every render frame. mask_revision is advanced by the
     // thermal readback, so this interval remains idle while simulation is idle.
-    bool msf_melt_sdf_refresh = true;
+    // Legacy project/API field. Automatic recooking is intentionally disabled;
+    // use the explicit Force Rebuild SDF action.
+    bool msf_melt_sdf_refresh = false;
     uint32_t msf_melt_sdf_revision_interval = 4u;
     float msf_melt_sdf_change_threshold = 0.025f;
 

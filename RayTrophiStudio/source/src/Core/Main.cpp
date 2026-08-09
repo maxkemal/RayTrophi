@@ -5281,6 +5281,16 @@ int main(int argc, char* argv[]) try {
 
                                 auto* vkRenderBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
                                 if (vkRenderBackend != nullptr) {
+                                    // Solid may still have a raster submit in flight
+                                    // while this block starts publishing deformed
+                                    // mesh BLAS + molten SurfaceSDF resources to RT.
+                                    // Drain both owners once at the mode boundary;
+                                    // this is deliberately not a per-frame wait.
+                                    if (g_viewport_backend &&
+                                        g_viewport_backend.get() != g_backend.get()) {
+                                        g_viewport_backend->waitForCompletion();
+                                    }
+                                    vkRenderBackend->waitForCompletion();
                                     // Timeline marker for the volume-gate capture:
                                     // every gate line after this one belongs to the
                                     // switch into Vulkan RT.

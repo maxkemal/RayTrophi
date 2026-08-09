@@ -1,4 +1,5 @@
 #include "ParticleSimulation.h"
+#include "Fluid/FluidParticleSolidRecovery.h"
 
 #include "GridFluidSolver.h"
 #include "globals.h"
@@ -205,7 +206,8 @@ inline void voxelizeCollidersIntoGrid(
     const std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)>& obb_resolver,
     const std::vector<Vec3>* collider_velocities = nullptr,
     const std::vector<Vec3>* collider_angular_velocities = nullptr,
-    const std::vector<Vec3>* collider_centers = nullptr) {
+    const std::vector<Vec3>* collider_centers = nullptr,
+    bool fluid_collision_only = false) {
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) return;
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
 
@@ -270,7 +272,8 @@ inline void voxelizeCollidersIntoGrid(
     for (std::size_t ci = 0; ci < colliders.size(); ++ci) {
         const auto& c = colliders[ci];
         sig = hashU(sig, c.enabled ? 1ull : 0ull);
-        if (!c.enabled) continue;
+        sig = hashU(sig, c.fluid_collision_enabled ? 1ull : 0ull);
+        if (!c.enabled || (fluid_collision_only && !c.fluid_collision_enabled)) continue;
         sig = hashU(sig, static_cast<uint64_t>(c.source_mode));
         sig = hashF(sig, c.thickness);
         sig = hashU(sig, c.gas_interaction_enabled ? 1ull : 0ull);
@@ -471,7 +474,7 @@ inline void voxelizeCollidersIntoGrid(
 
     for (std::size_t c_idx = 0; c_idx < colliders.size(); ++c_idx) {
         const auto& c = colliders[c_idx];
-        if (!c.enabled) continue;
+        if (!c.enabled || (fluid_collision_only && !c.fluid_collision_enabled)) continue;
         const float thick = std::max(0.0f, c.thickness);
         active_gas_density = c.gas_interaction_enabled ? std::max(0.0f, c.gas_density_rate) : 0.0f;
         active_gas_temperature = c.gas_interaction_enabled ? std::max(0.0f, c.gas_temperature_rate) : 0.0f;
@@ -870,7 +873,8 @@ inline void computeSolidFaceWeights(
     FluidSim::FluidGrid& grid,
     const std::vector<ParticleColliderDesc>& colliders,
     const std::function<bool(const ParticleColliderDesc&, Vec3&, Vec3&)>& bounds_resolver,
-    const std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)>& obb_resolver) {
+    const std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)>& obb_resolver,
+    bool fluid_collision_only = false) {
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     if (nx <= 0 || ny <= 0 || nz <= 0) return;
 
@@ -1059,7 +1063,7 @@ inline void computeSolidFaceWeights(
     solids.reserve(colliders.size());
     Vec3 union_min(1e30f, 1e30f, 1e30f), union_max(-1e30f, -1e30f, -1e30f);
     for (const auto& c : colliders) {
-        if (!c.enabled) continue;
+        if (!c.enabled || (fluid_collision_only && !c.fluid_collision_enabled)) continue;
         const float thick = std::max(0.0f, c.thickness);
         AnalyticSolid s;
         bool ok = false;
@@ -8560,7 +8564,19 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                        colliders_,
                                        collider_bounds_resolver_,
                                        collider_obb_resolver_,
-                                       &collider_velocities_);
+                                       &collider_velocities_,
+                                       nullptr,
+                                       nullptr,
+                                       true);
+            // Cached/deforming colliders can enclose particles that were valid
+            // in the previous frame. Recover before P2G so neither the pressure
+            // grid nor SurfaceSDF density sees hidden liquid inside solid cells.
+            const std::size_t solid_recovery_count =
+                Fluid::recoverParticlesFromSolidCells(state.particles, state.grid);
+            // GPU particle buffers were uploaded before collider voxelization.
+            // If recovery moved anything, use CPU P2G for this one corrective
+            // frame rather than dispatching from stale device positions.
+            if (solid_recovery_count > 0u) gpu_integrated_forces = false;
             // Variational solid coupling: fractional MAC-face open weights for
             // sub-grid-accurate boundaries + moving-collider splash. Cheap (only
             // the collider neighbourhood is super-sampled); skipped when the flag
@@ -8569,7 +8585,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 computeSolidFaceWeights(state.grid,
                                         colliders_,
                                         collider_bounds_resolver_,
-                                        collider_obb_resolver_);
+                                        collider_obb_resolver_,
+                                        true);
             } else {
                 // Weights aren't maintained while variational is off; mark them
                 // stale so the next on-frame does a full open-init (the colliders
@@ -8644,6 +8661,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             Fluid::APICSolverStats gpu_mgpcg_stats;
 
             const bool try_gpu_g2p =
+                solid_recovery_count == 0u &&
                 fluid_params.free_surface &&
                 // Periodic boundaries need the wrap-coupled CPU PCG (the GPU MGPCG
                 // still treats out-of-grid as solid, i.e. behaves as Closed); fall
@@ -8788,6 +8806,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 state.fluid_stats.p2g_ms     = gpu_p2g_ms;
                 state.fluid_stats.p2g_on_gpu = true;
             }
+            state.fluid_stats.recovered_solid_particles = std::max(
+                state.fluid_stats.recovered_solid_particles,
+                solid_recovery_count);
 
             // ── Whitewater (spray/foam/bubbles) — Ihmsen 2012 ────────────────
             // Secondary render-only particles generated from the post-step liquid

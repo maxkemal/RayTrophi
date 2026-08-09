@@ -2605,6 +2605,7 @@ void drawSimulationDomainControls(
                     UIWidgets::PerfBlock blk("Fluid Step", step_total);
                     blk.Value("Particles", "%zu", fs.particle_count);
                     blk.Value("Active fluid cells", "%zu", fs.active_fluid_cells);
+                    blk.Value("Recovered from solids", "%zu", fs.recovered_solid_particles);
                     blk.Total("Step total", step_total);
                     blk.Time("P2G", fs.p2g_ms, fs.p2g_on_gpu ? "GPU" : "CPU", 1);
                     blk.Time("Pressure", fs.pressure_ms, fs.pressure_on_gpu ? "GPU" : "CPU", 1);

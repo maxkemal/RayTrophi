@@ -424,6 +424,7 @@
     <ClInclude Include="source\include\GridFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticles.h" />
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
+    <ClInclude Include="source\include\Fluid\FluidParticleSolidRecovery.h" />
     <ClInclude Include="source\include\Fluid\FluidObject.h" />
     <ClInclude Include="source\include\Fluid\FluidSimulationSystem.h" />
     <ClInclude Include="source\include\Fluid\FluidLevelSet.h" />
@@ -1464,6 +1465,7 @@
     <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp" />
     <ClCompile Include="source\src\Physics\FractureSourceAdapter.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidLevelSet.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidFoam.cpp" />

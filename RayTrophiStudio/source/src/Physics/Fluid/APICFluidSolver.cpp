@@ -2298,6 +2298,7 @@ void step(FluidParticles& particles,
 
     const auto total_begin = SolverClock::now();
 
+
     auto clampVelocity = [&](Vec3& v) {
         const float speed = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
         if (speed > params.max_velocity && speed > 1e-6f) {

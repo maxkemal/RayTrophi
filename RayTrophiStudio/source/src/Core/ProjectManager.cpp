@@ -5065,6 +5065,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         c["source_mode"] = particleColliderSourceModeToString(collider.source_mode);
         c["source_name"] = collider.source_name;
         c["enabled"] = collider.enabled;
+        c["fluid_collision_enabled"] = collider.fluid_collision_enabled;
         c["plane_y"] = collider.plane_y;
         c["sphere_center"] = vec3ToJson(collider.sphere_center);
         c["sphere_radius"] = collider.sphere_radius;
@@ -5537,6 +5538,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         collider.source_mode = particleColliderSourceModeFromString(item.value("source_mode", std::string("PlaneY")));
         collider.source_name = item.value("source_name", collider.source_name);
         collider.enabled = item.value("enabled", collider.enabled);
+        collider.fluid_collision_enabled = item.value("fluid_collision_enabled", collider.fluid_collision_enabled);
         collider.plane_y = item.value("plane_y", collider.plane_y);
         if (item.contains("sphere_center")) collider.sphere_center = jsonToVec3(item["sphere_center"]);
         collider.sphere_radius = item.value("sphere_radius", collider.sphere_radius);

@@ -1,5 +1,34 @@
 # Material Transformation, Mass Transfer and Fracture Roadmap
 
+Vulkan geometry/SDF/gas reset ve rewind guvenlik kurallari:
+[`VULKAN_SIMULATION_RESET_SAFETY.md`](VULKAN_SIMULATION_RESET_SAFETY.md).
+
+## 2026-08-09 kapanis ve sonraki sira
+
+Geometry melt, MSF yanma/erime ve molten kutlenin APIC fluid'e aktarildigi dikey
+hat cekirdek kapsaminda tamamlandi. Yuksek poligonlu birlesik sahne stres testleri
+yapildi; timeline End Frame degisikligi artik reset/rewind uretmiyor.
+
+Bilinen fizik siniri: ana mesh'in geometrik hacim kaybi ile APIC'e eklenen fluid
+hacmi henuz gorsel olarak birebir eslesmiyor. En guclu neden, ozellikle SDF kaynak
+collider'da molten cikis noktalarinin gercek eriyen yuzey/topoloji yerine cooked
+kapali hacimden turetilmesi. Kutle muhasebesi korunuyor; sorun hacim dagilimi,
+cikis yolu ve goruntu eslesmesidir. Bu madde mevcut fazi bloke etmez ve sonraki
+fizik fazinda ele alinacaktir:
+
+1. Melt alanindan baglantili yuzey akis yolu ve gercek kenar/delik cikisi bulma.
+2. Mesh hacim kaybi, density ve APIC particle hacmi arasinda kalibre edilmis esleme.
+3. Kaynak collider icin sabit cooked SDF yerine melt-aware proxy/dirty-region
+   collision temsili; her-frame tam SDF recook yapilmamasi.
+4. Birikme, tasma, taban yayilmasi ve katilasma/deposit geri aktarimi.
+
+Bu fizik eslemesi kapandiktan sonraki ana mimari faz: gas, fluid, collider ve mesh
+deformation zincirini node graph'a tasimaktir. Node'lar yeni bir ikinci solver
+olusturmayacak; mevcut runtime sistemlerini ortak veri/olay sozlesmeleriyle
+yonetecek. Siralama: domain/source/collider node'lari, MSF transform/transfer
+node'lari, geometry deformation cikisi, cache/reset lifecycle node'lari ve son
+olarak telemetry/debug node'lari.
+
 ## Amaç
 
 Yanma, erime, kütle kaybı ve parçalanmayı ayrı efektler olarak değil, aynı kalıcı
