@@ -48,7 +48,7 @@ rt.collider.create(
     msf_transfer_max_batch_particles=128,
     msf_transfer_velocity=(0.0, -0.1, 0.0),
     msf_melt_flow_enabled=True, msf_melt_height_loss=0.85,
-    msf_melt_sdf_refresh=True, msf_melt_sdf_revision_interval=4,
+    msf_melt_sdf_refresh=False, msf_melt_sdf_revision_interval=4,
     msf_melt_sdf_change_threshold=0.025,
     msf_melt_spread=1.50,
 )
@@ -89,7 +89,7 @@ assert collider["msf_auto_transfer"], collider
 assert collider["msf_transfer_domain"] == LIQUID, collider
 assert collider["msf_melt_flow_enabled"], collider
 assert abs(collider["msf_melt_height_loss"] - 0.85) < 1e-4, collider
-assert collider["msf_melt_sdf_refresh"], collider
+assert not collider["msf_melt_sdf_refresh"], collider
 assert collider["msf_melt_sdf_revision_interval"] == 4, collider
 assert abs(collider["msf_melt_sdf_change_threshold"] - 0.025) < 1e-4, collider
 assert abs(collider["msf_melt_spread"] - 1.50) < 1e-4, collider

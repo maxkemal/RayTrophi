@@ -1004,16 +1004,35 @@ void SceneData::syncFluidParticleRenderInstances(bool enable_rt_geometry) {
     for (auto& obj : fluid_objects) {
         // Particles render_mode OR Solid/Matcap viewport (splat-sphere proxy, since
         // the raster viewport can't draw the SurfaceSDF volume).
-        const bool wants = obj.visible && obj.enabled &&
+        const bool lifecycle_alive = obj.visible && obj.enabled;
+        const bool wants = lifecycle_alive &&
             (obj.render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
              g_solid_viewport_active);
-        if (!wants) {
+        if (!lifecycle_alive) {
             destroyFluidParticleRenderGroup(obj);
             continue;
         }
 
         InstanceGroup* group = (obj.render_instance_group_id >= 0)
             ? im.getGroup(obj.render_instance_group_id) : nullptr;
+        // SurfaceSDF uses this sphere pool only as Solid/Matcap proxy. Keep the
+        // already-built topology across Solid -> Rendered and hide it by scale;
+        // deleting here made the mode switch perform particle BLAS teardown,
+        // molten-mesh BLAS update and volume publication in one transition.
+        if (!wants) {
+            if (!group) continue;
+            bool had_visible = false;
+            for (auto& tr : group->instances) {
+                had_visible |= tr.scale.x != 0.0f || tr.scale.y != 0.0f || tr.scale.z != 0.0f;
+                tr.scale = Vec3(0.0f);
+            }
+            if (had_visible) {
+                group->gpu_dirty = true;
+                g_fluid_source_state[obj.render_instance_group_id].content_hash = 0u;
+                motion_change = true;
+            }
+            continue;
+        }
         if (!group) {
             const std::string gname = "[FluidParticles] " + obj.name + " #" + std::to_string(obj.id);
             obj.render_instance_group_id = im.createGroup(gname, "", {});
@@ -1200,15 +1219,16 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             // can't draw the SurfaceSDF NanoVDB volume, so spheres are the live proxy
             // there. In Rendered mode + SurfaceSDF this stays false (the volume renders
             // instead) and the gate below tears the sphere group down.
-            const bool render_eligible = enable_rt_geometry &&
+            const bool lifecycle_alive =
                 system.visible && system.enabled && state.valid && is_fluid &&
-                d < domains.size() &&
+                d < domains.size();
+            const bool render_eligible = enable_rt_geometry && lifecycle_alive &&
                 (domains[d].fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
                  g_solid_viewport_active);
 
             int& group_id = system.domain_particle_render_group_ids[d];
 
-            if (!render_eligible) {
+            if (!lifecycle_alive) {
                 if (group_id >= 0) {
                     if (InstanceGroup* g = im.getGroup(group_id)) {
                         if (!g->instances.empty()) structural_change = true;
@@ -1217,6 +1237,24 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     g_fluid_source_state.erase(group_id);
                     group_id = -1;
                     system.domain_particle_pool_capacities[d] = 0;
+                }
+                continue;
+            }
+
+            // Mode-only visibility changes are transform updates, not topology
+            // changes. Preserve the pool while SurfaceSDF takes over in Rendered.
+            if (!render_eligible) {
+                InstanceGroup* existing = (group_id >= 0) ? im.getGroup(group_id) : nullptr;
+                if (!existing) continue;
+                bool had_visible = false;
+                for (auto& tr : existing->instances) {
+                    had_visible |= tr.scale.x != 0.0f || tr.scale.y != 0.0f || tr.scale.z != 0.0f;
+                    tr.scale = Vec3(0.0f);
+                }
+                if (had_visible) {
+                    existing->gpu_dirty = true;
+                    g_fluid_source_state[group_id].content_hash = 0u;
+                    motion_change = true;
                 }
                 continue;
             }
@@ -1238,6 +1276,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 }
                 if (had_visible) {
                     existing->gpu_dirty = true;
+                    g_fluid_source_state[group_id].content_hash = 0u;
                     motion_change = true;
                 }
                 continue;

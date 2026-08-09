@@ -180,6 +180,9 @@
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidParticleSolidRecovery.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidObject.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -656,6 +659,9 @@
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp">

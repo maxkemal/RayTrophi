@@ -408,6 +408,7 @@ struct APICSolverStats {
     size_t particle_count = 0;
     size_t grid_cell_count = 0;
     size_t active_fluid_cells = 0;
+    size_t recovered_solid_particles = 0;
     bool  density_on_gpu = false;
     bool  p2g_on_gpu = false;
     bool  g2p_on_gpu = false;

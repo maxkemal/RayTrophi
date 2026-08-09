@@ -194,18 +194,24 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
         const float combustible = profile.combustible ? 1.0f : 0.0f;
         const float h = std::max(state.voxel_size, 1.0e-3f) * 0.35f;
 
-        // A material-transfer particle born on a closed Mesh SDF is its own
+        // A material-transfer particle born on a closed object collider is its own
         // collider's prisoner: collision projects it to the outer skin and
         // gravity immediately presses it back onto that same skin. OBB appeared
         // to work only because its coarse/updating bounds accidentally provided
         // an escape. The molten reservoir represents material that has ALREADY
         // left the solid phase, so route it to a gravity-side outlet just beyond
         // the source collider. Other fluid still collides with the complete SDF.
-        bool has_source_sdf_outlet = false;
+        bool has_source_collider_outlet = false;
         Vec3 source_bounds_min(0.0f), source_bounds_max(0.0f);
         for (const ParticleColliderDesc& collider : colliders_) {
+            const bool closed_object_collider =
+                collider.source_mode == ParticleColliderSourceMode::ObjectAABB ||
+                collider.source_mode == ParticleColliderSourceMode::ObjectOBB ||
+                collider.source_mode == ParticleColliderSourceMode::ObjectMeshSDF ||
+                collider.source_mode == ParticleColliderSourceMode::ObjectMeshBVH ||
+                collider.source_mode == ParticleColliderSourceMode::ObjectConvexDecomp;
             if (!collider.enabled || collider.source_name != request.object_key ||
-                collider.source_mode != ParticleColliderSourceMode::ObjectMeshSDF)
+                !closed_object_collider)
                 continue;
             if (collider_bounds_resolver_ &&
                 collider_bounds_resolver_(collider, source_bounds_min, source_bounds_max)) {
@@ -213,14 +219,18 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
                 const Vec3 ordered_max = Vec3::max(source_bounds_min, source_bounds_max);
                 source_bounds_min = ordered_min;
                 source_bounds_max = ordered_max;
-                has_source_sdf_outlet = true;
+                has_source_collider_outlet = true;
             }
             break;
         }
 
         Vec3 gravity_outlet = center;
-        if (has_source_sdf_outlet) {
-            const float clearance = std::max(h * 1.5f, state.voxel_size * 0.6f);
+        if (has_source_collider_outlet) {
+            // APIC collision is cell based. Merely crossing the analytic surface
+            // by half a voxel can still map the particle into the last solid
+            // cell, especially after its deterministic packet jitter. Keep the
+            // packet centre more than one full cell beyond the collider bounds.
+            const float clearance = std::max(h * 2.5f, state.voxel_size * 1.25f);
             gravity_outlet.y = source_bounds_min.y - clearance;
             // If the fluid domain does not extend below the object, select the
             // nearest horizontal AABB exit instead of clamping the particle back
@@ -245,7 +255,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
                     best = exit.distance;
                 }
                 if (best == std::numeric_limits<float>::max())
-                    has_source_sdf_outlet = false;
+                    has_source_collider_outlet = false;
             }
         }
         const std::size_t old_size = state.particles.size();
@@ -260,7 +270,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             const std::size_t element = molten_elements[(i / 8u) % molten_elements.size()];
             Vec3 p(field->centers[element * 4u], field->centers[element * 4u + 1u],
                    field->centers[element * 4u + 2u]);
-            if (has_source_sdf_outlet) {
+            if (has_source_collider_outlet) {
                 // Preserve the packet's small deterministic spread but keep its
                 // centre at the selected outlet. This avoids a single coincident
                 // APIC clump without putting samples back inside the collider.

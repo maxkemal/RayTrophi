@@ -764,6 +764,10 @@ struct SceneData {
     // that would dirty/refit BLAS every frame and permanently reset both Vulkan
     // and OptiX accumulation even though the simulation state is stationary.
     std::unordered_map<std::string, MeltAppliedStamp> melt_applied_stamp_;
+    // Rewind restores fluid/render resources in a burst. Hold melt mesh
+    // write-back for one render frame so a heavy source BLAS refit does not land
+    // in the same Vulkan submission window as fluid surface destruction/rebuild.
+    bool defer_melt_displacement_once_ = false;
     uint32_t fracture_summary_tick_ = 0;
     uint64_t structural_impulse_sequence_ = 0;
     std::vector<RayTrophiSim::StructuralImpulseEvent> structural_impulse_events_;
@@ -2034,6 +2038,10 @@ struct SceneData {
     // Set when a fluid-affecting edit rewinds the sim to frame 0; the UI consumes
     // it (consumeSimRewindRequest) to move the timeline playhead back to start.
     bool        sim_rewind_request_ = false;
+    // Short settle window after playback Start/End edits. Range metadata must
+    // never invalidate simulation state; the extra ticks cover ImGui commit and
+    // timeline-to-flow-key synchronization occurring on adjacent UI frames.
+    uint8_t     timeline_range_edit_grace_ = 0;
 
     // ── Cooperative (frame-driven) disk bake state machine ───────────────────
     // A disk bake re-simulates the whole timeline range; one blocking loop would
@@ -3120,6 +3128,7 @@ struct SceneData {
                 for (char ch : c.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
                 h = mix(h, static_cast<uint64_t>(c.source_mode));
                 h = mix(h, c.enabled ? 1ull : 0ull);
+                h = mix(h, c.fluid_collision_enabled ? 1ull : 0ull);
                 h = mix(h, qf(c.plane_y));
                 h = mix(h, qf(c.sphere_center.x)); h = mix(h, qf(c.sphere_center.y)); h = mix(h, qf(c.sphere_center.z));
                 h = mix(h, qf(c.sphere_radius));
@@ -3377,6 +3386,7 @@ struct SceneData {
                 for (char ch : c.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
                 h = mix(h, static_cast<uint64_t>(c.source_mode));
                 h = mix(h, c.enabled ? 1ull : 0ull);
+                h = mix(h, c.fluid_collision_enabled ? 1ull : 0ull);
                 h = mix(h, qf(c.plane_y));
                 h = mix(h, qf(c.sphere_center.x)); h = mix(h, qf(c.sphere_center.y)); h = mix(h, qf(c.sphere_center.z));
                 h = mix(h, qf(c.sphere_radius));
@@ -4166,6 +4176,10 @@ struct SceneData {
     // laterally as height is lost. It conserves the surface envelope only
     // approximately; topology loss and detached liquid belong to the APIC bridge.
     void applyMeltDisplacement() {
+        if (defer_melt_displacement_once_) {
+            defer_melt_displacement_once_ = false;
+            return;
+        }
         for (auto& system : particle_systems) {
             if (!system.runtime || !system.runtime->hasMaterialStateFields()) continue;
             for (const auto& entry : system.runtime->materialStateFields()) {
@@ -4209,6 +4223,20 @@ struct SceneData {
         SoftWeldCache& cache = cit->second;
         const std::size_t uc = cache.unique_count;
         if (uc < 3 || cache.rest_world_unique.size() != uc) return;
+
+        // A high-poly source otherwise rewrites all positions/normals and refits
+        // its BLAS on every MSF mask revision while the APIC surface BLAS changes
+        // too. Keep chemistry/fluid at full rate, but budget visual mesh refits.
+        // Rewinds (revision decreases) bypass the cadence and restore exactly.
+        const std::size_t triangle_count = cache.corner_unique.size() / 3u;
+        const uint64_t refit_interval = std::clamp<uint64_t>(
+            1u + triangle_count / 50000u, 1u, 8u);
+        if (stamp_it != melt_applied_stamp_.end() &&
+            stamp_it->second.topology == field.topology_generation &&
+            field.mask_revision > stamp_it->second.content &&
+            field.mask_revision - stamp_it->second.content < refit_interval) {
+            return;
+        }
 
         // ── Melt per UNIQUE vertex ────────────────────────────────────────────
         // ★★ THE trap of this phase: a UV seam is exactly where one spatial vertex
@@ -4304,11 +4332,14 @@ struct SceneData {
         else melt_displaced_.erase(node);
         melt_applied_stamp_[node] = { field.topology_generation, field.mask_revision };
 
+        // Disabled: repeated melt-driven ObjectMeshSDF recooks raced Vulkan RT
+        // geometry consumption during rewind. The explicit Force Rebuild SDF
+        // action is now the only authoritative refresh path.
         // The render mesh above is live geometry, while an ObjectMeshSDF is a
         // cooked snapshot. Refresh only after meaningful thermal change and a
         // revision interval; otherwise a melting object would start an expensive
         // 3D cook every readback/frame. Reset-to-rest is always allowed through.
-        if (authoring && authoring->source_mode ==
+        if (false && authoring && authoring->source_mode ==
                 RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF &&
             authoring->msf_melt_sdf_refresh) {
             float mean_melt = 0.0f;
@@ -4596,6 +4627,7 @@ struct SceneData {
     // Set each frame by the render loop: true only when the active RENDER backend
     // is Vulkan RT and a per-mesh BLAS refit is valid for this frame.
     void setDeformRefitActive(bool v) { deform_refit_active_ = v; }
+    void deferMeltDisplacementOnce() { defer_melt_displacement_once_ = true; }
     bool hasPendingDeformNodes() const { return !pending_deform_nodes_.empty(); }
     void clearPendingDeformNodes() { pending_deform_nodes_.clear(); }
     std::vector<std::string> takePendingDeformNodes() {
@@ -5036,6 +5068,18 @@ struct SceneData {
         return simulation_key_authoring_mode_;
     }
 
+    // Start/End are playback-range metadata, not simulation inputs. Editing
+    // them can end ImGui's generic `ui_editing` settle gate and expose a benign
+    // runtime signature drift (for example an asynchronously published collider
+    // or melt-owned geometry) as if the user changed fluid authoring. Rebase the
+    // signatures without dropping caches or restoring frame zero.
+    void preserveSimulationForTimelineRangeEdit() {
+        last_sim_config_sig_ = computeSimConfigSignature();
+        last_fluid_coupling_sig_ = computeFluidCouplingSignature();
+        timeline_range_edit_grace_ = 3;
+        sim_rewind_request_ = false;
+    }
+
     // A fluid-affecting setup edit rewinds the sim to frame 0 (see
     // updateSimulationTimeline) instead of auto-resimming up to a high parked
     // frame. The UI layer consumes this to move the timeline playhead to start.
@@ -5099,7 +5143,7 @@ struct SceneData {
     //   live_mode == false : Timeline (default) — play bakes into the cache, scrub
     //                        restores/resimulates, and a stopped timeline stays
     //                        frozen (no stepping, no render churn → cheap/idle).
-    void syncFlowSourceKeysFromTimeline() {
+    void syncFlowSourceKeysFromTimeline(bool preserve_cache = false) {
         bool keys_changed = false;
         auto keyEqual = [](const auto& a, const auto& b) {
             return a.has_enabled == b.has_enabled &&
@@ -5203,7 +5247,7 @@ struct SceneData {
                 }
             }
         }
-        if (keys_changed) {
+        if (keys_changed && !preserve_cache) {
             clearSimFrameCache();
             force_simulation_render_sync_ = true;
         }
@@ -5212,8 +5256,18 @@ struct SceneData {
     void updateSimulationTimeline(int tl_frame, bool playing, float realtime_dt, float fps, bool live_mode,
                                   bool ui_editing = false) {
         if (tl_frame < 0) tl_frame = 0;
+        const bool preserve_timeline_range_edit = timeline_range_edit_grace_ > 0;
         publishCompletedSdfBakes();
-        syncFlowSourceKeysFromTimeline();
+        syncFlowSourceKeysFromTimeline(preserve_timeline_range_edit);
+        if (preserve_timeline_range_edit) {
+            // Rebase after async SDF publication and flow-key synchronization,
+            // both of which run above and may otherwise expose a benign delta on
+            // the frame after the End field commits.
+            last_sim_config_sig_ = computeSimConfigSignature();
+            last_fluid_coupling_sig_ = computeFluidCouplingSignature();
+            sim_rewind_request_ = false;
+            --timeline_range_edit_grace_;
+        }
         simulation_render_updated = false;
         if (preserve_script_simulation_preview_) {
             preserve_script_simulation_preview_ = false;

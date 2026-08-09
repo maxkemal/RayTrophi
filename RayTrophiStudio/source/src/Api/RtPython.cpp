@@ -1334,6 +1334,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         py::dict d;
         d["name"] = c.name; d["source_mode"] = c.source_mode;
         d["source_object"] = c.source_object; d["enabled"] = c.enabled;
+        d["fluid_collision_enabled"] = c.fluid_collision_enabled;
         d["plane_y"] = c.plane_y; d["sphere_center"] = vec3ToPython(c.sphere_center);
         d["sphere_radius"] = c.sphere_radius;
         d["capsule_start"] = vec3ToPython(c.capsule_start);
@@ -1379,6 +1380,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 #define RT_COLLIDER_KW(name,type) if (kw.contains(#name)) c.name = py::cast<type>(kw[#name])
         RT_COLLIDER_KW(name, std::string); RT_COLLIDER_KW(source_mode, std::string);
         RT_COLLIDER_KW(source_object, std::string); RT_COLLIDER_KW(enabled, bool);
+        RT_COLLIDER_KW(fluid_collision_enabled, bool);
         RT_COLLIDER_KW(plane_y, float); RT_COLLIDER_KW(sphere_radius, float);
         RT_COLLIDER_KW(capsule_radius, float); RT_COLLIDER_KW(friction, float);
         RT_COLLIDER_KW(restitution, float); RT_COLLIDER_KW(thickness, float);

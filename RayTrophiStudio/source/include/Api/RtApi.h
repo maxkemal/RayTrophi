@@ -1134,6 +1134,7 @@ struct SimulationColliderInfo {
     std::string source_mode = "plane"; // plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh
     std::string source_object;
     bool enabled = true;
+    bool fluid_collision_enabled = true;
     float plane_y = 0.0f;
     Vec3 sphere_center = Vec3(0.0f, 1.0f, 0.0f);
     float sphere_radius = 1.0f;
@@ -1175,7 +1176,7 @@ struct SimulationColliderInfo {
     bool msf_melt_flow_enabled = true;
     float msf_melt_height_loss = 0.85f;
     float msf_melt_spread = 1.50f;
-    bool msf_melt_sdf_refresh = true;
+    bool msf_melt_sdf_refresh = false; // legacy; explicit force rebuild is authoritative
     uint32_t msf_melt_sdf_revision_interval = 4u;
     float msf_melt_sdf_change_threshold = 0.025f;
 };

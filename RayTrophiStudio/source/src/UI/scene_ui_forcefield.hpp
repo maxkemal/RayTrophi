@@ -2822,6 +2822,12 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 ImGui::SetTooltip("Inflates the collision bounds during fluid grid voxelization.\n"
                                   "For sub-voxel thin walls, set this value >= active Fluid voxel_size to prevent fluid leaks.");
             }
+            ImGui::Checkbox("Affect Fluid Collision##CollTab", &c.fluid_collision_enabled);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Controls only APIC/fluid solid-mask collision.\n"
+                                  "MSF melting, gas interaction and molten mass transfer remain active when disabled.\n"
+                                  "Disable on a melt-source object if its emitted liquid is trapped by its own collider.");
+            }
             ImGui::SeparatorText("Gas Interaction");
             ImGui::Checkbox("Enable Gas Surface Source##CollTab", &c.gas_interaction_enabled);
             if (ImGui::IsItemHovered()) {

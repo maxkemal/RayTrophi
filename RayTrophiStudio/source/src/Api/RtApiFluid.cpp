@@ -961,6 +961,7 @@ SimulationColliderInfo colliderInfoFromDesc(const RayTrophiSim::ParticleCollider
     out.source_mode = colliderModeToString(c.source_mode);
     out.source_object = c.source_name;
     out.enabled = c.enabled;
+    out.fluid_collision_enabled = c.fluid_collision_enabled;
     out.plane_y = c.plane_y;
     out.sphere_center = c.sphere_center;
     out.sphere_radius = c.sphere_radius;
@@ -1012,6 +1013,7 @@ Result colliderDescFromInfo(const SimulationColliderInfo& info,
     if (!mode_ok) return Result::fail("unknown collider source_mode: " + info.source_mode);
     out.source_name = info.source_object;
     out.enabled = info.enabled;
+    out.fluid_collision_enabled = info.fluid_collision_enabled;
     out.plane_y = info.plane_y;
     out.sphere_center = info.sphere_center;
     out.sphere_radius = std::max(0.001f, info.sphere_radius);
