@@ -63,7 +63,10 @@ extern "C" __global__ void __raygen__rg() {
             rel_stderr < effective_threshold) {
             float3 prev_color = make_float3(prev.x, prev.y, prev.z);
             // Apply exposure to converged pixels too
-            optixLaunchParams.framebuffer[pixel_index] = make_color(prev_color * optixLaunchParams.camera.exposure_factor);
+            const unsigned char coverage = optixLaunchParams.framebuffer[pixel_index].w;
+            uchar4 display = make_color(prev_color * optixLaunchParams.camera.exposure_factor);
+            display.w = coverage;
+            optixLaunchParams.framebuffer[pixel_index] = display;
             if (optixLaunchParams.converged_count != nullptr) {
                 atomicAdd(optixLaunchParams.converged_count, 1);
             }
@@ -237,5 +240,8 @@ extern "C" __global__ void __raygen__rg() {
         exposed_color *= vignette_factor;
     }
 
-    optixLaunchParams.framebuffer[pixel_index] = make_color(exposed_color);
+    uchar4 display = make_color(exposed_color);
+    display.w = static_cast<unsigned char>(255.0f *
+        (static_cast<float>(primary_hits) / static_cast<float>(samples_this_pass)) + 0.5f);
+    optixLaunchParams.framebuffer[pixel_index] = display;
 }

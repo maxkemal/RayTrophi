@@ -329,11 +329,24 @@ public:
     float render_isosurface_roughness = 0.0f;
     // Whitewater/foam strength 0..1 (curvature-driven) for the isosurface.
     float render_isosurface_foam = 0.0f;
+    // MaterialManager id shading the isosurface through the full Principled BSDF.
+    // -1 = the built-in dielectric boundary (previous, and still the fallback).
+    // Rides VkVolumeInstance::iso_material_index, NOT _reserved[1] — that slot
+    // already means "run the volume material VM with this program" and the two
+    // are resolved by different rules (a plain Principled material yields no
+    // volume program at all).
+    int   render_isosurface_material_id = -1;
     // Particle-foam (whitewater) look for the SurfaceSDF single-volume path:
     // foam rides this volume's temperature channel and the iso shader marches
     // it. Set from the domain foam_shader at sync. Tint + extinction multiplier.
     Vec3  render_isosurface_foam_color = Vec3(0.95f, 0.97f, 1.0f);
     float render_isosurface_foam_opacity = 0.0f;  // 0 → shader default
+    // Procedural porosity — see SimulationGridDomainDesc::fluid_surface_pore_*.
+    // Subtracted from the density before the ISO test, so pores are geometry
+    // (with real rim normals), not an alpha cutout.
+    float render_isosurface_pore_amount = 0.0f;
+    float render_isosurface_pore_scale  = 0.05f;   // world units
+    float render_isosurface_pore_detail = 0.5f;
 
     /**
      * @brief Get object type identifier

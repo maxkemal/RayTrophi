@@ -12149,6 +12149,39 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     }
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ── Consumer-side tripwire for the interior-volume fields ────────────────
+    // This loop is the LAST host code that touches these values before the
+    // shader reads them, so it is the only place that can say what the GPU
+    // actually got. The binding-time log in VolumetricRenderer cannot: it runs
+    // when the volume packet is rebuilt, and editing Interior Depth changes
+    // neither opacity nor any BLAS, so no rebuild happens and that line goes
+    // stale on exactly the parameter it was meant to measure.
+    //
+    // ★ Index is the material-table index the shader indexes with, i.e. the
+    // same number VolumetricRenderer reports as iso_material_id — so the two
+    // lines can be matched by eye. Only materials carrying an interior are
+    // printed, and only on change, so this stays quiet in normal scenes.
+    std::size_t mat_log_index = 0;
+    for (const auto& m : materials) {
+        if (m.is_bubble || m.transmission_density > 1e-4f || m.transmission > 0.01f) {
+            SCENE_LOG_ON_CHANGE(
+                "matupload." + std::to_string(mat_log_index),
+                static_cast<int>(m.transmission_density * 1000.0f) * 8
+                    + (m.is_bubble ? 1 : 0)
+                    + (m.transmission > 0.01f ? 2 : 0)
+                    + (m.resin_inclusion > 0.001f ? 4 : 0),
+                // MaterialData carries no name — match it to the [IsoMat] line
+                // by the index, which is the same material-table index the
+                // shader indexes with.
+                std::string("[MatUpload] idx ") + std::to_string(mat_log_index) +
+                " -> GPU gets  bubble=" + (m.is_bubble ? "1" : "0") +
+                " transmission_density=" + std::to_string(m.transmission_density) +
+                " transmission=" + std::to_string(m.transmission) +
+                " resin_inclusion=" + std::to_string(m.resin_inclusion));
+        }
+        ++mat_log_index;
+    }
+
     for (const auto& m : materials) {
         VulkanRT::VkGpuMaterial gm{};
         gm.albedo_r = m.albedo.x; gm.albedo_g = m.albedo.y; gm.albedo_b = m.albedo.z; gm.opacity = m.opacity;

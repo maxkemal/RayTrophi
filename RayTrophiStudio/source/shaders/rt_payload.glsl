@@ -70,3 +70,50 @@ vec3 plUnpackNormal(uint u) {
 uint plMetaReset(uint prevMeta) {
     return (prevMeta & PL_DISP_MASK) | PL_MATID_MASK;
 }
+
+// ── Bounce classification (payload.bounceType) ───────────────────────────────
+// Lives here rather than in a shader because bounceType is a PAYLOAD field, and
+// every shader that writes one needs the same numbering. closesthit.rchit owned
+// the full set while volume_closesthit.rchit declared its own BOUNCE_TRANSPARENT
+// — a partial copy that would have silently disagreed the moment the numbering
+// changed. raygen reads these to budget bounce depth per class.
+const float RAY_OFFSET  = 1e-3;   // Yüzey offset (self-intersection önleme)
+const uint BOUNCE_SPECULAR = 0u;
+const uint BOUNCE_DIFFUSE = 1u;
+const uint BOUNCE_TRANSMISSION = 2u;
+const uint BOUNCE_TRANSPARENT = 3u;
+// Resin interactions (glossy coat reflect + absorbing diffuse base) are tagged
+// separately so raygen can cap them at a small dedicated budget — an
+// energy-preserving resin would otherwise run full-depth GI paths (TDR risk).
+const uint BOUNCE_RESIN = 4u;
+// Interior-volume anchor: bit 21 of mat.flags (VK_MAT_FLAG_RESIN_OBJ_SPACE).
+// Set = the dust/speck fields are evaluated in OBJECT space (the interior
+// moves/rotates with the mesh); clear = legacy world anchor (fixed in space).
+const uint MAT_FLAG_RESIN_OBJ_SPACE = (1u << 21);
+// Thin-shell film: bit 19 of mat.flags (VK_MAT_FLAG_BUBBLE). Lives here rather
+// than in closesthit.rchit because the fluid isosurface dispatches the same
+// branch (volume_closesthit.rchit) — the moment a second shader needed it, a
+// per-shader copy was one edit away from silently disagreeing.
+// ★ NOTE the host has TWO different bits under this name: VK_MAT_FLAG_BUBBLE
+// (1<<19, vulkan_material_types.h) and GPU_MAT_FLAG_BUBBLE (1<<18,
+// material_gpu.h) — different material structs, different backends. This is
+// the Vulkan one; do not "fix" it to match the other.
+const uint MAT_FLAG_BUBBLE = (1u << 19);
+// Glass marble full-volume entry: tagged on the FRONT-face transmit so raygen
+// integrates the real interior segment (dust/dirt) before the next surface.
+const uint BOUNCE_MARBLE = 5u;
+// Glass mirror lobe (Fresnel reflect or TIR at an interface): the ray did NOT
+// cross the surface. Kept distinct from BOUNCE_TRANSMISSION so the photon pass
+// only counts real refractions as "crossed glass" — tagging reflections as
+// transmission made photons bounced off a sphere's OUTER surface splat a
+// mirrored ghost caustic on the floor. Camera-side raygen spends the same
+// transmission budget on it, so camera behavior is unchanged.
+const uint BOUNCE_GLASS_REFLECT = 6u;
+
+// Shared tracing constants. Same reasoning as the bounce codes above: both
+// closest-hit shaders and the shared BSDF module need identical values, and a
+// per-shader copy of a shadow epsilon is how two paths start showing different
+// contact shadows with nothing to point at.
+const float INV_PI      = 0.31830988618379067154;
+const float SHADOW_TMIN = 1e-3;   // Shadow rays: avoid near-field self/adjacent contact acne
+

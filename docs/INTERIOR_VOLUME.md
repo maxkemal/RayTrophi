@@ -113,6 +113,33 @@ is rotated into the same frame so speck shading stays consistent). A **world**
 option keeps the legacy behaviour deliberately: a moving object appears to
 pass through a frozen medium.
 
+### On a fluid isosurface
+
+The same interior march now runs on the reconstructed SDF liquid boundary, so a
+resin coat authored on a mesh reads the same way when the material is bound to a
+fluid domain. Two things differ, and both are structural rather than
+oversights:
+
+- **There is no object to anchor to.** The mesh path's object-space option maps
+  to **domain space** (the grid domain's inverse transform). That is not the
+  same guarantee: the liquid *flows through* a domain-fixed pattern, so on a
+  fast pour the inclusions read as stationary in the tank rather than carried by
+  the material. A still pool or a set resin is correct. Real carriage needs an
+  advected UVW particle attribute, which does not exist yet.
+- **The base gets no direct lighting.** The isosurface branch has no NEE block,
+  so the coated base is lit by the indirect bounce alone. That is unbiased but
+  noisier than the same material on a mesh at equal sample counts — grain that
+  cleans up with more samples is expected; a base that stays flat black is not.
+
+The coat **thickness** stays the authored `Interior Depth`, not the measured
+`hitT - tNear`. The liquid body's own depth absorption is applied separately,
+before the surface lobe, and folding the two together would double-count.
+
+Note also that thin-shell (Bubble) is a *type branch*, not a lobe: both shaders
+dispatch it and return before the resin coat and the glass lobe are considered,
+so enabling it disables the interior entirely. The material panel says so
+in-line when both are set.
+
 ## What is honestly approximate
 
 This is an **appearance model**, not physically-based volumetric transport:

@@ -109,7 +109,8 @@ namespace NodeSystem {
         MetersPerSecond,
         MillimetersPerHour,
         Degrees,
-        Identifier
+        Identifier,
+        CubicMeters
     };
 
     inline const char* getImageUnitName(ImageUnit unit) {
@@ -122,6 +123,7 @@ namespace NodeSystem {
             case ImageUnit::MillimetersPerHour: return "mm/h";
             case ImageUnit::Degrees: return "deg";
             case ImageUnit::Identifier: return "ID";
+            case ImageUnit::CubicMeters: return "m3";
             default: return "";
         }
     }

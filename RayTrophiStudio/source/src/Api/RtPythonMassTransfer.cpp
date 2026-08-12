@@ -29,6 +29,8 @@ void registerMassTransferBindings(py::module_& module) {
         d["queued"] = i.queued; d["completed"] = i.completed;
         d["deferred_no_domain"] = i.deferred_no_domain;
         d["deferred_no_capacity"] = i.deferred_no_capacity;
+        d["dropped"] = i.dropped;
+        d["discarded_on_reset"] = i.discarded_on_reset;
         d["requested_mass"] = i.requested_mass;
         d["transferred_mass"] = i.transferred_mass;
         d["spawned_particles"] = i.spawned_particles;

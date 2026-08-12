@@ -80,7 +80,8 @@ struct VkVolumeInstance {
     uint64_t flame_address;      // combustion reaction field for live dense gas (0 = none)
     uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
     float    emissive_capacity;
-    float    _accel_reserved[5];
+    float    iso_material_index;  // SDF isosurface material, 1-based (0 = none)
+    float    _accel_reserved[4];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;

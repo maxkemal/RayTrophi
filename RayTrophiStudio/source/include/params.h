@@ -250,6 +250,19 @@ struct GpuVDBVolume {
     int   density_noise_detail;
     int   density_noise_seed;
     int   material_program_index = -1; // Vulkan Volume Graph table index; -1 = none
+    // MaterialManager id shading an SDF isosurface through the full Principled
+    // BSDF; -1 = built-in dielectric. Separate from material_program_index above
+    // even though both are material-table ids: that one is gated on the graph
+    // actually driving VOLUME closure slots, so a plain surface material resolves
+    // to -1 there and would silently never reach the boundary.
+    int   iso_material_id = -1;
+    // Procedural porosity for the SDF isosurface — see
+    // SimulationGridDomainDesc::fluid_surface_pore_*. Rides
+    // VkVolumeInstance::_accel_reserved[0..2] (that block was declared in all
+    // five ABI mirrors and never claimed by anything).
+    float pore_amount = 0.0f;
+    float pore_scale  = 0.05f;
+    float pore_detail = 0.5f;
 
     // Vulkan live gas-domain dense fields. Host-only transport metadata; OptiX
     // ignores these fields and continues to consume NanoVDB pointers above.

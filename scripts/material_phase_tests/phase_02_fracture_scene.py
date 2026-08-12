@@ -56,14 +56,24 @@ rt.flow_source.create(
 
 # One object is a valid one-shard prepared group for this contract test. The
 # production UI's Voronoi generator supplies many objects to the same API.
-BASE_THRESHOLD = 4.0
+# ★ break_velocity is in m/s, not N-s. The impulse threshold this test compares
+# against is break_velocity * group mass, reported as base/effective_break_impulse.
+# Authoring the velocity is what lets one number describe the same material at
+# any size; the impulse it works out to is a consequence, not an input.
+BASE_TOUGHNESS = 4.0   # m/s
 for group, obj in ((BURNT, burnt), (INTACT, intact)):
     info = rt.physics.make_fracture_group(
-        group, [obj], break_impulse=BASE_THRESHOLD,
+        group, [obj], break_velocity=BASE_TOUGHNESS,
         integrity_weakening=True, integrity_exponent=1.5,
         minimum_threshold_scale=0.15,
     )
     assert info["shard_count"] == 1, info
+    assert info["group_mass_kg"] > 0.0, (
+        "a group with no mass has no threshold either", info)
+
+# Derived, not assumed: both bodies must weigh the same for the comparison below
+# to isolate thermal weakening rather than a mass difference.
+BASE_THRESHOLD = rt.physics.fracture_group(INTACT)["base_break_impulse"]
 
 # Materialise fields and prime the first readback request.
 for _ in range(4):

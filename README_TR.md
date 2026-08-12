@@ -172,6 +172,21 @@ CUDA ve CPU backend'li, çok iş parçacıklı grid ve parçacık tabanlı bir F
 - Keyframe ile animasyonlu collider'lar her alt-adımda yeniden konumlanır, böylece sıvı hareketli geometriyi takip eder
 - Adaptif çözünürlük, açık/kapalı sınır modları, sızıntıyı önleyen dinamik parçacık yeniden tohumlama, sıvı materyal preset'leri (Su, Yağ, Özel)
 
+### Sıvı yüzey gölgeleme — izoyüzey artık bir materyal yüzeyi
+Yeniden kurulan SDF sıvı sınırı, **bir üçgenin aldığı BSDF'in aynısıyla**
+gölgeleniyor ve bu sırada hiçbir mesh üretilmiyor. Bir sahne materyalini fluid
+domain'e bağla; eriyik cam, lav, çamur, çikolata veya donmuş resin artık shader
+özel durumu değil, sıradan materyal işi (Vulkan RT):
+- **Tam Principled lob seçimi** — clearcoat, metal, dielektrik, translucency ve random-walk SSS, hepsi paylaşılan BSDF modülünden
+- **Gerçek kırılma**, mesh'lerin kullandığı cam lobunun aynısıyla: IOR, pürüzlü geçirim, TIR ve dispersiyon. Ön/arka yüz kararı sarım sırasından okunmuyor, level set'ten **ölçülüyor**; iç yol uzunluğu da yazarın verdiği bir sabit değil, gerçekten kat edilen mesafe
+- **İnce kabuk filmi** (sabun köpüğü, şampanya başlığı): Fresnel rim + ince-film iridescence
+- **Resin kaplama**, opak taban üzerinde — toz, kir zerreleri ve renkli şardları marşeden prosedürel iç hacim dahil; domain uzayına çapalı
+- **Emission**, emission dokusu dahil
+- **Tri-planar dokular** (albedo, roughness, metallic, emission). Raymarch edilen izoyüzeyin UV'si yoktur ve olamaz — açılacak mesh yok, yüzey her karede alandan yeniden kuruluyor — bu yüzden materyalin kendi UV ölçek/offset'i dünya uzayında tiling anlamına geliyor. Roughness/metallic, mesh yolunun kullandığı paketlenmiş ORM kanal politikasının **aynısını** paylaşıyor
+- **Prosedürel gözeneklilik**: mayalanmış hamur, havalandırılmış kek harcı, ponza ve donmuş köpük. Hücresel bir alan, yüzey bulunmadan **önce** yoğunluktan oyuluyor; böylece gözenekler gerçek geometri. Kenarları doğru normali, kırılmayı ve öz-gölgeyi alan gradyanından alıyor — alpha kesme kenarsız delik açardı. Kabarcık boyutu dünya biriminde yazılıyor, yani domain çözünürlüğünü değiştirmek aynı içi yeniden render eder, boyutunu değiştirmez
+
+> Bilinen sınırlar — eksiklikten değil, kuruluştan: tri-planar projeksiyon ve resin iç yapısı **dünya uzayına** çapalı, dolayısıyla hızlı akan sıvı sabit bir desenin içinden kayar (durgun havuz, hamur veya donmuş resin doğrudur). Bunları sıvıyla birlikte taşımak advected UVW niteliği ister. Normal haritaları izoyüzeyde henüz bağlı değil: tri-planar normal mapping düzlem başına tanjant çerçevesi ve whiteout harmanı ister; yarım yapılırsa eksik özellik gibi değil, aydınlatma hatası gibi görünür.
+
 ### Gaz, duman & ateş
 - Sıcaklık, is ve yakıt yoğunluğu için CPU referans yolunu koruyan **Vulkan Compute yoğun-ızgara çözücü**
 - Advection, combustion, buoyancy, vorticity confinement, curl türbülansı, pressure projection ve dış kuvvetler için kalıcı GPU aşamaları

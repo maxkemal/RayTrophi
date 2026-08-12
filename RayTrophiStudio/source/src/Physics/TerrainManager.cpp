@@ -1420,7 +1420,7 @@ void TerrainManager::initLayers(TerrainObject* terrain) {
         terrain->layers.resize(4, nullptr);
         terrain->layer_uv_scales.resize(4, 50.0f); // Default tiling
         
-        static const char* defLayerNames[4] = {"Grass", "Rock", "Snow", "Flow"};
+        static const char* defLayerNames[4] = {"Grass", "Rock", "Snow", "Soil / Flow"};
         static const Vec3 defLayerColors[4] = {
             Vec3(0.3f, 0.5f, 0.2f),  // Grass
             Vec3(0.4f, 0.4f, 0.4f),  // Rock

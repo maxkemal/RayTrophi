@@ -140,7 +140,8 @@ inline bool cancel_bake = false;
 inline bool drawFluidPresetCombo(const char* id, RayTrophiSim::Fluid::APICSolverParams& params) {
     using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
     static const char* names[] = {
-        "Custom (Manual)", "Water", "Oil", "Mud", "Honey", "Lava", "Sand"
+        "Custom (Manual)", "Water", "Oil", "Mud", "Honey", "Lava", "Sand",
+        "Chocolate"
     };
     bool applied = false;
     int idx = static_cast<int>(params.current_preset);
@@ -157,16 +158,20 @@ inline bool drawFluidPresetCombo(const char* id, RayTrophiSim::Fluid::APICSolver
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "Physically-motivated rheology presets. Overwrites viscosity, friction,\n"
-            "FLIP/APIC blend, damping and packing only - domain, gravity, reseed and\n"
-            "performance settings are kept.\n\n"
-            "Water : thin, splashy Newtonian liquid.\n"
-            "Oil   : mildly viscous, less splashy.\n"
-            "Mud   : heavy dissipative slurry.\n"
-            "Honey : very viscous, slow, sticky.\n"
-            "Lava  : extreme viscosity (renderer adds the glow).\n"
-            "Sand  : granular approximation - high friction + strong packing.\n"
-            "        (liquid-solver approximation, not full MPM granular).");
+            "Rheology presets carrying a PHYSICAL kinematic viscosity (m^2/s).\n"
+            "Overwrites viscosity, wall slip, friction, FLIP/APIC blend, damping\n"
+            "and packing only - domain, gravity, reseed and performance settings\n"
+            "are kept.\n\n"
+            "Water     : nu=0, thin and splashy. Free-slip walls.\n"
+            "Oil       : nu=1e-4, mildly viscous.\n"
+            "Mud       : nu=2e-3, heavy slurry (no yield stress yet - it creeps\n"
+            "            to a stop instead of stopping).\n"
+            "Honey     : nu=7e-3, slow sticky threads. No-slip walls.\n"
+            "Chocolate : nu=4e-3, molten couverture. No-slip, coats surfaces.\n"
+            "Lava      : nu=0.5, extreme (renderer adds the glow).\n"
+            "Sand      : granular APPROXIMATION - friction + packing, no viscous\n"
+            "            solve. It has no angle of repose and does not fall at g;\n"
+            "            that needs Drucker-Prager plasticity.");
     }
     return applied;
 }
@@ -1750,24 +1755,49 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         // ── Destruction: convex Voronoi pre-fracture (Faz 1, geometry only) ──
         ImGui::Spacing();
         if (ImGui::CollapsingHeader("Fracture (Destruction)")) {
-            ImGui::TextDisabled("Splits the selected mesh into convex shards (Voronoi).");
+            ImGui::TextDisabled(ui.fracture_exact_surface
+                ? "Splits the selected MESH into Voronoi shards (keeps UVs/cavities)."
+                : "Splits the selected mesh's CONVEX HULL into Voronoi shards.");
             ImGui::TextDisabled("Faz 1: geometry only. Faz 2 makes shards rigid bodies.");
             const bool fractured = has_obj && ui.isMeshFractured(sel_name);
             if (!has_obj) ImGui::BeginDisabled();
             ImGui::SliderInt("Shards##frac", &ui.fracture_site_count, 2, 200);
             ImGui::InputInt("Seed##frac", &ui.fracture_seed);
-            ImGui::Combo("Pattern##frac", &ui.fracture_pattern, "Uniform\0Impact-clustered\0");
+            ImGui::Combo("Pattern##frac", &ui.fracture_pattern,
+                         "Uniform\0Impact-clustered\0Thermal (burn-guided)\0");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Thermal: seed density follows the mass this object has\n"
+                                  "actually lost to burning, melting and transfer, so it\n"
+                                  "breaks along the char line instead of along noise.\n"
+                                  "Falls back to Uniform on an object that has not burnt yet.");
+            ImGui::SliderInt("Structural Clusters##frac", &ui.fracture_cluster_count, 1, 32);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How many INDEPENDENT fracture groups the shards form.\n"
+                                  "1 = the whole object detaches on any hit anywhere.\n"
+                                  "Higher = a blast takes off the part it actually hit,\n"
+                                  "and the rest of the structure stays standing.");
             ImGui::SliderFloat("Preview Gap##frac", &ui.fracture_preview_gap, 0.0f, 0.3f, "%.3f");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Shrinks shards toward their centre so the cuts are visible\n"
                                   "before physics. 0 = perfect tiling (looks intact).");
+            ImGui::Checkbox("Exact Surface##frac", &ui.fracture_exact_surface);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Cut the MESH, not its convex hull.\n"
+                                  "Keeps cavities, concave shapes, UVs and materials, so a\n"
+                                  "shard can still show the char that decided where it broke.\n"
+                                  "Off: hollow assets fracture as solid blocks and shards\n"
+                                  "lose their texturing. Needs a closed mesh; any cut that\n"
+                                  "cannot be sealed falls back to the hull for that shard.");
             const float fw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
             if (ImGui::Button(fractured ? "Re-Fracture##frac" : "Generate Shards##frac", ImVec2(fw, 28))) {
                 ui.fractureSelectedMesh(ui_ctx, sel_name, ui.fracture_site_count,
                                         static_cast<uint32_t>(ui.fracture_seed), ui.fracture_pattern);
             }
             if (ImGui::IsItemHovered() && has_obj)
-                ImGui::SetTooltip("Clip the mesh's convex hull into %d Voronoi shards.", ui.fracture_site_count);
+                ImGui::SetTooltip(ui.fracture_exact_surface
+                    ? "Cut the mesh itself into %d Voronoi shards."
+                    : "Clip the mesh's convex hull into %d Voronoi shards.",
+                    ui.fracture_site_count);
             ImGui::SameLine();
             if (!fractured) ImGui::BeginDisabled();
             if (ImGui::Button("Restore##frac", ImVec2(fw, 28)))
@@ -1779,25 +1809,93 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 // ── Faz 2: shards → breakable rigid bodies ──
                 ImGui::Separator();
                 ImGui::TextDisabled("Destruction: shards become rigid bodies, intact until hit.");
-                ImGui::SliderFloat("Break Threshold##frac", &ui.fracture_break_threshold,
-                                   0.5f, 100.0f, "%.1f");
+                // ★ AUTHORED AS A VELOCITY, and the slider says so. An impulse
+                // threshold cannot be authored once and reused: the same N-s is a
+                // demolition charge for a plank and a nudge for a tower leg, so
+                // every object needed its own number and none of them transferred.
+                // The velocity a piece can absorb before it lets go is the same
+                // kind of quantity at both scales; multiplying by the group's mass
+                // turns it back into the impulse the solver compares against.
+                ImGui::DragFloat("Break Toughness##frac", &ui.fracture_break_threshold,
+                                 0.1f, 0.05f, 500.0f, "%.2f m/s",
+                                 ImGuiSliderFlags_Logarithmic);
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Impact impulse (kg·m/s) needed to shatter the object.\n"
-                                      "Lower = fragile, higher = tough.");
+                    ImGui::SetTooltip("How violent a shove this object survives, in m/s.\n"
+                                      "The impulse threshold is this times the group's\n"
+                                      "mass, so a heavy cluster resists what scatters a\n"
+                                      "light one WITHOUT retuning per object.\n"
+                                      "1-2 = brittle (glass, plaster)\n"
+                                      "5   = ordinary (default)\n"
+                                      "20+ = tough (welded steel)\n"
+                                      "Thermal damage lowers this automatically.");
+                // The mass the threshold is derived from. Shown because a group
+                // that will not break has two completely different causes — a high
+                // toughness, or shards that came out far heavier than they look —
+                // and the two are indistinguishable from the toughness alone.
+                {
+                    const float group_mass = scene.fractureGroupMass(sel_name);
+                    if (group_mass > 0.0f) {
+                        ImGui::TextDisabled("Group mass %.1f kg  ->  breaks above %.0f N-s",
+                                            group_mass,
+                                            group_mass * ui.fracture_break_threshold);
+                    }
+                }
                 if (ImGui::Button("Make Breakable##frac", ImVec2(fw, 28))) {
                     auto sit = ui.fracture_shard_nodes_.find(sel_name);
-                    if (sit != ui.fracture_shard_nodes_.end())
-                        scene.makeFractureGroupBreakable(sel_name, sit->second,
-                                                         ui.fracture_break_threshold);
+                    if (sit != ui.fracture_shard_nodes_.end()) {
+                        // ── One rigid-body group PER STRUCTURAL CLUSTER ───────
+                        // ★ Registering every shard under one group is what made
+                        // a single hit anywhere delete the whole object. The
+                        // impulse consumer works on groups, so the grouping IS
+                        // the destruction granularity.
+                        //
+                        // The first cluster keeps the plain object name so every
+                        // existing consumer (scripts, Break Now, the pressure
+                        // bridge telemetry) still finds the object by its own
+                        // name; further clusters get a suffix.
+                        const auto cit = ui.fracture_shard_clusters_.find(sel_name);
+                        const bool clustered = cit != ui.fracture_shard_clusters_.end() &&
+                                               cit->second.size() == sit->second.size();
+                        std::map<int, std::vector<std::string>> by_cluster;
+                        for (size_t i = 0; i < sit->second.size(); ++i)
+                            by_cluster[clustered ? cit->second[i] : 0].push_back(sit->second[i]);
+                        for (const auto& entry : by_cluster) {
+                            const std::string group = entry.first == 0
+                                ? sel_name
+                                : sel_name + "__cluster_" + std::to_string(entry.first);
+                            // ★ sel_name as the source object, so every cluster
+                            // — not just the one that inherited the object's own
+                            // name — can find the MSF field and weaken.
+                            scene.makeFractureGroupBreakable(
+                                group, entry.second, ui.fracture_break_threshold,
+                                /*integrity_weakening=*/true,
+                                /*integrity_exponent=*/1.5f,
+                                /*minimum_threshold_scale=*/0.15f,
+                                /*source_object=*/sel_name);
+                        }
+                        ui.addViewportMessage(
+                            "Registered " + std::to_string(by_cluster.size()) +
+                            " breakable cluster(s) for '" + sel_name + "'.");
+                    }
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Register the shards as static rigid bodies that shatter\n"
-                                      "into dynamic pieces when something hits them hard enough.");
+                                      "into dynamic pieces when something hits them hard enough.\n"
+                                      "One independent group per structural cluster.");
                 ImGui::SameLine();
-                if (ImGui::Button("Break Now##frac", ImVec2(fw, 28)))
+                if (ImGui::Button("Break Now##frac", ImVec2(fw, 28))) {
                     scene.breakFractureGroupNow(sel_name, 6.0f);
+                    const auto cit = ui.fracture_shard_clusters_.find(sel_name);
+                    if (cit != ui.fracture_shard_clusters_.end()) {
+                        int clusters = 0;
+                        for (int c : cit->second) clusters = (std::max)(clusters, c + 1);
+                        for (int c = 1; c < clusters; ++c)
+                            scene.breakFractureGroupNow(
+                                sel_name + "__cluster_" + std::to_string(c), 6.0f);
+                    }
+                }
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Shatter immediately (takes effect during playback).");
+                    ImGui::SetTooltip("Shatter every cluster immediately (takes effect during playback).");
             }
         }
 
@@ -1872,6 +1970,42 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         int rb_to_remove = -1;
         int rb_to_apply = -1;   // "Apply at Frame": freeze current shape + drop the body
         std::string selection_request_name;  // set when a list row is clicked
+        std::string group_to_remove;         // remove every body of a fracture group
+
+        // ── What the list actually shows ────────────────────────────────────
+        // ★ ONE ROW PER FRACTURE GROUP, not per shard.
+        //
+        // Fracturing a mesh registers a body PER SHARD, so a 40-shard break puts
+        // 40 rows here — the panel grew taller than the screen and everything
+        // below it (the editor, the bake controls) became unreachable. The rows
+        // were also useless individually: nobody edits shard 27 of 40, they edit
+        // the group, which is the unit that breaks anyway.
+        struct RegistryRow {
+            int body_index = -1;      // representative body (first of the group)
+            std::string label;
+            std::string group;        // non-empty => this row stands for a group
+            int shard_count = 0;
+        };
+        std::vector<RegistryRow> rows;
+        {
+            std::map<std::string, int> group_row;   // group -> index into `rows`
+            for (int i = 0; i < (int)scene.rigid_bodies.size(); ++i) {
+                const auto& body = scene.rigid_bodies[i];
+                const std::string group =
+                    body.getBreakable() ? body.getFractureGroup() : std::string();
+                if (group.empty()) {
+                    rows.push_back({i, body.source_name, std::string(), 0});
+                    continue;
+                }
+                auto it = group_row.find(group);
+                if (it == group_row.end()) {
+                    group_row.emplace(group, (int)rows.size());
+                    rows.push_back({i, group, group, 1});
+                } else {
+                    ++rows[it->second].shard_count;
+                }
+            }
+        }
 
         // --- Compact registry list (name | type | remove) ----------------
         // One row per body; selecting a row drives the viewport selection so the
@@ -1880,35 +2014,72 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         // object. Soft Body slots into the same list/editor when it lands.
         if (scene.rigid_bodies.empty()) {
             ImGui::TextDisabled("No rigid bodies yet. Select a mesh and click \"Make Rigid Body\".");
-        } else if (ImGui::BeginTable("RigidBodyRegistryTable", 3,
-                                     ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+        } else {
+            // Never taller than ten rows. Beyond that the list scrolls instead of
+            // pushing the editor and the bake controls off the bottom of the panel.
+            const float row_h = ImGui::GetFrameHeightWithSpacing();
+            const float list_h = std::min((float)rows.size(), 10.0f) * row_h + row_h * 0.5f;
+            ImGui::BeginChild("RigidBodyRegistryList", ImVec2(0.0f, list_h), false);
+            if (ImGui::BeginTable("RigidBodyRegistryTable", 3,
+                                  ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
             ImGui::TableSetupColumn("Body");
             ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 124.0f);
             ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 28.0f);
-            for (int i = 0; i < (int)scene.rigid_bodies.size(); ++i) {
-                auto& body = scene.rigid_bodies[i];
-                ImGui::PushID(i);
-                const bool is_sel = (i == sel_rb);
+            for (int r = 0; r < (int)rows.size(); ++r) {
+                const RegistryRow& row = rows[r];
+                auto& body = scene.rigid_bodies[row.body_index];
+                const bool is_group = !row.group.empty();
+                ImGui::PushID(r);
+                // A group row reads as selected while ANY of its shards is.
+                const bool is_sel = is_group
+                    ? (sel_rb >= 0 && sel_rb < (int)scene.rigid_bodies.size() &&
+                       scene.rigid_bodies[sel_rb].getFractureGroup() == row.group)
+                    : (row.body_index == sel_rb);
 
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
-                if (ImGui::Selectable(body.source_name.c_str(), is_sel)) {
+                const std::string label = is_group
+                    ? row.label + "  (" + std::to_string(row.shard_count) + " shards)"
+                    : row.label;
+                if (ImGui::Selectable(label.c_str(), is_sel)) {
                     selection_request_name = body.source_name;
                 }
+                if (is_group && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Fracture group '%s' — %d breakable shards.\n"
+                                      "Type and Remove apply to ALL of them.",
+                                      row.group.c_str(), row.shard_count);
 
                 ImGui::TableSetColumnIndex(1);
                 ImGui::SetNextItemWidth(-FLT_MIN);
                 int row_type = bodyTypeIndex(body);
                 if (ImGui::Combo("##rbrowtype", &row_type, kBodyTypeItems)) {
-                    if (applyBodyType(body, row_type)) applyRigidBodyChange();
+                    bool changed = false;
+                    if (is_group) {
+                        // Editing one shard of a group and leaving the other 39
+                        // behind produces a group that is half static and half
+                        // dynamic — never what was meant, and hard to even see.
+                        for (auto& b : scene.rigid_bodies)
+                            if (b.getBreakable() && b.getFractureGroup() == row.group)
+                                changed |= applyBodyType(b, row_type);
+                    } else {
+                        changed = applyBodyType(body, row_type);
+                    }
+                    if (changed) applyRigidBodyChange();
                 }
 
                 ImGui::TableSetColumnIndex(2);
-                if (ImGui::SmallButton("x")) rb_to_remove = i;
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this body");
+                if (ImGui::SmallButton("x")) {
+                    if (is_group) group_to_remove = row.group;
+                    else rb_to_remove = row.body_index;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(is_group ? "Remove every body in this group"
+                                               : "Remove this body");
                 ImGui::PopID();
             }
-            ImGui::EndTable();
+                ImGui::EndTable();
+            }
+            ImGui::EndChild();
         }
 
         // List click -> viewport selection (bidirectional sync; viewport -> list
@@ -2463,6 +2634,16 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
 
         if (rb_to_remove >= 0 && rb_to_remove < (int)scene.rigid_bodies.size()) {
             scene.removeRigidBodyForObject(scene.rigid_bodies[rb_to_remove].source_name);
+        }
+        if (!group_to_remove.empty()) {
+            // Names collected first: removeRigidBodyForObject mutates the vector
+            // we would otherwise be iterating.
+            std::vector<std::string> doomed;
+            for (const auto& b : scene.rigid_bodies)
+                if (b.getBreakable() && b.getFractureGroup() == group_to_remove)
+                    doomed.push_back(b.source_name);
+            for (const std::string& name : doomed)
+                scene.removeRigidBodyForObject(name);
         }
         if (rb_to_apply >= 0 && rb_to_apply < (int)scene.rigid_bodies.size()) {
             // applyBodyAtCurrentFrame requests a SceneUI mesh/bbox cache rebuild

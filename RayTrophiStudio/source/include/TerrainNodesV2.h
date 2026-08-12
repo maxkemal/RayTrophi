@@ -2576,18 +2576,22 @@ namespace TerrainNodesV2 {
             name = "Auto Splat";
             terrainNodeType = NodeType::AutoSplat;
             
-            // Default rules: Grass/Rock/Snow/Dirt
+            // Default rules: Grass/Rock/Snow/Soil-Flow
             // Layer 0 (R): Grass - flat, low-mid height
             rules[0] = { 0.0f, 50.0f, 0.0f, 25.0f, 0.5f, 0.5f, 10.0f, 0.05f, true };
             // Layer 1 (G): Rock - steep slopes
             rules[1] = { 0.0f, 200.0f, 30.0f, 90.0f, 0.2f, 0.8f, 5.0f, 0.03f, true };
             // Layer 2 (B): Snow - high altitude
             rules[2] = { 80.0f, 200.0f, 0.0f, 45.0f, 0.9f, 0.1f, 15.0f, 0.02f, true };
-            // Layer 3 (A): Dirt/Sand - low, flat
-            rules[3] = { 0.0f, 20.0f, 0.0f, 15.0f, 0.6f, 0.4f, 8.0f, 0.1f, false };
+            // Layer 3 (A): exposed soil; optional Flow is merged in compute().
+            rules[3] = { 0.0f, 20.0f, 0.0f, 15.0f, 0.6f, 0.4f, 8.0f, 0.1f, true };
             
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            // Appended for serialized pin-index stability. A combines the
+            // authored soil rule with dry/wet drainage channels.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             
             // 4-channel output for splat map
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -3265,6 +3269,9 @@ namespace TerrainNodesV2 {
             // snow-melt or climate mask here so flow accounts for snow water.
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Precipitation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Water Input Depth", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PhysicalScalar, true, 1, NodeSystem::ImageUnit::Meters));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Filled Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -3279,6 +3286,9 @@ namespace TerrainNodesV2 {
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
                 1, NodeSystem::ImageUnit::SquareMeters));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Runoff Volume", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::CubicMeters));
             metadata.displayName = "Watershed Analysis";
             metadata.category = "Hydrology";
             metadata.description = "Depression-safe D8 drainage, accumulation and catchments";
@@ -3311,6 +3321,9 @@ namespace TerrainNodesV2 {
         int maximumLakes = 64;
         bool includeClosedBasins = true;
         std::vector<WaterBodyData> pendingWaterBodies;
+        // Evaluation-local accepted footprint. Published as an internal terrain
+        // hydrology field so visible river output cannot depend on manual wiring.
+        NodeSystem::Image2DData pendingLakeMask;
 
         LakeBasinNode() {
             name = "Lake Basin";
@@ -3322,6 +3335,9 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction, true,
                 1, NodeSystem::ImageUnit::Unitless));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Runoff Volume", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PhysicalScalar, true, 1, NodeSystem::ImageUnit::CubicMeters));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -3507,6 +3523,10 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
                 true, 1, NodeSystem::ImageUnit::SquareMeters));
+            // Appended for pin-index serialization stability. A lake owns its
+            // complete footprint, so extracted channels must leave it empty.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -4620,6 +4640,9 @@ namespace TerrainNodesV2 {
                 "Meltwater", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Avalanche", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Meltwater Depth", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PhysicalScalar, 1, NodeSystem::ImageUnit::Meters));
             metadata.displayName = "Snow Layer";
             metadata.category = "Snow & Ice";
             metadata.headerColor = IM_COL32(105, 180, 220, 255);

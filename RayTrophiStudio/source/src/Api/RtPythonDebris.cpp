@@ -22,6 +22,7 @@ py::dict infoDict(const rtapi::AshDebrisInfo& i) {
     d["lod_reduced_particles"] = i.lod_reduced_particles;
     d["budget_rejected_particles"] = i.budget_rejected_particles;
     d["accepted_mass_kg"] = i.accepted_mass_kg;
+    d["reservoir_mass_kg"] = i.reservoir_mass_kg;
     return d;
 }
 }

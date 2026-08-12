@@ -22,12 +22,14 @@
 #include "rt_payload.glsl"
 layout(location = 0) rayPayloadEXT RayPayload payload;
 
-const uint BOUNCE_SPECULAR     = 0u;
-const uint BOUNCE_DIFFUSE      = 1u;
-const uint BOUNCE_TRANSMISSION = 2u;   // real refraction — the ONLY event that sets crossedGlass
-const uint BOUNCE_TRANSPARENT  = 3u;
-const uint BOUNCE_RESIN        = 4u;
-const uint BOUNCE_GLASS_REFLECT = 6u;  // glass mirror lobe: keep walking, does NOT count as crossing
+// BOUNCE_* come from rt_payload.glsl above — it is the single source of truth
+// for the payload ABI, and these were a duplicate copy of the same values.
+// Two notes worth keeping from that copy, because they are specific to the
+// photon walk rather than to the ABI:
+//   BOUNCE_TRANSMISSION  — real refraction; the ONLY event that sets crossedGlass.
+//   BOUNCE_GLASS_REFLECT — glass mirror lobe: keep walking, does NOT count as
+//                          a crossing (otherwise a reflection off a window
+//                          would qualify the path as a caustic).
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 

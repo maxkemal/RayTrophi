@@ -357,7 +357,10 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
 
     // APICSolverParams
     j["fluid_params"]["gravity"] = vec3ToJson(d.fluid_params.gravity);
-    j["fluid_params"]["viscosity"] = d.fluid_params.viscosity;
+    // ν in m²/s. Renamed from the old unitless `viscosity` rather than reused —
+    // see APICSolverParams::kinematic_viscosity.
+    j["fluid_params"]["kinematic_viscosity"] = d.fluid_params.kinematic_viscosity;
+    j["fluid_params"]["viscosity_wall_slip"] = d.fluid_params.viscosity_wall_slip;
     j["fluid_params"]["particles_per_cell"] = d.fluid_params.particles_per_cell;
     j["fluid_params"]["cfl"] = d.fluid_params.cfl;
     j["fluid_params"]["max_substeps"] = d.fluid_params.max_substeps;
@@ -376,7 +379,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["density_correction"] = d.fluid_params.density_correction;
     j["fluid_params"]["affine_damping"] = d.fluid_params.affine_damping;
     j["fluid_params"]["max_velocity"] = d.fluid_params.max_velocity;
-    j["fluid_params"]["viscosity_iterations"] = d.fluid_params.viscosity_iterations;
+    j["fluid_params"]["viscosity_sweeps"] = d.fluid_params.viscosity_sweeps;
     j["fluid_params"]["current_preset"] = static_cast<int>(d.fluid_params.current_preset);
     j["fluid_params"]["free_surface"] = d.fluid_params.free_surface;
     j["fluid_params"]["ghost_fluid_surface"] = d.fluid_params.ghost_fluid_surface;
@@ -450,6 +453,10 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_surface_ior"] = d.fluid_surface_ior;
     j["fluid_surface_roughness"] = d.fluid_surface_roughness;
     j["fluid_surface_foam"] = d.fluid_surface_foam;
+    j["fluid_surface_material_id"] = d.fluid_surface_material_id;
+    j["fluid_surface_pore_amount"] = d.fluid_surface_pore_amount;
+    j["fluid_surface_pore_scale"] = d.fluid_surface_pore_scale;
+    j["fluid_surface_pore_detail"] = d.fluid_surface_pore_detail;
     j["fluid_debug_overlay"] = d.fluid_debug_overlay;
 
     // Whitewater (foam/spray/bubbles) — Ihmsen 2012.
@@ -539,7 +546,8 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_params")) {
         const auto& fp = j["fluid_params"];
         if (fp.contains("gravity")) d.fluid_params.gravity = jsonToVec3(fp["gravity"]);
-        if (fp.contains("viscosity")) d.fluid_params.viscosity = fp["viscosity"];
+        if (fp.contains("kinematic_viscosity")) d.fluid_params.kinematic_viscosity = fp["kinematic_viscosity"];
+        if (fp.contains("viscosity_wall_slip")) d.fluid_params.viscosity_wall_slip = fp["viscosity_wall_slip"];
         if (fp.contains("particles_per_cell")) d.fluid_params.particles_per_cell = fp["particles_per_cell"];
         if (fp.contains("cfl")) d.fluid_params.cfl = fp["cfl"];
         if (fp.contains("max_substeps")) d.fluid_params.max_substeps = fp["max_substeps"];
@@ -556,10 +564,18 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("density_correction")) d.fluid_params.density_correction = fp["density_correction"];
         if (fp.contains("affine_damping")) d.fluid_params.affine_damping = fp["affine_damping"];
         if (fp.contains("max_velocity")) d.fluid_params.max_velocity = fp["max_velocity"];
-        if (fp.contains("viscosity_iterations")) d.fluid_params.viscosity_iterations = fp["viscosity_iterations"];
-        if (fp.contains("current_preset"))
+        if (fp.contains("viscosity_sweeps")) d.fluid_params.viscosity_sweeps = fp["viscosity_sweeps"];
+        if (fp.contains("current_preset")) {
             d.fluid_params.current_preset =
                 static_cast<RayTrophiSim::Fluid::APICSolverParams::FluidPreset>(fp["current_preset"].get<int>());
+            // Pre-rework scene: no ν key. Re-apply the named preset so "Honey"
+            // does not load as an inviscid liquid still labelled Honey.
+            if (!fp.contains("kinematic_viscosity") &&
+                d.fluid_params.current_preset !=
+                    RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom) {
+                d.fluid_params.applyPreset(d.fluid_params.current_preset);
+            }
+        }
         if (fp.contains("free_surface")) d.fluid_params.free_surface = fp["free_surface"];
         if (fp.contains("ghost_fluid_surface")) d.fluid_params.ghost_fluid_surface = fp["ghost_fluid_surface"];
         if (fp.contains("variational_solids")) d.fluid_params.variational_solids = fp["variational_solids"];
@@ -641,6 +657,10 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_surface_ior")) d.fluid_surface_ior = j["fluid_surface_ior"];
     if (j.contains("fluid_surface_roughness")) d.fluid_surface_roughness = j["fluid_surface_roughness"];
     if (j.contains("fluid_surface_foam")) d.fluid_surface_foam = j["fluid_surface_foam"];
+    if (j.contains("fluid_surface_material_id")) d.fluid_surface_material_id = j["fluid_surface_material_id"];
+    if (j.contains("fluid_surface_pore_amount")) d.fluid_surface_pore_amount = j["fluid_surface_pore_amount"];
+    if (j.contains("fluid_surface_pore_scale")) d.fluid_surface_pore_scale = j["fluid_surface_pore_scale"];
+    if (j.contains("fluid_surface_pore_detail")) d.fluid_surface_pore_detail = j["fluid_surface_pore_detail"];
     if (j.contains("fluid_debug_overlay")) d.fluid_debug_overlay = j["fluid_debug_overlay"];
 
     if (j.contains("fluid_foam_params")) {
@@ -848,6 +868,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     root["settings"]["use_vulkan"] = settings.use_vulkan;
     root["settings"]["backend"] = settings.use_vulkan ? "vulkan" : (settings.use_optix ? "optix" : "cpu");
     root["settings"]["persistent_tonemap"] = settings.persistent_tonemap;
+    root["settings"]["transparent_background"] = settings.transparent_background;
     
     // Animation Sequencer Settings
     root["settings"]["animation_start_frame"] = settings.animation_start_frame;
@@ -1186,6 +1207,8 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
             backend_name = std::string(backend_name_sv);
         }
         s["persistent_tonemap"].get(tonemap);
+        bool transparent_background = false;
+        (void)s["transparent_background"].get(transparent_background);
 
         if (!backend_name.empty()) {
             std::transform(backend_name.begin(), backend_name.end(), backend_name.begin(),
@@ -1216,6 +1239,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         settings.use_optix = optix;
         settings.use_vulkan = vulkan;
         settings.persistent_tonemap = tonemap;
+        settings.transparent_background = transparent_background;
         
         // Animation Sequencer Settings
         int64_t anim_start = 0, anim_end = 250, anim_fps = 24;

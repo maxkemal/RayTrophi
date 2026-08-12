@@ -21,6 +21,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <SurfaceMeshCache.h>
 #include "ColliderMeshBVH.h"
@@ -330,6 +331,28 @@ struct SimulationGridDomainDesc {
     float smoke_generation = 0.6f;
     float flame_dissipation = 3.0f;
     float fire_max_temperature = 10.0f;
+    // ── Combustion -> STRUCTURE (deflagration overpressure) ──────────────────
+    // ★ The missing link of the whole destruction chain. Burning already
+    // weakened the material and lowered its fracture threshold, but the ONLY
+    // producer of a structural impulse was rt.gas.pressure_pulse — so in the
+    // app, fire could never actually knock anything down. This closes it.
+    bool  structural_coupling_enabled = false;
+    // ★ CALIBRATION, NOT PHYSICS, and named so on purpose.
+    //
+    // This solver's fuel and temperature are normalized units, so there is no
+    // honest constant that converts its burn rate into kilopascals. Deriving a
+    // "real" pressure from unitless fuel would produce a number that looks
+    // physical and answers to nothing. This is the single knob mapping solver
+    // intensity onto the kPa the structural bridge consumes: raise it until a
+    // fire of the size you author breaks what it ought to break.
+    float structural_pressure_scale = 400.0f;  // kPa per unit mean burn rate
+    // Below this mean burn rate a fire is a fire, not a blast. Stops a steady
+    // candle-sized flame from emitting an endless drizzle of blast events.
+    float structural_min_intensity = 0.05f;
+    // Seconds between events from one domain, and also the duration each event
+    // claims — so the impulse it delivers (p x A x dt) covers exactly the
+    // interval it stands for instead of counting the same load twice.
+    float structural_event_interval = 0.25f;
     // Gas motion belongs to the domain, not to the discrete-particle physics
     // preset. Hybrid effects (spark particles + fire grid) otherwise inherit
     // Spark's zero buoyancy and move only through combustion expansion.
@@ -375,9 +398,24 @@ struct SimulationGridDomainDesc {
     std::shared_ptr<VolumeShader> shader;
 
     // ── Fluid render mode (consumed when type == Fluid). ─────────────────────
-    // Default is Volume so projects load unchanged. Other modes activate the
-    // particle-sphere mirror (debug) or the level-set surface proxy.
-    Fluid::FluidRenderMode fluid_render_mode = Fluid::FluidRenderMode::Volume;
+    // ★ The default used to be `Volume`, justified as "so projects load
+    // unchanged". That justification was false and the default was the bug:
+    // every serializer writes this field explicitly (SceneSerializer.cpp,
+    // ProjectManager.cpp), so a LOADED project never depends on the default —
+    // only a NEWLY CREATED domain does, and Volume is a DEAD configuration for
+    // a liquid (see the normalisation in scene_data.h: no SDF is built, nothing
+    // renders, nothing reports a failure).
+    //
+    // It also broke the panel silently: the combo offers only Particles and
+    // SurfaceSDF, so a Volume domain DISPLAYED "Smooth Glassy Surface" while
+    // the parameter blocks below stayed gated on the real enum — the section
+    // opened with a mode selected and no settings under it. Reported as
+    // "Liquid Visualization does not open", and it cleared up as soon as
+    // anything ran the sim, because that is where the value gets normalised.
+    //
+    // The consumer-side normalisation stays: it still repairs old .rtp files
+    // that literally saved Volume. This just stops manufacturing new ones.
+    Fluid::FluidRenderMode fluid_render_mode = Fluid::FluidRenderMode::SurfaceSDF;
 
     // Particles-mode render config (consumed only when fluid_render_mode ==
     // Particles). Mirrors the per-system render in ParticleSystemObject.
@@ -413,6 +451,44 @@ struct SimulationGridDomainDesc {
     // Whitewater/foam strength 0..1. Whitens high-curvature surface regions
     // (wave crests, breaking edges, splash) via the SDF Laplacian. 0 = off.
     float fluid_surface_foam = 0.0f;
+    // Explicit MaterialManager material id shading the SDF isosurface. -1 keeps
+    // the built-in Fresnel + Beer-Lambert dielectric (water/glass), which is all
+    // this surface could ever be before. When set, the isosurface runs the SAME
+    // Principled lobe selection a triangle does — clearcoat, metal, transmission,
+    // SSS — so molten glass, lava, mud and chocolate are ordinary material work
+    // instead of shader special cases.
+    // Deliberately NOT shared with fluid_particle_material_id: splat spheres and
+    // the reconstructed surface are two different looks, and silently rewriting
+    // one when the other is edited is the kind of surprise this codebase has
+    // paid for before.
+    int   fluid_surface_material_id = -1;
+
+    // ── Procedural POROSITY (fermented dough, aerated batter, pumice, foam) ──
+    // Amplitude of a 3D noise field SUBTRACTED from the density before the
+    // isosurface test, so a pore is a real hole in the level set rather than an
+    // alpha cutout. That distinction is the whole point: the surface normal is
+    // the field gradient, so the pore RIMS get correct normals, refraction and
+    // self-shadowing for free. An alpha cutout gives holes with no rim at all.
+    //
+    // 0 = off (exactly the surface as before). Sensible range 0..0.4; past ~0.5
+    // the field is eaten away faster than the band can close and the body
+    // disintegrates rather than becoming porous.
+    //
+    // ★ These live on the DOMAIN, not on the surface material, and they have to.
+    // The ISO threshold is evaluated in TWO places — the shading march AND
+    // nearestSurfaceSDFCrossing, the arbiter that decides where gas hands over
+    // to liquid — and the arbiter runs for OTHER volumes, with no access to this
+    // domain's material. Drive porosity from a material graph and the gas would
+    // be clipped against a surface the shader no longer has, silently.
+    float fluid_surface_pore_amount = 0.0f;
+    // Feature size in WORLD units (metres): the diameter of a typical bubble.
+    // Absolute rather than voxel-relative so changing the domain resolution
+    // re-renders the same dough instead of re-sizing its crumb.
+    float fluid_surface_pore_scale = 0.05f;
+    // Second octave weight 0..1. 0 = one clean bubble size (aerated batter);
+    // higher mixes a finer octave in, which is what separates bread crumb
+    // (mixed sizes) from packing foam (uniform).
+    float fluid_surface_pore_detail = 0.5f;
 
     // ImGui debug overlay (cyan blob per particle on top of everything). Used
     // to preview fluid coverage / debug seeding when the RT route hasn't
@@ -520,6 +596,15 @@ struct SimulationGridDomainState {
     bool gas_gpu_partial = false;
     std::string gas_compute_status = "Not stepped";
     SimulationGasStats gas_stats;
+    // ── Molten-transfer substance guard, incremental ─────────────────────────
+    // Mixing two molten substances in one APIC domain is rejected, which used to
+    // mean scanning every particle's substance tag on every transfer request —
+    // O(alive) per request per frame, and worst on the SUCCESS path where no tag
+    // mismatches and the scan runs to the end. Only particles appended since the
+    // last accepted scan can carry a new tag, so remember where the last clean
+    // scan stopped. Reset (count = 0) whenever the tag changes or the SoA shrinks.
+    uint32_t molten_scan_tag = 0u;
+    std::size_t molten_scan_count = 0u;
     // Fluid-only runtime state. Empty for Gas domains.
     Fluid::FluidParticles particles;
     Fluid::APICSolverStats fluid_stats;
@@ -1202,6 +1287,16 @@ struct MoltenMassTransferStats {
     uint64_t completed = 0;
     uint64_t deferred_no_domain = 0;
     uint64_t deferred_no_capacity = 0;
+    // A request that could not be retried and was not fulfilled: the object's
+    // field disappeared, nothing on it was molten any more, or the debit failed
+    // after particles had already been spawned. These used to `continue` out of
+    // the loop leaving no trace at all, so a scripted rt.mass_transfer.queue()
+    // could vanish with the stats still reporting a clean run.
+    uint64_t dropped = 0;
+    // Bumped every time the queue is discarded because the simulation was reset
+    // or a cached frame was restored. Non-zero here explains a reservoir that
+    // "should have" transferred and did not.
+    uint64_t discarded_on_reset = 0;
     float requested_mass = 0.0f;
     float transferred_mass = 0.0f;
     uint64_t spawned_particles = 0;
@@ -1278,7 +1373,12 @@ public:
     const MaterialStateFieldStats& materialStateFieldStats() const {
         return material_state_fields_.stats();
     }
-    void resetMaterialStateFields() { material_state_fields_.resetState(); }
+    void resetMaterialStateFields() {
+        // Clearing the fields zeroes the melt reservoirs a queued request was
+        // formed against; the request must not survive the thing it targets.
+        discardMoltenMassTransferState();
+        material_state_fields_.resetState();
+    }
     // Clear one object's accumulated burn/heat damage. Keyed by the collider's
     // source_name, the same key the field is stored under.
     bool clearMaterialStateField(const std::string& object_key) {
@@ -1294,6 +1394,20 @@ public:
     const MoltenMassTransferStats& moltenMassTransferStats() const {
         return molten_mass_transfer_stats_;
     }
+    // ★★ TIMELINE SAFETY — call on EVERY reset, rewind and cached-frame restore.
+    //
+    // A pending transfer request is an intent formed against a specific MSF
+    // state. Rewinding restores the melt reservoir the request was going to
+    // debit, but the request itself survived in the queue, so the very same
+    // kilogram was spawned into APIC a second time and debited again from a
+    // reservoir that had been rolled back to hold it. The roadmap's
+    // "(frame, source, event_id) dedup; a scrub never reproduces a batch" clause
+    // had no implementation at all — this is it, in its coarse but sound form:
+    // the intent does not outlive the state it was formed against.
+    //
+    // It also puts the domain descriptors back the way the user authored them;
+    // see moltenDomainAuthoredBackup_.
+    void discardMoltenMassTransferState();
     // ── MSF frame cache (Phase 4b) ───────────────────────────────────────────
     // Burn/heat damage is per-object runtime state and does NOT live under a
     // domain (Phase 4: an object outside every domain is still simulated), so it
@@ -1306,6 +1420,10 @@ public:
     void restoreMaterialStateFields(
         const std::vector<MaterialStateFieldSnapshot>& snapshot,
         SimulationComputeContext& compute) {
+        // Scrubbing to a cached frame rewinds `melt` and `transferred_mass`. A
+        // request queued after that frame would debit the restored reservoir a
+        // second time for mass APIC already holds.
+        discardMoltenMassTransferState();
         material_state_fields_.restoreSnapshot(snapshot, compute);
     }
     // ── World thermal boundary conditions (Phase 4) ──────────────────────────
@@ -1480,6 +1598,25 @@ private:
     std::vector<MoltenMassTransferRequest> molten_mass_transfer_queue_;
     MoltenMassTransferStats molten_mass_transfer_stats_;
     uint64_t next_molten_mass_transfer_sequence_ = 1;
+    // ★ AUTHORED STATE THE SIMULATION IS BORROWING, keyed by domain name.
+    //
+    // Routing molten plastic into a domain has to give that domain plastic's
+    // chemistry, viscosity and surface-SDF render mode — but those live on the
+    // DESCRIPTOR, which is authored configuration and is what gets serialized.
+    // Writing them directly meant one melting object permanently rewrote the
+    // user's domain: reopen the project and it was Custom/SurfaceSDF/flammable
+    // with no record of who did it, and no way back short of redoing it by hand.
+    //
+    // So the first time a domain is adapted, its authored form is copied here and
+    // the live desc becomes simulation-owned. discardMoltenMassTransferState()
+    // puts it back, which makes the borrow last exactly as long as the sim run.
+    std::unordered_map<std::string, SimulationGridDomainDesc>
+        molten_domain_authored_backup_;
+    // Restores the authored descriptors without touching the queue. Returns the
+    // number of domains put back.
+    std::size_t restoreMoltenDomainDescriptors();
+    // Copies the authored form aside on first adaptation. No-op afterwards.
+    void backupMoltenDomainDescriptor(const SimulationGridDomainDesc& desc);
     float automatic_molten_readback_seconds_ = 0.0f;
     WorldThermalState world_thermal_;
     std::function<bool(const SimulationGridDomainDesc&, Vec3&, Vec3&)> grid_domain_bounds_resolver_;

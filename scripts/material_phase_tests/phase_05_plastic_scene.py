@@ -64,6 +64,14 @@ accounted = (latest["solid_mass"] + latest["pyrolyzed_mass"] +
 tolerance = max(latest["initial_mass"] * 1e-4, 1e-5)
 assert abs(accounted - latest["initial_mass"]) <= tolerance, latest
 assert latest["mass_conservation_error"] <= tolerance, latest
+# ★ The line above is only worth asserting because the error is now measured on
+# the RAW field. It used to be derived from the four clamped masses, which made
+# it arithmetically incapable of being anything but 0.0 — a green light wired to
+# the switch rather than to the solver. These three name the failure mode when
+# it does trip.
+assert latest["mass_budget_overflow"] <= tolerance, latest
+assert latest["mass_negative"] <= tolerance, latest
+assert latest["mass_invalid_elements"] == 0, latest
 
 print({"result": "PASS", "phase": 5, "frames": frames,
        "initial_mass": latest["initial_mass"],

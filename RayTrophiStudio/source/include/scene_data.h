@@ -54,6 +54,7 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include <limits>
 #include <iterator>
 #include <utility>
+#include <set>
 #include <unordered_map>
 #include <map>
 #include <array>
@@ -771,6 +772,13 @@ struct SceneData {
     uint32_t fracture_summary_tick_ = 0;
     uint64_t structural_impulse_sequence_ = 0;
     std::vector<RayTrophiSim::StructuralImpulseEvent> structural_impulse_events_;
+    // fracture group -> the source object it was cut from. MSF fields are keyed
+    // by object, fracture groups by cluster, and the two stopped being the same
+    // string the moment clustering arrived.
+    std::map<std::string, std::string> fracture_group_source_;
+    // Per gas domain: seconds since it last emitted a blast event. Keyed by name
+    // rather than index because domains are added and removed underneath us.
+    std::map<std::string, float> combustion_event_clock_;
     RayTrophiSim::StructuralImpulseStats structural_impulse_stats_;
     RayTrophiSim::AshDebrisSystem ash_debris_system_;
 
@@ -1551,6 +1559,20 @@ struct SceneData {
         return false;
     }
 
+    // World AABBs for a whole set of nodes at once, keyed by the group each node
+    // maps to. ONE pass over world.objects regardless of how many groups are
+    // asked for, because the caller that needs every group is the blast path,
+    // which fires on the busiest frame in the scene.
+    void accumulateFractureGroupBounds(
+        const std::unordered_map<std::string, std::string>& node_to_group,
+        std::unordered_map<std::string, RayTrophiSim::FractureGroupBounds>& out) const;
+
+    // World AABB of a fracture group's shards, from shard GEOMETRY (never from
+    // shard centres — see FractureGroupBounds). False when the group has no
+    // surviving geometry.
+    bool fractureGroupBounds(const std::string& group,
+                             Vec3& out_min, Vec3& out_max) const;
+
     // World-space centre of a scene node's geometry (mesh AABB centre).
     Vec3 nodeWorldCenter(const std::string& node) const {
         Vec3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
@@ -1571,21 +1593,28 @@ struct SceneData {
     // Register each shard node of a fractured mesh as a STATIC, breakable rigid
     // body (intact until an impact exceeds `threshold`). Shards share `group` so a
     // hit on any one shatters them all. Shape = Mesh → ConvexHull once dynamic.
+    // `source_object` is the node the shards were cut FROM. It is what carries
+    // the MSF field, so without it a cluster whose group name differs from the
+    // object name can find no damage and never weakens. Empty = the group name
+    // is the object name (the single-group case).
     void makeFractureGroupBreakable(const std::string& group,
                                     const std::vector<std::string>& shard_nodes,
-                                    float threshold,
+                                    float break_velocity,
                                     bool integrity_weakening = true,
                                     float integrity_exponent = 1.5f,
-                                    float minimum_threshold_scale = 0.15f) {
+                                    float minimum_threshold_scale = 0.15f,
+                                    const std::string& source_object = "") {
         if (shard_nodes.empty()) return;
         ensureRigidBodySystem();
+        fracture_group_source_[group] =
+            source_object.empty() ? group : source_object;
         for (const auto& node : shard_nodes) {
             RayTrophiSim::RigidBodyObject* rb = addRigidBodyForObject(node, /*dynamic=*/false);
             if (!rb) continue;
             rb->setBreakable(true);
             rb->broken = false;
             rb->setFractureGroup(group);
-            rb->setBreakImpulse(threshold);
+            rb->setBreakVelocity(break_velocity);
             rb->setIntegrityWeakening(integrity_weakening);
             rb->setIntegrityExponent(std::max(integrity_exponent, 0.01f));
             rb->setMinimumThresholdScale(
@@ -1593,6 +1622,28 @@ struct SceneData {
             rb->shape = RayTrophiSim::RigidBodyShape::Mesh;   // convex hull when broken
             rb->motion_type = RayTrophiSim::RigidBodyMotionType::Static;
             rb->dynamic = false;
+            // ★ MASS FROM VOLUME, or every shard weighs the same 1 kg.
+            //
+            // `mass` defaults to 1.0 and `auto_mass_from_density` to false, so a
+            // 5 cm chip and a 2 m slab came out identical. Nothing looks heavier
+            // than anything else, big pieces drift like polystyrene and small
+            // ones plough through them: the "weightless" reading is exactly this
+            // default, not a solver problem. Shards are the one case where the
+            // authored default cannot be right — their sizes span two orders of
+            // magnitude BY CONSTRUCTION, and nobody is going to type a mass per
+            // shard for forty of them.
+            rb->auto_mass_from_density = true;
+            // ★ And WEIGH IT NOW, rather than leaving it to body creation.
+            //
+            // The volume-derived mass is computed in ensureBodyCreated, which
+            // only runs once the simulation starts. Until then rb.mass is the
+            // authored 1.0 — so before anyone presses play, the panel, the
+            // scripting API and the break threshold all see a 40-shard object
+            // weighing exactly 40 kg. That reads identically to the "every shard
+            // weighs one kilogram" bug, and a threshold derived from it is wrong
+            // by whatever the real mass turns out to be.
+            const float volume = nodeMeshVolume(node);
+            if (volume > 0.0f) rb->mass = std::max(0.001f, rb->density * volume);
         }
         if (rigid_body_system) {
             rigid_body_system->setContactEventsEnabled(true);  // impacts drive the break
@@ -1642,8 +1693,76 @@ struct SceneData {
                            Vec3(0.0f, 0.0f, 0.0f), strength);
     }
 
+    // ── Fracture bookkeeping the PROJECT has to know about ───────────────────
+    // group -> source object it was cut from. Without this on reload every
+    // clustered group looks up its MSF field under its own name, finds nothing,
+    // and reports pristine integrity forever — the exact silent failure the map
+    // was introduced to kill, resurrected by a save/load round trip.
+    const std::map<std::string, std::string>& fractureGroupSources() const {
+        return fracture_group_source_;
+    }
+    void setFractureGroupSource(const std::string& group, const std::string& source) {
+        if (!group.empty()) fracture_group_source_[group] = source;
+    }
+
+    // Nodes whose geometry is PARKED by an active fracture: alive, but pulled
+    // out of world.objects so the shards render in their place.
+    //
+    // ★ The project saver walks each imported model's nodes and records any it
+    // cannot find in world.objects as DELETED. A parked original is exactly that
+    // — absent but not gone — so fracturing and saving marked the source mesh
+    // deleted, and reopening dropped it for good. The shards do not survive
+    // either (they belong to no model and no procedural record), so the object
+    // simply vanished from the reopened project.
+    std::set<std::string> fracture_parked_nodes;
+
+    // ── How a saved fracture comes back ──────────────────────────────────────
+    //
+    // ★★ MEASURED, not assumed: with the default save settings
+    // (`save_geometry = true`) a project writes a binary geometry sidecar
+    // (`.rtp.bin`) and the shard meshes come back from it whole. So the primary
+    // job of this record is NOT to re-cut — it is to restore the BOOKKEEPING,
+    // which no amount of geometry brings back: which shards belong to which
+    // object, and which structural cluster each one is in. Without that the
+    // scene looks perfectly correct and yet the object does not know it is
+    // fractured, so Break Now, un-fracture and every cluster query fail.
+    //
+    // ★ Re-cutting is the FALLBACK, for projects saved with geometry off (where
+    // meshes are re-imported or procedurally regenerated instead). Never do both:
+    // cutting an object whose shards were already restored produces a second set
+    // of shards with the SAME names.
+    //
+    // ★★ The sites are what makes the fallback honest. Seed + pattern + count do
+    // not determine them: the scatter rejects candidates outside the hull and
+    // tops up from a second pass, and the thermal pattern draws from the MSF
+    // damage field as it stood when the artist pressed the button — a state that
+    // no longer exists after a reload. A re-derived cut would look plausible and
+    // be different, and the rigid bodies saved alongside are bound to shard
+    // NAMES, so a different cut silently rebinds them to other pieces.
+    struct FractureRecipe {
+        int      site_count = 15;
+        uint32_t seed = 1337u;
+        int      pattern = 0;        // 0 uniform, 1 impact-clustered, 2 thermal
+        int      cluster_count = 4;
+        bool     exact_surface = true;
+        float    preview_gap = 0.02f;
+        std::vector<Vec3> sites;     // world space, verbatim (re-cut fallback)
+        // The shards this cut produced and their cluster index, parallel arrays.
+        // This is what adoption rebuilds the UI bookkeeping from.
+        std::vector<std::string> shard_nodes;
+        std::vector<int>         shard_clusters;
+    };
+    std::map<std::string, FractureRecipe> fracture_recipes;
+
     RayTrophiSim::MaterialIntegritySummary fractureIntegritySummary(
         const std::string& group) const;
+    // Summed authored mass [kg] of a fracture group's shards. The break
+    // threshold is derived from it, so a heavy group resists a blast that
+    // scatters a light one without either being tuned separately.
+    float fractureGroupMass(const std::string& group) const;
+    // Closed-mesh volume [m^3] of a node's geometry. Handles flat SoA and the
+    // legacy facade form; returns 0 for a node with no geometry.
+    float nodeMeshVolume(const std::string& node) const;
     bool applyFractureImpulse(const std::string& group,
                               const Vec3& point,
                               const Vec3& direction,
@@ -1652,7 +1771,21 @@ struct SceneData {
     // After a sim step: read the contact events and shatter any breakable group
     // whose shard took an impact above its threshold. No-op without breakables.
     void processFractureImpacts();
+    // Turn this step's combustion into structural blast events. The producer the
+    // chain never had: burning weakened the material and dropped its threshold,
+    // but nothing outside a script ever delivered the load.
+    void emitCombustionStructuralImpulses(float dt);
     void queueStructuralImpulse(RayTrophiSim::StructuralImpulseEvent event);
+    // ★ MUST be pumped by every loop that steps the sim, next to
+    // processFractureImpacts().
+    //
+    // It used to be called from ONE place: rt.physics.step. So a blast queued
+    // inside the app was never consumed — it sat in the queue while the timeline
+    // played, and the queue grew. Contact could break a group, overpressure
+    // could not, and the scripted gate passed while the same scene did nothing
+    // interactively. Two consumers for two kinds of load is one consumer too
+    // few: they have to be pumped together or "it works in the test" means
+    // nothing about the app.
     void processStructuralImpulseEvents();
     const RayTrophiSim::StructuralImpulseStats& structuralImpulseStats() const {
         return structural_impulse_stats_;
@@ -1667,6 +1800,10 @@ struct SceneData {
     void resetFractureToIntact() {
         fracture_summary_tick_ = 0;
         structural_impulse_events_.clear();
+        // The ash reservoir is simulation state: mass waiting for a particle
+        // slot. Replaying from frame 0 must not inherit debris the rewound run
+        // produced, or the first budgeted event would spawn it a second time.
+        ash_debris_system_.resetReservoir();
         bool any = false;
         for (auto& rb : rigid_bodies) {
             if (!rb.getBreakable()) continue;
@@ -2802,6 +2939,11 @@ struct SceneData {
                     vol->render_isosurface_ior = domains[d].fluid_surface_ior;
                     vol->render_isosurface_roughness = domains[d].fluid_surface_roughness;
                     vol->render_isosurface_foam = domains[d].fluid_surface_foam;
+                    vol->render_isosurface_material_id =
+                        domains[d].fluid_surface_material_id;
+                    vol->render_isosurface_pore_amount = domains[d].fluid_surface_pore_amount;
+                    vol->render_isosurface_pore_scale  = domains[d].fluid_surface_pore_scale;
+                    vol->render_isosurface_pore_detail = domains[d].fluid_surface_pore_detail;
                     // Volume whitewater look (temperature-channel particle foam):
                     // tint + extinction drive the white single-scatter medium the
                     // shader marches (_ext_reserved[3..6]). Only meaningful when the
@@ -3536,7 +3678,7 @@ struct SceneData {
             for (char c : rb.collider_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
             if (rb.getBreakable()) {
                 h = mix(h, 0xB4EAC0DEull);  // stable "breakable, authored static" marker
-                h = mix(h, qf(rb.getBreakImpulse()));
+                h = mix(h, qf(rb.getBreakVelocity()));
                 h = mix(h, rb.getIntegrityWeakening() ? 1ull : 0ull);
                 h = mix(h, qf(rb.getIntegrityExponent()));
                 h = mix(h, qf(rb.getMinimumThresholdScale()));
@@ -4171,10 +4313,18 @@ struct SceneData {
     // Accumulating into the live vertices would have needed all three built by
     // hand, and would have compounded every frame the sim ran at a different dt.
     //
-    // ★ SCOPE, stated plainly: this is SLUMP, not flow. Vertices sink under
-    // gravity, diffuses only through connected triangle neighbours and widens
-    // laterally as height is lost. It conserves the surface envelope only
-    // approximately; topology loss and detached liquid belong to the APIC bridge.
+    // ★ SCOPE, stated plainly: this is quasi-static molten-shell FLOW. The liquid
+    // share of each vertex's remaining material is transported downhill through
+    // triangle connectivity, conserving volume exactly, and the surface sits at
+    // whatever thickness the material under it adds up to. Because that thickness
+    // is driven by the MSF mass fractions, the geometric volume the mesh loses
+    // EQUALS the mass that actually left it — one number, not two tunings that
+    // drift apart. (It was previously a slump approximation whose volume had to be
+    // reconciled with APIC's by hand, and never quite was.)
+    //
+    // Still out of scope, and belonging to the APIC bridge: topology loss,
+    // detached droplets, and pooling against anything other than the object's own
+    // rest floor.
     void applyMeltDisplacement() {
         if (defer_melt_displacement_once_) {
             defer_melt_displacement_once_ = false;
@@ -4224,6 +4374,32 @@ struct SceneData {
         const std::size_t uc = cache.unique_count;
         if (uc < 3 || cache.rest_world_unique.size() != uc) return;
 
+        // ── Per-object opt-out, evaluated BEFORE any work ─────────────────────
+        // ★ This gate used to sit at the bottom, after the whole UV sample pass,
+        // and it was a bare `return`. Two consequences, both wrong:
+        //   - the sampling cost was paid every revision even with the feature off;
+        //   - turning the switch off on an object that was ALREADY displaced left
+        //     the melted shape frozen on screen forever. melt_displaced_ still
+        //     claimed it was deformed, the stamp was never advanced, and nothing
+        //     downstream ever put the rest pose back.
+        // Disabling a visual option must undo its geometry, exactly as Clear
+        // Damage does — the MSF chemistry underneath is untouched either way,
+        // which is the whole point of the "performance options do not silently
+        // destroy physical state" rule.
+        RayTrophiSim::ParticleColliderDesc* authoring = nullptr;
+        for (auto& collider : runtime->colliders()) {
+            if (collider.source_name == node) { authoring = &collider; break; }
+        }
+        if (authoring && !authoring->msf_melt_flow_enabled) {
+            if (was_displaced) {
+                applyDeformedVertsToCache(cache, node, cache.rest_world_unique);
+                melt_displaced_.erase(node);
+            }
+            melt_applied_stamp_[node] = { field.topology_generation,
+                                          field.mask_revision };
+            return;
+        }
+
         // A high-poly source otherwise rewrites all positions/normals and refits
         // its BLAS on every MSF mask revision while the APIC surface BLAS changes
         // too. Keep chemistry/fluid at full rate, but budget visual mesh refits.
@@ -4247,6 +4423,10 @@ struct SceneData {
         // seam, so the two agree.
         std::vector<float> melt_unique(uc, 0.0f);
         std::vector<float> local_mass_unique(uc, 1.0f);
+        // ★ Which vertices the field could actually answer for. Without this the
+        // solver cannot tell "melted none" from "no reading", and a vertex whose
+        // UV lands between islands stands up as a spike while its neighbours sink.
+        std::vector<uint8_t> sampled_unique(uc, 0u);
         bool sampled_any = false;
 
         if (cache.flat_mesh && cache.flat_mesh->geometry &&
@@ -4266,6 +4446,7 @@ struct SceneData {
                 if (RayTrophiSim::MaterialStateFieldSystem::sampleLocalMassAtUV(
                         field, uv[v].x, uv[v].y, local_mass))
                     local_mass_unique[u] = std::min(local_mass_unique[u], local_mass);
+                sampled_unique[u] = 1u;
                 sampled_any = true;
             }
         } else {
@@ -4286,6 +4467,7 @@ struct SceneData {
                     if (RayTrophiSim::MaterialStateFieldSystem::sampleLocalMassAtUV(
                             field, c_uv[i].x, c_uv[i].y, local_mass))
                         local_mass_unique[u] = std::min(local_mass_unique[u], local_mass);
+                    sampled_unique[u] = 1u;
                     sampled_any = true;
                 }
             }
@@ -4299,24 +4481,6 @@ struct SceneData {
         // No new UI parameter, and therefore no script/IPC parity surface.
         const RayTrophiSim::SubstanceProfile& prof =
             RayTrophiSim::findSubstance(field.substance_name);
-        RayTrophiSim::ParticleColliderDesc* authoring = nullptr;
-        for (auto& collider : runtime->colliders()) {
-            if (collider.source_name == node) { authoring = &collider; break; }
-        }
-        if (authoring && !authoring->msf_melt_flow_enabled) return;
-        #if 0 // Replaced by connected MeltSurfaceFlow below.
-        std::vector<Vec3> displaced = cache.rest_world_unique;
-        for (std::size_t u = 0; u < uc; ++u) {
-            const float m = std::clamp(melt_unique[u], 0.0f, 1.0f);
-            if (m <= 0.0f) continue;
-            // ★ Clamped at the rest bounding box floor, not allowed to fall
-            // forever. Without pooling this is an approximation of the surface the
-            // object rests on, and it is what makes a melting shape FLATTEN
-            // instead of sinking through the ground.
-            displaced[u].y = std::max(rest_min_y, displaced[u].y - m * max_sag);
-        }
-
-        #endif
         std::vector<Vec3> displaced;
         RayTrophiSim::MeltSurfaceFlowSettings flow_settings;
         flow_settings.viscosity = prof.melt_viscosity;
@@ -4326,7 +4490,7 @@ struct SceneData {
         }
         if (!RayTrophiSim::solveMeltSurfaceFlow(cache.rest_world_unique,
                 cache.corner_unique, melt_unique, local_mass_unique,
-                flow_settings, displaced)) return;
+                sampled_unique, flow_settings, displaced)) return;
         applyDeformedVertsToCache(cache, node, displaced);
         if (peak_melt > 0.0f) melt_displaced_[node] = 1u;
         else melt_displaced_.erase(node);
@@ -4987,6 +5151,8 @@ struct SceneData {
             syncSimulationWorld();
             stepRigidBodiesOnly(fixed_dt, next_frame);
             processFractureImpacts();  // shatter on contact above threshold
+            emitCombustionStructuralImpulses(fixed_dt);  // fire -> blast
+            processStructuralImpulseEvents();  // ...and by blast overpressure
             rigid_timeline_frame_ = next_frame;
             ++steps;
         }
@@ -5110,6 +5276,18 @@ struct SceneData {
                 system.domain_volumes[d]->render_isosurface_ior = domains[d].fluid_surface_ior;
                 system.domain_volumes[d]->render_isosurface_roughness = domains[d].fluid_surface_roughness;
                 system.domain_volumes[d]->render_isosurface_foam = domains[d].fluid_surface_foam;
+                // Live like the IOR: picking a material must repaint without a
+                // re-sim, otherwise the control reads as broken.
+                system.domain_volumes[d]->render_isosurface_material_id =
+                    domains[d].fluid_surface_material_id;
+                // Porosity is pure shader state too — a crumb-size slider must
+                // repaint the current frame without a re-sim.
+                system.domain_volumes[d]->render_isosurface_pore_amount =
+                    domains[d].fluid_surface_pore_amount;
+                system.domain_volumes[d]->render_isosurface_pore_scale =
+                    domains[d].fluid_surface_pore_scale;
+                system.domain_volumes[d]->render_isosurface_pore_detail =
+                    domains[d].fluid_surface_pore_detail;
                 // Volume whitewater look (tint + extinction) is pure shader state —
                 // push it live like the IOR so a Foam Color / Foam Opacity slider
                 // updates the current frame without a re-splat (those ride
@@ -5365,6 +5543,8 @@ struct SceneData {
             simulation_world.setTimelineFrame(tl_frame);
             simulation_world.stepOnce(realtime_dt);
             processFractureImpacts();  // live preview: shatter on impact
+            emitCombustionStructuralImpulses(realtime_dt);  // fire -> blast
+            processStructuralImpulseEvents();  // ...and by blast overpressure
             syncSimulationRenderVolumes();
             return;
         }
@@ -5468,6 +5648,8 @@ struct SceneData {
                     simulation_world.setTimelineFrame(sim_timeline_frame_ + 1);
                     simulation_world.stepOnce(fixed_dt);
                     processFractureImpacts();  // shatter on impact above threshold
+                    emitCombustionStructuralImpulses(fixed_dt);  // fire -> blast
+                    processStructuralImpulseEvents();  // ...and by blast overpressure
                     ++sim_timeline_frame_;
                     rigid_timeline_frame_ = sim_timeline_frame_;
                     captureSimFrame(sim_timeline_frame_);
@@ -5571,6 +5753,8 @@ struct SceneData {
             simulation_world.setTimelineFrame(sim_timeline_frame_ + 1);
             simulation_world.stepOnce(fixed_dt);
             processFractureImpacts();  // shatter on impact above threshold
+            emitCombustionStructuralImpulses(fixed_dt);  // fire -> blast
+            processStructuralImpulseEvents();  // ...and by blast overpressure
             ++sim_timeline_frame_;
             rigid_timeline_frame_ = sim_timeline_frame_;
             if (cache_frames) captureSimFrame(sim_timeline_frame_);

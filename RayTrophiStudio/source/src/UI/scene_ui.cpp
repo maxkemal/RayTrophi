@@ -1862,7 +1862,22 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
     DrawRenderWindowToneMapControls(ctx);
 
-    if (UIWidgets::BeginSection("Animation Render & Export", ImVec4(1.0f, 0.4f, 0.7f, 1.0f))) {
+    if (UIWidgets::BeginSection("Output & Sequence", ImVec4(1.0f, 0.4f, 0.7f, 1.0f))) {
+        UIWidgets::ColoredHeader("PNG Output", ImVec4(0.72f, 0.88f, 1.0f, 1.0f));
+        if (ImGui::Checkbox("Transparent Background", &ctx.render_settings.transparent_background)) {
+            // Wake the otherwise event-driven presentation path immediately;
+            // the render itself remains unchanged because this is a preview/export option.
+            ctx.start_render = true;
+        }
+        UIWidgets::HelpMarker(
+            "Writes camera-miss pixels with zero alpha in saved PNG files. "
+            "Environment/HDRI lighting remains active and visible in the viewport. "
+            "Applies to Save Image, final render, automation output, and PNG sequences.");
+        ImGui::TextDisabled(ctx.render_settings.transparent_background
+            ? "PNG mode: RGBA (straight alpha)"
+            : "PNG mode: RGB (opaque background)");
+        UIWidgets::Divider();
+
         if (rendering_in_progress && ctx.is_animation_mode) {
             ImVec4 status_bg = ImVec4(0.15f, 0.15f, 0.2f, 1.0f);
             float status_round = 10.0f;
@@ -3615,9 +3630,14 @@ void SceneUI::draw(UIContext& ctx)
         g_viewport_raster_scatter_update_pending = true;
         if (!g_project.ui_layout_data.empty()) {
             // Disable auto-save to ini momentarily to avoid conflicts
-            ImGui::GetIO().IniFilename = nullptr; 
+            ImGui::GetIO().IniFilename = nullptr;
             deserialize(g_project.ui_layout_data);
         }
+        // Saved fractures are restored by re-cutting, and that has to happen here
+        // rather than in the loader: it edits world.objects and kicks every
+        // backend's geometry rebuild. By now the source meshes are back in the
+        // scene and the rigid bodies bound to the shards are already loaded.
+        replayFractureRecipes(ctx);
     }
 
     // Texture Safety Cleanup
@@ -8300,6 +8320,7 @@ void SceneUI::performNewProject(UIContext& ctx) {
      ForceFieldUI::selected_force_field = nullptr; // Clear force field selection
      resetMaterialUI();           // Reset material editor state
      hairUI.clear();              // Clear hair UI state
+     resetFractureState(ctx.scene);  // Fracture records belong to the OLD scene
 
      
      history.clear();
@@ -8420,6 +8441,7 @@ void SceneUI::performOpenProject(UIContext& ctx) {
         ForceFieldUI::selected_force_field = nullptr; // Clear force field selection
         resetMaterialUI();           // Reset material editor state
         hairUI.clear();              // Clear hair UI state
+        resetFractureState(ctx.scene);  // Fracture records belong to the OLD scene
 
         
         history.clear();

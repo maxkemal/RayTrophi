@@ -36,7 +36,11 @@ namespace RayTrophiSim {
 namespace Fluid {
 
 // Shared static storage exposed by getLastFlipPreSnapshot*().
-// Populated by the most recent Fluid::step call that ran pressure with skip_g2p=true.
+// The post-P2G MAC velocity field, published by every Fluid::step that runs the
+// transfer. This is the FLIP reference state: the delta the particles receive is
+// (post-pressure grid - this), so every grid-side change in between (solid
+// boundaries, viscosity, pressure) reaches them. The GPU split-step uploads THIS,
+// not grid.vel_*, which by upload time already carries the viscous solve.
 static std::vector<float> g_flip_snap_x, g_flip_snap_y, g_flip_snap_z;
 static bool g_flip_snap_valid = false;
 
@@ -1604,51 +1608,217 @@ static void enforceSolidBoundaries(FluidSim::FluidGrid& grid, const APICSolverPa
     }
 }
 
-static void applyViscosity(FluidSim::FluidGrid& grid, const APICSolverParams& params, float dt) {
-    if (params.viscosity <= 0.0f || dt <= 0.0f) {
+// ── Implicit viscous diffusion (CPU reference) ──────────────────────────────
+// Solves (I - ν·dt·∇²) u_new = u_old independently per MAC component with
+// red-black Gauss-Seidel. This is the ORACLE the Vulkan kernel
+// (sim_fluid_viscosity_rbgs.comp) must match face for face; keep the two
+// stencils and boundary rules in step, or a device/host mismatch shows up as
+// "the GPU one is a bit thinner", which nobody reports as a bug.
+//
+// Three things the previous neighbour-average smoother got wrong, all of which
+// made the viscosity dial mean different things in different scenes:
+//   1. no 1/h² — the SAME ν behaved differently at every voxel size;
+//   2. explicit, so it had to clamp its strength to 0.45 and saturated: 20 and
+//      30 produced nearly identical motion and honey could never be honey;
+//   3. it averaged AIR faces (velocity ≈ 0) into the surface, which brakes the
+//      free surface against nothing — a "skin" that is not a physical stress.
+//
+// Boundary rules, one per face classification:
+//   fluid neighbour → ordinary coupling;
+//   air neighbour   → stress-free: DROPPED from both the sum and the diagonal
+//                     (Neumann). Dropping, not zeroing — a zero would be a wall;
+//   solid neighbour → Dirichlet toward the solid's own velocity, weighted by
+//                     (1 - viscosity_wall_slip). slip=1 degenerates to the air
+//                     rule (free-slip), slip=0 is full no-slip, which is what
+//                     makes a viscous fluid coat a collider and get dragged by
+//                     a moving one.
+namespace {
+
+// Face classification shared by all three components. The fluid mask lives in
+// the cell-centred grid: solid cells are solid, cells holding particles are
+// fluid, everything else is air.
+enum class FaceKind { Fluid, Air, Solid };
+
+} // namespace
+
+// Cell-centred liquid occupancy for the viscous stencil: -1 solid, >0.5 fluid,
+// 0 air. Deliberately the SAME encoding the GPU pressure path uploads
+// (ParticleSimulation.cpp:buildFluidMaskFromParticles) so the host and device
+// viscosity kernels classify identical faces — a mask that disagreed by one
+// cell would show up as a slightly different surface, not as an error.
+static void buildViscosityFluidMask(const FluidSim::FluidGrid& grid,
+                                    const FluidParticles& particles,
+                                    std::vector<float>& mask) {
+    const std::size_t cells = grid.getCellCount();
+    if (mask.size() < cells) mask.assign(cells, 0.0f);
+    else std::fill(mask.begin(), mask.begin() + static_cast<std::ptrdiff_t>(cells), 0.0f);
+    const bool has_solid = grid.solid.size() == cells;
+    if (has_solid) {
+        for (std::size_t c = 0; c < cells; ++c)
+            if (grid.solid[c]) mask[c] = -1.0f;
+    }
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const float invH = grid.voxel_size > 1.0e-6f ? 1.0f / grid.voxel_size : 0.0f;
+    for (std::size_t p = 0; p < particles.size(); ++p) {
+        const Vec3 gp = (particles.position[p] - grid.origin) * invH;
+        const int i = static_cast<int>(std::floor(gp.x));
+        const int j = static_cast<int>(std::floor(gp.y));
+        const int k = static_cast<int>(std::floor(gp.z));
+        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
+        const std::size_t c = grid.cellIndex(i, j, k);
+        if (has_solid && grid.solid[c]) continue;
+        const float mass = p < particles.mass_fraction.size()
+            ? std::clamp(particles.mass_fraction[p], 0.0f, 1.0f)
+            : 1.0f;
+        if (mass > 0.02f) mask[c] += mass;
+    }
+}
+
+static void applyViscosity(FluidSim::FluidGrid& grid,
+                           const APICSolverParams& params,
+                           float dt,
+                           const std::vector<float>* fluid_mask,
+                           int& out_sweeps_run) {
+    out_sweeps_run = 0;
+    if (params.kinematic_viscosity <= 0.0f || dt <= 0.0f) {
         return;
     }
-
-    const int iterations = std::clamp(params.viscosity_iterations, 1, 16);
-    const float strength = std::clamp(params.viscosity * dt, 0.0f, 0.45f);
-    if (strength <= 0.0f) {
+    const float h = (grid.voxel_size > 1.0e-6f) ? grid.voxel_size : 1.0f;
+    // a = ν·dt/h² — the dimensionless diffusion number. THIS is the term the old
+    // code was missing; without it ν is not a viscosity, it is a screen-space
+    // blur radius.
+    const float a = params.kinematic_viscosity * dt / (h * h);
+    if (a <= 1.0e-8f) {
         return;
     }
+    const int sweeps = std::clamp(params.viscosity_sweeps, 1, 64);
+    const float slip = std::clamp(params.viscosity_wall_slip, 0.0f, 1.0f);
+    const float solid_weight = 1.0f - slip;   // 0 = free-slip, 1 = no-slip
 
-    auto smoothField = [&](std::vector<float>& field, int sx, int sy, int sz) {
-        std::vector<float> scratch(field.size(), 0.0f);
-        const int64_t count = static_cast<int64_t>(field.size());
-        auto idx = [sx, sy](int i, int j, int k) {
-            return static_cast<size_t>(i + j * sx + k * sx * sy);
-        };
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const bool closed = params.boundary != APICSolverParams::BoundaryMode::Open;
+    const bool has_mask = fluid_mask && fluid_mask->size() == grid.getCellCount();
+    const bool has_solid = !grid.solid.empty() && grid.solid.size() == grid.getCellCount();
+    const bool has_solid_vel = grid.solid_vel.size() == grid.getCellCount();
 
-        // Keep this serial for the CPU reference path. MSVC OpenMP rejects
-        // num_threads() over lambda-captured locals here, and prior OMP regions
-        // in this solver already hit vcomp stability issues on large domains.
-        for (int it = 0; it < iterations; ++it) {
-            for (int64_t raw = 0; raw < count; ++raw) {
-                const int i = static_cast<int>(raw % sx);
-                const int j = static_cast<int>((raw / sx) % sy);
-                const int k = static_cast<int>(raw / (static_cast<int64_t>(sx) * sy));
-                const float center = field[static_cast<size_t>(raw)];
-                float sum = 0.0f;
-                int n = 0;
-                if (i > 0)      { sum += field[idx(i - 1, j, k)]; ++n; }
-                if (i + 1 < sx) { sum += field[idx(i + 1, j, k)]; ++n; }
-                if (j > 0)      { sum += field[idx(i, j - 1, k)]; ++n; }
-                if (j + 1 < sy) { sum += field[idx(i, j + 1, k)]; ++n; }
-                if (k > 0)      { sum += field[idx(i, j, k - 1)]; ++n; }
-                if (k + 1 < sz) { sum += field[idx(i, j, k + 1)]; ++n; }
-                const float avg = (n > 0) ? (sum / static_cast<float>(n)) : center;
-                scratch[static_cast<size_t>(raw)] = center + (avg - center) * strength;
+    auto cellSolid = [&](int i, int j, int k) -> bool {
+        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return false;
+        return has_solid && grid.solid[grid.cellIndex(i, j, k)] != 0u;
+    };
+    auto cellFluid = [&](int i, int j, int k) -> bool {
+        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return false;
+        if (cellSolid(i, j, k)) return false;
+        // No mask (non-free-surface solve) means the whole grid is liquid.
+        if (!has_mask) return true;
+        return (*fluid_mask)[grid.cellIndex(i, j, k)] > 0.5f;
+    };
+    auto solidVel = [&](int i, int j, int k, int comp) -> float {
+        if (!has_solid_vel) return 0.0f;
+        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return 0.0f;
+        const Vec3& v = grid.solid_vel[grid.cellIndex(i, j, k)];
+        return (comp == 0) ? v.x : (comp == 1) ? v.y : v.z;
+    };
+
+    // Classify a face of the given component and, when it is usable, hand back
+    // the value to couple against.
+    auto classify = [&](int comp, int i, int j, int k,
+                        const std::vector<float>& field,
+                        float& out_value) -> FaceKind {
+        const int fsx = (comp == 0) ? nx + 1 : nx;
+        const int fsy = (comp == 1) ? ny + 1 : ny;
+        const int fsz = (comp == 2) ? nz + 1 : nz;
+        if (i < 0 || i >= fsx || j < 0 || j >= fsy || k < 0 || k >= fsz) {
+            // Outside the face grid: a closed domain wall is a solid at rest,
+            // an open one is outflow (treat as air / stress-free).
+            out_value = 0.0f;
+            return closed ? FaceKind::Solid : FaceKind::Air;
+        }
+        int li, lj, lk, hi, hj, hk;
+        li = i; lj = j; lk = k; hi = i; hj = j; hk = k;
+        if (comp == 0)      li = i - 1;
+        else if (comp == 1) lj = j - 1;
+        else                lk = k - 1;
+
+        if (cellSolid(li, lj, lk) || cellSolid(hi, hj, hk)) {
+            out_value = cellSolid(li, lj, lk) ? solidVel(li, lj, lk, comp)
+                                              : solidVel(hi, hj, hk, comp);
+            return FaceKind::Solid;
+        }
+        if (cellFluid(li, lj, lk) || cellFluid(hi, hj, hk)) {
+            const size_t idx = static_cast<size_t>(i) +
+                               static_cast<size_t>(j) * fsx +
+                               static_cast<size_t>(k) * static_cast<size_t>(fsx) * fsy;
+            out_value = field[idx];
+            return FaceKind::Fluid;
+        }
+        out_value = 0.0f;
+        return FaceKind::Air;
+    };
+
+    // Right-hand side: the pre-diffusion field. GS updates in place, so the
+    // original values must be kept somewhere. Function-static and grow-only,
+    // like the rest of this solver's scratch.
+    static std::vector<float> rhs_x, rhs_y, rhs_z;
+    rhs_x.assign(grid.vel_x.begin(), grid.vel_x.end());
+    rhs_y.assign(grid.vel_y.begin(), grid.vel_y.end());
+    rhs_z.assign(grid.vel_z.begin(), grid.vel_z.end());
+
+    auto sweepComponent = [&](int comp,
+                              std::vector<float>& field,
+                              const std::vector<float>& rhs,
+                              int parity) {
+        const int fsx = (comp == 0) ? nx + 1 : nx;
+        const int fsy = (comp == 1) ? ny + 1 : ny;
+        const int fsz = (comp == 2) ? nz + 1 : nz;
+        const int64_t count = static_cast<int64_t>(fsx) * fsy * fsz;
+        // Serial on purpose, same reason the old smoother was: MSVC OpenMP
+        // rejects num_threads() over lambda-captured locals here, and vcomp has
+        // already been a stability problem in this file on large domains. Vulkan
+        // is the primary path for this solve; the host copy is the reference and
+        // the fallback, so correctness outranks its throughput.
+        for (int64_t raw = 0; raw < count; ++raw) {
+            const int i = static_cast<int>(raw % fsx);
+            const int j = static_cast<int>((raw / fsx) % fsy);
+            const int k = static_cast<int>(raw / (static_cast<int64_t>(fsx) * fsy));
+            if (((i + j + k) & 1) != parity) continue;
+
+            float self_value = 0.0f;
+            if (classify(comp, i, j, k, field, self_value) != FaceKind::Fluid) {
+                continue; // only fluid faces carry the viscous unknown
             }
-            field.swap(scratch);
+
+            float sum = 0.0f;
+            float diag = 1.0f;
+            const int offsets[6][3] = {
+                {-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}
+            };
+            for (const auto& o : offsets) {
+                float nv = 0.0f;
+                const FaceKind kind = classify(comp, i + o[0], j + o[1], k + o[2],
+                                               field, nv);
+                if (kind == FaceKind::Fluid) {
+                    sum  += a * nv;
+                    diag += a;
+                } else if (kind == FaceKind::Solid) {
+                    // Dirichlet at the solid's velocity, scaled by how much of
+                    // the no-slip condition the material asks for.
+                    sum  += a * solid_weight * nv;
+                    diag += a * solid_weight;
+                }
+                // Air: stress-free — contributes to neither side.
+            }
+            field[static_cast<size_t>(raw)] = (rhs[static_cast<size_t>(raw)] + sum) / diag;
         }
     };
 
-    smoothField(grid.vel_x, grid.nx + 1, grid.ny,     grid.nz);
-    smoothField(grid.vel_y, grid.nx,     grid.ny + 1, grid.nz);
-    smoothField(grid.vel_z, grid.nx,     grid.ny,     grid.nz + 1);
+    for (int s = 0; s < sweeps; ++s) {
+        for (int parity = 0; parity < 2; ++parity) {
+            sweepComponent(0, grid.vel_x, rhs_x, parity);
+            sweepComponent(1, grid.vel_y, rhs_y, parity);
+            sweepComponent(2, grid.vel_z, rhs_z, parity);
+        }
+    }
+    out_sweeps_run = sweeps;
 }
 
 // Step particle positions through the grid velocity field, subdivided to
@@ -2327,9 +2497,52 @@ void step(FluidParticles& particles,
     out_stats.p2g_ms = elapsedMs(stage_begin, stage_end);
     out_stats.p2g_on_gpu = params.p2g_precomputed;
 
-    // 3. Solid boundary enforcement + viscosity.
-    //    Skipped in GPU split-step's second call (pressure_g2p_precomputed=true)
-    //    because these were already run in the first call (stop_after_viscosity=true).
+    // ── 3. FLIP snapshot ────────────────────────────────────────────────────
+    // ★ ROOT CAUSE OF "THE VISCOSITY DIAL DOES NOTHING".
+    // The FLIP update is  v_p = v_grid_post + flip·(v_p_old - v_snapshot).
+    // This snapshot used to be taken AFTER boundary+viscosity, so writing
+    // v_grid_post = v_visc + Δp and v_snapshot = v_visc gives
+    //     v_p = (1-flip)·v_visc + flip·v_p_old + Δp
+    // — the viscous field survives with weight (1-flip). At the water default
+    // flip_blend=0.97 that is THREE PERCENT, and the FLIP fraction simply kept
+    // its own old velocity, untouched by any viscosity at all. Every viscous
+    // preset was therefore forced to fake thickness with per-particle friction
+    // and damping, which drags the whole body instead of resisting shear.
+    // Snapshotting here — right after the transfer, before any grid-side force —
+    // is the standard FLIP contract: EVERY grid change (solid boundaries,
+    // viscosity, pressure) becomes part of the delta the particles receive.
+    static std::vector<float> vel_x_pre_buf;
+    static std::vector<float> vel_y_pre_buf;
+    static std::vector<float> vel_z_pre_buf;
+    const bool want_flip = params.flip_blend > 0.0f && params.free_surface;
+    if (!params.pressure_g2p_precomputed && want_flip) {
+        if (vel_x_pre_buf.size() < grid.vel_x.size()) vel_x_pre_buf.resize(grid.vel_x.size());
+        if (vel_y_pre_buf.size() < grid.vel_y.size()) vel_y_pre_buf.resize(grid.vel_y.size());
+        if (vel_z_pre_buf.size() < grid.vel_z.size()) vel_z_pre_buf.resize(grid.vel_z.size());
+        std::copy(grid.vel_x.begin(), grid.vel_x.end(), vel_x_pre_buf.begin());
+        std::copy(grid.vel_y.begin(), grid.vel_y.end(), vel_y_pre_buf.begin());
+        std::copy(grid.vel_z.begin(), grid.vel_z.end(), vel_z_pre_buf.begin());
+        // Publish for the GPU split-step: the caller uploads THIS, not
+        // grid.vel_*, which by then carries the viscous solve as well. Only on
+        // the split-step path — a CPU-only step reads vel_*_pre_buf directly, so
+        // copying three more face arrays for it would be pure waste.
+        if (params.stop_before_pressure) {
+            g_flip_snap_valid = true;
+            g_flip_snap_x.assign(vel_x_pre_buf.begin(),
+                                 vel_x_pre_buf.begin() + grid.vel_x.size());
+            g_flip_snap_y.assign(vel_y_pre_buf.begin(),
+                                 vel_y_pre_buf.begin() + grid.vel_y.size());
+            g_flip_snap_z.assign(vel_z_pre_buf.begin(),
+                                 vel_z_pre_buf.begin() + grid.vel_z.size());
+        }
+    } else if (!params.pressure_g2p_precomputed) {
+        g_flip_snap_valid = false;
+        g_flip_snap_x.clear(); g_flip_snap_y.clear(); g_flip_snap_z.clear();
+    }
+
+    // 3b. Solid boundary enforcement + viscous diffusion.
+    //     Skipped in GPU split-step's second call (pressure_g2p_precomputed=true)
+    //     because these were already run in the first call.
     if (!params.pressure_g2p_precomputed) {
         stage_begin = SolverClock::now();
         enforceSolidBoundaries(grid, params);
@@ -2337,42 +2550,42 @@ void step(FluidParticles& particles,
         out_stats.boundary_ms = elapsedMs(stage_begin, stage_end);
 
         stage_begin = SolverClock::now();
-        applyViscosity(grid, params, dt);
-        enforceSolidBoundaries(grid, params);
+        if (!params.viscosity_precomputed) {
+            // The viscous stencil needs to tell fluid faces from air faces —
+            // that distinction IS the stress-free surface condition. Build the
+            // same cell mask the pressure solve and the GPU kernel use.
+            static std::vector<float> visc_mask;
+            const std::vector<float>* mask_ptr = nullptr;
+            if (params.free_surface && params.kinematic_viscosity > 0.0f) {
+                buildViscosityFluidMask(grid, particles, visc_mask);
+                mask_ptr = &visc_mask;
+            }
+            int sweeps_run = 0;
+            applyViscosity(grid, params, dt, mask_ptr, sweeps_run);
+            out_stats.viscosity_sweeps_run = sweeps_run;
+            if (sweeps_run > 0) {
+                enforceSolidBoundaries(grid, params);
+            }
+        }
         stage_end = SolverClock::now();
         out_stats.viscosity_ms = elapsedMs(stage_begin, stage_end);
     }
 
-    // GPU split-step call 1: return after boundary+viscosity so caller can
-    // run GPU pressure → GPU G2P before the second call does advect+reseed.
-    if (params.stop_after_viscosity) {
+    // GPU split-step call 1: return after P2G + snapshot + boundary (+ CPU
+    // viscosity when the device did not take it) so the caller can run the
+    // device viscosity → pressure → G2P before the second call does the tail.
+    if (params.stop_before_pressure) {
         out_stats.total_ms = elapsedMs(total_begin, SolverClock::now());
         return;
     }
 
-    // 4–6. FLIP snapshot + pressure projection + G2P.
+    // 4–6. Pressure projection + G2P.
     //       When pressure_g2p_precomputed is set, the GPU path has already
-    //       run these three stages and downloaded updated particle velocities
+    //       run these stages and downloaded updated particle velocities
     //       and affine matrices to CPU. Skip them here; advect + reseed still
     //       run on CPU below using the GPU-written velocity data.
-    static std::vector<float> vel_x_pre_buf;
-    static std::vector<float> vel_y_pre_buf;
-    static std::vector<float> vel_z_pre_buf;
-
     stage_begin = SolverClock::now();
     if (!params.pressure_g2p_precomputed) {
-        // 4. Snapshot the MAC velocity field BEFORE pressure projection (FLIP).
-        const bool want_flip = params.flip_blend > 0.0f &&
-                               params.free_surface;
-        if (want_flip) {
-            if (vel_x_pre_buf.size() < grid.vel_x.size()) vel_x_pre_buf.resize(grid.vel_x.size());
-            if (vel_y_pre_buf.size() < grid.vel_y.size()) vel_y_pre_buf.resize(grid.vel_y.size());
-            if (vel_z_pre_buf.size() < grid.vel_z.size()) vel_z_pre_buf.resize(grid.vel_z.size());
-            std::copy(grid.vel_x.begin(), grid.vel_x.end(), vel_x_pre_buf.begin());
-            std::copy(grid.vel_y.begin(), grid.vel_y.end(), vel_y_pre_buf.begin());
-            std::copy(grid.vel_z.begin(), grid.vel_z.end(), vel_z_pre_buf.begin());
-        }
-
         // 5. Pressure projection (incompressibility).
         auto pressure_begin = SolverClock::now();
         if (params.free_surface) {
@@ -2390,37 +2603,14 @@ void step(FluidParticles& particles,
         }
         out_stats.pressure_ms = elapsedMs(pressure_begin, SolverClock::now());
 
-        if (!params.skip_g2p) {
-            // 6. Grid -> particle (APIC affine + PIC/FLIP linear blend + friction)
-            gridToParticle(particles,
-                           grid,
-                           params,
-                           dt,
-                           want_flip ? vel_x_pre_buf.data() : nullptr,
-                           want_flip ? vel_y_pre_buf.data() : nullptr,
-                           want_flip ? vel_z_pre_buf.data() : nullptr);
-        } else {
-            // Expose FLIP snapshot for GPU G2P. Copy static buffers to
-            // namespace-level g_ statics so the caller can access them after
-            // this call returns. vel_x_pre_buf is valid only when want_flip.
-            g_flip_snap_valid = want_flip;
-            if (want_flip) {
-                g_flip_snap_x.assign(vel_x_pre_buf.begin(),
-                                     vel_x_pre_buf.begin() + grid.vel_x.size());
-                g_flip_snap_y.assign(vel_y_pre_buf.begin(),
-                                     vel_y_pre_buf.begin() + grid.vel_y.size());
-                g_flip_snap_z.assign(vel_z_pre_buf.begin(),
-                                     vel_z_pre_buf.begin() + grid.vel_z.size());
-            } else {
-                g_flip_snap_x.clear(); g_flip_snap_y.clear(); g_flip_snap_z.clear();
-            }
-            out_stats.g2p_ms = 0.0f;
-            // Caller will do GPU G2P and then call Fluid::step with
-            // pressure_g2p_precomputed=true for the tail (air_drag+advect+reseed).
-            out_stats.total_ms = elapsedMs(total_begin, SolverClock::now());
-            return;
-        }
-        // When skip_g2p=true early return is above. Normal flow continues below.
+        // 6. Grid -> particle (APIC affine + PIC/FLIP linear blend + friction)
+        gridToParticle(particles,
+                       grid,
+                       params,
+                       dt,
+                       want_flip ? vel_x_pre_buf.data() : nullptr,
+                       want_flip ? vel_y_pre_buf.data() : nullptr,
+                       want_flip ? vel_z_pre_buf.data() : nullptr);
     } else {
         // pressure_g2p_precomputed: GPU already handled pressure+G2P,
         // particle velocities+affine are downloaded — only tail stages remain.

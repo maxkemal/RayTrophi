@@ -16,7 +16,9 @@ layout(push_constant) uniform PC {
     vec4  origin_voxel;  // xyz = grid origin (world), w = voxel size
     vec4  material0;     // ignition_T, fuel_capacity, burn_rate, thermal_response
     vec4  material1;     // (reserved, was cooling_rate), char_rate, dt, max_temperature
-    vec4  material2;     // boil_normalized, melt_normalized, melt_rate, mass_capacity
+    // melt_enthalpy_span = latent heat of fusion expressed as the normalized
+    // temperature span whose energy equals it (L/c / kelvin_per_unit).
+    vec4  material2;     // boil_normalized, melt_normalized, melt_enthalpy_span, mass_capacity
 } pc;
 
 layout(set=0, binding=0) readonly buffer Centers { vec4 centers[]; };  // xyz world, w area
@@ -161,16 +163,41 @@ void main() {
         st.x = mix(st.x, min(st.x, boil), wetness);
     }
 
-    // ── Melting (Phase 6b) ───────────────────────────────────────────────────
+    // ── Melting: a latent-heat ENERGY BUDGET (Phase 6b, reworked) ────────────
     // ★ Deliberately the SAME SHAPE as the moisture gate above, because it is the
     // same physics: a first-order phase change absorbs energy at a fixed
     // temperature. Water boiling pins the surface at 373 K; iron melting pins it
     // at 1811 K. Writing them differently would have been two models of one law.
     //
-    // ★ The overshoot is measured BEFORE the pin, from the temperature the gas
-    // exchange just produced. Measuring it after would pin the surface exactly at
-    // the melt point, make the overshoot zero, and stall melting forever at 50% —
-    // a self-cancelling loop that looks like "melting just stops".
+    // ★★ WHAT CHANGED, AND WHY IT MATTERS
+    //
+    // This used to advance the melt fraction at a RATE:
+    //     melt += (T - T_melt) * melt_rate * dt
+    // Two things were wrong with that, and both were visible in results:
+    //   - The amount melted depended on how LONG the surface sat above its melt
+    //     point, not on how much ENERGY reached it. A blowtorch for a moment and
+    //     a weak flame for the same wall-clock time melted about the same, which
+    //     is the opposite of how melting works.
+    //   - dt appeared explicitly, so the identical scene melted differently at a
+    //     different substep count or frame rate.
+    // It also needed a `mix(T_melt, T, melt)` fudge to avoid a self-cancelling
+    // loop that stalled melting at 50%.
+    //
+    // The replacement is bookkeeping, not a rate. `st.x` currently holds the
+    // temperature the heat exchange just produced. Anything ABOVE the melt point
+    // is energy the solid had no other way to absorb, so it buys phase change:
+    //
+    //     melted_fraction = overshoot / melt_enthalpy_span
+    //
+    // and exactly that much is subtracted back off the temperature. dt appears
+    // nowhere: the energy delivered this step is already baked into st.x by the
+    // exponential-exact update above, so two half-steps deliver — and melt — the
+    // same as one full step. Short burst versus sustained flame now compare on
+    // total energy transferred, which is the physical question.
+    //
+    // Superheating falls out for free: once max_melt_fraction is reached the
+    // budget can absorb nothing more, so molten iron climbs toward its boiling
+    // point on its own. No special case, and no 50% stall to work around.
     float area = max(centers[id].w, 1e-8);
     float capacity = max(pc.material2.w * area, 1e-8);
     float burned_total = clamp(aux.z, 0.0, capacity);
@@ -178,17 +205,16 @@ void main() {
     float max_melt_fraction = clamp(
         1.0 - (burned_total + transferred_total) / capacity, 0.0, 1.0);
     aux.y = min(aux.y, max_melt_fraction);
+    float melt_enthalpy = pc.material2.z;
     float melt_over = st.x - pc.material2.y;
-    if (melt_over > 0.0 && aux.y < 1.0 && pc.material2.z > 0.0) {
-        aux.y = clamp(aux.y + melt_over * pc.material2.z * dt,
-                      0.0, max_melt_fraction);
-    }
-    if (aux.y > 0.0 && aux.y < 1.0) {
-        // Latent heat: while there is still solid left to melt, the incoming
-        // energy goes into the phase change instead of into temperature. Released
-        // progressively so a fully molten surface is free to superheat — that is
-        // what lets molten iron keep climbing toward its boiling point.
-        st.x = mix(pc.material2.y, st.x, aux.y);
+    if (melt_over > 0.0 && aux.y < max_melt_fraction && melt_enthalpy > 0.0) {
+        // Spend the overshoot, but never more than the remaining solid can buy.
+        float affordable = melt_over / melt_enthalpy;
+        float applied = min(affordable, max_melt_fraction - aux.y);
+        aux.y += applied;
+        // Pay for it out of the temperature. When `applied` was capped by the
+        // remaining solid, the unspent overshoot correctly stays as heat.
+        st.x -= applied * melt_enthalpy;
     }
     float molten_mass = clamp(aux.y, 0.0, 1.0) * capacity;
     st.y = min(st.y, max(capacity - burned_total - transferred_total - molten_mass, 0.0));

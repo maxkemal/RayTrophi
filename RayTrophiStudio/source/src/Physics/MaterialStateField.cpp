@@ -38,7 +38,7 @@ struct MsfGatherConstants {
     float origin_voxel[4] = {}; // xyz origin, w voxel size
     float material0[4] = {};    // ignition_T, fuel_capacity, burn_rate, thermal_response
     float material1[4] = {};    // (reserved, was cooling_rate), char_rate, dt, max_temperature
-    float material2[4] = {};    // boil_normalized, melt_normalized, melt_rate, unused
+    float material2[4] = {};    // boil_normalized, melt_normalized, melt_enthalpy_span, mass_capacity
 };
 static_assert(sizeof(MsfGatherConstants) == 80,
               "sim_msf_gather push-constant ABI changed");
@@ -468,17 +468,22 @@ MaterialSubstance MaterialSubstance::fromProfile(const SubstanceProfile& profile
     // has one comparison and no way for a flag and a threshold to disagree.
     if (profile.meltable && profile.melt_kelvin > 0.0f) {
         out.melt_normalized = scale.toNormalized(profile.melt_kelvin);
-        // Latent heat maps to a RATE, not to an energy budget. A real enthalpy
-        // model needs mass and specific heat per element, which this layer does
-        // not carry; what it does carry is the physically meaningful ORDERING —
-        // ice (3.34e5) is stubborn, wax (2.1e5) gives way easily — and the
-        // reference is iron's, so iron melts at 1.0 per normalized degree per
-        // second. Stated as a tuning mapping because that is what it is.
-        constexpr float kLatentReference = 2.72e5f;  // iron
-        out.melt_rate = kLatentReference / std::max(1.0f, profile.latent_heat_fusion);
+        // ── Latent heat as an energy budget, not a tuning rate ────────────────
+        // L/c is the temperature rise that costs the same energy as melting the
+        // material outright, and it needs no per-element mass because the mass
+        // cancels between the two sides. See MaterialSubstance::melt_enthalpy_span.
+        //
+        // ★ An INTERVAL, so it scales by kelvin_per_unit only — toNormalized()
+        // would also subtract the ambient offset and turn an energy into a
+        // temperature reading, which is a different quantity.
+        const float latent_kelvin = std::max(0.0f, profile.latent_heat_fusion) /
+                                    std::max(1.0f, profile.specific_heat);
+        out.melt_enthalpy_span = (scale.kelvin_per_unit > 0.0f)
+            ? std::max(latent_kelvin / scale.kelvin_per_unit, 1.0e-4f)
+            : 0.0f;
     } else {
         out.melt_normalized = 1.0e9f;
-        out.melt_rate = 0.0f;
+        out.melt_enthalpy_span = 0.0f;
     }
     if (profile.combustible) {
         // Overrides are applied in Kelvin, BEFORE the conversion, so there stays
@@ -768,7 +773,7 @@ bool MaterialStateFieldSystem::step(SimulationComputeContext& compute,
         // Phase 6b. A non-meltable substance carries a sentinel melt point far
         // above anything reachable, so the shader needs no separate flag.
         pc.material2[1] = substance.melt_normalized;
-        pc.material2[2] = substance.melt_rate;
+        pc.material2[2] = substance.melt_enthalpy_span;
         pc.material2[3] = substance.mass_capacity;
         pc.material1[2] = dt;
         pc.material1[3] = std::max(1.0f, max_temperature);
@@ -786,6 +791,9 @@ bool MaterialStateFieldSystem::step(SimulationComputeContext& compute,
         gather.constants = &pc;
         gather.constants_size = sizeof(pc);
         gather.groups.groups_x = element_groups;
+        // The device copy is authoritative from here on; any host mirror taken
+        // before this dispatch is one step behind.
+        field.host_state_fresh = false;
         if (!compute.dispatch(gather)) { all_ok = false; continue; }
 
         // Scatter: deposit the released vapour into the accumulators. Only
@@ -1266,39 +1274,92 @@ bool MaterialStateFieldSystem::sampleLocalMassAtUV(const MaterialStateField& fie
     return true;
 }
 
+namespace {
+// Shared body for the whole-object and per-region integrity summaries. `bounded`
+// selects between them; keeping one implementation means a cluster and its
+// parent object can never disagree about what damage means.
+MaterialIntegritySummary summarizeIntegrityImpl(
+    const MaterialStateField& field, bool bounded,
+    const Vec3& bounds_min, const Vec3& bounds_max);
+}
+
 MaterialIntegritySummary MaterialStateFieldSystem::summarizeIntegrity(
     const MaterialStateField& field) {
+    return summarizeIntegrityImpl(field, false, Vec3(0.0f, 0.0f, 0.0f),
+                                  Vec3(0.0f, 0.0f, 0.0f));
+}
+
+MaterialIntegritySummary MaterialStateFieldSystem::summarizeIntegrityInBounds(
+    const MaterialStateField& field,
+    const Vec3& bounds_min, const Vec3& bounds_max) {
+    return summarizeIntegrityImpl(field, true, bounds_min, bounds_max);
+}
+
+namespace {
+MaterialIntegritySummary summarizeIntegrityImpl(
+    const MaterialStateField& field, bool bounded,
+    const Vec3& bounds_min, const Vec3& bounds_max) {
     MaterialIntegritySummary out;
     const std::size_t count = std::min(
         field.elementCount(), field.state.size() / MaterialStateField::kStateStride);
     if (count == 0u || field.centers.size() < count * 4u) return out;
 
     const auto& profile = findSubstance(field.substance_name);
-    const float fuel_capacity = profile.combustible
-        ? std::max(0.0f, profile.fuel_capacity *
-            std::max(0.0f, field.overrides.fuel_capacity_scale))
-        : 0.0f;
+    // ★ THE SAME MASS BASE AS summarizeMassBudget, deliberately.
+    //
+    // This used to divide by `profile.fuel_capacity`, which made the system carry
+    // two different mass authorities. Two failures followed from that:
+    //   - a NON-COMBUSTIBLE substance has fuel_capacity 0, so the divisor
+    //     collapsed to the 1e-8 floor and integrity was pinned at exactly 1.0
+    //     forever. A steel beam could never weaken, whatever happened to it.
+    //   - only pyrolysis counted as damage. A bar that had lost half its mass to
+    //     MELTING and APIC transfer still reported integrity 1.0 and kept its
+    //     full fracture threshold — the object was visibly half gone and
+    //     structurally pristine.
+    //
+    // Structural loss is mass that LEFT THE SOLID, by whatever route: pyrolyzed,
+    // molten, or already handed to the fluid. Melt counts because a molten shell
+    // carries no load, which is also why it is not weighted down relative to the
+    // other two.
+    const MaterialSubstance substance = MaterialSubstance::fromProfile(
+        profile, MaterialTemperatureScale{}, field.overrides);
+    const float capacity_per_area = std::max(substance.mass_capacity, 0.0f);
     double weighted_integrity = 0.0;
     double total_area = 0.0;
     double supported_area = 0.0;
     float weakest = 1.0f;
     Vec3 weakest_position(0.0f, 0.0f, 0.0f);
     float total_loss = 0.0f;
+    bool first = true;
+    uint32_t sampled = 0;
     for (std::size_t i = 0; i < count; ++i) {
+        const Vec3 centre(field.centers[i * 4u + 0u],
+                          field.centers[i * 4u + 1u],
+                          field.centers[i * 4u + 2u]);
+        if (bounded &&
+            (centre.x < bounds_min.x || centre.x > bounds_max.x ||
+             centre.y < bounds_min.y || centre.y > bounds_max.y ||
+             centre.z < bounds_min.z || centre.z > bounds_max.z)) continue;
         const float area = std::max(field.centers[i * 4u + 3u], 1e-8f);
-        const float capacity = std::max(fuel_capacity * area, 1e-8f);
-        const float loss = std::max(
-            field.state[i * MaterialStateField::kStateStride + 6u], 0.0f);
+        const float capacity = std::max(capacity_per_area * area, 1e-8f);
+        const std::size_t base = i * MaterialStateField::kStateStride;
+        const float burned = std::clamp(field.state[base + 6u], 0.0f, capacity);
+        const float melted = std::clamp(field.state[base + 5u], 0.0f, 1.0f) * capacity;
+        const float moved = std::clamp(field.state[base + 7u], 0.0f, capacity);
+        const float loss = std::min(burned + melted + moved, capacity);
         const float integrity = std::clamp(1.0f - loss / capacity, 0.0f, 1.0f);
+        ++sampled;
         weighted_integrity += static_cast<double>(integrity) * area;
         total_area += area;
         if (integrity > 0.25f) supported_area += area;
         total_loss += loss;
-        if (i == 0u || integrity < weakest) {
+        // `first`, not `i == 0`: with bounds active element 0 is usually outside
+        // the region, and seeding the minimum from a skipped element would let a
+        // cluster inherit its neighbour's weakest point.
+        if (first || integrity < weakest) {
             weakest = integrity;
-            weakest_position = Vec3(field.centers[i * 4u + 0u],
-                                    field.centers[i * 4u + 1u],
-                                    field.centers[i * 4u + 2u]);
+            weakest_position = centre;
+            first = false;
         }
     }
     out.valid = total_area > 0.0;
@@ -1309,8 +1370,11 @@ MaterialIntegritySummary MaterialStateFieldSystem::summarizeIntegrity(
     out.weakest_world_position = weakest_position;
     out.total_mass_loss = total_loss;
     out.content_generation = field.mask_revision;
+    out.regional = bounded;
+    out.sampled_elements = sampled;
     return out;
 }
+}  // namespace
 
 bool MaterialStateFieldSystem::refreshHostState(SimulationComputeContext& compute,
                                                 MaterialStateField& field) {
@@ -1320,8 +1384,11 @@ bool MaterialStateFieldSystem::refreshHostState(SimulationComputeContext& comput
     // ★ Sized by the live element count, never by the buffer's byte size: the
     // device buffers are grow-only, so after a mesh shrinks the allocation is
     // larger than the live data.
-    return compute.downloadBuffer(field.gpu_state, field.state.data(),
-                                  element_count * kStride * sizeof(float));
+    if (!compute.downloadBuffer(field.gpu_state, field.state.data(),
+                                element_count * kStride * sizeof(float)))
+        return false;
+    field.host_state_fresh = true;
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

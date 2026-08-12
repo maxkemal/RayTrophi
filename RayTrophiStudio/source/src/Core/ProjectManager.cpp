@@ -986,6 +986,21 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
                 // but let's assume if it's in the list, it's visible. 
                 // If you implement a specific hide flag in Triangle, use it here.)
                 inst.visible = true; 
+            } else if (scene.fracture_parked_nodes.count(inst.node_name) != 0) {
+                // ★ ABSENT IS NOT THE SAME AS DELETED.
+                //
+                // A fractured mesh has its original geometry PARKED: pulled out
+                // of world.objects so the shards render in its place, but very
+                // much still owned by the session (Restore puts it back). This
+                // loop only knows "I cannot find it", and recording that as a
+                // deletion made saving a fractured object destroy it — the
+                // re-import skipped the node on reload, and the shards were
+                // never persisted either, so the object was simply gone.
+                //
+                // Keep the node in the model. Reopening the project therefore
+                // gives back the WHOLE, un-fractured mesh: the fracture itself
+                // does not survive the round trip yet, but nothing is lost.
+                inst.visible = true;
             } else {
                 // Object MISSING from Scene -> It is DELETED
                 current_deleted.push_back(inst.node_name);
@@ -3909,6 +3924,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["aspect_base_height"] = settings.aspect_base_height;
     j["aspect_ratio_index"] = settings.aspect_ratio_index;
     j["show_background"] = settings.show_background;
+    j["transparent_background"] = settings.transparent_background;
     j["persistent_tonemap"] = settings.persistent_tonemap;
     
     // Animation Sequencer Settings
@@ -3962,6 +3978,7 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.aspect_base_height = j.value("aspect_base_height", settings.aspect_base_height);
     settings.aspect_ratio_index = j.value("aspect_ratio_index", settings.aspect_ratio_index);
     settings.show_background = j.value("show_background", settings.show_background);
+    settings.transparent_background = j.value("transparent_background", false);
     settings.persistent_tonemap = j.value("persistent_tonemap", settings.persistent_tonemap);
     
     // Animation Sequencer Settings
@@ -4865,6 +4882,58 @@ json ProjectManager::serializeRigidBodies(const SceneData& scene) {
         root["bodies"].push_back(std::move(b));
     }
 
+    // ★ group -> source object, and it does NOT follow from the bodies above.
+    //
+    // A structural cluster is a piece of an object, so its group name and the
+    // object's name are different strings. MSF fields are keyed by OBJECT; every
+    // per-region integrity lookup goes through this map to get from one to the
+    // other. Drop it and each cluster looks itself up under its own name, finds
+    // nothing, and reports integrity 1.0 — full strength, no thermal weakening,
+    // silently, because 1.0 is exactly what an undamaged object reports. That
+    // bug was found and fixed once; leaving the map out of the project simply
+    // reintroduced it on the far side of a save.
+    if (!scene.fractureGroupSources().empty()) {
+        json sources = json::object();
+        for (const auto& entry : scene.fractureGroupSources())
+            sources[entry.first] = entry.second;
+        root["fracture_group_sources"] = std::move(sources);
+    }
+
+    // ★ How the shards themselves come back. They are not written — they CANNOT
+    // be, the format has no geometry section — so each fractured node stores the
+    // recipe and the load re-cuts. The site list is the bulky part and the
+    // indispensable one; see SceneData::FractureRecipe for why it cannot be
+    // re-derived from seed and pattern.
+    if (!scene.fracture_recipes.empty()) {
+        json recipes = json::array();
+        for (const auto& entry : scene.fracture_recipes) {
+            const SceneData::FractureRecipe& recipe = entry.second;
+            json r;
+            r["node"] = entry.first;
+            r["site_count"] = recipe.site_count;
+            r["seed"] = recipe.seed;
+            r["pattern"] = recipe.pattern;
+            r["cluster_count"] = recipe.cluster_count;
+            r["exact_surface"] = recipe.exact_surface;
+            r["preview_gap"] = recipe.preview_gap;
+            json sites = json::array();
+            for (const Vec3& site : recipe.sites) {
+                sites.push_back(site.x);
+                sites.push_back(site.y);
+                sites.push_back(site.z);
+            }
+            r["sites"] = std::move(sites);
+            // What the load ADOPTS. The shard meshes themselves come back from
+            // the geometry sidecar; these names are how the fracture is matched
+            // to them again, and the cluster indices are the part no amount of
+            // geometry can reconstruct.
+            r["shard_nodes"] = recipe.shard_nodes;
+            r["shard_clusters"] = recipe.shard_clusters;
+            recipes.push_back(std::move(r));
+        }
+        root["fracture_recipes"] = std::move(recipes);
+    }
+
     return root;
 }
 
@@ -4874,6 +4943,57 @@ void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
     }
 
     scene.rigid_bodies.clear();
+
+    if (j.is_object() && j.contains("fracture_recipes") &&
+        j["fracture_recipes"].is_array()) {
+        scene.fracture_recipes.clear();
+        for (const auto& r : j["fracture_recipes"]) {
+            if (!r.is_object()) continue;
+            const std::string node = r.value("node", std::string());
+            if (node.empty()) continue;
+            SceneData::FractureRecipe recipe;
+            recipe.site_count    = r.value("site_count", recipe.site_count);
+            recipe.seed          = r.value("seed", recipe.seed);
+            recipe.pattern       = r.value("pattern", recipe.pattern);
+            recipe.cluster_count = r.value("cluster_count", recipe.cluster_count);
+            recipe.exact_surface = r.value("exact_surface", recipe.exact_surface);
+            recipe.preview_gap   = r.value("preview_gap", recipe.preview_gap);
+            if (r.contains("sites") && r["sites"].is_array()) {
+                const auto& sites = r["sites"];
+                recipe.sites.reserve(sites.size() / 3u);
+                for (std::size_t i = 0; i + 2 < sites.size(); i += 3) {
+                    recipe.sites.push_back(Vec3(sites[i].get<float>(),
+                                                sites[i + 1].get<float>(),
+                                                sites[i + 2].get<float>()));
+                }
+            }
+            if (r.contains("shard_nodes") && r["shard_nodes"].is_array())
+                recipe.shard_nodes = r["shard_nodes"].get<std::vector<std::string>>();
+            if (r.contains("shard_clusters") && r["shard_clusters"].is_array())
+                recipe.shard_clusters = r["shard_clusters"].get<std::vector<int>>();
+            // ★ A recipe with neither shard names nor sites can do nothing: it
+            // cannot adopt (no names to match) and re-cutting it would scatter
+            // afresh, producing a DIFFERENT break wearing the saved one's shard
+            // names — with the rigid bodies silently rebinding to it. An
+            // un-fractured mesh is the safe failure; a wrong one is not.
+            if (recipe.shard_nodes.empty() && recipe.sites.empty()) {
+                SCENE_LOG_WARN("[Fracture] Saved recipe for '" + node +
+                               "' has neither shard names nor sites; skipping "
+                               "rather than cutting it differently.");
+                continue;
+            }
+            scene.fracture_recipes[node] = std::move(recipe);
+        }
+    }
+
+    if (j.is_object() && j.contains("fracture_group_sources") &&
+        j["fracture_group_sources"].is_object()) {
+        for (auto it = j["fracture_group_sources"].begin();
+             it != j["fracture_group_sources"].end(); ++it) {
+            if (it.value().is_string())
+                scene.setFractureGroupSource(it.key(), it.value().get<std::string>());
+        }
+    }
 
     const json* bodies = nullptr;
     if (j.contains("bodies") && j["bodies"].is_array()) {
@@ -5218,8 +5338,12 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"velocity_damping", domain.fluid_params.velocity_damping},
             {"wall_damping", domain.fluid_params.wall_damping},
             {"domain_motion_coupling", domain.fluid_params.domain_motion_coupling},
-            {"viscosity", domain.fluid_params.viscosity},
-            {"viscosity_iterations", domain.fluid_params.viscosity_iterations},
+            // Renamed keys, deliberately not aliased to the old ones: the old
+            // `viscosity` was a unitless 0..200 dial, and reading 20.0 back as
+            // 20 m²/s would load lava where honey was authored.
+            {"kinematic_viscosity", domain.fluid_params.kinematic_viscosity},
+            {"viscosity_sweeps", domain.fluid_params.viscosity_sweeps},
+            {"viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip},
             {"affine_damping", domain.fluid_params.affine_damping},
             {"max_affine", domain.fluid_params.max_affine},
             {"cpu_threads", domain.fluid_params.cpu_threads},
@@ -5286,6 +5410,10 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["fluid_surface_ior"] = domain.fluid_surface_ior;
         d["fluid_surface_roughness"] = domain.fluid_surface_roughness;
         d["fluid_surface_foam"] = domain.fluid_surface_foam;
+        d["fluid_surface_material_id"] = domain.fluid_surface_material_id;
+        d["fluid_surface_pore_amount"] = domain.fluid_surface_pore_amount;
+        d["fluid_surface_pore_scale"] = domain.fluid_surface_pore_scale;
+        d["fluid_surface_pore_detail"] = domain.fluid_surface_pore_detail;
         d["fluid_debug_overlay"] = domain.fluid_debug_overlay;
 
         const auto& fo = domain.fluid_foam_params;
@@ -5329,6 +5457,10 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["smoke_generation"] = domain.smoke_generation;
         d["flame_dissipation"] = domain.flame_dissipation;
         d["fire_max_temperature"] = domain.fire_max_temperature;
+        d["structural_coupling_enabled"] = domain.structural_coupling_enabled;
+        d["structural_pressure_scale"] = domain.structural_pressure_scale;
+        d["structural_min_intensity"] = domain.structural_min_intensity;
+        d["structural_event_interval"] = domain.structural_event_interval;
         d["fire_expansion"] = domain.fire_expansion;
         d["gas_buoyancy_heat"] = domain.gas_buoyancy_heat;
         d["gas_buoyancy_density"] = domain.gas_buoyancy_density;
@@ -5731,8 +5863,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.velocity_damping = f.value("velocity_damping", domain.fluid_params.velocity_damping);
             domain.fluid_params.wall_damping = f.value("wall_damping", domain.fluid_params.wall_damping);
             domain.fluid_params.domain_motion_coupling = f.value("domain_motion_coupling", domain.fluid_params.domain_motion_coupling);
-            domain.fluid_params.viscosity = f.value("viscosity", domain.fluid_params.viscosity);
-            domain.fluid_params.viscosity_iterations = f.value("viscosity_iterations", domain.fluid_params.viscosity_iterations);
+            domain.fluid_params.kinematic_viscosity = f.value("kinematic_viscosity", domain.fluid_params.kinematic_viscosity);
+            domain.fluid_params.viscosity_sweeps = f.value("viscosity_sweeps", domain.fluid_params.viscosity_sweeps);
+            domain.fluid_params.viscosity_wall_slip = f.value("viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip);
             domain.fluid_params.affine_damping = f.value("affine_damping", domain.fluid_params.affine_damping);
             domain.fluid_params.max_affine = f.value("max_affine", domain.fluid_params.max_affine);
             domain.fluid_params.cpu_threads = f.value("cpu_threads", domain.fluid_params.cpu_threads);
@@ -5755,6 +5888,18 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
                 domain.fluid_params.current_preset =
                     static_cast<RayTrophiSim::Fluid::APICSolverParams::FluidPreset>(
                         f.value("current_preset", static_cast<int>(domain.fluid_params.current_preset)));
+                // A project written before the rheology rework carries the old
+                // unitless `viscosity` (which we deliberately do not read) and no
+                // `kinematic_viscosity`. Loading it as-is would give a domain
+                // labelled "Honey" that is inviscid — the label right, the physics
+                // silently gone. Re-apply the preset instead: named materials come
+                // back as the material, and only hand-tuned (Custom) domains are
+                // left alone, which is exactly where re-applying would be wrong.
+                if (!f.contains("kinematic_viscosity") &&
+                    domain.fluid_params.current_preset !=
+                        RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom) {
+                    domain.fluid_params.applyPreset(domain.fluid_params.current_preset);
+                }
             }
             if (f.contains("chemistry_preset")) {
                 domain.fluid_params.chemistry_preset =
@@ -5813,6 +5958,14 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.fluid_surface_ior = item.value("fluid_surface_ior", domain.fluid_surface_ior);
         domain.fluid_surface_roughness = item.value("fluid_surface_roughness", domain.fluid_surface_roughness);
         domain.fluid_surface_foam = item.value("fluid_surface_foam", domain.fluid_surface_foam);
+        domain.fluid_surface_material_id =
+            item.value("fluid_surface_material_id", domain.fluid_surface_material_id);
+        domain.fluid_surface_pore_amount =
+            item.value("fluid_surface_pore_amount", domain.fluid_surface_pore_amount);
+        domain.fluid_surface_pore_scale =
+            item.value("fluid_surface_pore_scale", domain.fluid_surface_pore_scale);
+        domain.fluid_surface_pore_detail =
+            item.value("fluid_surface_pore_detail", domain.fluid_surface_pore_detail);
         domain.fluid_debug_overlay = item.value("fluid_debug_overlay", domain.fluid_debug_overlay);
 
         if (item.contains("foam") && item["foam"].is_object()) {
@@ -5857,6 +6010,10 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.smoke_generation = item.value("smoke_generation", domain.smoke_generation);
         domain.flame_dissipation = item.value("flame_dissipation", domain.flame_dissipation);
         domain.fire_max_temperature = item.value("fire_max_temperature", domain.fire_max_temperature);
+        domain.structural_coupling_enabled = item.value("structural_coupling_enabled", domain.structural_coupling_enabled);
+        domain.structural_pressure_scale = item.value("structural_pressure_scale", domain.structural_pressure_scale);
+        domain.structural_min_intensity = item.value("structural_min_intensity", domain.structural_min_intensity);
+        domain.structural_event_interval = item.value("structural_event_interval", domain.structural_event_interval);
         domain.fire_expansion = item.value("fire_expansion", domain.fire_expansion);
         domain.gas_buoyancy_heat = item.value("gas_buoyancy_heat", domain.gas_buoyancy_heat);
         domain.gas_buoyancy_density = item.value("gas_buoyancy_density", domain.gas_buoyancy_density);

@@ -861,6 +861,14 @@ private:
             // sim_fluid_cg_* family — plain path only: non-variational, non-GFM,
             // non-fused reductions, no multigrid; the host's generic path covers
             // exactly this subset on non-CUDA backends).
+            // Implicit viscous diffusion (red-black Gauss-Seidel). One dispatch
+            // relaxes one colour of ALL THREE MAC components, so a sweep is two
+            // dispatches. FluidViscosityGpuConstants = 13 fields x 4 = 52 —
+            // deliberately the same 52 bytes as GridProjectionGpuConstants so it
+            // shares the size class the registry already validates.
+            // 10 buffers: vel xyz + mask + rhs xyz (the pre-diffusion field) +
+            // solid velocity xyz (the no-slip Dirichlet value).
+            { "sim_fluid_viscosity_rbgs",           "sim_fluid_viscosity_rbgs.spv",       10, 52 },
             { "sim_fluid_divergence",               "sim_fluid_divergence.spv",            5, 52 },
             { "sim_fluid_subtract_gradient",        "sim_fluid_subtract_gradient.spv",     5, 52 },
             { "sim_fluid_cg_build_diag",            "sim_fluid_cg_build_diag.spv",         2, 52 },

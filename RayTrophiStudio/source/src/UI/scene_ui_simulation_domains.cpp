@@ -839,6 +839,43 @@ void drawSimulationDomainControls(
                         }
 
                         ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Checkbox("Blast Damages Structures##StructCouple",
+                                        &domain.structural_coupling_enabled);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Turn this fire's combustion into blast loading on breakable\n"
+                                              "objects. Without it, burning still weakens material and lowers\n"
+                                              "its fracture threshold, but nothing ever delivers the push -\n"
+                                              "so a fire can char a structure and never bring it down.");
+                        }
+                        if (domain.structural_coupling_enabled) {
+                            ImGui::DragFloat("Blast Pressure Scale", &domain.structural_pressure_scale,
+                                             5.0f, 0.0f, 5000.0f, "%.0f kPa");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("CALIBRATION, not a physical constant.\n"
+                                                  "Fuel and temperature here are normalized units, so no honest\n"
+                                                  "formula turns them into kilopascals. Raise this until a fire\n"
+                                                  "of the size you author breaks what it should. Compare against\n"
+                                                  "the Break Threshold you set on the fracture group.");
+                            }
+                            ImGui::DragFloat("Minimum Blast Intensity", &domain.structural_min_intensity,
+                                             0.01f, 0.0f, 5.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Below this mean burn rate the fire loads nothing.\n"
+                                                  "Keeps a steady small flame from emitting an endless\n"
+                                                  "drizzle of weak blast events.");
+                            }
+                            ImGui::DragFloat("Blast Interval", &domain.structural_event_interval,
+                                             0.01f, 1.0f / 120.0f, 5.0f, "%.2f s");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Seconds between blast events from this domain, and the\n"
+                                                  "duration each one claims. A sustained fire therefore\n"
+                                                  "delivers repeated honest blows rather than one load\n"
+                                                  "counted again every frame.");
+                            }
+                        }
+
+                        ImGui::Spacing();
                         ImGui::TextDisabled("Physics Note: Remember to add a Flow Source emitting Fuel and Temperature.\n"
                                              "Set shader mode to 'Blackbody' in the Shading tab for realistic fire rendering.");
                     } else {
@@ -1098,14 +1135,37 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip("Couples domain coordinate translation to fluid velocity. Allows creating sloshing liquids inside a moving cup.");
                     }
 
-                    fp_edited |= ImGui::DragFloat("Viscosity Strength", &fp.viscosity, 0.05f,  0.0f, 200.0f, "%.2f");
+                    // Logarithmic: the useful range spans six decades (water 1e-6
+                    // to lava 1e2), so a linear drag bar would put every liquid
+                    // anyone actually pours inside its first pixel.
+                    fp_edited |= ImGui::DragFloat("Kinematic Viscosity (m^2/s)", &fp.kinematic_viscosity,
+                                                  0.0001f, 0.0f, 100.0f, "%.6f",
+                                                  ImGuiSliderFlags_Logarithmic);
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Fluid thickness and flow resistance (Laplacian velocity diffusion).\n"
-                                          "0 = water, ~3 = oil, ~10 = mud, ~20-50 = honey/plastic, 50+ = very slow melt.");
+                        ImGui::SetTooltip("Physical kinematic viscosity in m^2/s, solved implicitly\n"
+                                          "as nu*dt/h^2 - so the same value behaves the same at any\n"
+                                          "voxel size.\n"
+                                          "  water 1e-6 | olive oil 8e-5 | chocolate 4e-3\n"
+                                          "  honey 7e-3 | molten plastic 0.3 | lava 0.5+\n"
+                                          "0 skips the solve entirely.");
+                    }
+                    ImGui::SetNextItemWidth(120.0f);
+                    fp_edited |= ImGui::DragInt("Viscosity Sweeps", &fp.viscosity_sweeps, 1.0f, 1, 64);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Red-black Gauss-Seidel sweeps for the implicit solve.\n"
+                                          "Too few never explodes - it UNDER-applies the viscosity,\n"
+                                          "so raise this if a thick liquid still flows too freely\n"
+                                          "(especially after raising the resolution).");
                     }
                     ImGui::SameLine();
-                    ImGui::SetNextItemWidth(120.0f);
-                    fp_edited |= ImGui::DragInt("Viscosity Iterations", &fp.viscosity_iterations, 1.0f, 1, 16);
+                    ImGui::SetNextItemWidth(140.0f);
+                    fp_edited |= ImGui::SliderFloat("Wall Slip", &fp.viscosity_wall_slip, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Tangential condition at colliders for the viscous solve.\n"
+                                          "0 = no-slip: the liquid sticks to surfaces and is dragged\n"
+                                          "    by moving ones. Honey, chocolate, mud, lava.\n"
+                                          "1 = free-slip: slides freely. Water.");
+                    }
 
                     fp_edited |= ImGui::DragFloat("Density Correction Strength", &fp.density_correction, 0.05f, 0.0f, 10.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
@@ -1976,7 +2036,21 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip("Draws raw simulation particle coordinates as lightweight blue viewport overlays.");
                     }
 
-                    if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) {
+                    // ★ Gate the parameter blocks on what the COMBO SHOWS
+                    // (current_mode_idx), not on the raw enum. They used to read
+                    // the enum, so a domain still holding the invalid 'Volume'
+                    // mode displayed "Smooth Glassy Surface" as selected and
+                    // then matched NEITHER block — the section opened with a
+                    // mode chosen and nothing underneath it. That is the failure
+                    // that gets reported as "Liquid Visualization does not
+                    // open", and it looked seed-mode-dependent only because
+                    // touching the seed controls runs the sim, which is where
+                    // the mode gets normalised.
+                    //
+                    // This does NOT repair the scene data — the panel still
+                    // writes nothing (see the note above); it only stops the
+                    // combo from claiming a mode the rest of the panel ignores.
+                    if (current_mode_idx == 0) {
                         auto& mgr = MaterialManager::getInstance();
                         const auto& all_mats = mgr.getAllMaterials();
                         const char* current_label = "Auto (Color + Glow)";
@@ -2028,7 +2102,7 @@ void drawSimulationDomainControls(
                         }
                     }
 
-                    if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
+                    if (current_mode_idx == 1) {   // see the note above: display, not enum
                         bool sdf_changed = false;
                         sdf_changed |= ImGui::DragFloat("Level Set Kernel Radius", &domain.fluid_level_set_params.kernel_radius_voxels, 0.05f, 0.5f, 6.0f, "%.2f");
                         if (ImGui::IsItemHovered()) {
@@ -2041,6 +2115,50 @@ void drawSimulationDomainControls(
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Number of Laplacian smoothing passes applied to the surface level-set boundary. Prevents voxel stair-stepping.");
                         }
+                        // ── Procedural porosity ──────────────────────────────
+                        // NOT an sdf_changed knob: nothing is rebuilt. The pore
+                        // field is evaluated in the shader against the SAME
+                        // level set, so these repaint the current frame.
+                        ImGui::Separator();
+                        ImGui::TextDisabled("Porosity (crumb / aeration)");
+                        if (ImGui::SliderFloat("Pore Amount", &domain.fluid_surface_pore_amount, 0.0f, 0.5f, "%.3f")) {
+                            ui_ctx.start_render = true;
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Carves bubbles OUT OF THE FIELD before the surface is found, so the\n"
+                                              "pores are real geometry: their rims get correct normals, refraction\n"
+                                              "and self-shadowing. (An alpha cutout would punch rimless holes.)\n\n"
+                                              "0 = off, identical to before. Past ~0.5 the body is eaten faster than\n"
+                                              "it can close and disintegrates instead of becoming porous.");
+                        }
+                        if (domain.fluid_surface_pore_amount > 1e-4f) {
+                            ImGui::Indent();
+                            if (ImGui::DragFloat("Bubble Size (m)", &domain.fluid_surface_pore_scale, 0.002f, 0.001f, 2.0f, "%.3f")) {
+                                ui_ctx.start_render = true;
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Typical bubble diameter in WORLD units, not voxels — changing the\n"
+                                                  "domain resolution re-renders the same crumb instead of resizing it.");
+                            }
+                            if (ImGui::SliderFloat("Size Variation", &domain.fluid_surface_pore_detail, 0.0f, 1.0f, "%.2f")) {
+                                ui_ctx.start_render = true;
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Mixes a finer bubble size into the coarse one.\n"
+                                                  "0 = one uniform size (packing foam, aerated batter).\n"
+                                                  "High = mixed sizes (bread crumb, fermented dough).");
+                            }
+                            ImGui::TextDisabled("Also clips gas handoff \xE2\x80\x94 by design.");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("The pores are cut into the field itself, so the gas/liquid handoff\n"
+                                                  "arbiter sees the same holes the shader draws. That is deliberate:\n"
+                                                  "if the two used different fields, smoke would be clipped against a\n"
+                                                  "surface that is not rendered, with nothing reporting it.");
+                            }
+                            ImGui::Unindent();
+                        }
+                        ImGui::Separator();
+
                         sdf_changed |= ImGui::SliderInt("Surface Detail (x sim grid)", &domain.fluid_level_set_params.surface_resolution_multiplier, 1, 4);
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Reconstructs the render surface on a grid finer than the simulation\n"
@@ -2089,14 +2207,70 @@ void drawSimulationDomainControls(
                         }
 
                         bool mat_changed = false;
+                        {
+                            auto& smgr = MaterialManager::getInstance();
+                            const auto& surf_mats = smgr.getAllMaterials();
+                            const char* surf_label = "Built-in Dielectric (IOR below)";
+                            if (domain.fluid_surface_material_id >= 0 &&
+                                domain.fluid_surface_material_id != MaterialManager::INVALID_MATERIAL_ID &&
+                                static_cast<std::size_t>(domain.fluid_surface_material_id) < surf_mats.size()) {
+                                surf_label = surf_mats[domain.fluid_surface_material_id]
+                                                 ? surf_mats[domain.fluid_surface_material_id]->materialName.c_str()
+                                                 : "(missing)";
+                            }
+                            if (ImGui::BeginCombo("Surface Material##DomainFluidSDF", surf_label)) {
+                                const bool none_sel = (domain.fluid_surface_material_id < 0);
+                                if (ImGui::Selectable("Built-in Dielectric (IOR below)", none_sel)) {
+                                    domain.fluid_surface_material_id = -1;
+                                    mat_changed = true;
+                                }
+                                for (std::size_t mi = 0; mi < surf_mats.size(); ++mi) {
+                                    if (!surf_mats[mi]) continue;
+                                    const bool sel = (domain.fluid_surface_material_id == static_cast<int>(mi));
+                                    ImGui::PushID(static_cast<int>(mi) + 40000);
+                                    if (ImGui::Selectable(surf_mats[mi]->materialName.c_str(), sel)) {
+                                        domain.fluid_surface_material_id = static_cast<int>(mi);
+                                        mat_changed = true;
+                                    }
+                                    ImGui::PopID();
+                                }
+                                ImGui::EndCombo();
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Shades the reconstructed liquid surface with a full scene material —\n"
+                                    "the same Principled BSDF a mesh gets: metallic, clearcoat,\n"
+                                    "transmission and subsurface scattering. Use it for molten glass or\n"
+                                    "metal, lava, mud, chocolate — anything the built-in water/glass\n"
+                                    "dielectric cannot express.\n\n"
+                                    "With a material bound, the material owns the look: its own\n"
+                                    "roughness, IOR and transmission apply, and the two sliders below\n"
+                                    "grey out because they drive the built-in dielectric only.\n"
+                                    "Roughness and colour TEXTURES will not apply — a raymarched\n"
+                                    "isosurface has no UVs. Scalar material values do.");
+                            }
+                        }
+                        // IOR and roughness drive the built-in dielectric only. With a
+                        // material bound the material owns both, so the sliders are
+                        // disabled rather than left live and ignored — a control that
+                        // moves and changes nothing is read as a bug, and reported as one.
+                        const bool builtin_surface = (domain.fluid_surface_material_id < 0);
+                        ImGui::BeginDisabled(!builtin_surface);
                         mat_changed |= ImGui::DragFloat("Index of Refraction (IOR)", &domain.fluid_surface_ior, 0.005f, 1.0f, 2.5f, "%.3f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Refractive index bending light passing through the liquid:\n1.333 = Water, 1.47 = Glycerin, 1.5 = Glass.");
+                        // AllowWhenDisabled: without it a greyed slider shows no tooltip at
+                        // all, which is precisely the "why is this dead?" state being avoided.
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                            ImGui::SetTooltip(builtin_surface
+                                ? "Refractive index bending light passing through the liquid:\n1.333 = Water, 1.47 = Glycerin, 1.5 = Glass."
+                                : "Driven by the bound Surface Material's IOR.\nClear the material to use this slider.");
                         }
                         mat_changed |= ImGui::DragFloat("Surface Roughness", &domain.fluid_surface_roughness, 0.005f, 0.0f, 1.0f, "%.3f");
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Microfacet roughness of the glassy liquid interface. 0.0 = perfectly mirror reflective, >0.0 = frosted reflection.");
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                            ImGui::SetTooltip(builtin_surface
+                                ? "Microfacet roughness of the glassy liquid interface. 0.0 = perfectly mirror reflective, >0.0 = frosted reflection."
+                                : "Driven by the bound Surface Material's roughness.\nClear the material to use this slider.");
                         }
+                        ImGui::EndDisabled();
                         mat_changed |= ImGui::DragFloat("Splash Foam Intensity", &domain.fluid_surface_foam, 0.005f, 0.0f, 1.0f, "%.3f");
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Luminance intensity of foam generated in high-velocity turbulent regions.");
@@ -2177,8 +2351,13 @@ void drawSimulationDomainControls(
                                                       "but O(N) instances).\nVolume: foam rides the fluid surface volume's "
                                                       "temperature channel as a white single-scatter medium — cheap at "
                                                       "millions of particles, the production approach.");
+                                // Warn only when the mode actually SHOWN above is
+                                // Particles. Testing `!= SurfaceSDF` also caught the
+                                // invalid 'Volume' mode, which displays as — and
+                                // normalises to — Surface SDF: the panel told you to
+                                // pick a setting the combo already showed as picked.
                                 if (fo.render_mode == RayTrophiSim::Fluid::FoamRenderMode::Volume &&
-                                    domain.fluid_render_mode != RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
+                                    domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) {
                                     ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
                                         "  Volume foam needs Fluid Render = Surface SDF (it rides that volume).");
                                 }
@@ -2620,7 +2799,21 @@ void drawSimulationDomainControls(
                         std::snprintf(dot_tag, sizeof(dot_tag), "%d", fs.pressure_cg_dot_count);
                         blk.Time("    MGPCG dot sync", fs.pressure_cg_dot_ms, dot_tag, 2);
                     }
-                    blk.Time("Viscosity", fs.viscosity_ms, nullptr, 1);
+                    // Tag it with the sweep count, not just a time. "0.00 ms" is
+                    // the same reading for "the solve is fast" and "nu is 0 so
+                    // nothing ran" — and the whole reason the old viscosity dial
+                    // stayed broken for so long is that its silence looked normal.
+                    {
+                        char visc_tag[48];
+                        if (fs.viscosity_sweeps_run > 0) {
+                            std::snprintf(visc_tag, sizeof(visc_tag), "%s, %d sweeps",
+                                          fs.viscosity_on_gpu ? "GPU" : "CPU",
+                                          fs.viscosity_sweeps_run);
+                        } else {
+                            std::snprintf(visc_tag, sizeof(visc_tag), "off (nu=0)");
+                        }
+                        blk.Time("Viscosity", fs.viscosity_ms, visc_tag, 1);
+                    }
                     blk.Time("G2P", fs.g2p_ms, fs.g2p_on_gpu ? "GPU" : "CPU", 1);
                     char adv_tag[32];
                     std::snprintf(adv_tag, sizeof(adv_tag), "%d substeps", fs.advect_substeps);

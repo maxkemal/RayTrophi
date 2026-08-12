@@ -1357,11 +1357,47 @@ static void fractureEraseNodes_(UIContext& ctx, const std::unordered_set<std::st
             auto tri = std::dynamic_pointer_cast<Triangle>(o);
             return tri && nodes.count(tri->getNodeName()) > 0;
         }), objs.end());
+
+    // ★★ AND THE RIGID BODIES THAT POINTED AT THEM.
+    //
+    // This only ever erased scene geometry, so re-fracturing left the previous
+    // run's breakable bodies alive in the scene, referring to nodes that no
+    // longer exist. They were invisible and unhittable, but they still counted
+    // as members of their fracture group — and nodeWorldCenter() answers (0,0,0)
+    // for a node it cannot find, so every group's centre and AABB got dragged
+    // toward the world origin by a crowd of phantom shards.
+    //
+    // The visible symptoms were all downstream of that: shard_count reporting
+    // several times the number of shards actually requested, six clusters whose
+    // centres all sat on top of each other instead of spread along the object,
+    // and a pressure impulse computed from a projected area that belonged to no
+    // real geometry. Worth stating plainly because none of those symptoms points
+    // anywhere near this function.
+    auto& bodies = ctx.scene.rigid_bodies;
+    const std::size_t before = bodies.size();
+    bodies.erase(std::remove_if(bodies.begin(), bodies.end(),
+        [&](const RayTrophiSim::RigidBodyObject& rb) {
+            return nodes.count(rb.source_name) > 0;
+        }), bodies.end());
+    if (bodies.size() != before && ctx.scene.rigid_body_system)
+        ctx.scene.rigid_body_system->setBodies(&ctx.scene.rigid_bodies);
 }
 
 void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
-                                   int site_count, uint32_t seed, int pattern) {
+                                   int site_count, uint32_t seed, int pattern,
+                                   const SceneData::FractureRecipe* settings) {
     if (node.empty()) return;
+    // ★ Two different callers, one parameter, and they must not be conflated:
+    //   settings == nullptr        -> the panel drives it (the artist's knobs)
+    //   settings, sites EMPTY      -> a script drives it (rt.physics.fracture_object)
+    //   settings, sites NON-EMPTY  -> a saved fracture is being REPLAYED
+    // Only the third case is a replay. A script asking for a thermal fracture
+    // still wants the damage field sampled; treating it as a replay would hand
+    // it an empty site list and it would cut nothing.
+    const bool is_replay = settings && !settings->sites.empty();
+    const int   cluster_count = settings ? settings->cluster_count : fracture_cluster_count;
+    const bool  exact_surface = settings ? settings->exact_surface : fracture_exact_surface;
+    const float preview_gap   = settings ? settings->preview_gap   : fracture_preview_gap;
 
     // Remove any shards from a previous fracture of this node (re-fracture).
     if (auto sit = fracture_shard_nodes_.find(node); sit != fracture_shard_nodes_.end()) {
@@ -1394,6 +1430,8 @@ void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
             }
         }
         ctx.scene.world.objects.swap(keep);
+        // Tell the project saver this node is parked, not deleted.
+        ctx.scene.fracture_parked_nodes.insert(node);
     } else {
         RayTrophiSim::gatherFractureSource(parked, node, src, src_mat);
     }
@@ -1415,13 +1453,52 @@ void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
     RayTrophiSim::FractureParams fp;
     fp.site_count = (std::max)(1, site_count);
     fp.seed = seed ? seed : 1u;
-    fp.pattern = (pattern == 1) ? RayTrophiSim::FracturePattern::ImpactClustered
+    fp.pattern = (pattern == 2) ? RayTrophiSim::FracturePattern::ThermalWeakened
+               : (pattern == 1) ? RayTrophiSim::FracturePattern::ImpactClustered
                                 : RayTrophiSim::FracturePattern::Uniform;
     fp.impact_point = (mn + mx) * 0.5f;
     fp.impact_radius = (std::max)(1.0e-3f, (mx - mn).length() * 0.4f);
+    fp.cluster_count = (std::max)(1, cluster_count);
+    fp.exact_surface = exact_surface;
+    if (is_replay) fp.explicit_sites = settings->sites;
+
+    // ── Feed the burn history into the seeding ────────────────────────────────
+    // ★ The one place the material-transformation chain closes on itself: MSF
+    // knows where this object has lost mass to pyrolysis, melting and transfer,
+    // and that is exactly where it should come apart. Collected as a plain point
+    // cloud so the destruction module never learns the MSF buffer layout.
+    //
+    // Reads the HOST mirror, so it is only as current as the last readback —
+    // acceptable because fracture generation is an authoring action, not a
+    // per-frame one, and the panel that triggers it keeps readbacks flowing.
+    // ★ Skipped on replay, and that is the point of storing the sites. The damage
+    // field this reads is gone by the time a project reopens, so a replay that
+    // consulted it would seed from an unburnt object and cut somewhere else.
+    if (!is_replay && fp.pattern == RayTrophiSim::FracturePattern::ThermalWeakened) {
+        std::vector<RayTrophiSim::MaterialDamageSample> damage;
+        for (auto& system : ctx.scene.particle_systems) {
+            if (!system.runtime) continue;
+            const auto& fields = system.runtime->materialStateFields();
+            const auto it = fields.find(node);
+            if (it == fields.end()) continue;
+            RayTrophiSim::MaterialStateFieldSystem::collectDamageSamples(
+                it->second, damage);
+            break;
+        }
+        // Deliberately converted rather than shared: the destruction module
+        // takes a geometric point cloud and must not include MaterialStateField.h.
+        fp.damage_samples.reserve(damage.size());
+        for (const auto& sample : damage)
+            fp.damage_samples.push_back({sample.position, sample.weight});
+        if (fp.damage_samples.empty()) {
+            addViewportMessage("Thermal fracture: '" + node +
+                               "' has no recorded burn damage yet - seeding uniformly.");
+        }
+    }
 
     std::vector<RayTrophiSim::FractureShard> shards;
-    if (!RayTrophiSim::generateConvexFracture(src, fp, shards) || shards.empty()) {
+    RayTrophiSim::FractureStats fstats;
+    if (!RayTrophiSim::generateFracture(src, fp, shards, &fstats) || shards.empty()) {
         // Degenerate input (flat/thin mesh): restore the original so nothing is lost.
         unfractureMesh(ctx, node);
         addViewportMessage("Fracture failed: '" + node + "' is not a solid mesh.");
@@ -1430,12 +1507,40 @@ void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
 
     // Build a scene node per shard (identity transform → local == world rest).
     auto& shard_nodes = fracture_shard_nodes_[node];
+    auto& shard_clusters = fracture_shard_clusters_[node];
     shard_nodes.clear();
+    shard_clusters.clear();
     shard_nodes.reserve(shards.size());
+    shard_clusters.reserve(shards.size());
     // Optional preview gap: pull each shard toward its own centroid so the cut
     // seams are visible before any physics moves the pieces (Faz 1 feedback). 0 =
     // perfect tiling (looks intact until Faz 2 separates them on impact).
-    const float shrink = 1.0f - std::clamp(fracture_preview_gap, 0.0f, 0.9f);
+    const float shrink = 1.0f - std::clamp(preview_gap, 0.0f, 0.9f);
+
+    // ★ CUT FACES GET THEIR OWN MATERIAL, and this is not cosmetic.
+    //
+    // A fresh break is not burnt. Leave the interior on the source material and
+    // it inherits the source's char mask, sampled at whatever UV the cut face
+    // happens to carry — so the inside of a shard comes out painted with the
+    // burn that broke it, which is exactly backwards. Created lazily, so a
+    // convex-mode run (no interior faces distinguishable) registers nothing.
+    uint16_t interior_mat = 0xFFFFu;
+    const std::string interior_name = node + "_Interior";
+    auto interiorMaterial = [&]() {
+        if (interior_mat == 0xFFFFu) {
+            // Reused by name across re-fractures. addUniqueMaterial would mint a
+            // fresh slot on every Generate Shards press, and the registry is 16
+            // bits wide — an artist iterating on a break would quietly spend it.
+            interior_mat = MaterialManager::getInstance().getMaterialID(interior_name);
+            if (interior_mat == MaterialManager::INVALID_MATERIAL_ID) {
+                auto mat = std::make_shared<PrincipledBSDF>();
+                interior_mat = MaterialManager::getInstance().addMaterial(
+                    interior_name, mat);
+            }
+        }
+        return interior_mat;
+    };
+
     int idx = 0;
     for (const auto& shard : shards) {
         const std::string sname = node + "__shard_" + std::to_string(idx++);
@@ -1446,37 +1551,247 @@ void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
             const Vec3 a = cz + (st.a - cz) * shrink;
             const Vec3 b = cz + (st.b - cz) * shrink;
             const Vec3 c = cz + (st.c - cz) * shrink;
-            auto tri = std::make_shared<Triangle>(
-                a, b, c, st.n, st.n, st.n,
-                Vec2(0, 0), Vec2(1, 0), Vec2(0, 1), src_mat);
+            // Exterior faces carry the surface they were cut from: the source
+            // UVs, interpolated across the cut, and that triangle's own material
+            // (a multi-material asset does not collapse onto one slot). The
+            // convex path leaves both at their defaults, so it falls back to the
+            // single gathered material and the old placeholder UVs.
+            //
+            // Keyed off the MODE, not off the values: a convex-path shard also
+            // has a material field and a UV field, both left at their defaults,
+            // and reading those as real data would texture every hull shard with
+            // texel (0,0) of material 0.
+            const bool has_uv = fp.exact_surface && !st.interior;
+            const uint16_t mat = st.interior ? interiorMaterial()
+                               : (has_uv ? st.material : src_mat);
+            auto tri = has_uv
+                ? std::make_shared<Triangle>(a, b, c, st.n, st.n, st.n,
+                                             st.ua, st.ub, st.uc, mat)
+                : std::make_shared<Triangle>(a, b, c, st.n, st.n, st.n,
+                                             Vec2(0, 0), Vec2(1, 0), Vec2(0, 1), mat);
             tri->setTransformHandle(xf);
             tri->setNodeName(sname);
             tri->update_bounding_box();
             ctx.scene.world.objects.push_back(tri);
         }
         shard_nodes.push_back(sname);
+        shard_clusters.push_back(shard.cluster);
+    }
+
+    int cluster_total = 0;
+    for (int c : shard_clusters) cluster_total = (std::max)(cluster_total, c + 1);
+
+    // ── Record how to do this again ───────────────────────────────────────────
+    // Written from what the run REPORTED, not from what it was asked for: the
+    // scatter rejects candidates and tops up, so `fstats.sites` is the only
+    // description of this cut that reproduces it. Rewritten on replay too, so a
+    // recipe that survived a load is saved back out unchanged.
+    {
+        SceneData::FractureRecipe& recipe = ctx.scene.fracture_recipes[node];
+        recipe.site_count    = fp.site_count;
+        recipe.seed          = fp.seed;
+        recipe.pattern       = pattern;
+        recipe.cluster_count = fp.cluster_count;
+        recipe.exact_surface = fp.exact_surface;
+        recipe.preview_gap   = preview_gap;
+        recipe.sites         = fstats.sites;
+        recipe.shard_nodes    = shard_nodes;
+        recipe.shard_clusters = shard_clusters;
     }
 
     fractureRefreshScene_(ctx);
-    addViewportMessage("Fractured '" + node + "' into " + std::to_string(shards.size()) + " shards.");
-    SCENE_LOG_INFO("Fracture: '" + node + "' -> " + std::to_string(shards.size()) + " shards");
+    std::string summary = "Fractured '" + node + "' into " +
+                          std::to_string(shards.size()) + " shards / " +
+                          std::to_string(cluster_total) + " structural clusters.";
+    // ★ Say which path the cuts took. A cell that fell back to the hull looks
+    // EXACTLY like a cell that was never asked to be exact — a convex blob — so
+    // without this line "I enabled Exact Surface and it still blobs" is
+    // unreadable: an open mesh and a bug produce the same picture.
+    if (fp.exact_surface && fstats.cells_approximated > 0) {
+        summary += " " + std::to_string(fstats.cells_approximated) +
+                   " cut across holes in the mesh and were closed approximately"
+                   " (their mass is an estimate).";
+    }
+    if (fp.exact_surface && fstats.cells_unsealed > 0) {
+        summary += " " + std::to_string(fstats.cells_unsealed) +
+                   " found no cross-section at all and fell back to convex hulls.";
+    }
+    addViewportMessage(summary);
+    SCENE_LOG_INFO("Fracture: '" + node + "' -> " + std::to_string(shards.size()) +
+                   " shards, " + std::to_string(cluster_total) + " clusters, exact " +
+                   std::to_string(fstats.cells_exact) + " / approx " +
+                   std::to_string(fstats.cells_approximated) + " / unsealed " +
+                   std::to_string(fstats.cells_unsealed) + " / hull " +
+                   std::to_string(fstats.cells_hull));
 }
 
 void SceneUI::unfractureMesh(UIContext& ctx, const std::string& node) {
     if (node.empty()) return;
+    // ★ REFUSE rather than destroy. A fracture adopted from a reopened project
+    // has no parked original — the source mesh was out of the scene when the
+    // project was written, so nothing saved it. Falling through here would
+    // delete every shard and put nothing back, turning "undo the fracture" into
+    // "delete the object". Better to say why.
+    if (fracture_parked_originals_.find(node) == fracture_parked_originals_.end() &&
+        fracture_shard_nodes_.find(node) != fracture_shard_nodes_.end()) {
+        addViewportMessage("Cannot un-fracture '" + node + "': its original mesh "
+                           "was not saved with the project. Delete the shards "
+                           "manually if you want it gone.");
+        SCENE_LOG_WARN("[Fracture] un-fracture refused for '" + node +
+                       "': no parked original (fracture was adopted from a load).");
+        return;
+    }
     // Drop the shards.
     if (auto sit = fracture_shard_nodes_.find(node); sit != fracture_shard_nodes_.end()) {
         std::unordered_set<std::string> shard_set(sit->second.begin(), sit->second.end());
         fractureEraseNodes_(ctx, shard_set);
         fracture_shard_nodes_.erase(sit);
     }
+    fracture_shard_clusters_.erase(node);
     // Put the parked originals back into the scene.
     if (auto pit = fracture_parked_originals_.find(node); pit != fracture_parked_originals_.end()) {
         for (auto& o : pit->second) ctx.scene.world.objects.push_back(o);
         fracture_parked_originals_.erase(pit);
     }
+    ctx.scene.fracture_parked_nodes.erase(node);  // back in the scene: no longer parked
+    // The recipe describes a fracture that no longer exists. Leaving it would
+    // resurrect the shards on the next load of a project saved un-fractured.
+    ctx.scene.fracture_recipes.erase(node);
     fractureRefreshScene_(ctx);
     addViewportMessage("Restored '" + node + "' (un-fractured).");
+}
+
+// ── Restoring a saved fracture ───────────────────────────────────────────────
+// Runs once, on the main thread, after the load finishes: it can touch
+// world.objects and kick every backend's geometry rebuild, neither of which is
+// safe from the loader thread.
+//
+// ★★ ADOPT FIRST, CUT ONLY IF THERE IS NOTHING TO ADOPT. Measured, not assumed:
+// with `save_geometry` on (the default) the shard meshes come back from the
+// project's binary geometry sidecar, whole and correctly named. What does NOT
+// come back is SceneUI's bookkeeping, and that is what makes the object know it
+// is fractured. Re-cutting in that state would emit a second set of shards
+// carrying the same names as the restored ones.
+//
+// Re-cutting is for projects saved with geometry off, where meshes are
+// re-imported or procedurally regenerated instead.
+void SceneUI::replayFractureRecipes(UIContext& ctx) {
+    if (ctx.scene.fracture_recipes.empty()) return;
+
+    // Every node name currently in the scene, gathered once.
+    //
+    // ★★ BOTH REPRESENTATIONS. A scene object is either a flat TriangleMesh
+    // (SoA) or a Triangle facade, and which one you get depends on where the
+    // geometry came from — the project's binary sidecar restores flat meshes,
+    // while a fresh cut emits facades. Scanning only for facades made every
+    // restored shard invisible to this pass, so a fracture that HAD come back
+    // whole was reported as gone. Same enumeration as rtapi::listObjects.
+    std::unordered_set<std::string> present;
+    for (const auto& object : ctx.scene.world.objects) {
+        if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object)) {
+            if (!mesh->nodeName.empty()) present.insert(mesh->nodeName);
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(object)) {
+            if (!tri->getNodeName().empty()) present.insert(tri->getNodeName());
+        }
+    }
+
+    // Copied because fractureSelectedMesh writes the recipe back as it goes.
+    const std::map<std::string, SceneData::FractureRecipe> recipes =
+        ctx.scene.fracture_recipes;
+
+    int adopted = 0, recut = 0, failed = 0;
+    for (const auto& entry : recipes) {
+        const std::string& node = entry.first;
+        const SceneData::FractureRecipe& recipe = entry.second;
+
+        std::vector<std::string> live_shards;
+        std::vector<int> live_clusters;
+        const bool parallel = recipe.shard_clusters.size() == recipe.shard_nodes.size();
+        for (std::size_t i = 0; i < recipe.shard_nodes.size(); ++i) {
+            if (present.count(recipe.shard_nodes[i]) == 0) continue;
+            live_shards.push_back(recipe.shard_nodes[i]);
+            live_clusters.push_back(parallel ? recipe.shard_clusters[i] : 0);
+        }
+
+        if (!live_shards.empty()) {
+            // ── Adopt ────────────────────────────────────────────────────────
+            fracture_shard_nodes_[node] = live_shards;
+            fracture_shard_clusters_[node] = live_clusters;
+            // The source mesh is out of the scene because it was parked when the
+            // cut was made. Recording that keeps the saver from calling it
+            // deleted on the next save.
+            if (present.count(node) == 0)
+                ctx.scene.fracture_parked_nodes.insert(node);
+            // ★ fracture_parked_originals_ stays EMPTY, and that is a real
+            // limitation rather than an oversight: the parked mesh is not in the
+            // scene, so nothing wrote it to the geometry sidecar. unfractureMesh
+            // refuses rather than deleting shards it cannot replace.
+            ++adopted;
+            if (live_shards.size() != recipe.shard_nodes.size()) {
+                SCENE_LOG_WARN("[Fracture] '" + node + "': " +
+                    std::to_string(recipe.shard_nodes.size() - live_shards.size()) +
+                    " of its saved shards are missing from the scene; adopting the rest.");
+            }
+        } else if (present.count(node) != 0) {
+            // ── Re-cut ───────────────────────────────────────────────────────
+            // Geometry was not saved, but the source came back (re-imported or
+            // regenerated), so the recorded sites reproduce the same cut.
+            fractureSelectedMesh(ctx, node, recipe.site_count, recipe.seed,
+                                 recipe.pattern, &recipe);
+            if (isMeshFractured(node)) ++recut;
+            else {
+                ++failed;
+                SCENE_LOG_WARN("[Fracture] Re-cutting '" + node +
+                               "' from its saved recipe produced no shards.");
+            }
+        } else {
+            ++failed;
+            // ★ Say WHICH node and say it loudly. Neither the shards nor the
+            // source came back, so the object is simply absent — and an absent
+            // object is exactly what an artist does NOT notice until something
+            // else fails much later.
+            SCENE_LOG_WARN("[Fracture] '" + node + "' is gone: neither its saved "
+                           "shards nor its source mesh came back with the project.");
+            continue;
+        }
+
+        // Drop rigid bodies bound to shards that are not here. Their shards are
+        // invisible and unhittable, but they still count as members of their
+        // fracture group — which drags the group's centre toward the world
+        // origin and corrupts every impulse computed from it.
+        const auto& produced = fracture_shard_nodes_[node];
+        const std::unordered_set<std::string> alive(produced.begin(), produced.end());
+        const std::string prefix = node + "__shard_";
+        auto& bodies = ctx.scene.rigid_bodies;
+        const std::size_t before = bodies.size();
+        bodies.erase(std::remove_if(bodies.begin(), bodies.end(),
+            [&](const RayTrophiSim::RigidBodyObject& rb) {
+                return rb.source_name.rfind(prefix, 0) == 0 &&
+                       alive.count(rb.source_name) == 0;
+            }), bodies.end());
+        if (bodies.size() != before) {
+            SCENE_LOG_WARN("[Fracture] '" + node + "' came back with a different "
+                           "shard set than it was saved with; dropped " +
+                           std::to_string(before - bodies.size()) +
+                           " rigid bodies with no shard left to bind to.");
+            if (ctx.scene.rigid_body_system)
+                ctx.scene.rigid_body_system->setBodies(&ctx.scene.rigid_bodies);
+        }
+    }
+
+    if (adopted + recut > 0 || failed > 0) {
+        std::string message = "Restored " + std::to_string(adopted + recut) +
+                              " fracture(s)";
+        if (recut > 0) message += " (" + std::to_string(recut) + " re-cut)";
+        message += ".";
+        if (failed > 0)
+            message += " " + std::to_string(failed) +
+                       " could not be restored - see the log.";
+        addViewportMessage(message);
+        SCENE_LOG_INFO("[Fracture] Replay: " + std::to_string(adopted) +
+                       " adopted, " + std::to_string(recut) + " re-cut, " +
+                       std::to_string(failed) + " failed.");
+    }
 }
 
 // Add a procedural cube to the scene

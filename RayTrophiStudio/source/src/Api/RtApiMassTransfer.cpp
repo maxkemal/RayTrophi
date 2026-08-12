@@ -35,6 +35,8 @@ Result getMoltenMassTransferInfo(MoltenMassTransferInfo& out) {
     out.queued = s.queued; out.completed = s.completed;
     out.deferred_no_domain = s.deferred_no_domain;
     out.deferred_no_capacity = s.deferred_no_capacity;
+    out.dropped = s.dropped;
+    out.discarded_on_reset = s.discarded_on_reset;
     out.requested_mass = s.requested_mass;
     out.transferred_mass = s.transferred_mass;
     out.spawned_particles = s.spawned_particles;

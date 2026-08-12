@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 
 namespace RayTrophiSim {
@@ -17,12 +18,19 @@ bool contains(const SimulationGridDomainState& d, const Vec3& p) {
            p.x <= d.bounds_max.x && p.y <= d.bounds_max.y && p.z <= d.bounds_max.z;
 }
 
+// Kinematic viscosity in m²/s of the melt, near its melting point. These were
+// artistic 0..30 numbers on the old dial, which had no physical unit at all;
+// the solver now integrates ν·dt/h², so they had to be restated as real
+// quantities rather than rescaled.
+//   molten plastic/wax are extremely viscous (10² … 10³ Pa·s over ~10³ kg/m³);
+//   molten iron is famously RUNNIER than water in kinematic terms (~7e-7),
+//   because its enormous density divides out its dynamic viscosity.
 float moltenViscosity(const std::string& substance) {
-    if (substance.find("Plastic") != std::string::npos) return 30.0f;
-    if (substance.find("Wax") != std::string::npos) return 30.0f;
-    if (substance == "Iron" || substance == "Steel") return 1.0f;
+    if (substance.find("Plastic") != std::string::npos) return 0.30f;
+    if (substance.find("Wax") != std::string::npos) return 5.0e-3f;
+    if (substance == "Iron" || substance == "Steel") return 1.0e-6f;
     if (substance == "Ice") return 0.0f;
-    return 10.0f;
+    return 5.0e-3f;
 }
 
 Fluid::FluidChemistryPreset moltenChemistry(const std::string& substance) {
@@ -49,6 +57,41 @@ void applyMoltenChemistry(SimulationGridDomainDesc& desc,
         desc.fluid_surface_cooling = std::max(
             desc.fluid_surface_cooling, chemistry.cooling_power);
 }
+}
+
+void ParticleSimulationSystem::backupMoltenDomainDescriptor(
+    const SimulationGridDomainDesc& desc) {
+    if (desc.name.empty()) return;
+    molten_domain_authored_backup_.emplace(desc.name, desc);
+}
+
+std::size_t ParticleSimulationSystem::restoreMoltenDomainDescriptors() {
+    if (molten_domain_authored_backup_.empty()) return 0u;
+    std::size_t restored = 0u;
+    for (SimulationGridDomainDesc& desc : grid_domains_) {
+        auto it = molten_domain_authored_backup_.find(desc.name);
+        if (it == molten_domain_authored_backup_.end()) continue;
+        desc = it->second;
+        ++restored;
+    }
+    molten_domain_authored_backup_.clear();
+    return restored;
+}
+
+void ParticleSimulationSystem::discardMoltenMassTransferState() {
+    if (!molten_mass_transfer_queue_.empty()) {
+        molten_mass_transfer_stats_.discarded_on_reset +=
+            molten_mass_transfer_queue_.size();
+        molten_mass_transfer_queue_.clear();
+    }
+    restoreMoltenDomainDescriptors();
+    // The substance guard caches how far it scanned. After a reset the SoA it
+    // was describing is gone, so the cache has to go with it or the next request
+    // would trust a watermark past the end of a shorter particle array.
+    for (SimulationGridDomainState& state : grid_domain_states_) {
+        state.molten_scan_tag = 0u;
+        state.molten_scan_count = 0u;
+    }
 }
 
 uint64_t ParticleSimulationSystem::queueMoltenMassTransfer(
@@ -102,7 +145,12 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
 
     for (const MoltenMassTransferRequest& request : molten_mass_transfer_queue_) {
         const MaterialStateField* field = material_state_fields_.findField(request.object_key);
-        if (!field || field->elementCount() == 0) continue;
+        if (!field || field->elementCount() == 0) {
+            // The object lost its field (deleted, disabled, re-synced). Retrying
+            // would never succeed, so this is a drop and must be counted as one.
+            ++molten_mass_transfer_stats_.dropped;
+            continue;
+        }
 
         Vec3 center(0.0f);
         double total_area = 0.0;
@@ -121,7 +169,13 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             total_area += weight;
             molten_elements.push_back(i);
         }
-        if (total_area <= 0.0) continue;
+        if (total_area <= 0.0) {
+            // Nothing on the surface is molten right now. Unlike "no domain",
+            // there is no spawn position to defer TO — the reservoir keeps the
+            // mass and the automatic pass re-queues once melt reappears.
+            ++molten_mass_transfer_stats_.dropped;
+            continue;
+        }
         center *= static_cast<float>(1.0 / total_area);
         const float temperature_kelvin = world_thermal_.scale().toKelvin(
             static_cast<float>(weighted_temperature / total_area));
@@ -156,20 +210,41 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
         auto& state = grid_domain_states_[domain_index];
         const uint32_t tag = substanceTag(field->substance_name);
         if (request.configure_domain_chemistry) {
+            // Incremental substance guard: only particles appended since the last
+            // clean scan can be carrying a different tag. A changed tag or a SoA
+            // that shrank invalidates the watermark and forces a full rescan.
+            const std::size_t tag_count = state.particles.substance_tag.size();
+            std::size_t scan_begin = 0u;
+            if (state.molten_scan_tag == tag && state.molten_scan_count <= tag_count)
+                scan_begin = state.molten_scan_count;
             const bool incompatible = std::any_of(
-                state.particles.substance_tag.begin(),
+                state.particles.substance_tag.begin() +
+                    static_cast<std::ptrdiff_t>(scan_begin),
                 state.particles.substance_tag.end(),
                 [tag](uint32_t existing) { return existing != tag; });
             if (incompatible) {
+                state.molten_scan_tag = 0u;
+                state.molten_scan_count = 0u;
                 ++molten_mass_transfer_stats_.deferred_no_domain;
                 deferred.push_back(request);
                 continue;
             }
+            state.molten_scan_tag = tag;
+            state.molten_scan_count = tag_count;
+            // ★ From here the descriptor stops being purely authored data. Take
+            // the authored copy BEFORE the first write, so a reset can undo it.
+            backupMoltenDomainDescriptor(desc);
             if (state.particles.empty()) {
-                if (desc.fluid_params.viscosity <= 0.0f)
-                    desc.fluid_params.viscosity = moltenViscosity(field->substance_name);
-                desc.fluid_params.viscosity_iterations =
-                    desc.fluid_params.viscosity >= 20.0f ? 4 : 2;
+                if (desc.fluid_params.kinematic_viscosity <= 0.0f)
+                    desc.fluid_params.kinematic_viscosity =
+                        moltenViscosity(field->substance_name);
+                // Sweeps track how stiff the implicit system is: ν·dt/h² grows
+                // with viscosity, and an under-converged solve under-applies it.
+                desc.fluid_params.viscosity_sweeps =
+                    desc.fluid_params.kinematic_viscosity >= 0.1f  ? 24 :
+                    desc.fluid_params.kinematic_viscosity >= 1.0e-3f ? 16 : 6;
+                // A melt wets what it runs over — no-slip, not free-slip.
+                desc.fluid_params.viscosity_wall_slip = 0.0f;
                 desc.fluid_params.current_preset =
                     Fluid::APICSolverParams::FluidPreset::Custom;
                 desc.fluid_render_mode = Fluid::FluidRenderMode::SurfaceSDF;
@@ -289,6 +364,16 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             std::abs(consumed - spawn_mass) > std::max(1.0e-5f, spawn_mass * 1.0e-3f)) {
             while (state.particles.size() > old_size)
                 state.particles.removeSwap(state.particles.size() - 1u);
+            // The rollback has to reach the substance watermark too: it was moved
+            // forward to cover particles that no longer exist, and leaving it
+            // there would let a foreign tag slip past the next guard unscanned.
+            if (state.molten_scan_count > old_size)
+                state.molten_scan_count = old_size;
+            // The mass is still in the reservoir and the object is still molten,
+            // so this is a transient failure (a failed upload, a partial debit) —
+            // retry it rather than losing the request.
+            ++molten_mass_transfer_stats_.dropped;
+            deferred.push_back(request);
             continue;
         }
         ++state.version;

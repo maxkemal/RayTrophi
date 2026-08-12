@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * File:          Api/RtPython.cpp
@@ -222,10 +222,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     scene.def("get_transform", [](const std::string& name) -> py::dict {
         Matrix4x4 m;
         requireResult(rtapi::getObjectTransform(name, m));
-        Vec3 t = m.getTranslation();
+        Vec3 t(0.0f), r(0.0f), s(1.0f);
+        m.decompose(t, r, s);
         py::dict d;
         d["matrix"] = matrixToPython(m);
         d["translation"] = vec3ToPython(t);
+        // Reported alongside the matrix so a script can ask which way an object
+        // actually points instead of assuming the axis it was authored on. A
+        // test that hardcodes "the beam runs along X" is measuring its own
+        // assumption the moment anyone rescales the scene.
+        d["rotation"] = vec3ToPython(r);
+        d["scale"] = vec3ToPython(s);
         return d;
     }, py::arg("name"));
 
@@ -236,11 +243,30 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         Matrix4x4 m = Matrix4x4::identity();
         requireResult(rtapi::getObjectTransform(name, m));
-        if (!translation.is_none()) {
-            Vec3 t = vec3FromPython(translation);
-            m.m[0][3] = t.x; m.m[1][3] = t.y; m.m[2][3] = t.z;
+        // ★ `rotation` and `scale` used to be ACCEPTED AND DROPPED: only the
+        // translation column was written, so `set_transform(o, scale=(3,.3,.3))`
+        // returned success and left a unit cube. Silent no-op parameters are
+        // worse than missing ones — every scene built by a script that passed
+        // them was quietly the wrong shape, and the tests written against those
+        // scenes measured geometry that was never there.
+        if (rotation.is_none() && scale.is_none()) {
+            // Translation only: patch the column in place rather than round-trip
+            // through Euler, so a matrix carrying shear (or any basis this
+            // decomposition cannot name) survives a move untouched.
+            if (!translation.is_none()) {
+                Vec3 t = vec3FromPython(translation);
+                m.m[0][3] = t.x; m.m[1][3] = t.y; m.m[2][3] = t.z;
+            }
+            requireResult(rtapi::setObjectTransform(name, m));
+            return;
         }
-        requireResult(rtapi::setObjectTransform(name, m));
+        Vec3 t(0.0f), r(0.0f), s(1.0f);
+        m.decompose(t, r, s);
+        if (!translation.is_none()) t = vec3FromPython(translation);
+        if (!rotation.is_none())    r = vec3FromPython(rotation);
+        if (!scale.is_none())       s = vec3FromPython(scale);
+        requireResult(rtapi::setObjectTransform(
+            name, Matrix4x4::composeTRS(t, r, s)));
     }, py::arg("name"), py::arg("translation") = py::none(), py::arg("rotation") = py::none(), py::arg("scale") = py::none(), py::arg("matrix") = py::none());
 
     scene.attr("transform") = TransformProxy{};
@@ -970,7 +996,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["backend"] = info.backend;
         d["boundary"] = info.boundary;
         d["preset"] = info.preset;
-        d["viscosity"] = info.viscosity;
+        d["kinematic_viscosity"] = info.kinematic_viscosity;
+        d["viscosity_sweeps"] = info.viscosity_sweeps;
+        d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+        d["surface_material"] = info.surface_material;
         d["enabled"] = info.enabled;
         d["visible"] = info.visible;
         return d;
@@ -1008,7 +1037,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["backend"] = info.backend;
             d["boundary"] = info.boundary;
             d["preset"] = info.preset;
-            d["viscosity"] = info.viscosity;
+            d["kinematic_viscosity"] = info.kinematic_viscosity;
+            d["viscosity_sweeps"] = info.viscosity_sweeps;
+            d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+            d["surface_material"] = info.surface_material;
             d["enabled"] = info.enabled;
             d["visible"] = info.visible;
             out.append(d);
@@ -1031,7 +1063,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["backend"] = info.backend;
         d["boundary"] = info.boundary;
         d["preset"] = info.preset;
-        d["viscosity"] = info.viscosity;
+        d["kinematic_viscosity"] = info.kinematic_viscosity;
+        d["viscosity_sweeps"] = info.viscosity_sweeps;
+        d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+        d["surface_material"] = info.surface_material;
         d["enabled"] = info.enabled;
         d["visible"] = info.visible;
         return d;
@@ -1073,8 +1108,35 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         std::string preset_val; const std::string* p_preset = nullptr;
         if (kwargs.contains("preset")) { preset_val = py::cast<std::string>(kwargs["preset"]); p_preset = &preset_val; }
 
+        // No `viscosity` alias on purpose: it used to be a unitless 0..200 dial
+        // and is now m^2/s, so silently accepting the old keyword would turn a
+        // script's honey into lava. Reject it with the conversion spelled out.
+        if (kwargs.contains("viscosity")) {
+            throw std::runtime_error(
+                "'viscosity' was replaced by 'kinematic_viscosity' in m^2/s "
+                "(water 1e-6, oil 1e-4, chocolate 4e-3, honey 7e-3, lava 0.5). "
+                "The old value was unitless and is not convertible.");
+        }
         float visc_val = 0.0f; const float* p_visc = nullptr;
-        if (kwargs.contains("viscosity")) { visc_val = py::cast<float>(kwargs["viscosity"]); p_visc = &visc_val; }
+        if (kwargs.contains("kinematic_viscosity")) { visc_val = py::cast<float>(kwargs["kinematic_viscosity"]); p_visc = &visc_val; }
+
+        int sweeps_val = 0; const int* p_sweeps = nullptr;
+        if (kwargs.contains("viscosity_sweeps")) { sweeps_val = py::cast<int>(kwargs["viscosity_sweeps"]); p_sweeps = &sweeps_val; }
+
+        float slip_val = 0.0f; const float* p_slip = nullptr;
+        if (kwargs.contains("viscosity_wall_slip")) { slip_val = py::cast<float>(kwargs["viscosity_wall_slip"]); p_slip = &slip_val; }
+
+        // Material name shading the SurfaceSDF isosurface; "" = built-in dielectric.
+        std::string surf_mat_val; const std::string* p_surf_mat = nullptr;
+        if (kwargs.contains("surface_material")) { surf_mat_val = py::cast<std::string>(kwargs["surface_material"]); p_surf_mat = &surf_mat_val; }
+
+        // Procedural porosity on the SDF isosurface (crumb / aeration).
+        float pore_amt_val = 0.0f; const float* p_pore_amt = nullptr;
+        if (kwargs.contains("pore_amount")) { pore_amt_val = py::cast<float>(kwargs["pore_amount"]); p_pore_amt = &pore_amt_val; }
+        float pore_scl_val = 0.0f; const float* p_pore_scl = nullptr;
+        if (kwargs.contains("pore_scale")) { pore_scl_val = py::cast<float>(kwargs["pore_scale"]); p_pore_scl = &pore_scl_val; }
+        float pore_det_val = 0.0f; const float* p_pore_det = nullptr;
+        if (kwargs.contains("pore_detail")) { pore_det_val = py::cast<float>(kwargs["pore_detail"]); p_pore_det = &pore_det_val; }
 
         bool enabled_val = false; const bool* p_enabled = nullptr;
         if (kwargs.contains("enabled")) { enabled_val = py::cast<bool>(kwargs["enabled"]); p_enabled = &enabled_val; }
@@ -1082,7 +1144,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         bool visible_val = false; const bool* p_visible = nullptr;
         if (kwargs.contains("visible")) { visible_val = py::cast<bool>(kwargs["visible"]); p_visible = &visible_val; }
 
-        requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_preset, p_visc, p_enabled, p_visible));
+        requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_preset, p_visc, p_sweeps, p_slip, p_surf_mat,
+                                               p_pore_amt, p_pore_scl, p_pore_det, p_enabled, p_visible));
     }, py::arg("domain"));
 
     fluid.def("reset", []() {
@@ -1118,6 +1181,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["smoke_generation"] = s.smoke_generation;
         d["flame_dissipation"] = s.flame_dissipation;
         d["fire_max_temperature"] = s.fire_max_temperature;
+        d["structural_coupling_enabled"] = s.structural_coupling_enabled;
+        d["structural_pressure_scale"] = s.structural_pressure_scale;
+        d["structural_min_intensity"] = s.structural_min_intensity;
+        d["structural_event_interval"] = s.structural_event_interval;
         d["buoyancy_heat"] = s.buoyancy_heat;
         d["buoyancy_density"] = s.buoyancy_density;
         d["vorticity"] = s.vorticity;
@@ -1151,6 +1218,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_GAS_KW(smoke_generation, float);
         RT_GAS_KW(flame_dissipation, float);
         RT_GAS_KW(fire_max_temperature, float);
+        RT_GAS_KW(structural_coupling_enabled, bool);
+        RT_GAS_KW(structural_pressure_scale, float);
+        RT_GAS_KW(structural_min_intensity, float);
+        RT_GAS_KW(structural_event_interval, float);
         RT_GAS_KW(buoyancy_heat, float);
         RT_GAS_KW(buoyancy_density, float);
         RT_GAS_KW(vorticity, float);
@@ -1485,6 +1556,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["molten_reservoir_mass"] = f.molten_reservoir_mass;
             d["transferred_mass"] = f.transferred_mass;
             d["mass_conservation_error"] = f.mass_conservation_error;
+            d["mass_budget_overflow"] = f.mass_budget_overflow;
+            d["mass_negative"] = f.mass_negative;
+            d["mass_invalid_elements"] = f.mass_invalid_elements;
             d["domain"] = "surface_uv";
             py::list semantics;
             for (const auto& semantic : f.semantics) semantics.append(semantic);

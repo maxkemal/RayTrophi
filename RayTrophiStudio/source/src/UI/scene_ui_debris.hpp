@@ -29,8 +29,15 @@ inline void drawSceneControls(SceneData& scene) {
                         static_cast<unsigned long long>(stats.lod_reduced_particles),
                         static_cast<unsigned long long>(stats.budget_rejected_particles),
                         stats.accepted_mass_kg);
+    ImGui::TextDisabled("reservoir %.4f kg", system.reservoirMassKg());
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Debris mass waiting for a free particle slot.\n"
+                          "The budget limits visual detail only; it never\n"
+                          "destroys mass, so anything it rejects is held here\n"
+                          "and rides along with the next event.");
     if (ImGui::Button("Reset Debris Telemetry##AshScene")) system.resetStats();
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Clears counters only; live particles and authored settings remain.");
+        ImGui::SetTooltip("Clears counters only; live particles, the held mass\n"
+                          "reservoir and authored settings remain.");
 }
 } // namespace DebrisUI
