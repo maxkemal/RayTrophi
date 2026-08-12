@@ -94,5 +94,28 @@ assert collider["msf_melt_sdf_revision_interval"] == 4, collider
 assert abs(collider["msf_melt_sdf_change_threshold"] - 0.025) < 1e-4, collider
 assert abs(collider["msf_melt_spread"] - 1.50) < 1e-4, collider
 
+# ── Regression gate: a rewind must not replay a queued transfer ──────────────
+# ★ A queued request is an INTENT formed against the melt reservoir as it stood.
+# Resetting restores that reservoir, so an intent that survived the reset would
+# spawn the same kilograms into APIC a second time and debit a reservoir that had
+# just been rolled back to hold them. The queue used to have no reset hook at all
+# and this is the gate that keeps one.
+pending_before = rt.mass_transfer.stats()
+rt.mass_transfer.queue(PLASTIC, mass_kg=0.05, domain=LIQUID)
+rt.fluid.reset()
+after_reset = rt.mass_transfer.stats()
+assert (after_reset["discarded_on_reset"] >
+        pending_before["discarded_on_reset"]), (pending_before, after_reset)
+assert after_reset["completed"] == pending_before["completed"], after_reset
+
+# Stepping past the reset must not resurrect the discarded intent.
+for _ in range(8):
+    rt.fluid.step(1.0 / 30.0)
+after_replay = rt.mass_transfer.stats()
+assert after_replay["completed"] == after_reset["completed"], (
+    after_reset, after_replay)
+
 print({"result": "PASS", "phase": "6-auto", "frames": frames,
-       "transfer": transfer, "domain": domain, "chemistry": chemistry})
+       "transfer": transfer, "domain": domain, "chemistry": chemistry,
+       "rewind": {"discarded_on_reset": after_reset["discarded_on_reset"],
+                  "completed_after_replay": after_replay["completed"]}})

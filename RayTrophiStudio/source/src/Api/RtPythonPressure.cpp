@@ -20,6 +20,7 @@ py::dict statsDict(const rtapi::StructuralImpulseInfo& info) {
     out["fractured_groups"] = info.fractured_groups;
     out["last_peak_pressure_kpa"] = info.last_peak_pressure_kpa;
     out["last_max_impulse"] = info.last_max_impulse;
+    out["last_projected_area_m2"] = info.last_projected_area_m2;
     return out;
 }
 } // namespace

@@ -261,7 +261,8 @@ struct VkVolumeInstance {
     uint64_t flame_address;      // combustion reaction field for live dense gas (0 = none)
     uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
     float    emissive_capacity;
-    float    _accel_reserved[5];
+    float    iso_material_index;  // SDF isosurface material, 1-based (0 = none)
+    float    _accel_reserved[4];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -324,13 +325,9 @@ layout(push_constant) uniform CameraPC {
 } cam;
 
 // ============================================================
-const uint BOUNCE_SPECULAR = 0u;
-const uint BOUNCE_DIFFUSE = 1u;
-const uint BOUNCE_TRANSMISSION = 2u;
-const uint BOUNCE_TRANSPARENT = 3u;
-const uint BOUNCE_RESIN = 4u; // resin coat reflect + absorbing base (own small budget)
-const uint BOUNCE_MARBLE = 5u; // glass marble full-volume entry → integrate interior medium
-const uint BOUNCE_GLASS_REFLECT = 6u; // glass mirror lobe (no interface crossing) — spends the transmission budget like before
+// BOUNCE_* now live in rt_payload.glsl next to payload.bounceType, the field
+// they classify — this file used to carry its own copy of the same seven
+// constants.
 const uint MAT_FLAG_MARBLE_VOLUME = (1u << 20);
 
 #include "rt_payload.glsl"

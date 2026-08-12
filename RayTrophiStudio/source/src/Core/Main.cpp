@@ -420,8 +420,11 @@ void installEarlyCrashHandlers() {
 }
 }
 
-bool SaveSurface(SDL_Surface* surface, const char* file_path) {
-    SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
+bool SaveSurface(SDL_Surface* surface, const char* file_path, bool transparent_background = false) {
+    const Uint32 output_format = transparent_background
+        ? SDL_PIXELFORMAT_RGBA32
+        : SDL_PIXELFORMAT_RGB24;
+    SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, output_format, 0);
     if (!surface_to_save) {
         SCENE_LOG_ERROR("Couldn't convert surface: " + std::string(SDL_GetError()));
         return false;
@@ -649,6 +652,52 @@ void copySurfacePixelsOrBlit(SDL_Surface* dst, SDL_Surface* src) {
     }
 
     SDL_BlitSurface(src, nullptr, dst, nullptr);
+}
+
+const void* transparencyPreviewPixels(SDL_Surface* source,
+                                      bool enabled,
+                                      std::vector<Uint32>& preview) {
+    if (!enabled || !source || !source->pixels || !source->format) {
+        return source ? source->pixels : nullptr;
+    }
+
+    const size_t count = static_cast<size_t>(source->w) * static_cast<size_t>(source->h);
+    preview.resize(count);
+    const Uint32* src = static_cast<const Uint32*>(source->pixels);
+    const int src_stride = source->pitch / static_cast<int>(sizeof(Uint32));
+    constexpr int checker_size = 16;
+    constexpr Uint8 checker_dark = 82;
+    constexpr Uint8 checker_light = 132;
+    const SDL_PixelFormat* fmt = source->format;
+    const Uint32 r_mask = fmt->Rmask, g_mask = fmt->Gmask;
+    const Uint32 b_mask = fmt->Bmask, a_mask = fmt->Amask;
+    const Uint8 r_shift = fmt->Rshift, g_shift = fmt->Gshift;
+    const Uint8 b_shift = fmt->Bshift, a_shift = fmt->Ashift;
+
+    for (int y = 0; y < source->h; ++y) {
+        const Uint32* src_row = src + static_cast<size_t>(y) * src_stride;
+        Uint32* dst_row = preview.data() + static_cast<size_t>(y) * source->w;
+        for (int x = 0; x < source->w; ++x) {
+            const Uint32 pixel = src_row[x];
+            const Uint8 r = static_cast<Uint8>((pixel & r_mask) >> r_shift);
+            const Uint8 g = static_cast<Uint8>((pixel & g_mask) >> g_shift);
+            const Uint8 b = static_cast<Uint8>((pixel & b_mask) >> b_shift);
+            const Uint8 a = a_mask
+                ? static_cast<Uint8>((pixel & a_mask) >> a_shift)
+                : 255;
+            const Uint8 checker = (((x / checker_size) + (y / checker_size)) & 1)
+                ? checker_light : checker_dark;
+            const unsigned alpha = a;
+            const Uint8 out_r = static_cast<Uint8>((r * alpha + checker * (255u - alpha) + 127u) / 255u);
+            const Uint8 out_g = static_cast<Uint8>((g * alpha + checker * (255u - alpha) + 127u) / 255u);
+            const Uint8 out_b = static_cast<Uint8>((b * alpha + checker * (255u - alpha) + 127u) / 255u);
+            dst_row[x] = (static_cast<Uint32>(out_r) << r_shift)
+                | (static_cast<Uint32>(out_g) << g_shift)
+                | (static_cast<Uint32>(out_b) << b_shift)
+                | a_mask;
+        }
+    }
+    return preview.data();
 }
 
 // GLOBAL
@@ -3788,7 +3837,13 @@ int main(int argc, char* argv[]) try {
             // 10 FPS visual update for animation
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tex_update).count() > 100) { 
                 SDL_LockSurface(surface);
-                SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+                static std::vector<Uint32> transparency_preview;
+                const void* display_pixels = transparencyPreviewPixels(
+                    surface, ui_ctx.render_settings.transparent_background,
+                    transparency_preview);
+                const int display_pitch = ui_ctx.render_settings.transparent_background
+                    ? surface->w * 4 : surface->pitch;
+                SDL_UpdateTexture(raytrace_texture, nullptr, display_pixels, display_pitch);
                 SDL_UnlockSurface(surface);
                 last_tex_update = now;
             }
@@ -6076,7 +6131,7 @@ int main(int argc, char* argv[]) try {
 
             std::string path = saveFileDialogW(L"PNG Files\0*.png\0All Files\0*.*\0");
             if (!path.empty()) {
-                if (SaveSurface(surface, path.c_str())) {
+                if (SaveSurface(surface, path.c_str(), ui_ctx.render_settings.transparent_background)) {
                     SCENE_LOG_INFO("Image saved to: " + path);
                 }
                 else {
@@ -6321,7 +6376,8 @@ int main(int argc, char* argv[]) try {
                 job.target_samples > 0 && job.current_samples >= job.target_samples;
             if (in_rendered_mode && (accumulation_done_for_display || reached_target)) {
                 const std::string output_path = rtapi::renderOutputPath();
-                const bool saved = surface && SaveSurface(surface, output_path.c_str());
+                const bool saved = surface && SaveSurface(
+                    surface, output_path.c_str(), ui_ctx.render_settings.transparent_background);
                 if (saved) {
                     rtapi::completeRenderOutput(true);
                     SCENE_LOG_INFO("[RtApi Render] Complete: " + output_path);
@@ -6372,7 +6428,7 @@ int main(int argc, char* argv[]) try {
                         char fn[512];
                         std::snprintf(fn, sizeof(fn), "%s/frame_%04d.png",
                                       g_seq_save_dir.c_str(), g_seq_save_frame);
-                        if (SaveSurface(surface, fn))
+                        if (SaveSurface(surface, fn, ui_ctx.render_settings.transparent_background))
                             SCENE_LOG_INFO("[SeqSave] Saved " + std::string(fn));
                         else
                             SCENE_LOG_ERROR("[SeqSave] Failed to save " + std::string(fn));
@@ -6523,7 +6579,13 @@ int main(int argc, char* argv[]) try {
         // --- Present / skip ---
         if (!skip_present) {
             if (needs_texture_update) {
-                SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+                static std::vector<Uint32> transparency_preview;
+                const void* display_pixels = transparencyPreviewPixels(
+                    surface, ui_ctx.render_settings.transparent_background,
+                    transparency_preview);
+                const int display_pitch = ui_ctx.render_settings.transparent_background
+                    ? surface->w * 4 : surface->pitch;
+                SDL_UpdateTexture(raytrace_texture, nullptr, display_pixels, display_pitch);
                 last_texture_updated = !accumulation_done_for_display;
             }
 

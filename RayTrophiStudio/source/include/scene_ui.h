@@ -410,24 +410,92 @@ public:
     // parked (kept alive, removed from the scene) so re-fracture reuses it and
     // unfractureMesh restores it exactly. No physics yet (Faz 2 makes shards
     // rigid bodies). `pattern`: 0 = uniform, 1 = impact-clustered.
+    // `settings` picks who is driving:
+    //   nullptr             — the panel (the artist's current knobs)
+    //   set, sites empty    — a script (rt.physics.fracture_object)
+    //   set, sites non-empty— REPLAY of a saved fracture, sites reused verbatim
+    // Every path records a recipe, so a scripted cut survives save/load too.
     void fractureSelectedMesh(UIContext& ctx, const std::string& node,
-                              int site_count, uint32_t seed, int pattern);
+                              int site_count, uint32_t seed, int pattern,
+                              const SceneData::FractureRecipe* settings = nullptr);
+    // Re-cut every node that carried a fracture when the project was saved. Runs
+    // on the main thread after load finalization, because it mutates scene
+    // geometry and kicks every backend's rebuild.
+    void replayFractureRecipes(UIContext& ctx);
     void unfractureMesh(UIContext& ctx, const std::string& node);
     void fractureRefreshScene_(UIContext& ctx);  // rebuild caches/BVH/backends after shard edits
     bool isMeshFractured(const std::string& node) const {
         return fracture_shard_nodes_.find(node) != fracture_shard_nodes_.end();
     }
+    // ★ Drop every fracture record when the SCENE changes underneath us.
+    //
+    // These maps are keyed by NODE NAME and hold shared_ptrs to objects pulled
+    // out of the old scene. Surviving a New/Open, they turn into a trap: a new
+    // scene with a node of the same name (imports very often reuse names) is
+    // reported as already fractured, and a re-fracture reads the PARKED old
+    // geometry — so the mesh is cut at the position and shape it had in the
+    // previous scene, silently, with no error anywhere.
+    void resetFractureUIState() {
+        fracture_parked_originals_.clear();
+        fracture_shard_nodes_.clear();
+        fracture_shard_clusters_.clear();
+    }
+    // Same wipe, plus the scene-side parked-node set. Separate because the
+    // scene reference is not available everywhere the UI state is reset.
+    void resetFractureState(SceneData& scene) {
+        resetFractureUIState();
+        scene.fracture_parked_nodes.clear();
+        // Cleared BEFORE a load, never after: the incoming project's recipes are
+        // deserialized into this map and are what the replay pass reads.
+        scene.fracture_recipes.clear();
+    }
     // Fracture authoring state (panel controls).
     int   fracture_site_count = 15;
     int   fracture_seed = 1337;
-    int   fracture_pattern = 0;     // 0 = Uniform, 1 = Impact-clustered
+    int   fracture_pattern = 0;     // 0 = Uniform, 1 = Impact-clustered, 2 = Thermal
+    // ★ How many INDEPENDENT fracture groups the shards are split into.
+    //
+    // A fracture group is the unit the impulse consumer breaks, so one group for
+    // the whole object means any hit anywhere detaches all of it. Splitting into
+    // structural clusters is what turns "the tower vanished" into "a leg was
+    // blown off", and it matters more to how destruction READS than the quality
+    // of the cuts does.
+    int   fracture_cluster_count = 4;
     float fracture_preview_gap = 0.02f;  // shrink shards toward their centroid so the
                                          // cuts are visible without physics (Faz 1)
-    float fracture_break_threshold = 5.0f;  // impact impulse (kg·m/s) to shatter (Faz 2)
+    // ★ Cut the SOURCE SURFACE rather than its convex hull.
+    //
+    // Off, a hollow or concave asset fractures as the solid block its hull
+    // describes, and the shards lose every UV — so a beam that broke along its
+    // char line cannot SHOW the char that put the crack there. On, the surviving
+    // surface is the original one. Default on: the failure mode of the hull path
+    // is silent and looks like a modelling mistake, while the exact path falls
+    // back to the hull per cell when a cut cannot be sealed.
+    bool  fracture_exact_surface = true;
+    // ★★ METRES PER SECOND — the velocity change a cluster absorbs before it
+    // lets go. The impulse threshold the solver compares against is this times
+    // the group's mass.
+    //
+    // It was an impulse in N·s, and the default kept chasing the units: 5.0 when
+    // a pressure event produced a unitless number, then 250 once the event became
+    // a real impulse. That chase was the symptom of a missing quantity, not of a
+    // badly chosen number. An impulse threshold cannot be authored once — a plank
+    // and a tower leg need values orders of magnitude apart for the SAME material
+    // — so every scene needed its own, and none of them transferred.
+    //
+    // 5 m/s is a solid shove, and it is also numerically what the old default was
+    // back when every shard weighed exactly 1 kg. So scenes authored in that era
+    // behave as they did, and only objects with real mass behave differently —
+    // which is precisely the bug being fixed.
+    float fracture_break_threshold = 5.0f;  // m/s; x group mass = N·s
     // Parked source meshes (alive, out of the scene) + emitted shard node names,
     // keyed by the fractured source node. UI-side for Faz 1 (serialize = Faz 5).
     std::map<std::string, std::vector<std::shared_ptr<Hittable>>> fracture_parked_originals_;
     std::map<std::string, std::vector<std::string>> fracture_shard_nodes_;
+    // Cluster index per entry of fracture_shard_nodes_[node], same order/length.
+    // Kept parallel rather than as a map-of-vectors so the existing shard-node
+    // consumers (erase, unfracture, Make Breakable) keep working unchanged.
+    std::map<std::string, std::vector<int>> fracture_shard_clusters_;
     
     // Procedural generator window state
     bool show_procedural_generator = false;

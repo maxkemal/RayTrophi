@@ -25,7 +25,7 @@
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const float PI      = 3.14159265358979323846;
-const float INV_PI  = 0.31830988618379067154;
+// INV_PI comes from rt_payload.glsl (included below) — same value, one copy.
 const float EPSILON = 1e-4;
 
 // ─── Push Constants ──────────────────────────────────────────────────────────

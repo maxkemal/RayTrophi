@@ -107,6 +107,9 @@ accounted = (after["solid_mass"] + after["pyrolyzed_mass"] +
 tolerance = max(after["initial_mass"] * 1e-4, 1e-5)
 assert abs(accounted - after["initial_mass"]) <= tolerance, after
 assert after["mass_conservation_error"] <= tolerance, after
+assert after["mass_budget_overflow"] <= tolerance, after
+assert after["mass_negative"] <= tolerance, after
+assert after["mass_invalid_elements"] == 0, after
 
 # The transfer is processed after this frame's fluid/gas coupling, so the first
 # snapshot is the unburnt APIC batch. Keep the pilot hot and prove that the

@@ -129,9 +129,25 @@ Result addPrimitive(const std::string& type, const std::string& name, float size
 // Material parameters (undoable). An object may use more than one material;
 // setters update every distinct Principled BSDF material assigned to that
 // flat mesh. Shared materials retain their normal shared-material semantics.
-// Supported color parameters: base_color, emission.
+// Supported color parameters: base_color, emission,
+//   resin_color, resin_dirt_color, dust_color_a, dust_color_b.
 // Supported scalar parameters: roughness, metallic, specular,
-// emission_strength, transmission, ior, opacity.
+// emission_strength, transmission, ior, opacity,
+//   bubble_ior, bubble_film,
+//   resin_density, resin_roughness, resin_inclusion, resin_dirt,
+//   resin_inclusion_scale, resin_shard, resin_shard_hue.
+// Booleans ride the scalar (>0.5 = true): is_bubble, resin_object_space.
+// Enums ride the scalar (rounded): dust_style (0..3), shard_shape (0..1).
+//
+// Names match the .rtp serializer keys (MaterialNodesV2.h) so a save file and
+// a script speak the same vocabulary. NOTE resin_density is the field the
+// shaders call transmission_density — it is the resin COAT thickness on the
+// resin path and the interior depth on the glass path.
+//
+// The thin-shell (is_bubble) and resin parameters also drive the fluid
+// ISOSURFACE when a material is bound to a grid domain's fluid surface, so
+// these are what a script needs to exercise volume_closesthit.rchit's
+// thin-shell and resin branches.
 // ---------------------------------------------------------------------------
 struct MaterialParamValue {
     bool is_color = false;
@@ -735,27 +751,88 @@ Result stepPhysicsSimulation(float dt = 0.0166667f);
 Result setPhysicsGravity(Vec3 gravity);
 Result getPhysicsGravity(Vec3& out_gravity);
 
+// What a cut actually produced. `shard_objects` is what you hand to
+// makePhysicsFractureGroup, and `shard_clusters` is the parallel cluster index
+// per shard — same order, same length, so the two cannot drift.
+struct FractureResultInfo {
+    std::string object;
+    std::vector<std::string> shard_objects;
+    std::vector<int> shard_clusters;
+    int cluster_count = 0;
+    // Sites the generator settled on, which is NOT always what was asked for:
+    // candidates outside the hull are rejected. Reported so a test can tell
+    // "the pattern starved" apart from "the cut failed".
+    int site_count = 0;
+};
+
+// Cut `node` into Voronoi shards. The object is parked (kept alive, pulled out
+// of the scene) and the shards take its place, exactly as the panel does — this
+// drives the same generator, so there is one parking/naming/erasing path.
+// `pattern`: 0 uniform, 1 impact-clustered, 2 thermal (burn-guided).
+Result fractureObject(const std::string& node, int site_count, uint32_t seed,
+                      int pattern, int cluster_count, bool exact_surface,
+                      float preview_gap, FractureResultInfo& out_info);
+// Drop the shards and restore the parked original.
+Result unfractureObject(const std::string& node);
+// The group names + members "Make Breakable" would create for this object, so a
+// script registers the same clusters the panel would.
+Result fractureClusterGroups(const std::string& node,
+                             std::vector<std::string>& out_groups,
+                             std::vector<std::vector<std::string>>& out_members);
+
 struct FractureGroupInfo {
     std::string group;
     int shard_count = 0;
     int broken_count = 0;
-    float base_break_impulse = 0.0f;
-    float effective_break_impulse = 0.0f;
+    // ★ The authored resistance, in METRES PER SECOND: the velocity change this
+    // group absorbs before it comes apart. Mass-free, so one value reads the
+    // same on a plank and on a tower leg.
+    float base_break_velocity = 0.0f;
+    // Summed shard mass [kg]. The two impulse figures below are this times the
+    // velocity above, which is the only reason they can be compared against an
+    // incoming impulse at all.
+    float group_mass_kg = 0.0f;
+    float base_break_impulse = 0.0f;      // N.s, = velocity * mass
+    float effective_break_impulse = 0.0f; // N.s, after thermal weakening
     bool integrity_weakening = true;
     float integrity_exponent = 1.5f;
     float minimum_threshold_scale = 0.15f;
     float mean_integrity = 1.0f;
     float minimum_integrity = 1.0f;
     float remaining_support_ratio = 1.0f;
+    // World centre of the group's shards. Exposed so a test can tell "survived
+    // because it was out of range" apart from "survived because it held" — a
+    // localisation check that cannot measure distance is really a radius check
+    // wearing a strength check's clothes.
+    Vec3 world_center = Vec3(0.0f, 0.0f, 0.0f);
+    // World AABB size of the group. The pressure bridge derives its impulse from
+    // the projection of exactly this box, so when a blast lands harder on a far
+    // cluster than a near one, this is the number that explains it — a finely
+    // shattered region has smaller boxes and therefore catches less of the front.
+    // Without it that observation can only be guessed at from one aggregate.
+    Vec3 world_extent = Vec3(0.0f, 0.0f, 0.0f);
+    // ★ Where the integrity numbers above came from, so a test can tell a
+    // per-cluster reading apart from the whole-object average silently
+    // substituted when the cluster's region held no elements. Several clusters
+    // reporting the identical mean is the visible symptom of that fallback and
+    // reads exactly like uniform damage without these two fields.
+    bool integrity_regional = false;
+    int integrity_sampled_elements = 0;
 };
 
 Result makePhysicsFractureGroup(const std::string& group,
                                 const std::vector<std::string>& shard_objects,
-                                float break_impulse,
+                                float break_velocity,   // m/s, times mass = N.s
                                 bool integrity_weakening,
                                 float integrity_exponent,
                                 float minimum_threshold_scale,
-                                FractureGroupInfo& out_info);
+                                FractureGroupInfo& out_info,
+                                // Node the shards were cut from — the one that
+                                // carries the MSF field. Required whenever the
+                                // group name differs from the object name (i.e.
+                                // any structural cluster), or the group finds no
+                                // damage and never thermally weakens.
+                                const std::string& source_object = "");
 Result getPhysicsFractureGroup(const std::string& group,
                                FractureGroupInfo& out_info);
 Result breakPhysicsFractureGroup(const std::string& group, float strength);
@@ -769,7 +846,11 @@ struct StructuralImpulseInfo {
     uint64_t affected_groups = 0;
     uint64_t fractured_groups = 0;
     float last_peak_pressure_kpa = 0.0f;
+    // ★ Now real newton-seconds: pressure x projected area x duration x coupling.
+    // Fracture thresholds authored against the old area-free expression are not
+    // comparable with these numbers.
     float last_max_impulse = 0.0f;
+    float last_projected_area_m2 = 0.0f;
 };
 Result emitGasPressurePulse(const std::string& domain, Vec3 center,
                             float radius, float peak_pressure_kpa,
@@ -791,6 +872,10 @@ struct AshDebrisInfo {
     uint64_t lod_reduced_particles = 0;
     uint64_t budget_rejected_particles = 0;
     float accepted_mass_kg = 0.0f;
+    // Debris mass held back by a full particle budget. Budget limits VISUAL
+    // detail; it is never allowed to destroy mass, so anything unrepresented
+    // waits here for the next event instead of vanishing.
+    float reservoir_mass_kg = 0.0f;
 };
 Result configureAshDebris(bool enabled, uint64_t max_particles,
                           float particles_per_kg, float near_distance,
@@ -1058,8 +1143,23 @@ struct FluidDomainInfo {
     std::string render_mode; // "volume", "surface", "particles"
     std::string backend;     // "cpu", "gpu", "vulkan", "cpu_sparse"
     std::string boundary;    // "closed", "open", "periodic"
-    std::string preset;      // "water", "oil", "mud", "honey", "lava", "sand", "custom"
-    float viscosity = 0.0f;
+    std::string preset;      // "water","oil","mud","honey","lava","sand","chocolate","custom"
+    // Kinematic viscosity in m²/s. Renamed from the old unitless `viscosity`
+    // together with the solver field it mirrors, so a script written against the
+    // old 0..200 dial fails loudly on the missing key instead of quietly asking
+    // for lava when it meant honey.
+    float kinematic_viscosity = 0.0f;
+    int   viscosity_sweeps = 8;
+    float viscosity_wall_slip = 1.0f;  // 0 = no-slip, 1 = free-slip
+    // Material shading the SurfaceSDF isosurface; empty = built-in dielectric.
+    std::string surface_material;
+    // Procedural porosity on the isosurface (fermented dough / aerated batter /
+    // pumice). Bubbles are cut out of the FIELD before the surface is found, so
+    // the pore rims are real geometry with real normals — not an alpha cutout.
+    // 0 = off. Bubble size is in world units, so it survives resolution changes.
+    float pore_amount = 0.0f;
+    float pore_scale  = 0.05f;
+    float pore_detail = 0.5f;
     bool enabled = true;
     bool visible = true;
 };
@@ -1077,6 +1177,12 @@ struct GasDomainSettings {
     float smoke_generation = 0.6f;
     float flame_dissipation = 3.0f;
     float fire_max_temperature = 10.0f;
+    // Combustion -> structure. See SimulationGridDomainDesc for why the
+    // pressure scale is a CALIBRATION knob and not a physical constant.
+    bool  structural_coupling_enabled = false;
+    float structural_pressure_scale = 400.0f;
+    float structural_min_intensity = 0.05f;
+    float structural_event_interval = 0.25f;
     float buoyancy_heat = 1.0f;
     float buoyancy_density = 0.08f;
     float vorticity = 0.35f;
@@ -1219,7 +1325,18 @@ struct MaterialFieldInfo {
     float pyrolyzed_mass = 0.0f;
     float molten_reservoir_mass = 0.0f;
     float transferred_mass = 0.0f;
+    // ★ Read the header comment on MaterialMassBudgetSummary before treating
+    // mass_conservation_error as a pass/fail gate. It is now measured on the RAW
+    // field, so it can be non-zero — that is the whole point. It used to be
+    // derived from the four clamped masses above, which made it structurally
+    // incapable of reporting anything but 0.0.
     float mass_conservation_error = 0.0f;
+    // The two independent ways the budget can break, reported separately so a
+    // failure names itself: overflow = one kilogram spent by two processes,
+    // negative = a sink ran backwards.
+    float mass_budget_overflow = 0.0f;
+    float mass_negative = 0.0f;
+    uint32_t mass_invalid_elements = 0u;
     std::vector<std::string> semantics;
 };
 
@@ -1229,6 +1346,10 @@ Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields);
 struct MoltenMassTransferInfo {
     uint64_t queued = 0, completed = 0;
     uint64_t deferred_no_domain = 0, deferred_no_capacity = 0;
+    // Requests that ended without transferring and without being retried, and
+    // requests thrown away because the simulation was reset or a cached frame
+    // restored. Both used to be invisible.
+    uint64_t dropped = 0, discarded_on_reset = 0;
     float requested_mass = 0.0f, transferred_mass = 0.0f;
     uint64_t spawned_particles = 0;
     std::string last_object, last_domain, last_substance;
@@ -1258,7 +1379,26 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const Vec3* domain_min = nullptr, const Vec3* domain_max = nullptr,
                          const float* voxel_size = nullptr, const std::string* render_mode = nullptr,
                          const std::string* backend = nullptr, const std::string* boundary = nullptr,
-                         const std::string* preset = nullptr, const float* viscosity = nullptr,
+                         const std::string* preset = nullptr,
+                         const float* kinematic_viscosity = nullptr,
+                         const int* viscosity_sweeps = nullptr,
+                         const float* viscosity_wall_slip = nullptr,
+                         // Scene material shading the SurfaceSDF isosurface, BY NAME.
+                         // Empty string clears it back to the built-in dielectric.
+                         // A name and not an index: material ids shift as the scene
+                         // is edited, so an id in a script is a number nobody can
+                         // check, and pointing at the wrong material is silent.
+                         const std::string* surface_material = nullptr,
+                         // Procedural porosity — see FluidDomainInfo::pore_*.
+                         // These belong to the DOMAIN and not to the surface
+                         // material on purpose: the gas/liquid handoff arbiter
+                         // evaluates the same field for OTHER volumes and has no
+                         // access to this domain's material, so driving pores
+                         // from a material would clip smoke against a surface
+                         // the shader never draws.
+                         const float* pore_amount = nullptr,
+                         const float* pore_scale = nullptr,
+                         const float* pore_detail = nullptr,
                          const bool* enabled = nullptr, const bool* visible = nullptr);
 Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSettings& out_settings);
 Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDomainSettings& settings);

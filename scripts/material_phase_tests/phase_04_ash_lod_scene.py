@@ -35,7 +35,27 @@ assert delta_rejected == 93, delta_rejected
 assert after["alive_particles"] == 20, after
 assert after["alive_particles"] <= after["max_particles"], after
 
+# ★ The budget caps VISUAL DETAIL, never mass. Rejecting 93 detail particles must
+# not delete the kilograms they stood for: whatever is not carried by a live
+# particle has to be sitting in the reservoir, waiting for the next event.
+emitted_mass = 0.10 + 0.10 + 1.0
+accounted_mass = ((after["accepted_mass_kg"] - before["accepted_mass_kg"]) +
+                  after["reservoir_mass_kg"] - before["reservoir_mass_kg"])
+assert abs(accounted_mass - emitted_mass) <= 1e-4, (
+    accounted_mass, emitted_mass, after)
+
+# A budget-starved event must park its mass rather than return it to nobody.
+starved = rt.debris.emit_ash(
+    center=(0.0, 1.2, 0.0), mass_kg=0.5,
+    velocity=(0.0, 0.5, 0.0), camera_distance=2.0, seed=44)
+starved_stats = rt.debris.stats()
+assert starved == 0, starved
+assert abs(starved_stats["reservoir_mass_kg"] -
+           (after["reservoir_mass_kg"] + 0.5)) <= 1e-4, starved_stats
+
 print({"result": "PASS", "phase": 4,
+       "mass_accounted": accounted_mass,
+       "reservoir_after_starved": starved_stats["reservoir_mass_kg"],
        "near_spawned": near_spawned, "far_spawned": far_spawned,
        "budget_spawned": budget_spawned,
        "delta": {"requested": delta_requested, "spawned": delta_spawned,

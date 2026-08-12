@@ -1891,7 +1891,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
                 const Uint8 ri = (Uint8)std::clamp((int)std::lround(std::pow((std::min)(rr, 1.0f), 1.0f / 2.2f) * 255.0f), 0, 255);
                 const Uint8 gi = (Uint8)std::clamp((int)std::lround(std::pow((std::min)(gg, 1.0f), 1.0f / 2.2f) * 255.0f), 0, 255);
                 const Uint8 bi = (Uint8)std::clamp((int)std::lround(std::pow((std::min)(bb, 1.0f), 1.0f / 2.2f) * 255.0f), 0, 255);
-                partial_framebuffer[(size_t)j * (size_t)width + (size_t)i] = make_uchar4(ri, gi, bi, 255);
+                partial_framebuffer[(size_t)j * (size_t)width + (size_t)i] = make_uchar4(ri, gi, bi, 0);
             }
         }
     }
@@ -2001,10 +2001,10 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
     // Cache format masks/shifts once — avoids per-pixel SDL_MapRGB dispatch.
     const SDL_PixelFormat* fmt = surface->format;
-    const Uint32 aMaskOr = fmt->Amask;  // Usually 0xFF000000; OR'd into every pixel
     const Uint8 rShift = fmt->Rshift;
     const Uint8 gShift = fmt->Gshift;
     const Uint8 bShift = fmt->Bshift;
+    const Uint8 aShift = fmt->Ashift;
 
     for (int j = 0; j < safe_h; ++j) {
         const int screen_y = surface->h - 1 - j;
@@ -2012,10 +2012,10 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         const uchar4* __restrict src_row = display_framebuffer + j * width;
         for (int i = 0; i < safe_w; ++i) {
             const uchar4& c = src_row[i];
-            dst_row[i] = aMaskOr
-                | ((Uint32)c.x << rShift)
+            dst_row[i] = ((Uint32)c.x << rShift)
                 | ((Uint32)c.y << gShift)
-                | ((Uint32)c.z << bShift);
+                | ((Uint32)c.z << bShift)
+                | ((Uint32)c.w << aShift);
         }
     }
 

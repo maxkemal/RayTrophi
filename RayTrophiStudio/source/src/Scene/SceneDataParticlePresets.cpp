@@ -629,7 +629,11 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 liquid.resource_budget_mb = 768;
                 liquid.fluid_params.applyPreset(
                     RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Oil);
-                liquid.fluid_params.viscosity = 0.16f;
+                // Thinner than the Oil preset: a spilled fuel puddle spreads. The
+                // old 0.16 was on the unitless dial (Oil sat at 3.0 there), i.e.
+                // "much thinner than oil" — restated in m²/s against the new
+                // Oil ν of 1e-4.
+                liquid.fluid_params.kinematic_viscosity = 5.0e-6f;
                 liquid.fluid_max_particles = 80000;
                 liquid.fluid_render_mode =
                     RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;

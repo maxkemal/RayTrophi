@@ -115,7 +115,29 @@ enum class MaterialParamKind {
     EmissionStrength,
     Transmission,
     Ior,
-    Opacity
+    Opacity,
+    // Thin-shell film + resin coat. These reach the fluid ISOSURFACE too (see
+    // volume_closesthit.rchit), so they must be scriptable or the isosurface
+    // branches that read them cannot be driven from a test at all.
+    // Names are the ones the .rtp serializer already uses (MaterialNodesV2.h)
+    // — one vocabulary for save files and scripts, so neither can drift.
+    IsBubble,
+    BubbleIor,
+    BubbleFilm,
+    ResinDensity,
+    ResinColor,
+    ResinRoughness,
+    ResinInclusion,
+    ResinDirt,
+    ResinDirtColor,
+    ResinInclusionScale,
+    ResinShard,
+    ResinShardHue,
+    ResinObjectSpace,
+    DustStyle,
+    DustColorA,
+    DustColorB,
+    ShardShape
 };
 
 struct MaterialValue {
@@ -140,6 +162,25 @@ bool parseMaterialParam(const std::string& name, MaterialParamKind& out, bool& i
     if (name == "transmission") { out = MaterialParamKind::Transmission; return true; }
     if (name == "ior") { out = MaterialParamKind::Ior; return true; }
     if (name == "opacity") { out = MaterialParamKind::Opacity; return true; }
+    // Thin-shell film.
+    if (name == "is_bubble") { out = MaterialParamKind::IsBubble; return true; }
+    if (name == "bubble_ior") { out = MaterialParamKind::BubbleIor; return true; }
+    if (name == "bubble_film") { out = MaterialParamKind::BubbleFilm; return true; }
+    // Resin coat + interior inclusions.
+    if (name == "resin_density") { out = MaterialParamKind::ResinDensity; return true; }
+    if (name == "resin_color") { out = MaterialParamKind::ResinColor; is_color = true; return true; }
+    if (name == "resin_roughness") { out = MaterialParamKind::ResinRoughness; return true; }
+    if (name == "resin_inclusion") { out = MaterialParamKind::ResinInclusion; return true; }
+    if (name == "resin_dirt") { out = MaterialParamKind::ResinDirt; return true; }
+    if (name == "resin_dirt_color") { out = MaterialParamKind::ResinDirtColor; is_color = true; return true; }
+    if (name == "resin_inclusion_scale") { out = MaterialParamKind::ResinInclusionScale; return true; }
+    if (name == "resin_shard") { out = MaterialParamKind::ResinShard; return true; }
+    if (name == "resin_shard_hue") { out = MaterialParamKind::ResinShardHue; return true; }
+    if (name == "resin_object_space") { out = MaterialParamKind::ResinObjectSpace; return true; }
+    if (name == "dust_style") { out = MaterialParamKind::DustStyle; return true; }
+    if (name == "dust_color_a") { out = MaterialParamKind::DustColorA; is_color = true; return true; }
+    if (name == "dust_color_b") { out = MaterialParamKind::DustColorB; is_color = true; return true; }
+    if (name == "shard_shape") { out = MaterialParamKind::ShardShape; return true; }
     return false;
 }
 
@@ -155,6 +196,26 @@ MaterialValue readMaterialValue(const PrincipledBSDF& material, MaterialParamKin
         case MaterialParamKind::Transmission:     value.scalar = material.transmission; break;
         case MaterialParamKind::Ior:              value.scalar = material.ior; break;
         case MaterialParamKind::Opacity:          value.scalar = material.opacityProperty.alpha; break;
+        // Bools and ints ride the scalar (bool: >0.5 = true; int: rounded) so
+        // the undo record below stays one type. A separate value variant would
+        // buy nothing and would have to be threaded through every edit path.
+        case MaterialParamKind::IsBubble:            value.scalar = material.getIsBubble() ? 1.0f : 0.0f; break;
+        case MaterialParamKind::BubbleIor:           value.scalar = material.getBubbleIor(); break;
+        case MaterialParamKind::BubbleFilm:          value.scalar = material.getBubbleFilm(); break;
+        case MaterialParamKind::ResinDensity:        value.scalar = material.getTransmissionDensity(); break;
+        case MaterialParamKind::ResinColor:          value.color  = material.getResinColor(); break;
+        case MaterialParamKind::ResinRoughness:      value.scalar = material.getResinRoughness(); break;
+        case MaterialParamKind::ResinInclusion:      value.scalar = material.getResinInclusion(); break;
+        case MaterialParamKind::ResinDirt:           value.scalar = material.getResinDirt(); break;
+        case MaterialParamKind::ResinDirtColor:      value.color  = material.getResinDirtColor(); break;
+        case MaterialParamKind::ResinInclusionScale: value.scalar = material.getResinInclusionScale(); break;
+        case MaterialParamKind::ResinShard:          value.scalar = material.getResinShard(); break;
+        case MaterialParamKind::ResinShardHue:       value.scalar = material.getResinShardHue(); break;
+        case MaterialParamKind::ResinObjectSpace:    value.scalar = material.getResinObjectSpace() ? 1.0f : 0.0f; break;
+        case MaterialParamKind::DustStyle:           value.scalar = static_cast<float>(material.getDustStyle()); break;
+        case MaterialParamKind::DustColorA:          value.color  = material.getDustColorA(); break;
+        case MaterialParamKind::DustColorB:          value.color  = material.getDustColorB(); break;
+        case MaterialParamKind::ShardShape:          value.scalar = static_cast<float>(material.getShardShape()); break;
     }
     return value;
 }
@@ -170,6 +231,23 @@ void writeMaterialValue(PrincipledBSDF& material, MaterialParamKind kind, const 
         case MaterialParamKind::Transmission:     material.setTransmission(value.scalar, material.ior); break;
         case MaterialParamKind::Ior:              material.setTransmission(material.transmission, value.scalar); break;
         case MaterialParamKind::Opacity:          material.opacityProperty.alpha = value.scalar; break;
+        case MaterialParamKind::IsBubble:            material.setIsBubble(value.scalar > 0.5f); break;
+        case MaterialParamKind::BubbleIor:           material.setBubbleIor(value.scalar); break;
+        case MaterialParamKind::BubbleFilm:          material.setBubbleFilm(value.scalar); break;
+        case MaterialParamKind::ResinDensity:        material.setTransmissionDensity(value.scalar); break;
+        case MaterialParamKind::ResinColor:          material.setResinColor(value.color); break;
+        case MaterialParamKind::ResinRoughness:      material.setResinRoughness(value.scalar); break;
+        case MaterialParamKind::ResinInclusion:      material.setResinInclusion(value.scalar); break;
+        case MaterialParamKind::ResinDirt:           material.setResinDirt(value.scalar); break;
+        case MaterialParamKind::ResinDirtColor:      material.setResinDirtColor(value.color); break;
+        case MaterialParamKind::ResinInclusionScale: material.setResinInclusionScale(value.scalar); break;
+        case MaterialParamKind::ResinShard:          material.setResinShard(value.scalar); break;
+        case MaterialParamKind::ResinShardHue:       material.setResinShardHue(value.scalar); break;
+        case MaterialParamKind::ResinObjectSpace:    material.setResinObjectSpace(value.scalar > 0.5f); break;
+        case MaterialParamKind::DustStyle:           material.setDustStyle(static_cast<int>(value.scalar + 0.5f)); break;
+        case MaterialParamKind::DustColorA:          material.setDustColorA(value.color); break;
+        case MaterialParamKind::DustColorB:          material.setDustColorB(value.color); break;
+        case MaterialParamKind::ShardShape:          material.setShardShape(static_cast<int>(value.scalar + 0.5f)); break;
     }
     if (!material.gpuMaterial) material.gpuMaterial = std::make_shared<GpuMaterial>();
     applyPBRMaterialSnapshotToGpuMaterial(capturePBRMaterialSnapshot(material), *material.gpuMaterial);
@@ -1289,6 +1367,15 @@ Result openProject(const std::string& filepath) {
         return Result::fail("project file not found: " + filepath);
     }
 
+    // ★★ BEFORE the load, and the pairing matters as much as the calls do.
+    //
+    // These maps are keyed by node NAME and hold shared_ptrs pulled out of the
+    // OLD scene. Surviving a load, a new scene with a same-named node is
+    // reported as already fractured and a re-fracture reads the previous
+    // scene's geometry — silently, with no error anywhere. The UI's open path
+    // has cleared them for a while; this one never did.
+    ui.resetFractureState(g_ctx->scene);
+
     const bool ok = ProjectManager::getInstance().openProject(
         filepath, g_ctx->scene, g_ctx->render_settings, g_ctx->renderer, g_ctx->backend_ptr);
     if (!ok) return Result::fail("project open failed: " + filepath);
@@ -1305,6 +1392,13 @@ Result openProject(const std::string& filepath) {
     g_ctx->active_model_path = filepath;
     ui.invalidateCache();
     ui.mesh_cache_valid = false;
+    // ★ AFTER the load: re-cut every fracture the project recorded. The UI's
+    // open path does this from draw() once the loader thread finishes; a
+    // scripted open finishes here, so it has to do it here. Without it a
+    // script could save a fractured scene and reopen it whole — and the test
+    // that was supposed to prove persistence would be the thing that failed to
+    // exercise it.
+    ui.replayFractureRecipes(*g_ctx);
     g_ctx->start_render = true;
     notifySceneLoaded();
     return Result::success();
@@ -2249,6 +2343,20 @@ Result stepPhysicsSimulation(float dt) {
         simCtx.dt = dt;
         g_ctx->scene.rigid_body_system->step(simCtx);
         g_ctx->scene.processFractureImpacts();
+        // ★ The PRODUCER belongs here too, and forgetting it is the same mistake
+        // the consumer used to have — just mirrored.
+        //
+        // The consumer was once wired only to this scripted step and not to the
+        // app's loops, so blast events piled up unconsumed during playback. That
+        // was fixed by pumping it in all four app loops... and the producer was
+        // then added to those same four loops and NOT here. Result: fire broke
+        // structures interactively while the scripted gate reported `queued: 0`
+        // and looked like a dead feature.
+        //
+        // A step is a step. Anything the app's loop does after stepping, this
+        // has to do as well, or "works in the app" and "works in the test" keep
+        // taking turns being false.
+        g_ctx->scene.emitCombustionStructuralImpulses(dt);
         g_ctx->scene.processStructuralImpulseEvents();
     }
     return Result::success();

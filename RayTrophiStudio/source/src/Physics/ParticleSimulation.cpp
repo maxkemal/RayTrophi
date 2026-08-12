@@ -2726,6 +2726,168 @@ bool runGpuFluidFreeSurfacePressure(SimulationGridDomainState& state,
 //         sigma = sigma_new; until sigma_new <= tol*sigma0 or max_iter.
 // The CG scalars alpha/beta are carried into the kernels via the (otherwise
 // unused on this path) GridProjectionGpuConstants::sor_omega field.
+// ── Implicit viscous diffusion on the device ────────────────────────────────
+// Solves (I - a*L) u = u_pre per MAC component with red-black Gauss-Seidel;
+// a = nu*dt/h^2. Vulkan only — the CUDA backend has no matching kernel yet, so
+// it returns false there and the caller lets the CPU reference run instead.
+//
+// This runs BEFORE the pressure attempt and writes the result back to the host
+// grid, rather than living inside runGpuFluidMGPCGPressure. Two reasons:
+//   - the pressure solve is not always on the GPU (a domain with the ghost-fluid
+//     surface on — the DEFAULT — routes pressure to the CPU PCG), and viscosity
+//     that only works when some other stage happens to be device-resident is a
+//     knob that silently changes strength with unrelated settings;
+//   - the host grid stays the single authority between stages, which is what
+//     every other stage in this file already assumes.
+// The extra upload/download is the price of that; fusing it into the pressure
+// path is a later optimization, not a correctness question.
+struct FluidViscosityGpuConstants {
+    int   nx = 0;
+    int   ny = 0;
+    int   nz = 0;
+    int   boundary = 1;      // 0 = open, 1 = closed, 2 = periodic
+    float voxel_size = 1.0f;
+    float dt = 0.0f;
+    float alpha = 0.0f;         // nu*dt/h^2
+    float solid_weight = 0.0f;  // 1 - wall_slip
+    int   parity = 0;
+    int   pad0 = 0;
+    int   pad1 = 0;
+    int   pad2 = 0;
+    int   pad3 = 0;
+};
+static_assert(sizeof(FluidViscosityGpuConstants) == 52,
+              "sim_fluid_viscosity_rbgs push-constant ABI changed");
+
+bool runGpuFluidViscosity(SimulationGridDomainState& state,
+                          const Fluid::APICSolverParams& params,
+                          float dt,
+                          SimulationComputeContext* compute,
+                          SimulationGridDomainComputeBuffers& gpu_buffers,
+                          const std::vector<float>& fluid_mask_cpu,
+                          int* out_sweeps_run) {
+    if (out_sweeps_run) *out_sweeps_run = 0;
+    auto& grid = state.grid;
+    if (!compute ||
+        compute->backendType() != ComputeBackendType::VulkanCompute ||
+        !compute->supportsDispatch() || dt <= 0.0f ||
+        grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
+        grid.vel_x.empty() || grid.vel_y.empty() || grid.vel_z.empty()) {
+        return false;
+    }
+    const float h = (grid.voxel_size > 1.0e-6f) ? grid.voxel_size : 1.0f;
+    const float alpha = params.kinematic_viscosity * dt / (h * h);
+    if (alpha <= 1.0e-8f) {
+        return false;   // nothing to diffuse; let the host no-op it
+    }
+
+    ComputeBufferHandle bufs[10] = {
+        gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
+        gpu_buffers.fluid_mask,
+        // scratch2_* is the MacCormack second-pass target, which only the GAS
+        // solver uses; a domain is fluid or gas, never both in one step.
+        gpu_buffers.scratch2_vel_x, gpu_buffers.scratch2_vel_y, gpu_buffers.scratch2_vel_z,
+        gpu_buffers.var_svx, gpu_buffers.var_svy, gpu_buffers.var_svz
+    };
+    for (const auto& handle : bufs) {
+        if (!handle.valid()) return false;
+    }
+
+    const uint32_t cell_count = static_cast<uint32_t>(grid.getCellCount());
+    if (fluid_mask_cpu.size() < cell_count) return false;
+
+    // Solid velocities, deinterleaved. Zero when the grid carries no colliders —
+    // with wall_slip=0 the walls then hold the fluid still, which is what a
+    // static no-slip boundary means.
+    static std::vector<float> svx_host, svy_host, svz_host;
+    if (svx_host.size() < cell_count) {
+        svx_host.assign(cell_count, 0.0f);
+        svy_host.assign(cell_count, 0.0f);
+        svz_host.assign(cell_count, 0.0f);
+    }
+    if (grid.solid_vel.size() == cell_count) {
+        for (uint32_t c = 0; c < cell_count; ++c) {
+            svx_host[c] = grid.solid_vel[c].x;
+            svy_host[c] = grid.solid_vel[c].y;
+            svz_host[c] = grid.solid_vel[c].z;
+        }
+    } else {
+        std::fill(svx_host.begin(), svx_host.begin() + cell_count, 0.0f);
+        std::fill(svy_host.begin(), svy_host.begin() + cell_count, 0.0f);
+        std::fill(svz_host.begin(), svz_host.begin() + cell_count, 0.0f);
+    }
+
+    const std::size_t vx_bytes = grid.vel_x.size() * sizeof(float);
+    const std::size_t vy_bytes = grid.vel_y.size() * sizeof(float);
+    const std::size_t vz_bytes = grid.vel_z.size() * sizeof(float);
+
+    compute->beginTransferBatch();
+    bool ok =
+        compute->uploadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), vx_bytes) &&
+        compute->uploadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), vy_bytes) &&
+        compute->uploadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), vz_bytes) &&
+        // The RHS is the same field: GS starts from the pre-diffusion state and
+        // relaxes in place, so both copies begin identical.
+        compute->uploadBuffer(gpu_buffers.scratch2_vel_x, grid.vel_x.data(), vx_bytes) &&
+        compute->uploadBuffer(gpu_buffers.scratch2_vel_y, grid.vel_y.data(), vy_bytes) &&
+        compute->uploadBuffer(gpu_buffers.scratch2_vel_z, grid.vel_z.data(), vz_bytes) &&
+        // cell_count, NOT fluid_mask_cpu.size(): the caller's scratch is
+        // function-static and grow-only, so a smaller domain later in the same
+        // session would otherwise overflow its correctly-sized buffer.
+        compute->uploadBuffer(gpu_buffers.fluid_mask, fluid_mask_cpu.data(),
+                              cell_count * sizeof(float)) &&
+        compute->uploadBuffer(gpu_buffers.var_svx, svx_host.data(), cell_count * sizeof(float)) &&
+        compute->uploadBuffer(gpu_buffers.var_svy, svy_host.data(), cell_count * sizeof(float)) &&
+        compute->uploadBuffer(gpu_buffers.var_svz, svz_host.data(), cell_count * sizeof(float));
+    ok = compute->endTransferBatch() && ok;
+    if (!ok) return false;
+
+    FluidViscosityGpuConstants c;
+    c.nx = grid.nx; c.ny = grid.ny; c.nz = grid.nz;
+    c.boundary = (params.boundary == Fluid::APICSolverParams::BoundaryMode::Open)     ? 0
+               : (params.boundary == Fluid::APICSolverParams::BoundaryMode::Periodic) ? 2
+                                                                                      : 1;
+    c.voxel_size = grid.voxel_size;
+    c.dt = dt;
+    c.alpha = alpha;
+    c.solid_weight = 1.0f - std::clamp(params.viscosity_wall_slip, 0.0f, 1.0f);
+
+    const uint32_t threads = 256;
+    const uint32_t max_faces = static_cast<uint32_t>(
+        std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}));
+    const uint32_t groups = (max_faces + threads - 1u) / threads;
+    const int sweeps = std::clamp(params.viscosity_sweeps, 1, 64);
+
+    ComputeDispatch cmd;
+    cmd.kernel = "sim_fluid_viscosity_rbgs";
+    cmd.buffers = bufs;
+    cmd.buffer_count = 10;
+    cmd.constants_size = sizeof(c);
+    cmd.groups.groups_x = groups;
+    cmd.groups.groups_y = 1;
+    cmd.groups.groups_z = 1;
+
+    for (int s = 0; s < sweeps && ok; ++s) {
+        for (int parity = 0; parity < 2 && ok; ++parity) {
+            c.parity = parity;
+            cmd.constants = &c;
+            ok = compute->dispatch(cmd);
+        }
+    }
+    if (!ok) return false;
+
+    compute->synchronize();
+    compute->beginTransferBatch();
+    ok = compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), vx_bytes) &&
+         compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), vy_bytes) &&
+         compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), vz_bytes);
+    ok = compute->endTransferBatch() && ok;
+    if (!ok) return false;
+
+    if (out_sweeps_run) *out_sweeps_run = sweeps;
+    return true;
+}
+
 bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                               const Fluid::APICSolverParams& fluid_params,
                               float dt,
@@ -6747,6 +6909,10 @@ void ParticleSimulationSystem::clearGridDomains() {
 }
 
 void ParticleSimulationSystem::resetGridDomainStates() {
+    // ★ Before the states go: a queued molten transfer is an intent formed
+    // against the MSF reservoir as it stood, and the reset is about to roll that
+    // reservoir back. Carrying the intent across would spawn the same mass twice.
+    discardMoltenMassTransferState();
     grid_domain_states_.clear();
     grid_domain_states_.resize(grid_domains_.size());
     // Timeline reset/rewind replaces the CPU grid state without dispatching a
@@ -6759,6 +6925,10 @@ void ParticleSimulationSystem::resetGridDomainStates() {
 }
 
 void ParticleSimulationSystem::setGridDomainStates(const std::vector<SimulationGridDomainState>& states) {
+    // Same contract as resetGridDomainStates: a cached-frame restore rewinds the
+    // particle SoA and (alongside it) the MSF snapshot, so any transfer request
+    // still in flight belongs to a future that has just been undone.
+    discardMoltenMassTransferState();
     grid_domain_states_ = states;
     // Frame-cache restore is CPU-side. Invalidate the published device view so
     // the render bridge uploads the restored snapshot through its NanoVDB
@@ -8647,15 +8817,21 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // stage fails.
             //
             // Pattern (all-GPU pressure+G2P when compute backend dispatches):
-            //   Call 1 (stop_after_viscosity=true): forces(opt) + P2G(opt) +
-            //     boundary + viscosity → returns; grid.vel = pre-pressure field.
-            //   GPU: upload pre-pressure vel to scratch (FLIP snapshot) → MGPCG
-            //     pressure projection → GPU G2P → download particle vel/affine.
+            //   Call 1 (stop_before_pressure=true): forces(opt) + P2G(opt) +
+            //     FLIP snapshot + boundary → returns; grid.vel = post-boundary,
+            //     pre-viscosity field.
+            //   GPU: upload the published FLIP snapshot to scratch → viscous
+            //     diffusion → MGPCG pressure projection → GPU G2P → download
+            //     particle vel/affine.
             //   Call 2 (pressure_g2p_precomputed=true): air_drag + damping +
             //     advect + reseed only.
-            //   Any GPU step failing falls back to the full CPU step below.
+            //   Any GPU step failing falls back to the full CPU step below,
+            //   which re-runs P2G and therefore redoes viscosity itself — the
+            //   device result is discarded rather than applied twice.
             float gpu_g2p_ms = 0.0f;
             float gpu_pressure_ms = 0.0f;
+            float gpu_viscosity_ms = 0.0f;
+            int   gpu_viscosity_sweeps = 0;
             bool  g2p_on_gpu = false;
             bool  particle_tail_on_gpu = false;
             Fluid::APICSolverStats gpu_mgpcg_stats;
@@ -8674,44 +8850,69 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             if (try_gpu_g2p) {
                 auto& gpu_buffers = grid_domain_compute_buffers_[i];
                 if (ensureGridDomainComputeBuffers(*context.compute, gpu_buffers, state.grid)) {
-                    // Call 1: physics up to viscosity, STOP before pressure so the
-                    // GPU MGPCG solver does the pressure projection. After this,
-                    // grid.vel is the pre-pressure (FLIP snapshot) MAC field.
+                    // Call 1: P2G + FLIP snapshot + solid boundaries, STOP before
+                    // pressure. Viscosity is claimed by the device below, so the
+                    // host must not also run it.
                     auto call1_params = step_params;
-                    call1_params.stop_after_viscosity = true;
+                    call1_params.stop_before_pressure = true;
+                    call1_params.viscosity_precomputed = true;
                     Fluid::APICSolverStats call1_stats;
                     Fluid::step(state.particles, state.grid, call1_params, dt,
                                 gpu_integrated_forces ? nullptr : context.force_snapshot,
                                 context.time_seconds, &call1_stats);
 
-                    // The current MAC velocity IS the FLIP pre-pressure snapshot.
-                    // Upload it to scratch BEFORE the pressure solve overwrites
-                    // grid.vel with the projected (divergence-free) field.
+                    // ★ The FLIP snapshot is the POST-P2G field that step() just
+                    // published — NOT state.grid.vel_*, which by now carries the
+                    // solid boundaries and is about to carry the viscous solve.
+                    // Uploading grid.vel here is what used to cancel viscosity out
+                    // of the FLIP delta entirely (see the note in Fluid::step).
                     const bool has_flip =
                         gpu_buffers.scratch_vel_x.valid() &&
                         gpu_buffers.scratch_vel_y.valid() &&
                         gpu_buffers.scratch_vel_z.valid() &&
-                        fluid_params.flip_blend > 0.0f;
+                        fluid_params.flip_blend > 0.0f &&
+                        Fluid::hasLastFlipPreSnapshot();
                     bool upload_ok = true;
                     if (has_flip) {
                         context.compute->beginTransferBatch();
                         upload_ok =
                             context.compute->uploadBuffer(gpu_buffers.scratch_vel_x,
-                                state.grid.vel_x.data(), state.grid.vel_x.size() * sizeof(float)) &&
+                                Fluid::getLastFlipPreSnapshotX(), state.grid.vel_x.size() * sizeof(float)) &&
                             context.compute->uploadBuffer(gpu_buffers.scratch_vel_y,
-                                state.grid.vel_y.data(), state.grid.vel_y.size() * sizeof(float)) &&
+                                Fluid::getLastFlipPreSnapshotY(), state.grid.vel_y.size() * sizeof(float)) &&
                             context.compute->uploadBuffer(gpu_buffers.scratch_vel_z,
-                                state.grid.vel_z.data(), state.grid.vel_z.size() * sizeof(float));
+                                Fluid::getLastFlipPreSnapshotZ(), state.grid.vel_z.size() * sizeof(float));
                         upload_ok = context.compute->endTransferBatch() && upload_ok;
                     }
 
-                    // GPU pressure projection (MGPCG). Build the fluid mask from
-                    // particle positions, then solve. On success grid.vel holds
+                    // Fluid mask (cell occupancy) — the viscous stencil and the
+                    // pressure matrix both classify faces with it.
+                    static std::vector<float> s_fluid_mask_gpu; // function-static scratch
+                    if (upload_ok) {
+                        buildFluidMaskFromParticles(state.grid, state.particles, s_fluid_mask_gpu);
+                    }
+
+                    // Viscous diffusion. A requested viscosity the device cannot
+                    // deliver is a FALLBACK, not something to skip: silently
+                    // shipping an inviscid step for a honey preset is the exact
+                    // class of failure that looks plausible and gets tuned around.
+                    bool viscosity_ok = true;
+                    if (upload_ok && fluid_params.kinematic_viscosity > 0.0f) {
+                        const auto visc_begin = SimulationClock::now();
+                        viscosity_ok = runGpuFluidViscosity(state, fluid_params, dt,
+                                                            context.compute, gpu_buffers,
+                                                            s_fluid_mask_gpu,
+                                                            &gpu_viscosity_sweeps);
+                        if (viscosity_ok) {
+                            enforceGridSolidFaceBoundaries(state.grid);
+                            gpu_viscosity_ms = elapsedMilliseconds(visc_begin, SimulationClock::now());
+                        }
+                    }
+
+                    // GPU pressure projection (MGPCG). On success grid.vel holds
                     // the projected field and the GPU vel buffers match it.
                     bool pressure_on_gpu = false;
-                    if (upload_ok) {
-                        static std::vector<float> s_fluid_mask_gpu; // function-static scratch
-                        buildFluidMaskFromParticles(state.grid, state.particles, s_fluid_mask_gpu);
+                    if (upload_ok && viscosity_ok) {
                         const auto gpu_pressure_begin = SimulationClock::now();
                         pressure_on_gpu = runGpuFluidMGPCGPressure(state, fluid_params, dt,
                                                                    context.compute, gpu_buffers,
@@ -8759,6 +8960,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                         // the SAME session and its fallback is invisible because
                         // the first one already burned the flag.
                         const char* stage = !upload_ok      ? "FLIP snapshot upload"
+                                          : !viscosity_ok   ? "viscous diffusion"
                                           : !pressure_on_gpu ? "MGPCG pressure projection"
                                                              : "G2P";
                         const std::string key =
@@ -8788,6 +8990,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 state.fluid_stats.g2p_on_gpu   = true;
                 state.fluid_stats.pressure_ms     = gpu_pressure_ms;
                 state.fluid_stats.pressure_on_gpu = true;
+                state.fluid_stats.viscosity_ms         = gpu_viscosity_ms;
+                state.fluid_stats.viscosity_on_gpu     = gpu_viscosity_sweeps > 0;
+                state.fluid_stats.viscosity_sweeps_run = gpu_viscosity_sweeps;
                 state.fluid_stats.pressure_cg_iterations = gpu_mgpcg_stats.pressure_cg_iterations;
                 state.fluid_stats.pressure_cg_max_iterations = gpu_mgpcg_stats.pressure_cg_max_iterations;
                 state.fluid_stats.pressure_cg_dot_count = gpu_mgpcg_stats.pressure_cg_dot_count;

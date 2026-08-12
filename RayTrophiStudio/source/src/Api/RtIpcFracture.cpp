@@ -11,6 +11,8 @@ namespace {
 json fractureInfoJson(const rtapi::FractureGroupInfo& info) {
     return json{{"group", info.group}, {"shard_count", info.shard_count},
                 {"broken_count", info.broken_count},
+                {"base_break_velocity", info.base_break_velocity},
+                {"group_mass_kg", info.group_mass_kg},
                 {"base_break_impulse", info.base_break_impulse},
                 {"effective_break_impulse", info.effective_break_impulse},
                 {"integrity_weakening", info.integrity_weakening},
@@ -18,7 +20,21 @@ json fractureInfoJson(const rtapi::FractureGroupInfo& info) {
                 {"minimum_threshold_scale", info.minimum_threshold_scale},
                 {"mean_integrity", info.mean_integrity},
                 {"minimum_integrity", info.minimum_integrity},
-                {"remaining_support_ratio", info.remaining_support_ratio}};
+                {"remaining_support_ratio", info.remaining_support_ratio},
+                {"world_center", {info.world_center.x, info.world_center.y,
+                                  info.world_center.z}},
+                {"world_extent", {info.world_extent.x, info.world_extent.y,
+                                  info.world_extent.z}},
+                {"integrity_regional", info.integrity_regional},
+                {"integrity_sampled_elements", info.integrity_sampled_elements}};
+}
+
+json fractureResultJson(const rtapi::FractureResultInfo& info) {
+    return json{{"object", info.object},
+                {"shard_objects", info.shard_objects},
+                {"shard_clusters", info.shard_clusters},
+                {"cluster_count", info.cluster_count},
+                {"site_count", info.site_count}};
 }
 
 } // namespace
@@ -26,17 +42,59 @@ json fractureInfoJson(const rtapi::FractureGroupInfo& info) {
 bool dispatchFractureIpc(const std::string& method, const json& params,
                          const RtIpcFractureEnqueue& enqueue,
                          json& out_result) {
+    if (method == "physics.fracture_object") {
+        const std::string node = params.at("object").get<std::string>();
+        const int sites = params.value("site_count", 15);
+        const uint32_t seed = params.value("seed", 1337u);
+        const int pattern = params.value("pattern", 0);
+        const int clusters = params.value("cluster_count", 4);
+        const bool exact = params.value("exact_surface", true);
+        const float gap = params.value("preview_gap", 0.02f);
+        out_result = enqueue([=](UIContext&) {
+            rtapi::FractureResultInfo info;
+            const auto result = rtapi::fractureObject(
+                node, sites, seed, pattern, clusters, exact, gap, info);
+            return result.ok ? fractureResultJson(info)
+                             : json{{"__error", result.error}};
+        });
+        return true;
+    }
+    if (method == "physics.unfracture_object") {
+        const std::string node = params.at("object").get<std::string>();
+        out_result = enqueue([=](UIContext&) {
+            const auto result = rtapi::unfractureObject(node);
+            return result.ok ? json{{"object", node}}
+                             : json{{"__error", result.error}};
+        });
+        return true;
+    }
+    if (method == "physics.fracture_cluster_groups") {
+        const std::string node = params.at("object").get<std::string>();
+        out_result = enqueue([=](UIContext&) {
+            std::vector<std::string> groups;
+            std::vector<std::vector<std::string>> members;
+            const auto result = rtapi::fractureClusterGroups(node, groups, members);
+            if (!result.ok) return json{{"__error", result.error}};
+            json out = json::array();
+            for (std::size_t i = 0; i < groups.size(); ++i)
+                out.push_back(json{{"group", groups[i]}, {"shard_objects", members[i]}});
+            return json{{"object", node}, {"groups", std::move(out)}};
+        });
+        return true;
+    }
     if (method == "physics.make_fracture_group") {
         const std::string group = params.at("group").get<std::string>();
         const auto shards = params.value("shard_objects", std::vector<std::string>{});
-        const float threshold = params.value("break_impulse", 5.0f);
+        const float threshold = params.value("break_velocity", 5.0f);
         const bool weakening = params.value("integrity_weakening", true);
         const float exponent = params.value("integrity_exponent", 1.5f);
         const float minimum = params.value("minimum_threshold_scale", 0.15f);
+        const std::string source = params.value("source_object", std::string());
         out_result = enqueue([=](UIContext&) {
             rtapi::FractureGroupInfo info;
             const auto result = rtapi::makePhysicsFractureGroup(
-                group, shards, threshold, weakening, exponent, minimum, info);
+                group, shards, threshold, weakening, exponent, minimum, info,
+                source);
             return result.ok ? fractureInfoJson(info)
                              : json{{"__error", result.error}};
         });
@@ -111,7 +169,8 @@ bool dispatchFractureIpc(const std::string& method, const json& params,
                        {"affected_groups", info.affected_groups},
                        {"fractured_groups", info.fractured_groups},
                        {"last_peak_pressure_kpa", info.last_peak_pressure_kpa},
-                       {"last_max_impulse", info.last_max_impulse}}
+                       {"last_max_impulse", info.last_max_impulse},
+                       {"last_projected_area_m2", info.last_projected_area_m2}}
                 : json{{"__error", result.error}};
         });
         return true;
@@ -163,7 +222,8 @@ bool dispatchFractureIpc(const std::string& method, const json& params,
                        {"spawned_particles", i.spawned_particles},
                        {"lod_reduced_particles", i.lod_reduced_particles},
                        {"budget_rejected_particles", i.budget_rejected_particles},
-                       {"accepted_mass_kg", i.accepted_mass_kg}}
+                       {"accepted_mass_kg", i.accepted_mass_kg},
+                       {"reservoir_mass_kg", i.reservoir_mass_kg}}
                 : json{{"__error", result.error}};
         });
         return true;

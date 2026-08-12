@@ -34,8 +34,10 @@ rt.flow_source.create(
     temperature=7.0, fuel=0.8, falloff=1.2,
 )
 
+# break_velocity is m/s; the N-s threshold asserted below is this times the
+# group's mass, and is read back rather than assumed.
 rt.physics.make_fracture_group(
-    TARGET, [target], break_impulse=4.0, integrity_weakening=False)
+    TARGET, [target], break_velocity=4.0, integrity_weakening=False)
 baseline = rt.gas.structural_impulse_stats()
 
 # A normal open flame may heat/burn, but it is not an explosion and must not

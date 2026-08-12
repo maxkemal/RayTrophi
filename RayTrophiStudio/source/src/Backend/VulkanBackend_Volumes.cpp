@@ -506,6 +506,18 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // to preserve the fixed 512-byte volume ABI.
         dst._reserved[1] = src.material_program_index >= 0
             ? static_cast<float>(src.material_program_index + 1) : 0.0f;
+        // Isosurface surface material, same 1-based encoding but a DIFFERENT
+        // slot and a different resolution rule (see params.h). 0 from the memset
+        // above already means "none", so an unbound domain keeps the built-in
+        // dielectric boundary exactly as before.
+        dst.iso_material_index = src.iso_material_id >= 0
+            ? static_cast<float>(src.iso_material_id + 1) : 0.0f;
+        // Procedural porosity rides _accel_reserved[0..2]. That block was
+        // declared in all five ABI mirrors and never claimed, so the 576-byte
+        // layout is unchanged and no other reader is disturbed.
+        dst._accel_reserved[0] = std::max(0.0f, src.pore_amount);
+        dst._accel_reserved[1] = std::max(1e-4f, src.pore_scale);
+        dst._accel_reserved[2] = std::max(0.0f, std::min(1.0f, src.pore_detail));
         dst.shadow_stride = std::max(1, std::min(src.shadow_stride, 16));
         // Sync NanoVDB Host Buffer to Vulkan Device Buffer
         dst.volume_type = liveDenseGas ? 4 : 2;

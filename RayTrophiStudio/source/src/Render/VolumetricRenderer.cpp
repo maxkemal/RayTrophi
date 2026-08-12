@@ -20,6 +20,7 @@
 #include <cmath>
 #include <algorithm> // For std::min, std::max
 #include <limits>
+#include <string>    // logIsoMaterialBinding builds its message
 #include "AtmosphereLUT.h"
 #include "GodRaysModel.h"
 
@@ -72,6 +73,56 @@ void applySharedSurfaceMaterial(VDBVolume& volume, const std::shared_ptr<VolumeS
     volume.render_isosurface_ior = (std::max)(1.0f, surface->getIOR());
     volume.render_isosurface_roughness =
         (std::max)(0.0f, (std::min)(1.0f, surface->getRoughnessValue(Vec2(0.5f, 0.5f))));
+}
+
+// ── Producer gate for the isosurface material binding ────────────────────────
+// This is the FIRST point where a concrete material becomes the liquid surface,
+// so it is the right place to say what that material actually carries. The
+// shader branches downstream (thin-shell, resin coat, Principled) are silent
+// when their fields are zero — indistinguishable from "the feature is broken"
+// — and there is no way to print from a closest-hit shader.
+//
+// Reports on CHANGE only, so it costs nothing per frame. Read it as:
+//   iso=-1                      -> no material bound; the built-in dielectric runs
+//   bubble=1                    -> THIN SHELL wins; resin and transmission are
+//                                  never reached (both shaders return first)
+//   resin_density=0             -> the resin branch cannot fire, whatever the
+//                                  other resin_* values say
+//   resin_density>0 & trans>0   -> the glass lobe steals that fraction of the
+//                                  draws; resin only runs on the remainder
+void logIsoMaterialBinding(int iso_material_id) {
+    if (iso_material_id < 0) {
+        SCENE_LOG_ON_CHANGE("isomat.bind", 1,
+            std::string("[IsoMat] no surface material bound -> built-in dielectric."));
+        return;
+    }
+    auto& materials = MaterialManager::getInstance();
+    auto* m = dynamic_cast<PrincipledBSDF*>(
+        materials.getMaterial(static_cast<uint16_t>(iso_material_id)));
+    if (!m) {
+        SCENE_LOG_ON_CHANGE("isomat.bind", 2,
+            std::string("[IsoMat] id ") + std::to_string(iso_material_id) +
+            " is bound but is NOT a Principled BSDF -> nothing will shade it.");
+        return;
+    }
+    const bool  bubble = m->getIsBubble();
+    const float dens   = m->getTransmissionDensity();
+    const float trans  = m->transmission;
+    // State key folds the three gates so the line reprints whenever any of them
+    // flips, not merely when the material changes.
+    const int state = 100 + (bubble ? 1 : 0) + (dens > 1e-4f ? 2 : 0) + (trans > 0.01f ? 4 : 0);
+    std::string branch;
+    if (bubble)                   branch = "THIN SHELL (resin + transmission NOT reached)";
+    else if (dens > 1e-4f)        branch = (trans > 0.01f)
+                                         ? "RESIN, but the glass lobe takes some draws (transmission > 0)"
+                                         : "RESIN coat";
+    else                          branch = "plain Principled (no resin: Interior Depth is 0)";
+    SCENE_LOG_ON_CHANGE("isomat.bind", state,
+        std::string("[IsoMat] '") + m->materialName + "' (id " +
+        std::to_string(iso_material_id) + ") -> " + branch +
+        "  [bubble=" + (bubble ? "1" : "0") +
+        " resin_density=" + std::to_string(dens) +
+        " transmission=" + std::to_string(trans) + "]");
 }
 
 // A VDB only needs the material VM when the compiled graph actually writes at
@@ -530,6 +581,11 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.surface_foam = (vdb->render_isosurface_foam > 0.0f)
             ? ((vdb->render_isosurface_foam < 1.0f) ? vdb->render_isosurface_foam : 1.0f)
             : 0.0f;
+        gv.iso_material_id = vdb->render_isosurface_material_id;
+        gv.pore_amount = vdb->render_isosurface_pore_amount;
+        gv.pore_scale  = vdb->render_isosurface_pore_scale;
+        gv.pore_detail = vdb->render_isosurface_pore_detail;
+        logIsoMaterialBinding(gv.iso_material_id);
         gv.foam_color = make_float3(vdb->render_isosurface_foam_color.x,
                                     vdb->render_isosurface_foam_color.y,
                                     vdb->render_isosurface_foam_color.z);
@@ -571,6 +627,11 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.material_program_index = resolveVolumeMaterialProgramIndex(shader);
         gv.ior = (vdb->render_isosurface_ior > 1.0f) ? vdb->render_isosurface_ior : 1.33f;
         gv.surface_roughness = clamp01(vdb->render_isosurface_roughness);
+        gv.iso_material_id = vdb->render_isosurface_material_id;
+        gv.pore_amount = vdb->render_isosurface_pore_amount;
+        gv.pore_scale  = vdb->render_isosurface_pore_scale;
+        gv.pore_detail = vdb->render_isosurface_pore_detail;
+        logIsoMaterialBinding(gv.iso_material_id);
         if (shader) {
             GpuVolumeShaderData gs = shader->toGPU();
             gv.density_multiplier = gs.density_multiplier * vdb->density_scale;

@@ -1791,6 +1791,19 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Soap-bubble iridescence: thin-film interference tints the rim by view angle.\n"
                                   "0 = clean silver rim. Higher = rainbow shimmer (thicker film / more cycles).");
+            // Thin-shell is a TYPE branch, not a lobe: both shaders dispatch it
+            // and return before the resin coat and the transmission lobes are
+            // ever considered. Silently winning over settings the user can still
+            // see and drag reads as "resin does nothing" — say which one is
+            // actually driving the surface.
+            if (pbsdf->getTransmissionDensity() > 1e-4f || pbsdf->transmission > 0.01f) {
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                    "Thin shell OVERRIDES resin + transmission.");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A bubble is shaded as a thin film and returns before the resin\n"
+                                      "coat and the glass lobe run — Interior Depth and Trans have no\n"
+                                      "effect while this is on. Uncheck it to author a resin coat.");
+            }
             ImGui::Unindent();
         }
 

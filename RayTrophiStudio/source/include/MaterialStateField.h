@@ -263,10 +263,34 @@ struct MaterialSubstance {
     // bool: one comparison in the shader instead of a branch, and no way for a
     // "meltable" flag and a melt point to disagree.
     float melt_normalized      = 1.0e9f;
-    // How fast the solid->liquid fraction advances per unit of temperature
-    // overshoot per second. Derived from latent_heat_fusion — a high latent heat
-    // means more energy has to go in before the same fraction melts.
-    float melt_rate            = 0.0f;
+    // ★ THE LATENT HEAT OF FUSION, EXPRESSED AS A NORMALIZED TEMPERATURE SPAN.
+    //
+    // This replaces the old `melt_rate` (fraction per normalized degree of
+    // overshoot per SECOND). That was a rate, so the amount melted depended on
+    // how long the surface sat above its melt point rather than on how much
+    // energy reached it — a brief blowtorch and a weak flame left burning for
+    // the same wall-clock time melted comparably, which is backwards. It was
+    // also explicit-Euler in dt, so the same scene melted differently at a
+    // different substep count.
+    //
+    // The trick that makes a real enthalpy budget possible here — and the
+    // reason the old code's "needs per-element mass and specific heat" excuse
+    // was wrong — is that BOTH sides of the balance are per unit mass, so the
+    // mass cancels:
+    //
+    //     E_to_melt_all = m * L          (J)
+    //     E_to_heat_1K  = m * c          (J/K)
+    //     => melting the whole element costs the same energy as heating it
+    //        L/c kelvin.  Iron: 2.72e5 / 450 = 604 K.  Wax: ~100 K.
+    //
+    // Divided by kelvin_per_unit that becomes a normalized temperature span, and
+    // the melt update is then pure bookkeeping: any temperature the heat
+    // exchange produced ABOVE the melt point is energy that had nowhere else to
+    // go, so it is spent on the phase change and subtracted from the
+    // temperature. No dt appears anywhere, so two half-steps melt exactly as
+    // much as one full step, and a short intense burst and a long weak one are
+    // compared on total energy delivered — which is the physical question.
+    float melt_enthalpy_span   = 0.0f;
     // Total transferable surface mass per square metre. Combustibles use their
     // authored fuel capacity; meltable non-combustibles use a documented 1 mm
     // surface-shell mass (density * 0.001 m).
@@ -334,6 +358,30 @@ struct MaterialIntegritySummary {
     Vec3 weakest_world_position = Vec3(0.0f, 0.0f, 0.0f);
     float total_mass_loss = 0.0f;
     uint64_t content_generation = 0;
+    // ★ Telemetry, not physics: HOW this number was reached.
+    //
+    // `regional == false` on a caller that asked for a region means the region
+    // held no elements and the whole-object figure was substituted. That
+    // substitution is invisible in the values themselves — several clusters
+    // reporting the identical mean is exactly what a silent fallback looks like,
+    // and is indistinguishable from genuinely uniform damage without this flag.
+    // `sampled_elements` separates the other confusion: a region that overlaps
+    // its neighbours reports a plausible average built from far more elements
+    // than the cluster owns.
+    bool regional = false;
+    uint32_t sampled_elements = 0;
+};
+
+// One damaged spot on an object's surface: where it is, and how much of the
+// material that used to be there is gone (0 pristine .. 1 fully lost).
+//
+// This is the export the fracture generator consumes to seed its Voronoi sites,
+// and it is deliberately a plain point cloud rather than a field handle — the
+// destruction module must not learn the MSF buffer layout, only the shape of
+// the damage. Same reason the Jolt bridge takes a summary and not the field.
+struct MaterialDamageSample {
+    Vec3  position = Vec3(0.0f, 0.0f, 0.0f);
+    float weight = 0.0f;
 };
 
 struct MaterialMassBudgetSummary {
@@ -343,6 +391,25 @@ struct MaterialMassBudgetSummary {
     float pyrolyzed_mass = 0.0f;
     float molten_reservoir_mass = 0.0f;
     float transferred_mass = 0.0f;
+    // ★ MEASURED ON THE RAW FIELD, NOT ON THE REPORTED MASSES.
+    //
+    // The four masses above are individually clamped so downstream consumers
+    // (the APIC transfer, the panel) always see sane numbers. That clamping also
+    // makes them sum to initial_mass BY CONSTRUCTION — a conservation figure
+    // derived from them is a tautology that reports 0.0 no matter how badly the
+    // solver misbehaves, which is exactly the kind of single reassuring zero that
+    // hides three separate faults.
+    //
+    // These three are computed from the UNCLAMPED buffer values instead, so they
+    // report what the shader actually wrote:
+    //   overflow  — Σ max(0, burned + melted + moved - capacity): the same mass
+    //               was spent by more than one process.
+    //   negative  — Σ of any negative term: a sink ran backwards.
+    //   invalid   — elements holding NaN/Inf.
+    // conservation_error is their sum and is the real acceptance gate.
+    float budget_overflow_mass = 0.0f;
+    float negative_mass = 0.0f;
+    uint32_t invalid_elements = 0u;
     float conservation_error = 0.0f;
 };
 
@@ -452,6 +519,11 @@ public:
 
     bool centers_dirty = true;  // world positions changed (moving/animated object)
     bool state_dirty = false;   // host reset must replace the device-authoritative state
+    // ★ Set by refreshHostState, cleared the moment a dispatch makes the device
+    // copy authoritative again. Without it the molten debit path issued a SECOND
+    // full download in the same frame the readback had already paid for — two
+    // submit+fence stalls per transferring object per frame.
+    bool host_state_fresh = false;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -696,8 +768,29 @@ public:
 
     static MaterialIntegritySummary summarizeIntegrity(
         const MaterialStateField& field);
+    // ★ Integrity of ONE REGION of an object, not the whole of it.
+    //
+    // A fracture cluster is a piece of an object, and it has to be judged on the
+    // damage IT carries. Averaging over the entire object gives every cluster the
+    // same number, so a beam charred at one end reports one mediocre integrity
+    // everywhere: the burnt end is stronger than it should be and the untouched
+    // end weaker. Both errors point the wrong way for the one thing the feature
+    // exists to do — make a burnt object come apart where it burnt.
+    //
+    // Returns an invalid summary when no element falls inside the bounds, so the
+    // caller can decide whether to fall back to the whole-object figure rather
+    // than being handed a confident 1.0.
+    static MaterialIntegritySummary summarizeIntegrityInBounds(
+        const MaterialStateField& field,
+        const Vec3& bounds_min, const Vec3& bounds_max);
     static MaterialMassBudgetSummary summarizeMassBudget(
         const MaterialStateField& field);
+    // World-space damage point cloud for fracture seeding. Only elements whose
+    // damage exceeds `minimum_weight` are emitted, so a pristine object costs
+    // one scan and returns nothing rather than a cloud of zeros. Appends.
+    static void collectDamageSamples(const MaterialStateField& field,
+                                     std::vector<MaterialDamageSample>& out,
+                                     float minimum_weight = 0.01f);
     bool consumeMoltenMass(const std::string& object_key, float requested_mass,
                            SimulationComputeContext& compute,
                            float& out_consumed_mass);

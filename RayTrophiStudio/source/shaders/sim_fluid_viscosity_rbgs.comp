@@ -1,0 +1,189 @@
+// sim_fluid_viscosity_rbgs.comp
+// Implicit viscous diffusion, red-black Gauss-Seidel.
+//
+// Solves  (I - a*L) u_new = u_old  independently per MAC component, where
+// a = nu*dt/h^2 and L is the 6-point face Laplacian. One dispatch does ONE
+// colour of ALL THREE components; the host issues two per sweep.
+//
+// The 1/h^2 is the whole point. The field this replaced was a neighbour-average
+// lerp with no grid scaling and an explicit-stability clamp of 0.45, so the same
+// "viscosity" number meant different physics at every voxel size and saturated
+// long before honey. Being implicit, this one is unconditionally stable: running
+// too few sweeps under-applies the viscosity, it never explodes.
+//
+// Boundary rules — these must stay identical to the CPU reference in
+// APICFluidSolver.cpp:applyViscosity(), which is the oracle for this kernel:
+//   fluid neighbour -> ordinary coupling;
+//   air neighbour   -> stress-free: dropped from BOTH the sum and the diagonal.
+//                      Dropping is not the same as contributing a zero — a zero
+//                      is a wall, and averaging air into the surface is exactly
+//                      the "viscous skin" the old smoother produced;
+//   solid neighbour -> Dirichlet at the solid's own velocity, weighted by
+//                      (1 - wall_slip). wall_slip=1 degenerates to the air rule
+//                      (free-slip, what water wants); wall_slip=0 is full
+//                      no-slip, which is what makes honey coat a collider and
+//                      get dragged along by a moving one.
+//
+// In-place GS over a red-black colouring: every face reads only the opposite
+// colour, so within one dispatch no invocation reads a value another is writing.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;      // 0 = open (outflow), 1 = closed, 2 = periodic
+    float voxel_size;
+    float dt;
+    float alpha;         // a = nu*dt/h^2, precomputed on the host
+    float solid_weight;  // 1 - wall_slip
+    int   parity;        // 0 = red, 1 = black
+    int   _pad0;
+    int   _pad1;
+    int   _pad2;
+    int   _pad3;
+} pc;
+
+layout(set = 0, binding = 0) buffer VelX  { float vel_x[]; };
+layout(set = 0, binding = 1) buffer VelY  { float vel_y[]; };
+layout(set = 0, binding = 2) buffer VelZ  { float vel_z[]; };
+layout(set = 0, binding = 3) readonly buffer Mask { float fluid_mask[]; };
+// The pre-diffusion field: the right-hand side. GS updates in place, so the
+// original values have to live somewhere the sweeps do not touch.
+layout(set = 0, binding = 4) readonly buffer RhsX { float rhs_x[]; };
+layout(set = 0, binding = 5) readonly buffer RhsY { float rhs_y[]; };
+layout(set = 0, binding = 6) readonly buffer RhsZ { float rhs_z[]; };
+layout(set = 0, binding = 7) readonly buffer SVX  { float svx[]; };
+layout(set = 0, binding = 8) readonly buffer SVY  { float svy[]; };
+layout(set = 0, binding = 9) readonly buffer SVZ  { float svz[]; };
+
+int cell_id(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
+int vx_idx(int i, int j, int k)  { return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
+int vy_idx(int i, int j, int k)  { return i + j*pc.nx + k*pc.nx*(pc.ny+1); }
+int vz_idx(int i, int j, int k)  { return i + j*pc.nx + k*pc.nx*pc.ny; }
+
+// Same encoding the pressure path uploads: < -0.5 solid, > 0.5 fluid, else air.
+bool cell_in_range(int i, int j, int k) {
+    return i >= 0 && i < pc.nx && j >= 0 && j < pc.ny && k >= 0 && k < pc.nz;
+}
+bool cell_solid(int i, int j, int k) {
+    if (!cell_in_range(i, j, k)) return false;
+    return fluid_mask[cell_id(i, j, k)] < -0.5;
+}
+bool cell_fluid(int i, int j, int k) {
+    if (!cell_in_range(i, j, k)) return false;
+    return fluid_mask[cell_id(i, j, k)] > 0.5;
+}
+float solid_vel(int i, int j, int k, int comp) {
+    if (!cell_in_range(i, j, k)) return 0.0;
+    int c = cell_id(i, j, k);
+    return (comp == 0) ? svx[c] : ((comp == 1) ? svy[c] : svz[c]);
+}
+
+// Face classification. kind: 0 = fluid, 1 = air, 2 = solid. `value` is the
+// velocity to couple against for fluid and solid faces.
+void classify(int comp, int i, int j, int k, out int kind, out float value) {
+    int fsx = (comp == 0) ? pc.nx + 1 : pc.nx;
+    int fsy = (comp == 1) ? pc.ny + 1 : pc.ny;
+    int fsz = (comp == 2) ? pc.nz + 1 : pc.nz;
+
+    value = 0.0;
+    if (i < 0 || i >= fsx || j < 0 || j >= fsy || k < 0 || k >= fsz) {
+        // Outside the face grid. A closed wall is a solid at rest; an open
+        // domain is outflow, which carries no viscous stress.
+        kind = (pc.boundary == 1) ? 2 : 1;
+        return;
+    }
+
+    // The two cells straddling this face along the component axis.
+    int li = i, lj = j, lk = k;
+    if (comp == 0)      li = i - 1;
+    else if (comp == 1) lj = j - 1;
+    else                lk = k - 1;
+
+    bool lo_solid = cell_solid(li, lj, lk);
+    bool hi_solid = cell_solid(i, j, k);
+    if (lo_solid || hi_solid) {
+        kind  = 2;
+        value = lo_solid ? solid_vel(li, lj, lk, comp) : solid_vel(i, j, k, comp);
+        return;
+    }
+    if (cell_fluid(li, lj, lk) || cell_fluid(i, j, k)) {
+        kind = 0;
+        int idx = (comp == 0) ? vx_idx(i, j, k)
+                : ((comp == 1) ? vy_idx(i, j, k) : vz_idx(i, j, k));
+        value = (comp == 0) ? vel_x[idx] : ((comp == 1) ? vel_y[idx] : vel_z[idx]);
+        return;
+    }
+    kind = 1;
+}
+
+// One face of one component. Returns the relaxed value; the caller writes it.
+bool relax(int comp, int i, int j, int k, float rhs, out float result) {
+    result = 0.0;
+    int self_kind; float self_value;
+    classify(comp, i, j, k, self_kind, self_value);
+    if (self_kind != 0) return false;   // only fluid faces carry an unknown
+
+    float sum  = 0.0;
+    float diag = 1.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int side = -1; side <= 1; side += 2) {
+            int ni = i + ((axis == 0) ? side : 0);
+            int nj = j + ((axis == 1) ? side : 0);
+            int nk = k + ((axis == 2) ? side : 0);
+            int nkind; float nvalue;
+            classify(comp, ni, nj, nk, nkind, nvalue);
+            if (nkind == 0) {
+                sum  += pc.alpha * nvalue;
+                diag += pc.alpha;
+            } else if (nkind == 2) {
+                sum  += pc.alpha * pc.solid_weight * nvalue;
+                diag += pc.alpha * pc.solid_weight;
+            }
+            // air: stress-free, contributes to neither side.
+        }
+    }
+    result = (rhs + sum) / diag;
+    return true;
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int vx_count = (pc.nx + 1) * pc.ny * pc.nz;
+    int vy_count = pc.nx * (pc.ny + 1) * pc.nz;
+    int vz_count = pc.nx * pc.ny * (pc.nz + 1);
+
+    if (id < vx_count) {
+        int plane = (pc.nx + 1) * pc.ny;
+        int k = id / plane;
+        int rem = id - k * plane;
+        int j = rem / (pc.nx + 1);
+        int i = rem - j * (pc.nx + 1);
+        if (((i + j + k) & 1) == pc.parity) {
+            float r;
+            if (relax(0, i, j, k, rhs_x[id], r)) vel_x[id] = r;
+        }
+    }
+    if (id < vy_count) {
+        int plane = pc.nx * (pc.ny + 1);
+        int k = id / plane;
+        int rem = id - k * plane;
+        int j = rem / pc.nx;
+        int i = rem - j * pc.nx;
+        if (((i + j + k) & 1) == pc.parity) {
+            float r;
+            if (relax(1, i, j, k, rhs_y[id], r)) vel_y[id] = r;
+        }
+    }
+    if (id < vz_count) {
+        int plane = pc.nx * pc.ny;
+        int k = id / plane;
+        int rem = id - k * plane;
+        int j = rem / pc.nx;
+        int i = rem - j * pc.nx;
+        if (((i + j + k) & 1) == pc.parity) {
+            float r;
+            if (relax(2, i, j, k, rhs_z[id], r)) vel_z[id] = r;
+        }
+    }
+}

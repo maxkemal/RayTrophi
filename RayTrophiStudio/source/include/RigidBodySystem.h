@@ -91,7 +91,17 @@ struct FluidCouplingComponent {
 
 struct FractureComponent {
     bool  breakable = false;
-    float break_impulse = 5.0f;   // impact impulse (kg·m/s) that triggers a break
+    // ★ METRES PER SECOND, not newton-seconds. The velocity change this group
+    // can absorb before it comes apart; the impulse threshold is this times the
+    // group's mass. Authored as a velocity because that is the quantity that
+    // stays meaningful across scales: 5 m/s is a hard shove whether the thing
+    // shoved is a plank or a tower leg, while 5 N.s is a demolition charge for
+    // one and a nudge for the other.
+    //
+    // The old field was the impulse itself, and it was tuned when every shard
+    // weighed 1 kg regardless of size — so numerically the defaults carry over
+    // unchanged, and only objects with real mass behave differently.
+    float break_velocity = 5.0f;  // m/s
     std::string fracture_group;         // shards of one source share this id (= source node)
     bool integrity_weakening = true;
     float integrity_exponent = 1.5f;
@@ -194,8 +204,8 @@ struct RigidBodyObject {
     // Fracture Getters/Setters
     inline bool getBreakable() const { return fracture ? fracture->breakable : false; }
     void setBreakable(bool val);
-    inline float getBreakImpulse() const { return fracture ? fracture->break_impulse : 5.0f; }
-    inline void setBreakImpulse(float val) { ensureFracture(); fracture->break_impulse = val; }
+    inline float getBreakVelocity() const { return fracture ? fracture->break_velocity : 5.0f; }
+    inline void setBreakVelocity(float val) { ensureFracture(); fracture->break_velocity = val; }
     inline std::string getFractureGroup() const { return fracture ? fracture->fracture_group : ""; }
     inline void setFractureGroup(const std::string& val) { ensureFracture(); fracture->fracture_group = val; }
     inline bool getIntegrityWeakening() const { return fracture ? fracture->integrity_weakening : true; }

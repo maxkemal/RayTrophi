@@ -159,11 +159,32 @@ struct APICSolverParams {
     // How strongly pure domain translation drives the liquid mass. 0 = moving
     // bounds only, 1 = the container fully carries the nearby fluid velocity.
     float domain_motion_coupling = 1.0f;
-    // Artistic kinematic viscosity for the CPU reference path. 0 = water-like,
-    // higher values smooth the MAC velocity field before projection for syrupy
-    // / honey-like motion.
-    float viscosity = 0.0f;
-    int   viscosity_iterations = 1;
+    // ── Viscosity ──────────────────────────────────────────────────────────
+    // Kinematic viscosity ν in m²/s — a PHYSICAL quantity, not an artistic
+    // 0..200 dial.
+    //   water 1e-6 · olive oil 8e-5 · molten chocolate ~4e-3 · honey ~7e-3 ·
+    //   lava 0.1 … 100
+    // RENAMED, not repurposed. The old `viscosity` field drove a raw neighbour-
+    // average lerp with NO 1/h² factor, so its meaning changed with voxel size,
+    // and its strength saturated at clamp(v*dt, 0, 0.45) — 20 and 30 produced
+    // nearly the same motion. A project written before this change must NOT
+    // silently load 20.0 as 20 m²/s (that is lava, not honey), so the field name
+    // changed with it and old files fall back to the preset default.
+    float kinematic_viscosity = 0.0f;
+    // Red-black Gauss-Seidel sweeps for the implicit diffusion solve. One sweep
+    // is 2 dispatches covering all three MAC components. Under-converging does
+    // not blow up — implicit diffusion is unconditionally stable — it merely
+    // UNDER-applies the viscosity, so raise this if a thick preset still flows
+    // too freely (especially at high resolution, where ν·dt/h² grows).
+    int   viscosity_sweeps = 8;
+    // Tangential wall condition for the viscous solve.
+    //   0 = no-slip   — the fluid sticks to colliders and is dragged by moving
+    //                   ones. Required for honey/chocolate to coat a surface.
+    //   1 = free-slip — matches the pressure projection's own condition, which
+    //                   is what water wants.
+    // Values between blend the two. The pressure projection is unaffected;
+    // this only enters the viscous stencil.
+    float viscosity_wall_slip = 1.0f;
     float affine_damping = 0.98f;
     float max_affine = 80.0f;
 
@@ -245,23 +266,29 @@ struct APICSolverParams {
     bool  external_forces_preintegrated = false;
     bool  p2g_precomputed = false;
 
-    // CPU pressure runs normally; only G2P is skipped so the caller can run it
-    // on GPU. The FLIP pre-snapshot (vel_x/y/z before pressure) is left in the
-    // internal static buffers — access via Fluid::getLastFlipPreSnapshot*().
-    // After GPU G2P downloads particle velocities, call Fluid::step again with
-    // pressure_g2p_precomputed=true so only air_drag/damping/advect/reseed run.
-    bool  skip_g2p = false;
+    // (`skip_g2p` removed: no caller ever set it. The GPU split-step goes
+    // through stop_before_pressure + pressure_g2p_precomputed, and the FLIP
+    // snapshot it needed is now published unconditionally by step().)
 
     // GPU split-step second call: boundary+viscosity+pressure already done
     // externally; skip to air_drag → velocity_damping → advect → reseed only.
     bool  pressure_g2p_precomputed = false;
+    // The caller runs the viscous diffusion itself (GPU). step() then does
+    // P2G → FLIP snapshot → solid boundaries and stops, leaving grid.vel as the
+    // POST-boundary, PRE-viscosity field for the device solve to consume.
+    bool  viscosity_precomputed = false;
     // Vulkan tail dispatch already applied spray drag, damping, particle
     // advection and domain/collider boundaries. CPU retains only the
     // topology-changing reseed/reference fallback.
     bool  particle_tail_precomputed = false;
 
-    // (Legacy GPU split-step — kept for compatibility, no longer used.)
-    bool  stop_after_viscosity = false;
+    // GPU split-step first call: run P2G → FLIP snapshot → solid boundaries →
+    // (viscosity, unless viscosity_precomputed) and return, so the caller can
+    // drive the device viscosity + pressure + G2P before calling back with
+    // pressure_g2p_precomputed for the tail.
+    // Was `stop_after_viscosity`: the stop point no longer implies viscosity ran
+    // here, so the name had to move with the meaning.
+    bool  stop_before_pressure = false;
 
     // Use the free-surface pressure projection (treat empty cells as p=0)
     // instead of the gas-style fill-everywhere Poisson. Required for actual
@@ -306,21 +333,38 @@ struct APICSolverParams {
     // rheology fields (viscosity / friction / blend / damping / packing); the
     // domain, gravity, reseed, performance and free-surface settings are left
     // alone so a preset can be dropped onto an already-configured fluid.
+    // ★ These presets used to differ almost entirely in DISSIPATION —
+    // internal_friction, velocity_damping, air_drag, max_velocity — because the
+    // viscosity dial barely worked (no 1/h², saturating clamp, and the FLIP
+    // snapshot was taken AFTER it, which cancelled it out of the FLIP delta
+    // entirely). Dissipation is not viscosity: it drags the whole body, so the
+    // fluid reached a terminal fall speed of g/rate instead of accelerating.
+    // Honey fell at ~1.8 m/s and Sand at ~0.9 m/s no matter the drop height, and
+    // sand fell SLOWER than honey — the tell that the knob was wrong.
+    // Real honey in free fall accelerates at g; it resists SHEAR, not motion.
+    // So the thick presets now carry a physical ν and only a light residual
+    // damping, and none of them clamp max_velocity below the safety value.
     enum class FluidPreset : int {
         Custom = 0,
-        Water,   // low-viscosity Newtonian, splashy (Houdini/Bridson defaults)
-        Oil,     // mildly viscous, less splashy, slightly wetting walls
-        Mud,     // heavy, dissipative slurry between oil and honey
-        Honey,   // very viscous, slow, sticky threads
-        Lava,    // extreme viscosity, very slow (renderer adds the glow)
-        Sand     // granular approximation: high friction + strong packing
+        Water,     // ν≈1e-6, effectively inviscid at any renderable voxel size
+        Oil,       // mildly viscous, wets walls a little
+        Mud,       // heavy slurry (a real yield stress needs Drucker-Prager)
+        Honey,     // very viscous, sticky threads, no-slip walls
+        Lava,      // extreme viscosity, very slow (renderer adds the glow)
+        Sand,      // granular APPROXIMATION — see the case body
+        Chocolate  // molten couverture: between oil and honey, fully no-slip
     };
     FluidPreset current_preset = FluidPreset::Water;
 
     void applyPreset(FluidPreset preset) {
         switch (preset) {
             case FluidPreset::Water:
-                viscosity = 0.0f;  viscosity_iterations = 1;
+                // ν=0 skips the viscous solve outright: water's 1e-6 m²/s is
+                // orders of magnitude below the numerical diffusion of any grid
+                // coarse enough to render, so paying for the sweeps buys motion
+                // you cannot see.
+                kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
+                viscosity_wall_slip = 1.0f;
                 internal_friction = 0.5f;
                 flip_blend = 0.97f; apic_blend = 0.95f;
                 velocity_damping = 0.999f;
@@ -329,54 +373,83 @@ struct APICSolverParams {
                 affine_damping = 0.98f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Oil:
-                viscosity = 3.0f;  viscosity_iterations = 2;
-                internal_friction = 1.5f;
-                flip_blend = 0.70f; apic_blend = 0.88f;
-                velocity_damping = 0.997f;
+                kinematic_viscosity = 1.0e-4f; viscosity_sweeps = 6;
+                viscosity_wall_slip = 0.6f;
+                internal_friction = 0.15f;
+                flip_blend = 0.95f; apic_blend = 0.95f;
+                velocity_damping = 0.999f;
                 density_correction = 1.0f;
-                air_drag = 0.8f;   wall_damping = 0.35f;
-                affine_damping = 0.95f; max_velocity = 40.0f;
+                air_drag = 0.6f;   wall_damping = 0.20f;
+                affine_damping = 0.97f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Mud:
-                viscosity = 10.0f; viscosity_iterations = 3;
-                internal_friction = 3.5f;
-                flip_blend = 0.40f; apic_blend = 0.70f;
-                velocity_damping = 0.99f;
+                // Mud is really a yield-stress (Bingham) material: it should
+                // STOP, not creep slowly to a stop. Without a plastic return
+                // mapping the solver cannot express that, so a little residual
+                // internal_friction stands in for the yield surface. Marked so
+                // the approximation is not mistaken for the physics.
+                kinematic_viscosity = 2.0e-3f; viscosity_sweeps = 12;
+                viscosity_wall_slip = 0.2f;
+                internal_friction = 0.35f;
+                flip_blend = 0.90f; apic_blend = 0.90f;
+                velocity_damping = 0.999f;
                 density_correction = 1.2f;
-                air_drag = 1.2f;   wall_damping = 0.60f;
-                affine_damping = 0.90f; max_velocity = 25.0f;
+                air_drag = 0.8f;   wall_damping = 0.30f;
+                affine_damping = 0.95f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Honey:
-                viscosity = 20.0f; viscosity_iterations = 4;
-                internal_friction = 5.0f;
-                flip_blend = 0.25f; apic_blend = 0.60f;
-                velocity_damping = 0.99f;
+                kinematic_viscosity = 7.0e-3f; viscosity_sweeps = 16;
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 0.2f;
+                flip_blend = 0.90f; apic_blend = 0.90f;
+                velocity_damping = 0.999f;
                 density_correction = 1.0f;
-                air_drag = 1.5f;   wall_damping = 0.70f;
-                affine_damping = 0.90f; max_velocity = 20.0f;
+                air_drag = 0.8f;   wall_damping = 0.35f;
+                affine_damping = 0.95f; max_velocity = 50.0f;
+                break;
+            case FluidPreset::Chocolate:
+                // Molten couverture at ~40 °C: roughly half honey's kinematic
+                // viscosity, and it wets everything it touches (no-slip). The
+                // ribbon/coiling it is known for comes from the viscous solve;
+                // the mound it holds after landing needs the yield stress this
+                // solver does not have yet, so a thick pour reads better than a
+                // slow drip until then.
+                kinematic_viscosity = 4.0e-3f; viscosity_sweeps = 16;
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 0.2f;
+                flip_blend = 0.90f; apic_blend = 0.92f;
+                velocity_damping = 0.999f;
+                density_correction = 1.0f;
+                air_drag = 0.7f;   wall_damping = 0.40f;
+                affine_damping = 0.95f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Lava:
-                viscosity = 30.0f; viscosity_iterations = 6;
-                internal_friction = 6.0f;
-                flip_blend = 0.15f; apic_blend = 0.50f;
-                velocity_damping = 0.985f;
+                kinematic_viscosity = 0.5f;    viscosity_sweeps = 24;
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 0.2f;
+                flip_blend = 0.85f; apic_blend = 0.85f;
+                velocity_damping = 0.999f;
                 density_correction = 1.0f;
-                air_drag = 2.0f;   wall_damping = 0.80f;
-                affine_damping = 0.85f; max_velocity = 12.0f;
+                air_drag = 1.0f;   wall_damping = 0.50f;
+                affine_damping = 0.92f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Sand:
-                // Granular approximation in a liquid solver: no kinematic
-                // viscosity (grain friction is not velocity-Laplacian), heavy
-                // per-particle friction + damping so it stops quickly, low
-                // APIC angular preservation, and strong density correction so
-                // the pile resists collapse instead of flattening.
-                viscosity = 0.0f;  viscosity_iterations = 1;
-                internal_friction = 8.0f;
-                flip_blend = 0.50f; apic_blend = 0.40f;
-                velocity_damping = 0.96f;
+                // ★ STILL AN APPROXIMATION, and knowingly so. Grain friction is
+                // a SHEAR YIELD criterion (Drucker-Prager), not a velocity
+                // Laplacian — no value of ν produces an angle of repose, so the
+                // viscous solve is left off and per-particle friction + strong
+                // density correction stand in. Consequence to expect: a sand
+                // pile still flattens further than it should, and sand does not
+                // fall at g. Fixing it properly needs per-particle plastic
+                // state, which FluidParticles does not carry yet.
+                kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 4.0f;
+                flip_blend = 0.60f; apic_blend = 0.40f;
+                velocity_damping = 0.99f;
                 density_correction = 2.0f;
                 air_drag = 1.0f;   wall_damping = 0.90f;
-                affine_damping = 0.85f; max_velocity = 30.0f;
+                affine_damping = 0.85f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Custom:
             default:
@@ -409,6 +482,12 @@ struct APICSolverStats {
     size_t grid_cell_count = 0;
     size_t active_fluid_cells = 0;
     size_t recovered_solid_particles = 0;
+    // Sweeps the viscous solve actually ran this step (0 = ν was 0, i.e. the
+    // solve was skipped). Reported so "Viscosity 0.00 ms" can be told apart
+    // from "viscosity is switched off" — the same reading for two very
+    // different states is how a dead knob stays invisible.
+    int   viscosity_sweeps_run = 0;
+    bool  viscosity_on_gpu = false;
     bool  density_on_gpu = false;
     bool  p2g_on_gpu = false;
     bool  g2p_on_gpu = false;

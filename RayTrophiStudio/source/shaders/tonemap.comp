@@ -122,12 +122,14 @@ void main() {
             else if (enc > 0.5)  dbg = vec3(0.25);
         }
         vec3 outc = mix(dbg, beauty, clamp(pc.overlay, 0.0, 1.0));
-        imageStore(outLDR, ivec2(px), vec4(linToSrgb(outc.r), linToSrgb(outc.g), linToSrgb(outc.b), 1.0));
+        float coverage = imageLoad(aovPosition, ivec2(px)).a > 0.5 ? 1.0 : 0.0;
+        imageStore(outLDR, ivec2(px), vec4(linToSrgb(outc.r), linToSrgb(outc.g), linToSrgb(outc.b), coverage));
         return;
     }
 
     // Linear -> sRGB (matches CPU LUT analytic form, no quantization)
-    vec4 ldr = vec4(linToSrgb(beauty.r), linToSrgb(beauty.g), linToSrgb(beauty.b), 1.0);
+    float coverage = imageLoad(aovPosition, ivec2(px)).a > 0.5 ? 1.0 : 0.0;
+    vec4 ldr = vec4(linToSrgb(beauty.r), linToSrgb(beauty.g), linToSrgb(beauty.b), coverage);
 
     imageStore(outLDR, ivec2(px), ldr);
 }

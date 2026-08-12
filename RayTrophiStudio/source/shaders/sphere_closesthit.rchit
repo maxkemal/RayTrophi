@@ -23,10 +23,8 @@
 #extension GL_EXT_scalar_block_layout : require
 
 const float PI         = 3.14159265358979323846;
-const float RAY_OFFSET  = 1e-3;
-const uint  BOUNCE_SPECULAR     = 0u;
-const uint  BOUNCE_DIFFUSE      = 1u;
-const uint  BOUNCE_TRANSMISSION = 2u;
+// RAY_OFFSET and the BOUNCE_* codes come from rt_payload.glsl (included below)
+// — these were an identical local copy of the shared payload ABI.
 
 // ─── Payload (shared ABI, single source of truth) ────────────────────────────
 #include "rt_payload.glsl"

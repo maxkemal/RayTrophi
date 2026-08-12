@@ -30,12 +30,21 @@ std::size_t recoverParticlesFromSolidCells(FluidParticles& particles,
 
         int best_i = -1, best_j = -1, best_k = -1;
         float best_distance2 = std::numeric_limits<float>::max();
+        // ★ WALK THE SHELL, NOT THE CUBE.
+        //
+        // This used to iterate the full (2r+1)^3 cube at every radius and
+        // `continue` past everything that was not on the shell. Summed over radii
+        // that is ~60k cell tests per embedded particle at the old limit of 12 —
+        // and this routine only has work to do when MANY particles are embedded,
+        // i.e. it spiked hardest exactly when the sim was already misbehaving.
+        // Stepping dz by 2r whenever dx and dy are both interior visits the shell
+        // and nothing else, for the identical result.
         for (int radius = 1; radius <= search_limit && best_i < 0; ++radius) {
-            for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dx = -radius; dx <= radius; ++dx) {
                 for (int dy = -radius; dy <= radius; ++dy) {
-                    for (int dx = -radius; dx <= radius; ++dx) {
-                        if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != radius)
-                            continue;
+                    const bool rim = std::abs(dx) == radius || std::abs(dy) == radius;
+                    const int dz_step = rim ? 1 : 2 * radius;
+                    for (int dz = -radius; dz <= radius; dz += dz_step) {
                         const int i = ci + dx, j = cj + dy, k = ck + dz;
                         if (i < 0 || i >= grid.nx || j < 0 || j >= grid.ny ||
                             k < 0 || k >= grid.nz || grid.solid[grid.cellIndex(i, j, k)] != 0u)

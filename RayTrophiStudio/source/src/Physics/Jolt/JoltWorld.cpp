@@ -13,6 +13,7 @@
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyLock.h>
@@ -27,6 +28,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -333,18 +335,88 @@ JoltBodyHandle JoltWorld::createBody(const JoltBodyDesc& desc) {
                 if (r.HasError()) return kInvalidBody;
                 shape = r.Get();
             } else {
-                // Dynamic / Kinematic: a concave mesh can't move in Jolt, so build a
-                // ConvexHull from the same points (interior points are discarded by
-                // the hull builder). Tighter than an OBB; concave cavities are filled.
-                JPH::Array<JPH::Vec3> points;
-                points.reserve(desc.mesh_vertices.size());
-                for (const Vec3& v : desc.mesh_vertices)
-                    points.push_back(JPH::Vec3(v.x, v.y, v.z));
-                JPH::ConvexHullShapeSettings s(points, JPH::cDefaultConvexRadius);
-                s.SetEmbedded();
-                JPH::ShapeSettings::ShapeResult r = s.Create();
-                if (r.HasError()) return kInvalidBody;
-                shape = r.Get();
+                // Dynamic / Kinematic: Jolt forbids a concave MeshShape on a moving
+                // body, so the collider has to be built from convex parts.
+                //
+                // ★ ONE HULL PER CONNECTED COMPONENT, not one hull for the body.
+                //
+                // A single hull over every vertex is only honest when the body is
+                // one connected lump. An exact fracture shard frequently is not:
+                // a Voronoi cell cutting across a water tower takes a piece of one
+                // plank and a piece of the next, with air between them. Hulling
+                // that pair together spans the gap, and the shard collides as a
+                // solid brick that is mostly empty space — the visible mesh and
+                // the thing physics reacts to stop being the same object.
+                //
+                // Components come free: the resolver hands us WELDED, indexed
+                // vertices, so "connected" is just shared indices.
+                std::vector<int> parent(desc.mesh_vertices.size());
+                for (std::size_t i = 0; i < parent.size(); ++i)
+                    parent[i] = static_cast<int>(i);
+                std::function<int(int)> find = [&](int x) {
+                    while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+                    return x;
+                };
+                auto unite = [&](int a, int b) {
+                    const int ra = find(a), rb = find(b);
+                    if (ra != rb) parent[ra] = rb;
+                };
+                for (std::size_t t = 0; t + 2 < desc.mesh_indices.size(); t += 3) {
+                    const JPH::uint a = desc.mesh_indices[t + 0];
+                    const JPH::uint b = desc.mesh_indices[t + 1];
+                    const JPH::uint c = desc.mesh_indices[t + 2];
+                    if (a >= vcount || b >= vcount || c >= vcount) continue;
+                    unite(static_cast<int>(a), static_cast<int>(b));
+                    unite(static_cast<int>(b), static_cast<int>(c));
+                }
+                std::unordered_map<int, JPH::Array<JPH::Vec3>> components;
+                for (std::size_t i = 0; i < desc.mesh_vertices.size(); ++i) {
+                    const Vec3& v = desc.mesh_vertices[i];
+                    components[find(static_cast<int>(i))].push_back(
+                        JPH::Vec3(v.x, v.y, v.z));
+                }
+
+                auto makeHull = [](const JPH::Array<JPH::Vec3>& points) -> JPH::ShapeRefC {
+                    if (points.size() < 4) return {};   // no 3D hull from a sliver
+                    JPH::ConvexHullShapeSettings s(points, JPH::cDefaultConvexRadius);
+                    s.SetEmbedded();
+                    JPH::ShapeSettings::ShapeResult r = s.Create();
+                    return r.HasError() ? JPH::ShapeRefC{} : r.Get();
+                };
+
+                // A body shattered into hundreds of specks would build a compound
+                // more expensive than the collision it serves. Past that, one hull
+                // is the cheaper lie.
+                constexpr std::size_t kMaxCompoundParts = 64;
+                std::vector<JPH::ShapeRefC> parts;
+                if (components.size() > 1 && components.size() <= kMaxCompoundParts) {
+                    parts.reserve(components.size());
+                    for (const auto& entry : components) {
+                        JPH::ShapeRefC hull = makeHull(entry.second);
+                        if (hull.GetPtr() != nullptr) parts.push_back(std::move(hull));
+                    }
+                }
+
+                if (parts.size() > 1) {
+                    JPH::StaticCompoundShapeSettings s;
+                    s.SetEmbedded();
+                    // The vertices are already world-space at rest and the body is
+                    // created at identity, so every part sits at the origin with no
+                    // rotation of its own.
+                    for (const JPH::ShapeRefC& part : parts)
+                        s.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), part);
+                    JPH::ShapeSettings::ShapeResult r = s.Create();
+                    if (r.HasError()) return kInvalidBody;
+                    shape = r.Get();
+                } else {
+                    JPH::Array<JPH::Vec3> points;
+                    points.reserve(desc.mesh_vertices.size());
+                    for (const Vec3& v : desc.mesh_vertices)
+                        points.push_back(JPH::Vec3(v.x, v.y, v.z));
+                    JPH::ShapeRefC hull = makeHull(points);
+                    if (hull.GetPtr() == nullptr) return kInvalidBody;
+                    shape = hull;
+                }
             }
             break;
         }

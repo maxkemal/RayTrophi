@@ -142,8 +142,13 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     // fire instead of waiting for a random bounce to land in it.
     uint64_t emissive_list_address;
     float    emissive_capacity;   // entries the list can hold (0 = unavailable)
+    // SDF isosurface material: 1-based MaterialManager id, 0 = none. Claimed from
+    // the accel headroom rather than _reserved[1] so the volume-VM meaning of that
+    // slot is untouched, and rather than growing the struct so the 576-byte ABI
+    // (mirrored by five shader declarations) stays put.
+    float    iso_material_index;
     // Headroom for the next pass (velocity grid for volume motion blur).
-    float    _accel_reserved[5];
+    float    _accel_reserved[4];
 };
 
 // Compile-time size check (576 bytes = 9 cache lines)

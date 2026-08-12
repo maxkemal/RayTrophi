@@ -50,6 +50,7 @@ Result getAshDebrisInfo(AshDebrisInfo& out) {
     out.lod_reduced_particles = stats.lod_reduced_particles;
     out.budget_rejected_particles = stats.budget_rejected_particles;
     out.accepted_mass_kg = stats.accepted_mass_kg;
+    out.reservoir_mass_kg = system.reservoirMassKg();
     return Result::success();
 }
 } // namespace rtapi

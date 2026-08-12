@@ -3,6 +3,295 @@
 Vulkan geometry/SDF/gas reset ve rewind guvenlik kurallari:
 [`VULKAN_SIMULATION_RESET_SAFETY.md`](VULKAN_SIMULATION_RESET_SAFETY.md).
 
+## 2026-08-09 Faz 7 oncesi saglamlastirma turu
+
+Faz 7'ye gecmeden once dogruluk, maliyet ve fizik yeterliligi denetlendi. Asagidaki
+maddeler uygulandi. Derleme ve gorsel dogrulama kullanici tarafinda yapilacaktir.
+
+### Dogruluk / calisma guvenligi
+
+1. **Molten transfer kuyrugu artik reset/rewind'i asmiyor.** Kuyruktaki istek,
+   olusturuldugu MSF rezervuar durumuna ait bir NIYETTIR. Rewind rezervuari geri
+   yukluyor, istek ise kuyrukta kaliyordu; ayni kutle APIC'e ikinci kez
+   dogurulup geri alinmis rezervuardan tekrar dusuluyordu. `sequence` alani
+   yaziliyor ama hicbir yerde okunmuyordu, yani roadmap'in
+   "(frame, source, event_id) tekillestirme" maddesinin uygulamasi hic yoktu.
+   `discardMoltenMassTransferState()` eklendi ve `resetGridDomainStates`,
+   `setGridDomainStates`, `resetMaterialStateFields`, `restoreMaterialStateFields`
+   yollarina baglandi. `phase_06_auto_transfer_scene.py` bu davranisi artik
+   regresyon kapisi olarak dogruluyor.
+2. **`conservation_error` gercek invariant uzerinden olculuyor.** Onceki hali dort
+   clamp'li kutleden turetiliyordu; bu terimler tanim geregi `initial_mass`'a
+   toplaniyordu, yani deger solver ne yaparsa yapsin `0.0` basmak zorundaydi.
+   Artik ham buffer degerlerinden olculuyor: `budget_overflow_mass` (ayni kutle
+   birden fazla surecte harcandi), `negative_mass` (bir sink geri calisti),
+   `invalid_elements` (NaN/Inf). Raporlanan dort kutle gosterim icin clamp'li
+   kalmaya devam ediyor; korunum kapisi artik ayri ve gercek.
+3. **Melt flow kapatilinca mesh rest'e donuyor.** Kapi fonksiyonun sonunda ciplak
+   bir `return` idi: tum UV ornekleme maliyeti bosa odeniyor, ve zaten deforme
+   olmus bir objede erimis sekil kalici olarak ekranda kaliyordu. Kapi en basa
+   alindi ve kapatma artik deformasyonu geri aliyor. MSF kimyasi etkilenmiyor.
+4. **Ash/debris butcesi artik kutle yok etmiyor.** Butce dolunca `emit` 0 donup
+   kutleyi siliyordu; MSF tarafi o kutleyi coktan dusmustu. Roadmap'in
+   `AshReservoir` maddesi uygulandi: temsil edilemeyen kutle rezervuarda bekliyor
+   ve butce acilan ilk olaya biniyor. Butce yalniz GORSEL AYRINTIYI sinirlar.
+5. **Simulasyon authored domain descriptor'ini kalici olarak kirletmiyor.**
+   Molten kimya/viskozite/SurfaceSDF ayarlari dogrudan `SimulationGridDomainDesc`
+   uzerine yaziliyordu; bu serilestirilen konfigurasyondur, yani eriyen tek bir
+   obje kullanicinin domain'ini kalici olarak Custom/SurfaceSDF/flammable'a
+   ceviriyordu. Ilk uyarlamada authored kopya saklaniyor ve reset geri yukluyor;
+   odunc, sim kosusu kadar suruyor.
+6. Rollback tamamlandi (particle geri alma + substance watermark geri alma +
+   yeniden deneme), sessizce dusen istekler icin `dropped` ve
+   `discarded_on_reset` sayaclari eklendi.
+
+### Optimizasyon
+
+7. **Molten debit sicak yolu.** Kare basina obje basina IKI senkron GPU stall
+   vardi: readback zaten indirmis olmasina ragmen ikinci bir tam download, ve
+   ardindan tuketicisi olmayan tam bir CPU `scatterCharMask` yeniden uretimi
+   (mask'i okuyan herkes `mask_revision`'a bagli, debit onu artirmiyordu).
+   `host_state_fresh` bayragi ile ikinci download kaldirildi, gereksiz mask
+   yeniden uretimi silindi.
+8. **Substance uyum taramasi artimli.** Istek basina tum partikul dizisi
+   taraniyordu ve en kotu durum BASARI yoluydu. Domain state'inde watermark
+   tutuluyor; yalniz yeni eklenen partikuller taraniyor.
+9. **`gas.pressure_pulse` yalniz erisebildigi hucreleri geziyor** (256^3 domainde
+   ~16.7M iterasyon yerine kure AABB'si) ve MAC yuzlerine tek yazim yapiyor.
+   Onceki hali her hucrenin dv'sini iki komsu yuze de ekliyordu: ic bolgede ~2x
+   fazla, kenarda tekil, yani patlama merkezden kaymis goruntusu veriyordu.
+   Hucre merkezli `pressure` yazimi yalniz telemetri icindir; bir sonraki
+   projeksiyon uzerine yazar.
+10. **`recoverParticlesFromSolidCells` kup yerine kabuk geziyor.** Eski hali her
+    yaricapta tam `(2r+1)^3` kupu gezip kabuk disini atliyordu (~60k hucre testi
+    / gomulu partikul) ve bu rutin tam olarak cok sayida partikul gomuluyken,
+    yani sim zaten bozulmusken en pahali hale geliyordu.
+11. **Structural impulse tek gecise indi.** Grup merkezleri her olay icin
+    O(gövde² x nesne) yeniden hesaplaniyordu (`nodeWorldCenter` kendisi tum
+    sahneyi tariyor). Artik sahne bir kez taranip grup AABB'leri cikariliyor;
+    flat/SoA mesh'ler de kapsam icinde.
+
+### Fizik yeterliligi
+
+12. **Basinc -> impulse artik alan iceriyor.** Eski ifade
+    `kPa * saniye * coupling * falloff` idi: hicbir birim sisteminde impulse
+    degil, ve icinde objeye dair hicbir olcu yok. 10 cm'lik kutu ile 10 m'lik
+    duvar ayni darbeyi aliyordu, `coupling` de eksik alani sessizce yutuyordu.
+    Yeni ifade:
+
+    ```text
+    J [N s] = dp [Pa] * A_projected [m^2] * dt [s] * coupling * falloff
+    ```
+
+    `A_projected` grup AABB'sinin darbe yonune dik izdusum alanidir, yani yuze
+    alinan duvar kenardan alinandan cok daha fazlasini sunar. `coupling` artik
+    boyutsuz ve 0..1 gercekten bir anlam tasiyor.
+    **UYARI: buyuklukler mertebelerce degisti.** Eski ifadeye gore ayarlanmis
+    `break_impulse` esikleri artik anlamsizdir; gercek N s cinsinden yeniden
+    yazilmalidir. `last_projected_area_m2` telemetriye eklendi.
+13. **Integrity erime ve transferi goruyor, ortak kutle tabanini kullaniyor.**
+    Eski hali `profile.fuel_capacity`'ye boluyordu: yanmaz bir maddede bolen
+    1e-8 tabanina cokuyor ve integrity sonsuza kadar tam 1.0'da cakiliyordu, yani
+    celik bir kiris asla zayiflayamiyordu. Ayrica yalniz piroliz hasar sayiliyordu;
+    kutlesinin yarisini ERIMEYE ve APIC transferine kaptirmis bir cubuk hala
+    integrity 1.0 ve tam kirilma esigi bildiriyordu. Artik yapisal kayip
+    "kati fazi terk eden kutle"dir: pyrolyzed + molten + transferred, ve taban
+    `summarizeMassBudget` ile ayni `mass_capacity`'dir.
+14. Uzak/agregat kul partikulleri artik temsil ettikleri kutlenin kup koku ile
+    olceklenen boyutta ciziliyor; LOD ile 10x agirlasan bir tane, tek tanecik
+    boyutunda cizilip tas gibi dusmuyor.
+
+### Ikinci tur: iki fizik acigi kapatildi
+
+15. **Erime artik gercek bir entalpi butcesi (dt-bagimsiz).** Eski model
+    `melt += (T - T_melt) * melt_rate * dt` idi. Iki sonucu vardi: erime miktari
+    yuzeyin erime noktasi USTUNDE ne kadar SURE kaldigina bagliydi, ona ne kadar
+    ENERJI ulastigina degil — yani kisa bir sufle ile ayni sure yanan zayif bir
+    alev benzer sonuc veriyordu; ve `dt` acikca formulde oldugu icin ayni sahne
+    farkli substep sayisinda farkli eriyordu. Ayrica %50'de kilitlenen bir
+    kendini-goturen dongu vardi ve `mix(T_melt, T, melt)` yamasi bunun icindi.
+
+    Yeni model muhasebedir. `L/c`, malzemeyi eritmenin onu kac kelvin isitmakla
+    ayni enerjiye mal oldugudur (demir: 2.72e5 / 450 = 604 K) ve kutle iki
+    tarafta da sadelestigi icin element basina kutle GEREKMEZ — eski koddaki
+    "gercek entalpi modeli element basina kutle ister" gerekcesi yanlisti.
+    `kelvin_per_unit`'e bolunerek normalize bir sicaklik araligina donuyor
+    (`MaterialSubstance::melt_enthalpy_span`) ve shader su hale geliyor:
+
+    ```text
+    asim  = T - T_melt                    // isi degisiminin urettigi fazlalik
+    eriyen = asim / melt_enthalpy_span    // enerji faz degisimine harcanir
+    T     -= eriyen * melt_enthalpy_span  // ve sicakliktan dusulur
+    ```
+
+    Formulde `dt` hic gecmiyor: bu adimda ulasan enerji zaten `st.x` icinde
+    (ustteki us-tam sicaklik guncellemesi tarafindan) mevcut. Iki yarim adim bir
+    tam adimla ayni miktari eritir. Superheat de bedavaya gelir: kalan kati
+    bitince butce enerji yutamaz ve erimis demir kendi basina kaynama noktasina
+    tirmanir. `melt_rate` alani kaldirildi.
+
+    **Not: `sim_msf_gather.comp` degisti, `compile_shaders.bat` calistirilmali.**
+
+16. **`MeltSurfaceFlow` artik hacim koruyan gercek bir yuzey akisi.** Eski hali
+    akis degildi: melt DEGERINI yumusatiyor ama `melt[i] > 0` kapisi yuzunden
+    soguk bir komsuya asla yayilamiyordu — erimis bolgeyi yumusatip icinden
+    hicbir sey disari tasimiyordu. Ayrica yukseklik kaybi ile yanal olcek ayri
+    ayri uydurulmustu, yani hacim korunmuyordu.
+
+    Yeni model: her vertex'in hala BAGLI olan malzemesi (`local_mass_fraction`)
+    kati ve sivi paya ayriliyor; sivi pay ucgen komsulugu grafinde asagi dogru
+    tasiniyor. Bir vertex'ten cikan digerine varir, yani toplam hacim tam olarak
+    korunur. Yuzey, altindaki malzemenin toplam kalinligina oturuyor. Akisi
+    suren yukseklik, biriken sivi dahil GUNCEL yuzeydir; boylece havuz sivri bir
+    tepe yapmak yerine terazileniyor.
+
+    Bunun dogrudan sonucu asagida "bilinen fizik siniri" olarak bildirilen
+    maddedir: kalinlik MSF kutle fraksiyonlarindan surulduğu icin, **APIC'e
+    devredilen bir kilogram mesh'ten tam olarak kendi hacmini goturur.** Mesh
+    hacim kaybi ile APIC hacmi artik iki ayri ayar degil, tek bir sayidir. Geriye
+    kalan yaklasiklik yalniz yanal yayilimin silueti (havuz, gercek yuzey tanjanti
+    yerine objenin dusey ekseninden disari itiliyor); hacim MUHASEBESI tamdir.
+
+### Ucuncu tur: yanma -> zayiflama -> parcalanma zincirinin kapanmasi
+
+Karar: exact fracture **OpenVDB ile degil**, mevcut half-space kirpma makinesini
+kaynak ucgen corbasina uygulayarak yapilacak. Gerekce mimariye ozgudur ve genel
+bir tercih degildir: char/burn maskesi UV uzayinda yasiyor, OpenVDB'nin
+`volumeToMesh` cikisi ise UV ve material ID tasimaz — yani su kulesi patladigi
+anda her shard yanik izini kaybederdi. Kabuk (watertight olmayan) varliklar da
+`meshToVolume` icin yapay kalinlik ister, bu da kacinilan "bosluklar dolar"
+hatasini geri getirir. GPU compute ise yanlis ekseni optimize eder: fracture
+authoring aninda bir kez calisiyor, runtime mesh kesme zaten kapsam disi
+(karar #5).
+
+OpenVDB **ikinci mod** olarak kalir (kaya/beton/organik: kenar yuvarlanmasi
+dogru gorunur, UV cogunlukla triplanar). Bagimlilik zaten mevcut.
+
+Bu turda uygulananlar — kesici degistirilmeden, gorsel kazancin buyuk kismi:
+
+17. **Yapisal kumeleme.** Fracture grubu, impulse tuketicisinin kirdigi
+    birimdir; tum shard'lari tek gruba koymak "herhangi bir yere gelen darbe tum
+    objeyi kopariyor" demekti. Su kulesinde bu, "bir ayagi ucdu" ile "kule yok
+    oldu" arasindaki farktir ve yukaridaki kesme kalitesiyle DUZELTILEMEZ, cunku
+    burada, gruplamada belirlenir. `assignStructuralClusters` shard'lari hacim
+    agirlikli, deterministik (RNG yok: farthest-point tohumlama + sabit sayida
+    Lloyd gecisi) k-means ile mekansal olarak bitisik kumelere ayiriyor.
+    Determinizm sart: kume indeksi hangi rigid body'lerin var olacagini
+    belirliyor, kosudan kosuya degisirse cache'lenmis timeline FARKLI bir
+    parcalanma oynatir. UI her kume icin ayri grup kaydediyor; ilk kume objenin
+    kendi adini koruyor, boylece mevcut script/telemetri tuketicileri bozulmuyor.
+
+18. **`FracturePattern::ThermalWeakened` — hasar guduml tohumlama.** Tum
+    malzeme-donusumu zincirinin uzerine kuruldugu sey: MSF her yuzey texel'i icin
+    o yamanin piroliz, erime ve transfere ne kadar kutle kaptirdigini biliyor.
+    `MaterialStateFieldSystem::collectDamageSamples` bunu dunya-uzayi nokta
+    bulutu olarak veriyor (fracture modulu MSF buffer duzenini ogrenmiyor —
+    Jolt koprusunun ozet almasiyla ayni gerekce), generator de tohum yogunlugunu
+    bu dagilimdan cekiyor. **Yanmis kiris char hattindan kirilir.** Hasar
+    tanimi `summarizeIntegrity` ile ayni: kati fazi terk eden kutle. Iki ayri
+    turetme, objenin kendi integrity ozetinin "burasi hala saglam" dedigi yerden
+    kirilmasina izin verirdi. Henuz yanmamis obje uniform'a dusuyor.
+
+### ✔ COZULDU — grup AABB'si artik shard GEOMETRISINDEN kuruluyor
+
+`SceneData::fractureGroupBounds` ve `rtapi::getPhysicsFractureGroup` kutuyu
+`nodeWorldCenter(shard)` noktalarindan kuruyordu. **Tek shard'li kume icin
+extent = (0,0,0)** -> izdusum alani 0 -> impulse 0 -> o kume basincla ASLA
+kirilamiyordu (olculdu: `cluster_5`, 1 shard, predicted_impulse 0.0), cok
+shard'li kumelerde de her kenarda yarim shard eksik olculuyordu. Ustelik
+`GasStructuralImpulseBridge` ayni soruyu DOGRU cevapliyordu, yani raporlanan
+`world_extent` ile impulse'un hesaplandigi geometri ayrisiyordu — `world_extent`
+tam da bu ayrismayi onlemek icin eklenmisti.
+
+Duzeltme: `RayTrophiSim::FractureGroupBounds` (StructuralImpulse.h) + tek
+uygulama `SceneData::accumulateFractureGroupBounds` — Triangle facade'lari ve
+flat SoA mesh'leri tek gecisle tariyor. Ucu de (bridge, bounds, rtapi) artik
+onu cagiriyor. Regresyon kapisi: stage B degenerate `world_extent` gorurse FAIL.
+
+**Bolgesel integrity telemetrisi.** `MaterialIntegritySummary` artik `regional`
+ve `sampled_elements` tasiyor, `FractureGroupInfo` bunlari
+`integrity_regional` / `integrity_sampled_elements` olarak script+IPC'ye
+veriyor. Bolge bos donup tum-obje ortalamasina dusuldugunde bu SESSIZ degil.
+Padding %25 + 2 cm'den %5 + 2 mm'ye indi: eski pay, shard MERKEZLERINDEN kurulan
+(yani yuzeyin ICINDE kalan) kutuyu telafi etmek icindi; kutu artik gercek vertex
+AABB'si oldugu icin o pay sadece komsu kumeleri ortustururuyordu — alti kumenin
+ayni ortalamayi raporlamasinin muhtemel sebebi.
+
+### ✔ COZULDU — `set_transform(scale=)` SESSIZCE YUTULUYORDU
+
+`rt.scene.set_transform` `rotation` ve `scale` argumanlarini kabul edip yalnizca
+translation kolonunu yaziyordu. Yani `scale=(3.0, 0.3, 0.3)` basariyla donuyor,
+obje KUP kaliyordu. phase_08'in "kiris"i hic kiris olmadi; phase_01/02/03/05/06
+sahneleri de authored geometriyle ayni sekilde ayrisiyor.
+
+★ Ders: sessiz no-op parametre, eksik parametreden kotudur — hata vermez, sadece
+o parametreyi veren herkesin sahnesi yanlis sekilde kurulur ve o sahneler
+uzerine yazilan testler var olmayan geometriyi olcer.
+
+Duzeltme: `Matrix4x4::composeTRS` (mevcut `decompose`'un tam tersi; `fromTRS`
+farkli ve round-trip etmeyen bir baz kuruyor, ona guvenilmez), python binding'de
+decompose->override->compose, IPC `scene.set_transform`'da ayni komponent formu
+(parite), `get_transform` ikisinde de translation/rotation/scale raporluyor.
+
+⚠️ **Retune gerekiyor:** phase_01/02/03/05/06 sahneleri simdi authored
+sekillerini gercekten aliyor (ornegin phase_01 kagidi 0.55 kup degil, 0.044
+kalinliginda levha). Esikleri/domain'leri bir kosuyla yeniden gozlemlemek lazim.
+
+### Hala acik (bilincli olarak)
+(exact clipping ve shard UV'leri asagida — YAZILDI, KOSULMADI)
+
+## Exact surface clipping (2026-08-10) — ✔ CALISIYOR
+
+Dogrulama: SM_Water_Tower import (7K ucgen, 40 shard) dogru parcalandi.
+`exact 4 / approx 37 / unsealed 2 / hull 2`. Kalan tek kusur, hull'a dusen 2
+hucrenin kaba blok gorunmesi (~%5, kozmetik).
+
+★★ Yol boyunca ogrenilen: ILK surum bir tek zincir kapanmayinca TUM hucreyi
+hull'a dusuruyordu -> ayni asset'te `exact 4 / unsealed 31`, yani ozellik
+tanistigi ilk modelde HICBIR SEY yapmadi. Game asset'lerinde gorunmeyen yuzler
+rutin silinir. **Yaklasikligi reddetme, ISARETLE**: kapanmayan zincirin uclari
+birlestirilip `approx` olarak sayiliyor.
+
+
+`FractureParams::exact_surface` (UI: Fracture panelinde "Exact Surface", VARSAYILAN
+ACIK). Ayni site'lar, ayni yari-uzaylar; kesilen sey hull degil KAYNAK UCGEN
+CORBASI. Hayatta kalan yuzey ORIJINAL yuzey oldugu icin bosluklar, icbukey
+profiller, UV'ler ve material ID'ler geciyor.
+
+Zincir: `clipAttrPolygon` (UV interpolasyonlu) -> kesik segmentler ->
+`chainSegmentsToLoops` (kuantize weld) -> `triangulateCap` (even-odd nesting ->
+delik yonlendirme -> `bridgeHoles` -> `earClip`).
+
+★ TUM ISI MUMKUN KILAN INVARYANT: her yuz KONVEKS kalir. Kaynak ucgenleri
+konveks, konveks ∩ yari-uzay konveks, ve kapaklar n-gon degil UCGEN olarak
+yayinlaniyor. Bu sayede hicbir yuz bir duzlemi ikiden fazla kesemez — yani
+Sutherland-Hodgman kesin ve her yuz EN FAZLA BIR kesik segmenti veriyor. Kapagi
+tek n-gon olarak yayinlarsan bu invaryant gider.
+
+★ Weld toleransi NESNEYE gore (`diagonal * 1e-5`): sabit 1e-5 m 100 m'lik bir
+binada hicbir seyi weld etmez, 1 cm'lik bir civatada gercek detayi yok eder.
+
+★ Kapanmayan kesit (`Unsealed`) o HUCRE icin convex forma dusuyor. Delikli shard
+yayinlamak yerine: kapanmamis shard'in ic hacmi yok, yani volume/centroid/kutle
+hepsi yanlis olur - ve fizigi suren kutledir.
+
+★ Perf kapisi: canli yuz kumesinin AABB'si tutuluyor, kesemeyecek duzlem
+atlaniyor. Yoksa her hucre her bisector'u tum corba uzerinden oduyor.
+
+**Shard UV'leri COZULDU:** exterior yuzler kaynak UV'sini ve kendi material'ini
+tasiyor (cok-materialli asset tek slota cokmuyor). `interior` yuzler AYRI
+material aliyor (`<node>_Interior`, isimle yeniden kullaniliyor — her
+re-fracture'da yeni slot yakmasin diye): taze kirik yanik DEGILDIR, kaynak
+material'inda birakmak shard'in icini onu kiran yanikla boyardi.
+
+⚠️ Fizik notu: exact shard'lar icbukey olabilir, rigid body yolu Jolt ConvexHull
+kuruyor — yani gorunen kirik bosluklu, carpisma kendi hull'u. Kasitli; mesh
+collider'a cevirmek ayri bir is.
+- Fracture URETIMI hala UI'a ozel; `rt.physics.make_fracture_group` yalniz
+  gruplamayi verir. Script paritesi icin uretim de rtapi'ye tasinmali.
+- Havuzlanma yalniz objenin kendi rest taban duzlemine karsi yapiliyor; gercek
+  zemine/komsu objeye temas ve tasma hala APIC koprusune ait.
+
 ## 2026-08-09 kapanis ve sonraki sira
 
 Geometry melt, MSF yanma/erime ve molten kutlenin APIC fluid'e aktarildigi dikey

@@ -223,6 +223,9 @@ struct RenderSettings {
     // Viewport Grid Settings
     bool grid_enabled = false;
     bool show_background = true;       // NEW: Toggle background visibility
+    // PNG output only: keep environment lighting/color in the renderer while
+    // exporting camera-miss pixels with zero alpha.
+    bool transparent_background = false;
    // float grid_fade_distance = 500.0f;  // Units where grid fades out completely
     float viewport_near_clip = 0.01f;   // Objects closer than this won't be seen
     float viewport_far_clip = 1000000.0f; // Keep far volumes/clouds visible in large-scale scenes

@@ -13,6 +13,7 @@
 #include "Fluid/APICFluidSolver.h"
 #include "ParticleSimulation.h"
 #include "MaterialStateField.h"
+#include "MaterialManager.h"
 #include "VolumeShader.h"
 #include <algorithm>
 #include <cctype>
@@ -20,6 +21,54 @@
 namespace rtapi {
 
 namespace {
+
+// Preset enum -> the string scripts use. One definition, because this ternary
+// chain was copy-pasted at three call sites and adding Chocolate to two of them
+// would have produced a domain that reports "custom" from fluid.list and
+// "chocolate" from fluid.get.
+const char* fluidPresetName(RayTrophiSim::Fluid::APICSolverParams::FluidPreset p) {
+    using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
+    switch (p) {
+        case FluidPreset::Water:     return "water";
+        case FluidPreset::Oil:       return "oil";
+        case FluidPreset::Mud:       return "mud";
+        case FluidPreset::Honey:     return "honey";
+        case FluidPreset::Lava:      return "lava";
+        case FluidPreset::Sand:      return "sand";
+        case FluidPreset::Chocolate: return "chocolate";
+        case FluidPreset::Custom:
+        default:                     return "custom";
+    }
+}
+
+// Copy the rheology block a script can read back. Kept together so a new
+// rheology field cannot reach one reporting path and miss another.
+void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
+                       FluidDomainInfo& info) {
+    info.preset              = fluidPresetName(params.current_preset);
+    info.kinematic_viscosity = params.kinematic_viscosity;
+    info.viscosity_sweeps    = params.viscosity_sweeps;
+    info.viscosity_wall_slip = params.viscosity_wall_slip;
+}
+
+// Report the isosurface material by NAME. Lives on the grid descriptor rather
+// than in APICSolverParams (it is a look, not rheology), so it needs its own
+// helper next to fillFluidRheology instead of riding along inside it.
+void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
+                              FluidDomainInfo& info) {
+    // Porosity rides along here for the same reason: it is surface LOOK, and a
+    // script has to be able to read back what it set or it cannot tell "the
+    // value never landed" from "the value landed and did nothing".
+    info.pore_amount = d.fluid_surface_pore_amount;
+    info.pore_scale  = d.fluid_surface_pore_scale;
+    info.pore_detail = d.fluid_surface_pore_detail;
+
+    info.surface_material.clear();
+    if (d.fluid_surface_material_id < 0) return;
+    const auto& mats = MaterialManager::getInstance().getAllMaterials();
+    const std::size_t mi = static_cast<std::size_t>(d.fluid_surface_material_id);
+    if (mi < mats.size() && mats[mi]) info.surface_material = mats[mi]->materialName;
+}
 
 // Locate a Gas domain descriptor by id or name. Shared by the shader accessors
 // below; mirrors the lookup updateGasDomainSettings performs.
@@ -87,6 +136,9 @@ Result listMaterialFields(std::vector<MaterialFieldInfo>& out_fields) {
             info.molten_reservoir_mass = budget.molten_reservoir_mass;
             info.transferred_mass = budget.transferred_mass;
             info.mass_conservation_error = budget.conservation_error;
+            info.mass_budget_overflow = budget.budget_overflow_mass;
+            info.mass_negative = budget.negative_mass;
+            info.mass_invalid_elements = budget.invalid_elements;
         }
         info.semantics = {
             RayTrophiSim::fieldSemanticName(RayTrophiSim::FieldSemantic::Temperature),
@@ -231,7 +283,6 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
             (grid_dom->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
             (grid_dom->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
         out_info.preset = "custom";
-        out_info.viscosity = 0.0f;
         out_info.backend =
             (grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
             (grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
@@ -267,13 +318,7 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
                            (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
     out_info.boundary = (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open) ? "open" :
                         (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic) ? "periodic" : "closed";
-    out_info.preset = (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Water) ? "water" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Oil) ? "oil" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Mud) ? "mud" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Honey) ? "honey" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Lava) ? "lava" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Sand) ? "sand" : "custom";
-    out_info.viscosity = obj->params.viscosity;
+    fillFluidRheology(obj->params, out_info);
     out_info.backend = (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
@@ -316,8 +361,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
                 (d.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
                 (d.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
             out_info.preset = "custom";
-            out_info.viscosity = 0.0f;
-            out_info.backend =
+                out_info.backend =
                 (d.backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
                 (d.backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
                 (d.backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
@@ -345,13 +389,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
                            (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
     out_info.boundary = (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open) ? "open" :
                         (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic) ? "periodic" : "closed";
-    out_info.preset = (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Water) ? "water" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Oil) ? "oil" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Mud) ? "mud" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Honey) ? "honey" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Lava) ? "lava" :
-                      (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Sand) ? "sand" : "custom";
-    out_info.viscosity = obj->params.viscosity;
+    fillFluidRheology(obj->params, out_info);
     out_info.backend = (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
@@ -364,7 +402,8 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
         out_info.render_mode =
             (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
             (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
-        out_info.viscosity = grid_dom->fluid_params.viscosity;
+        fillFluidRheology(grid_dom->fluid_params, out_info);
+        fillFluidSurfaceMaterial(*grid_dom, out_info);
         const auto& states = p_sys_get.gridDomainStates();
         const auto& domains = p_sys_get.gridDomains();
         const std::size_t index = static_cast<std::size_t>(grid_dom - domains.data());
@@ -402,8 +441,8 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
             info.visible = true;
             info.render_mode = "volume";
             info.preset = "custom";
-            info.viscosity = 0.0f;
             info.particle_count = 0;
+            fillFluidSurfaceMaterial(d, info);
 
             // Liquid domains additionally carry a legacy FluidObject; take the
             // id/preset/viscosity from it so the entry matches what fluid.get
@@ -412,18 +451,11 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
                 if (auto* obj = g_ctx->scene.findFluidObjectByName(d.name)) {
                     info.id = obj->id;
                     info.particle_count = obj->particles.size();
-                    info.viscosity = obj->params.viscosity;
                     info.visible = obj->visible;
                     info.render_mode =
                         (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
                         (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
-                    info.preset =
-                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Water) ? "water" :
-                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Oil) ? "oil" :
-                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Mud) ? "mud" :
-                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Honey) ? "honey" :
-                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Lava) ? "lava" :
-                        (obj->params.current_preset == RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Sand) ? "sand" : "custom";
+                    fillFluidRheology(obj->params, info);
                 }
             }
             out_domains.push_back(std::move(info));
@@ -528,7 +560,14 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const Vec3* domain_min, const Vec3* domain_max,
                          const float* voxel_size, const std::string* render_mode,
                          const std::string* backend, const std::string* boundary,
-                         const std::string* preset, const float* viscosity,
+                         const std::string* preset,
+                         const float* kinematic_viscosity,
+                         const int* viscosity_sweeps,
+                         const float* viscosity_wall_slip,
+                         const std::string* surface_material,
+                         const float* pore_amount,
+                         const float* pore_scale,
+                         const float* pore_detail,
                          const bool* enabled, const bool* visible) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
@@ -577,15 +616,33 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         }
     }
 
-    if (preset && obj) {
+    // ★ Rheology writes go to BOTH representations. The grid domain descriptor is
+    // what the solver actually steps; the FluidObject is the authoring-side copy.
+    // Writing only the FluidObject — which is what this did — meant a script
+    // asking for "honey" on a grid-domain fluid got success() and no honey. A
+    // silent no-op is worse than a rejection: nothing distinguishes it from a
+    // preset that simply does not look like much, which is precisely how the
+    // broken viscosity dial survived this long.
+    if (preset) {
         std::string p = *preset;
         std::transform(p.begin(), p.end(), p.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        if (p == "water") obj->params.applyPreset(RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Water);
-        else if (p == "oil") obj->params.applyPreset(RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Oil);
-        else if (p == "mud") obj->params.applyPreset(RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Mud);
-        else if (p == "honey") obj->params.applyPreset(RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Honey);
-        else if (p == "lava") obj->params.applyPreset(RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Lava);
-        else if (p == "sand") obj->params.applyPreset(RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Sand);
+        using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
+        bool known = true;
+        FluidPreset chosen = FluidPreset::Custom;
+        if      (p == "water")     chosen = FluidPreset::Water;
+        else if (p == "oil")       chosen = FluidPreset::Oil;
+        else if (p == "mud")       chosen = FluidPreset::Mud;
+        else if (p == "honey")     chosen = FluidPreset::Honey;
+        else if (p == "lava")      chosen = FluidPreset::Lava;
+        else if (p == "sand")      chosen = FluidPreset::Sand;
+        else if (p == "chocolate") chosen = FluidPreset::Chocolate;
+        else known = false;
+        if (!known) {
+            return Result::fail("unknown fluid preset: " + *preset +
+                                " (water, oil, mud, honey, lava, sand, chocolate)");
+        }
+        if (obj)      obj->params.applyPreset(chosen);
+        if (grid_dom) grid_dom->fluid_params.applyPreset(chosen);
     }
 
     if (boundary) {
@@ -603,8 +660,31 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         }
     }
 
-    if (viscosity && obj) {
-        obj->params.viscosity = std::max(0.0f, *viscosity);
+    // Hand-setting any rheology field means the domain is no longer the named
+    // material — mirror the UI's rule so a script and a slider leave the same
+    // state behind.
+    auto markCustom = [&]() {
+        using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
+        if (obj)      obj->params.current_preset      = FluidPreset::Custom;
+        if (grid_dom) grid_dom->fluid_params.current_preset = FluidPreset::Custom;
+    };
+    if (kinematic_viscosity) {
+        const float v = std::max(0.0f, *kinematic_viscosity);
+        if (obj)      obj->params.kinematic_viscosity = v;
+        if (grid_dom) grid_dom->fluid_params.kinematic_viscosity = v;
+        markCustom();
+    }
+    if (viscosity_sweeps) {
+        const int s = std::clamp(*viscosity_sweeps, 1, 64);
+        if (obj)      obj->params.viscosity_sweeps = s;
+        if (grid_dom) grid_dom->fluid_params.viscosity_sweeps = s;
+        markCustom();
+    }
+    if (viscosity_wall_slip) {
+        const float w = std::clamp(*viscosity_wall_slip, 0.0f, 1.0f);
+        if (obj)      obj->params.viscosity_wall_slip = w;
+        if (grid_dom) grid_dom->fluid_params.viscosity_wall_slip = w;
+        markCustom();
     }
 
     if (backend) {
@@ -620,6 +700,43 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         }
 
         if (grid_dom) grid_dom->backend = be;
+    }
+
+    if (surface_material && grid_dom) {
+        if (surface_material->empty()) {
+            grid_dom->fluid_surface_material_id = -1;
+        } else {
+            auto& mm = MaterialManager::getInstance();
+            const auto& mats = mm.getAllMaterials();
+            int found = -1;
+            for (std::size_t mi = 0; mi < mats.size(); ++mi) {
+                if (mats[mi] && mats[mi]->materialName == *surface_material) {
+                    found = static_cast<int>(mi);
+                    break;
+                }
+            }
+            // Fail loudly. A missing material silently left as the built-in
+            // dielectric would look like "the material had no effect", which is
+            // exactly the report nobody can act on.
+            if (found < 0) {
+                return Result::fail("material not found: " + *surface_material);
+            }
+            grid_dom->fluid_surface_material_id = found;
+        }
+        g_ctx->scene.refreshFluidSurfaceMaterial();
+    }
+
+    // Procedural porosity. Clamped the same way the GPU packer clamps, so a
+    // scripted value and a panel value cannot mean different things.
+    if (grid_dom && pore_amount) {
+        grid_dom->fluid_surface_pore_amount = (std::max)(0.0f, *pore_amount);
+    }
+    if (grid_dom && pore_scale) {
+        grid_dom->fluid_surface_pore_scale = (std::max)(1e-4f, *pore_scale);
+    }
+    if (grid_dom && pore_detail) {
+        grid_dom->fluid_surface_pore_detail =
+            (std::max)(0.0f, (std::min)(1.0f, *pore_detail));
     }
 
     if (obj && enabled) obj->enabled = *enabled;
@@ -660,6 +777,10 @@ Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSetti
     out.smoke_generation = it->smoke_generation;
     out.flame_dissipation = it->flame_dissipation;
     out.fire_max_temperature = it->fire_max_temperature;
+    out.structural_coupling_enabled = it->structural_coupling_enabled;
+    out.structural_pressure_scale = it->structural_pressure_scale;
+    out.structural_min_intensity = it->structural_min_intensity;
+    out.structural_event_interval = it->structural_event_interval;
     out.buoyancy_heat = it->gas_buoyancy_heat;
     out.buoyancy_density = it->gas_buoyancy_density;
     out.vorticity = it->gas_vorticity;
@@ -707,6 +828,10 @@ Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDo
     it->smoke_generation = std::max(0.0f, s.smoke_generation);
     it->flame_dissipation = std::max(0.0f, s.flame_dissipation);
     it->fire_max_temperature = std::max(0.0f, s.fire_max_temperature);
+    it->structural_coupling_enabled = s.structural_coupling_enabled;
+    it->structural_pressure_scale = std::max(0.0f, s.structural_pressure_scale);
+    it->structural_min_intensity = std::max(0.0f, s.structural_min_intensity);
+    it->structural_event_interval = std::max(1.0f / 120.0f, s.structural_event_interval);
     it->gas_buoyancy_heat = s.buoyancy_heat;
     it->gas_buoyancy_density = s.buoyancy_density;
     it->gas_vorticity = std::max(0.0f, s.vorticity);

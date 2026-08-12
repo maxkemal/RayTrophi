@@ -90,7 +90,18 @@ void RigidBodySystem::ensureBodyCreated(RigidBodyObject& rb) {
         half_extents = rb.rest_half_extents;
     }
 
-    if (rb.auto_mass_from_density && rb.motion_type == RigidBodyMotionType::Dynamic) {
+    const bool auto_mass = rb.auto_mass_from_density &&
+                           rb.motion_type == RigidBodyMotionType::Dynamic;
+    // ★ A MESH BODY'S VOLUME IS NOT ITS BOUNDING BOX.
+    //
+    // The switch below had no Mesh case, so a mesh body fell through to the OBB
+    // volume — and for a fracture shard that is nonsense. Shards are wedges and
+    // slivers; the box around one holds several times its actual material, so
+    // its mass came out several times too high while the SHAPE it collides with
+    // stayed correct. Deferred here and computed from the real triangles once
+    // the Mesh case below has resolved them.
+    const bool defer_mesh_mass = auto_mass && resolved_shape == RigidBodyShape::Mesh;
+    if (auto_mass && !defer_mesh_mass) {
         float volume = 1.0f;
         switch (resolved_shape) {
             case RigidBodyShape::Sphere: {
@@ -165,6 +176,23 @@ void RigidBodySystem::ensureBodyCreated(RigidBodyObject& rb) {
                 // Source mesh not ready yet (e.g. surface cache); try again next tick.
                 return;
             }
+            if (defer_mesh_mass) {
+                // Signed volume by the divergence theorem over the closed
+                // surface — the same measure the fracture generator uses, so a
+                // shard's mass and the volume it was culled against agree.
+                double vol6 = 0.0;
+                for (std::size_t t = 0; t + 2 < indices.size(); t += 3) {
+                    const uint32_t ia = indices[t], ib = indices[t + 1], ic = indices[t + 2];
+                    if (ia >= verts.size() || ib >= verts.size() || ic >= verts.size()) continue;
+                    const Vec3& a = verts[ia];
+                    const Vec3& b = verts[ib];
+                    const Vec3& c = verts[ic];
+                    vol6 += a.dot(b.cross(c));
+                }
+                const float volume = std::max(1e-6f, std::fabs((float)vol6) / 6.0f);
+                rb.mass = std::max(0.001f, rb.density * volume);
+                desc.mass = rb.mass;  // desc.mass was copied before this switch
+            }
             desc.shape = JoltIntegration::JoltShapeType::Mesh;
             desc.mesh_vertices = std::move(verts);
             desc.mesh_indices = std::move(indices);
@@ -177,6 +205,30 @@ void RigidBodySystem::ensureBodyCreated(RigidBodyObject& rb) {
             desc.shape = JoltIntegration::JoltShapeType::Box;
             desc.half_extents = half_extents;
             break;
+    }
+
+    // ★ A BODY BEING REBUILT MUST FIRST STOP EXISTING.
+    //
+    // `created = false` is how everything requests a rebuild: a fracture group
+    // flipping Static->Dynamic, the Type picker in the body list, a shape edit.
+    // But the handle below was only ever OVERWRITTEN, so the previous Jolt body
+    // stayed in the world with nothing left referencing it — invisible,
+    // unreachable, and still colliding.
+    //
+    // Breaking a group DURING playback therefore left a full static copy of
+    // every shard behind, and the falling pieces collided with their own ghosts:
+    // they hung in the air, jammed against nothing, and slid off surfaces that
+    // were not there. It read as a solver or collider problem and was a leak.
+    // Breaking while STOPPED hid it completely, because the rewind path destroys
+    // every body first, so the rebuild started from an empty world.
+    //
+    // Removed here rather than at the top of the function on purpose: everything
+    // above can bail out (an unresolved shape, a mesh whose cache is not ready),
+    // and destroying the old body before knowing we can build the new one would
+    // drop the object out of the simulation for a frame — or forever.
+    if (world_ && rb.handle != JoltIntegration::kInvalidBody) {
+        world_->removeBody(rb.handle);
+        rb.handle = JoltIntegration::kInvalidBody;
     }
 
     rb.handle = world_->createBody(desc);
@@ -238,6 +290,14 @@ void RigidBodySystem::ensureSoftBodyCreated(RigidBodyObject& rb) {
     desc.gravity_factor = rb.getSoftGravityFactor();
     desc.vertex_radius = rb.getSoftVertexRadius();
     desc.two_sided = (rb.kind == BodyKind::Cloth) ? rb.getSoftTwoSided() : false;
+
+    // Same rebuild leak as the rigid path above: switching a body's Type in the
+    // panel sets created=false, and without this the old body stayed in the
+    // world colliding with its own replacement.
+    if (world_ && rb.handle != JoltIntegration::kInvalidBody) {
+        world_->removeBody(rb.handle);
+        rb.handle = JoltIntegration::kInvalidBody;
+    }
 
     rb.handle = world_->createSoftBody(desc);
     rb.created = (rb.handle != JoltIntegration::kInvalidBody);

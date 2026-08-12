@@ -76,7 +76,6 @@ layout(push_constant) uniform CameraPC {
 #include "rt_payload.glsl"
 #include "volume_instrumentation.glsl"
 
-const uint BOUNCE_TRANSPARENT = 3u;
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 // Shadow payload: rgb = transmissive tint, w = reached-light flag (0 = hit/occluded).
@@ -195,7 +194,8 @@ struct VkVolumeInstance {
     uint64_t flame_address;      // combustion reaction field for live dense gas (0 = none)
     uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
     float    emissive_capacity;
-    float    _accel_reserved[5];
+    float    iso_material_index;  // SDF isosurface material, 1-based (0 = none)
+    float    _accel_reserved[4];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -254,6 +254,125 @@ uint pcgNext(inout uint state) {
 float rnd(inout uint seed) {
     return float(pcgNext(seed)) * (1.0 / 4294967296.0);
 }
+
+// Volume-shadow query required by the shared BSDF module. The surface shader
+// marches every other volume here; this shader is already INSIDE one, and its
+// own grids are sampled through sampleDensityAcc rather than that path. Return
+// full transmittance for now and say so: it means a liquid surface is not
+// shadowed by a SEPARATE volume (a smoke plume over a pool). It is not a
+// regression — this path had no volumetric shadowing at all before — but it is
+// the one place the two shaders do not yet agree.
+float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float maxDist) {
+    return 1.0;
+}
+
+// Water lobes in the shared module need the v3 helpers.
+#include "water_v3.glsl"
+// ONE BSDF for both shaders: this is what lets the fluid isosurface take an
+// ordinary scene material (molten glass, lava, mud, chocolate) instead of the
+// hand-written Fresnel + Beer-Lambert dielectric it used to be limited to.
+// Scene materials. Bindings 2/24 already exist in set 0 for the surface
+// closest-hit; set 0 is shared across the pipeline, so declaring them here
+// needs no host-side change at all.
+#include "material_struct.glsl"
+layout(set = 0, binding = 2, scalar) readonly buffer VolMaterialBuffer  { Material    m[]; } materials;
+layout(set = 0, binding = 24, scalar) readonly buffer VolMaterialExtBuffer { MaterialExt m[]; } materialsExt;
+
+// Packed-ORM channel policy (which channel roughness/metallic live in, per
+// material flags). Shared with the surface closest-hit rather than copied: a
+// second copy of that policy is exactly how the isosurface would end up
+// reading a different channel than the mesh for the very same texture.
+#include "pbr_texture_policy.glsl"
+
+#include "bsdf_scatter.glsl"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRI-PLANAR TEXTURING for the SDF isosurface
+// ═══════════════════════════════════════════════════════════════════════════
+// A raymarched isosurface has no UVs, and cannot have them in the usual sense:
+// there is no mesh to unwrap, and the surface is rebuilt from the field every
+// frame, so there is nothing stable for a UV to be attached to. Until now that
+// meant only the material's SCALAR values reached the liquid — assigning a
+// texture looked like it did nothing.
+//
+// Tri-planar projection is the standard answer: sample the texture once per
+// world axis plane and blend the three by the (sharpened) squared normal.
+//
+// ★ Tiling reuses the material's OWN uv_scale / uv_offset rather than adding
+// new fields. On a mesh those multiply the mesh UV; here they are world units
+// per tile. Same control, same meaning — "how does this texture tile" — with
+// no ABI change and nothing new for an author to learn.
+//
+// ★ LIMIT, and it is the same one the resin interior carries: the projection
+// is anchored in WORLD space, so a FLOWING liquid slides through a stationary
+// texture. For a body that barely moves — dough, a set resin, a still pool —
+// that is right. For a pour it is not, and the fix is an advected UVW carried
+// as a particle attribute (the same machine velocity already rides), which
+// does not exist yet.
+// ═══════════════════════════════════════════════════════════════════════════
+// Re-seating a scattered ray outside the level-set band, WITHOUT stepping over
+// whatever sits inside the push distance.
+// ═══════════════════════════════════════════════════════════════════════════
+// Every lobe leaves this surface via offset_ray, whose offset is a few float
+// ULPs. That is right for a triangle — a plane of zero thickness. It is wrong
+// here: the isosurface lives inside a proxy band about half a voxel thick, so a
+// ULP-offset ray restarts INSIDE the band and immediately re-hits the same
+// surface. The cure is to push along the direction of travel by roughly a
+// voxel.
+//
+// ★ But that push is CENTIMETRES at production voxel sizes, so for a direction
+// that continues INTO the surface it can clear the liquid AND whatever is
+// immediately behind it in one step. Symptom: a pooled liquid looks right from
+// above, where the body is thick, and fails at the thin SIDES, where one voxel
+// spans the whole wall — the surface behind is never handed over.
+//
+// So probe exactly the push segment first. It is a few centimetres long and
+// terminates on first hit, so it costs far less than the march that produced
+// this hit. Reflections are exempt: they leave the surface outward and have
+// nothing to skip.
+//
+// ★ ONE rule, ONE place, used by every inward-going lobe. It used to be inlined
+// in the thin-shell branch with the justification "only the pass-through goes
+// straight in" — then the glass lobe was added, whose refracted direction also
+// goes in, and that justification silently stopped covering it.
+vec3 seatOutsideBand(vec3 hitPos, vec3 dir, vec3 N, float push, out bool handOff) {
+    handOff = false;
+    // Outward-going (reflection): nothing between here and open space.
+    if (dot(dir, N) > 0.0) return hitPos + dir * push;
+
+    const uint PUSH_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
+                          | gl_RayFlagsSkipClosestHitShaderEXT
+                          | gl_RayFlagsNoOpaqueEXT;
+    const uint PUSH_MASK  = 0xF1;   // exclude gas/particle/SDF AABBs, as the
+                                    // entry-side solid probe does
+    const uint PUSH_PROBE = 0xC17D5EEDu;
+    shadowPayload = vec4(0.0, 0.0, 0.0, uintBitsToFloat(PUSH_PROBE));
+    traceRayEXT(topLevelAS, PUSH_FLAGS, PUSH_MASK, 0, 1, 1,
+                hitPos, 1e-4, dir, push, 1);
+    handOff = (shadowPayload.w < 0.5);
+    // On a hand-off, continue from the hit point itself with the volume AABBs
+    // skipped (caller sets skipAABBs) so the triangle closest-hit fires on that
+    // surface at its true distance and true facing — the same contract the
+    // entry-side solid probe uses, and the reason it needs no epsilon.
+    return handOff ? hitPos : (hitPos + dir * push);
+}
+
+vec4 triplanarTexel(uint texId, vec3 worldPos, vec3 N, vec2 scale, vec2 offset) {
+    // Sharpened squared normal. The exponent sets how wide the seam blend is:
+    // 4 is the usual compromise — lower smears the texture across the
+    // transition, higher makes the three projections visibly meet.
+    vec3 w = pow(abs(N), vec3(4.0));
+    w /= max(w.x + w.y + w.z, 1e-6);
+
+    vec2 uvX = worldPos.zy * scale + offset;
+    vec2 uvY = worldPos.xz * scale + offset;
+    vec2 uvZ = worldPos.xy * scale + offset;
+
+    return texture(materialTextures[nonuniformEXT(texId)], uvX) * w.x
+         + texture(materialTextures[nonuniformEXT(texId)], uvY) * w.y
+         + texture(materialTextures[nonuniformEXT(texId)], uvZ) * w.z;
+}
+
 
 vec3 sampleTransmittanceLUT(vec3 worldPos, vec3 sunDir) {
     if (worldData.w.mode != 2) return vec3(1.0);
@@ -424,37 +543,6 @@ float dualLobeHG(float cosTheta, float g_forward, float g_back, float lobeMix) {
     return mix(phaseBack, phaseForward, lobeMix);
 }
 
-// ============================================================
-// Sample HG Phase Function Direction
-// ============================================================
-vec3 sampleHG(vec3 inDir, float g, inout uint seed) {
-    float r1 = rnd(seed);
-    float r2 = rnd(seed);
-    
-    float cosTheta;
-    if (abs(g) < 1e-3) {
-        // Isotropic
-        cosTheta = 1.0 - 2.0 * r1;
-    } else {
-        float s = (1.0 - g * g) / (1.0 - g + 2.0 * g * r1);
-        cosTheta = (1.0 + g * g - s * s) / (2.0 * g);
-    }
-    
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float phi = TWO_PI * r2;
-    
-    // Build local frame from inDir
-    vec3 w = normalize(inDir);
-    vec3 u, v;
-    if (abs(w.x) > 0.9) {
-        u = normalize(cross(vec3(0, 1, 0), w));
-    } else {
-        u = normalize(cross(vec3(1, 0, 0), w));
-    }
-    v = cross(w, u);
-    
-    return normalize(u * (sinTheta * cos(phi)) + v * (sinTheta * sin(phi)) + w * cosTheta);
-}
 
 // ============================================================
 // 3D Noise (procedural density for volume_type=1)
@@ -1054,6 +1142,63 @@ float sampleDensityAcc(
     return remappedDensity * vol.density_multiplier * cutoffFade;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PROCEDURAL POROSITY — fermented dough, aerated batter, pumice, set foam
+// ═══════════════════════════════════════════════════════════════════════════
+// Returns the amount to SUBTRACT from the density before the ISO test.
+//
+// ★ Why subtract from the FIELD instead of cutting alpha at the surface.
+// A pore made by alpha has no rim: the hole is punched in an otherwise flat
+// shading point, so its edge carries the parent surface's normal, refracts
+// wrongly and casts no self-shadow. Displacing the field makes the pore real
+// geometry — the surface normal here IS the field gradient, so the rim picks
+// up the noise derivative for FREE, from the six samples already being taken.
+// That is the whole reason this is a field term and not a shading term.
+//
+// ★★ MUST be a pure function of world position and the domain's own
+// parameters — nothing per-ray, nothing per-material, no state. It is called
+// from TWO places: the shading march AND nearestSurfaceSDFCrossing, the
+// arbiter that decides where gas hands the ray over to liquid. If those two
+// disagree by so much as a term, the gas is clipped against a surface the
+// shader never draws, and nothing reports it. That constraint is also why the
+// parameters live on the domain instance: the arbiter runs for OTHER volumes
+// and has no access to this domain's surface material.
+//
+// Worley rather than fbm, deliberately: a bubble is a CELL. The distance to
+// the nearest feature point of a Worley lattice is already a packed-sphere
+// field, so 1-d gives voids at the cell centres. fbm would give clouds.
+float isoPoreOffset(VkVolumeInstance vol, vec3 worldPos) {
+    float amount = vol._accel_reserved[0];
+    if (amount <= 1e-4) return 0.0;                       // off: exact old path
+    float scale  = max(vol._accel_reserved[1], 1e-4);     // world units per cell
+    float detail = clamp(vol._accel_reserved[2], 0.0, 1.0);
+
+    // World space, not voxel space: the crumb must keep its real size when the
+    // domain resolution changes, or every resolution edit re-bakes the bread.
+    vec3 p = worldPos / scale;
+
+    float pore = 1.0 - clamp(rh_worley(p) * 2.0, 0.0, 1.0);
+    if (detail > 1e-3) {
+        // A second, finer cell size mixed in by MAX (union of voids, not an
+        // average): this is what separates bread crumb, which has mixed bubble
+        // sizes, from packing foam, which has one.
+        float fine = 1.0 - clamp(rh_worley(p * 2.7 + vec3(19.3, 7.1, 31.7)) * 2.0, 0.0, 1.0);
+        pore = max(pore, fine * detail);
+    }
+    return amount * pore;
+}
+
+// The ONE field every isosurface consumer must read. Both ISO threshold sites
+// and all six gradient samples go through here, so the surface that gas is
+// clipped against, the surface that is shaded, and the normal used to shade it
+// can never come from different fields.
+// `acc` is inout for the same reason sampleDensityAcc takes it that way: it is
+// a persistent NanoVDB read accessor whose node cache must survive the call.
+float sampleIsoField(VkVolumeInstance vol, vec3 worldPos, pnanovdb_buf_t buf,
+                     pnanovdb_map_handle_t mapH, inout pnanovdb_readaccessor_t acc) {
+    return sampleDensityAcc(vol, worldPos, buf, mapH, acc) - isoPoreOffset(vol, worldPos);
+}
+
 // ============================================================
 // Density Sampling — supports homogeneous and procedural noise
 // ============================================================
@@ -1403,12 +1548,12 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
         float step = max(0.001, max(fineStep, span / float(cap)));
         int steps = min(int(ceil(span / step)) + 1, cap + 1);
         float t0s = beginT;
-        float d0 = sampleDensityAcc(
+        float d0 = sampleIsoField(
             surface, rayOrigin + rayDir * t0s, surfaceBuf, mapH, acc);
         bool startedInside = d0 > ISO;
         for (int s = 0; s < steps; ++s) {
             float t1s = min(t0s + step, endT);
-            float d1 = sampleDensityAcc(
+            float d1 = sampleIsoField(
                 surface, rayOrigin + rayDir * t1s, surfaceBuf, mapH, acc);
             bool crossed = startedInside
                 ? (d0 >= ISO && d1 < ISO)
@@ -1418,7 +1563,7 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
                 float b = t1s;
                 for (int refine = 0; refine < 4; ++refine) {
                     float mid = 0.5 * (a + b);
-                    float dm = sampleDensityAcc(
+                    float dm = sampleIsoField(
                         surface, rayOrigin + rayDir * mid, surfaceBuf, mapH, acc);
                     if ((dm > ISO) == startedInside) a = mid;
                     else b = mid;
@@ -1569,7 +1714,7 @@ void main() {
         int   maxSteps = min(int(marchLen / step) + 2, isoCap + 2);
 
         float t      = tNear;
-        float startD = sampleDensityAcc(vol, rayOrigin + rayDir * t, vdbBuf, vdbMapH, vdbAcc);
+        float startD = sampleIsoField(vol, rayOrigin + rayDir * t, vdbBuf, vdbMapH, vdbAcc);
         // ★Side test with hysteresis — the black-band candidate.
         // A bare `startD > ISO_THRESH` is a coin flip whenever the walk BEGINS on
         // the boundary, and on Vulkan that happens by construction: the gas
@@ -1594,7 +1739,7 @@ void main() {
 
         for (int s = 0; s < maxSteps; ++s) {
             float nextT = min(t + step, tFar);
-            float curD = sampleDensityAcc(vol, rayOrigin + rayDir * nextT, vdbBuf, vdbMapH, vdbAcc);
+            float curD = sampleIsoField(vol, rayOrigin + rayDir * nextT, vdbBuf, vdbMapH, vdbAcc);
             bool crossed = startInside
                 ? (prevD >= ISO_THRESH && curD < ISO_THRESH)   // exit
                 : (prevD <  ISO_THRESH && curD >= ISO_THRESH); // enter
@@ -1607,7 +1752,7 @@ void main() {
                 float d1 = curD;
                 for (int it = 0; it < 4; ++it) {
                     float tMid = 0.5 * (t0 + t1);
-                    float dMid = sampleDensityAcc(vol, rayOrigin + rayDir * tMid, vdbBuf, vdbMapH, vdbAcc);
+                    float dMid = sampleIsoField(vol, rayOrigin + rayDir * tMid, vdbBuf, vdbMapH, vdbAcc);
                     bool midInside = dMid > ISO_THRESH;
                     if (startInside == midInside) {
                         t0 = tMid;
@@ -1800,12 +1945,12 @@ void main() {
         // band thickness (band ≈ 0.5*voxel by default), so the gradient is
         // numerically well-conditioned.
         float h = max(0.001, vol.voxel_size);
-        float sxp = sampleDensityAcc(vol, hitPos + vec3(h, 0.0, 0.0), vdbBuf, vdbMapH, vdbAcc);
-        float sxm = sampleDensityAcc(vol, hitPos - vec3(h, 0.0, 0.0), vdbBuf, vdbMapH, vdbAcc);
-        float syp = sampleDensityAcc(vol, hitPos + vec3(0.0, h, 0.0), vdbBuf, vdbMapH, vdbAcc);
-        float sym = sampleDensityAcc(vol, hitPos - vec3(0.0, h, 0.0), vdbBuf, vdbMapH, vdbAcc);
-        float szp = sampleDensityAcc(vol, hitPos + vec3(0.0, 0.0, h), vdbBuf, vdbMapH, vdbAcc);
-        float szm = sampleDensityAcc(vol, hitPos - vec3(0.0, 0.0, h), vdbBuf, vdbMapH, vdbAcc);
+        float sxp = sampleIsoField(vol, hitPos + vec3(h, 0.0, 0.0), vdbBuf, vdbMapH, vdbAcc);
+        float sxm = sampleIsoField(vol, hitPos - vec3(h, 0.0, 0.0), vdbBuf, vdbMapH, vdbAcc);
+        float syp = sampleIsoField(vol, hitPos + vec3(0.0, h, 0.0), vdbBuf, vdbMapH, vdbAcc);
+        float sym = sampleIsoField(vol, hitPos - vec3(0.0, h, 0.0), vdbBuf, vdbMapH, vdbAcc);
+        float szp = sampleIsoField(vol, hitPos + vec3(0.0, 0.0, h), vdbBuf, vdbMapH, vdbAcc);
+        float szm = sampleIsoField(vol, hitPos - vec3(0.0, 0.0, h), vdbBuf, vdbMapH, vdbAcc);
         vec3 grad = vec3(sxp - sxm, syp - sym, szp - szm);
         float gradLen = length(grad);
 
@@ -1814,15 +1959,43 @@ void main() {
         // samples + the centre (≈iso), so it's nearly free.
         float foam_strength = clamp(vol._ext_reserved[2], 0.0, 1.0);
         if (foam_strength > 1e-3) {
-            float dc = sampleDensityAcc(vol, hitPos, vdbBuf, vdbMapH, vdbAcc);
+            float dc = sampleIsoField(vol, hitPos, vdbBuf, vdbMapH, vdbAcc);
             float lap = abs((sxp + sxm + syp + sym + szp + szm) - 6.0 * dc);
             float foam = foam_strength * smoothstep(0.15, 0.7, lap);
             // Bright white whitewater, lit by the current throughput.
             payload.radiance += payload.attenuation * foam * vec3(0.9);
         }
+        // ★ A degenerate gradient is a MISSING MEASUREMENT, not a normal.
+        //
+        // This used to fall back to -rayDir, i.e. a normal that always faces the
+        // viewer. For a dielectric that is nearly harmless (normal incidence =
+        // minimum Fresnel = it transmits, which is what a pass-through would
+        // have done anyway), so it survived unnoticed. With a real BSDF it is
+        // not harmless at all: a metal reflects about that fabricated normal,
+        // straight back into the liquid, and goes BLACK.
+        //
+        // Where does it actually fire? Exactly where two droplets have merged
+        // or sheets have stacked: the density field saturates on BOTH sides of
+        // the sample, the central difference cancels, and there is no surface
+        // to speak of there. So say that, instead of inventing one — let the ray
+        // continue to the next crossing, which is a real surface.
+        //
+        // Threshold is absolute because density is a normalised 0..1 field: a
+        // genuine boundary crosses it over roughly half a voxel, giving |grad|
+        // on the order of 1. Anything near zero is saturation, not a grazing
+        // surface.
+        if (gradLen <= 1e-4) {
+            payload.radiance      += foam_inscatter;
+            payload.attenuation   *= foam_T;
+            payload.scatterOrigin  = hitPos + rayDir * max(0.003, vol.voxel_size);
+            payload.scatterDir     = rayDir;
+            payload.scattered      = true;
+            payload.bounceType     = BOUNCE_TRANSPARENT;
+            return;
+        }
         // Density increases TOWARD fluid interior, so -gradient points OUT of
         // the surface (toward the less-dense / air side).
-        vec3 N = (gradLen > 1e-6) ? normalize(-grad) : -rayDir;
+        vec3 N = normalize(-grad);
 
         // ── Rough dielectric event (Fresnel importance-sampled). ────────────
         // Orient the geometric normal against the incoming ray.
@@ -1832,6 +2005,478 @@ void main() {
         // reflection AND the refraction blur with surface_roughness
         // (_ext_reserved[1]). 0 = mirror-smooth still water.
         float roughness = clamp(vol._ext_reserved[1], 0.0, 1.0);
+
+        // -- Scene material on the liquid surface -------------------------
+        // vol.iso_material_index is the 1-based scene material the domain binds
+        // for its surface. Deliberately NOT _reserved[1]: that slot means "run
+        // the volume material VM with this program" and is gated on the graph
+        // driving volume closure slots, so a plain Principled material resolves
+        // to none there and would never have reached this branch.
+        // When one is bound, the isosurface is shaded by the SAME lobe
+        // selection a triangle gets: clearcoat, metal, transmission and the
+        // random-walk SSS. That is what makes molten glass, lava, mud and
+        // chocolate ordinary material settings instead of shader special
+        // cases -- this branch used to be a bare Fresnel + Beer-Lambert
+        // dielectric, which is why a dense material could only ever read as
+        // dark glass.
+        // No material bound -> fall through to that original path, so scenes
+        // authored before this change render exactly as they did.
+        if (vol.iso_material_index > 0.5) {
+            uint isoMatIdx = uint(vol.iso_material_index - 1.0);
+            Material    im  = materials.m[isoMatIdx];
+            MaterialExt imx = materialsExt.m[isoMatIdx];
+
+            // ★ ONE exit push for EVERY lobe below — see the long note at the
+            // bottom of this block. Hoisted here because the thin-shell and
+            // resin branches return early and need it just as much as the
+            // Principled path does; a ULP offset re-hits the same surface.
+            float exitPush = max(0.003, vol.voxel_size);
+
+            // Depth absorption and whitewater are properties of the LIQUID
+            // BODY, not of the surface lobe, so they apply whichever branch is
+            // taken below. Hoisted out of the Principled path for that reason.
+            if (startInside) {
+                float depth = max(0.0, hitT - tNear);
+                payload.attenuation *= exp(-(vol.absorption_color * vol.absorption_coefficient) * depth);
+            }
+            payload.radiance    += foam_inscatter;
+            payload.attenuation *= foam_T;
+
+            // ── THIN-SHELL FILM (bubble) ─────────────────────────────────────
+            // Soap foam / champagne head sitting ON the liquid. A thin shell is
+            // entered and exited parallel, so there is no net refraction: the
+            // ray either Fresnel-reflects off the film (bright silver rim,
+            // strongest at grazing) or passes STRAIGHT through. Mirrors the
+            // triangle branch in closesthit.rchit — same fields, same look, so
+            // a bubble material reads identically on a mesh and on a liquid.
+            //
+            // Dispatched BEFORE the Principled fill because on the triangle
+            // side it is likewise a separate type branch, not a lobe: there is
+            // no roughness/metallic/SSS to build for a film.
+            if ((im.flags & MAT_FLAG_BUBBLE) != 0u) {
+                float cosTb = min(abs(dot(rayDir, N)), 1.0);
+                float bio   = (imx.bubble_ior > 1.0001) ? imx.bubble_ior : 1.33;
+                float r0b   = (1.0 - bio) / (1.0 + bio); r0b = r0b * r0b;
+                float fresb = r0b + (1.0 - r0b) * pow(1.0 - cosTb, 5.0);
+                vec3 bDir, bAtt;
+                bool bPassThrough = false;
+                if (rnd(payload.seed) < fresb) {
+                    bDir = reflect(rayDir, N);              // bright Fresnel rim
+                    if (imx.bubble_film > 1e-3) {
+                        float opd = imx.bubble_film * (1.0 / max(cosTb, 0.15));
+                        bAtt = vec3(0.55 + 0.45 * cos(opd * TWO_PI),
+                                    0.55 + 0.45 * cos(opd * TWO_PI + 2.0944),
+                                    0.55 + 0.45 * cos(opd * TWO_PI + 4.1888));
+                    } else {
+                        bAtt = vec3(1.0);
+                    }
+                } else {
+                    bDir = rayDir;                          // straight through
+                    bAtt = vec3(0.85) + 0.15 * vec3(im.albedo_r, im.albedo_g, im.albedo_b);
+                    bPassThrough = true;
+                }
+                // ★ Both lobes leave along bDir, pushed clear of the level-set
+                // band. The triangle version offsets a few ULPs off the plane;
+                // here that restarts INSIDE the band — and for the pass-through
+                // lobe (bDir == rayDir) that means the ray immediately re-hits
+                // the same film and never leaves the surface at all.
+                // ★ The push must not STEP OVER real geometry.
+                //
+                // exitPush is scaled to the level-set band, i.e. to voxel_size —
+                // centimetres at production settings. The pass-through lobe
+                // travels straight INTO whatever sits behind the film, so any
+                // solid closer than one voxel is simply jumped past: the ray
+                // restarts beyond it and the surface behind never renders. That
+                // is the reported "thin shell skips the surface behind", and it
+                // is specific to this lobe — the reflection lobe leaves the
+                // surface outward, and the Principled path's own scatter lobes
+                // do too.
+                //
+                // So probe just the push segment first. It is a few centimetres
+                // long and terminates on first hit, so it costs far less than
+                // the march that produced this hit. If a solid is inside it,
+                // hand the ray over exactly the way the entry-side solid probe
+                // above does: continue from the hit point with the volume AABBs
+                // skipped, so the triangle closest-hit fires on that surface at
+                // its true distance and true facing.
+                bool bHandOff = false;
+                payload.scatterDir    = bDir;
+                payload.scatterOrigin = seatOutsideBand(hitPos, bDir, N, exitPush, bHandOff);
+                payload.skipAABBs     = bHandOff;
+                payload.attenuation  *= bAtt;
+                payload.scattered     = true;
+                // ★ The two lobes must be tagged DIFFERENTLY, and this is what
+                // produced the black patches on the shell.
+                //
+                // A straight-through crossing is not a scattering event — the
+                // ray leaves along the direction it arrived on. raygen only
+                // treats a pass as free when the direction is unchanged AND
+                // either the attenuation is exactly 1 or the tag is
+                // BOUNCE_TRANSPARENT (isTransparentPass, raygen.rgen). The film
+                // tints by 0.85..1.0, so the attenuation test can never pass —
+                // tagged SPECULAR, every crossing spent a full GI bounce.
+                //
+                // A mesh bubble survives that: two crossings. A foam shell on an
+                // isosurface does not — the level-set band is crossed many times
+                // over, the budget runs out before the ray reaches the ground
+                // behind, and raygen breaks the loop. Those paths return only
+                // what they had accumulated, which is why the holes appeared
+                // exactly where the shell is thickest and why the surface behind
+                // was never reached.
+                //
+                // The reflection lobe DOES redirect the ray, so it stays a real
+                // specular bounce and keeps costing one.
+                payload.bounceType    = bPassThrough ? BOUNCE_TRANSPARENT
+                                                     : BOUNCE_SPECULAR;
+                // NOTE: the triangle branch clears payload.radiance here. Do NOT
+                // copy that — this shader ACCUMULATES radiance (+=), and the
+                // foam in-scatter for this hit was already added above.
+                payload.primaryARG = packHalf2x16(vec2(im.albedo_r, im.albedo_g));
+                payload.primaryABT = packHalf2x16(vec2(0.0, 1.0));   // aerial parity
+                payload.primaryNrm = plPackNormal(N);
+                return;
+            }
+
+            SurfaceSample ss = defaultSurfaceSample();
+            ss.P      = hitPos;
+            ss.N      = N;
+            ss.rayDir = rayDir;
+            ss.albedo    = vec3(im.albedo_r, im.albedo_g, im.albedo_b);
+            // The MATERIAL's roughness wins. Binding a material means the
+            // liquid is shaded by that material, full stop — having one of its
+            // parameters silently overridden by a panel elsewhere is the kind
+            // of split authority that makes a control look broken. The domain's
+            // Surface Roughness governs the built-in dielectric below, and the
+            // panel greys it out while a material is bound so the split is
+            // visible rather than inferred.
+            // Note this is the material's SCALAR roughness: a roughness texture
+            // needs UVs, which a raymarched isosurface has none of.
+            ss.roughness = clamp(im.roughness, 0.0, 1.0);
+            ss.metallic  = clamp(im.metallic, 0.0, 1.0);
+            ss.specular  = im.specular;
+            ss.clearcoat          = clamp(im.clearcoat, 0.0, 1.0);
+            ss.clearcoatRoughness = clamp(im.clearcoat_roughness, 0.001, 1.0);
+            ss.clearcoatIridescence   = imx.clearcoat_iridescence;
+            ss.clearcoatFilmThickness = imx.clearcoat_film_thickness;
+            ss.translucent        = clamp(im.translucent, 0.0, 1.0);
+            ss.subsurfaceAmount   = clamp(im.subsurface_amount, 0.0, 1.0);
+            ss.subsurfaceColor    = max(vec3(imx.subsurface_r, imx.subsurface_g, imx.subsurface_b), vec3(0.001));
+            ss.subsurfaceRadius   = max(vec3(imx.subsurface_radius_r, imx.subsurface_radius_g, imx.subsurface_radius_b), vec3(0.001));
+            ss.subsurfaceScale    = max(imx.subsurface_scale, 0.001);
+            ss.subsurfaceAnisotropy = clamp(imx.subsurface_anisotropy, -0.99, 0.99);
+
+            // ── Tri-planar textures ──────────────────────────────────────────
+            // This is what lets a texture reach the liquid at all. Before it,
+            // only scalar material values did, and assigning an image to a
+            // fluid surface silently did nothing.
+            //
+            // Roughness/metallic go through the SHARED packed-ORM policy, so a
+            // texture authored for a mesh reads the same channel here. Writing
+            // a second channel rule for the isosurface would eventually pick a
+            // different one and shade the liquid as metal for no visible reason.
+            {
+                // uv_scale doubles as world units per tile here; 0 would
+                // collapse every sample onto one texel, so treat it as unset.
+                vec2 texScale = vec2(abs(im.uv_scale_x) > 1e-6 ? im.uv_scale_x : 1.0,
+                                     abs(im.uv_scale_y) > 1e-6 ? im.uv_scale_y : 1.0);
+                vec2 texOffset = vec2(im.uv_offset_x, im.uv_offset_y);
+
+                if (im.albedo_tex > 0u) {
+                    // Replaces, matching the surface path (the texture is the
+                    // base colour there, not a tint on it).
+                    ss.albedo = triplanarTexel(im.albedo_tex, hitPos, N, texScale, texOffset).rgb;
+                }
+                if (im.roughness_tex > 0u) {
+                    ss.roughness = clamp(samplePackedRoughness(
+                        triplanarTexel(im.roughness_tex, hitPos, N, texScale, texOffset),
+                        0.0, im.flags), 0.0, 1.0);
+                }
+                if (im.metallic_tex > 0u) {
+                    ss.metallic = clamp(samplePackedMetallic(
+                        triplanarTexel(im.metallic_tex, hitPos, N, texScale, texOffset),
+                        im.flags), 0.0, 1.0);
+                }
+                // NOT wired: normal maps. Perturbing the normal needs a tangent
+                // frame, and tri-planar normal mapping needs one PER PLANE plus
+                // a whiteout blend to recombine them. Doing that half-way looks
+                // like lighting bugs rather than like a missing feature, so it
+                // is left out deliberately until it is done properly.
+            }
+
+            // ── EMISSION ─────────────────────────────────────────────────────
+            // SurfaceSample is a REFLECTION parameter set: it has no slot for
+            // emission, transmission or opacity. So a bound material's Emission
+            // never reached the liquid — the branch simply never read the field.
+            // Reported as "emission worked yesterday and stopped": binding a
+            // material moves shading into this branch, and this branch had no
+            // emission, so the glow disappeared the moment a material was bound.
+            //
+            // Added as LOCAL radiance, matching the foam in-scatter convention
+            // right above: raygen multiplies payload.radiance by the throughput
+            // it already carries, so pre-multiplying here would square it.
+            //
+            // The thin-shell branch above deliberately returns before this, the
+            // same way the triangle branch does — an emissive bubble material
+            // would wash the film out.
+            {
+                vec3 isoEmission = vec3(im.emission_r, im.emission_g, im.emission_b)
+                                 * max(im.emission_strength, 0.0);
+                if (im.emission_tex > 0u) {
+                    // Emission texture is authoritative for colour, exactly as on
+                    // the surface path; strength stays the material's.
+                    vec2 emScale = vec2(abs(im.uv_scale_x) > 1e-6 ? im.uv_scale_x : 1.0,
+                                        abs(im.uv_scale_y) > 1e-6 ? im.uv_scale_y : 1.0);
+                    isoEmission = triplanarTexel(im.emission_tex, hitPos, N,
+                                                 emScale, vec2(im.uv_offset_x, im.uv_offset_y)).rgb
+                                * max(im.emission_strength, 0.0);
+                }
+                payload.radiance += isoEmission;
+            }
+
+            // ── Glass / resin split, drawn ONCE ──────────────────────────────
+            // Declared here because BOTH branches below read it and the draw
+            // must be the same one: rolling separately would let a material
+            // take the glass lobe and the resin coat in the same hit.
+            //
+            // The rule is the triangle's, kept verbatim: a material carrying
+            // BOTH transmission and interior depth is an amber/jade body, not a
+            // coated one. Picking the coat for it would silently repaint every
+            // existing scene with such a material bound to a liquid.
+            float isoTrans      = clamp(im.transmission, 0.0, 1.0);
+            bool  takeGlassLobe = (isoTrans > 0.01) && (rnd(payload.seed) < isoTrans);
+
+            // ── TRANSMISSION (real refraction) ───────────────────────────────
+            // ★ This is the lobe whose absence made "transmission does nothing"
+            // on the liquid. scatterPrincipled is reflection-only, so binding a
+            // material actually made the surface LESS capable than leaving it
+            // unbound: the built-in dielectric below refracts, the material path
+            // did not. Nothing about the data was wrong.
+            //
+            // Uses the SAME scatterGlass the mesh uses — it already lives in the
+            // shared bsdf_scatter module — so IOR, roughness, dispersion and the
+            // resin-tinted interior behave identically on a mesh and on a liquid.
+            //
+            // ★ frontFace comes from startInside, which is SDF-INHERITED data:
+            // the march already established which side of the level set the ray
+            // began on. A mesh has to read a winding order for this; here it is
+            // a measurement, and it is the reason the lobe can be trusted on a
+            // surface that has no consistent orientation of its own.
+            if (takeGlassLobe) {
+                float isoIor = (im.ior > 1.0001) ? im.ior : 1.33;
+                scatterGlass(hitPos,
+                             /*macroNormal  */ N,
+                             /*shadingNormal*/ N,   // an SDF has one normal: the gradient
+                             /*frontFace    */ !startInside,
+                             rayDir, ss.albedo, isoIor, ss.roughness,
+                             imx.transmission_density,
+                             clamp(vec3(imx.resin_color_r, imx.resin_color_g, imx.resin_color_b),
+                                   vec3(0.0), vec3(1.0)),
+                             im.dispersion, payload.seed);
+                // ★ Same band re-seat every other lobe here needs — and this one
+                // NEEDS the probe: the refracted direction continues INTO the
+                // body, so on a thin wall (the side of a pool) a blind voxel
+                // push clears the liquid and the surface behind it together.
+                bool gHandOff = false;
+                payload.scatterOrigin =
+                    seatOutsideBand(hitPos, payload.scatterDir, N, exitPush, gHandOff);
+                payload.skipAABBs = gHandOff;
+                payload.primaryARG = packHalf2x16(ss.albedo.rg);
+                payload.primaryABT = packHalf2x16(vec2(ss.albedo.b, 1.0));
+                payload.primaryNrm = plPackNormal(N);
+                return;
+            }
+
+            // ── RESIN COAT ───────────────────────────────────────────────────
+            // A refractive ABSORBING layer over an opaque base: lacquered/candied
+            // surfaces, honey and syrup skins, anything with suspended interior
+            // structure. Fresnel-splits the surface — the reflection lobe is the
+            // glossy coat, everything else reaches the base, which is tinted by
+            // the coat absorption and then shaded as an ordinary opaque surface.
+            //
+            // ★ The coat thickness is AUTHORED (transmission_density), NOT
+            // measured from the field. This is a skin ON the surface, not the
+            // body of the liquid — the body's own depth absorption already ran
+            // above, and folding the two together would double-count. That is
+            // also why this matches the triangle path's thickness model exactly
+            // rather than using the (better) real hitT - tNear distance: same
+            // parameter, same look, on a mesh and on a liquid alike.
+            //
+            // The glass/resin split is drawn once, above — on the draws where
+            // the glass lobe won we already returned through scatterGlass, so
+            // reaching here means this hit is the coat.
+            if (imx.transmission_density > 1e-4 && !takeGlassLobe) {
+                float effIor = max((im.ior > 0.01) ? im.ior : 1.45, 1.45);
+                float cosTr  = clamp(dot(-rayDir, N), 0.0, 1.0);
+                float fresr  = schlickFresnel(cosTr, effIor);
+                // Coat gloss is the resin LAYER's own roughness, independent of
+                // the base (which is forced rough below).
+                float resinRough = clamp(imx.resin_roughness, 0.0, 1.0);
+                if (rnd(payload.seed) < fresr) {
+                    vec3 Vr = -rayDir;
+                    vec3 refl;
+                    if (resinRough < 0.02) {
+                        refl = reflect(rayDir, N);
+                    } else {
+                        // ggxSampleVNDF returns the REFLECTED direction directly.
+                        float alphaR = max(resinRough * resinRough, 1e-4);
+                        refl = ggxSampleVNDF(N, Vr, alphaR, rnd(payload.seed), rnd(payload.seed));
+                        if (dot(refl, N) <= 0.0) refl = reflect(rayDir, N);
+                    }
+                    refl = normalize(refl);
+                    payload.scatterDir    = refl;
+                    // Outward-going, so the helper's probe is skipped and this
+                    // is just the band push — routed through it anyway so every
+                    // lobe in this branch obeys ONE rule. Divergence between
+                    // these sites is what produced the thin-wall bug.
+                    bool rHandOff = false;
+                    payload.scatterOrigin =
+                        seatOutsideBand(hitPos, refl, N, exitPush, rHandOff);
+                    payload.skipAABBs = rHandOff;
+                    payload.scattered     = true;
+                    payload.bounceType    = BOUNCE_RESIN;   // raygen's resin budget
+                    payload.primaryARG = packHalf2x16(ss.albedo.rg);
+                    payload.primaryABT = packHalf2x16(vec2(ss.albedo.b, 1.0));
+                    payload.primaryNrm = plPackNormal(N);
+                    return;
+                }
+                // Reached the base. Per-channel absorption ∝ (1 - tint), so a
+                // warm tint passes its own hue and swallows the complement
+                // instead of darkening everything.
+                vec3  ct    = clamp(vec3(imx.resin_color_r, imx.resin_color_g, imx.resin_color_b),
+                                    vec3(0.0), vec3(1.0));
+                float ctMax = max(ct.r, max(ct.g, ct.b));
+                vec3  ext   = (vec3(1.0) - ct) * 1.35 + vec3(0.22 * (1.0 - ctMax));
+                float cosVr = max(abs(cosTr), 0.25);
+
+                vec3 Tdir = refract(rayDir, N, 1.0 / effIor);
+                if (dot(Tdir, Tdir) < 1e-6) Tdir = rayDir;   // TIR fallback
+                Tdir = normalize(Tdir);
+
+                // NOTE: the triangle path also parallax-offsets the base ALBEDO
+                // TEXTURE lookup along the refracted lateral travel. There is no
+                // texture to offset here — the isosurface has no UVs — so the
+                // base albedo is the material's scalar Base Color.
+                bool resinHasInclusions = (imx.resin_inclusion > 0.001 ||
+                                           imx.resin_dirt > 0.001 ||
+                                           imx.resin_shard > 0.001);
+                if (resinHasInclusions) {
+                    // One light direction to shade the interior specks by (no
+                    // shadow rays; the march is purely procedural). This uses
+                    // volSampleLight — the surface shader's pick_smart_light_gl
+                    // does NOT exist in this stage.
+                    vec3 resinLightDir = N;
+                    if (cam.lightCount > 0u) {
+                        uint li = min(uint(rnd(payload.seed) * float(cam.lightCount)),
+                                      cam.lightCount - 1u);
+                        vec3 wi_; float d_; float a_; bool invSq_;
+                        if (volSampleLight(lights.l[li], hitPos,
+                                           rnd(payload.seed), rnd(payload.seed),
+                                           wi_, d_, a_, invSq_) && dot(wi_, wi_) > 1e-8) {
+                            resinLightDir = normalize(wi_);
+                        }
+                    }
+                    // ANCHOR. The triangle path offers object space so the
+                    // interior travels with the mesh. There is no object here;
+                    // the analogue is DOMAIN-local, through the same inverse
+                    // transform the volume VM uses a few hundred lines below.
+                    //
+                    // ★ It is NOT the same guarantee, and the difference is
+                    // invisible until the liquid moves: the fluid FLOWS THROUGH
+                    // a domain-fixed pattern, so the inclusions read as
+                    // stationary in the tank rather than carried along by the
+                    // material. Static or slow liquids look right; a pour does
+                    // not. Real carriage needs an advected coordinate (a
+                    // per-particle UVW attribute), which does not exist yet.
+                    vec3 mOrg = hitPos, mDir = Tdir, mLit = resinLightDir;
+                    if ((im.flags & MAT_FLAG_RESIN_OBJ_SPACE) != 0u) {
+                        mOrg.x = vol.inv_transform[0]*hitPos.x + vol.inv_transform[1]*hitPos.y + vol.inv_transform[2]*hitPos.z  + vol.inv_transform[3];
+                        mOrg.y = vol.inv_transform[4]*hitPos.x + vol.inv_transform[5]*hitPos.y + vol.inv_transform[6]*hitPos.z  + vol.inv_transform[7];
+                        mOrg.z = vol.inv_transform[8]*hitPos.x + vol.inv_transform[9]*hitPos.y + vol.inv_transform[10]*hitPos.z + vol.inv_transform[11];
+                        // Directions drop the translation column.
+                        mat3 volRot = mat3(vol.inv_transform[0], vol.inv_transform[4], vol.inv_transform[8],
+                                           vol.inv_transform[1], vol.inv_transform[5], vol.inv_transform[9],
+                                           vol.inv_transform[2], vol.inv_transform[6], vol.inv_transform[10]);
+                        mDir = normalize(volRot * Tdir);
+                        mLit = normalize(volRot * resinLightDir);
+                    }
+                    ResinMarch rm = resinMarchInterior(
+                        mOrg, mDir, imx.transmission_density, ext,
+                        imx.resin_inclusion, imx.resin_dirt,
+                        vec3(imx.resin_dirt_color_r, imx.resin_dirt_color_g, imx.resin_dirt_color_b),
+                        imx.resin_shard, imx.resin_shard_hue,
+                        clamp(ct * 0.5 + vec3(0.45), 0.0, 1.0),   // dust tint from coat colour
+                        mLit,
+                        max(imx.resin_inclusion_scale, 0.01),
+                        uint(imx.dust_style + 0.5),
+                        vec3(imx.dust_color_a_r, imx.dust_color_a_g, imx.dust_color_a_b),
+                        vec3(imx.dust_color_b_r, imx.dust_color_b_g, imx.dust_color_b_b),
+                        uint(imx.shard_shape + 0.5), payload.seed);
+                    if (rm.dirtHit) {
+                        ss.albedo = rm.dirtAlbedo;   // terminate on the speck
+                    } else {
+                        ss.albedo = mix(ss.albedo * rm.absorb, rm.dustTint * rm.absorb, rm.dustCover);
+                        ss.albedo = clamp(ss.albedo + rm.shardGlow + rm.dustGlow + vec3(rm.sparkle),
+                                          0.0, 1.0);
+                    }
+                } else {
+                    float pathLen = 2.0 * imx.transmission_density / cosVr;
+                    ss.albedo *= exp(-pathLen * ext);
+                }
+                // The coat already took the specular, so the base is rough and
+                // non-metallic — same as the triangle path.
+                //
+                // ★ Unlike the triangle path, this base gets NO direct lighting:
+                // the isosurface branch has no NEE block, so it is lit by the
+                // indirect bounce alone. Unbiased but noisier — a dark resin
+                // base on a liquid needs more samples than the same material on
+                // a mesh, and that is a sample-count symptom, not a bug.
+                ss.roughness = 1.0;
+                ss.metallic  = 0.0;
+            }
+
+            scatterPrincipled(ss, payload.seed);
+
+            // ★ Re-seat the scattered ray OUTSIDE the level-set band.
+            //
+            // Every lobe leaves via offset_ray(), whose offset is a few float
+            // ULPs — correct for a triangle, where the surface is a plane of
+            // zero thickness. This surface is not: it is an isosurface inside a
+            // proxy band about half a voxel thick, i.e. ~25 mm at the 5 cm
+            // voxels the fluid actually runs at. A ULP-offset ray restarts
+            // INSIDE that band, immediately re-hits the same surface, and
+            // scatters again — and again.
+            //
+            // That single fact explains three separate symptoms:
+            //   - metal turns hard BLACK: each re-hit multiplies throughput by
+            //     the metal albedo, and a metal has no diffuse escape;
+            //   - clearcoat piles up glare: each re-hit is another draw of the
+            //     stochastic layer lottery, with its 1/p compensation;
+            //   - it is WORST on overlapping droplets and layered sheets, where
+            //     re-entry finds yet another crossing instead of open air.
+            // The fall-through dielectric below never showed it because it
+            // pushes 3 mm along the outgoing direction and mostly transmits.
+            //
+            // Push along the direction of travel, so it works for a reflection
+            // and a transmission alike, and scale it to the field the band is
+            // built from rather than to a hand-tuned millimetre.
+            // (exitPush is declared at the top of this block — the thin-shell
+            // and resin branches above return early and need the same push.)
+            //
+            // Goes through the shared seat helper as well: scatterPrincipled's
+            // translucent and subsurface lobes can also leave INTO the body, and
+            // there the blind push has the same thin-wall problem. Reflections
+            // cost nothing extra — the helper returns immediately for them.
+            bool pHandOff = false;
+            payload.scatterOrigin =
+                seatOutsideBand(hitPos, payload.scatterDir, N, exitPush, pHandOff);
+            payload.skipAABBs = pHandOff;
+
+            payload.primaryARG = packHalf2x16(ss.albedo.rg);
+            payload.primaryABT = packHalf2x16(vec2(ss.albedo.b, 1.0));
+            payload.primaryNrm = plPackNormal(N);
+            return;
+        }
+
         if (roughness > 1e-3) {
             float a = roughness * roughness;
             float u1 = rnd(payload.seed);

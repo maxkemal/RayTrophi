@@ -265,6 +265,20 @@ public:
         return mat;
     }
     
+    // Exact inverse of decompose(): T * Rz * Ry * Rx * S, the same order
+    // Transform::getPivotMatrix() uses. `fromTRS` above builds a different
+    // (and non-round-tripping) basis, so anything that has to survive a
+    // decompose/compose cycle — reading a transform, editing one component,
+    // writing it back — must come through here.
+    static Matrix4x4 composeTRS(const Vec3& position, const Vec3& rotation_degrees,
+                                const Vec3& scale) {
+        const float deg2rad = 3.14159265358979f / 180.0f;
+        const Matrix4x4 R = rotationZ(rotation_degrees.z * deg2rad) *
+                            rotationY(rotation_degrees.y * deg2rad) *
+                            rotationX(rotation_degrees.x * deg2rad);
+        return translation(position) * R * scaling(scale);
+    }
+
     // Decompose matrix into position, rotation (Euler XYZ degrees), and scale
     void decompose(Vec3& position, Vec3& rotation, Vec3& scale) const {
         // Extract position from translation column

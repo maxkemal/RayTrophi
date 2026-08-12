@@ -1,4 +1,4 @@
-/*
+﻿/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          Api/RtIpc.cpp
@@ -665,14 +665,49 @@ json dispatchMethod(const std::string& method, const json& params) {
             Matrix4x4 m;
             rtapi::Result r = rtapi::getObjectTransform(name, m);
             if (!r.ok) return json{{"__error", r.error}};
-            return matrixToJson(m);
+            Vec3 t(0.0f), rot(0.0f), s(1.0f);
+            m.decompose(t, rot, s);
+            return json{{"matrix", matrixToJson(m)},
+                        {"translation", vec3ToJson(t)},
+                        {"rotation", vec3ToJson(rot)},
+                        {"scale", vec3ToJson(s)}};
         });
     }
     if (method == "scene.set_transform") {
         std::string name = requireString(params, "name");
-        Matrix4x4 matrix = requireMatrix(params, "matrix");
-        return enqueueResult([name, matrix](UIContext&) {
-            return rtapi::setObjectTransform(name, matrix);
+        // Matrix wins when given; otherwise the same component form the script
+        // binding takes, so a scene can be authored identically over either
+        // channel instead of IPC callers having to compose Euler by hand.
+        if (params.contains("matrix")) {
+            Matrix4x4 matrix = requireMatrix(params, "matrix");
+            return enqueueResult([name, matrix](UIContext&) {
+                return rtapi::setObjectTransform(name, matrix);
+            });
+        }
+        const bool has_t = params.contains("translation");
+        const bool has_r = params.contains("rotation");
+        const bool has_s = params.contains("scale");
+        if (!has_t && !has_r && !has_s)
+            throw std::runtime_error(
+                "scene.set_transform needs 'matrix', or one of "
+                "'translation' / 'rotation' / 'scale'");
+        const Vec3 in_t = has_t ? requireVec3(params, "translation") : Vec3(0.0f);
+        const Vec3 in_r = has_r ? requireVec3(params, "rotation") : Vec3(0.0f);
+        const Vec3 in_s = has_s ? requireVec3(params, "scale") : Vec3(1.0f);
+        return enqueueResult([=](UIContext&) {
+            Matrix4x4 m = Matrix4x4::identity();
+            rtapi::Result got = rtapi::getObjectTransform(name, m);
+            if (!got.ok) return got;
+            if (!has_r && !has_s) {
+                m.m[0][3] = in_t.x; m.m[1][3] = in_t.y; m.m[2][3] = in_t.z;
+                return rtapi::setObjectTransform(name, m);
+            }
+            Vec3 t(0.0f), r(0.0f), s(1.0f);
+            m.decompose(t, r, s);
+            if (has_t) t = in_t;
+            if (has_r) r = in_r;
+            if (has_s) s = in_s;
+            return rtapi::setObjectTransform(name, Matrix4x4::composeTRS(t, r, s));
         });
     }
 
@@ -1292,7 +1327,14 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
                         {"render_mode", info.render_mode}, {"backend", info.backend},
                         {"boundary", info.boundary}, {"preset", info.preset},
-                        {"viscosity", info.viscosity}, {"enabled", info.enabled},
+                        {"kinematic_viscosity", info.kinematic_viscosity},
+                        {"viscosity_sweeps", info.viscosity_sweeps},
+                        {"viscosity_wall_slip", info.viscosity_wall_slip},
+                        {"surface_material", info.surface_material},
+                        {"pore_amount", info.pore_amount},
+                        {"pore_scale", info.pore_scale},
+                        {"pore_detail", info.pore_detail},
+                        {"enabled", info.enabled},
                         {"visible", info.visible}};
         });
     }
@@ -1312,7 +1354,14 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
                     {"render_mode", info.render_mode}, {"backend", info.backend},
                     {"boundary", info.boundary}, {"preset", info.preset},
-                    {"viscosity", info.viscosity}, {"enabled", info.enabled},
+                    {"kinematic_viscosity", info.kinematic_viscosity},
+                    {"viscosity_sweeps", info.viscosity_sweeps},
+                    {"viscosity_wall_slip", info.viscosity_wall_slip},
+                    {"surface_material", info.surface_material},
+                    {"pore_amount", info.pore_amount},
+                    {"pore_scale", info.pore_scale},
+                    {"pore_detail", info.pore_detail},
+                    {"enabled", info.enabled},
                     {"visible", info.visible}});
             }
             return json{{"domains", arr}};
@@ -1340,11 +1389,13 @@ json dispatchMethod(const std::string& method, const json& params) {
         std::string domain = requireString(params, "domain");
         return enqueueResult([domain, params](UIContext&) {
             Vec3 dmin, dmax;
-            float voxel_size = 0.0f, viscosity = 0.0f;
+            float voxel_size = 0.0f, kinematic_viscosity = 0.0f, wall_slip = 0.0f;
+            int   sweeps = 0;
             std::string render_mode, backend, boundary, preset;
             bool enabled = false, visible = false;
             const Vec3* p_dmin = nullptr; const Vec3* p_dmax = nullptr;
             const float* p_voxel = nullptr; const float* p_viscosity = nullptr;
+            const int* p_sweeps = nullptr; const float* p_wall_slip = nullptr;
             const std::string* p_render = nullptr; const std::string* p_backend = nullptr;
             const std::string* p_boundary = nullptr; const std::string* p_preset = nullptr;
             const bool* p_enabled = nullptr; const bool* p_visible = nullptr;
@@ -1356,11 +1407,51 @@ json dispatchMethod(const std::string& method, const json& params) {
             else if (params.contains("device")) { backend = params.at("device").get<std::string>(); p_backend = &backend; }
             if (params.contains("boundary")) { boundary = params.at("boundary").get<std::string>(); p_boundary = &boundary; }
             if (params.contains("preset")) { preset = params.at("preset").get<std::string>(); p_preset = &preset; }
-            if (params.contains("viscosity")) { viscosity = params.at("viscosity").get<float>(); p_viscosity = &viscosity; }
+            // `viscosity` is intentionally NOT accepted as an alias: the old key
+            // carried a unitless 0..200 dial and the new one is m²/s, so a script
+            // still sending viscosity=20 for honey must fail visibly rather than
+            // silently request lava.
+            if (params.contains("viscosity")) {
+                return rtapi::Result::fail(
+                    "'viscosity' was replaced by 'kinematic_viscosity' in m^2/s "
+                    "(water 1e-6, oil 1e-4, chocolate 4e-3, honey 7e-3, lava 0.5). "
+                    "The old value was unitless and is not convertible.");
+            }
+            if (params.contains("kinematic_viscosity")) {
+                kinematic_viscosity = params.at("kinematic_viscosity").get<float>();
+                p_viscosity = &kinematic_viscosity;
+            }
+            if (params.contains("viscosity_sweeps")) {
+                sweeps = params.at("viscosity_sweeps").get<int>(); p_sweeps = &sweeps;
+            }
+            if (params.contains("viscosity_wall_slip")) {
+                wall_slip = params.at("viscosity_wall_slip").get<float>(); p_wall_slip = &wall_slip;
+            }
+            // Material name, or "" to go back to the built-in dielectric.
+            std::string surface_material; const std::string* p_surf_mat = nullptr;
+            if (params.contains("surface_material")) {
+                surface_material = params.at("surface_material").get<std::string>();
+                p_surf_mat = &surface_material;
+            }
+            // Procedural porosity on the SDF isosurface.
+            float pore_amount = 0.0f; const float* p_pore_amt = nullptr;
+            float pore_scale = 0.0f;  const float* p_pore_scl = nullptr;
+            float pore_detail = 0.0f; const float* p_pore_det = nullptr;
+            if (params.contains("pore_amount")) {
+                pore_amount = params.at("pore_amount").get<float>(); p_pore_amt = &pore_amount;
+            }
+            if (params.contains("pore_scale")) {
+                pore_scale = params.at("pore_scale").get<float>(); p_pore_scl = &pore_scale;
+            }
+            if (params.contains("pore_detail")) {
+                pore_detail = params.at("pore_detail").get<float>(); p_pore_det = &pore_detail;
+            }
             if (params.contains("enabled")) { enabled = params.at("enabled").get<bool>(); p_enabled = &enabled; }
             if (params.contains("visible")) { visible = params.at("visible").get<bool>(); p_visible = &visible; }
             return rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
                                             p_backend, p_boundary, p_preset, p_viscosity,
+                                            p_sweeps, p_wall_slip, p_surf_mat,
+                                            p_pore_amt, p_pore_scl, p_pore_det,
                                             p_enabled, p_visible);
         });
     }
@@ -1388,6 +1479,10 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"smoke_generation", s.smoke_generation},
                         {"flame_dissipation", s.flame_dissipation},
                         {"fire_max_temperature", s.fire_max_temperature},
+                        {"structural_coupling_enabled", s.structural_coupling_enabled},
+                        {"structural_pressure_scale", s.structural_pressure_scale},
+                        {"structural_min_intensity", s.structural_min_intensity},
+                        {"structural_event_interval", s.structural_event_interval},
                         {"buoyancy_heat", s.buoyancy_heat},
                         {"buoyancy_density", s.buoyancy_density},
                         {"vorticity", s.vorticity}, {"fire_expansion", s.fire_expansion},
@@ -1418,6 +1513,10 @@ json dispatchMethod(const std::string& method, const json& params) {
             RT_GAS_JSON(smoke_generation, float);
             RT_GAS_JSON(flame_dissipation, float);
             RT_GAS_JSON(fire_max_temperature, float);
+            RT_GAS_JSON(structural_coupling_enabled, bool);
+            RT_GAS_JSON(structural_pressure_scale, float);
+            RT_GAS_JSON(structural_min_intensity, float);
+            RT_GAS_JSON(structural_event_interval, float);
             RT_GAS_JSON(buoyancy_heat, float);
             RT_GAS_JSON(buoyancy_density, float);
             RT_GAS_JSON(vorticity, float);
@@ -1500,7 +1599,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"solid_mass", f.solid_mass},
                     {"pyrolyzed_mass", f.pyrolyzed_mass},
                     {"molten_reservoir_mass", f.molten_reservoir_mass},
+                    {"transferred_mass", f.transferred_mass},
                     {"mass_conservation_error", f.mass_conservation_error},
+                    {"mass_budget_overflow", f.mass_budget_overflow},
+                    {"mass_negative", f.mass_negative},
+                    {"mass_invalid_elements", f.mass_invalid_elements},
                     {"domain", "surface_uv"},
                     {"semantics", f.semantics}
                 });

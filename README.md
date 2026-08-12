@@ -172,6 +172,21 @@ A multi-threaded grid- and particle-based FX suite with CUDA and CPU backends, i
 - Keyframe-animated colliders are re-posed per sub-step so the fluid tracks moving geometry
 - Adaptive resolution, open/closed boundary modes, dynamic particle reseeding to prevent leaks, fluid material presets (Water, Oil, Custom)
 
+### Liquid surface shading — the isosurface *is* a material surface
+The reconstructed SDF liquid boundary is shaded by the **same BSDF a triangle
+gets**, with no mesh generated at any point. Bind any scene material to a fluid
+domain and molten glass, lava, mud, chocolate or set resin become ordinary
+material work instead of shader special cases (Vulkan RT):
+- **Full Principled lobe selection** — clearcoat, metal, dielectric, translucency and random-walk SSS, all through the shared BSDF module
+- **Real refraction** through the same glass lobe meshes use: IOR, rough transmission, TIR and dispersion. The front/back-face decision is *measured* from the level set rather than read from a winding order, and the interior path length is the true traversed distance instead of an authored constant
+- **Thin-shell film** (soap foam, champagne head) with Fresnel rim and thin-film iridescence
+- **Resin coat** over an opaque base, including the procedural interior march — dust, dirt specks and colored shards — anchored in domain space
+- **Emission**, including emission textures
+- **Tri-planar textures** (albedo, roughness, metallic, emission). A raymarched isosurface has no UVs and cannot have them — there is no mesh to unwrap and the surface is rebuilt from the field every frame — so the material's own UV scale/offset become world-space tiling. Roughness/metallic share the exact packed-ORM channel policy the mesh path uses
+- **Procedural porosity** for fermented dough, aerated batter, pumice and set foam: a cellular field is carved out of the density *before* the surface is found, so the pores are real geometry. Their rims pick up correct normals, refraction and self-shadowing from the field gradient — an alpha cutout would punch rimless holes. Bubble size is authored in world units, so changing the domain resolution re-renders the same crumb instead of resizing it
+
+> Known limits, by construction rather than by omission: the tri-planar projection and the resin interior are anchored in **world space**, so a fast-flowing liquid slides through a stationary pattern (a still pool, dough, or set resin is correct). Carrying them with the fluid needs an advected UVW attribute. Normal maps are not wired on the isosurface yet — tri-planar normal mapping needs a per-plane tangent frame and a whiteout blend, and doing it half-way reads as a lighting bug rather than a missing feature.
+
 ### Gas, smoke & fire
 - A **Vulkan Compute dense-grid solver** for temperature, soot, and fuel density, with the CPU reference path retained
 - Persistent GPU stages for advection, combustion, buoyancy, vorticity confinement, curl turbulence, pressure projection, and external forces
