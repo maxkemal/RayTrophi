@@ -84,7 +84,7 @@ Tek bir fiziksel temelli path tracer, üç hızlandırma backend'ini besler. Sah
 - **Principled BSDF** (Disney tarzı uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
 - **Lambertian, Metal, Dielectric** klasik modeller
 - **Yüzey-altı saçılım (SSS)**
-- **Interior Volume** (resin / cam-bilye içi): opak taban üstünde veya şeffaf camın içinde Beer-Lambert derinlik emilimi (üç backend'de de), artı prosedürel iç sistem (Vulkan RT): deterministik DDA ile gezilen kapanımlar — keskin kir benekleri, hava kabarcıkları ve renkli cam kırıkları (yuvarlak çip veya obje döndükçe parlayan uzamış faset kristaller) — ve stilli toz bulutları (nebula, iki renkli billow, lifli çizgiler, domain-warp'lı "suda mürekkep" boya girdabı); obje/dünya çapalama, küratörlü iç-hacim preset'leri, ekstra sahne ışını yok. Kırık renkleri foton caustic'e taşınır — vitray desenli caustic. Teknik not: [docs/INTERIOR_VOLUME.md](docs/INTERIOR_VOLUME.md)
+- **Interior Volume** (resin / cam-bilye içi): opak taban üstünde veya şeffaf camın içinde Beer-Lambert derinlik emilimi (üç backend'de de), artı prosedürel iç sistem (Vulkan RT): deterministik DDA ile gezilen kapanımlar — keskin kir benekleri, hava kabarcıkları ve renkli cam kırıkları (yuvarlak çip veya obje döndükçe parlayan uzamış faset kristaller) — ve stilli toz bulutları (nebula, iki renkli billow, lifli çizgiler, domain-warp'lı "suda mürekkep" boya girdabı); obje/dünya çapalama, küratörlü iç-hacim preset'leri, ekstra sahne ışını yok. Kırık renkleri foton caustic'e taşınır — vitray desenli caustic. Teknik not: [docs/dev/INTERIOR_VOLUME.md](docs/dev/INTERIOR_VOLUME.md)
 - **Spektral / melanin tabanlı saç BSDF**
 - NanoVDB seyrek hacimler ve prosedürel gürültü yoğunluğuyla **volumetrik render**
 - Tam doku desteği (albedo, roughness, metallic, normal, emission, transmission, opacity), sRGB/linear yönetimi
@@ -317,9 +317,9 @@ yönetir ve undo/redo semantiğini korur.
 
 TLS listener; loopback, güvenilir LAN veya VPN içindir, public internete doğrudan açılmaz.
 Internet entegrasyonu ayrı OIDC/mTLS gateway arkasında yer alır. Ayrıntılar:
-[IPC güvenlik ve performans](docs/IPC_SECURITY_PERFORMANCE.md),
-[gateway sınırı](docs/REMOTE_IPC_GATEWAY.md) ve
-[API & scripting yol haritası](docs/API_SCRIPTING_ROADMAP.md).
+[IPC güvenlik ve performans](docs/dev/IPC_SECURITY_PERFORMANCE.md),
+[gateway sınırı](docs/dev/REMOTE_IPC_GATEWAY.md) ve
+[API & scripting yol haritası](docs/dev/API_SCRIPTING_ROADMAP.md).
 
 Regresyon istemcileri `scripts/` altındadır: `rt_api_smoke_test.py`, `ipc_test_client.py`,
 `remote_ipc_client.py` ve `remote_ipc_security_test.py`.
@@ -455,6 +455,11 @@ RayTrophi/
 ---
 
 ## 🗺️ Yol haritası
+
+> Ayrıntılı mühendislik yol haritaları, mimari kararlar, kabul testi
+> protokolleri ve kök neden postmortem'leri
+> [`docs/dev/`](docs/dev/README.md) altında; hepsi indekslenmiş ve durum
+> etiketli (AKTİF / REFERANS / ARŞİV / TASLAK).
 
 **Yakın zamanda eklenenler**
 - ✅ Vulkan RT backend (interaktif birincil) — GPU skinning, asenkron ping-pong pipeline, analitik LSS saç

@@ -137,7 +137,7 @@ Phase 1 and the first built-in runtime package were confirmed on 2026-08-14:
 - Offline contract test: `scripts/test_template_manifest_contract.py`
 - Embedded smoke test: `scripts/test/rt_test_templates.py`
 - Named-pipe coverage: `scripts/ipc_test_client.py`
-- Public API notes: `docs/TEMPLATE_REGISTRY_API.md`
+- Public API notes: `docs/dev/TEMPLATE_REGISTRY_API.md`
 
 No scene/project loading and no Template Hub UI were added in Phase 1.
 

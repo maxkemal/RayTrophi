@@ -84,7 +84,7 @@ A single physically-based path tracer feeds three acceleration backends. The sce
 - **Principled BSDF** (Disney-style uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
 - **Lambertian, Metal, Dielectric** classic models
 - **Subsurface scattering (SSS)**
-- **Interior Volume** (resin / glass-marble interiors): Beer-Lambert depth absorption over an opaque base or inside see-through glass (all three backends), plus a procedural interior system (Vulkan RT): deterministic DDA-traversed inclusions — sharp dirt specks, air bubbles, and colored glass shards (round chips or elongated faceted crystals that flash as the object turns) — and styled dust clouds (nebula, two-color billow, wispy streaks, domain-warped paint-swirl "ink in water"), all with object/world anchoring, curated interior presets, and no extra scene rays. Shard colors carry into photon caustics for stained-glass patterns. Technical note: [docs/INTERIOR_VOLUME.md](docs/INTERIOR_VOLUME.md)
+- **Interior Volume** (resin / glass-marble interiors): Beer-Lambert depth absorption over an opaque base or inside see-through glass (all three backends), plus a procedural interior system (Vulkan RT): deterministic DDA-traversed inclusions — sharp dirt specks, air bubbles, and colored glass shards (round chips or elongated faceted crystals that flash as the object turns) — and styled dust clouds (nebula, two-color billow, wispy streaks, domain-warped paint-swirl "ink in water"), all with object/world anchoring, curated interior presets, and no extra scene rays. Shard colors carry into photon caustics for stained-glass patterns. Technical note: [docs/dev/INTERIOR_VOLUME.md](docs/dev/INTERIOR_VOLUME.md)
 - **Spectral / melanin-based hair BSDF**
 - **Volumetric rendering** with NanoVDB sparse volumes and procedural noise density
 - Full texture support (albedo, roughness, metallic, normal, emission, transmission, opacity) with sRGB/linear handling
@@ -318,9 +318,9 @@ main-thread command queue and preserve undo/redo semantics.
 
 The TLS listener is intended for loopback, trusted LAN or VPN use—not direct public-Internet
 exposure. Internet integrations belong behind a separate OIDC/mTLS gateway. See
-[IPC security and performance](docs/IPC_SECURITY_PERFORMANCE.md),
-[gateway boundary](docs/REMOTE_IPC_GATEWAY.md), and the
-[API & scripting roadmap](docs/API_SCRIPTING_ROADMAP.md).
+[IPC security and performance](docs/dev/IPC_SECURITY_PERFORMANCE.md),
+[gateway boundary](docs/dev/REMOTE_IPC_GATEWAY.md), and the
+[API & scripting roadmap](docs/dev/API_SCRIPTING_ROADMAP.md).
 
 Regression clients live in `scripts/`: `rt_api_smoke_test.py`, `ipc_test_client.py`,
 `remote_ipc_client.py`, and `remote_ipc_security_test.py`.
@@ -456,6 +456,11 @@ RayTrophi/
 ---
 
 ## 🗺️ Roadmap
+
+> The detailed engineering roadmaps, architecture decisions, acceptance-test
+> protocols and root-cause postmortems live in
+> [`docs/dev/`](docs/dev/README.md) — indexed and status-tagged. Most of them
+> are written in Turkish; the index explains what each one covers.
 
 **Recently shipped**
 - ✅ Vulkan RT backend (interactive primary) with GPU skinning, async ping-pong pipeline, analytical LSS hair

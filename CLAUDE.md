@@ -46,12 +46,24 @@ Yeni bir `.cpp` eklediysen `.vcxproj`'a da eklemeyi unutma.
 
 ## 3. Her iş partisini SIRALI kontrol listesiyle bitir
 
-`docs/NEXT_BUILD_CHECKS.md`'ye yaz (her partide üzerine yazılır). Sıralama
+`docs/dev/NEXT_BUILD_CHECKS.md`'ye yaz (her partide üzerine yazılır). Sıralama
 ölçütü: **bağımsız ve hızlı görülen önce**, diğerlerinin sonucunu maskeleyen
 sonra. Her madde için hem "ne görmen gerek" hem "bozuksa ne demek" yaz.
 
 ★ En sinsi başarısızlığı ayrıca işaretle: sessizce makul görünen sonuç. Onu
 kimse bug diye raporlamaz.
+
+## 3b. Mühendislik notları `docs/dev/` altında ve DURUM ETİKETLİdir
+
+`docs/` kullanıcıya bakan HTML kılavuz; yol haritası, mimari kararı, kabul testi
+ve postmortem `docs/dev/` altında yaşar. Yeni bir not açtıysan:
+
+1. İlk başlığın hemen altına tek satır durum koy —
+   `> **Durum:** AKTİF | REFERANS | ARŞİV | TASLAK | CANLI — kısa açıklama`
+2. `docs/dev/README.md` indeksine bir satır ekle (doğru durum tablosuna).
+
+Biten bir notu **silme**, `ARŞİV`e çevir; postmortem'ler bu deponun en pahalı
+öğrenilmiş bilgisidir. Dil serbest — çoğu Türkçe, indeks bunu söylüyor.
 
 ## 4. Test scriptleri İKİ yere kopyalanır
 

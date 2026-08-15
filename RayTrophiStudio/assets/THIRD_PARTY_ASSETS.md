@@ -117,7 +117,7 @@ the product URL and its stated license below.
 are RayTrophi's own content and fall under the project's MIT license.
 
 Built-in templates are procedural by design and carry no binary asset payload;
-see `docs/TEMPLATE_HUB_UX_ROADMAP.md`.
+see `docs/dev/TEMPLATE_HUB_UX_ROADMAP.md`.
 
 ---
 
