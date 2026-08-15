@@ -1,4 +1,5 @@
 #include "ParticleSimulation.h"
+#include "Fluid/SubstanceTag.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,11 +8,9 @@
 
 namespace RayTrophiSim {
 namespace {
-uint32_t substanceTag(const std::string& text) {
-    uint32_t hash = 2166136261u;
-    for (unsigned char c : text) hash = (hash ^ c) * 16777619u;
-    return hash;
-}
+// ★ Was a local copy of the FNV loop; now the shared one, so an emitter, a mass
+// transfer and a diagnostic all agree about what a substance's identity IS.
+using RayTrophiSim::Fluid::substanceTag;
 
 bool contains(const SimulationGridDomainState& d, const Vec3& p) {
     return p.x >= d.bounds_min.x && p.y >= d.bounds_min.y && p.z >= d.bounds_min.z &&

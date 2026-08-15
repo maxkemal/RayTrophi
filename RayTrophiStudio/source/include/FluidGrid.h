@@ -127,7 +127,18 @@ public:
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     // SOLID/BOUNDARY FIELD
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    std::vector<uint8_t> solid;     // 0 = fluid, 1 = solid boundary
+    // 0 = fluid, 1 = collider boundary, 2 = solid-phase substance parcels.
+    //
+    // ★★ EVERY CONSUMER TESTS != 0, so the second value needs no consumer
+    // changes and cannot be silently ignored. The value is only distinguished
+    // where the DIFFERENCE matters, which is exactly one place: a solid parcel
+    // must not be ejected from, or blocked by, the cell it is itself filling.
+    // A separate parallel mask was the alternative and it is worse — every
+    // reader would then have to remember to OR two buffers, and the one that
+    // forgot would read as "the chunk works with variational solids off".
+    std::vector<uint8_t> solid;
+    static constexpr uint8_t kSolidCollider = 1u;
+    static constexpr uint8_t kSolidSubstance = 2u;
     std::vector<Vec3>    solid_vel; // linear velocity of the solid in each solid cell
                                     // (moving colliders); 0 elsewhere. Cell-centered,
                                     // size == solid. Read by advect for momentum transfer.
@@ -139,6 +150,35 @@ public:
     // sweep over solid[] (that is what a deserialized or hand-built grid gets).
     std::vector<uint32_t> solid_cells;
     bool solid_cells_valid = false;
+    // ── Solid-phase substance overlay ────────────────────────────────────────
+    // The cells the LAST step's overlay flipped from fluid to solid, and how
+    // many entries of solid_cells belong to the collider stamp. The overlay is
+    // rebuilt from particle positions every step, so unlike the collider mask
+    // it can never be cached — these two exist so removing it costs O(overlay)
+    // instead of a rebuild of the collider stamp.
+    //
+    // ★★★ ONLY CELLS THE OVERLAY ITSELF FLIPPED are recorded, never cells a
+    // collider already owned. Clearing a shared cell would punch a hole in a
+    // static collider that the voxelize cache then refuses to restamp (its
+    // signature did not change), and the hole would appear only where a chunk
+    // happened to touch the collider — i.e. it would look like a collision bug
+    // in the collider, not like bookkeeping.
+    std::vector<uint32_t> substance_solid_cells;
+    std::size_t solid_cells_collider_count = 0;
+    // LAST step's overlay, kept so the producer can be hysteretic and so a cell
+    // that stays solid can carry its wall velocity forward instead of jumping.
+    //
+    // ★★★ WITHOUT HISTORY THE BOUNDARY CHATTERS. The overlay is rebuilt from
+    // particle positions every step, so a cell right at the edge of the fill
+    // threshold flips solid/fluid/solid across consecutive steps. Each flip is a
+    // STEP CHANGE IN THE PRESSURE OPERATOR -- a cell that was carrying fluid
+    // divergence becomes a wall in one step -- and the projection answers it
+    // with an impulse the FLIP transfer hands straight to the particles. That is
+    // the reported "intermittent hard kicks" and, at the contact points, parcels
+    // being thrown clear. The mask must therefore have MEMORY: what was solid
+    // stays solid until it is clearly no longer solid.
+    std::vector<uint32_t> substance_solid_prev_cells;
+    std::vector<Vec3>     substance_solid_prev_vel;
     // Lazy, opt-in per-solid-cell gas source rates (density, heat, fuel, flame).
     // Populated only when a collider enables Gas Interaction.
     std::vector<float> solid_gas_density;
@@ -243,6 +283,10 @@ public:
         // the voxelizer rebuilds it.
         std::vector<uint32_t>().swap(solid_cells);
         solid_cells_valid = false;
+        std::vector<uint32_t>().swap(substance_solid_cells);
+        std::vector<uint32_t>().swap(substance_solid_prev_cells);
+        std::vector<Vec3>().swap(substance_solid_prev_vel);
+        solid_cells_collider_count = 0;
         // Lazy fields carry layout-dependent indexing too. Release them so
         // their respective builders recreate them for the new dimensions.
         std::vector<Vec3>().swap(solid_vel);

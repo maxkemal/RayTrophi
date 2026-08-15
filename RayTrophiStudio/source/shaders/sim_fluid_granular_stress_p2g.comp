@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x=256) in;
+
+layout(set=0,binding=0) readonly buffer Positions { float pos[]; };
+layout(set=0,binding=1) readonly buffer StressDiag { float sd[]; };
+layout(set=0,binding=2) readonly buffer StressShear { float ss[]; };
+layout(set=0,binding=3) buffer Momentum { float momentum[]; };
+
+layout(push_constant) uniform PC {
+    int nx;int ny;int nz;int count;int component;
+    float ox;float oy;float oz;float h;float dt;float inv_density;
+    uint pad;
+} pc;
+
+void weights(float x,out int b,out float w[3],out float dw[3]){
+    b=int(floor(x-0.5));float d=x-float(b+1);
+    w[0]=0.5*(0.5-d)*(0.5-d);w[1]=0.75-d*d;w[2]=0.5*(0.5+d)*(0.5+d);
+    dw[0]=d-0.5;dw[1]=-2.0*d;dw[2]=d+0.5;
+}
+void main(){
+    int id=int(gl_GlobalInvocationID.x);if(id>=pc.count||pc.h<=1e-6)return;
+    vec3 p=vec3(pos[id*3],pos[id*3+1],pos[id*3+2]);float ih=1.0/pc.h;
+    vec3 g=(p-vec3(pc.ox,pc.oy,pc.oz))*ih;
+    if(pc.component==0){g.yz-=vec2(0.5);}else if(pc.component==1){g.xz-=vec2(0.5);}else{g.xy-=vec2(0.5);}
+    int bx,by,bz;float wx[3],wy[3],wz[3],dx[3],dy[3],dz[3];
+    weights(g.x,bx,wx,dx);weights(g.y,by,wy,dy);weights(g.z,bz,wz,dz);
+    vec3 row=pc.component==0?vec3(sd[id*3],ss[id*3],ss[id*3+1]):
+             pc.component==1?vec3(ss[id*3],sd[id*3+1],ss[id*3+2]):
+                             vec3(ss[id*3+1],ss[id*3+2],sd[id*3+2]);
+    int xmax=pc.component==0?pc.nx:pc.nx-1;
+    int ymax=pc.component==1?pc.ny:pc.ny-1;
+    int zmax=pc.component==2?pc.nz:pc.nz-1;
+    for(int k=0;k<3;++k)for(int j=0;j<3;++j)for(int i=0;i<3;++i){
+        int x=bx+i,y=by+j,z=bz+k;if(x<0||x>xmax||y<0||y>ymax||z<0||z>zmax)continue;
+        vec3 grad=vec3(dx[i]*wy[j]*wz[k],wx[i]*dy[j]*wz[k],wx[i]*wy[j]*dz[k])*ih;
+        float impulse=-pc.dt*pc.inv_density*dot(row,grad);
+        int fi=pc.component==0?x+y*(pc.nx+1)+z*(pc.nx+1)*pc.ny:
+               pc.component==1?x+y*pc.nx+z*pc.nx*(pc.ny+1):x+y*pc.nx+z*pc.nx*pc.ny;
+        atomicAdd(momentum[fi],impulse);
+    }
+}

@@ -637,10 +637,9 @@ void main()
         vec3 shadowOrig = offset_ray(hitPoint, normal);
         shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
 
-        // Two shadow paths, chosen per-material by mat.selfShadow. Both use cullMask
-        // 0x01: hair instances carry mask 0xFF (so 0x01 already hits them) while volume
-        // AABBs carry mask 0x02 (so 0x01 excludes them) — do NOT widen to 0x03 or the
-        // shadow ray would strike volume AABBs and treat them as solid blockers.
+        // Two shadow paths, chosen per-material by mat.selfShadow. Both use the
+        // direct-shadow mask: authored triangles/hair plus transient splats,
+        // while volume AABBs remain excluded from hard-shadow traversal.
         //  - selfShadow > 0 → DEEP self-shadow. Drop OpaqueEXT so hair_shadow_anyhit
         //    runs (accumulating transmittance) and drop TerminateOnFirstHit so the ray
         //    passes through successive hair layers, each multiplying shadowPayload.rgb.
@@ -660,7 +659,7 @@ void main()
         }
         traceRayEXT(
             topLevelAS, shadowFlags,
-            0x01, 0, 0, 1,
+            RT_MASK_DIRECT_SHADOW, 0, 0, 1,
             shadowOrig, HAIR_SHADOW_TMIN, lightDir, lightDist - 0.002,
             1
         );

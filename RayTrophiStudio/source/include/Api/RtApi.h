@@ -90,6 +90,18 @@ void clearEventCallbacks();
 // own openProject and by Main.cpp once a UI-driven load completes.
 void notifySceneLoaded();
 
+struct TemplateOpenInfo {
+    std::string template_id;
+    std::string state;
+    std::string code;
+    bool opened = false;
+    bool ui_state_applied = false;
+    std::vector<std::string> errors;
+    std::vector<std::string> warnings;
+};
+Result openTemplate(const std::string& id, const std::string& conflict_policy,
+                    TemplateOpenInfo& out);
+
 // ---------------------------------------------------------------------------
 // Scene queries (main thread only). The API surface is flat-only: every scene
 // node is a flat SoA TriangleMesh (skinned, terrain, water, procedural,
@@ -1151,8 +1163,28 @@ struct FluidDomainInfo {
     float kinematic_viscosity = 0.0f;
     int   viscosity_sweeps = 8;
     float viscosity_wall_slip = 1.0f;  // 0 = no-slip, 1 = free-slip
+    bool  granular_enabled = false;
+    float granular_friction_angle_degrees = 35.0f;
+    float granular_cohesion = 0.0f;
+    float granular_dilatancy_degrees = 5.0f;
+    float granular_young_modulus = 2.0e5f;
+    float granular_poisson_ratio = 0.25f;
+    float granular_tensile_cutoff = 0.0f;
+    float granular_hardening = 0.0f;
+    float granular_fracture_strain = 0.04f;
+    float granular_damage_rate = 6.0f;
+    float granular_healing_rate = 0.0f;
+    bool  granular_rebonding = false;
+    int   granular_max_solver_substeps = 16;
     // Material shading the SurfaceSDF isosurface; empty = built-in dielectric.
     std::string surface_material;
+    // Explicit material shading splat geometry. Empty means scene default for
+    // Built-in Icosphere or preserved per-face materials for a scene object.
+    std::string splat_material;
+    // Zero-level-set displacement in simulation voxels. This is the canonical
+    // geometric fullness control; optical volume density must never be used to
+    // grow or shrink a SurfaceSDF.
+    float surface_offset_voxels = 0.65f;
     // Procedural porosity on the isosurface (fermented dough / aerated batter /
     // pumice). Bubbles are cut out of the FIELD before the surface is found, so
     // the pore rims are real geometry with real normals — not an alpha cutout.
@@ -1160,6 +1192,150 @@ struct FluidDomainInfo {
     float pore_amount = 0.0f;
     float pore_scale  = 0.05f;
     float pore_detail = 0.5f;
+    // Coordinate space every isosurface pattern is addressed in.
+    // 0 = Material, 1 = Domain, 2 = World. See setFluidSurface's coord_space.
+    int   coord_space = 0;
+    // ── Material coordinate (UVW) diagnostics ───────────────────────────────
+    // Read-only. There is nothing to author here — the coordinate is carried by
+    // the particles automatically — but it MUST be observable, or the only way
+    // to tell a working anchor from a silent fallback to world space is to look
+    // at a render and judge.
+    //
+    // ★ uvw_drift is the measurement that separates those two. It is the mean
+    // |uvw - position| over the particles: the average distance each parcel of
+    // liquid has travelled since birth, in world units.
+    //   ~0            -> nothing has moved (or the coordinate is being reseeded
+    //                    every frame, which is the failure this catches)
+    //   grows with the pour -> the coordinate is being carried, as intended
+    // A test asserts that it RISES while liquid falls. Asserting it is merely
+    // non-zero would pass on a coordinate that was seeded once and then frozen.
+    // ── Substance breakdown ─────────────────────────────────────────────────
+    // Which substances are actually present in this domain right now, and how
+    // much of each. One entry per distinct tag found on the live particles.
+    //
+    // ★ Reported by NAME wherever a flow source in this domain claims the tag,
+    // because a hash is not something a caller can act on. Unresolvable tags
+    // (liquid poured by a source that has since been renamed or deleted, or
+    // handed over by a mass transfer) keep their number and an empty name —
+    // "present but unnamed" is a real and different state from "absent", and
+    // collapsing the two would hide exactly the case where identity outlived
+    // its source.
+    struct SubstanceCount {
+        std::string name;        // empty when the tag resolves to nothing
+        uint32_t    tag = 0u;    // 0 = untagged liquid (domain material)
+        uint64_t    particles = 0;
+    };
+    std::vector<SubstanceCount> substances;
+    // Substance -> material bindings authored on this domain. material_id -1
+    // means "the built-in dielectric FOR THAT SUBSTANCE" — a real choice, not
+    // an unset value.
+    struct SubstanceMaterialBinding {
+        std::string substance;
+        int         material_id = -1;
+        std::string material;    // resolved name, empty when id is -1 or stale
+        std::string representation;
+        // What this substance is ACTUALLY drawn as, with "inherit" already
+        // resolved against the domain's own mode: "splat" or "sdf".
+        //
+        // ★★★ REPORTED BECAUSE "inherit" IS NOT AN ANSWER. Two knobs decide one
+        // question here — the domain default and this override — and reading
+        // back "inherit" tells a script only that the question was delegated,
+        // not what came out of it. A test asserting on `representation` passes
+        // happily while the substance is drawn the other way. The panel shows
+        // the same resolution, so the script and the picture can be compared.
+        // Read-only: routing is still authored through `representation`.
+        std::string effective_representation; // "inherit", "splat", "sdf"
+        // ★ REPORTED AS AUTHORED, including the -1 sentinel: a reader has to be
+        // able to tell "inherits the domain" from "was explicitly set to the
+        // same number the domain happens to have". Resolving it here would make
+        // the two indistinguishable and a test could not prove the override was
+        // ever written.
+        float kinematic_viscosity = -1.0f;  // < 0 = inherit domain
+        float miscibility = 1.0f;
+        // "liquid" or "solid" — a state of MATTER, reported separately from
+        // `representation` above because they are separate axes: a solid can be
+        // drawn as splat spheres or reconstructed into the isosurface.
+        std::string phase;
+    };
+    std::vector<SubstanceMaterialBinding> substance_materials;
+    bool  uvw_available = false;   // the domain published a coordinate field
+    int   uvw_dim[3] = { 0, 0, 0 };
+    // World placement of that grid, as the SHADER will index it. Reported so a
+    // script can check producer and consumer agree without a render.
+    // ★ Worth reporting because the failure it catches is silent: a grid indexed
+    // over the wrong region still shades, it just smears the pattern along the
+    // flow — which looks like a quality limit rather than like a wiring bug.
+    float uvw_origin[3] = { 0.0f, 0.0f, 0.0f };
+    float uvw_voxel = 0.0f;
+    // Solver steps between resets of one coordinate generation. Two run half a
+    // period apart and are blended, which is what bounds the stretch.
+    int   uvw_refresh_period = 240;
+    float uvw_drift = 0.0f;        // mean |uvw - position|, world units
+    uint64_t uvw_particles = 0;    // particles the drift was averaged over
+    // ── Solid-phase measurement (last simulated step) ───────────────────────
+    // Parcels carrying a substance the domain declares SOLID, and the cells
+    // they actually blocked.
+    //
+    // ★★★ BOTH, because the pair is the diagnosis and either alone lies. Zero
+    // parcels means the binding or the emitter never took. Parcels with zero
+    // cells means the phase DID land and the chunk is simply thinner than the
+    // voxel size can express — the fix is resolution, not the binding, and no
+    // amount of re-authoring the material would ever reveal that. This is the
+    // number a script asserts on; the rendered picture cannot distinguish the
+    // two states at all.
+    uint64_t solid_phase_particles = 0;
+    uint64_t solid_phase_cells = 0;
+    // ── Sealed pressure pockets (last simulated step) ───────────────────
+    // Fluid regions the projection found with no pressure reference — every
+    // face fluid-fluid or closed — and the cells they held. Such a region makes
+    // the Poisson block singular, and a singular block does not fail loudly: the
+    // pressure simply grows with the ITERATION COUNT and hurls the particles at
+    // its boundary. Liquid trapped under a collider is the usual way one forms.
+    //
+    // ★★ A SCRIPT CAN ASSERT ON THIS AND A PICTURE CANNOT. On screen a sealed
+    // pocket looks like "the solver is unstable"; only this counter says which
+    // frame it appeared and how big it was. Non-zero is not automatically a bug
+    // (a genuinely enclosed volume is legal, and the solver now handles it), but
+    // it is always the first number to read when contact goes violent.
+    uint64_t sealed_pockets = 0;
+    uint64_t sealed_pocket_cells = 0;
+    // False when the scan did not run at all (GPU pressure path, or the
+    // non-free-surface solver). Assert on THIS before asserting on the counts,
+    // or a test that never exercised the scan will report a clean bill of health.
+    bool sealed_pockets_measured = false;
+    // Fluid cells with liquid on all six sides (see active_fluid_cells for the
+    // total). Near zero while particles are plentiful = the liquid is thinner
+    // than one voxel everywhere, so there is no pressure field and no splash;
+    // raise the emission rate or lower the voxel size. A script can assert on
+    // this ratio; a rendered frame cannot be told apart from a viscous liquid.
+    uint64_t interior_fluid_cells = 0;
+    uint64_t reseed_added_particles = 0;
+    uint64_t reseed_removed_particles = 0;
+    uint64_t granular_yielded_particles = 0;
+    uint64_t granular_detached_particles = 0;
+    uint64_t granular_invalid_particles = 0;
+    uint64_t granular_sleeping_particles = 0;
+    uint64_t granular_damaged_particles = 0;
+    uint64_t granular_damage_over_10_particles = 0;
+    uint64_t granular_damage_over_50_particles = 0;
+    uint64_t granular_damage_over_90_particles = 0;
+    float granular_max_yield = 0.0f;
+    float granular_max_plastic_increment = 0.0f;
+    float granular_max_accumulated_plastic = 0.0f;
+    float granular_mean_accumulated_plastic = 0.0f;
+    float granular_max_fracture_history = 0.0f;
+    float granular_mean_fracture_history = 0.0f;
+    float granular_max_damage = 0.0f;
+    float granular_mean_damage = 0.0f;
+    float granular_requested_young_modulus = 0.0f;
+    float granular_effective_young_modulus = 0.0f;
+    int granular_required_substeps = 1;
+    int granular_solver_substeps = 1;
+    bool granular_stiffness_capped = false;
+    // Domain-wide solid-phase coupling: master switch, and how full of solid
+    // parcels a cell must be to block flow (fraction of the seed density).
+    bool  solid_phase_enabled = true;
+    float solid_phase_fill = 0.25f;
     bool enabled = true;
     bool visible = true;
 };
@@ -1228,6 +1404,8 @@ struct SimulationFlowSourceInfo {
     float fluid_particles_per_second = 1000.0f;
     float fluid_velocity_spread = 0.15f;
     bool fluid_emit_along_normal = false;
+    // Substance this source pours; empty = untagged (domain material).
+    std::string fluid_substance;
     bool use_time_limit = false;
     float start_time = 0.0f;
     float end_time = 5.0f;
@@ -1373,8 +1551,14 @@ Result getFluidDomain(const std::string& domain_id_or_name, FluidDomainInfo& out
 // authored itself, so it can never clean up what a UI preset left behind.
 Result listFluidDomains(std::vector<FluidDomainInfo>& out_domains);
 Result seedFluidParticles(const std::string& domain_id_or_name, Vec3 seed_min, Vec3 seed_max,
-                           int particles_per_cell = 4, bool replace = true);
-Result clearFluidParticles(const std::string& domain_id_or_name);
+                           int particles_per_cell = 4, bool replace = true,
+                           bool persistent = false);
+Result clearFluidParticles(const std::string& domain_id_or_name,
+                           bool clear_seed_recipe = false);
+// Assign by material NAME so scripts never depend on unstable registry ids.
+// Empty clears the override (scene default / source-object face materials).
+Result setFluidSplatMaterial(const std::string& domain_id_or_name,
+                             const std::string& material_name);
 Result updateFluidDomain(const std::string& domain_id_or_name,
                          const Vec3* domain_min = nullptr, const Vec3* domain_max = nullptr,
                          const float* voxel_size = nullptr, const std::string* render_mode = nullptr,
@@ -1389,17 +1573,100 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          // is edited, so an id in a script is a number nobody can
                          // check, and pointing at the wrong material is silent.
                          const std::string* surface_material = nullptr,
+                         // Geometric SurfaceSDF dilation in simulation voxels.
+                         // Bounded to [-0.75, 1.25]; constant reconstruction cost.
+                         const float* surface_offset_voxels = nullptr,
                          // Procedural porosity — see FluidDomainInfo::pore_*.
-                         // These belong to the DOMAIN and not to the surface
-                         // material on purpose: the gas/liquid handoff arbiter
-                         // evaluates the same field for OTHER volumes and has no
-                         // access to this domain's material, so driving pores
-                         // from a material would clip smoke against a surface
-                         // the shader never draws.
+                         // On the DOMAIN because a pore is a property of the
+                         // SUBSTANCE, and because the gas/liquid handoff arbiter
+                         // evaluates the same field: the two must agree term for
+                         // term or smoke is clipped against a surface the shader
+                         // never draws.
                          const float* pore_amount = nullptr,
                          const float* pore_scale = nullptr,
                          const float* pore_detail = nullptr,
-                         const bool* enabled = nullptr, const bool* visible = nullptr);
+                         // Coordinate space every isosurface pattern is
+                         // addressed in — textures, resin interior, porosity and
+                         // the opacity mask, all through one anchor.
+                         // 0 = Material (carried by the liquid, default and
+                         //     identical to World until something moves),
+                         // 1 = Domain (carried by the container),
+                         // 2 = World (fixed to the scene).
+                         // Out-of-range values are clamped, not rejected: this
+                         // is a look control and refusing a script mid-sequence
+                         // over a typo'd enum is worse than snapping it.
+                         const int* coord_space = nullptr,
+                         // Solver steps between resets of one material-coordinate
+                         // generation. Clamped to >= 2: below that the two
+                         // generations reset on the same step and stop being two.
+                         const int* uvw_refresh_period = nullptr,
+                         // Solid-phase coupling for this domain.
+                         //   solid_phase       — master switch. Off leaves every
+                         //     substance's authored phase intact and simply
+                         //     stamps nothing, so it is the one control that
+                         //     answers "is the solid causing this?" without
+                         //     destroying the setup being tested.
+                         //   solid_phase_fill  — cell fill fraction (of the seed
+                         //     density) required to block. Too low dams a
+                         //     channel with one stray parcel; too high blocks
+                         //     nothing while the panel still says Solid.
+                         const bool* solid_phase = nullptr,
+                         const float* solid_phase_fill = nullptr,
+                         const bool* enabled = nullptr, const bool* visible = nullptr,
+                         const bool* granular_enabled = nullptr,
+                         const float* granular_friction_angle_degrees = nullptr,
+                         const float* granular_cohesion = nullptr,
+                         const float* granular_dilatancy_degrees = nullptr,
+                         const float* granular_young_modulus = nullptr,
+                         const float* granular_poisson_ratio = nullptr,
+                         const float* granular_tensile_cutoff = nullptr,
+                         const float* granular_hardening = nullptr,
+                         const float* granular_fracture_strain = nullptr,
+                         const float* granular_damage_rate = nullptr,
+                         const float* granular_healing_rate = nullptr,
+                         const bool* granular_rebonding = nullptr,
+                         const int* granular_max_solver_substeps = nullptr);
+// Bind a material to a SUBSTANCE within one fluid domain. An empty
+// `material_name` clears the binding; the literal "dielectric" binds the
+// built-in refractive liquid for that substance specifically, which is how one
+// substance can be a full Principled BSDF while another stays plain water in
+// the same body.
+//
+// ★ Keyed by substance NAME rather than by emitter: at a surface point where two
+// streams have met there is no "which emitter", but there is a mixture of
+// substances — so this is the only key the shading question can be answered
+// with, and two emitters pouring the same substance are one body.
+//
+// ★★ Also carries the substance's PHYSICS, because a substance is one authored
+// thing. Splitting "what it looks like" from "how it flows" across two calls is
+// what let the panel imply that mixing was a shading choice. Both are optional:
+// a null pointer leaves the current value, it does not reset it.
+//   kinematic_viscosity — ABSOLUTE m^2/s. Negative means inherit the domain's.
+//   miscibility         — 1 fully miscible (soft gradient), 0 immiscible
+//                         (sharp front). The pair uses the MINIMUM of its two.
+//   phase               — "liquid" (default) or "solid". A solid substance's
+//                         parcels are rasterized into the grid's solid mask
+//                         every step, so the liquid flows around them and
+//                         clings to them.
+//
+// ★★★ `phase` IS NOT `representation`. Representation says how a parcel is
+// DRAWN; phase says what it IS. They are kept apart so a scene's flow can
+// never change because somebody switched a display mode — the same rule the
+// substance viscosity gather is built on.
+//
+// ★ A solid here is an OBSTACLE with mass and velocity, not a rigid body: the
+// parcels have no cohesion, so a pile spreads under load. Dragged cohesive
+// clusters belong to Jolt rather than to a second rigid solver in the fluid
+// step, and saying so is more useful to a caller than a number that quietly
+// under-delivers.
+Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
+                                 const std::string& substance,
+                                 const std::string& material_name,
+                                 const std::string* representation = nullptr,
+                                 const float* kinematic_viscosity = nullptr,
+                                 const float* miscibility = nullptr,
+                                 const std::string* phase = nullptr);
+
 Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSettings& out_settings);
 Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDomainSettings& settings);
 Result getCombustibleFluidSettings(const std::string& domain_id_or_name,

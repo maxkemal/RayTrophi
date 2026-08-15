@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "id": "raytrophi.start.portrait_groom",
+  "display_name": "Portrait & Groom",
+  "description": "A portrait-ready character, groom target, camera and light rig.",
+  "kind": "start",
+  "category": "character",
+  "sort_order": 40,
+  "compatibility": { "minimum_raytrophi_version": "1.0.0" },
+  "preview": { "image": "preview.webp", "alt": "Character portrait with editable hair groom" },
+  "scene": { "type": "project", "path": "scene.rtp" },
+  "ui_state": {
+    "properties_context": "hair",
+    "bottom_editor": "none",
+    "contextual_dock": "hair",
+    "contextual_dock_width": 260,
+    "viewport_shading": "rendered",
+    "frame_target": "Portrait_Character",
+    "show_timeline": false
+  },
+  "renderer": { "preference": "auto", "allow_fallback": true },
+  "performance": { "class": "medium", "estimated_vram_mb": 2048 },
+  "assets": { "required": ["scene.rtp"], "optional": [] },
+  "guidance": { "path": "guidance.json", "show_on_first_open": true }
+}

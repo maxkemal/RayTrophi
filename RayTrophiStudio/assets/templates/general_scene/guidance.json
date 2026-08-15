@@ -1,0 +1,22 @@
+{
+  "guidance_version": "1.0",
+  "title": "Start with a balanced scene",
+  "summary": "Use the canonical flat cube, camera, and key light as a compact starting point.",
+  "steps": [
+    {
+      "id": "shape-scene",
+      "title": "Shape the scene",
+      "description": "Replace or transform Default_Cube while keeping the viewport as the main workspace."
+    },
+    {
+      "id": "adjust-light",
+      "title": "Adjust the key light",
+      "description": "Select Key_Light and tune its position, intensity, and color for the intended mood."
+    },
+    {
+      "id": "choose-workflow",
+      "title": "Choose a focused workflow",
+      "description": "Open a context or bottom editor only when the task requires it."
+    }
+  ]
+}

@@ -1111,7 +1111,7 @@ void addWaterV3DirectLighting(vec3 hitPos,
     shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
     uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
                      | gl_RayFlagsSkipClosestHitShaderEXT;
-    traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1,
+    traceRayEXT(topLevelAS, shadowFlags, RT_MASK_DIRECT_SHADOW, 0, 1, 1,
                 shadowOrigin, SHADOW_TMIN, L, tMax, 1);
     vec3 visibility = shadowPayload.w > 0.5 ? shadowPayload.rgb : vec3(0.0);
     if (!any(greaterThan(visibility, vec3(1e-4)))) return;

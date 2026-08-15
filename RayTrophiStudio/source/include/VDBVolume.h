@@ -347,6 +347,46 @@ public:
     float render_isosurface_pore_amount = 0.0f;
     float render_isosurface_pore_scale  = 0.05f;   // world units
     float render_isosurface_pore_detail = 0.5f;
+    // Coordinate space for every isosurface pattern (textures, resin interior,
+    // porosity). 0 = Material, 1 = Domain, 2 = World. See
+    // SimulationGridDomainDesc::fluid_surface_coord_space.
+    int   render_isosurface_coord_space = 0;
+
+    // ── Material coordinate (UVW) field ─────────────────────────────────────
+    // Dense interleaved xyz triples at SIM-grid resolution, gathered from the
+    // particles' Lagrangian uvw and stored as a RESIDUAL (uvw - cell centre).
+    // Lets the isosurface anchor its textures to the MATERIAL rather than to the
+    // world, so a pour carries its texture instead of sliding through a
+    // stationary projection.
+    //
+    // ★ Residual rather than absolute so the grid only limits the DEFORMATION;
+    // the position term is reconstructed at full resolution in the shader. See
+    // buildMaterialCoordinateGrid for the argument.
+    //
+    // ★ Owned by value rather than pointed at the simulation's buffer. The
+    // producer (the sim system) and this consumer (the render object) have
+    // independent lifetimes and independent rebuild cadences, and a raw pointer
+    // across that boundary is the shape of bug that survives every test and
+    // then crashes on domain delete. It is refilled only on the frames the
+    // level set was actually rebuilt, so the copy is not a per-frame cost.
+    std::vector<float> render_isosurface_uvw_residual;
+    // Composition: per cell, material index A, material index B, weight of B.
+    // Empty = every substance resolves to one material, so there is nothing to
+    // blend and the shader uses the domain material directly.
+    std::vector<float> render_isosurface_composition;
+    int   render_isosurface_uvw_dim[3] = { 0, 0, 0 };
+    // World placement of that grid — origin of cell (0,0,0) and its cell size,
+    // copied from the SAME FluidGrid the gather walked.
+    // ★ Stored rather than re-derived downstream: the render bounds of this
+    // volume are the tight active box of the SDF grid and have neither the same
+    // origin nor the same cell size, and indexing the coordinate field with
+    // those smears it along the flow.
+    float render_isosurface_uvw_origin[3] = { 0.0f, 0.0f, 0.0f };
+    float render_isosurface_uvw_voxel = 0.0f;
+    // Bumped on every refill so the backend can skip re-uploading an unchanged
+    // field. Never reset — a wrapped-to-zero version would read as "unchanged"
+    // against a stale upload.
+    uint32_t render_isosurface_uvw_version = 0u;
 
     /**
      * @brief Get object type identifier

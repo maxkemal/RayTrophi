@@ -9,6 +9,7 @@
 */
 #include "SimCache.h"
 
+#include "Fluid/SubstanceTag.h"
 #include "json.hpp"
 
 #include <cstdio>
@@ -280,10 +281,50 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         writeFloatArray(os, d.grid.fuel);
         writeFloatArray(os, d.grid.interaction);
 
-        // Fluid particles — positions only (render source of truth).
+        // Fluid particles — position + material coordinate. Both are render
+        // source of truth: position places the surface, uvw anchors what is
+        // drawn on it. Velocity/affine stay out; the renderer never reads them.
         const uint64_t pcount = d.particles.position.size();
         writePod(os, pcount);
         for (uint64_t i = 0; i < pcount; ++i) writeVec3(os, d.particles.position[i]);
+        // Written unconditionally at pcount entries so the reader never has to
+        // guess. A state whose uvw sidecar is short (only possible if a producer
+        // skipped it) falls back to the position, which is exactly the identity
+        // seed — a wrong-but-stable texture rather than a coordinate of zero,
+        // which would collapse the whole surface onto one texel.
+        for (uint64_t i = 0; i < pcount; ++i) {
+            writeVec3(os, i < d.particles.uvw.size() ? d.particles.uvw[i]
+                                                     : d.particles.position[i]);
+        }
+        // Generation B, plus the schedule counter that says where in its cycle
+        // the pair is. ★ The counter matters as much as the coordinates: the
+        // blend weights are derived from it, so a frame restored without it
+        // would mix the two generations at the wrong ratio and the texture would
+        // jump on the first replayed frame.
+        for (uint64_t i = 0; i < pcount; ++i) {
+            writeVec3(os, i < d.particles.uvw_b.size() ? d.particles.uvw_b[i]
+                        : (i < d.particles.uvw.size() ? d.particles.uvw[i]
+                                                      : d.particles.position[i]));
+        }
+        writePod(os, d.particles.uvw_step);
+        writePod(os, static_cast<int32_t>(d.particles.uvw_refresh_period));
+
+        // ── Substance identity ───────────────────────────────────────────────
+        // ★★★ WHICH substance this parcel is, not just where it is. Render
+        // source of truth exactly like position and uvw: the isosurface looks up
+        // look (and later physics) from this, so a cache without it replays a
+        // mixed pour as a single anonymous liquid.
+        //
+        // ★ The reader USED to assign 0 here unconditionally, which is why this
+        // is being added rather than merely serialised: identity was surviving
+        // the whole live pipeline and then being erased at the cache boundary.
+        // A bug of that shape only shows on PLAYBACK, so it reads as "the bake
+        // is wrong" rather than as a missing field.
+        for (uint64_t i = 0; i < pcount; ++i) {
+            writePod(os, i < d.particles.substance_tag.size()
+                             ? d.particles.substance_tag[i]
+                             : Fluid::kSubstanceUntagged);
+        }
 
         // Foam — position + type + remaining lifetime.
         const uint64_t fcount = d.foam.position.size();
@@ -387,13 +428,32 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         for (uint64_t i = 0; i < pcount; ++i) {
             if (!readVec3(is, d.particles.position[i])) return false;
         }
+        d.particles.uvw.resize(static_cast<size_t>(pcount));
+        for (uint64_t i = 0; i < pcount; ++i) {
+            if (!readVec3(is, d.particles.uvw[i])) return false;
+        }
+        d.particles.uvw_b.resize(static_cast<size_t>(pcount));
+        for (uint64_t i = 0; i < pcount; ++i) {
+            if (!readVec3(is, d.particles.uvw_b[i])) return false;
+        }
+        int32_t period = 0;
+        if (!readPod(is, d.particles.uvw_step)) return false;
+        if (!readPod(is, period)) return false;
+        d.particles.uvw_refresh_period = period > 1 ? period : 240;
         d.particles.velocity.assign(static_cast<size_t>(pcount), Vec3(0.0f));
         d.particles.affine.assign(static_cast<size_t>(pcount), Fluid::AffineC{});
         d.particles.flags.assign(static_cast<size_t>(pcount), 0u);
         d.particles.mass_fraction.assign(static_cast<size_t>(pcount), 1.0f);
         d.particles.temperature.assign(static_cast<size_t>(pcount), 0.0f);
         d.particles.combustible_fraction.assign(static_cast<size_t>(pcount), 0.0f);
-        d.particles.substance_tag.assign(static_cast<size_t>(pcount), 0u);
+        // Playback caches are render-oriented and do not preserve constitutive
+        // history, but every particle sidecar must still remain cardinality-safe
+        // if the frame is inspected or resumed through the live domain path.
+        d.particles.ensureGranularStateSize();
+        d.particles.substance_tag.resize(static_cast<size_t>(pcount));
+        for (uint64_t i = 0; i < pcount; ++i) {
+            if (!readPod(is, d.particles.substance_tag[i])) return false;
+        }
 
         // Foam — position + type + lifetime restored; velocity zeroed.
         uint64_t fcount = 0;

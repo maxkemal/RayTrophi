@@ -195,7 +195,34 @@ struct VkVolumeInstance {
     uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
     float    emissive_capacity;
     float    iso_material_index;  // SDF isosurface material, 1-based (0 = none)
+    // FULLY CLAIMED: [0]=pore amount, [1]=world units per pore cell,
+    // [2]=pore size variation, [3]=coordinate space (0=Material, 1=Domain,
+    // 2=World — see materialAnchor below / in volume_closesthit.rchit).
     float    _accel_reserved[4];
+    // Material coordinate (UVW) RESIDUAL grid: dense xyz triples at sim-grid
+    // resolution holding (uvw - cell centre), so a texture on a liquid flows
+    // WITH the liquid instead of the body sliding through a world-anchored
+    // projection. 0 = not published, and the shader MUST then fall back to world
+    // anchoring — never read 0 as "the coordinate is the origin", which
+    // collapses the surface onto a single texel. See sampleMaterialCoord for why
+    // this is a displacement and not the coordinate itself.
+    uint64_t uvw_residual_address;
+    // Same grid/origin/voxel as the residual field; 0 = not published.
+    // Slotted beside the other address so the struct stays 624 bytes.
+    uint64_t composition_address;
+    float    uvw_dim[3];
+    // World placement of that grid: origin of cell (0,0,0) and its cell size.
+    // ★ NOT derivable from aabb_min/aabb_max — on a live fluid those are the
+    // tight ACTIVE box of the dense/SDF grid and move every frame, while this
+    // buffer spans the whole SIM grid. Using the former to index the latter
+    // smears the texture along the flow and makes it swim.
+    float    uvw_origin[3];
+    float    uvw_voxel;
+    // Explicit tail padding, mirroring vulkan_volume_types.h exactly. C++ pads
+    // the alignas(16) struct to 624; scalar layout would stop at 612. Implicit
+    // padding is where the two are free to disagree, and a stride mismatch does
+    // not fail loudly — it reads the NEXT volume's fields as this one's.
+    float    _uvw_pad[1];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -303,12 +330,23 @@ layout(set = 0, binding = 24, scalar) readonly buffer VolMaterialExtBuffer { Mat
 // per tile. Same control, same meaning — "how does this texture tile" — with
 // no ABI change and nothing new for an author to learn.
 //
-// ★ LIMIT, and it is the same one the resin interior carries: the projection
-// is anchored in WORLD space, so a FLOWING liquid slides through a stationary
-// texture. For a body that barely moves — dough, a set resin, a still pool —
-// that is right. For a pour it is not, and the fix is an advected UVW carried
-// as a particle attribute (the same machine velocity already rides), which
-// does not exist yet.
+// ★ ANCHORED IN MATERIAL SPACE, not world space. The projection formula below
+// is unchanged; what changed is the coordinate fed into it. Each particle
+// remembers where it was born, that value is gathered onto a grid, and the
+// shading point samples it — so a FLOWING liquid carries its texture instead of
+// sliding through a stationary pattern. See sampleMaterialCoord.
+//
+// Because the coordinate is seeded with the birth position in world units, a
+// body that has not moved yields uvw == worldPos and renders EXACTLY as the old
+// world-anchored path did. Nothing to re-author, and the still case is a
+// bit-level regression test rather than a judgement call.
+//
+// ★★ REMAINING LIMIT, and it is inherent to material coordinates rather than to
+// this implementation: the coordinate STRETCHES with the flow. A long pour
+// smears the texture along the stretch direction and, after enough deformation,
+// the mapping becomes chaotic. The cure is blending two coordinate sets seeded
+// at different times; that is deliberately not built here, because a single set
+// is what makes the still case identical and therefore verifiable.
 // ═══════════════════════════════════════════════════════════════════════════
 // Re-seating a scattered ray outside the level-set band, WITHOUT stepping over
 // whatever sits inside the push distance.
@@ -343,8 +381,9 @@ vec3 seatOutsideBand(vec3 hitPos, vec3 dir, vec3 N, float push, out bool handOff
     const uint PUSH_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
                           | gl_RayFlagsSkipClosestHitShaderEXT
                           | gl_RayFlagsNoOpaqueEXT;
-    const uint PUSH_MASK  = 0xF1;   // exclude gas/particle/SDF AABBs, as the
-                                    // entry-side solid probe does
+    // Exclude gas/fog AABBs (0x02) and SurfaceSDF AABBs (0x08), but KEEP
+    // transient simulation particles (0x04) — same set as the entry-side probe.
+    const uint PUSH_MASK  = 0xF5;
     const uint PUSH_PROBE = 0xC17D5EEDu;
     shadowPayload = vec4(0.0, 0.0, 0.0, uintBitsToFloat(PUSH_PROBE));
     traceRayEXT(topLevelAS, PUSH_FLAGS, PUSH_MASK, 0, 1, 1,
@@ -357,20 +396,117 @@ vec3 seatOutsideBand(vec3 hitPos, vec3 dir, vec3 N, float push, out bool handOff
     return handOff ? hitPos : (hitPos + dir * push);
 }
 
-vec4 triplanarTexel(uint texId, vec3 worldPos, vec3 N, vec2 scale, vec2 offset) {
-    // Sharpened squared normal. The exponent sets how wide the seam blend is:
-    // 4 is the usual compromise — lower smears the texture across the
-    // transition, higher makes the three projections visibly meet.
+// ═══════════════════════════════════════════════════════════════════════════
+// TRI-PLANAR NORMAL MAPPING — whiteout blend
+// ═══════════════════════════════════════════════════════════════════════════
+// This is the piece that could not be built before material coordinates
+// existed, and the reason is worth stating: a bump pattern nailed to the world
+// while the liquid flows through it does not read as detail, it reads as a
+// lighting error. The anchor had to come first.
+//
+// ★ Why not the ordinary tangent-frame path: an isosurface has no UVs and no
+// tangents. Tri-planar gives three sets of UVs, so it needs THREE tangent
+// frames and a rule for recombining them.
+//
+// ★★ WHITEOUT BLEND, not a weighted average of the three world-space normals.
+// Averaging pulls every sample toward the geometric normal — the detail
+// survives on the axis-aligned faces and quietly flattens everywhere the three
+// projections meet, which is exactly where a viewer looks for shape. Whiteout
+// (Golus) adds each tangent normal's XY into the geometric normal's other two
+// components before blending, so overlapping detail REINFORCES instead of
+// cancelling.
+//
+// ★★★ The axis SIGN matters and is the classic omission. Without flipping the
+// tangent basis by sign(N), the two opposite faces of every axis get mirrored
+// derivatives: one side of a droplet shows bumps and the other shows dents,
+// from the same texture. It looks like the map is wrong rather than the frame.
+// ═══════════════════════════════════════════════════════════════════════════
+// ★★★ ONE PLANE PER SAMPLE, CHOSEN STOCHASTICALLY — not three blended.
+// ═══════════════════════════════════════════════════════════════════════════
+// Blending the three projections hides the SEAM but not the DECOMPOSITION: on
+// an oblique surface the three stretch in different directions, so the pattern
+// visibly splits into three sheared copies of itself. No blend weight fixes
+// that, because all three copies are genuinely present.
+//
+// Picking ONE plane per sample with probability equal to its weight is
+// unbiased — the expected value is exactly the blend — but the error becomes
+// NOISE instead of a persistent ghost, and a path tracer already averages
+// noise away. The seam converges out; the decomposition never would.
+//
+// ★★ It is also CHEAPER, which is unusual for a quality fix: one texture fetch
+// instead of three. That matters most for the normal map, which was the
+// heaviest consumer here at three fetches per hit.
+//
+// ★ THE SAME xi MUST BE USED FOR EVERY CHANNEL AT ONE HIT. Draw it once per
+// hit and pass it down. Independent draws per channel would let albedo come
+// from one projection while roughness came from another, at the same point on
+// the surface — the channels would stop describing the same texel and the
+// result would converge to a plausible-looking average of two materials, which
+// is far harder to recognise as wrong than an obvious seam.
+int triplanarPlane(vec3 N, float xi) {
+    // Sharpened squared normal. The exponent sets how narrow the transition
+    // is: 4 is the usual compromise — lower spreads the choice across a wider
+    // band, higher makes the three regions nearly hard-edged.
     vec3 w = pow(abs(N), vec3(4.0));
     w /= max(w.x + w.y + w.z, 1e-6);
+    if (xi < w.x) return 0;
+    if (xi < w.x + w.y) return 1;
+    return 2;
+}
 
-    vec2 uvX = worldPos.zy * scale + offset;
-    vec2 uvY = worldPos.xz * scale + offset;
-    vec2 uvZ = worldPos.xy * scale + offset;
+vec2 triplanarUV(int plane, vec3 p, vec2 scale, vec2 offset) {
+    if (plane == 0) return p.zy * scale + offset;
+    if (plane == 1) return p.xz * scale + offset;
+    return p.xy * scale + offset;
+}
 
-    return texture(materialTextures[nonuniformEXT(texId)], uvX) * w.x
-         + texture(materialTextures[nonuniformEXT(texId)], uvY) * w.y
-         + texture(materialTextures[nonuniformEXT(texId)], uvZ) * w.z;
+vec3 triplanarNormal(uint texId, vec3 anchor, vec3 Ng, vec2 scale, vec2 offset,
+                     float strength, float xi) {
+    int plane = triplanarPlane(Ng, xi);
+
+    vec3 t = texture(materialTextures[nonuniformEXT(texId)],
+                     triplanarUV(plane, anchor, scale, offset)).rgb * 2.0 - 1.0;
+
+    // Strength scales the tangent tilt, never the Z: scaling all three would
+    // renormalise straight back to the same direction and the slider would do
+    // nothing — a control that moves and changes nothing gets reported as a bug.
+    t.xy *= strength;
+
+    // ★★★ The axis SIGN matters and is the classic omission. Without flipping
+    // the tangent basis by sign(N), the two opposite faces of every axis get
+    // mirrored derivatives: one side of a droplet shows bumps and the other
+    // shows dents, from the same texture. It looks like the map is wrong rather
+    // than the frame.
+    vec3 axisSign = sign(Ng);
+
+    // Whiteout (Golus): fold the geometric normal in on the two axes this plane
+    // does not own, so detail REINFORCES the shape instead of pulling every
+    // sample back toward Ng — which is what a plain tangent add would do, and
+    // it flattens exactly where a viewer looks for form.
+    vec3 n;
+    if (plane == 0) {
+        t.z *= axisSign.x;
+        n = vec3(t.xy + Ng.zy, abs(t.z) * Ng.x).zyx;
+    } else if (plane == 1) {
+        t.z *= axisSign.y;
+        n = vec3(t.xy + Ng.xz, abs(t.z) * Ng.y).xzy;
+    } else {
+        t.z *= axisSign.z;
+        n = vec3(t.xy + Ng.xy, abs(t.z) * Ng.z).xyz;
+    }
+
+    float len2 = dot(n, n);
+    // Degenerate only if the sample cancels the geometric normal, which a valid
+    // map cannot do — but a BLANK or wrongly-typed texture (an albedo bound into
+    // the normal slot) can. Fall back to the geometric normal rather than
+    // emitting a NaN that turns the surface black and looks like a geometry bug.
+    return (len2 > 1e-12) ? (n * inversesqrt(len2)) : Ng;
+}
+
+vec4 triplanarTexel(uint texId, vec3 worldPos, vec3 N, vec2 scale, vec2 offset,
+                    float xi) {
+    return texture(materialTextures[nonuniformEXT(texId)],
+                   triplanarUV(triplanarPlane(N, xi), worldPos, scale, offset));
 }
 
 
@@ -762,6 +898,267 @@ float sampleDenseGasFloat(uint64_t address, VkVolumeInstance vol, vec3 localPos)
     return mix(z0, z1, f.z);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MATERIAL COORDINATE (UVW) SAMPLING
+// ═══════════════════════════════════════════════════════════════════════════
+// The isosurface has no UVs and cannot have them: there is no mesh to unwrap,
+// and the surface is rebuilt from the field every frame, so there is nothing
+// stable for a UV to be attached to. What CAN be stable is a coordinate carried
+// by the liquid itself — each particle remembers where it was born, and that
+// value is gathered onto a grid the shader can sample.
+//
+// So the projection below is still tri-planar (no tangent frame exists here
+// either), but it is anchored in MATERIAL space instead of world space. The
+// difference only shows once the liquid moves: a pour now carries its texture
+// instead of sliding through a stationary pattern.
+//
+// ★ Identity at rest. The coordinate is seeded with the birth POSITION in world
+// units, so for a body that has not moved, uvw == worldPos and this returns
+// exactly what the old world-anchored path returned. That is deliberate: it
+// makes "did this change anything it should not have?" answerable by rendering
+// a still tank and diffing, rather than by judgement.
+// ★★★ THE BUFFER HOLDS A DISPLACEMENT, NOT A COORDINATE. Cell c stores
+// (uvw - centre(c)); the coordinate is rebuilt here as worldPos + d.
+//
+// Storing the sum instead would cap the WHOLE coordinate at the sim voxel size,
+// because the position term — which is full-resolution and free right here in
+// the shader — would have had to survive a trip through the grid. That is
+// exactly what "material mode looks like one pixel per cell" was. Only the
+// deformation is grid-limited now, and deformation is smooth.
+//
+// ★ Consequence worth knowing before debugging anything here: in still liquid
+// d is identically zero, so this returns worldPos EXACTLY. A resting tank
+// therefore has to match World mode pixel for pixel.
+layout(buffer_reference, std430, buffer_reference_align = 4)
+readonly buffer MaterialResidualGrid {
+    float values[];      // interleaved xyz displacement per cell
+};
+
+// Returns false when this volume publishes no coordinate field. Callers MUST
+// then fall back to worldPos. Returning a zero vector instead would map the
+// entire surface to one texel — a flat-tinted liquid, which looks like a
+// material authoring mistake rather than like missing data.
+bool sampleMaterialCoord(VkVolumeInstance vol, vec3 worldPos, out vec3 coord) {
+    coord = worldPos;
+    if (vol.uvw_residual_address == 0) return false;
+
+    ivec3 res = ivec3(int(vol.uvw_dim[0] + 0.5),
+                      int(vol.uvw_dim[1] + 0.5),
+                      int(vol.uvw_dim[2] + 0.5));
+    if (any(lessThanEqual(res, ivec3(0)))) return false;
+    if (vol.uvw_voxel <= 0.0) return false;
+
+    // ★★★ INDEXED IN WORLD SPACE, THROUGH THE GRID'S OWN ORIGIN AND CELL SIZE.
+    //
+    // This used to go through inv_transform and normalise by aabb_min/aabb_max,
+    // by analogy with the density sampler. That analogy is false. On a live
+    // fluid, aabb is the tight ACTIVE box of the dense/SDF grid — padded by a
+    // cell and recomputed as the liquid moves — while this buffer spans the
+    // whole SIM grid at the sim's own resolution. Mapping the first onto the
+    // second scaled the field by the ratio of their extents and offset it by the
+    // difference of their origins, and since the active box follows the liquid,
+    // both errors changed every frame.
+    //
+    // ★ The symptom was NOT "wrong texture position", which somebody would have
+    // reported immediately. A slowly varying scale error reads as the pattern
+    // smearing along the flow and swimming over the surface — i.e. it looks like
+    // a quality problem in the coordinate, and it survived a whole round of
+    // genuine quality work sitting underneath it.
+    //
+    // The producer walks the sim grid in world space, so the inverse of that
+    // walk is world space too. No transform: if the domain moves, its grid
+    // origin moves with it and arrives here already updated.
+    vec3 uvwOrigin = vec3(vol.uvw_origin[0], vol.uvw_origin[1], vol.uvw_origin[2]);
+    vec3 gridPos = (worldPos - uvwOrigin) / vol.uvw_voxel - vec3(0.5);
+
+    // CLAMP rather than reject out-of-range. The producer extrapolated the field
+    // a few voxels past the supported region precisely so the surface — which
+    // sits at the edge of it — reads valid data; failing out here at the domain
+    // wall would undo that and re-introduce a world-anchored ring exactly where
+    // liquid touches the boundary.
+    ivec3 p0 = clamp(ivec3(floor(gridPos)), ivec3(0), res - ivec3(1));
+    ivec3 p1 = min(p0 + ivec3(1), res - ivec3(1));
+    vec3  f  = clamp(gridPos - vec3(p0), vec3(0.0), vec3(1.0));
+
+    // ★ Quintic ease on the interpolation fraction (Perlin's 6t^5-15t^4+10t^3).
+    // Plain trilinear is only C0: the value is continuous across a cell boundary
+    // but its DERIVATIVE jumps, and the derivative is what a texture lookup
+    // actually rides. Easing makes it vanish at the boundaries instead.
+    //
+    // ★★★ THIS IS ONLY LEGAL ON A RESIDUAL, and getting that backwards is what
+    // produced the reported blockiness. Applied to an ABSOLUTE coordinate the
+    // ease modulates the identity gradient itself: d(coord)/d(world) becomes
+    // s'(f), which runs from 0.0 at every cell face to 1.875 at every cell
+    // centre. The texture is then frozen on the cell boundaries and compressed
+    // in the middles — a rectangular quilt of plateaus with pinched seams,
+    // at exactly one tile per cell. The seam-removal tool was the seam.
+    //
+    // On a residual it does what it was meant to do: the identity gradient is
+    // added outside this function and is untouched, so easing only softens the
+    // small deformation term.
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+
+    MaterialResidualGrid g = MaterialResidualGrid(vol.uvw_residual_address);
+    int xy = res.x * res.y;
+    int i000 = (p0.x + p0.y * res.x + p0.z * xy) * 3;
+    int i100 = (p1.x + p0.y * res.x + p0.z * xy) * 3;
+    int i010 = (p0.x + p1.y * res.x + p0.z * xy) * 3;
+    int i110 = (p1.x + p1.y * res.x + p0.z * xy) * 3;
+    int i001 = (p0.x + p0.y * res.x + p1.z * xy) * 3;
+    int i101 = (p1.x + p0.y * res.x + p1.z * xy) * 3;
+    int i011 = (p0.x + p1.y * res.x + p1.z * xy) * 3;
+    int i111 = (p1.x + p1.y * res.x + p1.z * xy) * 3;
+
+    vec3 c000 = vec3(g.values[i000], g.values[i000 + 1], g.values[i000 + 2]);
+    vec3 c100 = vec3(g.values[i100], g.values[i100 + 1], g.values[i100 + 2]);
+    vec3 c010 = vec3(g.values[i010], g.values[i010 + 1], g.values[i010 + 2]);
+    vec3 c110 = vec3(g.values[i110], g.values[i110 + 1], g.values[i110 + 2]);
+    vec3 c001 = vec3(g.values[i001], g.values[i001 + 1], g.values[i001 + 2]);
+    vec3 c101 = vec3(g.values[i101], g.values[i101 + 1], g.values[i101 + 2]);
+    vec3 c011 = vec3(g.values[i011], g.values[i011 + 1], g.values[i011 + 2]);
+    vec3 c111 = vec3(g.values[i111], g.values[i111 + 1], g.values[i111 + 2]);
+
+    vec3 z0 = mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y);
+    vec3 z1 = mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y);
+
+    // worldPos carries the full-resolution identity; the grid only bends it.
+    coord = worldPos + mix(z0, z1, f.z);
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPOSITION — which materials this point of the liquid is made of.
+// ═══════════════════════════════════════════════════════════════════════════
+// Per cell the producer stores the two dominant material slots and the weight
+// of the second. Both slots are 1-based ids; 0 means "the built-in dielectric",
+// which is a real choice for a substance and not an absence.
+//
+// ★★★ ONLY THE WEIGHT IS INTERPOLATED. An index is a NAME: the value halfway
+// between material 2 and material 4 is material 3, an unrelated material that
+// would appear as a band along every boundary. So the slots come from the
+// NEAREST cell and only the blend fraction is filtered. In a binary mixture —
+// the ordinary case — the pair is the same everywhere the mixture exists, so
+// nothing is lost; with three or more, the pair switches at a cell boundary
+// while the fraction stays smooth.
+//
+// ★ Falls back to the domain material when nothing is published, which is what
+// makes a single-material domain cost exactly what it did before.
+layout(buffer_reference, std430, buffer_reference_align = 4)
+readonly buffer CompositionGrid {
+    float values[];      // interleaved (slotA, slotB, weightB) per cell
+};
+
+void sampleComposition(VkVolumeInstance vol, vec3 worldPos,
+                       inout float slotA, out float slotB, out float weightB) {
+    slotB = slotA;
+    weightB = 0.0;
+    if (vol.composition_address == 0) return;
+    if (vol.uvw_voxel <= 0.0) return;
+
+    ivec3 res = ivec3(int(vol.uvw_dim[0] + 0.5),
+                      int(vol.uvw_dim[1] + 0.5),
+                      int(vol.uvw_dim[2] + 0.5));
+    if (any(lessThanEqual(res, ivec3(0)))) return;
+
+    // Same world-space indexing as the residual field — same grid, same origin,
+    // same cell size. Sharing the placement is what guarantees the mixture and
+    // the coordinate describe the same point.
+    vec3 uvwOrigin = vec3(vol.uvw_origin[0], vol.uvw_origin[1], vol.uvw_origin[2]);
+    vec3 gridPos = (worldPos - uvwOrigin) / vol.uvw_voxel - vec3(0.5);
+
+    ivec3 p0 = clamp(ivec3(floor(gridPos)), ivec3(0), res - ivec3(1));
+    ivec3 p1 = min(p0 + ivec3(1), res - ivec3(1));
+    vec3  f  = clamp(gridPos - vec3(p0), vec3(0.0), vec3(1.0));
+
+    CompositionGrid g = CompositionGrid(vol.composition_address);
+    int xy = res.x * res.y;
+
+    // Nearest cell decides WHICH two materials; see the note above.
+    ivec3 pn = ivec3(greaterThan(f, vec3(0.5))) * (p1 - p0) + p0;
+    int   ni = (pn.x + pn.y * res.x + pn.z * xy) * 3;
+    slotA = g.values[ni + 0];
+    slotB = g.values[ni + 1];
+
+    // The weight is a quantity and IS interpolated, so the transition between
+    // two substances is smooth rather than stepping at cell boundaries.
+    int i000 = (p0.x + p0.y * res.x + p0.z * xy) * 3 + 2;
+    int i100 = (p1.x + p0.y * res.x + p0.z * xy) * 3 + 2;
+    int i010 = (p0.x + p1.y * res.x + p0.z * xy) * 3 + 2;
+    int i110 = (p1.x + p1.y * res.x + p0.z * xy) * 3 + 2;
+    int i001 = (p0.x + p0.y * res.x + p1.z * xy) * 3 + 2;
+    int i101 = (p1.x + p0.y * res.x + p1.z * xy) * 3 + 2;
+    int i011 = (p0.x + p1.y * res.x + p1.z * xy) * 3 + 2;
+    int i111 = (p1.x + p1.y * res.x + p1.z * xy) * 3 + 2;
+
+    float z0 = mix(mix(g.values[i000], g.values[i100], f.x),
+                   mix(g.values[i010], g.values[i110], f.x), f.y);
+    float z1 = mix(mix(g.values[i001], g.values[i101], f.x),
+                   mix(g.values[i011], g.values[i111], f.x), f.y);
+    weightB = clamp(mix(z0, z1, f.z), 0.0, 1.0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE ONE ANCHOR. Every isosurface pattern goes through here — tri-planar
+// textures, the resin interior march, the porosity lattice, and the opacity
+// mask. Three spaces, ONE place they diverge.
+// ═══════════════════════════════════════════════════════════════════════════
+// ★ That single divergence point is the whole design. The consumers do not know
+// which space they are in and must not: the moment two of them resolve the
+// space separately, they are free to disagree, and a resin interior anchored
+// differently from the albedo painted over it reads as "the shading is a bit
+// off" rather than as a coordinate bug.
+//
+//   COORD_MATERIAL - the parcel's own coordinate. Carried BY the liquid, so a
+//                    pour takes its pattern with it. Identity for anything that
+//                    has not moved, so it is also the safe default.
+//   COORD_DOMAIN   - the container's local space. Travels with a carried vessel
+//                    while the liquid flows THROUGH the pattern: the right
+//                    answer for something painted on the tank, and the wrong
+//                    one for something that belongs to the substance.
+//   COORD_WORLD    - nailed to the room. The behaviour that shipped before
+//                    material coordinates existed. Kept because it is a real
+//                    look (a projected pattern), and because it is the escape
+//                    hatch from the material coordinate's one true weakness —
+//                    it STRETCHES with the flow, so a violently deformed splash
+//                    eventually maps chaotically and an artist needs a way out
+//                    that is not "animate less".
+//
+// The bool form above stays separate rather than folded in here because "there
+// is no coordinate field" and "the coordinate happens to equal the world
+// position" are different facts, and a caller that ever needs to tell them
+// apart must not have to re-derive it from a value that looks identical.
+const uint COORD_MATERIAL = 0u;
+const uint COORD_DOMAIN   = 1u;
+const uint COORD_WORLD    = 2u;
+
+vec3 materialAnchor(VkVolumeInstance vol, vec3 worldPos) {
+    uint space = uint(clamp(vol._accel_reserved[3], 0.0, 2.0) + 0.5);
+
+    if (space == COORD_WORLD) return worldPos;
+
+    if (space == COORD_DOMAIN) {
+        // Volume-local, through the same inverse transform the density sampler
+        // uses. NOT normalised to [0,1]: keeping it in world-sized units means
+        // uv_scale/pore_scale stay "world units per tile" in every space, so
+        // switching space re-anchors the pattern without also resizing it.
+        vec3 localPos;
+        localPos.x = vol.inv_transform[0] * worldPos.x + vol.inv_transform[1] * worldPos.y
+                   + vol.inv_transform[2] * worldPos.z + vol.inv_transform[3];
+        localPos.y = vol.inv_transform[4] * worldPos.x + vol.inv_transform[5] * worldPos.y
+                   + vol.inv_transform[6] * worldPos.z + vol.inv_transform[7];
+        localPos.z = vol.inv_transform[8] * worldPos.x + vol.inv_transform[9] * worldPos.y
+                   + vol.inv_transform[10] * worldPos.z + vol.inv_transform[11];
+        return localPos;
+    }
+
+    // COORD_MATERIAL. Falls back to worldPos when no field is published, which
+    // is what makes an unbuilt or unavailable coordinate degrade to the old
+    // behaviour instead of collapsing the surface onto the origin.
+    vec3 c;
+    sampleMaterialCoord(vol, worldPos, c);
+    return c;
+}
+
 layout(buffer_reference, std430, buffer_reference_align = 4)
 readonly buffer DenseGasMajorantGrid {
     float blocks[];
@@ -1076,12 +1473,13 @@ float applyMaterialDensityNoise(VkVolumeInstance vol, vec3 localPos, float densi
 // cloud) ignore the accessor params. Caller must guarantee buf/mapH are valid when
 // vol.volume_type == 2 && vol.vdb_grid_address != 0; otherwise the accessor args are
 // untouched.
-float sampleDensityAcc(
+float sampleDensityAccMode(
     VkVolumeInstance vol,
     vec3 worldPos,
     pnanovdb_buf_t buf,
     pnanovdb_map_handle_t mapH,
-    inout pnanovdb_readaccessor_t acc)
+    inout pnanovdb_readaccessor_t acc,
+    bool applyOpticalControls)
 {
     vec3 localPos;
     localPos.x = vol.inv_transform[0] * worldPos.x + vol.inv_transform[1] * worldPos.y
@@ -1126,6 +1524,15 @@ float sampleDensityAcc(
         density = sampleDenseGasFloat(vol.vdb_grid_address, vol, localPos);
     }
 
+    // SurfaceSDF consumes the producer's surface-centred 0..1 proxy directly.
+    // Density/Remap/Cutoff/volume-noise are optical fog controls: applying them
+    // before the iso=0.5 test moves the geometry and grows a false skirt along
+    // domain walls. Explicit surface modifiers (porosity and opacity mask) are
+    // applied later by sampleIsoField and remain geometric by design.
+    if (!applyOpticalControls) {
+        return (isnan(density) || isinf(density)) ? 0.0 : max(density, 0.0);
+    }
+
     density = applyMaterialDensityNoise(vol, localPos, density);
     float remappedDensity = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
     float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
@@ -1140,6 +1547,16 @@ float sampleDensityAcc(
         ? smoothstep(densityCutoff, densityCutoff * 2.0, remappedDensity)
         : 1.0;
     return remappedDensity * vol.density_multiplier * cutoffFade;
+}
+
+float sampleDensityAcc(
+    VkVolumeInstance vol,
+    vec3 worldPos,
+    pnanovdb_buf_t buf,
+    pnanovdb_map_handle_t mapH,
+    inout pnanovdb_readaccessor_t acc)
+{
+    return sampleDensityAccMode(vol, worldPos, buf, mapH, acc, true);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1173,9 +1590,25 @@ float isoPoreOffset(VkVolumeInstance vol, vec3 worldPos) {
     float scale  = max(vol._accel_reserved[1], 1e-4);     // world units per cell
     float detail = clamp(vol._accel_reserved[2], 0.0, 1.0);
 
-    // World space, not voxel space: the crumb must keep its real size when the
-    // domain resolution changes, or every resolution edit re-bakes the bread.
-    vec3 p = worldPos / scale;
+    // MATERIAL space, not world space, and not voxel space.
+    //
+    // Not voxel space, because the crumb must keep its real size when the domain
+    // resolution changes, or every resolution edit re-bakes the bread. That is
+    // why `scale` is in world units and why the coordinate below is too.
+    //
+    // Not world space, because a world-anchored pore lattice is nailed to the
+    // room: a rising dough would slide THROUGH its own bubbles, gaining and
+    // losing pores as it moved. The bubbles belong to the material, so they are
+    // addressed in the material's coordinate — which also means they now stretch
+    // with it, the way real crumb does. Falls back to worldPos when the domain
+    // publishes no coordinate field, i.e. exactly the previous behaviour.
+    //
+    // ★ This stays inside sampleIsoField's ONE-field contract: the arbiter
+    // (nearestSurfaceSDFCrossing) reaches this through the same call and reads
+    // the same vol, so it sees the identical displaced field. Anchoring here
+    // would only break that if it depended on something per-ray or per-material,
+    // which the coordinate grid is not — it is per-domain data, like `scale`.
+    vec3 p = materialAnchor(vol, worldPos) / scale;
 
     float pore = 1.0 - clamp(rh_worley(p) * 2.0, 0.0, 1.0);
     if (detail > 1e-3) {
@@ -1188,6 +1621,75 @@ float isoPoreOffset(VkVolumeInstance vol, vec3 worldPos) {
     return amount * pore;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// OPACITY MASK — holes in the liquid, cut in the FIELD
+// ═══════════════════════════════════════════════════════════════════════════
+// Returns the amount to SUBTRACT from the density before the ISO test, so a
+// masked-out region is a real hole in the level set.
+//
+// ★ Why not an any-hit shader, which is the obvious answer. The volume
+// procedural hit group binds VK_SHADER_UNUSED_KHR for any-hit, and the AABB
+// BLAS is already built non-opaque — so the acceleration structure was never
+// the obstacle, and adding an any-hit here would have "worked". It would also
+// have produced RIMLESS holes: a cutout at the shading point punches through an
+// otherwise flat surface, so the edge carries the parent surface's normal,
+// refracts as if the hole were not there, and casts no self-shadow. On a liquid
+// that is glaring, because the edge is exactly where refraction is read. Cut in
+// the field instead and the rim normal falls out of the gradient that six
+// samples are already computing — the same reason porosity is a field term.
+//
+// ★★ MEANING, matched to the mesh path deliberately. On a triangle,
+// `mat.opacity` as a SCALAR becomes transmission (closesthit.rchit: `opacity <
+// 0.99 -> transmission = 1 - opacity`), while the opacity TEXTURE is a cutout
+// mask. This keeps that split exactly: only the texture cuts geometry here, and
+// the scalar is left to the transmission path further down. Making the scalar
+// erode the body instead would mean one material reads as semi-transparent
+// glass on a mesh and as a thinner object on a liquid — the same number meaning
+// two things, which is how a "the material looks wrong on water" report becomes
+// unfindable.
+//
+// ★★★ THRESHOLDED, NOT STOCHASTIC, and this is forced rather than chosen. The
+// mesh dithers intermediate mask values across samples (shadow_anyhit does
+// exactly that, and it is right there). This field CANNOT: it is read by
+// nearestSurfaceSDFCrossing, the gas/liquid handover arbiter, which must agree
+// with the shading march sample for sample. A randomised threshold would make
+// gas clip against a surface that differs every sample — shimmering smoke edges
+// near liquid, with nothing pointing at opacity as the cause. The field must be
+// a pure function of position, so the mask is hard.
+float isoAlphaOffset(VkVolumeInstance vol, vec3 worldPos) {
+    if (vol.iso_material_index <= 0.5) return 0.0;          // no bound material
+    Material am = materials.m[uint(vol.iso_material_index - 1.0)];
+    if (am.opacity_tex == 0u) return 0.0;                   // off: not one fetch
+
+    // Tri-planar with EQUAL weights, not the sharpened-normal blend the albedo
+    // path uses. There is no normal available here and there cannot be: this
+    // function runs inside the gradient taps that COMPUTE the normal, so asking
+    // for one is circular. Equal thirds of a hard mask make the test a majority
+    // vote across the three projections, which is deterministic and stable.
+    //
+    // ★ Consequence worth knowing before it is mistaken for a bug: the hole edge
+    // and an albedo edge cut from the SAME image will not land in exactly the
+    // same place on steep faces, because the two use different blends.
+    vec3 p = materialAnchor(vol, worldPos);
+    vec2 sc = vec2(abs(am.uv_scale_x) > 1e-6 ? am.uv_scale_x : 1.0,
+                   abs(am.uv_scale_y) > 1e-6 ? am.uv_scale_y : 1.0);
+    vec2 of = vec2(am.uv_offset_x, am.uv_offset_y);
+    vec4 tx = textureLod(materialTextures[nonuniformEXT(am.opacity_tex)], p.zy * sc + of, 0.0)
+            + textureLod(materialTextures[nonuniformEXT(am.opacity_tex)], p.xz * sc + of, 0.0)
+            + textureLod(materialTextures[nonuniformEXT(am.opacity_tex)], p.xy * sc + of, 0.0);
+    tx *= (1.0 / 3.0);
+
+    float mask = ((am.flags & MAT_FLAG_OPACITY_RGBA) != 0u) ? tx.a : tx.r;
+    if (mask >= 0.5) return 0.0;                            // solid here
+
+    // 1.0 is enough to carry even a fully-interior cell (density 1.0) below the
+    // 0.5 ISO threshold, so a masked region is gone THROUGH the body rather than
+    // dimpled on its surface. A smaller push would erode the silhouette and
+    // leave the interior intact — a hole that closes as the liquid thickens,
+    // which reads as the mask "not working in deep water".
+    return 1.0;
+}
+
 // The ONE field every isosurface consumer must read. Both ISO threshold sites
 // and all six gradient samples go through here, so the surface that gas is
 // clipped against, the surface that is shaded, and the normal used to shade it
@@ -1196,7 +1698,9 @@ float isoPoreOffset(VkVolumeInstance vol, vec3 worldPos) {
 // a persistent NanoVDB read accessor whose node cache must survive the call.
 float sampleIsoField(VkVolumeInstance vol, vec3 worldPos, pnanovdb_buf_t buf,
                      pnanovdb_map_handle_t mapH, inout pnanovdb_readaccessor_t acc) {
-    return sampleDensityAcc(vol, worldPos, buf, mapH, acc) - isoPoreOffset(vol, worldPos);
+    return sampleDensityAccMode(vol, worldPos, buf, mapH, acc, false)
+         - isoPoreOffset(vol, worldPos)
+         - isoAlphaOffset(vol, worldPos);
 }
 
 // ============================================================
@@ -1884,11 +2388,36 @@ void main() {
             const uint SOLID_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
                                    | gl_RayFlagsSkipClosestHitShaderEXT
                                    | gl_RayFlagsNoOpaqueEXT;
-            // Exclude gas/fog AABBs (0x02), transient simulation particles
-            // (0x04), and SurfaceSDF AABBs (0x08). Particles remain visible
-            // to primary rays, but must not
-            // trigger the 1+6 solid-location probes for every gas ray.
-            const uint SOLID_MASK  = 0xF1;
+            // Exclude gas/fog AABBs (0x02) and SurfaceSDF AABBs (0x08), and
+            // KEEP transient simulation particles (0x04).
+            //
+            // ★★★ 0x04 USED TO BE EXCLUDED HERE AND THAT MADE SPLAT SPHERES
+            // DISAPPEAR. The exclusion was written when a fluid domain drew
+            // EITHER spheres OR an isosurface, so no sphere could ever be inside
+            // a liquid volume's AABB. Per-substance representation broke that
+            // assumption: one domain now draws some substances as spheres and
+            // reconstructs the rest into the isosurface, so the spheres live
+            // INSIDE this volume's box. Invisible to this probe, they were
+            // handled by whichever branch came next:
+            //   • a real surface behind them  -> hand-off fires for THAT surface,
+            //     the re-trace skips the AABBs, and the spheres draw correctly.
+            //     ("renders fine in front of a solid")
+            //   • nothing behind them          -> the miss branch below teleports
+            //     the ray to tFar, straight PAST the spheres. ("invisible in
+            //     empty space")
+            //   • liquid pooled behind them    -> the iso branch shades the water
+            //     and the spheres never get a chance. ("shows the dielectric")
+            // One excluded bit, three different-looking symptoms, and the only
+            // configuration that looked healthy was the one with no spheres at
+            // all. ★★ The comment claiming "particles remain visible to primary
+            // rays" stayed true and stopped being the whole story: a primary ray
+            // that enters a volume never gets back to the particles on its own.
+            //
+            // ★ The cost argument still holds where it was made: the GAS march's
+            // 1+6 nested solid-location probes still exclude 0x04. This is the
+            // fluid-surface branch (vol.source_type == 4) and this is ONE
+            // terminate-on-first-hit probe per volume hit.
+            const uint SOLID_MASK  = 0xF5;
             const uint VOLUME_SOLID_PROBE = 0xC17D5EEDu;
             shadowPayload = vec4(0.0, 0.0, 0.0, uintBitsToFloat(VOLUME_SOLID_PROBE));
             traceRayEXT(topLevelAS, SOLID_FLAGS, SOLID_MASK, 0, 1, 1,
@@ -1965,33 +2494,34 @@ void main() {
             // Bright white whitewater, lit by the current throughput.
             payload.radiance += payload.attenuation * foam * vec3(0.9);
         }
-        // ★ A degenerate gradient is a MISSING MEASUREMENT, not a normal.
-        //
-        // This used to fall back to -rayDir, i.e. a normal that always faces the
-        // viewer. For a dielectric that is nearly harmless (normal incidence =
-        // minimum Fresnel = it transmits, which is what a pass-through would
-        // have done anyway), so it survived unnoticed. With a real BSDF it is
-        // not harmless at all: a metal reflects about that fabricated normal,
-        // straight back into the liquid, and goes BLACK.
-        //
-        // Where does it actually fire? Exactly where two droplets have merged
-        // or sheets have stacked: the density field saturates on BOTH sides of
-        // the sample, the central difference cancels, and there is no surface
-        // to speak of there. So say that, instead of inventing one — let the ray
-        // continue to the next crossing, which is a real surface.
-        //
-        // Threshold is absolute because density is a normalised 0..1 field: a
-        // genuine boundary crosses it over roughly half a voxel, giving |grad|
-        // on the order of 1. Anything near zero is saturation, not a grazing
-        // surface.
+        // ★ A degenerate COARSE gradient is not proof that the crossing is fake.
+        // The ray march already measured a threshold sign change in this interval;
+        // retry the local derivative before choosing a conservative fallback.
+        // Density intentionally moves the 0.5 crossing through the proxy band
+        // and makes the rendered body fuller. Near a domain-side wall or a thin
+        // accumulated sheet, the one-voxel stencil can put both taps on the same
+        // plateau even though the march above measured a real crossing. Retry
+        // only that failed normal at quarter- and sixteenth-voxel scales. Normal
+        // hits pay nothing extra; a difficult side wall pays at most 12 samples.
+        for (int retry = 0; retry < 2 && gradLen <= 1e-4; ++retry) {
+            h *= 0.25;
+            sxp = sampleIsoField(vol, hitPos + vec3(h, 0.0, 0.0), vdbBuf, vdbMapH, vdbAcc);
+            sxm = sampleIsoField(vol, hitPos - vec3(h, 0.0, 0.0), vdbBuf, vdbMapH, vdbAcc);
+            syp = sampleIsoField(vol, hitPos + vec3(0.0, h, 0.0), vdbBuf, vdbMapH, vdbAcc);
+            sym = sampleIsoField(vol, hitPos - vec3(0.0, h, 0.0), vdbBuf, vdbMapH, vdbAcc);
+            szp = sampleIsoField(vol, hitPos + vec3(0.0, 0.0, h), vdbBuf, vdbMapH, vdbAcc);
+            szm = sampleIsoField(vol, hitPos - vec3(0.0, 0.0, h), vdbBuf, vdbMapH, vdbAcc);
+            grad = vec3(sxp - sxm, syp - sym, szp - szm);
+            gradLen = length(grad);
+        }
+        // If the sparse-grid quantisation defeats both finer stencils, the
+        // crossing direction still tells us the density derivative's sign:
+        // outside->inside rises along the ray, inside->outside falls. Preserve
+        // that measured entry/exit orientation instead of deleting the BSDF
+        // surface with a transparent pass-through.
         if (gradLen <= 1e-4) {
-            payload.radiance      += foam_inscatter;
-            payload.attenuation   *= foam_T;
-            payload.scatterOrigin  = hitPos + rayDir * max(0.003, vol.voxel_size);
-            payload.scatterDir     = rayDir;
-            payload.scattered      = true;
-            payload.bounceType     = BOUNCE_TRANSPARENT;
-            return;
+            grad = startInside ? -rayDir : rayDir;
+            gradLen = 1.0;
         }
         // Density increases TOWARD fluid interior, so -gradient points OUT of
         // the surface (toward the less-dense / air side).
@@ -2021,16 +2551,125 @@ void main() {
         // dark glass.
         // No material bound -> fall through to that original path, so scenes
         // authored before this change render exactly as they did.
-        if (vol.iso_material_index > 0.5) {
-            uint isoMatIdx = uint(vol.iso_material_index - 1.0);
+        // ── Which material(s) THIS point is made of ──────────────────────────
+        // With a composition field published, the domain's single material is
+        // only the fallback: each point resolves to the substances actually
+        // present there. Without one, isoMatSlot is exactly vol.iso_material_index
+        // and everything below is unchanged.
+        float isoMatSlot = vol.iso_material_index;
+        float isoMatSlotB = isoMatSlot;
+        float isoMixB = 0.0;
+        sampleComposition(vol, hitPos, isoMatSlot, isoMatSlotB, isoMixB);
+
+        if (isoMatSlot > 0.5 || isoMatSlotB > 0.5) {
+            // ★ A slot of 0 means "the built-in dielectric" for THAT substance,
+            // which is a real authoring choice — one substance a full Principled
+            // BSDF, another plain refractive liquid, in the same body. Clamped
+            // to a valid index here and given zero weight below, so the mixture
+            // degrades toward the material that IS bound instead of indexing
+            // material -1 and reading whatever precedes the table.
+            uint isoMatIdx  = uint(max(isoMatSlot,  1.0) - 1.0);
+            uint isoMatIdxB = uint(max(isoMatSlotB, 1.0) - 1.0);
+            float wB = (isoMatSlotB > 0.5) ? isoMixB : 0.0;
+            if (isoMatSlot <= 0.5) wB = 1.0;   // A is the dielectric; B carries it
+
             Material    im  = materials.m[isoMatIdx];
             MaterialExt imx = materialsExt.m[isoMatIdx];
+
+            // ═══════════════════════════════════════════════════════════════
+            // BLEND THE PARAMETERS, SHADE ONCE.
+            // ═══════════════════════════════════════════════════════════════
+            // ★★★ Not "shade twice and mix the results". Principled's parameter
+            // space is built to be interpolated, and one shading call keeps the
+            // lobe selection, the SSS walk and the refraction event SINGLE — a
+            // point in a mixture refracts once, through one interface, with an
+            // intermediate IOR. Mixing two shaded results would give two
+            // refractions and two entry events at one surface point, which reads
+            // as a ghosted double image exactly where the substances meet.
+            //
+            // ★ Only the fields this branch actually consumes are blended.
+            // Blending texture IDs would be meaningless (an index is a name, not
+            // a quantity), so the dominant material's textures win: at wB > 0.5
+            // the pair is swapped below instead.
+            if (wB > 0.001) {
+                if (wB > 0.5) {
+                    // Dominant side owns the texture bindings and the flags.
+                    // No temporary needed: the old A is re-fetched by index on
+                    // the line below, not read out of `im`.
+                    im  = materials.m[isoMatIdxB];
+                    imx = materialsExt.m[isoMatIdxB];
+                    isoMatIdx = isoMatIdxB;
+                    wB = 1.0 - wB;
+                    isoMatIdxB = uint(max(isoMatSlot, 1.0) - 1.0);
+                }
+                Material other = materials.m[isoMatIdxB];
+                im.albedo_r     = mix(im.albedo_r,     other.albedo_r,     wB);
+                im.albedo_g     = mix(im.albedo_g,     other.albedo_g,     wB);
+                im.albedo_b     = mix(im.albedo_b,     other.albedo_b,     wB);
+                im.roughness    = mix(im.roughness,    other.roughness,    wB);
+                im.metallic     = mix(im.metallic,     other.metallic,     wB);
+                im.transmission = mix(im.transmission, other.transmission, wB);
+                im.ior          = mix(im.ior,          other.ior,          wB);
+                im.opacity      = mix(im.opacity,      other.opacity,      wB);
+                im.emission_r   = mix(im.emission_r,   other.emission_r,   wB);
+                im.emission_g   = mix(im.emission_g,   other.emission_g,   wB);
+                im.emission_b   = mix(im.emission_b,   other.emission_b,   wB);
+                im.emission_strength =
+                    mix(im.emission_strength, other.emission_strength, wB);
+                im.clearcoat  = mix(im.clearcoat,  other.clearcoat,  wB);
+                im.clearcoat_roughness =
+                    mix(im.clearcoat_roughness, other.clearcoat_roughness, wB);
+                im.subsurface_amount =
+                    mix(im.subsurface_amount, other.subsurface_amount, wB);
+                im.translucent = mix(im.translucent, other.translucent, wB);
+                im.specular    = mix(im.specular,    other.specular,    wB);
+                im.normal_strength =
+                    mix(im.normal_strength, other.normal_strength, wB);
+            }
 
             // ★ ONE exit push for EVERY lobe below — see the long note at the
             // bottom of this block. Hoisted here because the thin-shell and
             // resin branches return early and need it just as much as the
             // Principled path does; a ULP offset re-hits the same surface.
             float exitPush = max(0.003, vol.voxel_size);
+
+            // ── GEOMETRIC vs SHADING normal ──────────────────────────────────
+            // Ng is the level-set gradient: the real orientation of the surface.
+            // N becomes the SHADING normal once a normal map perturbs it.
+            //
+            // ★★ THE SPLIT IS NOT COSMETIC. Everything that reasons about WHERE
+            // the surface is must keep using Ng — above all seatOutsideBand,
+            // which decides from dot(dir, N) whether a scattered ray is heading
+            // out of the body or into it. Feed it a perturbed normal and that
+            // test flips near grazing angles: an outgoing ray gets classified as
+            // inward, takes the probe path, and either self-occludes or steps
+            // through a thin wall. The result is light leaking through liquid
+            // exactly where the bump detail is strongest, which reads as a
+            // normal-map artefact and is really a band-logic one.
+            //
+            // Shading uses N; band, refraction geometry and ray re-seating use Ng.
+            vec3 Ng = N;
+            // ★ ONE projection draw for this hit, shared by the normal map and
+            // every texture channel below. Drawn here, before the first use, so
+            // there is exactly one place it can be got wrong. Independent draws
+            // per channel would sample albedo from one plane and roughness from
+            // another at the same surface point — which converges to a blend of
+            // two different materials and looks like a plausible material rather
+            // than like a bug.
+            float triXi = rnd(payload.seed);
+            if (im.normal_tex > 0u) {
+                vec2 nmScale = vec2(abs(im.uv_scale_x) > 1e-6 ? im.uv_scale_x : 1.0,
+                                    abs(im.uv_scale_y) > 1e-6 ? im.uv_scale_y : 1.0);
+                // Perturbed HERE, before SurfaceSample is filled and before the
+                // direct-light block reads N. Doing it later would light the
+                // surface with the flat normal and bounce off the bumped one —
+                // "the normal map only affects reflections", which is a report
+                // that sends you looking at the map instead of at the ordering.
+                N = triplanarNormal(im.normal_tex,
+                                    materialAnchor(vol, hitPos), Ng,
+                                    nmScale, vec2(im.uv_offset_x, im.uv_offset_y),
+                                    max(im.normal_strength, 0.0), triXi);
+            }
 
             // Depth absorption and whitewater are properties of the LIQUID
             // BODY, not of the surface lobe, so they apply whichever branch is
@@ -2101,7 +2740,7 @@ void main() {
                 // its true distance and true facing.
                 bool bHandOff = false;
                 payload.scatterDir    = bDir;
-                payload.scatterOrigin = seatOutsideBand(hitPos, bDir, N, exitPush, bHandOff);
+                payload.scatterOrigin = seatOutsideBand(hitPos, bDir, Ng, exitPush, bHandOff);
                 payload.skipAABBs     = bHandOff;
                 payload.attenuation  *= bAtt;
                 payload.scattered     = true;
@@ -2149,8 +2788,13 @@ void main() {
             // Surface Roughness governs the built-in dielectric below, and the
             // panel greys it out while a material is bound so the split is
             // visible rather than inferred.
-            // Note this is the material's SCALAR roughness: a roughness texture
-            // needs UVs, which a raymarched isosurface has none of.
+            // This is the material's SCALAR roughness; the tri-planar block
+            // below OVERRIDES it when a roughness texture is bound. (This note
+            // used to claim a roughness texture could not reach an isosurface
+            // at all. That stopped being true one screen further down, and a
+            // comment asserting a capability does not exist is worse than no
+            // comment — nobody goes looking for a feature they have been told
+            // is impossible.)
             ss.roughness = clamp(im.roughness, 0.0, 1.0);
             ss.metallic  = clamp(im.metallic, 0.0, 1.0);
             ss.specular  = im.specular;
@@ -2181,26 +2825,43 @@ void main() {
                                      abs(im.uv_scale_y) > 1e-6 ? im.uv_scale_y : 1.0);
                 vec2 texOffset = vec2(im.uv_offset_x, im.uv_offset_y);
 
+                // ★ THE ANCHOR. Everything below projects from `texAnchor`
+                // rather than from the world hit position, so the pattern is
+                // attached to the liquid instead of to the room. Sampled once
+                // and shared by all four maps: two maps resolving the anchor
+                // separately would be two chances for them to disagree, and a
+                // normal map registered against a different coordinate than its
+                // albedo is a class of wrongness that reads as "the lighting is
+                // off" rather than as a coordinate bug.
+                vec3 texAnchor = materialAnchor(vol, hitPos);
+                // Blend weights stay on the WORLD normal. They only decide which
+                // of the three projections dominates, and deriving a material-
+                // space normal would need the coordinate field's Jacobian for a
+                // difference that is invisible while the mapping is near
+                // identity — which is the regime this is useful in. It IS the
+                // reason a violently stretched region can show a seam shift; see
+                // the stretch limit noted on FluidParticles::uvw.
+
                 if (im.albedo_tex > 0u) {
                     // Replaces, matching the surface path (the texture is the
                     // base colour there, not a tint on it).
-                    ss.albedo = triplanarTexel(im.albedo_tex, hitPos, N, texScale, texOffset).rgb;
+                    ss.albedo = triplanarTexel(im.albedo_tex, texAnchor, N, texScale, texOffset, triXi).rgb;
                 }
                 if (im.roughness_tex > 0u) {
                     ss.roughness = clamp(samplePackedRoughness(
-                        triplanarTexel(im.roughness_tex, hitPos, N, texScale, texOffset),
+                        triplanarTexel(im.roughness_tex, texAnchor, N, texScale, texOffset, triXi),
                         0.0, im.flags), 0.0, 1.0);
                 }
                 if (im.metallic_tex > 0u) {
                     ss.metallic = clamp(samplePackedMetallic(
-                        triplanarTexel(im.metallic_tex, hitPos, N, texScale, texOffset),
+                        triplanarTexel(im.metallic_tex, texAnchor, N, texScale, texOffset, triXi),
                         im.flags), 0.0, 1.0);
                 }
-                // NOT wired: normal maps. Perturbing the normal needs a tangent
-                // frame, and tri-planar normal mapping needs one PER PLANE plus
-                // a whiteout blend to recombine them. Doing that half-way looks
-                // like lighting bugs rather than like a missing feature, so it
-                // is left out deliberately until it is done properly.
+                // Normal maps are handled EARLIER, where Ng/N are split — not
+                // here with the other maps. They have to be: this block runs
+                // after SurfaceSample is filled and after the direct-light
+                // block, both of which read the shading normal, so perturbing
+                // it here would light the surface flat and bounce it bumped.
             }
 
             // ── EMISSION ─────────────────────────────────────────────────────
@@ -2226,8 +2887,13 @@ void main() {
                     // the surface path; strength stays the material's.
                     vec2 emScale = vec2(abs(im.uv_scale_x) > 1e-6 ? im.uv_scale_x : 1.0,
                                         abs(im.uv_scale_y) > 1e-6 ? im.uv_scale_y : 1.0);
-                    isoEmission = triplanarTexel(im.emission_tex, hitPos, N,
-                                                 emScale, vec2(im.uv_offset_x, im.uv_offset_y)).rgb
+                    // Same anchor as the maps above — resolved again here
+                    // because this block sits outside their scope, NOT because
+                    // it is a different coordinate.
+                    isoEmission = triplanarTexel(im.emission_tex,
+                                                 materialAnchor(vol, hitPos), N,
+                                                 emScale, vec2(im.uv_offset_x, im.uv_offset_y),
+                                                 triXi).rgb
                                 * max(im.emission_strength, 0.0);
                 }
                 payload.radiance += isoEmission;
@@ -2242,8 +2908,58 @@ void main() {
             // BOTH transmission and interior depth is an amber/jade body, not a
             // coated one. Picking the coat for it would silently repaint every
             // existing scene with such a material bound to a liquid.
-            float isoTrans      = clamp(im.transmission, 0.0, 1.0);
-            bool  takeGlassLobe = (isoTrans > 0.01) && (rnd(payload.seed) < isoTrans);
+            // Resin coat absorption, hoisted so the NEE block below can apply it
+            // to DIRECT light too. The triangle path does exactly this
+            // (`resinActive/resinDensity/resinExt` carried into its NEE); without
+            // it a thick tinted coat would dim the indirect bounce and leave the
+            // direct term at full strength, i.e. the coat would look thinner the
+            // brighter the key light is.
+            bool  neeResinActive  = false;
+            vec3  neeResinExt     = vec3(0.0);
+            float neeResinDensity = 0.0;
+
+            // ★★★ TWO DIFFERENT TRANSMISSION VALUES, AND THEY MUST STAY APART.
+            //
+            // `isoTrans` SELECTS A LOBE here. On the triangle path the identically
+            // named local does NOT — SurfaceSample carries no transmission field,
+            // so there it only ever reaches evaluate_brdf_gl. That asymmetry is
+            // invisible when reading the two files side by side and it is exactly
+            // what a line copied from one into the other walks into.
+            //
+            // Copying the mesh's `opacity < 0.99 -> transmission = 1 - opacity`
+            // into the value below did precisely that: every material authored
+            // with opacity even slightly under 1 — which is most SKIN, WAX, JADE,
+            // MARBLE and MILK, i.e. exactly the subsurface materials — started
+            // taking the GLASS lobe and returning through scatterGlass before
+            // scatterPrincipled (where the subsurface lobe lives) ever ran.
+            //
+            // Two symptoms, one cause, and neither of them names it:
+            //   - "SSS broke"          — the subsurface lobe is never reached.
+            //   - "textures stopped
+            //      having any effect"  — scatterGlass ignores albedo/roughness
+            //                           detail, so the tri-planar maps that DID
+            //                           land stop showing.
+            // Both come back together when the lobe selector is restored.
+            float isoTransAuthored = clamp(im.transmission, 0.0, 1.0);
+
+            // LOBE SELECTION: authored transmission ONLY. An opaque material must
+            // never be routed into refraction because someone dialled its opacity
+            // to 0.95 — that is a coverage statement, not "this is glass".
+            bool  takeGlassLobe = (isoTransAuthored > 0.01) &&
+                                  (rnd(payload.seed) < isoTransAuthored);
+
+            // SHADING ONLY: scalar opacity thins the diffuse lobe in the BRDF
+            // evaluation, which is all the mesh's copy of this rule actually
+            // does. The isosurface read im.opacity nowhere before, so a
+            // semi-transparent material still looked fully solid on a liquid —
+            // that part of the fix stands, it just may not touch lobe choice.
+            //
+            // The TEXTURE half of opacity is elsewhere entirely: it cut geometry
+            // back in isoAlphaOffset.
+            float isoTrans = isoTransAuthored;
+            if (im.opacity < 0.99 && im.metallic < 0.1 && isoTransAuthored < 0.01) {
+                isoTrans = clamp(1.0 - im.opacity, 0.0, 1.0);
+            }
 
             // ── TRANSMISSION (real refraction) ───────────────────────────────
             // ★ This is the lobe whose absence made "transmission does nothing"
@@ -2264,8 +2980,8 @@ void main() {
             if (takeGlassLobe) {
                 float isoIor = (im.ior > 1.0001) ? im.ior : 1.33;
                 scatterGlass(hitPos,
-                             /*macroNormal  */ N,
-                             /*shadingNormal*/ N,   // an SDF has one normal: the gradient
+                             /*macroNormal  */ Ng,  // level-set gradient: the real surface
+                             /*shadingNormal*/ N,   // normal-mapped, if a map is bound
                              /*frontFace    */ !startInside,
                              rayDir, ss.albedo, isoIor, ss.roughness,
                              imx.transmission_density,
@@ -2278,7 +2994,7 @@ void main() {
                 // push clears the liquid and the surface behind it together.
                 bool gHandOff = false;
                 payload.scatterOrigin =
-                    seatOutsideBand(hitPos, payload.scatterDir, N, exitPush, gHandOff);
+                    seatOutsideBand(hitPos, payload.scatterDir, Ng, exitPush, gHandOff);
                 payload.skipAABBs = gHandOff;
                 payload.primaryARG = packHalf2x16(ss.albedo.rg);
                 payload.primaryABT = packHalf2x16(vec2(ss.albedo.b, 1.0));
@@ -2330,7 +3046,7 @@ void main() {
                     // these sites is what produced the thin-wall bug.
                     bool rHandOff = false;
                     payload.scatterOrigin =
-                        seatOutsideBand(hitPos, refl, N, exitPush, rHandOff);
+                        seatOutsideBand(hitPos, refl, Ng, exitPush, rHandOff);
                     payload.skipAABBs = rHandOff;
                     payload.scattered     = true;
                     payload.bounceType    = BOUNCE_RESIN;   // raygen's resin budget
@@ -2346,6 +3062,9 @@ void main() {
                                     vec3(0.0), vec3(1.0));
                 float ctMax = max(ct.r, max(ct.g, ct.b));
                 vec3  ext   = (vec3(1.0) - ct) * 1.35 + vec3(0.22 * (1.0 - ctMax));
+                neeResinActive  = true;
+                neeResinExt     = ext;
+                neeResinDensity = imx.transmission_density;
                 float cosVr = max(abs(cosTr), 0.25);
 
                 vec3 Tdir = refract(rayDir, N, 1.0 / effIor);
@@ -2376,22 +3095,45 @@ void main() {
                         }
                     }
                     // ANCHOR. The triangle path offers object space so the
-                    // interior travels with the mesh. There is no object here;
-                    // the analogue is DOMAIN-local, through the same inverse
-                    // transform the volume VM uses a few hundred lines below.
+                    // interior travels with the mesh. There is no object here —
+                    // the analogue is the MATERIAL coordinate, which is what the
+                    // liquid has instead of an object: the inclusions are now
+                    // carried by the fluid rather than left standing in the tank
+                    // while it pours past them.
                     //
-                    // ★ It is NOT the same guarantee, and the difference is
-                    // invisible until the liquid moves: the fluid FLOWS THROUGH
-                    // a domain-fixed pattern, so the inclusions read as
-                    // stationary in the tank rather than carried along by the
-                    // material. Static or slow liquids look right; a pour does
-                    // not. Real carriage needs an advected coordinate (a
-                    // per-particle UVW attribute), which does not exist yet.
-                    vec3 mOrg = hitPos, mDir = Tdir, mLit = resinLightDir;
+                    // ★ The ORIGIN goes through the shared anchor, so the resin
+                    // interior sits in whatever space the domain selected —
+                    // material, domain-local or world — and cannot end up in a
+                    // different one from the albedo painted over it.
+                    //
+                    // ★★ MAT_FLAG_RESIN_OBJ_SPACE IS DELIBERATELY NOT APPLIED TO
+                    // THE ORIGIN HERE, and that is a behaviour change worth being
+                    // explicit about. That flag means "object space" — on a mesh,
+                    // the object is the mesh. On a liquid there is no object, and
+                    // the analogue is the volume's own transform, which is
+                    // exactly what COORD_DOMAIN already does inside the anchor.
+                    // Applying both would run the inverse transform TWICE and
+                    // push the inclusions into a space that is nobody's: still
+                    // stable, still smooth, just wrong by a whole transform —
+                    // and it would look like a scale bug in the inclusion size
+                    // rather than like a double transform. On the isosurface the
+                    // domain's Coordinate Space is the single authority; the flag
+                    // keeps its full meaning on the triangle path, where it is
+                    // the only thing that can express it.
+                    //
+                    // ★★★ The DIRECTIONS still take the flag's rotation. They
+                    // cannot go through the anchor — transforming a direction
+                    // properly needs the field's Jacobian — and a march direction
+                    // that disagrees with its origin's space does not fail
+                    // visibly: it makes the inclusions subtly elongate along the
+                    // flow, which reads as "that is what resin looks like".
+                    // Origin in the anchored space with directions in the
+                    // volume's rotation is the honest approximation: exact
+                    // wherever the mapping is near-rigid, and it degrades by
+                    // SHEARING the pattern rather than tearing it.
+                    vec3 mOrg = materialAnchor(vol, hitPos);
+                    vec3 mDir = Tdir, mLit = resinLightDir;
                     if ((im.flags & MAT_FLAG_RESIN_OBJ_SPACE) != 0u) {
-                        mOrg.x = vol.inv_transform[0]*hitPos.x + vol.inv_transform[1]*hitPos.y + vol.inv_transform[2]*hitPos.z  + vol.inv_transform[3];
-                        mOrg.y = vol.inv_transform[4]*hitPos.x + vol.inv_transform[5]*hitPos.y + vol.inv_transform[6]*hitPos.z  + vol.inv_transform[7];
-                        mOrg.z = vol.inv_transform[8]*hitPos.x + vol.inv_transform[9]*hitPos.y + vol.inv_transform[10]*hitPos.z + vol.inv_transform[11];
                         // Directions drop the translation column.
                         mat3 volRot = mat3(vol.inv_transform[0], vol.inv_transform[4], vol.inv_transform[8],
                                            vol.inv_transform[1], vol.inv_transform[5], vol.inv_transform[9],
@@ -2425,13 +3167,127 @@ void main() {
                 // The coat already took the specular, so the base is rough and
                 // non-metallic — same as the triangle path.
                 //
-                // ★ Unlike the triangle path, this base gets NO direct lighting:
-                // the isosurface branch has no NEE block, so it is lit by the
-                // indirect bounce alone. Unbiased but noisier — a dark resin
-                // base on a liquid needs more samples than the same material on
-                // a mesh, and that is a sample-count symptom, not a bug.
+                // The base is rough and non-metallic, same as the triangle path.
+                // It DOES get direct lighting now — see the NEE block below,
+                // which applies the coat absorption to it as well.
                 ss.roughness = 1.0;
                 ss.metallic  = 0.0;
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // DIRECT LIGHTING (NEE) — the reason a liquid used to render darker
+            // and far noisier than a mesh carrying the SAME material
+            // ═══════════════════════════════════════════════════════════════
+            // Until now this branch sampled a bounce direction and returned, so
+            // the surface received light ONLY when a random BSDF sample happened
+            // to land on a light. For anything but a huge, close source that is a
+            // tiny solid angle, so most samples contributed nothing (dark) and
+            // the rare hits carried enormous energy (noisy). The mesh path never
+            // had that problem because it samples the light explicitly.
+            //
+            // ★ The give-away in a bug report is the pair: "dimmer AND grainier,
+            // same material, same distance". Energy loss alone would be dim and
+            // clean; a bad lobe would be bright and wrong. Dim + noisy together
+            // is the signature of a missing direct-light estimator.
+            //
+            // ★★ Uses the SHARED evaluators — evaluate_brdf_gl, pdf_brdf_gl,
+            // compute_light_pdf_gl, the same light picker — not a private copy.
+            // That is the point: the liquid and the mesh are now lit by one
+            // estimator, so they cannot drift apart under future edits the way
+            // two look-alike implementations would.
+            //
+            // ★★★ SHADOW RAYS USE MASK 0x01 (triangles only), matching the mesh.
+            // The liquid's own AABB is on 0x08, so it is invisible to the shadow
+            // ray and A LIQUID DOES NOT SHADOW ITSELF in the direct term. This is
+            // deliberate for now, not an oversight: a shadow ray leaving this
+            // surface starts inside the half-voxel level-set band and would
+            // self-occlude immediately, which needs the same seatOutsideBand
+            // treatment the scatter lobes get plus a march for the thickness. The
+            // visible consequence is that a deep pool of an OPAQUE liquid (molten
+            // metal, chocolate) is lit slightly too evenly on its underside.
+            // Clear water, which is what this path mostly renders, is unaffected.
+            //
+            // Skipped entirely when the glass lobe was taken — that path returned
+            // long before here — and skipped for the thin-shell film, which also
+            // returns early. Both are specular: NEE contributes nothing to a
+            // delta lobe and would just cost a shadow ray.
+            {
+                float pdf_select = 0.0;
+                int lightIdx = pick_smart_light_gl(uvec2(0), hitPos, pdf_select);
+                if (lightIdx >= 0) {
+                    vec3 wi; float dist; float lightAtten;
+                    if (sample_light_direction_gl(lights.l[lightIdx], hitPos,
+                                                  rnd(payload.seed), rnd(payload.seed),
+                                                  wi, dist, lightAtten) &&
+                        dot(wi, wi) > 1e-8) {
+                        wi = normalize(wi);
+                        float NdotL = max(dot(N, wi), 0.0);
+                        if (NdotL > 1e-6) {
+                            // Outward-going by construction (NdotL > 0), so the
+                            // band probe inside the helper returns immediately —
+                            // this costs nothing but keeps the ONE exit-push rule
+                            // rather than inventing a second epsilon here.
+                            bool sHandOff = false;
+                            vec3 shadowOrigin =
+                                seatOutsideBand(hitPos, wi, Ng, exitPush, sHandOff);
+
+                            shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+                            float tmax = max(dist - 1e-3, 1e-3);
+                            traceRayEXT(topLevelAS,
+                                        gl_RayFlagsTerminateOnFirstHitEXT
+                                      | gl_RayFlagsSkipClosestHitShaderEXT,
+                                        RT_MASK_DIRECT_SHADOW, 0, 1, 1,
+                                        shadowOrigin, 1e-4, wi, tmax, 1);
+                            vec3 vis = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
+
+                            if (any(greaterThan(vis, vec3(1e-4)))) {
+                                vec3 V    = normalize(-rayDir);
+                                vec3 brdf = evaluate_brdf_gl(N, V, wi, ss.albedo,
+                                                             ss.roughness, ss.metallic,
+                                                             ss.specular, isoTrans);
+                                vec3 Li = lights.l[lightIdx].color.rgb
+                                        * lights.l[lightIdx].color.a * lightAtten;
+
+                                int  ltype  = int(lights.l[lightIdx].position.w + 0.5);
+                                bool isDelta = (ltype == 0 || ltype == 1);
+
+                                vec3 contrib;
+                                if (isDelta) {
+                                    // A delta light has no solid angle for the BSDF
+                                    // to have sampled, so there is nothing to
+                                    // balance against — MIS weight is 1 by
+                                    // definition. Applying a heuristic here would
+                                    // halve point and sun lighting for no reason.
+                                    contrib = brdf * Li * NdotL / max(pdf_select, 1e-6);
+                                } else {
+                                    float pdfL = compute_light_pdf_gl(lights.l[lightIdx], dist, 1.0)
+                                               * pdf_select;
+                                    float pdfB = pdf_brdf_gl(N, V, wi, ss.roughness);
+                                    contrib = brdf * Li * NdotL
+                                            * power_heuristic(pdfL, pdfB)
+                                            / max(pdfL, 1e-6);
+                                }
+
+                                if (neeResinActive) {
+                                    // Slanted ENTRY path through the coat, exactly
+                                    // as the triangle path does it.
+                                    float cosL = max(NdotL, 0.05);
+                                    contrib *= exp(-(neeResinDensity / cosL) * neeResinExt);
+                                }
+
+                                // Firefly clamp, same shape as the mesh's. A single
+                                // sample landing on a tiny bright light with a
+                                // near-zero pdf otherwise writes a permanent white
+                                // dot into the accumulator.
+                                contrib = max(contrib, vec3(0.0));
+                                contrib = min(contrib, vec3(1e4));
+                                if (any(isnan(contrib)) || any(isinf(contrib))) contrib = vec3(0.0);
+
+                                payload.radiance += contrib * vis;
+                            }
+                        }
+                    }
+                }
             }
 
             scatterPrincipled(ss, payload.seed);
@@ -2468,7 +3324,7 @@ void main() {
             // cost nothing extra — the helper returns immediately for them.
             bool pHandOff = false;
             payload.scatterOrigin =
-                seatOutsideBand(hitPos, payload.scatterDir, N, exitPush, pHandOff);
+                seatOutsideBand(hitPos, payload.scatterDir, Ng, exitPush, pHandOff);
             payload.skipAABBs = pHandOff;
 
             payload.primaryARG = packHalf2x16(ss.albedo.rg);

@@ -1,0 +1,22 @@
+{
+  "guidance_version": "1.0",
+  "title": "Start with an empty scene",
+  "summary": "Build only what the scene needs while keeping the viewport in focus.",
+  "steps": [
+    {
+      "id": "add-content",
+      "title": "Add scene content",
+      "description": "Use the Add menu or scripting API to create geometry, lights, cameras, or other scene elements."
+    },
+    {
+      "id": "choose-context",
+      "title": "Choose a working context",
+      "description": "Select a context from the left rail when you need focused authoring controls."
+    },
+    {
+      "id": "open-editor",
+      "title": "Open an editor when needed",
+      "description": "Use the bottom editor switcher for graphs, animation, materials, assets, or diagnostics."
+    }
+  ]
+}

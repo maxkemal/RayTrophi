@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "id": "raytrophi.start.product_lookdev",
+  "display_name": "Product Lookdev",
+  "description": "A neutral studio, product target and lighting rig for material development.",
+  "kind": "start",
+  "category": "lookdev",
+  "sort_order": 30,
+  "compatibility": { "minimum_raytrophi_version": "1.0.0" },
+  "preview": { "image": "preview.webp", "alt": "Product in a neutral studio lighting setup" },
+  "scene": { "type": "project", "path": "scene.rtp" },
+  "ui_state": {
+    "properties_context": "scene",
+    "bottom_editor": "material",
+    "contextual_dock": "none",
+    "viewport_shading": "material_preview",
+    "frame_target": "Product_Target",
+    "show_timeline": false
+  },
+  "renderer": { "preference": "auto", "allow_fallback": true },
+  "performance": { "class": "light", "estimated_vram_mb": 768 },
+  "assets": { "required": ["scene.rtp"], "optional": ["assets/studio_hdri.exr"] }
+}

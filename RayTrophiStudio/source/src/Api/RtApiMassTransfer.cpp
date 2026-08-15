@@ -1,5 +1,6 @@
 #include "RtApiInternal.h"
 #include "ParticleSimulation.h"
+#include "Fluid/SubstanceTag.h"
 
 namespace rtapi {
 Result queueMoltenMassTransfer(const std::string& object_key,
@@ -44,8 +45,11 @@ Result getMoltenMassTransferInfo(MoltenMassTransferInfo& out) {
     out.last_substance = s.last_substance;
     out.last_temperature_kelvin = s.last_temperature_kelvin;
     out.last_combustible_fraction = s.last_combustible_fraction;
-    uint32_t tag = 2166136261u;
-    for (unsigned char c : s.last_substance) tag = (tag ^ c) * 16777619u;
+    // ★ Shared definition. This used to be an inlined copy of the FNV loop, and
+    // it had already drifted: it lacked the empty-name and hash-zero guards, so
+    // an unnamed substance hashed to the FNV seed here and to "untagged"
+    // elsewhere. Two definitions of an identity is two identities.
+    const uint32_t tag = RayTrophiSim::Fluid::substanceTag(s.last_substance);
     double remaining = 0.0;
     const auto& domains = scriptSimulationRuntime().gridDomains();
     const auto& states = scriptSimulationRuntime().gridDomainStates();

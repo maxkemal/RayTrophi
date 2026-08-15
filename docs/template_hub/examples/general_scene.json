@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "id": "raytrophi.start.general_scene",
+  "display_name": "General Scene",
+  "description": "A balanced scene with a canonical mesh, camera and light for general work.",
+  "kind": "start",
+  "category": "general",
+  "sort_order": 20,
+  "compatibility": { "minimum_raytrophi_version": "1.0.0" },
+  "preview": { "image": "preview.webp", "alt": "General scene with cube, camera and light" },
+  "scene": { "type": "recipe", "path": "scene.json" },
+  "ui_state": {
+    "properties_context": "scene",
+    "bottom_editor": "none",
+    "contextual_dock": "none",
+    "viewport_shading": "solid",
+    "frame_target": "Default_Cube",
+    "show_timeline": true
+  },
+  "renderer": { "preference": "auto", "allow_fallback": true },
+  "performance": { "class": "light", "estimated_vram_mb": 64 },
+  "assets": { "required": [], "optional": [] }
+}

@@ -236,7 +236,9 @@ uint32_t requiredCapabilities(const std::string& method) {
         method == "anim.graph_status" ||
         // Substance library enumeration: read-only, and its name matches none
         // of the ".get"/".list" substring heuristics below.
-        method == "msf.substances" || method == "msf.fields")
+        method == "msf.substances" || method == "msf.fields" ||
+        method == "templates.refresh" || method == "templates.validate" ||
+        method == "templates.prepare")
         return Read;
     const bool read_method = method == "version" || method == "project.path" ||
         method == "undo_description" || method == "redo_description" ||
@@ -255,7 +257,10 @@ uint32_t requiredCapabilities(const std::string& method) {
         "scene.", "select.", "material.", "lights.", "timeline.", "camera.",
         "world.", "post.", "anim.", "nodes.", "modifiers.",
         "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.",
-        "hair.", "paint.", "sculpt.", "project.", "undo", "redo"
+        // Emitters. `flow_source.list`/`.get` fall through to Read above via the
+        // substring heuristics; create/update/remove land here as SceneWrite.
+        "flow_source.",
+        "hair.", "paint.", "sculpt.", "debris.", "templates.", "project.", "undo", "redo"
     };
     for (const char* prefix : namespaces)
         if (method.rfind(prefix, 0) == 0) return SceneWrite;

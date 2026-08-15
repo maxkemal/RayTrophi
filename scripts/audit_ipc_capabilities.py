@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Audit the remote-IPC capability table against the dispatch chain.
+"""Audit the remote-IPC capability table against every dispatch module.
 
-RtIpc.cpp::dispatchMethod is a hand-written `if (method == "...")` chain and
-RtIpcSecurity.cpp::requiredCapabilities classifies methods with a namespace
-table. Nothing links the two, so they drift: a method missing from the table
+RtIpc.cpp and focused RtIpc*.cpp modules use hand-written
+`if (method == "...")` chains, while RtIpcSecurity.cpp::requiredCapabilities
+classifies methods with a namespace table. Nothing links them, so they drift:
+a method missing from the table
 gets 0 required capabilities and authorize() rejects it fail-closed, which
 looks exactly like an unrelated permission problem from the client side.
 (That is how `lights.` / `nodes.` / `modifiers.` / `anim.` were lost behind
@@ -24,7 +25,14 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 API = os.path.join(ROOT, "RayTrophiStudio", "source", "src", "Api")
-IPC = os.path.join(API, "RtIpc.cpp")
+IPC_FILES = [
+    os.path.join(API, name)
+    for name in os.listdir(API)
+    if name.startswith("RtIpc") and name.endswith(".cpp")
+    and name not in {"RtIpcSecurity.cpp", "RtIpcAudit.cpp",
+                     "RtIpcSession.cpp", "RtIpcTransportLocal.cpp",
+                     "RtIpcTransportTls.cpp", "RtIpcPanel.cpp"}
+]
 SECURITY = os.path.join(API, "RtIpcSecurity.cpp")
 
 # `batch` is authorized per child call instead of at the top level
@@ -70,7 +78,9 @@ def required(method, namespaces):
     if method in ("material.info", "material.of_object", "material.textures",
                   "nodes.graphs", "forcefield.evaluate", "particle.stats",
                   "particle.emitters", "anim.characters", "anim.character",
-                  "anim.clips", "anim.graph_status"):
+                  "anim.clips", "anim.graph_status", "msf.substances",
+                  "msf.fields", "templates.refresh", "templates.validate",
+                  "templates.prepare"):
         return "Read"
     if (method in ("version", "project.path", "undo_description",
                    "redo_description")
@@ -84,7 +94,7 @@ def required(method, namespaces):
 
 
 def main():
-    methods = dispatched_methods(read(IPC))
+    methods = dispatched_methods("\n".join(read(path) for path in IPC_FILES))
     namespaces = namespace_table(read(SECURITY))
 
     unreachable = [m for m in methods

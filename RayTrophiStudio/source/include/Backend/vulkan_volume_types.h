@@ -147,12 +147,87 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     // slot is untouched, and rather than growing the struct so the 576-byte ABI
     // (mirrored by five shader declarations) stays put.
     float    iso_material_index;
-    // Headroom for the next pass (velocity grid for volume motion blur).
+    // SDF isosurface, FULLY CLAIMED: [0]=pore amount, [1]=world units per pore
+    // cell, [2]=pore size variation, [3]=coordinate space
+    // (0=Material, 1=Domain, 2=World). No headroom left in this block — the
+    // next field that needs a home grows the struct, which is the five-file
+    // edit described below.
     float    _accel_reserved[4];
+
+    // ── Material coordinate (UVW) RESIDUAL grid ─────────────────────────────
+    // Dense xyz-triple field, sim-grid resolution, sampled by the isosurface
+    // shader so a texture on a liquid flows WITH the liquid. Address 0 = not
+    // published, and the shader must then anchor in world space exactly as it
+    // did before this existed — 0 may never be read as "the coordinate is the
+    // origin", which would collapse the surface onto one texel.
+    //
+    // ★★★ HOLDS (uvw - cell centre), NOT the coordinate. The consumer rebuilds
+    // it as worldPos + trilinear(d). The field was renamed with that change so
+    // a half-updated tree cannot compile: read as absolute, these values are
+    // near zero and the whole liquid collapses onto one texel.
+    //
+    // ★ This block is why the struct GREW past 576 rather than claiming
+    // headroom: an address needs 8 aligned bytes and only one float remained.
+    // Growing means every declaration below must move in the same commit, since
+    // the SSBO stride is per-declaration and one stale copy shifts every
+    // instance after the first:
+    //   volume_closesthit.rchit, closesthit.rchit, raygen.rgen,
+    //   volume_intersection.rint  (+ this header)
+    uint64_t uvw_residual_address;
+
+    // ── Composition (per-substance materials) ───────────────────────────────
+    // Same grid, same origin and cell size as the residual field above — it is
+    // gathered from the same particles with the same kernel — so it needs an
+    // address and nothing else. Per cell: material index A, material index B,
+    // weight of B.
+    //
+    // ★ Placed HERE rather than after uvw_voxel, and that is not cosmetic: an
+    // 8-byte address at offset 612 would need 4 bytes of alignment padding and
+    // push the struct from 624 to 640. Slotting it beside the other address
+    // leaves the size unchanged, so this feature costs no ABI churn across the
+    // five declarations at all — it consumes the tail padding that was already
+    // being reserved.
+    //
+    // 0 = no composition published: every substance in this domain resolves to
+    // the same material, so there is nothing to blend and the shader uses
+    // iso_material_index directly.
+    uint64_t composition_address;
+    // Cell counts of that grid. A zero on any axis means unusable; published
+    // only as a complete set with the address.
+    float    uvw_dim[3];
+
+    // ★★★ THE GRID'S OWN WORLD PLACEMENT — origin of cell (0,0,0) and its cell
+    // size, both in world units. Carried explicitly instead of being derived
+    // from aabb_min/aabb_max, and that is a bug fix, not tidiness:
+    //
+    // aabb_min/max on a live fluid volume is the ACTIVE box — a tight bound
+    // around the occupied cells of the DENSE/SDF grid, padded by one cell and
+    // recomputed every frame. This buffer, by contrast, covers the whole SIM
+    // grid at the sim's own resolution. Indexing one with the other stretches
+    // the field by the ratio between them, shifts it by the difference in
+    // origin, and — because the active box tracks the liquid — makes both errors
+    // change every frame. It renders as a texture that smears along the flow and
+    // swims, which is easy to mistake for the coordinate itself being coarse.
+    //
+    // ★ These must come from the SAME FluidGrid the producer walked. Deriving
+    // them from anything else re-opens exactly this bug in a form that looks
+    // plausible on a domain whose bounds happen to line up.
+    float    uvw_origin[3];
+    float    uvw_voxel;
+
+    // Pad to the 16-byte alignment this struct declares (604+16 = 620 -> 624).
+    // ★ Written out EXPLICITLY rather than left to the compiler, and mirrored
+    // verbatim in every GLSL declaration: C++ pads an alignas(16) struct to 624
+    // while std430 would only pad to the 8-byte alignment of the uint64 member.
+    // Implicit padding is exactly where the two layouts are free to disagree,
+    // and a stride disagreement here does not fail — it shifts every volume
+    // after the first and reads the neighbour's fields as this one's.
+    float    _uvw_pad[1];
 };
 
-// Compile-time size check (576 bytes = 9 cache lines)
-static_assert(sizeof(VkVolumeInstance) == 576, "VkVolumeInstance must be 576 bytes");
+// Compile-time size check (624 bytes). Growing this is a five-file edit — see
+// the UVW block above for the list and the reason.
+static_assert(sizeof(VkVolumeInstance) == 624, "VkVolumeInstance must be 624 bytes");
 
 /**
  * @struct VkVolumeParams

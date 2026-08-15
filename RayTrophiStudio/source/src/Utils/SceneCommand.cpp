@@ -148,6 +148,11 @@ void scheduleSceneMutationRebuilds(UIContext& ctx, bool includeCpuBvh) {
     g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
 
     if (includeCpuBvh) {
+        // Invalidate an already-running async snapshot at mutation time. Waiting
+        // until Main consumes g_bvh_rebuild_pending leaves a frame-sized race in
+        // which the stale future can replace scene.bvh after an add/template open.
+        extern uint64_t g_cpu_bvh_requested_generation;
+        ++g_cpu_bvh_requested_generation;
         g_bvh_rebuild_pending = true;
     }
 

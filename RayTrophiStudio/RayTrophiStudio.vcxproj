@@ -429,6 +429,8 @@
     <ClInclude Include="source\include\Fluid\FluidSimulationSystem.h" />
     <ClInclude Include="source\include\Fluid\FluidLevelSet.h" />
     <ClInclude Include="source\include\Fluid\FluidFoam.h" />
+    <ClInclude Include="source\include\Fluid\FluidSplatMaterialPolicy.h" />
+    <ClInclude Include="source\include\Fluid\FluidSplatMaterialAuthoring.h" />
     <ClInclude Include="source\include\Fluid\FoamSurface.h" />
     <ClInclude Include="source\include\Stylize\StylizePostProcess.h" />
     <ClInclude Include="source\include\Stylize\StylizeCore.h" />
@@ -457,6 +459,7 @@
     <ClInclude Include="source\include\Backend\VulkanVolumeInstrumentation.h" />
     <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h" />
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp" />
+    <ClInclude Include="source\include\UI\HierarchyLiveObjectView.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc" />
@@ -1355,6 +1358,11 @@
     <ClCompile Include="source\src\Scene\PointLight.cpp" />
     <ClCompile Include="source\src\Scene\PrincipledBSDF.cpp" />
     <ClCompile Include="source\src\Core\ProjectManager.cpp" />
+    <ClCompile Include="source\src\Template\TemplateRegistry.cpp" />
+    <ClCompile Include="source\src\Template\TemplateLoader.cpp" />
+    <ClCompile Include="source\src\Template\TemplateRecipeStage.cpp" />
+    <ClCompile Include="source\src\Template\TemplateSession.cpp" />
+    <ClCompile Include="source\src\Template\TemplateUiStateAdapter.cpp" />
     <ClCompile Include="source\src\Core\RenderStateManager.cpp" />
     <ClCompile Include="source\src\Render\Renderer.cpp" />
     <ClCompile Include="source\src\Physics\RiverManager.cpp" />
@@ -1370,6 +1378,8 @@
     <ClCompile Include="source\src\Api\RtApiDebris.cpp" />
     <ClCompile Include="source\src\Api\RtApiMassTransfer.cpp" />
     <ClCompile Include="source\src\Api\RtIpcFracture.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcTemplates.cpp" />
+    <ClCompile Include="source\src\Api\RtApiTemplates.cpp" />
     <ClCompile Include="source\src\Api\RtPythonFracture.cpp">
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
@@ -1380,6 +1390,9 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtPythonMassTransfer.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonTemplates.cpp">
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiForceField.cpp" />
@@ -1465,10 +1478,14 @@
     <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp" />
     <ClCompile Include="source\src\Physics\FractureSourceAdapter.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainParticleAuthoring.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainRenderLifecycle.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidLevelSet.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidFoam.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialPolicy.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialAuthoring.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FoamSurface.cpp" />
     <ClCompile Include="source\src\Physics\SimulationCompute.cpp" />
     <ClCompile Include="source\src\Device\SimulationComputeVulkan.cpp" />
@@ -1559,6 +1576,15 @@
           SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(RayTrophiScript)"
           DestinationFiles="@(RayTrophiScript->'$(OutDir)scripts\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="CopyTemplatePackages" AfterTargets="Build"
+          Condition="Exists('$(ProjectDir)assets\templates')">
+    <ItemGroup>
+      <RayTrophiTemplateAsset Include="$(ProjectDir)assets\templates\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RayTrophiTemplateAsset)"
+          DestinationFiles="@(RayTrophiTemplateAsset->'$(OutDir)assets\templates\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 </Project>

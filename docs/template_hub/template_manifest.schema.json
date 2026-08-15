@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raytrophi.local/schemas/template-manifest-v1.json",
+  "title": "RayTrophi Template Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "display_name",
+    "description",
+    "kind",
+    "category",
+    "sort_order",
+    "compatibility",
+    "preview",
+    "scene",
+    "ui_state",
+    "performance",
+    "assets"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$",
+      "minLength": 3,
+      "maxLength": 96
+    },
+    "display_name": { "type": "string", "minLength": 1, "maxLength": 48 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 140 },
+    "kind": { "enum": ["start", "learn"] },
+    "category": {
+      "enum": ["empty", "general", "lookdev", "character", "paint", "terrain", "animation", "simulation"]
+    },
+    "sort_order": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_raytrophi_version"],
+      "properties": {
+        "minimum_raytrophi_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "maximum_raytrophi_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
+      }
+    },
+    "preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image"],
+      "properties": {
+        "image": { "$ref": "#/$defs/relativePath" },
+        "alt": { "type": "string", "maxLength": 120 }
+      }
+    },
+    "scene": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "path"],
+      "properties": {
+        "type": { "enum": ["project", "recipe"] },
+        "path": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "ui_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["properties_context", "bottom_editor", "contextual_dock", "viewport_shading"],
+      "properties": {
+        "properties_context": {
+          "enum": ["scene", "render", "terrain", "water", "volumetric", "simulation", "world", "modeling", "hair", "system", "paint", "scatter", "stylize", "sculpt"]
+        },
+        "bottom_editor": {
+          "enum": ["none", "dope_sheet", "graph_editor", "console", "terrain", "anim_graph", "geometry", "material", "assets"]
+        },
+        "contextual_dock": { "enum": ["none", "paint", "hair", "sculpt", "terrain"] },
+        "contextual_dock_width": { "type": "number", "minimum": 50, "maximum": 400 },
+        "viewport_shading": { "enum": ["solid", "material_preview", "rendered", "matcap"] },
+        "frame_target": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "show_timeline": { "type": "boolean" }
+      }
+    },
+    "renderer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preference": { "enum": ["auto", "vulkan", "optix", "cpu"] },
+        "allow_fallback": { "type": "boolean" }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class"],
+      "properties": {
+        "class": { "enum": ["light", "medium", "heavy"] },
+        "estimated_vram_mb": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "optional"],
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/relativePath" },
+          "uniqueItems": true
+        },
+        "optional": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/relativePath" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "guidance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "show_on_first_open": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 260,
+      "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)).+$"
+    }
+  }
+}

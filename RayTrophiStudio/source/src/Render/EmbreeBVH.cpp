@@ -124,6 +124,9 @@ void EmbreeBVH::shutdown() {
 
 void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     auto build_start = std::chrono::high_resolution_clock::now();
+    Vec3 build_audit_min(0.0f);
+    Vec3 build_audit_max(0.0f);
+    bool build_audit_bounds_valid = false;
 
     // Reset state
     clearGeometry(); 
@@ -398,6 +401,49 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
             vertex_offset += standalone_count * 3;
         }
 
+        // Low-cost build audit for the canonical flat-mesh path. This runs once
+        // per BVH build (never per ray) and exposes whether CPU render/picking
+        // received finite vertices and valid indices before Embree commits them.
+        Vec3 audit_min(std::numeric_limits<float>::infinity());
+        Vec3 audit_max(-std::numeric_limits<float>::infinity());
+        size_t non_finite_vertices = 0;
+        for (size_t i = 0; i < total_vertices; ++i) {
+            const Vec3& p = vertex_buffer[i];
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+                ++non_finite_vertices;
+                continue;
+            }
+            audit_min = Vec3::min(audit_min, p);
+            audit_max = Vec3::max(audit_max, p);
+        }
+        size_t invalid_indices = 0;
+        for (size_t i = 0; i < total_triangles * 3; ++i) {
+            if (index_buffer[i] >= total_vertices) ++invalid_indices;
+        }
+        build_audit_min = audit_min;
+        build_audit_max = audit_max;
+        build_audit_bounds_valid = non_finite_vertices < total_vertices && total_vertices > 0;
+        SCENE_LOG_INFO(
+            "[EmbreeBVH::build/audit] direct_meshes=" + std::to_string(cached_direct_meshes.size()) +
+            " faceless_tris=" + std::to_string(facadeless_tri_count) +
+            " total_vertices=" + std::to_string(total_vertices) +
+            " total_tris=" + std::to_string(total_triangles) +
+            " invalid_indices=" + std::to_string(invalid_indices) +
+            " non_finite_vertices=" + std::to_string(non_finite_vertices) +
+            " bounds_min=(" + std::to_string(audit_min.x) + "," + std::to_string(audit_min.y) + "," + std::to_string(audit_min.z) + ")" +
+            " bounds_max=(" + std::to_string(audit_max.x) + "," + std::to_string(audit_max.y) + "," + std::to_string(audit_max.z) + ")");
+        for (const auto& mesh : cached_direct_meshes) {
+            if (!mesh || !mesh->transform) continue;
+            const Matrix4x4& base = mesh->transform->base;
+            const Matrix4x4& current = mesh->transform->current;
+            const Matrix4x4& final = mesh->transform->getFinal();
+            SCENE_LOG_INFO(
+                "[EmbreeBVH::build/transform] node=" + mesh->nodeName +
+                " base_t=(" + std::to_string(base.m[0][3]) + "," + std::to_string(base.m[1][3]) + "," + std::to_string(base.m[2][3]) + ")" +
+                " current_t=(" + std::to_string(current.m[0][3]) + "," + std::to_string(current.m[1][3]) + "," + std::to_string(current.m[2][3]) + ")" +
+                " final_t=(" + std::to_string(final.m[0][3]) + "," + std::to_string(final.m[1][3]) + "," + std::to_string(final.m[2][3]) + ")");
+        }
+
         rtcSetGeometryMask(geom, 0x01); // Mask 1 for Surfaces
         rtcCommitGeometry(geom);
         triangle_geom_id = rtcAttachGeometry(scene, geom);
@@ -469,6 +515,24 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     }
 
     rtcCommitScene(scene);
+
+    if (build_audit_bounds_valid && triangle_geom_id != RTC_INVALID_GEOMETRY_ID) {
+        const Vec3 center = (build_audit_min + build_audit_max) * 0.5f;
+        const Vec3 extent = build_audit_max - build_audit_min;
+        const float distance = std::max(1.0f, extent.length() * 2.0f);
+        const Vec3 axes[6] = {
+            Vec3(1, 0, 0), Vec3(-1, 0, 0), Vec3(0, 1, 0),
+            Vec3(0,-1, 0), Vec3(0, 0, 1), Vec3(0, 0,-1)};
+        int axis_hits = 0;
+        for (const Vec3& axis : axes) {
+            HitRecord audit_hit;
+            const Ray audit_ray(center - axis * distance, axis);
+            if (hit(audit_ray, 0.001f, distance * 2.0f, audit_hit, true)) ++axis_hits;
+        }
+        SCENE_LOG_INFO("[EmbreeBVH::build/selftest] axis_hits=" + std::to_string(axis_hits) +
+                       "/6 center=(" + std::to_string(center.x) + "," +
+                       std::to_string(center.y) + "," + std::to_string(center.z) + ")");
+    }
 }
 
 // ... existing methods ...

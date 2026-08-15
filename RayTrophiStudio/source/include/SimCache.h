@@ -48,7 +48,24 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 //    damage). An older cache is simply rejected by the reader and the caller
 //    falls back to resimulation — the project has not shipped, so carrying a
 //    v1 reader would be maintenance for nobody.
-constexpr uint32_t kVersion = 3u;
+// 4: fluid particles carry their material coordinate (uvw). A baked sequence is
+//    played back straight into the render bridge, so a cache without uvw would
+//    make every replayed frame re-anchor its surface texture to the world — the
+//    exact drift the coordinate exists to remove, appearing ONLY on playback and
+//    never in a live sim. Rejecting v3 forces a re-bake, which is correct: the
+//    old file genuinely does not contain the data.
+// 5: (a) fluid particles carry their SUBSTANCE TAG. The reader previously
+//    assigned 0 unconditionally, so identity survived the entire live pipeline
+//    and was erased at the cache boundary — a mixed pour replayed as one
+//    anonymous liquid, visible ONLY on playback and therefore read as "the bake
+//    is wrong" rather than as a missing field.
+//    (b) the material coordinate is now TWO generations, reset on staggered phases
+//    and blended, which is what bounds the stretch of the Lagrangian map. A v4
+//    cache carries only generation A. Replaying it would run the whole sequence
+//    on a single, ever-more-distorted map — i.e. exactly the smearing the second
+//    generation exists to remove, and visible ONLY on playback. Rejecting v4
+//    forces a re-bake, which is honest: the file does not contain the data.
+constexpr uint32_t kVersion = 5u;
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.
 std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int frame);

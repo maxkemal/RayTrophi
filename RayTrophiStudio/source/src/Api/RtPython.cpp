@@ -33,6 +33,7 @@
 #include "RtPythonPressure.h"
 #include "RtPythonDebris.h"
 #include "RtPythonMassTransfer.h"
+#include "RtPythonTemplates.h"
 
 namespace py = pybind11;
 
@@ -175,6 +176,8 @@ rtapi::NodeParamValue nodeParamFromPython(const py::handle& value) {
 
 PYBIND11_EMBEDDED_MODULE(rt, module) {
     module.doc() = "RayTrophi Studio embedded scripting API";
+
+    rtpy::registerTemplateBindings(module);
 
     module.def("version", [] {
         const rtapi::Version v = rtapi::version();
@@ -999,7 +1002,95 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["kinematic_viscosity"] = info.kinematic_viscosity;
         d["viscosity_sweeps"] = info.viscosity_sweeps;
         d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+        d["granular_enabled"] = info.granular_enabled;
+        d["granular_friction_angle"] = info.granular_friction_angle_degrees;
+        d["granular_cohesion"] = info.granular_cohesion;
+        d["granular_dilatancy"] = info.granular_dilatancy_degrees;
+        d["granular_young_modulus"] = info.granular_young_modulus;
+        d["granular_poisson_ratio"] = info.granular_poisson_ratio;
+        d["granular_tensile_cutoff"] = info.granular_tensile_cutoff;
+        d["granular_hardening"] = info.granular_hardening;
+        d["granular_fracture_strain"] = info.granular_fracture_strain;
+        d["granular_damage_rate"] = info.granular_damage_rate;
+        d["granular_healing_rate"] = info.granular_healing_rate;
+        d["granular_rebonding"] = info.granular_rebonding;
+        d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
+        d["granular_yielded"] = info.granular_yielded_particles;
+        d["granular_detached"] = info.granular_detached_particles;
+        d["granular_invalid"] = info.granular_invalid_particles;
+        d["granular_sleeping"] = info.granular_sleeping_particles;
+        d["granular_damaged"] = info.granular_damaged_particles;
+        d["granular_damage_over_10"] = info.granular_damage_over_10_particles;
+        d["granular_damage_over_50"] = info.granular_damage_over_50_particles;
+        d["granular_damage_over_90"] = info.granular_damage_over_90_particles;
+        d["granular_max_yield"] = info.granular_max_yield;
+        d["granular_max_plastic"] = info.granular_max_plastic_increment;
+        d["granular_max_accumulated_plastic"] = info.granular_max_accumulated_plastic;
+        d["granular_mean_accumulated_plastic"] = info.granular_mean_accumulated_plastic;
+        d["granular_max_fracture_history"] = info.granular_max_fracture_history;
+        d["granular_mean_fracture_history"] = info.granular_mean_fracture_history;
+        d["granular_max_damage"] = info.granular_max_damage;
+        d["granular_mean_damage"] = info.granular_mean_damage;
+        d["granular_requested_young_modulus"] = info.granular_requested_young_modulus;
+        d["granular_effective_young_modulus"] = info.granular_effective_young_modulus;
+        d["granular_required_substeps"] = info.granular_required_substeps;
+        d["granular_solver_substeps"] = info.granular_solver_substeps;
+        d["granular_stiffness_capped"] = info.granular_stiffness_capped;
         d["surface_material"] = info.surface_material;
+        d["splat_material"] = info.splat_material;
+        d["surface_offset_voxels"] = info.surface_offset_voxels;
+        // Porosity was readable over IPC but not from Python — a script could
+        // set it and never read it back. Closed here rather than in a separate
+        // pass: the file was already open for the coordinate fields below.
+        d["pore_amount"] = info.pore_amount;
+        d["pore_scale"] = info.pore_scale;
+        d["pore_detail"] = info.pore_detail;
+        d["coord_space"] = info.coord_space == 1 ? "domain"
+                         : info.coord_space == 2 ? "world" : "material";
+        d["uvw_available"] = info.uvw_available;
+        d["uvw_dim"] = py::make_tuple(info.uvw_dim[0], info.uvw_dim[1], info.uvw_dim[2]);
+        d["uvw_origin"] = py::make_tuple(info.uvw_origin[0], info.uvw_origin[1],
+                                         info.uvw_origin[2]);
+        d["uvw_voxel"] = info.uvw_voxel;
+        d["uvw_refresh_period"] = info.uvw_refresh_period;
+        {
+            py::list subs;
+            for (const auto& s : info.substances) {
+                py::dict e;
+                e["name"] = s.name; e["tag"] = s.tag; e["particles"] = s.particles;
+                subs.append(e);
+            }
+            d["substances"] = subs;
+            py::list binds;
+            for (const auto& b : info.substance_materials) {
+                py::dict e;
+                e["substance"] = b.substance; e["material_id"] = b.material_id;
+                e["material"] = b.material; e["representation"] = b.representation;
+                // "inherit" already resolved against the domain mode: what is
+                // actually DRAWN. Assert on this, not on the authored value.
+                e["effective_representation"] = b.effective_representation;
+                // As authored: a negative viscosity is the inherit sentinel.
+                e["kinematic_viscosity"] = b.kinematic_viscosity;
+                e["miscibility"] = b.miscibility;
+                // State of matter, a separate axis from representation.
+                e["phase"] = b.phase;
+                binds.append(e);
+            }
+            d["substance_materials"] = binds;
+        }
+        d["uvw_drift"] = info.uvw_drift;
+        // Measured on the last simulated step (see FluidDomainInfo).
+        d["solid_phase_particles"] = info.solid_phase_particles;
+        d["solid_phase_cells"] = info.solid_phase_cells;
+        d["sealed_pockets"] = info.sealed_pockets;
+        d["sealed_pocket_cells"] = info.sealed_pocket_cells;
+        d["sealed_pockets_measured"] = info.sealed_pockets_measured;
+        d["interior_fluid_cells"] = info.interior_fluid_cells;
+        d["reseed_added_particles"] = info.reseed_added_particles;
+        d["reseed_removed_particles"] = info.reseed_removed_particles;
+        d["solid_phase"] = info.solid_phase_enabled;
+        d["solid_phase_fill"] = info.solid_phase_fill;
+        d["uvw_particles"] = info.uvw_particles;
         d["enabled"] = info.enabled;
         d["visible"] = info.visible;
         return d;
@@ -1040,7 +1131,92 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["kinematic_viscosity"] = info.kinematic_viscosity;
             d["viscosity_sweeps"] = info.viscosity_sweeps;
             d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+            d["granular_enabled"] = info.granular_enabled;
+            d["granular_friction_angle"] = info.granular_friction_angle_degrees;
+            d["granular_cohesion"] = info.granular_cohesion;
+            d["granular_dilatancy"] = info.granular_dilatancy_degrees;
+            d["granular_young_modulus"] = info.granular_young_modulus;
+            d["granular_poisson_ratio"] = info.granular_poisson_ratio;
+            d["granular_tensile_cutoff"] = info.granular_tensile_cutoff;
+            d["granular_hardening"] = info.granular_hardening;
+            d["granular_fracture_strain"] = info.granular_fracture_strain;
+            d["granular_damage_rate"] = info.granular_damage_rate;
+            d["granular_healing_rate"] = info.granular_healing_rate;
+            d["granular_rebonding"] = info.granular_rebonding;
+            d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
+            d["granular_yielded"] = info.granular_yielded_particles;
+            d["granular_detached"] = info.granular_detached_particles;
+            d["granular_invalid"] = info.granular_invalid_particles;
+            d["granular_sleeping"] = info.granular_sleeping_particles;
+            d["granular_damaged"] = info.granular_damaged_particles;
+            d["granular_damage_over_10"] = info.granular_damage_over_10_particles;
+            d["granular_damage_over_50"] = info.granular_damage_over_50_particles;
+            d["granular_damage_over_90"] = info.granular_damage_over_90_particles;
+            d["granular_max_yield"] = info.granular_max_yield;
+            d["granular_max_plastic"] = info.granular_max_plastic_increment;
+            d["granular_max_accumulated_plastic"] = info.granular_max_accumulated_plastic;
+            d["granular_mean_accumulated_plastic"] = info.granular_mean_accumulated_plastic;
+            d["granular_max_fracture_history"] = info.granular_max_fracture_history;
+            d["granular_mean_fracture_history"] = info.granular_mean_fracture_history;
+            d["granular_max_damage"] = info.granular_max_damage;
+            d["granular_mean_damage"] = info.granular_mean_damage;
+            d["granular_requested_young_modulus"] = info.granular_requested_young_modulus;
+            d["granular_effective_young_modulus"] = info.granular_effective_young_modulus;
+            d["granular_required_substeps"] = info.granular_required_substeps;
+            d["granular_solver_substeps"] = info.granular_solver_substeps;
+            d["granular_stiffness_capped"] = info.granular_stiffness_capped;
             d["surface_material"] = info.surface_material;
+            d["splat_material"] = info.splat_material;
+            d["surface_offset_voxels"] = info.surface_offset_voxels;
+            d["pore_amount"] = info.pore_amount;
+            d["pore_scale"] = info.pore_scale;
+            d["pore_detail"] = info.pore_detail;
+            d["coord_space"] = info.coord_space == 1 ? "domain"
+                             : info.coord_space == 2 ? "world" : "material";
+            d["uvw_available"] = info.uvw_available;
+            d["uvw_dim"] = py::make_tuple(info.uvw_dim[0], info.uvw_dim[1], info.uvw_dim[2]);
+            d["uvw_origin"] = py::make_tuple(info.uvw_origin[0], info.uvw_origin[1],
+                                             info.uvw_origin[2]);
+            d["uvw_voxel"] = info.uvw_voxel;
+            d["uvw_refresh_period"] = info.uvw_refresh_period;
+            {
+                py::list subs;
+                for (const auto& s : info.substances) {
+                    py::dict e;
+                    e["name"] = s.name; e["tag"] = s.tag; e["particles"] = s.particles;
+                    subs.append(e);
+                }
+                d["substances"] = subs;
+                py::list binds;
+                for (const auto& b : info.substance_materials) {
+                    py::dict e;
+                    e["substance"] = b.substance; e["material_id"] = b.material_id;
+                    e["material"] = b.material; e["representation"] = b.representation;
+                    // "inherit" already resolved against the domain mode: what is
+                    // actually DRAWN. Assert on this, not on the authored value.
+                    e["effective_representation"] = b.effective_representation;
+                    // As authored: a negative viscosity is the inherit sentinel.
+                    e["kinematic_viscosity"] = b.kinematic_viscosity;
+                    e["miscibility"] = b.miscibility;
+                    // State of matter, a separate axis from representation.
+                    e["phase"] = b.phase;
+                    binds.append(e);
+                }
+                d["substance_materials"] = binds;
+            }
+            d["uvw_drift"] = info.uvw_drift;
+        // Measured on the last simulated step (see FluidDomainInfo).
+        d["solid_phase_particles"] = info.solid_phase_particles;
+        d["solid_phase_cells"] = info.solid_phase_cells;
+        d["sealed_pockets"] = info.sealed_pockets;
+        d["sealed_pocket_cells"] = info.sealed_pocket_cells;
+        d["sealed_pockets_measured"] = info.sealed_pockets_measured;
+        d["interior_fluid_cells"] = info.interior_fluid_cells;
+        d["reseed_added_particles"] = info.reseed_added_particles;
+        d["reseed_removed_particles"] = info.reseed_removed_particles;
+        d["solid_phase"] = info.solid_phase_enabled;
+        d["solid_phase_fill"] = info.solid_phase_fill;
+            d["uvw_particles"] = info.uvw_particles;
             d["enabled"] = info.enabled;
             d["visible"] = info.visible;
             out.append(d);
@@ -1066,22 +1242,164 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["kinematic_viscosity"] = info.kinematic_viscosity;
         d["viscosity_sweeps"] = info.viscosity_sweeps;
         d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+        d["granular_enabled"] = info.granular_enabled;
+        d["granular_friction_angle"] = info.granular_friction_angle_degrees;
+        d["granular_cohesion"] = info.granular_cohesion;
+        d["granular_dilatancy"] = info.granular_dilatancy_degrees;
+        d["granular_young_modulus"] = info.granular_young_modulus;
+        d["granular_poisson_ratio"] = info.granular_poisson_ratio;
+        d["granular_tensile_cutoff"] = info.granular_tensile_cutoff;
+        d["granular_hardening"] = info.granular_hardening;
+        d["granular_fracture_strain"] = info.granular_fracture_strain;
+        d["granular_damage_rate"] = info.granular_damage_rate;
+        d["granular_healing_rate"] = info.granular_healing_rate;
+        d["granular_rebonding"] = info.granular_rebonding;
+        d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
+        d["granular_yielded"] = info.granular_yielded_particles;
+        d["granular_detached"] = info.granular_detached_particles;
+        d["granular_invalid"] = info.granular_invalid_particles;
+        d["granular_sleeping"] = info.granular_sleeping_particles;
+        d["granular_damaged"] = info.granular_damaged_particles;
+        d["granular_damage_over_10"] = info.granular_damage_over_10_particles;
+        d["granular_damage_over_50"] = info.granular_damage_over_50_particles;
+        d["granular_damage_over_90"] = info.granular_damage_over_90_particles;
+        d["granular_max_yield"] = info.granular_max_yield;
+        d["granular_max_plastic"] = info.granular_max_plastic_increment;
+        d["granular_max_accumulated_plastic"] = info.granular_max_accumulated_plastic;
+        d["granular_mean_accumulated_plastic"] = info.granular_mean_accumulated_plastic;
+        d["granular_max_fracture_history"] = info.granular_max_fracture_history;
+        d["granular_mean_fracture_history"] = info.granular_mean_fracture_history;
+        d["granular_max_damage"] = info.granular_max_damage;
+        d["granular_mean_damage"] = info.granular_mean_damage;
+        d["granular_requested_young_modulus"] = info.granular_requested_young_modulus;
+        d["granular_effective_young_modulus"] = info.granular_effective_young_modulus;
+        d["granular_required_substeps"] = info.granular_required_substeps;
+        d["granular_solver_substeps"] = info.granular_solver_substeps;
+        d["granular_stiffness_capped"] = info.granular_stiffness_capped;
         d["surface_material"] = info.surface_material;
+        d["splat_material"] = info.splat_material;
+        d["surface_offset_voxels"] = info.surface_offset_voxels;
+        // Porosity was readable over IPC but not from Python — a script could
+        // set it and never read it back. Closed here rather than in a separate
+        // pass: the file was already open for the coordinate fields below.
+        d["pore_amount"] = info.pore_amount;
+        d["pore_scale"] = info.pore_scale;
+        d["pore_detail"] = info.pore_detail;
+        d["coord_space"] = info.coord_space == 1 ? "domain"
+                         : info.coord_space == 2 ? "world" : "material";
+        d["uvw_available"] = info.uvw_available;
+        d["uvw_dim"] = py::make_tuple(info.uvw_dim[0], info.uvw_dim[1], info.uvw_dim[2]);
+        d["uvw_origin"] = py::make_tuple(info.uvw_origin[0], info.uvw_origin[1],
+                                         info.uvw_origin[2]);
+        d["uvw_voxel"] = info.uvw_voxel;
+        d["uvw_refresh_period"] = info.uvw_refresh_period;
+        {
+            py::list subs;
+            for (const auto& s : info.substances) {
+                py::dict e;
+                e["name"] = s.name; e["tag"] = s.tag; e["particles"] = s.particles;
+                subs.append(e);
+            }
+            d["substances"] = subs;
+            py::list binds;
+            for (const auto& b : info.substance_materials) {
+                py::dict e;
+                e["substance"] = b.substance; e["material_id"] = b.material_id;
+                e["material"] = b.material; e["representation"] = b.representation;
+                // "inherit" already resolved against the domain mode: what is
+                // actually DRAWN. Assert on this, not on the authored value.
+                e["effective_representation"] = b.effective_representation;
+                // As authored: a negative viscosity is the inherit sentinel.
+                e["kinematic_viscosity"] = b.kinematic_viscosity;
+                e["miscibility"] = b.miscibility;
+                // State of matter, a separate axis from representation.
+                e["phase"] = b.phase;
+                binds.append(e);
+            }
+            d["substance_materials"] = binds;
+        }
+        d["uvw_drift"] = info.uvw_drift;
+        // Measured on the last simulated step (see FluidDomainInfo).
+        d["solid_phase_particles"] = info.solid_phase_particles;
+        d["solid_phase_cells"] = info.solid_phase_cells;
+        d["sealed_pockets"] = info.sealed_pockets;
+        d["sealed_pocket_cells"] = info.sealed_pocket_cells;
+        d["sealed_pockets_measured"] = info.sealed_pockets_measured;
+        d["interior_fluid_cells"] = info.interior_fluid_cells;
+        d["reseed_added_particles"] = info.reseed_added_particles;
+        d["reseed_removed_particles"] = info.reseed_removed_particles;
+        d["solid_phase"] = info.solid_phase_enabled;
+        d["solid_phase_fill"] = info.solid_phase_fill;
+        d["uvw_particles"] = info.uvw_particles;
         d["enabled"] = info.enabled;
         d["visible"] = info.visible;
         return d;
     }, py::arg("domain"));
 
-    fluid.def("seed", [](const std::string& domain, const py::tuple& seed_min, const py::tuple& seed_max, int particles_per_cell, bool replace) {
+    fluid.def("seed", [](const std::string& domain, const py::tuple& seed_min,
+                          const py::tuple& seed_max, int particles_per_cell,
+                          bool replace, bool persistent) {
         Vec3 smin = vec3FromPython(seed_min);
         Vec3 smax = vec3FromPython(seed_max);
-        requireResult(rtapi::seedFluidParticles(domain, smin, smax, particles_per_cell, replace));
+        requireResult(rtapi::seedFluidParticles(domain, smin, smax,
+                                                 particles_per_cell, replace,
+                                                 persistent));
     }, py::arg("domain"), py::arg("seed_min") = py::make_tuple(-0.5f, 1.0f, -0.5f),
-       py::arg("seed_max") = py::make_tuple(0.5f, 1.5f, 0.5f), py::arg("particles_per_cell") = 4, py::arg("replace") = true);
+       py::arg("seed_max") = py::make_tuple(0.5f, 1.5f, 0.5f),
+       py::arg("particles_per_cell") = 4, py::arg("replace") = true,
+       py::arg("persistent") = false);
 
-    fluid.def("clear", [](const std::string& domain) {
-        requireResult(rtapi::clearFluidParticles(domain));
-    }, py::arg("domain"));
+    fluid.def("clear", [](const std::string& domain, bool clear_seed) {
+        requireResult(rtapi::clearFluidParticles(domain, clear_seed));
+    }, py::arg("domain"), py::arg("clear_seed") = false);
+
+    // Bind a material to a SUBSTANCE inside one domain. "" clears the binding;
+    // "dielectric" selects the built-in refractive liquid for that substance,
+    // which is what lets one substance be a Principled BSDF and another stay
+    // plain water in the same body.
+    // Also carries the substance's PHYSICS: a substance is one authored thing,
+    // and separating how it looks from how it flows is what made the old panel
+    // imply that mixing was a shading choice.
+    //   kinematic_viscosity — ABSOLUTE m^2/s; NEGATIVE = inherit the domain's.
+    //   miscibility         — 1 soft gradient, 0 sharp front. The pair takes the
+    //                         minimum of its two: refusing to mix is unilateral.
+    //   phase               — "liquid" (default) or "solid". Solid parcels are
+    //                         rasterized into the grid's solid mask each step,
+    //                         so the liquid flows around and clings to them.
+    // ★ None means "leave alone", not "reset". For viscosity a sentinel could
+    // not have carried that, because a negative value is itself meaningful.
+    // ★★ `phase` is NOT `representation`: one says what the matter IS, the
+    // other how it is DRAWN. A solid can be splat spheres or an isosurface.
+    fluid.def("set_splat_material",
+              [](const std::string& domain, const std::string& material) {
+        requireResult(rtapi::setFluidSplatMaterial(domain, material));
+    }, py::arg("domain"), py::arg("material") = std::string());
+
+    fluid.def("set_substance_material",
+              [](const std::string& domain, const std::string& substance,
+                 const std::string& material, const py::object& representation,
+                 const py::object& kinematic_viscosity, const py::object& miscibility,
+                 const py::object& phase) {
+        std::string rep;
+        const std::string* p_rep = nullptr;
+        if (!representation.is_none()) { rep = py::cast<std::string>(representation); p_rep = &rep; }
+        float visc_val = 0.0f; const float* p_visc = nullptr;
+        if (!kinematic_viscosity.is_none()) {
+            visc_val = py::cast<float>(kinematic_viscosity); p_visc = &visc_val;
+        }
+        float misc_val = 0.0f; const float* p_misc = nullptr;
+        if (!miscibility.is_none()) {
+            misc_val = py::cast<float>(miscibility); p_misc = &misc_val;
+        }
+        std::string phase_val; const std::string* p_phase = nullptr;
+        if (!phase.is_none()) { phase_val = py::cast<std::string>(phase); p_phase = &phase_val; }
+        requireResult(rtapi::setFluidSubstanceMaterial(domain, substance, material,
+                                                       p_rep, p_visc, p_misc, p_phase));
+    }, py::arg("domain"), py::arg("substance"), py::arg("material") = std::string(),
+       py::arg("representation") = py::none(),
+       py::arg("kinematic_viscosity") = py::none(),
+       py::arg("miscibility") = py::none(),
+       py::arg("phase") = py::none());
 
     fluid.def("set_param", [](const std::string& domain, const py::kwargs& kwargs) {
         Vec3 dmin_val; const Vec3* p_dmin = nullptr;
@@ -1130,6 +1448,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         std::string surf_mat_val; const std::string* p_surf_mat = nullptr;
         if (kwargs.contains("surface_material")) { surf_mat_val = py::cast<std::string>(kwargs["surface_material"]); p_surf_mat = &surf_mat_val; }
 
+        float surface_offset_val = 0.0f; const float* p_surface_offset = nullptr;
+        if (kwargs.contains("surface_offset_voxels")) {
+            surface_offset_val = py::cast<float>(kwargs["surface_offset_voxels"]);
+            p_surface_offset = &surface_offset_val;
+        }
+
         // Procedural porosity on the SDF isosurface (crumb / aeration).
         float pore_amt_val = 0.0f; const float* p_pore_amt = nullptr;
         if (kwargs.contains("pore_amount")) { pore_amt_val = py::cast<float>(kwargs["pore_amount"]); p_pore_amt = &pore_amt_val; }
@@ -1144,8 +1468,74 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         bool visible_val = false; const bool* p_visible = nullptr;
         if (kwargs.contains("visible")) { visible_val = py::cast<bool>(kwargs["visible"]); p_visible = &visible_val; }
 
+        // Coordinate space for every isosurface pattern. By NAME, matching the
+        // IPC vocabulary and the read-back, so a script never keeps an enum
+        // table of its own; an int is still accepted for wire symmetry.
+        int coord_val = 0; const int* p_coord = nullptr;
+        if (kwargs.contains("coord_space")) {
+            const py::object cs = kwargs["coord_space"];
+            if (py::isinstance<py::str>(cs)) {
+                const std::string name = py::cast<std::string>(cs);
+                coord_val = (name == "domain") ? 1 : (name == "world") ? 2 : 0;
+            } else {
+                coord_val = py::cast<int>(cs);
+            }
+            p_coord = &coord_val;
+        }
+        int uvw_period = 0; const int* p_uvw_period = nullptr;
+        if (kwargs.contains("uvw_refresh_period")) {
+            uvw_period = py::cast<int>(kwargs["uvw_refresh_period"]);
+            p_uvw_period = &uvw_period;
+        }
+
+        // Solid-phase coupling. The master switch is the control that answers
+        // "is the solid causing this?" without destroying the authoring under
+        // test, so it has to be reachable from a script like everything else.
+        bool solid_phase_val = false; const bool* p_solid_phase = nullptr;
+        if (kwargs.contains("solid_phase")) {
+            solid_phase_val = py::cast<bool>(kwargs["solid_phase"]);
+            p_solid_phase = &solid_phase_val;
+        }
+        float solid_fill_val = 0.0f; const float* p_solid_fill = nullptr;
+        if (kwargs.contains("solid_phase_fill")) {
+            solid_fill_val = py::cast<float>(kwargs["solid_phase_fill"]);
+            p_solid_fill = &solid_fill_val;
+        }
+
+        bool granular_enabled_val=false; const bool* p_granular_enabled=nullptr;
+        float granular_friction=0, granular_cohesion=0, granular_dilatancy=0;
+        float granular_young=0, granular_poisson=0, granular_tensile=0, granular_hardening=0;
+        float granular_fracture=0, granular_damage=0, granular_healing=0;
+        bool granular_rebonding=false; const bool* p_granular_rebonding=nullptr;
+        int granular_max_solver_substeps=0; const int* p_granular_max_solver_substeps=nullptr;
+        const float *p_granular_friction=nullptr,*p_granular_cohesion=nullptr,*p_granular_dilatancy=nullptr;
+        const float *p_granular_young=nullptr,*p_granular_poisson=nullptr,*p_granular_tensile=nullptr,*p_granular_hardening=nullptr;
+        const float *p_granular_fracture=nullptr,*p_granular_damage=nullptr,*p_granular_healing=nullptr;
+        if(kwargs.contains("granular_enabled")){granular_enabled_val=py::cast<bool>(kwargs["granular_enabled"]);p_granular_enabled=&granular_enabled_val;}
+        if(kwargs.contains("granular_friction_angle")){granular_friction=py::cast<float>(kwargs["granular_friction_angle"]);p_granular_friction=&granular_friction;}
+        if(kwargs.contains("granular_cohesion")){granular_cohesion=py::cast<float>(kwargs["granular_cohesion"]);p_granular_cohesion=&granular_cohesion;}
+        if(kwargs.contains("granular_dilatancy")){granular_dilatancy=py::cast<float>(kwargs["granular_dilatancy"]);p_granular_dilatancy=&granular_dilatancy;}
+        if(kwargs.contains("granular_young_modulus")){granular_young=py::cast<float>(kwargs["granular_young_modulus"]);p_granular_young=&granular_young;}
+        if(kwargs.contains("granular_poisson_ratio")){granular_poisson=py::cast<float>(kwargs["granular_poisson_ratio"]);p_granular_poisson=&granular_poisson;}
+        if(kwargs.contains("granular_tensile_cutoff")){granular_tensile=py::cast<float>(kwargs["granular_tensile_cutoff"]);p_granular_tensile=&granular_tensile;}
+        if(kwargs.contains("granular_hardening")){granular_hardening=py::cast<float>(kwargs["granular_hardening"]);p_granular_hardening=&granular_hardening;}
+        if(kwargs.contains("granular_fracture_strain")){granular_fracture=py::cast<float>(kwargs["granular_fracture_strain"]);p_granular_fracture=&granular_fracture;}
+        if(kwargs.contains("granular_damage_rate")){granular_damage=py::cast<float>(kwargs["granular_damage_rate"]);p_granular_damage=&granular_damage;}
+        if(kwargs.contains("granular_healing_rate")){granular_healing=py::cast<float>(kwargs["granular_healing_rate"]);p_granular_healing=&granular_healing;}
+        if(kwargs.contains("granular_rebonding")){granular_rebonding=py::cast<bool>(kwargs["granular_rebonding"]);p_granular_rebonding=&granular_rebonding;}
+        if(kwargs.contains("granular_max_solver_substeps")){granular_max_solver_substeps=py::cast<int>(kwargs["granular_max_solver_substeps"]);p_granular_max_solver_substeps=&granular_max_solver_substeps;}
+
         requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_preset, p_visc, p_sweeps, p_slip, p_surf_mat,
-                                               p_pore_amt, p_pore_scl, p_pore_det, p_enabled, p_visible));
+                                               p_surface_offset,
+                                               p_pore_amt, p_pore_scl, p_pore_det, p_coord,
+                                               p_uvw_period, p_solid_phase, p_solid_fill,
+                                               p_enabled, p_visible,
+                                               p_granular_enabled,p_granular_friction,p_granular_cohesion,
+                                               p_granular_dilatancy,p_granular_young,p_granular_poisson,
+                                               p_granular_tensile,p_granular_hardening,
+                                               p_granular_fracture,p_granular_damage,
+                                               p_granular_healing,p_granular_rebonding,
+                                               p_granular_max_solver_substeps));
     }, py::arg("domain"));
 
     fluid.def("reset", []() {
@@ -1323,6 +1713,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fluid_particles_per_second"] = s.fluid_particles_per_second;
         d["fluid_velocity_spread"] = s.fluid_velocity_spread;
         d["fluid_emit_along_normal"] = s.fluid_emit_along_normal;
+        d["fluid_substance"] = s.fluid_substance;
         d["use_time_limit"] = s.use_time_limit;
         d["start_time"] = s.start_time; d["end_time"] = s.end_time;
         d["use_particle_limit"] = s.use_particle_limit;
@@ -1341,7 +1732,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FLOW_KW(temperature, float); RT_FLOW_KW(fuel, float);
         RT_FLOW_KW(falloff, float); RT_FLOW_KW(fluid_particles_per_second, float);
         RT_FLOW_KW(fluid_velocity_spread, float);
-        RT_FLOW_KW(fluid_emit_along_normal, bool); RT_FLOW_KW(use_time_limit, bool);
+        RT_FLOW_KW(fluid_emit_along_normal, bool);
+        RT_FLOW_KW(fluid_substance, std::string);
+        RT_FLOW_KW(use_time_limit, bool);
         RT_FLOW_KW(start_time, float); RT_FLOW_KW(end_time, float);
         RT_FLOW_KW(use_particle_limit, bool); RT_FLOW_KW(max_emitted_particles, int);
 #undef RT_FLOW_KW

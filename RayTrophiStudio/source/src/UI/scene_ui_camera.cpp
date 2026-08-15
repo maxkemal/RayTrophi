@@ -14,6 +14,8 @@
 #include "scene_data.h"
 #include "ProjectManager.h"
 
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+
 // ===========================================================================
 // CAMERA SETTINGS PANEL CONTENT NOT USING. MOVE THE PRO CAMERA FEATURES 
 // ===========================================================================
@@ -401,6 +403,10 @@
             if (ctx.backend_ptr) {
                 ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
                 ctx.backend_ptr->resetAccumulation();
+            }
+            if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+                g_viewport_backend->syncCamera(*ctx.scene.camera);
+                g_viewport_backend->resetAccumulation();
             }
             }
             ctx.renderer.resetCPUAccumulation();

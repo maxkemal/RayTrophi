@@ -395,7 +395,26 @@ struct VkVolumeInstance {
     uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
     float    emissive_capacity;
     float    iso_material_index;  // SDF isosurface material, 1-based (0 = none)
+    // FULLY CLAIMED: [0]=pore amount, [1]=world units per pore cell,
+    // [2]=pore size variation, [3]=coordinate space (0=Material, 1=Domain,
+    // 2=World — see materialAnchor below / in volume_closesthit.rchit).
     float    _accel_reserved[4];
+    // Material coordinate (UVW) RESIDUAL grid: dense xyz triples at sim-grid
+    // resolution holding (uvw - cell centre). Consumed only in
+    // volume_closesthit.rchit; mirrored here because the SSBO stride is
+    // per-declaration. 0 = not published.
+    uint64_t uvw_residual_address;
+    // Same grid/origin/voxel as the residual field; 0 = not published.
+    // Slotted beside the other address so the struct stays 624 bytes.
+    uint64_t composition_address;
+    float    uvw_dim[3];
+    float    uvw_origin[3];
+    float    uvw_voxel;
+    // Explicit tail padding, mirroring vulkan_volume_types.h exactly. C++ pads
+    // the alignas(16) struct to 608; scalar layout would stop at 600. Implicit
+    // padding is where the two are free to disagree, and a stride mismatch does
+    // not fail loudly — it reads the NEXT volume's fields as this one's.
+    float    _uvw_pad[1];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -2442,9 +2461,10 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
                             // missIndex=1 → shadow_miss.rmiss sets shadowPayload.w=1 when ray escapes
                             uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
                                              | gl_RayFlagsSkipClosestHitShaderEXT;
-                            // mask 0x01 = triangles only — volume AABBs have mask 0x02 so
-                            // they are invisible to shadow rays and cannot cast hard shadows.
-                            traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1, shadowOrigin, tmin, wi, tmax, 1);
+                            // Authored triangles and transient splats cast hard
+                            // shadows; volume AABBs remain on soft transmittance.
+                            traceRayEXT(topLevelAS, shadowFlags, RT_MASK_DIRECT_SHADOW,
+                                        0, 1, 1, shadowOrigin, tmin, wi, tmax, 1);
                         }
                         vec3 shadowVisibility = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
                         if (any(greaterThan(shadowVisibility, vec3(1e-4)))) {
@@ -2522,8 +2542,9 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
             float sunTmax = 1e8;
             uint sunShadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
                                 | gl_RayFlagsSkipClosestHitShaderEXT;
-            // mask 0x01 = triangles only — volume AABBs skipped (handled by volumetric transmittance)
-            traceRayEXT(topLevelAS, sunShadowFlags, 0x01, 0, 1, 1,
+            // Authored triangles + transient splats; volume AABBs are handled
+            // separately by volumetric transmittance.
+            traceRayEXT(topLevelAS, sunShadowFlags, RT_MASK_DIRECT_SHADOW, 0, 1, 1,
                         sunShadowOrigin, sunTmin, sunDir, sunTmax, 1);
             float sunShadowVisibility = (shadowPayload.w > 0.5) ? 1.0 : 0.0;
             if (sunShadowVisibility > 1e-4) {

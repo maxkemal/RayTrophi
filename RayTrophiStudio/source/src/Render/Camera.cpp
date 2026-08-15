@@ -54,7 +54,14 @@ Ray Camera::get_ray(float s, float t) const {
         use_t = v_centered + 0.5f;
     }
 
-    Vec3 rd = lens_radius * random_in_unit_polygon(blade_count);
+    // Do not evaluate the random aperture sampler when the lens is closed.
+    // Some polygon samplers can produce non-finite values for an invalid/zero
+    // blade configuration; multiplying those by zero still yields NaN and
+    // forces the primary ray into the -Z fallback path.
+    Vec3 rd(0.0f, 0.0f, 0.0f);
+    if (lens_radius > 1e-6f && blade_count >= 3) {
+        rd = random_in_unit_polygon(blade_count);
+    }
     Vec3 offset = u * rd.x + v * rd.y;
     // IMPORTANT: CPU renderer assumes ray/HitRecord t values are world-space distances.
     // Keep primary camera rays normalized, or small camera angle changes will skew

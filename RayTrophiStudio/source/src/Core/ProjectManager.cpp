@@ -5249,6 +5249,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["fluid_particles_per_second"] = source.fluid_particles_per_second;
         f["fluid_velocity_spread"] = source.fluid_velocity_spread;
         f["fluid_emit_along_normal"] = source.fluid_emit_along_normal;
+        f["fluid_substance"] = source.fluid_substance;
         f["use_time_limit"] = source.use_time_limit;
         f["start_time"] = source.start_time;
         f["end_time"] = source.end_time;
@@ -5356,6 +5357,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell},
             {"reseed_min_per_cell", domain.fluid_params.reseed_min_per_cell},
             {"reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell},
+            {"uvw_refresh_period", domain.fluid_params.uvw_refresh_period},
             {"internal_friction", domain.fluid_params.internal_friction},
             {"air_drag", domain.fluid_params.air_drag},
             {"density_correction", domain.fluid_params.density_correction},
@@ -5389,6 +5391,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["fluid_particle_radius_factor"] = domain.fluid_particle_radius_factor;
         d["fluid_particle_size_multiplier"] = domain.fluid_particle_size_multiplier;
         d["fluid_particle_subdivisions"] = domain.fluid_particle_subdivisions;
+        d["fluid_particle_geometry_mode"] = domain.fluid_particle_geometry_mode;
+        d["fluid_particle_geometry_source"] = domain.fluid_particle_geometry_source;
         d["fluid_particle_emissive"] = domain.fluid_particle_emissive;
         d["fluid_particle_emission"] = domain.fluid_particle_emission;
         d["fluid_particle_material_id"] = domain.fluid_particle_material_id;
@@ -5397,6 +5401,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"narrow_band_voxels", domain.fluid_level_set_params.narrow_band_voxels},
             {"kernel_radius_voxels", domain.fluid_level_set_params.kernel_radius_voxels},
             {"particle_radius_voxels", domain.fluid_level_set_params.particle_radius_voxels},
+            {"surface_offset_voxels", domain.fluid_level_set_params.surface_offset_voxels},
             {"smoothing_iterations", domain.fluid_level_set_params.smoothing_iterations},
             {"surface_resolution_multiplier", domain.fluid_level_set_params.surface_resolution_multiplier},
             {"anisotropy_enabled", domain.fluid_level_set_params.anisotropy_enabled},
@@ -5414,6 +5419,36 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["fluid_surface_pore_amount"] = domain.fluid_surface_pore_amount;
         d["fluid_surface_pore_scale"] = domain.fluid_surface_pore_scale;
         d["fluid_surface_pore_detail"] = domain.fluid_surface_pore_detail;
+        d["fluid_surface_coord_space"] = domain.fluid_surface_coord_space;
+        {
+            // Substance -> material bindings. Stored by material ID like every
+            // other material reference in this file; the substance is the NAME,
+            // because that is the identity the liquid carries.
+            nlohmann::json binds = nlohmann::json::array();
+            for (const auto& b : domain.fluid_substance_materials) {
+                binds.push_back({{"substance", b.substance},
+                                 {"material_id", b.material_id},
+                                 {"representation", static_cast<int>(b.representation)},
+                                 // Physics, alongside the shading binding: one
+                                 // substance is one authored thing, and splitting
+                                 // it across two records would let a project load
+                                 // half a definition.
+                                 {"kinematic_viscosity", b.kinematic_viscosity},
+                                 {"miscibility", b.miscibility},
+                                 // ★ Written as a STRING, unlike representation
+                                 // next to it. Phase decides whether matter
+                                 // blocks flow, and a bare 0/1 in a project file
+                                 // is a value nobody reading the file can check;
+                                 // if the enum ever grows, a stale integer would
+                                 // silently mean something else.
+                                 {"phase",
+                                  b.phase == RayTrophiSim::Fluid::SubstancePhase::Solid
+                                      ? "solid" : "liquid"}});
+            }
+            d["fluid_substance_materials"] = binds;
+            d["fluid_solid_phase_enabled"] = domain.fluid_solid_phase_enabled;
+            d["fluid_solid_phase_fill"] = domain.fluid_solid_phase_fill;
+        }
         d["fluid_debug_overlay"] = domain.fluid_debug_overlay;
 
         const auto& fo = domain.fluid_foam_params;
@@ -5746,6 +5781,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.fluid_particles_per_second = item.value("fluid_particles_per_second", source.fluid_particles_per_second);
         source.fluid_velocity_spread = item.value("fluid_velocity_spread", source.fluid_velocity_spread);
         source.fluid_emit_along_normal = item.value("fluid_emit_along_normal", source.fluid_emit_along_normal);
+        // Absent in older files -> empty -> untagged -> the domain material, i.e.
+        // exactly how the scene rendered before substances existed.
+        source.fluid_substance = item.value("fluid_substance", source.fluid_substance);
         source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
         source.start_time = item.value("start_time", source.start_time);
         source.end_time = item.value("end_time", source.end_time);
@@ -5881,6 +5919,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.reseed_target_per_cell = f.value("reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell);
             domain.fluid_params.reseed_min_per_cell = f.value("reseed_min_per_cell", domain.fluid_params.reseed_min_per_cell);
             domain.fluid_params.reseed_max_per_cell = f.value("reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell);
+            // Absent in older files, and the default is the shipped behaviour.
+            domain.fluid_params.uvw_refresh_period = f.value("uvw_refresh_period", domain.fluid_params.uvw_refresh_period);
             domain.fluid_params.internal_friction = f.value("internal_friction", domain.fluid_params.internal_friction);
             domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
             domain.fluid_params.density_correction = f.value("density_correction", domain.fluid_params.density_correction);
@@ -5936,6 +5976,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.fluid_particle_radius_factor = item.value("fluid_particle_radius_factor", domain.fluid_particle_radius_factor);
         domain.fluid_particle_size_multiplier = item.value("fluid_particle_size_multiplier", domain.fluid_particle_size_multiplier);
         domain.fluid_particle_subdivisions = item.value("fluid_particle_subdivisions", domain.fluid_particle_subdivisions);
+        domain.fluid_particle_geometry_mode = item.value("fluid_particle_geometry_mode", domain.fluid_particle_geometry_mode);
+        domain.fluid_particle_geometry_source = item.value("fluid_particle_geometry_source", domain.fluid_particle_geometry_source);
         domain.fluid_particle_emissive = item.value("fluid_particle_emissive", domain.fluid_particle_emissive);
         domain.fluid_particle_emission = item.value("fluid_particle_emission", domain.fluid_particle_emission);
         domain.fluid_particle_material_id = item.value("fluid_particle_material_id", domain.fluid_particle_material_id);
@@ -5945,6 +5987,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_level_set_params.narrow_band_voxels = lsp.value("narrow_band_voxels", domain.fluid_level_set_params.narrow_band_voxels);
             domain.fluid_level_set_params.kernel_radius_voxels = lsp.value("kernel_radius_voxels", domain.fluid_level_set_params.kernel_radius_voxels);
             domain.fluid_level_set_params.particle_radius_voxels = lsp.value("particle_radius_voxels", domain.fluid_level_set_params.particle_radius_voxels);
+            domain.fluid_level_set_params.surface_offset_voxels = lsp.value("surface_offset_voxels", domain.fluid_level_set_params.surface_offset_voxels);
             domain.fluid_level_set_params.smoothing_iterations = lsp.value("smoothing_iterations", domain.fluid_level_set_params.smoothing_iterations);
             domain.fluid_level_set_params.surface_resolution_multiplier = lsp.value("surface_resolution_multiplier", domain.fluid_level_set_params.surface_resolution_multiplier);
             domain.fluid_level_set_params.anisotropy_enabled = lsp.value("anisotropy_enabled", domain.fluid_level_set_params.anisotropy_enabled);
@@ -5966,6 +6009,56 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             item.value("fluid_surface_pore_scale", domain.fluid_surface_pore_scale);
         domain.fluid_surface_pore_detail =
             item.value("fluid_surface_pore_detail", domain.fluid_surface_pore_detail);
+        // Absent in projects saved before coordinate spaces existed. The default
+        // is Material, which is IDENTICAL to the old world anchoring for
+        // anything that has not moved (the coordinate is seeded with the birth
+        // position), so an old file opens looking exactly as it was saved.
+        domain.fluid_surface_coord_space =
+            item.value("fluid_surface_coord_space", domain.fluid_surface_coord_space);
+        // `fluid_blend_substance_materials` is gone — it was a domain-wide
+        // shading switch whose "off" state produced voxelised material patches,
+        // not a dominant material. Sharpness is now per-substance `miscibility`
+        // below. An old project has neither key: the flag is ignored and
+        // miscibility defaults to 1.0, which is what the flag's default meant.
+        domain.fluid_substance_materials.clear();
+        if (item.contains("fluid_substance_materials") &&
+            item["fluid_substance_materials"].is_array()) {
+            for (const auto& b : item["fluid_substance_materials"]) {
+                RayTrophiSim::SimulationGridDomainDesc::SubstanceMaterial entry;
+                entry.substance = b.value("substance", std::string());
+                entry.material_id = b.value("material_id", -1);
+                int representation = b.value("representation", 0);
+                if (representation < 0 || representation > 2) representation = 0;
+                entry.representation = static_cast<RayTrophiSim::Fluid::SubstanceRepresentation>(representation);
+                // ★ Default -1 = INHERIT the domain viscosity, not 0. Reading a
+                // missing key as 0 would turn every substance in every project
+                // saved before this feature into an inviscid one — a scene that
+                // opens thinner than it was saved, with nothing to point at.
+                entry.kinematic_viscosity = b.value("kinematic_viscosity", -1.0f);
+                entry.miscibility = std::clamp(b.value("miscibility", 1.0f), 0.0f, 1.0f);
+                // ★ Missing key = LIQUID, and that is the only safe default: a
+                // project saved before phases existed described liquid, so
+                // reading anything else would freeze scenes that never asked to
+                // be frozen. An unrecognised string falls back the same way
+                // rather than guessing — the panel and the script both report
+                // what was loaded, so a silent demotion is visible.
+                entry.phase = (b.value("phase", std::string("liquid")) == "solid")
+                    ? RayTrophiSim::Fluid::SubstancePhase::Solid
+                    : RayTrophiSim::Fluid::SubstancePhase::Liquid;
+                if (!entry.substance.empty())
+                    domain.fluid_substance_materials.push_back(entry);
+            }
+        }
+        // Absent in projects saved before the solid phase existed. Enabled is
+        // the safe default there BECAUSE no substance in such a file is solid:
+        // the switch gates a path that has nothing to do until a phase is
+        // authored, so defaulting it off would ship a control that starts in
+        // the state the user has to discover before the feature works at all.
+        domain.fluid_solid_phase_enabled =
+            item.value("fluid_solid_phase_enabled", domain.fluid_solid_phase_enabled);
+        domain.fluid_solid_phase_fill =
+            std::clamp(item.value("fluid_solid_phase_fill", domain.fluid_solid_phase_fill),
+                       0.01f, 4.0f);
         domain.fluid_debug_overlay = item.value("fluid_debug_overlay", domain.fluid_debug_overlay);
 
         if (item.contains("foam") && item["foam"].is_object()) {

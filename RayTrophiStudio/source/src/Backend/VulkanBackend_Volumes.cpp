@@ -161,7 +161,8 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     };
     if (vols.empty()) {
         // No active volumes: release any stale cached VDB buffers immediately.
-        if (!m_vdbBuffers.empty() || !m_vdbTempBuffers.empty()) {
+        if (!m_vdbBuffers.empty() || !m_vdbTempBuffers.empty() ||
+            !m_uvwBuffers.empty()) {
             m_device->waitIdle();
         }
         for (auto& [id, buf] : m_vdbBuffers) {
@@ -176,6 +177,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         }
         m_vdbTempBuffers.clear();
         m_vdbTempUploadedVersions.clear();
+        for (auto& [id, buf] : m_uvwBuffers) {
+            (void)id;
+            if (buf.buffer) m_device->destroyBuffer(buf);
+        }
+        m_uvwBuffers.clear();
+        m_uvwUploadedVersions.clear();
         // ★INVARIANT: the SSBO length is defined by the TLAS mapping, NOT by how
         // many volumes happen to carry content this frame. m_orderedVDBInstances
         // mirrors the TLAS instance list and only updateGeometry() may rewrite it.
@@ -256,6 +263,22 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             if (it->second.buffer) m_device->destroyBuffer(it->second);
             m_vdbTempUploadedVersions.erase(it->first);
             it = m_vdbTempBuffers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // Material-coordinate buffers follow the same rule, for the same reason: the
+    // address published for this vdb_id last frame is still sitting in a volume
+    // slot, and freed device memory does not stop being readable.
+    for (auto it = m_uvwBuffers.begin(); it != m_uvwBuffers.end(); ) {
+        if (volByID.find(it->first) == volByID.end()) {
+            if (!destroyedAny) {
+                m_device->waitIdle();
+                destroyedAny = true;
+            }
+            if (it->second.buffer) m_device->destroyBuffer(it->second);
+            m_uvwUploadedVersions.erase(it->first);
+            it = m_uvwBuffers.erase(it);
         } else {
             ++it;
         }
@@ -518,6 +541,11 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst._accel_reserved[0] = std::max(0.0f, src.pore_amount);
         dst._accel_reserved[1] = std::max(1e-4f, src.pore_scale);
         dst._accel_reserved[2] = std::max(0.0f, std::min(1.0f, src.pore_detail));
+        // Coordinate space claims [3], the last free float in that block.
+        // Clamped rather than trusted: an out-of-range value would fall through
+        // every branch in materialAnchor and return an uninitialised vector.
+        dst._accel_reserved[3] = static_cast<float>(
+            std::max(0, std::min(2, src.surface_coord_space)));
         dst.shadow_stride = std::max(1, std::min(src.shadow_stride, 16));
         // Sync NanoVDB Host Buffer to Vulkan Device Buffer
         dst.volume_type = liveDenseGas ? 4 : 2;
@@ -662,6 +690,117 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                     existingTemp->second.buffer) {
                     dst.vdb_temp_address = existingTemp->second.deviceAddress;
                 }
+            }
+        }
+
+        // ── Material coordinate (UVW) residual field upload ─────────────────
+        // Dense xyz triples at sim-grid resolution holding (uvw - cell centre),
+        // sampled by the isosurface so a texture flows WITH the liquid. Keyed by
+        // vdb_id like every other per-volume device buffer, and torn down with
+        // them. This layer only moves bytes and does not care what they mean.
+        //
+        // ★ dst.uvw_residual_address stays 0 unless a COMPLETE, freshly-uploaded set is
+        // available. Every failure path below leaves it 0, and the shader reads
+        // 0 as "anchor in world space" — the exact behaviour that shipped before
+        // this field existed. There is no path where a partial or stale field
+        // reaches the shader, because a coordinate that is subtly wrong is
+        // indistinguishable from an artistic choice.
+        {
+            const int ux = src.uvw_dim[0], uy = src.uvw_dim[1], uz = src.uvw_dim[2];
+            const size_t uvwFloats = static_cast<size_t>(ux) *
+                                     static_cast<size_t>(uy) *
+                                     static_cast<size_t>(uz) * 3u;
+            const size_t uvwBytes = uvwFloats * sizeof(float);
+            // The composition triples live in the SAME allocation, right
+            // after the residual ones. Same size, same lifetime, same
+            // version - so one buffer, one upload, one thing to get wrong.
+            const bool   wantComposition = src.composition_grid != nullptr;
+            const size_t totalBytes = uvwBytes * (wantComposition ? 2u : 1u);
+            const bool uvwWanted =
+                vdb_id >= 0 && src.uvw_residual_grid != nullptr && uvwFloats > 0 &&
+                src.uvw_voxel > 0.0f;
+            if (uvwWanted) {
+                auto itU = m_uvwBuffers.find(vdb_id);
+                bool needsUvwUpload = false;
+                // Exact-size allocation, not the 50% over-allocation the NanoVDB
+                // buffers use. That headroom exists because a NanoVDB grid's size
+                // drifts frame to frame with topology; this grid's size is
+                // resolution * 3 and changes only when the domain is resized, so
+                // the slack would be permanently wasted megabytes.
+                if (itU == m_uvwBuffers.end() || itU->second.size < totalBytes) {
+                    if (itU != m_uvwBuffers.end()) {
+                        m_device->waitIdle();
+                        m_device->destroyBuffer(itU->second);
+                    }
+                    VulkanRT::BufferCreateInfo ciU;
+                    ciU.size = totalBytes;
+                    ciU.usage = (VulkanRT::BufferUsage)(
+                        (uint32_t)VulkanRT::BufferUsage::STORAGE |
+                        (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
+                        0x0100 /* SHADER_DEVICE_ADDRESS */);
+                    ciU.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+                    m_uvwBuffers[vdb_id] = m_device->createBuffer(ciU);
+                    itU = m_uvwBuffers.find(vdb_id);
+                    // A fresh buffer holds garbage; the version check below could
+                    // otherwise match a version uploaded into the DESTROYED
+                    // buffer and publish an address to memory never written.
+                    needsUvwUpload = true;
+                    m_uvwUploadedVersions.erase(vdb_id);
+                }
+                auto verU = m_uvwUploadedVersions.find(vdb_id);
+                if (verU == m_uvwUploadedVersions.end() ||
+                    verU->second != src.uvw_version) {
+                    needsUvwUpload = true;
+                }
+                if (itU != m_uvwBuffers.end() && itU->second.buffer) {
+                    if (needsUvwUpload) {
+                        synchronizeGridUpload();
+                        m_device->uploadBuffer(itU->second, src.uvw_residual_grid, uvwBytes);
+                        if (wantComposition) {
+                            m_device->uploadBuffer(itU->second, src.composition_grid,
+                                                   uvwBytes, uvwBytes);
+                        }
+                        m_uvwUploadedVersions[vdb_id] = src.uvw_version;
+                    }
+                    dst.uvw_residual_address = itU->second.deviceAddress;
+                    dst.uvw_dim[0] = static_cast<float>(ux);
+                    dst.uvw_dim[1] = static_cast<float>(uy);
+                    dst.uvw_dim[2] = static_cast<float>(uz);
+                    // ★ Published in the SAME branch as the address. The shader
+                    // cannot index the buffer without these, so an address that
+                    // reached the GPU without its placement would sample a grid
+                    // laid over the wrong region — which does not fail, it warps.
+                    dst.uvw_origin[0] = src.uvw_origin[0];
+                    dst.uvw_origin[1] = src.uvw_origin[1];
+                    dst.uvw_origin[2] = src.uvw_origin[2];
+                    dst.uvw_voxel = src.uvw_voxel;
+
+                    // ── Composition, in the SAME buffer as the residual ──────
+                    // ★ Appended to the coordinate buffer rather than given its
+                    // own allocation, keyed and versioned identically: the two
+                    // are gathered from the same particles in the same pass and
+                    // are always published or withheld together, so a second
+                    // buffer would double the bookkeeping to express a state
+                    // that cannot occur — one present and the other stale.
+                    //
+                    // The composition triples start at cell_count*3 floats in.
+                    if (wantComposition) {
+                        dst.composition_address =
+                            itU->second.deviceAddress + uvwBytes;
+                    }
+                }
+            } else if (vdb_id >= 0) {
+                // The producer stopped publishing a field (route left SurfaceSDF,
+                // gather refused, domain deleted). Free it now rather than at the
+                // next scene sweep: holding it would keep megabytes alive for a
+                // volume that will never sample them again.
+                auto staleU = m_uvwBuffers.find(vdb_id);
+                if (staleU != m_uvwBuffers.end()) {
+                    synchronizeGridUpload();
+                    if (staleU->second.buffer) m_device->destroyBuffer(staleU->second);
+                    m_uvwBuffers.erase(staleU);
+                }
+                m_uvwUploadedVersions.erase(vdb_id);
             }
         }
 

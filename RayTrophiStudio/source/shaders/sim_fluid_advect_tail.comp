@@ -102,13 +102,21 @@ void main() {
 
     int steps=clamp(pc.substeps,1,32);
     float sdt=pc.dt/float(steps);
+    int boundaryMode=pc.boundary&3;
+    bool granularMode=(pc.boundary&4)!=0;
     vec3 omin=vec3(pc.origin_x,pc.origin_y,pc.origin_z);
     vec3 omax=omin+vec3(pc.nx,pc.ny,pc.nz)*pc.voxel_size;
     vec3 lo=omin+vec3(0.01*pc.voxel_size);
     vec3 hi=omax-vec3(0.01*pc.voxel_size);
     vec3 span=omax-omin;
     for(int s=0;s<steps;++s) {
-        vec3 vm=sampleVelocity(p+sampleVelocity(p)*(0.5*sdt));
+        // Liquid markers follow the RK2-sampled MAC field. MPM particles have
+        // already received their post-grid velocity in G2P and must advance
+        // with that Lagrangian value. Sampling the grid a second time with a
+        // different (linear) kernel creates free-surface/grid-crossing strain
+        // even in uniform free fall, which the fracture model then interprets
+        // as a real opening mode.
+        vec3 vm=granularMode?v:sampleVelocity(p+sampleVelocity(p)*(0.5*sdt));
         vec3 pn=p+vm*sdt;
         if(solidAt(pn)) {
             vec3 resolved=p, t=resolved; t.x=pn.x;
@@ -119,10 +127,10 @@ void main() {
             if(!solidAt(t)) resolved.z=pn.z; else v.z=solidVelocity(t).z;
             pn=resolved;
         }
-        if(pc.boundary==1) {
+        if(boundaryMode==1) {
             p=pn; // host compacts outflow before CPU reseed
             if(any(lessThan(p,omin))||any(greaterThan(p,omax))) break;
-        } else if(pc.boundary==2) {
+        } else if(boundaryMode==2) {
             p=omin+mod(mod(pn-omin,span)+span,span);
         } else {
             if(pn.x<lo.x){pn.x=lo.x;v.x=abs(v.x)*pc.wall_damping;}

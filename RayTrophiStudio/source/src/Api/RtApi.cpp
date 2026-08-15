@@ -137,7 +137,19 @@ enum class MaterialParamKind {
     DustStyle,
     DustColorA,
     DustColorB,
-    ShardShape
+    ShardShape,
+    // Texture tiling. Scriptable because on a fluid ISOSURFACE these are the
+    // ONLY tiling control there is: the surface has no UVs, so the tri-planar
+    // projection reuses uv_scale/uv_offset as world units per tile. Leaving
+    // them panel-only would have made the isosurface's texture mapping
+    // untestable from a script — which in this project is the same as untested.
+    // Exposed per AXIS rather than as a 2-vector: this channel carries a scalar
+    // or an RGB triple, and squeezing a 2-vector through the RGB path means an
+    // ignored third component that silently accepts nonsense.
+    UvScaleX,
+    UvScaleY,
+    UvOffsetX,
+    UvOffsetY
 };
 
 struct MaterialValue {
@@ -181,6 +193,10 @@ bool parseMaterialParam(const std::string& name, MaterialParamKind& out, bool& i
     if (name == "dust_color_a") { out = MaterialParamKind::DustColorA; is_color = true; return true; }
     if (name == "dust_color_b") { out = MaterialParamKind::DustColorB; is_color = true; return true; }
     if (name == "shard_shape") { out = MaterialParamKind::ShardShape; return true; }
+    if (name == "uv_scale_x") { out = MaterialParamKind::UvScaleX; return true; }
+    if (name == "uv_scale_y") { out = MaterialParamKind::UvScaleY; return true; }
+    if (name == "uv_offset_x") { out = MaterialParamKind::UvOffsetX; return true; }
+    if (name == "uv_offset_y") { out = MaterialParamKind::UvOffsetY; return true; }
     return false;
 }
 
@@ -216,6 +232,10 @@ MaterialValue readMaterialValue(const PrincipledBSDF& material, MaterialParamKin
         case MaterialParamKind::DustColorA:          value.color  = material.getDustColorA(); break;
         case MaterialParamKind::DustColorB:          value.color  = material.getDustColorB(); break;
         case MaterialParamKind::ShardShape:          value.scalar = static_cast<float>(material.getShardShape()); break;
+        case MaterialParamKind::UvScaleX:            value.scalar = material.textureTransform.scale.u; break;
+        case MaterialParamKind::UvScaleY:            value.scalar = material.textureTransform.scale.v; break;
+        case MaterialParamKind::UvOffsetX:           value.scalar = material.textureTransform.translation.u; break;
+        case MaterialParamKind::UvOffsetY:           value.scalar = material.textureTransform.translation.v; break;
     }
     return value;
 }
@@ -248,6 +268,13 @@ void writeMaterialValue(PrincipledBSDF& material, MaterialParamKind kind, const 
         case MaterialParamKind::DustColorA:          material.setDustColorA(value.color); break;
         case MaterialParamKind::DustColorB:          material.setDustColorB(value.color); break;
         case MaterialParamKind::ShardShape:          material.setShardShape(static_cast<int>(value.scalar + 0.5f)); break;
+        // No setter to route through: textureTransform is a plain public struct
+        // on PrincipledBSDF. The snapshot->GPU push at the end of this function
+        // is what makes the edit reach the renderer, so these need nothing more.
+        case MaterialParamKind::UvScaleX:            material.textureTransform.scale.u = value.scalar; break;
+        case MaterialParamKind::UvScaleY:            material.textureTransform.scale.v = value.scalar; break;
+        case MaterialParamKind::UvOffsetX:           material.textureTransform.translation.u = value.scalar; break;
+        case MaterialParamKind::UvOffsetY:           material.textureTransform.translation.v = value.scalar; break;
     }
     if (!material.gpuMaterial) material.gpuMaterial = std::make_shared<GpuMaterial>();
     applyPBRMaterialSnapshotToGpuMaterial(capturePBRMaterialSnapshot(material), *material.gpuMaterial);

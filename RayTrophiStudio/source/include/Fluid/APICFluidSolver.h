@@ -29,6 +29,7 @@
 #include "../Vec3.h"
 #include "../FluidGrid.h"
 #include "FluidParticles.h"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -130,24 +131,73 @@ struct APICSolverParams {
     float density_correction = 1.0f;
 
     // Per-particle viscous decay rate (1/s). Exponential energy loss:
-    // v *= exp(-internal_friction * dt). Models inviscid → viscous → highly
-    // damped behaviour without depending on velocity variance (so coherent
-    // bulk flows ALSO settle, not only splashy/spread-out ones).
-    // 0 = no decay, 0.5 ≈ water-like settle over seconds, 10+ ≈ near-instant.
-    float internal_friction = 0.5f;
+    // v *= exp(-internal_friction * dt), applied to EVERY particle in
+    // gridToParticle — bulk and spray alike, in whatever direction it is
+    // moving.
+    //
+    // ★★★ THIS IS NOT VISCOSITY AND THE DEFAULT USED TO PRETEND IT WAS. It
+    // brakes the whole body instead of resisting shear, so it also brakes free
+    // FALL. It carried 0.5 from the era before `kinematic_viscosity` was
+    // physical, when every thick preset had to fake thickness with it. The
+    // thick presets were converted to a real ν; this default was not, so water
+    // kept paying for thickness it does not have — a 2 m pour lost roughly a
+    // third of its speed on the way down and landed without a splash, which
+    // reads exactly as "even water is highly viscous now".
+    //
+    // ★ 0 is the honest default. Real water resists SHEAR, and shear is the
+    // viscous solve's job. Anything non-zero here is a body drag no liquid
+    // actually has; keep it for stylised or deliberately dead liquids.
+    float internal_friction = 0.0f;
 
-    // Quadratic air drag on particles whose containing cell has fewer than
-    // `reseed_min_per_cell` particles — i.e. spray, droplets, splash debris.
-    // Applied implicitly as v *= 1 / (1 + k|v|dt), unconditionally stable.
-    // 0 disables. Bulk fluid particles are not affected; their dissipation
-    // comes from internal_friction.
-    float air_drag = 0.5f;
+    // Drucker-Prager granular MPM parameters. They are inert unless the Sand
+    // preset is active; liquid presets keep the existing Navier-Stokes path.
+    bool  granular_enabled = false;
+    float granular_friction_angle_degrees = 35.0f;
+    float granular_cohesion = 0.0f;
+    float granular_dilatancy_degrees = 5.0f;
+    float granular_young_modulus = 2.0e5f;
+    float granular_poisson_ratio = 0.25f;
+    float granular_tensile_cutoff = 0.0f;
+    float granular_hardening = 0.0f;
+    float granular_fracture_strain = 0.04f;
+    float granular_damage_rate = 6.0f;
+    float granular_healing_rate = 0.0f;
+    bool  granular_rebonding = false;
+    int   granular_max_solver_substeps = 16;
 
-    // Particle redistribution (reseed). Each step, fluid cells whose particle
-    // count drifts away from the seed target are corrected: starved cells get
-    // new particles with grid-sampled velocity, over-populated cells lose
-    // their surplus (highest-index removal — order-agnostic). Without this,
-    // cell-per-particle drift causes density bands and apparent volume change.
+    // Canonical validation used by UI, scripting/IPC and scene loading. Keep
+    // every authoring surface on the same material contract.
+    void sanitizeGranularMaterial() {
+        granular_friction_angle_degrees = std::clamp(granular_friction_angle_degrees, 0.0f, 55.0f);
+        granular_cohesion = std::max(granular_cohesion, 0.0f);
+        granular_dilatancy_degrees = std::clamp(granular_dilatancy_degrees, 0.0f, 30.0f);
+        granular_young_modulus = std::clamp(granular_young_modulus, 10.0f, 1.0e7f);
+        granular_poisson_ratio = std::clamp(granular_poisson_ratio, 0.0f, 0.49f);
+        granular_tensile_cutoff = std::max(granular_tensile_cutoff, 0.0f);
+        granular_hardening = std::max(granular_hardening, 0.0f);
+        granular_fracture_strain = std::clamp(granular_fracture_strain, 1.0e-4f, 1.0f);
+        granular_damage_rate = std::clamp(granular_damage_rate, 0.0f, 100.0f);
+        granular_healing_rate = std::clamp(granular_healing_rate, 0.0f, 20.0f);
+        granular_max_solver_substeps = std::clamp(granular_max_solver_substeps, 1, 64);
+    }
+
+    // Quadratic air drag on DETACHED droplets (an isolated 3x3x3 neighbourhood,
+    // i.e. spray and splash debris — not merely a sparse cell). Applied
+    // implicitly as v *= 1 / (1 + k|v|dt), unconditionally stable. 0 disables.
+    //
+    // ★★ k has units of 1/m and IS derivable: for a droplet of diameter d,
+    // k = 3·ρ_air·C_d / (4·ρ_water·d). With C_d≈0.5 and d≈3 mm that is ≈0.15.
+    // The old 0.5 corresponds to sub-millimetre mist, and it was chosen while
+    // this knob was doubling as a thickness dial — so it was braking the very
+    // droplets a splash is made of, on top of internal_friction braking them
+    // again. Two brakes on one motion is why raising the old unitless viscosity
+    // to 200 was the only way to feel a difference.
+    float air_drag = 0.15f;
+
+    // Particle redistribution (reseed). Crowded-cell removals fund replacements
+    // in starved interior cells during the same step. Because P2G currently uses
+    // unit-mass particles, reseeding is count-conservative and cannot invent
+    // liquid; emitters and open boundaries remain the count-changing paths.
     bool  reseed_enabled = true;
     // Target particles per fluid cell. 0 = use particles_per_cell (the seed
     // density). Reseed kicks in when count falls below min_per_cell or rises
@@ -156,6 +206,21 @@ struct APICSolverParams {
     int   reseed_min_per_cell = 3;
     int   reseed_max_per_cell = 16;
     std::size_t max_particles = 1000000;
+    // ── Material-coordinate refresh ────────────────────────────────────────
+    // Solver steps between resets of the SAME coordinate generation. Two
+    // generations run half a period out of phase and are blended, so the
+    // texture is never carried by a map older than one period.
+    //
+    // ★ This is the ONE dial on the stretch/crossfade trade: larger carries the
+    // pattern further with the material before refreshing it (more faithful
+    // advection, more smearing at the end of each life), smaller keeps the map
+    // crisp at the cost of more visible crossfading between the two.
+    //
+    // ★ Counted in STEPS, not seconds or frames, because the map degrades with
+    // deformation and steps are what deform it. A scene run at a smaller dt
+    // deforms less per step and correspondingly refreshes less often in wall
+    // time, which is the behaviour you want and not a coincidence.
+    int   uvw_refresh_period = 240;
     // How strongly pure domain translation drives the liquid mass. 0 = moving
     // bounds only, 1 = the container fully carries the nearby fluid velocity.
     float domain_motion_coupling = 1.0f;
@@ -185,6 +250,41 @@ struct APICSolverParams {
     // Values between blend the two. The pressure projection is unaffected;
     // this only enters the viscous stencil.
     float viscosity_wall_slip = 1.0f;
+    // Optional cell-centred kinematic viscosity in m^2/s, one float per grid
+    // cell, produced by Fluid::buildSubstanceViscosityField from the per-
+    // substance overrides. When null (the common case) the scalar
+    // `kinematic_viscosity` above is used everywhere and nothing costs anything.
+    //
+    // ★★ NOT OWNED. The caller keeps it alive across the step; it is grow-only
+    // function-static scratch on the ParticleSimulation side, like every other
+    // per-step field this solver borrows.
+    //
+    // ★★★ THE PRESENCE OF THIS FIELD SWITCHES THE STAGE ON, even when the
+    // domain scalar is 0. The alternative — gating on the scalar alone — means
+    // binding honey to a substance in an inviscid domain authors a number that
+    // is read, uploaded, and then silently ignored: the liquid stays thin, no
+    // error is raised, and the only symptom is that a control does nothing.
+    // The field itself is only ever built when some substance actually
+    // overrides (see buildSubstanceViscosityField), so this cannot switch the
+    // stage on for a scene that did not ask for it.
+    const std::vector<float>* substance_viscosity = nullptr;
+    // ── Solid-phase substances ─────────────────────────────────────────────
+    // Tags of the substances the domain declares SOLID. Their parcels are
+    // already stamped into grid.solid by the caller (see
+    // Fluid::buildSubstanceSolidCells); this list is what lets the PARTICLE
+    // stages tell "I am inside a solid" from "I AM the solid".
+    //
+    // ★★★ WITHOUT THIS THE SOLID EJECTS ITSELF. advectParticles treats a
+    // parcel sitting in a solid cell as swallowed by a moving collider and
+    // shoves it to the nearest free cell — correct for liquid, and for a solid
+    // parcel it means the chunk explodes outward the instant it becomes thick
+    // enough to fill its own cell. The symptom would look like a collision
+    // instability, not like a missing exception.
+    //
+    // ★★ NOT OWNED and at most kMaxFluidSubstanceMaterials entries, so the
+    // membership test is a short linear scan resolved ONCE per particle per
+    // step into a mask rather than per substep.
+    const std::vector<uint32_t>* solid_substance_tags = nullptr;
     float affine_damping = 0.98f;
     float max_affine = 80.0f;
 
@@ -359,20 +459,30 @@ struct APICSolverParams {
     void applyPreset(FluidPreset preset) {
         switch (preset) {
             case FluidPreset::Water:
+                granular_enabled = false;
                 // ν=0 skips the viscous solve outright: water's 1e-6 m²/s is
                 // orders of magnitude below the numerical diffusion of any grid
                 // coarse enough to render, so paying for the sweeps buys motion
                 // you cannot see.
                 kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
                 viscosity_wall_slip = 1.0f;
-                internal_friction = 0.5f;
+                // ★★★ BOTH DISSIPATION DIALS WERE LEFT AT THEIR FAKE-THICKNESS
+                // VALUES when the thick presets were converted to a physical ν.
+                // Water is the preset with NOTHING to fake, so it was the one
+                // paying the whole cost: 0.5 body decay plus 0.5 droplet drag
+                // meant a 2 m pour arrived slow and its spray died on contact.
+                // Water resists shear, and its shear is below what any
+                // renderable voxel can express — so both of these belong at (or
+                // near) zero, and the splash comes back on its own.
+                internal_friction = 0.0f;
                 flip_blend = 0.97f; apic_blend = 0.95f;
                 velocity_damping = 0.999f;
                 density_correction = 1.0f;
-                air_drag = 0.5f;   wall_damping = 0.15f;
+                air_drag = 0.15f;  wall_damping = 0.15f;
                 affine_damping = 0.98f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Oil:
+                granular_enabled = false;
                 kinematic_viscosity = 1.0e-4f; viscosity_sweeps = 6;
                 viscosity_wall_slip = 0.6f;
                 internal_friction = 0.15f;
@@ -383,6 +493,7 @@ struct APICSolverParams {
                 affine_damping = 0.97f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Mud:
+                granular_enabled = false;
                 // Mud is really a yield-stress (Bingham) material: it should
                 // STOP, not creep slowly to a stop. Without a plastic return
                 // mapping the solver cannot express that, so a little residual
@@ -398,6 +509,7 @@ struct APICSolverParams {
                 affine_damping = 0.95f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Honey:
+                granular_enabled = false;
                 kinematic_viscosity = 7.0e-3f; viscosity_sweeps = 16;
                 viscosity_wall_slip = 0.0f;
                 internal_friction = 0.2f;
@@ -408,6 +520,7 @@ struct APICSolverParams {
                 affine_damping = 0.95f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Chocolate:
+                granular_enabled = false;
                 // Molten couverture at ~40 °C: roughly half honey's kinematic
                 // viscosity, and it wets everything it touches (no-slip). The
                 // ribbon/coiling it is known for comes from the viscous solve;
@@ -424,6 +537,7 @@ struct APICSolverParams {
                 affine_damping = 0.95f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Lava:
+                granular_enabled = false;
                 kinematic_viscosity = 0.5f;    viscosity_sweeps = 24;
                 viscosity_wall_slip = 0.0f;
                 internal_friction = 0.2f;
@@ -434,22 +548,35 @@ struct APICSolverParams {
                 affine_damping = 0.92f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Sand:
+                granular_enabled = true;
+                granular_friction_angle_degrees = 35.0f;
+                granular_cohesion = 0.0f;
+                granular_dilatancy_degrees = 5.0f;
+                granular_young_modulus = 2.0e5f;
+                granular_poisson_ratio = 0.25f;
+                granular_tensile_cutoff = 0.0f;
+                granular_hardening = 0.0f;
+                granular_fracture_strain = 0.02f;
+                granular_damage_rate = 8.0f;
+                granular_healing_rate = 0.0f;
+                granular_rebonding = false;
+                granular_max_solver_substeps = 16;
                 // ★ STILL AN APPROXIMATION, and knowingly so. Grain friction is
                 // a SHEAR YIELD criterion (Drucker-Prager), not a velocity
                 // Laplacian — no value of ν produces an angle of repose, so the
-                // viscous solve is left off and per-particle friction + strong
-                // density correction stand in. Consequence to expect: a sand
-                // pile still flattens further than it should, and sand does not
-                // fall at g. Fixing it properly needs per-particle plastic
-                // state, which FluidParticles does not carry yet.
+                // Vulkan uses a rate-form Drucker-Prager stress update and
+                // stress-divergence P2G. The legacy drag remains only as CPU
+                // fallback and is bypassed by the Vulkan G2P constants.
                 kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
                 viscosity_wall_slip = 0.0f;
+                // CPU fallback keeps the legacy approximation; Vulkan ignores
+                // this body drag when granular_enabled and uses stress yield.
                 internal_friction = 4.0f;
-                flip_blend = 0.60f; apic_blend = 0.40f;
-                velocity_damping = 0.99f;
-                density_correction = 2.0f;
-                air_drag = 1.0f;   wall_damping = 0.90f;
-                affine_damping = 0.85f; max_velocity = 50.0f;
+                flip_blend = 0.92f; apic_blend = 0.95f;
+                velocity_damping = 0.999f;
+                density_correction = 1.0f;
+                air_drag = 0.15f;  wall_damping = 0.40f;
+                affine_damping = 0.98f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Custom:
             default:
@@ -470,6 +597,7 @@ struct APICSolverStats {
     float g2p_ms = 0.0f;
     float advect_ms = 0.0f;
     float density_ms = 0.0f;
+    float granular_constitutive_ms = 0.0f;
     float pressure_cg_dot_ms = 0.0f;
     double pressure_cg_final_relative_residual = 0.0;
     int   cpu_threads = 1;
@@ -479,9 +607,76 @@ struct APICSolverStats {
     int   pressure_cg_dot_count = 0;
     bool  pressure_cg_multigrid = false;
     size_t particle_count = 0;
+    // Dynamic reseeding may only replace unit-mass samples removed from
+    // crowded cells in the same step; these counters expose that invariant.
+    size_t reseed_added_particles = 0;
+    size_t reseed_removed_particles = 0;
     size_t grid_cell_count = 0;
     size_t active_fluid_cells = 0;
     size_t recovered_solid_particles = 0;
+    size_t granular_yielded_particles = 0;
+    size_t granular_detached_particles = 0;
+    size_t granular_invalid_particles = 0;
+    size_t granular_sleeping_particles = 0;
+    size_t granular_damaged_particles = 0;
+    size_t granular_damage_over_10_particles = 0;
+    size_t granular_damage_over_50_particles = 0;
+    size_t granular_damage_over_90_particles = 0;
+    float granular_max_damage = 0.0f;
+    float granular_mean_damage = 0.0f;
+    float granular_max_yield_value = 0.0f;
+    float granular_max_plastic_increment = 0.0f;
+    float granular_max_accumulated_plastic = 0.0f;
+    float granular_mean_accumulated_plastic = 0.0f;
+    float granular_max_fracture_history = 0.0f;
+    float granular_mean_fracture_history = 0.0f;
+    float granular_requested_young_modulus = 0.0f;
+    float granular_effective_young_modulus = 0.0f;
+    int granular_required_substeps = 1;
+    int granular_solver_substeps = 1;
+    bool granular_stiffness_capped = false;
+    // Parcels of a SOLID-phase substance, and the cells they actually blocked
+    // this step.
+    //
+    // ★★★ BOTH NUMBERS, because their disagreement is the diagnosis. Parcels
+    // present with zero cells means the chunk is thinner than the voxel size
+    // can express — the phase control did land, the grid just cannot hold it,
+    // and raising the resolution fixes it. Reporting only the cells would make
+    // that indistinguishable from "the binding never took", and the user would
+    // go looking in the wrong layer.
+    size_t solid_phase_particles = 0;
+    size_t solid_phase_cells = 0;
+    // Fluid regions the projection found with NO pressure reference this step,
+    // and how many cells they held. A sealed region is one whose every face is
+    // either fluid-fluid or closed (solid / closed domain wall): the matrix
+    // block is singular and PCG grows its null-space component a little every
+    // iteration, so the pressure -- and the kick it hands the particles --
+    // scales with `pressure_iterations` instead of converging.
+    //
+    // ★★ REPORTED, NOT JUST FIXED. These two numbers are what tells "the
+    // pocket fix did something" apart from "there was no pocket and the change
+    // is inert". Without them the repair is unfalsifiable, which is exactly how
+    // a calibration round starts.
+    size_t sealed_pockets = 0;
+    size_t sealed_pocket_cells = 0;
+    // ★★★ A ZERO ABOVE IS ONLY A MEASUREMENT IF THIS IS TRUE. The pocket scan
+    // lives in the CPU free-surface projection; the GPU MGPCG path and the
+    // non-free-surface solver never run it, and there a zero would mean "not
+    // looked at" while reading exactly like "looked and found none". That is the
+    // silent failure this project keeps re-learning, so the two states are kept
+    // apart in the data rather than in a comment.
+    bool sealed_pockets_measured = false;
+    // Fluid cells with liquid on all six sides, out of `active_fluid_cells`.
+    //
+    // \u2605\u2605\u2605 THE RESOLUTION READING. A cell touching air is pinned near p = 0 by
+    // the free-surface condition, so only INTERIOR cells carry a pressure
+    // field. Interior \u2248 0 with a healthy particle count means the liquid is
+    // thinner than the grid can express: it is not a fluid to this solver, it
+    // is loose particles, and it will fall without a splash and land in a heap
+    // no matter what the viscosity says. The cure is mass per second or voxel
+    // size -- and nothing else, which is exactly what makes this worth
+    // reporting instead of inferring from the picture.
+    size_t interior_fluid_cells = 0;
     // Sweeps the viscous solve actually ran this step (0 = ν was 0, i.e. the
     // solve was skipped). Reported so "Viscosity 0.00 ms" can be told apart
     // from "viscosity is switched off" — the same reading for two very

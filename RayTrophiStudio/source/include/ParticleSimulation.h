@@ -7,6 +7,8 @@
 #include "Fluid/FluidLevelSet.h"
 #include "Fluid/FluidFoam.h"
 #include "Fluid/FluidRenderMode.h"
+#include "Fluid/GranularGpuState.h"
+#include "Fluid/SubstanceTag.h"
 #include "GridFluidSolver.h"   // GridFluid::GasSolverStats (gas step telemetry)
 #include "VolumeShader.h"
 #include "SimulationWorld.h"
@@ -423,13 +425,16 @@ struct SimulationGridDomainDesc {
     float fluid_particle_radius_factor = 0.45f;
     float fluid_particle_size_multiplier = 1.0f;
     int   fluid_particle_subdivisions = 1;
+    // Geometry instanced at each splat. 0 = built-in icosphere; 1 = triangles
+    // belonging to the named scene node, recentered and normalized once.
+    int   fluid_particle_geometry_mode = 0;
+    std::string fluid_particle_geometry_source;
     bool  fluid_particle_emissive = false;
     float fluid_particle_emission = 0.0f;
-    // Optional: explicit MaterialManager material id for the particle spheres.
-    // -1 (the default) falls back to the auto-synthesised PBR built from the
-    // color / emissive fields above. When set, the user can author full water
-    // PBR (high transmittance, IOR 1.33, low roughness) via the Materials
-    // panel and have it actually drive the fluid sphere look.
+    // Optional: explicit MaterialManager material id for splats. -1 preserves
+    // the selected scene object's per-face materials; a built-in sphere reuses
+    // the first existing scene material. Drawing fluid particles never creates
+    // hidden per-domain materials as a side effect.
     int   fluid_particle_material_id = -1;
 
     // SurfaceSDF-mode params (level-set narrow-band SDF + density-proxy band).
@@ -463,6 +468,103 @@ struct SimulationGridDomainDesc {
     // paid for before.
     int   fluid_surface_material_id = -1;
 
+    // ── Per-substance materials ─────────────────────────────────────────────
+    // Overrides `fluid_surface_material_id` for the liquid tagged with a given
+    // substance name. Liquid whose substance is not listed here (including all
+    // untagged liquid) falls back to the domain material above, so adding this
+    // table to an existing domain changes nothing until an entry is made.
+    //
+    // ★★★ KEYED BY SUBSTANCE NAME, NOT BY EMITTER. At a surface point where two
+    // streams have met there is no "which emitter", but there IS a mixture of
+    // substances — so this is the only key the shading question can actually be
+    // answered with. Two emitters pouring the same substance are one body here.
+    //
+    // ★★ A material_id of -1 is MEANINGFUL and not "unset": it selects the
+    // built-in dielectric (water/glass) for that substance specifically. That is
+    // what lets one substance be a full Principled BSDF while another stays the
+    // plain refractive liquid, in the same domain and the same isosurface.
+    //
+    // ★ Bounded on purpose (see kMaxFluidSubstanceMaterials): the composition
+    // field carries the two dominant substances per cell, and an unbounded table
+    // would imply a per-cell search whose cost is invisible until a scene has
+    // dozens of substances.
+    struct SubstanceMaterial {
+        std::string substance;
+        int material_id = -1;
+        Fluid::SubstanceRepresentation representation =
+            Fluid::SubstanceRepresentation::Inherit;
+
+        // ── PHYSICS, not shading ────────────────────────────────────────────
+        // Kinematic viscosity in m^2/s for THIS substance. Negative means
+        // "inherit the domain's fluid_params.kinematic_viscosity", matching the
+        // -1 convention material_id already uses in this struct.
+        //
+        // ★ ABSOLUTE UNITS, deliberately not a multiplier of the domain value.
+        // A scale factor would make a substance's thickness depend on whatever
+        // the domain happened to be set to, so the same chocolate would flow
+        // differently in two scenes and neither number would be wrong.
+        //
+        // ★★ Consumed on the GRID (see buildSubstanceViscosityField): the
+        // viscous solve diffuses MAC faces, so a per-particle number has to be
+        // gathered into a cell field before it can mean anything. Handing a
+        // per-particle value to a grid-wide stage does not crash — it looks
+        // like "a bit too runny" and gets buried in a calibration pass.
+        float kinematic_viscosity = -1.0f;
+
+        // How readily this substance blends with a DIFFERENT substance where
+        // the two meet. 1 = fully miscible (milk into chocolate: a wide, soft
+        // gradient). 0 = immiscible (oil in water: a front one ramp wide).
+        //
+        // ★★★ THIS ACTS ON THE FIELD, NOT ON THE SHADER. Sharpness is a
+        // property of the mixture, so the composition producer narrows the
+        // transition and every consumer — surface shading today, interfacial
+        // tension later — sees the same boundary. A shader-side switch would
+        // make the picture disagree with the simulation, which is what the
+        // retired `fluid_blend_substance_materials` domain flag did.
+        //
+        // ★ The PAIR takes the MINIMUM of the two: a substance that refuses to
+        // mix refuses on its own, without needing the other to agree.
+        float miscibility = 1.0f;
+
+        // State of matter. Solid parcels are rasterized into the grid's solid
+        // mask each step, so the liquid flows around them and (with no-slip)
+        // clings to them.
+        //
+        // ★★★ AN AXIS OF ITS OWN, not a second name for `representation`
+        // above. Representation is how the parcel is DRAWN; this is what it
+        // IS. Reading the render routing as the phase would make a scene's
+        // FLOW change the moment somebody switched a display mode.
+        //
+        // ★ Solid here means "obstacle with mass and velocity", not a rigid
+        // body: parcels have no cohesion, so a pile spreads. See
+        // Fluid::SubstancePhase for why that boundary is deliberate.
+        Fluid::SubstancePhase phase = Fluid::SubstancePhase::Liquid;
+    };
+    std::vector<SubstanceMaterial> fluid_substance_materials;
+
+    // ── Solid-phase coupling (domain-wide) ──────────────────────────────────
+    // Master switch for the whole solid-phase path: with this off, a substance
+    // still REMEMBERS it is solid but no cell is stamped and the solve behaves
+    // exactly as it did before phases existed.
+    //
+    // ★★★ AN OFF SWITCH IS PART OF THE FEATURE, not a nicety. A per-substance
+    // phase can only be turned off substance by substance, and the moment a
+    // solid misbehaves the user needs ONE control that proves whether it is the
+    // cause — without editing (and losing) the authoring they just did. A
+    // feature you cannot switch off is a feature you cannot bisect.
+    bool fluid_solid_phase_enabled = true;
+    // How full of solid parcels a cell must be before it blocks flow, as a
+    // fraction of the seed density (particles_per_cell). 0.25 = a quarter.
+    //
+    // ★★ THE ONE CALIBRATION DIAL of the solid phase, and it is exposed rather
+    // than hidden because its two failure modes point in opposite directions
+    // and neither announces itself: too low and a stray parcel dams a channel
+    // with a full voxel of wall; too high and a thin chunk blocks nothing at
+    // all while the panel still says "Solid". The domain's stats line reports
+    // parcels and blocked cells separately so this dial can be set by reading,
+    // not by guessing.
+    float fluid_solid_phase_fill = 0.25f;
+
     // ── Procedural POROSITY (fermented dough, aerated batter, pumice, foam) ──
     // Amplitude of a 3D noise field SUBTRACTED from the density before the
     // isosurface test, so a pore is a real hole in the level set rather than an
@@ -474,12 +576,26 @@ struct SimulationGridDomainDesc {
     // the field is eaten away faster than the band can close and the body
     // disintegrates rather than becoming porous.
     //
-    // ★ These live on the DOMAIN, not on the surface material, and they have to.
-    // The ISO threshold is evaluated in TWO places — the shading march AND
+    // ★ These live on the DOMAIN, not on the surface material. The ISO threshold
+    // is evaluated in TWO places — the shading march AND
     // nearestSurfaceSDFCrossing, the arbiter that decides where gas hands over
-    // to liquid — and the arbiter runs for OTHER volumes, with no access to this
-    // domain's material. Drive porosity from a material graph and the gas would
-    // be clipped against a surface the shader no longer has, silently.
+    // to liquid — and if those two disagree by so much as a term, gas is clipped
+    // against a surface the shader never draws, with nothing reporting it.
+    //
+    // ★★ CORRECTION to what this comment used to claim. It said the arbiter "has
+    // no access to this domain's material". That is not true and never was:
+    // nearestSurfaceSDFCrossing loads the CANDIDATE's own instance
+    // (`volumes.v[candidateIndex]`) and passes THAT into sampleIsoField, so it
+    // reads iso_material_index and the materials SSBO just like the shading
+    // march — it already reads max_steps / step_size / voxel_size off that same
+    // struct. Surface OPACITY is driven from the bound material precisely
+    // because of this.
+    //
+    // What is actually ruled out is a material GRAPH driving the threshold: that
+    // means running a per-pixel material VM inside the arbiter, which it has no
+    // business doing. Porosity stays here anyway — it is a property of the
+    // SUBSTANCE (this dough is aerated), not of the look, and relocating it now
+    // would silently re-scope every scene that set it.
     float fluid_surface_pore_amount = 0.0f;
     // Feature size in WORLD units (metres): the diameter of a typical bubble.
     // Absolute rather than voxel-relative so changing the domain resolution
@@ -489,6 +605,62 @@ struct SimulationGridDomainDesc {
     // higher mixes a finer octave in, which is what separates bread crumb
     // (mixed sizes) from packing foam (uniform).
     float fluid_surface_pore_detail = 0.5f;
+
+    // ── Surface COORDINATE SPACE ─────────────────────────────────────────────
+    // Which coordinate the isosurface addresses its patterns in — textures, the
+    // resin interior, and the porosity lattice, all three through the one
+    // materialAnchor() call in volume_closesthit.rchit.
+    //
+    //   0 = Material : the parcel's own coordinate. Carried by the liquid, so a
+    //                  pour takes its texture with it. Default, and identical to
+    //                  world for anything that has not moved (the coordinate is
+    //                  seeded with the birth position).
+    //   1 = Domain   : the container's local space. Moves with a carried tank
+    //                  but the liquid flows THROUGH the pattern. This is the
+    //                  right answer for something painted on the vessel.
+    //   2 = World    : nailed to the room. The behaviour that shipped before
+    //                  material coordinates existed, kept because it is a real
+    //                  look (a projected pattern) AND because it is the escape
+    //                  hatch from the material coordinate's one real weakness:
+    //                  it STRETCHES with the flow, so a violently deformed
+    //                  splash eventually maps chaotically.
+    //
+    // ★ Lives on the DOMAIN for the same reason porosity does, one paragraph
+    // up: the anchor is read inside sampleIsoField, so nearestSurfaceSDFCrossing
+    // — the gas/liquid handover arbiter, which runs for OTHER volumes — reads it
+    // too. Put this on the surface material and the arbiter cannot see it, so
+    // gas would be clipped against a differently-anchored surface than the one
+    // actually drawn. Nothing reports that; it just makes smoke end in the wrong
+    // place near the liquid.
+    int   fluid_surface_coord_space = 0;
+
+    // ── NOTE on surface OPACITY, which is deliberately NOT a field here ──────
+    // Alpha on the isosurface is driven by the BOUND SURFACE MATERIAL's own
+    // opacity / opacity_tex, not by a domain knob. It reaches the field the same
+    // way porosity does — subtracted from the density BEFORE the ISO test, so a
+    // hole is real geometry whose rim normal falls out of the gradient already
+    // being computed, rather than an alpha cutout whose edge carries the parent
+    // surface's normal and casts no self-shadow.
+    //
+    // ★ It can live on the material — unlike porosity — because the constraint
+    // written two paragraphs up is NOT what it says. nearestSurfaceSDFCrossing
+    // loads the CANDIDATE liquid's own instance (`volumes.v[candidateIndex]`)
+    // and passes THAT into sampleIsoField, so it reads that domain's
+    // iso_material_index and the materials SSBO exactly as the shading march
+    // does. The arbiter was never blind to the surface material; it already
+    // reads max_steps / step_size / voxel_size off the same struct.
+    //
+    // What the constraint really rules out is a material GRAPH driving the
+    // threshold: that would mean running a per-pixel material VM inside the
+    // arbiter. A plain scalar plus one texture fetch is not that. Porosity stays
+    // on the domain regardless — it is a property of the substance, and moving
+    // it now would be a silent meaning change for every scene that set it.
+    //
+    // ★ And this is why the isosurface has no any-hit shader and needs none. The
+    // volume procedural hit group binds VK_SHADER_UNUSED_KHR for any-hit, while
+    // the AABB BLAS is already built non-opaque — the acceleration structure was
+    // never the obstacle. Cutting alpha in an any-hit would have been the cheap
+    // answer and the rimless one.
 
     // ImGui debug overlay (cyan blob per particle on top of everything). Used
     // to preview fluid coverage / debug seeding when the RT route hasn't
@@ -714,12 +886,19 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle scratch2_vel_x;
     ComputeBufferHandle scratch2_vel_y;
     ComputeBufferHandle scratch2_vel_z;
+    // Cell-centred kinematic viscosity (m^2/s) for the variable-coefficient
+    // viscous solve. Its own allocation rather than a reuse of scratch_scalar2:
+    // that one belongs to the gas MacCormack pass, and although a domain is
+    // never fluid and gas in the same step, this file has been bitten more than
+    // once by state shared on a reasoning that a later reader has to rebuild.
+    ComputeBufferHandle substance_viscosity;
     ComputeBufferHandle fluid_positions;
     ComputeBufferHandle fluid_velocities;
     ComputeBufferHandle fluid_affine;
     // GPU mirror of FluidParticles::mass_fraction. Kept separate so existing
     // APIC kernels retain their buffer ABI while lifecycle support is added.
     ComputeBufferHandle fluid_mass_fraction;
+    Fluid::Granular::GpuBuffers granular;
     ComputeBufferHandle foam_positions;
     SimulationGpuFoamRenderBuffer foam_render;
     // Whitewater spawn-potential pass (GPU port of stepFoam's phase 3, which
@@ -920,6 +1099,21 @@ struct SimulationFlowSourceDesc {
     // liquid sprays outward off the geometry like a hose/fountain following the
     // shape. When false every particle uses the single `velocity` vector above.
     bool  fluid_emit_along_normal = false;
+    // ── Substance this source pours (fluid only) ─────────────────────────────
+    // Empty = untagged: the liquid takes the domain's single surface material,
+    // exactly as before substances existed.
+    //
+    // ★★★ NAMED, not an index or a material id, and that is the whole design.
+    // The look and (later) the physics are looked up FROM the substance, so two
+    // sources pouring "MilkChocolate" merge into one indistinguishable body
+    // while a third pouring "BitterChocolate" mixes with them. Binding a
+    // material to the SOURCE instead would leave the mixed region unanswerable:
+    // at a point where two streams have met there is no "which emitter".
+    //
+    // ★ The name is hashed to a per-particle tag (Fluid::substanceTag) that
+    // rides advection, compaction and reseed inheritance — the identity is a
+    // property of the material, not of where it was born.
+    std::string fluid_substance;
     // Per-source accumulator for fractional emit counts (kept in the desc so
     // it survives step boundaries; reset on disable).
     float fluid_emit_accumulator = 0.0f;
@@ -1456,6 +1650,20 @@ public:
         SimulationComputeContext* compute = nullptr);
     void clearGridDomains();
     void resetGridDomainStates();
+    /// Author and execute one fluid SeedBox on the authoritative grid-domain
+    /// particle state. `persistent` controls whether reset/timeline rewind
+    /// recreates it; it is independent of replacing the current live particles.
+    bool seedFluidDomainParticles(const std::string& domain_name,
+                                  const Vec3& seed_min,
+                                  const Vec3& seed_max,
+                                  int particles_per_cell,
+                                  bool replace,
+                                  bool persistent);
+    /// Clear the authoritative live particles. With `clear_seed_recipe`, also
+    /// disarm reset-time SeedBox/FillLevel reproduction so emitter-only domains
+    /// stay emitter-only after a rewind.
+    bool clearFluidDomainParticles(const std::string& domain_name,
+                                   bool clear_seed_recipe);
     void setGridDomainBoundsResolver(std::function<bool(const SimulationGridDomainDesc&, Vec3&, Vec3&)> resolver);
     /// Run a sync pass immediately (resize state, apply any pending fluid
     /// seeds, etc.) without waiting for the next sim tick. Needed when the

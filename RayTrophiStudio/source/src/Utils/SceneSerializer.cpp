@@ -370,6 +370,19 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["apic_blend"] = d.fluid_params.apic_blend;
     j["fluid_params"]["flip_blend"] = d.fluid_params.flip_blend;
     j["fluid_params"]["internal_friction"] = d.fluid_params.internal_friction;
+    j["fluid_params"]["granular_enabled"] = d.fluid_params.granular_enabled;
+    j["fluid_params"]["granular_friction_angle_degrees"] = d.fluid_params.granular_friction_angle_degrees;
+    j["fluid_params"]["granular_cohesion"] = d.fluid_params.granular_cohesion;
+    j["fluid_params"]["granular_dilatancy_degrees"] = d.fluid_params.granular_dilatancy_degrees;
+    j["fluid_params"]["granular_young_modulus"] = d.fluid_params.granular_young_modulus;
+    j["fluid_params"]["granular_poisson_ratio"] = d.fluid_params.granular_poisson_ratio;
+    j["fluid_params"]["granular_tensile_cutoff"] = d.fluid_params.granular_tensile_cutoff;
+    j["fluid_params"]["granular_hardening"] = d.fluid_params.granular_hardening;
+    j["fluid_params"]["granular_fracture_strain"] = d.fluid_params.granular_fracture_strain;
+    j["fluid_params"]["granular_damage_rate"] = d.fluid_params.granular_damage_rate;
+    j["fluid_params"]["granular_healing_rate"] = d.fluid_params.granular_healing_rate;
+    j["fluid_params"]["granular_rebonding"] = d.fluid_params.granular_rebonding;
+    j["fluid_params"]["granular_max_solver_substeps"] = d.fluid_params.granular_max_solver_substeps;
     j["fluid_params"]["air_drag"] = d.fluid_params.air_drag;
     j["fluid_params"]["reseed_enabled"] = d.fluid_params.reseed_enabled;
     // Remaining preset-driven rheology so a material preset round-trips fully
@@ -388,6 +401,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["reseed_target_per_cell"] = d.fluid_params.reseed_target_per_cell;
     j["fluid_params"]["reseed_min_per_cell"] = d.fluid_params.reseed_min_per_cell;
     j["fluid_params"]["reseed_max_per_cell"] = d.fluid_params.reseed_max_per_cell;
+    j["fluid_params"]["uvw_refresh_period"] = d.fluid_params.uvw_refresh_period;
     j["fluid_params"]["sor_omega"] = d.fluid_params.sor_omega;
     j["fluid_params"]["max_affine"] = d.fluid_params.max_affine;
     j["fluid_params"]["cpu_threads"] = d.fluid_params.cpu_threads;
@@ -433,14 +447,21 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_particle_radius_factor"] = d.fluid_particle_radius_factor;
     j["fluid_particle_size_multiplier"] = d.fluid_particle_size_multiplier;
     j["fluid_particle_subdivisions"] = d.fluid_particle_subdivisions;
+    j["fluid_particle_geometry_mode"] = d.fluid_particle_geometry_mode;
+    j["fluid_particle_geometry_source"] = d.fluid_particle_geometry_source;
     j["fluid_particle_emissive"] = d.fluid_particle_emissive;
     j["fluid_particle_emission"] = d.fluid_particle_emission;
     j["fluid_particle_material_id"] = d.fluid_particle_material_id;
+    // `fluid_blend_substance_materials` was REMOVED, not renamed. It was a
+    // domain-wide shading switch; sharpness is now per-substance `miscibility`.
+    // Old files simply lack the new key and default to 1.0 = fully miscible,
+    // which is what the retired flag's default (true = blended) meant.
 
     // LevelSetParams
     j["fluid_level_set_params"]["narrow_band_voxels"] = d.fluid_level_set_params.narrow_band_voxels;
     j["fluid_level_set_params"]["kernel_radius_voxels"] = d.fluid_level_set_params.kernel_radius_voxels;
     j["fluid_level_set_params"]["particle_radius_voxels"] = d.fluid_level_set_params.particle_radius_voxels;
+    j["fluid_level_set_params"]["surface_offset_voxels"] = d.fluid_level_set_params.surface_offset_voxels;
     j["fluid_level_set_params"]["smoothing_iterations"] = d.fluid_level_set_params.smoothing_iterations;
     j["fluid_level_set_params"]["surface_resolution_multiplier"] = d.fluid_level_set_params.surface_resolution_multiplier;
     j["fluid_level_set_params"]["anisotropy_enabled"] = d.fluid_level_set_params.anisotropy_enabled;
@@ -557,6 +578,20 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("apic_blend")) d.fluid_params.apic_blend = fp["apic_blend"];
         if (fp.contains("flip_blend")) d.fluid_params.flip_blend = fp["flip_blend"];
         if (fp.contains("internal_friction")) d.fluid_params.internal_friction = fp["internal_friction"];
+        if (fp.contains("granular_enabled")) d.fluid_params.granular_enabled = fp["granular_enabled"];
+        if (fp.contains("granular_friction_angle_degrees")) d.fluid_params.granular_friction_angle_degrees = fp["granular_friction_angle_degrees"];
+        if (fp.contains("granular_cohesion")) d.fluid_params.granular_cohesion = fp["granular_cohesion"];
+        if (fp.contains("granular_dilatancy_degrees")) d.fluid_params.granular_dilatancy_degrees = fp["granular_dilatancy_degrees"];
+        if (fp.contains("granular_young_modulus")) d.fluid_params.granular_young_modulus = fp["granular_young_modulus"];
+        if (fp.contains("granular_poisson_ratio")) d.fluid_params.granular_poisson_ratio = fp["granular_poisson_ratio"];
+        if (fp.contains("granular_tensile_cutoff")) d.fluid_params.granular_tensile_cutoff = fp["granular_tensile_cutoff"];
+        if (fp.contains("granular_hardening")) d.fluid_params.granular_hardening = fp["granular_hardening"];
+        if (fp.contains("granular_fracture_strain")) d.fluid_params.granular_fracture_strain = fp["granular_fracture_strain"];
+        if (fp.contains("granular_damage_rate")) d.fluid_params.granular_damage_rate = fp["granular_damage_rate"];
+        if (fp.contains("granular_healing_rate")) d.fluid_params.granular_healing_rate = fp["granular_healing_rate"];
+        if (fp.contains("granular_rebonding")) d.fluid_params.granular_rebonding = fp["granular_rebonding"];
+        if (fp.contains("granular_max_solver_substeps")) d.fluid_params.granular_max_solver_substeps = fp["granular_max_solver_substeps"];
+        d.fluid_params.sanitizeGranularMaterial();
         if (fp.contains("air_drag")) d.fluid_params.air_drag = fp["air_drag"];
         if (fp.contains("reseed_enabled")) d.fluid_params.reseed_enabled = fp["reseed_enabled"];
         if (fp.contains("velocity_damping")) d.fluid_params.velocity_damping = fp["velocity_damping"];
@@ -583,6 +618,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("reseed_target_per_cell")) d.fluid_params.reseed_target_per_cell = fp["reseed_target_per_cell"];
         if (fp.contains("reseed_min_per_cell")) d.fluid_params.reseed_min_per_cell = fp["reseed_min_per_cell"];
         if (fp.contains("reseed_max_per_cell")) d.fluid_params.reseed_max_per_cell = fp["reseed_max_per_cell"];
+        if (fp.contains("uvw_refresh_period")) d.fluid_params.uvw_refresh_period = fp["uvw_refresh_period"];
         if (fp.contains("sor_omega")) d.fluid_params.sor_omega = fp["sor_omega"];
         if (fp.contains("max_affine")) d.fluid_params.max_affine = fp["max_affine"];
         if (fp.contains("cpu_threads")) d.fluid_params.cpu_threads = fp["cpu_threads"];
@@ -634,6 +670,8 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_particle_radius_factor")) d.fluid_particle_radius_factor = j["fluid_particle_radius_factor"];
     if (j.contains("fluid_particle_size_multiplier")) d.fluid_particle_size_multiplier = j["fluid_particle_size_multiplier"];
     if (j.contains("fluid_particle_subdivisions")) d.fluid_particle_subdivisions = j["fluid_particle_subdivisions"];
+    if (j.contains("fluid_particle_geometry_mode")) d.fluid_particle_geometry_mode = j["fluid_particle_geometry_mode"];
+    if (j.contains("fluid_particle_geometry_source")) d.fluid_particle_geometry_source = j["fluid_particle_geometry_source"];
     if (j.contains("fluid_particle_emissive")) d.fluid_particle_emissive = j["fluid_particle_emissive"];
     if (j.contains("fluid_particle_emission")) d.fluid_particle_emission = j["fluid_particle_emission"];
     if (j.contains("fluid_particle_material_id")) d.fluid_particle_material_id = j["fluid_particle_material_id"];
@@ -644,6 +682,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (lsp.contains("narrow_band_voxels")) d.fluid_level_set_params.narrow_band_voxels = lsp["narrow_band_voxels"];
         if (lsp.contains("kernel_radius_voxels")) d.fluid_level_set_params.kernel_radius_voxels = lsp["kernel_radius_voxels"];
         if (lsp.contains("particle_radius_voxels")) d.fluid_level_set_params.particle_radius_voxels = lsp["particle_radius_voxels"];
+        if (lsp.contains("surface_offset_voxels")) d.fluid_level_set_params.surface_offset_voxels = lsp["surface_offset_voxels"];
         if (lsp.contains("smoothing_iterations")) d.fluid_level_set_params.smoothing_iterations = lsp["smoothing_iterations"];
         if (lsp.contains("surface_resolution_multiplier")) d.fluid_level_set_params.surface_resolution_multiplier = lsp["surface_resolution_multiplier"];
         if (lsp.contains("anisotropy_enabled")) d.fluid_level_set_params.anisotropy_enabled = lsp["anisotropy_enabled"];
@@ -751,6 +790,7 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["fluid_particles_per_second"] = fs.fluid_particles_per_second;
     j["fluid_velocity_spread"] = fs.fluid_velocity_spread;
     j["fluid_emit_along_normal"] = fs.fluid_emit_along_normal;
+    j["fluid_substance"] = fs.fluid_substance;
     j["use_time_limit"] = fs.use_time_limit;
     j["start_time"] = fs.start_time;
     j["end_time"] = fs.end_time;
@@ -780,6 +820,7 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("fluid_particles_per_second")) fs.fluid_particles_per_second = j["fluid_particles_per_second"];
     if (j.contains("fluid_velocity_spread")) fs.fluid_velocity_spread = j["fluid_velocity_spread"];
     if (j.contains("fluid_emit_along_normal")) fs.fluid_emit_along_normal = j["fluid_emit_along_normal"];
+    if (j.contains("fluid_substance")) fs.fluid_substance = j["fluid_substance"];
     if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
     if (j.contains("start_time")) fs.start_time = j["start_time"];
     if (j.contains("end_time")) fs.end_time = j["end_time"];

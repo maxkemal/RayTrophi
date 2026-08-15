@@ -31,6 +31,7 @@
 #include "InstanceManager.h"
 #include "InstanceGroup.h"
 #include "Triangle.h"
+#include "TriangleMesh.h"
 #include "HittableInstance.h"
 #include "EmbreeBVH.h"
 #include "ParallelBVHNode.h"
@@ -38,6 +39,7 @@
 #include "PrincipledBSDF.h"
 #include "PBRMaterialSnapshot.h"
 #include "Fluid/FluidFoam.h"
+#include "Fluid/FluidSplatMaterialPolicy.h"
 #include "globals.h"
 
 #include <algorithm>
@@ -284,50 +286,73 @@ void buildPrimitive(SceneData::ParticleRenderShape shape, int subdiv, uint16_t m
     }
 }
 
-// Collect a scene node's triangles, recenter them on their bounding-box center and
-// normalize to unit max-extent so an instance scale == particle size behaves like
-// the built-in primitives. The mesh keeps its own material (debris look). Returns
-// centered copies tagged with a unique node name (stable BLAS cache key).
+// Read a scene node directly from the canonical flat TriangleMesh SoA, recenter
+// it and normalize to unit max-extent. No source Triangle facades are consulted
+// or manufactured; the Triangle objects produced below belong solely to the
+// transient ScatterSource required by the instance backends.
 void gatherSceneMeshSource(const std::vector<std::shared_ptr<Hittable>>& objects,
                            const std::string& node_name,
                            std::vector<std::shared_ptr<Triangle>>& out) {
     out.clear();
     if (node_name.empty()) return;
 
-    std::vector<Triangle*> src;
+    struct FlatFace {
+        Vec3 p[3];
+        Vec3 n[3];
+        Vec2 uv[3];
+        uint16_t material = 0;
+    };
+    std::vector<FlatFace> faces;
     Vec3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
     for (const auto& obj : objects) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (!tri || tri->getNodeName() != node_name) continue;
-        src.push_back(tri.get());
-        for (int v = 0; v < 3; ++v) {
-            const Vec3 p = tri->getOriginalVertexPosition(v);
-            mn = Vec3::min(mn, p);
-            mx = Vec3::max(mx, p);
+        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+        if (!mesh || mesh->nodeName != node_name || !mesh->geometry) continue;
+        const DNA::GeometryDetail& g = *mesh->geometry;
+        const Vec3* P = g.get_attribute_data<Vec3>("P");
+        const Vec3* P_orig = g.get_attribute_data<Vec3>("P_orig");
+        const Vec3* N = g.get_attribute_data<Vec3>("N");
+        const Vec3* N_orig = g.get_attribute_data<Vec3>("N_orig");
+        const Vec2* uv = g.get_attribute_data<Vec2>("uv");
+        const uint16_t* material = g.get_attribute_data<uint16_t>("materialID");
+        if ((!P && !P_orig) || g.indices.size() < 3) continue;
+        const Matrix4x4 xf = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
+        const Matrix4x4 nt = mesh->transform ? mesh->transform->getNormalTransform() : Matrix4x4::identity();
+        const std::size_t vc = g.get_vertex_count();
+        for (std::size_t f = 0; f + 2 < g.indices.size(); f += 3) {
+            FlatFace face;
+            bool valid = true;
+            for (int c = 0; c < 3; ++c) {
+                const uint32_t vi = g.indices[f + static_cast<std::size_t>(c)];
+                if (vi >= vc) { valid = false; break; }
+                face.p[c] = P_orig ? xf.transform_point(P_orig[vi]) : P[vi];
+                const Vec3 local_n = N_orig ? N_orig[vi] : (N ? N[vi] : Vec3(0.0f, 1.0f, 0.0f));
+                face.n[c] = N_orig ? nt.transform_vector(local_n).normalize() : local_n.normalize();
+                face.uv[c] = uv ? uv[vi] : Vec2(0.0f, 0.0f);
+                mn = Vec3::min(mn, face.p[c]);
+                mx = Vec3::max(mx, face.p[c]);
+            }
+            if (!valid) continue;
+            face.material = material ? material[g.indices[f]] : 0;
+            faces.push_back(face);
         }
     }
-    if (src.empty()) return;
+    if (faces.empty()) return;
 
     const Vec3 center = (mn + mx) * 0.5f;
     const Vec3 ext = mx - mn;
     const float inv = 1.0f / std::max({ ext.x, ext.y, ext.z, 1e-4f });
     const std::string out_node = "[PSysSceneGeo] " + node_name;
 
-    out.reserve(src.size());
-    for (Triangle* t : src) {
-        const Vec3 p0 = (t->getOriginalVertexPosition(0) - center) * inv;
-        const Vec3 p1 = (t->getOriginalVertexPosition(1) - center) * inv;
-        const Vec3 p2 = (t->getOriginalVertexPosition(2) - center) * inv;
-        const Vec3 n0 = t->getOriginalVertexNormal(0);
-        const Vec3 n1 = t->getOriginalVertexNormal(1);
-        const Vec3 n2 = t->getOriginalVertexNormal(2);
-        const auto uv = t->getUVCoordinates();
-        uint16_t mat = t->getMaterialID();
-        if (mat == MaterialManager::INVALID_MATERIAL_ID) mat = 0;
-        auto nt = std::make_shared<Triangle>(p0, p1, p2, n0, n1, n2,
-                                             std::get<0>(uv), std::get<1>(uv), std::get<2>(uv), mat);
-        nt->setNodeName(out_node);
-        out.push_back(nt);
+    out.reserve(faces.size());
+    for (const FlatFace& f : faces) {
+        uint16_t mat = f.material == MaterialManager::INVALID_MATERIAL_ID ? 0 : f.material;
+        auto tri = std::make_shared<Triangle>((f.p[0] - center) * inv,
+                                              (f.p[1] - center) * inv,
+                                              (f.p[2] - center) * inv,
+                                              f.n[0], f.n[1], f.n[2],
+                                              f.uv[0], f.uv[1], f.uv[2], mat);
+        tri->setNodeName(out_node);
+        out.push_back(std::move(tri));
     }
 }
 
@@ -818,6 +843,14 @@ struct FluidSourceState {
     uint64_t signature = 0;
     uint64_t content_hash = 1;
     std::size_t drawn_count = 0;
+    // Domain splats keep one stable instance-slot range per material source.
+    // Reseed/compaction may reorder particles, but it must never change the
+    // source_index bound to an existing backend scatter slot.
+    std::vector<std::size_t> source_capacities;
+    // Parallel to InstanceGroup::sources. -1 preserves the scene mesh's
+    // original per-face materials; non-negative entries are explicit uniform
+    // material overrides.
+    std::vector<int> source_material_keys;
 };
 std::unordered_map<int, FluidSourceState> g_fluid_source_state;
 
@@ -832,54 +865,6 @@ uint64_t fluidRenderSignature(const RayTrophiSim::Fluid::FluidObject& obj) {
     h = hashCombine(h, static_cast<uint64_t>(
         std::max(0, std::min(obj.particle_render_subdivisions, 3))));
     return h;
-}
-
-// Core material builder. Takes plain fields so both the legacy FluidObject
-// loop and the SimulationGridDomain loop can reuse it without a shared struct.
-uint16_t ensureFluidParticleMaterialFields(const std::string& name,
-                                           const Vec3& col,
-                                           bool emissive,
-                                           float emission_strength) {
-    auto& mgr = MaterialManager::getInstance();
-    const uint16_t existing_id = mgr.getMaterialID(name);
-    std::shared_ptr<PrincipledBSDF> pbsdf;
-    if (existing_id != MaterialManager::INVALID_MATERIAL_ID) {
-        pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(mgr.getMaterialShared(existing_id));
-    }
-    const bool fresh = !pbsdf;
-    if (fresh) pbsdf = std::make_shared<PrincipledBSDF>();
-
-    const float rough = 0.25f;
-    pbsdf->albedoProperty = MaterialProperty(col, 1.0f);
-    pbsdf->roughnessProperty = MaterialProperty(Vec3(rough), rough);
-    pbsdf->metallicProperty = MaterialProperty(Vec3(0.0f), 0.0f);
-    pbsdf->specularProperty = MaterialProperty(Vec3(0.5f), 0.5f);
-    pbsdf->opacityProperty.alpha = 1.0f;
-    pbsdf->setRoughness(rough);
-    if (emissive) {
-        pbsdf->emissionProperty =
-            MaterialProperty(col, std::max(0.0f, emission_strength));
-    } else {
-        pbsdf->emissionProperty = MaterialProperty(Vec3(0.0f), 0.0f);
-    }
-    if (!pbsdf->gpuMaterial) pbsdf->gpuMaterial = std::make_shared<GpuMaterial>();
-    applyPBRMaterialSnapshotToGpuMaterial(capturePBRMaterialSnapshot(*pbsdf), *pbsdf->gpuMaterial);
-
-    if (fresh) {
-        pbsdf->materialName = name;
-        const uint16_t new_id = mgr.getOrCreateMaterialID(name, pbsdf);
-        ::g_materials_dirty = true;
-        return new_id;
-    }
-    return existing_id;
-}
-
-// Backwards-compatible wrapper for the existing FluidObject loop.
-uint16_t ensureFluidParticleMaterial(const std::string& name,
-                                     const RayTrophiSim::Fluid::FluidObject& obj) {
-    return ensureFluidParticleMaterialFields(
-        name, obj.particle_render_color,
-        obj.particle_render_emissive, obj.particle_render_emission);
 }
 
 // White scattering foam material — diffuse, high albedo, opaque. Foam is air
@@ -1002,6 +987,12 @@ void SceneData::syncFluidParticleRenderInstances(bool enable_rt_geometry) {
     bool motion_change = false;
 
     for (auto& obj : fluid_objects) {
+        // API-created liquids keep a FluidObject only as legacy identity. The
+        // matching grid domain exclusively owns simulation and rendering.
+        if (hasAuthoritativeGridFluidDomain(obj.name)) {
+            destroyFluidParticleRenderGroup(obj);
+            continue;
+        }
         // Particles render_mode OR Solid/Matcap viewport (splat-sphere proxy, since
         // the raster viewport can't draw the SurfaceSDF volume).
         const bool lifecycle_alive = obj.visible && obj.enabled;
@@ -1049,9 +1040,8 @@ void SceneData::syncFluidParticleRenderInstances(bool enable_rt_geometry) {
         const uint64_t sig = fluidRenderSignature(obj);
         if (group->sources.empty() || st.signature != sig) {
             group->sources.clear();
-            const std::string mat_name = "[FluidPMat] #" + std::to_string(obj.id);
             const std::string geo_node = "[FluidPGeo] #" + std::to_string(obj.id);
-            const uint16_t mat = ensureFluidParticleMaterial(mat_name, obj);
+            const uint16_t mat = RayTrophiSim::Fluid::resolveExistingSplatMaterial();
             ScatterSource src;
             src.name = geo_node;
             src.weight = 1.0f;
@@ -1222,9 +1212,15 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             const bool lifecycle_alive =
                 system.visible && system.enabled && state.valid && is_fluid &&
                 d < domains.size();
+            bool has_splat_override = false;
+            if (d < domains.size()) {
+                for (const auto& b : domains[d].fluid_substance_materials)
+                    has_splat_override |= b.representation ==
+                        RayTrophiSim::Fluid::SubstanceRepresentation::Splat;
+            }
             const bool render_eligible = enable_rt_geometry && lifecycle_alive &&
                 (domains[d].fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
-                 g_solid_viewport_active);
+                 has_splat_override || g_solid_viewport_active);
 
             int& group_id = system.domain_particle_render_group_ids[d];
 
@@ -1298,8 +1294,9 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             }
             group->transient = true;
 
-            // ── Source rebuild on config change. Single sphere bucket + a
-            //    material derived from the domain's particle render config.
+            // Source rebuild on geometry/material-routing changes. Scene mesh
+            // faces keep their authored materials unless an explicit binding
+            // requests a uniform override.
             uint64_t sig = 1469598103934665603ull;
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_color.x));
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_color.y));
@@ -1309,39 +1306,87 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             sig = hashCombine(sig, dconfig.fluid_particle_emissive ? 1ull : 0ull);
             sig = hashCombine(sig, static_cast<uint64_t>(
                 std::max(0, std::min(dconfig.fluid_particle_subdivisions, 3))));
-            // User-assigned materials must invalidate the cached BLAS — different
-            // ID = different shader binding on the backends.
+            sig = hashCombine(sig, static_cast<uint64_t>(dconfig.fluid_particle_geometry_mode));
+            const bool scene_source_live =
+                dconfig.fluid_particle_geometry_mode == 1 &&
+                !dconfig.fluid_particle_geometry_source.empty() &&
+                hasLiveSimulationObject(dconfig.fluid_particle_geometry_source);
+            sig = hashCombine(sig, scene_source_live ? 1ull : 0ull);
             sig = hashCombine(sig, static_cast<uint64_t>(
                 static_cast<uint32_t>(dconfig.fluid_particle_material_id)));
+            for (unsigned char c : dconfig.fluid_particle_geometry_source)
+                sig = hashCombine(sig, static_cast<uint64_t>(c));
+            // User-assigned materials must invalidate the cached BLAS — different
+            // ID = different shader binding on the backends.
+            for (const auto& b : dconfig.fluid_substance_materials) {
+                sig = hashCombine(sig, RayTrophiSim::Fluid::substanceTag(b.substance));
+                sig = hashCombine(sig, static_cast<uint64_t>(static_cast<uint32_t>(b.material_id)));
+                sig = hashCombine(sig, static_cast<uint64_t>(b.representation));
+            }
 
             FluidSourceState& st = g_fluid_source_state[group_id];
-            if (group->sources.empty() || st.signature != sig) {
+            if (group->sources.empty() || st.signature != sig ||
+                st.source_material_keys.size() != group->sources.size()) {
                 group->sources.clear();
-                const std::string mat_name = "[FluidDomMat] " + system.name +
-                                              " D" + std::to_string(d);
                 const std::string geo_node = "[FluidDomGeo] " + system.name +
                                               " D" + std::to_string(d);
-                // User-picked material wins (gives full PBR control — transmittance,
-                // IOR, roughness — for proper water authoring). Auto-synthesised
-                // material is the fallback when nothing is picked yet.
-                uint16_t mat;
-                if (dconfig.fluid_particle_material_id >= 0 &&
-                    dconfig.fluid_particle_material_id != MaterialManager::INVALID_MATERIAL_ID) {
-                    mat = static_cast<uint16_t>(dconfig.fluid_particle_material_id);
-                } else {
-                    mat = ensureFluidParticleMaterialFields(
-                        mat_name, dconfig.fluid_particle_color,
-                        dconfig.fluid_particle_emissive, dconfig.fluid_particle_emission);
+                // A valid explicit material wins. Built-in geometry otherwise
+                // reuses an existing scene material; selected scene geometry
+                // uses its original per-face material IDs.
+                const bool scene_geometry = scene_source_live;
+                const uint16_t fallback_mat =
+                    RayTrophiSim::Fluid::resolveExistingSplatMaterial(
+                        dconfig.fluid_particle_material_id);
+                const int base_material_key =
+                    RayTrophiSim::Fluid::isExistingSplatMaterial(
+                        dconfig.fluid_particle_material_id)
+                        ? dconfig.fluid_particle_material_id
+                        : (scene_geometry ? -1 : static_cast<int>(fallback_mat));
+                // One geometry source per distinct splat material. Instances
+                // select a source; material IDs are never interpolated.
+                std::vector<int> splat_material_keys{base_material_key};
+                for (const auto& b : dconfig.fluid_substance_materials) {
+                    // Material binding is independent from representation. An
+                    // Inherit binding in a Splat-default domain still owns its
+                    // material; filtering it here made those particles silently
+                    // fall through to the domain material.
+                    const int material_key =
+                        RayTrophiSim::Fluid::isExistingSplatMaterial(b.material_id)
+                            ? b.material_id : base_material_key;
+                    if (std::find(splat_material_keys.begin(), splat_material_keys.end(), material_key) ==
+                        splat_material_keys.end()) {
+                        splat_material_keys.push_back(material_key);
+                    }
                 }
-                ScatterSource src;
-                src.name = geo_node;
-                src.weight = 1.0f;
                 const int subdiv = std::max(0, std::min(dconfig.fluid_particle_subdivisions, 3));
-                buildIcosphere(subdiv, mat, geo_node, src.triangles);
-                for (auto& tri : src.triangles) if (tri) tri->setMaterialID(mat);
-                src.computeCenter();
-                group->sources.push_back(std::move(src));
+                for (std::size_t si = 0; si < splat_material_keys.size(); ++si) {
+                    const int material_key = splat_material_keys[si];
+                    const uint16_t geometry_mat = material_key >= 0
+                        ? static_cast<uint16_t>(material_key) : fallback_mat;
+                    ScatterSource src;
+                    src.name = geo_node + (material_key >= 0
+                        ? " M" + std::to_string(material_key) : " SceneMaterials");
+                    src.weight = 1.0f;
+                    if (scene_geometry) {
+                        gatherSceneMeshSource(world.objects,
+                                              dconfig.fluid_particle_geometry_source,
+                                              src.triangles);
+                    }
+                    // Missing/renamed scene nodes fall back visibly and safely;
+                    // the UI keeps the unresolved name so the user can repair it.
+                    const bool using_scene_mesh = !src.triangles.empty();
+                    if (!using_scene_mesh)
+                        buildIcosphere(subdiv, geometry_mat, src.name, src.triangles);
+                    if (!using_scene_mesh || material_key >= 0) {
+                        for (auto& tri : src.triangles)
+                            if (tri) tri->setMaterialID(geometry_mat);
+                    }
+                    src.computeCenter();
+                    group->sources.push_back(std::move(src));
+                }
                 st.signature = sig;
+                st.source_capacities.assign(group->sources.size(), 0);
+                st.source_material_keys = std::move(splat_material_keys);
                 structural_change = true;
             }
 
@@ -1350,25 +1395,62 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             // ceiling). draw_count is what we render; cap is the chunk-rounded
             // pool size. Chunked growth means a filling sim doesn't trigger a
             // structural BLAS rebuild every frame.
-            const std::size_t live_count = state.particles.size();
+            std::vector<std::vector<std::size_t>> source_particles(group->sources.size());
             const std::size_t budget = fluidRenderBudget(dconfig.fluid_max_particles);
-            const std::size_t draw_count = std::min(live_count, budget);
-            const std::size_t want_cap = fluidPoolCapacityFor(live_count, budget);
-            std::size_t& cap = system.domain_particle_pool_capacities[d];
-            // Grow immediately; shrink once well below (4x hysteresis). Same reason
-            // as the foam pool: every surplus slot is a scale-0 instance that still
-            // sits in the TLAS, so a pool that only ever grew left a draining/
-            // settling fluid tracing against a giant stale instance set.
-            if (want_cap > cap) {
-                cap = want_cap;
-            } else if (cap > kFluidPoolChunk && want_cap * 4 <= cap) {
-                cap = want_cap;
+            std::size_t accepted_particles = 0;
+            for (std::size_t pi = 0; pi < state.particles.size(); ++pi) {
+                const uint32_t tag = pi < state.particles.substance_tag.size()
+                    ? state.particles.substance_tag[pi] : RayTrophiSim::Fluid::kSubstanceUntagged;
+                bool splat = dconfig.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles;
+                std::size_t source_index = 0;
+                for (const auto& b : dconfig.fluid_substance_materials) {
+                    if (RayTrophiSim::Fluid::substanceTag(b.substance) != tag) continue;
+                    if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat) splat = true;
+                    if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF) splat = false;
+                    const int base_key = st.source_material_keys.empty()
+                        ? 0 : st.source_material_keys.front();
+                    const int requested_key =
+                        RayTrophiSim::Fluid::isExistingSplatMaterial(b.material_id)
+                            ? b.material_id : base_key;
+                    for (std::size_t si = 0; si < st.source_material_keys.size(); ++si) {
+                        if (st.source_material_keys[si] == requested_key) {
+                            source_index = si;
+                            break;
+                        }
+                    }
+                    break;
+                }
+                if ((splat || g_solid_viewport_active) && accepted_particles < budget) {
+                    source_particles[source_index].push_back(pi);
+                    ++accepted_particles;
+                }
             }
 
+            if (st.source_capacities.size() != source_particles.size()) {
+                st.source_capacities.assign(source_particles.size(), 0);
+                structural_change = true;
+            }
+            std::size_t total_capacity = 0;
+            for (std::size_t si = 0; si < source_particles.size(); ++si) {
+                const std::size_t live = source_particles[si].size();
+                const std::size_t want = fluidPoolCapacityFor(live, budget);
+                std::size_t& source_cap = st.source_capacities[si];
+                // Capacity changes move the following material ranges, so they
+                // are structural. Normal spawn/reseed inside a range is refit-only.
+                if (want > source_cap) {
+                    source_cap = want;
+                    structural_change = true;
+                } else if (source_cap > kFluidPoolChunk && want * 4 <= source_cap) {
+                    source_cap = want;
+                    structural_change = true;
+                }
+                total_capacity += source_cap;
+            }
+            system.domain_particle_pool_capacities[d] = total_capacity;
+
             std::vector<InstanceTransform>& inst = group->instances;
-            const bool pool_grew = inst.size() != cap;
-            if (pool_grew) {
-                inst.resize(cap);
+            if (inst.size() != total_capacity) {
+                inst.resize(total_capacity);
                 structural_change = true;
             }
 
@@ -1380,12 +1462,20 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
 
             uint64_t content = 1469598103934665603ull;
             std::size_t drawn = 0;
-            for (std::size_t i = 0; i < cap; ++i) {
-                InstanceTransform& tr = inst[i];
-                tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
-                tr.source_index = 0;
-                if (i < draw_count) {
-                    const Vec3& p = state.particles.position[i];
+            std::size_t slot_base = 0;
+            for (std::size_t si = 0; si < source_particles.size(); ++si) {
+                const std::size_t source_cap = st.source_capacities[si];
+                for (std::size_t local = 0; local < source_cap; ++local) {
+                    InstanceTransform& tr = inst[slot_base + local];
+                    tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
+                    tr.source_index = static_cast<int>(si);
+                    if (local >= source_particles[si].size()) {
+                        tr.position = Vec3(0.0f, 0.0f, 0.0f);
+                        tr.scale = Vec3(0.0f, 0.0f, 0.0f);
+                        continue;
+                    }
+                    const std::size_t pi = source_particles[si][local];
+                    const Vec3& p = state.particles.position[pi];
                     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
                         tr.position = Vec3(0.0f, 0.0f, 0.0f);
                         tr.scale = Vec3(0.0f, 0.0f, 0.0f);
@@ -1397,10 +1487,8 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     content = hashCombine(content, quantize(p.y));
                     content = hashCombine(content, quantize(p.z));
                     ++drawn;
-                } else {
-                    tr.position = Vec3(0.0f, 0.0f, 0.0f);
-                    tr.scale = Vec3(0.0f, 0.0f, 0.0f);
                 }
+                slot_base += source_cap;
             }
             content = hashCombine(content, quantize(diam));
             content = hashCombine(content, static_cast<uint64_t>(drawn));

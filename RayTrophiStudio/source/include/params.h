@@ -263,6 +263,44 @@ struct GpuVDBVolume {
     float pore_amount = 0.0f;
     float pore_scale  = 0.05f;
     float pore_detail = 0.5f;
+    // Which coordinate the isosurface addresses patterns in.
+    // 0 = Material (carried by the liquid), 1 = Domain (carried by the vessel),
+    // 2 = World (nailed to the room — the pre-material-coordinate behaviour).
+    // Rides VkVolumeInstance::_accel_reserved[3], the last free float in that
+    // block, so no ABI growth: the coordinate field's own address block already
+    // took the struct from 576 to 608 and one enum does not justify moving it
+    // again across five declarations.
+    int   surface_coord_space = 0;
+    // Material coordinate (UVW) RESIDUAL field for the SDF isosurface — HOST
+    // pointer to dense interleaved xyz triples at sim-grid resolution holding
+    // (uvw - cell centre), plus its cell counts. The backend uploads it and
+    // publishes a device address; nothing downstream of the upload reads this
+    // pointer.
+    //
+    // ★ A displacement, not a coordinate: the consumer adds worldPos back. Named
+    // for it so a consumer written against the old absolute meaning fails to
+    // compile instead of rendering a liquid collapsed onto one texel.
+    //
+    // ★ Null (or any zero dimension) means "no coordinate this frame", and every
+    // consumer must fall back to world anchoring. It may NEVER be treated as a
+    // zero coordinate: the whole surface would map to one texel, which reads as
+    // a flat-tinted liquid rather than as a missing feature.
+    const float* uvw_residual_grid = nullptr;
+    // Composition field, SAME grid/origin/voxel as the residual above (it is
+    // gathered from the same particles with the same kernel), so it needs no
+    // placement of its own. Null = nothing to blend.
+    const float* composition_grid = nullptr;
+    int uvw_dim[3] = { 0, 0, 0 };
+    // World origin of cell (0,0,0) and the cell size, from the producer's grid.
+    // ★ A zero voxel size means "not published" and the consumer must fall back
+    // to world anchoring — it may never be substituted with the volume's render
+    // bounds, which are a different box at a different resolution.
+    float uvw_origin[3] = { 0.0f, 0.0f, 0.0f };
+    float uvw_voxel = 0.0f;
+    // Bumped by the producer on every refill. The backend re-uploads only when
+    // it changes — the field is several megabytes and does not change on the
+    // frames the surface was not rebuilt.
+    unsigned int uvw_version = 0u;
 
     // Vulkan live gas-domain dense fields. Host-only transport metadata; OptiX
     // ignores these fields and continues to consume NanoVDB pointers above.

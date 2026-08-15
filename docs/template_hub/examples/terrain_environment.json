@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "id": "raytrophi.start.terrain_environment",
+  "display_name": "Terrain Environment",
+  "description": "A procedural terrain, sun and sky with a readable starter graph.",
+  "kind": "start",
+  "category": "terrain",
+  "sort_order": 60,
+  "compatibility": { "minimum_raytrophi_version": "1.0.0" },
+  "preview": { "image": "preview.webp", "alt": "Procedural terrain environment and node graph" },
+  "scene": { "type": "project", "path": "scene.rtp" },
+  "ui_state": {
+    "properties_context": "terrain",
+    "bottom_editor": "terrain",
+    "contextual_dock": "none",
+    "viewport_shading": "rendered",
+    "frame_target": "Terrain_1",
+    "show_timeline": false
+  },
+  "renderer": { "preference": "auto", "allow_fallback": true },
+  "performance": { "class": "medium", "estimated_vram_mb": 2048 },
+  "assets": { "required": ["scene.rtp"], "optional": [] },
+  "guidance": { "path": "guidance.json", "show_on_first_open": true }
+}

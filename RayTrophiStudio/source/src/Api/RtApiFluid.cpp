@@ -10,13 +10,16 @@
 #include "RtApiInternal.h"
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidSimulationSystem.h"
+#include "Fluid/SubstanceTag.h"
 #include "Fluid/APICFluidSolver.h"
+#include "Fluid/FluidSplatMaterialAuthoring.h"
 #include "ParticleSimulation.h"
 #include "MaterialStateField.h"
 #include "MaterialManager.h"
 #include "VolumeShader.h"
 #include <algorithm>
 #include <cctype>
+#include <cmath>     // std::sqrt, for the material-coordinate drift measurement
 
 namespace rtapi {
 
@@ -49,6 +52,19 @@ void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
     info.kinematic_viscosity = params.kinematic_viscosity;
     info.viscosity_sweeps    = params.viscosity_sweeps;
     info.viscosity_wall_slip = params.viscosity_wall_slip;
+    info.granular_enabled = params.granular_enabled;
+    info.granular_friction_angle_degrees = params.granular_friction_angle_degrees;
+    info.granular_cohesion = params.granular_cohesion;
+    info.granular_dilatancy_degrees = params.granular_dilatancy_degrees;
+    info.granular_young_modulus = params.granular_young_modulus;
+    info.granular_poisson_ratio = params.granular_poisson_ratio;
+    info.granular_tensile_cutoff = params.granular_tensile_cutoff;
+    info.granular_hardening = params.granular_hardening;
+    info.granular_fracture_strain = params.granular_fracture_strain;
+    info.granular_damage_rate = params.granular_damage_rate;
+    info.granular_healing_rate = params.granular_healing_rate;
+    info.granular_rebonding = params.granular_rebonding;
+    info.granular_max_solver_substeps = params.granular_max_solver_substeps;
 }
 
 // Report the isosurface material by NAME. Lives on the grid descriptor rather
@@ -62,12 +78,237 @@ void fillFluidSurfaceMaterial(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.pore_amount = d.fluid_surface_pore_amount;
     info.pore_scale  = d.fluid_surface_pore_scale;
     info.pore_detail = d.fluid_surface_pore_detail;
+    info.surface_offset_voxels = d.fluid_level_set_params.surface_offset_voxels;
+    info.coord_space = d.fluid_surface_coord_space;
+    info.solid_phase_enabled = d.fluid_solid_phase_enabled;
+    info.solid_phase_fill = d.fluid_solid_phase_fill;
+    info.uvw_refresh_period = d.fluid_params.uvw_refresh_period;
+    info.splat_material = RayTrophiSim::Fluid::fluidSplatMaterialName(d);
+
+    // Substance -> material bindings, with the material NAME resolved. A script
+    // that could only read the id would have to keep its own copy of the
+    // material table to make sense of it.
+    info.substance_materials.clear();
+    {
+        const auto& all = MaterialManager::getInstance().getAllMaterials();
+        for (const auto& b : d.fluid_substance_materials) {
+            FluidDomainInfo::SubstanceMaterialBinding out_b;
+            out_b.substance = b.substance;
+            out_b.material_id = b.material_id;
+            out_b.representation =
+                b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat ? "splat" :
+                b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF ? "sdf" : "inherit";
+            // Resolved exactly the way the render bridge resolves it: an explicit
+            // value wins, Inherit follows the domain mode. `Volume` is not a valid
+            // liquid mode and is normalised to the isosurface where it is
+            // consumed, so it resolves to "sdf" here too rather than inventing a
+            // third answer this one report would be alone in using.
+            out_b.effective_representation =
+                b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat ? "splat" :
+                b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF ? "sdf" :
+                (d.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ? "splat" : "sdf");
+            if (b.material_id >= 0 &&
+                static_cast<std::size_t>(b.material_id) < all.size() &&
+                all[static_cast<std::size_t>(b.material_id)]) {
+                out_b.material = all[static_cast<std::size_t>(b.material_id)]->materialName;
+            }
+            out_b.kinematic_viscosity = b.kinematic_viscosity;
+            out_b.miscibility = b.miscibility;
+            out_b.phase =
+                b.phase == RayTrophiSim::Fluid::SubstancePhase::Solid ? "solid" : "liquid";
+            info.substance_materials.push_back(out_b);
+        }
+    }
 
     info.surface_material.clear();
     if (d.fluid_surface_material_id < 0) return;
     const auto& mats = MaterialManager::getInstance().getAllMaterials();
     const std::size_t mi = static_cast<std::size_t>(d.fluid_surface_material_id);
     if (mi < mats.size() && mats[mi]) info.surface_material = mats[mi]->materialName;
+}
+
+Result setFluidSplatMaterialImpl(const std::string& domain_id_or_name,
+                                 const std::string& material_name) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (!system.runtime) continue;
+        const auto authored = RayTrophiSim::Fluid::setFluidSplatMaterial(
+            *system.runtime, domain_id_or_name, material_name);
+        if (authored.status ==
+            RayTrophiSim::Fluid::SplatMaterialAuthoringStatus::MaterialNotFound) {
+            return Result::fail("material not found: " + material_name);
+        }
+        if (!authored.ok()) continue;
+
+        if (authored.changed) {
+            g_ctx->scene.requestSimulationTimelineRenderResync();
+            g_ctx->renderer.resetCPUAccumulation();
+            if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+            g_ctx->start_render = true;
+        }
+        return Result::success();
+    }
+
+    return Result::fail("fluid domain not found: " + domain_id_or_name);
+}
+
+// Material-coordinate diagnostics. Read from the LIVE state, not the descriptor:
+// the coordinate is carried by particles, so the descriptor knows nothing about
+// it and a report sourced there would always say "fine".
+//
+// ★ The measurement is mean |uvw - position| — how far the average parcel of
+// liquid has moved since birth. This is the number that distinguishes a working
+// anchor from a silent fall back to world space, and it is deliberately a
+// TREND, not a threshold: it must RISE while liquid pours. A non-zero check
+// would also pass on a coordinate that was seeded once and then frozen by a
+// broken inheritance path, which is the most likely way this breaks.
+// Solid-phase measurement, read from the LIVE step statistics rather than from
+// the descriptor.
+//
+// ★★★ THE DESCRIPTOR CANNOT ANSWER THIS. It knows a substance was DECLARED
+// solid; only the step knows whether any parcel of it existed and whether any
+// cell was full enough to block. Sourcing it from the binding would produce a
+// report that always agrees with what the caller just wrote — the shape of
+// measurement with none of its value.
+void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
+                         FluidDomainInfo& info) {
+    info.solid_phase_particles =
+        static_cast<uint64_t>(state.fluid_stats.solid_phase_particles);
+    info.solid_phase_cells =
+        static_cast<uint64_t>(state.fluid_stats.solid_phase_cells);
+    // Same source, same reason: only the step knows whether a region ended up
+    // without a pressure reference. Nothing in the descriptor implies it.
+    info.sealed_pockets =
+        static_cast<uint64_t>(state.fluid_stats.sealed_pockets);
+    info.sealed_pocket_cells =
+        static_cast<uint64_t>(state.fluid_stats.sealed_pocket_cells);
+    info.sealed_pockets_measured = state.fluid_stats.sealed_pockets_measured;
+    info.interior_fluid_cells =
+        static_cast<uint64_t>(state.fluid_stats.interior_fluid_cells);
+    info.reseed_added_particles =
+        static_cast<uint64_t>(state.fluid_stats.reseed_added_particles);
+    info.reseed_removed_particles =
+        static_cast<uint64_t>(state.fluid_stats.reseed_removed_particles);
+    info.granular_yielded_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_yielded_particles);
+    info.granular_detached_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_detached_particles);
+    info.granular_invalid_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_invalid_particles);
+    info.granular_sleeping_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_sleeping_particles);
+    info.granular_damaged_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_damaged_particles);
+    info.granular_damage_over_10_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_damage_over_10_particles);
+    info.granular_damage_over_50_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_damage_over_50_particles);
+    info.granular_damage_over_90_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_damage_over_90_particles);
+    info.granular_max_yield = state.fluid_stats.granular_max_yield_value;
+    info.granular_max_plastic_increment = state.fluid_stats.granular_max_plastic_increment;
+    info.granular_max_accumulated_plastic = state.fluid_stats.granular_max_accumulated_plastic;
+    info.granular_mean_accumulated_plastic = state.fluid_stats.granular_mean_accumulated_plastic;
+    info.granular_max_fracture_history = state.fluid_stats.granular_max_fracture_history;
+    info.granular_mean_fracture_history = state.fluid_stats.granular_mean_fracture_history;
+    info.granular_max_damage = state.fluid_stats.granular_max_damage;
+    info.granular_mean_damage = state.fluid_stats.granular_mean_damage;
+    info.granular_requested_young_modulus = state.fluid_stats.granular_requested_young_modulus;
+    info.granular_effective_young_modulus = state.fluid_stats.granular_effective_young_modulus;
+    info.granular_required_substeps = state.fluid_stats.granular_required_substeps;
+    info.granular_solver_substeps = state.fluid_stats.granular_solver_substeps;
+    info.granular_stiffness_capped = state.fluid_stats.granular_stiffness_capped;
+}
+
+void fillFluidMaterialCoords(const RayTrophiSim::SimulationGridDomainState& state,
+                             FluidDomainInfo& info) {
+    info.uvw_dim[0] = state.grid.nx;
+    info.uvw_dim[1] = state.grid.ny;
+    info.uvw_dim[2] = state.grid.nz;
+    info.uvw_origin[0] = state.grid.origin.x;
+    info.uvw_origin[1] = state.grid.origin.y;
+    info.uvw_origin[2] = state.grid.origin.z;
+    info.uvw_voxel = state.grid.voxel_size;
+
+    const auto& parts = state.particles;
+    const std::size_t n = parts.size();
+    // A short sidecar means some producer emitted without a coordinate. Report
+    // unavailable rather than averaging over the prefix: a drift computed from
+    // the particles that HAPPEN to have one is a number that looks healthy while
+    // the surface tears.
+    if (n == 0 || parts.uvw.size() < n) {
+        info.uvw_available = false;
+        info.uvw_drift = 0.0f;
+        info.uvw_particles = 0;
+        return;
+    }
+    // ★★★ MEASURE THE BLEND, NOT ONE GENERATION. The shader is fed
+    // w_a*(uvw_a - p) + w_b*(uvw_b - p), and that is what this number has to
+    // describe. Reporting generation A alone would saw-tooth to zero every time
+    // A is reset — a periodic collapse in a metric whose whole job is to catch
+    // collapses, i.e. the instrument would raise an alarm about the schedule it
+    // is supposed to be measuring through.
+    //
+    // ★ Blended, it is continuous BY CONSTRUCTION: a generation's weight is zero
+    // exactly when it resets, so the discontinuity is multiplied away. The same
+    // property that makes the refresh invisible on screen makes it invisible
+    // here, which is the sign the two agree about what is happening.
+    float w_a = 1.0f, w_b = 0.0f;
+    parts.materialCoordWeights(w_a, w_b);
+    const bool has_gen_b = parts.uvw_b.size() >= n;
+    if (!has_gen_b) { w_a = 1.0f; w_b = 0.0f; }
+    double acc = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const Vec3 da = parts.uvw[i] - parts.position[i];
+        const Vec3 db = has_gen_b ? (parts.uvw_b[i] - parts.position[i]) : da;
+        const Vec3 d(w_a * da.x + w_b * db.x,
+                     w_a * da.y + w_b * db.y,
+                     w_a * da.z + w_b * db.z);
+        acc += std::sqrt(static_cast<double>(d.x) * d.x +
+                         static_cast<double>(d.y) * d.y +
+                         static_cast<double>(d.z) * d.z);
+    }
+    // ── Substance census ─────────────────────────────────────────────────────
+    // Counted from the LIVE particles, not from the emitter list: an emitter
+    // describes what is being poured, and this has to describe what is actually
+    // in the domain. The two differ constantly — after a source is disabled its
+    // liquid is still there, and that liquid is exactly what a test asking
+    // "did identity survive?" needs to see.
+    info.substances.clear();
+    {
+        const std::size_t tag_n = parts.substance_tag.size();
+        for (std::size_t i = 0; i < n && i < tag_n; ++i) {
+            const uint32_t tag = parts.substance_tag[i];
+            bool found = false;
+            for (auto& entry : info.substances) {
+                if (entry.tag == tag) { ++entry.particles; found = true; break; }
+            }
+            if (!found) {
+                FluidDomainInfo::SubstanceCount entry;
+                entry.tag = tag;
+                entry.particles = 1;
+                info.substances.push_back(entry);
+            }
+        }
+        // Resolve names from the sources feeding THIS domain. A linear scan over
+        // a handful of emitters per distinct tag; both counts are tiny.
+        const auto& sources = scriptSimulationRuntime().flowSources();
+        for (auto& entry : info.substances) {
+            if (entry.tag == RayTrophiSim::Fluid::kSubstanceUntagged) continue;
+            for (const auto& src : sources) {
+                if (src.fluid_substance.empty()) continue;
+                if (RayTrophiSim::Fluid::substanceTag(src.fluid_substance) != entry.tag)
+                    continue;
+                entry.name = src.fluid_substance;
+                break;
+            }
+        }
+    }
+
+    info.uvw_available = true;
+    info.uvw_particles = static_cast<uint64_t>(n);
+    info.uvw_drift = static_cast<float>(acc / static_cast<double>(n));
 }
 
 // Locate a Gas domain descriptor by id or name. Shared by the shader accessors
@@ -90,6 +331,11 @@ RayTrophiSim::SimulationGridDomainDesc* findGasDomainDesc(
 }
 
 } // namespace
+
+Result setFluidSplatMaterial(const std::string& domain_id_or_name,
+                             const std::string& material_name) {
+    return setFluidSplatMaterialImpl(domain_id_or_name, material_name);
+}
 
 Result listMaterialSubstances(std::vector<std::string>& out_names) {
     out_names.clear();
@@ -367,6 +613,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
                 (d.backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
             out_info.enabled = d.enabled;
             out_info.visible = true;
+            fillFluidSurfaceMaterial(d, out_info);
             return Result::success();
         }
         return Result::fail("fluid domain not found: " + domain_id_or_name);
@@ -390,6 +637,7 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
     out_info.boundary = (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open) ? "open" :
                         (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic) ? "periodic" : "closed";
     fillFluidRheology(obj->params, out_info);
+    out_info.surface_offset_voxels = obj->level_set_params.surface_offset_voxels;
     out_info.backend = (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
@@ -407,8 +655,11 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
         const auto& states = p_sys_get.gridDomainStates();
         const auto& domains = p_sys_get.gridDomains();
         const std::size_t index = static_cast<std::size_t>(grid_dom - domains.data());
-        if (index < states.size() && states[index].valid)
+        if (index < states.size() && states[index].valid) {
             out_info.particle_count = states[index].particles.size();
+            fillFluidMaterialCoords(states[index], out_info);
+            fillFluidSolidPhase(states[index], out_info);
+        }
     }
     return Result::success();
 }
@@ -443,19 +694,32 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
             info.preset = "custom";
             info.particle_count = 0;
             fillFluidSurfaceMaterial(d, info);
-
             // Liquid domains additionally carry a legacy FluidObject; take the
-            // id/preset/viscosity from it so the entry matches what fluid.get
-            // reports for the same name.
+            // id/editor visibility from it. Live particles and rheology remain
+            // grid-domain authoritative: the mirror intentionally owns no
+            // independently stepped particle copy.
             if (d.type != RayTrophiSim::SimulationDomainType::Gas) {
                 if (auto* obj = g_ctx->scene.findFluidObjectByName(d.name)) {
                     info.id = obj->id;
-                    info.particle_count = obj->particles.size();
                     info.visible = obj->visible;
-                    info.render_mode =
-                        (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
-                        (obj->render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
-                    fillFluidRheology(obj->params, info);
+                }
+                info.render_mode =
+                    (d.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
+                    (d.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+                fillFluidRheology(d.fluid_params, info);
+            }
+
+            // Same authoritative diagnostics fluid.get reports. Keep this
+            // after the legacy metadata block so particle_count can never be
+            // overwritten by the deliberately empty FluidObject mirror.
+            {
+                const auto& all = system.runtime->gridDomains();
+                const auto& states = system.runtime->gridDomainStates();
+                const std::size_t index = static_cast<std::size_t>(&d - all.data());
+                if (index < states.size() && states[index].valid) {
+                    info.particle_count = states[index].particles.size();
+                    fillFluidMaterialCoords(states[index], info);
+                    fillFluidSolidPhase(states[index], info);
                 }
             }
             out_domains.push_back(std::move(info));
@@ -495,7 +759,7 @@ Result removeFluidDomain(const std::string& domain_id_or_name) {
 }
 
 Result seedFluidParticles(const std::string& domain_id_or_name, Vec3 seed_min, Vec3 seed_max,
-                           int particles_per_cell, bool replace) {
+                           int particles_per_cell, bool replace, bool persistent) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
 
@@ -504,41 +768,55 @@ Result seedFluidParticles(const std::string& domain_id_or_name, Vec3 seed_min, V
         return Result::fail("fluid domain not found: " + domain_id_or_name);
     }
 
-    RayTrophiSim::Fluid::FluidObject* obj = nullptr;
-    for (auto& fo : g_ctx->scene.fluid_objects) {
-        if (fo.id == info.id) { obj = &fo; break; }
-    }
-    if (!obj) return Result::fail("fluid domain not found");
-
-    obj->seed_min = seed_min;
-    obj->seed_max = seed_max;
-    obj->seed_particles_per_cell = std::max(1, particles_per_cell);
-    obj->replace_on_seed = replace;
-    obj->pending_seed = true;
-
-    obj->ensureGrid();
-    if (replace) obj->particles.clear();
-
-    RayTrophiSim::Fluid::seedBox(obj->particles, obj->grid, seed_min, seed_max, std::max(1, particles_per_cell));
-
-    // Also update ParticleSimulationSystem's SimulationGridDomainDesc for UI Physics sync!
-    auto& p_sys = g_ctx->scene.ensureParticleSimulationSystem();
-    for (auto& d : p_sys.gridDomains()) {
-        if (d.name == obj->name) {
-            d.fluid_seed_min = seed_min;
-            d.fluid_seed_max = seed_max;
-            d.fluid_seed_particles_per_cell = std::max(1, particles_per_cell);
-            d.fluid_replace_on_seed = replace;
-            if (replace) d.fluid_reseed_on_reset = true;
-            d.fluid_pending_seed = true;
+    // `fluid.get` and every simulation authoring facade resolve against the
+    // active particle system. Prefer that same runtime here; scanning the scene
+    // from index zero first could seed a stale preset system carrying the same
+    // domain name while get() honestly reported zero from the active one.
+    const auto active_runtime = g_ctx->scene.getParticleSimulationSystem();
+    bool grid_seeded = active_runtime &&
+        active_runtime->seedFluidDomainParticles(
+            info.name, seed_min, seed_max, particles_per_cell, replace,
+            persistent);
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (!grid_seeded && system.runtime &&
+            system.runtime != active_runtime &&
+            system.runtime->seedFluidDomainParticles(
+                info.name, seed_min, seed_max, particles_per_cell, replace,
+                persistent)) {
+            grid_seeded = true;
             break;
         }
     }
+    if (!grid_seeded) {
+        return Result::fail("authoritative fluid grid domain not found: " + info.name);
+    }
 
+    // FluidObject is a legacy authoring/render mirror. It must never own a
+    // second live copy of a grid-domain seed: SimulationWorld steps both
+    // systems, so the duplicate ignored domain motion and appeared as a second
+    // stream passing through the real granular block.
+    for (auto& obj : g_ctx->scene.fluid_objects) {
+        if (obj.name != info.name) continue;
+        obj.seed_min = Vec3::min(seed_min, seed_max);
+        obj.seed_max = Vec3::max(seed_min, seed_max);
+        obj.seed_particles_per_cell = std::clamp(particles_per_cell, 1, 64);
+        obj.replace_on_seed = replace;
+        obj.pending_seed = false;
+        obj.resetState();
+        break;
+    }
+
+    // Seed is an executed initial-state action, not merely a descriptor edit.
+    // Drop stale baked frames, then rebase the signature watcher on this live
+    // result so its next UI tick does not interpret the new PPC/recipe fields
+    // as another edit and reset a one-shot seed back to zero.
+    invalidateScriptSimulation();
+    g_ctx->scene.preserveScriptSimulationPreview();
     return Result::success();
 }
 
-Result clearFluidParticles(const std::string& domain_id_or_name) {
+Result clearFluidParticles(const std::string& domain_id_or_name,
+                           bool clear_seed_recipe) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
 
@@ -547,12 +825,33 @@ Result clearFluidParticles(const std::string& domain_id_or_name) {
         return Result::fail("fluid domain not found: " + domain_id_or_name);
     }
 
-    for (auto& fo : g_ctx->scene.fluid_objects) {
-        if (fo.id == info.id) {
-            fo.resetState();
+    const auto active_runtime = g_ctx->scene.getParticleSimulationSystem();
+    bool grid_cleared = active_runtime &&
+        active_runtime->clearFluidDomainParticles(info.name,
+                                                  clear_seed_recipe);
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (!grid_cleared && system.runtime &&
+            system.runtime != active_runtime &&
+            system.runtime->clearFluidDomainParticles(info.name,
+                                                       clear_seed_recipe)) {
+            grid_cleared = true;
             break;
         }
     }
+
+    bool mirror_cleared = false;
+    for (auto& obj : g_ctx->scene.fluid_objects) {
+        if (obj.name == info.name) {
+            obj.pending_seed = false;
+            obj.resetState();
+            mirror_cleared = true;
+            break;
+        }
+    }
+    if (!grid_cleared && !mirror_cleared)
+        return Result::fail("fluid domain not found: " + info.name);
+    invalidateScriptSimulation();
+    g_ctx->scene.preserveScriptSimulationPreview();
     return Result::success();
 }
 
@@ -565,12 +864,35 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const int* viscosity_sweeps,
                          const float* viscosity_wall_slip,
                          const std::string* surface_material,
+                         const float* surface_offset_voxels,
                          const float* pore_amount,
                          const float* pore_scale,
                          const float* pore_detail,
-                         const bool* enabled, const bool* visible) {
+                         const int* coord_space,
+                         const int* uvw_refresh_period,
+                         const bool* solid_phase,
+                         const float* solid_phase_fill,
+                         const bool* enabled, const bool* visible,
+                         const bool* granular_enabled,
+                         const float* granular_friction_angle_degrees,
+                         const float* granular_cohesion,
+                         const float* granular_dilatancy_degrees,
+                         const float* granular_young_modulus,
+                         const float* granular_poisson_ratio,
+                         const float* granular_tensile_cutoff,
+                         const float* granular_hardening,
+                         const float* granular_fracture_strain,
+                         const float* granular_damage_rate,
+                         const float* granular_healing_rate,
+                         const bool* granular_rebonding,
+                         const int* granular_max_solver_substeps) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (surface_offset_voxels &&
+        (!std::isfinite(*surface_offset_voxels) ||
+         *surface_offset_voxels < -0.75f || *surface_offset_voxels > 1.25f)) {
+        return Result::fail("surface_offset_voxels must be finite and in [-0.75, 1.25]");
+    }
 
     rtapi::FluidDomainInfo info;
     if (!getFluidDomain(domain_id_or_name, info).ok) {
@@ -606,10 +928,34 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
     if (render_mode) {
         std::string rm = *render_mode;
         std::transform(rm.begin(), rm.end(), rm.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        const auto grid_mode = rm == "surface"
-            ? RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF
-            : (rm == "particles" ? RayTrophiSim::Fluid::FluidRenderMode::Particles
-                                  : RayTrophiSim::Fluid::FluidRenderMode::Volume);
+        // ★★★ UNKNOWN VALUES ARE REJECTED, NOT FOLDED INTO 'volume'. Every
+        // unrecognised string used to land on Volume — which is not a valid
+        // liquid mode and is normalised to the isosurface downstream. So
+        // render_mode="splat" (an entirely reasonable guess) silently produced
+        // the SURFACE: the opposite of the request, with no error, and the
+        // script's own read-back agreeing with the mistake.
+        //
+        // ★★ The two aliases exist because this project already has two words
+        // for these two things: a substance's `representation` says
+        // "splat"/"sdf" and a domain's render_mode says "particles"/"surface".
+        // One vocabulary for one question — the panel confusion the user
+        // reported starts here, in the API that taught the two names.
+        RayTrophiSim::Fluid::FluidRenderMode grid_mode;
+        if (rm == "surface" || rm == "sdf") {
+            grid_mode = RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
+        } else if (rm == "particles" || rm == "splat") {
+            grid_mode = RayTrophiSim::Fluid::FluidRenderMode::Particles;
+        } else if (rm == "volume") {
+            // Legal for GAS only; a liquid domain normalises it to the
+            // isosurface where it is consumed, so it is accepted but never a
+            // way to ask a liquid for something new.
+            grid_mode = RayTrophiSim::Fluid::FluidRenderMode::Volume;
+        } else {
+            return Result::fail(
+                "render_mode '" + *render_mode + "' is not a render mode. "
+                "Use 'particles' (alias 'splat'), 'surface' (alias 'sdf'), or "
+                "'volume' for gas domains.");
+        }
         if (grid_dom) grid_dom->fluid_render_mode = grid_mode;
         if (obj) {
             obj->render_mode = grid_mode;
@@ -686,6 +1032,32 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (grid_dom) grid_dom->fluid_params.viscosity_wall_slip = w;
         markCustom();
     }
+    auto applyGranularPatch = [&](RayTrophiSim::Fluid::APICSolverParams& p) {
+        if (granular_enabled) p.granular_enabled = *granular_enabled;
+        if (granular_friction_angle_degrees) p.granular_friction_angle_degrees = *granular_friction_angle_degrees;
+        if (granular_cohesion) p.granular_cohesion = *granular_cohesion;
+        if (granular_dilatancy_degrees) p.granular_dilatancy_degrees = *granular_dilatancy_degrees;
+        if (granular_young_modulus) p.granular_young_modulus = *granular_young_modulus;
+        if (granular_poisson_ratio) p.granular_poisson_ratio = *granular_poisson_ratio;
+        if (granular_tensile_cutoff) p.granular_tensile_cutoff = *granular_tensile_cutoff;
+        if (granular_hardening) p.granular_hardening = *granular_hardening;
+        if (granular_fracture_strain) p.granular_fracture_strain = *granular_fracture_strain;
+        if (granular_damage_rate) p.granular_damage_rate = *granular_damage_rate;
+        if (granular_healing_rate) p.granular_healing_rate = *granular_healing_rate;
+        if (granular_rebonding) p.granular_rebonding = *granular_rebonding;
+        if (granular_max_solver_substeps) p.granular_max_solver_substeps = *granular_max_solver_substeps;
+        p.sanitizeGranularMaterial();
+    };
+    const bool granular_patch = granular_enabled || granular_friction_angle_degrees ||
+        granular_cohesion || granular_dilatancy_degrees || granular_young_modulus ||
+        granular_poisson_ratio || granular_tensile_cutoff || granular_hardening ||
+        granular_fracture_strain || granular_damage_rate || granular_healing_rate ||
+        granular_rebonding || granular_max_solver_substeps;
+    if (granular_patch) {
+        if (obj) applyGranularPatch(obj->params);
+        if (grid_dom) applyGranularPatch(grid_dom->fluid_params);
+        markCustom();
+    }
 
     if (backend) {
         std::string dev = *backend;
@@ -726,6 +1098,22 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         g_ctx->scene.refreshFluidSurfaceMaterial();
     }
 
+    // Canonical geometric fullness. Apply to both authoring representations so
+    // switching between the legacy FluidObject and the live grid domain cannot
+    // resurrect an older silhouette. This deliberately does not mark rheology
+    // Custom: it is reconstruction state, not material physics.
+    if (surface_offset_voxels) {
+        if (obj) obj->level_set_params.surface_offset_voxels = *surface_offset_voxels;
+        if (grid_dom) grid_dom->fluid_level_set_params.surface_offset_voxels = *surface_offset_voxels;
+
+        // scene_data hashes the level-set parameters, so the next bridge update
+        // rebuilds the field without a simulation reset. Clear both progressive
+        // accumulators or the new silhouette would be averaged with the old one.
+        g_ctx->renderer.resetCPUAccumulation();
+        if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+        g_ctx->start_render = true;
+    }
+
     // Procedural porosity. Clamped the same way the GPU packer clamps, so a
     // scripted value and a panel value cannot mean different things.
     if (grid_dom && pore_amount) {
@@ -738,12 +1126,190 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         grid_dom->fluid_surface_pore_detail =
             (std::max)(0.0f, (std::min)(1.0f, *pore_detail));
     }
+    if (grid_dom && coord_space) {
+        // Clamped rather than rejected. The shader clamps too, so a stray value
+        // could never corrupt anything — but accepting it silently at one layer
+        // and snapping it at another means fluid.get reports a number the render
+        // does not use. Snap here, once, so the read-back is the truth.
+        grid_dom->fluid_surface_coord_space =
+            (std::max)(0, (std::min)(2, *coord_space));
+    }
+    if (grid_dom && solid_phase) {
+        grid_dom->fluid_solid_phase_enabled = *solid_phase;
+    }
+    if (grid_dom && solid_phase_fill) {
+        // ★ REJECTED, not clamped, outside a sane band. This dial decides
+        // whether matter blocks flow at all; silently snapping 0 to 0.01 would
+        // let a script believe it had disabled blocking while the solid kept
+        // walling the domain off.
+        if (*solid_phase_fill < 0.01f || *solid_phase_fill > 4.0f)
+            return Result::fail("solid_phase_fill must be in [0.01, 4.0] (fraction of the seed density)");
+        grid_dom->fluid_solid_phase_fill = *solid_phase_fill;
+    }
+    if (grid_dom && uvw_refresh_period) {
+        // Same snap-here rule as coord_space. Below 2 there is no second half to
+        // stagger against, so both generations would reset on the same step and
+        // collapse into one — the stretch cure would report as on and do
+        // nothing, which is the failure mode worth spending a clamp on.
+        grid_dom->fluid_params.uvw_refresh_period =
+            (std::max)(2, (std::min)(20000, *uvw_refresh_period));
+    }
+    // ★ PUSH AND RESET. Writing the descriptor is not the same as changing the
+    // render: these values live in the volume table, and until
+    // refreshFluidSurfaceMaterial copies them onto the render volume (and sets
+    // g_gas_volumes_dirty) the shader is still reading the old ones.
+    //
+    // Clearing the accumulator matters just as much and is easier to miss. A
+    // converged image is an AVERAGE over past samples; without a reset the new
+    // value only dilutes into it, so a script that sets a knob and renders
+    // immediately captures mostly the OLD look. That failure is worst exactly
+    // where it is least visible — an automated visual test, which converges
+    // longer than a human would wait and therefore hides the change best.
+    //
+    // Only when something actually changed: an unconditional reset here would
+    // let any fluid.set_param call (a viscosity tweak, an enable toggle) throw
+    // away a converging render.
+    if (grid_dom && (pore_amount || pore_scale || pore_detail || coord_space ||
+                     uvw_refresh_period)) {
+        g_ctx->scene.refreshFluidSurfaceMaterial();
+        g_ctx->renderer.resetCPUAccumulation();
+        if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+        g_ctx->start_render = true;
+    }
 
     if (obj && enabled) obj->enabled = *enabled;
     if (obj && visible) obj->visible = *visible;
     if (grid_dom && enabled) grid_dom->enabled = *enabled;
 
     if (obj) obj->ensureGrid();
+    return Result::success();
+}
+
+Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
+                                 const std::string& substance,
+                                 const std::string& material_name,
+                                 const std::string* representation,
+                                 const float* kinematic_viscosity,
+                                 const float* miscibility,
+                                 const std::string* phase) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (substance.empty())
+        return Result::fail("substance name is required");
+
+    Result found;
+    // Same lookup the gas settings use; the descriptor list is shared and this
+    // helper already reports a usable error for a bad name.
+    RayTrophiSim::SimulationGridDomainDesc* dom =
+        findGasDomainDesc(domain_id_or_name, found);
+    if (!dom) return found;
+
+    // Resolve the material FIRST. Writing the binding and then discovering the
+    // material does not exist would leave a table entry pointing at nothing,
+    // and the producer would silently fall back to the domain material — the
+    // script would have "succeeded" and changed no pixel.
+    int material_id = -1;
+    bool clear = material_name.empty();
+    if (!clear && material_name != "dielectric") {
+        const auto& mats = MaterialManager::getInstance().getAllMaterials();
+        bool resolved = false;
+        for (std::size_t i = 0; i < mats.size(); ++i) {
+            if (!mats[i] || mats[i]->materialName != material_name) continue;
+            material_id = static_cast<int>(i);
+            resolved = true;
+            break;
+        }
+        if (!resolved)
+            return Result::fail("material not found: " + material_name);
+    }
+
+    auto& table = dom->fluid_substance_materials;
+    auto it = std::find_if(table.begin(), table.end(),
+        [&](const RayTrophiSim::SimulationGridDomainDesc::SubstanceMaterial& b) {
+            return b.substance == substance;
+        });
+    RayTrophiSim::Fluid::SubstanceRepresentation rep =
+        RayTrophiSim::Fluid::SubstanceRepresentation::Inherit;
+    if (representation) {
+        std::string r;
+        for (unsigned char ch : *representation) {
+            if (ch == '_' || ch == '-' || std::isspace(ch)) continue;
+            r.push_back(static_cast<char>(std::tolower(ch)));
+        }
+        if (r == "splat" || r == "particles")
+            rep = RayTrophiSim::Fluid::SubstanceRepresentation::Splat;
+        else if (r == "sdf" || r == "surface" || r == "surfacesdf")
+            rep = RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
+        else if (r != "inherit" && r != "domain")
+            return Result::fail("representation must be inherit, splat, or sdf");
+    }
+    if (miscibility && (*miscibility < 0.0f || *miscibility > 1.0f))
+        return Result::fail("miscibility must be in [0, 1]");
+
+    RayTrophiSim::Fluid::SubstancePhase phase_value =
+        RayTrophiSim::Fluid::SubstancePhase::Liquid;
+    if (phase) {
+        std::string p;
+        for (unsigned char ch : *phase) {
+            if (ch == '_' || ch == '-' || std::isspace(ch)) continue;
+            p.push_back(static_cast<char>(std::tolower(ch)));
+        }
+        if (p == "solid" || p == "frozen")
+            phase_value = RayTrophiSim::Fluid::SubstancePhase::Solid;
+        // ★ REJECTED, not snapped to liquid. Phase decides whether matter
+        // blocks flow, so a typo silently read as "liquid" would leave a script
+        // believing it froze something while the sim kept pouring. Unlike the
+        // look controls elsewhere in this file, guessing here changes physics.
+        else if (p != "liquid" && p != "fluid")
+            return Result::fail("phase must be liquid or solid");
+    }
+
+    // ★ A physics-only call must NOT delete the binding. `clear` means "no
+    // material name given"; combined with a viscosity, miscibility or phase
+    // argument that is a request to author physics on an existing substance,
+    // and erasing the row would throw away the material binding the caller
+    // never mentioned.
+    const bool physics_only = clear && !representation &&
+                              (kinematic_viscosity || miscibility || phase);
+    if (clear && !representation && !physics_only) {
+        if (it != table.end()) table.erase(it);
+    } else if (it != table.end()) {
+        if (!clear) it->material_id = material_id;
+        if (representation) it->representation = rep;
+        // ★ Negative is a MEANINGFUL value here (inherit the domain), so it is
+        // stored as given rather than clamped up to 0 — clamping would make
+        // "inherit" unauthorable through the script layer while the panel could
+        // still set it, which is exactly the parity gap the project's first rule
+        // exists to prevent.
+        if (kinematic_viscosity) it->kinematic_viscosity = *kinematic_viscosity;
+        if (miscibility)         it->miscibility = *miscibility;
+        if (phase)               it->phase = phase_value;
+    } else {
+        if (table.size() >= RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials) {
+            return Result::fail(
+                "this domain already binds the maximum number of substances (" +
+                std::to_string(RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials) +
+                "); the composition field carries two per cell and an unbounded "
+                "table would make the gather cost invisible");
+        }
+        RayTrophiSim::SimulationGridDomainDesc::SubstanceMaterial entry;
+        entry.substance = substance;
+        entry.material_id = material_id;
+        entry.representation = rep;
+        if (kinematic_viscosity) entry.kinematic_viscosity = *kinematic_viscosity;
+        if (miscibility)         entry.miscibility = *miscibility;
+        if (phase)               entry.phase = phase_value;
+        table.push_back(entry);
+    }
+
+    // ★ PUSH AND RESET, same rule as every other look control here: the binding
+    // only reaches the shader through a surface rebuild, and a converged image
+    // would otherwise dilute the change instead of showing it — worst exactly
+    // in an automated visual test, which converges longer than a human waits.
+    g_ctx->scene.refreshFluidSurfaceMaterial();
+    g_ctx->renderer.resetCPUAccumulation();
+    if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+    g_ctx->start_render = true;
     return Result::success();
 }
 
@@ -1000,6 +1566,7 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     out.fluid_particles_per_second = source.fluid_particles_per_second;
     out.fluid_velocity_spread = source.fluid_velocity_spread;
     out.fluid_emit_along_normal = source.fluid_emit_along_normal;
+    out.fluid_substance = source.fluid_substance;
     out.use_time_limit = source.use_time_limit;
     out.start_time = source.start_time;
     out.end_time = source.end_time;
@@ -1043,6 +1610,7 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     out.fluid_particles_per_second = std::max(0.0f, info.fluid_particles_per_second);
     out.fluid_velocity_spread = std::max(0.0f, info.fluid_velocity_spread);
     out.fluid_emit_along_normal = info.fluid_emit_along_normal;
+    out.fluid_substance = info.fluid_substance;
     out.use_time_limit = info.use_time_limit;
     out.start_time = info.start_time;
     out.end_time = std::max(info.start_time, info.end_time);

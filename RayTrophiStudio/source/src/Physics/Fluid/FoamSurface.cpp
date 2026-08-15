@@ -332,6 +332,10 @@ bool buildFoamSurface(const FoamParticles& foam,
     LevelSetParams ls;
     ls.kernel_radius_voxels        = std::max(0.5f, params.surface_kernel_radius_voxels);
     ls.particle_radius_voxels      = std::max(0.1f, params.surface_particle_radius_voxels);
+    // Foam keeps its authored particle radius. The liquid domain's default
+    // fullness offset exists to restore a dense water silhouette and must not
+    // silently inflate the separate whitewater/foam reconstruction.
+    ls.surface_offset_voxels       = 0.0f;
     ls.narrow_band_voxels          = std::max(1.0f, params.surface_band_voxels);
     ls.smoothing_iterations        = std::max(0, params.surface_smoothing_iterations);
     ls.surface_resolution_multiplier = std::max(1, std::min(params.surface_resolution_multiplier, 4));

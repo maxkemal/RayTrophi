@@ -86,4 +86,15 @@ struct MaterialExt {
     float volume_light_steps, volume_shadow_strength, _volume_pad0, _volume_pad1;
 };
 
+// Opacity texture LAYOUT bit (flags bit 8): set = RGBA image with the mask in
+// .a, clear = a grayscale mask in .r.
+//
+// ★ Declared here, beside the `flags` field it describes, rather than in each
+// reader. It now has TWO readers — shadow_anyhit.rahit (stochastic shadows) and
+// volume_closesthit.rchit (the isosurface field cutout) — and a bare 256u in
+// each is precisely how the last batch ended up with four payload constants
+// redefined locally and one of them wrong.
+const uint MAT_FLAG_OPACITY_RGBA = (1u << 8);
+
+
 #endif // MATERIAL_STRUCT_GLSL

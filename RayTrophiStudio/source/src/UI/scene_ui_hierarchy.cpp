@@ -24,6 +24,7 @@
 #include "ProjectManager.h"
 #include "scene_ui_animgraph.hpp"
 #include "Backend/IViewportBackend.h"
+#include "UI/HierarchyLiveObjectView.h"
 
 extern bool g_hasOptix;
 extern bool g_hasCUDA;
@@ -980,6 +981,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             ctx.selection.clearSelection();
             for (auto& [name, triangles] : mesh_cache) {
                 if (triangles.empty()) continue;
+                if (ctx.scene.isEditorPendingDeleteObjectName(name)) continue;
 
                 // Check if all triangles share same transform (skip procedurals)
                 auto firstHandle = triangles[0].second->getTransformHandle();
@@ -1027,7 +1029,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             ImGui::SameLine();
         }
         
-        ImGui::Text("(%d objects)", (int)mesh_ui_cache.size());
+        const auto live_objects = HierarchyUI::buildLiveObjectView(
+            mesh_ui_cache,
+            [&ctx](const std::string& name) {
+                return ctx.scene.hasLiveSimulationObject(name);
+            },
+            [](const std::string&) { return true; });
+        ImGui::Text("(%d objects)", static_cast<int>(live_objects.size()));
 
         // ─────────────────────────────────────────────────────────────────────
         // GROUPS SECTION
@@ -1076,6 +1084,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 if (ImGui::IsItemClicked()) {
                     ctx.selection.clearSelection();
                     for (const auto& member_name : grp.member_names) {
+                        if (ctx.scene.isEditorPendingDeleteObjectName(member_name)) continue;
                         auto cache_it = mesh_cache.find(member_name);
                         if (cache_it != mesh_cache.end() && !cache_it->second.empty()) {
                             SelectableItem item;
@@ -1093,6 +1102,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     if (ImGui::MenuItem("Select Members")) {
                          ctx.selection.clearSelection();
                          for (const auto& member_name : grp.member_names) {
+                             if (ctx.scene.isEditorPendingDeleteObjectName(member_name)) continue;
                              auto cache_it = mesh_cache.find(member_name);
                              if (cache_it != mesh_cache.end() && !cache_it->second.empty()) {
                                  SelectableItem item;
@@ -1177,29 +1187,28 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         static ImGuiTextFilter filter;
         filter.Draw("Filter##objects");
 
-        ImGuiListClipper clipper;
-        clipper.Begin((int)mesh_ui_cache.size());
-
-        while (clipper.Step()) {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
-                if (i >= mesh_ui_cache.size()) break;
-
-                auto& kv = mesh_ui_cache[i];
-                const std::string& name = kv.first;
-
-                // Simple filter check
-                if (filter.IsActive() && !filter.PassFilter(name.c_str())) continue;
-                if (ctx.scene.isEditorPendingDeleteObjectName(name)) continue;
-                
-                // Skip objects that are in a group (they're shown inside the group)
-                bool in_group = false;
-                for (const auto& grp : ctx.scene.object_groups) {
-                    if (grp.contains(name)) {
-                        in_group = true;
-                        break;
-                    }
+        const auto visible_object_indices = HierarchyUI::buildLiveObjectView(
+            mesh_ui_cache,
+            [&ctx](const std::string& name) {
+                return ctx.scene.hasLiveSimulationObject(name);
+            },
+            [](const std::string& name) {
+                return !filter.IsActive() || filter.PassFilter(name.c_str());
+            },
+            [&ctx](const std::string& name) {
+                for (const auto& group : ctx.scene.object_groups) {
+                    if (group.contains(name)) return true;
                 }
-                if (in_group) continue;
+                return false;
+            });
+
+        // Object rows are not fixed-height: a selected/skinned row expands to
+        // transforms, bones and animations. ImGuiListClipper assumes uniform
+        // rows and can assert when an earlier cached/deleted row is skipped;
+        // iterate the already-filtered live view directly for correctness.
+        for (const std::size_t cache_index : visible_object_indices) {
+                auto& kv = mesh_ui_cache[cache_index];
+                const std::string& name = kv.first;
 
                 SelectableItem obj_item;
                 obj_item.type = SelectableType::Object;
@@ -1221,7 +1230,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 if (is_selected) flags |= ImGuiTreeNodeFlags_Selected | ImGuiTreeNodeFlags_DefaultOpen;
 
                 // OBJECT ITEM START
-                ImGui::PushID(i);
+                ImGui::PushID(static_cast<int>(cache_index));
 
                 // Visibility Toggle (Mesh level)
                 bool all_visible = true;
@@ -1289,6 +1298,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             SelectableItem item;
                             item.type = SelectableType::Object;
                             item.object = first_pair.second;
+                            item.mesh_object = first_pair.second->parentMesh;
+                            item.mesh_face_index = first_pair.second->faceIndex;
                             item.object_index = first_pair.first;
                             item.name = name;
                             
@@ -1299,7 +1310,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             }
                         } else {
                             // Normal click: Single selection (replaces current)
-                            sel.selectObject(first_pair.second, first_pair.first, name);
+                            if (first_pair.second->parentMesh) {
+                                sel.selectObject(first_pair.second->parentMesh, first_pair.first, name,
+                                                 first_pair.second->faceIndex, first_pair.second);
+                            } else {
+                                sel.selectObject(first_pair.second, first_pair.first, name);
+                            }
                         }
                         
                         // Persistent terrain_id is authoritative after save/load and
@@ -1462,7 +1478,6 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::TreePop();
                 }
                 ImGui::PopID();
-            }
         }
         ImGui::TreePop();
     }

@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "id": "raytrophi.start.empty",
+  "display_name": "Empty",
+  "description": "A clean viewport-first project with no default scene objects.",
+  "kind": "start",
+  "category": "empty",
+  "sort_order": 10,
+  "compatibility": {
+    "minimum_raytrophi_version": "1.0.0"
+  },
+  "preview": {
+    "image": "preview.svg",
+    "alt": "Empty RayTrophi viewport with a perspective grid"
+  },
+  "scene": {
+    "type": "recipe",
+    "path": "scene.json"
+  },
+  "ui_state": {
+    "properties_context": "scene",
+    "bottom_editor": "none",
+    "contextual_dock": "none",
+    "viewport_shading": "solid",
+    "show_timeline": false
+  },
+  "renderer": {
+    "preference": "auto",
+    "allow_fallback": true
+  },
+  "performance": {
+    "class": "light",
+    "estimated_vram_mb": 0
+  },
+  "assets": {
+    "required": [],
+    "optional": []
+  },
+  "guidance": {
+    "path": "guidance.json",
+    "show_on_first_open": true
+  }
+}

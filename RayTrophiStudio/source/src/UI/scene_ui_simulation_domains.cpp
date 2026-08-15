@@ -1,4 +1,7 @@
-#include "scene_ui_forcefield.hpp"
+﻿#include "scene_ui_forcefield.hpp"
+
+#include "Api/RtApi.h"
+#include "Fluid/FluidSplatMaterialAuthoring.h"
 
 namespace ForceFieldUI {
 
@@ -14,6 +17,45 @@ void drawSimulationDomainControls(
         auto particles = scene.getParticleSimulationSystem();
         const int domain_count = particles ? static_cast<int>(particles->gridDomains().size()) : 0;
         ImGui::Text("Domains: %d", domain_count);
+
+        // ── Reset, AT THE TOP ────────────────────────────────────────────────
+        // It used to live at the very bottom, past every domain section, every
+        // seeding control and the whole Export & Baking block — so the one
+        // action you reach for when a scene looks wrong was the hardest thing
+        // in the panel to find, and reaching it meant scrolling past the
+        // controls that had just confused you.
+        //
+        // ★ Editing a solver parameter no longer NEEDS this button: both
+        // simulation signatures now hash the fluid domain's solver config, so a
+        // physics edit drops the stale bake and rewinds by itself
+        // (hashFluidDomainSolverConfig). This stays for the case a signature
+        // cannot cover — going back to live free-run preview by hand.
+        const auto resetSimulationNow = [&]() {
+            drainSimulationMutationBackends();
+            scene.resetSimulation();
+            g_gas_volumes_dirty = true;
+            g_geometry_dirty = true;
+            g_viewport_raster_rebuild_pending = true;
+            g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+            ui_ctx.renderer.resetCPUAccumulation();
+            if (ui_ctx.backend_ptr) {
+                ui_ctx.backend_ptr->resetAccumulation();
+            }
+            ui_ctx.start_render = true;
+        };
+        if (ImGui::Button("Reset Simulation (Free-run)##SimResetTop", ImVec2(-1, 0))) {
+            resetSimulationNow();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Clear the bake cache and return to live free-run preview.\n"
+                "Play the timeline to bake each frame; scrub to replay cached frames.\n\n"
+                "Editing a PHYSICS parameter (viscosity, gravity, boundary, seed\n"
+                "density, per-substance physics) already invalidates the bake on its\n"
+                "own and rewinds to the start. Look parameters (material, drawn-as,\n"
+                "porosity, IOR) repaint the current frame and never re-simulate.");
+        }
+        ImGui::Separator();
 
         // With no object selected, spawn the domain centred on the world origin
         // (a predictable, reproducible spot) rather than wherever the camera
@@ -1073,13 +1115,48 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip("When enabled, clicking 'Seed Fluid' clears all pre-existing particles before seeding.");
                     }
 
+                    ImGui::Checkbox("Recreate Seed on Reset##PersistentSeed",
+                                    &domain.fluid_reseed_on_reset);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Stores this Seed Box as an initial-state recipe. When enabled, timeline\n"
+                                          "rewind/reset recreates it. Disable for emitter-only or one-shot seeds.\n"
+                                          "This is independent of clearing existing live particles.");
+                    }
+
                     if (ImGui::Button("Seed Fluid Now##SeedButton", ImVec2(-1, 30))) {
-                        domain.fluid_pending_seed = true;
-                        particles->synchronizeGridDomainsNow();
-                        ui_ctx.start_render = true;
+                        if (rtapi::seedFluidParticles(
+                                domain.name,
+                                domain.fluid_seed_min,
+                                domain.fluid_seed_max,
+                                domain.fluid_seed_particles_per_cell,
+                                domain.fluid_replace_on_seed,
+                                domain.fluid_reseed_on_reset).ok) {
+                            ui_ctx.start_render = true;
+                        }
                     }
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Places liquid particles within the specified box coordinates.");
+                        ImGui::SetTooltip("Places particles once in the authoritative grid-domain state.\n"
+                                          "Reset replay is controlled separately above.");
+                    }
+
+                    const float clear_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                    if (ImGui::Button("Clear Live##ClearFluidLive", ImVec2(clear_width, 0))) {
+                        if (rtapi::clearFluidParticles(domain.name, false).ok) {
+                            ui_ctx.start_render = true;
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Removes current particles but keeps the reset-time seed recipe armed.");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear + Disarm Seed##ClearFluidRecipe", ImVec2(-1, 0))) {
+                        if (rtapi::clearFluidParticles(domain.name, true).ok) {
+                            ui_ctx.start_render = true;
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Removes current particles and disables Seed Box/Fill Level recreation.\n"
+                                          "Emitters can keep adding particles without the original seed returning.");
                     }
                     }
 
@@ -1112,17 +1189,36 @@ void drawSimulationDomainControls(
                                           "1.0 = Highly energetic, splashy FLIP motion. Around 0.97 prevents excessive chaotic noise.");
                     }
 
+                    // ★★ NAMED AS A GROUP so the four knobs below stop competing
+                    // with the real one. Every name here contains "viscous",
+                    // "friction" or "damping", and all four drag the WHOLE BODY —
+                    // they slow a falling blob down instead of making it resist
+                    // shear. Turning them up to fake thickness is what made honey
+                    // reach a terminal fall speed and sand fall slower than honey.
+                    ImGui::SeparatorText("Dissipation (slows motion - not thickness)");
                     fp_edited |= ImGui::DragFloat("Velocity Damping", &fp.velocity_damping, 0.001f, 0.5f, 1.0f, "%.3f");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Velocity damping factor applied per step. 1.0 = frictionless flow, <1.0 = viscous slowdown.");
                     }
                     fp_edited |= ImGui::DragFloat("Internal Viscous Friction", &fp.internal_friction, 0.01f, 0.0f, 10.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Viscous friction resistance between fluid particles. Higher values damp motion.");
+                        ImGui::SetTooltip("Exponential decay on EVERY particle, in whatever direction it\n"
+                                          "is moving: v *= exp(-rate * dt).\n\n"
+                                          "This is NOT viscosity. It brakes the whole body, so it also\n"
+                                          "brakes free FALL - a tall pour arrives slow and lands without\n"
+                                          "a splash. Use Kinematic Viscosity below for thickness.\n\n"
+                                          "0 = water and any real liquid. Non-zero is a stylised or\n"
+                                          "deliberately dead liquid. 10+ = near-instant stop.");
                     }
                     fp_edited |= ImGui::DragFloat("Air Drag Resistance", &fp.air_drag, 0.01f, 0.0f, 10.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Aerodynamic friction drag applied to airborne splashing particles.");
+                        ImGui::SetTooltip("Quadratic drag on DETACHED droplets only (isolated spray), as\n"
+                                          "v *= 1 / (1 + k|v|dt). Bulk liquid is untouched.\n\n"
+                                          "k is in 1/m and follows from droplet size:\n"
+                                          "  k = 3*rho_air*Cd / (4*rho_water*d)\n"
+                                          "  ~0.15 for 3 mm drops | ~0.5 for sub-mm mist\n\n"
+                                          "Raising it is the fastest way to kill a splash - the spray is\n"
+                                          "exactly what it acts on.");
                     }
                     fp_edited |= ImGui::DragFloat("Wall Friction Damping", &fp.wall_damping, 0.01f,  0.0f, 1.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
@@ -1130,10 +1226,21 @@ void drawSimulationDomainControls(
                                           "0 = Slippery walls (sliding), 1 = Sticky walls (no-slip).");
                     }
 
+                    ImGui::SeparatorText("Coupling");
                     ImGui::SliderFloat("Domain Motion Coupling", &fp.domain_motion_coupling, 0.0f, 1.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Couples domain coordinate translation to fluid velocity. Allows creating sloshing liquids inside a moving cup.");
                     }
+
+                    // ★★★ THE ONE ROW THAT SETS THICKNESS, and it was the ninth
+                    // row down in a block where four of the eight above it are
+                    // also called viscous / friction / damping. "Internal Viscous
+                    // Friction", "Velocity Damping", "Air Drag" and "Wall Friction
+                    // Damping" all read like viscosity and none of them are one:
+                    // they drag the whole body instead of resisting SHEAR. A user
+                    // hunting for viscosity finds four plausible knobs before this
+                    // one and reasonably concludes the real control is gone.
+                    ImGui::SeparatorText("Rheology (how thick it is)");
 
                     // Logarithmic: the useful range spans six decades (water 1e-6
                     // to lava 1e2), so a linear drag bar would put every liquid
@@ -1141,6 +1248,31 @@ void drawSimulationDomainControls(
                     fp_edited |= ImGui::DragFloat("Kinematic Viscosity (m^2/s)", &fp.kinematic_viscosity,
                                                   0.0001f, 0.0f, 100.0f, "%.6f",
                                                   ImGuiSliderFlags_Logarithmic);
+                    // ★★★ AND IT DOES NOT APPLY TO EVERY PARTICLE. A substance
+                    // binding that is not inheriting carries its OWN ν, captured
+                    // when its "Inherit Domain Viscosity" box was unticked, and
+                    // from that moment this row — and every material preset
+                    // written through it — is a no-op for that liquid. The domain
+                    // knob still moved, still read back, still changed the preset
+                    // name, and nothing on screen got thicker. That reads exactly
+                    // as "all the thick presets use one fixed high viscosity".
+                    {
+                        std::string pinned;
+                        for (const auto& b : domain.fluid_substance_materials) {
+                            if (b.kinematic_viscosity < 0.0f) continue;   // inheriting
+                            if (!pinned.empty()) pinned += ", ";
+                            pinned += b.substance.empty() ? std::string("(unnamed)") : b.substance;
+                        }
+                        if (!pinned.empty()) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
+                            ImGui::TextWrapped(
+                                "Not applied to: %s - these substances pin their own "
+                                "viscosity. Tick \"Inherit Domain Viscosity\" on them "
+                                "in Substance Overrides to let this row (and material "
+                                "presets) reach them.", pinned.c_str());
+                            ImGui::PopStyleColor();
+                        }
+                    }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Physical kinematic viscosity in m^2/s, solved implicitly\n"
                                           "as nu*dt/h^2 - so the same value behaves the same at any\n"
@@ -1184,11 +1316,42 @@ void drawSimulationDomainControls(
 
                     ImGui::DragFloat("CFL Stability Factor", &fp.cfl,              0.01f,  0.05f, 1.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Courant stability factor limits timestep. Lower is more stable but requires more substeps.");
+                        ImGui::SetTooltip("Courant factor for the ADVECTION substeps below - how far a\n"
+                                          "particle is allowed to travel per substep, in cells.\n\n"
+                                          "It does not shorten the solver step: the transfer and the\n"
+                                          "pressure solve still run once per frame.");
                     }
-                    ImGui::DragInt("Max Solver Substeps", &fp.max_substeps,     1.0f,   1, 64);
+                    // ★★★ RENAMED, because the old name promised the whole solver
+                    // and delivered advection only. P2G, the boundaries, the
+                    // viscous solve, the pressure projection and G2P all run
+                    // EXACTLY ONCE PER TIMELINE FRAME, at dt = 1/fps
+                    // (scene_data.h: fixed_dt = 1/fps). Only particle positions
+                    // are integrated in substeps.
+                    //
+                    // ★★ That single fact is the fixed, parameter-proof "high
+                    // viscosity" a fast liquid runs into. At 24 fps a 6 m/s pour
+                    // crosses 5-12 cells between two pressure solves; momentum is
+                    // smeared over all of them and no crown, sheet or separate
+                    // droplet can form. It is NUMERICAL viscosity — set by dt/h²,
+                    // not by kinematic_viscosity, internal_friction or air_drag —
+                    // which is why zeroing all three changes nothing, and why the
+                    // thick presets look right (they are slow, so their CFL number
+                    // is small AND their thickness is real).
+                    //
+                    // ★ A user reading "Max Solver Substeps" reasonably concludes
+                    // the solver already sub-steps itself and looks elsewhere. The
+                    // name was doing the hiding.
+                    ImGui::DragInt("Max Advection Substeps", &fp.max_substeps,  1.0f,   1, 64);
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Maximum number of substeps the solver takes to maintain stability within CFL safety.");
+                        ImGui::SetTooltip("Substeps for PARTICLE ADVECTION only.\n\n"
+                                          "The transfer (P2G/G2P) and the pressure solve run ONCE per\n"
+                                          "frame, at dt = 1/fps. Raising this does not shorten that\n"
+                                          "step - it only stops fast particles from tunnelling.\n\n"
+                                          "For a fast liquid (water falling more than a metre) the frame\n"
+                                          "step itself is the limit: at 24 fps the liquid crosses several\n"
+                                          "cells between two pressure solves, which smears momentum and\n"
+                                          "flattens splashes no matter what the viscosity is set to.\n"
+                                          "Raise the timeline FPS to shorten it.");
                     }
                     ImGui::DragInt("Poisson Pressure Iterations", &fp.pressure_iterations, 1.0f, 0, 200);
                     if (ImGui::IsItemHovered()) {
@@ -1207,6 +1370,90 @@ void drawSimulationDomainControls(
                     if (fp_edited) {
                         fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
                     }
+                    }
+
+                    if (ImGui::CollapsingHeader("Granular Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        bool granular_edited = false;
+                        granular_edited |= ImGui::Checkbox("Enable Granular MPM", &fp.granular_enabled);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Switches this domain from incompressible liquid physics to compressible\n"
+                                              "Drucker-Prager granular MPM on Vulkan. Liquid pressure projection,\n"
+                                              "viscosity and particle reseeding are disabled. Use for sand, gravel,\n"
+                                              "soil, powder, snow and other frictional bulk materials.");
+                        ImGui::BeginDisabled(!fp.granular_enabled);
+                        granular_edited |= ImGui::SliderFloat("Friction Angle (deg)", &fp.granular_friction_angle_degrees, 0.0f, 55.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Internal grain friction controlling the shear-yield surface and repose angle.\n"
+                                              "Low values spread easily; high values form steeper, more stable piles.\n"
+                                              "Typical guides: powder 15-25, dry sand 30-38, angular gravel 38-48 deg.");
+                        granular_edited |= ImGui::DragFloat("Cohesion (Pa)", &fp.granular_cohesion, 1.0f, 0.0f, 100000.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Shear strength that remains even with no confining pressure.\n"
+                                              "0 Pa gives dry, non-sticky grains. Raise it for damp sand, soil, clay\n"
+                                              "or compacted snow. Excessive cohesion makes one rubber-like lump.");
+                        granular_edited |= ImGui::SliderFloat("Dilatancy (deg)", &fp.granular_dilatancy_degrees, 0.0f, 30.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Volume expansion produced by plastic shear as grains climb over neighbours.\n"
+                                              "0 keeps volume during shear; higher values make dense material swell\n"
+                                              "and loosen while flowing. Usually below the friction angle; sand 0-12 deg.");
+                        granular_edited |= ImGui::DragFloat("Young Modulus (Pa)", &fp.granular_young_modulus, 100.0f, 10.0f, 10000000.0f, "%.0f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Elastic stiffness before plastic yield. Higher values reduce the soft/rubber\n"
+                                              "compression seen on impact but require more granular solver substeps.\n"
+                                              "The runtime may cap the effective value for elastic CFL stability.");
+                        granular_edited |= ImGui::DragInt("Max Granular Solver Substeps",
+                                                          &fp.granular_max_solver_substeps,
+                                                          1.0f, 1, 64);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Maximum full P2G-grid-G2P elastic substeps per frame.\n"
+                                              "Raise until Effective Young matches Requested Young. This is a\n"
+                                              "real solver-quality cost: 15 substeps can cost about 15x one step.\n"
+                                              "The density/render bridge still runs once after the final substep.");
+                        granular_edited |= ImGui::SliderFloat("Poisson Ratio", &fp.granular_poisson_ratio, 0.0f, 0.49f, "%.3f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Couples axial compression to sideways expansion in the elastic response.\n"
+                                              "0 is independently compressible; values near 0.5 resist volume change.\n"
+                                              "Loose grains are commonly 0.15-0.30. Avoid 0.49 at coarse timesteps.");
+                        granular_edited |= ImGui::DragFloat("Tensile Cutoff (Pa)", &fp.granular_tensile_cutoff, 1.0f, 0.0f, 100000.0f, "%.1f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Maximum tensile stress before material points detach.\n"
+                                              "0 means dry grains cannot carry tension and separate immediately.\n"
+                                              "Raise it for wet sand, clay, packed snow or weak bonded aggregates.");
+                        granular_edited |= ImGui::DragFloat("Hardening", &fp.granular_hardening, 0.01f, 0.0f, 100.0f, "%.2f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Changes resistance after plastic deformation. 0 keeps constant strength;\n"
+                                              "higher values make compressed/sheared material progressively harder.\n"
+                                              "Useful for compacting soil and snow; keep near 0 for dry sand.");
+                        ImGui::SeparatorText("Damage & Rebonding");
+                        granular_edited |= ImGui::DragFloat("Fracture Strain", &fp.granular_fracture_strain, 0.001f, 0.001f, 1.0f, "%.3f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Maximum irreversible Rankine bond-opening strain where damage begins.\n"
+                                              "It is not summed once per solver substep. Frictional compression/shear\n"
+                                              "may still flow and harden without\n"
+                                              "spending this fracture budget. Low values give brittle snowballs\n"
+                                              "or soil clods; it is inactive when cohesion and tension are zero.");
+                        granular_edited |= ImGui::DragFloat("Damage Rate", &fp.granular_damage_rate, 0.05f, 0.0f, 100.0f, "%.2f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Post-threshold softening slope per unit strain. Damage follows\n"
+                                              "1-exp(-rate * excess strain), so it grows progressively instead\n"
+                                              "of deleting every bond on the first yielded frame. 0 disables it.");
+                        granular_edited |= ImGui::Checkbox("Allow Rebonding", &fp.granular_rebonding);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Lets damaged grains rebuild bonds while compressed and below yield.\n"
+                                              "Off for dry sand/gravel; on for wet sand, clay and compacting snow.");
+                        ImGui::BeginDisabled(!fp.granular_rebonding);
+                        granular_edited |= ImGui::DragFloat("Healing Rate", &fp.granular_healing_rate, 0.01f, 0.0f, 20.0f, "%.2f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Fractional bond-damage recovery per second under compression.\n"
+                                              "Higher values let compressed fragments clump and rebuild bonds faster.\n"
+                                              "Airborne or freely separated fragments do not heal.");
+                        ImGui::EndDisabled();
+                        ImGui::EndDisabled();
+                        if (granular_edited) {
+                            fp.sanitizeGranularMaterial();
+                            fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
+                        }
+                        ImGui::TextDisabled("Reset + Seed after changing material parameters.");
                     }
 
                     if (ImGui::CollapsingHeader(
@@ -1314,20 +1561,27 @@ void drawSimulationDomainControls(
                     if (ImGui::CollapsingHeader("Dynamic Particle Reseeding (Reseed)", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
 
+                    if (fp.granular_enabled) ImGui::BeginDisabled();
                     ImGui::Checkbox("Enable Dynamic Reseeding##Reseed", &fp.reseed_enabled);
+                    if (fp.granular_enabled) ImGui::EndDisabled();
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Dynamically generates and deletes particles to preserve density, maintain smooth level-set render boundaries, and prevent leaks.");
+                        ImGui::SetTooltip("Redistributes sampling density without creating liquid mass.\n"
+                                          "Only particles removed from crowded cells may be replaced in starved interior cells.\n"
+                                          "Emitters and open boundaries remain independent count-changing paths.");
                     }
 
-                    if (fp.reseed_enabled) {
+                    if (fp.granular_enabled) {
+                        ImGui::TextDisabled("Disabled for granular MPM: reseeding would destroy plastic history and mass.");
+                    } else if (fp.reseed_enabled) {
                         ImGui::DragInt("Target Particles Per Cell", &fp.reseed_target_per_cell, 0.1f, 0, 64);
                         ImGui::DragInt("Minimum Threshold Per Cell", &fp.reseed_min_per_cell, 0.1f, 1, 32);
                         ImGui::DragInt("Maximum Threshold Per Cell", &fp.reseed_max_per_cell, 0.1f, 2, 64);
                         if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("If the particle count inside a cell drops below minimum, new particles spawn. If it exceeds maximum, excess is culled.");
+                            ImGui::SetTooltip("Cells above maximum fund replacements in interior cells below minimum.\n"
+                                              "A step can never add more particles than it removed.");
                         }
                     } else {
-                        ImGui::TextDisabled("Dynamic reseeding is disabled. Total particle count remains constant during simulation.");
+                        ImGui::TextDisabled("Reseeding will not alter particle count; emitters and open boundaries still can.");
                     }
                     }
                 }
@@ -1781,6 +2035,36 @@ void drawSimulationDomainControls(
                                                   "single velocity vector. Makes liquid follow the mesh shape.");
                             }
                         }
+
+                        // ── Substance ────────────────────────────────────────
+                        {
+                            // Fixed buffer rather than an ImGui string callback:
+                            // a substance name is an identifier, and 63 chars is
+                            // past any sane one. Truncation is silent but the
+                            // field shows exactly what was kept.
+                            char subs_buf[64] = {0};
+                            const std::size_t copy_n =
+                                (std::min)(source.fluid_substance.size(), sizeof(subs_buf) - 1);
+                            source.fluid_substance.copy(subs_buf, copy_n);
+                            subs_buf[copy_n] = '\0';
+                            if (ImGui::InputText("Substance", subs_buf, sizeof(subs_buf))) {
+                                source.fluid_substance = subs_buf;
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "What this source POURS. Leave empty for untagged liquid, which\n"
+                                    "takes the domain's single surface material \xE2\x80\x94 the behaviour every\n"
+                                    "existing scene has.\n\n"
+                                    "Two sources naming the SAME substance merge into one\n"
+                                    "indistinguishable body. Two naming DIFFERENT substances mix, and\n"
+                                    "the mixture is a real field carried by the liquid, not a blend\n"
+                                    "applied at the surface.\n\n"
+                                    "The name is the identity: it is hashed onto every particle this\n"
+                                    "source emits and rides advection, compaction and reseeding.\n"
+                                    "Renaming it makes NEW liquid a different substance \xE2\x80\x94 liquid\n"
+                                    "already in the domain keeps what it was poured as.");
+                            }
+                        }
                     }
 
                     if (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::Point) {
@@ -2000,8 +2284,9 @@ void drawSimulationDomainControls(
                     }
                 } else {
                     // Fluid Render settings group
-                    if (ImGui::CollapsingHeader("Liquid Visualization & Shading", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (ImGui::CollapsingHeader("Liquid Display", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
+                    ImGui::TextDisabled("Domain default; Substance Overrides can replace it per liquid type.");
 
                     int current_mode_idx = 0; // default to Particles
                     if (domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
@@ -2029,11 +2314,392 @@ void drawSimulationDomainControls(
                                           "2. Smooth Surface: Reconstructs a glassy, refractive fluid mesh boundary.");
                     }
 
+                    // ★★★ WHAT IS ACTUALLY DRAWN, resolved the way the render
+                    // bridge resolves it. Two knobs answer one question here — a
+                    // domain default and a per-substance override — and the combo
+                    // above can only ever show one of them. With several
+                    // substances bound, the mode it displays may be true for
+                    // NOTHING on screen. Reading the answer back from the same
+                    // rule the bridge uses is the only line in this panel that
+                    // cannot drift from the picture.
+                    {
+                        const bool domain_is_splat = (current_mode_idx == 0);
+                        std::string as_spheres, as_surface;
+                        for (const auto& b : domain.fluid_substance_materials) {
+                            bool splat = domain_is_splat;
+                            if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat)
+                                splat = true;
+                            else if (b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF)
+                                splat = false;
+                            std::string& bucket = splat ? as_spheres : as_surface;
+                            if (!bucket.empty()) bucket += ", ";
+                            bucket += b.substance.empty() ? std::string("(unnamed)") : b.substance;
+                        }
+                        // Untagged particles never match a binding, so they always
+                        // follow the domain default. They are the reason the
+                        // default still matters once every substance overrides it.
+                        {
+                            std::string& bucket = domain_is_splat ? as_spheres : as_surface;
+                            if (!bucket.empty()) bucket += ", ";
+                            bucket += "untagged";
+                        }
+                        ImGui::TextDisabled("Now drawing:");
+                        ImGui::Indent(8.0f);
+                        if (!as_surface.empty())
+                            ImGui::TextWrapped("Isosurface: %s", as_surface.c_str());
+                        if (!as_spheres.empty())
+                            ImGui::TextWrapped("Splat spheres: %s", as_spheres.c_str());
+                        ImGui::Unindent(8.0f);
+                    }
+
                     if (ImGui::Checkbox("Debug Particle Points Overlay##DomainFluid", &domain.fluid_debug_overlay)) {
                         ui_ctx.start_render = true;
                     }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Draws raw simulation particle coordinates as lightweight blue viewport overlays.");
+                    }
+
+                    // Per-substance overrides are domain-level authoring, so keep
+                    // them outside both representation branches. A mixed domain
+                    // must remain editable regardless of its default mode.
+                    {
+                        std::vector<std::string> domain_substances;
+                        for (const auto& source : particles->flowSources()) {
+                            if (source.domain_index != selected_domain_index || source.fluid_substance.empty()) continue;
+                            if (std::find(domain_substances.begin(), domain_substances.end(),
+                                          source.fluid_substance) == domain_substances.end())
+                                domain_substances.push_back(source.fluid_substance);
+                        }
+                        std::sort(domain_substances.begin(), domain_substances.end());
+
+                        const std::string substance_header = "Substance Overrides (" +
+                            std::to_string(domain.fluid_substance_materials.size()) + ")";
+                        if (ImGui::CollapsingHeader(substance_header.c_str(),
+                                domain.fluid_substance_materials.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
+                            ImGui::TextDisabled("Emitter identity -> representation + scene material");
+
+                            ImGui::Spacing();
+                            ImGui::TextDisabled("Shared APIC velocity/pressure field");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "All substances share ONE velocity and pressure field, so they still\n"
+                                    "cannot separate by density.\n\n"
+                                    "What IS per-substance: kinematic viscosity (a real force, solved on\n"
+                                    "the grid), miscibility (how wide the boundary between two substances\n"
+                                    "is), and PHASE \xE2\x80\x94 a solid substance is stamped into the grid's solid\n"
+                                    "mask each step, so the liquid flows around it instead of through it.\n"
+                                    "All three are set per binding below.");
+                            }
+                            // ── Solid-phase coupling, DOMAIN-WIDE ────────────
+                            // Above the per-substance list on purpose: it is the
+                            // switch that answers "is the solid what is wrong
+                            // here?" and it must be reachable without editing —
+                            // and losing — the phase authoring being tested.
+                            {
+                                bool solid_on = domain.fluid_solid_phase_enabled;
+                                if (ImGui::Checkbox("Solid Phase Blocks Flow", &solid_on)) {
+                                    domain.fluid_solid_phase_enabled = solid_on;
+                                    scene.requestSimulationTimelineRenderResync();
+                                    ui_ctx.start_render = true;
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip(
+                                        "Master switch for every substance marked Solid in this domain.\n\n"
+                                        "Off: the phase stays authored (nothing is lost) and simply stops\n"
+                                        "being stamped into the grid, so the solve behaves exactly as it\n"
+                                        "did before phases existed. That makes it the fastest way to tell\n"
+                                        "whether a solid is responsible for something you are seeing.\n\n"
+                                        "This is physics: toggling it re-bakes the simulation.");
+                                }
+                                if (domain.fluid_solid_phase_enabled) {
+                                    float fill = domain.fluid_solid_phase_fill;
+                                    ImGui::SetNextItemWidth(-FLT_MIN);
+                                    if (ImGui::SliderFloat("Solid Cell Fill", &fill, 0.05f, 1.5f, "%.2f x seed")) {
+                                        domain.fluid_solid_phase_fill = std::clamp(fill, 0.01f, 4.0f);
+                                        scene.requestSimulationTimelineRenderResync();
+                                        ui_ctx.start_render = true;
+                                    }
+                                    if (ImGui::IsItemHovered()) {
+                                        ImGui::SetTooltip(
+                                            "How full of solid parcels a cell must be before it blocks flow,\n"
+                                            "as a fraction of the seed density (Particles Per Cell).\n\n"
+                                            "LOW: one stray parcel dams a channel with a full voxel of wall.\n"
+                                            "HIGH: a thin chunk blocks nothing while the panel still says\n"
+                                            "Solid.\n\n"
+                                            "Set it by READING, not guessing: the Fluid Step block reports\n"
+                                            "solid parcels and blocked cells separately, and parcels with\n"
+                                            "zero blocked cells means the chunk is thinner than the voxel\n"
+                                            "size can express.\n\n"
+                                            "A cell holding more liquid than solid never blocks, whatever\n"
+                                            "this is set to — that is what keeps the liquid from being\n"
+                                            "ejected when a chunk arrives.");
+                                    }
+                                }
+                            }
+                            ImGui::Separator();
+                            auto& smgr = MaterialManager::getInstance();
+                            int remove_binding = -1;
+                            for (std::size_t bi = 0; bi < domain.fluid_substance_materials.size(); ++bi) {
+                                auto& binding = domain.fluid_substance_materials[bi];
+                                const auto& mats = smgr.getAllMaterials();
+                                ImGui::PushID(static_cast<int>(bi) + 61000);
+                                // One framed block per substance. Two bindings
+                                // used to run together as an undifferentiated
+                                // column of widgets, so telling which slider
+                                // belonged to which chocolate meant counting
+                                // rows from the last coloured name.
+                                ImGui::BeginGroup();
+                                ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "%s", binding.substance.c_str());
+                                if (binding.phase == RayTrophiSim::Fluid::SubstancePhase::Solid) {
+                                    // The badge says what the row IS at a
+                                    // glance. Phase changes the flow, and a
+                                    // state of matter hidden inside a combo two
+                                    // rows down reads as a display option.
+                                    ImGui::SameLine();
+                                    ImGui::TextColored(ImVec4(0.75f, 0.85f, 1.0f, 1.0f), "[SOLID]");
+                                }
+                                // Right-aligned from the window's content edge,
+                                // not from what is LEFT after the name: the
+                                // remaining width shrinks with a longer
+                                // substance name, so an avail-based offset walks
+                                // the button around per row.
+                                ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 62.0f);
+                                if (ImGui::SmallButton("Remove")) remove_binding = static_cast<int>(bi);
+                                ImGui::Indent(8.0f);
+
+                                // ── PHYSICS first, LOOK second ───────────────
+                                // The order is the answer to "why did my edit
+                                // not show up": everything above the Look
+                                // separator re-simulates, everything below
+                                // repaints the frame you are already on. Mixing
+                                // the two in one list is what made the panel
+                                // feel arbitrary — a material pick and a
+                                // viscosity edit look identical as widgets and
+                                // cost three orders of magnitude apart.
+                                ImGui::SeparatorText("Physics (re-bakes the sim)");
+
+                                // Phase FIRST: it is the question about what the
+                                // matter is, and representation below only says
+                                // how to draw it. Putting the render routing
+                                // first is what made the two read as one knob.
+                                int phase_idx = static_cast<int>(binding.phase);
+                                const char* phases[] = { "Liquid", "Solid (blocks flow)" };
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                                if (ImGui::Combo("Phase", &phase_idx, phases, 2)) {
+                                    binding.phase =
+                                        static_cast<RayTrophiSim::Fluid::SubstancePhase>(phase_idx);
+                                    // Physics: the baked frames were solved with
+                                    // the old phase and no longer describe this
+                                    // scene. The signature drops them; this only
+                                    // asks the view to catch up.
+                                    scene.requestSimulationTimelineRenderResync();
+                                    ui_ctx.start_render = true;
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip(
+                                        "What this substance IS \xE2\x80\x94 not how it is drawn (that is\n"
+                                        "\"Drawn as\", under Look below, and the two are independent).\n\n"
+                                        "Solid: its parcels are rasterized into the grid's solid mask every\n"
+                                        "step, so the liquid flows AROUND them and, with a no-slip wall\n"
+                                        "setting, clings to them. A moving chunk pushes the liquid.\n\n"
+                                        "This is an OBSTACLE, not a rigid body: parcels have no cohesion,\n"
+                                        "so a pile spreads under load and a chunk does not rotate. Cohesive\n"
+                                        "dragged clusters belong to the rigid-body solver.\n\n"
+                                        "A cell only blocks once about a quarter of the seed density of\n"
+                                        "solid parcels is in it \xE2\x80\x94 a chunk thinner than a voxel blocks\n"
+                                        "nothing. The domain's stats line reports parcels and blocked\n"
+                                        "cells separately so the two cases can be told apart.");
+                                }
+
+                                bool inherit_visc = binding.kinematic_viscosity < 0.0f;
+                                if (ImGui::Checkbox("Inherit Domain Viscosity", &inherit_visc)) {
+                                    binding.kinematic_viscosity = inherit_visc
+                                        ? -1.0f
+                                        : std::max(0.0f, domain.fluid_params.kinematic_viscosity);
+                                    ui_ctx.start_render = true;
+                                }
+                                if (!inherit_visc) {
+                                    float visc = binding.kinematic_viscosity;
+                                    ImGui::SetNextItemWidth(-FLT_MIN);
+                                    if (ImGui::DragFloat("Kinematic Viscosity (m^2/s)", &visc,
+                                                         1.0e-4f, 0.0f, 100.0f, "%.6f")) {
+                                        binding.kinematic_viscosity = std::max(0.0f, visc);
+                                        ui_ctx.start_render = true;
+                                    }
+                                    if (ImGui::IsItemHovered()) {
+                                        ImGui::SetTooltip(
+                                            "This substance's own viscosity, in ABSOLUTE units, not a\n"
+                                            "multiple of the domain's. Reference: water 1e-6, olive oil\n"
+                                            "8e-5, molten chocolate ~4e-3, honey ~7e-3, lava 0.1 .. 100.\n\n"
+                                            "Solved on the grid as a variable-coefficient diffusion, so two\n"
+                                            "substances with different values really do lag and fold against\n"
+                                            "each other rather than just looking different.\n\n"
+                                            "Raise the domain's Viscosity Sweeps if a thick substance still\n"
+                                            "flows too freely: under-converging under-applies viscosity, it\n"
+                                            "never explodes.");
+                                    }
+                                }
+
+                                float misc = binding.miscibility;
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                                if (ImGui::SliderFloat("Miscibility", &misc, 0.0f, 1.0f, "%.2f")) {
+                                    binding.miscibility = std::clamp(misc, 0.0f, 1.0f);
+                                    scene.requestSimulationTimelineRenderResync();
+                                    ui_ctx.start_render = true;
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip(
+                                        "How wide the boundary is where this substance meets a DIFFERENT\n"
+                                        "one.\n\n"
+                                        "1.0 = fully miscible: a soft gradient, milk into chocolate.\n"
+                                        "0.0 = immiscible: a sharp front, oil in water.\n\n"
+                                        "A PAIR takes the smaller of its two values \xE2\x80\x94 refusing to mix is\n"
+                                        "unilateral.\n\n"
+                                        "This narrows the composition FIELD, not the shader, so every\n"
+                                        "consumer sees the same boundary. It does not stop the substances\n"
+                                        "from flowing through each other: they still share one velocity\n"
+                                        "field, so this changes how the mixture LOOKS, not whether the\n"
+                                        "liquids interpenetrate.");
+                                }
+
+                                // ── LOOK ─────────────────────────────────────
+                                // Nothing below this line re-simulates: it
+                                // repaints the frame currently on screen.
+                                ImGui::SeparatorText("Look (repaints this frame)");
+
+                                int rep = static_cast<int>(binding.representation);
+                                const char* reps[] = { "Inherit Domain Default", "Splat Spheres", "Surface SDF" };
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                                if (ImGui::Combo("Drawn as", &rep, reps, 3)) {
+                                    binding.representation = static_cast<RayTrophiSim::Fluid::SubstanceRepresentation>(rep);
+                                    scene.requestSimulationTimelineRenderResync();
+                                    ui_ctx.start_render = true;
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip(
+                                        "How this substance is DRAWN, and nothing else. A solid can be\n"
+                                        "splat spheres or part of the isosurface; so can a liquid.\n\n"
+                                        "Splat Spheres also removes the substance from the shared\n"
+                                        "isosurface, so its material is read per sphere instead of\n"
+                                        "blended into the mixture.");
+                                }
+
+                                // ★★ THE UNSET LABEL MUST NAME THE FALLBACK THAT WILL
+                                // ACTUALLY BE USED, and the two routes do not share
+                                // one. An unset SPLAT substance falls through to the
+                                // domain's opaque sphere material; only the
+                                // isosurface route reaches the built-in dielectric.
+                                // Labelling both "Built-in Dielectric" told a user
+                                // whose spheres rendered opaque that their material
+                                // had not been applied — when in truth the panel had
+                                // named a material the splat path never consults.
+                                const bool binding_draws_splat =
+                                    binding.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat ||
+                                    (binding.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Inherit &&
+                                     current_mode_idx == 0);
+                                const char* unset_label = binding_draws_splat
+                                    ? "Domain Splat Material" : "Built-in Dielectric";
+                                const char* mat_label = unset_label;
+                                if (binding.material_id >= 0 && static_cast<std::size_t>(binding.material_id) < mats.size() &&
+                                    mats[static_cast<std::size_t>(binding.material_id)])
+                                    mat_label = mats[static_cast<std::size_t>(binding.material_id)]->materialName.c_str();
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                                if (ImGui::BeginCombo("Material", mat_label)) {
+                                    // ★★★ requestSimulationTimelineRenderResync
+                                    // IS THE FIX FOR "picking a material does
+                                    // nothing until I rewind". The per-substance
+                                    // material reaches the shader only through
+                                    // the COMPOSITION field (a per-cell material
+                                    // index), and that field is rebuilt from a
+                                    // signature over the particles. On a paused
+                                    // timeline nothing in that signature moves,
+                                    // so the pick was stored, reported back
+                                    // correctly, and never drawn. Its neighbours
+                                    // here (representation, miscibility) always
+                                    // asked for the resync; this row did not,
+                                    // which is why one panel answered two ways.
+                                    // The signature now hashes material_id too,
+                                    // so the rebuild is correct even when the
+                                    // caller forgets — this call is what makes
+                                    // it happen NOW, on the frame being viewed.
+                                    if (ImGui::Selectable(unset_label, binding.material_id < 0)) {
+                                        binding.material_id = -1;
+                                        scene.refreshFluidSurfaceMaterial();
+                                        scene.requestSimulationTimelineRenderResync();
+                                        ui_ctx.start_render = true;
+                                    }
+                                    for (std::size_t mi = 0; mi < mats.size(); ++mi) {
+                                        if (!mats[mi]) continue;
+                                        if (ImGui::Selectable(mats[mi]->materialName.c_str(),
+                                                              binding.material_id == static_cast<int>(mi))) {
+                                            binding.material_id = static_cast<int>(mi);
+                                            scene.refreshFluidSurfaceMaterial();
+                                            scene.requestSimulationTimelineRenderResync();
+                                            ui_ctx.start_render = true;
+                                        }
+                                    }
+                                    ImGui::EndCombo();
+                                }
+                                if (ImGui::SmallButton("+ New Material")) {
+                                    auto fresh = std::make_shared<PrincipledBSDF>();
+                                    const uint16_t id = smgr.addUniqueMaterial(binding.substance + " Material", fresh);
+                                    if (id != MaterialManager::INVALID_MATERIAL_ID) {
+                                        binding.material_id = static_cast<int>(id);
+                                        scene.refreshFluidSurfaceMaterial();
+                                        scene.requestSimulationTimelineRenderResync();
+                                        ui_ctx.start_render = true;
+                                    }
+                                }
+
+                                ImGui::Unindent(8.0f);
+                                ImGui::EndGroup();
+                                ImGui::Spacing();
+                                ImGui::Separator();
+                                ImGui::Spacing();
+                                ImGui::PopID();
+                            }
+                            if (remove_binding >= 0) {
+                                domain.fluid_substance_materials.erase(
+                                    domain.fluid_substance_materials.begin() + remove_binding);
+                                scene.requestSimulationTimelineRenderResync();
+                                ui_ctx.start_render = true;
+                            }
+
+                            std::vector<std::string> available;
+                            for (const auto& name : domain_substances) {
+                                const bool bound = std::any_of(domain.fluid_substance_materials.begin(),
+                                    domain.fluid_substance_materials.end(),
+                                    [&](const auto& b) { return b.substance == name; });
+                                if (!bound) available.push_back(name);
+                            }
+                            static std::string pending_substance;
+                            if (std::find(available.begin(), available.end(), pending_substance) == available.end())
+                                pending_substance = available.empty() ? std::string() : available.front();
+                            const char* pending_label = available.empty()
+                                ? "No unbound emitter substances" : pending_substance.c_str();
+                            ImGui::BeginDisabled(available.empty());
+                            ImGui::SetNextItemWidth(-FLT_MIN);
+                            if (ImGui::BeginCombo("Add From Domain Emitters", pending_label)) {
+                                for (const auto& name : available) {
+                                    if (ImGui::Selectable(name.c_str(), pending_substance == name)) pending_substance = name;
+                                }
+                                ImGui::EndCombo();
+                            }
+                            const bool at_limit = domain.fluid_substance_materials.size() >=
+                                RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials;
+                            ImGui::BeginDisabled(at_limit);
+                            if (ImGui::Button("Add Override")) {
+                                RayTrophiSim::SimulationGridDomainDesc::SubstanceMaterial b;
+                                b.substance = pending_substance;
+                                domain.fluid_substance_materials.push_back(std::move(b));
+                                pending_substance.clear();
+                                ui_ctx.start_render = true;
+                            }
+                            ImGui::EndDisabled();
+                            ImGui::EndDisabled();
+                            if (domain_substances.empty())
+                                ImGui::TextDisabled("Assign a Substance to an emitter in this domain first.");
+                        }
                     }
 
                     // ★ Gate the parameter blocks on what the COMBO SHOWS
@@ -2050,71 +2716,237 @@ void drawSimulationDomainControls(
                     // This does NOT repair the scene data — the panel still
                     // writes nothing (see the note above); it only stops the
                     // combo from claiming a mode the rest of the panel ignores.
-                    if (current_mode_idx == 0) {
-                        auto& mgr = MaterialManager::getInstance();
-                        const auto& all_mats = mgr.getAllMaterials();
-                        const char* current_label = "Auto (Color + Glow)";
-                        if (domain.fluid_particle_material_id >= 0 &&
-                            domain.fluid_particle_material_id != MaterialManager::INVALID_MATERIAL_ID &&
-                            static_cast<std::size_t>(domain.fluid_particle_material_id) < all_mats.size()) {
-                            current_label = all_mats[domain.fluid_particle_material_id]
-                                                 ? all_mats[domain.fluid_particle_material_id]->materialName.c_str()
-                                                 : "(missing)";
+                    const bool has_splat_override = std::any_of(
+                        domain.fluid_substance_materials.begin(), domain.fluid_substance_materials.end(),
+                        [](const auto& b) { return b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::Splat; });
+                    if ((current_mode_idx == 0 || has_splat_override) &&
+                        ImGui::CollapsingHeader("Splat Geometry & Preview",
+                            current_mode_idx == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+                        const char* geometry_modes[] = { "Built-in Icosphere", "Scene Object / Mesh Group" };
+                        int geometry_mode = domain.fluid_particle_geometry_mode == 1 ? 1 : 0;
+                        if (ImGui::Combo("Geometry Source", &geometry_mode, geometry_modes, 2)) {
+                            domain.fluid_particle_geometry_mode = geometry_mode;
+                            scene.requestSimulationTimelineRenderResync();
+                            ui_ctx.start_render = true;
                         }
-                        if (ImGui::BeginCombo("Refractive Material Override##DomainFluid", current_label)) {
-                            const bool none_sel = (domain.fluid_particle_material_id < 0);
-                            if (ImGui::Selectable("Auto (Color + Glow)", none_sel)) {
-                                domain.fluid_particle_material_id = -1;
-                                ui_ctx.start_render = true;
+                        if (geometry_mode == 1) {
+                            std::vector<std::string> scene_nodes;
+                            for (const auto& object : scene.world.objects) {
+                                if (!object) continue;
+                                const auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object);
+                                if (!mesh || !mesh->geometry) continue;
+                                const std::string name = mesh->nodeName;
+                                if (name.empty() || name.front() == '[') continue;
+                                if (scene.isEditorPendingDeleteObjectName(name)) continue;
+                                if (std::find(scene_nodes.begin(), scene_nodes.end(), name) == scene_nodes.end())
+                                    scene_nodes.push_back(name);
                             }
-                            for (std::size_t mi = 0; mi < all_mats.size(); ++mi) {
-                                if (!all_mats[mi]) continue;
-                                const bool sel = (domain.fluid_particle_material_id == static_cast<int>(mi));
-                                ImGui::PushID(static_cast<int>(mi));
-                                if (ImGui::Selectable(all_mats[mi]->materialName.c_str(), sel)) {
-                                    domain.fluid_particle_material_id = static_cast<int>(mi);
-                                    ui_ctx.start_render = true;
+                            std::sort(scene_nodes.begin(), scene_nodes.end());
+                            const bool source_is_live =
+                                std::binary_search(scene_nodes.begin(), scene_nodes.end(),
+                                                   domain.fluid_particle_geometry_source);
+                            const std::string missing_source_label =
+                                domain.fluid_particle_geometry_source.empty()
+                                    ? std::string("Select scene object")
+                                    : std::string("Missing: ") + domain.fluid_particle_geometry_source;
+                            const char* source_label = source_is_live
+                                ? domain.fluid_particle_geometry_source.c_str()
+                                : missing_source_label.c_str();
+                            if (ImGui::BeginCombo("Scene Geometry", source_label)) {
+                                for (const auto& name : scene_nodes) {
+                                    if (ImGui::Selectable(name.c_str(),
+                                            domain.fluid_particle_geometry_source == name)) {
+                                        domain.fluid_particle_geometry_source = name;
+                                        scene.requestSimulationTimelineRenderResync();
+                                        ui_ctx.start_render = true;
+                                    }
                                 }
-                                ImGui::PopID();
+                                ImGui::EndCombo();
                             }
-                            ImGui::EndCombo();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Overrides fluid rendering with a custom scene material. Set to 'Auto' to use raw color/emissive controls below.");
-                        }
-
-                        const bool auto_mat = domain.fluid_particle_material_id < 0;
-                        if (auto_mat) {
-                            ImGui::ColorEdit3("Raw Particle Color##DomainFluid", &domain.fluid_particle_color.x);
-                            ImGui::Checkbox("Self-Emissive Glow##DomainFluid", &domain.fluid_particle_emissive);
+                            if (scene_nodes.empty()) ImGui::TextDisabled("No scene mesh groups available.");
+                            if (!domain.fluid_particle_geometry_source.empty() && !source_is_live) {
+                                ImGui::TextDisabled("Selected source is deleted or unavailable; using icosphere fallback.");
+                            }
                             if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Enables raw glowing luminance (useful for lava, glowing acid, or magical effects).");
-                            }
-                            if (domain.fluid_particle_emissive) {
-                                ImGui::DragFloat("Emissive Glow Intensity##DomainFluid", &domain.fluid_particle_emission, 0.05f, 0.0f, 50.0f, "%.2f");
+                                ImGui::SetTooltip("Instances the selected scene node at every splat position.\n"
+                                                  "Its triangles are centered and normalized once, while original per-face materials are preserved.\n"
+                                                  "Only an explicitly assigned domain or substance material overrides them.");
                             }
                         }
+                        {
+                            auto& material_mgr = MaterialManager::getInstance();
+                            const auto& scene_materials = material_mgr.getAllMaterials();
+                            const std::string authored_material =
+                                RayTrophiSim::Fluid::fluidSplatMaterialName(domain);
+                            const char* inherited_label = geometry_mode == 1
+                                ? "Use Source Object Materials"
+                                : "Scene Default Material";
+                            const char* splat_material_label = authored_material.empty()
+                                ? inherited_label : authored_material.c_str();
+                            if (ImGui::BeginCombo("Splat Material##DomainFluid", splat_material_label)) {
+                                if (ImGui::Selectable(inherited_label, authored_material.empty())) {
+                                    const auto result = RayTrophiSim::Fluid::setFluidSplatMaterial(
+                                        *particles, domain.name, std::string{});
+                                    if (result.ok() && result.changed) {
+                                        scene.requestSimulationTimelineRenderResync();
+                                        ui_ctx.renderer.resetCPUAccumulation();
+                                        if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                                        ui_ctx.start_render = true;
+                                    }
+                                }
+                                for (std::size_t mi = 0; mi < scene_materials.size(); ++mi) {
+                                    if (!scene_materials[mi]) continue;
+                                    const std::string& material_name = scene_materials[mi]->materialName;
+                                    ImGui::PushID(static_cast<int>(mi) + 52000);
+                                    if (ImGui::Selectable(material_name.c_str(),
+                                                          authored_material == material_name)) {
+                                        const auto result = RayTrophiSim::Fluid::setFluidSplatMaterial(
+                                            *particles, domain.name, material_name);
+                                        if (result.ok() && result.changed) {
+                                            scene.requestSimulationTimelineRenderResync();
+                                            ui_ctx.renderer.resetCPUAccumulation();
+                                            if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                                            ui_ctx.start_render = true;
+                                        }
+                                    }
+                                    ImGui::PopID();
+                                }
+                                ImGui::EndCombo();
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Material used by Built-in Icosphere splats.\n"
+                                    "Scene Default reuses an existing scene material and creates no hidden fluid material.\n\n"
+                                    "For Scene Object geometry, Use Source Object Materials preserves every face material.\n"
+                                    "Choosing a material here deliberately overrides the whole splat mesh.");
+                            }
+                        }
+                        ImGui::Separator();
                         ImGui::DragFloat("Voxel Radius Factor##DomainFluid", &domain.fluid_particle_radius_factor, 0.01f, 0.05f, 1.5f, "%.2f");
                         ImGui::DragFloat("Visual Size Multiplier##DomainFluid", &domain.fluid_particle_size_multiplier, 0.01f, 0.05f, 8.0f, "%.2f");
-                        ImGui::SliderInt("Sphere Subdivision Detail##DomainFluid", &domain.fluid_particle_subdivisions, 0, 3);
+                        if (geometry_mode == 0)
+                            ImGui::SliderInt("Sphere Subdivision Detail##DomainFluid", &domain.fluid_particle_subdivisions, 0, 3);
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Geometric subdivision level of particle spheres. Higher values are smoother but reduce rendering performance.");
                         }
                     }
 
-                    if (current_mode_idx == 1) {   // see the note above: display, not enum
+                    // ★★ MIRROR OF THE SPLAT GATE ABOVE, and it was missing.
+                    // A domain defaulting to spheres with ONE substance overridden
+                    // to Surface SDF really does render an isosurface — and every
+                    // control that shapes it was hidden, because this gate asked
+                    // only about the domain default. The surface was on screen and
+                    // unreachable, which reads as "these settings do not exist"
+                    // rather than as a missing gate. The splat half already got
+                    // this right; the two halves must agree or the panel teaches
+                    // that overrides are second-class.
+                    const bool has_sdf_override = std::any_of(
+                        domain.fluid_substance_materials.begin(), domain.fluid_substance_materials.end(),
+                        [](const auto& b) { return b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF; });
+                    if ((current_mode_idx == 1 || has_sdf_override) &&
+                        ImGui::CollapsingHeader("Surface SDF Settings",
+                            current_mode_idx == 1 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {   // see the note above: display, not enum
                         bool sdf_changed = false;
+                        // ★ PURE SHADER STATE, as opposed to sdf_changed. Nothing
+                        // is re-simulated or re-uploaded from the level set; only
+                        // values the shader reads out of the volume table change.
+                        //
+                        // It still needs its OWN consumer, and that is the thing
+                        // that was missing: `ui_ctx.start_render = true` alone
+                        // asks for another frame WITHOUT clearing the accumulator,
+                        // so the new samples average into a converged image made
+                        // with the old value. On a settled render the change is
+                        // then invisible until something else happens to reset —
+                        // which reads as "the control does nothing", the exact
+                        // failure the greyed-out IOR slider two screens down
+                        // exists to avoid.
+                        bool look_changed = false;
                         sdf_changed |= ImGui::DragFloat("Level Set Kernel Radius", &domain.fluid_level_set_params.kernel_radius_voxels, 0.05f, 0.5f, 6.0f, "%.2f");
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Splats radius determining how far apart particles fuse into a unified liquid body.\nLarger values produce a thicker, fuller appearance.");
                         }
                         sdf_changed |= ImGui::DragFloat("Particle Voxel Radius (vx)", &domain.fluid_level_set_params.particle_radius_voxels, 0.02f, 0.05f, 2.0f, "%.2f");
+                        sdf_changed |= ImGui::DragFloat("Surface Fullness (vx)", &domain.fluid_level_set_params.surface_offset_voxels, 0.02f, -0.75f, 1.25f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Moves the reconstructed SDF surface in simulation-voxel units.\n"
+                                "Positive values make the liquid body fuller; negative values shrink it.\n"
+                                "This is geometric and resolution-independent: it does not change fog/\n"
+                                "absorption density, particle physics, grid resolution, or kernel cost.\n"
+                                "For fracture work keep this modest so narrow cracks remain visible.");
+                        }
                         sdf_changed |= ImGui::DragFloat("SDF Narrow Band Width", &domain.fluid_level_set_params.narrow_band_voxels, 0.05f, 1.0f, 8.0f, "%.2f");
                         sdf_changed |= ImGui::DragFloat("SDF Surface Band Width", &domain.fluid_surface_band_voxels, 0.02f, 0.1f, 3.0f, "%.2f");
                         sdf_changed |= ImGui::SliderInt("Laplacian Surface Smoothing", &domain.fluid_level_set_params.smoothing_iterations, 0, 8);
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Number of Laplacian smoothing passes applied to the surface level-set boundary. Prevents voxel stair-stepping.");
                         }
+                        // ── Coordinate space ─────────────────────────────────
+                        // NOT an sdf_changed knob: the level set is untouched.
+                        // This only chooses which coordinate the SHADER
+                        // addresses its patterns in, so it repaints live.
+                        ImGui::Separator();
+                        ImGui::TextDisabled("Surface Coordinate Space");
+                        {
+                            // Order matches the shader's COORD_* constants; the
+                            // combo index IS the value, so inserting an entry
+                            // here silently re-labels every saved project.
+                            // Append only.
+                            const char* kCoordSpaces[] = { "Material (flows with liquid)",
+                                                           "Domain (fixed to container)",
+                                                           "World (fixed to scene)" };
+                            int space = domain.fluid_surface_coord_space;
+                            if (space < 0) space = 0;
+                            if (space > 2) space = 2;
+                            if (ImGui::Combo("Coordinate Space", &space, kCoordSpaces, 3)) {
+                                domain.fluid_surface_coord_space = space;
+                                look_changed = true;
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Which coordinate ALL isosurface patterns are addressed in \xE2\x80\x94\n"
+                                    "textures, the resin interior, porosity and the opacity mask.\n\n"
+                                    "Material : each parcel of liquid carries its own coordinate, so a\n"
+                                    "           pour takes its texture WITH it. Identical to World for\n"
+                                    "           anything that has not moved yet.\n"
+                                    "Domain   : fixed to the container. A carried vessel takes the\n"
+                                    "           pattern along, but liquid flows THROUGH it.\n"
+                                    "World    : nailed to the scene, like a slide projector.\n\n"
+                                    "Material stretches with the flow. Two coordinate generations\n"
+                                    "are blended to bound that stretch \xE2\x80\x94 see Refresh Period below.");
+                            }
+
+                            // Only Material mode uses the coordinate field, so
+                            // the refresh schedule is meaningless in the other
+                            // two. Shown greyed rather than hidden: a control
+                            // that vanishes reads as a missing feature, while a
+                            // disabled one says "not for this mode".
+                            const bool material_mode = (space == 0);
+                            ImGui::BeginDisabled(!material_mode);
+                            int period = domain.fluid_params.uvw_refresh_period;
+                            if (ImGui::DragInt("Coord Refresh Period", &period, 1.0f, 30, 2000,
+                                               "%d steps")) {
+                                domain.fluid_params.uvw_refresh_period =
+                                    period < 2 ? 2 : period;
+                                look_changed = true;
+                            }
+                            ImGui::EndDisabled();
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Solver steps before a coordinate generation is reset to the\n"
+                                    "identity. Two generations run half a period apart and are\n"
+                                    "blended, so the texture is never carried by a map older than\n"
+                                    "one period.\n\n"
+                                    "Higher : the pattern follows the material further before it is\n"
+                                    "         refreshed \xE2\x80\x94 more faithful advection, more smearing\n"
+                                    "         near the end of each generation's life.\n"
+                                    "Lower  : a crisper map, but the crossfade between the two\n"
+                                    "         generations becomes visible as a soft pulsing.\n\n"
+                                    "Counted in STEPS, not frames: the map degrades with deformation,\n"
+                                    "and steps are what deform it.");
+                            }
+                        }
+
                         // ── Procedural porosity ──────────────────────────────
                         // NOT an sdf_changed knob: nothing is rebuilt. The pore
                         // field is evaluated in the shader against the SAME
@@ -2122,7 +2954,7 @@ void drawSimulationDomainControls(
                         ImGui::Separator();
                         ImGui::TextDisabled("Porosity (crumb / aeration)");
                         if (ImGui::SliderFloat("Pore Amount", &domain.fluid_surface_pore_amount, 0.0f, 0.5f, "%.3f")) {
-                            ui_ctx.start_render = true;
+                            look_changed = true;
                         }
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Carves bubbles OUT OF THE FIELD before the surface is found, so the\n"
@@ -2134,14 +2966,14 @@ void drawSimulationDomainControls(
                         if (domain.fluid_surface_pore_amount > 1e-4f) {
                             ImGui::Indent();
                             if (ImGui::DragFloat("Bubble Size (m)", &domain.fluid_surface_pore_scale, 0.002f, 0.001f, 2.0f, "%.3f")) {
-                                ui_ctx.start_render = true;
+                                look_changed = true;
                             }
                             if (ImGui::IsItemHovered()) {
                                 ImGui::SetTooltip("Typical bubble diameter in WORLD units, not voxels — changing the\n"
                                                   "domain resolution re-renders the same crumb instead of resizing it.");
                             }
                             if (ImGui::SliderFloat("Size Variation", &domain.fluid_surface_pore_detail, 0.0f, 1.0f, "%.2f")) {
-                                ui_ctx.start_render = true;
+                                look_changed = true;
                             }
                             if (ImGui::IsItemHovered()) {
                                 ImGui::SetTooltip("Mixes a finer bubble size into the coarse one.\n"
@@ -2156,6 +2988,23 @@ void drawSimulationDomainControls(
                                                   "surface that is not rendered, with nothing reporting it.");
                             }
                             ImGui::Unindent();
+                        }
+                        // Consume the pure-shader-state edits. refreshFluidSurfaceMaterial
+                        // pushes the values onto the render volume AND sets
+                        // g_gas_volumes_dirty, so they reach the SSBO this frame;
+                        // both accumulators are then cleared so the change is
+                        // actually visible instead of averaging into what is
+                        // already on screen.
+                        //
+                        // ★ Deliberately NOT requestSimulationTimelineRenderResync
+                        // (which sdf_changed uses): nothing about the level set
+                        // moved, so forcing a rebuild + NanoVDB re-upload would
+                        // make a colour knob cost a full surface reconstruction.
+                        if (look_changed) {
+                            scene.refreshFluidSurfaceMaterial();
+                            ui_ctx.renderer.resetCPUAccumulation();
+                            if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                            ui_ctx.start_render = true;
                         }
                         ImGui::Separator();
 
@@ -2245,10 +3094,23 @@ void drawSimulationDomainControls(
                                     "dielectric cannot express.\n\n"
                                     "With a material bound, the material owns the look: its own\n"
                                     "roughness, IOR and transmission apply, and the two sliders below\n"
-                                    "grey out because they drive the built-in dielectric only.\n"
-                                    "Roughness and colour TEXTURES will not apply — a raymarched\n"
-                                    "isosurface has no UVs. Scalar material values do.");
+                                    "grey out because they drive the built-in dielectric only.\n\n"
+                                    "TEXTURES DO APPLY. An isosurface has no UVs, so albedo,\n"
+                                    "roughness, metallic and emission maps are projected tri-planarly\n"
+                                    "and the material's UV Scale becomes WORLD UNITS PER TILE. The\n"
+                                    "Coordinate Space above decides whether that projection travels\n"
+                                    "with the liquid, with the container, or stays fixed to the scene.\n\n"
+                                    "An OPACITY texture cuts REAL HOLES: it is subtracted from the\n"
+                                    "field before the surface is found, so the rims get correct\n"
+                                    "normals and refraction. It is a hard mask, not a dither — the\n"
+                                    "gas handoff reads the same field and has to agree with it sample\n"
+                                    "for sample. Scalar Opacity below 1 becomes transmission instead,\n"
+                                    "exactly as it does on a mesh.\n\n"
+                                    "NORMAL MAPS apply too, tri-planar with a whiteout blend, and\n"
+                                    "they ride the same Coordinate Space â so bump detail travels\n"
+                                    "with the liquid instead of the body flowing through it.");
                             }
+
                         }
                         // IOR and roughness drive the built-in dielectric only. With a
                         // material bound the material owns both, so the sliders are
@@ -2582,12 +3444,30 @@ void drawSimulationDomainControls(
                         }
                         if (ImGui::CollapsingHeader("Volumetric Absorption & Density", ImGuiTreeNodeFlags_DefaultOpen)) {
                             ImGui::Spacing();
-                        if (SceneUI::drawVolumeShaderUI(ui_ctx, domain.shader, nullptr, nullptr)) {
-                            scene.refreshFluidSurfaceMaterial();
-                            ui_ctx.renderer.resetCPUAccumulation();
-                            if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
-                            ui_ctx.start_render = true;
-                        }
+                            const bool has_surface_sdf =
+                                domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF ||
+                                std::any_of(domain.fluid_substance_materials.begin(),
+                                            domain.fluid_substance_materials.end(),
+                                            [](const auto& b) {
+                                                return b.representation ==
+                                                    RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
+                                            });
+                            if (has_surface_sdf) {
+                                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                                                   "Surface SDF uses a geometric density proxy");
+                                ImGui::TextWrapped(
+                                    "Density, Remap and Edge Cutoff are fog controls and do not thicken "
+                                    "the SDF. Shape comes from Surface SDF Settings. Scattering/Absorption "
+                                    "shade the built-in dielectric; a bound Principled BSDF uses its own "
+                                    "Transmission and Interior controls.");
+                                ImGui::Separator();
+                            }
+                            if (SceneUI::drawVolumeShaderUI(ui_ctx, domain.shader, nullptr, nullptr)) {
+                                scene.refreshFluidSurfaceMaterial();
+                                ui_ctx.renderer.resetCPUAccumulation();
+                                if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                                ui_ctx.start_render = true;
+                            }
                         }
                     }
                 }
@@ -2783,11 +3663,74 @@ void drawSimulationDomainControls(
                     const float step_total = std::max(fs.total_ms, phase_sum);
                     UIWidgets::PerfBlock blk("Fluid Step", step_total);
                     blk.Value("Particles", "%zu", fs.particle_count);
+                    if (fs.reseed_added_particles > 0 || fs.reseed_removed_particles > 0) {
+                        const long long reseed_net =
+                            static_cast<long long>(fs.reseed_added_particles) -
+                            static_cast<long long>(fs.reseed_removed_particles);
+                        blk.Value("Dynamic reseed", "+%zu / -%zu (net %+lld)",
+                                  fs.reseed_added_particles,
+                                  fs.reseed_removed_particles,
+                                  reseed_net);
+                    }
                     blk.Value("Active fluid cells", "%zu", fs.active_fluid_cells);
+                    // ★★★ THE RESOLUTION READING, and the row whose absence cost
+                    // days. A fluid cell that touches air is held near p = 0 by
+                    // the free-surface condition; only INTERIOR cells (liquid on
+                    // all six sides) carry a pressure field. A stream one or two
+                    // cells across is ALL surface: there is no pressure to build,
+                    // nothing to eject a droplet with on impact, and it falls as
+                    // loose particles and lands in a heap.
+                    //
+                    // ★★ On screen that is indistinguishable from a viscous
+                    // liquid — which is why viscosity, damping, air drag and the
+                    // surface settings were all tried first, and none of them
+                    // could have worked. The cure is mass per second or voxel
+                    // size, and this percentage is the only thing that says so.
+                    if (fs.sealed_pockets_measured && fs.active_fluid_cells > 0) {
+                        const double pct = 100.0 * static_cast<double>(fs.interior_fluid_cells) /
+                                           static_cast<double>(fs.active_fluid_cells);
+                        blk.Value("  of which interior", "%zu (%.0f%%)",
+                                  fs.interior_fluid_cells, pct);
+                        if (pct < 15.0) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
+                            ImGui::TextWrapped(
+                                "Almost every cell touches air, so this liquid has no "
+                                "pressure field to speak of - it will fall without a "
+                                "splash and pile up, whatever the viscosity says. "
+                                "Give it more mass per second, or a smaller voxel "
+                                "size, until the stream is several cells across.");
+                            ImGui::PopStyleColor();
+                        }
+                    }
                     blk.Value("Recovered from solids", "%zu", fs.recovered_solid_particles);
+                    // Both numbers, and only when a solid substance is actually
+                    // present. Parcels with ZERO blocked cells is the reading
+                    // that says the chunk is thinner than the voxel size can
+                    // express — reporting only the cells would make that
+                    // indistinguishable from "the binding never took", and the
+                    // picture cannot tell them apart either.
+                    // Shown only when it fires. A row reading 0 every frame is a
+                    // row the eye stops seeing, and this one has to be noticed the
+                    // one frame it turns non-zero.
+                    if (domain.fluid_params.granular_enabled) {
+                        blk.Value("Sealed pockets", "%s", "not applicable (granular MPM)");
+                    } else if (!fs.sealed_pockets_measured) {
+                        blk.Value("Sealed pockets", "%s", "not measured (GPU pressure)");
+                    } else if (fs.sealed_pockets > 0) {
+                        blk.Value("Sealed pockets", "%zu", fs.sealed_pockets);
+                        blk.Value("  cells (no p reference)", "%zu", fs.sealed_pocket_cells);
+                    }
+                    if (fs.solid_phase_particles > 0 || fs.solid_phase_cells > 0) {
+                        blk.Value("Solid-phase parcels", "%zu", fs.solid_phase_particles);
+                        blk.Value("  blocking cells", "%zu", fs.solid_phase_cells);
+                    }
                     blk.Total("Step total", step_total);
                     blk.Time("P2G", fs.p2g_ms, fs.p2g_on_gpu ? "GPU" : "CPU", 1);
-                    blk.Time("Pressure", fs.pressure_ms, fs.pressure_on_gpu ? "GPU" : "CPU", 1);
+                    blk.Time("Pressure", fs.pressure_ms,
+                             domain.fluid_params.granular_enabled &&
+                             fs.p2g_on_gpu && fs.g2p_on_gpu
+                                 ? "off (granular MPM)"
+                                 : (fs.pressure_on_gpu ? "GPU" : "CPU"), 1);
                     if (fs.pressure_on_gpu && fs.pressure_cg_max_iterations > 0) {
                         blk.Value("    MGPCG precond", "%s",
                                   fs.pressure_cg_multigrid ? "Layer B V-cycle" : "Layer A Jacobi");
@@ -2815,6 +3758,32 @@ void drawSimulationDomainControls(
                         blk.Time("Viscosity", fs.viscosity_ms, visc_tag, 1);
                     }
                     blk.Time("G2P", fs.g2p_ms, fs.g2p_on_gpu ? "GPU" : "CPU", 1);
+                    if (domain.fluid_params.granular_enabled) {
+                        blk.Value("Granular yielded", "%zu", fs.granular_yielded_particles);
+                        blk.Value("Granular detached", "%zu", fs.granular_detached_particles);
+                        blk.Value("Granular invalid", "%zu", fs.granular_invalid_particles);
+                        blk.Value("Granular sleeping", "%zu", fs.granular_sleeping_particles);
+                        blk.Value("Granular damaged (>0.01%)", "%zu", fs.granular_damaged_particles);
+                        blk.Value("  damage >= 10%", "%zu", fs.granular_damage_over_10_particles);
+                        blk.Value("  damage >= 50%", "%zu", fs.granular_damage_over_50_particles);
+                        blk.Value("  damage >= 90%", "%zu", fs.granular_damage_over_90_particles);
+                        blk.Value("Granular max yield", "%.3e", fs.granular_max_yield_value);
+                        blk.Value("Granular max plastic increment", "%.3e", fs.granular_max_plastic_increment);
+                        blk.Value("Granular max plastic accumulated", "%.3e", fs.granular_max_accumulated_plastic);
+                        blk.Value("Granular mean plastic accumulated", "%.3e", fs.granular_mean_accumulated_plastic);
+                        blk.Value("Granular max bond opening", "%.3e", fs.granular_max_fracture_history);
+                        blk.Value("Granular mean bond opening", "%.3e", fs.granular_mean_fracture_history);
+                        blk.Value("Granular max damage", "%.3f", fs.granular_max_damage);
+                        blk.Value("Granular mean damage", "%.3f", fs.granular_mean_damage);
+                        blk.Value("Granular Young requested", "%.0f Pa", fs.granular_requested_young_modulus);
+                        blk.Value("Granular Young effective", "%.0f Pa%s",
+                                  fs.granular_effective_young_modulus,
+                                  fs.granular_stiffness_capped ? " (CFL capped)" : "");
+                        blk.Value("Granular elastic substeps needed", "%d",
+                                  fs.granular_required_substeps);
+                        blk.Value("Granular solver substeps run", "%d",
+                                  fs.granular_solver_substeps);
+                    }
                     char adv_tag[32];
                     std::snprintf(adv_tag, sizeof(adv_tag), "%d substeps", fs.advect_substeps);
                     blk.Time("Advect", fs.advect_ms, adv_tag, 1);
@@ -3084,27 +4053,10 @@ void drawSimulationDomainControls(
             }
         }
 
+        // Reset lives at the TOP of this panel now (see resetSimulationNow).
+        // Deliberately NOT duplicated here: two buttons doing the same thing in
+        // one panel is how a user ends up unsure whether they differ.
         ImGui::Separator();
-        if (ImGui::Button("Reset Simulation (Free-run)##SimReset", ImVec2(-1, 0))) {
-
-            drainSimulationMutationBackends();
-
-            scene.resetSimulation();
-
-            g_gas_volumes_dirty = true;
-            g_geometry_dirty = true;
-            g_viewport_raster_rebuild_pending = true;
-            g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
-
-            ui_ctx.renderer.resetCPUAccumulation();
-            if (ui_ctx.backend_ptr) {
-                ui_ctx.backend_ptr->resetAccumulation();
-            }
-            ui_ctx.start_render = true;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Clear the bake cache and return to live free-run preview.\nPlay the timeline to bake each frame; scrub to replay cached frames.");
-        }
 
         // ── Render-only point cache: persist the bake across reloads ──────────
         // Writes every particle system (fluid particles + foam + gas grids) for

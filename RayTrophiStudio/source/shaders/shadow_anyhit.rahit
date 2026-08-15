@@ -193,7 +193,7 @@ void main() {
             }
             // Bit 8 of flags: RGBA texture, opacity in .a; clear: grayscale mask in .r
             if (aTexID > 0) {
-                alpha *= ((cmat.flags & 256u) != 0u)
+                alpha *= ((cmat.flags & MAT_FLAG_OPACITY_RGBA) != 0u)
                     ? textureLod(materialTextures[nonuniformEXT(aTexID)], auv, 0.0).a
                     : textureLod(materialTextures[nonuniformEXT(aTexID)], auv, 0.0).r;
             }
