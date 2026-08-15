@@ -590,12 +590,9 @@ __device__ float3 raymarch_vdb_volume(
         AccTIso accIso = iso_grid->getAccessor();
         nanovdb::math::SampleFromVoxels<AccTIso, 1, false> samplerIso(accIso);
 
-        // Apply the same density remap + multiplier the Vulkan iso path uses
-        // (sampleDensityAcc returns remapped*multiplier), so the UI density
-        // value moves the iso=0.5 crossing identically on both backends. Without
-        // this OptiX sampled the raw 0..1 proxy and ignored the density slider.
-        const float iso_remap_range = vol.density_remap_high - vol.density_remap_low + 1e-6f;
-        const float iso_mult = (vol.density_multiplier > 0.0f) ? vol.density_multiplier : 1.0f;
+        // SurfaceSDF geometry reads the producer's surface-centred proxy
+        // directly. Fog density/remap/cutoff controls extinction and must not
+        // move the iso=0.5 boundary. Mirrors Vulkan's sampleIsoField contract.
         auto sample_at_local = [&](const float3& lp) -> float {
             float3 pp = lp;
             pp.x -= vol.pivot_offset[0];
@@ -604,8 +601,7 @@ __device__ float3 raymarch_vdb_volume(
             nanovdb::Vec3f idx = iso_grid->worldToIndexF(nanovdb::Vec3f(pp.x, pp.y, pp.z));
             float v = samplerIso(idx);
             if (!isfinite(v)) return 0.0f;
-            float remapped = fmaxf((v - vol.density_remap_low) / iso_remap_range, 0.0f);
-            return remapped * iso_mult;
+            return fmaxf(v, 0.0f);
         };
 
         float t_iso = t_enter;

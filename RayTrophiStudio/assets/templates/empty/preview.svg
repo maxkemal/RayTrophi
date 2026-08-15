@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360" role="img" aria-labelledby="title description">
+  <title id="title">Empty RayTrophi viewport</title>
+  <desc id="description">A dark viewport with a perspective grid and open space.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#313339"/>
+      <stop offset="1" stop-color="#202227"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#36c7bd" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#36c7bd"/>
+      <stop offset="1" stop-color="#36c7bd" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" rx="14" fill="url(#background)"/>
+  <g fill="none" stroke="#555963" stroke-width="1" opacity="0.55">
+    <path d="M320 150 45 360M320 150 115 360M320 150 185 360M320 150 255 360M320 150 385 360M320 150 455 360M320 150 525 360M320 150 595 360"/>
+    <path d="M269 189h102M235 215h170M192 248h256M138 290h364M70 343h500"/>
+  </g>
+  <path d="M70 343h500" stroke="url(#accent)" stroke-width="2"/>
+  <circle cx="320" cy="150" r="4" fill="#d6bf72"/>
+  <text x="28" y="38" fill="#d9dbe0" font-family="Segoe UI, sans-serif" font-size="18">Empty</text>
+  <text x="28" y="61" fill="#9297a2" font-family="Segoe UI, sans-serif" font-size="12">A clean viewport-first starting point</text>
+</svg>

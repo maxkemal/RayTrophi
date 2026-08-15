@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "id": "raytrophi.start.character_paint",
+  "display_name": "Character Paint",
+  "description": "A paint-ready character with validated channels, texture set and layers.",
+  "kind": "start",
+  "category": "paint",
+  "sort_order": 50,
+  "compatibility": { "minimum_raytrophi_version": "1.0.0" },
+  "preview": { "image": "preview.webp", "alt": "Character prepared for multi-channel painting" },
+  "scene": { "type": "project", "path": "scene.rtp" },
+  "ui_state": {
+    "properties_context": "paint",
+    "bottom_editor": "none",
+    "contextual_dock": "paint",
+    "contextual_dock_width": 280,
+    "viewport_shading": "material_preview",
+    "frame_target": "Paint_Character",
+    "show_timeline": false
+  },
+  "renderer": { "preference": "auto", "allow_fallback": true },
+  "performance": { "class": "medium", "estimated_vram_mb": 1536 },
+  "assets": { "required": ["scene.rtp"], "optional": [] },
+  "guidance": { "path": "guidance.json", "show_on_first_open": true }
+}

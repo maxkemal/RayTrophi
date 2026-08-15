@@ -69,6 +69,7 @@
 #include "SceneCommand.h"  // For undo/redo
 #include "Paint/MeshPaintAdapter.h"
 #include "default_scene_creator.hpp"
+#include "Template/TemplateSession.h"
 #include "SceneSerializer.h"
 #include "ProjectManager.h"  // Project system
 #include "Api/RtPython.h"
@@ -5639,6 +5640,11 @@ bool SceneUI::raycastViewportHit(UIContext& ctx, const ImVec2& screen_pos, HitRe
         return false;
     }
 
+    // Keep viewport surface hits aligned with the final lookfrom/lookat state;
+    // startup/template restoration may have changed those fields after the
+    // camera's derived basis was last updated.
+    ctx.scene.camera->update_camera_vectors();
+
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     if (display.x <= 1.0f || display.y <= 1.0f) {
         return false;
@@ -8285,6 +8291,22 @@ void SceneUI::drawExitConfirmation(UIContext& ctx) {
 
 
 void SceneUI::performNewProject(UIContext& ctx) {
+     const auto opened = raytrophi::templates::TemplateSession::instance().open(
+         "raytrophi.start.general_scene", "discard", ctx, *this, &history);
+     if (opened.opened) {
+         active_model_path = "Untitled";
+         ctx.active_model_path = "Untitled";
+         g_ProjectManager.getProjectData().is_modified = false;
+         pending_action = PendingAction::None;
+         show_exit_confirmation = false;
+         addViewportMessage("General Scene Template Created");
+     } else {
+         addViewportMessage(
+             opened.errors.empty() ? "General Scene template failed" : opened.errors.front(),
+             4.0f, ImVec4(1.0f, 0.35f, 0.25f, 1.0f));
+     }
+     return;
+
      // Clear selection to remove references to objects about to be deleted
      ctx.selection.clearSelection();
      resetMeshEditState(ctx);

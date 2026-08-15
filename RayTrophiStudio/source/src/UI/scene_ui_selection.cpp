@@ -1230,6 +1230,23 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 return; // Camera selected, done
             }
 
+            // Object-mode fallback: right-button box selection already resolves
+            // flat meshes from the canonical hierarchy cache without depending on
+            // CPU BVH membership. Reuse that exact path for a left-click point when
+            // both GPU picking and CPU surface picking miss. The narrow region keeps
+            // normal clicks precise while preventing a newly staged/added flat mesh
+            // from becoming unselectable until an Open/Import rebuild occurs.
+            if (!hit && !gpu_pick_success) {
+                constexpr float point_pick_radius = 1.0f;
+                performObjectMarqueeSelection(
+                    ctx,
+                    static_cast<float>(x) - point_pick_radius,
+                    static_cast<float>(y) - point_pick_radius,
+                    static_cast<float>(x) + point_pick_radius,
+                    static_cast<float>(y) + point_pick_radius);
+                return;
+            }
+
             // ===========================================================================
             // GPU PICK SUCCESS PATH: Direct mesh selection from pick buffer result
             // ===========================================================================

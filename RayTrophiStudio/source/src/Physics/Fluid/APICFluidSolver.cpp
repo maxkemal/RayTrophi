@@ -8,6 +8,7 @@
  */
 
 #include "Fluid/APICFluidSolver.h"
+#include "Fluid/SubstanceTag.h"   // kSubstanceUntagged (solid-phase resolution)
 #include "GridFluidSolver.h"
 #include "SimulationWorld.h"
 #include "ForceField.h"
@@ -590,7 +591,10 @@ static void gridToParticle(FluidParticles& parts,
                            float dt,
                            const float* vel_x_pre,
                            const float* vel_y_pre,
-                           const float* vel_z_pre) {
+                           const float* vel_z_pre,
+                           // Per-particle "this parcel is solid phase" mask, or
+                           // null when the domain declares no solid substance.
+                           const uint8_t* solid_particle) {
     const float h    = grid.voxel_size;
     const float invH = 1.0f / h;
     // Inverse second moment of the quadratic B-spline kernel: 4/h^2.
@@ -614,6 +618,20 @@ static void gridToParticle(FluidParticles& parts,
 #endif
     for (int64_t raw_pi = 0; raw_pi < static_cast<int64_t>(parts.size()); ++raw_pi) {
         const size_t pi = static_cast<size_t>(raw_pi);
+        // ── Solid phase: the grid does not tell this parcel how to move ──────
+        // ★★★ A solid parcel keeps the velocity it entered the step with (its
+        // own gravity and force-field integration). Gathering the grid here
+        // would read the field the parcel ITSELF imposed through solid_vel and
+        // then blend the surrounding liquid into it, so the chunk would be
+        // carried by the flow it is supposed to obstruct — and it would do so
+        // at whatever rate the interpolation happened to give, which is not a
+        // force anyone authored. Cohesive, dragged clusters are the NEXT tier
+        // and belong to Jolt; see Fluid::SubstancePhase.
+        //
+        // ★ The affine matrix is left alone rather than zeroed: it is APIC's
+        // velocity gradient, and a parcel that never gathers never accumulates
+        // one. Zeroing it every step would be the same value at more cost.
+        if (solid_particle && solid_particle[pi]) continue;
         Vec3 v_new(0, 0, 0);
         Vec3 v_pre(0, 0, 0); // gathered pre-projection grid velocity (for FLIP)
         AffineC C_new;
@@ -730,7 +748,13 @@ static void gridToParticle(FluidParticles& parts,
 static size_t projectPressureFreeSurface(const FluidParticles& parts,
                                          FluidSim::FluidGrid& grid,
                                          const APICSolverParams& params,
-                                         float dt) {
+                                         float dt,
+                                         size_t& out_sealed_pockets,
+                                         size_t& out_sealed_cells,
+                                         size_t& out_interior_cells) {
+    out_sealed_pockets = 0;
+    out_sealed_cells = 0;
+    out_interior_cells = 0;
     if (dt <= 0.0f) return 0;
 
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
@@ -1133,6 +1157,149 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         // row → NaN in PCG. Floor it; an isolated cell just holds p≈0.
         if (diag < 1e-6f) diag = 1.0f;
         Adiag[c] = diag;
+    }
+
+    // 1b. Sealed pockets: give every fluid region a pressure reference.
+    //
+    // ★★★ THIS IS THE CURE FOR "MORE PRESSURE ITERATIONS = HARDER KICK".
+    // A connected group of fluid cells whose every face is either fluid-fluid or
+    // closed (solid, or a closed domain wall) has no Dirichlet row anywhere in
+    // it. Its matrix block is SINGULAR and the null space is the constant
+    // pressure over the region. PCG does not blow up on such a block in one
+    // iteration -- it grows the null-space component a little on EVERY
+    // iteration, because the right-hand side is never exactly orthogonal to it
+    // (a moving wall, the fractional variational face weights and plain
+    // floating-point rounding each break the exact flux balance). The pressure
+    // therefore ramps with the ITERATION COUNT, the gradient at the pocket's
+    // boundary ramps with it, and the particles sitting there are thrown clear.
+    //
+    // ★★ The measurement is what identified this, not a hunch: the symptom
+    // scales with `pressure_iterations` (quiet at 8, a few particles at 9, a
+    // one-frame explosion at 60+) and disappears when reseeding is switched off,
+    // because reseeding is what finally tops up the last starved cell and SEALS
+    // the pocket against the collider. Nothing else in this projection has
+    // "converge harder, kick harder" as a property -- a genuine physical impulse
+    // gets SMALLER as the solve converges, not larger. That single property
+    // rules out every candidate that was guessed at before.
+    //
+    // Two standard repairs per sealed region:
+    //   1. Subtract its mean divergence. That removes the part of the RHS lying
+    //      in the null space -- the part no pressure field can answer, because
+    //      it is asking a closed box to change volume. Spreading the leftover
+    //      over the region is the gentlest place to put an error that physically
+    //      cannot be removed.
+    //   2. Pin one cell to p = 0. With a reference the block is non-singular and
+    //      the answer is bounded however long PCG runs.
+    //
+    // ★ INERT WHEN THE DIAGNOSIS IS WRONG. A region touching air, an open wall,
+    // or any partially open solid face already has a reference and is left
+    // exactly as it was. `out_sealed_cells` reports what this actually fired on:
+    // zero means no pocket existed and this pass changed nothing -- which is the
+    // measurement that keeps this from being one more blind fix.
+    {
+        struct PocketCell { int i, j, k; uint32_t c; };
+        static std::vector<uint8_t>    pocket_seen_buf;
+        static std::vector<PocketCell> pocket_stack;
+        static std::vector<uint32_t>   pocket_members;
+        if (pocket_seen_buf.size() < total) pocket_seen_buf.assign(total, 0u);
+        else std::fill(pocket_seen_buf.begin(), pocket_seen_buf.begin() + total, 0u);
+        uint8_t* const seen = pocket_seen_buf.data();
+        constexpr float kOpenEps = 1e-6f;
+        const int face_off[6][3] = { {-1,0,0}, {1,0,0}, {0,-1,0},
+                                     {0,1,0},  {0,0,-1}, {0,0,1} };
+
+        for (int k0 = min_k; k0 <= max_k; ++k0)
+        for (int j0 = min_j; j0 <= max_j; ++j0)
+        for (int i0 = min_i; i0 <= max_i; ++i0) {
+            const size_t c0 = grid.cellIndex(i0, j0, k0);
+            if (!is_fluid[c0] || seen[c0]) continue;
+
+            pocket_stack.clear();
+            pocket_members.clear();
+            seen[c0] = 1u;
+            pocket_stack.push_back(PocketCell{ i0, j0, k0, static_cast<uint32_t>(c0) });
+            bool has_reference = false;
+
+            // Flood fill along exactly the couplings the matrix has: a face
+            // carries an off-diagonal only when its open weight is non-zero AND
+            // the neighbour is fluid. Following anything else here would merge
+            // regions the solver keeps apart, and the singularity test would be
+            // answering a question about a different matrix.
+            while (!pocket_stack.empty()) {
+                const PocketCell cur = pocket_stack.back();
+                pocket_stack.pop_back();
+                pocket_members.push_back(cur.c);
+                const int i = cur.i, j = cur.j, k = cur.k;
+                bool cell_touches_air = false;
+                const float fw[6] = { fWx(i, j, k), fWx(i + 1, j, k),
+                                      fWy(i, j, k), fWy(i, j + 1, k),
+                                      fWz(i, j, k), fWz(i, j, k + 1) };
+                for (int f = 0; f < 6; ++f) {
+                    if (fw[f] <= kOpenEps) continue;   // closed: no coupling, no ghost
+                    const int ni = i + face_off[f][0];
+                    const int nj = j + face_off[f][1];
+                    const int nk = k + face_off[f][2];
+                    if (!isFluid(ni, nj, nk)) {
+                        cell_touches_air = true;
+                        // Open face onto a non-fluid cell = the Dirichlet ghost
+                        // that gives this region its p = 0 reference. One is
+                        // enough; the region is well posed and we are done.
+                        has_reference = true;
+                        continue;
+                    }
+                    int wi = ni, wj = nj, wk = nk;
+                    if (periodic) { wi = wrapIdx(ni, nx); wj = wrapIdx(nj, ny); wk = wrapIdx(nk, nz); }
+                    const size_t nc = grid.cellIndex(wi, wj, wk);
+                    if (seen[nc]) continue;
+                    seen[nc] = 1u;
+                    pocket_stack.push_back(PocketCell{ wi, wj, wk, static_cast<uint32_t>(nc) });
+                }
+                // \u2605\u2605\u2605 INTERIOR = a fluid cell with liquid on all six sides. It is
+                // the only kind of cell the pressure solve can do anything with:
+                // a cell that touches air is held at p \u2248 0 by the free-surface
+                // condition, so a body made ENTIRELY of such cells has no
+                // pressure field, no incompressibility, and nothing to eject a
+                // droplet with on impact. It falls as loose particles and lands
+                // in a heap -- which reads exactly as "thick, blobby, no splash".
+                //
+                // \u2605\u2605 THIS IS THE NUMBER THAT SAYS "YOUR JET IS TOO THIN FOR THIS
+                // VOXEL SIZE", and its absence is why that diagnosis took days.
+                // A stream one or two cells across is all surface; the fix is
+                // more mass per second or a smaller voxel -- NOT viscosity, not
+                // damping, not the surface settings, all of which were tried.
+                // The eye cannot tell an under-resolved jet from a viscous one;
+                // this ratio can.
+                if (!cell_touches_air) ++out_interior_cells;
+            }
+
+            if (has_reference || pocket_members.empty()) continue;
+
+            ++out_sealed_pockets;
+            out_sealed_cells += pocket_members.size();
+
+            double div_sum = 0.0;
+            for (uint32_t c : pocket_members) div_sum += static_cast<double>(div[c]);
+            const float div_mean =
+                static_cast<float>(div_sum / static_cast<double>(pocket_members.size()));
+            for (uint32_t c : pocket_members) div[c] -= div_mean;
+
+            // Pin the seed cell. Both directions of every incident off-diagonal
+            // have to go: the PCG reads Aplus* from the lower cell for both
+            // sides of a face, so clearing only this cell's entries would leave
+            // an asymmetric matrix and CG would silently stop being CG.
+            const size_t pc = static_cast<size_t>(pocket_members[0]);
+            div[pc]    = 0.0f;
+            Adiag[pc]  = 1.0f;
+            Aplusi[pc] = 0.0f;
+            Aplusj[pc] = 0.0f;
+            Aplusk[pc] = 0.0f;
+            const int mi = (i0 > 0) ? i0 - 1 : (periodic ? nx - 1 : -1);
+            const int mj = (j0 > 0) ? j0 - 1 : (periodic ? ny - 1 : -1);
+            const int mk = (k0 > 0) ? k0 - 1 : (periodic ? nz - 1 : -1);
+            if (mi >= 0) Aplusi[grid.cellIndex(mi, j0, k0)] = 0.0f;
+            if (mj >= 0) Aplusj[grid.cellIndex(i0, mj, k0)] = 0.0f;
+            if (mk >= 0) Aplusk[grid.cellIndex(i0, j0, mk)] = 0.0f;
+        }
     }
 
     // 2. MIC(0) preconditioner. E[c] = A[c,c] - sum_{n in -i,-j,-k}
@@ -1680,7 +1847,13 @@ static void applyViscosity(FluidSim::FluidGrid& grid,
                            const std::vector<float>* fluid_mask,
                            int& out_sweeps_run) {
     out_sweeps_run = 0;
-    if (params.kinematic_viscosity <= 0.0f || dt <= 0.0f) {
+    // A per-cell field switches the stage on by itself: it is only ever built
+    // when a substance actually overrides the domain, and ignoring it because
+    // the domain happens to be inviscid would make an authored number a no-op.
+    const bool has_nu_field =
+        params.substance_viscosity != nullptr &&
+        params.substance_viscosity->size() == grid.getCellCount();
+    if ((params.kinematic_viscosity <= 0.0f && !has_nu_field) || dt <= 0.0f) {
         return;
     }
     const float h = (grid.voxel_size > 1.0e-6f) ? grid.voxel_size : 1.0f;
@@ -1688,9 +1861,10 @@ static void applyViscosity(FluidSim::FluidGrid& grid,
     // code was missing; without it ν is not a viscosity, it is a screen-space
     // blur radius.
     const float a = params.kinematic_viscosity * dt / (h * h);
-    if (a <= 1.0e-8f) {
+    if (a <= 1.0e-8f && !has_nu_field) {
         return;
     }
+    const float dt_over_h2 = dt / (h * h);
     const int sweeps = std::clamp(params.viscosity_sweeps, 1, 64);
     const float slip = std::clamp(params.viscosity_wall_slip, 0.0f, 1.0f);
     const float solid_weight = 1.0f - slip;   // 0 = free-slip, 1 = no-slip
@@ -1717,6 +1891,34 @@ static void applyViscosity(FluidSim::FluidGrid& grid,
         if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return 0.0f;
         const Vec3& v = grid.solid_vel[grid.cellIndex(i, j, k)];
         return (comp == 0) ? v.x : (comp == 1) ? v.y : v.z;
+    };
+
+    // ── Variable viscosity ──────────────────────────────────────────────────
+    // ν lives at CELL CENTRES; the unknowns live on FACES. A face's viscosity is
+    // the mean of the two cells it straddles, and the coefficient coupling two
+    // faces is the mean of THEIR viscosities.
+    //
+    // ★★★ SYMMETRIC ON PURPOSE. Taking the coefficient from the updating face
+    // alone would make the operator non-self-adjoint: the milk side would pull
+    // on the chocolate side harder than the chocolate side pulls back, so
+    // momentum would leak across the interface. Gauss-Seidel does not diverge
+    // on that — it converges to the wrong answer, and the wrong answer looks
+    // like a mixture that slowly drifts one way.
+    auto clampCell = [&](int& i, int& j, int& k) {
+        i = std::clamp(i, 0, nx - 1);
+        j = std::clamp(j, 0, ny - 1);
+        k = std::clamp(k, 0, nz - 1);
+    };
+    auto cellNu = [&](int i, int j, int k) -> float {
+        clampCell(i, j, k);
+        return (*params.substance_viscosity)[grid.cellIndex(i, j, k)];
+    };
+    auto faceNu = [&](int comp, int i, int j, int k) -> float {
+        int li = i, lj = j, lk = k;
+        if (comp == 0)      li = i - 1;
+        else if (comp == 1) lj = j - 1;
+        else                lk = k - 1;
+        return 0.5f * (cellNu(li, lj, lk) + cellNu(i, j, k));
     };
 
     // Classify a face of the given component and, when it is usable, hand back
@@ -1789,6 +1991,7 @@ static void applyViscosity(FluidSim::FluidGrid& grid,
 
             float sum = 0.0f;
             float diag = 1.0f;
+            const float nu_self = has_nu_field ? faceNu(comp, i, j, k) : 0.0f;
             const int offsets[6][3] = {
                 {-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}
             };
@@ -1796,14 +1999,20 @@ static void applyViscosity(FluidSim::FluidGrid& grid,
                 float nv = 0.0f;
                 const FaceKind kind = classify(comp, i + o[0], j + o[1], k + o[2],
                                                field, nv);
+                // Uniform domains keep the precomputed scalar; the branch is on
+                // a loop-invariant bool and costs nothing there.
+                const float a_link = has_nu_field
+                    ? 0.5f * (nu_self + faceNu(comp, i + o[0], j + o[1], k + o[2]))
+                          * dt_over_h2
+                    : a;
                 if (kind == FaceKind::Fluid) {
-                    sum  += a * nv;
-                    diag += a;
+                    sum  += a_link * nv;
+                    diag += a_link;
                 } else if (kind == FaceKind::Solid) {
                     // Dirichlet at the solid's velocity, scaled by how much of
                     // the no-slip condition the material asks for.
-                    sum  += a * solid_weight * nv;
-                    diag += a * solid_weight;
+                    sum  += a_link * solid_weight * nv;
+                    diag += a_link * solid_weight;
                 }
                 // Air: stress-free — contributes to neither side.
             }
@@ -1830,7 +2039,10 @@ static int advectParticles(FluidParticles& parts,
                             float max_velocity,
                             float wall_damping,
                             float cfl,
-                            int max_substeps) {
+                            int max_substeps,
+                            // Per-particle "this parcel is solid phase" mask, or
+                            // null when the domain declares no solid substance.
+                            const uint8_t* solid_particle) {
     const float h    = grid.voxel_size;
     const float invH = 1.0f / h;
 
@@ -1911,37 +2123,205 @@ static int advectParticles(FluidParticles& parts,
             // A particle that already flowed out this frame is frozen until the
             // post-loop cull removes it — skip so it never samples outside.
             if (parts.flags[pi] & FLAG_OUTFLOW) continue;
-            // RK2 midpoint using grid velocity (more stable than forward Euler
-            // for free-surface flow, negligible cost on CPU).
             Vec3 p0 = parts.position[pi];
-            Vec3 g0 = (p0 - grid.origin) * invH;
-            Vec3 v0(sampleMACComponent(grid, 0, g0),
-                    sampleMACComponent(grid, 1, g0),
-                    sampleMACComponent(grid, 2, g0));
-            Vec3 pmid = p0 + v0 * (0.5f * sub_dt);
-            Vec3 gm   = (pmid - grid.origin) * invH;
-            Vec3 vm(sampleMACComponent(grid, 0, gm),
-                    sampleMACComponent(grid, 1, gm),
-                    sampleMACComponent(grid, 2, gm));
-            Vec3 pn = p0 + vm * sub_dt;
+            const bool is_solid_parcel = solid_particle && solid_particle[pi];
+            Vec3 pn;
+            if (is_solid_parcel) {
+                // ★ A solid parcel moves by its OWN velocity, not by the grid
+                // field — the same reason gridToParticle skips it. Sampling the
+                // MAC field here would advect the chunk with the liquid it is
+                // blocking, and because its own cells carry solid_vel the
+                // result would look nearly right at rest and drift only under
+                // flow, which is the hardest version of this bug to see.
+                pn = p0 + parts.velocity[pi] * sub_dt;
+            } else {
+                // RK2 midpoint using grid velocity (more stable than forward Euler
+                // for free-surface flow, negligible cost on CPU).
+                Vec3 g0 = (p0 - grid.origin) * invH;
+                Vec3 v0(sampleMACComponent(grid, 0, g0),
+                        sampleMACComponent(grid, 1, g0),
+                        sampleMACComponent(grid, 2, g0));
+                Vec3 pmid = p0 + v0 * (0.5f * sub_dt);
+                Vec3 gm   = (pmid - grid.origin) * invH;
+                Vec3 vm(sampleMACComponent(grid, 0, gm),
+                        sampleMACComponent(grid, 1, gm),
+                        sampleMACComponent(grid, 2, gm));
+                pn = p0 + vm * sub_dt;
+            }
 
-            // ── Interior solid (collider) collision ──────────────────────────
-            // Resolve BEFORE the domain-wall handling so a particle never slides
-            // into a voxelized collider. Two cases:
-            //   (a) the origin is already solid — a MOVING collider swept its
-            //       cells over the particle this step; eject to the nearest free
-            //       cell so the collider shoves the fluid instead of swallowing
-            //       it (the reported "particles aren't stopped" case).
-            //   (b) the destination is solid — separated-axis slide from p0 so
-            //       the blocked component stops while motion along the surface is
-            //       preserved (water slides along the box face, no tunneling).
-            if (has_solid) {
+            // ── Interior solid collision ─────────────────────────────────────
+            // Resolved BEFORE the domain-wall handling so nothing ever slides
+            // into a voxelized solid. Two branches, because a parcel that IS
+            // the solid asks a different question than one caught inside it.
+            if (has_solid && is_solid_parcel) {
+                // ── Solid parcel vs. everything else that is solid ────────────
+                // ★★★ ITS OWN CELL IS NOT AN OBSTACLE. The liquid branch below
+                // treats a parcel standing in a solid cell as swallowed by a
+                // moving collider and ejects it; for the parcel that IS the
+                // solid that reads as the chunk blowing itself apart the moment
+                // it becomes thick enough to fill a cell — a "collision
+                // instability" nobody would trace back to a missing exception.
+                //
+                // ★★ Blocked against every OTHER solid cell, including cells
+                // held by sibling parcels: that mutual blocking is the only
+                // thing that makes chunks stack instead of collapsing into one
+                // layer on the floor. It is contact, not cohesion — a pile
+                // still spreads sideways under load, which is the honest limit
+                // of an obstacle field (see Fluid::SubstancePhase).
+                Vec3& pv = parts.velocity[pi];
+                const Vec3 g0c = (p0 - grid.origin) * invH;
+                const int own_i = static_cast<int>(std::floor(g0c.x));
+                const int own_j = static_cast<int>(std::floor(g0c.y));
+                const int own_k = static_cast<int>(std::floor(g0c.z));
+                auto blockedAt = [&](const Vec3& p) -> bool {
+                    const Vec3 g = (p - grid.origin) * invH;
+                    const int i = static_cast<int>(std::floor(g.x));
+                    const int j = static_cast<int>(std::floor(g.y));
+                    const int k = static_cast<int>(std::floor(g.z));
+                    if (i == own_i && j == own_j && k == own_k) return false; // own cell
+                    return solidCellAt(i, j, k);
+                };
+                // Separated-axis slide with a RELATIVE-velocity contact test.
+                //
+                // ★★★ "THE CELL AHEAD IS SOLID" IS NOT ENOUGH, and getting this
+                // wrong tears a falling chunk apart. Inside any solid body the
+                // cell below a parcel is occupied by its own siblings, so a
+                // purely positional test blocks every layer except the bottom
+                // one: the bottom falls, the rest stay put, and the chunk
+                // smears into a column. Blocking only when the parcel is
+                // APPROACHING the obstacle in the obstacle's own frame makes
+                // co-moving matter transparent to itself while a floor (or a
+                // chunk that has already stopped) still stops it. The failure
+                // this avoids looks like melting, not like a collision bug.
+                //
+                // ★ A blocked axis takes the obstacle's velocity — 0 for a
+                // static collider, so a landing chunk comes to rest with no
+                // restitution nobody authored. Tangential components survive,
+                // so it still slides down a slope.
+                auto resolveAxis = [&](int axis, float p0_a, float pn_a,
+                                       Vec3& out_pos, float& out_vel) {
+                    Vec3 probe = out_pos;
+                    if (axis == 0) probe.x = pn_a; else if (axis == 1) probe.y = pn_a; else probe.z = pn_a;
+                    if (!blockedAt(probe)) {
+                        if (axis == 0) out_pos.x = pn_a; else if (axis == 1) out_pos.y = pn_a; else out_pos.z = pn_a;
+                        return;
+                    }
+                    const Vec3 sv = solidVelAtPos(probe);
+                    const float sv_a = (axis == 0) ? sv.x : (axis == 1) ? sv.y : sv.z;
+                    const float dir = pn_a - p0_a;
+                    const float approach = (out_vel - sv_a) * dir;
+                    if (approach <= 0.0f) {
+                        // Separating or co-moving: the obstacle is this parcel's
+                        // own body travelling with it. Let it through.
+                        if (axis == 0) out_pos.x = pn_a; else if (axis == 1) out_pos.y = pn_a; else out_pos.z = pn_a;
+                        return;
+                    }
+                    out_vel = sv_a;
+                };
+                Vec3 resolved = p0;
+                resolveAxis(0, p0.x, pn.x, resolved, pv.x);
+                resolveAxis(1, p0.y, pn.y, resolved, pv.y);
+                resolveAxis(2, p0.z, pn.z, resolved, pv.z);
+                pn = resolved;
+            } else if (has_solid) {
+                // Liquid. Two cases:
+                //   (a) the origin is already solid — a MOVING collider swept
+                //       its cells over the particle this step; eject to the
+                //       nearest free cell so the collider shoves the fluid
+                //       instead of swallowing it.
+                //   (b) the destination is solid — separated-axis slide from p0
+                //       so the blocked component stops while motion along the
+                //       surface is preserved (no tunneling).
                 Vec3& pv = parts.velocity[pi];
                 if (solidAtPos(p0)) {
                     const Vec3 g0c = (p0 - grid.origin) * invH;
                     const int ci = static_cast<int>(std::floor(g0c.x));
                     const int cj = static_cast<int>(std::floor(g0c.y));
                     const int ck = static_cast<int>(std::floor(g0c.z));
+                    // -- Which KIND of solid swallowed this parcel? ------------
+                    // ★★★ A CHUNK OF MATTER IS NOT A COLLIDER, and resolving them
+                    // the same way is the second half of the reported burst.
+                    // Below, a swallowed parcel is teleported to the CENTRE of
+                    // the nearest free cell, up to three cells away -- correct
+                    // for a collider, which is a hard surface that genuinely
+                    // swept through and whose interior no liquid may occupy.
+                    // A solid-phase substance is liquid's own neighbour: its
+                    // mask changes shape every step, so parcels drift in and out
+                    // of it constantly, and a three-cell teleport per crossing
+                    // is an explosion sourced at the interface.
+                    //
+                    // ★ So a substance solid pushes across ONE FACE only, by a
+                    // hair, keeping the other two axes where they were. Worst
+                    // case the parcel is deep inside a chunk and no face is
+                    // free: then it is left ALONE this substep rather than flung
+                    // outward -- the mask moves on the next step and it leaves
+                    // on its own. Doing nothing is the honest answer to "there
+                    // is nowhere to go"; teleporting is a guess that always
+                    // looks like a bug.
+                    const bool in_bounds_cell =
+                        ci >= 0 && ci < snx && cj >= 0 && cj < sny && ck >= 0 && ck < snz;
+                    const bool substance_solid = in_bounds_cell &&
+                        grid.solid[grid.cellIndex(ci, cj, ck)] ==
+                            FluidSim::FluidGrid::kSolidSubstance;
+                    if (substance_solid) {
+                        static const int kFaceOffsets[6][3] = {
+                            { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 },
+                            { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }
+                        };
+                        int best = -1;
+                        float best_gap = -1.0f;
+                        for (int f = 0; f < 6; ++f) {
+                            const int di = kFaceOffsets[f][0];
+                            const int dj = kFaceOffsets[f][1];
+                            const int dk = kFaceOffsets[f][2];
+                            const int ni = ci + di, nj = cj + dj, nk = ck + dk;
+                            // ★ Out of grid is NOT a free cell here, even though
+                            // solidCellAt says "not solid" for it. Taking that
+                            // answer would push the parcel through the domain
+                            // wall — past the clamp this branch skips — and it
+                            // would only ever happen to a chunk touching the
+                            // boundary, i.e. rarely and inexplicably.
+                            if (ni < 0 || ni >= snx || nj < 0 || nj >= sny ||
+                                nk < 0 || nk >= snz) continue;
+                            if (solidCellAt(ni, nj, nk)) continue;
+                            // Prefer the face the parcel is already closest to:
+                            // it is the shortest way out and the one its own
+                            // motion was heading for.
+                            const float frac = (di != 0) ? (g0c.x - static_cast<float>(ci))
+                                             : (dj != 0) ? (g0c.y - static_cast<float>(cj))
+                                                         : (g0c.z - static_cast<float>(ck));
+                            const float gap = (di + dj + dk > 0) ? (1.0f - frac) : frac;
+                            if (best < 0 || gap < best_gap) { best = f; best_gap = gap; }
+                        }
+                        if (best >= 0) {
+                            const int di = kFaceOffsets[best][0];
+                            const int dj = kFaceOffsets[best][1];
+                            const int dk = kFaceOffsets[best][2];
+                            const float eps = 0.02f * h;
+                            pn = p0;
+                            if (di > 0)      pn.x = grid.origin.x + static_cast<float>(ci + 1) * h + eps;
+                            else if (di < 0) pn.x = grid.origin.x + static_cast<float>(ci) * h - eps;
+                            if (dj > 0)      pn.y = grid.origin.y + static_cast<float>(cj + 1) * h + eps;
+                            else if (dj < 0) pn.y = grid.origin.y + static_cast<float>(cj) * h - eps;
+                            if (dk > 0)      pn.z = grid.origin.z + static_cast<float>(ck + 1) * h + eps;
+                            else if (dk < 0) pn.z = grid.origin.z + static_cast<float>(ck) * h - eps;
+                            // Only the velocity going INTO the chunk is removed,
+                            // in the chunk's own frame. The parcel is not given
+                            // an outward kick: the push above already separated
+                            // them, and adding speed here is how a contact
+                            // resolution turns into a spray.
+                            const Vec3 sv = solidVelAtPos(p0);
+                            Vec3 rel = pv - sv;
+                            if (di != 0 && rel.x * static_cast<float>(di) < 0.0f) rel.x = 0.0f;
+                            if (dj != 0 && rel.y * static_cast<float>(dj) < 0.0f) rel.y = 0.0f;
+                            if (dk != 0 && rel.z * static_cast<float>(dk) < 0.0f) rel.z = 0.0f;
+                            pv = sv + rel;
+                        } else {
+                            pn = p0;  // fully enclosed: wait, do not fling
+                        }
+                        parts.position[pi] = pn;
+                        continue;
+                    }
                     bool found = false;
                     int fi = ci, fj = cj, fk = ck;
                     for (int r = 1; r <= 3 && !found; ++r) {
@@ -2056,7 +2436,15 @@ static int advectParticles(FluidParticles& parts,
 static void redistributeParticles(FluidParticles& parts,
                                   const FluidSim::FluidGrid& grid,
                                   const APICSolverParams& params,
-                                  uint32_t step_seed) {
+                                  uint32_t step_seed,
+                                  std::size_t* added_out,
+                                  std::size_t* removed_out) {
+    if (added_out) *added_out = 0u;
+    if (removed_out) *removed_out = 0u;
+    // Granular particles carry persistent stress/plastic history and represent
+    // material points. Liquid reseeding invents/removes samples and therefore
+    // destroys both mass and constitutive history; never run it for sand.
+    if (params.granular_enabled) return;
     if (!params.reseed_enabled || parts.empty()) return;
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) return;
 
@@ -2086,15 +2474,10 @@ static void redistributeParticles(FluidParticles& parts,
     // spreading film at ~min_per particles per wetted cell — a finite number set
     // by the floor area — instead of letting the frontier reach full bulk
     // density, push further, and compound.
-    const std::size_t count_before_reseed = parts.size();
-    // A second, deliberately GENEROUS backstop: no single step may create more
-    // than a quarter of the existing liquid. This must not bite during normal
-    // operation — the loop walks cells in scan order, so a budget that runs out
-    // mid-frame leaves the cells it never reached below the air threshold, which
-    // is the very starvation that made the surface behave as spray. It exists
-    // only so a pathological configuration cannot explode inside one frame.
-    std::size_t reseed_budget =
-        std::max<std::size_t>(2048u, count_before_reseed / 4u);
+    // Particle count is mass in the current unit-mass P2G formulation. This
+    // budget starts empty and is funded only by crowded-cell removals below;
+    // reseeding may redistribute samples but cannot increase total mass.
+    std::size_t reseed_budget = 0u;
 
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     const float h = grid.voxel_size;
@@ -2159,6 +2542,10 @@ static void redistributeParticles(FluidParticles& parts,
         }
     }
 
+    if (removed_out) *removed_out = static_cast<std::size_t>(removed);
+    reseed_budget = static_cast<std::size_t>(removed);
+    if (removed == 0) return;
+
     // 3. Compact in place. Write cursor advances only for kept particles.
     if (removed > 0) {
         std::size_t write = 0;
@@ -2173,6 +2560,12 @@ static void redistributeParticles(FluidParticles& parts,
                 parts.temperature[write] = parts.temperature[pi];
                 parts.combustible_fraction[write] = parts.combustible_fraction[pi];
                 parts.substance_tag[write] = parts.substance_tag[pi];
+                parts.uvw[write] = parts.uvw[pi];
+                // Both generations move together. Compacting one and not the
+                // other would misalign them by the number of removed particles,
+                // and since they are blended per index the result would be a
+                // liquid textured with two unrelated coordinates.
+                if (pi < parts.uvw_b.size()) parts.uvw_b[write] = parts.uvw_b[pi];
             }
             ++write;
         }
@@ -2184,6 +2577,8 @@ static void redistributeParticles(FluidParticles& parts,
         parts.temperature.resize(write);
         parts.combustible_fraction.resize(write);
         parts.substance_tag.resize(write);
+        parts.uvw.resize(write);
+        if (!parts.uvw_b.empty()) parts.uvw_b.resize(write);
     }
 
     // Compaction changes particle indices. Rebuild the per-cell chemistry donor
@@ -2314,8 +2709,44 @@ static void redistributeParticles(FluidParticles& parts,
                     const uint32_t substance = parent >= 0 &&
                         static_cast<std::size_t>(parent) < parts.substance_tag.size()
                         ? parts.substance_tag[static_cast<std::size_t>(parent)] : 0u;
-                    parts.emit(p, v, temperature, combustible, substance);
+                    // ★ Reseed does not TRANSPORT liquid, it CREATES particles —
+                    // and a created particle with no material coordinate is a
+                    // hole in the texture. Inherit the donor's, carrying the
+                    // spawn OFFSET across so the child lands at the coordinate
+                    // its own position implies rather than stacking every child
+                    // of one donor onto a single texel (which would show as a
+                    // smeared blob wherever the top-up is busy).
+                    //
+                    // No donor means no continuity to inherit: fall through to
+                    // emit's default (uvw = birth position). That is a seam, but
+                    // it is an HONEST one — there is no neighbour to be
+                    // continuous with — and it can only happen in a cell whose
+                    // only particles left the grid this step.
+                    //
+                    // ★ BOTH generations are inherited, each from its own donor
+                    // value. They were reset at different times, so the donor's
+                    // two coordinates genuinely differ; copying one into both
+                    // would fuse the pair into a single generation for every
+                    // reseeded particle — the stretch cure would keep reporting
+                    // as enabled while quietly not applying in splashes.
+                    Vec3 child_uvw, child_uvw_b;
+                    const Vec3* child_uvw_ptr = nullptr;
+                    const Vec3* child_uvw_b_ptr = nullptr;
+                    if (parent >= 0 &&
+                        static_cast<std::size_t>(parent) < parts.uvw.size()) {
+                        const std::size_t pidx = static_cast<std::size_t>(parent);
+                        const Vec3 offset = p - parts.position[pidx];
+                        child_uvw = parts.uvw[pidx] + offset;
+                        child_uvw_ptr = &child_uvw;
+                        if (pidx < parts.uvw_b.size()) {
+                            child_uvw_b = parts.uvw_b[pidx] + offset;
+                            child_uvw_b_ptr = &child_uvw_b;
+                        }
+                    }
+                    parts.emit(p, v, temperature, combustible, substance,
+                               child_uvw_ptr, child_uvw_b_ptr);
                 }
+                if (added_out) *added_out += static_cast<std::size_t>(actual_need);
             }
         }
     }
@@ -2478,6 +2909,36 @@ void step(FluidParticles& particles,
     const int thread_count = solverThreadCount(params);
     const bool particle_parallel = shouldParallelParticles(params, particles.size());
 
+    // ── Solid-phase parcels ─────────────────────────────────────────────────
+    // Resolved ONCE per step into a per-particle mask. The tag list is short
+    // (kMaxFluidSubstanceMaterials at most), but the particle stages that need
+    // the answer run per substep, so a scan there would multiply by CFL.
+    //
+    // ★ Null mask, not an empty one, when the domain declares no solid: every
+    // consumer then compiles down to exactly the code it ran before this
+    // existed, which is what keeps liquid-only domains bit-identical.
+    static std::vector<uint8_t> s_solid_particle;
+    const uint8_t* solid_particle = nullptr;
+    if (params.solid_substance_tags && !params.solid_substance_tags->empty() &&
+        particles.substance_tag.size() >= particles.size()) {
+        const auto& tags = *params.solid_substance_tags;
+        s_solid_particle.assign(particles.size(), 0u);
+        bool any = false;
+        for (std::size_t pi = 0; pi < particles.size(); ++pi) {
+            const uint32_t tag = particles.substance_tag[pi];
+            // ★ Tag 0 is untagged liquid, never solid — see
+            // buildSubstanceSolidCells for why that matters.
+            if (tag == kSubstanceUntagged) continue;
+            for (uint32_t st : tags) {
+                if (st != tag) continue;
+                s_solid_particle[pi] = 1u;
+                any = true;
+                break;
+            }
+        }
+        if (any) solid_particle = s_solid_particle.data();
+    }
+
     // 1. External forces on particles (gravity + force fields, incl. the wind
     // surface-drag model). Factored into applyExternalForces so the GPU pipeline
     // can run it on the CPU then upload the post-force velocities for a GPU P2G.
@@ -2556,7 +3017,16 @@ void step(FluidParticles& particles,
             // same cell mask the pressure solve and the GPU kernel use.
             static std::vector<float> visc_mask;
             const std::vector<float>* mask_ptr = nullptr;
-            if (params.free_surface && params.kinematic_viscosity > 0.0f) {
+            // ★ The per-substance field counts as "there is viscosity here"
+            // exactly like the scalar does. Without this, an inviscid domain
+            // with a thick substance would run the stencil with NO free-surface
+            // mask, so it would treat air faces as walls and brake the surface
+            // against nothing — a viscous skin, not a viscous liquid.
+            const bool nu_field_present =
+                params.substance_viscosity != nullptr &&
+                params.substance_viscosity->size() == grid.getCellCount();
+            if (params.free_surface &&
+                (params.kinematic_viscosity > 0.0f || nu_field_present)) {
                 buildViscosityFluidMask(grid, particles, visc_mask);
                 mask_ptr = &visc_mask;
             }
@@ -2592,7 +3062,11 @@ void step(FluidParticles& particles,
             out_stats.active_fluid_cells = projectPressureFreeSurface(particles,
                                                                       grid,
                                                                       params,
-                                                                      dt);
+                                                                      dt,
+                                                                      out_stats.sealed_pockets,
+                                                                      out_stats.sealed_pocket_cells,
+                                                                      out_stats.interior_fluid_cells);
+            out_stats.sealed_pockets_measured = true;
         } else {
             GridFluid::SolverParams pp{};
             pp.pressure_iterations = params.pressure_iterations;
@@ -2610,7 +3084,8 @@ void step(FluidParticles& particles,
                        dt,
                        want_flip ? vel_x_pre_buf.data() : nullptr,
                        want_flip ? vel_y_pre_buf.data() : nullptr,
-                       want_flip ? vel_z_pre_buf.data() : nullptr);
+                       want_flip ? vel_z_pre_buf.data() : nullptr,
+                       solid_particle);
     } else {
         // pressure_g2p_precomputed: GPU already handled pressure+G2P,
         // particle velocities+affine are downloaded — only tail stages remain.
@@ -2727,7 +3202,8 @@ void step(FluidParticles& particles,
                         params.max_velocity,
                         params.wall_damping,
                         params.cfl,
-                        params.max_substeps);
+                        params.max_substeps,
+                        solid_particle);
     stage_end = SolverClock::now();
     out_stats.advect_ms = elapsedMs(stage_begin, stage_end);
 
@@ -2738,8 +3214,26 @@ void step(FluidParticles& particles,
     const uint32_t reseed_seed =
         static_cast<uint32_t>(out_stats.particle_count) * 2654435761u ^
         static_cast<uint32_t>(std::llround(time_seconds * 1000.0));
-    redistributeParticles(particles, grid, params, reseed_seed);
+    redistributeParticles(particles, grid, params, reseed_seed,
+                          &out_stats.reseed_added_particles,
+                          &out_stats.reseed_removed_particles);
     out_stats.particle_count = particles.size();
+
+    // 9. Advance the material-coordinate refresh schedule and reset whichever
+    //    generation is due.
+    //
+    //    ★ LAST, and after reseed on purpose. A generation reset assigns
+    //    uvw = position, so it must see the FINAL particle set of this step:
+    //    reset before advection and the coordinate describes where the liquid
+    //    was, not where it is; reset before reseed and the particles created
+    //    this step never get the fresh generation and stay one period stale.
+    //
+    //    ★ The early-out at the top of this function (empty or dt <= 0) skips
+    //    this too, which is correct — a step that did not advance the liquid
+    //    must not age its coordinates either, or a paused sim would keep
+    //    refreshing a body that is not deforming.
+    particles.uvw_refresh_period = params.uvw_refresh_period;
+    particles.advanceMaterialCoordinates();
 
     out_stats.total_ms = elapsedMs(total_begin, stage_end);
 }

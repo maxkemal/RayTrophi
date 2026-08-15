@@ -26,6 +26,7 @@
 #include "RtIpcAudit.h"
 #include "RtIpcTransport.h"
 #include "RtIpcFracture.h"
+#include "RtIpcTemplates.h"
 
 #include <algorithm>
 #include <atomic>
@@ -249,6 +250,107 @@ json vec3ToJson(const Vec3& v) {
 
 json materialInfoToJson(const rtapi::MaterialInfo& info) {
     return json{{"id", info.id}, {"name", info.name}, {"type", info.type}};
+}
+
+json substanceCountsToJson(
+        const std::vector<rtapi::FluidDomainInfo::SubstanceCount>& counts) {
+    json out = json::array();
+    for (const auto& c : counts) {
+        out.push_back(json{{"name", c.name}, {"tag", c.tag},
+                           {"particles", c.particles}});
+    }
+    return out;
+}
+
+json substanceBindingsToJson(
+        const std::vector<rtapi::FluidDomainInfo::SubstanceMaterialBinding>& b) {
+    json out = json::array();
+    for (const auto& e : b) {
+        out.push_back(json{{"substance", e.substance},
+                           {"material_id", e.material_id},
+                           {"material", e.material},
+                           {"representation", e.representation},
+                           // "inherit" resolved against the domain mode: what is
+                           // actually drawn. Assert on THIS, not on the authored
+                           // value, or a delegated answer reads as an answer.
+                           {"effective_representation", e.effective_representation},
+                           // Reported AS AUTHORED — a negative viscosity is the
+                           // "inherit the domain" sentinel, not an error. A
+                           // reader that could not see it could not tell an
+                           // override from a coincidence.
+                           {"kinematic_viscosity", e.kinematic_viscosity},
+                           {"miscibility", e.miscibility},
+                           // State of matter, separate from `representation`:
+                           // a solid still has to be drawn somehow.
+                           {"phase", e.phase}});
+    }
+    return out;
+}
+
+Vec3 vec3FromJson(const json& j, const Vec3& fallback) {
+    if (!j.is_array() || j.size() < 3) return fallback;
+    return Vec3(j[0].get<float>(), j[1].get<float>(), j[2].get<float>());
+}
+
+// Flow source <-> JSON. Key names match the Python dict exactly, so a script
+// ported from rt.flow_source to remote IPC keeps working verbatim.
+json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
+    return json{
+        {"name", s.name}, {"domain", s.domain},
+        {"source_mode", s.source_mode}, {"source_object", s.source_object},
+        {"enabled", s.enabled},
+        {"parent_object", s.parent_object}, {"velocity_space", s.velocity_space},
+        {"inherit_velocity", s.inherit_velocity},
+        {"position", vec3ToJson(s.position)}, {"velocity", vec3ToJson(s.velocity)},
+        {"radius", s.radius}, {"velocity_coupling", s.velocity_coupling},
+        {"density", s.density}, {"temperature", s.temperature},
+        {"fuel", s.fuel}, {"falloff", s.falloff},
+        {"fluid_particles_per_second", s.fluid_particles_per_second},
+        {"fluid_velocity_spread", s.fluid_velocity_spread},
+        {"fluid_emit_along_normal", s.fluid_emit_along_normal},
+        // ★ Reported as the NAME, not as the hashed tag. The hash is an internal
+        // identity; a script that read it back would have no way to turn it into
+        // anything meaningful, and comparing hashes across a rename would give a
+        // difference nobody could interpret.
+        {"fluid_substance", s.fluid_substance},
+        {"use_time_limit", s.use_time_limit},
+        {"start_time", s.start_time}, {"end_time", s.end_time},
+        {"use_particle_limit", s.use_particle_limit},
+        {"max_emitted_particles", s.max_emitted_particles}};
+}
+
+// Overlay whichever fields the request mentions onto an existing info struct.
+// ★ Overlay rather than construct: see the read-modify-write note at
+// flow_source.update for why building fresh would silently reset the rest.
+void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
+#define RT_FS_FIELD(key, member) \
+    if (p.contains(key)) s.member = p.at(key).get<decltype(s.member)>()
+    RT_FS_FIELD("name", name);
+    RT_FS_FIELD("domain", domain);
+    RT_FS_FIELD("source_mode", source_mode);
+    RT_FS_FIELD("source_object", source_object);
+    RT_FS_FIELD("enabled", enabled);
+    RT_FS_FIELD("parent_object", parent_object);
+    RT_FS_FIELD("velocity_space", velocity_space);
+    RT_FS_FIELD("inherit_velocity", inherit_velocity);
+    RT_FS_FIELD("radius", radius);
+    RT_FS_FIELD("velocity_coupling", velocity_coupling);
+    RT_FS_FIELD("density", density);
+    RT_FS_FIELD("temperature", temperature);
+    RT_FS_FIELD("fuel", fuel);
+    RT_FS_FIELD("falloff", falloff);
+    RT_FS_FIELD("fluid_particles_per_second", fluid_particles_per_second);
+    RT_FS_FIELD("fluid_velocity_spread", fluid_velocity_spread);
+    RT_FS_FIELD("fluid_emit_along_normal", fluid_emit_along_normal);
+    RT_FS_FIELD("fluid_substance", fluid_substance);
+    RT_FS_FIELD("use_time_limit", use_time_limit);
+    RT_FS_FIELD("start_time", start_time);
+    RT_FS_FIELD("end_time", end_time);
+    RT_FS_FIELD("use_particle_limit", use_particle_limit);
+    RT_FS_FIELD("max_emitted_particles", max_emitted_particles);
+#undef RT_FS_FIELD
+    if (p.contains("position")) s.position = vec3FromJson(p.at("position"), s.position);
+    if (p.contains("velocity")) s.velocity = vec3FromJson(p.at("velocity"), s.velocity);
 }
 
 // Force field (Faz 5.6a) <-> JSON. The key names match the Python dict exactly,
@@ -488,6 +590,12 @@ rtapi::NodeParamValue nodeParamFromJson(const json& value) {
 // Method dispatch. Every rtapi function that is not mesh-binary gets a handler.
 // ---------------------------------------------------------------------------
 json dispatchMethod(const std::string& method, const json& params) {
+    json template_result;
+    if (dispatchTemplateIpc(
+            method, params,
+            [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+            template_result)) return template_result;
+
     auto auditEventJson = [](const rtipc_audit::Event& event) {
         return json{{"sequence", event.sequence}, {"timestamp", event.timestamp},
                     {"connection_id", event.connection_id}, {"token_id", event.token_id},
@@ -1330,10 +1438,71 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"kinematic_viscosity", info.kinematic_viscosity},
                         {"viscosity_sweeps", info.viscosity_sweeps},
                         {"viscosity_wall_slip", info.viscosity_wall_slip},
+                        {"granular_enabled", info.granular_enabled},
+                        {"granular_friction_angle", info.granular_friction_angle_degrees},
+                        {"granular_cohesion", info.granular_cohesion},
+                        {"granular_dilatancy", info.granular_dilatancy_degrees},
+                        {"granular_young_modulus", info.granular_young_modulus},
+                        {"granular_poisson_ratio", info.granular_poisson_ratio},
+                        {"granular_tensile_cutoff", info.granular_tensile_cutoff},
+                        {"granular_hardening", info.granular_hardening},
+                        {"granular_fracture_strain", info.granular_fracture_strain},
+                        {"granular_damage_rate", info.granular_damage_rate},
+                        {"granular_healing_rate", info.granular_healing_rate},
+                        {"granular_rebonding", info.granular_rebonding},
+                        {"granular_max_solver_substeps", info.granular_max_solver_substeps},
+                        {"granular_yielded", info.granular_yielded_particles},
+                        {"granular_detached", info.granular_detached_particles},
+                        {"granular_invalid", info.granular_invalid_particles},
+                        {"granular_sleeping", info.granular_sleeping_particles},
+                        {"granular_damaged", info.granular_damaged_particles},
+                        {"granular_damage_over_10", info.granular_damage_over_10_particles},
+                        {"granular_damage_over_50", info.granular_damage_over_50_particles},
+                        {"granular_damage_over_90", info.granular_damage_over_90_particles},
+                        {"granular_max_yield", info.granular_max_yield},
+                        {"granular_max_plastic", info.granular_max_plastic_increment},
+                        {"granular_max_accumulated_plastic", info.granular_max_accumulated_plastic},
+                        {"granular_mean_accumulated_plastic", info.granular_mean_accumulated_plastic},
+                        {"granular_max_fracture_history", info.granular_max_fracture_history},
+                        {"granular_mean_fracture_history", info.granular_mean_fracture_history},
+                        {"granular_max_damage", info.granular_max_damage},
+                        {"granular_mean_damage", info.granular_mean_damage},
+                        {"granular_requested_young_modulus", info.granular_requested_young_modulus},
+                        {"granular_effective_young_modulus", info.granular_effective_young_modulus},
+                        {"granular_required_substeps", info.granular_required_substeps},
+                        {"granular_solver_substeps", info.granular_solver_substeps},
+                        {"granular_stiffness_capped", info.granular_stiffness_capped},
                         {"surface_material", info.surface_material},
+                        {"splat_material", info.splat_material},
+                        {"surface_offset_voxels", info.surface_offset_voxels},
                         {"pore_amount", info.pore_amount},
                         {"pore_scale", info.pore_scale},
                         {"pore_detail", info.pore_detail},
+                        {"coord_space", info.coord_space == 1 ? "domain"
+                                      : info.coord_space == 2 ? "world" : "material"},
+                        {"uvw_available", info.uvw_available},
+                        {"uvw_dim", json::array({info.uvw_dim[0], info.uvw_dim[1], info.uvw_dim[2]})},
+                        {"uvw_origin", json::array({info.uvw_origin[0], info.uvw_origin[1],
+                                                    info.uvw_origin[2]})},
+                        {"uvw_voxel", info.uvw_voxel},
+                        {"uvw_refresh_period", info.uvw_refresh_period},
+                        {"substances", substanceCountsToJson(info.substances)},
+                        {"substance_materials", substanceBindingsToJson(info.substance_materials)},
+                        {"uvw_drift", info.uvw_drift},
+                    // Measured on the last simulated step, not derived from the
+                    // binding: parcels-with-zero-cells is the reading that says
+                    // "the chunk is thinner than the voxel size".
+                        {"solid_phase_particles", info.solid_phase_particles},
+                        {"solid_phase_cells", info.solid_phase_cells},
+                        {"sealed_pockets", info.sealed_pockets},
+                        {"sealed_pocket_cells", info.sealed_pocket_cells},
+                        {"sealed_pockets_measured", info.sealed_pockets_measured},
+                        {"interior_fluid_cells", info.interior_fluid_cells},
+                        {"reseed_added_particles", info.reseed_added_particles},
+                        {"reseed_removed_particles", info.reseed_removed_particles},
+                        {"solid_phase", info.solid_phase_enabled},
+                        {"solid_phase_fill", info.solid_phase_fill},
+                        {"uvw_particles", info.uvw_particles},
                         {"enabled", info.enabled},
                         {"visible", info.visible}};
         });
@@ -1357,10 +1526,71 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"kinematic_viscosity", info.kinematic_viscosity},
                     {"viscosity_sweeps", info.viscosity_sweeps},
                     {"viscosity_wall_slip", info.viscosity_wall_slip},
+                    {"granular_enabled", info.granular_enabled},
+                    {"granular_friction_angle", info.granular_friction_angle_degrees},
+                    {"granular_cohesion", info.granular_cohesion},
+                    {"granular_dilatancy", info.granular_dilatancy_degrees},
+                    {"granular_young_modulus", info.granular_young_modulus},
+                    {"granular_poisson_ratio", info.granular_poisson_ratio},
+                    {"granular_tensile_cutoff", info.granular_tensile_cutoff},
+                    {"granular_hardening", info.granular_hardening},
+                    {"granular_fracture_strain", info.granular_fracture_strain},
+                    {"granular_damage_rate", info.granular_damage_rate},
+                    {"granular_healing_rate", info.granular_healing_rate},
+                    {"granular_rebonding", info.granular_rebonding},
+                    {"granular_max_solver_substeps", info.granular_max_solver_substeps},
+                    {"granular_yielded", info.granular_yielded_particles},
+                    {"granular_detached", info.granular_detached_particles},
+                    {"granular_invalid", info.granular_invalid_particles},
+                    {"granular_sleeping", info.granular_sleeping_particles},
+                    {"granular_damaged", info.granular_damaged_particles},
+                    {"granular_damage_over_10", info.granular_damage_over_10_particles},
+                    {"granular_damage_over_50", info.granular_damage_over_50_particles},
+                    {"granular_damage_over_90", info.granular_damage_over_90_particles},
+                    {"granular_max_yield", info.granular_max_yield},
+                    {"granular_max_plastic", info.granular_max_plastic_increment},
+                    {"granular_max_accumulated_plastic", info.granular_max_accumulated_plastic},
+                    {"granular_mean_accumulated_plastic", info.granular_mean_accumulated_plastic},
+                    {"granular_max_fracture_history", info.granular_max_fracture_history},
+                    {"granular_mean_fracture_history", info.granular_mean_fracture_history},
+                    {"granular_max_damage", info.granular_max_damage},
+                    {"granular_mean_damage", info.granular_mean_damage},
+                    {"granular_requested_young_modulus", info.granular_requested_young_modulus},
+                    {"granular_effective_young_modulus", info.granular_effective_young_modulus},
+                    {"granular_required_substeps", info.granular_required_substeps},
+                    {"granular_solver_substeps", info.granular_solver_substeps},
+                    {"granular_stiffness_capped", info.granular_stiffness_capped},
                     {"surface_material", info.surface_material},
+                    {"splat_material", info.splat_material},
+                    {"surface_offset_voxels", info.surface_offset_voxels},
                     {"pore_amount", info.pore_amount},
                     {"pore_scale", info.pore_scale},
                     {"pore_detail", info.pore_detail},
+                    {"coord_space", info.coord_space == 1 ? "domain"
+                                  : info.coord_space == 2 ? "world" : "material"},
+                    {"uvw_available", info.uvw_available},
+                    {"uvw_dim", json::array({info.uvw_dim[0], info.uvw_dim[1], info.uvw_dim[2]})},
+                    {"uvw_origin", json::array({info.uvw_origin[0], info.uvw_origin[1],
+                                                info.uvw_origin[2]})},
+                    {"uvw_voxel", info.uvw_voxel},
+                    {"uvw_refresh_period", info.uvw_refresh_period},
+                    {"substances", substanceCountsToJson(info.substances)},
+                    {"substance_materials", substanceBindingsToJson(info.substance_materials)},
+                    {"uvw_drift", info.uvw_drift},
+                    // Measured on the last simulated step, not derived from the
+                    // binding: parcels-with-zero-cells is the reading that says
+                    // "the chunk is thinner than the voxel size".
+                    {"solid_phase_particles", info.solid_phase_particles},
+                    {"solid_phase_cells", info.solid_phase_cells},
+                    {"sealed_pockets", info.sealed_pockets},
+                    {"sealed_pocket_cells", info.sealed_pocket_cells},
+                    {"sealed_pockets_measured", info.sealed_pockets_measured},
+                    {"interior_fluid_cells", info.interior_fluid_cells},
+                    {"reseed_added_particles", info.reseed_added_particles},
+                    {"reseed_removed_particles", info.reseed_removed_particles},
+                    {"solid_phase", info.solid_phase_enabled},
+                    {"solid_phase_fill", info.solid_phase_fill},
+                    {"uvw_particles", info.uvw_particles},
                     {"enabled", info.enabled},
                     {"visible", info.visible}});
             }
@@ -1373,13 +1603,17 @@ json dispatchMethod(const std::string& method, const json& params) {
         Vec3 smax = optionalVec3(params, "seed_max", Vec3(0.5f, 1.5f, 0.5f));
         int ppc = optionalInt(params, "particles_per_cell", 4);
         bool replace = optionalBool(params, "replace", true);
-        return enqueueResult([domain, smin, smax, ppc, replace](UIContext&) {
-            return rtapi::seedFluidParticles(domain, smin, smax, ppc, replace);
+        bool persistent = optionalBool(params, "persistent", false);
+        return enqueueResult([domain, smin, smax, ppc, replace, persistent](UIContext&) {
+            return rtapi::seedFluidParticles(domain, smin, smax, ppc, replace, persistent);
         });
     }
     if (method == "fluid.clear" || method == "gas.clear") {
         std::string domain = requireString(params, "domain");
-        return enqueueResult([domain](UIContext&) { return rtapi::clearFluidParticles(domain); });
+        bool clear_seed = optionalBool(params, "clear_seed", false);
+        return enqueueResult([domain, clear_seed](UIContext&) {
+            return rtapi::clearFluidParticles(domain, clear_seed);
+        });
     }
     if (method == "fluid.remove_domain" || method == "gas.remove_domain") {
         std::string domain = requireString(params, "domain");
@@ -1433,6 +1667,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                 surface_material = params.at("surface_material").get<std::string>();
                 p_surf_mat = &surface_material;
             }
+            float surface_offset = 0.0f; const float* p_surface_offset = nullptr;
+            if (params.contains("surface_offset_voxels")) {
+                surface_offset = params.at("surface_offset_voxels").get<float>();
+                p_surface_offset = &surface_offset;
+            }
             // Procedural porosity on the SDF isosurface.
             float pore_amount = 0.0f; const float* p_pore_amt = nullptr;
             float pore_scale = 0.0f;  const float* p_pore_scl = nullptr;
@@ -1446,13 +1685,75 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (params.contains("pore_detail")) {
                 pore_detail = params.at("pore_detail").get<float>(); p_pore_det = &pore_detail;
             }
+            // Coordinate space, by NAME. The wire value is an enum index, but a
+            // script writing `2` has to be read against a table to be understood
+            // — and worse, an index silently changes meaning if the enum ever
+            // grows. Numbers stay accepted so an existing caller does not break.
+            int coord_space = 0; const int* p_coord = nullptr;
+            if (params.contains("coord_space")) {
+                const auto& cs = params.at("coord_space");
+                if (cs.is_string()) {
+                    const std::string name = cs.get<std::string>();
+                    coord_space = (name == "domain") ? 1 : (name == "world") ? 2 : 0;
+                } else {
+                    coord_space = cs.get<int>();
+                }
+                p_coord = &coord_space;
+            }
+            int uvw_period = 0; const int* p_uvw_period = nullptr;
+            if (params.contains("uvw_refresh_period")) {
+                uvw_period = params.at("uvw_refresh_period").get<int>();
+                p_uvw_period = &uvw_period;
+            }
+            // Solid-phase coupling: master switch + cell fill fraction.
+            bool solid_phase = false; const bool* p_solid_phase = nullptr;
+            if (params.contains("solid_phase")) {
+                solid_phase = params.at("solid_phase").get<bool>();
+                p_solid_phase = &solid_phase;
+            }
+            float solid_fill = 0.0f; const float* p_solid_fill = nullptr;
+            if (params.contains("solid_phase_fill")) {
+                solid_fill = params.at("solid_phase_fill").get<float>();
+                p_solid_fill = &solid_fill;
+            }
             if (params.contains("enabled")) { enabled = params.at("enabled").get<bool>(); p_enabled = &enabled; }
             if (params.contains("visible")) { visible = params.at("visible").get<bool>(); p_visible = &visible; }
+            bool granular_enabled=false; const bool* p_granular_enabled=nullptr;
+            float granular_friction=0,granular_cohesion=0,granular_dilatancy=0,granular_young=0;
+            float granular_poisson=0,granular_tensile=0,granular_hardening=0;
+            float granular_fracture=0,granular_damage=0,granular_healing=0;
+            bool granular_rebonding=false; const bool* p_granular_rebonding=nullptr;
+            int granular_max_solver_substeps=0; const int* p_granular_max_solver_substeps=nullptr;
+            const float *p_granular_friction=nullptr,*p_granular_cohesion=nullptr,*p_granular_dilatancy=nullptr;
+            const float *p_granular_young=nullptr,*p_granular_poisson=nullptr,*p_granular_tensile=nullptr,*p_granular_hardening=nullptr;
+            const float *p_granular_fracture=nullptr,*p_granular_damage=nullptr,*p_granular_healing=nullptr;
+            if(params.contains("granular_enabled")){granular_enabled=params.at("granular_enabled").get<bool>();p_granular_enabled=&granular_enabled;}
+            if(params.contains("granular_friction_angle")){granular_friction=params.at("granular_friction_angle").get<float>();p_granular_friction=&granular_friction;}
+            if(params.contains("granular_cohesion")){granular_cohesion=params.at("granular_cohesion").get<float>();p_granular_cohesion=&granular_cohesion;}
+            if(params.contains("granular_dilatancy")){granular_dilatancy=params.at("granular_dilatancy").get<float>();p_granular_dilatancy=&granular_dilatancy;}
+            if(params.contains("granular_young_modulus")){granular_young=params.at("granular_young_modulus").get<float>();p_granular_young=&granular_young;}
+            if(params.contains("granular_poisson_ratio")){granular_poisson=params.at("granular_poisson_ratio").get<float>();p_granular_poisson=&granular_poisson;}
+            if(params.contains("granular_tensile_cutoff")){granular_tensile=params.at("granular_tensile_cutoff").get<float>();p_granular_tensile=&granular_tensile;}
+            if(params.contains("granular_hardening")){granular_hardening=params.at("granular_hardening").get<float>();p_granular_hardening=&granular_hardening;}
+            if(params.contains("granular_fracture_strain")){granular_fracture=params.at("granular_fracture_strain").get<float>();p_granular_fracture=&granular_fracture;}
+            if(params.contains("granular_damage_rate")){granular_damage=params.at("granular_damage_rate").get<float>();p_granular_damage=&granular_damage;}
+            if(params.contains("granular_healing_rate")){granular_healing=params.at("granular_healing_rate").get<float>();p_granular_healing=&granular_healing;}
+            if(params.contains("granular_rebonding")){granular_rebonding=params.at("granular_rebonding").get<bool>();p_granular_rebonding=&granular_rebonding;}
+            if(params.contains("granular_max_solver_substeps")){granular_max_solver_substeps=params.at("granular_max_solver_substeps").get<int>();p_granular_max_solver_substeps=&granular_max_solver_substeps;}
             return rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
                                             p_backend, p_boundary, p_preset, p_viscosity,
                                             p_sweeps, p_wall_slip, p_surf_mat,
+                                            p_surface_offset,
                                             p_pore_amt, p_pore_scl, p_pore_det,
-                                            p_enabled, p_visible);
+                                            p_coord, p_uvw_period,
+                                            p_solid_phase, p_solid_fill,
+                                            p_enabled, p_visible,
+                                            p_granular_enabled,p_granular_friction,p_granular_cohesion,
+                                            p_granular_dilatancy,p_granular_young,p_granular_poisson,
+                                            p_granular_tensile,p_granular_hardening,
+                                            p_granular_fracture,p_granular_damage,
+                                            p_granular_healing,p_granular_rebonding,
+                                            p_granular_max_solver_substeps);
         });
     }
     if (method == "fluid.reset" || method == "gas.reset") {
@@ -2333,6 +2634,111 @@ json dispatchMethod(const std::string& method, const json& params) {
     // forcefield.set_param turns a partial params object into a read-patch-write.
     if (method == "forcefield.types") {
         return enqueueQuery([](UIContext&) { return json(rtapi::forceFieldTypes()); });
+    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // FLOW SOURCES — the emitters, reachable from IPC at last.
+    // ═══════════════════════════════════════════════════════════════════════
+    // ★★★ These existed only as a Python binding, which meant an emitter could
+    // not be driven from OUTSIDE the application at all. Every scenario this
+    // project tests — a pour, a mixture, a keyed valve — starts at an emitter,
+    // so the whole category was untestable by an external rig while looking
+    // complete from inside the app. That is precisely the gap the script/IPC
+    // parity rule exists to prevent, and it had opened here unnoticed.
+    if (method == "fluid.set_splat_material") {
+        std::string domain = requireString(params, "domain");
+        // Empty clears the explicit override. Built-in spheres then use the
+        // scene fallback; scene-object splats recover their face materials.
+        std::string material = params.value("material", "");
+        return enqueueResult([domain, material](UIContext&) {
+            return rtapi::setFluidSplatMaterial(domain, material);
+        });
+    }
+    if (method == "fluid.set_substance_material") {
+        std::string domain = requireString(params, "domain");
+        std::string substance = requireString(params, "substance");
+        // Absent material clears the binding; "dielectric" selects the built-in
+        // refractive liquid for that substance specifically.
+        std::string material = params.value("material", "");
+        std::optional<std::string> representation;
+        if (params.contains("representation")) representation = requireString(params, "representation");
+        // ★ std::optional, not a sentinel value: for viscosity a NEGATIVE number
+        // is meaningful (inherit the domain), so "not supplied" cannot be
+        // encoded as -1 the way it can for an id. Absent means leave alone.
+        std::optional<float> viscosity;
+        if (params.contains("kinematic_viscosity"))
+            viscosity = params.at("kinematic_viscosity").get<float>();
+        std::optional<float> miscibility;
+        if (params.contains("miscibility"))
+            miscibility = params.at("miscibility").get<float>();
+        // "liquid" | "solid". Absent leaves the phase alone; an unrecognised
+        // value is REJECTED by the core rather than snapped, because guessing
+        // here would change whether matter blocks flow.
+        std::optional<std::string> phase;
+        if (params.contains("phase")) phase = requireString(params, "phase");
+        return enqueueResult([domain, substance, material, representation,
+                              viscosity, miscibility, phase](UIContext&) {
+            return rtapi::setFluidSubstanceMaterial(domain, substance, material,
+                                                     representation ? &*representation : nullptr,
+                                                     viscosity ? &*viscosity : nullptr,
+                                                     miscibility ? &*miscibility : nullptr,
+                                                     phase ? &*phase : nullptr);
+        });
+    }
+    if (method == "flow_source.list") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::SimulationFlowSourceInfo> sources;
+            rtapi::Result r = rtapi::listSimulationFlowSources(sources);
+            if (!r.ok) return json{{"__error", r.error}};
+            json result = json::array();
+            for (const auto& s : sources) result.push_back(flowSourceToJson(s));
+            return result;
+        });
+    }
+    if (method == "flow_source.get") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            rtapi::SimulationFlowSourceInfo info;
+            rtapi::Result r = rtapi::getSimulationFlowSource(name, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return flowSourceToJson(info);
+        });
+    }
+    if (method == "flow_source.create") {
+        // Defaults come from the struct, so a caller names a domain and gets a
+        // working emitter; every other field is optional.
+        rtapi::SimulationFlowSourceInfo seed;
+        applyFlowSourceJson(seed, params);
+        return enqueueQuery([seed](UIContext&) {
+            rtapi::SimulationFlowSourceInfo out;
+            rtapi::Result r = rtapi::createSimulationFlowSource(seed, out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return flowSourceToJson(out);
+        });
+    }
+    if (method == "flow_source.update") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name, params](UIContext&) {
+            // ★ READ-MODIFY-WRITE. updateSimulationFlowSource takes a COMPLETE
+            // info struct, so building one from the request alone would reset
+            // every field the caller did not mention — a script setting only the
+            // substance would silently move the emitter back to its default
+            // position and rate. Fetch, overlay, write.
+            rtapi::SimulationFlowSourceInfo info;
+            rtapi::Result got = rtapi::getSimulationFlowSource(name, info);
+            if (!got.ok) return json{{"__error", got.error}};
+            applyFlowSourceJson(info, params);
+            rtapi::Result r = rtapi::updateSimulationFlowSource(name, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            rtapi::SimulationFlowSourceInfo after;
+            rtapi::getSimulationFlowSource(info.name, after);
+            return flowSourceToJson(after);
+        });
+    }
+    if (method == "flow_source.remove") {
+        std::string name = requireString(params, "name");
+        return enqueueResult([name](UIContext&) {
+            return rtapi::removeSimulationFlowSource(name);
+        });
     }
     if (method == "forcefield.list") {
         return enqueueQuery([](UIContext&) {

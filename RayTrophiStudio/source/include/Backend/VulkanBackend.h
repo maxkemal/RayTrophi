@@ -2319,6 +2319,12 @@ private:
     // Mapped content versions for NanoVDB grids to prevent redundant CPU-to-GPU kopyalama
     std::unordered_map<int, uint32_t> m_vdbUploadedVersions;
     std::unordered_map<int, uint32_t> m_vdbTempUploadedVersions;
+    // Material-coordinate (UVW) field device buffers, mapped by vdb_id, plus the
+    // producer version last uploaded. Same lifecycle as the NanoVDB buffers
+    // above and torn down with them — a device buffer that outlives its vdb_id
+    // is reachable only through a stale address, which reads as valid memory.
+    std::unordered_map<int, VulkanRT::BufferHandle> m_uvwBuffers;
+    std::unordered_map<int, uint32_t> m_uvwUploadedVersions;
     // VDB volumes in the ORDER they were added to the TLAS (customIndex 0,1,2...)
     // Guarantees SSBO layout matches gl_InstanceCustomIndexEXT lookups in the shader.
     // ★CONTRACT: only updateGeometry()/rebuildAccelerationStructure() — the two

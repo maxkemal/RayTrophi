@@ -585,6 +585,44 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.pore_amount = vdb->render_isosurface_pore_amount;
         gv.pore_scale  = vdb->render_isosurface_pore_scale;
         gv.pore_detail = vdb->render_isosurface_pore_detail;
+        gv.surface_coord_space = vdb->render_isosurface_coord_space;
+        // Material coordinates. Published only as a COMPLETE set — a pointer
+        // with a zero dimension would make the sampler index a grid of no
+        // cells, so the two are gated together and the pointer is left null
+        // otherwise. Null means "anchor in world space", never "coordinate 0".
+        {
+            const int ux = vdb->render_isosurface_uvw_dim[0];
+            const int uy = vdb->render_isosurface_uvw_dim[1];
+            const int uz = vdb->render_isosurface_uvw_dim[2];
+            // Voxel size is part of the completeness test, not an afterthought:
+            // without it the consumer cannot index the grid at all, and a zero
+            // would divide the world position by nothing.
+            const bool uvw_usable =
+                ux > 0 && uy > 0 && uz > 0 &&
+                vdb->render_isosurface_uvw_voxel > 0.0f &&
+                vdb->render_isosurface_uvw_residual.size() ==
+                    static_cast<size_t>(ux) * static_cast<size_t>(uy) *
+                    static_cast<size_t>(uz) * 3u;
+            gv.uvw_residual_grid =
+                uvw_usable ? vdb->render_isosurface_uvw_residual.data() : nullptr;
+            gv.uvw_origin[0] = vdb->render_isosurface_uvw_origin[0];
+            gv.uvw_origin[1] = vdb->render_isosurface_uvw_origin[1];
+            gv.uvw_origin[2] = vdb->render_isosurface_uvw_origin[2];
+            gv.uvw_voxel = uvw_usable ? vdb->render_isosurface_uvw_voxel : 0.0f;
+            // Composition shares the residual field's grid and placement, so it
+            // is gated on the SAME usability test: without dims and a voxel
+            // size the shader cannot index either of them.
+            gv.composition_grid =
+                (uvw_usable &&
+                 vdb->render_isosurface_composition.size() ==
+                     static_cast<size_t>(ux) * static_cast<size_t>(uy) *
+                     static_cast<size_t>(uz) * 3u)
+                    ? vdb->render_isosurface_composition.data() : nullptr;
+            gv.uvw_dim[0] = uvw_usable ? ux : 0;
+            gv.uvw_dim[1] = uvw_usable ? uy : 0;
+            gv.uvw_dim[2] = uvw_usable ? uz : 0;
+            gv.uvw_version = vdb->render_isosurface_uvw_version;
+        }
         logIsoMaterialBinding(gv.iso_material_id);
         gv.foam_color = make_float3(vdb->render_isosurface_foam_color.x,
                                     vdb->render_isosurface_foam_color.y,
@@ -631,6 +669,44 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.pore_amount = vdb->render_isosurface_pore_amount;
         gv.pore_scale  = vdb->render_isosurface_pore_scale;
         gv.pore_detail = vdb->render_isosurface_pore_detail;
+        gv.surface_coord_space = vdb->render_isosurface_coord_space;
+        // Material coordinates. Published only as a COMPLETE set — a pointer
+        // with a zero dimension would make the sampler index a grid of no
+        // cells, so the two are gated together and the pointer is left null
+        // otherwise. Null means "anchor in world space", never "coordinate 0".
+        {
+            const int ux = vdb->render_isosurface_uvw_dim[0];
+            const int uy = vdb->render_isosurface_uvw_dim[1];
+            const int uz = vdb->render_isosurface_uvw_dim[2];
+            // Voxel size is part of the completeness test, not an afterthought:
+            // without it the consumer cannot index the grid at all, and a zero
+            // would divide the world position by nothing.
+            const bool uvw_usable =
+                ux > 0 && uy > 0 && uz > 0 &&
+                vdb->render_isosurface_uvw_voxel > 0.0f &&
+                vdb->render_isosurface_uvw_residual.size() ==
+                    static_cast<size_t>(ux) * static_cast<size_t>(uy) *
+                    static_cast<size_t>(uz) * 3u;
+            gv.uvw_residual_grid =
+                uvw_usable ? vdb->render_isosurface_uvw_residual.data() : nullptr;
+            gv.uvw_origin[0] = vdb->render_isosurface_uvw_origin[0];
+            gv.uvw_origin[1] = vdb->render_isosurface_uvw_origin[1];
+            gv.uvw_origin[2] = vdb->render_isosurface_uvw_origin[2];
+            gv.uvw_voxel = uvw_usable ? vdb->render_isosurface_uvw_voxel : 0.0f;
+            // Composition shares the residual field's grid and placement, so it
+            // is gated on the SAME usability test: without dims and a voxel
+            // size the shader cannot index either of them.
+            gv.composition_grid =
+                (uvw_usable &&
+                 vdb->render_isosurface_composition.size() ==
+                     static_cast<size_t>(ux) * static_cast<size_t>(uy) *
+                     static_cast<size_t>(uz) * 3u)
+                    ? vdb->render_isosurface_composition.data() : nullptr;
+            gv.uvw_dim[0] = uvw_usable ? ux : 0;
+            gv.uvw_dim[1] = uvw_usable ? uy : 0;
+            gv.uvw_dim[2] = uvw_usable ? uz : 0;
+            gv.uvw_version = vdb->render_isosurface_uvw_version;
+        }
         logIsoMaterialBinding(gv.iso_material_id);
         if (shader) {
             GpuVolumeShaderData gs = shader->toGPU();

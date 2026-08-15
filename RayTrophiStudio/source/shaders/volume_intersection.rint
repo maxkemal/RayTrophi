@@ -81,7 +81,26 @@ struct VkVolumeInstance {
     uint64_t emissive_list_address; // [0]=count, [1..]=emitting block indices
     float    emissive_capacity;
     float    iso_material_index;  // SDF isosurface material, 1-based (0 = none)
+    // FULLY CLAIMED: [0]=pore amount, [1]=world units per pore cell,
+    // [2]=pore size variation, [3]=coordinate space (0=Material, 1=Domain,
+    // 2=World — see materialAnchor below / in volume_closesthit.rchit).
     float    _accel_reserved[4];
+    // Material coordinate (UVW) RESIDUAL grid: dense xyz triples at sim-grid
+    // resolution holding (uvw - cell centre). Consumed only in
+    // volume_closesthit.rchit; mirrored here because the SSBO stride is
+    // per-declaration. 0 = not published.
+    uint64_t uvw_residual_address;
+    // Same grid/origin/voxel as the residual field; 0 = not published.
+    // Slotted beside the other address so the struct stays 624 bytes.
+    uint64_t composition_address;
+    float    uvw_dim[3];
+    float    uvw_origin[3];
+    float    uvw_voxel;
+    // Explicit tail padding, mirroring vulkan_volume_types.h exactly. C++ pads
+    // the alignas(16) struct to 608; scalar layout would stop at 600. Implicit
+    // padding is where the two are free to disagree, and a stride mismatch does
+    // not fail loudly — it reads the NEXT volume's fields as this one's.
+    float    _uvw_pad[1];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;

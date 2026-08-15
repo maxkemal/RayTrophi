@@ -846,6 +846,15 @@ private:
             // FluidG2PGpuConstants = 17 fields x 4 = 68 (has use_solid_flip_limiter);
             // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
             { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                  10, 68 },
+            { "sim_fluid_granular_constitutive",    "sim_fluid_granular_constitutive.spv", 6, 32 },
+            // Bindings 9..12 are Rankine bond history plus the three columns
+            // of the recoverable deformation gradient. Keep
+            // this descriptor contract in lockstep with GranularGpuDispatch;
+            // the old nine-binding layout leaves damage active while the new
+            // fracture-history telemetry remains permanently zero.
+            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 13, 64 },
+            { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
+            { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
             { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 64 },
             { "sim_fluid_surface_combustion",       "sim_fluid_surface_combustion.spv",    6, 96 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
@@ -868,7 +877,10 @@ private:
             // shares the size class the registry already validates.
             // 10 buffers: vel xyz + mask + rhs xyz (the pre-diffusion field) +
             // solid velocity xyz (the no-slip Dirichlet value).
-            { "sim_fluid_viscosity_rbgs",           "sim_fluid_viscosity_rbgs.spv",       10, 52 },
+            // 11th binding: per-cell kinematic viscosity (per-substance
+            // overrides). The push block stayed 52 bytes — a pad word became
+            // has_nu — so only the descriptor count moved.
+            { "sim_fluid_viscosity_rbgs",           "sim_fluid_viscosity_rbgs.spv",       11, 52 },
             { "sim_fluid_divergence",               "sim_fluid_divergence.spv",            5, 52 },
             { "sim_fluid_subtract_gradient",        "sim_fluid_subtract_gradient.spv",     5, 52 },
             { "sim_fluid_cg_build_diag",            "sim_fluid_cg_build_diag.spv",         2, 52 },

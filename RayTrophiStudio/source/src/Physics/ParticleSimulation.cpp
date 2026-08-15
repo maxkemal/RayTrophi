@@ -1,5 +1,8 @@
 #include "ParticleSimulation.h"
 #include "Fluid/FluidParticleSolidRecovery.h"
+#include "Fluid/FluidLevelSet.h"   // buildSubstanceViscosityField
+#include "Fluid/SubstanceTag.h"
+#include "Fluid/GranularGpuDispatch.h"
 
 #include "GridFluidSolver.h"
 #include "globals.h"
@@ -1981,9 +1984,156 @@ void enforceGridSolidFaceBoundaries(FluidSim::FluidGrid& grid) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SOLID-PHASE SUBSTANCE OVERLAY
+// ═══════════════════════════════════════════════════════════════════════════
+// Parcels of a substance declared SOLID are stamped into the same grid.solid
+// mask the collider voxelizer owns, so the no-slip boundary, the pressure
+// matrix and the GPU fluid mask all see them without a single new branch.
+//
+// ★★★ THE COLLIDER STAMP IS CACHED AND THIS IS NOT, which is the whole reason
+// the two are kept apart by a ledger instead of sharing one rebuild. A chunk
+// moves every step; a static ground collider is stamped ONCE and then skipped
+// on signature match for the rest of the sim. Rebuilding the mask every step
+// to fold in the overlay would throw that optimisation away, and writing the
+// overlay into the cached mask without a ledger would leave last step's chunk
+// standing as a GHOST OBSTACLE — liquid piling up on nothing, in mid-air,
+// which reads as a solver instability rather than as stale bookkeeping.
+//
+// Order per step, and it is not interchangeable:
+//   1. clearSubstanceSolidOverlay   — mask is pure collider again
+//   2. voxelizeCollidersIntoGrid    — may early-return on its cache
+//   3. recoverParticlesFromSolidCells — pushes LIQUID out of collider cells
+//   4. record solid_cells_collider_count, then applySubstanceSolidOverlay
+//
+// ★★ (3) BEFORE (4) IS THE SUBTLE ONE. Recovery ejects any particle standing
+// in a solid cell, which is exactly what a solid parcel does by definition —
+// run it after the stamp and every chunk teleports itself apart on the frame
+// it forms.
+void clearSubstanceSolidOverlay(FluidSim::FluidGrid& grid) {
+    // Hand this step's overlay to the next one BEFORE erasing it: the producer
+    // reads it as the sticky set (see FluidGrid::substance_solid_prev_cells).
+    // Recorded even when the overlay is empty, so a chunk that leaves the domain
+    // does not leave a stale sticky set behind it.
+    grid.substance_solid_prev_cells.assign(grid.substance_solid_cells.begin(),
+                                           grid.substance_solid_cells.end());
+    grid.substance_solid_prev_vel.clear();
+    if (grid.solid_vel.size() == grid.solid.size()) {
+        grid.substance_solid_prev_vel.reserve(grid.substance_solid_cells.size());
+        for (uint32_t c : grid.substance_solid_cells) {
+            grid.substance_solid_prev_vel.push_back(
+                c < grid.solid_vel.size() ? grid.solid_vel[c] : Vec3(0.0f, 0.0f, 0.0f));
+        }
+    }
+    if (grid.substance_solid_cells.empty()) return;
+    const bool has_vel = grid.solid_vel.size() == grid.solid.size();
+    for (uint32_t c : grid.substance_solid_cells) {
+        if (c >= grid.solid.size()) continue;
+        // ★ Only ever clear what the overlay itself wrote. The value check is
+        // the guard: if a collider has since claimed the cell, its 1 must
+        // survive — the voxelize cache would not restamp it (its signature did
+        // not change) and the hole would appear only under a chunk.
+        if (grid.solid[c] != FluidSim::FluidGrid::kSolidSubstance) continue;
+        grid.solid[c] = 0u;
+        if (has_vel) grid.solid_vel[c] = Vec3(0.0f, 0.0f, 0.0f);
+    }
+    grid.substance_solid_cells.clear();
+    // The compact list is collider entries first, overlay appended: truncating
+    // to the recorded prefix removes exactly this overlay's contribution
+    // without touching the collider stamp's own list.
+    if (grid.solid_cells_valid &&
+        grid.solid_cells.size() > grid.solid_cells_collider_count) {
+        grid.solid_cells.resize(grid.solid_cells_collider_count);
+    }
+}
+
+void applySubstanceSolidOverlay(FluidSim::FluidGrid& grid,
+                                const std::vector<uint32_t>& cells,
+                                const std::vector<Vec3>& cell_velocity,
+                                float max_wall_speed) {
+    if (cells.empty() || grid.solid.empty()) return;
+    // solid_vel is LAZY — sized by the voxelizer only when a moving collider
+    // exists. A chunk is a moving solid by nature, so a domain whose only solid
+    // is a substance needs it allocated here or its velocity would be dropped
+    // and the chunk would block flow without pushing it.
+    if (grid.solid_vel.size() != grid.solid.size())
+        grid.solid_vel.assign(grid.solid.size(), Vec3(0.0f, 0.0f, 0.0f));
+    grid.substance_solid_cells.clear();
+    grid.substance_solid_cells.reserve(cells.size());
+    for (std::size_t n = 0; n < cells.size(); ++n) {
+        const uint32_t c = cells[n];
+        if (c >= grid.solid.size()) continue;
+        // A cell a collider already owns is left as the collider's, and is NOT
+        // recorded — see the ledger note above.
+        if (grid.solid[c] != 0u) continue;
+        grid.solid[c] = FluidSim::FluidGrid::kSolidSubstance;
+        if (n < cell_velocity.size()) {
+            // ★★ CLAMPED TO THE SAME CEILING THE PARTICLES OBEY. This value
+            // becomes a WALL velocity: the viscous stencil pulls the neighbouring
+            // liquid toward it and the variational projection feeds it into the
+            // divergence. A single parcel that briefly went fast -- a splash
+            // artefact, a reseed, a bad step -- would otherwise be imposed on the
+            // fluid as a moving wall and blow the contact neighbourhood apart,
+            // and the kick would be blamed on the chunk rather than on one
+            // parcel's outlier velocity.
+            Vec3 v = cell_velocity[n];
+            const float speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+            if (max_wall_speed > 0.0f && speed > max_wall_speed && speed > 1e-6f)
+                v = v * (max_wall_speed / speed);
+            grid.solid_vel[c] = v;
+        }
+        grid.substance_solid_cells.push_back(c);
+        if (grid.solid_cells_valid) grid.solid_cells.push_back(c);
+    }
+}
+
+// Fully block the MAC faces of every overlay cell for the variational pressure
+// coupling. Runs AFTER computeSolidFaceWeights, which knows only about
+// colliders.
+//
+// ★★★ WITHOUT THIS THE CHUNK IS INVISIBLE TO THE PRESSURE SOLVE WHENEVER
+// VARIATIONAL SOLIDS ARE ON: that path reads the fractional face weights
+// instead of the binary mask, and a face the collider refine never touched
+// stays fully open. The symptom is the worst kind — the feature works, then
+// stops working because somebody ticked an unrelated quality option.
+//
+// ★ Binary 0, not a fraction: the overlay itself is binary (a cell is either
+// full enough to block or it is not), so inventing a sub-grid fraction here
+// would be a smoothness the producer never measured.
+void blockSubstanceSolidFaceWeights(FluidSim::FluidGrid& grid) {
+    if (grid.substance_solid_cells.empty()) return;
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    if (nx <= 0 || ny <= 0 || nz <= 0) return;
+    const std::size_t exp_u = static_cast<std::size_t>(nx + 1) * ny * nz;
+    const std::size_t exp_v = static_cast<std::size_t>(nx) * (ny + 1) * nz;
+    const std::size_t exp_w = static_cast<std::size_t>(nx) * ny * (nz + 1);
+    // A domain with no colliders never had the weights allocated; allocate them
+    // open so the overlay can close its own faces.
+    if (grid.u_weight.size() != exp_u) grid.u_weight.assign(exp_u, 255u);
+    if (grid.v_weight.size() != exp_v) grid.v_weight.assign(exp_v, 255u);
+    if (grid.w_weight.size() != exp_w) grid.w_weight.assign(exp_w, 255u);
+    const std::size_t stride_y = static_cast<std::size_t>(nx);
+    const std::size_t stride_z = static_cast<std::size_t>(nx) * ny;
+    for (uint32_t cell : grid.substance_solid_cells) {
+        const std::size_t c = cell;
+        const int i = static_cast<int>(c % stride_y);
+        const int j = static_cast<int>((c / stride_y) % ny);
+        const int k = static_cast<int>(c / stride_z);
+        grid.u_weight[grid.velXIndex(i,     j, k)] = 0u;
+        grid.u_weight[grid.velXIndex(i + 1, j, k)] = 0u;
+        grid.v_weight[grid.velYIndex(i, j,     k)] = 0u;
+        grid.v_weight[grid.velYIndex(i, j + 1, k)] = 0u;
+        grid.w_weight[grid.velZIndex(i, j, k)]     = 0u;
+        grid.w_weight[grid.velZIndex(i, j, k + 1)] = 0u;
+    }
+}
+
 bool runGpuFluidP2G(SimulationGridDomainState& state,
                     SimulationComputeContext* compute,
-                    SimulationGridDomainComputeBuffers& gpu_buffers) {
+                    SimulationGridDomainComputeBuffers& gpu_buffers,
+                    const Fluid::APICSolverParams& fluid_params,
+                    float dt,
+                    bool upload_granular_state = true) {
     auto& grid = state.grid;
     const std::size_t particle_count = state.particles.size();
     if (!compute || !compute->supportsDispatch() || particle_count == 0 ||
@@ -1995,6 +2145,11 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
     if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers)) {
         return false;
     }
+    const bool granular = fluid_params.granular_enabled;
+    if (granular) state.particles.ensureGranularStateSize();
+    if (granular && upload_granular_state &&
+        !Fluid::Granular::uploadState(*compute, state.particles,
+                                      gpu_buffers.granular)) return false;
     const auto p2g_phase1 = SimulationClock::now(); // particle upload done
 
     ComputeBufferHandle velocity_fields[3] = {
@@ -2057,6 +2212,13 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         cmd.buffer_count = 5;
         cmd.groups.groups_x = (static_cast<uint32_t>(constants.particle_count) + threads - 1u) / threads;
         ok = ok && compute->dispatch(cmd);
+
+        if (granular) {
+            ok = ok && Fluid::Granular::dispatchStressP2G(
+                *compute, gpu_buffers.granular, gpu_buffers.fluid_positions,
+                velocity_fields[comp], grid.nx, grid.ny, grid.nz, comp,
+                grid.origin, grid.voxel_size, dt, 1600.0f, particle_count);
+        }
 
         cmd.kernel = "sim_fluid_p2g_normalize";
         cmd.groups.groups_x = (field_count + threads - 1u) / threads;
@@ -2751,7 +2913,9 @@ struct FluidViscosityGpuConstants {
     float alpha = 0.0f;         // nu*dt/h^2
     float solid_weight = 0.0f;  // 1 - wall_slip
     int   parity = 0;
-    int   pad0 = 0;
+    // Per-cell viscosity present in binding 10. Took a pad word rather than
+    // extending the block, so the ABI below is unchanged by this feature.
+    int   has_nu = 0;
     int   pad1 = 0;
     int   pad2 = 0;
     int   pad3 = 0;
@@ -2777,17 +2941,30 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
     }
     const float h = (grid.voxel_size > 1.0e-6f) ? grid.voxel_size : 1.0f;
     const float alpha = params.kinematic_viscosity * dt / (h * h);
-    if (alpha <= 1.0e-8f) {
+    const uint32_t cell_count_for_nu = static_cast<uint32_t>(grid.getCellCount());
+    // A per-substance field carries its own viscosities, so it is reason enough
+    // to run the stage even when the domain scalar is zero. Only the pair being
+    // absent means there is nothing to diffuse.
+    const bool has_nu_field =
+        params.substance_viscosity != nullptr &&
+        params.substance_viscosity->size() == cell_count_for_nu;
+    if (alpha <= 1.0e-8f && !has_nu_field) {
         return false;   // nothing to diffuse; let the host no-op it
     }
 
-    ComputeBufferHandle bufs[10] = {
+    ComputeBufferHandle bufs[11] = {
         gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
         gpu_buffers.fluid_mask,
         // scratch2_* is the MacCormack second-pass target, which only the GAS
         // solver uses; a domain is fluid or gas, never both in one step.
         gpu_buffers.scratch2_vel_x, gpu_buffers.scratch2_vel_y, gpu_buffers.scratch2_vel_z,
-        gpu_buffers.var_svx, gpu_buffers.var_svy, gpu_buffers.var_svz
+        gpu_buffers.var_svx, gpu_buffers.var_svy, gpu_buffers.var_svz,
+        // ★ ALWAYS BOUND, read only when has_nu. Vulkan requires every declared
+        // descriptor to have a buffer behind it, so a uniform domain points this
+        // at an existing cell-sized allocation the kernel then never touches.
+        // Leaving it unbound would be a validation error on the common path.
+        gpu_buffers.substance_viscosity.valid() ? gpu_buffers.substance_viscosity
+                                                : gpu_buffers.fluid_mask
     };
     for (const auto& handle : bufs) {
         if (!handle.valid()) return false;
@@ -2839,6 +3016,19 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
         compute->uploadBuffer(gpu_buffers.var_svx, svx_host.data(), cell_count * sizeof(float)) &&
         compute->uploadBuffer(gpu_buffers.var_svy, svy_host.data(), cell_count * sizeof(float)) &&
         compute->uploadBuffer(gpu_buffers.var_svz, svz_host.data(), cell_count * sizeof(float));
+    // ★ Uploaded INSIDE the same batch, not after: the dispatch below reads it
+    // in the first sweep, and a field one transfer late would apply the previous
+    // step's substance layout to this step's velocities — a mismatch that shows
+    // up as the interface lagging the flow by a frame, which reads as "a bit
+    // soft" rather than as a synchronisation bug.
+    bool nu_uploaded = false;
+    if (has_nu_field && gpu_buffers.substance_viscosity.valid()) {
+        nu_uploaded = compute->uploadBuffer(
+            gpu_buffers.substance_viscosity,
+            params.substance_viscosity->data(),
+            cell_count * sizeof(float));
+        ok = ok && nu_uploaded;
+    }
     ok = compute->endTransferBatch() && ok;
     if (!ok) return false;
 
@@ -2851,6 +3041,13 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
     c.dt = dt;
     c.alpha = alpha;
     c.solid_weight = 1.0f - std::clamp(params.viscosity_wall_slip, 0.0f, 1.0f);
+    // ★ Gated on the UPLOAD, not on the field existing. If the transfer failed
+    // the buffer still holds the previous step's viscosities, and telling the
+    // kernel to read it would diffuse this frame's velocities with last frame's
+    // material layout — plausible-looking and untraceable. Falling back to the
+    // uniform alpha is wrong by a known amount instead of wrong by an unknown
+    // one.
+    c.has_nu = nu_uploaded ? 1 : 0;
 
     const uint32_t threads = 256;
     const uint32_t max_faces = static_cast<uint32_t>(
@@ -2861,7 +3058,7 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
     ComputeDispatch cmd;
     cmd.kernel = "sim_fluid_viscosity_rbgs";
     cmd.buffers = bufs;
-    cmd.buffer_count = 10;
+    cmd.buffer_count = 11;
     cmd.constants_size = sizeof(c);
     cmd.groups.groups_x = groups;
     cmd.groups.groups_y = 1;
@@ -3725,7 +3922,8 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
                     float dt,
                     SimulationComputeContext* compute,
                     SimulationGridDomainComputeBuffers& gpu_buffers,
-                    bool has_flip_snapshot) {
+                    bool has_flip_snapshot,
+                    bool download_granular_state = true) {
     auto& grid      = state.grid;
     auto& particles = state.particles;
     const std::size_t n = particles.size();
@@ -3782,7 +3980,8 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     c.voxel_size        = grid.voxel_size;
     c.flip_blend        = std::clamp(fluid_params.flip_blend, 0.0f, 1.0f);
     c.apic_blend        = std::clamp(fluid_params.apic_blend, 0.0f, 1.0f);
-    c.internal_friction = fluid_params.internal_friction;
+    c.internal_friction = fluid_params.granular_enabled ? 0.0f
+                                                         : fluid_params.internal_friction;
     c.max_velocity      = fluid_params.max_velocity;
     c.dt                = dt;
     c.has_flip_snapshot = has_flip_snapshot ? 1 : 0;
@@ -3816,6 +4015,31 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     cmd.groups.groups_x = (static_cast<uint32_t>(c.particle_count) + threads - 1u) / threads;
     ok = compute->dispatch(cmd);
 
+    if (ok && fluid_params.granular_enabled) {
+        Fluid::Granular::Parameters gp;
+        constexpr float deg_to_rad = 0.017453292519943295f;
+        gp.friction_angle_radians = fluid_params.granular_friction_angle_degrees * deg_to_rad;
+        gp.cohesion = fluid_params.granular_cohesion;
+        gp.dilatancy = fluid_params.granular_dilatancy_degrees * deg_to_rad;
+        gp.hardening = fluid_params.granular_hardening;
+        gp.tensile_cutoff = fluid_params.granular_tensile_cutoff;
+        const auto elastic_step = Fluid::Granular::elasticStepInfo(
+            fluid_params.granular_young_modulus, state.grid.voxel_size, dt);
+        ok = Fluid::Granular::dispatchStressUpdate(
+            *compute, gpu_buffers.granular, gpu_buffers.fluid_affine, n, dt, gp,
+            elastic_step.effective_young_modulus,
+            fluid_params.granular_poisson_ratio,
+            fluid_params.granular_fracture_strain,
+            fluid_params.granular_damage_rate,
+            fluid_params.granular_healing_rate,
+            fluid_params.granular_rebonding);
+        if (ok) {
+            ok = Fluid::Granular::dispatchSettle(
+                *compute, gpu_buffers.granular,
+                gpu_buffers.fluid_velocities, n, dt);
+        }
+    }
+
     // No synchronize(): the download batch flushes uploads+dispatch+downloads
     // in one submit (see the P2G tail note).
     compute->beginTransferBatch();
@@ -3826,6 +4050,32 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
          compute->downloadBuffer(gpu_buffers.fluid_affine,
                                  particles.affine.data(),
                                  n * sizeof(Fluid::AffineC));
+    if (ok && fluid_params.granular_enabled && download_granular_state) {
+        ok = compute->downloadBuffer(gpu_buffers.granular.stress_diag,
+                                     particles.granular_stress_diag.data(), n * sizeof(Vec3)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.stress_shear,
+                                     particles.granular_stress_shear.data(), n * sizeof(Vec3)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.plastic_volume,
+                                     particles.granular_plastic_volume.data(), n * sizeof(float)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.state_flags,
+                                     particles.granular_material_flags.data(), n * sizeof(uint32_t)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.yield_value,
+                                     particles.granular_yield_value.data(), n * sizeof(float)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.plastic_increment,
+                                     particles.granular_plastic_increment.data(), n * sizeof(float)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.damage,
+                                     particles.granular_damage.data(), n * sizeof(float)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.hardening,
+                                     particles.granular_hardening.data(), n * sizeof(float)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.fracture_history,
+                                     particles.granular_fracture_history.data(), n * sizeof(float)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.deformation_col0,
+                                     particles.granular_deformation_col0.data(), n * sizeof(Vec3)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.deformation_col1,
+                                     particles.granular_deformation_col1.data(), n * sizeof(Vec3)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.deformation_col2,
+                                     particles.granular_deformation_col2.data(), n * sizeof(Vec3)) && ok;
+    }
     ok = compute->endTransferBatch() && ok;
     return ok;
 }
@@ -3834,7 +4084,9 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
                            const Fluid::APICSolverParams& params,
                            float dt,
                            SimulationComputeContext* compute,
-                           SimulationGridDomainComputeBuffers& buffers) {
+                           SimulationGridDomainComputeBuffers& buffers,
+                           int* executed_substeps = nullptr) {
+    if (executed_substeps) *executed_substeps = 0;
     auto& particles = state.particles;
     auto& grid = state.grid;
     const std::size_t n = particles.size();
@@ -3856,8 +4108,12 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
     c.nx = grid.nx; c.ny = grid.ny; c.nz = grid.nz;
     c.particle_count = static_cast<int>(std::min<std::size_t>(
         n, static_cast<std::size_t>(std::numeric_limits<int>::max())));
-    c.boundary = params.boundary == Fluid::APICSolverParams::BoundaryMode::Open ? 1 :
-                 params.boundary == Fluid::APICSolverParams::BoundaryMode::Periodic ? 2 : 0;
+    const int boundary_mode =
+        params.boundary == Fluid::APICSolverParams::BoundaryMode::Open ? 1 :
+        params.boundary == Fluid::APICSolverParams::BoundaryMode::Periodic ? 2 : 0;
+    // Bits 0..1 retain the boundary enum; bit 2 selects Lagrangian MPM
+    // advection. Reuse the existing word so the 64-byte push ABI is unchanged.
+    c.boundary = boundary_mode | (params.granular_enabled ? 4 : 0);
     c.origin_x = grid.origin.x; c.origin_y = grid.origin.y; c.origin_z = grid.origin.z;
     c.voxel_size = grid.voxel_size; c.dt = dt;
     c.velocity_damping = std::clamp(params.velocity_damping, 0.0f, 1.0f);
@@ -3887,6 +4143,7 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
                                  particles.velocity.data(), n * sizeof(Vec3));
     ok = compute->endTransferBatch() && ok;
     if (!ok) return false;
+    if (executed_substeps) *executed_substeps = c.substeps;
 
     if (params.boundary == Fluid::APICSolverParams::BoundaryMode::Open) {
         Vec3 mn, mx;
@@ -7592,12 +7849,6 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         // the seed deferred so it applies on the next sim tick with a freshly
         // resized grid.
         if (domain.type == SimulationDomainType::Fluid && domain.fluid_pending_seed && state.valid) {
-            // Remember that this domain owns an authored initial liquid state.
-            // fluid_pending_seed is consumed below, so it cannot by itself tell
-            // a later timeline/cache reset that SeedBox must be replayed.
-            if (domain.fluid_replace_on_seed) {
-                domain.fluid_reseed_on_reset = true;
-            }
             if (domain.fluid_replace_on_seed) {
                 state.particles.clear();
                 state.foam.clear();   // drop stale whitewater with the old liquid
@@ -7764,10 +8015,22 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                                                     fluid_domain.fluid_params.reseed_max_per_cell, 1 });
                 const int cap = std::max(1, static_cast<int>(spawn_cells * static_cast<double>(pack_ceiling)));
                 if (emit_count > cap) {
-                    source.fluid_emit_accumulator += static_cast<float>(emit_count - cap);
+                    // Keep at most one locally packable batch as debt. Returning
+                    // every rejected particle made the accumulator grow without
+                    // bound whenever authored rate exceeded local capacity; a
+                    // later radius/keyframe change then released that history as
+                    // the delayed particle avalanche mistaken for a seed replay.
+                    const int deferred = std::min(emit_count - cap, cap);
+                    source.fluid_emit_accumulator += static_cast<float>(deferred);
                     emit_count = cap;
                 }
             }
+
+            // What this source is pouring. Empty name -> untagged, which the
+            // consumers read as "use the domain's single material" — the exact
+            // behaviour every existing scene has.
+            const uint32_t emit_substance =
+                RayTrophiSim::Fluid::substanceTag(source.fluid_substance);
 
             // Per-source-per-particle hash seed so jitter is deterministic but
             // not synchronized across sources.
@@ -7846,7 +8109,11 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                         emit_vel = emit_vel + jitter * jitter_mag;
                     }
                 }
-                state.particles.emit(spawn_pos, emit_vel);
+                // ★ Hashed ONCE per source per step, not per particle: it is a
+                // property of the source, and hashing a string inside the spawn
+                // loop would put a per-character cost on every emitted particle
+                // for a value that cannot change between them.
+                state.particles.emit(spawn_pos, emit_vel, 0.0f, 0.0f, emit_substance);
             }
             source.total_emitted_particles += emit_count;
             continue;
@@ -8727,6 +8994,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     state.particles.velocity[pi] = state.particles.velocity[pi] + container_velocity_delta;
                 }
             }
+            // Remove LAST step's solid-phase overlay before the voxelizer runs,
+            // so its cache compares a pure collider mask against a collider
+            // signature. Consume-before-service: see clearSubstanceSolidOverlay.
+            clearSubstanceSolidOverlay(state.grid);
             // Stamp the active collider set into grid.solid[] every step so
             // Fluid::step's pressure projection + enforceSolidBoundaries see
             // up-to-date boundaries (works for moving/scaled colliders too).
@@ -8744,9 +9015,90 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             const std::size_t solid_recovery_count =
                 Fluid::recoverParticlesFromSolidCells(state.particles, state.grid);
             // GPU particle buffers were uploaded before collider voxelization.
-            // If recovery moved anything, use CPU P2G for this one corrective
-            // frame rather than dispatching from stale device positions.
-            if (solid_recovery_count > 0u) gpu_integrated_forces = false;
+            // Recovery changes positions on the host, so refresh the particle
+            // buffers instead of changing physics models for one frame. The old
+            // CPU fallback made granular piles alternate between MPM and liquid
+            // pressure whenever a collider recovered even one parcel, observed
+            // as a perpetual boiling layer at the contact surface.
+            if (solid_recovery_count > 0u && fluid_gpu_requested &&
+                fluid_gpu_compute_available && context.compute &&
+                i < grid_domain_compute_buffers_.size()) {
+                gpu_integrated_forces = ensureGpuFluidParticleBuffers(
+                    state, context.compute, grid_domain_compute_buffers_[i]);
+            }
+
+            // ── Solid-phase substances → grid.solid overlay ──────────────────
+            // Tags first: this list is what tells the particle stages "I AM the
+            // solid" apart from "I am inside one", and the same list decides
+            // whether the overlay is built at all.
+            static std::vector<uint32_t> s_solid_tags;
+            s_solid_tags.clear();
+            // ★ The master switch is read HERE, at the producer, and it empties
+            // the tag list rather than skipping the stamp further down. That way
+            // the particle stages see "no solid substance" too: a half-off state
+            // where parcels are exempt from advection but nothing blocks them
+            // would be a third behaviour nobody asked for.
+            if (i < grid_domains_.size() && grid_domains_[i].fluid_solid_phase_enabled) {
+                for (const auto& b : grid_domains_[i].fluid_substance_materials) {
+                    if (b.substance.empty()) continue;
+                    if (b.phase != RayTrophiSim::Fluid::SubstancePhase::Solid) continue;
+                    if (s_solid_tags.size() >= RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials)
+                        break;
+                    s_solid_tags.push_back(
+                        RayTrophiSim::Fluid::substanceTag(b.substance));
+                }
+            }
+            std::size_t solid_phase_cell_count = 0;
+            std::size_t solid_phase_particle_count = 0;
+            if (!s_solid_tags.empty()) {
+                // ★ THE FILL THRESHOLD IS TIED TO THE SEED DENSITY, because that
+                // is the only number in the scene that says what a FULL cell
+                // means. A quarter of it: high enough that one stray parcel does
+                // not dam a channel with a full h³ of wall, low enough that a
+                // chunk two parcels thick still blocks. A fixed constant would
+                // mean something different at every particles_per_cell setting,
+                // and the difference would show up as "solid works in this scene
+                // and not that one".
+                const float fill_fraction = (i < grid_domains_.size())
+                    ? std::max(0.01f, grid_domains_[i].fluid_solid_phase_fill)
+                    : 0.25f;
+                const float fill_threshold = std::max(1.0f,
+                    fill_fraction * static_cast<float>(std::max(1, fluid_params.particles_per_cell)));
+                static std::vector<uint32_t> s_solid_cells;
+                static std::vector<Vec3>     s_solid_cell_vel;
+                if (RayTrophiSim::Fluid::buildSubstanceSolidCells(
+                        state.particles, state.grid,
+                        s_solid_tags.data(), s_solid_tags.size(),
+                        fill_threshold,
+                        s_solid_cells, s_solid_cell_vel)) {
+                    state.grid.solid_cells_collider_count =
+                        state.grid.solid_cells.size();
+                    applySubstanceSolidOverlay(state.grid, s_solid_cells, s_solid_cell_vel,
+                                               fluid_params.max_velocity);
+                    solid_phase_cell_count = state.grid.substance_solid_cells.size();
+                }
+                // Counted even when no cell filled: parcels-present-with-zero-
+                // cells is the reading that says "raise the resolution", and it
+                // is invisible if only the cells are reported.
+                for (std::size_t pi = 0; pi < state.particles.size() &&
+                                         pi < state.particles.substance_tag.size(); ++pi) {
+                    const uint32_t tag = state.particles.substance_tag[pi];
+                    if (tag == RayTrophiSim::Fluid::kSubstanceUntagged) continue;
+                    for (uint32_t st : s_solid_tags) {
+                        if (st != tag) continue;
+                        ++solid_phase_particle_count;
+                        break;
+                    }
+                }
+                // ★★ An overlay that moves every step makes the variational
+                // face-weight cache a liability: it keys on the COLLIDER
+                // signature, which is unchanged, so it would happily skip the
+                // rebuild and leave last step's chunk faces closed. Invalidating
+                // costs one full weight pass per step, and only in scenes that
+                // actually have a solid substance.
+                state.grid.collider_weights_sig = 0;
+                state.grid.collider_weights_init = false;
+            }
             // Variational solid coupling: fractional MAC-face open weights for
             // sub-grid-accurate boundaries + moving-collider splash. Cheap (only
             // the collider neighbourhood is super-sampled); skipped when the flag
@@ -8757,6 +9109,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                         collider_bounds_resolver_,
                                         collider_obb_resolver_,
                                         true);
+                // The weights above describe COLLIDERS only; close the overlay's
+                // own faces or a chunk is invisible to the variational pressure
+                // solve while remaining visible to the binary one.
+                blockSubstanceSolidFaceWeights(state.grid);
             } else {
                 // Weights aren't maintained while variational is off; mark them
                 // stale so the next on-frame does a full open-init (the colliders
@@ -8765,6 +9121,54 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             }
             auto step_params = fluid_params;
             step_params.max_particles = (i < grid_domains_.size()) ? grid_domains_[i].fluid_max_particles : 100000;
+            // Hand the solid tags to the solver: the mask is already stamped,
+            // but the PARTICLE stages need to know which parcels are the solid
+            // so they are neither advected by the flow nor ejected from their
+            // own cells (see APICSolverParams::solid_substance_tags).
+            step_params.solid_substance_tags =
+                s_solid_tags.empty() ? nullptr : &s_solid_tags;
+
+            // ── Per-substance viscosity field ────────────────────────────────
+            // Built HERE, once per domain per step, and pointed at by the params
+            // every downstream call copies — the CPU solve, the device solve and
+            // both split-step halves must diffuse with the SAME field or the two
+            // backends produce different liquid from the same scene.
+            //
+            // ★ Function-static and reused across domains: it is consumed
+            // entirely within this iteration (Fluid::step and
+            // runGpuFluidViscosity are both called below, before the next
+            // domain), so one buffer is enough and a per-domain vector would be
+            // an allocation per domain per frame.
+            //
+            // ★★ The gather takes NO representation/exclusion filter. Splat is
+            // a RENDER routing decision; a substance drawn as spheres still has
+            // mass and still resists shear. See buildSubstanceViscosityField.
+            static std::vector<float> s_substance_viscosity;
+            step_params.substance_viscosity = nullptr;
+            if (i < grid_domains_.size() &&
+                !grid_domains_[i].fluid_substance_materials.empty()) {
+                RayTrophiSim::Fluid::SubstanceViscosityEntry visc_entries[
+                    RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials];
+                std::size_t visc_entry_count = 0;
+                for (const auto& b : grid_domains_[i].fluid_substance_materials) {
+                    if (visc_entry_count >= RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials)
+                        break;
+                    if (b.substance.empty()) continue;
+                    visc_entries[visc_entry_count].tag =
+                        RayTrophiSim::Fluid::substanceTag(b.substance);
+                    visc_entries[visc_entry_count].kinematic_viscosity =
+                        b.kinematic_viscosity;
+                    ++visc_entry_count;
+                }
+                if (visc_entry_count > 0 &&
+                    RayTrophiSim::Fluid::buildSubstanceViscosityField(
+                        state.particles, state.grid,
+                        visc_entries, visc_entry_count,
+                        fluid_params.kinematic_viscosity,
+                        s_substance_viscosity)) {
+                    step_params.substance_viscosity = &s_substance_viscosity;
+                }
+            }
             // Forces were evaluated on the CPU (force-field branch); make every
             // downstream step() skip its force stage so they are not applied twice.
             // This holds whether or not the GPU upload/P2G succeeded.
@@ -8794,6 +9198,54 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             }
 
             // ── GPU P2G ──────────────────────────────────────────────────────
+            // Elastic MPM stability depends on wave speed, not only particle
+            // advection velocity. Subcycle the complete transfer/grid/gather/
+            // advect path so the authored Young modulus is actually used.
+            const float granular_frame_dt = dt;
+            const auto granular_frame_elastic = Fluid::Granular::elasticStepInfo(
+                fluid_params.granular_young_modulus,
+                state.grid.voxel_size, granular_frame_dt);
+            const int granular_solver_substeps = fluid_params.granular_enabled
+                ? std::clamp(granular_frame_elastic.required_substeps, 1,
+                             fluid_params.granular_max_solver_substeps)
+                : 1;
+            if (granular_solver_substeps > 1) {
+                fluid_params.velocity_damping = std::pow(
+                    std::clamp(fluid_params.velocity_damping, 0.0f, 1.0f),
+                    1.0f / static_cast<float>(granular_solver_substeps));
+                fluid_params.affine_damping = std::pow(
+                    std::clamp(fluid_params.affine_damping, 0.0f, 1.0f),
+                    1.0f / static_cast<float>(granular_solver_substeps));
+                step_params.velocity_damping = fluid_params.velocity_damping;
+                step_params.affine_damping = fluid_params.affine_damping;
+            }
+            float granular_p2g_ms_sum = 0.0f;
+            float granular_pressure_ms_sum = 0.0f;
+            float granular_viscosity_ms_sum = 0.0f;
+            float granular_g2p_ms_sum = 0.0f;
+            float granular_advect_ms_sum = 0.0f;
+            int granular_advect_substeps_sum = 0;
+            bool granular_substep_failed = false;
+            bool granular_state_resident = false;
+            // Final substep result is also consumed by the frame-level GPU
+            // status/cache section after the elastic subcycle closes.
+            bool g2p_on_gpu = false;
+            bool particle_tail_on_gpu = false;
+            const bool granular_state_can_stay_resident =
+                fluid_params.granular_enabled &&
+                fluid_params.boundary != Fluid::APICSolverParams::BoundaryMode::Open;
+
+            for (int granular_substep = 0;
+                 granular_substep < granular_solver_substeps;
+                 ++granular_substep) {
+            const std::size_t granular_particle_count_before = state.particles.size();
+            const float dt = granular_frame_dt /
+                static_cast<float>(granular_solver_substeps);
+            step_params.stop_before_pressure = false;
+            step_params.pressure_g2p_precomputed = false;
+            step_params.particle_tail_precomputed = false;
+            step_params.viscosity_precomputed = false;
+
             float gpu_p2g_ms = 0.0f;
             if (gpu_integrated_forces) {
                 step_params.external_forces_preintegrated = true;
@@ -8803,7 +9255,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     if (ensureGridDomainComputeBuffers(*context.compute, gpu_buffers, state.grid)) {
                         step_params.p2g_precomputed = runGpuFluidP2G(state,
                                                                      context.compute,
-                                                                     gpu_buffers);
+                                                                     gpu_buffers,
+                                                                     step_params,
+                                                                     dt,
+                                                                     !granular_state_resident);
+                        if (step_params.p2g_precomputed &&
+                            granular_state_can_stay_resident)
+                            granular_state_resident = true;
                     }
                 }
                 if (step_params.p2g_precomputed)
@@ -8829,15 +9287,16 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             //   which re-runs P2G and therefore redoes viscosity itself — the
             //   device result is discarded rather than applied twice.
             float gpu_g2p_ms = 0.0f;
+            float gpu_advect_ms = 0.0f;
+            int gpu_advect_substeps = 0;
             float gpu_pressure_ms = 0.0f;
             float gpu_viscosity_ms = 0.0f;
             int   gpu_viscosity_sweeps = 0;
-            bool  g2p_on_gpu = false;
-            bool  particle_tail_on_gpu = false;
+            g2p_on_gpu = false;
+            particle_tail_on_gpu = false;
             Fluid::APICSolverStats gpu_mgpcg_stats;
 
             const bool try_gpu_g2p =
-                solid_recovery_count == 0u &&
                 fluid_params.free_surface &&
                 // Periodic boundaries need the wrap-coupled CPU PCG (the GPU MGPCG
                 // still treats out-of-grid as solid, i.e. behaves as Closed); fall
@@ -8856,10 +9315,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     auto call1_params = step_params;
                     call1_params.stop_before_pressure = true;
                     call1_params.viscosity_precomputed = true;
-                    Fluid::APICSolverStats call1_stats;
                     Fluid::step(state.particles, state.grid, call1_params, dt,
                                 gpu_integrated_forces ? nullptr : context.force_snapshot,
-                                context.time_seconds, &call1_stats);
+                                context.time_seconds, nullptr);
 
                     // ★ The FLIP snapshot is the POST-P2G field that step() just
                     // published — NOT state.grid.vel_*, which by now carries the
@@ -8867,6 +9325,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     // Uploading grid.vel here is what used to cancel viscosity out
                     // of the FLIP delta entirely (see the note in Fluid::step).
                     const bool has_flip =
+                        !fluid_params.granular_enabled &&
                         gpu_buffers.scratch_vel_x.valid() &&
                         gpu_buffers.scratch_vel_y.valid() &&
                         gpu_buffers.scratch_vel_z.valid() &&
@@ -8890,6 +9349,31 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     static std::vector<float> s_fluid_mask_gpu; // function-static scratch
                     if (upload_ok) {
                         buildFluidMaskFromParticles(state.grid, state.particles, s_fluid_mask_gpu);
+                        if (fluid_params.granular_enabled) {
+                            const std::size_t cell_count = state.grid.getCellCount();
+                            static std::vector<float> s_granular_svx, s_granular_svy, s_granular_svz;
+                            s_granular_svx.assign(cell_count, 0.0f);
+                            s_granular_svy.assign(cell_count, 0.0f);
+                            s_granular_svz.assign(cell_count, 0.0f);
+                            if (state.grid.solid_vel.size() == cell_count) {
+                                for (std::size_t c = 0; c < cell_count; ++c) {
+                                    s_granular_svx[c] = state.grid.solid_vel[c].x;
+                                    s_granular_svy[c] = state.grid.solid_vel[c].y;
+                                    s_granular_svz[c] = state.grid.solid_vel[c].z;
+                                }
+                            }
+                            context.compute->beginTransferBatch();
+                            upload_ok =
+                                context.compute->uploadBuffer(gpu_buffers.fluid_mask,
+                                    s_fluid_mask_gpu.data(), cell_count * sizeof(float)) &&
+                                context.compute->uploadBuffer(gpu_buffers.var_svx,
+                                    s_granular_svx.data(), cell_count * sizeof(float)) &&
+                                context.compute->uploadBuffer(gpu_buffers.var_svy,
+                                    s_granular_svy.data(), cell_count * sizeof(float)) &&
+                                context.compute->uploadBuffer(gpu_buffers.var_svz,
+                                    s_granular_svz.data(), cell_count * sizeof(float));
+                            upload_ok = context.compute->endTransferBatch() && upload_ok;
+                        }
                     }
 
                     // Viscous diffusion. A requested viscosity the device cannot
@@ -8897,9 +9381,16 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     // shipping an inviscid step for a honey preset is the exact
                     // class of failure that looks plausible and gets tuned around.
                     bool viscosity_ok = true;
-                    if (upload_ok && fluid_params.kinematic_viscosity > 0.0f) {
+                    // ★ step_params, NOT fluid_params: the per-substance field
+                    // hangs off step_params, and passing the domain params here
+                    // would run the DEVICE solve uniform while the host copy ran
+                    // it variable — two backends, two liquids, no error.
+                    // The field is also reason enough to run the stage: an
+                    // inviscid domain pouring honey must still be honey.
+                    if (upload_ok && (fluid_params.kinematic_viscosity > 0.0f ||
+                                      step_params.substance_viscosity != nullptr)) {
                         const auto visc_begin = SimulationClock::now();
-                        viscosity_ok = runGpuFluidViscosity(state, fluid_params, dt,
+                        viscosity_ok = runGpuFluidViscosity(state, step_params, dt,
                                                             context.compute, gpu_buffers,
                                                             s_fluid_mask_gpu,
                                                             &gpu_viscosity_sweeps);
@@ -8912,7 +9403,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     // GPU pressure projection (MGPCG). On success grid.vel holds
                     // the projected field and the GPU vel buffers match it.
                     bool pressure_on_gpu = false;
-                    if (upload_ok && viscosity_ok) {
+                    if (upload_ok && viscosity_ok && fluid_params.granular_enabled) {
+                        // Granular MPM is compressible. Running the liquid
+                        // incompressibility projection on top of its elastic
+                        // volumetric stress double-enforces volume and causes an
+                        // immediate pressure explosion.
+                        pressure_on_gpu = true;
+                    } else if (upload_ok && viscosity_ok) {
                         const auto gpu_pressure_begin = SimulationClock::now();
                         pressure_on_gpu = runGpuFluidMGPCGPressure(state, fluid_params, dt,
                                                                    context.compute, gpu_buffers,
@@ -8930,16 +9427,79 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
 
                     if (pressure_on_gpu) {
                         const auto gpu_g2p_begin = SimulationClock::now();
-                        g2p_on_gpu = runGpuFluidG2P(state, fluid_params, dt,
-                                                     context.compute, gpu_buffers, has_flip);
+                        // ── Solid-phase parcels are not the device's to move ──
+                        // ★★★ THE DEVICE G2P KERNEL HAS NO PHASE CONCEPT, so it
+                        // will hand every parcel the grid velocity — including
+                        // the ones that ARE the solid. Their own cells carry
+                        // solid_vel, so the value it writes is close enough to
+                        // look right at rest and wrong only under flow: the
+                        // chunk would slowly get carried away by the liquid it
+                        // is supposed to obstruct. Snapshot before, restore
+                        // after; indices are stable across P2G/pressure/G2P
+                        // because nothing adds or removes parcels in between.
+                        //
+                        // ★ Restoring rather than gating in the shader keeps the
+                        // two backends answering identically without a fifth
+                        // ABI mirror. If the phase ever needs to be ON the
+                        // device (it does not yet — nothing there reads it), it
+                        // becomes a per-particle flag, not a tag list.
+                        static std::vector<uint32_t> s_solid_idx;
+                        static std::vector<Vec3>     s_solid_vel_keep;
+                        static std::vector<Fluid::AffineC> s_solid_affine_keep;
+                        s_solid_idx.clear();
+                        s_solid_vel_keep.clear();
+                        s_solid_affine_keep.clear();
+                        if (!s_solid_tags.empty()) {
+                            for (std::size_t pi = 0; pi < state.particles.size() &&
+                                                     pi < state.particles.substance_tag.size(); ++pi) {
+                                const uint32_t tag = state.particles.substance_tag[pi];
+                                if (tag == RayTrophiSim::Fluid::kSubstanceUntagged) continue;
+                                bool solid = false;
+                                for (uint32_t st : s_solid_tags) { if (st == tag) { solid = true; break; } }
+                                if (!solid) continue;
+                                s_solid_idx.push_back(static_cast<uint32_t>(pi));
+                                s_solid_vel_keep.push_back(state.particles.velocity[pi]);
+                                if (pi < state.particles.affine.size())
+                                    s_solid_affine_keep.push_back(state.particles.affine[pi]);
+                                else
+                                    s_solid_affine_keep.emplace_back();
+                            }
+                        }
+                        g2p_on_gpu = runGpuFluidG2P(
+                            state, fluid_params, dt,
+                            context.compute, gpu_buffers, has_flip,
+                            !granular_state_can_stay_resident ||
+                                granular_substep + 1 == granular_solver_substeps);
                         if (g2p_on_gpu) {
                             gpu_g2p_ms = elapsedMilliseconds(gpu_g2p_begin, SimulationClock::now());
-                            particle_tail_on_gpu =
-                                runGpuFluidAdvectTail(state, fluid_params, dt,
-                                                     context.compute, gpu_buffers);
-                            // Patch stats from Call 1 into fluid_stats so the
-                            // second call's reset doesn't clobber them.
-                            state.fluid_stats = call1_stats;
+                            for (std::size_t n = 0; n < s_solid_idx.size(); ++n) {
+                                const std::size_t pi = s_solid_idx[n];
+                                if (pi >= state.particles.velocity.size()) continue;
+                                state.particles.velocity[pi] = s_solid_vel_keep[n];
+                                if (pi < state.particles.affine.size())
+                                    state.particles.affine[pi] = s_solid_affine_keep[n];
+                            }
+                            // ★★ The device advect tail is skipped outright while
+                            // a solid substance is live: it moves parcels by the
+                            // grid field and knows nothing about the own-cell
+                            // exception, so a chunk would eject itself there
+                            // exactly as it would have in the host path before
+                            // that exception existed. The host tail runs instead
+                            // — a measurable perf cost in these scenes, not a
+                            // silent difference in result.
+                            if (s_solid_tags.empty()) {
+                                const auto gpu_advect_begin = SimulationClock::now();
+                                particle_tail_on_gpu = runGpuFluidAdvectTail(
+                                    state, fluid_params, dt,
+                                    context.compute, gpu_buffers,
+                                    &gpu_advect_substeps);
+                                if (particle_tail_on_gpu) {
+                                    gpu_advect_ms = elapsedMilliseconds(
+                                        gpu_advect_begin, SimulationClock::now());
+                                }
+                            }
+                            // Granular counters are collected after Call 2 below:
+                            // Fluid::step resets its output stats on entry.
                         }
                     }
 
@@ -8988,6 +9548,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                             nullptr, context.time_seconds, &state.fluid_stats);
                 state.fluid_stats.g2p_ms       = gpu_g2p_ms;
                 state.fluid_stats.g2p_on_gpu   = true;
+                if (particle_tail_on_gpu) {
+                    state.fluid_stats.advect_ms = gpu_advect_ms;
+                    state.fluid_stats.advect_substeps = gpu_advect_substeps;
+                }
                 state.fluid_stats.pressure_ms     = gpu_pressure_ms;
                 state.fluid_stats.pressure_on_gpu = true;
                 state.fluid_stats.viscosity_ms         = gpu_viscosity_ms;
@@ -9000,6 +9564,100 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 state.fluid_stats.pressure_cg_multigrid = gpu_mgpcg_stats.pressure_cg_multigrid;
                 state.fluid_stats.pressure_cg_final_relative_residual =
                     gpu_mgpcg_stats.pressure_cg_final_relative_residual;
+                if (fluid_params.granular_enabled &&
+                    granular_substep + 1 == granular_solver_substeps) {
+                    std::size_t yielded = 0, detached = 0, invalid = 0, sleeping = 0, damaged = 0;
+                    std::size_t damage_over_10 = 0, damage_over_50 = 0, damage_over_90 = 0;
+                    for (uint32_t f : state.particles.granular_material_flags) {
+                        yielded += (f & 1u) != 0u;
+                        detached += (f & 2u) != 0u;
+                        invalid += (f & 4u) != 0u;
+                        sleeping += (f & 8u) != 0u;
+                    }
+                    float max_yield = 0.0f, max_plastic = 0.0f;
+                    float max_accumulated_plastic = 0.0f, max_damage = 0.0f;
+                    float max_fracture_history = 0.0f;
+                    double accumulated_plastic_sum = 0.0, damage_sum = 0.0;
+                    double fracture_history_sum = 0.0;
+                    std::size_t accumulated_plastic_samples = 0, damage_samples = 0;
+                    std::size_t fracture_history_samples = 0;
+                    for (float v : state.particles.granular_yield_value)
+                        if (std::isfinite(v)) max_yield = std::max(max_yield, v);
+                    for (float v : state.particles.granular_plastic_increment)
+                        if (std::isfinite(v)) max_plastic = std::max(max_plastic, v);
+                    for (float v : state.particles.granular_hardening) {
+                        if (!std::isfinite(v)) continue;
+                        max_accumulated_plastic = std::max(max_accumulated_plastic, v);
+                        accumulated_plastic_sum += static_cast<double>(v);
+                        ++accumulated_plastic_samples;
+                    }
+                    for (float v : state.particles.granular_damage) {
+                        if (!std::isfinite(v)) continue;
+                        max_damage = std::max(max_damage, v);
+                        damaged += v > 1.0e-4f;
+                        damage_over_10 += v >= 0.10f;
+                        damage_over_50 += v >= 0.50f;
+                        damage_over_90 += v >= 0.90f;
+                        damage_sum += static_cast<double>(v);
+                        ++damage_samples;
+                    }
+                    for (float v : state.particles.granular_fracture_history) {
+                        if (!std::isfinite(v)) continue;
+                        max_fracture_history = std::max(max_fracture_history, v);
+                        fracture_history_sum += static_cast<double>(v);
+                        ++fracture_history_samples;
+                    }
+                    state.fluid_stats.granular_yielded_particles = yielded;
+                    state.fluid_stats.granular_detached_particles = detached;
+                    state.fluid_stats.granular_invalid_particles = invalid;
+                    state.fluid_stats.granular_sleeping_particles = sleeping;
+                    state.fluid_stats.granular_damaged_particles = damaged;
+                    state.fluid_stats.granular_damage_over_10_particles = damage_over_10;
+                    state.fluid_stats.granular_damage_over_50_particles = damage_over_50;
+                    state.fluid_stats.granular_damage_over_90_particles = damage_over_90;
+                    state.fluid_stats.granular_max_yield_value = max_yield;
+                    state.fluid_stats.granular_max_plastic_increment = max_plastic;
+                    state.fluid_stats.granular_max_accumulated_plastic = max_accumulated_plastic;
+                    state.fluid_stats.granular_mean_accumulated_plastic =
+                        accumulated_plastic_samples > 0
+                            ? static_cast<float>(accumulated_plastic_sum /
+                                                 static_cast<double>(accumulated_plastic_samples))
+                            : 0.0f;
+                    state.fluid_stats.granular_max_fracture_history = max_fracture_history;
+                    state.fluid_stats.granular_mean_fracture_history =
+                        fracture_history_samples > 0
+                            ? static_cast<float>(fracture_history_sum /
+                                                 static_cast<double>(fracture_history_samples))
+                            : 0.0f;
+                    state.fluid_stats.granular_max_damage = max_damage;
+                    state.fluid_stats.granular_mean_damage =
+                        damage_samples > 0
+                            ? static_cast<float>(damage_sum / static_cast<double>(damage_samples))
+                            : 0.0f;
+                    const auto elastic_step = Fluid::Granular::elasticStepInfo(
+                        fluid_params.granular_young_modulus,
+                        state.grid.voxel_size, dt);
+                    state.fluid_stats.granular_requested_young_modulus =
+                        elastic_step.requested_young_modulus;
+                    state.fluid_stats.granular_effective_young_modulus =
+                        elastic_step.effective_young_modulus;
+                    state.fluid_stats.granular_required_substeps =
+                        elastic_step.required_substeps;
+                    state.fluid_stats.granular_stiffness_capped = elastic_step.capped;
+                }
+            } else if (step_params.granular_enabled && fluid_gpu_requested) {
+                // There is no physically equivalent CPU granular solver yet.
+                // Falling through to the incompressible liquid solver changes
+                // the material model mid-simulation and makes a resting pile
+                // boil. Hold the step visibly instead of producing plausible
+                // but invalid motion.
+                state.fluid_stats = {};
+                state.fluid_stats.particle_count = state.particles.size();
+                state.fluid_stats.gpu_requested = true;
+                state.fluid_stats.gpu_compute_available = fluid_gpu_compute_available;
+                state.fluid_stats.gpu_fallback = true;
+                state.fluid_stats.gpu_status =
+                    "Granular Vulkan stage failed; step held (no liquid fallback)";
             } else {
                 // Full CPU path (either GPU G2P not engaged or failed).
                 Fluid::step(state.particles, state.grid, step_params, dt,
@@ -9011,9 +9669,49 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 state.fluid_stats.p2g_ms     = gpu_p2g_ms;
                 state.fluid_stats.p2g_on_gpu = true;
             }
+            granular_p2g_ms_sum += state.fluid_stats.p2g_ms;
+            granular_pressure_ms_sum += state.fluid_stats.pressure_ms;
+            granular_viscosity_ms_sum += state.fluid_stats.viscosity_ms;
+            granular_g2p_ms_sum += state.fluid_stats.g2p_ms;
+            granular_advect_ms_sum += state.fluid_stats.advect_ms;
+            granular_advect_substeps_sum += state.fluid_stats.advect_substeps;
+            if (state.particles.size() != granular_particle_count_before)
+                granular_state_resident = false;
+            if (state.fluid_stats.gpu_fallback) {
+                granular_substep_failed = true;
+                break;
+            }
+            }
+
+            state.fluid_stats.p2g_ms = granular_p2g_ms_sum;
+            state.fluid_stats.pressure_ms = granular_pressure_ms_sum;
+            state.fluid_stats.viscosity_ms = granular_viscosity_ms_sum;
+            state.fluid_stats.g2p_ms = granular_g2p_ms_sum;
+            state.fluid_stats.advect_ms = granular_advect_ms_sum;
+            state.fluid_stats.advect_substeps = granular_advect_substeps_sum;
+            if (fluid_params.granular_enabled && !granular_substep_failed) {
+                const auto resolved_elastic = Fluid::Granular::elasticStepInfo(
+                    fluid_params.granular_young_modulus,
+                    state.grid.voxel_size,
+                    granular_frame_dt / static_cast<float>(granular_solver_substeps));
+                state.fluid_stats.granular_requested_young_modulus =
+                    granular_frame_elastic.requested_young_modulus;
+                state.fluid_stats.granular_effective_young_modulus =
+                    resolved_elastic.effective_young_modulus;
+                state.fluid_stats.granular_required_substeps =
+                    granular_frame_elastic.required_substeps;
+                state.fluid_stats.granular_solver_substeps = granular_solver_substeps;
+                state.fluid_stats.granular_stiffness_capped = resolved_elastic.capped;
+            }
             state.fluid_stats.recovered_solid_particles = std::max(
                 state.fluid_stats.recovered_solid_particles,
                 solid_recovery_count);
+            // Patched in after the step because Fluid::step resets the stats
+            // block: these two are MEASURED here, where the overlay was built,
+            // and the pair is what distinguishes "no solid parcels" from
+            // "parcels too thin for this voxel size" (see APICSolverStats).
+            state.fluid_stats.solid_phase_particles = solid_phase_particle_count;
+            state.fluid_stats.solid_phase_cells     = solid_phase_cell_count;
 
             // ── Whitewater (spray/foam/bubbles) — Ihmsen 2012 ────────────────
             // Secondary render-only particles generated from the post-step liquid
@@ -10750,6 +11448,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.scratch_vel_z);
     destroy(buffers.scratch_scalar);
     destroy(buffers.scratch_scalar2);
+    destroy(buffers.substance_viscosity);
     destroy(buffers.scratch2_vel_x);
     destroy(buffers.scratch2_vel_y);
     destroy(buffers.scratch2_vel_z);
@@ -10816,6 +11515,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.fluid_velocities);
     destroy(buffers.fluid_affine);
     destroy(buffers.fluid_mass_fraction);
+    Fluid::Granular::destroy(&compute, buffers.granular);
     destroy(buffers.foam_positions);
     destroy(buffers.foam_render.spheres);
     buffers.foam_render = {};
@@ -10928,6 +11628,7 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     ensureComputeBuffer(compute, buffers.scratch_vel_z, "GridDomainScratchVelZ", grid.vel_z.size() * sizeof(float), usage);
     ensureComputeBuffer(compute, buffers.scratch_scalar, "GridDomainScratchScalar", weight_bytes, usage);
     ensureComputeBuffer(compute, buffers.scratch_scalar2, "GridDomainScratchScalar2", weight_bytes, usage);
+    ensureComputeBuffer(compute, buffers.substance_viscosity, "GridDomainSubstanceViscosity", weight_bytes, usage);
     ensureComputeBuffer(compute, buffers.scratch2_vel_x, "GridDomainScratch2VelX", grid.vel_x.size() * sizeof(float), usage);
     ensureComputeBuffer(compute, buffers.scratch2_vel_y, "GridDomainScratch2VelY", grid.vel_y.size() * sizeof(float), usage);
     ensureComputeBuffer(compute, buffers.scratch2_vel_z, "GridDomainScratch2VelZ", grid.vel_z.size() * sizeof(float), usage);

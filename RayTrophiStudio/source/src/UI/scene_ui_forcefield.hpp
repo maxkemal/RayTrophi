@@ -22,6 +22,7 @@
 #pragma once
 
 #include "scene_ui.h"
+#include "Api/RtApi.h"
 #include "ui_modern.h"
 #include "ForceField.h"
 #include "Backend/IViewportBackend.h"
@@ -1441,26 +1442,19 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         }
         ImGui::Checkbox("Seed Replaces Existing", &fluid->replace_on_seed);
         if (ImGui::Button("Seed Fluid", ImVec2(-1, 0))) {
-            fluid->grid_dirty = true;
-            fluid->ensureGrid();
-            if (fluid->replace_on_seed) {
-                fluid->particles.clear();
-                fluid->grid.clear();
-                fluid->ensureGrid();
+            // The legacy FluidObject panel remains for old project authoring,
+            // but live particles belong to the unified grid domain. Routing
+            // through the shared service prevents a second independently
+            // stepped seed from appearing beside the Vulkan/APIC state.
+            if (rtapi::seedFluidParticles(
+                    fluid->name,
+                    fluid->seed_min,
+                    fluid->seed_max,
+                    fluid->seed_particles_per_cell,
+                    fluid->replace_on_seed,
+                    false).ok) {
+                ui_ctx.start_render = true;
             }
-            RayTrophiSim::Fluid::seedBox(fluid->particles,
-                                         fluid->grid,
-                                         fluid->seed_min,
-                                         fluid->seed_max,
-                                         fluid->seed_particles_per_cell,
-                                         static_cast<uint32_t>(fluid->id) * 2654435761u,
-                                         fluid->particles.size() < fluid->max_particles
-                                             ? fluid->max_particles - fluid->particles.size()
-                                             : 0u);
-            fluid->pending_seed = false;
-            fluid->stats = RayTrophiSim::Fluid::APICSolverStats{};
-            scene.ensureFluidSimulationSystem();
-            ui_ctx.start_render = true;
         }
 
         ImGui::Separator();
@@ -1498,6 +1492,11 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             ImGui::SetTooltip("Ghost Fluid Method (GFM) models sub-cell pressure extrapolation at the air-fluid boundary to eliminate staircasing/aliasing.");
         }
         ImGui::Checkbox("Reseed Enabled", &fluid->params.reseed_enabled);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Count-conservative sample redistribution.\n"
+                              "Crowded-cell removals fund replacements in starved interior cells;\n"
+                              "this path cannot increase total liquid mass.");
+        }
         if (fluid->params.reseed_enabled) {
             ImGui::DragInt("Reseed Target/Cell", &fluid->params.reseed_target_per_cell, 0.1f, 0, 64);
             ImGui::DragInt("Reseed Min/Cell",    &fluid->params.reseed_min_per_cell,    0.1f, 1, 32);

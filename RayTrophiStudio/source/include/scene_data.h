@@ -24,12 +24,14 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <cstring>   // std::memcpy — bit-exact float hashing in the sim signatures
 
 // Global atomics to track and cancel active background SDF bakes during scene destruction/clearance.
 inline std::atomic<bool> g_cancel_sdf_bakes{false};
 inline std::atomic<int> g_active_sdf_bakes{0};
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidSimulationSystem.h"
+#include "Fluid/SubstanceTag.h"
 #include "RigidBodySystem.h"
 #include "StructuralImpulse.h"
 #include "AshDebrisSystem.h"
@@ -1185,6 +1187,9 @@ struct SceneData {
         sim_cache_valid_system_ids_.clear();
         last_sim_config_sig_ = 0;
         last_fluid_coupling_sig_ = 0;
+        // Back to "nothing baked yet": the next tick adopts whatever frame rate
+        // it is handed instead of reporting a change against a dead bake.
+        last_sim_bake_fps_ = 0.0f;
     }
 
     void ensureRigidBodySystem() {
@@ -2051,6 +2056,17 @@ struct SceneData {
         // SurfaceSDF render route. Transient; not serialized.
         std::vector<std::vector<float>>        domain_sdf_buffers;
         std::vector<RayTrophiSim::Fluid::LevelSetStats> domain_sdf_stats;
+        // Per-domain material-coordinate (UVW) field, gathered alongside the
+        // SDF. Interleaved xyz triples at SIM-grid resolution — NOT the refined
+        // surface resolution, see buildMaterialCoordinateGrid for why.
+        //
+        // These are staging buffers only: the contents are SWAPPED into the
+        // render volume that consumes them, so what stays here between rebuilds
+        // is the previous frame's storage being recycled, not a live copy.
+        // Nothing may read these expecting current data.
+        std::vector<std::vector<float>>        domain_uvw_buffers;
+        // Composition staging, same swap-on-rebuild contract as above.
+        std::vector<std::vector<float>>        domain_composition_buffers;
         // SurfaceSDF rebuild gates. The first signature tracks particle +
         // surfacing params, so buildLevelSet is skipped when the generated SDF
         // would be identical. The second tracks the already-converted density
@@ -2158,6 +2174,12 @@ struct SceneData {
     // doesn't, the change was a non-coupling rigid edit/move: the cheap rigid
     // re-sim runs but the expensive fluid cache is preserved.
     uint64_t last_fluid_coupling_sig_ = 0;
+    // Frame rate the current bake was produced with. Every system steps once per
+    // timeline frame at fixed_dt = 1/fps, so this IS a physics input — but it
+    // arrives as an argument rather than as scene state, so it cannot live in
+    // computeSimConfigSignature(). 0 = nothing baked yet, so the first tick
+    // never counts as a change.
+    float last_sim_bake_fps_ = 0.0f;
     // Last g_scene_geometry_generation value consumed by refreshRigidRestPosesOnUserEdit;
     // lets the idle user-edit detector skip work when no geometry edit happened.
     uint64_t last_user_edit_gen_ = 0;
@@ -2267,6 +2289,8 @@ struct SceneData {
             system.domain_vdb_ids.resize(live_domain_count, -1);
             system.domain_volumes.resize(live_domain_count);
             system.domain_sdf_buffers.resize(live_domain_count);
+            system.domain_uvw_buffers.resize(live_domain_count);
+            system.domain_composition_buffers.resize(live_domain_count);
             system.domain_sdf_stats.resize(live_domain_count);
             system.domain_sdf_signatures.resize(live_domain_count, 0);
             // ★ Same length as the arrays above. These are all per-domain
@@ -2323,12 +2347,15 @@ struct SceneData {
                         std::to_string(d) + "' had the invalid liquid render mode "
                         "'Volume'; normalised to SurfaceSDF.");
                 }
-                const bool fluid_skip_volume =
-                    is_fluid_domain &&
-                    fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles;
-                const bool fluid_surface_route =
-                    is_fluid_domain &&
-                    fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
+                bool has_sdf_override = false;
+                if (is_fluid_domain && d < domains.size()) {
+                    for (const auto& b : domains[d].fluid_substance_materials)
+                        has_sdf_override |= b.representation ==
+                            RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF;
+                }
+                const bool fluid_surface_route = is_fluid_domain &&
+                    (fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF || has_sdf_override);
+                const bool fluid_skip_volume = is_fluid_domain && !fluid_surface_route;
                 // Volume whitewater: foam rides THIS surface volume's temperature
                 // channel (single volume → no coincident-volume drop). Only on the
                 // surface route (that is the volume it rides) and only when the foam
@@ -2340,14 +2367,14 @@ struct SceneData {
                         RayTrophiSim::Fluid::FoamRenderMode::Volume;
 
                 const bool renderable =
-                    domain_render_enabled && system.visible && state.valid && has_density &&
+                    domain_render_enabled && system.visible && state.valid &&
                     state.grid.nx > 0 && !fluid_skip_volume &&
                     // Volume mode needs density splatted; SurfaceSDF rebuilds
                     // its own density-proxy from particles, so it only needs
                     // particles to be present.
                     (fluid_surface_route
                         ? !state.particles.empty()
-                        : state.active_density_cells > 0);
+                        : (has_density && state.active_density_cells > 0));
 
                 // ★ GATE 0 — the domain producer. This is the decision that
                 // determines whether the domain volume exists at all, upstream
@@ -2382,6 +2409,14 @@ struct SceneData {
                     " active_cells=" + std::to_string(state.active_density_cells));
 
                 if (!renderable) {
+                    // A real representation switch is different from a
+                    // temporarily empty SurfaceSDF frame. The latter keeps its
+                    // stable slot; Particles mode must retire the SDF resource
+                    // before the splat bridge publishes its geometry.
+                    if (fluid_skip_volume) {
+                        retireDomainSurfaceRepresentation(system, d);
+                        continue;
+                    }
                     // Keep the VDB registered and visible so the TLAS customIndex→SSBO
                     // slot mapping stays valid. Setting visible=false here causes a
                     // became_visible rebuild on the very next renderable frame, and
@@ -2417,14 +2452,6 @@ struct SceneData {
                         // intact; only this empty frame is omitted from the packet.
                         mgr.setLiveDenseContentActive(system.domain_vdb_ids[d], false);
                         g_gas_volumes_dirty = true;
-                    }
-                    // Particles/splat-sphere mode: the kept-alive volume must NOT
-                    // occlude on the CPU, or its AABB masks the splat spheres inside
-                    // the domain (only wall-adjacent ones, hit before the box entry,
-                    // survived). GPU keeps using it via the SSBO (visible stays true).
-                    if (fluid_skip_volume && d < system.domain_volumes.size() &&
-                        system.domain_volumes[d]) {
-                        system.domain_volumes[d]->cpu_render_skip = true;
                     }
                     continue;
                 }
@@ -2501,6 +2528,10 @@ struct SceneData {
                                 system.domain_sdf_buffers[d].clear();
                                 system.domain_sdf_buffers[d].shrink_to_fit();
                             }
+                            if (d < system.domain_uvw_buffers.size()) {
+                                system.domain_uvw_buffers[d].clear();
+                                system.domain_uvw_buffers[d].shrink_to_fit();
+                            }
                             if (d < system.domain_sdf_signatures.size()) {
                                 system.domain_sdf_signatures[d] = 0;
                             }
@@ -2574,6 +2605,11 @@ struct SceneData {
                 // own density (which the splat pass owns).
                 const float* density_ptr_override = nullptr;
                 bool surface_sdf_changed = false;
+                // Set only on frames the material-coordinate field was actually
+                // regathered, so the handoff to the render volume below is a
+                // swap on rebuild frames and nothing at all on the others.
+                bool uvw_rebuilt = false;
+                bool composition_rebuilt = false;
                 auto hash_combine_local = [](uint64_t h, uint64_t v) {
                     h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
                     return h;
@@ -2597,6 +2633,7 @@ struct SceneData {
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(domains[d].fluid_surface_band_voxels));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.kernel_radius_voxels));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.particle_radius_voxels));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.surface_offset_voxels));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.narrow_band_voxels));
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(lsp.smoothing_iterations));
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(lsp.surface_resolution_multiplier));
@@ -2605,6 +2642,41 @@ struct SceneData {
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.anisotropy_max_stretch));
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(lsp.anisotropy_neighbor_min));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.position_smoothing));
+                    // ★★★ THE DOMAIN MATERIAL AND EVERY SUBSTANCE MATERIAL ID
+                    // BELONG HERE, and their absence was a reported bug: the
+                    // composition field carries a per-cell material INDEX, so
+                    // assigning a material from the list changes what this
+                    // buffer must contain — while the tags, positions and
+                    // representations it was keyed on are all unchanged. On a
+                    // PAUSED timeline nothing else moves either, so the
+                    // signature matched, the rebuild was skipped, and the pick
+                    // did not reach the picture until the user rewound and
+                    // re-simulated. The domain-level material updates live (it
+                    // is pushed straight onto the volume), so the same panel
+                    // answered two ways depending on which row you clicked.
+                    sdf_sig = hash_combine_local(sdf_sig,
+                        static_cast<uint64_t>(
+                            static_cast<int64_t>(domains[d].fluid_surface_material_id)));
+                    for (const auto& b : domains[d].fluid_substance_materials) {
+                        sdf_sig = hash_combine_local(sdf_sig,
+                            RayTrophiSim::Fluid::substanceTag(b.substance));
+                        sdf_sig = hash_combine_local(sdf_sig,
+                            static_cast<uint64_t>(b.representation));
+                        sdf_sig = hash_combine_local(sdf_sig,
+                            static_cast<uint64_t>(static_cast<int64_t>(b.material_id)));
+                        // Miscibility narrows the composition ramp in the
+                        // producer, so it must invalidate the cached fields
+                        // exactly like the material binding does.
+                        sdf_sig = hash_combine_local(sdf_sig,
+                            quantize_local(b.miscibility));
+                        // ★ Substance VISCOSITY and PHASE are deliberately
+                        // absent: they feed the solver, not the surface. Their
+                        // effect reaches these fields only by moving particles,
+                        // and the positions are already hashed below — adding
+                        // them would rebuild the surface on parameters that
+                        // cannot change it. A solid chunk is still drawn by
+                        // whatever `representation` says, which IS hashed.
+                    }
                     for (std::size_t particle_index = 0;
                          particle_index < state.particles.position.size(); ++particle_index) {
                         const auto& p = state.particles.position[particle_index];
@@ -2626,13 +2698,96 @@ struct SceneData {
                         system.domain_sdf_signatures[d] != sdf_sig ||
                         sdf_buf.empty();
                     if (needs_sdf_rebuild) {
+                        std::vector<uint32_t> excluded_splat_tags;
+                        if (fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) {
+                            for (uint32_t tag : state.particles.substance_tag) {
+                                bool explicit_sdf = false;
+                                for (const auto& b : domains[d].fluid_substance_materials) {
+                                    if (RayTrophiSim::Fluid::substanceTag(b.substance) == tag &&
+                                        b.representation == RayTrophiSim::Fluid::SubstanceRepresentation::SurfaceSDF) {
+                                        explicit_sdf = true; break;
+                                    }
+                                }
+                                if (!explicit_sdf && std::find(excluded_splat_tags.begin(),
+                                        excluded_splat_tags.end(), tag) == excluded_splat_tags.end())
+                                    excluded_splat_tags.push_back(tag);
+                            }
+                        }
+                        for (const auto& b : domains[d].fluid_substance_materials) {
+                            bool exclude = b.representation ==
+                                RayTrophiSim::Fluid::SubstanceRepresentation::Splat;
+                            if (fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles)
+                                exclude = false; // handled from live tags above
+                            if (exclude) excluded_splat_tags.push_back(
+                                RayTrophiSim::Fluid::substanceTag(b.substance));
+                        }
                         RayTrophiSim::Fluid::buildLevelSet(
                             state.particles, state.grid,
-                            lsp, sdf_buf, &sdf_stats);
+                            lsp, sdf_buf, &sdf_stats, &excluded_splat_tags);
                         if (d < system.domain_sdf_signatures.size()) {
                             system.domain_sdf_signatures[d] = sdf_sig;
                         }
                         surface_sdf_changed = true;
+                        // Material coordinates ride the SAME rebuild gate as the
+                        // surface, deliberately. They are gathered from the same
+                        // particles with the same kernel, so a coordinate field
+                        // one rebuild older than the surface it anchors would
+                        // slide the texture by exactly one step of motion —
+                        // small, plausible-looking, and untraceable.
+                        if (d < system.domain_uvw_buffers.size()) {
+                            uvw_rebuilt =
+                                RayTrophiSim::Fluid::buildMaterialCoordinateGrid(
+                                    state.particles, state.grid, lsp,
+                                    system.domain_uvw_buffers[d],
+                                    &excluded_splat_tags);
+                        }
+                        // Composition rides the SAME rebuild gate, for the same
+                        // reason the coordinate does: it is gathered from the
+                        // same particles with the same kernel, and a mixture one
+                        // rebuild older than the surface it describes would put
+                        // yesterday's boundary on today's shape.
+                        if (d < system.domain_composition_buffers.size()) {
+                            RayTrophiSim::Fluid::SubstanceMaterialEntry entries[
+                                RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials];
+                            std::size_t entry_count = 0;
+                            for (const auto& b : domains[d].fluid_substance_materials) {
+                                if (entry_count >= RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials)
+                                    break;
+                                if (b.substance.empty()) continue;
+                                entries[entry_count].tag =
+                                    RayTrophiSim::Fluid::substanceTag(b.substance);
+                                entries[entry_count].material_id = b.material_id;
+                                entries[entry_count].miscibility = b.miscibility;
+                                ++entry_count;
+                            }
+                            composition_rebuilt =
+                                RayTrophiSim::Fluid::buildCompositionGrid(
+                                    state.particles, state.grid, lsp,
+                                    entries, entry_count,
+                                    domains[d].fluid_surface_material_id,
+                                    system.domain_composition_buffers[d],
+                                    // ★ THE SAME list the level set was given.
+                                    // All three fields describe ONE surface, so
+                                    // they must agree about which particles it
+                                    // is made of; a splat substance voting here
+                                    // tints a surface it has no part in.
+                                    &excluded_splat_tags);
+                            // ★★★ The post-pass that used to live here — collapse
+                            // every cell's pair to its dominant slot when the
+                            // domain flag `fluid_blend_substance_materials` was
+                            // off — IS GONE, and the flag with it. It set the
+                            // weight to exactly 0 or 1 in every cell, which left
+                            // the shader's trilinear filter nothing to filter:
+                            // the boundary landed on cell FACES and rendered as
+                            // axis-aligned cubes of colour. A control labelled
+                            // "Dominant Cell Material" that delivers "voxelised
+                            // material" is worse than no control, because the
+                            // artefact reads as a mixing bug rather than as the
+                            // setting doing what it says.
+                            // Sharpness is now per-substance MISCIBILITY, applied
+                            // inside buildCompositionGrid as a gain on the ramp:
+                            // an immiscible front is sharp AND sub-cell smooth.
+                        }
                     }
                     // SDF may be refined above the sim grid (surface_resolution_
                     // multiplier), so size the proxy loop from the buffer itself,
@@ -2675,6 +2830,10 @@ struct SceneData {
                     // memory footprint honest with the current route.
                     system.domain_sdf_buffers[d].clear();
                     system.domain_sdf_buffers[d].shrink_to_fit();
+                    if (d < system.domain_uvw_buffers.size()) {
+                        system.domain_uvw_buffers[d].clear();
+                        system.domain_uvw_buffers[d].shrink_to_fit();
+                    }
                     if (d < system.domain_sdf_signatures.size()) {
                         system.domain_sdf_signatures[d] = 0;
                     }
@@ -2944,6 +3103,68 @@ struct SceneData {
                     vol->render_isosurface_pore_amount = domains[d].fluid_surface_pore_amount;
                     vol->render_isosurface_pore_scale  = domains[d].fluid_surface_pore_scale;
                     vol->render_isosurface_pore_detail = domains[d].fluid_surface_pore_detail;
+                    vol->render_isosurface_coord_space = domains[d].fluid_surface_coord_space;
+                    // ── Material coordinates: hand the field over ─────────────
+                    // SWAP, not copy: the staging buffer's whole purpose is to
+                    // become the volume's, and the volume's previous storage
+                    // going back the other way is capacity the next rebuild
+                    // reuses. Only on frames it was regathered — otherwise the
+                    // volume keeps the field it already has, which is still the
+                    // one matching the surface currently uploaded.
+                    if (uvw_rebuilt && d < system.domain_uvw_buffers.size()) {
+                        vol->render_isosurface_uvw_residual.swap(system.domain_uvw_buffers[d]);
+                        vol->render_isosurface_uvw_dim[0] = state.grid.nx;
+                        vol->render_isosurface_uvw_dim[1] = state.grid.ny;
+                        vol->render_isosurface_uvw_dim[2] = state.grid.nz;
+                        // ★ Placement travels WITH the buffer, from the same
+                        // grid, in the same statement. The consumer indexes in
+                        // world space through these; taking them from anywhere
+                        // else (the volume's render bounds, a cached copy) is
+                        // how the field ends up stretched relative to the
+                        // surface it describes.
+                        vol->render_isosurface_uvw_origin[0] = state.grid.origin.x;
+                        vol->render_isosurface_uvw_origin[1] = state.grid.origin.y;
+                        vol->render_isosurface_uvw_origin[2] = state.grid.origin.z;
+                        vol->render_isosurface_uvw_voxel = state.grid.voxel_size;
+                        ++vol->render_isosurface_uvw_version;
+                    } else if (!uvw_rebuilt && surface_sdf_changed) {
+                        // The surface rebuilt but the coordinate gather refused
+                        // (no uvw sidecar, or every particle off-grid). Drop the
+                        // field rather than leaving the previous one attached to
+                        // a surface it no longer describes — a STALE coordinate
+                        // is worse than none, because none falls back to world
+                        // anchoring and looks merely old-fashioned, while stale
+                        // pins the texture to where the liquid used to be.
+                        vol->render_isosurface_uvw_residual.clear();
+                        vol->render_isosurface_uvw_dim[0] = 0;
+                        vol->render_isosurface_uvw_dim[1] = 0;
+                        vol->render_isosurface_uvw_dim[2] = 0;
+                        vol->render_isosurface_uvw_voxel = 0.0f;
+                        ++vol->render_isosurface_uvw_version;
+                    }
+
+                    // ── Composition: its OWN gate, deliberately ───────────────
+                    // ★ Not folded into the coordinate's if/else above. The
+                    // composition gather legitimately refuses on a frame the
+                    // coordinate succeeded — a single-material domain has no
+                    // mixture to describe — so sharing a branch would either
+                    // publish nothing as if it were data, or drop a perfectly
+                    // good coordinate because there happened to be no mixture.
+                    if (d < system.domain_composition_buffers.size()) {
+                        if (composition_rebuilt) {
+                            vol->render_isosurface_composition.swap(
+                                system.domain_composition_buffers[d]);
+                            ++vol->render_isosurface_uvw_version;
+                        } else if (surface_sdf_changed &&
+                                   !vol->render_isosurface_composition.empty()) {
+                            // Same stale-is-worse-than-absent rule as the
+                            // coordinate: a mixture pinned to where the liquid
+                            // used to be reads as a shading bug, while none at
+                            // all falls back to the domain material.
+                            vol->render_isosurface_composition.clear();
+                            ++vol->render_isosurface_uvw_version;
+                        }
+                    }
                     // Volume whitewater look (temperature-channel particle foam):
                     // tint + extinction drive the white single-scatter medium the
                     // shader marches (_ext_reserved[3..6]). Only meaningful when the
@@ -3227,6 +3448,165 @@ struct SceneData {
     // dynamics, and live spawn pose). A non-coupling rigid (e.g. a far static
     // prop) is deliberately absent here, so editing or moving it leaves this
     // signature — and therefore the fluid cache — unchanged.
+    // -- Fluid domain solver config -> cache signature ----------------------
+    // Everything the APIC solve READS off a domain descriptor, folded into both
+    // simulation signatures so editing it drops the stale bake instead of
+    // replaying it.
+    //
+    // ★★★ THE BUG THIS CLOSES: the two signatures hashed emitters, colliders,
+    // flow sources, force fields and rigid bodies -- and NOTHING off the grid
+    // domain itself except its thermal override. So viscosity, gravity, FLIP
+    // blend, boundary mode, seed density, per-substance physics... every one of
+    // them was edited, ignored, and the previously baked frames replayed
+    // unchanged. The control appeared dead until the user pressed Reset by
+    // hand, which is exactly the workflow the auto-invalidation was written to
+    // make unnecessary.
+    //
+    // ★★★ LOOK IS NOT PHYSICS, and that split is the whole design here:
+    //   physics (this function) -> invalidate the bake, rewind, re-simulate
+    //   look (material id, representation, porosity, coord space, IOR, ...)
+    //        -> refreshFluidSurfaceMaterial + a render resync, NO re-sim
+    // Hashing a look value here would throw away an expensive bake every time
+    // somebody clicked a material, and the user would learn to fear the panel.
+    // Leaving a physics value OUT -- the state this replaces -- silently shows
+    // the wrong simulation, which is worse because nothing announces it.
+    //
+    // ★★ BOUNDS ARE DELIBERATELY ABSENT. A domain bound to an object tracks it
+    // every frame, so hashing bounds_min/max would re-key the cache on every
+    // frame of a MOVING domain and the bake could never complete. Domain motion
+    // has its own path (domain_motion_delta). Resolution and voxel size are
+    // authored and safe: a translation does not change them.
+    //
+    // ★ Bit-exact, not quantized. The rest of these signatures quantize to
+    // 1/1000 to keep live poses from jittering the hash -- but a kinematic
+    // viscosity of 1e-6 (water) quantizes to ZERO, and so does 9e-4. Half the
+    // physical range of the very control the user reported as dead would have
+    // stayed dead. These are AUTHORED values, never written per step, so there
+    // is no jitter to filter and the exact bits are the honest key.
+    static uint64_t hashFluidDomainSolverConfig(uint64_t h,
+                                                const RayTrophiSim::SimulationGridDomainDesc& d) {
+        auto mix = [](uint64_t hv, uint64_t v) {
+            hv ^= v + 0x9e3779b97f4a7c15ull + (hv << 6) + (hv >> 2);
+            return hv;
+        };
+        auto fb = [](float f) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &f, sizeof(bits));
+            return static_cast<uint64_t>(bits);
+        };
+        if (d.type != RayTrophiSim::SimulationDomainType::Fluid) return h;
+        h = mix(h, d.enabled ? 1ull : 0ull);
+        h = mix(h, static_cast<uint64_t>(d.backend));
+        h = mix(h, static_cast<uint64_t>(d.boundary_mode));
+
+        // ★★★ voxel_size / resolution_* / padding ARE NOT HASHED, and leaving
+        // them out is not an oversight — the runtime WRITES THEM BACK every
+        // sync, recomputed from the domain extent
+        // (ParticleSimulation.cpp: domain.voxel_size = max(extent_i / res_i)).
+        // For a domain bound to a moving object the extent drifts, so their bits
+        // change every frame and this signature would re-key the cache forever:
+        // the bake would rewind to frame 0 on every tick and never complete.
+        // That failure is far worse than the one it would fix, and grid-shape
+        // edits already have their own path (the seed-settled auto-reseed in the
+        // domain panel, which reseeds and snaps the playhead to start).
+        //
+        // Same reason fluid_params.particles_per_cell is absent while
+        // fluid_seed_particles_per_cell below IS hashed: the solver overwrites
+        // the former at seed time with the budget-clamped value. Hash what the
+        // USER authored, never what the runtime derived from it.
+        const auto& fp = d.fluid_params;
+        h = mix(h, fb(fp.gravity.x)); h = mix(h, fb(fp.gravity.y)); h = mix(h, fb(fp.gravity.z));
+        h = mix(h, fb(fp.cfl));
+        h = mix(h, static_cast<uint64_t>(fp.max_substeps));
+        h = mix(h, static_cast<uint64_t>(fp.pressure_iterations));
+        h = mix(h, fb(fp.pressure_relative_residual));
+        h = mix(h, fp.pressure_multigrid_preconditioner ? 1ull : 0ull);
+        h = mix(h, fb(fp.apic_blend));
+        h = mix(h, fb(fp.flip_blend));
+        h = mix(h, fb(fp.max_velocity));
+        h = mix(h, fb(fp.velocity_damping));
+        h = mix(h, fb(fp.wall_damping));
+        h = mix(h, fb(fp.density_correction));
+        h = mix(h, fb(fp.internal_friction));
+        h = mix(h, fb(fp.air_drag));
+        h = mix(h, fp.reseed_enabled ? 1ull : 0ull);
+        h = mix(h, static_cast<uint64_t>(fp.reseed_target_per_cell));
+        h = mix(h, static_cast<uint64_t>(fp.reseed_min_per_cell));
+        h = mix(h, static_cast<uint64_t>(fp.reseed_max_per_cell));
+        h = mix(h, static_cast<uint64_t>(fp.max_particles));
+        h = mix(h, static_cast<uint64_t>(fp.uvw_refresh_period));
+        h = mix(h, fb(fp.domain_motion_coupling));
+        h = mix(h, fb(fp.kinematic_viscosity));
+        h = mix(h, static_cast<uint64_t>(fp.viscosity_sweeps));
+        h = mix(h, fb(fp.viscosity_wall_slip));
+        h = mix(h, fb(fp.affine_damping));
+        h = mix(h, fb(fp.max_affine));
+        h = mix(h, static_cast<uint64_t>(fp.boundary));
+        h = mix(h, static_cast<uint64_t>(fp.chemistry_preset));
+        h = mix(h, fp.free_surface ? 1ull : 0ull);
+        h = mix(h, fp.variational_solids ? 1ull : 0ull);
+        h = mix(h, fp.ghost_fluid_surface ? 1ull : 0ull);
+
+        // Authored initial state. A seed box or fill level that does not re-key
+        // the cache means the tank the user just resized replays at its old
+        // level -- the setting looks like it did nothing.
+        h = mix(h, static_cast<uint64_t>(d.fluid_seed_mode));
+        // ★★★ THE SEED AABB IS NOT HASHED, and this one was learned the
+        // expensive way: fluid_seed_min/max FOLLOW THE DOMAIN. When the domain
+        // is translated the sync glues the seed box to it
+        // (ParticleSimulation.cpp: "Fluid seed AABB follows the domain's
+        // translation"), so hashing it re-keys the cache on every frame that
+        // the domain moves. Symptom, reported from a real session: dragging the
+        // domain DURING PLAYBACK snapped the playhead to frame 0 every tick and
+        // the simulation could never advance.
+        //
+        // ★★ Same family as the bounds and voxel_size exclusions above, and the
+        // rule they all serve is one line: HASH WHAT THE USER AUTHORED, NEVER
+        // WHAT THE RUNTIME DERIVED FROM IT. A field that the sim writes back is
+        // a live pose wearing a config field's name, and every one of them
+        // turns this signature into a cache shredder.
+        //
+        // Editing the seed box is not lost as a result: it has its own path,
+        // the panel's seed-settled auto-reseed, which reseeds and snaps the
+        // playhead to start once the drag is released.
+        h = mix(h, static_cast<uint64_t>(d.fluid_seed_particles_per_cell));
+        h = mix(h, static_cast<uint64_t>(d.fluid_max_particles));
+        h = mix(h, d.fluid_reseed_on_reset ? 1ull : 0ull);
+        h = mix(h, fb(d.fluid_fill_level));
+        h = mix(h, fb(d.fluid_fill_wall_margin));
+
+        // Liquid -> gas combustion coupling: all authored, all change the solve.
+        h = mix(h, d.fluid_flammable ? 1ull : 0ull);
+        h = mix(h, d.fluid_extinguishing ? 1ull : 0ull);
+        h = mix(h, d.fluid_auto_ignite ? 1ull : 0ull);
+        h = mix(h, fb(d.fluid_ignition_temperature));
+        h = mix(h, fb(d.fluid_evaporation_rate));
+        h = mix(h, fb(d.fluid_surface_fuel_capacity));
+        h = mix(h, fb(d.fluid_combustion_heat_release));
+        h = mix(h, fb(d.fluid_combustion_smoke_yield));
+        h = mix(h, fb(d.fluid_surface_cooling));
+        h = mix(h, fb(d.fluid_cooling_power));
+        h = mix(h, fb(d.fluid_oxygen_dilution));
+
+        // Solid-phase coupling: both are physics, both change the solve.
+        h = mix(h, d.fluid_solid_phase_enabled ? 1ull : 0ull);
+        h = mix(h, fb(d.fluid_solid_phase_fill));
+
+        // -- Per-substance PHYSICS only -------------------------------------
+        // ★★★ material_id and representation are NOT here on purpose. They are
+        // look: assigning a material must repaint the current frame, never
+        // discard a bake. They reach the picture through the composition field
+        // instead -- see the surface rebuild signature, which DOES hash them.
+        for (const auto& b : d.fluid_substance_materials) {
+            h = mix(h, static_cast<uint64_t>(
+                RayTrophiSim::Fluid::substanceTag(b.substance)));
+            h = mix(h, fb(b.kinematic_viscosity));
+            h = mix(h, fb(b.miscibility));
+            h = mix(h, static_cast<uint64_t>(b.phase));
+        }
+        return h;
+    }
+
     uint64_t computeFluidCouplingSignature() const {
         auto mix = [](uint64_t h, uint64_t v) {
             h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
@@ -3327,9 +3707,11 @@ struct SceneData {
             // Per-domain ambient/oxygen override, for the same reason.
             for (const auto& d : s.runtime->gridDomains()) {
                 h = mix(h, d.thermal_override_enabled ? 1ull : 0ull);
-                if (!d.thermal_override_enabled) continue;
-                h = mix(h, qf(d.thermal_ambient_kelvin));
-                h = mix(h, qf(d.thermal_oxygen));
+                if (d.thermal_override_enabled) {
+                    h = mix(h, qf(d.thermal_ambient_kelvin));
+                    h = mix(h, qf(d.thermal_oxygen));
+                }
+                h = hashFluidDomainSolverConfig(h, d);
             }
             h = mix(h, s.runtime->flowSources().size());
             // Flow sources are domain-owned emitters. Hash their authored
@@ -3353,6 +3735,10 @@ struct SceneData {
                 h = mix(h, qf(f.fluid_particles_per_second));
                 h = mix(h, qf(f.fluid_velocity_spread));
                 h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
+                // ★ The substance changes what the liquid IS, so a cached
+                // sequence baked under the old name no longer describes it.
+                h = mix(h, static_cast<uint64_t>(
+                    RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
                 h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
                 h = mix(h, f.use_particle_limit ? 1ull : 0ull);
@@ -3585,9 +3971,11 @@ struct SceneData {
             // Per-domain ambient/oxygen override, for the same reason.
             for (const auto& d : s.runtime->gridDomains()) {
                 h = mix(h, d.thermal_override_enabled ? 1ull : 0ull);
-                if (!d.thermal_override_enabled) continue;
-                h = mix(h, qf(d.thermal_ambient_kelvin));
-                h = mix(h, qf(d.thermal_oxygen));
+                if (d.thermal_override_enabled) {
+                    h = mix(h, qf(d.thermal_ambient_kelvin));
+                    h = mix(h, qf(d.thermal_oxygen));
+                }
+                h = hashFluidDomainSolverConfig(h, d);
             }
             h = mix(h, s.runtime->flowSources().size());
             // Keep the general simulation-cache signature sensitive to the
@@ -3609,6 +3997,8 @@ struct SceneData {
                 h = mix(h, qf(f.fluid_particles_per_second));
                 h = mix(h, qf(f.fluid_velocity_spread));
                 h = mix(h, f.fluid_emit_along_normal ? 1ull : 0ull);
+                h = mix(h, static_cast<uint64_t>(
+                    RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
                 h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
                 h = mix(h, f.use_particle_limit ? 1ull : 0ull);
@@ -5288,6 +5678,14 @@ struct SceneData {
                     domains[d].fluid_surface_pore_scale;
                 system.domain_volumes[d]->render_isosurface_pore_detail =
                     domains[d].fluid_surface_pore_detail;
+                // Coordinate space is pure shader state as well — the level set
+                // is untouched, only the coordinate the patterns are addressed
+                // in changes. It MUST be pushed here and not only in the sync
+                // loop: the sync loop runs on simulation frames, so without this
+                // the combo would appear dead on a paused timeline, which is the
+                // state an artist is in while choosing a look.
+                system.domain_volumes[d]->render_isosurface_coord_space =
+                    domains[d].fluid_surface_coord_space;
                 // Volume whitewater look (tint + extinction) is pure shader state —
                 // push it live like the IOR so a Foam Color / Foam Opacity slider
                 // updates the current frame without a re-splat (those ride
@@ -5480,8 +5878,34 @@ struct SceneData {
         // Auto-invalidate the in-memory bake cache when the simulation SETUP
         // changes (add/remove of any sim element, rigid-body param edit, …) so a
         // stale cache is never replayed. Replaces the old manual-reset workflow.
+        // ★★★ THE FRAME RATE IS A PHYSICS PARAMETER HERE, and it was the one
+        // config input with no cache key. Every system steps once per timeline
+        // frame at fixed_dt = 1/fps, so changing fps changes dt — and dt is the
+        // single largest term in what a FLIP liquid actually does. A bake made
+        // at 24 fps is not the same simulation at 96.
+        //
+        // ★★ It is also the exact reason a "raise the fps and see" test comes
+        // back meaningless: the cache is keyed by FRAME INDEX, so the old frames
+        // simply replay four times faster and NOTHING re-simulates. The user
+        // sees a fast playback, concludes the change did nothing, and a correct
+        // diagnosis gets thrown away on the strength of a test that never ran.
+        // That is worse than a wrong answer — it is a wrong answer that looks
+        // like evidence.
+        //
+        // Handled here rather than inside computeSimConfigSignature() because
+        // fps arrives as an argument, not as scene state: the signature is a
+        // const method over the scene and cannot see it.
+        const float effective_fps = (fps > 1.0f) ? fps : 24.0f;
+        const bool fps_changed =
+            last_sim_bake_fps_ > 0.0f &&
+            std::fabs(effective_fps - last_sim_bake_fps_) > 1.0e-4f;
+        last_sim_bake_fps_ = effective_fps;
+
+        // Auto-invalidate the in-memory bake cache when the simulation SETUP
+        // changes (add/remove of any sim element, rigid-body param edit, …) so a
+        // stale cache is never replayed.
         const uint64_t cfg_sig = computeSimConfigSignature();
-        if (cfg_sig != last_sim_config_sig_) {
+        if (cfg_sig != last_sim_config_sig_ || fps_changed) {
             // Settle-gate: defer the (expensive) cache drop until the edit finishes.
             // The signature changes on EVERY drag tick, so committing immediately
             // would restart the bake from frame 0 each frame of a slider drag —
@@ -5494,7 +5918,13 @@ struct SceneData {
                 // cheap rigid re-sim — the expensive fluid cache survives. Recompute
                 // the coupling signature AFTER the proxy-collider sync.
                 const uint64_t fluid_sig = computeFluidCouplingSignature();
-                const bool fluid_affected = (fluid_sig != last_fluid_coupling_sig_);
+                // ★ A frame-rate change always affects the fluid: dt is in every
+                // term of the step. It cannot show up in the coupling signature,
+                // which only knows about scene contents, so it is OR-ed in here —
+                // otherwise the drop would run and spare the one cache that most
+                // needed dropping.
+                const bool fluid_affected =
+                    (fluid_sig != last_fluid_coupling_sig_) || fps_changed;
                 last_sim_config_sig_ = computeSimConfigSignature();
                 last_fluid_coupling_sig_ = fluid_sig;
                 if (fluid_affected) {
@@ -5575,7 +6005,14 @@ struct SceneData {
                 syncRigidToFrame(want, fixed_dt, kMaxStepsPerTick);
                 changed = true;
             }
-            if (changed) syncSimulationRenderVolumes();
+            // ★★★ `|| force_resync`: a LOOK edit changes nothing about the
+            // simulation, so `changed` stays false and the request would be
+            // dropped on the floor — with the flag then cleared by the next
+            // sync that happens for some other reason. That is the "picking a
+            // material does nothing until I rewind, and sometimes I have to
+            // Reset" report: the resync only landed when the timeline happened
+            // to move. A resync request IS the change; honour it.
+            if (changed || force_resync) syncSimulationRenderVolumes();
             return;
         }
 
@@ -5673,7 +6110,14 @@ struct SceneData {
 
         // Only touch the renderer when something actually changed; otherwise the
         // timeline is frozen and the path tracer is allowed to converge + idle.
-        if (changed) {
+        //
+        // ★★★ A pending resync counts as changed. Without it a look edit on a
+        // PAUSED timeline was silently discarded whenever the frame could not be
+        // restored from the RAM cache (freshly loaded project, or a frame the
+        // bake never captured): nothing moved, so `changed` was false, so the
+        // rebuild never ran and the request evaporated. The user's workaround
+        // was to rewind or Reset, i.e. to force something else to move.
+        if (changed || force_resync) {
             syncSimulationRenderVolumes();
         }
     }
@@ -6259,6 +6703,12 @@ public:
     }
 
 private:
+    // Implemented in FluidDomainRenderLifecycle.cpp so representation ownership
+    // does not grow this already-large scene header further.
+    bool hasAuthoritativeGridFluidDomain(const std::string& name) const;
+    void retireDomainSurfaceRepresentation(ParticleSystemObject& system,
+                                           std::size_t domain_index);
+
     void invalidateSimulationRenderBindings(ParticleSystemObject& system) {
         // Invalidates NanoVDB host/GPU bindings so the next syncSimulationRenderVolumes
         // re-registers + re-uploads density from the restored/reset sim state.
@@ -6372,6 +6822,7 @@ private:
         system.domain_foam_density.clear();
         // Surface-route render artifacts share the per-domain lifetime.
         system.domain_sdf_buffers.clear();
+        system.domain_uvw_buffers.clear();
         system.domain_sdf_stats.clear();
         system.domain_sdf_signatures.clear();
         system.domain_vdb_upload_signatures.clear();
@@ -6507,6 +6958,13 @@ private:
     void syncFluidRenderVolumes(VDBVolumeManager& mgr, int frame, bool force_sync) {
         std::unordered_set<uint32_t> alive_ids;
         for (auto& obj : fluid_objects) {
+            // Modern liquid domains keep this object only for legacy API/editor
+            // identity. Its particles/render mode are not authoritative and
+            // must never publish a second SDF beside the grid-domain route.
+            if (hasAuthoritativeGridFluidDomain(obj.name)) {
+                destroyFluidRenderVolume(obj.id);
+                continue;
+            }
             // Volume + SurfaceSDF routes share this density / level-set volume.
             // Particles route is handled exclusively by ParticleRenderBridge —
             // tear any prior density binding down so the two routes never both
@@ -8051,6 +8509,7 @@ public:
         erase_index(system.domain_foam_volumes);
         erase_index(system.domain_foam_density);
         erase_index(system.domain_sdf_buffers);
+        erase_index(system.domain_uvw_buffers);
         erase_index(system.domain_sdf_stats);
         erase_index(system.domain_sdf_signatures);
         erase_index(system.domain_vdb_upload_signatures);
@@ -8545,4 +9004,3 @@ public:
         initialized = false;
     }
 };
-

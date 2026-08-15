@@ -451,6 +451,108 @@ def main():
     else:
         print("  [skip] anim.* character tests: no animated character in the scene")
 
+    # Template Registry (Template Hub Phase 1) - read-only parity with rt.templates.
+    run_test("templates.refresh", {}, "templates.refresh")
+    templates_response = run_test(
+        "templates.list", {"include_invalid": True}, "templates.list(include_invalid)")
+    template_entries = (templates_response or {}).get("result") or []
+    if template_entries:
+        template_id = template_entries[0]["id"]
+        run_test("templates.get", {"id": template_id}, "templates.get")
+        run_test("templates.validate", {"id": template_id}, "templates.validate")
+        if template_id == "raytrophi.start.empty":
+            prepared = run_test(
+                "templates.prepare",
+                {"id": template_id, "conflict_policy": "discard"},
+                "templates.prepare(Empty -> ready)")
+            plan = (prepared or {}).get("result") or {}
+            if not plan.get("ready") or plan.get("code") != "ready":
+                failures.append("templates.prepare(Empty) did not return a ready load plan")
+                print("  [FAIL] Empty template load plan is not ready")
+    else:
+        print("  [skip] templates.get/validate: no installed runtime template packages")
+    run_test("templates.get", {"id": "raytrophi.missing.template"},
+             "templates.get(missing) -> error", expect_error=True)
+    run_test("templates.validate", {},
+             "templates.validate(missing id) -> error", expect_error=True)
+    run_test("templates.prepare", {"id": "raytrophi.missing.template"},
+             "templates.prepare(missing -> load plan)")
+    run_test("templates.prepare", {"id": "raytrophi.missing.template",
+             "conflict_policy": "invalid"},
+             "templates.prepare(invalid policy) -> error", expect_error=True)
+    rejected_template = run_test(
+        "templates.open",
+        {"id": "raytrophi.start.empty", "conflict_policy": "reject"},
+        "templates.open(Empty, reject unsaved)")
+    rejected_info = (rejected_template or {}).get("result") or {}
+    if rejected_info.get("opened") or rejected_info.get("code") != "unsaved_changes":
+        failures.append("templates.open reject policy did not preserve unsaved scene")
+        print("  [FAIL] Empty template reject policy was not enforced")
+    preserved_objects = run_test(
+        "scene.list_objects", {}, "scene.list_objects(after rejected Empty)")
+    if "IpcTestCube" not in ((preserved_objects or {}).get("result") or []):
+        failures.append("rejected template open mutated the active scene")
+        print("  [FAIL] Rejected Empty template mutated the active scene")
+    invalid_open = run_test(
+        "templates.open",
+        {"id": "raytrophi.start.empty", "conflict_policy": "invalid"},
+        "templates.open(Empty, invalid policy)")
+    invalid_open_info = (invalid_open or {}).get("result") or {}
+    if invalid_open_info.get("opened") or invalid_open_info.get("code") != "invalid_parameter":
+        failures.append("templates.open invalid policy returned the wrong state")
+        print("  [FAIL] Empty template invalid policy was not rejected")
+    general_template = run_test(
+        "templates.open",
+        {"id": "raytrophi.start.general_scene", "conflict_policy": "discard"},
+        "templates.open(General Scene)")
+    general_info = (general_template or {}).get("result") or {}
+    if not general_info.get("opened") or general_info.get("code") != "opened":
+        failures.append("templates.open(General Scene) did not report opened")
+        print("  [FAIL] General Scene template was not opened")
+    general_objects = run_test(
+        "scene.list_objects", {}, "scene.list_objects(after General Scene)")
+    if "Default_Cube" not in ((general_objects or {}).get("result") or []):
+        failures.append("General Scene did not create its canonical flat cube")
+        print("  [FAIL] General Scene flat cube is missing")
+    general_cube = run_test(
+        "scene.object_info", {"name": "Default_Cube"},
+        "scene.object_info(General Scene flat cube)")
+    if ((general_cube or {}).get("result") or {}).get("triangles") != 12:
+        failures.append("General Scene cube is not the expected 12-triangle flat mesh")
+        print("  [FAIL] General Scene cube topology is incorrect")
+    general_materials = run_test(
+        "material.list", {}, "material.list(after General Scene)")
+    general_material_names = [
+        item if isinstance(item, str) else item.get("name")
+        for item in ((general_materials or {}).get("result") or [])
+    ]
+    if "Default_Cube_Material" not in general_material_names:
+        failures.append("General Scene cube material was not registered")
+        print("  [FAIL] General Scene cube material is missing")
+    general_lights = run_test("lights.list", {}, "lights.list(after General Scene)")
+    if len((general_lights or {}).get("result") or []) != 1:
+        failures.append("General Scene did not create exactly one key light")
+        print("  [FAIL] General Scene key light count is incorrect")
+    general_selection = run_test(
+        "select.list", {}, "select.list(after General Scene frame target)")
+    selected_general = (general_selection or {}).get("result") or []
+    if not selected_general or selected_general[0].get("name") != "Default_Cube":
+        failures.append("General Scene frame target was not selected")
+        print("  [FAIL] General Scene frame target selection is missing")
+    opened_template = run_test(
+        "templates.open",
+        {"id": "raytrophi.start.empty", "conflict_policy": "discard"},
+        "templates.open(Empty)")
+    opened_info = (opened_template or {}).get("result") or {}
+    if not opened_info.get("opened") or opened_info.get("code") != "opened":
+        failures.append("templates.open(Empty) did not report opened")
+        print("  [FAIL] Empty template was not opened")
+    empty_objects = run_test("scene.list_objects", {}, "scene.list_objects(after Empty)")
+    if (empty_objects or {}).get("result") != []:
+        failures.append("Empty template left scene objects behind")
+        print("  [FAIL] Empty template scene is not empty")
+    run_test("camera.get", {}, "camera.get(after Empty viewport camera)")
+
     # Error cases
     run_test("scene.object_info", {"name": "DOES_NOT_EXIST"}, "info(missing) → error", expect_error=True)
     run_test("nonexistent_method", {}, "unknown method → error", expect_error=True)

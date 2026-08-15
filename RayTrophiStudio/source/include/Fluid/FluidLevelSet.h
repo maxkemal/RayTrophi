@@ -49,6 +49,14 @@ struct LevelSetParams {
     // at the seed density; lower = more concave between particles.
     float particle_radius_voxels = 0.55f;
 
+    // Geometric dilation of the reconstructed zero level set, expressed in
+    // SIMULATION voxels. Unlike render/volume density this changes only the
+    // liquid silhouette; it neither raises the SDF resolution nor widens the
+    // particle kernel, so its build cost is effectively constant. A modest
+    // positive default restores the full water body formerly (and incorrectly)
+    // obtained by driving the shader's optical density.
+    float surface_offset_voxels = 0.65f;
+
     // Distance assigned to cells with no in-range particles. Must be > 0 and
     // typically larger than kernel_radius so the isosurface walk can early-
     // out. Expressed in voxels.
@@ -120,7 +128,198 @@ bool buildLevelSet(const FluidParticles& particles,
                    const FluidSim::FluidGrid& grid,
                    const LevelSetParams& params,
                    std::vector<float>& sdf_out,
-                   LevelSetStats* stats = nullptr);
+                   LevelSetStats* stats = nullptr,
+                   const std::vector<uint32_t>* excluded_substance_tags = nullptr);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MATERIAL COORDINATE (UVW) GRID
+// ═══════════════════════════════════════════════════════════════════════════
+// Gathers the particles' Lagrangian uvw (see FluidParticles::uvw) into a dense
+// xyz-triple grid the isosurface shader can sample, so a texture on a liquid
+// FLOWS WITH the liquid instead of the body sliding through a projection nailed
+// to the world.
+//
+// ★ Built on the SIMULATION grid, NOT the refined surface grid, and that is a
+// decision rather than an oversight. uvw is a smooth, slowly-varying field — a
+// mildly deformed identity map — and it is trilinearly interpolated at sample
+// time, so surface-level fineness buys it nothing. Riding the refinement
+// multiplier instead would multiply this buffer by up to 64x for no visible
+// gain, and would silently tie "I want a crisper surface" to "my texture
+// coordinates now cost 800 MB". The SDF is the field that needs the detail.
+//
+// ★★ Cells with no particle support are EXTRAPOLATED from their valid
+// neighbours, and this is not optional. The point being shaded is the ISO
+// crossing, which sits at the edge of — and often just outside — the supported
+// region. Leaving unsupported cells at zero would let the trilinear filter drag
+// the coordinate toward the world origin exactly at the surface, i.e. garbage
+// precisely where every sample is taken and nowhere else.
+//
+// `uvw_out` is resized to 3 * (nx*ny*nz), interleaved xyz. Returns false (and
+// clears the buffer) when nothing was supported, which callers must treat as
+// "no coordinate available" and fall back to the world-anchored projection —
+// never as "the coordinate is zero".
+// ★★★ `excluded_substance_tags` MUST be the SAME list buildLevelSet was given.
+// A substance routed to splat has no isosurface, so letting its particles vote
+// here drags the coordinate of a surface they are not part of. Symmetry between
+// the three gathers is the invariant: they describe one surface, so they must
+// agree about which particles that surface is made of.
+bool buildMaterialCoordinateGrid(const FluidParticles& particles,
+                                 const FluidSim::FluidGrid& grid,
+                                 const LevelSetParams& params,
+                                 std::vector<float>& uvw_out,
+                                 const std::vector<uint32_t>* excluded_substance_tags = nullptr);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPOSITION FIELD — which materials the liquid is made of, per cell.
+// ═══════════════════════════════════════════════════════════════════════════
+// Interleaved xyz triples at SIM-grid resolution, one per cell:
+//   [0] material index A  (dominant)      -- an INDEX, encoded as a float
+//   [1] material index B  (runner-up)
+//   [2] weight of B in [0,1]              -- A's weight is 1 - this
+//
+// Both indices are 1-based ids into the material table with 0 meaning "the
+// built-in dielectric"; the consumer lerps the two materials' parameters and
+// shades ONCE.
+//
+// ★★★ ONLY THE WEIGHT MAY BE INTERPOLATED. An index is a name, not a quantity:
+// the value halfway between material 2 and material 4 is material 3, which is
+// some unrelated material. So the consumer takes indices from the NEAREST cell
+// and interpolates only [2]. In a binary mixture — the overwhelmingly common
+// case — the pair is identical everywhere the mixture exists, so nothing is
+// lost; with three or more, the pair changes at cell boundaries while the
+// blend fraction stays smooth.
+//
+// ★★ TWO SLOTS, NOT N. At any one point a mixture is dominated by two things,
+// and carrying N would mean an unbounded per-cell payload for a difference no
+// shading model would show. A cell with three substances keeps the two
+// strongest and renormalises; the third is not silently added to one of them,
+// which would tint the result by an amount nobody could trace.
+//
+// `substance_materials` maps substance tag -> material id, at most
+// kMaxFluidSubstanceMaterials entries. `fallback_material` is used for untagged
+// liquid and for any tag not in the map.
+//
+// Returns false (and clears) when there is nothing to describe — no particles,
+// or no substance in the domain differs from the fallback. ★ That second case
+// matters: a domain with one material has NO composition to publish, and
+// publishing a uniform field would cost megabytes and a blend that is a no-op.
+struct SubstanceMaterialEntry {
+    uint32_t tag = 0u;
+    int      material_id = -1;
+    // 1 = fully miscible (soft, kernel-wide gradient), 0 = immiscible (a front
+    // one ramp wide). The PAIR uses the minimum of its two members: refusing to
+    // mix is unilateral.
+    //
+    // ★★★ SHARPENING HAPPENS HERE, IN THE PRODUCER, AS A GAIN — never as a
+    // collapse to 0/1. A hard 0/1 weight leaves the consumer's trilinear filter
+    // nothing to filter, so the boundary lands exactly on cell faces and reads
+    // as axis-aligned voxel cubes of colour. The gain keeps a sub-cell ramp, so
+    // an immiscible front is sharp AND smooth-edged. That distinction is the
+    // whole reason the retired `fluid_blend_substance_materials` flag looked
+    // wrong: its "dominant material" mode was really "voxelised material".
+    float    miscibility = 1.0f;
+};
+
+bool buildCompositionGrid(const FluidParticles& particles,
+                          const FluidSim::FluidGrid& grid,
+                          const LevelSetParams& params,
+                          const SubstanceMaterialEntry* substance_materials,
+                          std::size_t substance_material_count,
+                          int fallback_material,
+                          std::vector<float>& composition_out,
+                          // ★★★ Same list buildLevelSet was given. Without it a
+                          // substance rendered as SPLAT still votes in the
+                          // mixture of the SDF surface, so the surface tints
+                          // toward a material that has no surface there. That
+                          // reads as plausible wetness rather than as a bug.
+                          const std::vector<uint32_t>* excluded_substance_tags = nullptr);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SUBSTANCE VISCOSITY FIELD — a PHYSICS field, not a surface field.
+// ═══════════════════════════════════════════════════════════════════════════
+// Cell-centred kinematic viscosity in m^2/s, one float per sim cell, consumed
+// by the implicit viscous solve (APICFluidSolver.cpp:applyViscosity and its
+// device mirror sim_fluid_viscosity_rbgs.comp).
+//
+// ★★★ THIS GATHER TAKES NO EXCLUSION LIST, AND THAT IS THE POINT.
+// Its three neighbours above (level set, material coordinate, composition) all
+// describe ONE ISOSURFACE, so they must agree about which particles that
+// surface is made of and each takes `excluded_substance_tags`. This one
+// describes the LIQUID. A substance rendered as splat spheres still has mass,
+// still occupies cells and still resists shear; dropping it here would make the
+// flow change when someone edited a RENDER setting. If a later reader "fixes
+// the inconsistency" by passing the exclusion list in, that is the bug.
+//
+// ★★ Trilinear P2G weights, not the level-set kernel. The viscous stencil
+// relaxes faces the FLUID MASK calls fluid, and that mask is built with the
+// transfer's weights; gathering viscosity with a wider surface kernel would
+// leave fluid cells whose viscosity came mostly from liquid that is not in
+// them.
+//
+// `fallback_viscosity` fills untagged liquid, unbound tags, and cells no
+// particle supported. Returns false (and clears) when no entry actually
+// overrides the fallback — a uniform field is exactly what the scalar path
+// already does, for free.
+struct SubstanceViscosityEntry {
+    uint32_t tag = 0u;
+    float    kinematic_viscosity = -1.0f;   // < 0 = inherit the fallback
+};
+
+bool buildSubstanceViscosityField(const FluidParticles& particles,
+                                  const FluidSim::FluidGrid& grid,
+                                  const SubstanceViscosityEntry* entries,
+                                  std::size_t entry_count,
+                                  float fallback_viscosity,
+                                  std::vector<float>& viscosity_out);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SOLID-PHASE CELLS — where a SOLID substance blocks the flow, per step.
+// ═══════════════════════════════════════════════════════════════════════════
+// Compact list of cells occupied by parcels of a solid-phase substance, plus
+// the mass-averaged parcel velocity in each of them. The caller ORs this into
+// the grid's solid mask, where the existing no-slip / free-slip boundary and
+// the pressure projection consume it without knowing it came from particles.
+//
+// ★★★ NEAREST CELL, NOT A TRILINEAR SPLAT — the opposite choice from the three
+// gathers above, on purpose. Those reconstruct a smooth field, where spreading
+// a parcel over eight cells is what makes the surface continuous. This one
+// answers a BINARY question about where matter blocks flow, and smearing it
+// would inflate every chunk by a full cell in each direction: a marble would
+// dam a channel it should roll down, and the error would grow with voxel size
+// rather than with anything the user set.
+//
+// ★★★ A CELL HOLDING MORE LIQUID THAN SOLID IS NEVER SOLID, whatever the
+// threshold says. Flipping an interface cell to solid under the liquid standing
+// in it drops that liquid's volume from the pressure solve and then has the
+// particle stage eject every parcel in it — hundreds at once, outward, on one
+// frame. That is a burst at the interface, and it reads as solver instability
+// rather than as a mask that moved under the liquid's feet. Requiring dominance
+// costs one cell of wetting at the boundary and buys the whole failure away.
+//
+// ★★ THE FILL THRESHOLD IS THE WHOLE CALIBRATION. A cell is solid once the
+// solid mass in it reaches `fill_threshold` parcels. Too low and one stray
+// parcel blocks a full h³ of flow (an under-resolved solid is a FATTER
+// obstacle than it looks, never a thinner one); too high and a thin chunk
+// never blocks at all, so the phase control reads as doing nothing. It is an
+// explicit argument rather than a constant here so the caller can tie it to
+// the domain's seed density — the only number that says what "full" means.
+//
+// ★ Velocity is carried so a MOVING chunk drags the liquid: it is written into
+// grid.solid_vel, which both the viscous stencil (no-slip) and the variational
+// pressure coupling already read for moving colliders. Dropping it would make
+// a falling chunk punch a hole through the liquid without pushing it, which
+// looks like weightlessness and reads as a tuning problem.
+//
+// Returns false (and clears both outputs) when no solid-phase parcel reaches
+// the threshold anywhere — the caller must then leave the mask untouched
+// rather than stamp an empty overlay.
+bool buildSubstanceSolidCells(const FluidParticles& particles,
+                              const FluidSim::FluidGrid& grid,
+                              const uint32_t* solid_tags,
+                              std::size_t solid_tag_count,
+                              float fill_threshold,
+                              std::vector<uint32_t>& cells_out,
+                              std::vector<Vec3>& cell_velocity_out);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

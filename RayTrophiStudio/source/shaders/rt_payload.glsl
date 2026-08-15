@@ -116,4 +116,9 @@ const uint BOUNCE_GLASS_REFLECT = 6u;
 // contact shadows with nothing to point at.
 const float INV_PI      = 0.31830988618379067154;
 const float SHADOW_TMIN = 1e-3;   // Shadow rays: avoid near-field self/adjacent contact acne
+// TLAS visibility: 0x01 authored solids, 0x02 gas/fog AABBs,
+// 0x04 transient simulation/splat geometry, 0x08 SurfaceSDF AABBs.
+// Direct-light shadows see solids and splats. Volume-internal probes retain
+// their narrower masks so particle-rich gas does not cause nested RT work.
+const uint RT_MASK_DIRECT_SHADOW = 0x05u;
 

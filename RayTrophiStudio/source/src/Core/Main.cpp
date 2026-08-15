@@ -40,7 +40,7 @@
 #include "EmbreeBVH.h"
 #include "ParallelBVHNode.h"
 #include "scene_ui_guides.hpp"  // Viewport guides (safe areas, letterbox, grids)
-#include "default_scene_creator.hpp"
+#include "Template/TemplateSession.h"
 #include "ColorProcessingParams.h"
 #include "Stylize/StylizePostProcess.h"
 #include "Stylize/StylizeKernel.h"
@@ -2679,8 +2679,12 @@ int main(int argc, char* argv[]) try {
         }
         ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
     } else {
-        if (splashOk) { splash.setStatus("Creating default scene..."); splash.render(); }
-        createDefaultScene(scene, ray_renderer, g_backend.get());
+        if (splashOk) { splash.setStatus("Creating General Scene template..."); splash.render(); }
+        const auto template_result = raytrophi::templates::TemplateSession::instance().open(
+            "raytrophi.start.general_scene", "discard", ui_ctx, ui, &ui.history);
+        if (!template_result.opened) {
+            SCENE_LOG_ERROR("General Scene startup template failed: " + template_result.code);
+        }
         ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
     }
     resolveRequestedRenderBackend(true, false);
@@ -3368,9 +3372,14 @@ int main(int argc, char* argv[]) try {
         const bool skip_backend_for_anim =
             rendering_in_progress.load() && ui_ctx.is_animation_mode && !g_seq_save_active;
 
+        bool window_focus_gained_event = false;
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
             if (e.type == SDL_QUIT) ui.tryExit();
+            if (e.type == SDL_WINDOWEVENT &&
+                e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                window_focus_gained_event = true;
+            }
             const bool python_console_captures_input =
                 rtpython::wantsInputCapture() || rtapi::renderOutputPending();
 
@@ -3801,6 +3810,23 @@ int main(int argc, char* argv[]) try {
                     g_camera_dirty = true;
                 }
             }
+        }
+
+        static bool window_was_focused =
+            (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+        const bool window_is_focused =
+            (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+        const bool window_focus_regained =
+            window_focus_gained_event || (!window_was_focused && window_is_focused);
+        window_was_focused = window_is_focused;
+
+        // A dormant/background frame deliberately skips SDL texture uploads. When
+        // focus returns after accumulation has already converged, there may be no
+        // new render sample to rebuild the display, leaving the stale raw texture
+        // visible. Re-apply the persistent display transform without restarting
+        // accumulation; post_processing_happened will force the texture upload.
+        if (window_focus_regained && ui_ctx.render_settings.persistent_tonemap) {
+            apply_tonemap = true;
         }
 
         // --- AUTO RESIZE FOR FINAL RENDER ---
@@ -4332,7 +4358,7 @@ int main(int argc, char* argv[]) try {
             
             // CPU BVH: defer to async path instead of blocking main thread.
             // The async BVH builder at g_bvh_rebuild_pending handles large scenes
-            // without freezing the UI (copies objects, builds on a background thread).
+            // without freezing the UI.
             if (g_needs_geometry_rebuild.exchange(false, std::memory_order_acq_rel)) {
                 g_bvh_rebuild_pending = true;
             }

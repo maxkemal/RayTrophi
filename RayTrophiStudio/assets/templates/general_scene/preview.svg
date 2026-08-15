@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360" role="img" aria-labelledby="title description">
+  <title id="title">General RayTrophi scene</title>
+  <desc id="description">A cube on a perspective grid lit from above.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#363941"/>
+      <stop offset="1" stop-color="#202228"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d9dce2"/>
+      <stop offset="1" stop-color="#747b88"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" rx="14" fill="url(#background)"/>
+  <g fill="none" stroke="#565b66" stroke-width="1" opacity="0.45">
+    <path d="M320 145 45 360M320 145 125 360M320 145 205 360M320 145 435 360M320 145 515 360M320 145 595 360"/>
+    <path d="M255 196h130M215 235h210M160 286h320M85 350h470"/>
+  </g>
+  <path d="m270 160 78-24 70 39-79 26z" fill="#dfe2e7"/>
+  <path d="m270 160 69 41v91l-69-43z" fill="url(#front)"/>
+  <path d="m339 201 79-26v89l-79 28z" fill="#555d69"/>
+  <circle cx="438" cy="94" r="11" fill="#d8bd66"/>
+  <path d="m430 108-24 40" stroke="#d8bd66" stroke-width="2" opacity="0.65"/>
+  <text x="28" y="38" fill="#e0e2e7" font-family="Segoe UI, sans-serif" font-size="18">General Scene</text>
+  <text x="28" y="61" fill="#969ca7" font-family="Segoe UI, sans-serif" font-size="12">Flat mesh · camera · key light</text>
+</svg>

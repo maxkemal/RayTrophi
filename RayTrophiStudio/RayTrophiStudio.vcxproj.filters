@@ -195,6 +195,12 @@
     <ClInclude Include="source\include\Fluid\FluidFoam.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidSplatMaterialPolicy.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidSplatMaterialAuthoring.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\FoamSurface.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -459,6 +465,9 @@
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\UI\HierarchyLiveObjectView.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\AssetRegistry.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -661,6 +670,12 @@
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainParticleAuthoring.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainRenderLifecycle.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
@@ -671,6 +686,12 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidFoam.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialPolicy.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialAuthoring.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FoamSurface.cpp">
@@ -725,6 +746,15 @@
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApi.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonTemplates.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcTemplates.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiTemplates.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiModifiers.cpp">
@@ -797,6 +827,21 @@
       <Filter>Kaynak Dosyalar\Core</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Core\ProjectManager.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\TemplateRegistry.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\TemplateLoader.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\TemplateRecipeStage.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\TemplateSession.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\TemplateUiStateAdapter.cpp">
       <Filter>Kaynak Dosyalar\Core</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Core\RenderStateManager.cpp">

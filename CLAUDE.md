@@ -102,6 +102,10 @@ Bu kod tabanında aynı hata sınıfları dönüp duruyor. Yeni bir arıza arark
 - **Tüketicinin BİRİMİNİ oku.** Bir sayıyı başka bir alana verirken. Impulse'ı
   hız alanına yazmak çökmez, "çok güçlü" gibi görünür ve kalibrasyon turuna
   gömülür.
+- **★ Bir çözücüde "daha çok yakınsa, daha sert" bir belirti FİZİK DEĞİLDİR.**
+  Gerçek bir kuvvet yakınsadıkça küçülür. İterasyon sayısıyla *büyüyen* şey
+  neredeyse her zaman **tekil bir sistemin boş uzay bileşenidir** (referanssız
+  bir bölge). Bu tek özellik, makul görünen bütün fiziksel adayları eler.
 - **Varsayılan bir ölçüm değildir.** `false` dönen bir okuma çağıran tarafta
   yutulursa, bilgi eksikliği sessizce "sıfır ölçtüm"e dönüşür.
 - **"Yok" ≠ "silinmiş".** Kaydediciler bulamadıklarını silinmiş sanabilir.
