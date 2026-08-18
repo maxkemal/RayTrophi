@@ -179,6 +179,19 @@ public:
     // big surgery exactly where a regression goes unnoticed.
     enum class NodeEditorDomain { Simulation = 0, Geometry, Material, Terrain, Animation };
     NodeEditorDomain node_editor_domain = NodeEditorDomain::Simulation;
+
+    // ── Which SCOPED simulation graph the Nodes canvas is showing ────────────
+    // Decision record: docs/dev/SIMULATION_NODE_OBJECT_MODEL.md, section 8.
+    //
+    // ★★ View state, so it sits beside node_editor_domain above and is published
+    // as a VALUE through `rt.editor` — same reasoning as that field. It is a
+    // selection, never an authority: the graphs themselves live on the scene,
+    // and a scope named here that has no graph draws an empty-state message
+    // rather than falling back to another owner's canvas.
+    //
+    // Empty owner with scope "domain"/"object" means "nothing picked yet".
+    std::string sim_graph_scope = "domain";
+    std::string sim_graph_owner;
     bool show_node_editor = false;    // the Nodes window (simulation occupant)
     // Same shortcut-guard as geometry_graph_focused: while the canvas has focus
     // Delete belongs to the node selection, not to the scene object behind it.

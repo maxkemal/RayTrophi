@@ -102,22 +102,85 @@ except Exception as exc:                       # noqa: BLE001
     log("   refused: %s" % exc)
 check("unknown node domain raises", refused)
 
+log("== which SCOPED graph the canvas is on is a VALUE ==")
+# ★★★ The canvas shows one scoped graph at a time, so "which one" is a reading
+# an agent must be able to take. Without it, every later assertion about the
+# panel would be about an unknown graph -- the panel-lies shape again, one level
+# up.
+state = rt.editor.get_state()
+for key in ("sim_graph_scope", "sim_graph_owner"):
+    check("get_state carries %r" % key, key in state, "%s" % (sorted(state),))
+
+domains = rt.fluid.list_domains()
+if not domains:
+    log("   no fluid domain -- scope selection checks need one")
+else:
+    domain_name = domains[0]["name"]
+    rt.editor.set_sim_graph_scope("domain", domain_name)
+    state = rt.editor.get_state()
+    check("the scope selection is reported back",
+          state["sim_graph_scope"] == "domain" and
+          state["sim_graph_owner"] == domain_name,
+          "%s / %s" % (state["sim_graph_scope"], state["sim_graph_owner"]))
+
+    # ★★ Selecting a scope with NO graph must be allowed: the panel draws an
+    # explicit empty state, and that is how graph creation is reached at all.
+    # Refusing here would make the empty case unreachable from UI and script.
+    if any(g["scope"] == "domain" and g["owner"] == domain_name
+           for g in rt.sim_graph.list()):
+        rt.sim_graph.delete("domain", domain_name)
+    rt.editor.set_sim_graph_scope("domain", domain_name)
+    check("selecting a scope with no graph is allowed",
+          rt.editor.get_state()["sim_graph_owner"] == domain_name)
+
+    log("== world scope carries no owner ==")
+    rt.editor.set_sim_graph_scope("world", "ignored")
+    state = rt.editor.get_state()
+    # ★ There is one world, so an owner name here would be a value that means
+    # nothing and could disagree with itself between readings.
+    check("world scope drops the owner name",
+          state["sim_graph_scope"] == "world" and state["sim_graph_owner"] == "",
+          "%s / %r" % (state["sim_graph_scope"], state["sim_graph_owner"]))
+
+    log("== an unknown scope is REFUSED, and changes nothing ==")
+    before = rt.editor.get_state()
+    refused = False
+    try:
+        rt.editor.set_sim_graph_scope("no_such_scope", "x")
+    except Exception as exc:                       # noqa: BLE001
+        refused = True
+        log("   refused: %s" % exc)
+    check("unknown scope raises", refused)
+    after = rt.editor.get_state()
+    # ★★★ Same trap as set_bottom_editor: a refused call that had already moved
+    # the selection would leave the canvas somewhere the caller was told it had
+    # not gone. The user sees the error; nobody sees the side effect.
+    check("a refused scope change moved nothing",
+          after["sim_graph_scope"] == before["sim_graph_scope"] and
+          after["sim_graph_owner"] == before["sim_graph_owner"],
+          "%s -> %s" % (before, after))
+
 log("== the panel and the script edit the SAME graph ==")
 # ★★★ This is what makes the Nodes panel legitimate under CLAUDE.md rule 1. The
-# panel draws rtapi::simulationGraph(); if it kept a copy, a script-built graph
-# would not be the one on screen and neither side could check the other.
+# panel draws rtapi::simulationGraph(scope, owner); if it kept a copy, a
+# script-built graph would not be the one on screen and neither side could check
+# the other.
 rt.editor.set_bottom_editor("simulation")
-rt.sim_graph.clear()
-node = rt.sim_graph.add_node("sim.domain_ref")
-domains = rt.fluid.list_domains()
 if domains:
-    rt.sim_graph.set_node(node, "domain", domains[0]["name"])
-nodes = rt.sim_graph.nodes()
-check("the graph the panel draws has the script's node", len(nodes) == 1,
-      "%d" % len(nodes))
-check("every simulation node type is offered by the registry",
-      all(n["type"].startswith("sim.") for n in nodes), "%s" % (nodes,))
-rt.sim_graph.clear()
+    domain_name = domains[0]["name"]
+    rt.editor.set_sim_graph_scope("domain", domain_name)
+    node = rt_testlog.fresh_graph(rt, "domain", domain_name)
+    nodes = rt.sim_graph.nodes("domain", domain_name)
+    # One node, and it is the OWNER node the graph was created with -- not an
+    # authored one. A scoped graph is never ownerless.
+    check("the graph the panel draws opens with its owner node",
+          len(nodes) == 1 and nodes[0]["id"] == node and nodes[0]["owner_node"],
+          "%s" % (nodes,))
+    check("the owner node names this graph's owner",
+          nodes and nodes[0].get("domain") == domain_name, "%s" % (nodes,))
+    check("every simulation node type is offered by the registry",
+          all(n["type"].startswith("sim.") for n in nodes), "%s" % (nodes,))
+    rt.sim_graph.clear("domain", domain_name)
 
 log("")
 if FAIL:

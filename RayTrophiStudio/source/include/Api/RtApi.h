@@ -595,11 +595,33 @@ struct SimRestartRequest {
 };
 struct SimGraphEvaluation {
     bool evaluated = false;
+    // ★★ Why a graph produced nothing. An empty command list on a graph that was
+    // never found must not read as "this graph declares no commands" — that is
+    // the "a default is not a measurement" shape. `evaluated` false plus this
+    // string says the reading was not taken.
+    std::string error;
     std::vector<SimCommandInfo>   commands;        // topological order IS meaningful
     std::vector<SimRestartRequest> restart_requests;
 };
+// One opt-in parameter on a Solver / Domain Settings node.
+//
+// ★★★ `in_use` false does NOT mean "zero". It means this graph has no opinion
+// about the parameter and will not write it. Collapsing the two would make an
+// untouched dial overwrite an authored value with a number nobody chose.
+struct SimNodeField {
+    std::string key;          // the same name readParameter/writeParameter use
+    bool        in_use = false;
+    float       value = 0.0f;
+    // Applying this field would discard the accumulated simulation state.
+    // Reported per field so the prompt can name the one dial responsible.
+    bool        requires_restart = false;
+};
+
 struct SimNodeInfo {
     uint32_t    id = 0;
+    // The implicit node naming this graph's owner. It cannot be retargeted, so a
+    // panel should draw it pinned rather than offering an editable name field.
+    bool        is_owner_node = false;
     std::string type_id;
     std::string display_name;
     bool        enabled = true;
@@ -638,6 +660,11 @@ struct SimNodeInfo {
     bool     cache_baking = false;
     bool     cache_stale = false;
     uint32_t cache_ram_frames = 0;
+    // Solver / Domain Settings nodes. Empty for every other node type.
+    // ★ Published so a script can DISCOVER which parameters a node offers
+    // instead of reading the source — the same reason the attribute naming
+    // layer exists.
+    std::vector<SimNodeField> fields;
 };
 
 // ── Editor view state (rt.editor) ───────────────────────────────────────────
@@ -670,34 +697,95 @@ struct EditorState {
     // structurally cannot see a defect is the same trap as the gas shader reader
     // that answered from a field its writer never touched.
     std::vector<std::string> open_editors;
+    // Which SCOPED simulation graph the Nodes canvas is on: "object" | "domain"
+    // | "world", plus the owner's name (empty for world, and empty for the
+    // other two when nothing has been picked yet). Reported even when the Nodes
+    // window is closed — it is the selection, not a property of the window.
+    std::string sim_graph_scope;
+    std::string sim_graph_owner;
 };
 EditorState editorState();
 Result setBottomEditor(const std::string& name);
 Result setNodeEditorDomain(const std::string& name);
+// ★ Selecting a scope does not require a graph to exist there: the panel draws
+// an explicit empty state, which is how a user reaches graph creation at all.
+Result setSimGraphScope(const std::string& scope, const std::string& owner);
 
 void initSimulationNodes();   // register types + install the attribute resolver
 
-// ★★★ The ONE simulation graph. The editor panel draws THIS object; it does not
-// keep a copy. A panel that mirrors state the core owns is how the fracture UI
-// cache outlived a scene change and how the panel came to disagree with the
-// solver — so the drawing surface is given the original, never a snapshot.
+// ── Scoped simulation graphs ────────────────────────────────────────────────
+//
+// Decision record: docs/dev/SIMULATION_NODE_OBJECT_MODEL.md, section 8 steps 1-2.
+//
+// ★★★ A graph belongs to a NAMED scene entity: an object, a domain, or the
+// world. There is no "the" simulation graph any more, and — deliberately — no
+// optional scope argument. "Use the active domain" is exactly the silent
+// assumption this repository keeps paying for: the call succeeds, configures a
+// different entity, and no later reading contradicts it.
+//
+// scope is "object" | "domain" | "world"; owner is the entity's name, and is
+// ignored for "world" because there is only one.
+struct SimGraphRef {
+    std::string scope;
+    std::string owner;
+    uint32_t    node_count = 0;
+    // The implicit node naming this graph's owner. 0 means the scope has none —
+    // World, whose thermal state has no scripting surface yet (section 7).
+    uint32_t    owner_node = 0;
+    // ★★★ The named entity is GONE, but the graph is still here. Removing a
+    // domain drops its graph at that one call site; objects are deleted through
+    // several paths (command history, UI, project load), so instead of claiming
+    // to have hooked them all this is MEASURED and reported. A stranded graph
+    // still draws and still accepts edits while driving nothing — the fracture
+    // UI state shape — and a flag nobody can read is how that stays invisible.
+    bool        owner_missing = false;
+};
+std::vector<SimGraphRef> simGraphList();
+// Idempotent: creating an existing graph succeeds and changes nothing. Fails
+// when the named entity does not exist, so a typo cannot produce a live graph
+// that drives nothing.
+Result simGraphCreate(const std::string& scope, const std::string& owner);
+Result simGraphDelete(const std::string& scope, const std::string& owner);
+
+// ★★★ The editor panel draws THIS object; it does not keep a copy. A panel that
+// mirrors state the core owns is how the fracture UI cache outlived a scene
+// change and how the panel came to disagree with the solver — so the drawing
+// surface is given the original, never a snapshot.
+//
+// ★★ Returns null when no graph exists for the scope. The panel must say so
+// rather than fall back to another graph: showing one owner's nodes under
+// another's name is the panel-lies failure this layer exists to end.
 // Forward-declared to keep solver/node headers out of the API header (D.4).
-NodeSystem::Sim::SimulationNodeGraph& simulationGraph();
+NodeSystem::Sim::SimulationNodeGraph* simulationGraph(const std::string& scope,
+                                                      const std::string& owner);
 // Discoverability, which is the whole point of the naming layer: until now the
 // only way to learn an attribute existed was to read the solver source.
 std::vector<std::string> simListAttributes(const std::string& domain);
 // Same, for per-object surface (MSF) attributes: temperature, char, melt,
 // moisture, fuel_remaining, mass_loss. N5.
 std::vector<std::string> simListSurfaceAttributes(const std::string& object);
-Result simGraphClear();
-Result simGraphAddNode(const std::string& type_id, uint32_t& out_id);
-Result simGraphSetNodeText(uint32_t node_id, const std::string& key,
+// ★ clear() empties the canvas but re-seeds the owner node: a scoped graph is
+// never ownerless, because a node authored on an ownerless canvas would name
+// nothing.
+Result simGraphClear(const std::string& scope, const std::string& owner);
+Result simGraphAddNode(const std::string& scope, const std::string& owner,
+                       const std::string& type_id, uint32_t& out_id);
+Result simGraphSetNodeText(const std::string& scope, const std::string& owner,
+                           uint32_t node_id, const std::string& key,
                            const std::string& value);
-Result simGraphSetNodeValue(uint32_t node_id, const std::string& key, float value);
-Result simGraphConnect(uint32_t from_node, int from_pin,
+Result simGraphSetNodeValue(const std::string& scope, const std::string& owner,
+                            uint32_t node_id, const std::string& key, float value);
+Result simGraphConnect(const std::string& scope, const std::string& owner,
+                       uint32_t from_node, int from_pin,
                        uint32_t to_node, int to_pin);
-SimGraphEvaluation simGraphEvaluate();
-std::vector<SimNodeInfo> simGraphNodes();
+SimGraphEvaluation simGraphEvaluate(const std::string& scope, const std::string& owner);
+// ★★★ Returns a Result, not just the vector. An empty list from a graph that
+// was never found is indistinguishable from a graph that genuinely has no
+// nodes — "a default is not a measurement", and here the default would tell a
+// caller its typo'd owner name was fine. Measured 2026-08-18: the test that
+// asserted an unknown owner is refused caught exactly this.
+Result simGraphNodes(const std::string& scope, const std::string& owner,
+                     std::vector<SimNodeInfo>& out_nodes);
 
 // N3 — applying the graph as an OVERRIDE layer.
 //
@@ -715,7 +803,14 @@ struct SimApplyResult {
     std::vector<std::string> refused;
     std::vector<std::string> failed;
 };
-SimApplyResult simGraphApply(bool allow_restart);
+SimApplyResult simGraphApply(const std::string& scope, const std::string& owner,
+                             bool allow_restart);
+// ★★★ The override layer is deliberately NOT scoped. It is keyed by the entity
+// and parameter actually written, so it already spans graphs — and restoring
+// "only this graph's" overrides is not a thing the solver can do: two graphs
+// that wrote the same key hold one authored value between them. Scoping the
+// restore would leave whichever graph cleared second unable to put anything
+// back, silently stranding an authored value.
 Result   simGraphClearOverrides();   // restores every captured authored value
 uint32_t simGraphOverrideCount();
 
@@ -734,6 +829,11 @@ struct SimCouplingEntry {
     std::string target_domain;
     bool        active = false;
     uint32_t    source_node = 0; // declared entries only
+    // Which graph declared it (declared entries only). A coupling joins two
+    // domains, so the report spans every scope and has to say where each
+    // declaration came from.
+    std::string scope;
+    std::string owner;
 };
 struct SimCouplingReport {
     std::vector<SimCouplingEntry> declared;   // graph order

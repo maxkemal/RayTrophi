@@ -27,18 +27,18 @@ if not attrs:
     log("no Material State Field on this object -- nothing to measure")
     raise SystemExit(0)
 
-rt.sim_graph.clear()
-node = rt.sim_graph.add_node("sim.object_ref")
-rt.sim_graph.set_node(node, "object", obj)
-insp = rt.sim_graph.add_node("sim.surface_inspect")
-rt.sim_graph.connect(node, insp)
+SCOPE = "object"
+OWNER = obj
+node = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
+insp = rt.sim_graph.add_node(SCOPE, OWNER, "sim.surface_inspect")
+rt.sim_graph.connect(SCOPE, OWNER, node, insp)
 
 readings = {}
 for channel in attrs:
-    rt.sim_graph.set_node(insp, "channel", channel)
-    rt.sim_graph.evaluate()
+    rt.sim_graph.set_node(SCOPE, OWNER, insp, "channel", channel)
+    rt.sim_graph.evaluate(SCOPE, OWNER)
     stats = None
-    for n in rt.sim_graph.nodes():
+    for n in rt.sim_graph.nodes(SCOPE, OWNER):
         if n["type"] == "sim.surface_inspect":
             stats = n
             break
@@ -54,10 +54,10 @@ for channel in attrs:
         "  <- varies" if spread > 0.0 else "",
         "" if fresh else "  <- STALE HOST MIRROR"))
 
-rt.sim_graph.set_node(insp, "channel", "no_such_channel_xyz")
-rt.sim_graph.evaluate()
+rt.sim_graph.set_node(SCOPE, OWNER, insp, "channel", "no_such_channel_xyz")
+rt.sim_graph.evaluate(SCOPE, OWNER)
 bogus = None
-for n in rt.sim_graph.nodes():
+for n in rt.sim_graph.nodes(SCOPE, OWNER):
     if n["type"] == "sim.surface_inspect":
         bogus = n
         break
@@ -89,4 +89,4 @@ else:
     log("VERDICT: every channel reads the SAME flat value -- consistent with a "
         "zero-filled buffer or a wrong stride. Do not trust the inspector until "
         "a channel is made to vary.")
-rt.sim_graph.clear()
+rt.sim_graph.clear(SCOPE, OWNER)

@@ -35,6 +35,7 @@ being paid for twice.
 | Document | Area |
 |---|---|
 | [API_SCRIPTING_ROADMAP.md](API_SCRIPTING_ROADMAP.md) | Scripting/IPC API waves and their status table |
+| [SIMULATION_NODE_OBJECT_MODEL.md](SIMULATION_NODE_OBJECT_MODEL.md) | Scope-based object model for the simulation node layer — scopes landed, steps 3-6 open |
 | [AGENT_VIEWPORT_MEASUREMENT_PLAN.md](AGENT_VIEWPORT_MEASUREMENT_PLAN.md) | Driving the viewport and reading render DATA over IPC — the substrate agents verify with |
 | [TEMPLATE_HUB_UX_ROADMAP.md](TEMPLATE_HUB_UX_ROADMAP.md) | Canonical product direction for startup / template / guided-scene UX |
 | [GRANULAR_SIMULATION_ROADMAP.md](GRANULAR_SIMULATION_ROADMAP.md) | Sand and granular MPM/APIC constitutive solver |
@@ -87,7 +88,6 @@ being paid for twice.
 | Document | Area |
 |---|---|
 | [AGENT_PIPELINE_ARCHITECTURE.md](AGENT_PIPELINE_ARCHITECTURE.md) | Multi-instance agent/human production pipeline — which decisions are irreversible |
-| [SIMULATION_NODE_OBJECT_MODEL.md](SIMULATION_NODE_OBJECT_MODEL.md) | Scope-based object model for the simulation node layer, and what "one roof" can and cannot unify |
 | [photon_caustics_plan.md](photon_caustics_plan.md) | Photon caustic pass, Vulkan RT first |
 | [stylize_mode_architecture.md](stylize_mode_architecture.md) | Stylize mode as an AOV-driven post layer |
 | [stylize_pipeline_notes.md](stylize_pipeline_notes.md) | Stylize working notes |

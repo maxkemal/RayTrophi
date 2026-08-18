@@ -26,21 +26,21 @@ log("domain: %s (%d particles)" % (name, domains[0]["particle_count"]))
 attrs = rt.sim_graph.attributes(name)
 log("attributes: %s" % (attrs,))
 
-rt.sim_graph.clear()
-dom = rt.sim_graph.add_node("sim.domain_ref")
-insp = rt.sim_graph.add_node("sim.field_inspect")
-rt.sim_graph.set_node(dom, "domain", name)
-rt.sim_graph.connect(dom, insp)
+SCOPE = "domain"
+OWNER = name
+dom = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
+insp = rt.sim_graph.add_node(SCOPE, OWNER, "sim.field_inspect")
+rt.sim_graph.connect(SCOPE, OWNER, dom, insp)
 
 varying = 0
 unavailable = []
 out_of_sync = []
 readings = {}
 for channel in attrs:
-    rt.sim_graph.set_node(insp, "channel", channel)
-    rt.sim_graph.evaluate()
+    rt.sim_graph.set_node(SCOPE, OWNER, insp, "channel", channel)
+    rt.sim_graph.evaluate(SCOPE, OWNER)
     stats = None
-    for n in rt.sim_graph.nodes():
+    for n in rt.sim_graph.nodes(SCOPE, OWNER):
         if n["type"] == "sim.field_inspect":
             stats = n
             break
@@ -65,10 +65,10 @@ for channel in attrs:
         "  <- ARRAY OUT OF SYNC (%d)" % stats.get("array_size", 0) if not synced else ""))
 
 # An unknown name must report NOT MEASURABLE, never a confident zero.
-rt.sim_graph.set_node(insp, "channel", "no_such_attribute_xyz")
-rt.sim_graph.evaluate()
+rt.sim_graph.set_node(SCOPE, OWNER, insp, "channel", "no_such_attribute_xyz")
+rt.sim_graph.evaluate(SCOPE, OWNER)
 bogus = None
-for n in rt.sim_graph.nodes():
+for n in rt.sim_graph.nodes(SCOPE, OWNER):
     if n["type"] == "sim.field_inspect":
         bogus = n
         break
@@ -96,4 +96,4 @@ else:
     log("VERDICT: every channel reads the SAME flat value -- consistent with a "
         "zero-filled buffer or an unresolved pointer. Do not trust N2 until a "
         "channel is made to vary.")
-rt.sim_graph.clear()
+rt.sim_graph.clear(SCOPE, OWNER)

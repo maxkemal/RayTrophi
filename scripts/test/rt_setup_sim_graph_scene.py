@@ -27,6 +27,20 @@ rt.fluid.set_param(NAME, backend="gpu", preset="water", boundary="closed")
 for _ in range(8):
     rt.fluid.step(0.0166)
 
+# ★ A flow source, so the Emitter node path is actually MEASURED. Without one
+# the emitter half of rt_test_sim_graph.py reports NOT VERIFIED -- and a claim
+# that never ran is not a passing claim.
+EMITTER = "SimGraphTestEmitter"
+if any(src["name"] == EMITTER for src in rt.flow_source.list()):
+    rt.flow_source.remove(EMITTER)
+rt.flow_source.create(EMITTER, NAME,
+                      source_mode="point",
+                      position=(0.0, 1.2, 0.0),
+                      radius=0.3,
+                      density=1.0,
+                      fluid_particles_per_second=500.0)
+print("emitter: %s" % ([src["name"] for src in rt.flow_source.list()],))
+
 d = rt.fluid.get(NAME)
 print("particles=%d backend=%s preset=%s live=%s" % (
     d["particle_count"], d["backend"], d["preset"], d.get("live_state")))

@@ -30,12 +30,104 @@ namespace rtapi {
 
 namespace {
 
-std::unique_ptr<NodeSystem::Sim::SimulationNodeGraph> g_sim_graph;
+// ── The scoped graph registry ───────────────────────────────────────────────
+//
+// Decision record: docs/dev/SIMULATION_NODE_OBJECT_MODEL.md, section 8 steps 1-2.
+//
+// ★★★ The graphs live on the SCENE (scene_data.h), not in a static here. The
+// static this replaced outlived scene changes — the same shape as the fracture
+// UI cache that went on describing a scene that no longer existed. Opening a
+// project now replaces the graphs along with everything they name.
+//
+// ★★★ There is NO default scope and NO default owner. Every entry point below
+// takes both. An "active domain" fallback is precisely the silent assumption
+// this repository keeps paying for: the call succeeds, edits something else,
+// and no reading ever contradicts it.
 
-NodeSystem::Sim::SimulationNodeGraph& simGraph() {
-    if (!g_sim_graph)
-        g_sim_graph = std::make_unique<NodeSystem::Sim::SimulationNodeGraph>();
-    return *g_sim_graph;
+using SimGraphPtr = std::shared_ptr<NodeSystem::Sim::SimulationNodeGraph>;
+
+// Where a scope's graphs are stored. Returns null for World, which has a single
+// graph rather than a map — the caller handles that case explicitly.
+std::unordered_map<std::string, SimGraphPtr>*
+scopeStorage(UIContext& ctx, NodeSystem::Sim::GraphScope scope) {
+    switch (scope) {
+        case NodeSystem::Sim::GraphScope::Domain: return &ctx.scene.simulation_domain_graphs;
+        case NodeSystem::Sim::GraphScope::Object: return &ctx.scene.simulation_object_graphs;
+        case NodeSystem::Sim::GraphScope::World:  return nullptr;
+    }
+    return nullptr;
+}
+
+// ★ One message shape for every bad scope string, and it LISTS the choices.
+// A caller that guessed wrong learns what the options are from the failure.
+Result parseScopeArg(const std::string& scope_text,
+                     NodeSystem::Sim::GraphScope& out) {
+    if (!NodeSystem::Sim::parseScope(scope_text, out))
+        return Result::fail("unknown graph scope '" + scope_text +
+                            "' (expected 'object', 'domain' or 'world')");
+    return Result::success();
+}
+
+// Does the scene entity a graph would name actually exist? Checked when a graph
+// is CREATED, not on every edit.
+//
+// ★★ A graph whose owner does not exist is the failure this check exists to
+// prevent: it looks healthy, accepts nodes, applies nothing, and reports no
+// error — the "node forever pointing at nothing" shape from the sim node panel.
+Result ownerExists(NodeSystem::Sim::GraphScope scope, const std::string& owner) {
+    if (scope == NodeSystem::Sim::GraphScope::World) return Result::success();
+    if (owner.empty())
+        return Result::fail(std::string("scope '") + NodeSystem::Sim::scopeName(scope) +
+                            "' needs an owner name");
+    if (scope == NodeSystem::Sim::GraphScope::Object) {
+        // ★★★ An object surface has TWO legitimate names: the scene object, and
+        // the simulation collider that references it. Both are accepted here for
+        // the same reason ObjectRefNode resolves both — the authored material
+        // lives on the collider while the measured MSF field is keyed by its
+        // source object. Accepting only one would make a graph silently work
+        // under one name and silently do nothing under the other, with no error
+        // either way, which this repository has already measured once.
+        if (objectExists(owner)) return Result::success();
+        SimulationColliderInfo collider;
+        if (getSimulationCollider(owner, collider).ok) return Result::success();
+        return Result::fail("no object or simulation collider named '" + owner +
+                            "' in the scene");
+    }
+    std::vector<FluidDomainInfo> domains;
+    Result listed = listFluidDomains(domains);
+    if (!listed.ok) return listed;
+    for (const auto& d : domains)
+        if (d.name == owner) return Result::success();
+    return Result::fail("no simulation domain named '" + owner + "' in the scene");
+}
+
+// Looks up an EXISTING graph. Does not create one.
+//
+// ★★★ Deliberately not create-on-demand. Auto-creating here would make a typo
+// in a domain name produce a second, empty graph that silently accepts every
+// later edit — the caller would see success on every call and no effect
+// anywhere. Creation is its own explicit call.
+Result findGraph(const std::string& scope_text, const std::string& owner,
+                 SimGraphPtr& out) {
+    if (!g_ctx) return notBound();
+    NodeSystem::Sim::GraphScope scope;
+    Result parsed = parseScopeArg(scope_text, scope);
+    if (!parsed.ok) return parsed;
+
+    if (scope == NodeSystem::Sim::GraphScope::World) {
+        if (!g_ctx->scene.simulation_world_graph)
+            return Result::fail("no world simulation graph (create it first)");
+        out = g_ctx->scene.simulation_world_graph;
+        return Result::success();
+    }
+    auto* storage = scopeStorage(*g_ctx, scope);
+    if (!storage) return Result::fail("unsupported graph scope");
+    auto it = storage->find(owner);
+    if (it == storage->end() || !it->second)
+        return Result::fail(std::string("no ") + NodeSystem::Sim::scopeName(scope) +
+                            " graph for '" + owner + "' (create it first)");
+    out = it->second;
+    return Result::success();
 }
 
 // ── The naming layer, first instance ────────────────────────────────────────
@@ -207,6 +299,17 @@ bool readParameter(const std::string& domain, const std::string& key, float& out
         if (key == "solid_phase_fill")      { out = d.solid_phase_fill;      return true; }
         if (key == "granular_cohesion")     { out = d.granular_cohesion;     return true; }
         if (key == "voxel_size")            { out = d.voxel_size;            return true; }
+        // ★★ Integer and boolean parameters travel as floats because SimCommand
+        // carries one numeric type. They are rounded back on the WRITE side, in
+        // one place — a value that round-trips through a float here and is
+        // truncated somewhere else would drift by one and nobody would look.
+        if (key == "viscosity_sweeps")      { out = static_cast<float>(d.viscosity_sweeps);    return true; }
+        if (key == "uvw_refresh_period")    { out = static_cast<float>(d.uvw_refresh_period);  return true; }
+        if (key == "granular_friction_angle_degrees")
+                                            { out = d.granular_friction_angle_degrees;        return true; }
+        if (key == "solid_phase")           { out = d.solid_phase_enabled ? 1.0f : 0.0f;       return true; }
+        if (key == "enabled")               { out = d.enabled ? 1.0f : 0.0f;                   return true; }
+        if (key == "visible")               { out = d.visible ? 1.0f : 0.0f;                   return true; }
         return false;                       // unknown key: say so, do not guess
     }
     return false;                           // unknown domain
@@ -222,6 +325,24 @@ bool writeParameter(const std::string& domain, const std::string& key, float val
     const float* solid_phase_fill = nullptr;
     const float* granular_cohesion = nullptr;
     const float* voxel_size = nullptr;
+    const float* granular_friction_angle = nullptr;
+    // ★ Non-float targets need their own storage: updateFluidDomain takes an
+    // int/bool pointer, and handing it the address of `value` would reinterpret
+    // a float's bits as an integer.
+    int  sweeps_store = 0;      const int*  viscosity_sweeps = nullptr;
+    int  refresh_store = 0;     const int*  uvw_refresh_period = nullptr;
+    bool solid_store = false;   const bool* solid_phase = nullptr;
+    bool enabled_store = false; const bool* enabled = nullptr;
+    bool visible_store = false; const bool* visible = nullptr;
+
+    // ★★ ONE rounding site for every integer parameter, and it rounds rather
+    // than truncates: 7.999999 arriving from a float round-trip must land on 8,
+    // not 7. A truncation here would make a value read back one lower than the
+    // one just written, and the override layer would then "restore" the wrong
+    // authored number.
+    auto as_int = [&value]() { return static_cast<int>(value + (value < 0.0f ? -0.5f : 0.5f)); };
+    // Anything above zero means on. There is no in-between to interpolate.
+    auto as_bool = [&value]() { return value > 0.5f; };
 
     if (key == "kinematic_viscosity")        kinematic_viscosity = &value;
     else if (key == "viscosity_wall_slip")   viscosity_wall_slip = &value;
@@ -232,6 +353,18 @@ bool writeParameter(const std::string& domain, const std::string& key, float val
     else if (key == "solid_phase_fill")      solid_phase_fill = &value;
     else if (key == "granular_cohesion")     granular_cohesion = &value;
     else if (key == "voxel_size")            voxel_size = &value;
+    else if (key == "granular_friction_angle_degrees") granular_friction_angle = &value;
+    else if (key == "viscosity_sweeps")   { sweeps_store  = as_int();  viscosity_sweeps   = &sweeps_store; }
+    else if (key == "uvw_refresh_period") { refresh_store = as_int();  uvw_refresh_period = &refresh_store; }
+    else if (key == "solid_phase")        { solid_store   = as_bool(); solid_phase        = &solid_store; }
+    else if (key == "enabled")            { enabled_store = as_bool(); enabled            = &enabled_store; }
+    else if (key == "visible")            { visible_store = as_bool(); visible            = &visible_store; }
+    // ★★★ granular_enabled is deliberately NOT here. Toggling it changes which
+    // solver representation the domain runs, and whether that invalidates the
+    // accumulated state has not been MEASURED. Exposing it without knowing
+    // would either discard a simulation silently or demand a restart nobody
+    // needs — and a dial whose restart semantics are guessed is worse than a
+    // missing one, because the guess is invisible.
     else return false;
 
     // ★ One argument per line, each labelled. updateFluidDomain takes 25
@@ -248,7 +381,7 @@ bool writeParameter(const std::string& domain, const std::string& key, float val
         /* boundary                       */ nullptr,
         /* preset                         */ nullptr,
         /* kinematic_viscosity            */ kinematic_viscosity,
-        /* viscosity_sweeps               */ nullptr,
+        /* viscosity_sweeps               */ viscosity_sweeps,
         /* viscosity_wall_slip            */ viscosity_wall_slip,
         /* surface_material               */ nullptr,
         /* surface_offset_voxels          */ surface_offset_voxels,
@@ -256,13 +389,13 @@ bool writeParameter(const std::string& domain, const std::string& key, float val
         /* pore_scale                     */ pore_scale,
         /* pore_detail                    */ pore_detail,
         /* coord_space                    */ nullptr,
-        /* uvw_refresh_period             */ nullptr,
-        /* solid_phase                    */ nullptr,
+        /* uvw_refresh_period             */ uvw_refresh_period,
+        /* solid_phase                    */ solid_phase,
         /* solid_phase_fill               */ solid_phase_fill,
-        /* enabled                        */ nullptr,
-        /* visible                        */ nullptr,
+        /* enabled                        */ enabled,
+        /* visible                        */ visible,
         /* granular_enabled               */ nullptr,
-        /* granular_friction_angle_degrees*/ nullptr,
+        /* granular_friction_angle_degrees*/ granular_friction_angle,
         /* granular_cohesion              */ granular_cohesion).ok;
 }
 
@@ -464,6 +597,72 @@ bool writeSurfaceText(const std::string& object, const std::string& key,
 std::unordered_map<OverrideKey, float, OverrideKeyHash> g_authored_surface;
 std::unordered_map<OverrideKey, std::string, OverrideKeyHash> g_authored_surface_text;
 
+// ── Emitter (flow source) parameters ────────────────────────────────────────
+//
+// ★★ Read-modify-write against the LIVE source, never a freshly built one.
+// SimulationFlowSourceInfo carries ~25 authored fields; constructing one to set
+// a single value would reset every other field to its default, and the symptom
+// would be "changing the rate also moved the emitter and dropped its substance".
+bool readEmitterParameter(const std::string& emitter, const std::string& key,
+                          float& out) {
+    SimulationFlowSourceInfo src;
+    if (!getSimulationFlowSource(emitter, src).ok) return false;
+    if      (key == "enabled")                    { out = src.enabled ? 1.0f : 0.0f; return true; }
+    else if (key == "radius")                     { out = src.radius; return true; }
+    else if (key == "density")                    { out = src.density; return true; }
+    else if (key == "temperature")                { out = src.temperature; return true; }
+    else if (key == "fuel")                       { out = src.fuel; return true; }
+    else if (key == "falloff")                    { out = src.falloff; return true; }
+    else if (key == "velocity_coupling")          { out = src.velocity_coupling; return true; }
+    else if (key == "inherit_velocity")           { out = src.inherit_velocity; return true; }
+    else if (key == "fluid_particles_per_second") { out = src.fluid_particles_per_second; return true; }
+    else if (key == "fluid_velocity_spread")      { out = src.fluid_velocity_spread; return true; }
+    return false;                       // unknown key: say so, do not guess
+}
+
+bool writeEmitterParameter(const std::string& emitter, const std::string& key,
+                           float value) {
+    SimulationFlowSourceInfo src;
+    if (!getSimulationFlowSource(emitter, src).ok) return false;
+    if      (key == "enabled")                    src.enabled = value > 0.5f;
+    else if (key == "radius")                     src.radius = value;
+    else if (key == "density")                    src.density = value;
+    else if (key == "temperature")                src.temperature = value;
+    else if (key == "fuel")                       src.fuel = value;
+    else if (key == "falloff")                    src.falloff = value;
+    else if (key == "velocity_coupling")          src.velocity_coupling = value;
+    else if (key == "inherit_velocity")           src.inherit_velocity = value;
+    else if (key == "fluid_particles_per_second") src.fluid_particles_per_second = value;
+    else if (key == "fluid_velocity_spread")      src.fluid_velocity_spread = value;
+    // ★★★ `domain` is deliberately absent. Which region a source feeds resolves
+    // an ambiguity (an object inside two overlapping domains has no geometric
+    // answer) and is authored on the source. A graph silently rebinding it would
+    // move emission to another domain with nothing on screen to say so.
+    else return false;
+    return updateSimulationFlowSource(emitter, src).ok;
+}
+
+bool readEmitterText(const std::string& emitter, const std::string& key,
+                     std::string& out) {
+    SimulationFlowSourceInfo src;
+    if (!getSimulationFlowSource(emitter, src).ok) return false;
+    if (key != "fluid_substance") return false;
+    out = src.fluid_substance;
+    return true;
+}
+
+bool writeEmitterText(const std::string& emitter, const std::string& key,
+                      const std::string& text) {
+    SimulationFlowSourceInfo src;
+    if (!getSimulationFlowSource(emitter, src).ok) return false;
+    if (key != "fluid_substance") return false;
+    src.fluid_substance = text;
+    return updateSimulationFlowSource(emitter, src).ok;
+}
+
+std::unordered_map<OverrideKey, float, OverrideKeyHash> g_authored_emitter;
+std::unordered_map<OverrideKey, std::string, OverrideKeyHash> g_authored_emitter_text;
+
 // ── N7: render binding ──────────────────────────────────────────────────────
 //
 // Binds EXISTING look parameters — the SDF surface material, the splat material
@@ -659,9 +858,17 @@ bool writeCouplingSwitch(const std::string& domain, const std::string& coupling,
 
 } // namespace
 
-SimApplyResult simGraphApply(bool allow_restart) {
+SimApplyResult simGraphApply(const std::string& scope_text, const std::string& owner,
+                             bool allow_restart) {
     SimApplyResult out;
-    const SimGraphEvaluation evaluation = simGraphEvaluate();
+    const SimGraphEvaluation evaluation = simGraphEvaluate(scope_text, owner);
+    // ★ A graph that could not be found applied nothing, and must not read as a
+    // successful apply of zero commands.
+    if (!evaluation.evaluated) {
+        out.failed.push_back(evaluation.error.empty() ? "graph not found"
+                                                      : evaluation.error);
+        return out;
+    }
 
     for (const auto& cmd : evaluation.commands) {
         if (cmd.kind != "set_parameter") continue;
@@ -733,6 +940,53 @@ SimApplyResult simGraphApply(bool allow_restart) {
         if (!writeSurfaceParameter(cmd.target, cmd.key, cmd.value)) {
             if (inserted) g_authored_surface.erase(ok);
             out.failed.push_back("cannot apply " + cmd.key + " on object '" +
+                                 cmd.target + "'");
+            continue;
+        }
+        ++out.applied;
+    }
+
+    // Emitter properties. Same capture-before-write contract.
+    for (const auto& cmd : evaluation.commands) {
+        if (cmd.kind != "set_emitter") continue;
+        OverrideKey ok{cmd.target, cmd.key};
+        if (cmd.key == "fluid_substance") {
+            const bool inserted =
+                g_authored_emitter_text.find(ok) == g_authored_emitter_text.end();
+            if (inserted) {
+                std::string authored;
+                if (!readEmitterText(cmd.target, cmd.key, authored)) {
+                    out.failed.push_back("cannot read authored " + cmd.key +
+                                         " on emitter '" + cmd.target + "'");
+                    continue;
+                }
+                g_authored_emitter_text.emplace(ok, authored);
+            }
+            if (!writeEmitterText(cmd.target, cmd.key, cmd.text)) {
+                // ★ Roll the capture back. A captured key that was never written
+                // makes clear_overrides try to restore a value it never
+                // replaced, and that failure would repeat forever.
+                if (inserted) g_authored_emitter_text.erase(ok);
+                out.failed.push_back("cannot apply " + cmd.key + "='" + cmd.text +
+                                     "' on emitter '" + cmd.target + "'");
+                continue;
+            }
+            ++out.applied;
+            continue;
+        }
+        const bool inserted = g_authored_emitter.find(ok) == g_authored_emitter.end();
+        if (inserted) {
+            float authored = 0.0f;
+            if (!readEmitterParameter(cmd.target, cmd.key, authored)) {
+                out.failed.push_back("cannot read authored " + cmd.key +
+                                     " on emitter '" + cmd.target + "'");
+                continue;
+            }
+            g_authored_emitter.emplace(ok, authored);
+        }
+        if (!writeEmitterParameter(cmd.target, cmd.key, cmd.value)) {
+            if (inserted) g_authored_emitter.erase(ok);
+            out.failed.push_back("cannot apply " + cmd.key + " on emitter '" +
                                  cmd.target + "'");
             continue;
         }
@@ -847,7 +1101,9 @@ SimApplyResult simGraphApply(bool allow_restart) {
                                                g_authored_surface_text.size() +
                                                g_authored_render.size() +
                                                g_authored_render_text.size() +
-                                               g_authored_gas_shader.size());
+                                               g_authored_gas_shader.size() +
+                                 g_authored_emitter.size() +
+                                 g_authored_emitter_text.size());
     out.ok = out.failed.empty();
     return out;
 }
@@ -887,6 +1143,24 @@ Result simGraphClearOverrides() {
                           entry.first.domain + "'";
         }
     }
+    // Emitters: text then numbers, matching every other restore path. A flow
+    // source substance does not currently rewrite the numeric fields, but
+    // keeping one ordering everywhere means there is no second rule to reason
+    // about the next time a value turns out to be a recipe.
+    for (const auto& entry : g_authored_emitter_text) {
+        if (!writeEmitterText(entry.first.domain, entry.first.key,
+                              entry.second) && first_error.empty()) {
+            first_error = "cannot restore " + entry.first.key + " on emitter '" +
+                          entry.first.domain + "'";
+        }
+    }
+    for (const auto& entry : g_authored_emitter) {
+        if (!writeEmitterParameter(entry.first.domain, entry.first.key,
+                                   entry.second) && first_error.empty()) {
+            first_error = "cannot restore " + entry.first.key + " on emitter '" +
+                          entry.first.domain + "'";
+        }
+    }
     // ★★★ TEXT FIRST, THEN NUMBERS — restoring in the other order silently
     // loses the numbers. A volume preset is a RECIPE: putting "smoke" back
     // reinstalls smoke's pristine values, so any numeric restore that ran before
@@ -923,6 +1197,8 @@ Result simGraphClearOverrides() {
     g_authored_render.clear();
     g_authored_render_text.clear();
     g_authored_gas_shader.clear();
+    g_authored_emitter.clear();
+    g_authored_emitter_text.clear();
     if (!first_error.empty()) return Result::fail(first_error);
     return Result::success();
 }
@@ -983,17 +1259,28 @@ Result simClearCache() {
 SimCouplingReport simGraphCouplings() {
     SimCouplingReport out;
 
-    // Declared: the graph's Couple commands, in dependency order.
-    const SimGraphEvaluation evaluation = simGraphEvaluate();
-    for (const auto& cmd : evaluation.commands) {
-        if (cmd.kind != "couple") continue;
-        SimCouplingEntry e;
-        e.coupling = cmd.key;
-        e.source_domain = cmd.target;
-        e.target_domain = cmd.text;
-        e.active = cmd.value > 0.5f;
-        e.source_node = cmd.source_node;
-        out.declared.push_back(std::move(e));
+    // Declared: every graph's Couple commands, in dependency order.
+    //
+    // ★★★ This report spans ALL scopes on purpose — it is the answer to "I can't
+    // see the whole simulation on one canvas" (section 4.3). A coupling joins two
+    // domains, so it belongs to neither graph alone; the overview is a REPORT,
+    // never a fourth editing surface. Scoping this to one graph would hide
+    // exactly the cross-domain declarations it exists to show.
+    for (const auto& ref : simGraphList()) {
+        const SimGraphEvaluation evaluation = simGraphEvaluate(ref.scope, ref.owner);
+        if (!evaluation.evaluated) continue;
+        for (const auto& cmd : evaluation.commands) {
+            if (cmd.kind != "couple") continue;
+            SimCouplingEntry e;
+            e.coupling = cmd.key;
+            e.source_domain = cmd.target;
+            e.target_domain = cmd.text;
+            e.active = cmd.value > 0.5f;
+            e.source_node = cmd.source_node;
+            e.scope = ref.scope;
+            e.owner = ref.owner;
+            out.declared.push_back(std::move(e));
+        }
     }
 
     // Actual: what the solver RAN in the last step, in execution order.
@@ -1086,24 +1373,116 @@ std::vector<std::string> simListAttributes(const std::string& domain) {
     return resolveAttributeList(domain);
 }
 
-Result simGraphClear() {
-    simGraph().clear();
+// ── Graph lifecycle ─────────────────────────────────────────────────────────
+
+std::vector<SimGraphRef> simGraphList() {
+    std::vector<SimGraphRef> out;
+    if (!g_ctx) return out;
+    auto push = [&out](const SimGraphPtr& g) {
+        if (!g) return;
+        SimGraphRef ref;
+        ref.scope = NodeSystem::Sim::scopeName(g->scope);
+        ref.owner = g->owner;
+        ref.node_count = static_cast<uint32_t>(g->nodes.size());
+        ref.owner_node = g->ownerNodeId;
+        ref.owner_missing = !ownerExists(g->scope, g->owner).ok;
+        out.push_back(std::move(ref));
+    };
+    for (auto& [name, g] : g_ctx->scene.simulation_domain_graphs) push(g);
+    for (auto& [name, g] : g_ctx->scene.simulation_object_graphs) push(g);
+    push(g_ctx->scene.simulation_world_graph);
+    std::sort(out.begin(), out.end(), [](const SimGraphRef& a, const SimGraphRef& b) {
+        if (a.scope != b.scope) return a.scope < b.scope;
+        return a.owner < b.owner;
+    });
+    return out;
+}
+
+Result simGraphCreate(const std::string& scope_text, const std::string& owner) {
+    if (!g_ctx) return notBound();
+    NodeSystem::Sim::GraphScope scope;
+    Result parsed = parseScopeArg(scope_text, scope);
+    if (!parsed.ok) return parsed;
+    Result exists = ownerExists(scope, owner);
+    if (!exists.ok) return exists;
+
+    if (scope == NodeSystem::Sim::GraphScope::World) {
+        if (!g_ctx->scene.simulation_world_graph)
+            g_ctx->scene.simulation_world_graph =
+                NodeSystem::Sim::makeScopedGraph(scope, std::string());
+        return Result::success();
+    }
+    auto* storage = scopeStorage(*g_ctx, scope);
+    if (!storage) return Result::fail("unsupported graph scope");
+    auto it = storage->find(owner);
+    // ★ Creating twice is not an error — it is how a caller says "make sure this
+    // exists". Failing here would push every script into a look-then-create
+    // dance whose two halves can disagree.
+    if (it == storage->end() || !it->second)
+        (*storage)[owner] = NodeSystem::Sim::makeScopedGraph(scope, owner);
     return Result::success();
 }
 
-Result simGraphAddNode(const std::string& type_id, uint32_t& out_id) {
+Result simGraphDelete(const std::string& scope_text, const std::string& owner) {
+    if (!g_ctx) return notBound();
+    NodeSystem::Sim::GraphScope scope;
+    Result parsed = parseScopeArg(scope_text, scope);
+    if (!parsed.ok) return parsed;
+    if (scope == NodeSystem::Sim::GraphScope::World) {
+        if (!g_ctx->scene.simulation_world_graph)
+            return Result::fail("no world simulation graph to delete");
+        g_ctx->scene.simulation_world_graph.reset();
+        return Result::success();
+    }
+    auto* storage = scopeStorage(*g_ctx, scope);
+    if (!storage) return Result::fail("unsupported graph scope");
+    if (storage->erase(owner) == 0)
+        return Result::fail(std::string("no ") + NodeSystem::Sim::scopeName(scope) +
+                            " graph for '" + owner + "'");
+    return Result::success();
+}
+
+Result simGraphClear(const std::string& scope_text, const std::string& owner) {
+    SimGraphPtr graph;
+    Result found = findGraph(scope_text, owner, graph);
+    if (!found.ok) return found;
+    graph->clear();
+    // ★ clear() empties the node list, which takes the owner node with it. The
+    // graph must not come back ownerless: an empty canvas that no longer says
+    // whose it is would let the next node be authored against nothing.
+    graph->ownerNodeId = 0;
+    NodeSystem::Sim::seedOwnerNode(*graph);
+    return Result::success();
+}
+
+Result simGraphAddNode(const std::string& scope_text, const std::string& owner,
+                       const std::string& type_id, uint32_t& out_id) {
+    SimGraphPtr graph;
+    Result found = findGraph(scope_text, owner, graph);
+    if (!found.ok) return found;
     auto node = NodeSystem::NodeRegistry::instance().create(type_id);
     if (!node) return Result::fail("unknown simulation node type: " + type_id);
-    NodeSystem::NodeBase* added = simGraph().registerNode(std::move(node));
+    NodeSystem::NodeBase* added = graph->registerNode(std::move(node));
     if (!added) return Result::fail("failed to add node: " + type_id);
     out_id = added->id;
     return Result::success();
 }
 
-Result simGraphSetNodeText(uint32_t node_id, const std::string& key,
+Result simGraphSetNodeText(const std::string& scope_text, const std::string& owner,
+                           uint32_t node_id, const std::string& key,
                            const std::string& value) {
-    NodeSystem::NodeBase* node = simGraph().getNode(node_id);
+    SimGraphPtr graph;
+    Result found = findGraph(scope_text, owner, graph);
+    if (!found.ok) return found;
+    NodeSystem::NodeBase* node = graph->getNode(node_id);
     if (!node) return Result::fail("no simulation node with id " + std::to_string(node_id));
+    // ★★ The owner node names the entity the graph BELONGS to. Letting a script
+    // retarget it would leave a graph filed under one name that drives another —
+    // and every later reading would agree with the wrong one.
+    if (graph->isOwnerNode(node_id) && (key == "domain" || key == "object"))
+        return Result::fail("node " + std::to_string(node_id) +
+                            " is this graph's owner node; its target is the graph's "
+                            "own scope and cannot be retargeted");
     if (auto* dom = dynamic_cast<NodeSystem::Sim::DomainRefNode*>(node)) {
         if (key == "domain") { dom->domainName = value; node->dirty = true; return Result::success(); }
     }
@@ -1115,6 +1494,18 @@ Result simGraphSetNodeText(uint32_t node_id, const std::string& key,
     }
     if (auto* cache = dynamic_cast<NodeSystem::Sim::CacheNode*>(node)) {
         if (key == "cache_dir") { cache->cacheDir = value; node->dirty = true; return Result::success(); }
+    }
+    if (auto* emitter = dynamic_cast<NodeSystem::Sim::EmitterNode*>(node)) {
+        if (key == "emitter") { emitter->emitterName = value; node->dirty = true; return Result::success(); }
+        if (key == "fluid_substance") {
+            // ★ Setting the substance turns the override ON. An empty string is
+            // a legitimate substance value, so emptiness cannot mean "unset" —
+            // use fluid_substance.use = 0 to stop overriding it.
+            emitter->substance = value;
+            emitter->useSubstance = true;
+            node->dirty = true;
+            return Result::success();
+        }
     }
     if (auto* liquid = dynamic_cast<NodeSystem::Sim::LiquidMaterialNode*>(node)) {
         if (key == "surface_material") { liquid->surfaceMaterial = value; node->dirty = true; return Result::success(); }
@@ -1142,9 +1533,63 @@ Result simGraphSetNodeText(uint32_t node_id, const std::string& key,
     return Result::fail("node " + std::to_string(node_id) + " has no text parameter '" + key + "'");
 }
 
-Result simGraphSetNodeValue(uint32_t node_id, const std::string& key, float value) {
-    NodeSystem::NodeBase* node = simGraph().getNode(node_id);
+Result simGraphSetNodeValue(const std::string& scope_text, const std::string& owner,
+                            uint32_t node_id, const std::string& key, float value) {
+    SimGraphPtr graph;
+    Result found = findGraph(scope_text, owner, graph);
+    if (!found.ok) return found;
+    NodeSystem::NodeBase* node = graph->getNode(node_id);
     if (!node) return Result::fail("no simulation node with id " + std::to_string(node_id));
+    if (auto* emitter = dynamic_cast<NodeSystem::Sim::EmitterNode*>(node)) {
+        if (key == "fluid_substance.use") {
+            emitter->useSubstance = value > 0.5f;
+            node->dirty = true;
+            return Result::success();
+        }
+        const std::string suffix = ".use";
+        if (key.size() > suffix.size() &&
+            key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            const std::string base = key.substr(0, key.size() - suffix.size());
+            auto* f = emitter->find(base);
+            if (!f) return Result::fail("node " + std::to_string(node_id) +
+                                        " has no parameter '" + base + "'");
+            f->use = value > 0.5f;
+            node->dirty = true;
+            return Result::success();
+        }
+        if (auto* f = emitter->find(key)) {
+            f->value = value;
+            f->use = true;
+            node->dirty = true;
+            return Result::success();
+        }
+        return Result::fail("node " + std::to_string(node_id) +
+                            " has no parameter '" + key + "'");
+    }
+    if (auto* aspect = dynamic_cast<NodeSystem::Sim::DomainParamNodeBase*>(node)) {
+        // "<key>.use" turns a field OFF again. Writing a value turns it ON,
+        // because a value written into a field that stayed inert would be a
+        // silent no-op — and a silent no-op is worse than a missing parameter.
+        const std::string suffix = ".use";
+        if (key.size() > suffix.size() &&
+            key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            const std::string base = key.substr(0, key.size() - suffix.size());
+            auto* f = aspect->find(base);
+            if (!f) return Result::fail("node " + std::to_string(node_id) +
+                                        " has no parameter '" + base + "'");
+            f->use = value > 0.5f;
+            node->dirty = true;
+            return Result::success();
+        }
+        if (auto* f = aspect->find(key)) {
+            f->value = value;
+            f->use = true;
+            node->dirty = true;
+            return Result::success();
+        }
+        return Result::fail("node " + std::to_string(node_id) +
+                            " has no parameter '" + key + "'");
+    }
     if (auto* setter = dynamic_cast<NodeSystem::Sim::SetParameterNode*>(node)) {
         if (key == "value") { setter->value = value; node->dirty = true; return Result::success(); }
     }
@@ -1188,10 +1633,14 @@ Result simGraphSetNodeValue(uint32_t node_id, const std::string& key, float valu
                         " has no numeric parameter '" + key + "'");
 }
 
-Result simGraphConnect(uint32_t from_node, int from_pin,
+Result simGraphConnect(const std::string& scope_text, const std::string& owner,
+                       uint32_t from_node, int from_pin,
                        uint32_t to_node, int to_pin) {
-    NodeSystem::NodeBase* src = simGraph().getNode(from_node);
-    NodeSystem::NodeBase* dst = simGraph().getNode(to_node);
+    SimGraphPtr graph;
+    Result found = findGraph(scope_text, owner, graph);
+    if (!found.ok) return found;
+    NodeSystem::NodeBase* src = graph->getNode(from_node);
+    NodeSystem::NodeBase* dst = graph->getNode(to_node);
     if (!src) return Result::fail("no simulation node with id " + std::to_string(from_node));
     if (!dst) return Result::fail("no simulation node with id " + std::to_string(to_node));
     if (from_pin < 0 || from_pin >= static_cast<int>(src->outputs.size()))
@@ -1201,14 +1650,20 @@ Result simGraphConnect(uint32_t from_node, int from_pin,
     // addLink returns 0 when the graph rejects the connection — type mismatch or
     // a cycle. ★ A cycle here is not merely invalid: the repo has already paid
     // for one as a stack overflow in the node-graph evaluator.
-    if (simGraph().addLink(src->outputs[from_pin].id, dst->inputs[to_pin].id) == 0)
+    if (graph->addLink(src->outputs[from_pin].id, dst->inputs[to_pin].id) == 0)
         return Result::fail("connection rejected (type mismatch or cycle)");
     return Result::success();
 }
 
-SimGraphEvaluation simGraphEvaluate() {
+SimGraphEvaluation simGraphEvaluate(const std::string& scope_text,
+                                    const std::string& owner) {
     SimGraphEvaluation out;
-    auto& graph = simGraph();
+    SimGraphPtr found_graph;
+    Result found = findGraph(scope_text, owner, found_graph);
+    // ★ evaluated stays false and the error is carried, so a caller cannot read
+    // an empty command list as "the graph declared nothing".
+    if (!found.ok) { out.error = found.error; return out; }
+    auto& graph = *found_graph;
     NodeSystem::EvaluationContext ctx(&graph);
     graph.evaluateSimulation(ctx);
 
@@ -1221,6 +1676,7 @@ SimGraphEvaluation simGraphEvaluate() {
             case NodeSystem::Sim::SimCommand::Kind::BindObject:   info.kind = "bind_object"; break;
             case NodeSystem::Sim::SimCommand::Kind::SetSurface:   info.kind = "set_surface"; break;
             case NodeSystem::Sim::SimCommand::Kind::SetRender:    info.kind = "set_render"; break;
+            case NodeSystem::Sim::SimCommand::Kind::SetEmitter:   info.kind = "set_emitter"; break;
             default: info.kind = "none"; break;
         }
         info.target = cmd.target;
@@ -1242,11 +1698,45 @@ SimGraphEvaluation simGraphEvaluate() {
     return out;
 }
 
-std::vector<SimNodeInfo> simGraphNodes() {
+Result simGraphNodes(const std::string& scope_text, const std::string& owner,
+                     std::vector<SimNodeInfo>& out_nodes) {
+    out_nodes.clear();
     std::vector<SimNodeInfo> out;
-    for (const auto& node : simGraph().nodes) {
+    SimGraphPtr graph;
+    Result found = findGraph(scope_text, owner, graph);
+    if (!found.ok) return found;
+    for (const auto& node : graph->nodes) {
         SimNodeInfo info;
         info.id = node->id;
+        info.is_owner_node = graph->isOwnerNode(node->id);
+        if (const auto* emitter =
+                dynamic_cast<const NodeSystem::Sim::EmitterNode*>(node.get())) {
+            info.domain = emitter->emitterName;   // which flow source it names
+            for (const auto& f : emitter->fields) {
+                SimNodeField out_field;
+                out_field.key = f.key;
+                out_field.in_use = f.use;
+                out_field.value = f.value;
+                info.fields.push_back(std::move(out_field));
+            }
+            SimNodeField substance_field;
+            substance_field.key = "fluid_substance";
+            substance_field.in_use = emitter->useSubstance;
+            info.fields.push_back(std::move(substance_field));
+            info.channel = emitter->substance;    // the text value itself
+        }
+        if (const auto* aspect =
+                dynamic_cast<const NodeSystem::Sim::DomainParamNodeBase*>(node.get())) {
+            for (const auto& f : aspect->fields) {
+                SimNodeField out_field;
+                out_field.key = f.key;
+                out_field.in_use = f.use;
+                out_field.value = f.value;
+                out_field.requires_restart =
+                    NodeSystem::Sim::SetParameterNode::keyRequiresRestart(f.key);
+                info.fields.push_back(std::move(out_field));
+            }
+        }
         info.type_id = node->getTypeId();
         info.display_name = node->metadata.displayName;
         info.enabled = node->enabled;
@@ -1293,7 +1783,8 @@ std::vector<SimNodeInfo> simGraphNodes() {
         }
         out.push_back(std::move(info));
     }
-    return out;
+    out_nodes = std::move(out);
+    return Result::success();
 }
 
 // ★★★ Published for the editor panel (D.4), and deliberately as a REFERENCE to
@@ -1302,6 +1793,15 @@ std::vector<SimNodeInfo> simGraphNodes() {
 // human just wired and a human sees what a script wired. Handing the UI its own
 // copy would recreate the exact failure this repo already paid for twice — a
 // panel holding state the core does not know about.
-NodeSystem::Sim::SimulationNodeGraph& simulationGraph() { return simGraph(); }
+// ★★★ Returns null rather than a fallback graph. The panel must render "no
+// graph for this scope" instead of drawing a graph that belongs to something
+// else — a canvas that silently showed the wrong owner's nodes would be the
+// panel-lies failure class this layer was built to end.
+NodeSystem::Sim::SimulationNodeGraph* simulationGraph(const std::string& scope_text,
+                                                      const std::string& owner) {
+    SimGraphPtr graph;
+    if (!findGraph(scope_text, owner, graph).ok) return nullptr;
+    return graph.get();
+}
 
 } // namespace rtapi
