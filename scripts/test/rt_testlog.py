@@ -25,6 +25,26 @@ def start(name):
     _flush()
 
 
+def fresh_graph(rt, scope, owner):
+    """Create-or-empty the scoped graph and return its OWNER NODE id.
+
+    ★★★ Every test used to open with clear() + add_node("sim.domain_ref") +
+    set_node(..., "domain", name). That triple is now one call: a scoped graph
+    is created already naming its owner, and clear() re-seeds that node rather
+    than leaving an ownerless canvas.
+
+    ★ Returns 0 for the World scope, which has no owner node -- WorldThermalState
+    has no scripting surface yet, so a world owner node would name something no
+    reader can query. A caller that needs the id must check, not assume.
+    """
+    rt.sim_graph.create(scope, owner)
+    rt.sim_graph.clear(scope, owner)
+    for node in rt.sim_graph.nodes(scope, owner):
+        if node.get("owner_node"):
+            return node["id"]
+    return 0
+
+
 def log(message=""):
     text = str(message)
     print(text)

@@ -140,9 +140,95 @@ bool namePicker(const char* label, const std::string& current,
 
 void SceneUI::drawSimulationNodePanel(UIContext& ctx)
 {
-    (void)ctx;   // the simulation graph is reached through rtapi, not the scene
+    (void)ctx;   // the simulation graphs are reached through rtapi, not the scene
 
-    NodeSystem::Sim::SimulationNodeGraph& graph = rtapi::simulationGraph();
+    // -- Scope bar: whose graph is this? -------------------------------------
+    //
+    // *** The canvas shows ONE scoped graph and always says which. The scope
+    // and owner are held as editor view state and published through
+    // rt.editor.get_state, so a script can read what the user is looking at --
+    // the same reasoning that put bottom_editor there. The panel keeps no copy.
+    const std::string scope = sim_graph_scope;
+    const std::string owner = sim_graph_owner;
+
+    {
+        static const char* kScopes[] = { "object", "domain", "world" };
+        int scope_index = 1;
+        for (int i = 0; i < 3; ++i) if (scope == kScopes[i]) scope_index = i;
+        ImGui::TextDisabled("Scope");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(110.0f);
+        if (ImGui::BeginCombo("##sim_scope", kScopes[scope_index])) {
+            for (int i = 0; i < 3; ++i) {
+                if (ImGui::Selectable(kScopes[i], i == scope_index)) {
+                    // Through the API, exactly as a script would: the selection
+                    // is a value the core owns, not a panel-local variable.
+                    const rtapi::Result r = rtapi::setSimGraphScope(kScopes[i], "");
+                    if (!r.ok) setReport(false, r.error);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+
+        // The owner picker lists REAL scene entities. A free-text field here
+        // would let the user name something that does not exist and get a graph
+        // that drives nothing -- the failure simGraphCreate refuses.
+        if (scope != "world") {
+            std::vector<std::string> owners;
+            if (scope == "domain") {
+                std::vector<rtapi::FluidDomainInfo> domains;
+                if (rtapi::listFluidDomains(domains).ok)
+                    for (const auto& d : domains) owners.push_back(d.name);
+            } else {
+                owners = rtapi::listObjects();
+            }
+            ImGui::SameLine();
+            ImGui::PushItemWidth(200.0f);
+            const char* preview = owner.empty() ? "(pick one)" : owner.c_str();
+            if (ImGui::BeginCombo("##sim_owner", preview)) {
+                for (const auto& name : owners) {
+                    if (ImGui::Selectable(name.c_str(), name == owner)) {
+                        const rtapi::Result r = rtapi::setSimGraphScope(scope, name);
+                        if (!r.ok) setReport(false, r.error);
+                    }
+                }
+                if (owners.empty())
+                    ImGui::TextDisabled("nothing of this kind in the scene");
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+        }
+    }
+
+    // ** Null means NO GRAPH for this scope, and the panel says exactly that
+    // instead of falling back to another owner's canvas. Drawing someone else's
+    // nodes under this owner's name is the panel-lies failure class this whole
+    // layer exists to end.
+    NodeSystem::Sim::SimulationNodeGraph* graph_ptr =
+        rtapi::simulationGraph(scope, owner);
+    if (!graph_ptr) {
+        ImGui::Separator();
+        if (scope != "world" && owner.empty()) {
+            ImGui::TextColored(kWarn, "No %s selected.", scope.c_str());
+            helpText("Pick one above. A simulation graph belongs to a scene "
+                     "entity -- there is no global simulation graph, so there is "
+                     "nothing to show until you say whose graph you mean.");
+        } else {
+            ImGui::TextColored(kWarn, "No graph for this %s yet.", scope.c_str());
+            helpText("The graph reflects an entity that already exists; creating "
+                     "it here adds the canvas, never the entity.");
+            if (ImGui::Button("Create graph")) {
+                const rtapi::Result r = rtapi::simGraphCreate(scope, owner);
+                setReport(r.ok, r.ok ? "graph created" : r.error);
+            }
+        }
+        if (g_last_report.has)
+            ImGui::TextColored(g_last_report.ok ? kGood : kBad, "%s",
+                               g_last_report.text.c_str());
+        return;
+    }
+    NodeSystem::Sim::SimulationNodeGraph& graph = *graph_ptr;
 
     // ── Toolbar ─────────────────────────────────────────────────────────────
     // `allow_restart` is a deliberate opt-in and stays OFF between sessions.
@@ -152,7 +238,7 @@ void SceneUI::drawSimulationNodePanel(UIContext& ctx)
     static bool allow_restart = false;
 
     if (ImGui::Button("Evaluate")) {
-        const rtapi::SimGraphEvaluation ev = rtapi::simGraphEvaluate();
+        const rtapi::SimGraphEvaluation ev = rtapi::simGraphEvaluate(scope, owner);
         // ★ Evaluation produces INTENT. It applies nothing, and it must not
         // disturb the solver — no cache clear, no dirty sweep. The wording here
         // says so, because a button called "Evaluate" next to a running sim
@@ -160,14 +246,17 @@ void SceneUI::drawSimulationNodePanel(UIContext& ctx)
         std::string text = std::to_string(ev.commands.size()) + " command(s)";
         if (!ev.restart_requests.empty())
             text += ", " + std::to_string(ev.restart_requests.size()) + " need a restart";
-        setReport(ev.evaluated, ev.evaluated ? text : "graph did not evaluate");
+        // * On failure report WHY. "graph did not evaluate" alone cannot be
+        // told apart from a graph that evaluated and declared nothing.
+        setReport(ev.evaluated, ev.evaluated ? text
+                  : (ev.error.empty() ? "graph did not evaluate" : ev.error));
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Runs the graph and reports what it WOULD do.\nApplies nothing; the solver is untouched.");
 
     ImGui::SameLine();
     if (ImGui::Button("Apply")) {
-        const rtapi::SimApplyResult r = rtapi::simGraphApply(allow_restart);
+        const rtapi::SimApplyResult r = rtapi::simGraphApply(scope, owner, allow_restart);
         std::string text = std::to_string(r.applied) + " applied";
         if (!r.refused.empty()) text += ", refused: " + joinFirst(r.refused, 2);
         if (!r.failed.empty())  text += ", failed: "  + joinFirst(r.failed, 2);
@@ -213,8 +302,8 @@ void SceneUI::drawSimulationNodePanel(UIContext& ctx)
     ImGui::TextDisabled("%zu node%s", graph.nodes.size(), graph.nodes.size() == 1 ? "" : "s");
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear Graph")) {
-        const rtapi::Result r = rtapi::simGraphClear();
-        setReport(r.ok, r.ok ? "graph cleared" : r.error);
+        const rtapi::Result r = rtapi::simGraphClear(scope, owner);
+        setReport(r.ok, r.ok ? "graph cleared (owner node re-seeded)" : r.error);
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Removes every node.\nDoes NOT clear overrides — use Clear Overrides for that,\nor the authored values stay overwritten with no graph left to explain why.");
@@ -249,7 +338,7 @@ void SceneUI::drawSimulationNodePanel(UIContext& ctx)
     // that exists for scripts but is missing from this menu would be a
     // capability the panel silently does not have, and nobody would notice
     // until they went looking for it.
-    simulationNodeEditorUI.onDrawBackgroundMenu = [this, &graph]() {
+    simulationNodeEditorUI.onDrawBackgroundMenu = [this, &graph, scope, owner]() {
         const ImVec2 spawn = simulationNodeEditorUI.mousePosOnRightClick;
         auto types = NodeSystem::NodeRegistry::instance().getAllTypes();
         types.erase(std::remove_if(types.begin(), types.end(),
@@ -265,7 +354,8 @@ void SceneUI::drawSimulationNodePanel(UIContext& ctx)
             if (ImGui::MenuItem(type.displayName.c_str())) {
                 // Through the API, exactly as a script would.
                 uint32_t new_id = 0;
-                const rtapi::Result r = rtapi::simGraphAddNode(type.typeId, new_id);
+                const rtapi::Result r =
+                    rtapi::simGraphAddNode(scope, owner, type.typeId, new_id);
                 if (r.ok) {
                     if (NodeSystem::NodeBase* node = graph.getNode(new_id)) {
                         node->x = spawn.x;
@@ -315,6 +405,13 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
     using namespace NodeSystem;
     using namespace NodeSystem::Sim;
 
+    // ★★ Taken from the GRAPH, not passed in. The graph carries the scope it
+    // belongs to, so there is exactly one answer to "whose graph is this?" —
+    // threading a second copy through the signature would create a place for
+    // the two to disagree, which is the defect this layer exists to end.
+    const std::string scope = scopeName(graph.scope);
+    const std::string owner = graph.owner;
+
     // ── Scene context: what this graph can point AT ─────────────────────────
     //
     // ★★★ This block exists because of a real confusion report: adding a Domain
@@ -356,17 +453,23 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
             helpText("Right-click the canvas to add nodes. A minimal useful graph "
                      "is Domain -> Set Parameter: the Domain names what to drive, "
                      "and Set Parameter overrides one of its solver settings.");
-            if (!domain_names.empty() && ImGui::Button("Add starter graph")) {
+            if (graph.ownerNodeId != 0 && ImGui::Button("Add starter graph")) {
                 // Built through the API, exactly like a script would build it —
                 // so the button cannot do anything a script could not.
-                uint32_t dom = 0, setter = 0;
-                rtapi::Result r = rtapi::simGraphAddNode("sim.domain_ref", dom);
-                if (r.ok) r = rtapi::simGraphAddNode("sim.set_parameter", setter);
-                if (r.ok) r = rtapi::simGraphSetNodeText(dom, "domain", domain_names.front());
-                if (r.ok) r = rtapi::simGraphConnect(dom, 0, setter, 0);
+                // * The owner node is already on the canvas, so the starter
+                // graph wires the SETTER to it rather than adding a second
+                // Domain node that would name the same entity twice.
+                uint32_t setter = 0;
+                rtapi::Result r =
+                    rtapi::simGraphAddNode(scope, owner, "sim.set_parameter", setter);
+                if (r.ok && graph.ownerNodeId != 0)
+                    r = rtapi::simGraphConnect(scope, owner, graph.ownerNodeId, 0,
+                                               setter, 0);
                 if (r.ok) {
-                    if (NodeBase* n = graph.getNode(dom))    { n->x =  60.0f; n->y = 120.0f; }
-                    if (NodeBase* n = graph.getNode(setter)) { n->x = 340.0f; n->y = 120.0f; }
+                    if (NodeBase* n = graph.getNode(graph.ownerNodeId))
+                        { n->x =  60.0f; n->y = 120.0f; }
+                    if (NodeBase* n = graph.getNode(setter))
+                        { n->x = 340.0f; n->y = 120.0f; }
                 }
                 setReport(r.ok, r.ok ? "starter graph added" : r.error);
             }
@@ -440,17 +543,100 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
     // cannot, which is what keeps this surface testable.
     const uint32_t id = selected->id;
     auto setText = [&](const char* key, const std::string& value) {
-        const rtapi::Result r = rtapi::simGraphSetNodeText(id, key, value);
+        const rtapi::Result r = rtapi::simGraphSetNodeText(scope, owner, id, key, value);
         if (!r.ok) setReport(false, r.error);
     };
     auto setValue = [&](const char* key, float value) {
-        const rtapi::Result r = rtapi::simGraphSetNodeValue(id, key, value);
+        const rtapi::Result r = rtapi::simGraphSetNodeValue(scope, owner, id, key, value);
         if (!r.ok) setReport(false, r.error);
     };
 
     ImGui::PushItemWidth(-1.0f);
 
-    if (auto* dom = dynamic_cast<DomainRefNode*>(selected)) {
+    // ★★★ Opt-in parameter grid for Solver / Domain Settings / Emitter.
+    //
+    // The tick box is not decoration: an unticked field is one this graph has NO
+    // OPINION about and will not write. Drawing only the value would make an
+    // untouched dial look like an authored zero and quietly flatten the user's
+    // own setting on the next Apply.
+    auto drawOptInFields = [&](auto& owner_node) {
+        for (auto& f : owner_node.fields) {
+            ImGui::PushID(f.key);
+            bool use = f.use;
+            if (ImGui::Checkbox("##use", &use))
+                setValue((std::string(f.key) + ".use").c_str(), use ? 1.0f : 0.0f);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Off = this graph does not write %s.\n"
+                                  "That is NOT the same as writing zero.", f.key);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(f.key);
+            float value = f.value;
+            ImGui::PushItemWidth(-1.0f);
+            // Editing a value turns the field on, matching the API: a number
+            // typed into an inert field would be a silent no-op.
+            if (ImGui::DragFloat("##v", &value, 0.01f)) setValue(f.key, value);
+            ImGui::PopItemWidth();
+            if (use && NodeSystem::Sim::SetParameterNode::keyRequiresRestart(f.key))
+                ImGui::TextColored(kWarn, "requires a restart");
+            ImGui::PopID();
+        }
+    };
+
+    // ** The OWNER node is drawn pinned, not as a picker. Its target IS the
+    // graph's scope, so offering a name field would present a choice the API
+    // refuses -- an editable control that cannot take an edit is worse than no
+    // control, because the user learns it is broken only after trying.
+    if (graph.isOwnerNode(selected->id)) {
+        ImGui::TextUnformatted(scope == "object" ? "Object" : "Domain");
+        ImGui::TextDisabled("%s", owner.c_str());
+        helpText("This graph's owner. It cannot be retargeted here: a graph "
+                 "filed under one entity that drove another would make every "
+                 "later reading agree with the wrong one. To work on a "
+                 "different one, switch it in the Scope bar above.");
+    }
+    else if (auto* aspect = dynamic_cast<DomainParamNodeBase*>(selected)) {
+        drawOptInFields(*aspect);
+        helpText("Only ticked fields are written. Everything else keeps the "
+                 "value authored on the domain.");
+    }
+    else if (auto* emitter = dynamic_cast<EmitterNode*>(selected)) {
+        ImGui::TextUnformatted("Flow source");
+        std::vector<std::string> emitter_names;
+        {
+            std::vector<rtapi::SimulationFlowSourceInfo> sources;
+            if (rtapi::listSimulationFlowSources(sources).ok)
+                for (const auto& src : sources) emitter_names.push_back(src.name);
+        }
+        std::string choice;
+        if (namePicker("##emitter", emitter->emitterName, emitter_names, true, choice))
+            setText("emitter", choice);
+        helpText("The flow source this node overrides. It creates none, and it "
+                 "does not change which domain the source feeds -- that binding "
+                 "resolves an ambiguity and is authored on the source itself.");
+        ImGui::Spacing();
+        drawOptInFields(*emitter);
+
+        ImGui::PushID("substance");
+        bool use_sub = emitter->useSubstance;
+        if (ImGui::Checkbox("##use", &use_sub))
+            setValue("fluid_substance.use", use_sub ? 1.0f : 0.0f);
+        ImGui::SameLine();
+        ImGui::TextUnformatted("fluid_substance");
+        char sub_buf[128];
+        std::snprintf(sub_buf, sizeof(sub_buf), "%s", emitter->substance.c_str());
+        ImGui::PushItemWidth(-1.0f);
+        if (ImGui::InputText("##sub", sub_buf, sizeof(sub_buf),
+                             ImGuiInputTextFlags_EnterReturnsTrue))
+            setText("fluid_substance", sub_buf);
+        ImGui::PopItemWidth();
+        // ★ An empty substance is a REAL value, so emptiness cannot encode
+        // "unset" -- the tick box is the only thing that says whether this
+        // graph has an opinion about it.
+        helpText("Empty is a legitimate substance value, so the tick box -- not "
+                 "emptiness -- decides whether it is written. Enter to commit.");
+        ImGui::PopID();
+    }
+    else if (auto* dom = dynamic_cast<DomainRefNode*>(selected)) {
         ImGui::TextUnformatted("Domain");
         std::string choice;
         if (namePicker("##domain", dom->domainName, domain_names, true, choice))

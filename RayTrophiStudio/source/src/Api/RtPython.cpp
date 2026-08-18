@@ -2874,6 +2874,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["node_editor_domain"] = s.node_editor_domain;
         d["node_editor_open"] = s.node_editor_open;
         d["open_editors"] = s.open_editors;
+        d["sim_graph_scope"] = s.sim_graph_scope;
+        d["sim_graph_owner"] = s.sim_graph_owner;
         return d;
     }, "Which bottom editor is on screen right now.");
     editor.def("set_bottom_editor", [](const std::string& name) {
@@ -2885,6 +2887,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::setNodeEditorDomain(name));
     }, py::arg("name"),
        "simulation|geometry|material|terrain|animation");
+    editor.def("set_sim_graph_scope", [](const std::string& scope,
+                                         const std::string& owner) {
+        requireResult(rtapi::setSimGraphScope(scope, owner));
+    }, py::arg("scope"), py::arg("owner") = std::string(),
+       "Which scoped simulation graph the Nodes canvas shows: object|domain|"
+       "world plus the owner name. Selecting a scope with no graph is allowed "
+       "and draws the empty state -- that is how creation is reached.");
 
     // ── Simulation node graph (Faz N0/N1/N2) ────────────────────────────────
     // ★ Evaluating produces COMMANDS, not effects. A script can read what a
@@ -2893,41 +2902,79 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     py::module_ sim_graph = module.def_submodule("sim_graph",
         "Simulation node graph: build it, read its intent, apply it as an "
         "override layer. Nothing here owns simulation state.");
-    sim_graph.def("clear", [] { requireResult(rtapi::simGraphClear()); });
-    sim_graph.def("add_node", [](const std::string& type_id) {
+    // *** scope and owner are POSITIONAL AND REQUIRED on every call below.
+    // Giving `scope` a default would restore the "active domain" assumption the
+    // scoped model exists to remove: the call would succeed against whichever
+    // entity happened to be current and never report that it guessed.
+    sim_graph.def("list", [] {
+        py::list arr;
+        for (const auto& g : rtapi::simGraphList()) {
+            py::dict d;
+            d["scope"] = g.scope; d["owner"] = g.owner;
+            d["nodes"] = g.node_count; d["owner_node"] = g.owner_node;
+            // True = the entity this graph names no longer exists. The graph
+            // still draws and still accepts edits, and drives nothing.
+            d["owner_missing"] = g.owner_missing;
+            arr.append(d);
+        }
+        return arr;
+    }, "Every simulation graph in the scene, with its scope and owner.");
+    sim_graph.def("create", [](const std::string& scope, const std::string& owner) {
+        requireResult(rtapi::simGraphCreate(scope, owner));
+    }, py::arg("scope"), py::arg("owner") = std::string(),
+       "Create the graph for a scene entity, seeded with its owner node. "
+       "Idempotent. Fails if the named entity does not exist, so a typo cannot "
+       "produce a live graph that drives nothing.");
+    sim_graph.def("delete", [](const std::string& scope, const std::string& owner) {
+        requireResult(rtapi::simGraphDelete(scope, owner));
+    }, py::arg("scope"), py::arg("owner") = std::string());
+    sim_graph.def("clear", [](const std::string& scope, const std::string& owner) {
+        requireResult(rtapi::simGraphClear(scope, owner));
+    }, py::arg("scope"), py::arg("owner") = std::string(),
+       "Empty the canvas. The owner node is re-seeded: a scoped graph is never "
+       "ownerless.");
+    sim_graph.def("add_node", [](const std::string& scope, const std::string& owner,
+                                 const std::string& type_id) {
         uint32_t id = 0;
-        requireResult(rtapi::simGraphAddNode(type_id, id));
+        requireResult(rtapi::simGraphAddNode(scope, owner, type_id, id));
         return id;
-    }, py::arg("type"));
-    sim_graph.def("set_node", [](uint32_t node, const std::string& key,
+    }, py::arg("scope"), py::arg("owner"), py::arg("type"));
+    sim_graph.def("set_node", [](const std::string& scope, const std::string& owner,
+                                 uint32_t node, const std::string& key,
                                  const std::string& value) {
-        requireResult(rtapi::simGraphSetNodeText(node, key, value));
-    }, py::arg("node"), py::arg("key"), py::arg("value"));
-    sim_graph.def("set_node_value", [](uint32_t node, const std::string& key, float value) {
-        requireResult(rtapi::simGraphSetNodeValue(node, key, value));
-    }, py::arg("node"), py::arg("key"), py::arg("value"));
-    sim_graph.def("apply", [](bool allow_restart) {
-        const rtapi::SimApplyResult r = rtapi::simGraphApply(allow_restart);
+        requireResult(rtapi::simGraphSetNodeText(scope, owner, node, key, value));
+    }, py::arg("scope"), py::arg("owner"), py::arg("node"), py::arg("key"), py::arg("value"));
+    sim_graph.def("set_node_value", [](const std::string& scope, const std::string& owner,
+                                       uint32_t node, const std::string& key, float value) {
+        requireResult(rtapi::simGraphSetNodeValue(scope, owner, node, key, value));
+    }, py::arg("scope"), py::arg("owner"), py::arg("node"), py::arg("key"), py::arg("value"));
+    sim_graph.def("apply", [](const std::string& scope, const std::string& owner,
+                              bool allow_restart) {
+        const rtapi::SimApplyResult r = rtapi::simGraphApply(scope, owner, allow_restart);
         py::dict d;
         d["ok"] = r.ok; d["applied"] = r.applied;
         d["overrides_held"] = r.overrides_held;
         d["refused"] = r.refused; d["failed"] = r.failed;
         return d;
-    }, py::arg("allow_restart") = false,
+    }, py::arg("scope"), py::arg("owner"), py::arg("allow_restart") = false,
        "Apply the graph as an OVERRIDE layer. Authored values are captured "
        "before the first write and restored by clear_overrides(). Parameters "
        "needing a restart are refused and reported unless allow_restart=True.");
     sim_graph.def("clear_overrides", [] {
         requireResult(rtapi::simGraphClearOverrides());
-    }, "Restore every authored value this graph overrode.");
+    }, "Restore every authored value ANY graph overrode. Deliberately not "
+       "scoped: two graphs that wrote the same key share one authored value, so "
+       "a per-graph restore could not put it back.");
     sim_graph.def("override_count", [] { return rtapi::simGraphOverrideCount(); });
-    sim_graph.def("connect", [](uint32_t from_node, uint32_t to_node,
+    sim_graph.def("connect", [](const std::string& scope, const std::string& owner,
+                                uint32_t from_node, uint32_t to_node,
                                 int from_pin, int to_pin) {
-        requireResult(rtapi::simGraphConnect(from_node, from_pin, to_node, to_pin));
-    }, py::arg("from_node"), py::arg("to_node"),
+        requireResult(rtapi::simGraphConnect(scope, owner, from_node, from_pin,
+                                             to_node, to_pin));
+    }, py::arg("scope"), py::arg("owner"), py::arg("from_node"), py::arg("to_node"),
        py::arg("from_pin") = 0, py::arg("to_pin") = 0);
-    sim_graph.def("evaluate", [] {
-        const rtapi::SimGraphEvaluation e = rtapi::simGraphEvaluate();
+    sim_graph.def("evaluate", [](const std::string& scope, const std::string& owner) {
+        const rtapi::SimGraphEvaluation e = rtapi::simGraphEvaluate(scope, owner);
         py::list commands;
         for (const auto& c : e.commands) {
             py::dict d;
@@ -2942,16 +2989,25 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         py::dict out;
         out["evaluated"] = e.evaluated;
+        // * Says WHY nothing was evaluated. Without it, a graph that was not
+        // found is indistinguishable from one that declares nothing.
+        out["error"] = e.error;
         out["commands"] = commands;
         out["restart_requests"] = restarts;
         return out;
-    }, "Evaluate the graph and return its intent. Nothing is applied, and a "
+    }, py::arg("scope"), py::arg("owner"),
+       "Evaluate the graph and return its intent. Nothing is applied, and a "
        "restart request is REPORTED, never acted on.");
-    sim_graph.def("nodes", [] {
+    sim_graph.def("nodes", [](const std::string& scope, const std::string& owner) {
+        std::vector<rtapi::SimNodeInfo> nodes;
+        // ★ Raises when the graph does not exist. An empty list would say
+        // "this graph has no nodes" about a graph that was never found.
+        requireResult(rtapi::simGraphNodes(scope, owner, nodes));
         py::list arr;
-        for (const auto& n : rtapi::simGraphNodes()) {
+        for (const auto& n : nodes) {
             py::dict d;
-            d["id"] = n.id; d["type"] = n.type_id; d["name"] = n.display_name;
+            d["id"] = n.id; d["owner_node"] = n.is_owner_node;
+            d["type"] = n.type_id; d["name"] = n.display_name;
             d["enabled"] = n.enabled; d["inputs"] = n.input_count;
             d["outputs"] = n.output_count; d["domain"] = n.domain;
             d["channel"] = n.channel; d["source"] = n.source;
@@ -2971,10 +3027,25 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 d["cache_stale"] = n.cache_stale;
                 d["cache_ram_frames"] = n.cache_ram_frames;
             }
+            if (!n.fields.empty()) {
+                py::list fields;
+                for (const auto& f : n.fields) {
+                    py::dict fd;
+                    fd["key"] = f.key;
+                    // ★ False means this graph has no opinion about the
+                    // parameter -- NOT that its value is zero.
+                    fd["in_use"] = f.in_use;
+                    fd["value"] = f.value;
+                    fd["requires_restart"] = f.requires_restart;
+                    fields.append(fd);
+                }
+                d["fields"] = fields;
+            }
             arr.append(d);
         }
         return arr;
-    }, "Nodes with their parameters. On a Field Inspect node, 'stats_available' "
+    }, py::arg("scope"), py::arg("owner"),
+       "Nodes with their parameters. On a Field Inspect node, 'stats_available' "
        "false means the value could NOT be measured -- not that it measured zero. "
        "'array_in_sync' false means the attribute array is longer than the live "
        "particle count; the statistics still cover the live particles only.");
@@ -2991,6 +3062,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 d["target_domain"] = e.target_domain;
                 d["active"] = e.active;
                 d["source_node"] = e.source_node;
+                d["scope"] = e.scope;
+                d["owner"] = e.owner;
                 arr.append(d);
             }
             return arr;

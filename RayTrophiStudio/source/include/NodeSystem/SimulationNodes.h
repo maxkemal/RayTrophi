@@ -20,6 +20,7 @@
 #include "NodeSystem/Node.h"
 #include "NodeSystem/EvaluationContext.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,7 @@ struct SimCommand {
         BindObject,      // "this graph drives the object called <target>" (N5)
         SetSurface,      // override a per-object material/thermal setting (N5)
         SetRender,       // override a domain's LOOK (N7)
+        SetEmitter,      // override a flow source's emission properties
     };
     Kind        kind = Kind::None;
     std::string target;      // domain / object name — the identity, not a handle
@@ -107,10 +109,61 @@ protected:
     void clearCommands() { commands.clear(); }
 };
 
+// ============================================================================
+// SCOPES — which scene entity a graph belongs to
+// ============================================================================
+// Decision record: docs/dev/SIMULATION_NODE_OBJECT_MODEL.md, section 8 step 1.
+//
+// ★★★ There is no "the" simulation graph. A graph belongs to a NAMED scene
+// entity, exactly the way material_node_graphs is keyed by material name, and
+// the entity is the owner — the graph only reflects it. One global graph made
+// every question ambiguous the moment a scene held two domains: "set the voxel
+// size" had no answer to "of what".
+//
+// ★★ World carries no owner name: there is one world. Its map key is the empty
+// string so the three storages can share one lookup shape.
+enum class GraphScope : uint8_t { Object = 0, Domain, World };
+
+inline const char* scopeName(GraphScope s) {
+    switch (s) {
+        case GraphScope::Object: return "object";
+        case GraphScope::Domain: return "domain";
+        case GraphScope::World:  return "world";
+    }
+    return "domain";
+}
+
+// ★ Name at the boundary. This is the ONLY place a scope string becomes an
+// enum; nothing downstream compares scope strings.
+inline bool parseScope(const std::string& text, GraphScope& out) {
+    if (text == "object") { out = GraphScope::Object; return true; }
+    if (text == "domain") { out = GraphScope::Domain; return true; }
+    if (text == "world")  { out = GraphScope::World;  return true; }
+    return false;
+}
+
 // The simulation graph. Differs from GraphBase in exactly one respect, and that
 // difference is the whole of N0.
 class SimulationNodeGraph : public GraphBase {
 public:
+    // Which scene entity this graph belongs to. Set once when the graph is
+    // created and never edited: retargeting a graph is deleting one and making
+    // another, because every node inside it names the old owner.
+    GraphScope  scope = GraphScope::Domain;
+    std::string owner;            // domain / object name; empty for World
+
+    // ★★ The implicit OWNER NODE. Every scoped graph opens with one node naming
+    // its owner, so the canvas answers "whose graph is this?" without a panel
+    // caption, and so surface/parameter nodes have something to connect to on
+    // an empty graph. It is created with the graph and re-created by clear();
+    // 0 means the scope has no owner node (World — see section 7 item 1: the
+    // world has no scripting surface yet, so its graph is honestly empty).
+    uint32_t ownerNodeId = 0;
+
+    bool isOwnerNode(uint32_t node_id) const {
+        return ownerNodeId != 0 && node_id == ownerNodeId;
+    }
+
     // Commands gathered from every node in the last evaluation, in topological
     // order. ORDER IS MEANINGFUL — for coupling nodes it IS the physics.
     std::vector<SimCommand> collected;
@@ -330,6 +383,183 @@ public:
     }
 
     PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// ============================================================================
+// DOMAIN ASPECT NODES — one entity, several aspects
+// ============================================================================
+// Decision record: SIMULATION_NODE_OBJECT_MODEL.md section 5 and section 8 step 3.
+//
+// ★★★ Splitting a domain across several nodes is legitimate BECAUSE a node is a
+// reflection, not an authority: identity/bounds, discretisation/solver, cache
+// and look are different aspects of one scene entity, and the material graph
+// already splits a material the same way. Deleting one of these nodes removes a
+// view, never the domain.
+//
+// ★★★ EVERY FIELD IS OPT-IN. A node that wrote all of its fields on every apply
+// would flatten authored values the user never touched, and the override layer
+// would faithfully "restore" numbers this graph had invented. Only fields whose
+// `use` flag is set emit anything.
+class DomainParamNodeBase : public SimNodeBase {
+public:
+    // ★ `key` is the SAME string readParameter/writeParameter use. One
+    // vocabulary end to end: a second spelling here would work in the panel and
+    // fail over IPC, which this repository has already paid for once.
+    struct Field {
+        const char* key;
+        bool        use = false;
+        float       value = 0.0f;
+    };
+    std::vector<Field> fields;
+
+    DomainParamNodeBase() {
+        metadata.category = "Simulation";
+        addInput("Domain", DataType::DomainRef);
+        addOutput("Domain", DataType::DomainRef);
+    }
+
+    Field* find(const std::string& key) {
+        for (auto& f : fields)
+            if (key == f.key) return &f;
+        return nullptr;
+    }
+
+    // ★★ Only a field that is actually IN USE can demand a restart. Asking the
+    // user to discard a simulation for a voxel_size dial they never enabled is
+    // how a restart prompt becomes noise that gets clicked through.
+    bool requiresRestart() const override {
+        for (const auto& f : fields)
+            if (f.use && SetParameterNode::keyRequiresRestart(f.key)) return true;
+        return false;
+    }
+    std::string restartReason() const override {
+        for (const auto& f : fields) {
+            if (f.use && SetParameterNode::keyRequiresRestart(f.key))
+                return std::string("'") + f.key + "' changes the grid "
+                       "discretisation; applying it discards the accumulated "
+                       "simulation state";
+        }
+        return {};
+    }
+
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// Discretisation and solver settings. Separate from the domain's identity
+// because they answer a different question: not "which region" but "how it is
+// solved". That separation was invisible before, and the invisibility cost a
+// bake failure — nothing showed which grid a domain was actually running.
+class SolverNode : public DomainParamNodeBase {
+public:
+    SolverNode() {
+        metadata.typeId = "sim.solver";
+        metadata.displayName = "Solver";
+        metadata.description =
+            "How the domain is DISCRETISED and solved: cell size, viscosity "
+            "sweeps, granular strength. It creates no domain and chooses no "
+            "solver -- it overrides settings on the domain wired into it. "
+            "Every field is opt-in: untouched fields keep their authored value. ";
+        fields = {
+            {"voxel_size"},
+            {"kinematic_viscosity"},
+            {"viscosity_sweeps"},
+            {"viscosity_wall_slip"},
+            {"granular_friction_angle_degrees"},
+            {"granular_cohesion"},
+        };
+    }
+};
+
+// The domain's own switches: is it running, is it drawn, how its surface and
+// porosity are resolved.
+//
+// ★ granular_enabled is deliberately absent — see writeParameter. Whether
+// toggling it invalidates accumulated state has not been measured, and a dial
+// whose restart semantics are guessed is worse than a missing one.
+class DomainSettingsNode : public DomainParamNodeBase {
+public:
+    DomainSettingsNode() {
+        metadata.typeId = "sim.domain_settings";
+        metadata.displayName = "Domain Settings";
+        metadata.description =
+            "The domain's own switches and surface settings: enabled, visible, "
+            "solid phase, porosity, surface offset. Like every node here it "
+            "REFERS -- it cannot create or delete a domain. Every field is "
+            "opt-in: untouched fields keep their authored value. ";
+        fields = {
+            {"enabled"},
+            {"visible"},
+            {"solid_phase"},
+            {"solid_phase_fill"},
+            {"surface_offset_voxels"},
+            {"pore_amount"},
+            {"pore_scale"},
+            {"pore_detail"},
+            {"uvw_refresh_period"},
+        };
+    }
+};
+
+// ── EMITTER ─────────────────────────────────────────────────────────────────
+//
+// ★★★ Emission is a property of MATTER (section 9.1): "this object emits
+// substance S at rate R". The flow source's explicit `domain` field is not a
+// property but a RESOLUTION — an object sitting inside two overlapping domains
+// has no unambiguous geometric answer, and this repository has already paid for
+// overlapping volume boxes. So this node edits the emission properties and
+// deliberately does NOT touch the binding: retargeting which domain a source
+// feeds is a different decision, made where the source is authored.
+//
+// ★★ It names an existing flow source; like every node here it creates nothing.
+class EmitterNode : public SimNodeBase {
+public:
+    std::string emitterName;
+
+    // Opt-in, same contract as the domain aspect nodes: a field this graph has
+    // no opinion about must not overwrite an authored value with a default.
+    struct Field {
+        const char* key;
+        bool        use = false;
+        float       value = 0.0f;
+    };
+    std::vector<Field> fields;
+
+    // Text-valued, and separate because an empty string is a LEGITIMATE value
+    // (no substance override) — so "unset" cannot be encoded as emptiness.
+    bool        useSubstance = false;
+    std::string substance;
+
+    EmitterNode() {
+        metadata.typeId = "sim.emitter";
+        metadata.displayName = "Emitter";
+        metadata.description =
+            "NAMES an existing flow source and overrides what it emits: rate, "
+            "radius, temperature, fuel, substance. It does not create a source "
+            "and does not change which domain the source feeds -- that binding "
+            "resolves an ambiguity and is authored on the source itself. Every "
+            "field is opt-in. ";
+        metadata.category = "Simulation";
+        fields = {
+            {"enabled"},
+            {"radius"},
+            {"density"},
+            {"temperature"},
+            {"fuel"},
+            {"falloff"},
+            {"velocity_coupling"},
+            {"inherit_velocity"},
+            {"fluid_particles_per_second"},
+            {"fluid_velocity_spread"},
+        };
+    }
+
+    Field* find(const std::string& key) {
+        for (auto& f : fields)
+            if (key == f.key) return &f;
+        return nullptr;
+    }
+
+    PinValue compute(int, EvaluationContext&) override;
 };
 
 // ============================================================================
@@ -809,6 +1039,43 @@ std::vector<std::string> listSurfaceAttributes(const std::string& object);
 // Registers every simulation node type with NodeRegistry. Called once at
 // startup, alongside the geometry/material/terrain registrations.
 void registerSimulationNodeTypes();
+
+// ── The implicit owner node ─────────────────────────────────────────────────
+//
+// Seeds `graph` with the one node that names its owner and records its id.
+// Idempotent: an owner node that is already present is left alone, so this can
+// be called after deserialization without duplicating it.
+//
+// ★ World seeds nothing on purpose. WorldThermalState has no scripting surface
+// (section 7 item 1), so a World owner node would be a node that names a thing
+// no reader can query — a graph pretending to more reach than the core has.
+inline void seedOwnerNode(SimulationNodeGraph& graph) {
+    if (graph.ownerNodeId != 0 && graph.getNode(graph.ownerNodeId)) return;
+    graph.ownerNodeId = 0;
+    if (graph.scope == GraphScope::Domain) {
+        auto node = std::make_unique<DomainRefNode>();
+        node->domainName = graph.owner;
+        NodeBase* added = graph.registerNode(std::move(node));
+        if (added) graph.ownerNodeId = added->id;
+    } else if (graph.scope == GraphScope::Object) {
+        auto node = std::make_unique<ObjectRefNode>();
+        node->objectName = graph.owner;
+        NodeBase* added = graph.registerNode(std::move(node));
+        if (added) graph.ownerNodeId = added->id;
+    }
+}
+
+// Creates a graph already bound to its owner. The ONLY way a scoped graph
+// should come into existence, so no code path can produce one with an empty
+// scope or a missing owner node.
+inline std::shared_ptr<SimulationNodeGraph> makeScopedGraph(GraphScope scope,
+                                                            const std::string& owner) {
+    auto graph = std::make_shared<SimulationNodeGraph>();
+    graph->scope = scope;
+    graph->owner = (scope == GraphScope::World) ? std::string() : owner;
+    seedOwnerNode(*graph);
+    return graph;
+}
 
 } // namespace Sim
 } // namespace NodeSystem

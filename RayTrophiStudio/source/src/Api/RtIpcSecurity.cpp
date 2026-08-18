@@ -237,7 +237,10 @@ uint32_t requiredCapabilities(const std::string& method) {
     // caller's token, and authorize() is fail-closed either way.
     if (method == "sim_graph.nodes" || method == "sim_graph.evaluate" ||
         method == "sim_graph.attributes" || method == "sim_graph.couplings" ||
-        method == "sim_graph.surface_attributes") return Read;
+        method == "sim_graph.surface_attributes" ||
+        // Enumerating which scoped graphs exist reads the scene and changes
+        // nothing. create/delete/clear stay SceneWrite via the prefix below.
+        method == "sim_graph.list") return Read;
     if (method.rfind("sim_graph.", 0) == 0) return SceneWrite;
     // sim_cache.* — status is a read; baking and clearing rewrite simulation
     // state and drop cached frames, so they take SceneWrite via the namespace

@@ -54,15 +54,17 @@ for key in ("valid", "baking", "ram_frames", "config_signature"):
     check("status reports %s" % key, key in status, "%s" % (sorted(status),))
 
 log("== evaluating a Cache node must NOT bake ==")
-rt.sim_graph.clear()
-dom = rt.sim_graph.add_node("sim.domain_ref")
-rt.sim_graph.set_node(dom, "domain", domain)
-cache = rt.sim_graph.add_node("sim.cache")
-rt.sim_graph.connect(dom, cache)
+# The cache belongs to the domain being baked, so the graph is owned by it.
+SCOPE = "domain"
+OWNER = domain
+dom = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
+check("the graph opens with an owner node", dom != 0)
+cache = rt.sim_graph.add_node(SCOPE, OWNER, "sim.cache")
+rt.sim_graph.connect(SCOPE, OWNER, dom, cache)
 
 before = rt.sim_cache.status()
 started = time.time()
-rt.sim_graph.evaluate()
+rt.sim_graph.evaluate(SCOPE, OWNER)
 elapsed = time.time() - started
 after = rt.sim_cache.status()
 log("   evaluate took %.3f s" % elapsed)
@@ -76,7 +78,7 @@ check("evaluation did not change the cache",
 
 log("== the node REPORTS the cache instead of guessing ==")
 node = None
-for n in rt.sim_graph.nodes():
+for n in rt.sim_graph.nodes(SCOPE, OWNER):
     if n["type"] == "sim.cache":
         node = n
         break
@@ -120,9 +122,9 @@ else:
     # reallocates the field the simulation lives in.
     live = [d for d in rt.fluid.list_domains() if d["name"] == domain][0]
     rt.fluid.set_param(domain, voxel_size=live["voxel_size"] * 1.5)
-    rt.sim_graph.evaluate()
+    rt.sim_graph.evaluate(SCOPE, OWNER)
     changed = None
-    for n in rt.sim_graph.nodes():
+    for n in rt.sim_graph.nodes(SCOPE, OWNER):
         if n["type"] == "sim.cache":
             changed = n
             break
@@ -139,7 +141,7 @@ else:
           "dropped=%s stale=%s" % (dropped, changed.get("cache_stale") if changed else None))
     rt.fluid.set_param(domain, voxel_size=live["voxel_size"])
 
-rt.sim_graph.clear()
+rt.sim_graph.clear(SCOPE, OWNER)
 
 log("")
 if FAIL:

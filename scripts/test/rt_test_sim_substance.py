@@ -52,21 +52,34 @@ log("authored substance=%r ignite_on_contact=%s melt_spread=%.3f" % (
     authored["msf_melt_spread"]))
 
 log("== build an object chain ==")
-rt.sim_graph.clear()
-node_obj = rt.sim_graph.add_node("sim.object_ref")
-rt.sim_graph.set_node(node_obj, "object", obj)
-node_sub = rt.sim_graph.add_node("sim.substance")
-node_pyro = rt.sim_graph.add_node("sim.pyrolysis")
-rt.sim_graph.connect(node_obj, node_sub)
-rt.sim_graph.connect(node_sub, node_pyro)
+# ★★★ OBJECT scope, not domain: what an object is made of is a property of the
+# object, so it lives on the object's own graph. This is the second scope, and
+# the reason scopes are separate graph kinds rather than a flag.
+SCOPE = "object"
+OWNER = obj
+node_obj = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
+check("the object graph opens with an owner node", node_obj != 0)
+node_sub = rt.sim_graph.add_node(SCOPE, OWNER, "sim.substance")
+node_pyro = rt.sim_graph.add_node(SCOPE, OWNER, "sim.pyrolysis")
+rt.sim_graph.connect(SCOPE, OWNER, node_obj, node_sub)
+rt.sim_graph.connect(SCOPE, OWNER, node_sub, node_pyro)
 
 TARGET = "Iron" if authored["msf_substance"] != "Iron" else "Steel"
-rt.sim_graph.set_node(node_sub, "substance", TARGET)
-rt.sim_graph.set_node_value(node_sub, "burn_rate_scale", 2.5)
-rt.sim_graph.set_node_value(node_pyro, "active",
+rt.sim_graph.set_node(SCOPE, OWNER, node_sub, "substance", TARGET)
+rt.sim_graph.set_node_value(SCOPE, OWNER, node_sub, "burn_rate_scale", 2.5)
+rt.sim_graph.set_node_value(SCOPE, OWNER, node_pyro, "active",
                             0.0 if authored["gas_ignite_on_contact"] else 1.0)
 
-result = rt.sim_graph.evaluate()
+log("== object and domain scopes are SEPARATE graphs ==")
+# ★★ Same owner name in a different scope must be a different canvas. If the two
+# storages ever collapsed into one, an object graph and a domain graph that
+# happened to share a name would overwrite each other silently.
+scoped = rt.sim_graph.list()
+mine = [g for g in scoped if g["scope"] == SCOPE and g["owner"] == OWNER]
+check("the object graph is listed under the object scope", len(mine) == 1,
+      "%s" % (scoped,))
+
+result = rt.sim_graph.evaluate(SCOPE, OWNER)
 kinds = [c["kind"] for c in result["commands"]]
 log("   commands: %s" % (kinds,))
 check("object bind emitted", "bind_object" in kinds, "%s" % (kinds,))
@@ -77,7 +90,7 @@ targets = {c["target"] for c in result["commands"]}
 check("commands name the object", targets == {obj}, "%s" % (targets,))
 
 log("== apply, then read the AUTHORED state back ==")
-applied = rt.sim_graph.apply()
+applied = rt.sim_graph.apply(SCOPE, OWNER)
 log("   apply -> %s" % (applied,))
 check("apply reported no failures", not applied["failed"], "%s" % (applied["failed"],))
 
@@ -118,13 +131,11 @@ check("authored pyrolysis switch restored",
 check("no overrides held after clear", rt.sim_graph.override_count() == 0)
 
 log("== an unknown substance must be REFUSED, not silently accepted ==")
-rt.sim_graph.clear()
-node_obj = rt.sim_graph.add_node("sim.object_ref")
-rt.sim_graph.set_node(node_obj, "object", obj)
-node_sub = rt.sim_graph.add_node("sim.substance")
-rt.sim_graph.connect(node_obj, node_sub)
-rt.sim_graph.set_node(node_sub, "substance", "Unobtainium")
-bad = rt.sim_graph.apply()
+node_obj = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
+node_sub = rt.sim_graph.add_node(SCOPE, OWNER, "sim.substance")
+rt.sim_graph.connect(SCOPE, OWNER, node_obj, node_sub)
+rt.sim_graph.set_node(SCOPE, OWNER, node_sub, "substance", "Unobtainium")
+bad = rt.sim_graph.apply(SCOPE, OWNER)
 log("   apply -> %s" % (bad,))
 # A typo must not quietly turn a steel beam into oak.
 check("unknown substance reported as a failure", bool(bad["failed"]),
@@ -133,7 +144,7 @@ check("object kept its substance",
       rt.collider.get(obj)["msf_substance"] == authored["msf_substance"],
       "%r" % rt.collider.get(obj)["msf_substance"])
 rt.sim_graph.clear_overrides()
-rt.sim_graph.clear()
+rt.sim_graph.clear(SCOPE, OWNER)
 
 log("== an object has TWO names, and both must work ==")
 # ★★★ The authored material lives on the COLLIDER; the measured MSF field is
@@ -169,14 +180,12 @@ else:
           "%s" % (attrs,))
     check("melt is exposed as a READING", "melt" in attrs, "%s" % (attrs,))
 
-    rt.sim_graph.clear()
-    node_obj = rt.sim_graph.add_node("sim.object_ref")
-    rt.sim_graph.set_node(node_obj, "object", obj)
-    insp = rt.sim_graph.add_node("sim.surface_inspect")
-    rt.sim_graph.set_node(insp, "channel", "temperature")
-    rt.sim_graph.connect(node_obj, insp)
-    rt.sim_graph.evaluate()
-    for n in rt.sim_graph.nodes():
+    node_obj = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
+    insp = rt.sim_graph.add_node(SCOPE, OWNER, "sim.surface_inspect")
+    rt.sim_graph.set_node(SCOPE, OWNER, insp, "channel", "temperature")
+    rt.sim_graph.connect(SCOPE, OWNER, node_obj, insp)
+    rt.sim_graph.evaluate(SCOPE, OWNER)
+    for n in rt.sim_graph.nodes(SCOPE, OWNER):
         if n["type"] != "sim.surface_inspect":
             continue
         if not n.get("stats_available"):
@@ -196,7 +205,7 @@ else:
         # wearing a measurement's clothes.
         check("the reading reports its freshness", "host_fresh" in n,
               "%s" % (sorted(n.keys()),))
-    rt.sim_graph.clear()
+    rt.sim_graph.clear(SCOPE, OWNER)
 
 log("")
 log("NOTE: there is deliberately no Moisture setter node and no Thermal")

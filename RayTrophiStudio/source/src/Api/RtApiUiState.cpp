@@ -85,7 +85,29 @@ EditorState editorState() {
     out.node_editor_domain =
         (domain >= 0 && domain < 5) ? kNodeDomains[domain] : "simulation";
     out.node_editor_open = ui.show_node_editor;
+    // Which scoped simulation graph the canvas is on. Reported even when the
+    // Nodes window is closed: it is the selection, not a property of the window.
+    out.sim_graph_scope = ui.sim_graph_scope;
+    out.sim_graph_owner = ui.sim_graph_owner;
     return out;
+}
+
+Result setSimGraphScope(const std::string& scope, const std::string& owner) {
+    // *** VALIDATE BEFORE MUTATING, for the same reason setBottomEditor does:
+    // a refused call that had already moved the selection would leave the canvas
+    // somewhere the caller was told it had not gone.
+    NodeSystem::Sim::GraphScope parsed;
+    if (!NodeSystem::Sim::parseScope(scope, parsed))
+        return Result::fail("unknown graph scope '" + scope +
+                            "' (expected 'object', 'domain' or 'world')");
+    // ** Selecting a scope does NOT require a graph to exist there. The panel
+    // draws an explicit "no graph for this owner -- create one" state, which is
+    // how a user reaches creation in the first place. Refusing here would make
+    // the empty case unreachable from the UI and from a script alike.
+    ui.sim_graph_scope = scope;
+    ui.sim_graph_owner = (parsed == NodeSystem::Sim::GraphScope::World)
+                         ? std::string() : owner;
+    return Result::success();
 }
 
 Result setBottomEditor(const std::string& name) {

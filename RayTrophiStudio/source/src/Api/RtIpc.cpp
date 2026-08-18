@@ -2326,39 +2326,84 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"arbiter_no_crossing", s.arbiter_no_crossing}};
         });
     }
+    // -- sim_graph.* : every method names the scope it means -----------------
+    //
+    // *** `scope` is REQUIRED and there is no active-domain fallback. Making it
+    // optional would let a script that forgot it configure whichever entity
+    // happened to be selected, succeed, and report nothing.
+    // `owner` is the entity name; it is unused for scope "world" (there is one).
+    if (method == "sim_graph.list") {
+        return enqueueQuery([](UIContext&) {
+            json arr = json::array();
+            for (const auto& g : rtapi::simGraphList())
+                arr.push_back(json{{"scope", g.scope}, {"owner", g.owner},
+                                   {"nodes", g.node_count},
+                                   {"owner_node", g.owner_node},
+                                   {"owner_missing", g.owner_missing}});
+            return json{{"graphs", arr}};
+        });
+    }
+    if (method == "sim_graph.create") {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
+        return enqueueResult([scope, owner](UIContext&) {
+            return rtapi::simGraphCreate(scope, owner);
+        });
+    }
+    if (method == "sim_graph.delete") {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
+        return enqueueResult([scope, owner](UIContext&) {
+            return rtapi::simGraphDelete(scope, owner);
+        });
+    }
     if (method == "sim_graph.clear") {
-        return enqueueResult([](UIContext&) { return rtapi::simGraphClear(); });
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
+        return enqueueResult([scope, owner](UIContext&) {
+            return rtapi::simGraphClear(scope, owner);
+        });
     }
     if (method == "sim_graph.add_node") {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
         std::string type_id = requireString(params, "type");
-        return enqueueQuery([type_id](UIContext&) {
+        return enqueueQuery([scope, owner, type_id](UIContext&) {
             uint32_t id = 0;
-            auto r = rtapi::simGraphAddNode(type_id, id);
+            auto r = rtapi::simGraphAddNode(scope, owner, type_id, id);
             if (!r.ok) return json{{"__error", r.error}};
             return json{{"id", id}};
         });
     }
     if (method == "sim_graph.set_node") {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
         int node_id = requireInt(params, "node");
         std::string key = requireString(params, "key");
         std::string value = requireString(params, "value");
-        return enqueueResult([node_id, key, value](UIContext&) {
-            return rtapi::simGraphSetNodeText(static_cast<uint32_t>(node_id), key, value);
+        return enqueueResult([scope, owner, node_id, key, value](UIContext&) {
+            return rtapi::simGraphSetNodeText(scope, owner,
+                                              static_cast<uint32_t>(node_id), key, value);
         });
     }
     if (method == "sim_graph.connect") {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
         int from_node = requireInt(params, "from_node");
         int to_node = requireInt(params, "to_node");
         int from_pin = optionalInt(params, "from_pin", 0);
         int to_pin = optionalInt(params, "to_pin", 0);
-        return enqueueResult([from_node, from_pin, to_node, to_pin](UIContext&) {
-            return rtapi::simGraphConnect(static_cast<uint32_t>(from_node), from_pin,
+        return enqueueResult([scope, owner, from_node, from_pin, to_node, to_pin](UIContext&) {
+            return rtapi::simGraphConnect(scope, owner,
+                                          static_cast<uint32_t>(from_node), from_pin,
                                           static_cast<uint32_t>(to_node), to_pin);
         });
     }
     if (method == "sim_graph.evaluate") {
-        return enqueueQuery([](UIContext&) {
-            const rtapi::SimGraphEvaluation e = rtapi::simGraphEvaluate();
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
+        return enqueueQuery([scope, owner](UIContext&) {
+            const rtapi::SimGraphEvaluation e = rtapi::simGraphEvaluate(scope, owner);
             json commands = json::array();
             for (const auto& c : e.commands) {
                 commands.push_back(json{{"kind", c.kind}, {"target", c.target},
@@ -2370,16 +2415,27 @@ json dispatchMethod(const std::string& method, const json& params) {
                 restarts.push_back(json{{"node", r.node_id}, {"reason", r.reason}});
             // ★ commands are the graph's INTENT, in dependency order. Nothing was
             // applied by this call, and restart_requests were reported, not acted on.
+            // * `error` carries WHY nothing was evaluated. Without it an
+            // unfound graph and a graph that declares nothing look identical.
             return json{{"evaluated", e.evaluated},
+                        {"error", e.error},
                         {"commands", commands},
                         {"restart_requests", restarts}};
         });
     }
     if (method == "sim_graph.nodes") {
-        return enqueueQuery([](UIContext&) {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
+        return enqueueQuery([scope, owner](UIContext&) {
+            std::vector<rtapi::SimNodeInfo> nodes;
+            const rtapi::Result found = rtapi::simGraphNodes(scope, owner, nodes);
+            // ★ A missing graph is an ERROR, not an empty node list. Reporting
+            // zero nodes would tell the caller its owner name was fine.
+            if (!found.ok) return json{{"__error", found.error}};
             json arr = json::array();
-            for (const auto& n : rtapi::simGraphNodes()) {
-                json j{{"id", n.id}, {"type", n.type_id}, {"name", n.display_name},
+            for (const auto& n : nodes) {
+                json j{{"id", n.id}, {"owner_node", n.is_owner_node},
+                       {"type", n.type_id}, {"name", n.display_name},
                        {"enabled", n.enabled}, {"inputs", n.input_count},
                        {"outputs", n.output_count}, {"domain", n.domain},
                        {"channel", n.channel}, {"source", n.source}};
@@ -2409,23 +2465,40 @@ json dispatchMethod(const std::string& method, const json& params) {
                     j["cache_stale"] = n.cache_stale;
                     j["cache_ram_frames"] = n.cache_ram_frames;
                 }
+                if (!n.fields.empty()) {
+                    json fields = json::array();
+                    for (const auto& f : n.fields) {
+                        // ★ in_use false = this graph has no opinion about the
+                        // parameter. It is NOT the same as a value of zero.
+                        fields.push_back(json{{"key", f.key},
+                                              {"in_use", f.in_use},
+                                              {"value", f.value},
+                                              {"requires_restart", f.requires_restart}});
+                    }
+                    j["fields"] = fields;
+                }
                 arr.push_back(std::move(j));
             }
             return json{{"nodes", arr}};
         });
     }
     if (method == "sim_graph.set_node_value") {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
         int node_id = requireInt(params, "node");
         std::string key = requireString(params, "key");
         float value = requireFloat(params, "value");
-        return enqueueResult([node_id, key, value](UIContext&) {
-            return rtapi::simGraphSetNodeValue(static_cast<uint32_t>(node_id), key, value);
+        return enqueueResult([scope, owner, node_id, key, value](UIContext&) {
+            return rtapi::simGraphSetNodeValue(scope, owner,
+                                               static_cast<uint32_t>(node_id), key, value);
         });
     }
     if (method == "sim_graph.apply") {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
         bool allow_restart = optionalBool(params, "allow_restart", false);
-        return enqueueQuery([allow_restart](UIContext&) {
-            const rtapi::SimApplyResult r = rtapi::simGraphApply(allow_restart);
+        return enqueueQuery([scope, owner, allow_restart](UIContext&) {
+            const rtapi::SimApplyResult r = rtapi::simGraphApply(scope, owner, allow_restart);
             // ★ `refused` is not an error: it is the graph asking permission to
             // discard a running simulation. Reported, never done silently.
             return json{{"ok", r.ok}, {"applied", r.applied},
@@ -2447,7 +2520,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"producer", e.producer}, {"consumer", e.consumer},
                         {"source_domain", e.source_domain},
                         {"target_domain", e.target_domain},
-                        {"active", e.active}, {"source_node", e.source_node}});
+                        {"active", e.active}, {"source_node", e.source_node},
+                        {"scope", e.scope}, {"owner", e.owner}});
                 }
                 return arr;
             };
@@ -2479,7 +2553,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"bottom_editor", s.bottom_editor},
                         {"node_editor_domain", s.node_editor_domain},
                         {"node_editor_open", s.node_editor_open},
-                        {"open_editors", s.open_editors}};
+                        {"open_editors", s.open_editors},
+                        {"sim_graph_scope", s.sim_graph_scope},
+                        {"sim_graph_owner", s.sim_graph_owner}};
         });
     }
     if (method == "editor.set_bottom_editor") {
@@ -2489,6 +2565,13 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "editor.set_node_domain") {
         std::string name = requireString(params, "name");
         return enqueueResult([name](UIContext&) { return rtapi::setNodeEditorDomain(name); });
+    }
+    if (method == "editor.set_sim_graph_scope") {
+        std::string scope = requireString(params, "scope");
+        std::string owner = optionalString(params, "owner", "");
+        return enqueueResult([scope, owner](UIContext&) {
+            return rtapi::setSimGraphScope(scope, owner);
+        });
     }
     if (method == "sim_cache.status") {
         return enqueueQuery([](UIContext&) {

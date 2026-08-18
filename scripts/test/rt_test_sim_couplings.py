@@ -49,19 +49,23 @@ gas_name = gases[0] if gases else ""
 log("fluid: %s   gas: %s" % (fluid_name, gas_name or "(none)"))
 
 log("== build a coupling chain ==")
-rt.sim_graph.clear()
-src = rt.sim_graph.add_node("sim.domain_ref")
-rt.sim_graph.set_node(src, "domain", fluid_name)
-dst = rt.sim_graph.add_node("sim.domain_ref")
-rt.sim_graph.set_node(dst, "domain", gas_name or fluid_name)
+# The chain lives in the FLUID domain's graph: it is the source of the coupling.
+# ★ The far end is still an ordinary Domain node inside that graph -- a coupling
+# names two ends, and only one of them owns the canvas.
+SCOPE = "domain"
+OWNER = fluid_name
+src = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
+check("the graph opens with an owner node", src != 0)
+dst = rt.sim_graph.add_node(SCOPE, OWNER, "sim.domain_ref")
+rt.sim_graph.set_node(SCOPE, OWNER, dst, "domain", gas_name or fluid_name)
 
 # Chained through the Source pass-through, so the command order follows the
 # chain rather than node creation order. That order is what gets compared.
-burn = rt.sim_graph.add_node("sim.couple_fluid_to_gas")
-foam = rt.sim_graph.add_node("sim.couple_foam")
-rt.sim_graph.connect(src, burn)          # Source -> Source
-rt.sim_graph.connect(dst, burn, 0, 1)    # Domain -> Target
-rt.sim_graph.connect(burn, foam)
+burn = rt.sim_graph.add_node(SCOPE, OWNER, "sim.couple_fluid_to_gas")
+foam = rt.sim_graph.add_node(SCOPE, OWNER, "sim.couple_foam")
+rt.sim_graph.connect(SCOPE, OWNER, src, burn)          # Source -> Source
+rt.sim_graph.connect(SCOPE, OWNER, dst, burn, 0, 1)    # Domain -> Target
+rt.sim_graph.connect(SCOPE, OWNER, burn, foam)
 
 report = rt.sim_graph.couplings()
 declared = [c["coupling"] for c in report["declared"]]
@@ -74,6 +78,13 @@ check("declared coupling names its two ends",
       report["declared"][0]["source_domain"] == fluid_name and
       report["declared"][0]["target_domain"] == (gas_name or fluid_name),
       "%s" % (report["declared"][0],))
+# ★★★ The coupling report spans EVERY scope on purpose: a coupling joins two
+# domains, so it belongs to neither graph alone. Scoping this report to one
+# graph would hide exactly the cross-domain declarations it exists to show, so
+# each declaration has to say which graph it came from.
+check("each declaration names the graph it came from",
+      all(c.get("scope") and c.get("owner") for c in report["declared"]),
+      "%s" % (report["declared"],))
 
 log("== the solver's OWN report, not a copy of the graph ==")
 # ★★★ `traced` false means the solver was never asked. An empty `actual` alone
@@ -111,7 +122,7 @@ check("a declared-but-not-running coupling is named",
       "neither declared_not_running nor actual mentions foam")
 
 log("== foam has no script-writable switch, and must SAY so ==")
-applied = rt.sim_graph.apply()
+applied = rt.sim_graph.apply(SCOPE, OWNER)
 log("   apply -> %s" % (applied,))
 # ★ A coupling that cannot be switched must fail loudly. Reporting success here
 # would leave a user believing a graph edit took effect when nothing changed.
@@ -138,15 +149,13 @@ if before is not None:
     log("   authored combustion enabled=%s auto_ignite=%s" %
         (before["enabled"], before["auto_ignite"]))
 
-    rt.sim_graph.clear()
-    src = rt.sim_graph.add_node("sim.domain_ref")
-    rt.sim_graph.set_node(src, "domain", fluid_name)
-    burn = rt.sim_graph.add_node("sim.couple_fluid_to_gas")
-    rt.sim_graph.connect(src, burn)
-    rt.sim_graph.set_node_value(burn, "active",
+    src = rt_testlog.fresh_graph(rt, SCOPE, OWNER)
+    burn = rt.sim_graph.add_node(SCOPE, OWNER, "sim.couple_fluid_to_gas")
+    rt.sim_graph.connect(SCOPE, OWNER, src, burn)
+    rt.sim_graph.set_node_value(SCOPE, OWNER, burn, "active",
                                 0.0 if before["enabled"] else 1.0)
 
-    applied = rt.sim_graph.apply()
+    applied = rt.sim_graph.apply(SCOPE, OWNER)
     log("   apply -> %s" % (applied,))
     during = rt.fluid.get_combustion(fluid_name)
     check("coupling switch actually changed",
@@ -163,7 +172,7 @@ if before is not None:
           "%s / %s" % (after["enabled"], after["auto_ignite"]))
     check("no overrides held after clear", rt.sim_graph.override_count() == 0)
 
-rt.sim_graph.clear()
+rt.sim_graph.clear(SCOPE, OWNER)
 
 log("")
 if FAIL:

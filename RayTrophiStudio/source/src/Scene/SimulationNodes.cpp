@@ -83,6 +83,54 @@ PinValue FieldInspectNode::compute(int outputIndex, EvaluationContext& ctx) {
     return PinValue{ domain + ":" + channel };
 }
 
+PinValue DomainParamNodeBase::compute(int, EvaluationContext& ctx) {
+    PinValue upstream = getInputValue(0, ctx);
+    const auto* domain = std::get_if<std::string>(&upstream);
+    if (!domain || domain->empty()) return PinValue{};
+
+    // ★★★ Only fields in USE emit. An unused field is not "zero" — it is a
+    // parameter this graph has no opinion about, and writing a zero there would
+    // silently overwrite an authored value with a number nobody chose.
+    for (const auto& f : fields) {
+        if (!f.use) continue;
+        SimCommand cmd;
+        cmd.kind = SimCommand::Kind::SetParameter;
+        cmd.target = *domain;
+        cmd.key = f.key;
+        cmd.value = f.value;
+        emit(std::move(cmd));
+    }
+    // Pass the domain through so aspect nodes chain onto one another and the
+    // command order follows the chain.
+    return PinValue{ *domain };
+}
+
+PinValue EmitterNode::compute(int, EvaluationContext&) {
+    // ★ The target is the emitter's OWN name, not something read off a pin.
+    // A flow source already knows which domain it feeds, so making this node
+    // take a Domain input would invite a second, disagreeing answer.
+    if (emitterName.empty()) return PinValue{};
+
+    for (const auto& f : fields) {
+        if (!f.use) continue;
+        SimCommand cmd;
+        cmd.kind = SimCommand::Kind::SetEmitter;
+        cmd.target = emitterName;
+        cmd.key = f.key;
+        cmd.value = f.value;
+        emit(std::move(cmd));
+    }
+    if (useSubstance) {
+        SimCommand cmd;
+        cmd.kind = SimCommand::Kind::SetEmitter;
+        cmd.target = emitterName;
+        cmd.key = "fluid_substance";
+        cmd.text = substance;
+        emit(std::move(cmd));
+    }
+    return PinValue{};
+}
+
 PinValue SetParameterNode::compute(int, EvaluationContext& ctx) {
     // Reuse FieldReadNode's resolver shape without inheriting from it: this node
     // is not a reader, and making it one would blur "acts" and "observes".
@@ -320,6 +368,15 @@ void registerSimulationNodeTypes() {
     reg.registerType("sim.set_parameter",
                      [] { return std::static_pointer_cast<NodeBase>(
                               std::make_shared<SetParameterNode>()); });
+    reg.registerType("sim.solver",
+                     [] { return std::static_pointer_cast<NodeBase>(
+                              std::make_shared<SolverNode>()); });
+    reg.registerType("sim.domain_settings",
+                     [] { return std::static_pointer_cast<NodeBase>(
+                              std::make_shared<DomainSettingsNode>()); });
+    reg.registerType("sim.emitter",
+                     [] { return std::static_pointer_cast<NodeBase>(
+                              std::make_shared<EmitterNode>()); });
     reg.registerType("sim.field_inspect",
                      [] { return std::static_pointer_cast<NodeBase>(
                               std::make_shared<FieldInspectNode>()); });

@@ -1,8 +1,9 @@
 # Simülasyon node katmanı — nesne modeli raporu
 
-> **Durum:** TASLAK — 2026-08-17. Temel mimari önerisi; uygulanmadı. Onaylanırsa
-> `NODE_SIMULATION_ARCHITECTURE_PLAN.md` BÖLÜM D'nin depolama/kapsam kısmını
-> bu belge yeniden yazar. N0'ın yürütme sözleşmesi değişmez.
+> **Durum:** AKTİF — 2026-08-18. §8 adım **1, 2 ve 3 uygulandı** (derlenmedi;
+> derleme kullanıcıda). Kalan adımlar 4–6 aşağıda. `NODE_SIMULATION_ARCHITECTURE_PLAN.md`
+> BÖLÜM D'nin depolama/kapsam kısmını bu belge yeniden yazar. N0'ın yürütme
+> sözleşmesi değişmedi.
 
 Bu belge "node sistemi nasıl olmalı" sorusuna **mevcut veri modelinden yola
 çıkarak** cevap arar. Konuşmada dile getirilen öneriler burada ayrıca
@@ -221,7 +222,11 @@ Kapsam modeli bunları görünür kılar; hiçbiri node ile kapatılamaz:
 
 1. `WorldThermalState`'in **hiç** script yüzeyi yok → World kapsamı bugün boş.
 2. Foam'un script yüzeyi yok (`foam_material_id`, aç/kapa).
-3. `flow_source.delete` yok (create/update/get/list var).
+3. ~~`flow_source.delete` yok~~ — **DÜZELTME (2026-08-18): var.** Çekirdekte
+   `removeSimulationFlowSource`, IPC'de `flow_source.remove`. Bu madde yazıldığı
+   sırada zaten kapanmıştı; not eskimişti. ★ Boşluk listesi de ölçülmeden
+   güncellenmemeli — kapanmış bir boşluğu açık göstermek, açık olanı kapalı
+   göstermek kadar yanıltıcı.
 4. `splat_material`'in `updateFluidDomain`'de yeri yok.
 5. Collider/force **domain kapsamlı değil** — §1.3. Bu bir çekirdek kararıdır,
    node'un düzeltebileceği bir şey değil.
@@ -232,13 +237,84 @@ Kapsam modeli bunları görünür kılar; hiçbiri node ile kapatılamaz:
 
 Doğrulanmış N0–N7'ye dokunulacak; testler duruyor, kırılırsa söylerler.
 
-1. **Kapsam altyapısı** — `NodeSystem::ScopedGraph` (sahip kimliği + kapsam),
-   `scene_data.h`'de üç depolama, örtük sahip node'u.
-2. **`rt.sim_graph.*` kapsam argümanı alır.** ★ Argüman **opsiyonel
-   yapılmayacak**: "aktif domain" varsayımı tam olarak deponun ısırdığı sessiz
-   varsayım desenidir. Beş test dosyası buna göre güncellenir.
-3. **A cinsini tamamla:** Domain node'u panel kadar kapsamlı olur, Solver
-   node'u ayrılır, Emitter node'u eklenir (+ inspector'da `Create…`).
+1. ✅ **Kapsam altyapısı** — `scene_data.h`'de üç depolama, örtük sahip node'u.
+2b. ✅ **A cinsi tamamlandı (adım 3).** `sim.solver` (ayrıklaştırma/çözücü),
+   `sim.domain_settings` (domain'in kendi anahtarları), `sim.emitter` (flow
+   source). Hepsinde **her alan opt-in**, ve panelde de öyle çizilir.
+
+2. ✅ **`rt.sim_graph.*` kapsam argümanı alır.** ★ Argüman **opsiyonel
+   yapılmadı**: "aktif domain" varsayımı tam olarak deponun ısırdığı sessiz
+   varsayım desenidir. Beş test dosyası buna göre güncellendi.
+
+### ★ 1–2'de plandan sapma: `ScopedGraph` diye ayrı bir tip YOK
+
+Plan `NodeSystem::ScopedGraph` adında sarmalayıcı bir tip öngörüyordu. Uygulamada
+`scope` + `owner` + `ownerNodeId` doğrudan `SimulationNodeGraph`'ın alanları
+oldu. Gerekçe: sarmalayıcı aynı bilgiyi taşıyıp her erişim noktasına bir
+dolaylılık ekliyordu, ve grafiğin kendi kapsamını bilmesi zaten gerekiyor —
+örtük sahip node'unu `clear()` sonrası yeniden tohumlayan kod grafiğin içinde.
+
+**Uygulanan sözleşme:**
+
+| Karar | Nerede |
+|---|---|
+| Üç depolama, **isimle** anahtarlı (`material_node_graphs` emsali) | `scene_data.h` |
+| Grafik **sahneye** ait — statik değil, yani sahne değişimini sağ kalmaz | `scene_data.h` |
+| Örtük sahip node'u; `clear()` onu **yeniden tohumlar** | `makeScopedGraph` / `seedOwnerNode` |
+| Sahip node'u **yeniden hedeflenemez** (API reddeder, panel sabit çizer) | `simGraphSetNodeText` |
+| Kapsam/sahip **her çağrıda zorunlu**, varsayılan yok | `rt.sim_graph.*` |
+| Var olmayan sahip için grafik **yaratılmaz** | `ownerExists` |
+| Object kapsamı **iki ismi** de kabul eder (obje ve collider) | `ownerExists` |
+| Kuplaj raporu **bütün kapsamları** tarar (§4.3: genel görünüm bir rapordur) | `simGraphCouplings` |
+| Override katmanı **kapsamlı DEĞİL** — aynı anahtarı yazan iki grafik tek yazılı değeri paylaşır | `simGraphClearOverrides` |
+| Hangi kapsamın açık olduğu bir **değer**: `rt.editor` | `EditorState.sim_graph_scope` |
+
+### ★★★ Adım 3'te tek kural: HER ALAN OPT-IN
+
+Solver / Domain Settings / Emitter node'larının her alanı bir `use` bayrağı
+taşır. Bayrak kapalıysa node o parametre hakkında **fikri yok** demektir ve
+**yazmaz**.
+
+Gerekçe, bu deponun en pahalı hata sınıfının bu katmandaki hâli: her apply'da
+bütün alanlarını yazan bir node, kullanıcının hiç dokunmadığı authored
+değerleri kimsenin seçmediği varsayılanlarla ezerdi — ve override katmanı sonra
+o uydurmaları sadakatle "geri yüklerdi". `in_use=false` ile `value=0` **aynı şey
+değildir**; ikisini birleştiren bir okuma bu arızayı görünmez yapar.
+
+★ Değer yazmak bayrağı **açar** (script'te de panelde de). Etkisiz bir alana
+yazılan değer sessiz bir no-op olurdu; kapatmak için `<key>.use = 0`.
+
+★★ `fluid_substance` ayrı tutuldu: **boş string meşru bir değerdir**, yani
+boşluk "ayarlanmadı" anlamına gelemez. Bayrak tek söz sahibi.
+
+★★★ **`granular_enabled` bilerek AÇILMADI.** Açıp kapatmanın biriken durumu
+geçersiz kılıp kılmadığı **ölçülmedi**. Restart semantiği tahmin edilmiş bir
+kadran, eksik kadrandan kötüdür — çünkü tahmin görünmez.
+
+★★★ **Emitter `domain` bağlamasını DEĞİŞTİRMEZ.** §9.2'deki gerekçe: bağlama bir
+özellik değil, çakışık domain belirsizliğinin **çözümü**. Grafiğin sessizce
+yeniden bağlaması emisyonu başka bir domain'e taşırdı ve ekranda bunu söyleyen
+hiçbir şey olmazdı.
+
+★★ Emitter yazma yolu **oku-değiştir-yaz**: `SimulationFlowSourceInfo` ~25
+authored alan taşıyor, tek değer için taze bir tane kurmak gerisini
+sıfırlardı — belirti "debiyi değiştirdim, emitter yer değiştirdi ve maddesi
+gitti" olurdu.
+
+### ★★ Öksüz grafik: hooklanmadı, **ÖLÇÜLDÜ**
+
+Sahibi silinen bir grafik çizmeye ve düzenleme kabul etmeye devam eder, hiçbir
+şeyi sürmez — fracture UI state'inin sahne değişimini sağ kalması bu şekildi.
+Domain silme tek çağrı noktası olduğu için grafiği orada düşürüyoruz
+(`removeFluidDomain`). Obje silme/yeniden adlandırma birden çok yoldan geçiyor;
+hepsini hooklamış gibi yapmak yerine durum `sim_graph.list()` üzerinde
+**`owner_missing`** olarak raporlanıyor. ★ Görünür kılmak, sessiz bayatlığın
+önündeki tek gerçek engel.
+3. ✅ **A cinsi tamamlandı:** `sim.solver` ayrıldı, `sim.domain_settings`
+   domain'in kendi anahtarlarını açtı, `sim.emitter` eklendi. ★ Inspector'daki
+   `Create…` YAPILMADI: node hiçbir varlık yaratmaz, ve yaratma düğmesi tam da
+   "node varlığı sahiplenir" izlenimini verirdi. Varlık yaratma kendi API'sinde
+   (`fluid.create_domain`, `flow_source.create`) kalıyor.
 4. **World kapsamı** — önce `WorldThermalState`'in dört katmanı, sonra node'u.
 5. **Object kapsamı** — MSF node'ları global graph'tan oraya taşınır.
 6. **Ölçüm ilişkileri** — domain ile kesişen collider/force raporu.

@@ -57,15 +57,14 @@ else:
         log("authored gas shader: preset=%r scattering=%.3f" % (
             authored["preset"], authored["scattering_coefficient"]))
 
-        rt.sim_graph.clear()
-        dom = rt.sim_graph.add_node("sim.domain_ref")
-        rt.sim_graph.set_node(dom, "domain", gas)
-        mat = rt.sim_graph.add_node("sim.material_volume")
-        rt.sim_graph.connect(dom, mat)
+        # A domain's LOOK belongs to that domain, so the graph is owned by it.
+        dom = rt_testlog.fresh_graph(rt, "domain", gas)
+        mat = rt.sim_graph.add_node("domain", gas, "sim.material_volume")
+        rt.sim_graph.connect("domain", gas, dom, mat)
         target_preset = "fire" if authored["preset"] != "fire" else "smoke"
-        rt.sim_graph.set_node(mat, "preset", target_preset)
+        rt.sim_graph.set_node("domain", gas, mat, "preset", target_preset)
 
-        result = rt.sim_graph.evaluate()
+        result = rt.sim_graph.evaluate("domain", gas)
         kinds = [c["kind"] for c in result["commands"]]
         check("render commands emitted", "set_render" in kinds, "%s" % (kinds,))
         # â˜…â˜…â˜… Preset ALONE by default. A node that also pushed its placeholder
@@ -77,7 +76,7 @@ else:
               sum(1 for c in result["commands"] if c["kind"] == "set_render") == 1,
               "%s" % ([c["key"] for c in result["commands"]],))
 
-        applied = rt.sim_graph.apply()
+        applied = rt.sim_graph.apply("domain", gas)
         log("   apply -> %s" % (applied,))
         check("apply reported no failures", not applied["failed"],
               "%s" % (applied["failed"],))
@@ -92,9 +91,9 @@ else:
               "nothing changed but the label: %s" % (now,))
 
         log("   -- now with explicit value overrides --")
-        rt.sim_graph.set_node_value(mat, "override_values", 1.0)
-        rt.sim_graph.set_node_value(mat, "scattering", 0.77)
-        rt.sim_graph.apply()
+        rt.sim_graph.set_node_value("domain", gas, mat, "override_values", 1.0)
+        rt.sim_graph.set_node_value("domain", gas, mat, "scattering", 0.77)
+        rt.sim_graph.apply("domain", gas)
         overridden = rt.gas.get_shader(gas)
         check("explicit override reaches the shader",
               abs(overridden["scattering_coefficient"] - 0.77) < 1e-4,
@@ -111,7 +110,7 @@ else:
               "%.6f != %.6f" % (restored["scattering_coefficient"],
                                 authored["scattering_coefficient"]))
         check("no overrides held after clear", rt.sim_graph.override_count() == 0)
-        rt.sim_graph.clear()
+        rt.sim_graph.clear("domain", gas)
 
 if not fluids:
     vacuous("liquid material is bound and reversible", "no fluid domain")
@@ -130,14 +129,12 @@ else:
         vacuous("liquid material is bound and reversible",
                 "the scene has no second material to bind")
     else:
-        rt.sim_graph.clear()
-        dom = rt.sim_graph.add_node("sim.domain_ref")
-        rt.sim_graph.set_node(dom, "domain", fluid)
-        mat = rt.sim_graph.add_node("sim.material_liquid")
-        rt.sim_graph.connect(dom, mat)
-        rt.sim_graph.set_node(mat, "surface_material", target)
+        dom = rt_testlog.fresh_graph(rt, "domain", fluid)
+        mat = rt.sim_graph.add_node("domain", fluid, "sim.material_liquid")
+        rt.sim_graph.connect("domain", fluid, dom, mat)
+        rt.sim_graph.set_node("domain", fluid, mat, "surface_material", target)
 
-        applied = rt.sim_graph.apply()
+        applied = rt.sim_graph.apply("domain", fluid)
         log("   apply -> %s" % (applied,))
         now = [d for d in rt.fluid.list_domains() if d["name"] == fluid][0]
         check("surface material actually changed",
@@ -154,7 +151,13 @@ else:
               restored == authored_surface,
               "%r != %r" % (restored, authored_surface))
 
-rt.sim_graph.clear()
+# ★ Two graphs were built, so two get cleared. There is no "clear everything"
+# call on purpose: a caller that cannot name what it is clearing is the same
+# ambiguity the scope argument removes.
+# * Read from the domain lists, not from `gas`/`fluid`: those names only exist
+# if their branch ran, and a NameError here would erase a completed test run.
+for _owner in ([gases[0]] if gases else []) + ([fluids[0]] if fluids else []):
+    rt.sim_graph.clear("domain", _owner)
 
 log("")
 log("NOTE: there is deliberately no Foam Material node (FoamParams has no")

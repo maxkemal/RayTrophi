@@ -44,6 +44,7 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include "MeshModifiers.h"
 #include "GeometryNodesV2.h"
 #include "MaterialNodesV2.h"
+#include "NodeSystem/SimulationNodes.h"
 #include "Paint/PaintTextureSet.h"
 #include "Paint/PaintLayerStack.h"
 
@@ -147,6 +148,31 @@ struct SceneData {
     // Material node graphs (Faz 1): per-MATERIAL (not per-object) graph that folds
     // into the existing PrincipledBSDF on Apply — see MaterialNodesV2.h header.
     std::unordered_map<std::string, std::shared_ptr<MaterialNodesV2::MaterialNodeGraphV2>> material_node_graphs; // materialName -> graph
+    // ── Simulation node graphs, SCOPED ───────────────────────────────────────
+    // Decision record: docs/dev/SIMULATION_NODE_OBJECT_MODEL.md, section 8 step 1.
+    //
+    // ★★★ There is no "the" simulation graph and NO "active domain" default.
+    // A graph belongs to a named scene entity, so every caller says which one it
+    // means. An implicit default here would be the exact silent-assumption
+    // pattern this repository keeps paying for: the call succeeds, edits the
+    // wrong domain, and nothing reports it.
+    //
+    // ★★ Keyed by NAME, like material_node_graphs above — not by pointer or id.
+    // A name survives a solver rebuild and means the same thing over IPC.
+    //
+    // ★★★ A graph whose owner is gone is the "fracture UI state survived the
+    // scene change" shape: it keeps drawing, keeps accepting edits, and drives
+    // nothing. Domain removal drops its graph at that one call site
+    // (rtapi::removeFluidDomain). Object deletion and renaming reach the scene
+    // through several paths, so rather than claim they are all hooked, the
+    // condition is MEASURED and reported as `owner_missing` on
+    // rtapi::simGraphList(). Making it visible is what keeps it from being the
+    // silent kind of stale.
+    std::unordered_map<std::string, std::shared_ptr<NodeSystem::Sim::SimulationNodeGraph>> simulation_domain_graphs; // domainName -> graph
+    std::unordered_map<std::string, std::shared_ptr<NodeSystem::Sim::SimulationNodeGraph>> simulation_object_graphs; // objectName -> graph
+    // One world, so one graph and no key. Null until something asks for it.
+    std::shared_ptr<NodeSystem::Sim::SimulationNodeGraph> simulation_world_graph;
+
     std::unordered_map<std::string, Paint::PaintTextureSet> mesh_paint_texture_sets;       // nodeName#materialID -> texture set
     std::unordered_map<std::string, Paint::PaintLayerStack> mesh_paint_layer_stacks;      // nodeName#materialID -> layer stack
 

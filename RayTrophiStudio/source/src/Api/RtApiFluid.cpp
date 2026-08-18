@@ -920,6 +920,12 @@ Result removeFluidDomain(const std::string& domain_id_or_name) {
         (info.type == "gas") ? false : g_ctx->scene.removeFluidObject(info.id);
     if (!grid_removed && !object_removed)
         return Result::fail("failed to remove fluid domain: " + info.name);
+    // ★★ The domain's scoped node graph goes with it. A graph outliving the
+    // entity it names is the shape that let fracture UI state survive a scene
+    // change: it keeps drawing, keeps accepting edits, and drives nothing.
+    // Removed AFTER the domain is actually gone, so a failed removal above
+    // cannot take the graph with it.
+    g_ctx->scene.simulation_domain_graphs.erase(info.name);
     return Result::success();
 }
 
