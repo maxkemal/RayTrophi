@@ -1,7 +1,8 @@
-#include "RtIpcTemplates.h"
+﻿#include "RtIpcTemplates.h"
 
 #include "Template/TemplateRegistry.h"
 #include "Template/TemplateLoader.h"
+#include "UI/TemplateHubUI.h"
 #include "ProjectManager.h"
 #include "Api/RtApi.h"
 
@@ -137,6 +138,50 @@ bool dispatchTemplateIpc(const std::string& method, const nlohmann::json& params
             rtapi::TemplateOpenInfo info;
             (void)rtapi::openTemplate(id, policy_name, info);
             return openInfoJson(info);
+        });
+        return true;
+    }
+    if (method == "templates.save_user") {
+        const std::string name = params.value("display_name", "");
+        const std::string desc = params.value("description", "");
+        const std::string cat = params.value("category", "user");
+        out_result = enqueue([name, desc, cat](UIContext&) {
+            const auto res = rtapi::saveUserTemplate(name, desc, cat);
+            if (!res.ok) {
+                return json{{"__error", res.error}, {"code", "save_failed"}};
+            }
+            return json{{"ok", true}, {"display_name", name}};
+        });
+        return true;
+    }
+    if (method == "templates.delete_user") {
+        const std::string id = params.value("id", "");
+        out_result = enqueue([id](UIContext&) {
+            const auto res = rtapi::deleteUserTemplate(id);
+            if (!res.ok) {
+                return json{{"__error", res.error}, {"code", "delete_failed"}};
+            }
+            return json{{"ok", true}, {"id", id}};
+        });
+        return true;
+    }
+    if (method == "templates.show_hub") {
+        out_result = enqueue([](UIContext&) {
+            raytrophi::templates::TemplateHubUI::instance().show();
+            return json{{"ok", true}, {"visible", true}};
+        });
+        return true;
+    }
+    if (method == "templates.hide_hub") {
+        out_result = enqueue([](UIContext&) {
+            raytrophi::templates::TemplateHubUI::instance().hide();
+            return json{{"ok", true}, {"visible", false}};
+        });
+        return true;
+    }
+    if (method == "templates.is_hub_visible") {
+        out_result = enqueue([](UIContext&) {
+            return json{{"visible", raytrophi::templates::TemplateHubUI::instance().isVisible()}};
         });
         return true;
     }

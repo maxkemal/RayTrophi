@@ -21,7 +21,7 @@ bool VulkanVolumeInstrumentation::ensure(VulkanDevice& device) {
     }
 
     VolumePerformanceStats initial{};
-    initial.reserved[2] = 0u; // counters are opt-in; normal rendering stays uncontaminated
+    initial.enabled = 0u; // counters are opt-in; normal rendering stays uncontaminated
 
     BufferCreateInfo info{};
     info.size = sizeof(VolumePerformanceStats);
@@ -44,7 +44,7 @@ void VulkanVolumeInstrumentation::reset(VulkanDevice& device, bool enabled) {
         return;
     }
     VolumePerformanceStats cleared{};
-    cleared.reserved[2] = enabled ? 1u : 0u;
+    cleared.enabled = enabled ? 1u : 0u;
     if (void* mapped = device.mapBuffer(m_impl->buffer)) {
         std::memcpy(mapped, &cleared, sizeof(cleared));
         device.unmapBuffer(m_impl->buffer);

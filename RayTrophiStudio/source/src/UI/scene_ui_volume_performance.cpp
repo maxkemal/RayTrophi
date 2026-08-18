@@ -41,10 +41,10 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         stats.densitySamples + stats.emptySegmentsSkipped;
     const uint32_t temporalTotal =
         stats.temporalAccepted + stats.temporalRejected;
-    char report[1400];
+    char report[1800];
     std::snprintf(
         report, sizeof(report),
-        "RayTrophi Vulkan Volume Metrics v6\n"
+        "RayTrophi Vulkan Volume Metrics v8\n"
         "volume_rays: %u\n"
         "density_samples: %u\n"
         "shadow_density_samples: %u\n"
@@ -60,6 +60,15 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         "majorant_available_queries: %u\n"
         "solid_probe_runs: %u\n"
         "solid_probe_hits: %u\n"
+        "gas_handoffs: %u\n"
+        "layered_handoffs: %u\n"
+        "arbiter_gate_open: %u\n"
+        "arbiter_candidates: %u\n"
+        "arbiter_rejects: %u\n"
+        "arbiter_no_box: %u\n"
+        "arbiter_empty_range: %u\n"
+        "arbiter_no_crossing: %u\n"
+        "teleports: %u\n"
         "density_samples_per_ray: %.4f\n"
         "shadow_samples_per_ray: %.4f\n"
         "empty_space_skip_ratio_percent: %.3f\n"
@@ -82,11 +91,21 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         stats.temporalRejected,
         stats.majorantQueries,
         stats.majorantAvailableQueries,
-        // reserved[0]/reserved[1] carry the embedded-solid probe counters
-        // (shader-side volumeRecordSolidProbe). Runs==0 means the perf gate
-        // suppressed the probe; runs>0 with hits==0 means it ran and missed.
-        stats.reserved[0],
-        stats.reserved[1],
+        // Embedded-solid probe counters (shader-side volumeRecordSolidProbe).
+        // Runs==0 means the perf gate suppressed the probe; runs>0 with hits==0
+        // means it ran and missed. They were named reserved[0]/reserved[1] and
+        // reached only this report — the panel itself never showed them.
+        stats.solidProbeRuns,
+        stats.solidProbeHits,
+        stats.gasHandoffs,
+        stats.layeredHandoffs,
+        stats.arbiterGateOpen,
+        stats.arbiterCandidates,
+        stats.arbiterRejects,
+        stats.arbiterNoBox,
+        stats.arbiterEmptyRange,
+        stats.arbiterNoCrossing,
+        stats.teleports,
         safeRatio(stats.densitySamples, stats.volumeRays),
         safeRatio(stats.shadowDensitySamples, stats.volumeRays),
         100.0f * safeRatio(stats.emptySegmentsSkipped, traversalWork),
@@ -326,6 +345,26 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
     ImGui::Text("Extinction terminations: %u", g_cachedStats.extinctionTerminations);
     ImGui::Text("Step budget exhausted: %u", g_cachedStats.stepBudgetExhausted);
     ImGui::Text("Completed intervals: %u", g_cachedStats.completedIntervals);
+    ImGui::Text("Solid probes run: %u", g_cachedStats.solidProbeRuns);
+    ImGui::Text("Solid probes hit: %u", g_cachedStats.solidProbeHits);
+    ImGui::Text("Gas handoffs: %u", g_cachedStats.gasHandoffs);
+    ImGui::Text("Layered handoffs: %u", g_cachedStats.layeredHandoffs);
+    ImGui::Text("Arbiter gate opened: %u", g_cachedStats.arbiterGateOpen);
+    ImGui::Text("Arbiter candidates seen: %u", g_cachedStats.arbiterCandidates);
+    if (g_cachedStats.arbiterGateOpen == 0u && g_cachedStats.volumeRays > 0u) {
+        ImGui::TextDisabled("  (gate NEVER opened - this volume reads itself as\n                             liquid/cloud: customIndex vs SSBO order mismatch)");
+    }
+    ImGui::Text("Arbiter rejects: %u", g_cachedStats.arbiterRejects);
+    ImGui::Text("Teleports past box: %u", g_cachedStats.teleports);
+    if (g_cachedStats.teleports > g_cachedStats.volumeRays / 4u &&
+        g_cachedStats.volumeRays > 0u) {
+        ImGui::TextDisabled("  (a quarter of gas rays jump past everything "
+                            "inside the box — the black-band signature)");
+    }
+    if (g_cachedStats.solidProbeRuns == 0 && g_cachedStats.volumeRays > 0) {
+        ImGui::TextDisabled("  (gate suppressed every probe — surfaces inside a "
+                            "volume cannot be found)");
+    }
 
     ImGui::Separator();
     ImGui::Text("Density samples / ray: %.2f",

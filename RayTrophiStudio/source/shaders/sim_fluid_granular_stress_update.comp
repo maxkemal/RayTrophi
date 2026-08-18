@@ -14,6 +14,15 @@ layout(set=0,binding=9) buffer FractureHistory { float fracture_history[]; };
 layout(set=0,binding=10) buffer DeformationCol0 { float f0[]; };
 layout(set=0,binding=11) buffer DeformationCol1 { float f1[]; };
 layout(set=0,binding=12) buffer DeformationCol2 { float f2[]; };
+// Thermal/burn softening, 1 = cold and intact. Derived on the host from the
+// particle's temperature and remaining mass; the kernel needs no thermal model.
+layout(set=0,binding=13) readonly buffer Softening { float softening[]; };
+// Cohesion/tensile multiplier. Deliberately a SEPARATE array rather than a
+// curve evaluated here: bond strength does NOT track stiffness (a thermoplastic
+// goes tacky before it flows), and a second copy of that curve in GLSL would
+// drift from the host the first time either side was tuned. The host derives
+// both scalars once per frame; this shader only multiplies.
+layout(set=0,binding=14) readonly buffer BondScale { float bond_scale_buf[]; };
 
 layout(push_constant) uniform PC {
     uint count;
@@ -29,7 +38,7 @@ layout(push_constant) uniform PC {
     float healing_rate;
     uint rebonding;
     float hardening_coefficient;
-    uint pad0;
+    float max_stored_strain;
     uint pad1;
     uint pad2;
 } pc;
@@ -95,15 +104,53 @@ void main() {
                 vec3(c_data[a+3],c_data[a+4],c_data[a+5]),
                 vec3(c_data[a+6],c_data[a+7],c_data[a+8]));
     float nu=clamp(pc.poisson_ratio,-0.49,0.49);
-    float mu=pc.young_modulus/(2.0*(1.0+nu));
-    float lambda=pc.young_modulus*nu/((1.0+nu)*(1.0-2.0*nu));
+    // ★★ BOND STRENGTH FALLS QUADRATICALLY, STIFFNESS LINEARLY, and that
+    // asymmetry is what makes a melt read as a melt: the block stops holding
+    // its shape before it goes soft. Falling together gives a body that sags
+    // while still refusing to tear, which reads as rubber.
+    // ★ tensile_cutoff follows cohesion — they are the same bonds.
+    // The push-constant values are the AUTHORED material and are never
+    // written back; only these locals are scaled.
+    float soft=clamp(softening[i],0.0,1.0);
+    if(isnan(soft)||isinf(soft))soft=1.0;
+    float bond_scale=bond_scale_buf[i];
+    if(isnan(bond_scale)||isinf(bond_scale))bond_scale=1.0;
+    bond_scale=max(bond_scale,0.0);
+    float young=max(pc.young_modulus*soft,1.0);
+    float cohesion=max(pc.cohesion,0.0)*bond_scale;
+    float tensile_cutoff=max(pc.tensile_cutoff,0.0)*bond_scale;
+    float mu=young/(2.0*(1.0+nu));
+    float lambda=young*nu/((1.0+nu)*(1.0-2.0*nu));
     mat3 F=mat3(vec3(f0[i*3],f0[i*3+1],f0[i*3+2]),
                 vec3(f1[i*3],f1[i*3+1],f1[i*3+2]),
                 vec3(f2[i*3],f2[i*3+1],f2[i*3+2]));
-    mat3 F_trial=(mat3(1.0)+pc.dt*C)*F;
-    bool bad_kinematics=!finiteMat3(F_trial)||determinant(F_trial)<=1.0e-6;
+    // ★★★ (I + dt*C) IS A FIRST-ORDER EXPONENTIAL MAP AND IT HAS ITS OWN CFL,
+    // one that contains no Young modulus. The host sizes the subcycle from the
+    // PREVIOUS frame's C (elasticStepInfo/measureLoad), which cannot see a
+    // gradient spike forming inside this frame and is capped by
+    // granular_max_solver_substeps besides. Clamping the increment here is what
+    // makes the step finite regardless.
+    //
+    // Frobenius bounds the spectral norm, so ||dC|| <= 0.25 keeps every
+    // eigenvalue of I + dC at modulus >= 0.75 and det(I + dC) >= 0.42: the
+    // trial gradient cannot invert or collapse in a single step no matter what
+    // C arrives. Past this bound the increment is not physics being discarded,
+    // it is integration error being manufactured -- but a clamped step is still
+    // an UNDER-RESOLVED step, so it raises bit 16 rather than passing silently.
+    mat3 dC=pc.dt*C;
+    float strain_increment=sqrt(dot(dC[0],dC[0])+dot(dC[1],dC[1])+dot(dC[2],dC[2]));
+    bool strain_limited=false;
+    if(!(strain_increment<1.0e30)){dC=mat3(0.0);strain_limited=true;}
+    else if(strain_increment>0.25){dC*=0.25/strain_increment;strain_limited=true;}
+    mat3 F_trial=(mat3(1.0)+dC)*F;
+    // Only a NON-FINITE gradient is unrecoverable now. The determinant floor
+    // that used to live here fired constantly on soft material and dumped the
+    // particle's whole stress in one step; the cause was downstream (see the
+    // stored-strain cap near F_projected) and is fixed there instead of being
+    // absorbed by a reset here.
+    bool bad_kinematics=!finiteMat3(F_trial);
     if(bad_kinematics)
-        F_trial=(finiteMat3(F)&&determinant(F)>1.0e-6)?F:mat3(1.0);
+        F_trial=finiteMat3(F)?F:mat3(1.0);
     mat3 R=polarRotation(F_trial);
     mat3 stretch=transpose(R)*F_trial;
     mat3 elastic_strain=0.5*(stretch+transpose(stretch))-mat3(1.0);
@@ -117,14 +164,14 @@ void main() {
              +2.0*(dev[0][1]*dev[0][1]+dev[0][2]*dev[0][2]+dev[1][2]*dev[1][2]);
     float q=sqrt(max(1.5*ssq,0.0));
     float d=clamp(damage[i],0.0,1.0);
-    bool has_bonds=pc.cohesion>0.0||pc.tensile_cutoff>0.0;
+    bool has_bonds=cohesion>0.0||tensile_cutoff>0.0;
     float accumulated_plastic=max(hardening_state[i],0.0);
     float bond_opening=max(fracture_history[i],0.0);
     float hardening_scale=exp(clamp(pc.hardening_coefficient*accumulated_plastic,0.0,4.0));
-    float effective_cohesion=(1.0-d)*max(pc.cohesion,0.0);
+    float effective_cohesion=(1.0-d)*cohesion;
     float strength=max((effective_cohesion+max(pressure,0.0)*pc.friction_tangent)*hardening_scale,0.0);
     float tensile=max(maxPrincipalStress(S),0.0);
-    float effective_tensile=(1.0-d)*max(pc.tensile_cutoff,0.0);
+    float effective_tensile=(1.0-d)*tensile_cutoff;
     bool tensile_failure=tensile>effective_tensile+1.0e-6;
     bool detached=false;
     bool yielded=q>strength+1e-6;
@@ -133,7 +180,7 @@ void main() {
     if(yielded){
         float scale=strength/max(q,1e-6);
         S=mean*mat3(1.0)+scale*dev;
-        float dp=(q-strength)/max(pc.young_modulus,1e-6);
+        float dp=(q-strength)/young;
         plastic_increment=dp;
         accumulated_plastic+=dp;
         pv[i]=clamp(pv[i]*exp(-pc.dilatancy_tangent*dp),0.25,4.0);
@@ -141,7 +188,7 @@ void main() {
     if(tensile_failure){
         if(has_bonds){
             float tensile_overstress_strain=max(
-                tensile-effective_tensile,0.0)/max(pc.young_modulus,1.0e-6);
+                tensile-effective_tensile,0.0)/young;
             // Rankine history is a maximum equivalent opening, not a time
             // integral. Adding the same elastic overstress every solver
             // substep makes the result depend on substep count and eventually
@@ -156,8 +203,8 @@ void main() {
         float target_damage=1.0-exp(-pc.damage_rate*damage_driver);
         d=max(d,target_damage);
     }
-    float undamaged_strength=max((max(pc.cohesion,0.0)+max(pressure,0.0)*pc.friction_tangent)*hardening_scale,0.0);
-    if(pc.rebonding!=0u && pressure>max(pc.cohesion,0.1) && q<=undamaged_strength+1.0e-6){
+    float undamaged_strength=max((cohesion+max(pressure,0.0)*pc.friction_tangent)*hardening_scale,0.0);
+    if(pc.rebonding!=0u && pressure>max(cohesion,0.1) && q<=undamaged_strength+1.0e-6){
         d-=pc.healing_rate*pc.dt;
         if(pc.damage_rate>1.0e-6){
             float compatible_history=pc.fracture_strain-
@@ -166,7 +213,7 @@ void main() {
         }
     }
     d=clamp(d,0.0,1.0);
-    effective_tensile=(1.0-d)*max(pc.tensile_cutoff,0.0);
+    effective_tensile=(1.0-d)*tensile_cutoff;
     float max_principal=maxPrincipalStress(S);
     if(max_principal>effective_tensile){
         vec3 direction=principalDirection(S,max_principal);
@@ -178,7 +225,7 @@ void main() {
     ssq=dev[0][0]*dev[0][0]+dev[1][1]*dev[1][1]+dev[2][2]*dev[2][2]
        +2.0*(dev[0][1]*dev[0][1]+dev[0][2]*dev[0][2]+dev[1][2]*dev[1][2]);
     q=sqrt(max(1.5*ssq,0.0));
-    effective_cohesion=(1.0-d)*max(pc.cohesion,0.0);
+    effective_cohesion=(1.0-d)*cohesion;
     strength=max((effective_cohesion+max(pressure,0.0)*pc.friction_tangent)*hardening_scale,0.0);
     if(q>strength+1.0e-6)
         S=mean*mat3(1.0)+(strength/max(q,1.0e-6))*dev;
@@ -192,12 +239,41 @@ void main() {
     float bulk=max(lambda+2.0*mu/3.0,1.0e-6);
     mat3 projected_strain=local_dev/max(2.0*mu,1.0e-6)+
         (local_mean/(3.0*bulk))*mat3(1.0);
+    // ★★★★★ THIS IS WHERE THE "POP" WAS BORN, AND IT IS A PLASTICITY QUESTION,
+    // NOT A STABILITY ONE. The strain a given stress implies is stress/E, so as
+    // E falls the elastic strain this back-projection asks the gradient to store
+    // grows without bound. Measured: a 1 kPa pile carries 26 kPa of its own
+    // overburden, K = 667 Pa, so the volumetric strain wanted is about -39.
+    // I + eps is then wildly negative-determinant, the NEXT step's kinematics
+    // check called it invalid, and the particle's entire stress was dumped to
+    // zero in a single step. That step-function discharge is exactly what reads
+    // as a small burst escaping the pile. 22 such events in a 240-step run.
+    //
+    // A deformation gradient can only carry RECOVERABLE strain. Strain past what
+    // the material can elastically hold is permanent -- it is compaction, and it
+    // belongs in the particle positions, which already carry the plastic motion.
+    // So clamp what gets STORED and let the excess be plastic. The stress S
+    // written out this step is untouched (it was already return-mapped), so
+    // nothing is discarded and there is nothing to discharge.
+    //
+    // Frobenius <= 0.5 bounds every eigenvalue of eps by 0.5, so I + eps keeps
+    // det >= 0.125 and the determinant floor downstream becomes unreachable by
+    // this route -- which is why that floor is now a non-finite check only.
+    float stored_strain=sqrt(dot(projected_strain[0],projected_strain[0])+
+                             dot(projected_strain[1],projected_strain[1])+
+                             dot(projected_strain[2],projected_strain[2]));
+    bool compaction_capped=false;
+    if(!(stored_strain<1.0e30)){projected_strain=mat3(0.0);compaction_capped=true;}
+    else if(stored_strain>pc.max_stored_strain){
+        projected_strain*=pc.max_stored_strain/stored_strain;
+        compaction_capped=true;
+    }
     mat3 F_projected=R*(mat3(1.0)+projected_strain);
     bool bad=bad_kinematics||!finiteMat3(S)||!finiteMat3(F_projected)||
              determinant(F_projected)<=1.0e-6||
              isnan(d)||isinf(d)||isnan(accumulated_plastic)||isinf(accumulated_plastic)||
              isnan(bond_opening)||isinf(bond_opening);
-    if(bad){S=mat3(0.0);F_projected=mat3(1.0);d=1.0;accumulated_plastic=0.0;bond_opening=0.0;plastic_increment=0.0;detached=true;yielded=false;}
+    if(bad){S=mat3(0.0);F_projected=mat3(1.0);d=1.0;accumulated_plastic=0.0;bond_opening=0.0;plastic_increment=0.0;detached=true;yielded=false;compaction_capped=false;}
     sd[i*3]=S[0][0];sd[i*3+1]=S[1][1];sd[i*3+2]=S[2][2];
     ss[i*3]=S[0][1];ss[i*3+1]=S[0][2];ss[i*3+2]=S[1][2];
     yield_values[i]=bad?0.0:trial_yield_overstress;
@@ -208,5 +284,16 @@ void main() {
     f0[i*3]=F_projected[0][0];f0[i*3+1]=F_projected[0][1];f0[i*3+2]=F_projected[0][2];
     f1[i*3]=F_projected[1][0];f1[i*3+1]=F_projected[1][1];f1[i*3+2]=F_projected[1][2];
     f2[i*3]=F_projected[2][0];f2[i*3+1]=F_projected[2][1];f2[i*3+2]=F_projected[2][2];
-    flags[i]=(yielded?1u:0u)|(detached?2u:0u)|(bad?4u:0u);
+    // Bit 8 (sleeping) is the settle kernel's, and settle runs right after this
+    // one, so clearing it here is deliberate and unchanged. Bit 16 is new: "the
+    // subcycle was too coarse for the strain rate I was handed". It exists so
+    // an under-resolved step is COUNTABLE instead of merely survivable.
+    //
+    // Bit 32 is different in kind: it says the material compacted past what it
+    // can elastically store, so the excess became permanent. That is REAL
+    // PLASTICITY, not an error -- a soft pile is expected to show it steadily.
+    // It is reported so "soft but valid" can be told apart from "diverging",
+    // which is the distinction the det(F) reset used to destroy.
+    flags[i]=(yielded?1u:0u)|(detached?2u:0u)|(bad?4u:0u)|(strain_limited?16u:0u)|
+             (compaction_capped?32u:0u);
 }

@@ -1,4 +1,4 @@
-#include "ParticleSimulation.h"
+﻿#include "ParticleSimulation.h"
 #include "Fluid/FluidParticleSolidRecovery.h"
 #include "Fluid/FluidLevelSet.h"   // buildSubstanceViscosityField
 #include "Fluid/SubstanceTag.h"
@@ -2249,11 +2249,11 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         s_down += elapsedMilliseconds(p2g_phase2, SimulationClock::now());
         if (++s_n >= 240) {
             const float inv = 1.0f / static_cast<float>(s_n);
-            SCENE_LOG_INFO("[FluidGPU P2G avg ms] backend=" + std::string(compute->backendName()) +
+           /* SCENE_LOG_INFO("[FluidGPU P2G avg ms] backend=" + std::string(compute->backendName()) +
                            " particle_upload=" + std::to_string(s_up * inv) +
                            " dispatch+sync=" + std::to_string(s_disp * inv) +
                            " field_download=" + std::to_string(s_down * inv) +
-                           " particles=" + std::to_string(particle_count));
+                           " particles=" + std::to_string(particle_count));*/
             s_up = s_disp = s_down = 0.0f;
             s_n = 0;
         }
@@ -5254,7 +5254,8 @@ bool runGpuFluidSurfaceCombustion(
     const FluidSim::FluidGrid& gas_grid,
     SimulationGridDomainComputeBuffers& gas_buffers,
     float dt,
-    SimulationComputeContext* compute) {
+    SimulationComputeContext* compute,
+    std::size_t& burned_particles_total) {
     if ((!fluid_domain.fluid_flammable && !fluid_domain.fluid_extinguishing) ||
         fluid_domain.type != SimulationDomainType::Fluid ||
         gas_domain.type != SimulationDomainType::Gas ||
@@ -5343,6 +5344,25 @@ bool runGpuFluidSurfaceCombustion(
         ? 1.0f / gas_grid.voxel_size : 0.0f;
     const float ignition = std::max(0.0f, fluid_domain.fluid_ignition_temperature);
     const float rate = std::max(0.0f, fluid_domain.fluid_evaporation_rate);
+    // Kelvin frame for the particle-side thermal state (see the unit note at the
+    // conversion below). ambient is the domain's authored rest temperature —
+    // NOT 0, which is what the field used to hold because nothing ever wrote it.
+    const float ambient_kelvin = std::max(1.0f, fluid_domain.thermal_ambient_kelvin);
+    // ★★ Normalised gas temperature maps onto [ambient, ambient + 1500 K] —
+    // the same fallback span volume_closesthit.rchit uses when a volume
+    // publishes no explicit Kelvin range, so the sim and the renderer agree on
+    // what a given gas value looks like.
+    //
+    // ★ fire_max_temperature is NOT usable here even though the name fits: it
+    // defaults to 10.0, i.e. the gas solver's own arbitrary scale (its
+    // ignition_temperature is 0.3 in the same units), not Kelvin. Feeding it in
+    // as a Kelvin ceiling would clamp every particle to 10 K and freeze the
+    // whole thermal chain without erroring.
+    const float max_kelvin = ambient_kelvin + 1500.0f;
+    const float heat_release = std::max(0.0f, fluid_domain.fluid_combustion_heat_release) * 100.0f;
+    const float cooling = std::max(0.0f, fluid_domain.fluid_surface_cooling);
+    const float contact_conductivity =
+        std::max(0.0f, fluid_domain.fluid_params.granular_thermal_conductivity);
     if (inv_gas_voxel > 0.0f && !gas_grid.temperature.empty() && rate > 0.0f) {
         for (std::size_t p = fluid_particles.size(); p-- > 0;) {
             // Untagged legacy/seed/flow particles inherit the authored domain
@@ -5364,13 +5384,54 @@ bool runGpuFluidSurfaceCombustion(
                 gz < 0 || gz >= gas_grid.nz) continue;
             const std::size_t gi = gas_grid.cellIndex(gx, gy, gz);
             const float temperature = gas_grid.temperature[gi];
+            // ★★★ UNIT BOUNDARY. The gas grid stores EITHER normalised 0..1 OR
+            // Kelvin and disambiguates by magnitude; the particle field is
+            // strictly Kelvin (see FluidParticles::temperature). Converting here
+            // is the whole reason the thermal half of softening can fire at all:
+            // handing a 0..1 value to a threshold authored as 380 K is a silent
+            // no-op, not an error.
+            const float gas_kelvin = (temperature > 20.0f)
+                ? temperature
+                : ambient_kelvin + std::clamp(temperature, 0.0f, 1.0f) *
+                                       std::max(max_kelvin - ambient_kelvin, 1.0f);
+            if (p < fluid_particles.temperature.size()) {
+                float& particle_kelvin = fluid_particles.temperature[p];
+                // Contact heating toward the surrounding gas, then relaxation
+                // back toward ambient. Exponential form so both are stable at
+                // any dt and neither can overshoot past its own target.
+                if (gas_kelvin > particle_kelvin) {
+                    particle_kelvin += (gas_kelvin - particle_kelvin) *
+                                       (1.0f - std::exp(-contact_conductivity * dt));
+                }
+                if (cooling > 0.0f && particle_kelvin > ambient_kelvin) {
+                    particle_kelvin += (ambient_kelvin - particle_kelvin) *
+                                       (1.0f - std::exp(-cooling * dt));
+                }
+            }
             if (temperature < ignition) continue;
             const float heat_factor = std::clamp(
                 (temperature - ignition) / std::max(ignition, 1.0f), 0.0f, 1.0f);
             float& mass = fluid_particles.mass_fraction[p];
+            const float before = mass;
             mass = std::clamp(
                 mass - rate * heat_factor * combustible * dt, 0.0f, 1.0f);
-            if (mass <= 0.02f) fluid_particles.removeSwap(p);
+            // Reaction heat: the mass this particle just gave up warms the
+            // particle itself, not only the gas. Without this a body only ever
+            // heats from outside and the exothermic part of its own combustion
+            // is invisible to the constitutive path.
+            const float burned = std::max(before - mass, 0.0f);
+            if (burned > 0.0f && p < fluid_particles.temperature.size()) {
+                fluid_particles.temperature[p] =
+                    std::min(fluid_particles.temperature[p] + heat_release * burned,
+                             max_kelvin);
+            }
+            if (mass <= 0.02f) {
+                // Counted HERE, at the only place combustion destroys a
+                // particle, so the emitter gate cannot mistake burned material
+                // for freed capacity.
+                ++burned_particles_total;
+                fluid_particles.removeSwap(p);
+            }
         }
     }
     return true;
@@ -7957,6 +8018,17 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // Only allow emission when at least 1% capacity is available so
             // normal filling (empty → full) is unaffected but steady-state
             // at-max oscillation is suppressed.
+            // ★ fluid_max_particles is a RESOURCE ceiling (memory/perf), not a
+            // budget on how much material may ever be introduced. An emitter
+            // authored as a continuous source is SUPPOSED to keep replacing what
+            // burns away; bounding total emission is what use_particle_limit and
+            // use_time_limit on the source are for.
+            //
+            // ★★ A previous revision subtracted state.burned_particles here so
+            // burned mass could not fund new emission. It was reverted: it
+            // silently repurposed the ceiling, and it would have throttled every
+            // ordinary fountain draining through an open boundary too. The
+            // counter is kept as telemetry only — read it, do not gate on it.
             const std::size_t max_p = fluid_domain.fluid_max_particles;
             const std::size_t cur_p = state.particles.size();
             const std::size_t dead_band = std::max<std::size_t>(1u, max_p / 100u);
@@ -8385,6 +8457,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         }
         return;
     }
+
+    // ★ Cleared per step, capacity kept. The trace describes THIS step: a
+    // coupling that stopped running must disappear from it, or a stale entry
+    // would keep reporting a dead path as live.
+    coupling_trace_.clear();
 
     const float dt = context.dt;
     const bool automatic_molten_transfer =
@@ -9202,13 +9279,69 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // advection velocity. Subcycle the complete transfer/grid/gather/
             // advect path so the authored Young modulus is actually used.
             const float granular_frame_dt = dt;
+            // The subcycle must satisfy the strain-rate CFL as well as the wave
+            // CFL. Measuring ||C|| here (from the affine the last G2P wrote) is
+            // what closes the soft-material hole: without it any E below
+            // rho*(0.35h/dt)^2 silently returns a single full-frame substep.
+            // ★ ONCE PER FRAME, before the subcycle and before the granular
+            // state is uploaded. Deriving it per substep would make the melt
+            // rate depend on the substep count.
+            // Conduction FIRST, then the softening derivation reads the result
+            // in the same frame. The other order costs a frame of latency per
+            // link in the chain, which at 24 fps is visible as the melt front
+            // lagging the flame.
+            Fluid::diffuseParticleTemperature(
+                state.particles, state.grid,
+                fluid_params.granular_thermal_conductivity, granular_frame_dt);
+            if (fluid_params.granular_enabled) {
+                state.particles.ensureGranularStateSize();
+                Fluid::Granular::SofteningParams softening_params;
+                softening_params.softening_temperature =
+                    fluid_params.granular_softening_temperature;
+                softening_params.softening_range =
+                    fluid_params.granular_softening_range;
+                softening_params.tack_peak = fluid_params.granular_tack_peak;
+                softening_params.residual_strength =
+                    fluid_params.granular_residual_strength;
+                Fluid::Granular::updateSoftening(state.particles, softening_params);
+            }
+            const auto granular_load = fluid_params.granular_enabled
+                ? Fluid::Granular::measureLoad(state.particles)
+                : Fluid::Granular::LoadMeasurement{};
+            const float granular_strain_rate = granular_load.strain_rate;
+            const float granular_overburden = granular_load.overburden_pressure;
             const auto granular_frame_elastic = Fluid::Granular::elasticStepInfo(
                 fluid_params.granular_young_modulus,
-                state.grid.voxel_size, granular_frame_dt);
+                state.grid.voxel_size, granular_frame_dt,
+                granular_strain_rate, granular_overburden,
+                granular_load.softening_min);
             const int granular_solver_substeps = fluid_params.granular_enabled
                 ? std::clamp(granular_frame_elastic.required_substeps, 1,
                              fluid_params.granular_max_solver_substeps)
                 : 1;
+            // ★ A material too soft for its own overburden is not a tuning
+            // choice, it is outside the corotational model's domain: holding
+            // pressure p needs volumetric strain p/K, and at E far below the
+            // load that strain exceeds one. It stays stable for a while, then
+            // discharges. Say so once per parameter change rather than letting
+            // it read as a mysterious explosion.
+            if (fluid_params.granular_enabled && granular_frame_elastic.below_load) {
+                static float s_last_warned_young = -1.0f;
+                if (s_last_warned_young != fluid_params.granular_young_modulus) {
+                    s_last_warned_young = fluid_params.granular_young_modulus;
+                    SCENE_LOG_WARN(
+                        "[Granular] Young modulus " +
+                        std::to_string(granular_frame_elastic.requested_young_modulus) +
+                        " Pa is below the " +
+                        std::to_string(granular_frame_elastic.young_modulus_for_load) +
+                        " Pa its own overburden needs (" +
+                        std::to_string(granular_load.column_height) + " m of material = " +
+                        std::to_string(granular_frame_elastic.overburden_pressure) +
+                        " Pa). The pile cannot hold itself in the small-strain regime: "
+                        "expect compaction, a det(F) reset, and a velocity burst. This is "
+                        "a material limit, not a timestep one - substeps will not fix it.");
+                }
+            }
             if (granular_solver_substeps > 1) {
                 fluid_params.velocity_damping = std::pow(
                     std::clamp(fluid_params.velocity_damping, 0.0f, 1.0f),
@@ -9568,11 +9701,14 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     granular_substep + 1 == granular_solver_substeps) {
                     std::size_t yielded = 0, detached = 0, invalid = 0, sleeping = 0, damaged = 0;
                     std::size_t damage_over_10 = 0, damage_over_50 = 0, damage_over_90 = 0;
+                    std::size_t strain_limited = 0, compaction_capped = 0;
                     for (uint32_t f : state.particles.granular_material_flags) {
                         yielded += (f & 1u) != 0u;
                         detached += (f & 2u) != 0u;
                         invalid += (f & 4u) != 0u;
                         sleeping += (f & 8u) != 0u;
+                        strain_limited += (f & 16u) != 0u;
+                        compaction_capped += (f & 32u) != 0u;
                     }
                     float max_yield = 0.0f, max_plastic = 0.0f;
                     float max_accumulated_plastic = 0.0f, max_damage = 0.0f;
@@ -9611,6 +9747,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     state.fluid_stats.granular_detached_particles = detached;
                     state.fluid_stats.granular_invalid_particles = invalid;
                     state.fluid_stats.granular_sleeping_particles = sleeping;
+                    state.fluid_stats.granular_strain_limited_particles = strain_limited;
+                    state.fluid_stats.granular_compaction_capped_particles = compaction_capped;
                     state.fluid_stats.granular_damaged_particles = damaged;
                     state.fluid_stats.granular_damage_over_10_particles = damage_over_10;
                     state.fluid_stats.granular_damage_over_50_particles = damage_over_50;
@@ -9636,7 +9774,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                             : 0.0f;
                     const auto elastic_step = Fluid::Granular::elasticStepInfo(
                         fluid_params.granular_young_modulus,
-                        state.grid.voxel_size, dt);
+                        state.grid.voxel_size, dt,
+                        granular_strain_rate, granular_overburden,
+                granular_load.softening_min);
                     state.fluid_stats.granular_requested_young_modulus =
                         elastic_step.requested_young_modulus;
                     state.fluid_stats.granular_effective_young_modulus =
@@ -9645,20 +9785,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                         elastic_step.required_substeps;
                     state.fluid_stats.granular_stiffness_capped = elastic_step.capped;
                 }
-            } else if (step_params.granular_enabled && fluid_gpu_requested) {
-                // There is no physically equivalent CPU granular solver yet.
-                // Falling through to the incompressible liquid solver changes
-                // the material model mid-simulation and makes a resting pile
-                // boil. Hold the step visibly instead of producing plausible
-                // but invalid motion.
-                state.fluid_stats = {};
-                state.fluid_stats.particle_count = state.particles.size();
-                state.fluid_stats.gpu_requested = true;
-                state.fluid_stats.gpu_compute_available = fluid_gpu_compute_available;
-                state.fluid_stats.gpu_fallback = true;
-                state.fluid_stats.gpu_status =
-                    "Granular Vulkan stage failed; step held (no liquid fallback)";
             } else {
+                // ★ Granular now has a real CPU path (Fluid::step runs the same
+                // Drucker-Prager constitutive update, stress divergence and
+                // settle as the Vulkan kernels), so this no longer falls through
+                // to the incompressible liquid solver.
+                //
+                // That silent fallthrough was the worst outcome available: same
+                // particles, same panel, a DIFFERENT material model, and a
+                // resting sand pile turning into a boiling puddle with nothing
+                // reporting it. Holding the step was the stopgap; a reference
+                // implementation is the fix, and it is also what the roadmap's
+                // CPU/Vulkan parity gate needs in order to be runnable at all.
                 // Full CPU path (either GPU G2P not engaged or failed).
                 Fluid::step(state.particles, state.grid, step_params, dt,
                             gpu_integrated_forces ? nullptr : context.force_snapshot,
@@ -9693,7 +9831,9 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 const auto resolved_elastic = Fluid::Granular::elasticStepInfo(
                     fluid_params.granular_young_modulus,
                     state.grid.voxel_size,
-                    granular_frame_dt / static_cast<float>(granular_solver_substeps));
+                    granular_frame_dt / static_cast<float>(granular_solver_substeps),
+                    granular_strain_rate, granular_overburden,
+                granular_load.softening_min);
                 state.fluid_stats.granular_requested_young_modulus =
                     granular_frame_elastic.requested_young_modulus;
                 state.fluid_stats.granular_effective_young_modulus =
@@ -9702,6 +9842,26 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     granular_frame_elastic.required_substeps;
                 state.fluid_stats.granular_solver_substeps = granular_solver_substeps;
                 state.fluid_stats.granular_stiffness_capped = resolved_elastic.capped;
+                // ★ required vs solver substeps is the pair that matters: equal
+                // means the subcycle was granted, solver < required means
+                // granular_max_solver_substeps clamped it and the shader clamp
+                // is carrying the difference (see strain_limited_particles).
+                state.fluid_stats.granular_wave_substeps =
+                    granular_frame_elastic.wave_substeps;
+                state.fluid_stats.granular_strain_substeps =
+                    granular_frame_elastic.strain_substeps;
+                state.fluid_stats.granular_strain_rate =
+                    granular_frame_elastic.strain_rate;
+                state.fluid_stats.granular_overburden_pressure =
+                    granular_frame_elastic.overburden_pressure;
+                state.fluid_stats.granular_young_modulus_for_load =
+                    granular_frame_elastic.young_modulus_for_load;
+                state.fluid_stats.granular_stiffness_below_load =
+                    granular_frame_elastic.below_load;
+                state.fluid_stats.granular_min_softening =
+                    granular_load.softening_min;
+                state.fluid_stats.granular_softened_particles =
+                    granular_load.softened_particles;
             }
             state.fluid_stats.recovered_solid_particles = std::max(
                 state.fluid_stats.recovered_solid_particles,
@@ -9766,6 +9926,15 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 Fluid::stepFoam(state.particles, state.grid, state.foam, fparams,
                                 fluid_params.gravity, dt, foam_seed, &state.foam_stats,
                                 gpu_expected, gpu_neigh);
+                // Foam is produced FROM the fluid and consumed by rendering; it
+                // is a coupling in the same sense as the others, and a graph
+                // that shows the others but hides this one would misdescribe the
+                // step. Source and target are the same domain by construction.
+                noteCoupling("foam_from_fluid", "fluid", "foam",
+                             i < grid_domains_.size() ? grid_domains_[i].name
+                                                      : std::string(),
+                             i < grid_domains_.size() ? grid_domains_[i].name
+                                                      : std::string());
                 // Queue the next step's counts over the array stepFoam just left
                 // behind — advected, culled and topped up. It stays untouched until
                 // the consume above runs again, which is what makes the indices line
@@ -9886,6 +10055,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     state.grid.origin,
                     state.grid.voxel_size,
                     dt);
+                noteCoupling("fluid_to_surface_moisture", "fluid", "surface",
+                             i < grid_domains_.size() ? grid_domains_[i].name
+                                                      : std::string(),
+                             std::string());
             }
             continue;
         }
@@ -10152,6 +10325,15 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     world_thermal_.scale(),
                     domain_oxygen);
                 gas_gpu_mark(state.gas_stats.gpu_msf_ms);
+                // Pyrolysis is bidirectional in one pass: the surface reads gas
+                // temperature (gather) and releases fuel/smoke/heat back into it
+                // (scatter/resolve). Recorded as one entry because it IS one
+                // ordered stage — splitting it would suggest the two halves can
+                // be reordered independently, and they cannot.
+                noteCoupling("msf_pyrolysis", "surface", "gas",
+                             std::string(),
+                             i < grid_domains_.size() ? grid_domains_[i].name
+                                                      : std::string());
             }
             // Apply overlapping APIC-liquid surface combustion only after the
             // host gas snapshot has been uploaded. This ordering prevents the
@@ -10164,8 +10346,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                    fluid_index>=grid_domain_states_.size() ||
                    fluid_index>=grid_domain_compute_buffers_.size() ||
                    !grid_domain_states_[fluid_index].valid) continue;
-                fluid_combustion_deposit_pre_run =
-                    runGpuFluidSurfaceCombustion(
+                const bool ran = runGpuFluidSurfaceCombustion(
                     grid_domains_[fluid_index],
                     grid_domain_states_[fluid_index].grid,
                     grid_domain_states_[fluid_index].particles,
@@ -10174,8 +10355,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     state.grid,
                     *gpu_buffers,
                     dt,
-                    context.compute) ||
-                    fluid_combustion_deposit_pre_run;
+                    context.compute,
+                    grid_domain_states_[fluid_index].burned_particles);
+                // ★ Recorded only when it actually ran. The flag below is an OR
+                // across every fluid domain and cannot say WHICH pair coupled;
+                // the trace can, and the pair is what a graph declares.
+                if (ran) {
+                    noteCoupling("fluid_to_gas", "fluid", "gas",
+                                 grid_domains_[fluid_index].name,
+                                 grid_domains_[i].name);
+                }
+                fluid_combustion_deposit_pre_run =
+                    ran || fluid_combustion_deposit_pre_run;
             }
             gas_gpu_mark(state.gas_stats.gpu_fluid_combustion_ms);
             gpu_velocity_advection_pre_run = runGpuVelocityAdvection(state.grid, params, dt, context.compute, *gpu_buffers);

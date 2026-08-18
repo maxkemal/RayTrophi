@@ -2865,6 +2865,9 @@ int main(int argc, char* argv[]) try {
     // below (skipped while a scene load is in flight). See
     // docs/API_SCRIPTING_ROADMAP.md.
     rtapi::bind(&ui_ctx, &ui.history);
+    // Simulation node types + the attribute resolver they read through. Must
+    // follow bind(): the resolver reaches the scene via rtapi's context.
+    rtapi::initSimulationNodes();
 
     std::string python_error;
     if (!rtpython::initialize(python_error)) {
@@ -3421,7 +3424,8 @@ int main(int argc, char* argv[]) try {
                     // handleEditorShortcuts for the matching guard on the other Delete listener).
                     if (!python_console_captures_input && !ImGui::GetIO().WantTextInput &&
                         !ui.terrain_graph_focused && !ui.geometry_graph_focused && !ui.material_graph_focused &&
-                        !ui.anim_graph_focused && !ui.timeline.panel_focused) {
+                        !ui.anim_graph_focused && !ui.node_editor_focused &&
+                        !ui.timeline.panel_focused) {
                         ui.triggerDelete(ui_ctx);
                     }
                 }
@@ -6389,6 +6393,23 @@ int main(int argc, char* argv[]) try {
             accumulation_done_for_display = ray_renderer.isCPUAccumulationComplete();
             if (accumulation_done_for_display) {
                 render_settings.is_rendering_active = false;
+            }
+        }
+
+        // ── RTAPI VIEWPORT CAPTURE ──────────────────────────────────────────
+        // Publish the SAME surface the viewport displays, so an automated probe
+        // measures what the viewer sees rather than a separate re-render. The
+        // call is a no-op unless rt.viewport.capture(True) was requested, and it
+        // copies — no SDL_Surface pointer escapes into the API layer.
+        if (surface && rtapi::viewportCaptureEnabled()) {
+            SDL_Surface* probe_src = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+            if (probe_src) {
+                if (SDL_LockSurface(probe_src) == 0) {
+                    rtapi::publishViewportFrame(probe_src->pixels, probe_src->w,
+                                                probe_src->h, probe_src->pitch);
+                    SDL_UnlockSurface(probe_src);
+                }
+                SDL_FreeSurface(probe_src);
             }
         }
 

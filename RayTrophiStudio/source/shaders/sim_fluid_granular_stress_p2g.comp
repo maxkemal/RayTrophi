@@ -13,6 +13,16 @@ layout(push_constant) uniform PC {
     uint pad;
 } pc;
 
+// A node whose shape function is this close to zero still receives a stress
+// impulse proportional to grad(w), which does NOT vanish as fast as w does. The
+// impulse lands in the unnormalised momentum accumulator and sim_fluid_p2g_normalize
+// then divides it by that same near-zero node weight, so grad(w)/w diverges at
+// the edge of the quadratic support and a bounded stress produces an unbounded
+// velocity. This is the classic MPM small-mass node, and dropping the tail of
+// the kernel is the standard remedy: the force discarded is below 1e-4 of the
+// particle's contribution, while the velocity it could inject is unbounded.
+const float kMinNodeWeight = 1.0e-4;
+
 void weights(float x,out int b,out float w[3],out float dw[3]){
     b=int(floor(x-0.5));float d=x-float(b+1);
     w[0]=0.5*(0.5-d)*(0.5-d);w[1]=0.75-d*d;w[2]=0.5*(0.5+d)*(0.5+d);
@@ -33,7 +43,13 @@ void main(){
     int zmax=pc.component==2?pc.nz:pc.nz-1;
     for(int k=0;k<3;++k)for(int j=0;j<3;++j)for(int i=0;i<3;++i){
         int x=bx+i,y=by+j,z=bz+k;if(x<0||x>xmax||y<0||y>ymax||z<0||z>zmax)continue;
+        if(wx[i]*wy[j]*wz[k]<kMinNodeWeight)continue;
         vec3 grad=vec3(dx[i]*wy[j]*wz[k],wx[i]*dy[j]*wz[k],wx[i]*wy[j]*dz[k])*ih;
+        // inv_density is V_p/m_p, not a fudge: sim_fluid_p2g_scatter accumulates
+        // UNIT particle mass, so the node mass this impulse is divided by is a
+        // particle count. Expressing the force per unit particle mass makes
+        // V_p cancel against m_p = rho*V_p and leaves 1/rho, independent of
+        // voxel size and particles per cell. Do not "fix" this into h^3/ppc.
         float impulse=-pc.dt*pc.inv_density*dot(row,grad);
         int fi=pc.component==0?x+y*(pc.nx+1)+z*(pc.nx+1)*pc.ny:
                pc.component==1?x+y*pc.nx+z*pc.nx*(pc.ny+1):x+y*pc.nx+z*pc.nx*pc.ny;

@@ -28,7 +28,32 @@ Her yeni yetenek için gereken **dört** dokunuş:
 çalışır, yani metot sessizce reddedilir. `scripts/audit_ipc_capabilities.py`
 bu ikisini karşılaştırır; yeni bir namespace eklediysen çalıştır.
 
-**Tek istisna:** `rt.ui` — panel çizimi scriptlenmez.
+**Tek istisna `rt.ui`, ve istisna bir DELİK DEĞİL — bir sınırdır.** Ayrım
+"UI mi değil mi" değil, **çizim çağrısı mı değer mi**:
+
+- **Çizim çağrısı** (`rt.ui`: `register_panel`, `button`, `slider_float`) frame'in
+  draw context'i dışında anlamsızdır, o yüzden süreç içinde kalır. Bu bir
+  *eklenti* API'si.
+- **Değer** (`rt.editor`: hangi editör açık, node editörünün hangi alan graph'ını
+  gösterdiği) IPC'den geçer ve **geçmelidir.**
+
+★★★ Gerekçe: bu deponun en pahalı hata sınıfı **panelin yalan söylemesi**
+(`Volume` varsayılanı, `fire_enabled`'dan raporlayan gaz shader okuyucusu).
+Yalnızca çekirdeği okuyabilen bir ajan, çekirdek ile panelin ayrıştığı duruma
+**yapısal olarak kördür**. Kuralın doğru okunuşu şudur:
+
+> **UI kendine ait durum TUTMAZ — bu yüzden içinde scriptlenecek bir şey yoktur.**
+> Bir paneli scriptleme isteği duyduğun an, o panel çekirdeğe ait bir durumu
+> tutuyordur.
+
+★★ Widget seviyesinde sürüş (**"X yazan düğmeye bas"**) yasaktır: etiketleri
+yük taşıyan hale getirir ve UI'yi tekrar otorite yapar. Bir düğme bir iş
+yapıyorsa o işin kendi API'si olmalı — bu kuralın *kendisi*, istisnası değil.
+
+★ Tersi de geçerli: **script'ten yazılabilen her alan panelden de düzenlenebilir
+olmalı.** Simülasyon node paneli ilk halinde inspector'sız çıktı; `sim.domain_ref`
+yalnızca script'ten bir domain'e bağlanabiliyordu, yani panelden eklenen node
+sonsuza kadar boşa işaret ediyordu — hatasız, ipucusuz.
 
 ★ Bir yeteneği yalnızca UI'da bırakmak, zincirin ortasına **manuel bir adım**
 koymaktır. Fracture üretimi tam olarak böyleydi: script bir objeyi yakabiliyor

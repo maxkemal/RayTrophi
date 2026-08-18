@@ -226,6 +226,29 @@ uint32_t requiredCapabilities(const std::string& method) {
             return Render | FilesWrite;
         return Render;
     }
+    // ★ viewport.* drives and measures the ENGINE; it is not the `rt.ui`
+    // exception, which covers panel DRAWING only. Nothing here writes to the
+    // scene, so Render is the whole requirement — and authorize() is
+    // fail-closed, so a namespace missing from this table is silently refused.
+    if (method.rfind("viewport.", 0) == 0) return Render;
+    // sim_graph.* builds and inspects the simulation graph. Reads are harmless,
+    // but building/connecting alters what the graph will drive, so the whole
+    // namespace takes SceneWrite. Queries are still gated by Read below via the
+    // caller's token, and authorize() is fail-closed either way.
+    if (method == "sim_graph.nodes" || method == "sim_graph.evaluate" ||
+        method == "sim_graph.attributes" || method == "sim_graph.couplings" ||
+        method == "sim_graph.surface_attributes") return Read;
+    if (method.rfind("sim_graph.", 0) == 0) return SceneWrite;
+    // sim_cache.* — status is a read; baking and clearing rewrite simulation
+    // state and drop cached frames, so they take SceneWrite via the namespace
+    // table below. A bake also WRITES FILES, but the directory is the caller's
+    // own argument and the path gate (authorizePath) governs where it may land.
+    //
+    // ★ Classified through `namespaces[]` rather than a local prefix check on
+    // purpose: audit_ipc_capabilities.py mirrors requiredCapabilities by parsing
+    // that array, so a namespace handled only here is invisible to the audit and
+    // reads as unclassified. That is how this very method pair was caught.
+    if (method == "sim_cache.status") return Read;
     if (method == "request_render" || method == "reset_accumulation") return Render;
     // Read-only methods whose names miss the substring heuristics below.
     if (method == "material.info" || method == "material.of_object" ||
@@ -260,6 +283,19 @@ uint32_t requiredCapabilities(const std::string& method) {
         // Emitters. `flow_source.list`/`.get` fall through to Read above via the
         // substring heuristics; create/update/remove land here as SceneWrite.
         "flow_source.",
+        // Editor view state. `editor.get_state` falls through to Read above via
+        // the `.get` heuristic; set_bottom_editor/set_node_domain land here.
+        // ★ Named `editor.` and NOT `ui.` on purpose: rt.ui draws your own panel
+        // and stays in-process, rt.editor reports which editor is showing and is
+        // a value. One namespace for both would blur the only line that makes
+        // the drawing exemption defensible.
+        // ★★ Do not put quoted text in a comment inside this array —
+        // audit_ipc_capabilities.py scrapes string literals out of it and read
+        // the quoted phrases above as two dead namespaces.
+        "editor.",
+        // Bake and cache control. `sim_cache.status` falls through to Read above
+        // via the `.status` heuristic; bake/clear land here as SceneWrite.
+        "sim_cache.",
         "hair.", "paint.", "sculpt.", "debris.", "templates.", "project.", "undo", "redo"
     };
     for (const char* prefix : namespaces)

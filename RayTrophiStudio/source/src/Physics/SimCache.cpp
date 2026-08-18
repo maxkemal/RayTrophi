@@ -444,7 +444,12 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.particles.affine.assign(static_cast<size_t>(pcount), Fluid::AffineC{});
         d.particles.flags.assign(static_cast<size_t>(pcount), 0u);
         d.particles.mass_fraction.assign(static_cast<size_t>(pcount), 1.0f);
-        d.particles.temperature.assign(static_cast<size_t>(pcount), 0.0f);
+        // ★ 293 K, not 0. Playback used to assign 0 K here, so a cached frame
+        // came back colder than absolute ambient and every thermal threshold
+        // read against it behaved differently from the live sim. Same class as
+        // the substance_tag-zeroed-on-playback bug: only playback was wrong,
+        // which is exactly why it went unnoticed.
+        d.particles.temperature.assign(static_cast<size_t>(pcount), 293.0f);
         d.particles.combustible_fraction.assign(static_cast<size_t>(pcount), 0.0f);
         // Playback caches are render-oriented and do not preserve constitutive
         // history, but every particle sidecar must still remain cardinality-safe

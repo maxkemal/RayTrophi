@@ -1,7 +1,8 @@
-#include "RtPythonTemplates.h"
+﻿#include "RtPythonTemplates.h"
 
 #include "Template/TemplateRegistry.h"
 #include "Template/TemplateLoader.h"
+#include "UI/TemplateHubUI.h"
 #include "ProjectManager.h"
 #include "Api/RtApi.h"
 
@@ -131,6 +132,34 @@ void registerTemplateBindings(py::module_& root) {
         return openInfoDict(info);
     }, py::arg("id"), py::arg("conflict_policy") = "reject",
        "Open a preflighted template through the canonical transactional recipe boundary.");
+
+    module.def("save_user_template", [](const std::string& display_name,
+                                        const std::string& description,
+                                        const std::string& category) {
+        const auto res = rtapi::saveUserTemplate(display_name, description, category);
+        if (!res.ok) throw py::value_error(res.error);
+        return true;
+    }, py::arg("display_name"), py::arg("description") = "", py::arg("category") = "user",
+       "Save the active scene as a custom user template.");
+
+    module.def("delete_user_template", [](const std::string& template_id) {
+        const auto res = rtapi::deleteUserTemplate(template_id);
+        if (!res.ok) throw py::value_error(res.error);
+        return true;
+    }, py::arg("template_id"),
+       "Delete a user template package by its template ID.");
+
+    module.def("show_hub", []() {
+        raytrophi::templates::TemplateHubUI::instance().show();
+    }, "Show the Template Hub UI overlay.");
+
+    module.def("hide_hub", []() {
+        raytrophi::templates::TemplateHubUI::instance().hide();
+    }, "Hide the Template Hub UI overlay.");
+
+    module.def("is_hub_visible", []() {
+        return raytrophi::templates::TemplateHubUI::instance().isVisible();
+    }, "Return True if the Template Hub UI overlay is visible.");
 }
 
 } // namespace rtpy

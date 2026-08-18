@@ -30,11 +30,28 @@ TemplateUiApplyResult TemplateUiStateAdapter::apply(const TemplateUiState& state
     ui.show_geometry_graph = state.bottom_editor == "geometry";
     ui.show_material_graph = state.bottom_editor == "material";
     ui.show_anim_graph = state.bottom_editor == "anim_graph";
+    // The Nodes editor's simulation domain (D.4). The four names above still
+    // address their own windows while their drawing is migrated one at a time;
+    // keeping the template vocabulary per-domain means it survives that move
+    // unchanged, because the domain is what a template actually means.
+    ui.show_node_editor = state.bottom_editor == "simulation";
+    if (state.bottom_editor == "simulation") {
+        ui.node_editor_domain = SceneUI::NodeEditorDomain::Simulation;
+    } else if (state.bottom_editor == "geometry") {
+        ui.node_editor_domain = SceneUI::NodeEditorDomain::Geometry;
+    } else if (state.bottom_editor == "material") {
+        ui.node_editor_domain = SceneUI::NodeEditorDomain::Material;
+    } else if (state.bottom_editor == "terrain") {
+        ui.node_editor_domain = SceneUI::NodeEditorDomain::Terrain;
+    } else if (state.bottom_editor == "anim_graph") {
+        ui.node_editor_domain = SceneUI::NodeEditorDomain::Animation;
+    }
     if (state.bottom_editor == "dope_sheet" || state.bottom_editor == "graph_editor") {
         ui.show_animation_panel = true;
     } else if (state.bottom_editor != "none" && state.bottom_editor != "terrain" &&
                state.bottom_editor != "geometry" && state.bottom_editor != "material" &&
-               state.bottom_editor != "anim_graph" && state.bottom_editor != "assets" &&
+               state.bottom_editor != "anim_graph" && state.bottom_editor != "simulation" &&
+               state.bottom_editor != "assets" &&
                state.bottom_editor != "console") {
         result.warnings.push_back("bottom editor was not applied: " + state.bottom_editor);
     }

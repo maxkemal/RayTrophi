@@ -393,8 +393,7 @@ ImVec4 ScaleColor(const ImVec4& c, float scale) {
 
 ImGuiTreeNodeFlags GetSectionFlags(bool defaultOpen) {
     ImGuiTreeNodeFlags flags =
-        ImGuiTreeNodeFlags_Framed |
-        ImGuiTreeNodeFlags_SpanFullWidth |
+        ImGuiTreeNodeFlags_SpanAvailWidth |
         ImGuiTreeNodeFlags_AllowOverlap |
         ImGuiTreeNodeFlags_FramePadding |
         ImGuiTreeNodeFlags_NoTreePushOnOpen; // Disable default tree indentation
@@ -420,15 +419,18 @@ bool BeginSection(const char* title, const ImVec4& accentColor, bool defaultOpen
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     ImVec2 cursorPos = ImGui::GetCursorScreenPos();
     float width = ImGui::GetContentRegionAvail().x;
-    float height = ImGui::GetFrameHeight(); // Standard frame height (thinner than before)
+    
+    // Set frame padding before querying height to ensure exact, slim header height
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 5.0f));
+    float height = ImGui::GetFrameHeight();
     
     // Convert accent color
     ImU32 accentU32 = ImGui::ColorConvertFloat4ToU32(accentColor);
-    ImU32 headerBg = ImGui::ColorConvertFloat4ToU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.15f));
-    ImU32 borderColor = ImGui::ColorConvertFloat4ToU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.5f));
+    ImU32 headerBg = ImGui::ColorConvertFloat4ToU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.16f));
+    ImU32 borderColor = ImGui::ColorConvertFloat4ToU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.40f));
 
-    // Draw Header Background (Sleek)
-    drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + width, cursorPos.y + height), headerBg, 4.0f, ImDrawFlags_RoundCornersTop);
+    // Draw Header Background (Sleek, rounded corners top if open, all if closed)
+    drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + width, cursorPos.y + height), headerBg, 4.0f, defaultOpen ? ImDrawFlags_RoundCornersTop : ImDrawFlags_RoundCornersAll);
     
     // Draw Top Accent Line (Thin, distinct)
     drawList->AddLine(
@@ -437,23 +439,24 @@ bool BeginSection(const char* title, const ImVec4& accentColor, bool defaultOpen
         accentU32, 2.0f
     );
     
-    // Modernized TreeNode
-    // Use FramePadding 4,4 to make it slimmer (default is often 4,3 or 8,6)
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 4));
-    // Color text matching accent for consistency
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,0.95f)); 
+    // Override TreeNode style colors so ImGui doesn't render built-in chunky frame background
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.14f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.24f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.95f)); 
     
     bool opened = ImGui::TreeNodeEx(title, GetSectionFlags(defaultOpen));
     
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(4);
     ImGui::PopStyleVar();
 
     if (opened) {
         // Push state for EndSection to draw the surrounding border
         s_SectionStack.push_back({cursorPos, width, borderColor, opened});
         
-        // Add a small indent for content (reduced from 8.0f to 4.0f)
-        ImGui::Indent(4.0f);
+        // Add indent and vertical spacing for content
+        ImGui::Indent(6.0f);
+        ImGui::Spacing();
     } else {
         ImGui::PopID();
     }
@@ -468,8 +471,8 @@ void EndSection() {
     s_SectionStack.pop_back();
     
     if (state.isOpen) {
-        ImGui::Unindent(4.0f);
-        // TreePop is NOT needed when using ImGuiTreeNodeFlags_NoTreePushOnOpen
+        ImGui::Spacing();
+        ImGui::Unindent(6.0f);
         
         // Draw the Border around the whole open section
         ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -3422,33 +3425,28 @@ bool HorizontalTab(const char* label, UIWidgets::IconType icon, bool active, flo
     const float anim_speed = 12.0f * io.DeltaTime;
     anim += (target_hover - anim) * ImClamp(anim_speed, 0.0f, 1.0f);
 
-    auto getHoverTint = [&](UIWidgets::IconType iconType) -> ImVec4 {
-        switch (iconType) {
-            case UIWidgets::IconType::Timeline:  return ImVec4(0.98f, 0.78f, 0.36f, 1.0f);
-            case UIWidgets::IconType::Console:   return ImVec4(0.52f, 0.90f, 0.62f, 1.0f);
-            case UIWidgets::IconType::Graph:     return ImVec4(0.56f, 0.84f, 1.00f, 1.0f);
-            case UIWidgets::IconType::AnimGraph: return ImVec4(0.98f, 0.58f, 0.82f, 1.0f);
-            case UIWidgets::IconType::Assets:    return ImVec4(1.00f, 0.72f, 0.42f, 1.0f);
-            default:                             return ImVec4(0.50f, 0.92f, 0.72f, 1.0f);
-        }
-    };
+    const ImVec4* sys_colors = style.Colors;
+    ImVec4 active_accent = (sys_colors[ImGuiCol_HeaderActive].w > 0.1f) ? 
+                           sys_colors[ImGuiCol_HeaderActive] : 
+                           sys_colors[ImGuiCol_SliderGrab];
+    ImVec4 theme_accent(active_accent.x, active_accent.y, active_accent.z, 1.0f);
 
     if (active) {
         dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,0.08f)), 3.0f);
-        dl->AddRectFilled(ImVec2(p.x + 4, p.y + size.y - 2), ImVec2(p.x + size.x - 4, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)), 1.0f);
+        dl->AddRectFilled(ImVec2(p.x + 4, p.y + size.y - 2), ImVec2(p.x + size.x - 4, p.y + size.y), ImGui::ColorConvertFloat4ToU32(theme_accent), 1.0f);
     } else if (anim > 0.01f) {
         dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,0.04f * anim)), 3.0f);
     }
 
     ImVec4 idleIcon(0.6f, 0.6f, 0.65f, 1.0f);
-    ImVec4 activeIcon(0.1f, 0.9f, 0.8f, 1.0f);
-    ImVec4 hoverIcon = getHoverTint(icon);
+    ImVec4 activeIcon = theme_accent;
+    ImVec4 hoverIcon = theme_accent;
     ImVec4 iconTint = active ? activeIcon : ImLerp(idleIcon, hoverIcon, anim);
     const float iconSize = 16.0f + 2.0f * anim;
     DrawIcon(icon, ImVec2(p.x + 8.0f - (iconSize - 16.0f) * 0.5f, p.y + 3.0f - (iconSize - 16.0f) * 0.5f), iconSize, ImGui::ColorConvertFloat4ToU32(iconTint), 1.5f + 0.25f * anim);
     
     ImVec4 idleText(0.6f, 0.6f, 0.65f, 1.0f);
-    ImVec4 hoverText = getHoverTint(icon);
+    ImVec4 hoverText = theme_accent;
     ImVec4 textTint = active ? ImVec4(1,1,1,1) : ImLerp(idleText, hoverText, anim * 0.85f);
     dl->AddText(ImVec2(p.x + 30, p.y + 3), ImGui::ColorConvertFloat4ToU32(textTint), label);
 
@@ -3457,7 +3455,7 @@ bool HorizontalTab(const char* label, UIWidgets::IconType icon, bool active, flo
         dl->AddRectFilled(
             ImVec2(p.x + 4, p.y + size.y - 3), 
             ImVec2(p.x + size.x - 4, p.y + size.y), 
-            ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)),
+            ImGui::ColorConvertFloat4ToU32(theme_accent),
             1.5f
         );
 

@@ -1526,7 +1526,7 @@ void main() {
         payload.scatterOrigin = hitPos + rayDir * 0.002;
         payload.scatterDir = rayDir;
         payload.scattered = true;
-        payload.skipAABBs = false;
+        payload.skipVolumeAABBs = false;
         // Only an optically empty interval is a free transparent pass. A real
         // medium interaction must be visible to raygen's first-hit/aerial logic.
         if (!primaryVolumeInteraction) {

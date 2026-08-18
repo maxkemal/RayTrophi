@@ -390,7 +390,7 @@ vec3 seatOutsideBand(vec3 hitPos, vec3 dir, vec3 N, float push, out bool handOff
                 hitPos, 1e-4, dir, push, 1);
     handOff = (shadowPayload.w < 0.5);
     // On a hand-off, continue from the hit point itself with the volume AABBs
-    // skipped (caller sets skipAABBs) so the triangle closest-hit fires on that
+    // skipped (caller sets skipVolumeAABBs) so the triangle closest-hit fires on that
     // surface at its true distance and true facing — the same contract the
     // entry-side solid probe uses, and the reason it needs no epsilon.
     return handOff ? hitPos : (hitPos + dir * push);
@@ -1187,7 +1187,14 @@ readonly buffer DenseGasEmissiveList {
 // reconstruction at the boundary of a skipped block still reads zero.
 float denseGasEmptyBlockStep(VkVolumeInstance vol, vec3 worldPos, vec3 worldDir,
                              float cutoff) {
-    if (vol.majorant_address == 0 || vol.majorant_block < 1.0) return 0.0;
+    // The panel's "Majorant availability %" reads these. It was showing 0/0 on
+    // every scene because volumeRecordMajorantQuery() was defined and never
+    // called — a published majorant grid and a missing one produced the same
+    // blank reading, so the row could not distinguish "no acceleration
+    // available" from "acceleration available and not helping".
+    bool majorantPublished = vol.majorant_address != 0 && vol.majorant_block >= 1.0;
+    volumeRecordMajorantQuery(majorantPublished);
+    if (!majorantPublished) return 0.0;
 
     ivec3 bdim = ivec3(vol.majorant_dim[0] + 0.5,
                        vol.majorant_dim[1] + 0.5,
@@ -2022,16 +2029,47 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
     for (uint candidateIndex = 0u; candidateIndex < count; ++candidateIndex) {
         if (candidateIndex == currentVolume) continue;
         VkVolumeInstance surface = volumes.v[candidateIndex];
-        if (surface.is_active == 0 || surface.source_type != 4 ||
-            surface.volume_type != 2 || surface.vdb_grid_address == 0) {
+        // A liquid isosurface is source_type == 4 whatever storage it currently
+        // uses. Everything else is not our business.
+        if (surface.is_active == 0 || surface.source_type != 4) continue;
+        volumeRecordArbiterCandidate();
+
+        float boxNear, boxFar;
+        if (!volumeRayInterval(surface, rayOrigin, rayDir, boxNear, boxFar)) {
+            volumeRecordArbiterNoBox();
+            continue;
+        }
+        float beginT = max(rangeNear, max(boxNear, 0.001));
+        float endT = min(rangeFar, boxFar);
+        if (endT <= beginT || beginT >= nearestHit) {
+            volumeRecordArbiterEmptyRange();
             continue;
         }
 
-        float boxNear, boxFar;
-        if (!volumeRayInterval(surface, rayOrigin, rayDir, boxNear, boxFar)) continue;
-        float beginT = max(rangeNear, max(boxNear, 0.001));
-        float endT = min(rangeFar, boxFar);
-        if (endT <= beginT || beginT >= nearestHit) continue;
+        // ★★★ "Cannot evaluate it here" is NOT "it is not there".
+        //
+        // This test used to also demand volume_type == 2 and a non-zero
+        // vdb_grid_address, i.e. a HOST NanoVDB grid. A liquid surface published
+        // as a live dense GPU field (volume_type 4) failed it silently, the
+        // arbiter returned -1, and the gas march then ran its whole AABB and
+        // teleported the ray to tFar — straight PAST the liquid. Symptom: a black
+        // band at the fluid boundary whenever gas and liquid share a domain.
+        //
+        // ★ And it is why putting a BOX inside the domain "fixed" it: a triangle
+        // is found by the solid probe, which knows nothing about NanoVDB, so the
+        // handoff fired and the re-trace reached the liquid through the TLAS.
+        // Delete the box and this arbiter is the only remaining path.
+        //
+        // The conservative action for a surface we cannot sample is to hand the
+        // ray over at the box entry and let the liquid's OWN closest-hit decide.
+        // Erring the other way erases geometry that is plainly there, which is
+        // the strictly worse failure — the same reasoning as the solid probe's
+        // "err toward PROBING" rule.
+        if (surface.volume_type != 2 || surface.vdb_grid_address == 0) {
+            volumeRecordArbiterReject();
+            nearestHit = min(nearestHit, beginT);
+            continue;
+        }
 
         pnanovdb_buf_t surfaceBuf;
         surfaceBuf.address = surface.vdb_grid_address;
@@ -2055,6 +2093,7 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
         float d0 = sampleIsoField(
             surface, rayOrigin + rayDir * t0s, surfaceBuf, mapH, acc);
         bool startedInside = d0 > ISO;
+        bool foundCrossing = false;
         for (int s = 0; s < steps; ++s) {
             float t1s = min(t0s + step, endT);
             float d1 = sampleIsoField(
@@ -2073,12 +2112,14 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
                     else b = mid;
                 }
                 nearestHit = min(nearestHit, 0.5 * (a + b));
+                foundCrossing = true;
                 break;
             }
             t0s = t1s;
             d0 = d1;
             if (t0s >= endT) break;
         }
+        if (!foundCrossing) volumeRecordArbiterNoCrossing();
     }
     return nearestHit <= rangeFar ? nearestHit : -1.0;
 }
@@ -2113,7 +2154,7 @@ void main() {
             gl_WorldRayOriginEXT + passDir * (max(volumeHitAttrib.y, gl_HitTEXT) + 0.002);
         payload.scatterDir = passDir;
         payload.scattered = true;
-        payload.skipAABBs = false;
+        payload.skipVolumeAABBs = false;
         payload.bounceType = BOUNCE_TRANSPARENT;
         return;
     }
@@ -2130,7 +2171,7 @@ void main() {
             gl_WorldRayOriginEXT + inactiveDir * (max(volumeHitAttrib.y, gl_HitTEXT) + 0.002);
         payload.scatterDir = inactiveDir;
         payload.scattered = true;
-        payload.skipAABBs = false;
+        payload.skipVolumeAABBs = false;
         payload.bounceType = BOUNCE_TRANSPARENT;
         return;
     }
@@ -2155,7 +2196,7 @@ void main() {
         payload.scatterOrigin = rayOrigin + rayDir * (max(tFar, gl_HitTEXT) + 0.002);
         payload.scatterDir = rayDir;
         payload.scattered = true;
-        payload.skipAABBs = false;
+        payload.skipVolumeAABBs = false;
         payload.bounceType = BOUNCE_TRANSPARENT;
         return;
     }
@@ -2381,7 +2422,7 @@ void main() {
         // iso branch would refract straight to the water surface and SKIP any
         // solid triangle sitting between the ray origin and that surface (or,
         // on a miss, anywhere in the domain). Probe for a solid in the relevant
-        // span; if one is closer, stop and let it render (skipAABBs) instead of
+        // span; if one is closer, stop and let it render (skipVolumeAABBs) instead of
         // refracting past it. Tints by the water depth in front of it.
         {
             float probeFar = (hitT < 0.0) ? tFar : hitT;
@@ -2444,11 +2485,19 @@ void main() {
                 // inside — flipped normals in the debug view, black in beauty, and
                 // only ever inside an active volume. No epsilon is needed: the ray
                 // reached this volume because nothing was closer than the box, and
-                // skipAABBs now removes the box, so the nearest hit from the same
-                // origin IS that surface, at its true distance and true facing.
+                // the handoff mask removes the box, so the nearest hit from the
+                // same origin is that surface at its true distance and facing.
+                //
+                // ★ That last sentence used to say "IS that surface", and it was
+                // the bug. It only holds for geometry the probe above could SEE.
+                // With gl_RayFlagsSkipAABBEXT the re-trace also erased everything
+                // the probe was blind to, so anything nearer than solidT was
+                // dropped twice. The mask now clears only the volume bits
+                // (RT_MASK_VOLUME_HANDOFF): if a splat sphere really is closer, it
+                // wins the re-trace on its own and no extra probe is paid for it.
                 payload.scatterOrigin = rayOrigin;
                 payload.scatterDir    = rayDir;
-                payload.skipAABBs     = true;
+                payload.skipVolumeAABBs     = true;
                 payload.scattered     = true;
                 payload.bounceType    = 0u;
                 return;
@@ -2741,7 +2790,7 @@ void main() {
                 bool bHandOff = false;
                 payload.scatterDir    = bDir;
                 payload.scatterOrigin = seatOutsideBand(hitPos, bDir, Ng, exitPush, bHandOff);
-                payload.skipAABBs     = bHandOff;
+                payload.skipVolumeAABBs     = bHandOff;
                 payload.attenuation  *= bAtt;
                 payload.scattered     = true;
                 // ★ The two lobes must be tagged DIFFERENTLY, and this is what
@@ -2995,7 +3044,7 @@ void main() {
                 bool gHandOff = false;
                 payload.scatterOrigin =
                     seatOutsideBand(hitPos, payload.scatterDir, Ng, exitPush, gHandOff);
-                payload.skipAABBs = gHandOff;
+                payload.skipVolumeAABBs = gHandOff;
                 payload.primaryARG = packHalf2x16(ss.albedo.rg);
                 payload.primaryABT = packHalf2x16(vec2(ss.albedo.b, 1.0));
                 payload.primaryNrm = plPackNormal(N);
@@ -3047,7 +3096,7 @@ void main() {
                     bool rHandOff = false;
                     payload.scatterOrigin =
                         seatOutsideBand(hitPos, refl, Ng, exitPush, rHandOff);
-                    payload.skipAABBs = rHandOff;
+                    payload.skipVolumeAABBs = rHandOff;
                     payload.scattered     = true;
                     payload.bounceType    = BOUNCE_RESIN;   // raygen's resin budget
                     payload.primaryARG = packHalf2x16(ss.albedo.rg);
@@ -3325,7 +3374,7 @@ void main() {
             bool pHandOff = false;
             payload.scatterOrigin =
                 seatOutsideBand(hitPos, payload.scatterDir, Ng, exitPush, pHandOff);
-            payload.skipAABBs = pHandOff;
+            payload.skipVolumeAABBs = pHandOff;
 
             payload.primaryARG = packHalf2x16(ss.albedo.rg);
             payload.primaryABT = packHalf2x16(vec2(ss.albedo.b, 1.0));
@@ -3419,6 +3468,7 @@ void main() {
     // SurfaceSDF, so with no liquid in the scene this is a ≤16-slot early-out loop. An
     // ordinary VDB genuinely overlapping a water surface WANTS this ordering too.
     if (vol.source_type != 4 && vol.source_type != 3 && volCount > 1u) {
+        volumeRecordArbiterGateOpen();
         layeredSurfaceT = nearestSurfaceSDFCrossing(
             rayOrigin, rayDir, tNear, tFar, volIdx, volCount);
         if (layeredSurfaceT > 0.0) {
@@ -3431,6 +3481,7 @@ void main() {
                 payload.scattered = true;
                 payload.skipGasVolumes = true;
                 payload.bounceType = BOUNCE_TRANSPARENT;
+                volumeRecordLayeredHandoff();
                 return;
             }
             tFar = min(tFar, layeredSurfaceT - 0.001);
@@ -3503,11 +3554,34 @@ void main() {
             const uint PROBE_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
                                    | gl_RayFlagsSkipClosestHitShaderEXT
                                    | gl_RayFlagsNoOpaqueEXT;
-            // Real scene solids use bit 0x01. Exclude gas/fog AABBs (0x02),
-            // transient simulation particles (0x04), and SurfaceSDF AABBs
-            // (0x08); otherwise a particle-rich
-            // gas preset turns each volume hit into up to six nested RT probes.
-            const uint PROBE_MASK  = 0xF1;
+            // Exclude the two VOLUME bits (0x02 gas/fog, 0x08 SurfaceSDF) and
+            // keep everything else, including transient simulation particles
+            // (0x04). Same set as the fluid branch's SOLID_MASK above.
+            //
+            // ★★★ 0x04 WAS EXCLUDED HERE AND THAT IS WHY SPLAT SPHERES STILL
+            // VANISHED INSIDE A GAS DOMAIN after the fluid branch was fixed.
+            // The postmortem at SOLID_MASK lists three symptoms of the excluded
+            // bit and fixed only the fluid branch, deferring this one on cost
+            // grounds — "the GAS march's 1+6 nested solid-location probes".
+            // That cost argument had already expired: the 1+5/6 binary search
+            // was replaced by the SINGLE any-hit distance probe below (see the
+            // strategy note above, written when a gas domain touching the ground
+            // multiplied those traces catastrophically). Widening a mask on one
+            // terminate-on-first-hit probe adds no probes at all.
+            //
+            // ★ Symptom this restores: "invisible in EMPTY space". With no solid
+            // behind them the probe returned nothing, solidT stayed -1, and the
+            // no-scatter branch at the end of the march teleports the ray to
+            // tFar + 0.002 — straight past every sphere in the box. The spheres
+            // only ever survived when a real surface happened to stand behind
+            // them and dragged them into the handoff.
+            //
+            // ★★ This works ONLY together with RT_MASK_VOLUME_HANDOFF. The probe
+            // finding the splat is half of it; the handoff re-trace must also
+            // keep 0x04 alive, or the splat is found and then erased on the very
+            // next trace. Either change alone leaves the bug on screen, which is
+            // why fixing the handoff first did not visibly help.
+            const uint PROBE_MASK  = 0xF5;
 
             // Initial check: any solid in [tNear, tFar]?
             const uint VOLUME_SOLID_PROBE = 0xC17D5EEDu;
@@ -3526,7 +3600,11 @@ void main() {
                     payload.scatterOrigin = rayOrigin;
                     payload.scatterDir = rayDir;
                     payload.scattered = true;
-                    payload.skipAABBs = true;
+                    // Gas march handoff: clear the gas bit only, so a coincident
+                    // liquid SurfaceSDF (0x08) still gets its chance. See the
+                    // note at the end-of-march handoff — clearing both bits here
+                    // is what blacked out the domain in SDF mode.
+                    payload.skipGasVolumes = true;
                     return;
                 }
             }
@@ -4153,7 +4231,7 @@ void main() {
 
     // Accumulated in-scattered radiance
     payload.radiance  = accumulated_radiance;
-    payload.skipAABBs = false; // default; overridden below if solid found
+    payload.skipVolumeAABBs = false; // default; overridden below if solid found
     // ── Solid surface found inside the volume: hand off to closesthit ──
     // March was already clamped to solidT. Now position the scatter ray
     // just before the solid surface and tell raygen to skip AABBs next
@@ -4171,7 +4249,28 @@ void main() {
         payload.scatterOrigin = rayOrigin;
         payload.scatterDir    = rayDir;
         payload.scattered     = true;
-        payload.skipAABBs     = true;
+        // ★★★ GAS handoff clears ONLY the gas bit (0xFD), not both volume bits.
+        //
+        // Measured 2026-08-16 with the probe counters: in SurfaceSDF mode this
+        // path fires on 6.6% of volume rays (the solid's screen coverage) and
+        // the handoff mask was RT_MASK_VOLUME_HANDOFF (0xF5), which also clears
+        // 0x08 — the liquid's own SurfaceSDF. So every ray that found a solid
+        // inside a coincident gas+liquid domain erased the LIQUID on the
+        // re-trace and shaded whatever stood behind it. The domain went black in
+        // SDF mode and looked fine in splat mode, because splats are 0x04 and
+        // 0x04 survives that mask. That is exactly the reported symptom.
+        //
+        // skipGasVolumes already exists for precisely this handoff ("gas segment
+        // -> coincident SurfaceSDF") and keeps 0x08 alive. Reaching this line
+        // means the iso branch did not claim the ray, i.e. this is the gas/fog
+        // march, so clearing the gas bit alone is both correct and enough to
+        // prevent re-hitting this same box.
+        //
+        // ★ No ping-pong: if the re-trace lands on the SDF, THAT branch hands
+        // off with RT_MASK_VOLUME_HANDOFF, which clears both bits and terminates
+        // the chain. gas -> sdf -> solid, three traces, bounded.
+        payload.skipGasVolumes = true;
+        volumeRecordGasHandoff();
         return;
     }
 
@@ -4218,14 +4317,102 @@ void main() {
 
         // Set scattered = true with original direction to let the ray continue through
         // Ensure forward progress to avoid re-hitting the same boundary when camera is inside.
+        if (layeredSurfaceT <= 0.0) volumeRecordTeleport();
+        // ★★★★★ THE ADVANCE MUST OUTRUN THE GAP BETWEEN COINCIDENT BOXES.
+        //
+        // This was a hardcoded 0.002 world units. Two domains sharing a volume
+        // (the normal way a burning liquid is authored: one fluid box, one gas
+        // box, same extents) put their faces in the SAME PLANE, or a few
+        // thousandths apart. Measured on the reproducing scene:
+        //     fluid X,Z -2.5      .. 2.5        gas X,Z -2.5 .. 2.5   (identical)
+        //     fluid Y   -2.5      .. 2.5        gas Y   -2.4970703125 ..
+        // The 0.002 step is SMALLER than that 0.0029 offset, so a ray leaving one
+        // box landed inside/on the face of the other, hit it again, advanced 0.002
+        // again... never making progress. skipGasVolumes is false on this path, so
+        // no mask stops the re-entry either.
+        //
+        // ★★ It reads as BLACK, not as a hang: raygen's free-pass budget runs out
+        // with no light gathered. Raising maxBounces does NOTHING — a loop with
+        // zero forward progress is invariant to budget, which is exactly why the
+        // 64-bounce test came back unchanged and was misread as exoneration.
+        //
+        // ★★★ Measured, same scene, counters reset between reads:
+        //     coincident faces : volume_rays 1,306,255,937  density/ray 0.0001
+        //     boxes separated  : volume_rays   111,898,134  density/ray 0.9832
+        // 11.7x the volume traces, each doing NO work. The cost explosion and the
+        // black band are ONE root, not two.
+        //
+        // ★ A solid inside the domain "fixed" it because the solid probe hands the
+        // ray to real geometry and it escapes the loop; splat mode "fixed" it
+        // because there is no second coincident box. Both are escapes, not cures.
+        //
+        // The voxel is the smallest distance this volume can represent, so a
+        // quarter voxel past the exit cannot skip any representable content, and
+        // it clears a coincident-face gap by an order of magnitude.
+        float exitEpsilon = max(0.002, vol.voxel_size * 0.25);
         payload.scatterOrigin = layeredSurfaceT > 0.0
             ? rayOrigin + rayDir * max(tNear, layeredSurfaceT - 0.0005)
-            : rayOrigin + rayDir * (tFar + 0.002);
+            : rayOrigin + rayDir * (tFar + exitEpsilon);
         payload.scatterDir    = rayDir;
         payload.scattered     = (transmittanceLuma > 0.01); // Stop if fully absorbed
+
+        // ★★★★★ FORWARD PROGRESS IS GUARANTEED BY THE MASK, NOT BY A DISTANCE.
+        //
+        // The exit epsilon above is a RACE: it advances a fixed distance against
+        // a gap whose size nobody controls. Two domains authored with the same
+        // extents put their faces in one plane; widening the epsilon from 0.002
+        // to a quarter voxel only MOVED the trapped band further in, because some
+        // pair of surfaces is always closer than whatever constant is chosen.
+        // Measured with fire present and the epsilon already in the build:
+        //     healthy (boxes apart) : volume_rays 111,898,134  density/ray 0.9832
+        //     trapped (same extents): volume_rays 419,661,625  density/ray 0.0196
+        // 3.75x the entries, 50x less work each — the ray keeps being handed back
+        // into a box it has already marched, burning raygen's free passes until
+        // the path dies with no light gathered. That is the black band, and the
+        // same re-entries are the pathtrace cost explosion. One root.
+        //
+        // ★★ A budget cannot fix a loop whose progress is zero, which is why the
+        // 64-bounce test came back unchanged. Only refusing the re-entry fixes it.
+        //
+        // ★ Gated on the segment being effectively TRANSPARENT, and that gate is
+        // what keeps this safe. Skipping gas the ray has already established it
+        // cannot see is a visual no-op; the flag is consumed by the very next
+        // trace and cleared at the top of this shader, so a genuinely dense second
+        // gas volume loses at most one pass and only when the first one was clear.
+        // Any segment that actually absorbed or scattered keeps the old behaviour
+        // untouched.
+        bool transparentSegment =
+            (volumeOpacity <= 0.04 && volumeContribution <= 5e-4);
+
+        // ★★★ THE TRAP'S SIGNATURE IS A DEGENERATE SPAN, NOT A THIN GAS.
+        //
+        // The first version of this mask fired on `transparentSegment` alone, and
+        // that is far broader than the fault it was written for. A flame's edges,
+        // wispy smoke and a dying fire are all LEGITIMATELY transparent, so the
+        // mask suppressed gas for one trace after almost every thin segment and
+        // the gas lost its multi-segment accumulation. Visible as: inside an
+        // overlapping fluid domain the gas collapsed to a thin shell at the box
+        // plane, with a different look above and below it — the overlap is where
+        // the arbiter clamps tFar, so that is where the mis-gate bit hardest.
+        //
+        // ★ A trapped ray and a thin gas are opposite in TRAVERSAL, which is what
+        // separates them cleanly. Trapped: the ray was pushed to a coincident
+        // box's exit face, so re-entering leaves less than a voxel to cross.
+        // Thin gas: the ray crosses the WHOLE box and simply finds little density.
+        // So use the raw box interval from the intersection shader — tNear/tFar
+        // here may already be clamped by the arbiter or the solid probe, which
+        // would make a healthy full traversal look degenerate.
+        float rawSpan = volumeHitAttrib.y - max(volumeHitAttrib.x, 0.0);
+        bool degenerateSpan = rawSpan < max(0.01, vol.voxel_size * 0.5);
+
+        // Requiring BOTH is strictly narrower than the trap: a trapped segment is
+        // degenerate AND does no work. Nothing that marches a real span is
+        // affected, so legitimate gas keeps every segment it had before.
         payload.skipGasVolumes =
-            layeredSurfaceT > 0.0 && payload.scattered;
-        if (volumeOpacity <= 0.04 && volumeContribution <= 5e-4) {
+            payload.scattered &&
+            ((layeredSurfaceT > 0.0) ||
+             (degenerateSpan && transparentSegment && layeredSurfaceT <= 0.0));
+        if (transparentSegment) {
             payload.bounceType = BOUNCE_TRANSPARENT;
         }
     }

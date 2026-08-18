@@ -398,6 +398,19 @@ struct SimulationGridDomainDesc {
     // render bridge / UI). Travels with the domain for serialization and is
     // bound to the domain's live VDB volume. Not used by the solver.
     std::shared_ptr<VolumeShader> shader;
+    // Which preset recipe the shader above was built from ("fire" | "smoke"),
+    // empty when it was never chosen explicitly.
+    //
+    // ★★★ WITHOUT THIS THE READ-BACK LIED. getGasShaderSettings reported the
+    // preset from `fire_enabled`, which is a COMBUSTION setting the shader path
+    // never writes — so setting the shader preset to "fire" installed the fire
+    // recipe and still read back as "smoke". Measured 2026-08-17: a silent
+    // no-op through the app's own rt.gas.set_shader.
+    //
+    // ★★ And `fire_enabled` deliberately stays out of it: it turns COMBUSTION
+    // on. Deriving it from a look change would make choosing a shader preset
+    // silently start burning the gas — same name, different job.
+    std::string shader_preset;
 
     // ── Fluid render mode (consumed when type == Fluid). ─────────────────────
     // ★ The default used to be `Volume`, justified as "so projects load
@@ -755,6 +768,22 @@ struct SimulationGridDomainState {
     // density/temperature/fuel). For Fluid this is per-step scratch for the
     // pressure projection; the source of truth is `particles`.
     FluidSim::FluidGrid grid;
+    // ★★★ Particles destroyed by COMBUSTION, cumulative for this run.
+    //
+    // The emitter's capacity gate compares the live particle count against
+    // fluid_max_particles, so any removal frees quota and the source refills it.
+    // That is right for a fountain draining through an open boundary and wrong
+    // for a body that burned: burning DESTROYS material, it does not return
+    // budget. Without this the plastic never shrinks — the emitter simply keeps
+    // pace with the flame and the object looks static at the ceiling.
+    //
+    // ★ The distinguishing fact is never "how many particles left" but WHY they
+    // left, which is exactly what the old dead-band could not know: it was sized
+    // (max_p/100) for reseed trim jitter, a few particles either way, while burn
+    // loss is one-directional and unbounded and crosses that band instantly.
+    //
+    // Reset with the simulation, not per frame — it is a running total.
+    std::size_t burned_particles = 0;
     std::size_t active_density_cells = 0;
     float max_density = 0.0f;
     // Inclusive active-density cell bounds. Empty when max < min. Used by the
@@ -1634,6 +1663,33 @@ public:
         return world_thermal_.scale();
     }
 
+    // ── Coupling trace (node layer Faz N4) ───────────────────────────────────
+    //
+    // ★★★ MEASURED, NOT MIRRORED. The node graph declares which couplings a user
+    // wants and in what order, but the order they actually run in is decided
+    // here, inside stepGridDomains. Keeping a hand-written copy of that order in
+    // the node layer would be a second representation of the same fact, and this
+    // repository has paid for parallel representations more than once: the copy
+    // drifts, and the symptom is a graph that confidently shows the wrong order.
+    //
+    // So the solver reports what it RAN. An entry is appended only when a
+    // coupling actually did work this step — "configured" and "ran" are
+    // different claims, and conflating them is how a dead coupling reads as
+    // healthy.
+    //
+    // ★ No allocation in the step: names are string literals and the vector is
+    // cleared (capacity kept) rather than freed.
+    struct CouplingTraceEntry {
+        const char* name = "";       // stable id, matches the node's coupling key
+        const char* producer = "";   // which system wrote
+        const char* consumer = "";   // which system read
+        std::string source_domain;   // identity, never a handle
+        std::string target_domain;
+    };
+    const std::vector<CouplingTraceEntry>& couplingTrace() const {
+        return coupling_trace_;
+    }
+
     std::vector<SimulationGridDomainDesc>& gridDomains();
     const std::vector<SimulationGridDomainDesc>& gridDomains() const;
     const std::vector<SimulationGridDomainState>& gridDomainStates() const;
@@ -1801,6 +1857,16 @@ private:
     std::function<bool(const ParticleColliderDesc&, Vec3&, Vec3&)> collider_bounds_resolver_;
     std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)> collider_obb_resolver_;
     std::function<bool(const ParticleColliderDesc&, std::vector<SurfaceMeshTriangle>&, uint64_t&)> collider_mesh_resolver_;
+    // Couplings that RAN during the last stepGridDomains, in execution order.
+    // Cleared at the top of every step; see couplingTrace().
+    std::vector<CouplingTraceEntry> coupling_trace_;
+    void noteCoupling(const char* name, const char* producer, const char* consumer,
+                      std::string source_domain, std::string target_domain) {
+        coupling_trace_.push_back(CouplingTraceEntry{
+            name, producer, consumer,
+            std::move(source_domain), std::move(target_domain)});
+    }
+
     // Material State Field — persistent per-object surface burn state.
     MaterialStateFieldSystem material_state_fields_;
     std::vector<MoltenMassTransferRequest> molten_mass_transfer_queue_;

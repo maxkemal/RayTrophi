@@ -995,6 +995,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["domain_max"] = vec3ToPython(info.domain_max);
         d["voxel_size"] = info.voxel_size;
         d["particle_count"] = info.particle_count;
+        d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
         d["backend"] = info.backend;
         d["boundary"] = info.boundary;
@@ -1015,6 +1016,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_healing_rate"] = info.granular_healing_rate;
         d["granular_rebonding"] = info.granular_rebonding;
         d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
+        d["granular_softening_temperature"] = info.granular_softening_temperature;
+        d["granular_softening_range"] = info.granular_softening_range;
+        d["granular_residual_strength"] = info.granular_residual_strength;
+        d["granular_tack_peak"] = info.granular_tack_peak;
+        d["granular_thermal_conductivity"] = info.granular_thermal_conductivity;
         d["granular_yielded"] = info.granular_yielded_particles;
         d["granular_detached"] = info.granular_detached_particles;
         d["granular_invalid"] = info.granular_invalid_particles;
@@ -1036,6 +1042,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_required_substeps"] = info.granular_required_substeps;
         d["granular_solver_substeps"] = info.granular_solver_substeps;
         d["granular_stiffness_capped"] = info.granular_stiffness_capped;
+        d["granular_wave_substeps"] = info.granular_wave_substeps;
+        d["granular_strain_substeps"] = info.granular_strain_substeps;
+        d["granular_strain_rate"] = info.granular_strain_rate;
+        d["granular_strain_limited"] = info.granular_strain_limited_particles;
+        d["granular_compaction_capped"] = info.granular_compaction_capped_particles;
+        d["granular_min_softening"] = info.granular_min_softening;
+        d["granular_softened"] = info.granular_softened_particles;
+        d["granular_overburden_pressure"] = info.granular_overburden_pressure;
+        d["granular_young_modulus_for_load"] = info.granular_young_modulus_for_load;
+        d["granular_stiffness_below_load"] = info.granular_stiffness_below_load;
         d["surface_material"] = info.surface_material;
         d["splat_material"] = info.splat_material;
         d["surface_offset_voxels"] = info.surface_offset_voxels;
@@ -1124,6 +1140,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["domain_max"] = vec3ToPython(info.domain_max);
             d["voxel_size"] = info.voxel_size;
             d["particle_count"] = info.particle_count;
+            d["live_state"] = info.live_state;
             d["render_mode"] = info.render_mode;
             d["backend"] = info.backend;
             d["boundary"] = info.boundary;
@@ -1144,6 +1161,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["granular_healing_rate"] = info.granular_healing_rate;
             d["granular_rebonding"] = info.granular_rebonding;
             d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
+        d["granular_softening_temperature"] = info.granular_softening_temperature;
+        d["granular_softening_range"] = info.granular_softening_range;
+        d["granular_residual_strength"] = info.granular_residual_strength;
+        d["granular_tack_peak"] = info.granular_tack_peak;
+        d["granular_thermal_conductivity"] = info.granular_thermal_conductivity;
             d["granular_yielded"] = info.granular_yielded_particles;
             d["granular_detached"] = info.granular_detached_particles;
             d["granular_invalid"] = info.granular_invalid_particles;
@@ -1165,6 +1187,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["granular_required_substeps"] = info.granular_required_substeps;
             d["granular_solver_substeps"] = info.granular_solver_substeps;
             d["granular_stiffness_capped"] = info.granular_stiffness_capped;
+            d["granular_wave_substeps"] = info.granular_wave_substeps;
+            d["granular_strain_substeps"] = info.granular_strain_substeps;
+            d["granular_strain_rate"] = info.granular_strain_rate;
+            d["granular_strain_limited"] = info.granular_strain_limited_particles;
+        d["granular_compaction_capped"] = info.granular_compaction_capped_particles;
+        d["granular_min_softening"] = info.granular_min_softening;
+        d["granular_softened"] = info.granular_softened_particles;
+            d["granular_overburden_pressure"] = info.granular_overburden_pressure;
+            d["granular_young_modulus_for_load"] = info.granular_young_modulus_for_load;
+            d["granular_stiffness_below_load"] = info.granular_stiffness_below_load;
             d["surface_material"] = info.surface_material;
             d["splat_material"] = info.splat_material;
             d["surface_offset_voxels"] = info.surface_offset_voxels;
@@ -1235,6 +1267,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["domain_max"] = vec3ToPython(info.domain_max);
         d["voxel_size"] = info.voxel_size;
         d["particle_count"] = info.particle_count;
+        d["live_state"] = info.live_state;
         d["render_mode"] = info.render_mode;
         d["backend"] = info.backend;
         d["boundary"] = info.boundary;
@@ -1255,6 +1288,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_healing_rate"] = info.granular_healing_rate;
         d["granular_rebonding"] = info.granular_rebonding;
         d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
+        d["granular_softening_temperature"] = info.granular_softening_temperature;
+        d["granular_softening_range"] = info.granular_softening_range;
+        d["granular_residual_strength"] = info.granular_residual_strength;
+        d["granular_tack_peak"] = info.granular_tack_peak;
+        d["granular_thermal_conductivity"] = info.granular_thermal_conductivity;
         d["granular_yielded"] = info.granular_yielded_particles;
         d["granular_detached"] = info.granular_detached_particles;
         d["granular_invalid"] = info.granular_invalid_particles;
@@ -1276,6 +1314,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_required_substeps"] = info.granular_required_substeps;
         d["granular_solver_substeps"] = info.granular_solver_substeps;
         d["granular_stiffness_capped"] = info.granular_stiffness_capped;
+        d["granular_wave_substeps"] = info.granular_wave_substeps;
+        d["granular_strain_substeps"] = info.granular_strain_substeps;
+        d["granular_strain_rate"] = info.granular_strain_rate;
+        d["granular_strain_limited"] = info.granular_strain_limited_particles;
+        d["granular_compaction_capped"] = info.granular_compaction_capped_particles;
+        d["granular_min_softening"] = info.granular_min_softening;
+        d["granular_softened"] = info.granular_softened_particles;
+        d["granular_overburden_pressure"] = info.granular_overburden_pressure;
+        d["granular_young_modulus_for_load"] = info.granular_young_modulus_for_load;
+        d["granular_stiffness_below_load"] = info.granular_stiffness_below_load;
         d["surface_material"] = info.surface_material;
         d["splat_material"] = info.splat_material;
         d["surface_offset_voxels"] = info.surface_offset_voxels;
@@ -1524,6 +1572,15 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if(kwargs.contains("granular_healing_rate")){granular_healing=py::cast<float>(kwargs["granular_healing_rate"]);p_granular_healing=&granular_healing;}
         if(kwargs.contains("granular_rebonding")){granular_rebonding=py::cast<bool>(kwargs["granular_rebonding"]);p_granular_rebonding=&granular_rebonding;}
         if(kwargs.contains("granular_max_solver_substeps")){granular_max_solver_substeps=py::cast<int>(kwargs["granular_max_solver_substeps"]);p_granular_max_solver_substeps=&granular_max_solver_substeps;}
+        float granular_soft_temp=0,granular_soft_range=0,granular_residual=0;
+        const float *p_granular_soft_temp=nullptr,*p_granular_soft_range=nullptr,*p_granular_residual=nullptr;
+        if(kwargs.contains("granular_softening_temperature")){granular_soft_temp=py::cast<float>(kwargs["granular_softening_temperature"]);p_granular_soft_temp=&granular_soft_temp;}
+        if(kwargs.contains("granular_softening_range")){granular_soft_range=py::cast<float>(kwargs["granular_softening_range"]);p_granular_soft_range=&granular_soft_range;}
+        if(kwargs.contains("granular_residual_strength")){granular_residual=py::cast<float>(kwargs["granular_residual_strength"]);p_granular_residual=&granular_residual;}
+        float granular_tack=0.0f;const float* p_granular_tack=nullptr;
+        if(kwargs.contains("granular_tack_peak")){granular_tack=py::cast<float>(kwargs["granular_tack_peak"]);p_granular_tack=&granular_tack;}
+        float granular_cond=0.0f;const float* p_granular_cond=nullptr;
+        if(kwargs.contains("granular_thermal_conductivity")){granular_cond=py::cast<float>(kwargs["granular_thermal_conductivity"]);p_granular_cond=&granular_cond;}
 
         requireResult(rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_vs, p_rm, p_dev, p_bound, p_preset, p_visc, p_sweeps, p_slip, p_surf_mat,
                                                p_surface_offset,
@@ -1535,7 +1592,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                                p_granular_tensile,p_granular_hardening,
                                                p_granular_fracture,p_granular_damage,
                                                p_granular_healing,p_granular_rebonding,
-                                               p_granular_max_solver_substeps));
+                                               p_granular_max_solver_substeps,
+                                               p_granular_soft_temp,p_granular_soft_range,
+                                               p_granular_residual,
+                                               p_granular_tack, p_granular_cond));
     }, py::arg("domain"));
 
     fluid.def("reset", []() {
@@ -2728,6 +2788,294 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return result;
     });
     render.def("cancel", [] { requireResult(rtapi::cancelRender()); });
+    render.def("volume_counters", [](bool enabled) {
+        requireResult(rtapi::setVolumeInstrumentation(enabled));
+    }, py::arg("enabled"),
+       "Enable/disable the Vulkan volume GPU counters and zero them. They are "
+       "opt-in: the atomics cost a little, so leave them off while measuring "
+       "frame time.");
+    render.def("volume_stats", [] {
+        const rtapi::VolumeInstrumentationInfo s = rtapi::volumeStats();
+        py::dict d;
+        d["available"] = s.available;
+        d["enabled"] = s.enabled;
+        d["volume_rays"] = s.volume_rays;
+        d["density_samples"] = s.density_samples;
+        d["shadow_density_samples"] = s.shadow_density_samples;
+        d["empty_segments_skipped"] = s.empty_segments_skipped;
+        d["topology_segments_skipped"] = s.topology_segments_skipped;
+        d["majorant_segments_skipped"] = s.majorant_segments_skipped;
+        d["majorant_queries"] = s.majorant_queries;
+        d["majorant_available_queries"] = s.majorant_available_queries;
+        d["extinction_terminations"] = s.extinction_terminations;
+        d["step_budget_exhausted"] = s.step_budget_exhausted;
+        d["completed_intervals"] = s.completed_intervals;
+        d["temporal_accepted"] = s.temporal_accepted;
+        d["temporal_rejected"] = s.temporal_rejected;
+        d["solid_probe_runs"] = s.solid_probe_runs;
+        d["solid_probe_hits"] = s.solid_probe_hits;
+        d["gas_handoffs"] = s.gas_handoffs;
+        d["layered_handoffs"] = s.layered_handoffs;
+        d["arbiter_rejects"] = s.arbiter_rejects;
+        d["teleports"] = s.teleports;
+        d["arbiter_candidates"] = s.arbiter_candidates;
+        d["arbiter_gate_open"] = s.arbiter_gate_open;
+        d["arbiter_no_box"] = s.arbiter_no_box;
+        d["arbiter_empty_range"] = s.arbiter_empty_range;
+        d["arbiter_no_crossing"] = s.arbiter_no_crossing;
+        return d;
+    }, "Synchronized snapshot of the Vulkan volume counters. Check 'available' "
+       "(Vulkan backend present) and 'enabled' before reading any number — an "
+       "all-zero result means one of those is false far more often than it "
+       "means the volume was free.");
+
+    // ── Viewport measurement ────────────────────────────────────────────────
+    // ★ Reading a render's DATA instead of saving it and looking. See
+    // docs/dev/AGENT_VIEWPORT_MEASUREMENT_PLAN.md for what this cost to learn.
+    render.def("probe", [](int x, int y, int width, int height, float threshold) {
+        rtapi::ViewportProbeRegion region;
+        region.x = x; region.y = y; region.width = width; region.height = height;
+        const rtapi::ViewportProbeInfo p = rtapi::probeViewportFrame(region, threshold);
+        py::dict d;
+        d["available"] = p.available;
+        d["width"] = p.width;
+        d["height"] = p.height;
+        d["pixels"] = p.pixels;
+        d["mean_luminance"] = p.mean_luminance;
+        d["min_luminance"] = p.min_luminance;
+        d["max_luminance"] = p.max_luminance;
+        d["black_fraction"] = p.black_fraction;
+        d["nan_fraction"] = p.nan_fraction;
+        py::list hist;
+        for (uint32_t bucket : p.histogram) hist.append(bucket);
+        d["histogram"] = hist;
+        return d;
+    }, py::arg("x") = 0, py::arg("y") = 0, py::arg("width") = 0,
+       py::arg("height") = 0, py::arg("threshold") = 0.001f,
+       "Numeric statistics of the captured viewport frame. Requires "
+       "rt.viewport.capture(True); 'available' is false until a frame has been "
+       "captured, and that is NOT the same as a black frame.");
+
+    // ── rt.editor: the application's own editor view state ──────────────────
+    //
+    // ★★★ Distinct from `rt.ui` on purpose. `rt.ui` means "draw your own panel"
+    // and can only work in-process, because a widget call is meaningless outside
+    // a frame's draw context. `rt.editor` means "which editor is showing", which
+    // is a value and crosses IPC like any other. Keeping them apart is what
+    // makes the drawing exemption honest instead of a blanket blind spot — see
+    // the EditorState note in RtApi.h.
+    py::module_ editor = module.def_submodule("editor",
+        "Editor view state: which bottom editor is open and which node graph "
+        "domain it shows. Values only -- widgets are rt.ui and stay in-process.");
+    editor.def("get_state", [] {
+        const rtapi::EditorState s = rtapi::editorState();
+        py::dict d;
+        d["bottom_editor"] = s.bottom_editor;
+        d["node_editor_domain"] = s.node_editor_domain;
+        d["node_editor_open"] = s.node_editor_open;
+        d["open_editors"] = s.open_editors;
+        return d;
+    }, "Which bottom editor is on screen right now.");
+    editor.def("set_bottom_editor", [](const std::string& name) {
+        requireResult(rtapi::setBottomEditor(name));
+    }, py::arg("name"),
+       "none|dope_sheet|graph_editor|console|assets|simulation|geometry|"
+       "material|terrain|anim_graph");
+    editor.def("set_node_domain", [](const std::string& name) {
+        requireResult(rtapi::setNodeEditorDomain(name));
+    }, py::arg("name"),
+       "simulation|geometry|material|terrain|animation");
+
+    // ── Simulation node graph (Faz N0/N1/N2) ────────────────────────────────
+    // ★ Evaluating produces COMMANDS, not effects. A script can read what a
+    // graph MEANS without running a simulation, which is what makes the layer
+    // testable at all. See NODE_SIMULATION_ARCHITECTURE_PLAN.md, BOLUM D.
+    py::module_ sim_graph = module.def_submodule("sim_graph",
+        "Simulation node graph: build it, read its intent, apply it as an "
+        "override layer. Nothing here owns simulation state.");
+    sim_graph.def("clear", [] { requireResult(rtapi::simGraphClear()); });
+    sim_graph.def("add_node", [](const std::string& type_id) {
+        uint32_t id = 0;
+        requireResult(rtapi::simGraphAddNode(type_id, id));
+        return id;
+    }, py::arg("type"));
+    sim_graph.def("set_node", [](uint32_t node, const std::string& key,
+                                 const std::string& value) {
+        requireResult(rtapi::simGraphSetNodeText(node, key, value));
+    }, py::arg("node"), py::arg("key"), py::arg("value"));
+    sim_graph.def("set_node_value", [](uint32_t node, const std::string& key, float value) {
+        requireResult(rtapi::simGraphSetNodeValue(node, key, value));
+    }, py::arg("node"), py::arg("key"), py::arg("value"));
+    sim_graph.def("apply", [](bool allow_restart) {
+        const rtapi::SimApplyResult r = rtapi::simGraphApply(allow_restart);
+        py::dict d;
+        d["ok"] = r.ok; d["applied"] = r.applied;
+        d["overrides_held"] = r.overrides_held;
+        d["refused"] = r.refused; d["failed"] = r.failed;
+        return d;
+    }, py::arg("allow_restart") = false,
+       "Apply the graph as an OVERRIDE layer. Authored values are captured "
+       "before the first write and restored by clear_overrides(). Parameters "
+       "needing a restart are refused and reported unless allow_restart=True.");
+    sim_graph.def("clear_overrides", [] {
+        requireResult(rtapi::simGraphClearOverrides());
+    }, "Restore every authored value this graph overrode.");
+    sim_graph.def("override_count", [] { return rtapi::simGraphOverrideCount(); });
+    sim_graph.def("connect", [](uint32_t from_node, uint32_t to_node,
+                                int from_pin, int to_pin) {
+        requireResult(rtapi::simGraphConnect(from_node, from_pin, to_node, to_pin));
+    }, py::arg("from_node"), py::arg("to_node"),
+       py::arg("from_pin") = 0, py::arg("to_pin") = 0);
+    sim_graph.def("evaluate", [] {
+        const rtapi::SimGraphEvaluation e = rtapi::simGraphEvaluate();
+        py::list commands;
+        for (const auto& c : e.commands) {
+            py::dict d;
+            d["kind"] = c.kind; d["target"] = c.target; d["key"] = c.key;
+            d["value"] = c.value; d["text"] = c.text; d["source_node"] = c.source_node;
+            commands.append(d);
+        }
+        py::list restarts;
+        for (const auto& r : e.restart_requests) {
+            py::dict d; d["node"] = r.node_id; d["reason"] = r.reason;
+            restarts.append(d);
+        }
+        py::dict out;
+        out["evaluated"] = e.evaluated;
+        out["commands"] = commands;
+        out["restart_requests"] = restarts;
+        return out;
+    }, "Evaluate the graph and return its intent. Nothing is applied, and a "
+       "restart request is REPORTED, never acted on.");
+    sim_graph.def("nodes", [] {
+        py::list arr;
+        for (const auto& n : rtapi::simGraphNodes()) {
+            py::dict d;
+            d["id"] = n.id; d["type"] = n.type_id; d["name"] = n.display_name;
+            d["enabled"] = n.enabled; d["inputs"] = n.input_count;
+            d["outputs"] = n.output_count; d["domain"] = n.domain;
+            d["channel"] = n.channel; d["source"] = n.source;
+            if (n.has_stats) {
+                d["stats_available"] = n.stats_available;
+                d["particle_count"] = n.particle_count;
+                d["array_size"] = n.array_size;
+                d["array_in_sync"] = n.array_in_sync;
+                d["host_fresh"] = n.host_fresh;
+                d["min_value"] = n.min_value;
+                d["max_value"] = n.max_value;
+                d["mean_value"] = n.mean_value;
+            }
+            if (n.has_cache_status) {
+                d["cache_valid"] = n.cache_valid;
+                d["cache_baking"] = n.cache_baking;
+                d["cache_stale"] = n.cache_stale;
+                d["cache_ram_frames"] = n.cache_ram_frames;
+            }
+            arr.append(d);
+        }
+        return arr;
+    }, "Nodes with their parameters. On a Field Inspect node, 'stats_available' "
+       "false means the value could NOT be measured -- not that it measured zero. "
+       "'array_in_sync' false means the attribute array is longer than the live "
+       "particle count; the statistics still cover the live particles only.");
+    sim_graph.def("couplings", [] {
+        const rtapi::SimCouplingReport r = rtapi::simGraphCouplings();
+        auto pack = [](const std::vector<rtapi::SimCouplingEntry>& v) {
+            py::list arr;
+            for (const auto& e : v) {
+                py::dict d;
+                d["coupling"] = e.coupling;
+                d["producer"] = e.producer;
+                d["consumer"] = e.consumer;
+                d["source_domain"] = e.source_domain;
+                d["target_domain"] = e.target_domain;
+                d["active"] = e.active;
+                d["source_node"] = e.source_node;
+                arr.append(d);
+            }
+            return arr;
+        };
+        py::dict out;
+        out["declared"] = pack(r.declared);
+        out["actual"] = pack(r.actual);
+        out["traced"] = r.traced;
+        out["order_matches"] = r.order_matches;
+        out["declared_not_running"] = r.declared_not_running;
+        out["running_not_declared"] = r.running_not_declared;
+        return out;
+    }, "Couplings the graph DECLARES and the ones the solver actually RAN last "
+       "step, in execution order. The graph does not schedule couplings -- "
+       "comparing the two is the point. 'traced' false means the solver was "
+       "never asked; an empty 'actual' with traced true is a measurement.");
+    // N6 — the bake, and the state a script needs to reason about it.
+    py::module_ sim_cache = module.def_submodule(
+        "sim_cache", "Simulation bake and timeline cache state");
+    sim_cache.def("status", [] {
+        rtapi::SimCacheStatus s;
+        requireResult(rtapi::simCacheStatus(s));
+        py::dict d;
+        d["valid"] = s.valid;
+        d["baking"] = s.baking;
+        d["cache_dir"] = s.cache_dir;
+        d["ram_frames"] = s.ram_frames;
+        d["has_range"] = s.has_range;
+        d["first_frame"] = s.first_frame;
+        d["last_frame"] = s.last_frame;
+        d["config_signature"] = s.config_signature;
+        return d;
+    }, "Bake state. 'valid' (disk bake bound), 'baking' (running) and "
+       "'ram_frames' (timeline scrub cache) are SEPARATE: all three can read "
+       "'nothing usable' and they mean different things. 'config_signature' is "
+       "the authored config the cache was built from -- when it changes, a bake "
+       "that still exists no longer describes this scene.");
+    sim_cache.def("bake", [](const std::string& cache_dir, int end_frame,
+                             int start_frame, float fps) {
+        requireResult(rtapi::simBake(cache_dir, start_frame, end_frame, fps));
+    }, py::arg("cache_dir"), py::arg("end_frame"), py::arg("start_frame") = 0,
+       py::arg("fps") = 24.0f,
+       "Deterministically bake [start_frame, end_frame] to a disk point cache. "
+       "BLOCKING: it walks the whole simulation on the calling thread.");
+    sim_cache.def("clear", [] {
+        requireResult(rtapi::simClearCache());
+    }, "Drop the timeline cache and unbind the disk bake (free-run preview).");
+
+    sim_graph.def("surface_attributes", [](const std::string& object) {
+        return rtapi::simListSurfaceAttributes(object);
+    }, py::arg("object"),
+       "Per-element MSF attributes on one object: temperature, char, melt, "
+       "moisture, fuel_remaining, mass_loss. Empty when the object carries no "
+       "Material State Field -- which means UNMEASURED, not zero.");
+    sim_graph.def("attributes", [](const std::string& domain) {
+        return rtapi::simListAttributes(domain);
+    }, py::arg("domain"),
+       "Per-particle attributes that actually exist on this domain. This is the "
+       "naming layer: until now the only way to learn an attribute existed was "
+       "to read the solver source.");
+
+    py::module_ viewport = module.def_submodule("viewport",
+        "Viewport state and per-frame capture for render.probe().");
+    viewport.def("capture", [](bool enabled) {
+        requireResult(rtapi::setViewportCapture(enabled));
+    }, py::arg("enabled"),
+       "Enable per-frame capture of the displayed frame so render.probe can "
+       "measure it. Off by default: it costs one copy per frame.");
+    viewport.def("status", [] {
+        const rtapi::ViewportStatusInfo s = rtapi::viewportStatus();
+        py::dict d;
+        d["available"] = s.available;
+        d["backend"] = s.backend;
+        d["width"] = s.width;
+        d["height"] = s.height;
+        d["samples"] = s.samples;
+        d["accumulation_complete"] = s.accumulation_complete;
+        d["ms_per_sample"] = s.ms_per_sample;
+        d["rendering_active"] = s.rendering_active;
+        d["capture_enabled"] = s.capture_enabled;
+        d["frame_available"] = s.frame_available;
+        return d;
+    }, "Viewport state. Check 'rendering_active' and 'samples' before trusting "
+       "any counter: an idle viewport reports zeros that look exactly like a "
+       "cheap scene.");
 
     // Multi-frame sequence render (maps to the g_seq_save_active state machine).
     render.def("start_sequence", [](const std::string& output_dir, int spp,

@@ -958,7 +958,7 @@ void main() {
     vec3 firstHitPos   = vec3(0.0);
     bool firstHitValid = false;
     bool causticGathered = false;   // photon-map gather fires once per path (Faz 2 / Dilim 2)
-    payload.skipAABBs = false;
+    payload.skipVolumeAABBs = false;
     payload.skipGasVolumes = false;
     // Dispersion hero channel: reset once per PATH (not per bounce) so the exit
     // interface of a dispersive glass refracts with the same channel as the entry.
@@ -982,8 +982,8 @@ void main() {
     int bounce = 0;      // hoisted: Bounce Count debug view reads it after the loop
     for (int totalPasses = 0; bounce < effectiveBounces && totalPasses < maxTotalPasses; totalPasses++) {
 
-        // Consume skipAABBs flag set by previous bounce (volume solid detection)
-        bool useSkipAABBs = payload.skipAABBs;
+        // Consume skipVolumeAABBs flag set by previous bounce (volume solid detection)
+        bool useSkipVolumeAABBs = payload.skipVolumeAABBs;
         bool useSkipGasVolumes = payload.skipGasVolumes;
 
         payload.radiance      = vec3(0.0);
@@ -992,7 +992,7 @@ void main() {
         payload.scatterDir    = vec3(0.0);
         payload.seed          = seed;
         payload.scattered     = false;
-        payload.skipAABBs     = false;
+        payload.skipVolumeAABBs     = false;
         payload.skipGasVolumes = false;
         payload.primaryARG    = 0u;
         payload.primaryABT    = 0u;
@@ -1000,20 +1000,24 @@ void main() {
         payload.primaryMeta   = plMetaReset(payload.primaryMeta); // keeps dispersion bits
         payload.bounceType = BOUNCE_SPECULAR;
 
-        // When the previous bounce was a volume that detected a solid surface inside,
-        // skip AABB (procedural) geometry so the solid triangle is hit directly.
+        // When the previous bounce was a volume that detected a solid surface
+        // inside, remove that volume from the re-trace so the solid is hit
+        // directly. This is now a CULL MASK, not gl_RayFlagsSkipAABBEXT: the ray
+        // flag removed all procedural geometry, taking splat spheres and hair
+        // down with the volume box. See RT_MASK_VOLUME_HANDOFF in rt_payload.glsl.
+        //
         // NO OpaqueEXT: alpha-cutout materials resolve in the any-hit during
         // traversal (shadow_anyhit.rahit camera-mode branch) — forcing opaque
         // here would bring back the old transparent-pass re-trace per foliage
         // layer. Opaque BLASes still skip the any-hit via their geometry flag.
-        uint traceFlags = useSkipAABBs
-            ? gl_RayFlagsSkipAABBEXT
-            : gl_RayFlagsNoneEXT;
+        uint cullMask = 0xFFu;
+        if (useSkipVolumeAABBs) cullMask &= RT_MASK_VOLUME_HANDOFF;
+        if (useSkipGasVolumes)  cullMask &= RT_MASK_GAS_HANDOFF;
 
         traceRayEXT(
             topLevelAS,
-            traceFlags,
-            useSkipGasVolumes ? 0xFD : 0xFF,
+            gl_RayFlagsNoneEXT,
+            cullMask,
             0, 0, 0,
             rayOrigin,
             T_MIN,
@@ -1114,7 +1118,7 @@ void main() {
         // --- STOCHASTIC TRANSPARENCY BOUNCE PRESERVATION ---
         // If the ray passed straight through without altering radiance or attenuation (opacity cutout),
         // do NOT count it as a GI bounce. Keep bounce limit available for actual lighting.
-        if (!isTransparentPass && !payload.skipAABBs &&
+        if (!isTransparentPass && !payload.skipVolumeAABBs &&
             !payload.skipGasVolumes) {
             if (payload.bounceType == BOUNCE_DIFFUSE) {
                 diffuseBounceCount++;

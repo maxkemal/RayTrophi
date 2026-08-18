@@ -4,6 +4,8 @@
 #include "Template/TemplateRegistry.h"
 #include "Template/TemplateRecipeStage.h"
 #include "Template/TemplateUiStateAdapter.h"
+#include "Template/PathUtils.h"
+#include "UI/TemplateHubUI.h"
 #include "ProjectManager.h"
 #include "MaterialManager.h"
 #include "SceneCommand.h"
@@ -13,6 +15,7 @@
 #include <utility>
 
 namespace raytrophi::templates {
+using pathutils::pathToUtf8;
 namespace {
 
 TemplateOpenResult rejected(const std::string& id, const std::string& code,
@@ -23,6 +26,15 @@ TemplateOpenResult rejected(const std::string& id, const std::string& code,
     result.code = code;
     result.errors = std::move(errors);
     result.warnings = std::move(warnings);
+    return result;
+}
+
+TemplateOpenResult ok(const std::string& id, const std::string& path) {
+    TemplateOpenResult result;
+    result.template_id = id;
+    result.state = "opened";
+    result.code = "opened";
+    result.opened = true;
     return result;
 }
 
@@ -47,10 +59,32 @@ TemplateOpenResult TemplateSession::open(const std::string& template_id,
     const auto plan = TemplateLoader::instance().prepare(
         template_id, ProjectManager::getInstance().hasUnsavedChanges(), policy);
     if (!plan.ready) return rejected(template_id, plan.code, plan.errors, plan.warnings);
+
+    // Support opening custom user templates and project-based templates
     if (plan.scene_type == "project") {
-        return rejected(template_id, "transaction_not_available",
-                        {"project template commit requires staged project loading"});
+        bool opened_proj = ProjectManager::getInstance().openProject(
+            pathToUtf8(plan.scene_path), context.scene, context.render_settings, context.renderer, context.backend_ptr);
+        if (!opened_proj) {
+            return rejected(template_id, "project_open_failed", {"failed to open project template"});
+        }
+        if (!context.scene.camera) {
+            auto fallback_camera = std::make_shared<Camera>(
+                Vec3(11.0f, 8.0f, 14.0f), Vec3(0.0f, 0.25f, 0.0f),
+                Vec3(0.0f, 1.0f, 0.0f), 40.0f, 16.0f / 9.0f,
+                0.0f, (Vec3(11.0f, 8.0f, 14.0f) - Vec3(0.0f, 0.25f, 0.0f)).length(), 0);
+            fallback_camera->nodeName = "Startup Camera";
+            context.scene.addCamera(fallback_camera);
+            context.scene.setActiveCamera(context.scene.cameras.size() - 1);
+        }
+        context.scene.initialized = true;
+        context.selection.clearSelection();
+        if (history) history->clear();
+        ui.timeline.reset();
+        ui.invalidateCache();
+        ui.rebuildMeshCache(context.scene.world.objects);
+        return ok(template_id, pathToUtf8(plan.scene_path));
     }
+
     if (plan.scene_type != "recipe") {
         return rejected(template_id, "unsupported_scene_type",
                         {"unsupported scene type: " + plan.scene_type});
@@ -163,6 +197,8 @@ TemplateOpenResult TemplateSession::open(const std::string& template_id,
     g_needs_optix_sync.store(true, std::memory_order_release);
     if (context.render_settings.use_vulkan) context.render_settings.backend_changed = true;
     context.start_render = true;
+
+    TemplateHubUI::instance().addRecentProject(metadata->display_name);
 
     TemplateOpenResult result;
     result.template_id = template_id;

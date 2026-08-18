@@ -59,6 +59,45 @@ The token can be supplied through `RAYTROPHI_REMOTE_IPC_TOKEN` or `--token`. Pre
 secret-managed environment over a command-line token because command lines may be visible
 to other local processes.
 
+## Data model boundary — binding rule
+
+> **Nothing crosses the IPC boundary except NAMES, IDs and VALUES.**
+> No pointers, no handles, no engine objects, no direct core access.
+
+This is not a style preference; it is what makes the surface diagnosable.
+
+- **A pointer is meaningless across the boundary.** For a remote (TLS) caller it
+  is another process's address space. Even locally it commits us to a lifetime
+  contract: every scene edit that invalidates a handle turns into a *remote*
+  correctness problem, and this repository has already paid for that class of
+  bug in-process (rigid-body rebuild leaking the old Jolt body, the rtapi
+  modifier use-after-free on `DNA::TriangleMesh`, CUDA ghost handles). Those
+  were hard enough to find inside one process; behind IPC they are not
+  diagnosable at all.
+- **Values fail loudly, handles fail silently.** 2026-08-16: `fluid.get`
+  returned a wrongly-filled `FluidDomainInfo`. Because it was a value, it could
+  be compared against `fluid.list_domains` and the disagreement located the bug
+  in one measurement. A stale handle would have produced the same wrong reading
+  with nothing to compare.
+- The existing surface already obeys this: `rtapi` returns plain structs
+  (`FluidDomainInfo`, `VolumeInstrumentationInfo`, …) and addresses objects by
+  name or id. This section only makes the de-facto rule explicit.
+
+### What this rule does NOT forbid
+
+Driving the engine and reading measurements are both value traffic, and both are
+in scope:
+
+- **Commands** — "advance N frames", "render until converged".
+- **Value structs** — counters, timings, per-domain statistics.
+- **Buffers** — pixels or AOV data returned as a serialized block.
+
+★ Returning a rendered image as a *file to look at* is not the same as returning
+its *data*. An agent that can only view a PNG is guessing; an agent that can ask
+"what fraction of pixels inside this region is below 0.001 luminance" is
+measuring. See
+[AGENT_VIEWPORT_MEASUREMENT_PLAN.md](AGENT_VIEWPORT_MEASUREMENT_PLAN.md).
+
 ## Limits
 
 - TLS 1.2 minimum; TLS 1.3 is used when available.

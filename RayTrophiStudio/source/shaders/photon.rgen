@@ -196,7 +196,7 @@ void main() {
     // per-path hero channel cleared (like raygen); PRIMARY_DONE pre-set so
     // closesthit skips the primary-AOV work for photon paths.
     payload.primaryMeta = plMetaReset(0u) | PL_PRIMARY_DONE;
-    payload.skipAABBs = false;
+    payload.skipVolumeAABBs = false;
     payload.skipGasVolumes = false;
 
     for (int bounce = 0; bounce < 8; ++bounce) {
@@ -206,7 +206,7 @@ void main() {
         payload.scatterDir    = vec3(0.0);
         payload.seed          = seed;
         payload.scattered     = false;
-        payload.skipAABBs     = false;
+        payload.skipVolumeAABBs     = false;
         payload.primaryARG    = 0u;
         payload.primaryABT    = 0u;
         payload.primaryNrm    = 0u;

@@ -1443,6 +1443,26 @@ void drawSimulationDomainControls(
                                               "Off for dry sand/gravel; on for wet sand, clay and compacting snow.");
                         ImGui::BeginDisabled(!fp.granular_rebonding);
                         granular_edited |= ImGui::DragFloat("Healing Rate", &fp.granular_healing_rate, 0.01f, 0.0f, 20.0f, "%.2f");
+                        ImGui::SeparatorText("Thermal / Burn Softening");
+                        granular_edited |= ImGui::DragFloat("Softening Temperature (K)",
+                                                           &fp.granular_softening_temperature,
+                                                           1.0f, 0.0f, 4000.0f, "%.0f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Temperature at which the granular skeleton has lost half"
+                                              "its strength. 0 DISABLES softening entirely (sand does not"
+                                              "melt). Bond strength falls faster than stiffness, so the body"
+                                              "stops holding its shape before it goes soft."
+                                              "Remaining mass_fraction multiplies this, so a charring body"
+                                              "weakens as it burns off without a second dial.");
+                        granular_edited |= ImGui::DragFloat("Softening Range (K)",
+                                                           &fp.granular_softening_range,
+                                                           1.0f, 1.0f, 2000.0f, "%.0f");
+                        granular_edited |= ImGui::SliderFloat("Residual Strength",
+                                                             &fp.granular_residual_strength,
+                                                             0.0f, 1.0f, "%.3f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Fraction of strength kept once fully softened."
+                                              "0 = a true melt; a small value leaves a molten residue.");
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Fractional bond-damage recovery per second under compression.\n"
                                               "Higher values let compressed fragments clump and rebuild bonds faster.\n"
@@ -1453,7 +1473,13 @@ void drawSimulationDomainControls(
                             fp.sanitizeGranularMaterial();
                             fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
                         }
-                        ImGui::TextDisabled("Reset + Seed after changing material parameters.");
+                        // These parameters are in the fluid coupling signature,
+                        // so committing an edit drops the bake and snaps the
+                        // playhead to frame 0 by itself. Telling the user to
+                        // Reset + Seed by hand described the old behaviour and
+                        // would now just be a second, redundant round trip.
+                        ImGui::TextDisabled(
+                            "Material edits rewind to frame 0 and drop the bake automatically.");
                     }
 
                     if (ImGui::CollapsingHeader(
@@ -3781,8 +3807,47 @@ void drawSimulationDomainControls(
                                   fs.granular_stiffness_capped ? " (CFL capped)" : "");
                         blk.Value("Granular elastic substeps needed", "%d",
                                   fs.granular_required_substeps);
+                        blk.Value("  from wave CFL", "%d", fs.granular_wave_substeps);
+                        blk.Value("  from strain rate", "%d / |C| = %.1f 1/s",
+                                  fs.granular_strain_substeps, fs.granular_strain_rate);
                         blk.Value("Granular solver substeps run", "%d",
                                   fs.granular_solver_substeps);
+                        // ★ THE ROW THAT MATTERS WHEN A PILE EXPLODES. Non-zero
+                        // means the subcycle could not cover the motion and the
+                        // stress kernel clamped dt*C to stay finite: the step
+                        // survived, it was not correct. Raise
+                        // granular_max_solver_substeps until this reads 0.
+                        if (fs.granular_strain_limited_particles > 0) {
+                            blk.Value("Granular strain-rate CLAMPED", "%zu particles",
+                                      fs.granular_strain_limited_particles);
+                        }
+                        // Not an error row. Soft material compacts permanently,
+                        // and this is that compaction being recorded instead of
+                        // being dumped through a det(F) reset. A steady count on
+                        // a soft preset is expected; a count on a stiff one means
+                        // the material is carrying more load than it can hold.
+                        if (fs.granular_compaction_capped_particles > 0) {
+                            blk.Value("Granular plastic compaction", "%zu particles",
+                                      fs.granular_compaction_capped_particles);
+                        }
+                        // Stability and validity are different questions. This
+                        // one says the material is too soft to hold its own
+                        // weight inside the small-strain model, which no amount
+                        // of substepping repairs.
+                        // Melting IS the material crossing the load gate, so the
+                        // two rows belong together: how far it has softened, and
+                        // whether it can still hold itself up.
+                        if (fs.granular_softened_particles > 0) {
+                            blk.Value("Granular softened", "%zu particles, min %.3f",
+                                      fs.granular_softened_particles,
+                                      fs.granular_min_softening);
+                        }
+                        if (fs.granular_stiffness_below_load) {
+                            blk.Value("Granular TOO SOFT FOR LOAD",
+                                      "%.0f Pa needed, overburden %.0f Pa",
+                                      fs.granular_young_modulus_for_load,
+                                      fs.granular_overburden_pressure);
+                        }
                     }
                     char adv_tag[32];
                     std::snprintf(adv_tag, sizeof(adv_tag), "%d substeps", fs.advect_substeps);

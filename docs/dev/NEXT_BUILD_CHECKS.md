@@ -1,148 +1,141 @@
-# Sıradaki derlemede kontrol listesi
+# Sıradaki build — sıralı kontrol listesi
 
-> **Durum:** CANLI — Her is partisinde bastan yazilir; yalnizca en son parti gecerlidir.
+> **Durum:** AKTİF — 2026-08-17 ikinci partisi (D.4 Nodes sekmesi + `rt.editor`).
+> Her partide üzerine yazılır.
 
-**Parti: Template Hub — Faz 2B.2b-i (dürüst reddetme) + varlık lisans kaydı.**
+Sıra ölçütü: bağımsız ve hızlı görülen önce, başkasının sonucunu maskeleyen sonra.
 
-Tek konu: *preflight'ın verdiği söz tutuyor mu, ve hiçbir başarısızlık yolu
-aktif sahneyi siliyor mu.*
+Bu parti **derlenmedi** — kod yazıldı, derleme kullanıcıda.
+`audit_ipc_capabilities.py`: **293 metot / 30 namespace**, hepsi sınıflandırılmış.
 
-Sıralama ölçütü: **bağımsız ve hızlı görülen önce**, diğerlerinin sonucunu
-maskeleyen sonra.
-
----
-
-## Neden bu değişiklik yazıldı
-
-`prepare()` tek bir şey vaat eder: **ready ⇒ open() kabul eder.** Bu vaat
-yalnız teamülle ayaktaydı, çünkü desteklenen preset listesi **iki yerde** ayrı
-ayrı duruyordu:
-
-| Yer | Rol |
-|---|---|
-| `TemplateLoader::preflightRecipe` | `ready` der |
-| `TemplateRecipeStager::stage` | commit eder |
-
-Birine preset eklenip diğerine eklenmezse **hata alınmaz**: `prepare` `ready`
-döner, `open` `recipe_commit_not_available` ile reddeder. Faz 4'te altı preset
-eklenirken bu tuzağa basılması an meselesiydi. Liste artık **tek kanonik
-tabloda** (`kPresetBuilders`) ve `stage()` dispatch'i de aynı tablodan sürülüyor
-— ayrışma yapısal olarak imkânsız.
-
-İkinci kök: `preflightProject`, `openProject`'in **gerçek** kabul şartından
-gevşekti. `openProject` yalnız `is_v3 && has_geometry && has_binary` yolunu
-yükler (`is_v3` = **tam** `"3.0"` eşitliği); geri kalan her şey legacy dalına
-düşüp `false` döner — ama bunu `newProject()` sahneyi **çoktan sildikten sonra**
-yapar ([ProjectManager.cpp:1854](../RayTrophiStudio/source/src/Core/ProjectManager.cpp#L1854),
-[2470](../RayTrophiStudio/source/src/Core/ProjectManager.cpp#L2470)). Preflight
-ise `rfind("3",0)` ile `"3.1"`i geçiriyor ve `has_geometry=false`'u hiç
-sorgulamıyordu ⇒ **`ready` dediği bir proje sahneyi silip başarısız oluyordu.**
+**Yeni dosyalar** (ikisi de `.vcxproj` + `.filters`'a eklendi):
+`source/src/UI/scene_ui_simnodes.cpp`, `source/src/Api/RtApiUiState.cpp`.
 
 ---
 
-## Sıra
-
-### 1. Derleme (bağımsız, en hızlı)
-
-Dokunulan dosyalar: `Template/TemplateRecipeStage.h`,
-`Template/TemplateRecipeStage.cpp`, `Template/TemplateLoader.cpp`.
-
-**Yeni .cpp YOK ⇒ vcxproj değişmedi. Yeni IPC metodu YOK ⇒ capability
-değişmedi.** `audit_ipc_capabilities.py` çalıştırmaya gerek yok.
-
-- **Görmen gereken:** temiz derleme.
-- **Bozuksa ne demek:** muhtemelen include eksiği — `TemplateRecipeStage.cpp`
-  `<iterator>` (std::size), `TemplateLoader.cpp` `<array>` + `<cstring>`
-  (memcmp) ekledi.
-
-### 2. Sağlıklı yol bozulmamış olmalı (maskeleyeni ÖNCE ele)
-
-Uygulamayı aç. Açılış **General Scene** template'i üzerinden geliyor.
-
-- **Görmen gereken:** eskisiyle **birebir aynı** açılış — Default_Cube seçili,
-  key light, kamera küpü çerçeveliyor, Solid/Rendered geçişi çalışıyor.
-- **Bozuksa ne demek:** preset dispatch'inin tabloya taşınması sırasında bir
-  build fonksiyonu yanlış bağlandı. `empty` ve `general_scene` davranışı
-  değişmemeliydi; bu parti **hiçbir sahne içeriğini** değiştirmedi.
-
-### 3. Preset paritesi (yeni assertion)
+## 1. `rt.editor` — önce bu, çünkü 2'nin ölçüm aleti bu
 
 ```powershell
-.\scripts\ipc\Start-RayTrophi.ps1
+Import-Module .\scripts\ipc\RtIpc.psm1 -Force
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_test_editor_state.py' }
+Get-Content .\x64\Release\scripts\test\_editor_state_result.txt
 ```
-sonra gömülü test: `scripts/test/rt_test_templates.py`
 
-- **Görmen gereken:** `[rt.templates] PASS - N discovered, M valid, 2 recipe parity`
-  ve canlı named-pipe suite'in tamamı **0 FAIL**.
-- **Bozuksa ne demek:** `prepare() ready dedi ama open() reddetti` mesajı
-  çıkarsa tek kanonik liste bağlanmamış demektir — `preflightRecipe` hâlâ kendi
-  kopyasını kullanıyordur.
-- **`recipe parity` sayısı 2'den küçükse:** registry recipe template'lerini
-  keşfetmiyor; asıl arıza 3. maddede değil registry'de.
+- **Görmen gereken:** `RESULT: ALL PASSED`.
+- **Bozuksa:** "only one editor open after…" satırı düşerse alt panellerin
+  karşılıklı dışlaması bozulmuş demektir; ekranda iki panel üst üste görünür.
 
-### 4. Reddetme mutasyonsuz mu (asıl garanti)
+★ **En sinsi başarısızlık burada:** `a refused call changed nothing`. İlk
+yazımda `setBottomEditor` **önce hepsini kapatıyor**, sonra ismi tanımadığını
+fark ediyordu — yani reddedilen çağrı ekranı boşaltıyordu. Yazarken düzeltildi
+(isim artık hiçbir şeye dokunmadan doğrulanıyor); test bu davranışı kilitliyor.
+Düşerse belirti "hata verdi **ve** ekran boşaldı" olur: kullanıcı hatayı görür,
+yan etkiyi görmez.
 
-Sahneye elle birkaç nesne ekle, sonra kaydetmeden bir template açmayı dene:
+## 2. Nodes sekmesi — gözle (otomatik testi olmayan tek kısım)
+
+Alt şeritte artık **tek `Nodes` sekmesi** ve yanında alan seçici var. Eski dört
+sekme (Graph/terrain, AnimGraph, Geometry, Material) **kaldırıldı**.
+
+- **Görmen gereken:** şerit `Dope Sheet | Graph Editor | Console | Python |
+  Nodes [seçici] | Assets`. Seçiciden Geometry seçince eski Geometry Graph
+  penceresi açılıyor (çizimi henüz taşınmadı — bu plana uygun).
+- **Bozuksa:** bir alan seçilince hiçbir şey açılmıyorsa `closeOtherBottomPanels`
+  indeksleri kaymıştır (Nodes = 7).
+
+★ Dördünün **çizim gövdesine dokunulmadı**, yalnızca giriş noktaları katlandı.
+Bir panel bozulduysa sebep sekme yönlendirmesidir, panelin kendisi değil.
+
+## 3. Simülasyon node paneli — kullanıcı raporunun cevabı
+
+Sağda **Properties** kenar çubuğu var: node açıklaması, pin rehberi, ve gerçek
+sahne isimlerinden seçen alanlar.
+
+- **Görmen gereken:** boş sahnede `Nodes` açıp Domain node'u eklediğinde sağda
+  "No simulation domains in this scene" uyarısı ve **Domain node'un domain
+  YARATMADIĞINI** söyleyen açıklama. Bir domain oluşturduktan sonra aynı yerde
+  isim seçici dolu gelmeli.
+- **Bozuksa:** seçici boş kalıyorsa `rtapi::listFluidDomains` sahneye bağlı değil
+  demektir (`rtapi is not bound` mesajı beklenir).
+
+★ **En sinsi başarısızlık:** seçicide isim **var** ama seçmek node'u
+değiştirmiyor. Sebep `simGraphSetNodeText`'in o anahtarı tanımaması olur ve
+belirti "tıkladım, bir şey olmadı" — hata satırı toolbar'ın altında kırmızı
+görünür, oraya bak.
+
+## 4. Granül regresyonu (önceki partiden, izole sahne gerekir)
 
 ```powershell
-Invoke-RtIpc templates.open @{ template_id = 'raytrophi.start.empty' }
+python .\scripts\test\rt_test_granular_soft_stability.py     # PASS bekleniyor
 ```
 
-- **Görmen gereken:** `unsaved_changes` kodu ile **ret**, ve sahnen **olduğu
-  gibi** duruyor — tek bir nesne bile kaybolmamış.
-- **Bozuksa ne demek:** `reject` politikası mutasyon sınırının yanlış tarafında;
-  bu, partinin tek gerçek garantisinin çökmesi demektir.
+- **Görmen gereken:** `PASS`, `below_load ever=True final=False`.
+- **Bozuksa:** `detached > 0` veya `peak overburden` 16 kPa'nın çok altındaysa
+  `FluidParticles::compact()` sıkıştırma yolu bozulmuştur.
 
-### 5. ★ EN SİNSİ: project preflight'ı bu partide HİÇ KOŞMUYOR
+## 5. Node katmanı N0–N7 (önceki parti, regresyon kontrolü)
 
-★★★ Bu partinin en riskli kısmı **çalıştığını hiçbir testin göstermemesi.**
-Depoda **tek bir project-backed template yok** (`empty` ve `general_scene`
-ikisi de recipe). Yani sıkılaştırılmış `preflightProject` kodu **hiç
-çağrılmıyor**; 1–4 arasındaki her madde geçse bile o kod yanlış olabilir ve
-kimse fark etmez. Faz 2B.2b-ii'ye gelindiğinde kod "eski ve güvenilir"
-görüneceği için bir daha da sorgulanmaz.
-
-Bunu kapatmak için elle bir tuzak paket kur — `assets/templates/_probe_project/`:
-
-```json
-manifest.json  →  "scene": { "type": "project", "path": "scene.rtp" }
-scene.rtp      →  { "format_version": "2.0", "has_geometry": true }
+```powershell
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_setup_sim_graph_scene.py' }
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_test_sim_graph.py' }
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_test_sim_couplings.py' }
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_setup_sim_substance_scene.py' }
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_test_sim_substance.py' }
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_setup_sim_render_scene.py' }
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_test_sim_render.py' }
+Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_test_sim_cache.py' }
 ```
 
-`templates.refresh` sonra `templates.prepare` çağır.
+Beşi de `RESULT: ALL PASSED` kalmalı. Bu partide node sınıflarına yalnızca
+`metadata.description` eklendi; davranış değişmedi, yani bir düşüş olursa
+`description` eklemesi bir ctor'u bozmuş demektir.
 
-- **Görmen gereken:** `ready=false`, kod **`unsupported_project_version`**, ve
-  hata metninde `found: 2.0`. Sahne değişmemiş olmalı.
-- **Sonra `format_version`'ı `"3.0"` yap, `.bin` koyma:** kod
-  **`missing_project_binary`** olmalı.
-- **Sonra boş olmayan ama çöp bir `.bin` koy:** kod
-  **`invalid_project_binary`** olmalı (magic `RTP3`–`RTP8` tutmuyor).
-- **`has_geometry`'yi `false` yap:** kod **`unsupported_project_layout`**.
-- **Bozuksa ne demek:** herhangi biri `ready=true` dönerse tam olarak
-  düzeltmeye çalıştığımız arıza duruyordur: preflight, commit'i sahneyi
-  silerek başarısız olacak bir projeye "hazır" diyor.
-- **İş bitince probe paketini sil** — registry'de kalırsa Template Hub'da
-  görünür.
+★ `PASSED SO FAR ... NOT VERIFIED` bir BAŞARI DEĞİLDİR.
 
-### 6. Lisans kaydı (kod değil, doğrulaması hızlı)
+## 6. Çakışık kutu siyah bandı (HÂLÂ DOĞRULANMADI)
 
-- `RayTrophiStudio/assets/THIRD_PARTY_ASSETS.md` okunabilir ve doğru mu.
-- 11 vegetation descriptor'ı damgalandı; Asset Browser'ı aç, bir ağacın
-  bilgisinde `license` alanı **"SALE FORBIDDEN"** ibaresini gösteriyor mu.
-- **Bozuksa ne demek:** `AssetRegistry` damgayı geri yazarken eziyorsa
-  ([AssetRegistry.cpp:866](../RayTrophiStudio/source/src/Scene/AssetRegistry.cpp#L866))
-  kayıt kalıcı değildir ve her tarama lisansı siler.
-- ★ Damgalanamayan 3 model var (`Ox_eye_daisy`, `Quercus_Rubra`,
-  `Red Currant`) — `.asset.json`'ları yok, sessizce `unknown` kalıyorlar.
-  Asset Browser'dan descriptor ürettirip
-  `python scripts/stamp_vegetation_licenses.py x64/Release/assets --write`
-  ikinci kez koşturulabilir.
+Sahne: bir fluid domain + bir gas domain, **aynı sınırlarla**.
+
+- **Görmen gereken:** `density_samples / volume_rays` **0,9 civarı**.
+- **Bozuksa:** oran **0,02 ve altına** düşer, `volume_rays` birkaç kat artar.
+
+★ **En sinsi:** bant kaybolur ama maliyet yüksek kalır. **Gözle değil, oranla.**
+
+## 7. Karanlık izoyüzey / kayıtlı graph (önceki partiden, sırayla en son)
+
+`DataType`'a beş değer sona eklendi; eski bir proje açıp materyal/geometri
+graph'larının doğru pin tiplerini gösterdiğini gör. Belirti "node yanlış tipte
+veri okuyor" olur, yükleme hatası değil.
 
 ---
 
-## Bu partide DEĞİŞMEYENLER
+## Bu partide alınan karar: `rt.ui` istisnası yeniden yazıldı
 
-- Sahne içeriği, template geometrisi, UI state uygulaması — hiçbiri.
-- Project template **hâlâ açılmıyor** (2B.2b-ii ertelendi). Bu parti onu
-  açmayı değil, **reddin dürüst olmasını** sağlıyor.
-- Vulkan/OptiX/render yolları — hiç dokunulmadı.
+CLAUDE.md güncellendi. Ayrım artık "UI mi değil mi" değil, **çizim çağrısı mı
+değer mi**:
+
+- `rt.ui` (çizim) süreç içinde kalır — frame'in draw context'i dışında anlamsız.
+- `rt.editor` (**yeni**) hangi editörün açık olduğunu değer olarak verir ve
+  IPC'den geçer.
+
+Gerekçe: bu deponun en pahalı hata sınıfı **panelin yalan söylemesi**, ve
+yalnızca çekirdeği okuyabilen bir ajan o ayrışmaya **yapısal olarak kördür**.
+
+★★ Widget sürüşü ("X yazan düğmeye bas") bilerek AÇILMADI: etiketleri yük
+taşıyan hale getirir ve UI'yi tekrar otorite yapar.
+
+## Bu partide düzeltilen arıza
+
+**`EditorState` ilk halinde ilk açık paneli döndürüyordu.** İki panel birden
+açık olsaydı okuyucu birini raporlayıp diğerini **gizlerdi** — yani en çok
+sorulacak arızayı göremeyecek bir okuyucu. `open_editors` listesi eklendi;
+`bottom_editor` artık o listenin ilk elemanı.
+
+## Açık borçlar (değişmedi)
+
+- `script.console` IPC metodu · Foam'un script yüzeyi · `WorldThermalState`'in
+  script yüzeyi · `flow_source.delete` · `splat_material` slotu.
+- Granül `below_load` göstergesi anlık — yapışkan gösterge panel sayısının
+  anlamını değiştireceği için **kullanıcı kararına bırakıldı**.
+- D.4'ün kalan yarısı: Geometry / Material / Terrain / Animation çizimlerinin
+  `Nodes` penceresine **teker teker** taşınması.

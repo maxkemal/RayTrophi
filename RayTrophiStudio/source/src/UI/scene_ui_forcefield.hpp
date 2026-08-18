@@ -140,9 +140,12 @@ inline bool cancel_bake = false;
  */
 inline bool drawFluidPresetCombo(const char* id, RayTrophiSim::Fluid::APICSolverParams& params) {
     using FluidPreset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset;
+    // Order MUST match APICSolverParams::FluidPreset — the combo index is cast
+    // straight to the enum. The granular family is appended for the same reason
+    // the enum appends: SceneSerializer stores the raw int.
     static const char* names[] = {
         "Custom (Manual)", "Water", "Oil", "Mud", "Honey", "Lava", "Sand",
-        "Chocolate"
+        "Chocolate", "Wet Sand", "Gravel", "Cohesive Soil"
     };
     bool applied = false;
     int idx = static_cast<int>(params.current_preset);
@@ -169,10 +172,18 @@ inline bool drawFluidPresetCombo(const char* id, RayTrophiSim::Fluid::APICSolver
             "            to a stop instead of stopping).\n"
             "Honey     : nu=7e-3, slow sticky threads. No-slip walls.\n"
             "Chocolate : nu=4e-3, molten couverture. No-slip, coats surfaces.\n"
-            "Lava      : nu=0.5, extreme (renderer adds the glow).\n"
-            "Sand      : granular APPROXIMATION - friction + packing, no viscous\n"
-            "            solve. It has no angle of repose and does not fall at g;\n"
-            "            that needs Drucker-Prager plasticity.");
+            "Lava      : nu=0.5, extreme (renderer adds the glow).\n\n"
+            "GRANULAR (Drucker-Prager plasticity, no viscous solve). These do\n"
+            "have an angle of repose. Young modulus is calibrated against PILE\n"
+            "DEPTH: past the stated depth the stats panel reports TOO SOFT FOR\n"
+            "LOAD instead of the pile quietly sinking.\n\n"
+            "Sand          : dry, cohesionless. 35 deg friction, honest to ~1.3 m.\n"
+            "Wet Sand      : capillary cohesion - holds a shape and re-clumps\n"
+            "                when squeezed. 37 deg, honest to ~1.6 m.\n"
+            "Gravel        : coarse and interlocking, strongly dilatant.\n"
+            "                43 deg, honest to ~1.9 m.\n"
+            "Cohesive Soil : clay-like - strength is cohesion, not friction.\n"
+            "                Blocky cracks. 20 deg, honest to ~0.76 m.");
     }
     return applied;
 }

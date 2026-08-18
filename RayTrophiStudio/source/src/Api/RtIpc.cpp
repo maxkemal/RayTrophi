@@ -1420,7 +1420,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::Result r = rtapi::createFluidDomain(name, dmin, dmax, vs, type, info);
             if (!r.ok) return json{{"__error", r.error}};
             return json{{"id", info.id}, {"name", info.name}, {"type", info.type}, {"voxel_size", info.voxel_size},
-                        {"particle_count", info.particle_count}, {"render_mode", info.render_mode}};
+                        {"particle_count", info.particle_count}, {"live_state", info.live_state}, {"render_mode", info.render_mode}};
         });
     }
     if (method == "fluid.get" || method == "gas.get") {
@@ -1432,7 +1432,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"id", info.id}, {"name", info.name}, {"type", info.type},
                         {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
                         {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
-                        {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
+                        {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count}, {"live_state", info.live_state},
                         {"render_mode", info.render_mode}, {"backend", info.backend},
                         {"boundary", info.boundary}, {"preset", info.preset},
                         {"kinematic_viscosity", info.kinematic_viscosity},
@@ -1451,6 +1451,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_healing_rate", info.granular_healing_rate},
                         {"granular_rebonding", info.granular_rebonding},
                         {"granular_max_solver_substeps", info.granular_max_solver_substeps},
+                        {"granular_softening_temperature", info.granular_softening_temperature},
+                        {"granular_softening_range", info.granular_softening_range},
+                        {"granular_residual_strength", info.granular_residual_strength},
+                        {"granular_tack_peak", info.granular_tack_peak},
+                        {"granular_thermal_conductivity", info.granular_thermal_conductivity},
                         {"granular_yielded", info.granular_yielded_particles},
                         {"granular_detached", info.granular_detached_particles},
                         {"granular_invalid", info.granular_invalid_particles},
@@ -1472,6 +1477,16 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_required_substeps", info.granular_required_substeps},
                         {"granular_solver_substeps", info.granular_solver_substeps},
                         {"granular_stiffness_capped", info.granular_stiffness_capped},
+                        {"granular_wave_substeps", info.granular_wave_substeps},
+                        {"granular_strain_substeps", info.granular_strain_substeps},
+                        {"granular_strain_rate", info.granular_strain_rate},
+                        {"granular_strain_limited", info.granular_strain_limited_particles},
+                        {"granular_compaction_capped", info.granular_compaction_capped_particles},
+                        {"granular_min_softening", info.granular_min_softening},
+                        {"granular_softened", info.granular_softened_particles},
+                        {"granular_overburden_pressure", info.granular_overburden_pressure},
+                        {"granular_young_modulus_for_load", info.granular_young_modulus_for_load},
+                        {"granular_stiffness_below_load", info.granular_stiffness_below_load},
                         {"surface_material", info.surface_material},
                         {"splat_material", info.splat_material},
                         {"surface_offset_voxels", info.surface_offset_voxels},
@@ -1520,7 +1535,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"id", info.id}, {"name", info.name}, {"type", info.type},
                     {"domain_min", json::array({info.domain_min.x, info.domain_min.y, info.domain_min.z})},
                     {"domain_max", json::array({info.domain_max.x, info.domain_max.y, info.domain_max.z})},
-                    {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count},
+                    {"voxel_size", info.voxel_size}, {"particle_count", info.particle_count}, {"live_state", info.live_state},
                     {"render_mode", info.render_mode}, {"backend", info.backend},
                     {"boundary", info.boundary}, {"preset", info.preset},
                     {"kinematic_viscosity", info.kinematic_viscosity},
@@ -1539,6 +1554,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"granular_healing_rate", info.granular_healing_rate},
                     {"granular_rebonding", info.granular_rebonding},
                     {"granular_max_solver_substeps", info.granular_max_solver_substeps},
+                        {"granular_softening_temperature", info.granular_softening_temperature},
+                        {"granular_softening_range", info.granular_softening_range},
+                        {"granular_residual_strength", info.granular_residual_strength},
+                        {"granular_tack_peak", info.granular_tack_peak},
+                        {"granular_thermal_conductivity", info.granular_thermal_conductivity},
                     {"granular_yielded", info.granular_yielded_particles},
                     {"granular_detached", info.granular_detached_particles},
                     {"granular_invalid", info.granular_invalid_particles},
@@ -1560,6 +1580,16 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"granular_required_substeps", info.granular_required_substeps},
                     {"granular_solver_substeps", info.granular_solver_substeps},
                     {"granular_stiffness_capped", info.granular_stiffness_capped},
+                    {"granular_wave_substeps", info.granular_wave_substeps},
+                    {"granular_strain_substeps", info.granular_strain_substeps},
+                    {"granular_strain_rate", info.granular_strain_rate},
+                    {"granular_strain_limited", info.granular_strain_limited_particles},
+                        {"granular_compaction_capped", info.granular_compaction_capped_particles},
+                        {"granular_min_softening", info.granular_min_softening},
+                        {"granular_softened", info.granular_softened_particles},
+                    {"granular_overburden_pressure", info.granular_overburden_pressure},
+                    {"granular_young_modulus_for_load", info.granular_young_modulus_for_load},
+                    {"granular_stiffness_below_load", info.granular_stiffness_below_load},
                     {"surface_material", info.surface_material},
                     {"splat_material", info.splat_material},
                     {"surface_offset_voxels", info.surface_offset_voxels},
@@ -1740,6 +1770,15 @@ json dispatchMethod(const std::string& method, const json& params) {
             if(params.contains("granular_healing_rate")){granular_healing=params.at("granular_healing_rate").get<float>();p_granular_healing=&granular_healing;}
             if(params.contains("granular_rebonding")){granular_rebonding=params.at("granular_rebonding").get<bool>();p_granular_rebonding=&granular_rebonding;}
             if(params.contains("granular_max_solver_substeps")){granular_max_solver_substeps=params.at("granular_max_solver_substeps").get<int>();p_granular_max_solver_substeps=&granular_max_solver_substeps;}
+            float granular_soft_temp=0,granular_soft_range=0,granular_residual=0;
+            const float *p_granular_soft_temp=nullptr,*p_granular_soft_range=nullptr,*p_granular_residual=nullptr;
+            if(params.contains("granular_softening_temperature")){granular_soft_temp=params.at("granular_softening_temperature").get<float>();p_granular_soft_temp=&granular_soft_temp;}
+            if(params.contains("granular_softening_range")){granular_soft_range=params.at("granular_softening_range").get<float>();p_granular_soft_range=&granular_soft_range;}
+            if(params.contains("granular_residual_strength")){granular_residual=params.at("granular_residual_strength").get<float>();p_granular_residual=&granular_residual;}
+            float granular_tack=0.0f;const float* p_granular_tack=nullptr;
+            if(params.contains("granular_tack_peak")){granular_tack=params.at("granular_tack_peak").get<float>();p_granular_tack=&granular_tack;}
+            float granular_cond=0.0f;const float* p_granular_cond=nullptr;
+            if(params.contains("granular_thermal_conductivity")){granular_cond=params.at("granular_thermal_conductivity").get<float>();p_granular_cond=&granular_cond;}
             return rtapi::updateFluidDomain(domain, p_dmin, p_dmax, p_voxel, p_render,
                                             p_backend, p_boundary, p_preset, p_viscosity,
                                             p_sweeps, p_wall_slip, p_surf_mat,
@@ -1753,7 +1792,10 @@ json dispatchMethod(const std::string& method, const json& params) {
                                             p_granular_tensile,p_granular_hardening,
                                             p_granular_fracture,p_granular_damage,
                                             p_granular_healing,p_granular_rebonding,
-                                            p_granular_max_solver_substeps);
+                                            p_granular_max_solver_substeps,
+                                            p_granular_soft_temp,p_granular_soft_range,
+                                            p_granular_residual,
+                                            p_granular_tack, p_granular_cond);
         });
     }
     if (method == "fluid.reset" || method == "gas.reset") {
@@ -2240,6 +2282,298 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "render.cancel") {
         return enqueueResult([](UIContext&) { return rtapi::cancelRender(); });
+    }
+    if (method == "render.volume_counters") {
+        const bool on = requireBool(params, "enabled");
+        return enqueueResult([on](UIContext&) {
+            return rtapi::setVolumeInstrumentation(on);
+        });
+    }
+    if (method == "render.volume_stats") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::VolumeInstrumentationInfo s = rtapi::volumeStats();
+            // `available` and `enabled` ship alongside the numbers on purpose. A
+            // caller that reads only the counters cannot tell an all-zero
+            // snapshot caused by "counters were never switched on" from one
+            // caused by "no ray entered a volume" — and those lead to opposite
+            // conclusions about the scene.
+            return json{
+                {"available", s.available},
+                {"enabled", s.enabled},
+                {"volume_rays", s.volume_rays},
+                {"density_samples", s.density_samples},
+                {"shadow_density_samples", s.shadow_density_samples},
+                {"empty_segments_skipped", s.empty_segments_skipped},
+                {"topology_segments_skipped", s.topology_segments_skipped},
+                {"majorant_segments_skipped", s.majorant_segments_skipped},
+                {"majorant_queries", s.majorant_queries},
+                {"majorant_available_queries", s.majorant_available_queries},
+                {"extinction_terminations", s.extinction_terminations},
+                {"step_budget_exhausted", s.step_budget_exhausted},
+                {"completed_intervals", s.completed_intervals},
+                {"temporal_accepted", s.temporal_accepted},
+                {"temporal_rejected", s.temporal_rejected},
+                {"solid_probe_runs", s.solid_probe_runs},
+                {"solid_probe_hits", s.solid_probe_hits},
+                {"gas_handoffs", s.gas_handoffs},
+                {"layered_handoffs", s.layered_handoffs},
+                {"arbiter_rejects", s.arbiter_rejects},
+                {"teleports", s.teleports},
+                {"arbiter_candidates", s.arbiter_candidates},
+                {"arbiter_gate_open", s.arbiter_gate_open},
+                {"arbiter_no_box", s.arbiter_no_box},
+                {"arbiter_empty_range", s.arbiter_empty_range},
+                {"arbiter_no_crossing", s.arbiter_no_crossing}};
+        });
+    }
+    if (method == "sim_graph.clear") {
+        return enqueueResult([](UIContext&) { return rtapi::simGraphClear(); });
+    }
+    if (method == "sim_graph.add_node") {
+        std::string type_id = requireString(params, "type");
+        return enqueueQuery([type_id](UIContext&) {
+            uint32_t id = 0;
+            auto r = rtapi::simGraphAddNode(type_id, id);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"id", id}};
+        });
+    }
+    if (method == "sim_graph.set_node") {
+        int node_id = requireInt(params, "node");
+        std::string key = requireString(params, "key");
+        std::string value = requireString(params, "value");
+        return enqueueResult([node_id, key, value](UIContext&) {
+            return rtapi::simGraphSetNodeText(static_cast<uint32_t>(node_id), key, value);
+        });
+    }
+    if (method == "sim_graph.connect") {
+        int from_node = requireInt(params, "from_node");
+        int to_node = requireInt(params, "to_node");
+        int from_pin = optionalInt(params, "from_pin", 0);
+        int to_pin = optionalInt(params, "to_pin", 0);
+        return enqueueResult([from_node, from_pin, to_node, to_pin](UIContext&) {
+            return rtapi::simGraphConnect(static_cast<uint32_t>(from_node), from_pin,
+                                          static_cast<uint32_t>(to_node), to_pin);
+        });
+    }
+    if (method == "sim_graph.evaluate") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::SimGraphEvaluation e = rtapi::simGraphEvaluate();
+            json commands = json::array();
+            for (const auto& c : e.commands) {
+                commands.push_back(json{{"kind", c.kind}, {"target", c.target},
+                                        {"key", c.key}, {"value", c.value},
+                                        {"text", c.text}, {"source_node", c.source_node}});
+            }
+            json restarts = json::array();
+            for (const auto& r : e.restart_requests)
+                restarts.push_back(json{{"node", r.node_id}, {"reason", r.reason}});
+            // ★ commands are the graph's INTENT, in dependency order. Nothing was
+            // applied by this call, and restart_requests were reported, not acted on.
+            return json{{"evaluated", e.evaluated},
+                        {"commands", commands},
+                        {"restart_requests", restarts}};
+        });
+    }
+    if (method == "sim_graph.nodes") {
+        return enqueueQuery([](UIContext&) {
+            json arr = json::array();
+            for (const auto& n : rtapi::simGraphNodes()) {
+                json j{{"id", n.id}, {"type", n.type_id}, {"name", n.display_name},
+                       {"enabled", n.enabled}, {"inputs", n.input_count},
+                       {"outputs", n.output_count}, {"domain", n.domain},
+                       {"channel", n.channel}, {"source", n.source}};
+                if (n.has_stats) {
+                    // stats_available false = could NOT measure. Distinct from zero.
+                    j["stats_available"] = n.stats_available;
+                    j["particle_count"] = n.particle_count;
+                    // array_in_sync false: the backing array is longer than the
+                    // live particle count. Reported, not hidden — the statistics
+                    // still cover the live particles only.
+                    j["array_size"] = n.array_size;
+                    j["array_in_sync"] = n.array_in_sync;
+                    // Surface Inspect: false = the host mirror was not refreshed
+                    // since the last dispatch, so these are the previous
+                    // readback's numbers (or the initialisation values).
+                    j["host_fresh"] = n.host_fresh;
+                    j["min_value"] = n.min_value;
+                    j["max_value"] = n.max_value;
+                    j["mean_value"] = n.mean_value;
+                }
+                if (n.has_cache_status) {
+                    j["cache_valid"] = n.cache_valid;
+                    j["cache_baking"] = n.cache_baking;
+                    // ★ A cache that exists but no longer matches the authored
+                    // config. Reported separately from `cache_valid` because it
+                    // IS valid — it just describes a different scene.
+                    j["cache_stale"] = n.cache_stale;
+                    j["cache_ram_frames"] = n.cache_ram_frames;
+                }
+                arr.push_back(std::move(j));
+            }
+            return json{{"nodes", arr}};
+        });
+    }
+    if (method == "sim_graph.set_node_value") {
+        int node_id = requireInt(params, "node");
+        std::string key = requireString(params, "key");
+        float value = requireFloat(params, "value");
+        return enqueueResult([node_id, key, value](UIContext&) {
+            return rtapi::simGraphSetNodeValue(static_cast<uint32_t>(node_id), key, value);
+        });
+    }
+    if (method == "sim_graph.apply") {
+        bool allow_restart = optionalBool(params, "allow_restart", false);
+        return enqueueQuery([allow_restart](UIContext&) {
+            const rtapi::SimApplyResult r = rtapi::simGraphApply(allow_restart);
+            // ★ `refused` is not an error: it is the graph asking permission to
+            // discard a running simulation. Reported, never done silently.
+            return json{{"ok", r.ok}, {"applied", r.applied},
+                        {"overrides_held", r.overrides_held},
+                        {"refused", r.refused}, {"failed", r.failed}};
+        });
+    }
+    if (method == "sim_graph.clear_overrides") {
+        return enqueueResult([](UIContext&) { return rtapi::simGraphClearOverrides(); });
+    }
+    if (method == "sim_graph.couplings") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::SimCouplingReport r = rtapi::simGraphCouplings();
+            auto pack = [](const std::vector<rtapi::SimCouplingEntry>& v) {
+                json arr = json::array();
+                for (const auto& e : v) {
+                    arr.push_back(json{
+                        {"coupling", e.coupling},
+                        {"producer", e.producer}, {"consumer", e.consumer},
+                        {"source_domain", e.source_domain},
+                        {"target_domain", e.target_domain},
+                        {"active", e.active}, {"source_node", e.source_node}});
+                }
+                return arr;
+            };
+            // ★ `traced` distinguishes "stepped and nothing coupled" from "never
+            // asked". An empty `actual` alone cannot tell those apart, and
+            // reading it as zero is the mistake this flag exists to prevent.
+            return json{{"declared", pack(r.declared)},
+                        {"actual", pack(r.actual)},
+                        {"traced", r.traced},
+                        {"order_matches", r.order_matches},
+                        {"declared_not_running", r.declared_not_running},
+                        {"running_not_declared", r.running_not_declared}};
+        });
+    }
+    if (method == "sim_graph.attributes") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            return json{{"attributes", rtapi::simListAttributes(domain)}};
+        });
+    }
+    // ── rt.editor: which editor is on screen, as values ─────────────────────
+    // ★ See the EditorState note in RtApi.h. This is not a crack in the "panels
+    // are not scripted" rule; it is the part of the panel that was never a draw
+    // call. Without it an agent cannot tell whether the UI agrees with the core,
+    // and that disagreement is this repo's most expensive bug class.
+    if (method == "editor.get_state") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::EditorState s = rtapi::editorState();
+            return json{{"bottom_editor", s.bottom_editor},
+                        {"node_editor_domain", s.node_editor_domain},
+                        {"node_editor_open", s.node_editor_open},
+                        {"open_editors", s.open_editors}};
+        });
+    }
+    if (method == "editor.set_bottom_editor") {
+        std::string name = requireString(params, "name");
+        return enqueueResult([name](UIContext&) { return rtapi::setBottomEditor(name); });
+    }
+    if (method == "editor.set_node_domain") {
+        std::string name = requireString(params, "name");
+        return enqueueResult([name](UIContext&) { return rtapi::setNodeEditorDomain(name); });
+    }
+    if (method == "sim_cache.status") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::SimCacheStatus s;
+            const rtapi::Result r = rtapi::simCacheStatus(s);
+            if (!r.ok) return json{{"__error", r.error}};
+            // ★ `valid`, `baking` and `ram_frames` are reported separately: all
+            // three can read "nothing usable" and they mean different things.
+            return json{{"valid", s.valid}, {"baking", s.baking},
+                        {"cache_dir", s.cache_dir},
+                        {"ram_frames", s.ram_frames},
+                        {"has_range", s.has_range},
+                        {"first_frame", s.first_frame},
+                        {"last_frame", s.last_frame},
+                        {"config_signature", s.config_signature}};
+        });
+    }
+    if (method == "sim_cache.bake") {
+        std::string dir = requireString(params, "cache_dir");
+        int start = optionalInt(params, "start_frame", 0);
+        int end = requireInt(params, "end_frame");
+        float fps = optionalFloat(params, "fps", 24.0f);
+        return enqueueResult([dir, start, end, fps](UIContext&) {
+            return rtapi::simBake(dir, start, end, fps);
+        });
+    }
+    if (method == "sim_cache.clear") {
+        return enqueueResult([](UIContext&) { return rtapi::simClearCache(); });
+    }
+    if (method == "sim_graph.surface_attributes") {
+        std::string object = requireString(params, "object");
+        return enqueueQuery([object](UIContext&) {
+            return json{{"attributes", rtapi::simListSurfaceAttributes(object)}};
+        });
+    }
+    if (method == "viewport.status") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportStatusInfo s = rtapi::viewportStatus();
+            // ★ `available` and `rendering_active` are reported so a caller can
+            // tell "the viewport is idle" from "the scene is cheap". Reading
+            // zero counters without checking these is what cost a diagnosis
+            // round on 2026-08-16.
+            return json{
+                {"available", s.available},
+                {"backend", s.backend},
+                {"width", s.width},
+                {"height", s.height},
+                {"samples", s.samples},
+                {"accumulation_complete", s.accumulation_complete},
+                {"ms_per_sample", s.ms_per_sample},
+                {"rendering_active", s.rendering_active},
+                {"capture_enabled", s.capture_enabled},
+                {"frame_available", s.frame_available}};
+        });
+    }
+    if (method == "viewport.capture") {
+        bool enabled = requireBool(params, "enabled");
+        return enqueueResult([enabled](UIContext&) {
+            return rtapi::setViewportCapture(enabled);
+        });
+    }
+    if (method == "render.probe") {
+        rtapi::ViewportProbeRegion region;
+        region.x      = optionalInt(params, "x", 0);
+        region.y      = optionalInt(params, "y", 0);
+        region.width  = optionalInt(params, "width", 0);
+        region.height = optionalInt(params, "height", 0);
+        float threshold = optionalFloat(params, "threshold", 0.001f);
+        return enqueueQuery([region, threshold](UIContext&) {
+            const rtapi::ViewportProbeInfo p =
+                rtapi::probeViewportFrame(region, threshold);
+            json hist = json::array();
+            for (uint32_t bucket : p.histogram) hist.push_back(bucket);
+            return json{
+                {"available", p.available},
+                {"width", p.width},
+                {"height", p.height},
+                {"pixels", p.pixels},
+                {"mean_luminance", p.mean_luminance},
+                {"min_luminance", p.min_luminance},
+                {"max_luminance", p.max_luminance},
+                {"black_fraction", p.black_fraction},
+                {"nan_fraction", p.nan_fraction},
+                {"histogram", hist}};
+        });
     }
     if (method == "render.start_sequence") {
         std::string dir = requireString(params, "output_dir");
@@ -2973,6 +3307,7 @@ bool authorizeRemoteCall(uint32_t capabilities, const std::string& method,
     const char* key = nullptr;
     if (method == "scene.import_model" || method == "project.open" ||
         method == "project.save" || method == "script.run_file") key = "path";
+    else if (method == "sim_cache.bake") key = "cache_dir";
     else if (method == "terrain.import_heightmap" || method == "terrain.export_heightmap" ||
              method == "paint.import_channel" || method == "paint.export_channel" ||
              method == "ipc.admin.audit.export") key = "filepath";

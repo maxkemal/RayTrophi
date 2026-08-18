@@ -21,7 +21,13 @@ struct RayPayload {
     vec3  scatterDir;
     uint  seed;
     bool  scattered;
-    bool  skipAABBs;      // set by volume_closesthit when a solid surface is found inside
+    // Set by volume_closesthit when its solid probe found a surface inside the
+    // box: the ray re-traces from the SAME origin, so the box it just marched
+    // must not win again. RENAMED from skipAABBs, and the rename is the point —
+    // it used to mean gl_RayFlagsSkipAABBEXT, which removed EVERY procedural
+    // primitive: splat spheres (0x04), authored spheres, hair. See
+    // RT_MASK_VOLUME_HANDOFF for why that was wrong.
+    bool  skipVolumeAABBs;
     uint  bounceType;
     bool  skipGasVolumes; // one-shot handoff from a gas segment to a SurfaceSDF
     // ── Primary-hit AOV block, packed ───────────────────────────────────────
@@ -121,4 +127,30 @@ const float SHADOW_TMIN = 1e-3;   // Shadow rays: avoid near-field self/adjacent
 // Direct-light shadows see solids and splats. Volume-internal probes retain
 // their narrower masks so particle-rich gas does not cause nested RT work.
 const uint RT_MASK_DIRECT_SHADOW = 0x05u;
+
+// ★ Volume→solid handoff cull mask: clear BOTH volume bits (0x02 gas, 0x08
+// SurfaceSDF), keep everything else — solids AND splats (0x04).
+//
+// This replaces gl_RayFlagsSkipAABBEXT, which removed every procedural
+// primitive at once. The handoff's justification (volume_closesthit.rchit,
+// "the nearest hit from the same origin IS that surface") only holds for
+// geometry the solid PROBE could see, and the gas march's probe uses 0xF1 —
+// blind to splats. So a splat sitting between the box entry and the solid was
+// dropped twice: once by the probe that set solidT, and again by the handoff
+// that erased it from the re-trace. Symptom: splat geometry inside a gas
+// domain vanishes unless it happens to sit in FRONT of the box, where its own
+// closest-hit wins before the volume ever runs.
+//
+// Clearing both volume bits (rather than only the one this instance carries)
+// keeps the no-self-hit guarantee absolute: TLAS volume instances are only ever
+// 0x02 or 0x08 (VulkanBackend.cpp), so the re-trace provably cannot land back
+// in a volume box and ping-pong through raygen's free-pass budget.
+//
+// ★ Note this is NOT the same as skipGasVolumes (0xFD, gas→SurfaceSDF handoff):
+// that one must KEEP 0x08 alive, because reaching the coincident liquid
+// boundary is its entire purpose. The two masks look similar and mean opposite
+// things about bit 0x08 — do not merge them.
+const uint RT_MASK_VOLUME_HANDOFF = 0xF5u;
+// Gas segment → coincident SurfaceSDF: clear only the gas bit.
+const uint RT_MASK_GAS_HANDOFF    = 0xFDu;
 

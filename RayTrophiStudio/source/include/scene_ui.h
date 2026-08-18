@@ -39,6 +39,9 @@ class Hittable;
 #include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
 #include "scene_ui_materialnodes.hpp" // Material node editor UI (MaterialNodesV2 Faz 1)
 #include "GeometryNodesV2.h" // Faz 8a Geo-DAG node graph system
+// Forward-declared rather than included: only the simulation node panel needs
+// the concrete type, and it includes the header itself (D.4).
+namespace NodeSystem { namespace Sim { class SimulationNodeGraph; } }
 #include <fstream>
 #include <map>
 #include <set> // For lazy CPU sync
@@ -154,6 +157,32 @@ public:
     // one Delete keypress had two listeners: the AnimGraph canvas removed the selected node
     // AND the global/SDL handler deleted the selected scene object behind it.
     bool anim_graph_focused = false;
+    // Bottom-bar panel visibility. ★ These three moved out of the private
+    // section for `rt.editor` (RtApiUiState.cpp): which editor is open is a
+    // VALUE, and a value an agent cannot read is a place where the panel and the
+    // core can disagree unobserved. Drawing stays unscriptable; this does not.
+    bool show_asset_browser = false;
+    bool show_scene_log = false;              // Default closed
+    bool focus_bottom_panel_next_frame = false;
+
+    // ── The single Nodes editor (plan D.4) ──────────────────────────────────
+    //
+    // The bottom bar used to carry FOUR graph tabs (Terrain / AnimGraph /
+    // Geometry / Material) and the simulation graph would have been a fifth.
+    // They are one tab now, with the domain picked from a selector: to the user
+    // they were never four different things, they were "where I edit nodes".
+    //
+    // ★★ Only the SIMULATION domain is drawn inside this window so far. The
+    // other four still draw in their own windows and the selector switches to
+    // them; moving a drawing body is done one domain at a time, because panel
+    // drawing is the one area with no automated test and four at once would put
+    // big surgery exactly where a regression goes unnoticed.
+    enum class NodeEditorDomain { Simulation = 0, Geometry, Material, Terrain, Animation };
+    NodeEditorDomain node_editor_domain = NodeEditorDomain::Simulation;
+    bool show_node_editor = false;    // the Nodes window (simulation occupant)
+    // Same shortcut-guard as geometry_graph_focused: while the canvas has focus
+    // Delete belongs to the node selection, not to the scene object behind it.
+    bool node_editor_focused = false;
     bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
     bool show_forcefield_tab = true;   // Simulation tab (Default open)
     bool show_world_tab = true;        // World & Sky tab (Default open)
@@ -247,6 +276,17 @@ public:
      void drawModifiersPanel(UIContext& ctx);  // Modifiers & Sculpting panel
      void drawGeometryGraphToolbar(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph); // Faz 8a: Add Node combo + Evaluate button
      bool evaluateGeometryGraph(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph); // Faz 8a: runs the graph and swaps the object's TriangleMesh in world.objects
+     // Simulation node editor contents (D.4) — scene_ui_simnodes.cpp.
+     // ★ Every action here goes through the same rtapi:: calls a script makes,
+     // so the panel cannot grow a behaviour the script surface does not have.
+     void drawSimulationNodePanel(UIContext& ctx);
+     // The inspector half. Takes the live scene name lists so it can offer real
+     // identities to pick from instead of free text — an unresolvable name is
+     // otherwise only reported at apply time, far from where it was typed.
+     void drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph& graph,
+                                       const std::vector<std::string>& domain_names,
+                                       const std::vector<std::string>& object_names,
+                                       const std::vector<std::string>& material_names);
      void drawSculptPanel(UIContext& ctx);      // Dedicated sculpt panel
      void activateEditWorkspace(UIContext& ctx);
      void activateSculptWorkspace(UIContext& ctx);
@@ -1401,7 +1441,6 @@ private:
     void validateSelectionAgainstScene(UIContext& ctx);
     bool showSidePanel = true;
      bool show_controls_window = false; // Controls/Help window visibility
-     bool show_asset_browser = false;
      AssetRegistry asset_registry;
      std::vector<std::filesystem::path> asset_library_paths;
      int active_asset_library_index = 0;
@@ -1454,9 +1493,7 @@ private:
     Vec3 camera_initial_target;
     float camera_initial_fov;
 
-    bool show_scene_log = false; // Default closed
 
-    bool focus_bottom_panel_next_frame = false;
     bool pending_project_ui_restore = false;
     // --- Modern dockable panel layout (ImGui docking) ---
     bool docking_enabled = true;        // Master toggle: dockable panels vs. legacy pinned layout
@@ -1634,6 +1671,11 @@ private:
     MaterialNodesV2::MaterialNodeEditorUI materialNodeEditorUI;
     bool geometry_graph_show_properties = true;
     float geometry_graph_properties_width = 260.0f;
+
+    // Simulation graph canvas (D.4). ★ The editor is here; the GRAPH is not —
+    // it lives in rtapi and is reached through rtapi::simulationGraph(), so the
+    // panel and `rt.sim_graph.*` are looking at the same object.
+    NodeSystem::NodeEditorUIV2 simulationNodeEditorUI;
 
 public:
     void releaseTerrainNodePreviewTexture() { terrainNodeEditorUI.releaseMaskPreviewTexture(); }
