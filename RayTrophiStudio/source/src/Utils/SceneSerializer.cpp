@@ -371,6 +371,11 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["flip_blend"] = d.fluid_params.flip_blend;
     j["fluid_params"]["internal_friction"] = d.fluid_params.internal_friction;
     j["fluid_params"]["granular_enabled"] = d.fluid_params.granular_enabled;
+    j["fluid_params"]["granular_softening_temperature"] = d.fluid_params.granular_softening_temperature;
+    j["fluid_params"]["granular_softening_range"] = d.fluid_params.granular_softening_range;
+    j["fluid_params"]["granular_residual_strength"] = d.fluid_params.granular_residual_strength;
+    j["fluid_params"]["granular_tack_peak"] = d.fluid_params.granular_tack_peak;
+    j["fluid_params"]["granular_thermal_conductivity"] = d.fluid_params.granular_thermal_conductivity;
     j["fluid_params"]["granular_friction_angle_degrees"] = d.fluid_params.granular_friction_angle_degrees;
     j["fluid_params"]["granular_cohesion"] = d.fluid_params.granular_cohesion;
     j["fluid_params"]["granular_dilatancy_degrees"] = d.fluid_params.granular_dilatancy_degrees;
@@ -579,6 +584,11 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("flip_blend")) d.fluid_params.flip_blend = fp["flip_blend"];
         if (fp.contains("internal_friction")) d.fluid_params.internal_friction = fp["internal_friction"];
         if (fp.contains("granular_enabled")) d.fluid_params.granular_enabled = fp["granular_enabled"];
+        if (fp.contains("granular_softening_temperature")) d.fluid_params.granular_softening_temperature = fp["granular_softening_temperature"];
+        if (fp.contains("granular_softening_range")) d.fluid_params.granular_softening_range = fp["granular_softening_range"];
+        if (fp.contains("granular_residual_strength")) d.fluid_params.granular_residual_strength = fp["granular_residual_strength"];
+        if (fp.contains("granular_tack_peak")) d.fluid_params.granular_tack_peak = fp["granular_tack_peak"];
+        if (fp.contains("granular_thermal_conductivity")) d.fluid_params.granular_thermal_conductivity = fp["granular_thermal_conductivity"];
         if (fp.contains("granular_friction_angle_degrees")) d.fluid_params.granular_friction_angle_degrees = fp["granular_friction_angle_degrees"];
         if (fp.contains("granular_cohesion")) d.fluid_params.granular_cohesion = fp["granular_cohesion"];
         if (fp.contains("granular_dilatancy_degrees")) d.fluid_params.granular_dilatancy_degrees = fp["granular_dilatancy_degrees"];
@@ -591,6 +601,9 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("granular_healing_rate")) d.fluid_params.granular_healing_rate = fp["granular_healing_rate"];
         if (fp.contains("granular_rebonding")) d.fluid_params.granular_rebonding = fp["granular_rebonding"];
         if (fp.contains("granular_max_solver_substeps")) d.fluid_params.granular_max_solver_substeps = fp["granular_max_solver_substeps"];
+        // Same clamp the UI applies after every edit, so a hand-edited or
+        // partially-written file cannot hand the solver an out-of-range material.
+        d.fluid_params.sanitizeGranularMaterial();
         d.fluid_params.sanitizeGranularMaterial();
         if (fp.contains("air_drag")) d.fluid_params.air_drag = fp["air_drag"];
         if (fp.contains("reseed_enabled")) d.fluid_params.reseed_enabled = fp["reseed_enabled"];

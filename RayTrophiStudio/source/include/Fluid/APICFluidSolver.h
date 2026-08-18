@@ -163,7 +163,37 @@ struct APICSolverParams {
     float granular_damage_rate = 6.0f;
     float granular_healing_rate = 0.0f;
     bool  granular_rebonding = false;
-    int   granular_max_solver_substeps = 16;
+    int   granular_max_solver_substeps = 32;
+
+    // ── Thermal / burn softening ─────────────────────────────────────────────
+    // Melting a granular body is not a special-cased animation: it is the
+    // skeleton losing the strength that held it up. These drive a PER-PARTICLE
+    // multiplier (FluidParticles::granular_softening) from the particle's own
+    // temperature and remaining mass, so a corner of a foam block can slump
+    // while the rest stays cold — the entire point of doing it per particle.
+    //
+    // ★★★ THE AUTHORED VALUES ABOVE ARE NEVER MODIFIED BY THE RUNTIME. They are
+    // hashed into the fluid coupling signature; writing a softened modulus back
+    // into granular_young_modulus would re-key the bake every frame and the
+    // rewind would restart from frame 0 forever. Softening lives beside them,
+    // not on top of them.
+    //
+    // 0 K disables the whole path, which is the default: sand does not soften.
+    float granular_softening_temperature = 0.0f;  // K, midpoint of the transition
+    float granular_softening_range = 40.0f;       // K, width of the transition
+    // Floor the skeleton keeps once fully softened. 0 = it can lose all
+    // strength (a melt); a small value keeps a molten-but-not-liquid residue.
+    float granular_residual_strength = 0.05f;
+    // ★★★ Cohesion multiplier at peak tackiness. 1.0 = no hump (bonds simply
+    // fade with stiffness — correct for a CHARRING material, wrong for a
+    // thermoplastic). A melting plastic must get STICKIER before it flows, or
+    // the block crumbles into separate grains instead of slumping as one body.
+    // Both look like "lost its shape"; only one looks like melting.
+    float granular_tack_peak = 1.0f;
+    // Heat conduction rate, 1/s. Drives BOTH particle<->gas contact heating and
+    // particle<->particle conduction. 0 = no conduction, which means a burning
+    // body heats only at the surface and its interior never softens.
+    float granular_thermal_conductivity = 0.0f;
 
     // Canonical validation used by UI, scripting/IPC and scene loading. Keep
     // every authoring surface on the same material contract.
@@ -179,6 +209,14 @@ struct APICSolverParams {
         granular_damage_rate = std::clamp(granular_damage_rate, 0.0f, 100.0f);
         granular_healing_rate = std::clamp(granular_healing_rate, 0.0f, 20.0f);
         granular_max_solver_substeps = std::clamp(granular_max_solver_substeps, 1, 64);
+        granular_softening_temperature = std::max(granular_softening_temperature, 0.0f);
+        // A zero range would make the transition a step function at one exact
+        // temperature, so a particle either never softens or softens completely
+        // between two frames. Keep a floor.
+        granular_softening_range = std::clamp(granular_softening_range, 1.0f, 2000.0f);
+        granular_residual_strength = std::clamp(granular_residual_strength, 0.0f, 1.0f);
+        granular_tack_peak = std::clamp(granular_tack_peak, 0.0f, 20.0f);
+        granular_thermal_conductivity = std::clamp(granular_thermal_conductivity, 0.0f, 200.0f);
     }
 
     // Quadratic air drag on DETACHED droplets (an isolated 3x3x3 neighbourhood,
@@ -451,8 +489,14 @@ struct APICSolverParams {
         Mud,       // heavy slurry (a real yield stress needs Drucker-Prager)
         Honey,     // very viscous, sticky threads, no-slip walls
         Lava,      // extreme viscosity, very slow (renderer adds the glow)
-        Sand,      // granular APPROXIMATION — see the case body
-        Chocolate  // molten couverture: between oil and honey, fully no-slip
+        Sand,      // dry granular: Drucker-Prager, cohesionless
+        Chocolate, // molten couverture: between oil and honey, fully no-slip
+        // ★ APPEND ONLY. SceneSerializer stores current_preset as a raw int, so
+        // inserting anything above shifts every saved project's material.
+        WetSand,      // capillary cohesion: clumps, holds a steeper wall
+        Gravel,       // coarse, strongly dilatant, no cohesion
+        CohesiveSoil, // clay-like: low friction, high cohesion, blocky failure
+        MoltenPlastic // thermoplastic: rigid cold, TACKY hot, then viscous
     };
     FluidPreset current_preset = FluidPreset::Water;
 
@@ -560,22 +604,179 @@ struct APICSolverParams {
                 granular_damage_rate = 8.0f;
                 granular_healing_rate = 0.0f;
                 granular_rebonding = false;
-                granular_max_solver_substeps = 16;
-                // ★ STILL AN APPROXIMATION, and knowingly so. Grain friction is
-                // a SHEAR YIELD criterion (Drucker-Prager), not a velocity
-                // Laplacian — no value of ν produces an angle of repose, so the
-                // Vulkan uses a rate-form Drucker-Prager stress update and
-                // stress-divergence P2G. The legacy drag remains only as CPU
-                // fallback and is bypassed by the Vulkan G2P constants.
+                granular_max_solver_substeps = 32;
+                // Grain friction is a SHEAR YIELD criterion (Drucker-Prager),
+                // not a velocity Laplacian — no value of ν produces an angle of
+                // repose. Both backends now run the rate-form Drucker-Prager
+                // stress update and stress-divergence P2G, so there is no
+                // viscous stand-in left to configure.
                 kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
                 viscosity_wall_slip = 0.0f;
-                // CPU fallback keeps the legacy approximation; Vulkan ignores
-                // this body drag when granular_enabled and uses stress yield.
-                internal_friction = 4.0f;
-                flip_blend = 0.92f; apic_blend = 0.95f;
+                // ★★★ THE TWO DEAD DIALS, REMOVED RATHER THAN LEFT AT A VALUE
+                // THAT NO LONGER REACHES ANYTHING.
+                //
+                // internal_friction carried 4.0 as the pre-Drucker-Prager
+                // stand-in for grain friction. Both G2P paths now zero it when
+                // granular_enabled, so 4.0 described a drag the solver does not
+                // apply — a dial a user would tune for an hour with no effect.
+                //
+                // flip_blend carried 0.92, and FLIP is forced OFF for granular
+                // on both paths: the elastic stress goes into the grid during
+                // P2G, i.e. before the FLIP snapshot, so a non-zero blend
+                // subtracts the stress back out. That is not a preference, it
+                // is the reason a soft pile used to collapse. Zero here says so.
+                internal_friction = 0.0f;
+                flip_blend = 0.0f; apic_blend = 0.95f;
                 velocity_damping = 0.999f;
                 density_correction = 1.0f;
                 air_drag = 0.15f;  wall_damping = 0.40f;
+                affine_damping = 0.98f; max_velocity = 50.0f;
+                break;
+
+            // ── Granular family ──────────────────────────────────────────────
+            // ★ E IS CALIBRATED AGAINST PILE DEPTH, not picked for feel. The
+            // corotational predictor needs E >= 10*rho*g*h to keep the bottom
+            // layer's elastic strain inside small-strain (see
+            // kGranularStiffnessLoadRatio), so each preset below states the
+            // depth it is honest up to. Past that depth the panel's
+            // "TOO SOFT FOR LOAD" row lights up rather than the pile quietly
+            // sinking — raise E, or accept a shallower pour.
+            //
+            // ★★ granular_max_solver_substeps IS PART OF THE MATERIAL, because
+            // it decides how much of the authored E the solver can deliver
+            // (E_eff = E * (granted/needed)^2). The ceilings below are sized for
+            // roughly 5 cm voxels at 24 fps, the common preview setup; coarser
+            // voxels need fewer. Watch "Granular Young effective" in the panel —
+            // if it sits below requested, this ceiling is the reason.
+            case FluidPreset::WetSand:
+                granular_enabled = true;
+                // Capillary bridges: wet sand stands steeper than dry and holds
+                // a shape, which is tensile strength, not extra friction. That
+                // is what tensile_cutoff buys — and rebonding, because a
+                // squeezed clump genuinely re-forms.
+                granular_friction_angle_degrees = 37.0f;
+                granular_cohesion = 1500.0f;      // apparent capillary cohesion
+                granular_dilatancy_degrees = 6.0f;
+                granular_young_modulus = 2.5e5f;  // honest to ~1.6 m of pile
+                granular_poisson_ratio = 0.25f;
+                granular_tensile_cutoff = 400.0f;
+                granular_hardening = 0.0f;
+                granular_fracture_strain = 0.010f;
+                granular_damage_rate = 14.0f;     // clumps part cleanly
+                granular_healing_rate = 0.5f;
+                granular_rebonding = true;
+                granular_max_solver_substeps = 32;
+                kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 0.0f;
+                flip_blend = 0.0f; apic_blend = 0.95f;
+                velocity_damping = 0.999f;
+                density_correction = 1.0f;
+                air_drag = 0.12f;  wall_damping = 0.45f;
+                affine_damping = 0.98f; max_velocity = 50.0f;
+                break;
+            case FluidPreset::Gravel:
+                granular_enabled = true;
+                // Coarse angular grains interlock: high friction, strong
+                // dilatancy (the pile must loosen to shear at all), and no
+                // cohesion whatsoever. Heavier grains also fall through air
+                // more cleanly, hence the low drag.
+                granular_friction_angle_degrees = 43.0f;
+                granular_cohesion = 0.0f;
+                granular_dilatancy_degrees = 12.0f;
+                granular_young_modulus = 3.0e5f;  // honest to ~1.9 m of pile
+                granular_poisson_ratio = 0.22f;
+                granular_tensile_cutoff = 0.0f;
+                granular_hardening = 0.0f;
+                granular_fracture_strain = 0.02f;
+                granular_damage_rate = 8.0f;
+                granular_healing_rate = 0.0f;
+                granular_rebonding = false;
+                // ★ 40, not 32: at 5 cm / 24 fps this E needs 33 substeps, so a
+                // 32 ceiling would silently deliver a softer gravel than the
+                // number in the panel.
+                granular_max_solver_substeps = 40;
+                kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 0.0f;
+                flip_blend = 0.0f; apic_blend = 0.90f;
+                velocity_damping = 0.999f;
+                density_correction = 1.0f;
+                air_drag = 0.08f;  wall_damping = 0.50f;
+                affine_damping = 0.96f; max_velocity = 50.0f;
+                break;
+            case FluidPreset::CohesiveSoil:
+                granular_enabled = true;
+                // Clay-like: the strength is cohesion, not friction, and it
+                // does not dilate. Failure is blocky — a low fracture strain
+                // with a fast damage rate localises cracks instead of spreading
+                // damage through the body. No rebonding: once a clay block
+                // parts it stays parted.
+                granular_friction_angle_degrees = 20.0f;
+                granular_cohesion = 12000.0f;
+                granular_dilatancy_degrees = 0.0f;
+                granular_young_modulus = 1.2e5f;  // honest to ~0.76 m of pile
+                granular_poisson_ratio = 0.35f;   // nearly incompressible skeleton
+                granular_tensile_cutoff = 3000.0f;
+                granular_hardening = 0.5f;
+                granular_fracture_strain = 0.006f;
+                granular_damage_rate = 20.0f;
+                granular_healing_rate = 0.0f;
+                granular_rebonding = false;
+                granular_max_solver_substeps = 32;
+                kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 0.0f;
+                flip_blend = 0.0f; apic_blend = 0.95f;
+                velocity_damping = 0.999f;
+                density_correction = 1.0f;
+                air_drag = 0.10f;  wall_damping = 0.60f;  // clay clings
+                affine_damping = 0.98f; max_velocity = 50.0f;
+                break;
+            case FluidPreset::MoltenPlastic:
+                // ★★★ The whole point of this preset is that it TURNS ON the
+                // thermal chain. Every dial below is inert on its own: without
+                // granular_enabled there is no skeleton to lose, without
+                // softening_temperature the thermal path is disabled, and
+                // without thermal_conductivity only the surface ever heats.
+                // Leaving a user to find three separate switches is how the
+                // feature stayed invisible after it was written.
+                granular_enabled = true;
+                granular_friction_angle_degrees = 30.0f;
+                granular_cohesion = 6000.0f;      // cold pellets already stick a little
+                granular_dilatancy_degrees = 2.0f;
+                granular_young_modulus = 2.0e5f;
+                granular_poisson_ratio = 0.40f;   // polymers are nearly incompressible
+                granular_tensile_cutoff = 1500.0f;
+                granular_hardening = 0.0f;
+                granular_fracture_strain = 0.02f;
+                granular_damage_rate = 6.0f;
+                granular_healing_rate = 2.0f;     // tacky material re-bonds on contact
+                granular_rebonding = true;
+                granular_max_solver_substeps = 32;
+                // Softens around a typical thermoplastic working range, over a
+                // wide window so the tacky phase is actually visible rather than
+                // being crossed in a single frame.
+                granular_softening_temperature = 420.0f;
+                granular_softening_range = 90.0f;
+                // ★ No residual skeleton: molten plastic must release fully into
+                // viscous flow. A floor here would leave a weak solid that sags
+                // forever and never behaves like a liquid. (A CHARRING material
+                // is the opposite case and wants a real residual — that is the
+                // per-substance split, not this preset.)
+                granular_residual_strength = 0.0f;
+                // ★★★ The correction this preset exists to carry: bonds PEAK
+                // mid-transition instead of fading with stiffness, so the block
+                // fuses and slumps as one body instead of crumbling into grains.
+                granular_tack_peak = 3.5f;
+                granular_thermal_conductivity = 2.5f;
+                kinematic_viscosity = 0.0f;   viscosity_sweeps = 1;
+                viscosity_wall_slip = 0.0f;
+                internal_friction = 0.0f;
+                flip_blend = 0.0f; apic_blend = 0.95f;
+                velocity_damping = 0.999f;
+                density_correction = 1.0f;
+                air_drag = 0.05f;  wall_damping = 0.70f;
                 affine_damping = 0.98f; max_velocity = 50.0f;
                 break;
             case FluidPreset::Custom:
@@ -635,6 +836,28 @@ struct APICSolverStats {
     int granular_required_substeps = 1;
     int granular_solver_substeps = 1;
     bool granular_stiffness_capped = false;
+    // The subcycle answers to two limits; reporting only the total hides which
+    // one asked, and hides the case where NEITHER was granted because
+    // granular_max_solver_substeps clamped the request.
+    int granular_wave_substeps = 1;
+    int granular_strain_substeps = 1;
+    float granular_strain_rate = 0.0f;
+    // Particles whose dt*C had to be clamped by the stress kernel. Non-zero
+    // means the subcycle was too coarse for the motion, and the step survived
+    // rather than being correct.
+    size_t granular_strain_limited_particles = 0;
+    // Particles whose elastic strain exceeded what a deformation gradient can
+    // store, so the excess became permanent compaction. This is REAL
+    // PLASTICITY on soft material, not an error -- it replaces the det(F)
+    // reset that used to dump such a particle's whole stress in one step.
+    size_t granular_compaction_capped_particles = 0;
+    float granular_min_softening = 1.0f;
+    size_t granular_softened_particles = 0;
+    // Material validity, not stability: the load the domain puts on its own
+    // bottom layer, and the stiffness the small-strain model needs to carry it.
+    float granular_overburden_pressure = 0.0f;
+    float granular_young_modulus_for_load = 0.0f;
+    bool granular_stiffness_below_load = false;
     // Parcels of a SOLID-phase substance, and the cells they actually blocked
     // this step.
     //
@@ -743,6 +966,15 @@ size_t estimateSeedBoxParticleCount(const FluidSim::FluidGrid& grid,
                                     const Vec3& min_world,
                                     const Vec3& max_world,
                                     int particles_per_cell);
+
+// Cell-scale heat conduction between particles. Call ONCE PER FRAME with the
+// frame dt — see the definition for why per-substep would make the melt rate
+// depend on the substep count. `conductivity` is 1/s; 0 disables it, which
+// leaves a burning body heating only at its surface.
+void diffuseParticleTemperature(FluidParticles& parts,
+                                const FluidSim::FluidGrid& grid,
+                                float conductivity,
+                                float dt);
 
 void seedBox(FluidParticles& particles,
              const FluidSim::FluidGrid& grid,

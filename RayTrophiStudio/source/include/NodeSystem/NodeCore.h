@@ -77,6 +77,21 @@ namespace NodeSystem {
         Simulation,     ///< Simulation state (cache-backed)
         Material,       ///< Material shader DAG handle
         Light,          ///< Light parameters variant
+        // ── Simulation graph types (Faz N1) ─────────────────────────────────
+        // ★★ APPEND ONLY. This enum is uint8_t and its VALUES are written into
+        // serialized graphs. Adding at the end is safe; reordering silently
+        // re-types every pin in every saved graph, and the symptom is "a node
+        // reads the wrong kind of data", not a load error.
+        //
+        // ★ None of these carry a handle. A simulation node addresses solver
+        // state by IDENTITY, so DomainRef/ParticleSet/SurfaceField/Substance all
+        // travel as a plain name string in PinValue — which is why PinValue did
+        // not have to grow. See NODE_SIMULATION_ARCHITECTURE_PLAN.md D.1.
+        DomainRef,      ///< Fluid/gas domain, addressed by name (std::string)
+        Field,          ///< Solver field reference; semantic says which channel
+        ParticleSet,    ///< Particle collection of a referenced domain
+        SurfaceField,   ///< Material State Field (per-object surface state)
+        Substance,      ///< SubstanceProfile selection, by name
         Custom = 255    ///< Domain-specific extension point
     };
 
@@ -264,6 +279,19 @@ namespace NodeSystem {
                 return { IM_COL32(233, 30, 99, 255), PinShape::Circle, "Material" };
             case DataType::Light:
                 return { IM_COL32(255, 193, 7, 255), PinShape::Circle, "Light" };
+            // Simulation graph types. Given distinct shapes as well as colours:
+            // a DomainRef must never be mistaken for a Field at a glance, and
+            // colour alone fails exactly the users who need the distinction.
+            case DataType::DomainRef:
+                return { IM_COL32(0, 200, 190, 255), PinShape::Square, "Domain" };
+            case DataType::Field:
+                return { IM_COL32(120, 220, 130, 255), PinShape::Diamond, "Field" };
+            case DataType::ParticleSet:
+                return { IM_COL32(200, 160, 255, 255), PinShape::Arrow, "Particles" };
+            case DataType::SurfaceField:
+                return { IM_COL32(255, 140, 90, 255), PinShape::Diamond, "Surface" };
+            case DataType::Substance:
+                return { IM_COL32(220, 200, 120, 255), PinShape::Square, "Substance" };
             default:
                 return { IM_COL32(128, 128, 128, 255), PinShape::Circle, "Unknown" };
         }

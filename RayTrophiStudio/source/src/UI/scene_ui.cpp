@@ -3364,6 +3364,28 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         ImGui::PopStyleColor(); // ChildBg
         ImGui::PopStyleVar();   // ChildRounding
     }
+
+    // Invisible Drag Splitter on Right Edge of Properties Panel / Left Context Rail
+    if (!docking_enabled) {
+        ImVec2 win_pos = ImGui::GetWindowPos();
+        ImVec2 win_size = ImGui::GetWindowSize();
+        ImVec2 p_min = ImVec2(win_pos.x + win_size.x - 3.0f, win_pos.y);
+        ImVec2 p_max = ImVec2(win_pos.x + win_size.x + 3.0f, win_pos.y + win_size.y);
+        ImGui::SetCursorScreenPos(p_min);
+        ImGui::InvisibleButton("##LeftPanelSplitter", ImVec2(6.0f, win_size.y));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        }
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            side_panel_width += ImGui::GetIO().MouseDelta.x;
+            side_panel_width = std::clamp(side_panel_width, 200.0f, (std::min)(650.0f, ImGui::GetIO().DisplaySize.x * 0.45f));
+        }
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+            ImDrawList* parent_dl = ImGui::GetWindowDrawList();
+            parent_dl->AddRectFilled(p_min, p_max, IM_COL32(140, 140, 140, 180));
+        }
+    }
+
     ImGui::End();
     ImGui::PopStyleColor(2); // WindowBg, Border
     ImGui::PopStyleVar(3);   // WindowPadding, WindowRounding, BorderSize
@@ -4037,7 +4059,7 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     // also deleted the scene object the graph belongs to (same Delete keypress, two listeners).
     if (!io.WantTextInput && ctx.selection.hasSelection() &&
         !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused &&
-        !anim_graph_focused && !timeline.panel_focused) {
+        !anim_graph_focused && !node_editor_focused && !timeline.panel_focused) {
         handleDeleteShortcut(ctx);
     }
 
@@ -4311,6 +4333,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             show_asset_browser  = (keep_index == 4) ? show_asset_browser : false;
             show_geometry_graph = (keep_index == 5) ? show_geometry_graph : false;
             show_material_graph = (keep_index == 6) ? show_material_graph : false;
+            show_node_editor    = (keep_index == 7) ? show_node_editor : false;
         };
         
         bool active_dope = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::DopeSheet);
@@ -4373,69 +4396,74 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             show_python_console = !show_python_console;
         }
         
-        if (UIWidgets::HorizontalTab("Graph", UIWidgets::IconType::Graph, show_terrain_graph))
+        // ── Nodes: ONE editor tab, domain chosen beside it (plan D.4) ───────
+        //
+        // This bar used to carry four graph tabs — Terrain Graph, AnimGraph,
+        // Geometry, Material — and the simulation graph would have made five.
+        // They are one tab now: the names differ but to the user they were
+        // never four things, they were "where I edit nodes". The inconsistent
+        // naming (`Graph` for terrain, `AnimGraph` with no space) goes with it.
+        //
+        // ★★ Only Simulation draws INSIDE the "Nodes" window so far. The other
+        // four still own their windows and the selector switches to them. That
+        // is deliberate: moving a drawing body is the risky half, panel drawing
+        // is the one area with no automated test, and doing all four at once
+        // would put big surgery exactly where a regression goes unnoticed. The
+        // user-facing model is already correct; the code catches up one domain
+        // at a time.
+        struct NodeDomainEntry { const char* label; const char* window; bool* show; int keep; };
+        const NodeDomainEntry node_domains[] = {
+            { "Simulation", "Nodes",          &show_node_editor,    7 },
+            { "Geometry",   "Geometry Graph", &show_geometry_graph, 5 },
+            { "Material",   "Material Graph", &show_material_graph, 6 },
+            { "Terrain",    "Terrain Graph",  &show_terrain_graph,  2 },
+            { "Animation",  "AnimGraph",      &show_anim_graph,     3 },
+        };
+        const int node_domain_count = static_cast<int>(IM_ARRAYSIZE(node_domains));
+        int node_domain_index = std::clamp(static_cast<int>(node_editor_domain), 0, node_domain_count - 1);
+        const bool any_node_editor_open = show_node_editor || show_geometry_graph ||
+            show_material_graph || show_terrain_graph || show_anim_graph;
+
+        auto openNodeDomain = [&](const NodeDomainEntry& entry) {
+            *entry.show = true;
+            closeOtherBottomPanels(entry.keep);
+            focus_bottom_panel_next_frame = true;
+        };
+
+        if (UIWidgets::HorizontalTab("Nodes", UIWidgets::IconType::Graph, any_node_editor_open))
         {
-            show_terrain_graph = !show_terrain_graph;
-            if (show_terrain_graph) {
-                closeOtherBottomPanels(2);
-                focus_bottom_panel_next_frame = true;
+            if (any_node_editor_open) {
+                // -1 keeps nothing. The bottom panels are mutually exclusive, so
+                // with a node editor open the others are already closed; this
+                // just shuts whichever node editor was showing.
+                closeOtherBottomPanels(-1);
+                if (docking_enabled) dockToBottom(node_domains[node_domain_index].window);
             } else {
-                if (docking_enabled) dockToBottom("Terrain Graph");
+                openNodeDomain(node_domains[node_domain_index]);
             }
         }
-        handleBottomTabEvents(3, "Terrain Graph", show_terrain_graph, [&]() {
-            show_terrain_graph = true;
-            closeOtherBottomPanels(2);
-            focus_bottom_panel_next_frame = true;
+        handleBottomTabEvents(3, node_domains[node_domain_index].window,
+                              *node_domains[node_domain_index].show, [&]() {
+            openNodeDomain(node_domains[node_domain_index]);
         });
+
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(104.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 1));
+        const char* node_domain_labels[] = { "Simulation", "Geometry", "Material", "Terrain", "Animation" };
+        if (ImGui::Combo("##node_editor_domain", &node_domain_index, node_domain_labels, node_domain_count)) {
+            node_editor_domain = static_cast<NodeEditorDomain>(node_domain_index);
+            // ★ Switching the domain while the editor is open MOVES the editor.
+            // Leaving the previous graph on screen under a selector that now
+            // names a different one is precisely the shape of "the panel lies",
+            // and this repo has paid for that reading more than once.
+            if (any_node_editor_open) openNodeDomain(node_domains[node_domain_index]);
+        }
+        ImGui::PopStyleVar();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Which node graph the Nodes editor edits.");
         
-        if (UIWidgets::HorizontalTab("AnimGraph", UIWidgets::IconType::AnimGraph, show_anim_graph))
-        {
-            show_anim_graph = !show_anim_graph;
-            if (show_anim_graph) {
-                closeOtherBottomPanels(3);
-                focus_bottom_panel_next_frame = true;
-            } else {
-                if (docking_enabled) dockToBottom("AnimGraph");
-            }
-        }
-        handleBottomTabEvents(4, "AnimGraph", show_anim_graph, [&]() {
-            show_anim_graph = true;
-            closeOtherBottomPanels(3);
-            focus_bottom_panel_next_frame = true;
-        });
-
-        if (UIWidgets::HorizontalTab("Geometry", UIWidgets::IconType::Mesh, show_geometry_graph))
-        {
-            show_geometry_graph = !show_geometry_graph;
-            if (show_geometry_graph) {
-                closeOtherBottomPanels(5);
-                focus_bottom_panel_next_frame = true;
-            } else {
-                if (docking_enabled) dockToBottom("Geometry Graph");
-            }
-        }
-        handleBottomTabEvents(5, "Geometry Graph", show_geometry_graph, [&]() {
-            show_geometry_graph = true;
-            closeOtherBottomPanels(5);
-            focus_bottom_panel_next_frame = true;
-        });
-
-        if (UIWidgets::HorizontalTab("Material", UIWidgets::IconType::Graph, show_material_graph))
-        {
-            show_material_graph = !show_material_graph;
-            if (show_material_graph) {
-                closeOtherBottomPanels(6);
-                focus_bottom_panel_next_frame = true;
-            } else {
-                if (docking_enabled) dockToBottom("Material Graph");
-            }
-        }
-        handleBottomTabEvents(7, "Material Graph", show_material_graph, [&]() {
-            show_material_graph = true;
-            closeOtherBottomPanels(6);
-            focus_bottom_panel_next_frame = true;
-        });
+        // (AnimGraph / Geometry / Material tabs folded into "Nodes" above.)
 
         if (UIWidgets::HorizontalTab("Assets", UIWidgets::IconType::Assets, show_asset_browser))
         {
@@ -4654,10 +4682,11 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     if (!show_geometry_graph)  geometry_graph_focused = false;
     if (!show_material_graph)  material_graph_focused = false;
     if (!show_anim_graph)      anim_graph_focused     = false;
+    if (!show_node_editor)     node_editor_focused    = false;
     if (!show_animation_panel) timeline.panel_focused = false;
 
     // ---------------- BOTTOM PANEL (Resizable) ----------------
-    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_material_graph || show_anim_graph || show_asset_browser);
+    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_material_graph || show_anim_graph || show_node_editor || show_asset_browser);
     if (!show_bottom) return;
 
     // Use class member for persistent height
@@ -4699,28 +4728,30 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoSavedSettings))
     {
-        // Draw a subtle resize indicator line
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        ImVec2 p1(0, panel_top);
-        ImVec2 p2(screen_x, panel_top);
-        const bool resize_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-        draw_list->AddLine(
-            p1,
-            p2,
-            resize_hovered ? IM_COL32(140, 140, 140, 220) : IM_COL32(100, 100, 100, 180),
-            resize_hovered ? 3.0f : 2.0f);
-        
         // Handle resize dragging
         ImGui::InvisibleButton("##ResizeHandle", ImVec2(screen_x, resize_handle_height));
-        if (ImGui::IsItemHovered()) {
+        const bool resize_hovered = ImGui::IsItemHovered();
+        const bool resize_active = ImGui::IsItemActive();
+        if (resize_hovered) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
         }
-        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        if (resize_active && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             preferred_bottom_panel_height -= ImGui::GetIO().MouseDelta.y;
             preferred_bottom_panel_height = std::clamp(preferred_bottom_panel_height, min_height, max_height);
             bottom_panel_height = preferred_bottom_panel_height;
             effective_bottom_panel_height = bottom_panel_height;
         }
+
+        // Draw a subtle resize indicator line with feedback
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        ImVec2 p1(0, panel_top);
+        ImVec2 p2(screen_x, panel_top);
+        const bool active_or_hovered = resize_hovered || resize_active;
+        draw_list->AddLine(
+            p1,
+            p2,
+            active_or_hovered ? IM_COL32(140, 140, 140, 220) : IM_COL32(80, 80, 80, 120),
+            active_or_hovered ? 3.0f : 1.0f);
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -5151,6 +5182,38 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             material_graph_focused = false;
         }
 
+        // ── Nodes window: the simulation graph (plan D.4, first occupant) ────
+        if (show_node_editor) {
+            bool open = true;
+            node_editor_focused = false;  // re-armed below only if actually focused
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (!isBottomPanelFloating("Nodes")) {
+                flags |= ImGuiWindowFlags_NoTitleBar;
+            }
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin("Nodes", &open, flags)) {
+                if (focus_bottom_panel_next_frame) {
+                    ImGui::SetWindowFocus();
+                }
+                node_editor_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+                drawSimulationNodePanel(ctx);
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            if (!open) {
+                show_node_editor = false;
+                node_editor_focused = false;
+                dockToBottom("Nodes");
+            }
+        } else {
+            node_editor_focused = false;
+        }
+
         if (show_anim_graph) {
             bool open = true;
             anim_graph_focused = false;  // re-armed below only if the window is actually focused this frame
@@ -5447,7 +5510,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
         }
 
         const bool show_bottom =
-            (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_material_graph || show_anim_graph || show_asset_browser);
+            (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_material_graph || show_anim_graph || show_node_editor || show_asset_browser);
         const float menu_height = getMainMenuReservedHeight();
         const float status_bar_height = 24.0f;
         const float left_offset = showSidePanel ? side_panel_width : 0.0f;
@@ -9558,6 +9621,8 @@ std::string SceneUI::serialize() {
     j["show_terrain_graph"] = show_terrain_graph;
     j["show_geometry_graph"] = show_geometry_graph;
     j["show_material_graph"] = show_material_graph;
+    j["show_node_editor"] = show_node_editor;
+    j["node_editor_domain"] = static_cast<int>(node_editor_domain);
     j["show_anim_graph"] = show_anim_graph;
     j["show_volumetric_tab"] = show_volumetric_tab;
     j["show_forcefield_tab"] = show_forcefield_tab;
@@ -9607,6 +9672,8 @@ std::string SceneUI::serialize() {
     j["show_terrain_graph"] = show_terrain_graph;
     j["show_geometry_graph"] = show_geometry_graph;
     j["show_material_graph"] = show_material_graph;
+    j["show_node_editor"] = show_node_editor;
+    j["node_editor_domain"] = static_cast<int>(node_editor_domain);
     j["show_anim_graph"] = show_anim_graph;
     j["show_asset_browser"] = show_asset_browser;
 
@@ -9707,6 +9774,13 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_terrain_graph")) show_terrain_graph = j["show_terrain_graph"];
         if (j.contains("show_geometry_graph")) show_geometry_graph = j["show_geometry_graph"];
         if (j.contains("show_material_graph")) show_material_graph = j["show_material_graph"];
+        if (j.contains("show_node_editor")) show_node_editor = j["show_node_editor"];
+        // Clamped on read: the enum gained values at the END (D.4) and a saved
+        // layout from a build with fewer domains must not index past the array.
+        if (j.contains("node_editor_domain")) {
+            const int stored = std::clamp(static_cast<int>(j["node_editor_domain"]), 0, 4);
+            node_editor_domain = static_cast<NodeEditorDomain>(stored);
+        }
         if (j.contains("show_anim_graph")) show_anim_graph = j["show_anim_graph"];
         if (j.contains("show_volumetric_tab")) show_volumetric_tab = j["show_volumetric_tab"];
         if (j.contains("show_forcefield_tab")) show_forcefield_tab = j["show_forcefield_tab"];
@@ -9789,6 +9863,13 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_terrain_graph")) show_terrain_graph = j["show_terrain_graph"];
         if (j.contains("show_geometry_graph")) show_geometry_graph = j["show_geometry_graph"];
         if (j.contains("show_material_graph")) show_material_graph = j["show_material_graph"];
+        if (j.contains("show_node_editor")) show_node_editor = j["show_node_editor"];
+        // Clamped on read: the enum gained values at the END (D.4) and a saved
+        // layout from a build with fewer domains must not index past the array.
+        if (j.contains("node_editor_domain")) {
+            const int stored = std::clamp(static_cast<int>(j["node_editor_domain"]), 0, 4);
+            node_editor_domain = static_cast<NodeEditorDomain>(stored);
+        }
         if (j.contains("show_anim_graph")) show_anim_graph = j["show_anim_graph"];
         if (j.contains("show_asset_browser")) show_asset_browser = j["show_asset_browser"];
 

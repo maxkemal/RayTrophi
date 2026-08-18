@@ -12,6 +12,7 @@
 #include "GridFluidSolver.h"
 #include "SimulationWorld.h"
 #include "ForceField.h"
+#include "Fluid/GranularConstitutive.h"
 
 #include <algorithm>
 #include <chrono>
@@ -444,9 +445,101 @@ void seedBox(FluidParticles& particles,
 // Scatter particle velocities (with APIC affine term) onto the MAC grid.
 // One pass per velocity component, each on its own face-centred coordinate
 // frame. Weights are quadratic B-spline (3x3x3 stencil per particle).
+// ── Granular stress divergence, CPU mirror of sim_fluid_granular_stress_p2g ──
+// Adds -dt * (1/rho) * S.grad(w) into the UNNORMALISED momentum accumulator, so
+// the weight normalisation that follows divides it by the node mass exactly as
+// the ordinary APIC momentum is divided. That placement is the whole contract:
+// moving this after the normalisation would turn a force into a velocity.
+//
+// ★ inv_density is V_p/m_p, not a fudge. The scatter above accumulates UNIT
+// particle mass, so the node mass this is divided by is a particle count.
+// Expressing the force per unit particle mass makes V_p cancel against
+// m_p = rho*V_p and leaves 1/rho -- independent of voxel size and particles per
+// cell. Do not "fix" this into h^3/ppc.
+static void granularStressToGrid(const FluidParticles& parts,
+                                 const FluidSim::FluidGrid& grid,
+                                 int comp, float dt,
+                                 std::vector<float>& vfield) {
+    const float h = grid.voxel_size;
+    if (!(h > 1.0e-6f) || dt == 0.0f) return;
+    const size_t n = parts.size();
+    if (parts.granular_stress_diag.size() != n ||
+        parts.granular_stress_shear.size() != n) return;
+    const float invH = 1.0f / h;
+    const float inv_density = 1.0f / RayTrophiSim::Fluid::Granular::kGranularDensity;
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const int xmax = (comp == 0) ? nx : nx - 1;
+    const int ymax = (comp == 1) ? ny : ny - 1;
+    const int zmax = (comp == 2) ? nz : nz - 1;
+    // A node whose shape function is this close to zero still receives an
+    // impulse proportional to grad(w), which does not vanish as fast as w does;
+    // the normalisation then divides by that same near-zero weight, so
+    // grad(w)/w diverges at the edge of the quadratic support and a bounded
+    // stress produces an unbounded velocity. Dropping the tail is the standard
+    // MPM small-mass-node remedy and matches the shader.
+    constexpr float kMinNodeWeight = 1.0e-4f;
+
+    auto weights = [](float x, int& base, float w[3], float dw[3]) {
+        base = static_cast<int>(std::floor(x - 0.5f));
+        const float d = x - static_cast<float>(base + 1);
+        w[0] = 0.5f * (0.5f - d) * (0.5f - d);
+        w[1] = 0.75f - d * d;
+        w[2] = 0.5f * (0.5f + d) * (0.5f + d);
+        dw[0] = d - 0.5f;
+        dw[1] = -2.0f * d;
+        dw[2] = d + 0.5f;
+    };
+
+    for (size_t p = 0; p < n; ++p) {
+        const Vec3& pos = parts.position[p];
+        if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z))
+            continue;
+        float gx = (pos.x - grid.origin.x) * invH;
+        float gy = (pos.y - grid.origin.y) * invH;
+        float gz = (pos.z - grid.origin.z) * invH;
+        if (comp == 0)      { gy -= 0.5f; gz -= 0.5f; }
+        else if (comp == 1) { gx -= 0.5f; gz -= 0.5f; }
+        else                { gx -= 0.5f; gy -= 0.5f; }
+
+        int bx, by, bz;
+        float wx[3], wy[3], wz[3], dx[3], dy[3], dz[3];
+        weights(gx, bx, wx, dx);
+        weights(gy, by, wy, dy);
+        weights(gz, bz, wz, dz);
+
+        const Vec3& sd = parts.granular_stress_diag[p];
+        const Vec3& ss = parts.granular_stress_shear[p];
+        const Vec3 row = (comp == 0) ? Vec3(sd.x, ss.x, ss.y)
+                       : (comp == 1) ? Vec3(ss.x, sd.y, ss.z)
+                                     : Vec3(ss.y, ss.z, sd.z);
+
+        for (int k = 0; k < 3; ++k)
+        for (int j = 0; j < 3; ++j)
+        for (int i = 0; i < 3; ++i) {
+            const int x = bx + i, y = by + j, z = bz + k;
+            if (x < 0 || x > xmax || y < 0 || y > ymax || z < 0 || z > zmax) continue;
+            if (wx[i] * wy[j] * wz[k] < kMinNodeWeight) continue;
+            const Vec3 grad(dx[i] * wy[j] * wz[k] * invH,
+                            wx[i] * dy[j] * wz[k] * invH,
+                            wx[i] * wy[j] * dz[k] * invH);
+            const float impulse = -dt * inv_density * row.dot(grad);
+            const size_t fi = (comp == 0)
+                ? static_cast<size_t>(x) + static_cast<size_t>(y) * (nx + 1) +
+                  static_cast<size_t>(z) * (nx + 1) * ny
+                : (comp == 1)
+                ? static_cast<size_t>(x) + static_cast<size_t>(y) * nx +
+                  static_cast<size_t>(z) * nx * (ny + 1)
+                : static_cast<size_t>(x) + static_cast<size_t>(y) * nx +
+                  static_cast<size_t>(z) * nx * ny;
+            if (fi < vfield.size()) vfield[fi] += impulse;
+        }
+    }
+}
+
 static void particleToGrid(const FluidParticles& parts,
                            FluidSim::FluidGrid& grid,
-                           const APICSolverParams& params) {
+                           const APICSolverParams& params,
+                           float dt) {
     std::fill(grid.vel_x.begin(), grid.vel_x.end(), 0.0f);
     std::fill(grid.vel_y.begin(), grid.vel_y.end(), 0.0f);
     std::fill(grid.vel_z.begin(), grid.vel_z.end(), 0.0f);
@@ -562,6 +655,14 @@ static void particleToGrid(const FluidParticles& parts,
                 scatterTile(comp, active_t, vfield, wfield);
             }
         }
+
+        // ★ ORDER IS THE CONTRACT: the stress divergence goes into the raw
+        // momentum accumulator, BEFORE the weight normalisation below, so it is
+        // divided by the node mass along with the APIC momentum. Same placement
+        // as the Vulkan path, where the granular kernel is dispatched between
+        // sim_fluid_p2g_scatter and sim_fluid_p2g_normalize.
+        if (params.granular_enabled)
+            granularStressToGrid(parts, grid, comp, dt, vfield);
 
         // Weight normalization: per-index, no cross-cell dependency, so
         // safe to parallelize over the whole field.
@@ -722,7 +823,15 @@ static void gridToParticle(FluidParticles& parts,
         //
         // Exponential decay sidesteps that entirely. rate=0 disables;
         // rate=0.5 → ~50% energy lost per ~1.4 s; rate=10 → per ~0.07 s.
-        if (params.internal_friction > 0.0f && dt > 0.0f) {
+        // ★★ NOT FOR GRANULAR. The Sand preset still carries
+        // internal_friction = 4.0 as the legacy pre-Drucker-Prager stand-in for
+        // grain friction, and the device G2P has always zeroed it when the
+        // granular solver is active (`c.internal_friction = granular ? 0 : ...`).
+        // Leaving it on here would brake the whole body — free fall included —
+        // on top of a real shear yield criterion, i.e. the same drag being paid
+        // twice, once as physics and once as its own replacement.
+        if (params.internal_friction > 0.0f && dt > 0.0f &&
+            !params.granular_enabled) {
             const float decay = std::exp(-params.internal_friction * dt);
             v_out = v_out * decay;
         }
@@ -2134,6 +2243,19 @@ static int advectParticles(FluidParticles& parts,
                 // result would look nearly right at rest and drift only under
                 // flow, which is the hardest version of this bug to see.
                 pn = p0 + parts.velocity[pi] * sub_dt;
+            } else if (params.granular_enabled) {
+                // ★ Lagrangian MPM advection: a material point moves with ITS
+                // OWN velocity, not with a resampled field. Re-sampling the MAC
+                // grid here would smear neighbouring material points back
+                // together and dissolve the shear bands the Drucker-Prager
+                // return map just produced — the pile would creep instead of
+                // holding an angle of repose.
+                //
+                // The Vulkan tail does exactly this via boundary bit 2
+                // (sim_fluid_advect_tail.comp: `vm = granularMode ? v : ...`).
+                // Both backends have to agree about which motion exists, not
+                // merely about how each one is computed.
+                pn = p0 + parts.velocity[pi] * sub_dt;
             } else {
                 // RK2 midpoint using grid velocity (more stable than forward Euler
                 // for free-surface flow, negligible cost on CPU).
@@ -2433,6 +2555,78 @@ static int advectParticles(FluidParticles& parts,
 // Addition samples grid velocity at the new particle's position — this is
 // the post-projection (incompressible) field, so injected particles do not
 // re-introduce divergence.
+// ── Particle-to-particle heat conduction ─────────────────────────────────────
+// Relax every particle toward the mean temperature of its grid cell. That is
+// diffusion at exactly the resolution the simulation already has, and it costs
+// one scatter plus one gather — no neighbour search, no new grid fields.
+//
+// ★ Why this had to exist before any of the melt chain could work: combustion is
+// a CONTACT reaction driven by the gas temperature at the particle, so only
+// exposed particles ever see heat. With no conduction the interior of a burning
+// body stays at ambient forever — it cannot soften, cannot melt from the outside
+// in, and cannot generate the interior volatiles that a boil needs. The body
+// burns as a shell around a cold core.
+//
+// ★★ Called ONCE PER FRAME with the frame dt, not per elastic substep. The
+// exponential form is unconditionally stable at any dt, and per-substep
+// evaluation would make the melt rate depend on the substep count — the same
+// trap the Rankine bond history and the softening derivation both had to avoid.
+void diffuseParticleTemperature(FluidParticles& parts,
+                                const FluidSim::FluidGrid& grid,
+                                float conductivity,
+                                float dt) {
+    const std::size_t n = parts.size();
+    if (n == 0 || parts.temperature.size() != n) return;
+    if (!(conductivity > 0.0f) || !(dt > 0.0f)) return;
+    if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) return;
+
+    const std::size_t cells = static_cast<std::size_t>(grid.nx) *
+                              static_cast<std::size_t>(grid.ny) *
+                              static_cast<std::size_t>(grid.nz);
+    // Function-static: a per-call vector here stalls under contention (see
+    // feedback_persistent_per_step_buffers.md).
+    static std::vector<float> cell_sum;
+    static std::vector<float> cell_weight;
+    cell_sum.assign(cells, 0.0f);
+    cell_weight.assign(cells, 0.0f);
+
+    const float h = grid.voxel_size > 1e-6f ? grid.voxel_size : 1.0f;
+    const float invH = 1.0f / h;
+    const bool has_mass = parts.mass_fraction.size() == n;
+
+    auto cellOf = [&](std::size_t p, std::size_t& out) -> bool {
+        const Vec3 local = (parts.position[p] - grid.origin) * invH;
+        const int gx = static_cast<int>(std::floor(local.x));
+        const int gy = static_cast<int>(std::floor(local.y));
+        const int gz = static_cast<int>(std::floor(local.z));
+        if (gx < 0 || gx >= grid.nx || gy < 0 || gy >= grid.ny ||
+            gz < 0 || gz >= grid.nz) return false;
+        out = grid.cellIndex(gx, gy, gz);
+        return true;
+    };
+
+    for (std::size_t p = 0; p < n; ++p) {
+        std::size_t ci = 0;
+        if (!cellOf(p, ci)) continue;
+        // Mass-weighted: a nearly burned-out particle should not drag the cell
+        // mean as hard as an intact one.
+        const float w = has_mass ? std::clamp(parts.mass_fraction[p], 0.0f, 1.0f)
+                                 : 1.0f;
+        if (!(w > 0.0f)) continue;
+        cell_sum[ci] += parts.temperature[p] * w;
+        cell_weight[ci] += w;
+    }
+
+    const float relax = 1.0f - std::exp(-conductivity * dt);
+    for (std::size_t p = 0; p < n; ++p) {
+        std::size_t ci = 0;
+        if (!cellOf(p, ci)) continue;
+        if (!(cell_weight[ci] > 0.0f)) continue;
+        const float mean = cell_sum[ci] / cell_weight[ci];
+        parts.temperature[p] += (mean - parts.temperature[p]) * relax;
+    }
+}
+
 static void redistributeParticles(FluidParticles& parts,
                                   const FluidSim::FluidGrid& grid,
                                   const APICSolverParams& params,
@@ -2547,39 +2741,16 @@ static void redistributeParticles(FluidParticles& parts,
     if (removed == 0) return;
 
     // 3. Compact in place. Write cursor advances only for kept particles.
-    if (removed > 0) {
-        std::size_t write = 0;
-        for (std::size_t pi = 0; pi < parts.size(); ++pi) {
-            if (remove_mask_buf[pi]) continue;
-            if (write != pi) {
-                parts.position[write] = parts.position[pi];
-                parts.velocity[write] = parts.velocity[pi];
-                parts.affine[write]   = parts.affine[pi];
-                parts.flags[write]    = parts.flags[pi];
-                parts.mass_fraction[write] = parts.mass_fraction[pi];
-                parts.temperature[write] = parts.temperature[pi];
-                parts.combustible_fraction[write] = parts.combustible_fraction[pi];
-                parts.substance_tag[write] = parts.substance_tag[pi];
-                parts.uvw[write] = parts.uvw[pi];
-                // Both generations move together. Compacting one and not the
-                // other would misalign them by the number of removed particles,
-                // and since they are blended per index the result would be a
-                // liquid textured with two unrelated coordinates.
-                if (pi < parts.uvw_b.size()) parts.uvw_b[write] = parts.uvw_b[pi];
-            }
-            ++write;
-        }
-        parts.position.resize(write);
-        parts.velocity.resize(write);
-        parts.affine.resize(write);
-        parts.flags.resize(write);
-        parts.mass_fraction.resize(write);
-        parts.temperature.resize(write);
-        parts.combustible_fraction.resize(write);
-        parts.substance_tag.resize(write);
-        parts.uvw.resize(write);
-        if (!parts.uvw_b.empty()) parts.uvw_b.resize(write);
-    }
+    //
+    // ★★★ EVERY per-particle array moves together, and that is why this is one
+    // call into FluidParticles instead of a list of arrays written out here.
+    // The list written out here used to cover position/velocity/uvw and the
+    // chemistry sidecars but NOT the granular state, so after a trim
+    // `granular_damage[i]` belonged to a different particle than `position[i]`.
+    // The comment that used to sit on the uvw lines gave the exact reason —
+    // "compacting one and not the other would misalign them by the number of
+    // removed particles" — and the granular arrays were the ones it missed.
+    if (removed > 0) parts.compact(remove_mask_buf);
 
     // Compaction changes particle indices. Rebuild the per-cell chemistry donor
     // map before any reseed emits children; using the pre-compaction index can
@@ -2952,7 +3123,7 @@ void step(FluidParticles& particles,
     // 2. Particle -> grid (APIC scatter)
     stage_begin = SolverClock::now();
     if (!params.p2g_precomputed) {
-        particleToGrid(particles, grid, params);
+        particleToGrid(particles, grid, params, dt);
     }
     stage_end = SolverClock::now();
     out_stats.p2g_ms = elapsedMs(stage_begin, stage_end);
@@ -2975,7 +3146,26 @@ void step(FluidParticles& particles,
     static std::vector<float> vel_x_pre_buf;
     static std::vector<float> vel_y_pre_buf;
     static std::vector<float> vel_z_pre_buf;
-    const bool want_flip = params.flip_blend > 0.0f && params.free_surface;
+    // ★★★★★ FLIP MUST BE OFF FOR GRANULAR, AND THIS IS WHY YOUNG MODULUS
+    // LOOKED LIKE IT DID NOTHING ON THE CPU PATH.
+    //
+    // FLIP reconstructs v_new = v_old + (grid_post - grid_pre). The snapshot
+    // above is taken right after P2G, which for granular ALREADY CONTAINS the
+    // elastic stress divergence — and granular skips the pressure projection,
+    // so nothing changes the grid afterwards. grid_post == grid_pre, the delta
+    // is exactly zero, and the particle simply keeps its old velocity: the
+    // entire elastic response is subtracted back out. At the Sand preset's
+    // flip_blend = 0.92 only 8% of the stress survived, so the pile lost volume
+    // and collapsed while the same parameters on Vulkan held their shape.
+    //
+    // ★ The device path has always gated this (`has_flip = !granular_enabled`
+    // in ParticleSimulation.cpp). The CPU port reproduced the stress kernels
+    // faithfully and missed the gate — which is the harder half to notice,
+    // because the stress WAS being computed correctly the whole time. The two
+    // backends have to agree about which stages exist, not only about the maths
+    // inside each stage.
+    const bool want_flip = params.flip_blend > 0.0f && params.free_surface &&
+                           !params.granular_enabled;
     if (!params.pressure_g2p_precomputed && want_flip) {
         if (vel_x_pre_buf.size() < grid.vel_x.size()) vel_x_pre_buf.resize(grid.vel_x.size());
         if (vel_y_pre_buf.size() < grid.vel_y.size()) vel_y_pre_buf.resize(grid.vel_y.size());
@@ -3057,8 +3247,20 @@ void step(FluidParticles& particles,
     stage_begin = SolverClock::now();
     if (!params.pressure_g2p_precomputed) {
         // 5. Pressure projection (incompressibility).
+        //
+        // ★★★ GRANULAR MPM IS COMPRESSIBLE AND MUST NOT BE PROJECTED. Its
+        // volumetric response already lives in the elastic stress that
+        // granularStressToGrid pushed into the grid; running the liquid
+        // incompressibility solve on top of it enforces volume twice and blows
+        // the pressure up immediately. The Vulkan path skips this stage for the
+        // same reason — the two backends have to agree about which forces exist,
+        // not merely about how each one is computed.
         auto pressure_begin = SolverClock::now();
-        if (params.free_surface) {
+        if (params.granular_enabled) {
+            // No projection. Report the cell count so the panel does not read
+            // this as "the solve found nothing to do".
+            out_stats.active_fluid_cells = out_stats.grid_cell_count;
+        } else if (params.free_surface) {
             out_stats.active_fluid_cells = projectPressureFreeSurface(particles,
                                                                       grid,
                                                                       params,
@@ -3089,6 +3291,143 @@ void step(FluidParticles& particles,
     } else {
         // pressure_g2p_precomputed: GPU already handled pressure+G2P,
         // particle velocities+affine are downloaded — only tail stages remain.
+    }
+
+    // 6a. Granular constitutive update + settle (CPU path).
+    //
+    // ★★★ Runs only when the DEVICE did not already do it. `pressure_g2p_precomputed`
+    // means the Vulkan G2P dispatch already ran the stress update and settle
+    // kernels and downloaded the result; repeating them here would apply the
+    // material model twice per step — which does not crash, it just makes the
+    // material roughly twice as stiff and sends the whole preset table off
+    // calibration. Exactly the "producer != consumer" trap this codebase keeps
+    // paying for.
+    if (params.granular_enabled && !params.pressure_g2p_precomputed &&
+        !params.particle_tail_precomputed) {
+        const auto granular_begin = SolverClock::now();
+        particles.ensureGranularStateSize();
+        namespace G = RayTrophiSim::Fluid::Granular;
+        G::StressUpdateParams sp;
+        sp.dt = dt;
+        sp.young_modulus = std::max(params.granular_young_modulus, 1.0f);
+        sp.poisson_ratio = params.granular_poisson_ratio;
+        sp.friction_tangent = std::tan(std::clamp(
+            params.granular_friction_angle_degrees * 0.017453292519943295f,
+            0.0f, 1.3962634f));
+        sp.cohesion = std::max(params.granular_cohesion, 0.0f);
+        sp.dilatancy_tangent = std::tan(std::clamp(
+            params.granular_dilatancy_degrees * 0.017453292519943295f,
+            0.0f, 0.7853982f));
+        sp.tensile_cutoff = std::max(params.granular_tensile_cutoff, 0.0f);
+        sp.fracture_strain = std::max(params.granular_fracture_strain, 1.0e-5f);
+        sp.damage_rate = std::max(params.granular_damage_rate, 0.0f);
+        sp.healing_rate = std::max(params.granular_healing_rate, 0.0f);
+        sp.rebonding = params.granular_rebonding;
+        sp.hardening_coefficient = std::max(params.granular_hardening, 0.0f);
+        sp.max_stored_strain = G::kGranularMaxStoredStrain;
+
+        G::SettleParams settle;
+        settle.dt = dt;
+
+        const int64_t count = static_cast<int64_t>(particles.size());
+        const int threads = solverThreadCount(params);
+        const bool par = threads > 1 &&
+                         shouldParallelParticles(params, particles.size());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads) if(par)
+#endif
+        for (int64_t i = 0; i < count; ++i) {
+            const size_t p = static_cast<size_t>(i);
+            uint32_t flags = 0u;
+            const float soft = p < particles.granular_softening.size()
+                ? particles.granular_softening[p] : 1.0f;
+            const float bond = p < particles.granular_bond_scale.size()
+                ? particles.granular_bond_scale[p] : 1.0f;
+            G::stressUpdateParticle(
+                particles.affine[p], sp, soft, bond,
+                particles.granular_deformation_col0[p],
+                particles.granular_deformation_col1[p],
+                particles.granular_deformation_col2[p],
+                particles.granular_stress_diag[p],
+                particles.granular_stress_shear[p],
+                particles.granular_plastic_volume[p],
+                particles.granular_damage[p],
+                particles.granular_hardening[p],
+                particles.granular_fracture_history[p],
+                particles.granular_yield_value[p],
+                particles.granular_plastic_increment[p],
+                flags);
+            // Settle runs after the stress update on the device too, and reads
+            // the stress this step just wrote — keep the order.
+            G::settleParticle(particles.granular_stress_diag[p], settle,
+                              particles.velocity[p], flags);
+            particles.granular_material_flags[p] = flags;
+        }
+        (void)par;
+
+        // ★ The CPU path must report the SAME counters the device path does.
+        // A backend that runs but reports nothing is indistinguishable from one
+        // that never ran, and the strain/compaction rows are precisely how a
+        // soft-material run is told apart from a diverging one.
+        double damage_sum = 0.0, plastic_sum = 0.0, bond_sum = 0.0;
+        out_stats.granular_min_softening = 1.0f;
+        for (size_t p = 0; p < particles.size(); ++p) {
+            const uint32_t f = particles.granular_material_flags[p];
+            out_stats.granular_yielded_particles += (f & G::kFlagYielded) != 0u;
+            out_stats.granular_detached_particles += (f & G::kFlagDetached) != 0u;
+            out_stats.granular_invalid_particles += (f & G::kFlagInvalid) != 0u;
+            out_stats.granular_sleeping_particles += (f & G::kFlagSleeping) != 0u;
+            out_stats.granular_strain_limited_particles +=
+                (f & G::kFlagStrainLimited) != 0u;
+            out_stats.granular_compaction_capped_particles +=
+                (f & G::kFlagCompactionCapped) != 0u;
+            if (p < particles.granular_softening.size()) {
+                const float soft_p = particles.granular_softening[p];
+                if (std::isfinite(soft_p)) {
+                    out_stats.granular_min_softening =
+                        std::min(out_stats.granular_min_softening, soft_p);
+                    out_stats.granular_softened_particles += soft_p < 0.999f;
+                }
+            }
+            const float dmg = particles.granular_damage[p];
+            if (std::isfinite(dmg)) {
+                out_stats.granular_max_damage = std::max(out_stats.granular_max_damage, dmg);
+                out_stats.granular_damaged_particles += dmg > 1.0e-4f;
+                out_stats.granular_damage_over_10_particles += dmg >= 0.10f;
+                out_stats.granular_damage_over_50_particles += dmg >= 0.50f;
+                out_stats.granular_damage_over_90_particles += dmg >= 0.90f;
+                damage_sum += dmg;
+            }
+            const float yv = particles.granular_yield_value[p];
+            if (std::isfinite(yv))
+                out_stats.granular_max_yield_value = std::max(out_stats.granular_max_yield_value, yv);
+            const float pi = particles.granular_plastic_increment[p];
+            if (std::isfinite(pi))
+                out_stats.granular_max_plastic_increment =
+                    std::max(out_stats.granular_max_plastic_increment, pi);
+            const float ap = particles.granular_hardening[p];
+            if (std::isfinite(ap)) {
+                out_stats.granular_max_accumulated_plastic =
+                    std::max(out_stats.granular_max_accumulated_plastic, ap);
+                plastic_sum += ap;
+            }
+            const float bo = particles.granular_fracture_history[p];
+            if (std::isfinite(bo)) {
+                out_stats.granular_max_fracture_history =
+                    std::max(out_stats.granular_max_fracture_history, bo);
+                bond_sum += bo;
+            }
+        }
+        if (!particles.empty()) {
+            const double inv_n = 1.0 / static_cast<double>(particles.size());
+            out_stats.granular_mean_damage = static_cast<float>(damage_sum * inv_n);
+            out_stats.granular_mean_accumulated_plastic =
+                static_cast<float>(plastic_sum * inv_n);
+            out_stats.granular_mean_fracture_history =
+                static_cast<float>(bond_sum * inv_n);
+        }
+        out_stats.granular_constitutive_ms =
+            elapsedMs(granular_begin, SolverClock::now());
     }
 
     // 6b. Air drag for spray/droplet particles. A particle whose containing

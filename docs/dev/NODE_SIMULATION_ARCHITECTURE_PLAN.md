@@ -304,7 +304,523 @@ Faz 3'e kadar solver'lara neredeyse hiç dokunmadan görünür sonuç alınır.
 | **6c-2** | **Yanal akış + gölet** — wet-clay çekirdeği, hacim korunumu | |
 | **7** | **Kül / kütle kaybı** — büzülme + kül parçacık doğurma | |
 | **8** | **Fluid'e kütle devri** (demir dökümü) — en riskli, en sona | |
-| **9** | **Node katmanı** — Bölüm B; alttaki sistem oturduktan sonra üstüne arayüz | |
+| **9** | **Node katmanı** — Bölüm B; faz kırılımı için bkz. **BÖLÜM D** | |
+
+---
+
+# BÖLÜM D — Node katmanının faz kırılımı
+
+> Eklendi 2026-08-16. Bölüm B'nin *ne* olduğunu değil, **hangi sırayla ve hangi
+> sözleşmeyle** yapılacağını belirler.
+
+## D.0 Kapsam — çekirdek YAZMIYORUZ
+
+Bu katman **yeni bir simülasyon çekirdeği değildir.** Mevcut çözücüleri (APIC
+fluid, gaz/yanma, MSF, foam, rigid) **süren ince bir sürücüdür**. Node katmanı
+**süreksizdir**: koşu döngüsüne sahip değildir, kare üretmez, durum tutmaz.
+
+Temel hedef **saf fizik ve kimya simülasyonu** ile ilerlemek. Node katmanı o
+hedefin *arayüzü*; kendisi bir hedef değil. Bir node yeni bir fizik icat
+ediyorsa, o fizik yanlış yerdedir.
+
+Kapsam dışı, açıkça: yeni çözücü, yeni koşu döngüsü, GPU node fusion, shader
+graph, node'a gömülü fizik.
+
+## D.1 ★★★ Yürütme sözleşmesi — bu bölümün tek geri alınamaz kararı
+
+Mevcut `GraphBase::evaluate()` (`NodeSystem/Graph.h`) **saf** bir sözleşmeye
+sahip:
+
+```cpp
+ctx.clearCache();   // taze değerlendirme
+markAllDirty();     // her şeyi yeniden hesapla
+```
+
+Geometri ve materyal için doğru: çıktı girdilerin fonksiyonudur. **Simülasyon
+için ölümcül olurdu** — bir çözücüde durum, birikmiş tarihin ta kendisidir;
+"girdilerden yeniden hesapla" demek "simülasyonu sıfırla" demektir. Belirtisi de
+hata değil, "sim ilerlemiyor" olurdu.
+
+Çare, node'lara durum vermek DEĞİL. Üç kural:
+
+1. **Node durum SAHİBİ DEĞİLDİR.** Durum bugünkü yerinde kalır
+   (`ParticleSimulationSystem`, grid domain state, MSF). Node o duruma
+   **kimlikle** (isim/id) başvurur.
+2. **Node değerlendirmesi KOMUT YAYAR, yeniden hesaplamaz.** Bu, depodaki mevcut
+   kuralın aynısı: UI `SceneCommand`'i *kaydeder*, çalıştırmaz. Node da öyle.
+3. **`dirty` = "yapılandırmayı yeniden uygula", ASLA "sıfırla".** Reset yalnızca
+   açık, görünür bir eylemdir.
+
+★★ Bir parametre değişikliği gerçekten yeniden başlatma gerektiriyorsa, node
+bunu **kullanıcıya söyler** ("bu değişiklik simülasyonu sıfırlar") ve onay
+bekler. Sessizce sıfırlamak bu depodaki tekrar eden sessiz arıza şeklidir.
+
+## D.2 Fazlar
+
+| Faz | İş | Bağımlılık / neden bu sırada |
+|---|---|---|
+| **N0** | **Sözleşme.** `SimulationNodeGraph : GraphBase`, `evaluate()` override: `clearCache`/`markAllDirty` yok. Node taban sınıfı komut yayar, durum tutmaz. Kimlik = `DomainRef` — **✅ DOĞRULANDI** | Her şey buna oturuyor; yanlışı geri alınamaz |
+| **N1** | **Tip sistemi.** `DomainRef`, `Field`, `ParticleSet`, `SurfaceField`, `Substance` + per-particle attribute isimlendirme tablosu — **✅ DOĞRULANDI** | Küçük, mekanik; node yazmayı açar |
+| **N2** | **Salt-okunur node'lar.** Domain referansları, alan okuyucular, Field Inspector (istatistik) — **✅ DOĞRULANDI** | Çözücüye **hiç dokunmaz**; görünür sonuç, IPC'den test edilebilir |
+| **N3** | **Parametre bağlama** — override katmanı, yazılı veriyi mutate etmeden (B.5) — **✅ DOĞRULANDI** | Node katmanı panel işini burada devralmaya başlar |
+| **N4** | **Kuplaj node'ları** — Fluid→Gas, Gas→Fluid ateşleme, Foam — **✅ DOĞRULANDI** | Kuplaj **sırası** bugün `ParticleSimulation.cpp` içinde örtük |
+| **N5** | **Madde/kimya node'ları** — Substance, Pyrolysis, Phase Change, Surface Inspect — **✅ DOĞRULANDI**. Moisture ve Thermal Transfer bilerek DIŞARIDA (bkz. D.2d) | Altındaki MSF Faz 6b'ye kadar ✅; **Char/Ash parçası Faz 7'yi bekler** |
+| **N6** | **Cache/bake node'u** — imza tabanlı, kullanıcı kontrollü — **✅ DOĞRULANDI** (bkz. D.2e) | N0'ın kimlik kararına bağlı |
+| **N7** | **Render bağlama** — Liquid + Volume(smoke/fire). Foam ve Char bilerek DIŞARIDA — **✅ DOĞRULANDI** (bkz. D.2f) | Mevcut shader parametrelerine bağlanır; yeni shader yok |
+
+> **BÖLÜM D TAMAMLANDI (2026-08-17).** N0–N7'nin tamamı yazıldı ve canlı sahnede
+> doğrulandı: beş test dosyası da `RESULT: ALL PASSED`. Geriye kalan tek madde
+> **D.4'ün UI'si** (tek `Nodes` sekmesi) — panel çizimi, yani `rt.ui` istisnası
+> ve otomatik testi olmayan tek alan; plan onu bilerek adım adım yapılacak iş
+> olarak tanımlıyor.
+
+N2–N4, Bölüm C'nin 6c-2/7/8 fazlarına **bağlı değildir**, paralel gidebilir.
+Plan node katmanını Faz 9'a koymuştu; o sıralama yalnızca N5'in Char/Ash parçası
+için bağlayıcıdır.
+
+## D.2b N0–N3 doğrulaması (2026-08-17) ve isimlendirme katmanının ilk kazancı
+
+Test canlı sahnede koştu (3200 parçacık, tohumlanmış + 8 adım): graph iki kez
+değerlendirildi ve parçacık sayısı değişmedi, override birebir geri alındı,
+`voxel_size` izinsiz reddedildi. **N0'ın sözleşmesi ayakta.**
+
+### ★★★ Ve katman daha ilk gün bir hata buldu
+
+`sim.field_inspect` granül kanallarda **3987** eleman, parçacık sayısı olarak
+**3981** raporladı. Kök: `APICFluidSolver`'ın reseed trim'i birincil dizileri
+sıkıştırıp `granular_*` dizilerinin hiçbirine dokunmuyordu.
+
+Kuyruk fazlalığı zararsız yarısıydı. **Zararlı yarısı hizalanmadır:**
+sıkıştırmadan sonra `granular_damage[i]` artık `position[i]` ile aynı parçacığı
+tarif etmiyordu — hasar, yumuşama ve bond scale sessizce yanlış tanelere
+yapıştı. Çökme yok, hata yok, kum hâlâ kum gibi görünüyor.
+
+★ Kodun kendisi gerekçeyi zaten yazmıştı: sıkıştırma bloğundaki yorum, iki UVW
+kuşağının birlikte taşınması gerektiğini "yoksa kaldırılan parçacık sayısı kadar
+kayarlar" diye açıklıyordu. Aynı cümle granül diziler için de geçerliydi ve o
+diziler listede yoktu.
+
+Çare tek satır değil, **tek yer**: sıkıştırma `FluidParticles::compact()` içine,
+`addParticle`/`removeSwap` ile yan yana taşındı. Dizileri sayan dördüncü bir
+liste, birini unutmak için dördüncü bir yerdi.
+
+### İki ölçüm düzeltmesi
+
+- **`substance_tag` bir kimlik ve float onu yuvarlıyordu.** İstatistik yolu
+  `float` taşıyordu; 2^24 üstünde tag `1951804163` geri okunurken `1951804160`
+  oluyordu — bir kimlik **başka bir kimliğe** dönüşüyor, sayı makul görünüyor.
+  `FieldStats` artık `double`.
+- **İstatistik dizinin tamamını değil, canlı parçacık sayısını gezer.** Ölü
+  kuyruğu ortalamaya katmak "makul görünen yanlış sayı" üretiyordu. Uyuşmazlık
+  gizlenmiyor, `array_in_sync` ile dışarı veriliyor.
+
+★★ Ders, planın D.3'te vaat ettiğinin ta kendisi: isimlendirme katmanı yeni
+depolama getirmedi, **görünürlük** getirdi — ve görünür olan ilk şey bir hataydı.
+
+## D.2c N4 — kuplaj node'ları (2026-08-17, YAZILDI)
+
+### ★★★ Tek geri alınamaz karar: graph BEYAN eder, ÇÖZÜCÜ bildirir
+
+Kuplaj sırası bugün `stepGridDomains` içinde örtük: sıvı yanması gaz anlık
+görüntüsü yüklendikten **sonra**, foam yoğunluk splat'ından **sonra**, ıslanma
+ikisinden de sonra çalışıyor. Node katmanı bu sırayı **kontrol etmiyor**.
+
+O yüzden node bir kuplajı **beyan eder, planlamaz.** Çözücü ne koştuğunu
+`ParticleSimulationSystem::couplingTrace()` ile bildirir ve `sim_graph.couplings`
+ikisini karşılaştırır.
+
+★★ Alternatifi — sırayı node'dan okuyup elle bir kopyasını node katmanında
+tutmak — **ikinci bir temsil** olurdu; bu depoda paralel temsil defalarca sessiz
+arızaya döndü. Üstelik arızası özellikle kötü olurdu: kullanıcıya seçtiği sırayı
+gösteren, ama çözücünün başka sıra koştuğu bir graph, **kontrol gibi görünen bir
+yalandır**.
+
+İz **ölçümdür, ayna değil**: bir girdi ancak o kuplaj o adımda gerçekten iş
+yaptıysa yazılır. "Yapılandırıldı" ile "koştu" farklı iddialardır ve ikisini
+birbirine karıştırmak ölü bir kuplajı sağlıklı gösterir.
+
+### Karşılaştırma üç ayrı olguyu ayrı tutuyor
+
+- `declared_not_running` — graph istiyor, çözücü hiç ulaşmadı.
+- `running_not_declared` — çözücü koşuyor, hiçbir node söylemiyor. **Hata
+  değil**; paneller hâlâ doğrudan kuplaj yazıyor. Önemi: yalnızca graph'a bakan
+  kullanıcı onun varlığını bilmez.
+- `order_matches` — yalnızca **iki listede de olan** kuplajlar üzerinden. Hiç
+  koşmamış bir beyanın tartışacağı bir konumu yoktur; onu sıra kontrolüne katmak
+  **yokluk** sorununu **sıra** sorunu diye raporlardı.
+
+★ `traced` bayrağı: boş bir `actual` listesi "adım atıldı, hiçbir şey kuplaj
+yapmadı" da olabilir, "çözücüye hiç sorulmadı" da. İkisini ayırmayan bir okuma
+sağlıklı sahneyi bozuk gösterir.
+
+### `strength` kadranı YOK — bilerek
+
+Kuplaj node'u aç/kapa taşır (`active`), 0..1 bir "şiddet" değil. Bu kuplajların
+arkasında tek bir yazılı kazanç yok; bir şiddet kadranı **icat edilmiş** bir
+kalibrasyon olurdu ve depo bunu zaten ayrıca test ediyor ("ölü kadranlar ölü
+kalır"). Kuplaj **parametreleri** arkasına N3 Set Parameter node'u zincirlenerek
+yazılır — yani aynı geri alınabilir override katmanından.
+
+### Doğrulama (2026-08-17, 12:10 build'i)
+
+`RESULT: ALL PASSED`. İz gerçekten ölçüyor: `foam_from_fluid` koştu ve izde
+göründü; `fluid_to_gas` beyan edildi, koşmadı ve `declared_not_running` içinde
+**isimlendirildi**; foam anahtarı `failed` ile dürüstçe reddedildi.
+
+★★ İlk koşuda geri alma FAIL vermişti ve **kod değil test yanlıştı**: test
+"yazılı değer"i, bir önceki bölümün override'ı hâlâ yürürlükteyken okuyordu ve
+sonra o değerin geri gelmesini istiyordu. Override katmanı tam da sözleşmesine
+uygun davranıyordu (yakalama **ilk yazımdan önce**); onu koruyan test onu yanlış
+anlıyordu. ★ Bir sözleşmeyi test eden şeyin, o sözleşmeyi ihlal etmesi kolay.
+
+### Dürüst boşluk: foam anahtarı script'ten yazılamıyor
+
+`foam_from_fluid` izde **görünür** ama açılıp kapatılamaz: foam parametrelerinin
+script yüzeyi henüz yok. `apply()` bunu `failed` içinde açıkça söylüyor —
+sessizce başarı dönmek, kullanıcıya etkisi olmayan bir graph düzenlemesini
+olmuş gibi gösterirdi. Foam yüzeyi kendi dilimi.
+
+## D.2d N5 — madde ve kimya node'ları (2026-08-17, YAZILDI)
+
+Node'lar: `sim.object_ref`, `sim.substance`, `sim.pyrolysis`,
+`sim.phase_change`, `sim.surface_inspect`. IPC:
+`sim_graph.surface_attributes` (285 metot, audit geçiyor).
+
+### Obje kimliği: yeni DataType YOK
+
+Node'lar artık domain'e değil **objeye** de başvuruyor. Yeni bir `ObjectRef`
+tipi **eklenmedi**: N1'in `SurfaceField` tipi zaten "MSF referansı" demek ve bir
+objenin graph'a kattığı şey tam olarak bu. ★ Kazanç sadece zariflik değil —
+`DataType` bir `uint8_t` ve serileştirilmiş graph'larda yaşıyor (D.5), yani her
+yeni değer kayıtlı dosyalarla taşınacak bir yük.
+
+★★ Ama `SimCommand`'e **scope** eklendi (`Domain` | `Object`). İsim tek başına
+hangisi olduğunu söyleyemez; onsuz uygulama katmanı "Crate"i domain'ler arasında
+arar, bulamaz ve **var olan bir obje için "bilinmeyen domain"** hatası verirdi.
+
+### İki node BİLEREK yok — ve bu cevabın kendisi
+
+- **Moisture:** yazılı bir kadranı **yok**. Nem sıvı temasıyla *yazılır* (Faz 5)
+  ve ortama karşı buharlaşır. Bir "Moisture node"u, çözücüde olmayan bir yazım
+  yüzeyi **icat etmek** zorunda kalırdı — D.0'ın yasakladığı tam da bu. Bunun
+  yerine `sim.surface_inspect` üzerinden **okuma** olarak açıldı.
+- **Thermal Transfer:** `WorldThermalState`'in **hiçbir script yüzeyi yok**.
+  Node onu eklemek, ilk üç dokunuşu eksik bir zincirin dördüncüsü olurdu. Kendi
+  dilimi.
+- **Char/Ash:** Faz 7 inmedi.
+
+### `sim.phase_change` erime NOKTASI taşımaz
+
+Erime sıcaklığı **maddeden** gelir (demir 1811 K'de erir çünkü demir öyle
+erir). Node'a ikinci bir erime noktası koymak, graph'ın yapıldığı malzemeyle
+çelişmesine izin vermek olurdu. Node yalnızca akış kadranlarını taşıyor
+(`melt_flow`, `height_loss`, `spread`) — Faz 6c'nin zaten yazılı knob'ları.
+
+### ★★ Read-modify-write, ve nedeni
+
+`updateSimulationCollider` **tam** bir descriptor alıyor. Tek alan yazmak, geri
+kalan her alanı değişmeden geri vermek demek; önce okumayan bir yazıcı, madde
+yazımı "başarılı" görünürken collider'ın geometrisini ve oranlarını sessizce
+varsayılana döndürürdü. Test bunu ayrıca sınıyor.
+
+### ★★★ Madde bir İSİMDİR — geri alınabilirliğin en sert vakası
+
+Sayısal override kaybolursa en azından makul bir değer uydurulabilir; **isim
+kaybolursa "bu eskiden çelikti" bilgisi geri getirilemez.** Bu yüzden metin
+override'ları ayrı bir defterde tutuluyor ve yakalama yine **ilk yazımdan
+önce**. Bilinmeyen madde adı `updateSimulationCollider` tarafından reddediliyor
+— bir yazım hatası çelik kirişi sessizce meşeye çevirmemeli.
+
+## D.2e N6 — cache / bake (2026-08-17, YAZILDI)
+
+Node `sim.cache`; IPC `sim_cache.status` / `.bake` / `.clear`; Python
+`rt.sim_cache.*`.
+
+### ★★★ Node BAKE ETMEZ
+
+Bake bütün simülasyonu yürütür; graph **değerlendirmesi** ise anlık ve yan
+etkisiz kalmalı, yoksa graph'a bakmak simülasyonu koşturur. Node niyeti beyan
+eder ve durumu bildirir; bake açık bir eylemdir (`sim_cache.bake`). Bu zaten
+B.5'in cevabı: "kullanıcı kontrollü bake + otomatik imza doğrulama".
+
+### ★★★ Asıl kazanç: BAYAT cache
+
+Var olan ama **başka bir yazılı konfigürasyondan** üretilmiş bir bake kare
+servis etmeye devam eder, ve o kareler artık var olmayan bir sahneyi tarif eder.
+Dışarıdan sağlıklı bir cache'ten **hiçbir farkı yoktur** — bayat fiziğin
+render'a bu şekilde sızar ve kimse bunu bug diye raporlamaz. `cache_stale`
+bunu `cache_valid`'den **ayrı** raporluyor, çünkü cache gerçekten geçerli;
+sadece başka bir sahneyi anlatıyor.
+
+★★ İmza **taze hesaplanır**, hatırlanmaz: cache'in imzasını kendi kopyasıyla
+karşılaştırmak her zaman "uyuyor" derdi. Soru sahnenin bake'ten beri kıpırdayıp
+kıpırdamadığı.
+
+★ Üç durum ayrı raporlanıyor — hiç bake yok / bake koşuyor / bake geçersizleşti.
+Üçü de dışarıdan "kullanılabilir bir şey yok" gibi okunur.
+
+### ★★★ Ve node daha ilk testinde bir arıza buldu
+
+Test bake aldı (`valid=True`), sonra domain'in `voxel_size`'ını değiştirdi:
+**imza değişmedi, bake geçerli kaldı.** Kök `computeSimConfigSignature()`
+içindeydi — emitter ve collider konfigürasyonu ayrıntısıyla hash'leniyordu ama
+grid domain'lerden yalnızca **sayı** alınıyordu. Yani simülasyonun içinde
+yaşadığı ayrıklaştırma imzanın dışındaydı ve bir bake, ızgara çözünürlüğü
+değişimini sağ kalıp başka bir ızgarada çözülmüş kareleri servis ediyordu.
+
+Kodun kendi yorumu borcu zaten yazmıştı ("full content signature is part of the
+Faz 5 cache hardening"). Hash'e **yalnızca yazılı** domain alanları eklendi
+(ad, tip, backend, boundary, source_mode, enabled, bounds, resolution,
+voxel_size); türetilmiş veya adım başına değişen bir alan cache'i her karede
+düşürürdü.
+
+### ★ Audit, namespace tablosuna eklemeyi yakaladı
+
+`sim_cache.bake`/`clear` önce yalnızca yerel bir prefix kontrolüyle
+sınıflandırılmıştı ve `audit_ipc_capabilities.py` bunları **sınıflandırılmamış**
+gösterdi: audit `requiredCapabilities`'i `namespaces[]` dizisini ayrıştırarak
+aynalıyor. Yalnızca elle yazılmış bir dalda ele alınan namespace audit'e
+görünmez — ve `authorize()` fail-closed olduğu için belirtisi "metot sessizce
+reddedildi" olurdu. Namespace tabloya eklendi.
+
+## D.2f N7 — render bağlama (2026-08-17, YAZILDI)
+
+Node'lar: `sim.material_liquid` (SDF izoyüzey materyali),
+`sim.material_volume` (GasShaderSettings). Yeni shader yok — plan B.5.
+
+### Smoke ve Fire TEK node, bilerek
+
+Plan ikisini ayrı saymıştı, ama ikisi **aynı yazılı struct** üzerinde bir
+preset ile ayrışıyor. İki node aynı struct'a yazsaydı bir graph ikisini birden
+tutabilir ve ikincisi birincisini **sessizce** ezerdi — hata yok, görünür sebep
+yok. Tek node, `preset` alanı.
+
+### ★★ "Boş" anlamlı bir DEĞER
+
+Boş yüzey materyali "yerleşik dielektrik" demek. Bu yüzden node boş değeri de
+**yayar**: yalnızca boş olmayanı yazan bir katmanda graph'tan materyal
+temizlemek imkânsız olurdu, son yazılan isim sonsuza kadar yapışırdı.
+
+### İki node yine BİLEREK yok
+
+- **Foam Material:** `FoamParams::foam_material_id`'nin script yüzeyi yok —
+  N4'teki foam kuplaj anahtarıyla **aynı eksik dilim**. Bir kez doldurulmalı,
+  iki kez taklit edilmemeli.
+- **Char / Molten Surface:** kendi kadranı yok; char rengi ve erimiş emisyon
+  **maddeden türetilir** (demir demir gibi parlıyor çünkü). Kendi char rengi
+  olan bir node, graph'ın yapıldığı malzemeyle çelişmesine izin verirdi — Phase
+  Change'e erime noktası koymakla aynı hata.
+
+### ★★★ Ve bu node da ilk testinde bir arıza buldu
+
+`rt.gas.set_shader(preset="fire")` — **uygulamanın kendi API'si** — sessiz bir
+no-op'muş: başarı dönüyor, preset `'smoke'` kalıyor, hiçbir sayı değişmiyor.
+İki kök üst üste binmişti:
+
+1. **İki doğruluk kaynağı.** Yazıcı preset'i **shader'a** uyguluyordu, okuyucu
+   ise preset'i **`fire_enabled`**'dan raporluyordu — yazıcının hiç dokunmadığı
+   alandan. Artık `shader_preset` alanı var. ★★ `fire_enabled` bilerek dışarıda:
+   o **yanmayı** açar, bir görünüm seçiminden türetmek gazı sessizce tutuştururdu.
+2. **Tarif anında eziliyordu.** Tipik çağıran ayarları okur, bir alanı değiştirir,
+   structu geri yazar — yani preset değiştiğinde gönderilen bütün sayılar hâlâ
+   ESKİ preset'i tarif eder, ve kod tarifi kurduktan hemen sonra onları
+   uyguluyordu. Preset görünür etkisi olmayan bir etikete dönüşüyordu. Artık
+   preset **değiştiyse** tarif kurulur ve dönülür.
+
+Bu yüzden node varsayılan olarak **yalnızca preset** yayar
+(`override_values=false`): sayısal alanları koşulsuz yaysaydı tarifin
+karakteristik değerlerini kendi yer-tutucu varsayılanlarıyla ezerdi — N5'teki
+"her zaman yay" kararının burada tersi doğru, çünkü orada geri yazılabilirlik,
+burada tarif bütünlüğü söz konusu.
+
+### ★★★ Aynı tuzağın GERİ ALMA yolundaki hali
+
+Düzeltmenin hemen ardından test yine kırmızı verdi: `clear_overrides` başarı
+dönüyor ama saçılım yazılı 0,15 yerine preset'in 2,0'ı olarak geri geliyordu.
+Sebep aynı "tarif" mantığı, bu kez ters yönde — geri alma önce **sayıları**,
+sonra **preset'i** yüklüyordu, ve preset'i geri koymak taze bir smoke tarifi
+kurup az önce geri yüklenen sayıları siliyordu.
+
+Kural: **önce metin (kimlik/tarif), sonra sayılar.** Uygulama yolunda zaten
+böyleydi (node preset'i değerlerden önce yayıyor); geri alma yolu da aynı sıraya
+getirildi, ve madde/yüzey geri alması da tutarlılık için aynı sıraya alındı —
+ikinci bir sıralamayı sonradan akıl yürütmek zorunda kalmamak için.
+
+### ★★★★ Ama sıra düzeltmesi de yetmedi: preset yazımı YIKICI
+
+Test yine kırmızı verdi (bu sefer 2,0 değil 0,5 döndü) ve asıl kök oradaydı:
+**preset yazmak shader'ı el değmemiş bir tarifle DEĞİŞTİRİR**, dolayısıyla
+yalnızca preset **adını** saklamak onu geri alamaz. Yazılı durum "smoke, ama
+saçılımı 0,15'e elle ayarlanmış"tı; adı geri koymak el değmemiş smoke kuruyor ve
+ayar yok oluyordu — `clear_overrides` yine başarı diyerek.
+
+★★ İkinci, daha ince arıza: anahtar başına yakalama. `scattering`'in ilk yazımı
+**başka bir preset yürürlükteyken** olabiliyor, yani onun "yazılı" değeri geri
+almanın az sonra değiştireceği bir tarife ait. Geri oynatınca yeni kurulan
+tarifi bozuyor.
+
+Çare ikisini birden kesiyor: gaz shader'ı **domain başına, bütün olarak** bir
+kez yakalanıyor (herhangi bir shader anahtarının ilk yazımından önce) ve iki
+çağrıyla geri yükleniyor — biri tarifi kurar, diğeri yazılı sayıları üstüne
+koyar.
+
+★ Ders: **anahtar başına geri alma, ancak anahtarlar birbirinden bağımsızsa
+doğrudur.** Bir "tarif" alanı komşularını sıfırlıyorsa, geri alma birimi tek
+anahtar değil o bütün bloktur.
+
+### ★★★ Yazılamayan bir anahtar YAKALANMAMALI
+
+Sıvı yarısı sınanabilir hale gelir gelmez üçüncü bir kusur çıktı:
+`clear_overrides` **her çağrıda** "cannot restore splat_material" diye
+patlıyordu. Sebep: yakalama yazımdan önce yapılıyor (sözleşme bu), ama yazım
+başarısız olduğunda yakalama **duruyordu**. Hiçbir şeyin değiştirmediği bir
+değeri, onu yazamayan bir yazıcıyla geri yüklemeye çalışan kalıcı bir kayıt.
+
+Kural: **yazım başarısızsa yakalama geri alınır.** Değişmemiş bir şeyin geri
+alınacak bir hali yoktur. Aynı düzeltme madde/yüzey yoluna da uygulandı.
+
+### ★ `splat_material` bağlanamıyor ve bu SÖYLENİYOR
+
+`updateFluidDomain`'in argüman listesinde splat materyali için yer yok. Node
+onu emit ediyor, uygulama katmanı **`failed` ile reddediyor** — sessizce yok
+saymak, hiçbir etkisi olmayan bir graph düzenlemesini olmuş gibi gösterirdi.
+
+## D.3 Veri modeli — attribute nerede, ızgara nerede
+
+Soru: sistemin alanları birbiriyle konuşabilsin diye çoğu veri **attribute**
+olarak mı taşınmalı? Cevap ikiye ayrılıyor, ve ayrım performans değil
+**temsil** kaynaklı.
+
+**Izgara alanları attribute DEĞİLDİR.** Density, temperature, velocity, SDF
+voksel ızgaralarında yaşar; GPU'da yerleşiktir, NanoVDB topolojisi ve majorant
+hiyerarşisi vardır. Bunları attribute'a taşımak **ikinci bir temsil** yaratır ve
+bu depoda iki paralel yol tekrar tekrar sessiz arızaya döndü. Izgara çözücünün
+malı kalır; node ona **isimle** başvurur (`"<domain>:<channel>"`).
+
+**Eleman başına veriler attribute'tur — çünkü zaten öyleler.** Parçacık ve
+texel başına veriler bugün paralel diziler hâlinde duruyor: `temperature`,
+`mass_fraction`, `substance_tag`, `granular_softening`, `granular_bond_scale`,
+MSF'te `melt`/`moisture`/char. Bu zaten bir attribute sistemi; eksik olan tek
+şey **isimlendirme katmanı**. Depo bu modele zaten karar vermiş durumda:
+`DNA::GeometryDetail` açıkça bir attribute sistemidir (indeks tamponu yok).
+
+Karar: **yeni depolama YOK, isimlendirme VAR.** Var olan dizilerin üstüne ortak
+bir sözleşme — `ad + tip + tanım kümesi` (per-particle / per-texel / per-vertex
+/ per-domain). Bayt taşınmaz; kazanılan şey **keşfedilebilirlik**.
+
+★★ Kazanç somut: bugün bir alanın var olduğunu öğrenmenin tek yolu kodu okumak.
+`substance_tag`'in "zaten var ama kimse bilmiyor" durumu tam olarak bunun
+maliyetiydi. İsimlendirilince node `Field` pini "herhangi bir eleman kümesi
+üzerindeki herhangi bir isimli attribute" hâline gelir ve sistemlerin birbiriyle
+konuşması bedava gelir.
+
+★★★ **İsim sınırda, indeks döngüde.** Attribute adı graph derlemesinde **bir
+kez** çözülüp kararlı bir indekse dönüşür; çözücünün iç döngüsü asla string
+aramaz. Bu kural çiğnenirse parçacık başına string lookup sistemi öldürür — ve
+bu, attribute modelinin klasik tuzağıdır.
+
+Kapsam: isimlendirme katmanı **N1'in parçasıdır**; `Field` tipi hem ızgara
+kanalını hem isimli eleman attribute'unu taşır, semantik hangisi olduğunu söyler.
+
+## D.4 UI yerleşimi — 5. graph sekmesi AÇILMAYACAK
+
+Alt şerit bugün birbirini dışlayan sekmelerden oluşuyor
+(`closeOtherBottomPanels`, `scene_ui.cpp`): Dope Sheet, Scene Log,
+**Terrain Graph**, **AnimGraph**, Asset Browser, **Geometry Graph**,
+**Material Graph**. Dördü graph. Simülasyon grafiğine ayrı bir sekme açmak
+beşinci olurdu.
+
+Karar: **tek `Nodes` sekmesi + içinde graph tipi seçici.** Blender'ın tek node
+editörü + ağaç tipi listesi modeli; sebebi de aynı: adları ve işlevleri farklı
+olsa da kullanıcı için hepsi "node düzenlediğim yer", ve hangi işin hangi
+panelde olduğunu ezberlemek zorunda kalıyor.
+
+```
+Dope Sheet | Scene Log | Nodes ▾ | Asset Browser
+                          └─ Geometry / Material / Terrain / Animation / Simulation
+```
+
+★ İsimlendirme bedava düzeliyor: editörün adı **Nodes** olunca "Graph" kelimesi
+gereksizleşir, geriye alan adı kalır. Bugünkü
+`Terrain Graph / Geometry Graph / Material Graph / AnimGraph` tutarsızlığı
+(sonuncusunda boşluk yok) o arada temizlenir.
+
+★★ **Tek seferde birleştirme YOK.** Panel çizimi `rt.ui` istisnası, yani
+otomatik testi olmayan tek alan; dört çalışan paneli aynı anda taşımak, bir
+regresyonun sessizce fark edilmediği tek yerde büyük cerrahi demektir. Sıra:
+
+1. Simülasyon graph UI'si yazılırken **ayrı sekme açılmaz** — doğrudan yeni
+   `Nodes` sekmesi kurulur, tip seçici konur, ilk sakini simülasyon olur.
+2. Diğer dördü **teker teker** taşınır; her adım gözle doğrulanır ve bozulursa
+   yalnızca o panel geri alınır.
+
+Böylece hiçbir zaman 5 sekmeye çıkılmaz.
+
+### D.4 uygulandı (2026-08-17) — ilk yarı
+
+`Nodes` sekmesi kuruldu, seçici şeride kondu, dört eski graph sekmesi kaldırıldı.
+Şerit: `Dope Sheet | Graph Editor | Console | Python | Nodes ▾ | Assets`.
+
+**Çizim gövdelerine dokunulmadı.** Seçiciden Geometry/Material/Terrain/Animation
+seçmek hâlâ o panellerin kendi pencerelerini açıyor; taşınmaları ikinci yarı.
+Kullanıcıya görünen model (tek yer) bugünden doğru, kod arkadan yetişiyor.
+
+### ★★★ `rt.ui` istisnası yeniden yazıldı
+
+Kullanıcı doğru soruyu sordu: ajanların ortak çalışma alanı olacak bir uygulamada
+UI kısıtlaması doğru mu? Cevap **kısmen**. "UI" üç ayrı şeydi:
+
+1. **Çizim çağrısı** — draw context dışında anlamsız, süreç içinde kalır. Doğru.
+2. **UI'nin tuttuğu durum** — çare scriptlemek değil, *UI'nin otorite tutmaması*.
+3. **UI'nin ne gösterdiği** — ★★★ eksik olan buydu.
+
+(3)'ün maliyeti somut: bu deponun en pahalı hata sınıfı **panelin yalan
+söylemesi** (`Volume` varsayılanı; `fire_enabled`'dan raporlayan gaz shader
+okuyucusu), ve yalnızca çekirdeği okuyabilen bir ajan o ayrışmaya **yapısal
+olarak kördür**. Kural artık:
+
+> UI kendine ait durum TUTMAZ — bu yüzden içinde scriptlenecek bir şey yoktur.
+> Bir paneli scriptleme isteği duyduğun an, o panel çekirdeğe ait bir durumu
+> tutuyordur.
+
+`rt.editor` eklendi (`get_state` / `set_bottom_editor` / `set_node_domain`),
+`rt.ui` panel çizimi olarak yerinde kaldı. Widget sürüşü bilerek açılmadı.
+
+★★ `EditorState` ilk halinde **ilk** açık paneli döndürüyordu: iki panel birden
+açıksa okuyucu birini raporlayıp diğerini gizlerdi — en çok sorulacak arızayı
+göremeyecek bir okuyucu. `open_editors` listesi eklendi.
+
+### ★ Ve inspector'sız panel kuralın TERSİNİ ihlal ediyordu
+
+İlk çıkan panel yalnızca tuval + toolbar'dı. `sim.domain_ref`'in `domain` alanı
+yalnızca `rt.sim_graph.set_node` ile yazılabiliyor, yani **panelden eklenen node
+sonsuza kadar boşa işaret ediyordu** — hatasız, ipucusuz. Kural 1'in aynası:
+script-only bir yetenek de en az panel-only kadar test edilemez.
+
+Properties kenar çubuğu eklendi: node açıklaması (artık `metadata.description`,
+tek kaynak — ekleme menüsü de oradan okuyor), pin rehberi (bağlı mı, bağlı
+değilse *ne* bağlanmalı), ve **gerçek sahne isimlerinden** seçen alanlar. Serbest
+metin değil: çözülmeyen bir isim ancak apply anında, başka bir panelde, yazıldığı
+yerden uzakta hata verir.
+
+★ "Domain node ekledim, viewport'ta domain çıkmadı" da bir belge sorunuydu:
+node **isim verir, yaratmaz** (N0'ın ilk kuralı). Panel artık domain yokken bunu
+açıkça söylüyor ve nerede yaratılacağını yazıyor.
+
+## D.5 ★ Tuzaklar
+
+**`DataType` bir `uint8_t` ve serileştirilmiş graph'larda yaşıyor.** N1'de değer
+**eklemek** güvenli; **sıralamayı değiştirmek** kayıtlı her graph'ı bozar ve
+bunun belirtisi "node yanlış tipte veri okuyor" olur. Sona eklenecek.
+
+**Kuplaj sırası N4'ün asıl kazancıdır.** Bu depoda "üretici ≠ tüketici" tekrar
+eden bir arıza sınıfı: bir olayı kuyruğa koyan yer ile tüketen yer ayrı
+döngülerde olabiliyor. Graph bu sırayı **görünür** kılar — node katmanının
+fiziğe en somut katkısı budur, kozmetik değil.
+
+**Her faz dört dokunuşu tamamlar.** Node **kurmak ve bağlamak** panel çizimi
+değildir; `rt.ui` istisnasına girmez. Faz `scripts/audit_ipc_capabilities.py`
+geçmeden kapanmaz.
 
 ---
 

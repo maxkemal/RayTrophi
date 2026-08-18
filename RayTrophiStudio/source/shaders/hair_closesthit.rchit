@@ -502,7 +502,7 @@ void main()
         payload.scatterOrigin = hitPoint;
         payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
         payload.scattered     = false;
-        payload.skipAABBs     = false;
+        payload.skipVolumeAABBs     = false;
         return;
     }
     HairSegmentGPU seg = hairSegs[segIdx];
@@ -514,7 +514,7 @@ void main()
         payload.scatterOrigin = hitPoint;
         payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
         payload.scattered     = false;
-        payload.skipAABBs     = false;
+        payload.skipVolumeAABBs     = false;
         return;
     }
     if (matID >= matCount) matID = 0u;
@@ -690,5 +690,5 @@ void main()
     payload.scatterOrigin = offset_ray(hitPoint, normal);
     payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
     payload.scattered   = false;
-    payload.skipAABBs   = false;
+    payload.skipVolumeAABBs   = false;
 }

@@ -26,6 +26,9 @@
 #include "scene_ui.h"          // UIContext, SceneHistory
 #include "SceneCommand.h"      // TransformCommand / TransformState
 #include "Backend/IBackend.h"  // backend resetAccumulation
+#include "Backend/IViewportBackend.h"  // g_viewport_backend (volume counters)
+#include "Backend/VulkanBackend.h"     // VulkanBackendAdapter volume instrumentation
+#include <memory>
 #include "TriangleMesh.h"
 #include "Camera.h"            // Faz 5.1a: active-camera get/set
 #include "World.h"             // Faz 5.1c: NishitaSkyParams / background (rt.world)
@@ -75,6 +78,12 @@ extern bool        g_bvh_rebuild_pending;
 extern bool        g_optix_rebuild_pending;
 extern bool        g_vulkan_rebuild_pending;
 extern bool        g_viewport_raster_rebuild_pending;
+// Owner of the Vulkan volume instrumentation buffer when the app is in viewport
+// mode. Declared here rather than pulled in from a UI header because those drag
+// ImGui along; it lives at global scope, so this must stay OUTSIDE namespace
+// rtapi — declaring it inside would silently create a second, never-defined
+// symbol and fail at link time rather than at the point of the mistake.
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 
 namespace rtapi {
 
@@ -1240,6 +1249,61 @@ bool renderOutputPending() {
 
 std::string renderOutputPath() {
     return g_render_job.output_path;
+}
+
+namespace {
+Backend::VulkanBackendAdapter* activeVulkanBackendForStats() {
+    if (g_ctx) {
+        if (auto* r = dynamic_cast<Backend::VulkanBackendAdapter*>(g_ctx->backend_ptr))
+            return r;
+    }
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(::g_viewport_backend.get());
+}
+} // namespace
+
+VolumeInstrumentationInfo volumeStats() {
+    VolumeInstrumentationInfo out;
+    auto* backend = activeVulkanBackendForStats();
+    if (!backend) return out;   // available stays false: no Vulkan backend
+    // ★ Synchronized readback (true), the same call the panel's Refresh makes.
+    // A non-synchronized read races the in-flight frame and returns a partially
+    // updated set — which looks like a plausible measurement, not like an error.
+    const VulkanRT::VolumePerformanceStats s = backend->getVolumePerformanceStats(true);
+    out.available = true;
+    out.enabled = s.enabled != 0u;
+    out.volume_rays = s.volumeRays;
+    out.density_samples = s.densitySamples;
+    out.shadow_density_samples = s.shadowDensitySamples;
+    out.empty_segments_skipped = s.emptySegmentsSkipped;
+    out.topology_segments_skipped = s.topologySegmentsSkipped;
+    out.majorant_segments_skipped = s.majorantSegmentsSkipped;
+    out.majorant_queries = s.majorantQueries;
+    out.majorant_available_queries = s.majorantAvailableQueries;
+    out.extinction_terminations = s.extinctionTerminations;
+    out.step_budget_exhausted = s.stepBudgetExhausted;
+    out.completed_intervals = s.completedIntervals;
+    out.temporal_accepted = s.temporalAccepted;
+    out.temporal_rejected = s.temporalRejected;
+    out.solid_probe_runs = s.solidProbeRuns;
+    out.solid_probe_hits = s.solidProbeHits;
+    out.gas_handoffs = s.gasHandoffs;
+    out.layered_handoffs = s.layeredHandoffs;
+    out.arbiter_rejects = s.arbiterRejects;
+    out.teleports = s.teleports;
+    out.arbiter_candidates = s.arbiterCandidates;
+    out.arbiter_gate_open = s.arbiterGateOpen;
+    out.arbiter_no_box = s.arbiterNoBox;
+    out.arbiter_empty_range = s.arbiterEmptyRange;
+    out.arbiter_no_crossing = s.arbiterNoCrossing;
+    return out;
+}
+
+Result setVolumeInstrumentation(bool enabled) {
+    auto* backend = activeVulkanBackendForStats();
+    if (!backend)
+        return Result::fail("no active Vulkan backend (volume counters are Vulkan-only)");
+    backend->resetVolumePerformanceStats(enabled);
+    return Result::success();
 }
 
 void completeRenderOutput(bool ok, const std::string& error) {

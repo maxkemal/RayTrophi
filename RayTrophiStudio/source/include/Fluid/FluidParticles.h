@@ -51,6 +51,20 @@ public:
     // evaporate or burn a liquid without changing APIC momentum until the
     // hysteresis-based lifecycle pass safely compacts particles.
     std::vector<float>    mass_fraction;
+    // ★★★ KELVIN, ABSOLUTE. Not the gas grid's convention.
+    //
+    // The gas grid stores temperature in EITHER normalised 0..1 OR Kelvin and
+    // disambiguates by magnitude (`> 20` means Kelvin). This field must never
+    // inherit that: every threshold read against it (softening_temperature,
+    // ignition) is authored in Kelvin, and a normalised 0..1 value compared to
+    // 380 K silently never fires. Convert at the boundary, not here.
+    //
+    // ★★ This field had NO writer until the thermal chain was added. Reseed
+    // copied it, splits inherited 0.0f, and SimCache assigned 0.0f outright, so
+    // every fluid particle was permanently 0 K. Nothing noticed because the only
+    // consumer (softening) defaults to disabled. Seed/emit now start it at the
+    // domain ambient — 0 K is not a cold particle, it is an unwritten one, and
+    // conduction toward the gas from 0 K produces nonsense heating rates.
     std::vector<float>    temperature;
     std::vector<float>    combustible_fraction;
     std::vector<uint32_t> substance_tag;
@@ -60,6 +74,14 @@ public:
     std::vector<Vec3> granular_deformation_col1;
     std::vector<Vec3> granular_deformation_col2;
     std::vector<float> granular_plastic_volume;
+    // Thermal/burn softening of the granular skeleton, 1 = cold and intact,
+    // 0 = fully softened. Derived every step from `temperature` and
+    // `mass_fraction`; it multiplies the AUTHORED stiffness inside the
+    // constitutive update and is never written back into the domain params.
+    std::vector<float> granular_softening;
+    // Cohesion/tensile multiplier. Separate array because it does NOT track
+    // granular_softening: see SofteningParams::tack_peak.
+    std::vector<float> granular_bond_scale;
     std::vector<float> granular_hardening;
     std::vector<uint32_t> granular_material_flags;
     // Symmetric Cauchy stress: diagonal (xx,yy,zz) and shear (xy,xz,yz).
@@ -183,6 +205,8 @@ public:
         substance_tag.clear();
         granular_deformation_col0.clear(); granular_deformation_col1.clear();
         granular_deformation_col2.clear(); granular_plastic_volume.clear();
+        granular_softening.clear();
+        granular_bond_scale.clear();
         granular_hardening.clear(); granular_material_flags.clear();
         granular_stress_diag.clear(); granular_stress_shear.clear();
         granular_yield_value.clear(); granular_plastic_increment.clear();
@@ -201,6 +225,8 @@ public:
         granular_deformation_col1.resize(n, Vec3(0,1,0));
         granular_deformation_col2.resize(n, Vec3(0,0,1));
         granular_plastic_volume.resize(n, 1.0f);
+        granular_softening.resize(n, 1.0f);
+        granular_bond_scale.resize(n, 1.0f);
         granular_hardening.resize(n, 0.0f);
         granular_material_flags.resize(n, 0u);
         granular_stress_diag.resize(n, Vec3(0,0,0));
@@ -222,6 +248,8 @@ public:
         substance_tag.reserve(n);
         granular_deformation_col0.reserve(n); granular_deformation_col1.reserve(n);
         granular_deformation_col2.reserve(n); granular_plastic_volume.reserve(n);
+        granular_softening.reserve(n);
+        granular_bond_scale.reserve(n);
         granular_hardening.reserve(n); granular_material_flags.reserve(n);
         granular_stress_diag.reserve(n); granular_stress_shear.reserve(n);
         granular_yield_value.reserve(n); granular_plastic_increment.reserve(n);
@@ -261,6 +289,8 @@ public:
         granular_deformation_col1.emplace_back(0,1,0);
         granular_deformation_col2.emplace_back(0,0,1);
         granular_plastic_volume.push_back(1.0f);
+        granular_softening.push_back(1.0f);
+        granular_bond_scale.push_back(1.0f);
         granular_hardening.push_back(0.0f);
         granular_material_flags.push_back(0u);
         granular_stress_diag.emplace_back(0,0,0);
@@ -292,6 +322,8 @@ public:
             granular_deformation_col1[i] = granular_deformation_col1[last];
             granular_deformation_col2[i] = granular_deformation_col2[last];
             granular_plastic_volume[i] = granular_plastic_volume[last];
+            granular_softening[i] = granular_softening[last];
+            granular_bond_scale[i] = granular_bond_scale[last];
             granular_hardening[i] = granular_hardening[last];
             granular_material_flags[i] = granular_material_flags[last];
             granular_stress_diag[i] = granular_stress_diag[last];
@@ -313,6 +345,8 @@ public:
         substance_tag.pop_back();
         granular_deformation_col0.pop_back(); granular_deformation_col1.pop_back();
         granular_deformation_col2.pop_back(); granular_plastic_volume.pop_back();
+        granular_softening.pop_back();
+        granular_bond_scale.pop_back();
         granular_hardening.pop_back(); granular_material_flags.pop_back();
         granular_stress_diag.pop_back(); granular_stress_shear.pop_back();
         granular_yield_value.pop_back(); granular_plastic_increment.pop_back();
@@ -320,6 +354,95 @@ public:
         granular_fracture_history.pop_back();
         uvw.pop_back();
         if (!uvw_b.empty()) uvw_b.pop_back();
+    }
+
+    // Keep every particle whose mask byte is 0, in order, and shorten every
+    // array. Returns the surviving count.
+    //
+    // ★★★ This exists because the reseed trim used to compact the primary arrays
+    // in the SOLVER and leave the granular ones behind (measured 2026-08-17: 3987
+    // granular entries against 3981 particles). The tail was the harmless half.
+    // The damaging half is that after a trim, `granular_damage[i]` described a
+    // DIFFERENT particle than `position[i]` — per-particle damage, softening and
+    // bond scale silently attached to the wrong grains. Nothing crashes and the
+    // sim still looks like sand.
+    //
+    // ★★ The list of arrays lives HERE, next to addParticle and removeSwap, and
+    // not at the call site. A fourth place enumerating these arrays is a fourth
+    // place to forget one, which is exactly how this bug happened.
+    std::size_t compact(const std::vector<uint8_t>& remove_mask) {
+        const std::size_t n = position.size();
+        std::size_t write = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (i < remove_mask.size() && remove_mask[i]) continue;
+            if (write != i) moveParticle(write, i);
+            ++write;
+        }
+        resizeAll(write);
+        return write;
+    }
+
+private:
+    // Copy particle `src` onto slot `dst`. Every optional sidecar is guarded by
+    // its own length: granular arrays are empty on a pure liquid domain, and
+    // uvw_b can lag by a step.
+    void moveParticle(std::size_t dst, std::size_t src) {
+        position[dst] = position[src];
+        velocity[dst] = velocity[src];
+        affine[dst]   = affine[src];
+        flags[dst]    = flags[src];
+        mass_fraction[dst] = mass_fraction[src];
+        temperature[dst] = temperature[src];
+        combustible_fraction[dst] = combustible_fraction[src];
+        substance_tag[dst] = substance_tag[src];
+        uvw[dst] = uvw[src];
+        if (src < uvw_b.size() && dst < uvw_b.size()) uvw_b[dst] = uvw_b[src];
+        auto move = [&](auto& v) { if (src < v.size() && dst < v.size()) v[dst] = v[src]; };
+        move(granular_deformation_col0);
+        move(granular_deformation_col1);
+        move(granular_deformation_col2);
+        move(granular_plastic_volume);
+        move(granular_softening);
+        move(granular_bond_scale);
+        move(granular_hardening);
+        move(granular_material_flags);
+        move(granular_stress_diag);
+        move(granular_stress_shear);
+        move(granular_yield_value);
+        move(granular_plastic_increment);
+        move(granular_damage);
+        move(granular_fracture_history);
+    }
+
+    // Shrink every array that is currently in use. An array that was never
+    // allocated (granular state on a liquid domain) stays empty — resizing it up
+    // here would fabricate granular state for particles that have none.
+    void resizeAll(std::size_t n) {
+        position.resize(n);
+        velocity.resize(n);
+        affine.resize(n);
+        flags.resize(n);
+        mass_fraction.resize(n);
+        temperature.resize(n);
+        combustible_fraction.resize(n);
+        substance_tag.resize(n);
+        uvw.resize(n);
+        auto shrink = [&](auto& v) { if (!v.empty()) v.resize(n); };
+        shrink(uvw_b);
+        shrink(granular_deformation_col0);
+        shrink(granular_deformation_col1);
+        shrink(granular_deformation_col2);
+        shrink(granular_plastic_volume);
+        shrink(granular_softening);
+        shrink(granular_bond_scale);
+        shrink(granular_hardening);
+        shrink(granular_material_flags);
+        shrink(granular_stress_diag);
+        shrink(granular_stress_shear);
+        shrink(granular_yield_value);
+        shrink(granular_plastic_increment);
+        shrink(granular_damage);
+        shrink(granular_fracture_history);
     }
 };
 

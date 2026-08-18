@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Kaynak Dosyalar">
@@ -468,6 +468,18 @@
     <ClInclude Include="source\include\UI\HierarchyLiveObjectView.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\UI\TemplateHubUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Template\StartupPreferences.h">
+      <Filter>Header Files\Template</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Template\PathUtils.h">
+      <Filter>Header Files\Template</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Template\UserTemplateManager.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\AssetRegistry.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -775,6 +787,12 @@
     <ClCompile Include="source\src\Api\RtApiTerrain.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSimNodes.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiViewport.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiHair.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
@@ -922,6 +940,12 @@
     <ClCompile Include="source\src\UI\scene_ui_modifiers.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_simnodes.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiUiState.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_procamera.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
@@ -1001,6 +1025,9 @@
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Scene\MaterialNodesV2.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\SimulationNodes.cpp">
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Animation\AnimationController.cpp">
@@ -1644,6 +1671,15 @@
     </ClCompile>
     <ClCompile Include="source\src\Utils\TriangleProxyConverter.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\TemplateHubUI.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\StartupPreferences.cpp">
+      <Filter>Kaynak Dosyalar\Template</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\UserTemplateManager.cpp">
+      <Filter>Kaynak Dosyalar\Template</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

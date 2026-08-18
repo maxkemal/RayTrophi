@@ -44,6 +44,8 @@
 #include "FractureSourceAdapter.h"
 #include "MeshModifiers.h"      // facadesToFlatMesh (add-object-flat collapse)
 #include "TriangleMesh.h"       // complete type for shared_ptr<TriangleMesh>→shared_ptr<Hittable> upcast
+#include "UI/TemplateHubUI.h"
+#include "Template/UserTemplateManager.h"
 // extern bool show_controls_window; // Assume defined elsewhere
 
 extern bool g_vulkan_rebuild_pending;
@@ -55,6 +57,7 @@ extern std::unique_ptr<Backend::IBackend> g_backend;
 extern bool g_dense_mesh_as_hittable;
 
 namespace {
+    bool s_show_save_user_template_modal = false;
     std::atomic<bool>  s_bakeRunning{false};
     std::atomic<int>   s_bakeDone{0};
     std::atomic<int>   s_bakeTotal{0};
@@ -280,7 +283,13 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             // NEW PROJECT
             // ================================================================
             if (ImGui::MenuItem("New Project", "Ctrl+N")) {
-                 tryNew(ctx);
+                 raytrophi::templates::TemplateHubUI::instance().show();
+            }
+            if (ImGui::MenuItem("Template Hub...", "Ctrl+Shift+T")) {
+                 raytrophi::templates::TemplateHubUI::instance().show();
+            }
+            if (ImGui::MenuItem("Save Scene as Template...")) {
+                 s_show_save_user_template_modal = true;
             }
 
             ImGui::Separator();
@@ -1240,6 +1249,53 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             addViewportMessage(buf, 8.f, ImVec4(0.3f, 1.f, 0.4f, 1.f));
         }
         s_bakeWasRunning = bakeNow;
+    }
+
+    // Render Template Hub overlay if visible
+    raytrophi::templates::TemplateHubUI::instance().render(ctx, *this, &history);
+
+    if (s_show_save_user_template_modal) {
+        static char t_name[128] = "";
+        static char t_desc[256] = "";
+
+        if (!ImGui::IsPopupOpen("Save Scene as Template##UserModal")) {
+            ImGui::OpenPopup("Save Scene as Template##UserModal");
+        }
+
+        if (ImGui::BeginPopupModal("Save Scene as Template##UserModal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Save active scene setup as a custom user template:");
+            ImGui::Spacing();
+
+            ImGui::InputText("Template Title", t_name, sizeof(t_name));
+            ImGui::InputText("Description", t_desc, sizeof(t_desc));
+            ImGui::Spacing();
+
+            if (UIWidgets::PrimaryButton("Save Template", ImVec2(140, 32))) {
+                if (strlen(t_name) > 0) {
+                    std::string name_str = t_name;
+                    std::string desc_str = t_desc;
+                    bool saved = raytrophi::templates::UserTemplateManager::instance().saveCurrentSceneAsTemplate(
+                        name_str, desc_str, "user", ctx, *this, &history);
+                    if (saved) {
+                        std::string msg = "User template '" + name_str + "' saved successfully!";
+                        addViewportMessage(msg, 4.0f, ImVec4(0.3f, 1.0f, 0.4f, 1.0f));
+
+                        t_name[0] = '\0';
+                        t_desc[0] = '\0';
+                        s_show_save_user_template_modal = false;
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+            }
+            ImGui::SameLine();
+            if (UIWidgets::SecondaryButton("Cancel", ImVec2(100, 32))) {
+                s_show_save_user_template_modal = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        } else {
+            s_show_save_user_template_modal = false;
+        }
     }
 }
 

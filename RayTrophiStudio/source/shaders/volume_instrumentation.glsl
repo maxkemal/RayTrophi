@@ -15,9 +15,64 @@ layout(set = 0, binding = 29, scalar) buffer VolumeInstrumentationBuffer {
     uint temporalRejected;
     uint majorantQueries;
     uint majorantAvailableQueries;
-    uint reserved2;
-    uint reserved3;
+    uint solidProbeRuns;
+    uint solidProbeHits;
     uint enabled;
+    // ── Handoff accounting (black-band / cost tripwire) ──────────────────────
+    // A gas segment can leave its box FOUR ways, and on screen three of them can
+    // look identical. These separate them:
+    //   gasHandoff    - found a solid, handed the ray over (progress)
+    //   layeredHandoff- the arbiter found a coincident liquid surface (progress)
+    //   arbiterReject - a liquid box overlapped but could not be sampled here
+    //   teleport      - nothing found, ray jumped to tFar PAST everything inside
+    // A black band with teleport >> 0 means the liquid is being jumped over. The
+    // same band with gasHandoff/layeredHandoff >> volumeRays means the ray is
+    // ping-ponging through raygen's free-pass budget, which is a COST bug that
+    // also reads as black once the budget runs out before any light is reached.
+    uint gasHandoffs;
+    uint layeredHandoffs;
+    uint arbiterRejects;
+    uint teleports;
+    // ★★★ How many SurfaceSDF candidates the arbiter actually SAW (passed
+    // is_active && source_type == 4). This is the one number that separates the
+    // two remaining explanations for the black band:
+    //   > 0  the liquid IS visible to the arbiter and the fault is downstream
+    //   = 0  the liquid is NOT in the arbiter's reach at all -- its slot sits
+    //        beyond volCount (cam.pad0), so `candidateIndex < count` never gets
+    //        to it. That is the customIndex/count contract, not the mask logic,
+    //        and the VolumeSSBO/VolumeGuard tripwires already watch for it.
+    uint arbiterCandidates;
+    // Times the layered-surface GATE opened at all, i.e. this volume
+    // decided it is NOT itself a liquid/cloud and went looking for one.
+    //
+    // Pairs with arbiterCandidates to separate three outcomes that all
+    // look like the same black band on screen:
+    //   gate == 0                  the GAS volume believes it IS a liquid
+    //                              (source_type read as 4) -- the shader is
+    //                              reading another volume's record, i.e. a
+    //                              TLAS customIndex / SSBO order mismatch
+    //   gate > 0, candidates == 0  gate opened but no liquid was reachable
+    //                              within volCount slots
+    //   candidates > 0             the arbiter saw it; the fault is later
+    uint arbiterGateOpen;
+    // ★★★ The three SILENT exits of nearestSurfaceSDFCrossing.
+    //
+    // arbiterCandidates is incremented BEFORE all three tests, so it reads 100%
+    // no matter which one fails — it cannot diagnose anything on its own. These
+    // partition the failure exactly once per candidate:
+    //   noBox       volumeRayInterval said the ray misses the liquid's AABB.
+    //               The liquid's box transform / aabb_min-max is wrong, or it is
+    //               genuinely elsewhere.
+    //   emptyRange  the box was hit but the usable span collapsed after clipping
+    //               to the GAS interval (endT <= beginT). The two boxes do not
+    //               overlap along this ray even though both contain it.
+    //   noCrossing  the field WAS marched and never crossed ISO=0.5. Sampling or
+    //               threshold semantics, not geometry.
+    //
+    // found = arbiterGateOpen - noBox - emptyRange - noCrossing.
+    uint arbiterNoBox;
+    uint arbiterEmptyRange;
+    uint arbiterNoCrossing;
 } volumeInstrumentation;
 
 const uint VOLUME_MARCH_COMPLETED = 0u;
@@ -38,9 +93,19 @@ bool volumeInstrumentationEnabled() {
 // Occupies reserved2/reserved3, so the buffer layout is unchanged.
 void volumeRecordSolidProbe(bool foundSolid) {
     if (!volumeInstrumentationEnabled()) return;
-    atomicAdd(volumeInstrumentation.reserved2, 1u);
-    if (foundSolid) atomicAdd(volumeInstrumentation.reserved3, 1u);
+    atomicAdd(volumeInstrumentation.solidProbeRuns, 1u);
+    if (foundSolid) atomicAdd(volumeInstrumentation.solidProbeHits, 1u);
 }
+
+void volumeRecordGasHandoff()     { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.gasHandoffs, 1u); }
+void volumeRecordLayeredHandoff() { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.layeredHandoffs, 1u); }
+void volumeRecordArbiterReject()  { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.arbiterRejects, 1u); }
+void volumeRecordTeleport()       { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.teleports, 1u); }
+void volumeRecordArbiterCandidate(){ if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.arbiterCandidates, 1u); }
+void volumeRecordArbiterGateOpen(){ if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.arbiterGateOpen, 1u); }
+void volumeRecordArbiterNoBox()      { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.arbiterNoBox, 1u); }
+void volumeRecordArbiterEmptyRange() { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.arbiterEmptyRange, 1u); }
+void volumeRecordArbiterNoCrossing() { if (volumeInstrumentationEnabled()) atomicAdd(volumeInstrumentation.arbiterNoCrossing, 1u); }
 
 void volumeRecordRay(
     uint densityCount,

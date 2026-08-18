@@ -6111,6 +6111,27 @@ void SceneUI::drawPaintBrushDock(UIContext& ctx) {
         was_focused = false;
         return;
     }
+    
+    // Invisible Drag Splitter on Left Edge of Brush Dock
+    {
+        ImVec2 win_pos = ImGui::GetWindowPos();
+        ImVec2 win_size = ImGui::GetWindowSize();
+        ImVec2 p_min = ImVec2(win_pos.x - 2.0f, win_pos.y);
+        ImVec2 p_max = ImVec2(win_pos.x + 4.0f, win_pos.y + win_size.y);
+        ImGui::SetCursorScreenPos(p_min);
+        ImGui::InvisibleButton("##RightDockSplitter", ImVec2(6.0f, win_size.y));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        }
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            paint_brush_dock_width -= ImGui::GetIO().MouseDelta.x;
+            paint_brush_dock_width = std::clamp(paint_brush_dock_width, 50.0f, 450.0f);
+        }
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(p_min, p_max, IM_COL32(140, 140, 140, 180));
+        }
+    }
 
     bool is_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if (is_focused && !was_focused) {

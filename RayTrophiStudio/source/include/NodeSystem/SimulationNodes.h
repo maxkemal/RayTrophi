@@ -1,0 +1,814 @@
+/*
+ * =========================================================================
+ * Project:       RayTrophi Studio
+ * File:          NodeSystem/SimulationNodes.h
+ * Author:        Kemal Demirtas
+ * License:       MIT
+ * =========================================================================
+ * Simulation node layer — Faz N0 (contract) and N2 (read-only nodes).
+ * Decision record: docs/dev/NODE_SIMULATION_ARCHITECTURE_PLAN.md, BOLUM D.
+ *
+ * ★★★ THIS IS NOT A SIMULATION CORE. It is a thin driver over the solvers that
+ * already exist (APIC fluid, gas/combustion, MSF, foam, rigid). The layer is
+ * DISCONTINUOUS: it owns no run loop, produces no frames, and holds no state.
+ * If a node is inventing physics, the physics is in the wrong place.
+ */
+
+#pragma once
+
+#include "NodeSystem/Graph.h"
+#include "NodeSystem/Node.h"
+#include "NodeSystem/EvaluationContext.h"
+
+#include <string>
+#include <vector>
+
+namespace NodeSystem {
+namespace Sim {
+
+// ============================================================================
+// N0 — THE EXECUTION CONTRACT
+// ============================================================================
+//
+// ★★★ GraphBase::evaluate() is PURE: it calls clearCache() and markAllDirty()
+// so every run recomputes from inputs. That is right for geometry and material
+// graphs, where the output IS a function of the inputs.
+//
+// It would be fatal here. In a solver the state IS the accumulated history, so
+// "recompute from inputs" means "reset the simulation" — and the symptom would
+// not be an error, it would be "the sim never advances", which is the hardest
+// kind of bug this repository keeps paying for.
+//
+// The fix is NOT to give nodes their own state. Three rules instead:
+//
+//   1. A node OWNS NO STATE. State stays where it already lives
+//      (ParticleSimulationSystem, grid domain states, MSF). A node refers to it
+//      by IDENTITY — a name — which is also why no pin carries a handle.
+//   2. Evaluating a node EMITS A COMMAND; it does not recompute. This mirrors
+//      the rule the UI already follows: it RECORDS a SceneCommand rather than
+//      executing one.
+//   3. `dirty` means "re-apply configuration", NEVER "reset". A reset is an
+//      explicit, visible action a user asks for.
+//
+// ★★ If a parameter genuinely requires a restart, the node must SAY SO and wait
+// for confirmation (see SimNodeBase::requiresRestart). Resetting silently is the
+// exact failure shape this codebase keeps rediscovering.
+
+// One command the graph wants applied to the existing solvers. Values only:
+// a name plus parameters, never a pointer into the scene.
+struct SimCommand {
+    enum class Kind : uint8_t {
+        None = 0,
+        BindDomain,      // "this graph drives the domain called <target>"
+        SetParameter,    // override a solver parameter (N3)
+        Couple,          // declare an ordered coupling (N4)
+        BindObject,      // "this graph drives the object called <target>" (N5)
+        SetSurface,      // override a per-object material/thermal setting (N5)
+        SetRender,       // override a domain's LOOK (N7)
+    };
+    Kind        kind = Kind::None;
+    std::string target;      // domain / object name — the identity, not a handle
+    // ★ Objects and domains are both named, and a name alone cannot say which
+    // one it is. Without this the apply layer would look "Crate" up among the
+    // domains, fail, and report "unknown domain" for an object that exists.
+    enum class Scope : uint8_t { Domain = 0, Object };
+    Scope       scope = Scope::Domain;
+    std::string key;         // parameter or coupling name
+    float       value = 0.0f;
+    std::string text;        // string-valued parameter (substance name, mode)
+    // Producer node, so a rejected command can be reported on the right node
+    // instead of as a nameless graph error.
+    uint32_t    sourceNode = 0;
+};
+
+// Base for every simulation node.
+class SimNodeBase : public NodeBase {
+public:
+    // Commands produced by the last evaluation. The graph collects these; the
+    // node never applies them itself. Keeping emission and application apart is
+    // what lets an agent inspect a graph's intent WITHOUT running it.
+    std::vector<SimCommand> commands;
+
+    // ★ Does changing this node's configuration invalidate accumulated state?
+    // Default false: most nodes re-apply cleanly mid-run. A node that answers
+    // true is telling the UI to ask the user before discarding a simulation —
+    // it must never act on that answer itself.
+    virtual bool requiresRestart() const { return false; }
+
+    // Human-readable reason shown next to the restart prompt. Empty when
+    // requiresRestart() is false.
+    virtual std::string restartReason() const { return {}; }
+
+protected:
+    void emit(SimCommand cmd) {
+        cmd.sourceNode = id;
+        commands.push_back(std::move(cmd));
+    }
+    void clearCommands() { commands.clear(); }
+};
+
+// The simulation graph. Differs from GraphBase in exactly one respect, and that
+// difference is the whole of N0.
+class SimulationNodeGraph : public GraphBase {
+public:
+    // Commands gathered from every node in the last evaluation, in topological
+    // order. ORDER IS MEANINGFUL — for coupling nodes it IS the physics.
+    std::vector<SimCommand> collected;
+
+    // ★★★ Deliberately NOT calling clearCache() or markAllDirty(). See the
+    // contract note above: those two lines are what make GraphBase pure, and
+    // purity here would reset the solvers every evaluation.
+    //
+    // Nodes are still evaluated in dependency order, and `dirty` still
+    // propagates downstream through markDirtyDownstream() — but it means
+    // "re-apply your configuration", so a clean node may legitimately re-emit
+    // its command without recomputing anything.
+    void evaluateSimulation(EvaluationContext& ctx) {
+        ctx.startTiming();
+        ctx.clearErrors();
+        collected.clear();
+
+        for (auto& node : nodes) {
+            if (ctx.isCancelled()) break;
+            auto* sim = dynamic_cast<SimNodeBase*>(node.get());
+            if (!sim || !sim->enabled) continue;
+            sim->commands.clear();
+        }
+
+        // Terminal-first pull, same traversal GraphBase uses, so upstream nodes
+        // are evaluated before their consumers and the command order matches the
+        // dependency order rather than node creation order.
+        for (auto& node : nodes) {
+            if (ctx.isCancelled()) break;
+            if (!isTerminalNode(node.get())) continue;
+            if (!node->enabled) continue;
+            if (node->outputs.empty()) {
+                node->compute(0, ctx);
+            } else {
+                for (size_t i = 0; i < node->outputs.size(); ++i)
+                    node->requestOutput(static_cast<int>(i), ctx);
+            }
+        }
+
+        for (auto& node : nodes) {
+            auto* sim = dynamic_cast<SimNodeBase*>(node.get());
+            if (!sim || !sim->enabled) continue;
+            collected.insert(collected.end(),
+                             sim->commands.begin(), sim->commands.end());
+        }
+        ctx.setProgress(1.0f);
+    }
+
+    // Any node currently asking for a restart, for the UI prompt. Returning the
+    // nodes rather than a bool keeps the prompt specific ("Substance on node 4
+    // changes the material and restarts the sim") instead of generic.
+    std::vector<const SimNodeBase*> nodesRequiringRestart() const {
+        std::vector<const SimNodeBase*> out;
+        for (const auto& node : nodes) {
+            const auto* sim = dynamic_cast<const SimNodeBase*>(node.get());
+            if (sim && sim->enabled && sim->requiresRestart()) out.push_back(sim);
+        }
+        return out;
+    }
+};
+
+// ============================================================================
+// N2 — READ-ONLY NODES
+// ============================================================================
+// These touch no solver. They exist so the node model can be seen and corrected
+// on real data before anything is allowed to write.
+
+// Names a fluid or gas domain. The output is the domain NAME: identity, not a
+// handle, so it stays valid across rebuilds and means the same thing over IPC.
+class DomainRefNode : public SimNodeBase {
+public:
+    std::string domainName;
+
+    DomainRefNode() {
+        metadata.typeId = "sim.domain_ref";
+        metadata.displayName = "Domain";
+        metadata.description =
+            "NAMES a fluid or gas domain that ALREADY EXISTS in the scene. It "
+            "does not create one -- a node owns no state, it refers by "
+            "identity. Pick the name in the properties panel; if the list is "
+            "empty, create the domain first. ";
+        metadata.category = "Simulation";
+        addOutput("Domain", DataType::DomainRef);
+    }
+    PinValue compute(int, EvaluationContext&) override {
+        SimCommand cmd;
+        cmd.kind = SimCommand::Kind::BindDomain;
+        cmd.target = domainName;
+        emit(std::move(cmd));
+        return PinValue{ domainName };
+    }
+};
+
+// ★★ A Field is one of TWO things, and the distinction is representation, not
+// performance (plan D.3):
+//
+//   Grid channel      — "density", "temperature", "velocity", "fuel", "flame",
+//                       "sdf". Lives on the solver's voxel grid, GPU-resident,
+//                       with NanoVDB topology and majorants. NOT an attribute:
+//                       copying it into one would create a second representation
+//                       of the same data, and parallel representations are a
+//                       recurring source of silent failure here.
+//
+//   Element attribute — per-particle / per-texel / per-vertex data that ALREADY
+//                       exists as parallel arrays (temperature, mass_fraction,
+//                       substance_tag, granular_softening, granular_bond_scale,
+//                       MSF melt/moisture/char). These are an attribute system
+//                       already; what was missing is only the NAMING layer.
+//
+// ★★★ Name at the boundary, index in the loop. The name is resolved ONCE when
+// the graph is compiled and becomes a stable index; a solver inner loop must
+// never look up a string. Breaking that rule is how an attribute model dies.
+class FieldReadNode : public SimNodeBase {
+public:
+    enum class Source : uint8_t { GridChannel = 0, ElementAttribute };
+    Source source = Source::GridChannel;
+    // Grid channel name, or the attribute name when source is ElementAttribute.
+    std::string channel = "density";
+
+    FieldReadNode() {
+        metadata.typeId = "sim.field_read";
+        metadata.displayName = "Field";
+        metadata.description =
+            "Names one channel of a domain: a grid channel (density, "
+            "temperature, fuel, flame, sdf) or a per-element attribute. "
+            "Produces an identity, reads nothing. ";
+        metadata.category = "Simulation";
+        addInput("Domain", DataType::DomainRef);
+        addOutput("Field", DataType::Field);
+    }
+    PinValue compute(int, EvaluationContext& ctx) override {
+        std::string domain = inputString(0, ctx);
+        if (domain.empty()) return PinValue{};
+        // Field identity is "<domain>:<channel>" — still just a name.
+        return PinValue{ domain + ":" + channel };
+    }
+
+protected:
+    // Small helper shared by the read-only nodes: pull an upstream string.
+    std::string inputString(int index, EvaluationContext& ctx);
+};
+
+// Reports statistics about a field. This is the node that makes the graph
+// TESTABLE from a script: it turns "looks about right" into a number.
+class FieldInspectNode : public FieldReadNode {
+public:
+    // Filled in during evaluation; read back over IPC.
+    //
+    // ★ Doubles, not floats, and that is not pedantry: `substance_tag` is a
+    // uint32 hash, and a float cannot hold one past 2^24. The first probe read
+    // tag 1951804163 back as 1951804160 — an IDENTITY silently rounded into a
+    // different identity. A double represents every uint32 exactly.
+    struct Stats {
+        bool  available = false;
+        uint32_t particle_count = 0;   // elements actually measured
+        uint32_t array_size = 0;       // raw array length; see `in_sync`
+        bool  in_sync = true;          // array_size == the domain's particle count
+        double min_value = 0.0;
+        double max_value = 0.0;
+        double mean_value = 0.0;
+    } stats;
+
+    FieldInspectNode() {
+        metadata.typeId = "sim.field_inspect";
+        metadata.displayName = "Field Inspect";
+        metadata.description =
+            "Measures a per-element attribute over the live particles and "
+            "reports min, max and mean. This is what turns \"looks right\" into a "
+            "number. ";
+        metadata.category = "Simulation";
+        source = Source::ElementAttribute;
+        channel = "temperature";
+        addOutput("Mean", DataType::Float);
+    }
+    PinValue compute(int outputIndex, EvaluationContext& ctx) override;
+};
+
+// ============================================================================
+// N3 — PARAMETER BINDING
+// ============================================================================
+
+// Writes one solver parameter as an OVERRIDE. The authored value is never
+// mutated: the apply layer captures it before the first write and restores it
+// when overrides are cleared. That is plan B.5's decision — MSF and solver
+// configuration are runtime state and must stay resettable to frame 0; writing
+// them into the authored data makes the change irreversible.
+class SetParameterNode : public SimNodeBase {
+public:
+    std::string key;              // "kinematic_viscosity", "voxel_size", ...
+    float       value = 0.0f;
+
+    SetParameterNode() {
+        metadata.typeId = "sim.set_parameter";
+        metadata.displayName = "Set Parameter";
+        metadata.description =
+            "Overrides one solver parameter on the incoming domain. Reversible: "
+            "the authored value is captured before the first write and restored "
+            "by Clear Overrides. Chain several to configure a domain. ";
+        metadata.category = "Simulation";
+        addInput("Domain", DataType::DomainRef);
+        addOutput("Domain", DataType::DomainRef);   // pass-through, so nodes chain
+    }
+
+    // ★★ Some parameters cannot be changed without discarding accumulated state
+    // — a grid resolution change reallocates the field the simulation lives in.
+    // The node SAYS SO; it never decides. simGraphApply() refuses these unless
+    // the caller explicitly allows a restart, so a user's running simulation is
+    // never thrown away by a graph edit alone.
+    static bool keyRequiresRestart(const std::string& k) {
+        return k == "voxel_size";
+    }
+    bool requiresRestart() const override { return keyRequiresRestart(key); }
+    std::string restartReason() const override {
+        if (!requiresRestart()) return {};
+        return "'" + key + "' changes the grid discretisation; applying it "
+               "discards the accumulated simulation state";
+    }
+
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// ============================================================================
+// N4 — COUPLING NODES
+// ============================================================================
+//
+// ★★★ THE POINT OF THIS PHASE IS ORDER, and order is the one thing the graph
+// must not lie about. Today the coupling order is implicit inside
+// stepGridDomains: fluid combustion runs after the gas snapshot upload, foam
+// after the density splat, wetting after both. "Producer ≠ consumer" is a
+// recurring failure class here precisely because that order is invisible.
+//
+// So a coupling node DECLARES a coupling. It does not schedule one. The solver
+// reports which couplings actually ran and in what order (see
+// ParticleSimulationSystem::couplingTrace), and the API compares declaration
+// against reality. A graph that showed a user-chosen order while the solver ran
+// a different one would be worse than no graph at all: it would look like
+// control.
+//
+// ★★ Coupling knobs go through the SAME reversible override layer as N3. A
+// coupling is configuration, and configuration must stay resettable to frame 0.
+class CouplingNodeBase : public SimNodeBase {
+public:
+    // Stable coupling id. Matches the name the solver records in its trace, and
+    // that match is checked — a node whose id no consumer knows would silently
+    // declare nothing.
+    virtual const char* couplingId() const = 0;
+
+    // ★★ A coupling is ON or OFF here, and nothing else. It deliberately carries
+    // no strength dial: there is no single authored gain behind these couplings,
+    // so a 0..1 "strength" would have had to invent one — and a dial that scales
+    // nothing real is the exact thing this project tests for elsewhere ("the
+    // dead dials stay dead"). Coupling PARAMETERS are set by chaining N3 Set
+    // Parameter nodes after this one, through the reversible override layer.
+    //
+    // `active = false` is not the same as deleting the node: it DECLARES that
+    // this coupling should be off, which is a statement the apply layer acts on.
+    // A disabled node (NodeBase::enabled) is not evaluated at all and declares
+    // nothing.
+    bool active = true;
+
+    CouplingNodeBase() {
+        metadata.category = "Simulation";
+        addInput("Source", DataType::DomainRef);
+        addInput("Target", DataType::DomainRef);
+        addOutput("Source", DataType::DomainRef);   // pass-through, so a chain
+                                                    // of couplings has an order
+    }
+
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// A burning liquid surface releasing heat, smoke and fuel into a gas domain.
+// Maps onto the combustible-fluid settings that already exist; invents nothing.
+class FluidToGasCouplingNode : public CouplingNodeBase {
+public:
+    FluidToGasCouplingNode() {
+        metadata.typeId = "sim.couple_fluid_to_gas";
+        metadata.displayName = "Fluid to Gas";
+        metadata.description =
+            "Declares that a burning liquid surface feeds heat, smoke and fuel "
+            "into a gas domain. Source = the fluid domain, Target = the gas "
+            "domain. ";
+    }
+    const char* couplingId() const override { return "fluid_to_gas"; }
+};
+
+// Gas temperature igniting the liquid surface. Separate node from the one
+// above, and deliberately so: they are opposite directions, they run at
+// different points in the step, and merging them would hide exactly the
+// ordering this phase exists to expose.
+class GasToFluidIgnitionNode : public CouplingNodeBase {
+public:
+    GasToFluidIgnitionNode() {
+        metadata.typeId = "sim.couple_gas_ignition";
+        metadata.displayName = "Gas Ignites Fluid";
+        metadata.description =
+            "Declares that gas temperature ignites the liquid surface -- the "
+            "opposite direction to Fluid to Gas, and a separate node because it "
+            "runs at a different point in the step. ";
+    }
+    const char* couplingId() const override { return "gas_to_fluid_ignition"; }
+};
+
+// Whitewater generated from the fluid it belongs to.
+class FoamFromFluidNode : public CouplingNodeBase {
+public:
+    FoamFromFluidNode() {
+        metadata.typeId = "sim.couple_foam";
+        metadata.displayName = "Foam From Fluid";
+        metadata.description =
+            "Declares whitewater generation from the fluid it belongs to. "
+            "Source and Target are the same fluid domain. ";
+    }
+    const char* couplingId() const override { return "foam_from_fluid"; }
+};
+
+// ============================================================================
+// N5 — SUBSTANCE AND CHEMISTRY
+// ============================================================================
+//
+// These nodes drive the Material State Field: what an object is MADE OF, and
+// what it does when it gets hot. Every knob below already exists on
+// ParticleColliderDesc and is derived from real physical constants in Kelvin —
+// no node here invents a number.
+//
+// ★★ TWO PLANNED NODES ARE DELIBERATELY ABSENT, and their absence is the
+// honest answer rather than an omission:
+//
+//   Moisture — has NO authored knob. Moisture is WRITTEN by fluid contact
+//     (Phase 5) and evaporates against the ambient. A "Moisture node" would
+//     have to invent an authoring surface the solver does not have, which is
+//     precisely the failure D.0 forbids: a node inventing physics. It is
+//     exposed as a READING instead, through Surface Inspect.
+//
+//   Thermal Transfer — WorldThermalState (ambient Kelvin, oxygen, convection)
+//     has no scripting surface AT ALL yet, so a node would be the fourth touch
+//     of a chain whose first three are missing. That is its own slice.
+//
+// Char / Ash stays out too: plan Faz 7 has not landed.
+
+// Names a simulation OBJECT. Output is the object name — identity, not a
+// handle, exactly like DomainRefNode. Typed as SurfaceField because that is
+// what the object contributes to a graph: its per-surface material state.
+class ObjectRefNode : public SimNodeBase {
+public:
+    std::string objectName;
+
+    ObjectRefNode() {
+        metadata.typeId = "sim.object_ref";
+        metadata.displayName = "Object";
+        metadata.description =
+            "NAMES a scene object that already exists, and contributes its "
+            "per-surface material state (MSF) to the graph. Like Domain, it "
+            "refers -- it creates nothing. ";
+        metadata.category = "Simulation";
+        addOutput("Surface", DataType::SurfaceField);
+    }
+    PinValue compute(int, EvaluationContext&) override;
+};
+
+// Base for the object-scoped setters. They all take a surface in, pass it out,
+// and write through the same reversible override layer as N3 — a substance
+// change is configuration, and configuration stays resettable to frame 0.
+class SurfaceNodeBase : public SimNodeBase {
+public:
+    SurfaceNodeBase() {
+        metadata.category = "Simulation";
+        addInput("Surface", DataType::SurfaceField);
+        addOutput("Surface", DataType::SurfaceField);
+    }
+
+protected:
+    // Returns the bound object name, or empty when the pin is unconnected.
+    std::string boundObject(EvaluationContext& ctx);
+    void emitSurface(const std::string& object, const char* key, float value);
+    void emitSurfaceText(const std::string& object, const char* key,
+                         const std::string& text);
+};
+
+// What the object is made of. The name resolves through the built-in substance
+// library; the three scales are the per-object deviation from it.
+//
+// ★ The override is authored in KELVIN and applied BEFORE the normalized
+// conversion, so the system still has exactly one Kelvin->normalized point.
+class SubstanceNode : public SurfaceNodeBase {
+public:
+    std::string substanceName = "Wood (Oak)";
+    bool  overrideIgnition = false;
+    float ignitionKelvin = 573.0f;
+    float burnRateScale = 1.0f;
+    float fuelCapacityScale = 1.0f;
+
+    SubstanceNode() {
+        metadata.typeId = "sim.substance";
+        metadata.displayName = "Substance";
+        metadata.description =
+            "What the incoming object is MADE OF. The name resolves through the "
+            "built-in substance library; the scales are this object's deviation "
+            "from it. ";
+    }
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// Whether this object pyrolyses on contact with flame at all. One switch,
+// because that is what the solver actually has (`gas_ignite_on_contact`).
+class PyrolysisNode : public SurfaceNodeBase {
+public:
+    bool active = true;
+
+    PyrolysisNode() {
+        metadata.typeId = "sim.pyrolysis";
+        metadata.displayName = "Pyrolysis";
+        metadata.description =
+            "Whether the incoming object pyrolyses on contact with flame at "
+            "all. One switch, because that is what the solver actually has. ";
+    }
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// Melting: whether molten material flows, and how far it slumps. These are the
+// authored knobs behind Faz 6c, not new physics.
+//
+// ★ It does NOT expose a melting point. That comes from the substance (iron
+// melts at 1811 K because iron does), and putting a second melting point on a
+// node would let a graph disagree with the material it is made of.
+class PhaseChangeNode : public SurfaceNodeBase {
+public:
+    bool  meltFlow = true;
+    float heightLoss = 0.85f;
+    float spread = 1.50f;
+
+    PhaseChangeNode() {
+        metadata.typeId = "sim.phase_change";
+        metadata.displayName = "Phase Change";
+        metadata.description =
+            "Melting behaviour for the incoming object: whether molten material "
+            "flows and how far it slumps. The melting POINT comes from the "
+            "substance, not here. ";
+    }
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// Reads per-element MSF state for one object: temperature, char, melt,
+// moisture, fuel.
+//
+// ★★ This is the naming layer from D.3 reaching per-TEXEL data, and it needed
+// no new storage either: MSF already keeps parallel arrays. Same FieldStats,
+// same "false means unmeasured, not zero" rule as Field Inspect — the only
+// difference is that the identity is an object instead of a domain.
+class SurfaceInspectNode : public SimNodeBase {
+public:
+    std::string channel = "temperature";
+    struct Stats {
+        bool  available = false;
+        uint32_t particle_count = 0;   // elements measured
+        uint32_t array_size = 0;
+        bool  in_sync = true;
+        bool  host_fresh = true;       // see FieldStats::host_fresh
+        double min_value = 0.0;
+        double max_value = 0.0;
+        double mean_value = 0.0;
+    } stats;
+
+    SurfaceInspectNode() {
+        metadata.typeId = "sim.surface_inspect";
+        metadata.displayName = "Surface Inspect";
+        metadata.description =
+            "Measures per-texel MSF state on the incoming object -- "
+            "temperature, char, melt, moisture, fuel. Reports whether the "
+            "reading is fresh. ";
+        metadata.category = "Simulation";
+        addInput("Surface", DataType::SurfaceField);
+        addOutput("Mean", DataType::Float);
+    }
+    PinValue compute(int outputIndex, EvaluationContext& ctx) override;
+};
+
+// ============================================================================
+// N7 — RENDER BINDING
+// ============================================================================
+//
+// These bind EXISTING shader parameters. No new shader, no new look — plan B.5:
+// "shader graph and GPU fusion are not in the first release; existing shader
+// parameters get bound to Material nodes first."
+//
+// ★★ Two planned nodes are absent, and for the same reason as in N5 — the thing
+// they would author does not exist to be authored:
+//
+//   Foam Material — `FoamParams::foam_material_id` has no scripting surface,
+//     exactly like the foam coupling switch in N4. Same missing slice, and it
+//     should be filled once rather than faked twice.
+//
+//   Char / Molten Surface — has no knob of its own: char colour and molten
+//     emission are DERIVED from the substance (that is why iron glows like iron).
+//     A node with its own char colour would let a graph disagree with the
+//     material the object is made of, which is the same mistake as putting a
+//     melting point on Phase Change.
+
+class RenderNodeBase : public SimNodeBase {
+public:
+    RenderNodeBase() {
+        metadata.category = "Simulation";
+        addInput("Domain", DataType::DomainRef);
+        addOutput("Domain", DataType::DomainRef);
+    }
+
+protected:
+    std::string boundDomain(EvaluationContext& ctx);
+    void emitRender(const std::string& domain, const char* key, float value);
+    void emitRenderText(const std::string& domain, const char* key,
+                        const std::string& text);
+};
+
+// The liquid's look: which material shades the SDF isosurface, and which shades
+// splat geometry. Both are NAMES — material ids shift as a scene is edited, and
+// an id in a graph is a number nobody can check.
+class LiquidMaterialNode : public RenderNodeBase {
+public:
+    std::string surfaceMaterial;   // empty = built-in dielectric
+    std::string splatMaterial;     // empty = scene default
+
+    LiquidMaterialNode() {
+        metadata.typeId = "sim.material_liquid";
+        metadata.displayName = "Liquid Material";
+        metadata.description =
+            "Which materials shade the incoming liquid domain: one for the SDF "
+            "isosurface, one for splat geometry. Both by NAME. ";
+    }
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// Smoke AND fire, in one node — deliberately.
+//
+// ★★ The plan listed "Smoke Volume" and "Fire / Blackbody" as separate nodes,
+// but they are one authored struct (GasShaderSettings) with a preset that
+// selects between them. Two nodes writing the same struct would let a graph hold
+// both, and the second would silently overwrite the first with no error and no
+// visible cause. One node, one preset field.
+class VolumeMaterialNode : public RenderNodeBase {
+public:
+    std::string preset = "smoke";      // "fire" | "smoke"
+    // ★★★ Off by default, and that is the whole reason this flag exists. The
+    // numeric fields below carry arbitrary struct defaults, not the preset's
+    // values — emitting them unconditionally would install the fire recipe and
+    // then overwrite every characteristic number it has (blackbody intensity,
+    // the 800..1900 K emission range) with these placeholders. The preset would
+    // become a label that changes nothing visible.
+    //
+    // So: preset alone by default; the sliders speak only when asked to.
+    bool overrideValues = false;
+    float densityMultiplier = 1.0f;
+    float densityCutoff = 0.01f;
+    float temperatureMin = 0.0f;
+    float temperatureMax = 1.0f;
+    float scattering = 0.5f;
+    float absorption = 0.5f;
+
+    VolumeMaterialNode() {
+        metadata.typeId = "sim.material_volume";
+        metadata.displayName = "Volume Material";
+        metadata.description =
+            "Smoke and fire look for the incoming gas domain. The preset "
+            "selects the recipe; the numeric fields stay silent unless Override "
+            "values is on. ";
+    }
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// ============================================================================
+// N6 — CACHE / BAKE
+// ============================================================================
+//
+// ★★★ THIS NODE DOES NOT BAKE. Baking walks the whole simulation and takes as
+// long as it takes; a graph EVALUATION must stay instant and side-effect free,
+// or every inspection of the graph would run the sim. So the node declares the
+// intent and reports the state, and the bake itself is an explicit action
+// (`sim_cache.bake`) the user or a script invokes — which is also plan B.5's
+// answer: "user-controlled bake plus automatic signature validation".
+//
+// ★★ What it adds over reading `sim_cache.status` directly is the SIGNATURE
+// comparison in context: a cache that still exists but was built from a
+// different authored config is the failure that silently renders stale physics,
+// and it looks exactly like a healthy cache from the outside.
+class CacheNode : public SimNodeBase {
+public:
+    std::string cacheDir;          // empty = RAM timeline cache only
+    int startFrame = 0;
+    int endFrame = 100;
+
+    struct Status {
+        bool     available = false;   // false = could not read, NOT "no cache"
+        bool     valid = false;
+        bool     baking = false;
+        uint32_t ram_frames = 0;
+        bool     has_range = false;
+        int      first_frame = 0;
+        int      last_frame = 0;
+        uint64_t config_signature = 0;
+        // ★ True when a cache exists but the authored config has moved on since
+        // it was built. NOT the same as "no cache": this one still serves
+        // frames, and they describe a scene that no longer exists.
+        bool     stale = false;
+    } status;
+
+    CacheNode() {
+        metadata.typeId = "sim.cache";
+        metadata.displayName = "Cache";
+        metadata.description =
+            "Reports the bake state of the incoming domain and compares the "
+            "cache signature against the authored config. It does NOT bake -- "
+            "baking is an explicit action, so that inspecting a graph never "
+            "runs the simulation. ";
+        metadata.category = "Simulation";
+        addInput("Domain", DataType::DomainRef);
+        addOutput("Domain", DataType::DomainRef);
+    }
+    PinValue compute(int, EvaluationContext& ctx) override;
+};
+
+// Seam for the cache reading, installed by the application like the others.
+struct CacheStatusReading {
+    bool     valid = false;
+    bool     baking = false;
+    uint32_t ram_frames = 0;
+    bool     has_range = false;
+    int      first_frame = 0;
+    int      last_frame = 0;
+    uint64_t config_signature = 0;
+    uint64_t live_signature = 0;   // what the scene hashes to RIGHT NOW
+};
+using CacheStatusFn = bool (*)(CacheStatusReading& out);
+void setCacheStatusResolver(CacheStatusFn fn);
+
+// ============================================================================
+// DATA ACCESS SEAM
+// ============================================================================
+//
+// ★ The node layer must not reach into the engine, and the engine must not
+// depend on the node layer. So reading is done through a resolver the
+// application installs at startup (RtApiSimNodes.cpp). Nodes stay drivers; this
+// header stays free of solver includes.
+//
+// ★★ The resolver returns FALSE when it cannot measure, and the caller must
+// keep `available` false rather than reporting zeros. A zero that means "I could
+// not read this" is indistinguishable from a real zero, and that confusion has
+// cost this project entire debugging rounds.
+// ★★ `count` is what was MEASURED and it is the domain's particle count, never
+// the raw array length. Those two disagreeing is a real condition in this engine
+// (a granular array outlived six removed particles on 2026-08-17), and averaging
+// over the dead tail produced a number that looked perfectly reasonable. The
+// mismatch is reported, not smoothed away.
+struct FieldStats {
+    uint32_t count = 0;         // elements measured (= the domain's particle count)
+    uint32_t array_size = 0;    // raw length of the backing array
+    bool     in_sync = true;    // array_size == count
+    // ★★★ Surface (MSF) readings only: the numbers come from the HOST MIRROR,
+    // and during a step the DEVICE copy is authoritative. False means this
+    // mirror has not been refreshed since the last dispatch, so the values are
+    // the previous readback — or, before any readback at all, the INITIALISATION
+    // values. Measured 2026-08-17: a fresh crate reported fuel_remaining = -1
+    // across 99072 elements, which is the sentinel for "not seeded yet" and not
+    // a fuel level. Reporting that as a measurement is the exact shape of "a
+    // default is not a measurement".
+    bool     host_fresh = true;
+    double min_value = 0.0;
+    double max_value = 0.0;
+    double mean_value = 0.0;
+};
+
+// domain name + attribute name -> stats. Attribute names are the per-particle
+// arrays that already exist ("temperature", "mass_fraction", "substance_tag",
+// "granular_softening", "granular_bond_scale", "granular_damage", ...).
+using AttributeStatsFn =
+    bool (*)(const std::string& domain, const std::string& attribute,
+             FieldStats& out);
+void setAttributeStatsResolver(AttributeStatsFn fn);
+
+// Names the resolver can answer for, so a script can DISCOVER what exists
+// instead of reading the source. This is the whole point of the naming layer.
+using AttributeListFn = std::vector<std::string> (*)(const std::string& domain);
+void setAttributeListResolver(AttributeListFn fn);
+std::vector<std::string> listAttributes(const std::string& domain);
+
+// Same seam again, for per-object surface (MSF) attributes. Separate resolver
+// rather than a scope flag on the one above: the two read completely different
+// systems, and a single function that branched on a string would be one place
+// to accidentally answer a domain question with object data.
+using SurfaceStatsFn =
+    bool (*)(const std::string& object, const std::string& attribute,
+             FieldStats& out);
+void setSurfaceStatsResolver(SurfaceStatsFn fn);
+using SurfaceListFn = std::vector<std::string> (*)(const std::string& object);
+void setSurfaceListResolver(SurfaceListFn fn);
+std::vector<std::string> listSurfaceAttributes(const std::string& object);
+
+// Registers every simulation node type with NodeRegistry. Called once at
+// startup, alongside the geometry/material/terrain registrations.
+void registerSimulationNodeTypes();
+
+} // namespace Sim
+} // namespace NodeSystem

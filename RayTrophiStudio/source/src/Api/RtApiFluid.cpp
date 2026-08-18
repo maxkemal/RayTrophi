@@ -39,6 +39,10 @@ const char* fluidPresetName(RayTrophiSim::Fluid::APICSolverParams::FluidPreset p
         case FluidPreset::Lava:      return "lava";
         case FluidPreset::Sand:      return "sand";
         case FluidPreset::Chocolate: return "chocolate";
+        case FluidPreset::WetSand:      return "wet_sand";
+        case FluidPreset::Gravel:       return "gravel";
+        case FluidPreset::CohesiveSoil: return "cohesive_soil";
+        case FluidPreset::MoltenPlastic: return "molten_plastic";
         case FluidPreset::Custom:
         default:                     return "custom";
     }
@@ -65,6 +69,11 @@ void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
     info.granular_healing_rate = params.granular_healing_rate;
     info.granular_rebonding = params.granular_rebonding;
     info.granular_max_solver_substeps = params.granular_max_solver_substeps;
+    info.granular_softening_temperature = params.granular_softening_temperature;
+    info.granular_softening_range = params.granular_softening_range;
+    info.granular_residual_strength = params.granular_residual_strength;
+    info.granular_tack_peak = params.granular_tack_peak;
+    info.granular_thermal_conductivity = params.granular_thermal_conductivity;
 }
 
 // Report the isosurface material by NAME. Lives on the grid descriptor rather
@@ -219,6 +228,19 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.granular_required_substeps = state.fluid_stats.granular_required_substeps;
     info.granular_solver_substeps = state.fluid_stats.granular_solver_substeps;
     info.granular_stiffness_capped = state.fluid_stats.granular_stiffness_capped;
+    info.granular_wave_substeps = state.fluid_stats.granular_wave_substeps;
+    info.granular_strain_substeps = state.fluid_stats.granular_strain_substeps;
+    info.granular_strain_rate = state.fluid_stats.granular_strain_rate;
+    info.granular_strain_limited_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_strain_limited_particles);
+    info.granular_compaction_capped_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_compaction_capped_particles);
+    info.granular_min_softening = state.fluid_stats.granular_min_softening;
+    info.granular_softened_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_softened_particles);
+    info.granular_overburden_pressure = state.fluid_stats.granular_overburden_pressure;
+    info.granular_young_modulus_for_load = state.fluid_stats.granular_young_modulus_for_load;
+    info.granular_stiffness_below_load = state.fluid_stats.granular_stiffness_below_load;
 }
 
 void fillFluidMaterialCoords(const RayTrophiSim::SimulationGridDomainState& state,
@@ -409,11 +431,19 @@ Result getGasShaderSettings(const std::string& domain_id_or_name,
         // Not an error: the render bridge creates the shader lazily on the
         // first sync. Report the defaults the domain's intent will produce.
         out_settings = GasShaderSettings{};
+        // No shader yet: the domain's combustion intent is the only signal there
+        // is, so it stands in for a preset that was never chosen.
         out_settings.preset = domain->fire_enabled ? "fire" : "smoke";
         return Result::success();
     }
     const auto& s = *domain->shader;
-    out_settings.preset = domain->fire_enabled ? "fire" : "smoke";
+    // ★★★ Report the preset the SHADER was built from, not the combustion flag.
+    // These are two different questions and the writer only ever touched the
+    // first, so reading the second made a preset change look like a no-op.
+    // `fire_enabled` remains the fallback for shaders that predate the field.
+    out_settings.preset = !domain->shader_preset.empty()
+        ? domain->shader_preset
+        : (domain->fire_enabled ? "fire" : "smoke");
     out_settings.density_multiplier = s.density.multiplier;
     out_settings.density_cutoff = s.density.cutoff_threshold;
     out_settings.blackbody_intensity = s.emission.blackbody_intensity;
@@ -434,15 +464,34 @@ Result updateGasShaderSettings(const std::string& domain_id_or_name,
     std::string preset = settings.preset;
     std::transform(preset.begin(), preset.end(), preset.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // ★★★ A PRESET IS A RECIPE, so switching to a different one must let its own
+    // values stand. The usual caller reads the settings, edits one field and
+    // writes the whole struct back — so on a preset CHANGE every numeric field
+    // in `settings` still describes the OLD preset, and applying them would
+    // install the fire recipe and immediately overwrite it with smoke's numbers.
+    // The preset would be a label with no effect: measured 2026-08-17 through
+    // rt.gas.set_shader, which reported success and changed nothing.
+    //
+    // So a change installs the recipe and returns. Setting a preset AND custom
+    // values is two calls, which is also the honest description of what it is.
+    const bool preset_changed =
+        !preset.empty() && preset != domain->shader_preset;
     if (preset == "fire") {
         domain->shader = VolumeShader::createFirePreset();
+        domain->shader_preset = "fire";
     } else if (preset == "smoke") {
         domain->shader = VolumeShader::createSmokePreset();
+        domain->shader_preset = "smoke";
     } else if (!preset.empty()) {
         return Result::fail("unknown gas shader preset: " + settings.preset);
     } else if (!domain->shader) {
         domain->shader = domain->fire_enabled ? VolumeShader::createFirePreset()
                                               : VolumeShader::createSmokePreset();
+        domain->shader_preset = domain->fire_enabled ? "fire" : "smoke";
+    }
+    if (preset_changed) {
+        g_gas_volumes_dirty = true;
+        return Result::success();
     }
     auto& s = *domain->shader;
     s.density.multiplier = std::max(0.0f, settings.density_multiplier);
@@ -565,6 +614,26 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
     out_info.boundary = (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open) ? "open" :
                         (obj->params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic) ? "periodic" : "closed";
     fillFluidRheology(obj->params, out_info);
+    // ★★★ THE GRID DESCRIPTOR IS THE LIVE APIC AUTHORITY, and getFluidDomain
+    // has always said so (see the same override there). This listing did not,
+    // so it reported the legacy editor mirror for every rheology field.
+    //
+    // Measured divergence on a real scene: fluid.list_domains said
+    // granular_enabled = true while fluid.get said false for the SAME domain,
+    // with every other granular field agreeing. The solver reads the grid
+    // descriptor, so the listing was the one lying — and it is the surface a
+    // script reaches for first when it asks "which domains are granular?".
+    // Filtering on it would pick a domain the solver is not running as granular
+    // at all, and nothing would report an error.
+    if (grid_dom) {
+        out_info.render_mode =
+            (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
+            (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+        out_info.boundary =
+            (grid_dom->fluid_params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Open) ? "open" :
+            (grid_dom->fluid_params.boundary == RayTrophiSim::Fluid::APICSolverParams::BoundaryMode::Periodic) ? "periodic" : "closed";
+        fillFluidRheology(grid_dom->fluid_params, out_info);
+    }
     out_info.backend = (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
                        (grid_dom && grid_dom->backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
@@ -589,41 +658,132 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
 
     if (!obj) obj = g_ctx->scene.findFluidObjectByName(domain_id_or_name);
     if (!obj) {
-        // Gas domains own no FluidObject (see createFluidDomain). Resolve them
-        // from the grid-domain list, which is the authority for both types.
-        auto& p_sys_gas = g_ctx->scene.ensureParticleSimulationSystem();
-        for (const auto& d : p_sys_gas.gridDomains()) {
-            if (d.name != domain_id_or_name) continue;
-            out_info = FluidDomainInfo{};
-            out_info.id = 0;
-            out_info.name = d.name;
-            out_info.type = (d.type == RayTrophiSim::SimulationDomainType::Gas) ? "gas" : "fluid";
-            out_info.domain_min = d.bounds_min;
-            out_info.domain_max = d.bounds_max;
-            out_info.voxel_size = d.voxel_size;
-            out_info.particle_count = 0;
-            out_info.render_mode = "volume";
-            out_info.boundary =
-                (d.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
-                (d.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
-            out_info.preset = "custom";
-                out_info.backend =
-                (d.backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
-                (d.backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
-                (d.backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
-            out_info.enabled = d.enabled;
-            out_info.visible = true;
-            fillFluidSurfaceMaterial(d, out_info);
-            return Result::success();
+        // ★★★★★ THE DEAD TWIN. This branch is labelled "gas domains own no
+        // FluidObject", but what it actually tests is "no FluidObject carries
+        // this NAME" — and a GRID-BASED FLUID domain satisfies that too. So a
+        // live fluid domain with 30,000 particles fell in here and was answered
+        // from a bare descriptor: particle_count hardcoded to 0, preset forced
+        // to "custom", every granular field left at its struct default.
+        //
+        // ★★★ It returns no error. It returns a PLAUSIBLE domain that reads
+        // "granular disabled, nothing simulated", while fluid.list_domains
+        // reports the same domain at the same instant as granular_enabled=true
+        // with 30,000 particles. Measured 2026-08-16 over IPC.
+        //
+        // ★★ That false reading is what produced the diagnosis "the thermal
+        // chain is off on this domain" — the chain was fine, the INSTRUMENT was
+        // lying. This is the QA read path agents drive the app through, so a
+        // silent wrong answer here costs a whole debugging round.
+        //
+        // ★ Same class as "a default is not a measurement": absence of a
+        // FluidObject was silently converted into "I measured zero particles".
+        // The cure is to answer from the same authority list_domains uses — the
+        // grid domains of EVERY particle system, preferring one with a stepped
+        // state — and to leave live_state false when there is genuinely no
+        // measurement to report.
+        RayTrophiSim::SimulationGridDomainDesc* gd = nullptr;
+        RayTrophiSim::ParticleSimulationSystem* gd_sys = nullptr;
+        std::size_t gd_index = 0u;
+        auto considerNamed = [&](RayTrophiSim::ParticleSimulationSystem& sys) {
+            const auto& domains = sys.gridDomains();
+            const auto& states = sys.gridDomainStates();
+            for (std::size_t i = 0; i < domains.size(); ++i) {
+                if (domains[i].name != domain_id_or_name) continue;
+                const bool live = i < states.size() && states[i].valid;
+                if (gd && !live) continue;          // keep the better candidate
+                gd = const_cast<RayTrophiSim::SimulationGridDomainDesc*>(&domains[i]);
+                gd_sys = &sys;
+                gd_index = i;
+                if (live) return true;              // cannot do better
+            }
+            return false;
+        };
+        for (auto& system : g_ctx->scene.particle_systems) {
+            if (!system.runtime) continue;
+            if (considerNamed(*system.runtime)) break;
         }
-        return Result::fail("fluid domain not found: " + domain_id_or_name);
+        if (!gd) considerNamed(g_ctx->scene.ensureParticleSimulationSystem());
+        if (!gd) return Result::fail("fluid domain not found: " + domain_id_or_name);
+
+        out_info = FluidDomainInfo{};
+        out_info.id = 0;
+        out_info.name = gd->name;
+        out_info.type = (gd->type == RayTrophiSim::SimulationDomainType::Gas) ? "gas" : "fluid";
+        out_info.domain_min = gd->bounds_min;
+        out_info.domain_max = gd->bounds_max;
+        out_info.voxel_size = gd->voxel_size;
+        out_info.particle_count = 0;
+        out_info.render_mode =
+            (gd->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) ? "surface" :
+            (gd->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
+        out_info.boundary =
+            (gd->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) ? "open" :
+            (gd->boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic) ? "periodic" : "closed";
+        out_info.backend =
+            (gd->backend == RayTrophiSim::SimulationDomainBackend::GPU_Compute) ? "gpu" :
+            (gd->backend == RayTrophiSim::SimulationDomainBackend::GPU_Vulkan) ? "vulkan" :
+            (gd->backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) ? "cpu_sparse" : "cpu";
+        out_info.enabled = gd->enabled;
+        out_info.visible = true;
+        // The real parameters, not struct defaults: preset, rheology and every
+        // granular dial come from the descriptor the solver is actually running.
+        fillFluidRheology(gd->fluid_params, out_info);
+        fillFluidSurfaceMaterial(*gd, out_info);
+        if (gd_sys) {
+            const auto& states = gd_sys->gridDomainStates();
+            if (gd_index < states.size() && states[gd_index].valid) {
+                out_info.particle_count = states[gd_index].particles.size();
+                out_info.live_state = true;  // only now is the count a measurement
+                fillFluidMaterialCoords(states[gd_index], out_info);
+                fillFluidSolidPhase(states[gd_index], out_info);
+            }
+        }
+        return Result::success();
     }
 
+    // ★ Search EVERY particle system, not just the active one. fluid.list_domains
+    // already walks them all, and resolving the same domain name through two
+    // different scopes is how the two calls came to disagree (9963 vs 0) about
+    // the same domain at the same instant. Sim APIs are otherwise locked to the
+    // active system on purpose; a read-only lookup must not inherit that limit,
+    // because the answer it falls back to is indistinguishable from a real zero.
+    // ★★ Prefer the system that actually HAS a stepped state for this name, not
+    // simply the first system that carries the name.
+    //
+    // Searching every system (rather than only the active one) was needed
+    // because fluid.get and fluid.list_domains disagreed — 9963 vs 0 — about the
+    // same domain at the same instant. But "first match wins" then picked up a
+    // stale same-named descriptor from an inactive system, which reported
+    // granular_enabled=false while the panel showed the granular solver plainly
+    // running. Trading one wrong answer for a different wrong answer.
+    //
+    // A descriptor with a live state is the only one that can answer a question
+    // about the simulation, so that is the one to return. The nameless fallback
+    // below still resolves authored parameters for a domain that has never been
+    // stepped — but live_state stays false there, which is the caller's signal
+    // that no measurement was taken.
     RayTrophiSim::SimulationGridDomainDesc* grid_dom = nullptr;
-    auto& p_sys_get = g_ctx->scene.ensureParticleSimulationSystem();
-    for (auto& d : p_sys_get.gridDomains()) {
-        if (d.name == obj->name) { grid_dom = &d; break; }
+    RayTrophiSim::ParticleSimulationSystem* owning_sys = nullptr;
+    std::size_t grid_index = 0u;
+    auto consider = [&](RayTrophiSim::ParticleSimulationSystem& sys) {
+        const auto& domains = sys.gridDomains();
+        const auto& states = sys.gridDomainStates();
+        for (std::size_t i = 0; i < domains.size(); ++i) {
+            if (domains[i].name != obj->name) continue;
+            const bool live = i < states.size() && states[i].valid;
+            if (grid_dom && !live) continue;   // keep the better candidate
+            grid_dom = const_cast<RayTrophiSim::SimulationGridDomainDesc*>(&domains[i]);
+            owning_sys = &sys;
+            grid_index = i;
+            if (live) return true;             // cannot do better than a live one
+        }
+        return false;
+    };
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (!system.runtime) continue;
+        if (consider(*system.runtime)) break;
     }
+    if (!grid_dom) consider(g_ctx->scene.ensureParticleSimulationSystem());
 
     out_info.id = obj->id;
     out_info.name = obj->name;
@@ -652,11 +812,15 @@ Result getFluidDomain(const std::string& domain_id_or_name, rtapi::FluidDomainIn
             (grid_dom->fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles) ? "particles" : "volume";
         fillFluidRheology(grid_dom->fluid_params, out_info);
         fillFluidSurfaceMaterial(*grid_dom, out_info);
-        const auto& states = p_sys_get.gridDomainStates();
-        const auto& domains = p_sys_get.gridDomains();
-        const std::size_t index = static_cast<std::size_t>(grid_dom - domains.data());
+        const auto& states = owning_sys->gridDomainStates();
+        // Index comes from the search above, not from pointer arithmetic: the
+        // candidate may have been picked in an earlier system than the one this
+        // pointer now belongs to, and `&d - data()` would then index the wrong
+        // state array without any sign that it had.
+        const std::size_t index = grid_index;
         if (index < states.size() && states[index].valid) {
             out_info.particle_count = states[index].particles.size();
+            out_info.live_state = true;   // only now is the count a measurement
             fillFluidMaterialCoords(states[index], out_info);
             fillFluidSolidPhase(states[index], out_info);
         }
@@ -718,6 +882,7 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
                 const std::size_t index = static_cast<std::size_t>(&d - all.data());
                 if (index < states.size() && states[index].valid) {
                     info.particle_count = states[index].particles.size();
+                    info.live_state = true;   // only now is the count a measurement
                     fillFluidMaterialCoords(states[index], info);
                     fillFluidSolidPhase(states[index], info);
                 }
@@ -885,7 +1050,12 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const float* granular_damage_rate,
                          const float* granular_healing_rate,
                          const bool* granular_rebonding,
-                         const int* granular_max_solver_substeps) {
+                         const int* granular_max_solver_substeps,
+                         const float* granular_softening_temperature,
+                         const float* granular_softening_range,
+                         const float* granular_residual_strength,
+                         const float* granular_tack_peak,
+                         const float* granular_thermal_conductivity) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (surface_offset_voxels &&
@@ -982,10 +1152,21 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         else if (p == "lava")      chosen = FluidPreset::Lava;
         else if (p == "sand")      chosen = FluidPreset::Sand;
         else if (p == "chocolate") chosen = FluidPreset::Chocolate;
+        else if (p == "wet_sand" || p == "wetsand")           chosen = FluidPreset::WetSand;
+        else if (p == "gravel")                               chosen = FluidPreset::Gravel;
+        else if (p == "cohesive_soil" || p == "cohesivesoil") chosen = FluidPreset::CohesiveSoil;
+        else if (p == "molten_plastic" || p == "moltenplastic" || p == "plastic") chosen = FluidPreset::MoltenPlastic;
+        // ★ "custom" is what fluid.get REPORTS for a hand-tuned domain, so
+        // rejecting it here broke the obvious round trip: read a domain, write
+        // it back, get an error on a value this very API produced. It applies
+        // nothing (applyPreset(Custom) returns early) and is accepted as the
+        // explicit "leave the material alone" request it reads as.
+        else if (p == "custom")                               chosen = FluidPreset::Custom;
         else known = false;
         if (!known) {
             return Result::fail("unknown fluid preset: " + *preset +
-                                " (water, oil, mud, honey, lava, sand, chocolate)");
+                                " (water, oil, mud, honey, lava, sand, chocolate,"
+                                " wet_sand, gravel, cohesive_soil, molten_plastic, custom)");
         }
         if (obj)      obj->params.applyPreset(chosen);
         if (grid_dom) grid_dom->fluid_params.applyPreset(chosen);
@@ -1046,13 +1227,21 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         if (granular_healing_rate) p.granular_healing_rate = *granular_healing_rate;
         if (granular_rebonding) p.granular_rebonding = *granular_rebonding;
         if (granular_max_solver_substeps) p.granular_max_solver_substeps = *granular_max_solver_substeps;
+        if (granular_softening_temperature) p.granular_softening_temperature = *granular_softening_temperature;
+        if (granular_softening_range) p.granular_softening_range = *granular_softening_range;
+        if (granular_residual_strength) p.granular_residual_strength = *granular_residual_strength;
+        if (granular_tack_peak) p.granular_tack_peak = *granular_tack_peak;
+        if (granular_thermal_conductivity) p.granular_thermal_conductivity = *granular_thermal_conductivity;
         p.sanitizeGranularMaterial();
     };
     const bool granular_patch = granular_enabled || granular_friction_angle_degrees ||
         granular_cohesion || granular_dilatancy_degrees || granular_young_modulus ||
         granular_poisson_ratio || granular_tensile_cutoff || granular_hardening ||
         granular_fracture_strain || granular_damage_rate || granular_healing_rate ||
-        granular_rebonding || granular_max_solver_substeps;
+        granular_rebonding || granular_max_solver_substeps ||
+        granular_softening_temperature || granular_softening_range ||
+        granular_residual_strength || granular_tack_peak ||
+        granular_thermal_conductivity;
     if (granular_patch) {
         if (obj) applyGranularPatch(obj->params);
         if (grid_dom) applyGranularPatch(grid_dom->fluid_params);

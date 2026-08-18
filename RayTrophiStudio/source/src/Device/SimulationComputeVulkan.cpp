@@ -846,13 +846,12 @@ private:
             // FluidG2PGpuConstants = 17 fields x 4 = 68 (has use_solid_flip_limiter);
             // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
             { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                  10, 68 },
-            { "sim_fluid_granular_constitutive",    "sim_fluid_granular_constitutive.spv", 6, 32 },
             // Bindings 9..12 are Rankine bond history plus the three columns
             // of the recoverable deformation gradient. Keep
             // this descriptor contract in lockstep with GranularGpuDispatch;
             // the old nine-binding layout leaves damage active while the new
             // fracture-history telemetry remains permanently zero.
-            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 13, 64 },
+            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 14, 64 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
             { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 64 },

@@ -1,4 +1,5 @@
 #include "Template/TemplateRegistry.h"
+#include "Template/PathUtils.h"
 
 #include "json.hpp"
 
@@ -11,35 +12,37 @@
 #include <SDL.h>
 
 namespace raytrophi::templates {
+using pathutils::pathFromUtf8;
+using pathutils::pathToUtf8;
 namespace {
 
 using json = nlohmann::json;
 
-const std::set<std::string> kKinds{"start", "learn"};
+const std::set<std::string> kKinds{"start", "learn", "user"};
 const std::set<std::string> kCategories{
-    "empty", "general", "lookdev", "character", "paint", "terrain", "animation", "simulation"};
+    "empty", "general", "lookdev", "character", "paint", "terrain", "animation", "simulation", "vfx", "volume", "fluid", "user"};
 const std::set<std::string> kPropertiesContexts{
     "scene", "render", "terrain", "water", "volumetric", "simulation", "world",
     "modeling", "hair", "system", "paint", "scatter", "stylize", "sculpt"};
 const std::set<std::string> kBottomEditors{
     "none", "dope_sheet", "graph_editor", "console", "terrain", "anim_graph",
-    "geometry", "material", "assets"};
-const std::set<std::string> kContextualDocks{"none", "paint", "hair", "sculpt", "terrain"};
-const std::set<std::string> kViewportShading{"solid", "material_preview", "rendered", "matcap"};
-const std::set<std::string> kSceneTypes{"project", "recipe"};
-const std::set<std::string> kRendererPreferences{"auto", "vulkan", "optix", "cpu"};
-const std::set<std::string> kPerformanceClasses{"light", "medium", "heavy"};
+    "timeline", "material_graph", "terrain_graph", "geometry_graph", "foliage", "mesh_overlay"};
+const std::set<std::string> kContextualDocks{"none", "material", "lighting", "asset_browser", "camera", "color", "mesh", "post_fx"};
+const std::set<std::string> kViewportShading{"wireframe", "solid", "material_preview", "rendered"};
+const std::set<std::string> kSceneTypes{"project", "recipe", "procedural"};
+const std::set<std::string> kRendererPreferences{"any", "auto", "cpu", "optix", "vulkan"};
+const std::set<std::string> kPerformanceClasses{"light", "medium", "heavy", "Light", "Medium", "Heavy", "User Custom"};
 
-void addError(TemplateMetadata& item, const std::string& message) {
-    item.errors.push_back(message);
+void addError(TemplateMetadata& item, std::string message) {
+    item.errors.push_back(std::move(message));
 }
 
 void rejectUnknownFields(const json& object, const std::set<std::string>& allowed,
-                         const char* scope, TemplateMetadata& item) {
+                         const char* context, TemplateMetadata& item) {
     if (!object.is_object()) return;
     for (auto it = object.begin(); it != object.end(); ++it) {
         if (allowed.find(it.key()) == allowed.end())
-            addError(item, std::string("Unknown field in ") + scope + ": " + it.key());
+            addError(item, std::string("Unknown field in ") + context + ": " + it.key());
     }
 }
 
@@ -61,26 +64,18 @@ bool isSemanticVersion(const std::string& value) {
 }
 
 bool isTemplateId(const std::string& value) {
-    if (value.size() < 3 || value.size() > 96) return false;
-    bool has_separator = false;
-    bool previous_separator = true;
+    if (value.empty() || value.size() > 96) return false;
     for (char c : value) {
-        const bool separator = c == '.' || c == '_' || c == '-';
-        if (separator) {
-            if (previous_separator) return false;
-            previous_separator = true;
-            has_separator = true;
-        } else {
-            if (!(c >= 'a' && c <= 'z') && !std::isdigit(static_cast<unsigned char>(c))) return false;
-            previous_separator = false;
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '_' && c != '-') {
+            return false;
         }
     }
-    return has_separator && !previous_separator;
+    return true;
 }
 
-bool safeRelativePath(const std::filesystem::path& value) {
-    if (value.empty() || value.is_absolute() || value.has_root_name() || value.has_root_directory()) return false;
-    for (const auto& part : value) {
+bool safeRelativePath(const std::filesystem::path& path) {
+    if (path.is_absolute()) return false;
+    for (const auto& part : path) {
         if (part == "..") return false;
     }
     return true;
@@ -102,13 +97,15 @@ std::optional<std::string> stringField(const json& object, const char* key,
 
 std::filesystem::path packagePath(const std::filesystem::path& root, const std::string& value,
                                   const char* field, TemplateMetadata& item, bool must_exist) {
-    const std::filesystem::path relative(value);
+    if (value.empty()) return {};
+    const std::filesystem::path relative = pathFromUtf8(value);
     if (!safeRelativePath(relative)) {
         addError(item, std::string("Unsafe relative path in ") + field + ": " + value);
         return {};
     }
     const std::filesystem::path result = (root / relative).lexically_normal();
-    if (must_exist && !std::filesystem::is_regular_file(result)) {
+    std::error_code ec;
+    if (must_exist && !std::filesystem::is_regular_file(result, ec)) {
         addError(item, std::string("Required file does not exist for ") + field + ": " + value);
     }
     return result;
@@ -138,11 +135,10 @@ std::vector<std::filesystem::path> readAssetList(const json& assets, const char*
         }
         const std::string relative = value.get<std::string>();
         if (!unique.insert(relative).second) {
-            addError(item, std::string("Duplicate asset path in ") + key + ": " + relative);
+            addError(item, std::string("Duplicate asset entry in ") + key + ": " + relative);
             continue;
         }
-        auto resolved = packagePath(root, relative, key, item, required);
-        if (!resolved.empty()) result.push_back(std::move(resolved));
+        result.push_back(packagePath(root, relative, key, item, required));
     }
     return result;
 }
@@ -167,11 +163,19 @@ void TemplateRegistry::resetSearchRoots() {
 std::vector<std::filesystem::path> TemplateRegistry::defaultSearchRoots() {
     std::vector<std::filesystem::path> roots;
     if (char* base = SDL_GetBasePath()) {
-        roots.emplace_back(std::filesystem::path(base) / "assets" / "templates");
+        const auto base_path = pathFromUtf8(base);
+        roots.emplace_back(base_path / "assets" / "templates");
+        roots.emplace_back(base_path.parent_path() / "assets" / "templates");
+        roots.emplace_back(base_path.parent_path().parent_path() / "assets" / "templates");
+        roots.emplace_back(base_path.parent_path().parent_path() / "RayTrophiStudio" / "assets" / "templates");
         SDL_free(base);
     }
-    roots.emplace_back(std::filesystem::current_path() / "assets" / "templates");
-    roots.emplace_back(std::filesystem::current_path() / "RayTrophiStudio" / "assets" / "templates");
+    std::error_code ec;
+    const auto curr = std::filesystem::current_path(ec);
+    roots.emplace_back(curr / "assets" / "templates");
+    roots.emplace_back(curr / "RayTrophiStudio" / "assets" / "templates");
+    roots.emplace_back(curr.parent_path() / "assets" / "templates");
+    roots.emplace_back(curr.parent_path() / "RayTrophiStudio" / "assets" / "templates");
     return roots;
 }
 
@@ -190,8 +194,12 @@ void TemplateRegistry::refresh() {
              it != end; it.increment(ec)) {
             if (ec) { ec.clear(); continue; }
             if (!it->is_regular_file(ec) || it->path().filename() != "manifest.json") continue;
-            const auto normalized = it->path().lexically_normal();
-            if (seen_manifests.insert(normalized).second) entries_.push_back(validateManifest(normalized));
+            std::error_code canon_ec;
+            const auto canonical_p = std::filesystem::weakly_canonical(it->path(), canon_ec);
+            const auto key_path = canon_ec ? it->path().lexically_normal() : canonical_p;
+            if (seen_manifests.insert(key_path).second) {
+                entries_.push_back(validateManifest(it->path().lexically_normal()));
+            }
         }
     }
 
@@ -229,169 +237,177 @@ const TemplateMetadata* TemplateRegistry::find(const std::string& id) const {
 
 TemplateMetadata TemplateRegistry::validateManifest(const std::filesystem::path& manifest_path) {
     TemplateMetadata item;
-    item.manifest_path = manifest_path.lexically_normal();
-    item.package_root = item.manifest_path.parent_path();
-
-    json root;
     try {
-        std::ifstream stream(item.manifest_path);
-        if (!stream) {
-            addError(item, "Manifest cannot be opened");
+        item.manifest_path = manifest_path.lexically_normal();
+        item.package_root = item.manifest_path.parent_path();
+
+        json root;
+        try {
+            std::ifstream stream(item.manifest_path);
+            if (!stream) {
+                addError(item, "Manifest cannot be opened");
+                return item;
+            }
+            stream >> root;
+        } catch (const std::exception& error) {
+            addError(item, std::string("Manifest JSON parse failed: ") + error.what());
             return item;
         }
-        stream >> root;
-    } catch (const std::exception& error) {
-        addError(item, std::string("Manifest JSON parse failed: ") + error.what());
-        return item;
-    }
-    if (!root.is_object()) {
-        addError(item, "Manifest root must be an object");
-        return item;
-    }
-    rejectUnknownFields(root,
-        {"schema_version", "id", "display_name", "description", "kind", "category",
-         "sort_order", "compatibility", "preview", "scene", "ui_state", "renderer",
-         "performance", "assets", "guidance"}, "manifest", item);
-
-    if (auto value = stringField(root, "schema_version", item)) item.schema_version = *value;
-    if (item.schema_version != "1.0") addError(item, "Unsupported schema_version: " + item.schema_version);
-    if (auto value = stringField(root, "id", item, 96)) item.id = *value;
-    if (!isTemplateId(item.id)) addError(item, "Invalid template id: " + item.id);
-    if (auto value = stringField(root, "display_name", item, 48)) item.display_name = *value;
-    if (auto value = stringField(root, "description", item, 140)) item.description = *value;
-    if (auto value = stringField(root, "kind", item)) item.kind = *value;
-    requireEnum(item.kind, kKinds, "kind", item);
-    if (auto value = stringField(root, "category", item)) item.category = *value;
-    requireEnum(item.category, kCategories, "category", item);
-    if (!root.contains("sort_order") || !root["sort_order"].is_number_integer()) {
-        addError(item, "Missing or invalid integer field: sort_order");
-    } else {
-        item.sort_order = root["sort_order"].get<int>();
-        if (item.sort_order < 0 || item.sort_order > 10000) addError(item, "sort_order is out of range");
-    }
-
-    if (!root.contains("compatibility") || !root["compatibility"].is_object()) {
-        addError(item, "Missing or invalid object: compatibility");
-    } else {
-        const auto& compatibility = root["compatibility"];
-        rejectUnknownFields(compatibility,
-            {"minimum_raytrophi_version", "maximum_raytrophi_version"}, "compatibility", item);
-        if (auto value = stringField(compatibility, "minimum_raytrophi_version", item))
-            item.minimum_raytrophi_version = *value;
-        if (!isSemanticVersion(item.minimum_raytrophi_version)) addError(item, "Invalid minimum RayTrophi version");
-        if (compatibility.contains("maximum_raytrophi_version")) {
-            if (compatibility["maximum_raytrophi_version"].is_string())
-                item.maximum_raytrophi_version = compatibility["maximum_raytrophi_version"].get<std::string>();
-            else addError(item, "Invalid maximum_raytrophi_version");
-            if (!item.maximum_raytrophi_version.empty() && !isSemanticVersion(item.maximum_raytrophi_version))
-                addError(item, "Invalid maximum RayTrophi version");
+        if (!root.is_object()) {
+            addError(item, "Manifest root must be an object");
+            return item;
         }
-    }
+        rejectUnknownFields(root,
+            {"schema_version", "id", "display_name", "description", "kind", "category",
+             "sort_order", "compatibility", "preview", "scene", "ui_state", "renderer",
+             "performance", "assets", "guidance"}, "manifest", item);
 
-    if (!root.contains("preview") || !root["preview"].is_object()) {
-        addError(item, "Missing or invalid object: preview");
-    } else {
-        const auto& preview = root["preview"];
-        rejectUnknownFields(preview, {"image", "alt"}, "preview", item);
-        if (auto value = stringField(preview, "image", item))
-            item.preview_path = packagePath(item.package_root, *value, "preview.image", item, true);
-        if (preview.contains("alt") && preview["alt"].is_string()) item.preview_alt = preview["alt"].get<std::string>();
-    }
-
-    if (!root.contains("scene") || !root["scene"].is_object()) {
-        addError(item, "Missing or invalid object: scene");
-    } else {
-        const auto& scene = root["scene"];
-        rejectUnknownFields(scene, {"type", "path"}, "scene", item);
-        if (auto value = stringField(scene, "type", item)) item.scene_type = *value;
-        requireEnum(item.scene_type, kSceneTypes, "scene.type", item);
-        if (auto value = stringField(scene, "path", item))
-            item.scene_path = packagePath(item.package_root, *value, "scene.path", item, true);
-    }
-
-    if (!root.contains("ui_state") || !root["ui_state"].is_object()) {
-        addError(item, "Missing or invalid object: ui_state");
-    } else {
-        const auto& ui = root["ui_state"];
-        rejectUnknownFields(ui,
-            {"properties_context", "bottom_editor", "contextual_dock", "contextual_dock_width",
-             "viewport_shading", "frame_target", "show_timeline"}, "ui_state", item);
-        if (auto value = stringField(ui, "properties_context", item)) item.ui_state.properties_context = *value;
-        requireEnum(item.ui_state.properties_context, kPropertiesContexts, "ui_state.properties_context", item);
-        if (auto value = stringField(ui, "bottom_editor", item)) item.ui_state.bottom_editor = *value;
-        requireEnum(item.ui_state.bottom_editor, kBottomEditors, "ui_state.bottom_editor", item);
-        if (auto value = stringField(ui, "contextual_dock", item)) item.ui_state.contextual_dock = *value;
-        requireEnum(item.ui_state.contextual_dock, kContextualDocks, "ui_state.contextual_dock", item);
-        if (ui.contains("contextual_dock_width")) {
-            if (ui["contextual_dock_width"].is_number()) {
-                item.ui_state.contextual_dock_width = ui["contextual_dock_width"].get<float>();
-                if (item.ui_state.contextual_dock_width < 50.0f || item.ui_state.contextual_dock_width > 400.0f)
-                    addError(item, "ui_state.contextual_dock_width is out of range");
-            } else addError(item, "Invalid ui_state.contextual_dock_width");
+        if (auto value = stringField(root, "schema_version", item)) item.schema_version = *value;
+        if (item.schema_version != "1.0") addError(item, "Unsupported schema_version: " + item.schema_version);
+        if (auto value = stringField(root, "id", item, 96)) item.id = *value;
+        if (!isTemplateId(item.id)) addError(item, "Invalid template id: " + item.id);
+        if (auto value = stringField(root, "display_name", item, 48)) item.display_name = *value;
+        if (auto value = stringField(root, "description", item, 140)) item.description = *value;
+        if (auto value = stringField(root, "kind", item)) item.kind = *value;
+        requireEnum(item.kind, kKinds, "kind", item);
+        if (auto value = stringField(root, "category", item)) item.category = *value;
+        requireEnum(item.category, kCategories, "category", item);
+        if (!root.contains("sort_order") || !root["sort_order"].is_number_integer()) {
+            addError(item, "Missing or invalid integer field: sort_order");
+        } else {
+            item.sort_order = root["sort_order"].get<int>();
+            if (item.sort_order < 0 || item.sort_order > 10000) addError(item, "sort_order is out of range");
         }
-        if (auto value = stringField(ui, "viewport_shading", item)) item.ui_state.viewport_shading = *value;
-        requireEnum(item.ui_state.viewport_shading, kViewportShading, "ui_state.viewport_shading", item);
-        if (ui.contains("frame_target") && ui["frame_target"].is_string()) item.ui_state.frame_target = ui["frame_target"].get<std::string>();
-        if (ui.contains("show_timeline")) {
-            if (ui["show_timeline"].is_boolean()) item.ui_state.show_timeline = ui["show_timeline"].get<bool>();
-            else addError(item, "Invalid ui_state.show_timeline");
-        }
-    }
 
-    if (root.contains("renderer")) {
-        if (!root["renderer"].is_object()) addError(item, "Invalid object: renderer");
-        else {
-            const auto& renderer = root["renderer"];
-            rejectUnknownFields(renderer, {"preference", "allow_fallback"}, "renderer", item);
-            if (renderer.contains("preference") && renderer["preference"].is_string())
-                item.renderer_preference = renderer["preference"].get<std::string>();
-            requireEnum(item.renderer_preference, kRendererPreferences, "renderer.preference", item);
-            if (renderer.contains("allow_fallback")) {
-                if (renderer["allow_fallback"].is_boolean()) item.renderer_allow_fallback = renderer["allow_fallback"].get<bool>();
-                else addError(item, "Invalid renderer.allow_fallback");
+        if (!root.contains("compatibility") || !root["compatibility"].is_object()) {
+            addError(item, "Missing or invalid object: compatibility");
+        } else {
+            const auto& compatibility = root["compatibility"];
+            rejectUnknownFields(compatibility,
+                {"minimum_raytrophi_version", "maximum_raytrophi_version"}, "compatibility", item);
+            if (auto value = stringField(compatibility, "minimum_raytrophi_version", item))
+                item.minimum_raytrophi_version = *value;
+            if (!isSemanticVersion(item.minimum_raytrophi_version)) addError(item, "Invalid minimum RayTrophi version");
+            if (compatibility.contains("maximum_raytrophi_version")) {
+                if (compatibility["maximum_raytrophi_version"].is_string())
+                    item.maximum_raytrophi_version = compatibility["maximum_raytrophi_version"].get<std::string>();
+                else addError(item, "Invalid maximum_raytrophi_version");
+                if (!item.maximum_raytrophi_version.empty() && !isSemanticVersion(item.maximum_raytrophi_version))
+                    addError(item, "Invalid maximum RayTrophi version");
             }
         }
-    }
 
-    if (!root.contains("performance") || !root["performance"].is_object()) {
-        addError(item, "Missing or invalid object: performance");
-    } else {
-        const auto& performance = root["performance"];
-        rejectUnknownFields(performance, {"class", "estimated_vram_mb"}, "performance", item);
-        if (auto value = stringField(performance, "class", item)) item.performance_class = *value;
-        requireEnum(item.performance_class, kPerformanceClasses, "performance.class", item);
-        if (performance.contains("estimated_vram_mb")) {
-            if (performance["estimated_vram_mb"].is_number_integer()) {
-                item.estimated_vram_mb = performance["estimated_vram_mb"].get<int>();
-                if (item.estimated_vram_mb < 0) addError(item, "performance.estimated_vram_mb cannot be negative");
-            } else addError(item, "Invalid performance.estimated_vram_mb");
+        if (root.contains("preview") && root["preview"].is_object()) {
+            const auto& preview = root["preview"];
+            rejectUnknownFields(preview, {"image", "alt"}, "preview", item);
+            if (preview.contains("image") && preview["image"].is_string()) {
+                std::string img_val = preview["image"].get<std::string>();
+                if (!img_val.empty()) {
+                    item.preview_path = packagePath(item.package_root, img_val, "preview.image", item, false);
+                }
+            }
+            if (preview.contains("alt") && preview["alt"].is_string()) item.preview_alt = preview["alt"].get<std::string>();
         }
-    }
 
-    if (!root.contains("assets") || !root["assets"].is_object()) {
-        addError(item, "Missing or invalid object: assets");
-    } else {
-        rejectUnknownFields(root["assets"], {"required", "optional"}, "assets", item);
-        item.required_assets = readAssetList(root["assets"], "required", item.package_root, item, true);
-        item.optional_assets = readAssetList(root["assets"], "optional", item.package_root, item, false);
-    }
+        if (!root.contains("scene") || !root["scene"].is_object()) {
+            addError(item, "Missing or invalid object: scene");
+        } else {
+            const auto& scene = root["scene"];
+            rejectUnknownFields(scene, {"type", "path"}, "scene", item);
+            if (auto value = stringField(scene, "type", item)) item.scene_type = *value;
+            requireEnum(item.scene_type, kSceneTypes, "scene.type", item);
+            if (auto value = stringField(scene, "path", item))
+                item.scene_path = packagePath(item.package_root, *value, "scene.path", item, true);
+        }
 
-    if (root.contains("guidance")) {
-        if (!root["guidance"].is_object()) addError(item, "Invalid object: guidance");
-        else {
-            const auto& guidance = root["guidance"];
-            rejectUnknownFields(guidance, {"path", "show_on_first_open"}, "guidance", item);
-            if (auto value = stringField(guidance, "path", item))
-                item.guidance_path = packagePath(item.package_root, *value, "guidance.path", item, true);
-            if (guidance.contains("show_on_first_open")) {
-                if (guidance["show_on_first_open"].is_boolean())
-                    item.guidance_show_on_first_open = guidance["show_on_first_open"].get<bool>();
-                else addError(item, "Invalid guidance.show_on_first_open");
+        if (!root.contains("ui_state") || !root["ui_state"].is_object()) {
+            addError(item, "Missing or invalid object: ui_state");
+        } else {
+            const auto& ui = root["ui_state"];
+            rejectUnknownFields(ui,
+                {"properties_context", "bottom_editor", "contextual_dock", "contextual_dock_width",
+                 "viewport_shading", "frame_target", "show_timeline"}, "ui_state", item);
+            if (auto value = stringField(ui, "properties_context", item)) item.ui_state.properties_context = *value;
+            requireEnum(item.ui_state.properties_context, kPropertiesContexts, "ui_state.properties_context", item);
+            if (auto value = stringField(ui, "bottom_editor", item)) item.ui_state.bottom_editor = *value;
+            requireEnum(item.ui_state.bottom_editor, kBottomEditors, "ui_state.bottom_editor", item);
+            if (auto value = stringField(ui, "contextual_dock", item)) item.ui_state.contextual_dock = *value;
+            requireEnum(item.ui_state.contextual_dock, kContextualDocks, "ui_state.contextual_dock", item);
+            if (ui.contains("contextual_dock_width")) {
+                if (ui["contextual_dock_width"].is_number()) {
+                    item.ui_state.contextual_dock_width = ui["contextual_dock_width"].get<float>();
+                    if (item.ui_state.contextual_dock_width < 50.0f || item.ui_state.contextual_dock_width > 400.0f)
+                        addError(item, "ui_state.contextual_dock_width is out of range");
+                } else addError(item, "Invalid ui_state.contextual_dock_width");
+            }
+            if (auto value = stringField(ui, "viewport_shading", item)) item.ui_state.viewport_shading = *value;
+            requireEnum(item.ui_state.viewport_shading, kViewportShading, "ui_state.viewport_shading", item);
+            if (ui.contains("frame_target") && ui["frame_target"].is_string()) item.ui_state.frame_target = ui["frame_target"].get<std::string>();
+            if (ui.contains("show_timeline")) {
+                if (ui["show_timeline"].is_boolean()) item.ui_state.show_timeline = ui["show_timeline"].get<bool>();
+                else addError(item, "Invalid ui_state.show_timeline");
             }
         }
-    }
 
-    item.valid = item.errors.empty();
+        if (root.contains("renderer")) {
+            if (!root["renderer"].is_object()) addError(item, "Invalid object: renderer");
+            else {
+                const auto& renderer = root["renderer"];
+                rejectUnknownFields(renderer, {"preference", "allow_fallback"}, "renderer", item);
+                if (renderer.contains("preference") && renderer["preference"].is_string())
+                    item.renderer_preference = renderer["preference"].get<std::string>();
+                requireEnum(item.renderer_preference, kRendererPreferences, "renderer.preference", item);
+                if (renderer.contains("allow_fallback")) {
+                    if (renderer["allow_fallback"].is_boolean()) item.renderer_allow_fallback = renderer["allow_fallback"].get<bool>();
+                    else addError(item, "Invalid renderer.allow_fallback");
+                }
+            }
+        }
+
+        if (!root.contains("performance") || !root["performance"].is_object()) {
+            addError(item, "Missing or invalid object: performance");
+        } else {
+            const auto& performance = root["performance"];
+            rejectUnknownFields(performance, {"class", "estimated_vram_mb"}, "performance", item);
+            if (auto value = stringField(performance, "class", item)) item.performance_class = *value;
+            requireEnum(item.performance_class, kPerformanceClasses, "performance.class", item);
+            if (performance.contains("estimated_vram_mb")) {
+                if (performance["estimated_vram_mb"].is_number_integer()) {
+                    item.estimated_vram_mb = performance["estimated_vram_mb"].get<int>();
+                    if (item.estimated_vram_mb < 0) addError(item, "performance.estimated_vram_mb cannot be negative");
+                } else addError(item, "Invalid performance.estimated_vram_mb");
+            }
+        }
+
+        if (!root.contains("assets") || !root["assets"].is_object()) {
+            addError(item, "Missing or invalid object: assets");
+        } else {
+            rejectUnknownFields(root["assets"], {"required", "optional"}, "assets", item);
+            item.required_assets = readAssetList(root["assets"], "required", item.package_root, item, true);
+            item.optional_assets = readAssetList(root["assets"], "optional", item.package_root, item, false);
+        }
+
+        if (root.contains("guidance")) {
+            if (!root["guidance"].is_object()) addError(item, "Invalid object: guidance");
+            else {
+                const auto& guidance = root["guidance"];
+                rejectUnknownFields(guidance, {"path", "show_on_first_open"}, "guidance", item);
+                if (auto value = stringField(guidance, "path", item))
+                    item.guidance_path = packagePath(item.package_root, *value, "guidance.path", item, true);
+                if (guidance.contains("show_on_first_open")) {
+                    if (guidance["show_on_first_open"].is_boolean())
+                        item.guidance_show_on_first_open = guidance["show_on_first_open"].get<bool>();
+                    else addError(item, "Invalid guidance.show_on_first_open");
+                }
+            }
+        }
+
+        item.valid = item.errors.empty();
+    } catch (const std::exception& e) {
+        addError(item, std::string("Unhandled exception in validateManifest: ") + e.what());
+    } catch (...) {
+        addError(item, "Unknown exception in validateManifest");
+    }
     return item;
 }
 

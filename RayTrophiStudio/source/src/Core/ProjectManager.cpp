@@ -18,6 +18,7 @@
 #include "MeshModifiers.h"
 #include "Paint/PaintLayerStack.h"
 #include "AshDebrisSerialization.h"
+#include "UI/TemplateHubUI.h"
 #include "json.hpp"
 #include "simdjson.h"
 #include <fstream>
@@ -1171,6 +1172,18 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
     g_animGraphUI.activeCharacter = "";
     g_animGraphUI = AnimGraphUIState();
     
+    // Ensure scene always has an active camera so viewport is never black
+    if (scene.cameras.empty() || !scene.camera) {
+        auto startup_camera = std::make_shared<Camera>(
+            Vec3(11.0f, 8.0f, 14.0f), Vec3(0.0f, 0.25f, 0.0f),
+            Vec3(0.0f, 1.0f, 0.0f), 40.0f, 16.0f / 9.0f,
+            0.0f, (Vec3(11.0f, 8.0f, 14.0f) - Vec3(0.0f, 0.25f, 0.0f)).length(), 0);
+        startup_camera->nodeName = "Startup Camera";
+        scene.addCamera(startup_camera);
+        scene.setActiveCamera(scene.cameras.size() - 1);
+    }
+    scene.initialized = true;
+
     // The scene is gone; edge-triggered diagnostics must not carry its state
     // into the next one (that is what made the second comparison run look
     // silent while hunting the domain-edge black band).
@@ -1763,6 +1776,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
     
     g_project.current_file_path = filepath;
     g_project.is_modified = false;
+    raytrophi::templates::TemplateHubUI::instance().addRecentProject(filepath);
     
     if (progress_callback) progress_callback(100, "Done.");
     SCENE_LOG_INFO("Project saved successfully: " + filepath);
@@ -2494,6 +2508,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     
     g_project.current_file_path = filepath;
     g_project.is_modified = false;
+    raytrophi::templates::TemplateHubUI::instance().addRecentProject(filepath);
 
     // Bind an existing on-disk bake cache (render-only point cache) now that the
     // project path is known AND particle systems are loaded (deserializeParticle
@@ -2582,6 +2597,16 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     g_materials_dirty = true;
     g_gas_volumes_dirty = true;
     g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    
+    if (!scene.camera || scene.cameras.empty()) {
+        auto fallback_camera = std::make_shared<Camera>(
+            Vec3(11.0f, 8.0f, 14.0f), Vec3(0.0f, 0.25f, 0.0f),
+            Vec3(0.0f, 1.0f, 0.0f), 40.0f, 16.0f / 9.0f,
+            0.0f, (Vec3(11.0f, 8.0f, 14.0f) - Vec3(0.0f, 0.25f, 0.0f)).length(), 0);
+        fallback_camera->nodeName = "Startup Camera";
+        scene.addCamera(fallback_camera);
+        scene.setActiveCamera(scene.cameras.size() - 1);
+    }
     
     if (scene.camera) {
         scene.camera->update_camera_vectors();
@@ -5361,6 +5386,33 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"internal_friction", domain.fluid_params.internal_friction},
             {"air_drag", domain.fluid_params.air_drag},
             {"density_correction", domain.fluid_params.density_correction},
+            // ★ Granular rheology. These were absent here while SceneSerializer
+            // wrote all of them, so a domain authored as Wet Sand saved to .rtp
+            // and reopened as the DEFAULTS — granular_enabled back to false,
+            // which also hides the whole panel section. current_preset survived
+            // on its own, so the label still read "Wet Sand" over default sand
+            // numbers: the loss was silent and looked like a UI bug.
+            // Keep this list in sync with SceneSerializer.cpp and with
+            // hashFluidDomainSolverConfig — a field missing from any one of the
+            // three fails differently and none of them fail loudly.
+            {"granular_enabled", domain.fluid_params.granular_enabled},
+            {"granular_friction_angle_degrees", domain.fluid_params.granular_friction_angle_degrees},
+            {"granular_cohesion", domain.fluid_params.granular_cohesion},
+            {"granular_dilatancy_degrees", domain.fluid_params.granular_dilatancy_degrees},
+            {"granular_young_modulus", domain.fluid_params.granular_young_modulus},
+            {"granular_poisson_ratio", domain.fluid_params.granular_poisson_ratio},
+            {"granular_tensile_cutoff", domain.fluid_params.granular_tensile_cutoff},
+            {"granular_hardening", domain.fluid_params.granular_hardening},
+            {"granular_fracture_strain", domain.fluid_params.granular_fracture_strain},
+            {"granular_damage_rate", domain.fluid_params.granular_damage_rate},
+            {"granular_healing_rate", domain.fluid_params.granular_healing_rate},
+            {"granular_rebonding", domain.fluid_params.granular_rebonding},
+            {"granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps},
+            {"granular_softening_temperature", domain.fluid_params.granular_softening_temperature},
+            {"granular_softening_range", domain.fluid_params.granular_softening_range},
+            {"granular_residual_strength", domain.fluid_params.granular_residual_strength},
+            {"granular_tack_peak", domain.fluid_params.granular_tack_peak},
+            {"granular_thermal_conductivity", domain.fluid_params.granular_thermal_conductivity},
             {"current_preset", static_cast<int>(domain.fluid_params.current_preset)},
             {"chemistry_preset", static_cast<int>(domain.fluid_params.chemistry_preset)},
             {"fuel_profile", {
@@ -5924,6 +5976,58 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.internal_friction = f.value("internal_friction", domain.fluid_params.internal_friction);
             domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
             domain.fluid_params.density_correction = f.value("density_correction", domain.fluid_params.density_correction);
+            // ★ Read BEFORE current_preset, not after. A project written before
+            // the rheology rework has no granular keys at all, so these are
+            // no-ops there and the applyPreset() below legitimately supplies the
+            // material's granular numbers. Reading them afterwards would let that
+            // same applyPreset overwrite a modern file's authored values.
+            domain.fluid_params.granular_enabled = f.value("granular_enabled", domain.fluid_params.granular_enabled);
+            domain.fluid_params.granular_friction_angle_degrees = f.value("granular_friction_angle_degrees", domain.fluid_params.granular_friction_angle_degrees);
+            domain.fluid_params.granular_cohesion = f.value("granular_cohesion", domain.fluid_params.granular_cohesion);
+            domain.fluid_params.granular_dilatancy_degrees = f.value("granular_dilatancy_degrees", domain.fluid_params.granular_dilatancy_degrees);
+            domain.fluid_params.granular_young_modulus = f.value("granular_young_modulus", domain.fluid_params.granular_young_modulus);
+            domain.fluid_params.granular_poisson_ratio = f.value("granular_poisson_ratio", domain.fluid_params.granular_poisson_ratio);
+            domain.fluid_params.granular_tensile_cutoff = f.value("granular_tensile_cutoff", domain.fluid_params.granular_tensile_cutoff);
+            domain.fluid_params.granular_hardening = f.value("granular_hardening", domain.fluid_params.granular_hardening);
+            domain.fluid_params.granular_fracture_strain = f.value("granular_fracture_strain", domain.fluid_params.granular_fracture_strain);
+            domain.fluid_params.granular_damage_rate = f.value("granular_damage_rate", domain.fluid_params.granular_damage_rate);
+            domain.fluid_params.granular_healing_rate = f.value("granular_healing_rate", domain.fluid_params.granular_healing_rate);
+            domain.fluid_params.granular_rebonding = f.value("granular_rebonding", domain.fluid_params.granular_rebonding);
+            domain.fluid_params.granular_max_solver_substeps = f.value("granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps);
+            domain.fluid_params.granular_softening_temperature = f.value("granular_softening_temperature", domain.fluid_params.granular_softening_temperature);
+            domain.fluid_params.granular_softening_range = f.value("granular_softening_range", domain.fluid_params.granular_softening_range);
+            domain.fluid_params.granular_residual_strength = f.value("granular_residual_strength", domain.fluid_params.granular_residual_strength);
+            domain.fluid_params.granular_tack_peak = f.value("granular_tack_peak", domain.fluid_params.granular_tack_peak);
+            domain.fluid_params.granular_thermal_conductivity = f.value("granular_thermal_conductivity", domain.fluid_params.granular_thermal_conductivity);
+            domain.fluid_params.sanitizeGranularMaterial();
+            // ★ TRIPWIRE — remove once the .rtp fluid_params loss is closed.
+            //
+            // Measured 2026-08-16 over IPC: save writes every fluid key
+            // correctly (verified in the JSON, both the legacy `domains[]` and
+            // `systems[]/domains[]` copies), the domain NAME and its siblings
+            // (voxel_size) load, but every fluid_params field read here comes
+            // back as the STRUCT DEFAULT afterwards — kinematic_viscosity 0.0313
+            // -> 0.0, viscosity_sweeps 7 -> 8 (8 is the default, not any
+            // preset's value), granular_young_modulus 123456 -> 200000.
+            // Polling right through the open found no window where the loaded
+            // values were ever present, so this is NOT a later pass clobbering
+            // them. It is pre-existing and NOT granular-specific; the granular
+            // keys were simply the first ones anyone checked.
+            //
+            // This line settles the remaining question in one build: if it
+            // prints the authored numbers, parseDomain works and the descriptor
+            // is being dropped downstream (adoptSystem / the system the API
+            // resolves). If it prints defaults, the guard above never saw the
+            // `fluid` object and the fault is in this function.
+            SCENE_LOG_INFO("[ProjectManager] parseDomain '" + domain.name +
+                           "' fluid block: visc=" +
+                           std::to_string(domain.fluid_params.kinematic_viscosity) +
+                           " sweeps=" +
+                           std::to_string(domain.fluid_params.viscosity_sweeps) +
+                           " granular_E=" +
+                           std::to_string(domain.fluid_params.granular_young_modulus) +
+                           " granular_on=" +
+                           (domain.fluid_params.granular_enabled ? "1" : "0"));
             if (f.contains("current_preset")) {
                 domain.fluid_params.current_preset =
                     static_cast<RayTrophiSim::Fluid::APICSolverParams::FluidPreset>(

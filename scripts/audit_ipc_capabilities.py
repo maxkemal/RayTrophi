@@ -75,6 +75,19 @@ def required(method, namespaces):
     if method.startswith("render.") or method in ("request_render",
                                                   "reset_accumulation"):
         return "Render"
+    # viewport.* drives and measures the engine (not the rt.ui panel-drawing
+    # exception). Must come BEFORE the ".status" read heuristic below, or only
+    # the query half of the namespace is classified and the command half falls
+    # through to None — which is how this mirror first went stale.
+    if method.startswith("viewport."):
+        return "Render"
+    # sim_graph.*: queries are Read, everything that builds the graph is
+    # SceneWrite. Same ordering lesson as viewport.* — the read heuristics below
+    # would otherwise classify only part of the namespace.
+    if method in ("sim_graph.nodes", "sim_graph.evaluate", "sim_graph.attributes"):
+        return "Read"
+    if method.startswith("sim_graph."):
+        return "SceneWrite"
     if method in ("material.info", "material.of_object", "material.textures",
                   "nodes.graphs", "forcefield.evaluate", "particle.stats",
                   "particle.emitters", "anim.characters", "anim.character",

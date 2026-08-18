@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "id": "raytrophi.vfx.fluid_studio",
+  "display_name": "Fluid Studio",
+  "description": "Procedural GPU Fluid solver domain with surface reconstruction presets.",
+  "kind": "start",
+  "category": "vfx",
+  "sort_order": 80,
+  "compatibility": {
+    "minimum_raytrophi_version": "1.0.0"
+  },
+  "preview": {
+    "image": "preview.svg",
+    "alt": "Fluid simulation studio setup"
+  },
+  "scene": {
+    "type": "recipe",
+    "path": "scene.json"
+  },
+  "ui_state": {
+    "properties_context": "fluid",
+    "bottom_editor": "none",
+    "contextual_dock": "none",
+    "viewport_shading": "material",
+    "frame_target": "Default_Cube",
+    "show_timeline": true
+  },
+  "renderer": {
+    "preference": "auto",
+    "allow_fallback": true
+  },
+  "performance": {
+    "class": "medium",
+    "estimated_vram_mb": 256
+  },
+  "assets": {
+    "required": [],
+    "optional": []
+  },
+  "guidance": {
+    "path": "guidance.json",
+    "show_on_first_open": false
+  }
+}

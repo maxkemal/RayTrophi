@@ -35,6 +35,7 @@ being paid for twice.
 | Document | Area |
 |---|---|
 | [API_SCRIPTING_ROADMAP.md](API_SCRIPTING_ROADMAP.md) | Scripting/IPC API waves and their status table |
+| [AGENT_VIEWPORT_MEASUREMENT_PLAN.md](AGENT_VIEWPORT_MEASUREMENT_PLAN.md) | Driving the viewport and reading render DATA over IPC — the substrate agents verify with |
 | [TEMPLATE_HUB_UX_ROADMAP.md](TEMPLATE_HUB_UX_ROADMAP.md) | Canonical product direction for startup / template / guided-scene UX |
 | [GRANULAR_SIMULATION_ROADMAP.md](GRANULAR_SIMULATION_ROADMAP.md) | Sand and granular MPM/APIC constitutive solver |
 | [GRANULAR_GPU_FIRST_PLAN.md](GRANULAR_GPU_FIRST_PLAN.md) | GPU-first execution plan for the granular solver |
@@ -63,6 +64,7 @@ being paid for twice.
 | [TEMPLATE_REGISTRY_API.md](TEMPLATE_REGISTRY_API.md) | Template Registry script/IPC surface |
 | [INTERIOR_VOLUME.md](INTERIOR_VOLUME.md) | Procedural interior appearance model |
 | [VULKAN_GAS_FLUID_LAYERING.md](VULKAN_GAS_FLUID_LAYERING.md) | Coincident gas + fluid surface layering |
+| [VOLUME_BOX_REENTRY_POSTMORTEM.md](VOLUME_BOX_REENTRY_POSTMORTEM.md) | Volume-box re-entry: black band + cost explosion, and why a distance epsilon cannot fix it |
 | [VULKAN_VOLUME_TEMPORAL_INSTRUMENTATION.md](VULKAN_VOLUME_TEMPORAL_INSTRUMENTATION.md) | Volume temporal stability and instrumentation |
 | [FOLIAGE_WIND_PIPELINE.md](FOLIAGE_WIND_PIPELINE.md) | Foliage wind runtime modes |
 | [terrain_river_lake_snow_notes.md](terrain_river_lake_snow_notes.md) | Snowmelt water budget and river visibility |
@@ -73,6 +75,7 @@ being paid for twice.
 
 | Document | What it records |
 |---|---|
+| [GRANULAR_STABILITY_POSTMORTEM.md](GRANULAR_STABILITY_POSTMORTEM.md) | Granular blow-up at low Young modulus — four root causes, and the CPU/Vulkan stage contract |
 | [VULKAN_HAIR_PAUSE_DOUBLE_FREE_POSTMORTEM.md](VULKAN_HAIR_PAUSE_DOUBLE_FREE_POSTMORTEM.md) | Double-free on the second pause/play, Vulkan RT hair |
 | [VULKAN_PARTICLE_PRESET_PAUSE_TDR.md](VULKAN_PARTICLE_PRESET_PAUSE_TDR.md) | Particle preset pause/resume TDR |
 | [VOLUME_RAYMARCH_FOUNDATION_AUDIT.md](VOLUME_RAYMARCH_FOUNDATION_AUDIT.md) | Three-backend volume parity audit, 2026-07-23 |
@@ -83,6 +86,8 @@ being paid for twice.
 
 | Document | Area |
 |---|---|
+| [AGENT_PIPELINE_ARCHITECTURE.md](AGENT_PIPELINE_ARCHITECTURE.md) | Multi-instance agent/human production pipeline — which decisions are irreversible |
+| [SIMULATION_NODE_OBJECT_MODEL.md](SIMULATION_NODE_OBJECT_MODEL.md) | Scope-based object model for the simulation node layer, and what "one roof" can and cannot unify |
 | [photon_caustics_plan.md](photon_caustics_plan.md) | Photon caustic pass, Vulkan RT first |
 | [stylize_mode_architecture.md](stylize_mode_architecture.md) | Stylize mode as an AOV-driven post layer |
 | [stylize_pipeline_notes.md](stylize_pipeline_notes.md) | Stylize working notes |

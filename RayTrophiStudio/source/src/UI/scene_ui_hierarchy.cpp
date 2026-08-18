@@ -185,7 +185,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     if ((ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) &&
         sel.hasSelection() && !ImGui::GetIO().WantTextInput &&
         !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused &&
-        !anim_graph_focused && !timeline.panel_focused) {
+        !anim_graph_focused && !node_editor_focused && !timeline.panel_focused) {
         triggerDelete(ctx);
     }
 

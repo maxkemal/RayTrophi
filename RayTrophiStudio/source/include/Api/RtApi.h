@@ -31,6 +31,7 @@
 
 struct UIContext;
 class SceneHistory;
+namespace NodeSystem { namespace Sim { class SimulationNodeGraph; } }
 
 namespace rtapi {
 
@@ -101,6 +102,10 @@ struct TemplateOpenInfo {
 };
 Result openTemplate(const std::string& id, const std::string& conflict_policy,
                     TemplateOpenInfo& out);
+Result saveUserTemplate(const std::string& display_name,
+                        const std::string& description,
+                        const std::string& category);
+Result deleteUserTemplate(const std::string& template_id);
 
 // ---------------------------------------------------------------------------
 // Scene queries (main thread only). The API surface is flat-only: every scene
@@ -441,6 +446,335 @@ Result cancelSequence();
 bool renderOutputPending();
 std::string renderOutputPath();
 void completeRenderOutput(bool ok, const std::string& error = {});
+
+// ---------------------------------------------------------------------------
+// Vulkan volume instrumentation (render.volume_stats / render.volume_counters).
+//
+// ★ These counters existed for a long time but reached only the Volume
+// Performance panel, so diagnosing a volume cost or a missing-surface report
+// meant asking a human to read numbers off a panel and type them back. That is
+// the one manual step that stops a render regression from being reproducible.
+//
+// The counters are OPT-IN: GPU atomics cost a little, so leaving them on
+// contaminates frame-time measurements. Enable, render some frames, read, then
+// disable. Counters accumulate until reset.
+//
+// ★★ Zeroes need care. `volume_rays == 0` means no ray entered a volume at all
+// (wrong camera, wrong frame, or the domain is not in the TLAS) — it does NOT
+// mean the volume is cheap. And `solid_probe_runs == 0` with rays > 0 means the
+// gate suppressed every probe, which is a different failure from a probe that
+// ran and found nothing (`hits == 0`). Report both, never just their sum.
+struct VolumeInstrumentationInfo {
+    bool     available = false;   // false = no Vulkan backend active
+    bool     enabled = false;
+    uint32_t volume_rays = 0;
+    uint32_t density_samples = 0;
+    uint32_t shadow_density_samples = 0;
+    uint32_t empty_segments_skipped = 0;
+    uint32_t topology_segments_skipped = 0;
+    uint32_t majorant_segments_skipped = 0;
+    uint32_t majorant_queries = 0;
+    uint32_t majorant_available_queries = 0;
+    uint32_t extinction_terminations = 0;
+    uint32_t step_budget_exhausted = 0;
+    uint32_t completed_intervals = 0;
+    uint32_t temporal_accepted = 0;
+    uint32_t temporal_rejected = 0;
+    uint32_t solid_probe_runs = 0;
+    uint32_t solid_probe_hits = 0;
+    uint32_t gas_handoffs = 0;
+    uint32_t layered_handoffs = 0;
+    uint32_t arbiter_rejects = 0;
+    uint32_t teleports = 0;
+    uint32_t arbiter_candidates = 0;
+    uint32_t arbiter_gate_open = 0;
+    uint32_t arbiter_no_box = 0;
+    uint32_t arbiter_empty_range = 0;
+    uint32_t arbiter_no_crossing = 0;
+};
+VolumeInstrumentationInfo volumeStats();
+Result setVolumeInstrumentation(bool enabled);  // also zeroes the counters
+
+// ---------------------------------------------------------------------------
+// Viewport measurement.
+//
+// ★★★ An agent that can only SAVE a render is guessing; one that can read the
+// render's DATA is measuring. Both halves of the 2026-08-16 black-band round
+// were lost to this gap: every counter had to be copied out of the panel by
+// hand, and one whole round was spent on a dump taken from a frame with no fire
+// in it — a condition the agent could not check because it could neither drive
+// the viewport nor query it.
+//
+// ★★ Everything here stays inside the IPC data-model rule: names, ids and
+// VALUES only. Driving is a command, counters are a value struct, pixels are a
+// buffer. No handle, no engine object and no core access crosses the boundary.
+// See docs/dev/IPC_SECURITY_PERFORMANCE.md, "Data model boundary".
+struct ViewportStatusInfo {
+    bool available = false;      // false = no backend bound yet
+    std::string backend;         // "vulkan", "optix", "cpu"
+    int  width = 0;
+    int  height = 0;
+    int  samples = 0;            // accumulated samples so far
+    bool accumulation_complete = false;
+    float ms_per_sample = 0.0f;
+    // ★ Distinguishes "converged, so it stopped" from "never started". Reading
+    // zero counters while this is false is NOT a measurement of a cheap scene;
+    // it is the absence of a measurement, which is the trap volume_rays == 0
+    // set on 2026-08-16.
+    bool rendering_active = false;
+    bool capture_enabled = false;   // is the probe buffer being filled?
+    bool frame_available = false;   // has a frame been captured yet?
+};
+ViewportStatusInfo viewportStatus();
+
+// Per-frame capture of the displayed frame costs a copy, so it is opt-in and
+// off by default. Enabling it does not change what is rendered.
+Result setViewportCapture(bool enabled);
+
+// Rectangle in pixels. All zero = whole frame.
+struct ViewportProbeRegion {
+    int x = 0, y = 0, width = 0, height = 0;
+};
+
+// Numeric description of the captured frame. This is the half that turns "it
+// looks black" into a threshold an automated check can fail on.
+struct ViewportProbeInfo {
+    bool available = false;      // false = capture disabled or no frame yet
+    int  width = 0;              // of the probed REGION, not the frame
+    int  height = 0;
+    uint32_t pixels = 0;
+    float mean_luminance = 0.0f;
+    float min_luminance = 0.0f;
+    float max_luminance = 0.0f;
+    // Fraction of pixels at or below the black threshold. The black band was a
+    // step change in exactly this number.
+    float black_fraction = 0.0f;
+    // ★ A separate class of failure nobody was watching for: a NaN reads as
+    // neither black nor lit, and averages hide it completely.
+    float nan_fraction = 0.0f;
+    uint32_t histogram[8] = {0};  // luminance buckets, 0..1 clamped
+};
+ViewportProbeInfo probeViewportFrame(const ViewportProbeRegion& region,
+                                     float black_threshold);
+
+// Engine-side hook. Called by the display loop with the SAME frame the viewport
+// shows, so a probe measures what the user sees rather than a re-render. Copies
+// under a lock and only when capture is enabled; a no-op otherwise.
+// `pixels` is tightly packed RGBA8 unless `pitch_bytes` says otherwise.
+void publishViewportFrame(const void* pixels, int width, int height,
+                          int pitch_bytes);
+
+// ★ Cheap gate for the display loop. The publish call itself is a no-op when
+// capture is off, but the CALLER still has to convert the surface to RGBA8 to
+// make the call — a per-frame allocation charged to every user who never asked
+// for a probe. Test this first and skip the conversion entirely.
+bool viewportCaptureEnabled();
+
+// ---------------------------------------------------------------------------
+// Simulation node graph (Faz N0/N1/N2).
+// docs/dev/NODE_SIMULATION_ARCHITECTURE_PLAN.md, BOLUM D.
+//
+// ★★ The graph DRIVES the existing solvers; it is not a simulation core and it
+// owns no state. Evaluating it produces COMMANDS — an intent the caller can
+// inspect without anything being applied. That separation is what lets a script
+// verify a graph's meaning without running a simulation.
+struct SimCommandInfo {
+    std::string kind;        // "bind_domain", "set_parameter", "couple"
+    std::string target;      // domain/object NAME — identity, never a handle
+    std::string key;
+    float       value = 0.0f;
+    std::string text;
+    uint32_t    source_node = 0;
+};
+// ★ A node asking for a restart REPORTS it; nothing acts on it. Discarding a
+// running simulation is the user's decision, and doing it silently is the
+// failure shape this codebase keeps rediscovering.
+struct SimRestartRequest {
+    uint32_t    node_id = 0;
+    std::string reason;
+};
+struct SimGraphEvaluation {
+    bool evaluated = false;
+    std::vector<SimCommandInfo>   commands;        // topological order IS meaningful
+    std::vector<SimRestartRequest> restart_requests;
+};
+struct SimNodeInfo {
+    uint32_t    id = 0;
+    std::string type_id;
+    std::string display_name;
+    bool        enabled = true;
+    int         input_count = 0;
+    int         output_count = 0;
+    std::string domain;      // DomainRef nodes
+    std::string channel;     // Field nodes
+    std::string source;      // "grid" | "attribute"
+    // Field Inspect only. ★ `stats_available` false means the value could NOT be
+    // measured; it is not the same as a field that measured zero.
+    bool     has_stats = false;
+    bool     stats_available = false;
+    uint32_t particle_count = 0;   // elements measured
+    // ★★ The backing array can be LONGER than the particle count — a granular
+    // array outlived six removed particles on 2026-08-17. `array_in_sync` false
+    // means the solver's arrays disagree with each other; the statistics above
+    // still describe the live particles only.
+    uint32_t array_size = 0;
+    bool     array_in_sync = true;
+    // ★★★ Surface Inspect only. False means the reading is the host mirror as of
+    // the last readback — or, before any readback, the INITIALISATION values.
+    // Measured 2026-08-17: fuel_remaining = -1 across a whole crate is the
+    // "not seeded yet" sentinel, not a fuel level.
+    bool     host_fresh = true;
+    // ★ double: substance_tag is a uint32 identity and a float rounds it into a
+    // DIFFERENT identity past 2^24 (measured: ...163 read back as ...160).
+    double   min_value = 0.0;
+    double   max_value = 0.0;
+    double   mean_value = 0.0;
+    // Cache node only. ★★★ `cache_stale` true means a cache EXISTS and was built
+    // from a DIFFERENT authored config — it still serves frames, and they
+    // describe a scene that no longer exists. Nothing else tells it apart from a
+    // healthy cache, which is how stale physics reaches a render.
+    bool     has_cache_status = false;
+    bool     cache_valid = false;
+    bool     cache_baking = false;
+    bool     cache_stale = false;
+    uint32_t cache_ram_frames = 0;
+};
+
+// ── Editor view state (rt.editor) ───────────────────────────────────────────
+//
+// ★★★ Not a hole in the "panels are not scripted" rule — a correction to what
+// that rule was protecting. Drawing is exempt because a draw call has no meaning
+// outside a frame's draw context, and `rt.ui` (register your own panel, emit
+// widgets) stays in-process for exactly that reason. But which editor is OPEN is
+// not a draw call, it is a VALUE, and leaving it unreadable made agents
+// structurally blind to this repository's most expensive failure class: the
+// panel disagreeing with the core. `Volume` as a default made the panel a liar;
+// the gas shader reader answered from a field the writer never touched. Neither
+// is visible to a caller that can only read the solver.
+//
+// ★★ What is deliberately NOT here: driving widgets ("click the button labelled
+// X"). That would make labels load-bearing, break on every restyle, and restore
+// the UI as an authority. If a button does something, that something needs its
+// own API — which is rule 1, not an exception to it.
+struct EditorState {
+    // "none" | "dope_sheet" | "graph_editor" | "console" | "assets" |
+    // "simulation" | "geometry" | "material" | "terrain" | "anim_graph"
+    std::string bottom_editor;
+    // "simulation" | "geometry" | "material" | "terrain" | "animation"
+    std::string node_editor_domain;
+    bool        node_editor_open = false;   // the Nodes window itself is showing
+    // ★★★ EVERY bottom editor currently showing, not just the first one found.
+    // `bottom_editor` above names one, and a reader that only ever names one
+    // cannot report the failure it is most likely to be asked about: two panels
+    // open at once because an exclusivity rule was routed around. A reader that
+    // structurally cannot see a defect is the same trap as the gas shader reader
+    // that answered from a field its writer never touched.
+    std::vector<std::string> open_editors;
+};
+EditorState editorState();
+Result setBottomEditor(const std::string& name);
+Result setNodeEditorDomain(const std::string& name);
+
+void initSimulationNodes();   // register types + install the attribute resolver
+
+// ★★★ The ONE simulation graph. The editor panel draws THIS object; it does not
+// keep a copy. A panel that mirrors state the core owns is how the fracture UI
+// cache outlived a scene change and how the panel came to disagree with the
+// solver — so the drawing surface is given the original, never a snapshot.
+// Forward-declared to keep solver/node headers out of the API header (D.4).
+NodeSystem::Sim::SimulationNodeGraph& simulationGraph();
+// Discoverability, which is the whole point of the naming layer: until now the
+// only way to learn an attribute existed was to read the solver source.
+std::vector<std::string> simListAttributes(const std::string& domain);
+// Same, for per-object surface (MSF) attributes: temperature, char, melt,
+// moisture, fuel_remaining, mass_loss. N5.
+std::vector<std::string> simListSurfaceAttributes(const std::string& object);
+Result simGraphClear();
+Result simGraphAddNode(const std::string& type_id, uint32_t& out_id);
+Result simGraphSetNodeText(uint32_t node_id, const std::string& key,
+                           const std::string& value);
+Result simGraphSetNodeValue(uint32_t node_id, const std::string& key, float value);
+Result simGraphConnect(uint32_t from_node, int from_pin,
+                       uint32_t to_node, int to_pin);
+SimGraphEvaluation simGraphEvaluate();
+std::vector<SimNodeInfo> simGraphNodes();
+
+// N3 — applying the graph as an OVERRIDE layer.
+//
+// ★★★ Overrides are reversible by construction: the authored value is captured
+// before the first write of a key and restored by simGraphClearOverrides().
+// A graph never mutates authored data (plan B.5) — solver configuration is
+// runtime state and has to stay resettable to frame 0.
+struct SimApplyResult {
+    bool     ok = false;
+    uint32_t applied = 0;
+    uint32_t overrides_held = 0;     // keys whose authored value we are holding
+    // Parameters that need a simulation restart, when the caller did not allow
+    // one. ★ Refused and reported, never applied quietly: a graph edit must not
+    // discard a running simulation on its own.
+    std::vector<std::string> refused;
+    std::vector<std::string> failed;
+};
+SimApplyResult simGraphApply(bool allow_restart);
+Result   simGraphClearOverrides();   // restores every captured authored value
+uint32_t simGraphOverrideCount();
+
+// N4 — couplings, and the reason this phase exists.
+//
+// ★★★ The graph DECLARES couplings; stepGridDomains decides the order they
+// actually run in. Both are reported here so they can be compared. A graph that
+// showed a chosen order while the solver ran a different one would look like
+// control and be a lie — and "producer ≠ consumer" is already one of this
+// repository's recurring failure classes.
+struct SimCouplingEntry {
+    std::string coupling;        // "fluid_to_gas", "gas_to_fluid_ignition", ...
+    std::string producer;        // actual entries only: which system wrote
+    std::string consumer;        // actual entries only: which system read
+    std::string source_domain;
+    std::string target_domain;
+    bool        active = false;
+    uint32_t    source_node = 0; // declared entries only
+};
+struct SimCouplingReport {
+    std::vector<SimCouplingEntry> declared;   // graph order
+    std::vector<SimCouplingEntry> actual;     // solver execution order
+    // ★ false means the solver was never asked — no particle system exists. An
+    // empty `actual` with traced == true means "stepped, and nothing coupled",
+    // which is a measurement. Without this flag the two are indistinguishable.
+    bool traced = false;
+    bool order_matches = true;
+    std::vector<std::string> declared_not_running;
+    std::vector<std::string> running_not_declared;
+};
+SimCouplingReport simGraphCouplings();
+
+// N6 — the bake, and the state a script needs to reason about it.
+//
+// ★★ "Bake" in this application is not a hidden background job: playing the
+// timeline caches each frame in RAM, and bakeSimulation() writes a deterministic
+// disk cache for a frame range. Both already exist; what was missing was any way
+// to SEE the result from outside.
+//
+// ★★★ Three states look identical from the outside and are not: nothing baked
+// yet, a bake running, and a bake INVALIDATED because the authored config
+// changed. The last is the one that silently makes a render use stale physics,
+// and it is invisible without the signature.
+struct SimCacheStatus {
+    bool     valid = false;          // a disk bake is bound and usable
+    bool     baking = false;         // a cooperative bake is running right now
+    std::string cache_dir;           // empty when the bake is RAM-only
+    uint32_t ram_frames = 0;         // frames held in the timeline scrub cache
+    int      first_frame = 0;
+    int      last_frame = 0;
+    bool     has_range = false;      // false when ram_frames == 0
+    uint64_t config_signature = 0;   // authored config hash the cache was built from
+};
+Result simCacheStatus(SimCacheStatus& out);
+// Blocking on purpose: baking is an explicit action, and the caller asked for
+// it. The interactive UI uses the cooperative begin/tick path instead.
+Result simBake(const std::string& cache_dir, int start_frame, int end_frame,
+               float fps);
+Result simClearCache();
 
 // ---------------------------------------------------------------------------
 // Project and timeline. Project loading is synchronous and clears selection +
@@ -1152,10 +1486,27 @@ struct FluidDomainInfo {
     Vec3 domain_max;
     float voxel_size = 0.05f;
     size_t particle_count = 0;
+    // ★★★ particle_count is only a MEASUREMENT when this is true.
+    //
+    // Measured 2026-08-16: fluid.get reported particle_count = 0 for a domain
+    // that fluid.list_domains reported as 9963 at the same instant. get resolves
+    // through the ACTIVE particle system only, list walks every system; when the
+    // lookup missed, get fell back to the legacy FluidObject mirror, which
+    // deliberately owns no stepped particle copy and is therefore always empty.
+    // Zero read as "the domain is empty" instead of "I could not measure it".
+    //
+    // A script watching a burn would have concluded there was nothing left to
+    // burn — a plausible, completely wrong observation, which is the worst kind.
+    // Callers must check this before acting on particle_count.
+    bool live_state = false;
     std::string render_mode; // "volume", "surface", "particles"
     std::string backend;     // "cpu", "gpu", "vulkan", "cpu_sparse"
     std::string boundary;    // "closed", "open", "periodic"
-    std::string preset;      // "water","oil","mud","honey","lava","sand","chocolate","custom"
+    // "water","oil","mud","honey","lava","chocolate" (liquid) |
+    // "sand","wet_sand","gravel","cohesive_soil" (granular) | "custom".
+    // Accepted on write as well as reported on read, "custom" included, so a
+    // get -> set round trip cannot fail on a value this API produced.
+    std::string preset;
     // Kinematic viscosity in m²/s. Renamed from the old unitless `viscosity`
     // together with the solver field it mirrors, so a script written against the
     // old 0..200 dial fails loudly on the missing key instead of quietly asking
@@ -1175,7 +1526,13 @@ struct FluidDomainInfo {
     float granular_damage_rate = 6.0f;
     float granular_healing_rate = 0.0f;
     bool  granular_rebonding = false;
-    int   granular_max_solver_substeps = 16;
+    int   granular_max_solver_substeps = 32;
+    // Thermal/burn softening of the skeleton. 0 K disables it.
+    float granular_softening_temperature = 0.0f;
+    float granular_softening_range = 40.0f;
+    float granular_residual_strength = 0.05f;
+    float granular_tack_peak = 1.0f;
+    float granular_thermal_conductivity = 0.0f;
     // Material shading the SurfaceSDF isosurface; empty = built-in dielectric.
     std::string surface_material;
     // Explicit material shading splat geometry. Empty means scene default for
@@ -1332,6 +1689,22 @@ struct FluidDomainInfo {
     int granular_required_substeps = 1;
     int granular_solver_substeps = 1;
     bool granular_stiffness_capped = false;
+    // Which limit sized the subcycle, and whether the shader had to clamp the
+    // deformation-gradient increment because it was not granted.
+    int granular_wave_substeps = 1;
+    int granular_strain_substeps = 1;
+    float granular_strain_rate = 0.0f;
+    uint64_t granular_strain_limited_particles = 0;
+    uint64_t granular_compaction_capped_particles = 0;
+    // Melt readout: how far the weakest particle has softened, and how many
+    // have softened at all. below_load is judged on the SOFTENED stiffness.
+    float granular_min_softening = 1.0f;
+    uint64_t granular_softened_particles = 0;
+    // Material validity: the load this domain puts on its own bottom layer and
+    // the stiffness the small-strain model needs to carry it.
+    float granular_overburden_pressure = 0.0f;
+    float granular_young_modulus_for_load = 0.0f;
+    bool granular_stiffness_below_load = false;
     // Domain-wide solid-phase coupling: master switch, and how full of solid
     // parcels a cell must be to block flow (fraction of the seed density).
     bool  solid_phase_enabled = true;
@@ -1625,7 +1998,12 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const float* granular_damage_rate = nullptr,
                          const float* granular_healing_rate = nullptr,
                          const bool* granular_rebonding = nullptr,
-                         const int* granular_max_solver_substeps = nullptr);
+                         const int* granular_max_solver_substeps = nullptr,
+                         const float* granular_softening_temperature = nullptr,
+                         const float* granular_softening_range = nullptr,
+                         const float* granular_residual_strength = nullptr,
+                         const float* granular_tack_peak = nullptr,
+                         const float* granular_thermal_conductivity = nullptr);
 // Bind a material to a SUBSTANCE within one fluid domain. An empty
 // `material_name` clears the binding; the literal "dielectric" binds the
 // built-in refractive liquid for that substance specifically, which is how one

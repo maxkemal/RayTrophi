@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -460,6 +460,10 @@
     <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h" />
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp" />
     <ClInclude Include="source\include\UI\HierarchyLiveObjectView.h" />
+    <ClInclude Include="source\include\UI\TemplateHubUI.h" />
+    <ClInclude Include="source\include\Template\StartupPreferences.h" />
+    <ClInclude Include="source\include\Template\PathUtils.h" />
+    <ClInclude Include="source\include\Template\UserTemplateManager.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc" />
@@ -1363,6 +1367,9 @@
     <ClCompile Include="source\src\Template\TemplateRecipeStage.cpp" />
     <ClCompile Include="source\src\Template\TemplateSession.cpp" />
     <ClCompile Include="source\src\Template\TemplateUiStateAdapter.cpp" />
+    <ClCompile Include="source\src\Template\StartupPreferences.cpp" />
+    <ClCompile Include="source\src\Template\UserTemplateManager.cpp" />
+    <ClCompile Include="source\src\UI\TemplateHubUI.cpp" />
     <ClCompile Include="source\src\Core\RenderStateManager.cpp" />
     <ClCompile Include="source\src\Render\Renderer.cpp" />
     <ClCompile Include="source\src\Physics\RiverManager.cpp" />
@@ -1399,6 +1406,8 @@
     <ClCompile Include="source\src\Api\RtApiParticle.cpp" />
     <ClCompile Include="source\src\Api\RtApiAnim.cpp" />
     <ClCompile Include="source\src\Api\RtApiTerrain.cpp" />
+    <ClCompile Include="source\src\Api\RtApiSimNodes.cpp" />
+    <ClCompile Include="source\src\Api\RtApiViewport.cpp" />
     <ClCompile Include="source\src\Api\RtApiHair.cpp" />
     <ClCompile Include="source\src\Api\RtApiPaint.cpp" />
     <ClCompile Include="source\src\Api\RtApiSculpt.cpp" />
@@ -1445,6 +1454,8 @@
     <ClCompile Include="source\src\UI\scene_ui_lights.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_materials.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_modifiers.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_simnodes.cpp" />
+    <ClCompile Include="source\src\Api\RtApiUiState.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_procamera.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_scatter.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_selection.cpp" />
@@ -1516,6 +1527,7 @@
     <ClCompile Include="source\src\Scene\World.cpp" />
     <ClCompile Include="source\src\Scene\MaterialManager.cpp" />
     <ClCompile Include="source\src\Scene\MaterialNodesV2.cpp" />
+    <ClCompile Include="source\src\Scene\SimulationNodes.cpp" />
     <ClCompile Include="external\imgui\imgui.cpp" />
     <ClCompile Include="external\imgui\imgui_draw.cpp" />
     <ClCompile Include="external\imgui\imgui_impl_sdl2.cpp" />

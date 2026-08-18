@@ -2,6 +2,12 @@
 
 > **Durum:** REFERANS — Uygulandi ve dogrulandi; katmanlama sozlesmesinin kaydi.
 
+> ★ Bu belge katmanlama **sozlesmesini** anlatir. Ayni konfigurasyonun uzun sure
+> acik kalan arizasi — cakisik kutularda isinin ilerleyememesi, siyah bant ve
+> maliyet patlamasi — ayri bir postmortemde:
+> [VOLUME_BOX_REENTRY_POSTMORTEM.md](VOLUME_BOX_REENTRY_POSTMORTEM.md).
+> Buradaki hakem (arbiter) mantigi dogru calisirken de o ariza olusabiliyordu.
+
 ## Status
 
 Implemented and validated for coincident live gas and Fluid `SurfaceSDF`

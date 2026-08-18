@@ -129,6 +129,66 @@ void buildGeneralScene(TemplateRecipeStage& result) {
     result.light = std::move(light);
 }
 
+void buildProductLookdev(TemplateRecipeStage& result) {
+    result.mesh = stageCube();
+    result.material = stageDefaultCubeMaterial();
+    result.camera = stageCamera(true);
+    auto light = std::make_shared<PointLight>(Vec3(3, 6, 4), Vec3(1, 0.95f, 0.9f), 0.5f);
+    light->nodeName = "Studio_Light";
+    light->intensity = 150.0f;
+    result.light = std::move(light);
+}
+
+void buildPortraitGroom(TemplateRecipeStage& result) {
+    result.mesh = stageCube();
+    result.material = stageDefaultCubeMaterial();
+    result.camera = stageCamera(true);
+    auto light = std::make_shared<PointLight>(Vec3(2, 4, 3), Vec3(1, 1, 1), 0.2f);
+    light->nodeName = "Groom_Key_Light";
+    light->intensity = 120.0f;
+    result.light = std::move(light);
+}
+
+void buildCharacterPaint(TemplateRecipeStage& result) {
+    result.mesh = stageCube();
+    result.material = stageDefaultCubeMaterial();
+    result.camera = stageCamera(true);
+    auto light = std::make_shared<PointLight>(Vec3(3, 4, 5), Vec3(1, 1, 1), 0.2f);
+    light->nodeName = "Paint_Key_Light";
+    light->intensity = 100.0f;
+    result.light = std::move(light);
+}
+
+void buildTerrainEnvironment(TemplateRecipeStage& result) {
+    result.mesh = stageCube();
+    result.material = stageDefaultCubeMaterial();
+    result.camera = stageCamera(true);
+    auto light = std::make_shared<PointLight>(Vec3(10, 15, 10), Vec3(1.0f, 0.95f, 0.85f), 1.0f);
+    light->nodeName = "Sun_Light";
+    light->intensity = 200.0f;
+    result.light = std::move(light);
+}
+
+void buildVfxGasSmoke(TemplateRecipeStage& result) {
+    result.mesh = stageCube();
+    result.material = stageDefaultCubeMaterial();
+    result.camera = stageCamera(true);
+    auto light = std::make_shared<PointLight>(Vec3(4, 6, 4), Vec3(0.9f, 0.95f, 1.0f), 0.3f);
+    light->nodeName = "Gas_Volume_Light";
+    light->intensity = 120.0f;
+    result.light = std::move(light);
+}
+
+void buildVfxFluidStudio(TemplateRecipeStage& result) {
+    result.mesh = stageCube();
+    result.material = stageDefaultCubeMaterial();
+    result.camera = stageCamera(true);
+    auto light = std::make_shared<PointLight>(Vec3(4, 6, 5), Vec3(1.0f, 1.0f, 1.0f), 0.3f);
+    light->nodeName = "Fluid_Key_Light";
+    light->intensity = 130.0f;
+    result.light = std::move(light);
+}
+
 struct PresetBuilder {
     const char* name;
     void (*build)(TemplateRecipeStage&);
@@ -140,6 +200,12 @@ struct PresetBuilder {
 const PresetBuilder kPresetBuilders[] = {
     {"empty", &buildEmpty},
     {"general_scene", &buildGeneralScene},
+    {"product_lookdev", &buildProductLookdev},
+    {"portrait_groom", &buildPortraitGroom},
+    {"character_paint", &buildCharacterPaint},
+    {"terrain_environment", &buildTerrainEnvironment},
+    {"vfx_gas_smoke", &buildVfxGasSmoke},
+    {"vfx_fluid_studio", &buildVfxFluidStudio},
 };
 
 const PresetBuilder* findPresetBuilder(const std::string& preset) {

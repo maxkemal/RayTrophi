@@ -3547,6 +3547,47 @@ struct SceneData {
         h = mix(h, fp.variational_solids ? 1ull : 0ull);
         h = mix(h, fp.ghost_fluid_surface ? 1ull : 0ull);
 
+        // ★★★ GRANULAR MATERIAL. Every one of these changes the constitutive
+        // law, so a cache baked at one friction angle must never replay as
+        // another. Their absence here is why editing Young modulus or cohesion
+        // left the old bake on screen and forced a manual Reset + Seed: the
+        // signature never moved, so the rewind never fired and the panel looked
+        // like it did nothing.
+        //
+        // ★ These are AUTHORED values, safe to hash. sanitizeGranularMaterial
+        // clamps them at edit time (deterministically, from the authored value),
+        // and unlike voxel_size or particles_per_cell above, the runtime never
+        // writes them back per frame -- ParticleSimulation takes a COPY of
+        // fluid_params before the substep loop rescales its damping fields, so
+        // that rewrite cannot reach the domain and re-key the cache every tick.
+        h = mix(h, fp.granular_enabled ? 1ull : 0ull);
+        h = mix(h, fb(fp.granular_friction_angle_degrees));
+        h = mix(h, fb(fp.granular_cohesion));
+        h = mix(h, fb(fp.granular_dilatancy_degrees));
+        h = mix(h, fb(fp.granular_young_modulus));
+        h = mix(h, fb(fp.granular_poisson_ratio));
+        h = mix(h, fb(fp.granular_tensile_cutoff));
+        h = mix(h, fb(fp.granular_hardening));
+        h = mix(h, fb(fp.granular_fracture_strain));
+        h = mix(h, fb(fp.granular_damage_rate));
+        h = mix(h, fb(fp.granular_healing_rate));
+        h = mix(h, fp.granular_rebonding ? 1ull : 0ull);
+        // The substep ceiling is not cosmetic: it decides how much of the
+        // authored stiffness the solver can actually deliver (measured -- at
+        // h = 0.05 m and 24 fps, E = 2e5 Pa needs 27 substeps, so a ceiling of
+        // 16 quietly ran the material at ~72 kPa). Two bakes at different
+        // ceilings are two different simulations.
+        h = mix(h, static_cast<uint64_t>(fp.granular_max_solver_substeps));
+        // Softening changes the material's whole history, so a bake made with
+        // it off must not replay as one made with it on. These are AUTHORED;
+        // the per-particle multiplier they drive lives on the particles and is
+        // deliberately never written back here (see APICSolverParams).
+        h = mix(h, fb(fp.granular_softening_temperature));
+        h = mix(h, fb(fp.granular_softening_range));
+        h = mix(h, fb(fp.granular_residual_strength));
+        h = mix(h, fb(fp.granular_tack_peak));
+        h = mix(h, fb(fp.granular_thermal_conductivity));
+
         // Authored initial state. A seed box or fill level that does not re-key
         // the cache means the tank the user just resized replays at its old
         // level -- the setting looks like it did nothing.
@@ -3882,6 +3923,32 @@ struct SceneData {
         for (const auto& s : particle_systems) {
             if (!s.runtime) { h = mix(h, 0); continue; }
             h = mix(h, s.runtime->gridDomains().size());
+            // ★★★ The DISCRETISATION the simulation lives in. Only the domain
+            // COUNT used to be hashed here, so changing a domain's voxel size or
+            // bounds left the signature identical: a bake survived a grid
+            // resolution change and kept serving frames solved on a different
+            // grid, while still reporting itself valid. Measured 2026-08-17 with
+            // the N6 cache node — that is stale physics reaching a render with
+            // nothing to report it.
+            //
+            // ★★ AUTHORED fields only. Nothing listed here mutates per step;
+            // hashing a derived or live field would drop the cache every frame
+            // (the same thrash trap the emitter hash below avoids by skipping
+            // `accumulator`).
+            for (const auto& gd : s.runtime->gridDomains()) {
+                for (char ch : gd.name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, static_cast<uint64_t>(gd.type));
+                h = mix(h, static_cast<uint64_t>(gd.backend));
+                h = mix(h, static_cast<uint64_t>(gd.boundary_mode));
+                h = mix(h, static_cast<uint64_t>(gd.source_mode));
+                h = mix(h, gd.enabled ? 1ull : 0ull);
+                h = mix(h, qf(gd.bounds_min.x)); h = mix(h, qf(gd.bounds_min.y)); h = mix(h, qf(gd.bounds_min.z));
+                h = mix(h, qf(gd.bounds_max.x)); h = mix(h, qf(gd.bounds_max.y)); h = mix(h, qf(gd.bounds_max.z));
+                h = mix(h, static_cast<uint64_t>(gd.resolution_x));
+                h = mix(h, static_cast<uint64_t>(gd.resolution_y));
+                h = mix(h, static_cast<uint64_t>(gd.resolution_z));
+                h = mix(h, qf(gd.voxel_size));
+            }
             h = mix(h, s.runtime->emitters().size());
             // Emitter config (rate/velocity/spread/lifetime/shape/etc.) must
             // invalidate the bake — editing it otherwise replays the stale RAM
@@ -4284,6 +4351,23 @@ struct SceneData {
 
     bool hasSimFrame(int frame) const {
         return sim_frame_cache_.find(frame) != sim_frame_cache_.end();
+    }
+
+    // ── Bake / cache state, read-only (node layer Faz N6) ────────────────────
+    // ★ A script driving the simulation has to be able to tell three states
+    // apart that all look like "nothing is cached": nothing baked yet, a bake in
+    // progress, and a bake INVALIDATED because the authored config changed. The
+    // last one is the interesting one and it is invisible without the signature.
+    bool simCacheValid() const { return sim_cache_valid_; }
+    const std::string& simCacheDir() const { return sim_cache_dir_; }
+    bool simBakeActive() const { return sim_bake_active_; }
+    uint64_t simConfigSignature() const { return last_sim_config_sig_; }
+    std::size_t simFrameCacheCount() const { return sim_frame_cache_.size(); }
+    bool simFrameCacheRange(int& out_first, int& out_last) const {
+        if (sim_frame_cache_.empty()) return false;
+        out_first = sim_frame_cache_.begin()->first;
+        out_last = sim_frame_cache_.rbegin()->first;
+        return true;
     }
 
     int nearestCachedSimFrameAtOrBelow(int frame) const {
