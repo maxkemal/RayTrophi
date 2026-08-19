@@ -23,6 +23,15 @@ Her yeni yetenek için gereken **dört** dokunuş:
 | IPC dispatch | `source/src/Api/RtIpc*.cpp` |
 | Python binding | `source/src/Api/RtPython*.cpp` |
 | Yetki (capability) | `source/src/Api/RtIpcSecurity.cpp` |
+| Ajan tarifi | `python scripts/gen_ipc_descriptors.py` + `scripts/ipc_descriptor_overlay.json` |
+
+★ Beşinci satır 2026-08-19'da eklendi. `RtIpcMethodDescriptors.cpp` **üretilmiş
+bir dosyadır, elle düzenleme**: parametreler dispatch kodundan okunur, özet ve
+notlar overlay JSON'undan gelir. Dispatch'i değiştirdiysen üreticiyi çalıştır
+(audit script'i bayat tabloyu FAIL eder); yeni metoda overlay'de tek satır özet
+yaz, yoksa `agent.discover` onu `documented_coverage`'da eksik gösterir.
+Gerekçe: elle tutulan 300 satırlık katalog denendi ve 299'u boş çıktı —
+**ölçü aleti doluluk raporluyordu.**
 
 Üçü yapılıp biri unutulursa hata almazsın: `authorize()` **fail-closed**
 çalışır, yani metot sessizce reddedilir. `scripts/audit_ipc_capabilities.py`

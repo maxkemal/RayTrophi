@@ -1496,13 +1496,19 @@ Result simGraphSetNodeText(const std::string& scope_text, const std::string& own
         if (key == "cache_dir") { cache->cacheDir = value; node->dirty = true; return Result::success(); }
     }
     if (auto* emitter = dynamic_cast<NodeSystem::Sim::EmitterNode*>(node)) {
-        if (key == "emitter") { emitter->emitterName = value; node->dirty = true; return Result::success(); }
+        if (key == "emitter") {
+            emitter->emitterName = value;
+            emitter->refreshTitle();   // the canvas names the source it drives
+            node->dirty = true;
+            return Result::success();
+        }
         if (key == "fluid_substance") {
             // ★ Setting the substance turns the override ON. An empty string is
             // a legitimate substance value, so emptiness cannot mean "unset" —
             // use fluid_substance.use = 0 to stop overriding it.
             emitter->substance = value;
             emitter->useSubstance = true;
+            emitter->refreshTitle();
             node->dirty = true;
             return Result::success();
         }
@@ -1543,6 +1549,7 @@ Result simGraphSetNodeValue(const std::string& scope_text, const std::string& ow
     if (auto* emitter = dynamic_cast<NodeSystem::Sim::EmitterNode*>(node)) {
         if (key == "fluid_substance.use") {
             emitter->useSubstance = value > 0.5f;
+            emitter->refreshTitle();
             node->dirty = true;
             return Result::success();
         }
@@ -1554,12 +1561,14 @@ Result simGraphSetNodeValue(const std::string& scope_text, const std::string& ow
             if (!f) return Result::fail("node " + std::to_string(node_id) +
                                         " has no parameter '" + base + "'");
             f->use = value > 0.5f;
+            emitter->refreshTitle();
             node->dirty = true;
             return Result::success();
         }
         if (auto* f = emitter->find(key)) {
             f->value = value;
             f->use = true;
+            emitter->refreshTitle();
             node->dirty = true;
             return Result::success();
         }
@@ -1578,12 +1587,14 @@ Result simGraphSetNodeValue(const std::string& scope_text, const std::string& ow
             if (!f) return Result::fail("node " + std::to_string(node_id) +
                                         " has no parameter '" + base + "'");
             f->use = value > 0.5f;
+            aspect->refreshTitle();
             node->dirty = true;
             return Result::success();
         }
         if (auto* f = aspect->find(key)) {
             f->value = value;
             f->use = true;
+            aspect->refreshTitle();
             node->dirty = true;
             return Result::success();
         }

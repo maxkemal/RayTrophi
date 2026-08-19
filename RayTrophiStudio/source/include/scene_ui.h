@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -37,6 +37,7 @@ class Hittable;
 
 #include "TerrainNodesV2.h" // Terrain node graph V2 system
 #include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
+#include "scene_ui_agent_chat.hpp"
 #include "scene_ui_materialnodes.hpp" // Material node editor UI (MaterialNodesV2 Faz 1)
 #include "GeometryNodesV2.h" // Faz 8a Geo-DAG node graph system
 // Forward-declared rather than included: only the simulation node panel needs
@@ -88,6 +89,7 @@ struct UIContext {
     ColorProcessor& color_processor;
     RenderSettings& render_settings;
     SceneSelection& selection;  // Scene selection manager
+    class SceneUI* scene_ui_ptr = nullptr; // Optional pointer back to UI host
    
 
     int& sample_count;                // dynamic counter (not in settings)
@@ -192,6 +194,15 @@ public:
     // Empty owner with scope "domain"/"object" means "nothing picked yet".
     std::string sim_graph_scope = "domain";
     std::string sim_graph_owner;
+    // ★★ The scene selection as of the last frame the Nodes panel drew.
+    //
+    // The panel FOLLOWS a selection CHANGE rather than mirroring the selection
+    // every frame. Mirroring would make the owner picker useless: the moment a
+    // user picked a different owner there, the next frame would drag it back to
+    // whatever is selected in the viewport, and the control would look broken.
+    // Comparing against the last seen value means the viewport wins when it
+    // changes, and the picker wins in between.
+    std::string sim_graph_last_scene_selection;
     bool show_node_editor = false;    // the Nodes window (simulation occupant)
     // Same shortcut-guard as geometry_graph_focused: while the canvas has focus
     // Delete belongs to the node selection, not to the scene object behind it.
@@ -211,6 +222,11 @@ public:
 
     // Hair/Fur System
     Hair::HairUI hairUI;               // Hair editing panel
+    
+    // Agent Chat UI
+    rtui::AgentChatPanel agentChatUI;
+    bool show_agent_chat = false;
+    
     // Persisted open/closed state for terrain subsections
     bool terrain_layer_open[4] = { true, true, true, true };
     bool foliage_section_open = true;

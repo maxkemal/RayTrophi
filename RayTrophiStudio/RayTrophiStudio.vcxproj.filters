@@ -72,6 +72,18 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="source\src\Api\RtIpcAgentDiscovery.h">
+      <Filter>Header Files\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcWorkflowRecipes.h">
+      <Filter>Header Files\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcMethodRegistry.h">
+      <Filter>Header Files\Api</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtPythonAgent.h">
+      <Filter>Header Files\Api</Filter>
+    </ClInclude>
     <ClInclude Include="resource.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -274,6 +286,9 @@
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClInclude>
     <ClInclude Include="source\include\scene_ui.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\UI\scene_ui_agent_chat.hpp">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\scene_data.h">
@@ -622,6 +637,18 @@
     </CudaCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="source\src\Api\RtIpcAgentDiscovery.cpp">
+      <Filter>Source Files\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcWorkflowRecipes.cpp">
+      <Filter>Source Files\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMethodDescriptors.cpp">
+      <Filter>Source Files\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMethodRegistry.cpp">
+      <Filter>Source Files\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\GasSimulator.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
@@ -761,6 +788,9 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtPythonTemplates.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonAgent.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtIpcTemplates.cpp">
@@ -917,6 +947,9 @@
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_agent_chat.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_animation.cpp">

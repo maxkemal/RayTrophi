@@ -282,6 +282,10 @@
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="source\src\Api\RtIpcAgentDiscovery.h" />
+    <ClInclude Include="source\src\Api\RtPythonAgent.h" />
+    <ClInclude Include="source\src\Api\RtIpcWorkflowRecipes.h" />
+    <ClInclude Include="source\src\Api\RtIpcMethodRegistry.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="source\src\Physics\Jolt\JoltSmokeTest.h" />
     <ClInclude Include="source\src\Physics\Jolt\JoltWorld.h" />
@@ -331,6 +335,7 @@
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
+    <ClInclude Include="source\src\UI\scene_ui_agent_chat.hpp" />
     <ClInclude Include="source\include\Viewport\ViewportSceneSync.h" />
     <ClInclude Include="source\include\stb_image_write.h" />
     <ClInclude Include="source\include\ui_modern.h" />
@@ -1269,6 +1274,10 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="source\src\Api\RtIpcAgentDiscovery.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcWorkflowRecipes.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcMethodDescriptors.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcMethodRegistry.cpp" />
     <ClCompile Include="external\miniz.c" />
     <ClCompile Include="external\miniz_tdef.c" />
     <ClCompile Include="external\miniz_tinfl.c" />
@@ -1402,6 +1411,9 @@
     <ClCompile Include="source\src\Api\RtPythonTemplates.cpp">
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonAgent.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiForceField.cpp" />
     <ClCompile Include="source\src\Api\RtApiParticle.cpp" />
     <ClCompile Include="source\src\Api\RtApiAnim.cpp" />
@@ -1447,6 +1459,7 @@
     <ClCompile Include="source\src\Stylize\StylizePostProcess.cpp" />
     <ClCompile Include="source\src\Stylize\StylizeModeState.cpp" />
     <ClCompile Include="source\src\UI\scene_ui.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_agent_chat.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_animation.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_camera.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_gizmos.cpp" />

@@ -1111,6 +1111,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             }
             ImGui::MenuItem("Python Console", nullptr, &show_python_console);
             ImGui::MenuItem("Remote IPC Control", nullptr, &show_remote_ipc_panel);
+            ImGui::MenuItem("Agent Chat", nullptr, &show_agent_chat);
             ImGui::Separator();
             // --- Dockable layout (modern movable/tabbable panels) ---
             if (ImGui::MenuItem("Dockable Layout", nullptr, &docking_enabled)) {

@@ -1063,6 +1063,7 @@ UIContext ui_ctx{
    color_processor,
    render_settings,
    scene_selection,  // Add selection reference
+   &ui,              // scene_ui_ptr
    sample_count,
    start_render,
    active_model_path,
@@ -2305,6 +2306,18 @@ int main(int argc, char* argv[]) try {
     startupDiagLog("[Startup] ImGui::CreateContext done");
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    
+    // --- Load UI Font with Extended Latin Support (Turkish) ---
+    static const ImWchar ext_ranges[] = {
+        0x0020, 0x00FF, // Basic Latin + Latin Supplement
+        0x0100, 0x017F, // Latin Extended-A (includes Turkish characters ş, ğ, ı, etc.)
+        0
+    };
+    ImFontConfig font_cfg;
+    font_cfg.OversampleH = 2;
+    font_cfg.OversampleV = 2;
+    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f, &font_cfg, ext_ranges);
+    // ----------------------------------------------------------
     // Modern dockable panel layout. Internal docking only — the SDLRenderer2 backend
     // does not support multi-viewport (OS-detached) windows, so we do NOT set
     // ImGuiConfigFlags_ViewportsEnable here.

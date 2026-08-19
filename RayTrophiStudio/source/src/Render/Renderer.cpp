@@ -1,4 +1,4 @@
-﻿#include "renderer.h"
+#include "renderer.h"
 #include <SDL_image.h>
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
@@ -8826,12 +8826,14 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                     int g = static_cast<int>(255 * std::clamp(toSRGB_fast(std::max(0.0f, exposed.y)), 0.0f, 1.0f));
                     int b = static_cast<int>(255 * std::clamp(toSRGB_fast(std::max(0.0f, exposed.z)), 0.0f, 1.0f));
 
-                    Uint32* pixels_ptr = static_cast<Uint32*>(surface->pixels);
-                    int screen_idx = (surface->h - 1 - j) * (surface->pitch / 4) + i;
-                    Uint8 old_r = 0, old_g = 0, old_b = 0, old_a = 255;
-                    SDL_GetRGBA(pixels_ptr[screen_idx], surface->format,
-                                &old_r, &old_g, &old_b, &old_a);
-                    pixels_ptr[screen_idx] = SDL_MapRGBA(surface->format, r, g, b, old_a);
+                    if (surface) {
+                        Uint32* pixels_ptr = static_cast<Uint32*>(surface->pixels);
+                        int screen_idx = (surface->h - 1 - j) * (surface->pitch / 4) + i;
+                        Uint8 old_r = 0, old_g = 0, old_b = 0, old_a = 255;
+                        SDL_GetRGBA(pixels_ptr[screen_idx], surface->format,
+                                    &old_r, &old_g, &old_b, &old_a);
+                        pixels_ptr[screen_idx] = SDL_MapRGBA(surface->format, r, g, b, old_a);
+                    }
 
                     continue;  // Skip to next pixel - FAST PATH!
                 }
@@ -9065,21 +9067,23 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             int g = static_cast<int>(255 * std::clamp(toSRGB(std::max(0.0f, exposed_color.y)), 0.0f, 1.0f));
             int b = static_cast<int>(255 * std::clamp(toSRGB(std::max(0.0f, exposed_color.z)), 0.0f, 1.0f));
 
-            Uint32* pixels = static_cast<Uint32*>(surface->pixels);
-            int screen_index = (surface->h - 1 - j) * (surface->pitch / 4) + i;
-            Uint8 old_r = 0, old_g = 0, old_b = 0, old_a = 0;
-            SDL_GetRGBA(pixels[screen_index], surface->format,
-                        &old_r, &old_g, &old_b, &old_a);
-            const float batch_coverage = static_cast<float>(primary_hit_count) /
-                static_cast<float>((std::max)(samples_this_pass, 1));
-            const float previous_coverage = static_cast<float>(old_a) / 255.0f;
-            const float coverage = prev_samples > 0.0f
-                ? (previous_coverage * prev_samples + batch_coverage * samples_this_pass) /
-                    new_total_samples
-                : batch_coverage;
-            const Uint8 alpha = static_cast<Uint8>(std::lround(
-                std::clamp(coverage, 0.0f, 1.0f) * 255.0f));
-            pixels[screen_index] = SDL_MapRGBA(surface->format, r, g, b, alpha);
+            if (surface) {
+                Uint32* pixels = static_cast<Uint32*>(surface->pixels);
+                int screen_index = (surface->h - 1 - j) * (surface->pitch / 4) + i;
+                Uint8 old_r = 0, old_g = 0, old_b = 0, old_a = 0;
+                SDL_GetRGBA(pixels[screen_index], surface->format,
+                            &old_r, &old_g, &old_b, &old_a);
+                const float batch_coverage = static_cast<float>(primary_hit_count) /
+                    static_cast<float>((std::max)(samples_this_pass, 1));
+                const float previous_coverage = static_cast<float>(old_a) / 255.0f;
+                const float coverage = prev_samples > 0.0f
+                    ? (previous_coverage * prev_samples + batch_coverage * samples_this_pass) /
+                        new_total_samples
+                    : batch_coverage;
+                const Uint8 alpha = static_cast<Uint8>(std::lround(
+                    std::clamp(coverage, 0.0f, 1.0f) * 255.0f));
+                pixels[screen_index] = SDL_MapRGBA(surface->format, r, g, b, alpha);
+            }
         }
         };
 

@@ -255,6 +255,21 @@ public:
         emit(std::move(cmd));
         return PinValue{ domainName };
     }
+
+    // ★★★ The node's whole job is to NAME a domain, so the name has to be on
+    // the canvas. Without it every Domain node in every graph looks identical
+    // and the canvas cannot answer "which domain is this graph about?" —
+    // reported by the user with two domains open and no way to tell them apart.
+    bool wantsInlineContent() const override { return true; }
+    void drawContent() override {
+        if (domainName.empty()) {
+            // ★ Not a styling choice: an unnamed Domain node resolves to
+            // nothing and every node downstream of it silently does nothing.
+            ImGui::TextDisabled("no domain picked");
+        } else {
+            ImGui::TextUnformatted(domainName.c_str());
+        }
+    }
 };
 
 // ★★ A Field is one of TWO things, and the distinction is representation, not
@@ -424,6 +439,61 @@ public:
         return nullptr;
     }
 
+    // ★★★ The canvas must say what this node DOES, not just what type it is.
+    // A row of identical boxes labelled "Solver" forces a click to learn whether
+    // any of them overrides anything — which makes the graph decorative and
+    // pushes the real state into a side panel. The title carries the summary
+    // because the node editor draws no body content.
+    //
+    // ★★ "(nothing)" is the important case: with every field opt-in, a node that
+    // overrides nothing looks exactly like one that overrides everything. That
+    // is the single most confusing state this model can produce, so it is the
+    // one the title states outright.
+    // Which word the title starts with. Virtual so one call site can refresh
+    // any aspect node without knowing which kind it holds.
+    virtual const char* titleWord() const { return "Parameters"; }
+    void refreshTitle() { refreshTitle(titleWord()); }
+    void refreshTitle(const char* base) {
+        size_t count = 0;
+        for (const auto& f : fields) if (f.use) ++count;
+        // ★ Short: the field NAMES and values are drawn in the body below. A
+        // title long enough to list them is truncated by the node width, which
+        // is how "Solver: kinematic_viscosity, vi..." ends up telling nobody
+        // anything.
+        metadata.displayName = std::string(base) +
+            (count == 0 ? ": nothing"
+                        : ": " + std::to_string(count) + " override" +
+                          (count == 1 ? "" : "s"));
+    }
+
+    // ★★★ THE CANVAS MUST SHOW WHAT THE NODE DOES.
+    //
+    // Reported by the user against the first cut: a row of boxes reading only
+    // "Solver", with every value hidden behind a click into a side panel. That
+    // makes the graph decorative — if the parameters only ever appear in a
+    // panel, the node is a label and the panel is the tool, and the question
+    // "why a node graph at all?" answers itself.
+    //
+    // NodeBase already supports this (wantsInlineContent/drawContent); the
+    // default is off, so no other graph family changes shape.
+    bool wantsInlineContent() const override { return true; }
+    void drawContent() override {
+        bool any = false;
+        for (const auto& f : fields) {
+            if (!f.use) continue;
+            any = true;
+            ImGui::TextDisabled("%s", f.key);
+            ImGui::SameLine();
+            // %g: a cell size of 0.05 and a sweep count of 12 both have to read
+            // correctly, and a fixed precision makes one of them a lie.
+            ImGui::Text("%g", static_cast<double>(f.value));
+        }
+        // ★★ The empty case is the one worth drawing. With every field opt-in,
+        // a node that overrides nothing is invisible otherwise — it looks
+        // exactly like one that overrides everything.
+        if (!any) ImGui::TextDisabled("no overrides");
+    }
+
     // ★★ Only a field that is actually IN USE can demand a restart. Asking the
     // user to discard a simulation for a voxel_size dial they never enabled is
     // how a restart prompt becomes noise that gets clicked through.
@@ -467,7 +537,9 @@ public:
             {"granular_friction_angle_degrees"},
             {"granular_cohesion"},
         };
+        refreshTitle("Solver");
     }
+    const char* titleWord() const override { return "Solver"; }
 };
 
 // The domain's own switches: is it running, is it drawn, how its surface and
@@ -497,7 +569,9 @@ public:
             {"pore_detail"},
             {"uvw_refresh_period"},
         };
+        refreshTitle("Domain Settings");
     }
+    const char* titleWord() const override { return "Domain Settings"; }
 };
 
 // ── EMITTER ─────────────────────────────────────────────────────────────────
@@ -510,7 +584,14 @@ public:
 // deliberately does NOT touch the binding: retargeting which domain a source
 // feeds is a different decision, made where the source is authored.
 //
-// ★★ It names an existing flow source; like every node here it creates nothing.
+// ★★★ IT TAKES A DOMAIN INPUT, and emits NOTHING when that pin is empty.
+// The first cut had no pins at all, on the reasoning that a flow source already
+// knows which domain it feeds. The result was visible on the canvas: an Emitter
+// sitting unconnected, wired to nothing, still emitting commands. A node whose
+// EFFECT does not follow its WIRING makes the graph decorative — the reader
+// sees no cause and the solver sees one — and "the panel disagrees with the
+// core" is the most expensive defect class in this repository. Connection is
+// causation here, so an unwired Emitter must do nothing.
 class EmitterNode : public SimNodeBase {
 public:
     std::string emitterName;
@@ -537,8 +618,12 @@ public:
             "radius, temperature, fuel, substance. It does not create a source "
             "and does not change which domain the source feeds -- that binding "
             "resolves an ambiguity and is authored on the source itself. Every "
-            "field is opt-in. ";
+            "field is opt-in. Wire the Domain pin: an unconnected Emitter emits "
+            "nothing, because a node that acted without being wired would make "
+            "the graph unreadable. ";
         metadata.category = "Simulation";
+        addInput("Domain", DataType::DomainRef);
+        addOutput("Domain", DataType::DomainRef);
         fields = {
             {"enabled"},
             {"radius"},
@@ -557,6 +642,40 @@ public:
         for (auto& f : fields)
             if (key == f.key) return &f;
         return nullptr;
+    }
+
+    // Same reasoning as the aspect nodes: the canvas names the flow source and
+    // says whether anything is actually overridden.
+    void refreshTitle() {
+        metadata.displayName =
+            emitterName.empty() ? "Emitter" : ("Emitter [" + emitterName + "]");
+    }
+
+    bool wantsInlineContent() const override { return true; }
+    void drawContent() override {
+        if (emitterName.empty()) {
+            // ★ Not "no overrides" — an unnamed emitter drives nothing at all,
+            // and saying the milder thing would hide the real problem.
+            ImGui::TextDisabled("no flow source picked");
+            return;
+        }
+        bool any = false;
+        for (const auto& f : fields) {
+            if (!f.use) continue;
+            any = true;
+            ImGui::TextDisabled("%s", f.key);
+            ImGui::SameLine();
+            ImGui::Text("%g", static_cast<double>(f.value));
+        }
+        if (useSubstance) {
+            any = true;
+            ImGui::TextDisabled("substance");
+            ImGui::SameLine();
+            // Empty is a legitimate substance value, so it is shown as such
+            // rather than as an absence.
+            ImGui::Text("%s", substance.empty() ? "(none)" : substance.c_str());
+        }
+        if (!any) ImGui::TextDisabled("no overrides");
     }
 
     PinValue compute(int, EvaluationContext&) override;
@@ -699,6 +818,13 @@ public:
         addOutput("Surface", DataType::SurfaceField);
     }
     PinValue compute(int, EvaluationContext&) override;
+
+    // Same reason as DomainRefNode: identity belongs on the canvas.
+    bool wantsInlineContent() const override { return true; }
+    void drawContent() override {
+        if (objectName.empty()) ImGui::TextDisabled("no object picked");
+        else ImGui::TextUnformatted(objectName.c_str());
+    }
 };
 
 // Base for the object-scoped setters. They all take a surface in, pass it out,

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          Api/RtIpc.cpp
@@ -26,7 +26,10 @@
 #include "RtIpcAudit.h"
 #include "RtIpcTransport.h"
 #include "RtIpcFracture.h"
+#include "RtIpcSecurity.h"
 #include "RtIpcTemplates.h"
+#include "RtIpcAgentDiscovery.h"
+#include "scene_ui.h"
 
 #include <algorithm>
 #include <atomic>
@@ -595,6 +598,12 @@ json dispatchMethod(const std::string& method, const json& params) {
             method, params,
             [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
             template_result)) return template_result;
+
+    json agent_result;
+    if (dispatchAgentMethod(
+            method, params,
+            [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+            agent_result)) return agent_result;
 
     auto auditEventJson = [](const rtipc_audit::Event& event) {
         return json{{"sequence", event.sequence}, {"timestamp", event.timestamp},
@@ -2624,7 +2633,24 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"ms_per_sample", s.ms_per_sample},
                 {"rendering_active", s.rendering_active},
                 {"capture_enabled", s.capture_enabled},
-                {"frame_available", s.frame_available}};
+                {"frame_available", s.frame_available},
+                {"shading", s.shading}};
+        });
+    }
+    if (method == "viewport.shading") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportShadingInfo s = rtapi::viewportShading();
+            return json{
+                {"mode", s.mode},
+                {"matcap_preset", s.matcap_preset},
+                {"interactive_available", s.interactive_available}};
+        });
+    }
+    if (method == "viewport.set_shading") {
+        std::string mode = requireString(params, "mode");
+        int matcap_preset = optionalInt(params, "matcap_preset", -1);
+        return enqueueResult([mode, matcap_preset](UIContext&) {
+            return rtapi::setViewportShading(mode, matcap_preset);
         });
     }
     if (method == "viewport.capture") {
@@ -2633,6 +2659,21 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::setViewportCapture(enabled);
         });
     }
+    if (method == "viewport.render_frames") {
+        int count = requireInt(params, "count");
+        return enqueueQuery([count](UIContext&) {
+            rtapi::ViewportRenderResult res = rtapi::renderViewportFrames(count);
+            if (!res.success) {
+                return json{{"error", res.error}};
+            }
+            return json{
+                {"samples_rendered", res.samples_rendered},
+                {"converged", res.converged},
+                {"ms_per_frame", res.ms_per_frame}
+            };
+        });
+    }
+
     if (method == "render.probe") {
         rtapi::ViewportProbeRegion region;
         region.x      = optionalInt(params, "x", 0);

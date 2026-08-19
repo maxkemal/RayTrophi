@@ -14,7 +14,12 @@ enum Capability : uint32_t {
     FilesWrite = 1u << 4u,
     Scripts    = 1u << 5u,
     Addons     = 1u << 6u,
-    Admin      = 1u << 7u
+    Admin      = 1u << 7u,
+    // Posting into the Agent Chat panel. Separate from SceneWrite on purpose:
+    // it changes nothing in the scene, but it DOES put text in front of the
+    // user under a sender name the caller chooses, so a read-only token must
+    // not carry it. agent.* is otherwise read-only.
+    AgentChat  = 1u << 8u
 };
 
 struct TokenInfo {

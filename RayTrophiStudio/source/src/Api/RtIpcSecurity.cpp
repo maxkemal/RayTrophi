@@ -211,6 +211,11 @@ bool loadLocked(std::string& error) {
 }
 
 uint32_t requiredCapabilities(const std::string& method) {
+    // ★ The one agent.* method that writes. The discovery plan says agent.* is
+    // read-only; rather than quietly break that rule, chat_send gets its own
+    // capability. A Read token can inspect the engine and must not be able to
+    // post a message signed "System" into the user's panel.
+    if (method == "agent.chat_send") return AgentChat;
     if (method == "ipc.admin.audit.export") return Admin | FilesWrite;
     if (method.rfind("ipc.admin.", 0) == 0) return Admin;
     if (method == "script.run_file") return Scripts | FilesRead;
@@ -271,7 +276,8 @@ uint32_t requiredCapabilities(const std::string& method) {
         method.find(".get") != std::string::npos || method.find(".list") != std::string::npos ||
         method.find(".status") != std::string::npos || method.find(".types") != std::string::npos ||
         method.find(".object_exists") != std::string::npos ||
-        method.find(".sample_height") != std::string::npos;
+        method.find(".sample_height") != std::string::npos ||
+        method.rfind("agent.", 0) == 0;
     if (read_method) return Read;
     // These MUST be the namespaces RtIpc.cpp::dispatchMethod actually uses —
     // a name that is here but never dispatched is dead, and a dispatched name
@@ -468,7 +474,8 @@ bool createToken(const std::string& display_name, uint32_t capabilities,
                  int64_t expires_at, TokenInfo& out_info,
                  std::string& out_raw_token, std::string& error) {
     constexpr uint32_t all_capabilities = Read | SceneWrite | Render | FilesRead |
-                                          FilesWrite | Scripts | Addons | Admin;
+                                          FilesWrite | Scripts | Addons | Admin |
+                                          AgentChat;
     if (display_name.empty() || capabilities == 0 || (capabilities & ~all_capabilities) != 0) {
         error = "token name and valid capabilities are required"; return false;
     }
@@ -504,7 +511,7 @@ bool updateToken(const std::string& token_id, uint32_t capabilities,
                  const std::vector<std::string>& allowed_cidrs,
                  int64_t expires_at, std::string& error) {
     constexpr uint32_t all = Read | SceneWrite | Render | FilesRead | FilesWrite |
-                             Scripts | Addons | Admin;
+                             Scripts | Addons | Admin | AgentChat;
     if (capabilities == 0 || (capabilities & ~all) != 0 ||
         (expires_at > 0 && expires_at <= unixNow()) ||
         !std::all_of(allowed_cidrs.begin(), allowed_cidrs.end(), validCidr)) {

@@ -34,6 +34,7 @@
 #include "RtPythonDebris.h"
 #include "RtPythonMassTransfer.h"
 #include "RtPythonTemplates.h"
+#include "RtPythonAgent.h"
 
 namespace py = pybind11;
 
@@ -178,6 +179,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     module.doc() = "RayTrophi Studio embedded scripting API";
 
     rtpy::registerTemplateBindings(module);
+    rtpy::registerAgentBindings(module);
 
     module.def("version", [] {
         const rtapi::Version v = rtapi::version();
@@ -3145,10 +3147,45 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["rendering_active"] = s.rendering_active;
         d["capture_enabled"] = s.capture_enabled;
         d["frame_available"] = s.frame_available;
+        d["shading"] = s.shading;
         return d;
     }, "Viewport state. Check 'rendering_active' and 'samples' before trusting "
        "any counter: an idle viewport reports zeros that look exactly like a "
        "cheap scene.");
+    // ★ Script/IPC parity: viewport.render_frames existed over IPC with no
+    // binding, so an in-app test could enable capture and probe but never make
+    // the viewport actually produce the frame it was probing.
+    viewport.def("render_frames", [](int count) {
+        const rtapi::ViewportRenderResult r = rtapi::renderViewportFrames(count);
+        py::dict d;
+        d["samples_rendered"] = r.samples_rendered;
+        d["converged"] = r.converged;
+        d["ms_per_frame"] = r.ms_per_frame;
+        return d;
+    }, py::arg("count"),
+       "Render this many viewport frames and report what was accumulated. Use it "
+       "to converge deliberately before render.probe instead of guessing a wait.");
+
+    // ★ Was panel-only until 2026-08-19. Every chain that needed a specific
+    // viewport ("switch to Rendered, then measure") had to stop and ask a human
+    // to click, which is the manual step CLAUDE.md rule 1 exists to prevent.
+    viewport.def("shading", [] {
+        const rtapi::ViewportShadingInfo s = rtapi::viewportShading();
+        py::dict d;
+        d["mode"] = s.mode;
+        d["matcap_preset"] = s.matcap_preset;
+        d["interactive_available"] = s.interactive_available;
+        return d;
+    }, "Which viewport is on screen: solid | material | rendered | matcap. "
+       "'interactive_available' false means this machine has no raster viewport "
+       "and only 'rendered' can be selected.");
+    viewport.def("set_shading", [](const std::string& mode, int matcap_preset) {
+        requireResult(rtapi::setViewportShading(mode, matcap_preset));
+    }, py::arg("mode"), py::arg("matcap_preset") = -1,
+       "Switch the viewport: solid | material | rendered | matcap ('preview' is "
+       "accepted for material). Resets accumulation, so probe again after "
+       "switching rather than reading the frame from the mode you left. Raises "
+       "when the mode is unavailable instead of silently falling back.");
 
     // Multi-frame sequence render (maps to the g_seq_save_active state machine).
     render.def("start_sequence", [](const std::string& output_dir, int spp,

@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -91,12 +91,12 @@ public:
     // ========================================================================
     
     // Add a procedural object (Cube, Plane, etc.)
-    uint32_t addProceduralObject(ProceduralMeshType type, const std::string& name,
+    uint64_t addProceduralObject(ProceduralMeshType type, const std::string& name,
                                  const Matrix4x4& transform, SceneData& scene,
                                  Renderer& renderer, Backend::IBackend* backend);
     
     // Remove procedural object by ID
-    bool removeProceduralObject(uint32_t id, SceneData& scene);
+    bool removeProceduralObject(uint64_t id, SceneData& scene);
     
     // ========================================================================
     // Accessors

@@ -301,6 +301,107 @@ authored alan taşıyor, tek değer için taze bir tane kurmak gerisini
 sıfırlardı — belirti "debiyi değiştirdim, emitter yer değiştirdi ve maddesi
 gitti" olurdu.
 
+### ★★★ Kullanıcı geri bildirimi: BAĞLANTI NEDENSELLİKTİR
+
+İlk yazımda `sim.emitter`'ın **hiç pini yoktu**. Gerekçe makuldü: flow source
+zaten hangi domain'i beslediğini biliyor, Domain girişi ikinci ve çelişebilecek
+bir cevap davet eder.
+
+**Ama sonucu tuvalde görüldü:** hiçbir şeye bağlı olmayan bir Emitter kutusu,
+yine de komut yayıyordu. Graph'ın *okunuşu* ile *yürütmesi* ayrışmıştı — okuyan
+sebep görmüyor, çözücü sonuç görüyor. Bu, deponun en pahalı hata sınıfının
+(*panel çekirdekle aynı şeyi söylemiyor*) bir seviye yukarıdaki hâli, ve bir
+node graph'ında **graph'ı dekoratif yapar.**
+
+**Düzeltme:** Emitter Domain girişi/çıkışı aldı; giriş boşsa **hiçbir şey
+yaymaz**. Hedef hâlâ `emitterName` — gelen domain hedefi EZMEZ, yoksa emisyon
+sessizce başka bölgeye taşınırdı. Test bu sözleşmeyi bağlanmamış hâli **önce**
+ölçerek kilitliyor (`an UNCONNECTED emitter emits nothing`).
+
+★★ Genel kural: **bir sim node'unun etkisi kablosunu izlemeli.** Kimliğini
+kendi alanından alan bir node bile zincire girmek için bağlanmalıdır.
+
+### ★★★★★ Kullanıcı geri bildirimi: INSPECTOR ÖLÜYDÜ
+
+Kullanıcının sorusu şuydu: *"hangisi seçilirse seçilsin aynı, sağ properties
+panel hiçbir işlevi yok — zaten UI panelde işlemleri yapıyorsak ne diye node
+kurduk?"*
+
+**Ölçüldü, ve çekirdek doğruydu:** `DemoFluid` 5 node, `DemoGas` 2 node,
+`rt.editor.get_state()` kapsamı doğru raporluyordu. Kapsam modeli çalışıyordu.
+
+**Arıza UI'daydı ve tekti:** panel seçili node'u `NodeBase::selected` alanını
+tarayarak buluyordu — ve `NodeEditorUIV2` o alana **hiç yazmıyor.** Seçimi
+kendi `selectedNodeId` / `selectedNodeIds` state'inde tutuyor. Yani kullanıcı
+ne tıklarsa tıklasın sidebar hiçbir şey seçili bulmuyor ve her seferinde
+"Select a node on the canvas to edit it" yazıyordu.
+
+★★★ **Panelin yarısı ölüydü, ve belirtisi "node'lar bir işe yaramıyor" idi.**
+Kullanıcının felsefi itirazı ("ne diye node kurduk") aslında bir arıza
+raporuydu: node'lar gerçekten hiçbir şey yapmıyor GÖRÜNÜYORDU.
+
+★★ Ders deponun kendi dersi: **bir alanın VAR olması, birinin ona YAZDIĞININ
+kanıtı değildir.** `selected` doğru kaynak gibi okunuyor — kimsenin kim yazıyor
+diye bakmamasının sebebi tam da bu. Aynı sınıf: "varsayılan bir ölçüm değildir".
+
+★ Bu alan yalnızca bu panelde okunuyordu, yani düzeltme başka graph ailesini
+etkilemiyor.
+
+### ★★★★ Kullanıcı geri bildirimi: SAHNE SEÇİMİ ile panel AYRI İKİ SEÇİMDİ
+
+*"Seçili domain'in node graph'ı gelmiyor, iki ayrı seçim gibi."*
+
+Ve gerçekten iki ayrı seçimdi: panelin kendi owner seçicisi vardı ve viewport
+seçimini **hiç dinlemiyordu**. Bu uygulamadaki diğer bütün graph editörleri
+aktif öğeyi takip ediyor, o yüzden bu panel kıyasla bozuk görünüyordu.
+
+**Düzeltme:** panel `ctx.selection.selected`'ı okuyor; `SimulationDomain` /
+`GasVolume` seçilince kapsam `domain/<ad>`, `Object` seçilince `object/<ad>`
+oluyor.
+
+★★ **Değeri değil DEĞİŞİMİ takip ediyor.** Her frame aynalamak owner seçicisini
+işe yaramaz hâle getirirdi: kullanıcı seçiciden başka bir sahip seçtiği an bir
+sonraki frame onu viewport'taki seçime geri sürüklerdi ve kontrol bozuk
+görünürdü. Son görülen seçimle karşılaştırınca **viewport değiştiğinde
+viewport, aradaki zamanda seçici kazanıyor.**
+
+★ Karşılaştırma anahtarı kapsamı da içeriyor (`domain/Ad`): bir obje ile bir
+domain aynı adı taşıyabilir, ve yalnızca ada bakmak ikisi arasındaki geçişi
+kaçırırdı.
+
+### ★★ Kullanıcı geri bildirimi: node NE YAPTIĞINI söylemeli
+
+Tuvalde `Solver` yazan kutu, hangi parametreyi override ettiğini göstermiyordu;
+öğrenmek için tıklayıp sağ paneli okumak gerekiyordu. Her alan opt-in olduğu
+için **hiçbir şey override etmeyen bir node ile her şeyi override eden node
+birbirinin aynı görünüyordu** — bu modelin üretebileceği en kafa karıştırıcı
+durum.
+
+★★★ **DÜZELTME — "gövdeye çizim kancası yok" iddiam YANLIŞTI.** `NodeBase`
+zaten `wantsInlineContent()` + `drawContent()` taşıyor ve `NodeEditorUIV2`
+bunu pinlerin altına çiziyor. Varsayılan kapalı olduğu için başka hiçbir graph
+ailesi etkilenmiyor. Yani yeni bir mekanizma gerekmiyordu; **var olanı
+bulmadan "yok" dedim.**
+
+Uygulanan hâli:
+
+| Node | Gövdede ne yazıyor |
+|---|---|
+| Domain / Object | **adı** — yoksa `no domain picked` |
+| Solver / Domain Settings | tikli alanlar + değerleri, yoksa `no overrides` |
+| Emitter | kaynak seçilmemişse `no flow source picked`, yoksa tikli alanlar |
+
+Başlık kısaldı (`Solver: 2 overrides`), çünkü detay artık gövdede — uzun başlık
+node genişliğinde kesiliyordu (`Solver: kinematic_viscosity, vi...`) ve kimseye
+bir şey söylemiyordu.
+
+★★ **Boş hâl bilerek çiziliyor.** Her alan opt-in olduğu için hiçbir şey
+override etmeyen node ile her şeyi override eden node aksi hâlde birbirinin
+aynı görünür — bu modelin üretebileceği en kafa karıştırıcı durum.
+
+★ Düzenleme hâlâ inspector'da. Ama tuval artık tıklamadan okunuyor: hangi
+domain, hangi parametreler, ve "bu node hiçbir şey yapmıyor" hâli.
+
 ### ★★ Öksüz grafik: hooklanmadı, **ÖLÇÜLDÜ**
 
 Sahibi silinen bir grafik çizmeye ve düzenleme kabul etmeye devam eder, hiçbir

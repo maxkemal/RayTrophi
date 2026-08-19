@@ -437,11 +437,11 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
             const Matrix4x4& base = mesh->transform->base;
             const Matrix4x4& current = mesh->transform->current;
             const Matrix4x4& final = mesh->transform->getFinal();
-            SCENE_LOG_INFO(
+           /* SCENE_LOG_INFO(
                 "[EmbreeBVH::build/transform] node=" + mesh->nodeName +
                 " base_t=(" + std::to_string(base.m[0][3]) + "," + std::to_string(base.m[1][3]) + "," + std::to_string(base.m[2][3]) + ")" +
                 " current_t=(" + std::to_string(current.m[0][3]) + "," + std::to_string(current.m[1][3]) + "," + std::to_string(current.m[2][3]) + ")" +
-                " final_t=(" + std::to_string(final.m[0][3]) + "," + std::to_string(final.m[1][3]) + "," + std::to_string(final.m[2][3]) + ")");
+                " final_t=(" + std::to_string(final.m[0][3]) + "," + std::to_string(final.m[1][3]) + "," + std::to_string(final.m[2][3]) + ")");*/
         }
 
         rtcSetGeometryMask(geom, 0x01); // Mask 1 for Surfaces
