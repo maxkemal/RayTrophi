@@ -360,6 +360,10 @@ void bind(UIContext* ctx, SceneHistory* history) {
     g_render_job = {};
 }
 
+UIContext* boundContext() {
+    return g_ctx;
+}
+
 void unbind() {
     g_ctx = nullptr;
     g_history = nullptr;
@@ -1214,6 +1218,11 @@ Result renderFrame(const std::string& output_path, int spp) {
     // mode-transition block owns backend creation/full sync if we came from Solid.
     ui.viewport_settings.shading_mode = 2;
     g_ctx->start_render = true;
+    
+    // Agent Viewport Measurement: Ensure counters are routing to the backend
+    // so that render.start doesn't falsely report 0 volume rays in probe queries.
+    setVolumeInstrumentation(true);
+    
     return Result::success();
 }
 

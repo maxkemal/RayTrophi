@@ -95,12 +95,15 @@ rt.sim_graph.connect("domain", FLUID, solver, settings)
 rt.sim_graph.set_node_value("domain", FLUID, settings, "pore_amount", 0.3)
 
 emit_node = rt.sim_graph.add_node("domain", FLUID, "sim.emitter")
+# ★ Zincire BAĞLI. Bağlanmamış bir Emitter hiçbir şey yaymaz: tuvalde yalıtılmış
+# duran ama yine de çözücüyü yapılandıran bir node, graph'ı okunamaz yapardı.
+rt.sim_graph.connect("domain", FLUID, settings, emit_node)
 rt.sim_graph.set_node("domain", FLUID, emit_node, "emitter", EMITTER)
 rt.sim_graph.set_node_value("domain", FLUID, emit_node, "radius", 0.45)
 rt.sim_graph.set_node_value("domain", FLUID, emit_node, "temperature", 340.0)
 
 insp = rt.sim_graph.add_node("domain", FLUID, "sim.field_inspect")
-rt.sim_graph.connect("domain", FLUID, settings, insp)
+rt.sim_graph.connect("domain", FLUID, emit_node, insp)
 rt.sim_graph.set_node("domain", FLUID, insp, "channel", "temperature")
 log("   node sayısı: %d" % len(rt.sim_graph.nodes("domain", FLUID)))
 

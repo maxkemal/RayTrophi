@@ -95,11 +95,15 @@ def required(method, namespaces):
                   "msf.fields", "templates.refresh", "templates.validate",
                   "templates.prepare"):
         return "Read"
+    # agent.chat_send posts into the user's chat panel under a sender name the
+    # caller chooses, so it is not part of the read-only agent.* surface.
+    if method == "agent.chat_send":
+        return "AgentChat"
     if (method in ("version", "project.path", "undo_description",
                    "redo_description")
             or ".get" in method or ".list" in method or ".status" in method
             or ".types" in method or ".object_exists" in method
-            or ".sample_height" in method):
+            or ".sample_height" in method or method.startswith("agent.")):
         return "Read"
     if any(method.startswith(prefix) for prefix in namespaces):
         return "SceneWrite"
@@ -125,8 +129,16 @@ def main():
         print("\nDEAD namespace prefixes (no method uses them):")
         for p in dead:
             print("  " + p)
-    if not unreachable and not dead:
-        print("OK - every dispatched method is classified, no dead prefixes.")
+    # Second pass: the descriptor table that answers agent.describe is generated
+    # from these same dispatch sources. If it is stale, a method exists over IPC
+    # but has no schema - which reads to an agent as "this capability does not
+    # exist" and is exactly the drift this script was written to catch.
+    import gen_ipc_descriptors
+    descriptors_stale = gen_ipc_descriptors.main(["--check"]) != 0
+
+    if not unreachable and not dead and not descriptors_stale:
+        print("OK - every dispatched method is classified, no dead prefixes, "
+              "descriptors current.")
         return 0
     return 1
 

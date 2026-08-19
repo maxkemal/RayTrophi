@@ -1,0 +1,1727 @@
+{
+  "$comment": "Hand-written half of the IPC method descriptors. Parameters, types, defaults and capabilities are extracted from the dispatch code by gen_ipc_descriptors.py - do NOT repeat them here unless you are adding a description, an enum hint or correcting a type the parser could only see as 'any'. Keys: summary (required, one line, present tense), notes, tags (extra search synonyms; the domain and the method name are added automatically), related (pipe-separated), returns, undoable, access, params{name:{description,enum,type,required,default}}.",
+  "agent.discover": {
+    "summary": "Identify the application and list every capability domain, agent role and coverage metric",
+    "notes": "First call for a new agent session. registered_coverage is registered/dispatched methods; documented_coverage is the share that carries a hand-written summary. A documented_coverage below 1.0 means agent.describe will answer some methods with parameters but no explanation.",
+    "tags": "bootstrap|handshake|capabilities|introspection",
+    "related": "agent.list_methods|agent.describe|agent.search_capabilities",
+    "returns": "DiscoveryInfo"
+  },
+  "agent.list_methods": {
+    "summary": "List every registered IPC method, optionally filtered to one domain",
+    "notes": "The full list is around 30 KB. Cache it once per session instead of calling it per step.",
+    "tags": "catalogue|introspection",
+    "related": "agent.describe|agent.search_capabilities",
+    "returns": "MethodSummary[]",
+    "params": {
+      "domain": {
+        "description": "Domain to restrict the listing to, e.g. 'fluid'. Omit for every method."
+      }
+    }
+  },
+  "agent.describe": {
+    "summary": "Return the full parameter schema, capability and related methods for one IPC method",
+    "notes": "Parameters come from the dispatch code itself, so they are exact. `documented: false` means the schema is real but nobody has written the prose yet - trust the parameters, be careful with intent.",
+    "tags": "schema|introspection|parameters",
+    "related": "agent.list_methods|agent.get_examples",
+    "returns": "MethodDescriptor",
+    "params": {
+      "method": {
+        "description": "Exact method name, e.g. 'fluid.create_domain'"
+      }
+    }
+  },
+  "agent.search_capabilities": {
+    "summary": "Search workflow recipes and method metadata for a plain-language goal",
+    "notes": "Recipes are the valuable half: each one is an ordered list of calls that is known to work end to end. Prefer following a recipe over assembling calls from the method hits.",
+    "tags": "search|howto|recipe|workflow|goal",
+    "related": "agent.get_examples|agent.describe",
+    "returns": "SearchResult",
+    "params": {
+      "query": {
+        "description": "Plain language goal, e.g. 'make a wooden object burn'"
+      }
+    }
+  },
+  "agent.get_examples": {
+    "summary": "Return runnable call sequences for a method or a named workflow recipe",
+    "tags": "example|sample|recipe",
+    "related": "agent.search_capabilities|agent.describe",
+    "returns": "ExampleSet",
+    "params": {
+      "method": {
+        "description": "Method to show examples for, e.g. 'fluid.create_domain'"
+      },
+      "workflow": {
+        "description": "Recipe id from agent.search_capabilities, e.g. 'combustion_setup'"
+      }
+    }
+  },
+  "agent.get_state_summary": {
+    "summary": "Compact snapshot of scene, lights, camera, timeline and viewport measurement state",
+    "notes": "The viewport block is a MEASUREMENT and is only present when frame capture is on and a frame exists; when it is absent that means 'not measured', never 'measured zero'. Turn capture on with viewport.capture before relying on it.",
+    "tags": "state|context|snapshot|scene|verify",
+    "related": "viewport.status|render.probe|scene.list_objects",
+    "returns": "StateSummary",
+    "params": {
+      "include_probe": {
+        "description": "Sample the last viewport frame for luminance and black/NaN fractions. Costs a full-frame scan.",
+        "type": "bool"
+      }
+    }
+  },
+  "agent.roles": {
+    "summary": "Describe the manager/controller/worker agent roles and their delegation chain",
+    "notes": "Informational only. Access is decided by the security capability on the connection token, not by the role an agent claims.",
+    "tags": "role|hierarchy|delegation|multi-agent",
+    "returns": "RoleSet"
+  },
+  "agent.chat_send": {
+    "summary": "Post a message into the Studio Agent Chat panel",
+    "notes": "This WRITES to the user interface, so it needs the AgentChat capability - it is the one agent.* method that is not read-only. Use type='activity' for per-call progress, 'thought' for reasoning, 'error' for failures; the panel colours and filters them separately.",
+    "tags": "chat|message|ui|report|progress",
+    "related": "agent.chat_poll",
+    "returns": "bool",
+    "params": {
+      "sender": {
+        "description": "Display name shown in the panel, e.g. 'RayTrophi Agent'"
+      },
+      "content": {
+        "description": "Message text"
+      },
+      "type": {
+        "description": "Message kind",
+        "type": "string",
+        "enum": "reply|activity|thought|error",
+        "default": "reply"
+      },
+      "payload": {
+        "description": "Optional structured data appended to the message"
+      },
+      "image_base64": {
+        "description": "Optional base64 image; the panel notes the attachment"
+      }
+    }
+  },
+  "agent.chat_poll": {
+    "summary": "Take the user prompts queued in the Agent Chat panel and mark the agent as alive",
+    "notes": "Polling is also the panel's heartbeat: it shows the agent as online for a few seconds after each call. An agent that blocks on a long model turn should keep polling from a second thread, or the panel reports it offline.",
+    "tags": "chat|poll|prompt|heartbeat",
+    "related": "agent.chat_send",
+    "returns": "QueuedPrompt[]"
+  },
+  "version": {
+    "summary": "Return the RayTrophi Studio version string"
+  },
+  "batch": {
+    "summary": "Execute several IPC calls in order and return one result array",
+    "notes": "Each child call is authorized on its own; nesting a batch inside a batch is refused. A failing child does not stop the rest.",
+    "tags": "sequence|bulk|transaction",
+    "params": {
+      "calls": {
+        "description": "Array of {method, params} objects",
+        "type": "array",
+        "required": true
+      }
+    }
+  },
+  "undo": {
+    "summary": "Undo the last recorded scene command",
+    "tags": "history",
+    "related": "redo|undo_description"
+  },
+  "redo": {
+    "summary": "Redo the last undone scene command",
+    "tags": "history",
+    "related": "undo|redo_description"
+  },
+  "undo_description": {
+    "summary": "Name of the command that undo would revert",
+    "tags": "history"
+  },
+  "redo_description": {
+    "summary": "Name of the command that redo would reapply",
+    "tags": "history"
+  },
+  "request_render": {
+    "summary": "Ask the viewport to render another frame",
+    "tags": "viewport|refresh"
+  },
+  "reset_accumulation": {
+    "summary": "Restart progressive sample accumulation in the viewport",
+    "notes": "Post-process changes must NOT reset accumulation - only changes to scene, camera or lighting should.",
+    "tags": "viewport|samples|refresh"
+  },
+  "scene.list_objects": {
+    "summary": "List every object in the scene by name",
+    "notes": "Covers both flat SoA meshes and legacy facade objects, so it is the reliable inventory call.",
+    "tags": "inventory|objects|browse",
+    "related": "scene.object_info|scene.object_exists",
+    "returns": "string[]"
+  },
+  "scene.object_exists": {
+    "summary": "Report whether an object with this name exists",
+    "returns": "bool",
+    "related": "scene.list_objects"
+  },
+  "scene.object_info": {
+    "summary": "Return vertex and triangle counts for one object",
+    "returns": "ObjectInfo",
+    "related": "scene.list_objects"
+  },
+  "scene.add_primitive": {
+    "summary": "Create a primitive mesh object and return its final name",
+    "notes": "The name is made unique by suffix, so the returned name may differ from the requested one - always use the returned name afterwards.",
+    "tags": "create|mesh|cube|sphere|plane|cylinder|torus",
+    "related": "scene.delete|scene.set_transform|material.assign",
+    "returns": "string",
+    "undoable": true,
+    "params": {
+      "type": {
+        "description": "Primitive shape",
+        "enum": "cube|sphere|plane|cylinder|torus"
+      },
+      "name": {
+        "description": "Requested name; a numeric suffix is added if it is taken"
+      },
+      "size": {
+        "description": "Edge length or radius in metres; must be positive"
+      }
+    }
+  },
+  "scene.delete": {
+    "summary": "Delete an object from the scene",
+    "undoable": true,
+    "tags": "remove"
+  },
+  "scene.duplicate": {
+    "summary": "Duplicate an object and return the new object's name",
+    "undoable": true,
+    "returns": "string",
+    "tags": "copy|clone"
+  },
+  "scene.get_transform": {
+    "summary": "Return an object's translation, rotation, scale and full matrix",
+    "returns": "TransformInfo",
+    "related": "scene.set_transform"
+  },
+  "scene.set_transform": {
+    "summary": "Set an object's transform, either as a matrix or as translation/rotation/scale components",
+    "notes": "Send `matrix`, or any combination of translation/rotation/scale - components you omit keep their current value. Rotation is in degrees.",
+    "tags": "move|rotate|scale|position|placement",
+    "related": "scene.get_transform",
+    "undoable": true,
+    "params": {
+      "name": {
+        "description": "Object name"
+      },
+      "matrix": {
+        "description": "Row-major 4x4 matrix; wins over the component form when both are sent"
+      },
+      "translation": {
+        "description": "World position in metres"
+      },
+      "rotation": {
+        "description": "Euler angles in degrees"
+      },
+      "scale": {
+        "description": "Per-axis scale factors"
+      }
+    }
+  },
+  "scene.import_model": {
+    "summary": "Import a model file (glTF/FBX/OBJ) into the scene",
+    "tags": "load|asset|mesh"
+  },
+  "select.object": {
+    "summary": "Select an object by name, optionally adding to the current selection",
+    "tags": "selection"
+  },
+  "select.light": {
+    "summary": "Select a light by index, optionally adding to the current selection",
+    "tags": "selection"
+  },
+  "select.deselect_object": {
+    "summary": "Remove one object from the selection",
+    "tags": "selection"
+  },
+  "select.all_objects": {
+    "summary": "Select every object in the scene",
+    "tags": "selection"
+  },
+  "select.clear": {
+    "summary": "Clear the selection",
+    "tags": "selection"
+  },
+  "select.list": {
+    "summary": "List the currently selected objects and lights",
+    "returns": "SelectionEntry[]",
+    "tags": "selection"
+  },
+  "camera.get": {
+    "summary": "Return camera position, target, up vector, field of view, focus distance and aperture",
+    "returns": "CameraState",
+    "tags": "view"
+  },
+  "camera.set_position": {
+    "summary": "Move the camera to a world position",
+    "tags": "view|move"
+  },
+  "camera.set_target": {
+    "summary": "Aim the camera at a world position",
+    "tags": "view|look|aim"
+  },
+  "camera.set_fov": {
+    "summary": "Set the camera field of view in degrees",
+    "tags": "view|lens|zoom"
+  },
+  "camera.set_focus_distance": {
+    "summary": "Set the depth-of-field focus distance in metres",
+    "tags": "view|lens|dof|blur"
+  },
+  "camera.set_aperture": {
+    "summary": "Set the camera aperture; larger values give shallower depth of field",
+    "tags": "view|lens|dof|blur|bokeh"
+  },
+  "lights.list": {
+    "summary": "List the scene lights with index, name, type and position",
+    "returns": "LightSummary[]",
+    "tags": "lighting"
+  },
+  "lights.get": {
+    "summary": "Return every property of one light",
+    "returns": "LightInfo",
+    "tags": "lighting"
+  },
+  "lights.add": {
+    "summary": "Add a light of the given type at a world position and return its name",
+    "tags": "lighting|create|illuminate",
+    "related": "lights.set_intensity|lights.set_color|world.set_mode",
+    "undoable": true,
+    "params": {
+      "type": {
+        "description": "Light type",
+        "enum": "point|directional|spot|area"
+      }
+    }
+  },
+  "lights.delete": {
+    "summary": "Delete a light by index",
+    "undoable": true,
+    "tags": "lighting|remove"
+  },
+  "lights.rename": {
+    "summary": "Rename a light",
+    "tags": "lighting"
+  },
+  "lights.set_position": {
+    "summary": "Move a light to a world position",
+    "tags": "lighting|move"
+  },
+  "lights.set_direction": {
+    "summary": "Set the direction a directional or spot light points in",
+    "tags": "lighting|aim"
+  },
+  "lights.set_color": {
+    "summary": "Set a light's RGB colour",
+    "tags": "lighting|colour"
+  },
+  "lights.set_intensity": {
+    "summary": "Set a light's intensity",
+    "tags": "lighting|brightness|exposure"
+  },
+  "lights.set_visible": {
+    "summary": "Show or hide a light without deleting it",
+    "tags": "lighting|visibility"
+  },
+  "lights.set_param": {
+    "summary": "Set one numeric light parameter by name (radius, spot_angle, spot_falloff, width, height)",
+    "notes": "spot_angle and spot_falloff apply to spot lights only; width and height to area lights only. The call fails rather than silently ignoring a mismatch.",
+    "tags": "lighting|softness|cone"
+  },
+  "world.get": {
+    "summary": "Return world mode, background colour, sun angles and atmosphere settings",
+    "returns": "WorldState",
+    "tags": "environment|sky"
+  },
+  "world.set_mode": {
+    "summary": "Switch the world background between flat colour, HDRI and physical sky",
+    "tags": "environment|sky|background|hdri",
+    "params": {
+      "mode": {
+        "description": "Background model",
+        "enum": "solid|hdri|nishita"
+      }
+    }
+  },
+  "world.set_background_color": {
+    "summary": "Set the flat background colour used in solid world mode",
+    "tags": "environment|sky|colour"
+  },
+  "world.set_sun_elevation": {
+    "summary": "Set the sun elevation angle of the physical sky",
+    "tags": "environment|sky|sun|time-of-day"
+  },
+  "world.set_sun_azimuth": {
+    "summary": "Set the sun compass angle of the physical sky",
+    "tags": "environment|sky|sun|direction"
+  },
+  "world.set_sun_intensity": {
+    "summary": "Set the sun intensity of the physical sky",
+    "tags": "environment|sky|sun|brightness"
+  },
+  "world.set_sun_size": {
+    "summary": "Set the sun's angular size; larger values give softer shadows",
+    "tags": "environment|sky|sun|shadow|softness"
+  },
+  "world.set_atmosphere_intensity": {
+    "summary": "Set the strength of atmospheric scattering in the physical sky",
+    "tags": "environment|sky|haze|fog"
+  },
+  "timeline.get_frame": {
+    "summary": "Return the current timeline frame",
+    "tags": "time|playhead",
+    "related": "timeline.set_frame"
+  },
+  "timeline.set_frame": {
+    "summary": "Move the timeline playhead to a frame",
+    "notes": "This is how simulations are advanced from a script: stepping the frame runs the solvers that are live for that frame.",
+    "tags": "time|playhead|simulate|advance",
+    "related": "timeline.get_frame|sim_cache.bake"
+  },
+  "render.start": {
+    "summary": "Render one frame at the given sample count and write it to an image file",
+    "notes": "Blocking work runs on the render job; poll render.status for progress. The written image can be read back, so visual checks can be automated.",
+    "tags": "output|image|final|save",
+    "related": "render.status|render.cancel|render.start_sequence",
+    "params": {
+      "output_path": {
+        "description": "Absolute path of the image file to write"
+      },
+      "spp": {
+        "description": "Samples per pixel"
+      }
+    }
+  },
+  "render.start_sequence": {
+    "summary": "Render a frame range to an output directory",
+    "tags": "animation|output|batch",
+    "related": "render.sequence_status|render.cancel_sequence"
+  },
+  "render.status": {
+    "summary": "Report render job state, progress and current sample count",
+    "returns": "RenderJobInfo",
+    "tags": "progress"
+  },
+  "render.sequence_status": {
+    "summary": "Report sequence render progress and current frame",
+    "returns": "SequenceInfo",
+    "tags": "progress|animation"
+  },
+  "render.cancel": {
+    "summary": "Cancel the running single-frame render",
+    "tags": "abort"
+  },
+  "render.cancel_sequence": {
+    "summary": "Cancel the running sequence render",
+    "tags": "abort|animation"
+  },
+  "render.probe": {
+    "summary": "Measure a region of the last viewport frame: mean/min/max luminance, black fraction, NaN fraction and a histogram",
+    "notes": "This is the measurement an agent verifies its own work with. `available: false` means no frame was captured - it is not a dark scene. A non-zero nan_fraction means a shader produced invalid pixels.",
+    "tags": "measure|verify|luminance|black|nan|check",
+    "related": "viewport.capture|viewport.render_frames|viewport.status",
+    "returns": "ProbeInfo",
+    "params": {
+      "x": {
+        "description": "Region origin in pixels"
+      },
+      "y": {
+        "description": "Region origin in pixels"
+      },
+      "width": {
+        "description": "Region width in pixels; 0 means to the right edge"
+      },
+      "height": {
+        "description": "Region height in pixels; 0 means to the bottom edge"
+      },
+      "threshold": {
+        "description": "Luminance at or below which a pixel counts as black"
+      }
+    }
+  },
+  "render.volume_stats": {
+    "summary": "Return volume traversal counters for the last frame",
+    "tags": "diagnostics|performance|volume"
+  },
+  "render.volume_counters": {
+    "summary": "Enable or disable volume instrumentation counters",
+    "tags": "diagnostics|performance|volume"
+  },
+  "viewport.status": {
+    "summary": "Report viewport backend, shading mode, resolution, sample count, capture state and whether a frame is available",
+    "returns": "ViewportStatusInfo",
+    "tags": "measure|verify|backend|samples",
+    "related": "viewport.capture|render.probe"
+  },
+  "viewport.shading": {
+    "summary": "Report which viewport shading mode is on screen and whether the interactive raster viewport exists",
+    "notes": "interactive_available false means this build has no raster viewport (no Vulkan), so 'rendered' is the only selectable mode - a rejected set_shading there is the machine, not a bad request.",
+    "tags": "viewport|shading|display|measure",
+    "related": "viewport.set_shading|viewport.status"
+  },
+  "viewport.set_shading": {
+    "summary": "Switch the viewport shading mode (solid, material, rendered, matcap) and optionally the matcap preset",
+    "notes": "Resets accumulation like the panel buttons do, so probe AFTER switching - otherwise you measure the frame from the mode you left. Fails loudly when a mode is unavailable instead of silently falling back to rendered.",
+    "enums": {
+      "mode": "solid|material|rendered|matcap"
+    },
+    "tags": "viewport|shading|display|solid|rendered|matcap|preview",
+    "related": "viewport.shading|viewport.render_frames|render.probe"
+  },
+  "viewport.capture": {
+    "summary": "Turn viewport frame capture on or off",
+    "notes": "Capture must be on before render.probe or the state summary can measure anything.",
+    "tags": "measure|verify|enable",
+    "related": "render.probe|viewport.render_frames"
+  },
+  "viewport.render_frames": {
+    "summary": "Render a fixed number of viewport frames and report timing and convergence",
+    "notes": "Use this to converge the viewport deliberately before probing it, instead of guessing how long to wait.",
+    "tags": "measure|converge|samples|wait",
+    "related": "render.probe|viewport.capture"
+  },
+  "material.list": {
+    "summary": "List every material in the scene",
+    "tags": "shading",
+    "returns": "string[]"
+  },
+  "material.create": {
+    "summary": "Create a material of the given type and return its name",
+    "tags": "shading|create",
+    "params": {
+      "type": {
+        "description": "Material type, e.g. 'principled'"
+      }
+    }
+  },
+  "material.assign": {
+    "summary": "Assign an existing material to an object",
+    "tags": "shading|apply"
+  },
+  "material.info": {
+    "summary": "Return a material's full parameter set",
+    "tags": "shading",
+    "returns": "MaterialInfo"
+  },
+  "material.of_object": {
+    "summary": "List the materials used by one object",
+    "tags": "shading",
+    "returns": "string[]"
+  },
+  "material.get": {
+    "summary": "Read one material parameter of an object",
+    "tags": "shading"
+  },
+  "material.set": {
+    "summary": "Set one material parameter on an object (base_color, roughness, metallic, emission, ior, transmission, ...)",
+    "notes": "Colour parameters take a 3-element array, scalars take a number. An unknown parameter name is an error, not a silent no-op.",
+    "tags": "shading|colour|roughness|metallic|emission",
+    "related": "material.get|material.info"
+  },
+  "material.set_texture": {
+    "summary": "Bind an image file to a material texture slot",
+    "tags": "shading|texture|image"
+  },
+  "material.clear_texture": {
+    "summary": "Clear one material texture slot",
+    "tags": "shading|texture"
+  },
+  "material.textures": {
+    "summary": "List a material's texture slots and their bound files",
+    "tags": "shading|texture"
+  },
+  "fluid.create_domain": {
+    "summary": "Create an APIC liquid or gas grid domain over a world-space box",
+    "notes": "voxel_size sets both resolution and cost: halving it multiplies cell count by eight. A liquid domain does nothing until fluid.seed or a flow_source fills it. Changing voxel_size later invalidates the bake.",
+    "tags": "simulation|liquid|water|smoke|fire|create|domain|grid",
+    "related": "fluid.seed|fluid.set_param|flow_source.create|fluid.list_domains",
+    "returns": "FluidDomainInfo",
+    "params": {
+      "name": {
+        "description": "Domain name; also the object name in the scene"
+      },
+      "type": {
+        "description": "Solver family",
+        "enum": "fluid|gas"
+      },
+      "domain_min": {
+        "description": "World-space AABB minimum in metres"
+      },
+      "domain_max": {
+        "description": "World-space AABB maximum in metres"
+      },
+      "voxel_size": {
+        "description": "Grid cell size in metres. Drives resolution, cost and the smallest feature the solver can resolve."
+      }
+    }
+  },
+  "fluid.list_domains": {
+    "summary": "List every fluid and gas domain with its full settings",
+    "tags": "simulation|inventory",
+    "related": "fluid.get",
+    "returns": "FluidDomainInfo[]"
+  },
+  "fluid.get": {
+    "summary": "Return one fluid or gas domain's complete settings and live counters",
+    "tags": "simulation",
+    "returns": "FluidDomainInfo"
+  },
+  "fluid.remove_domain": {
+    "summary": "Delete a fluid or gas domain",
+    "tags": "simulation|remove"
+  },
+  "fluid.seed": {
+    "summary": "Fill a box inside a liquid domain with particles",
+    "notes": "particles_per_cell of 4 is the standard APIC density; a thin jet seeded below that has no interior cells and therefore no pressure field, which reads as 'water that will not splash'. persistent=true re-seeds the box every reset.",
+    "tags": "simulation|liquid|water|fill|particles|initial",
+    "related": "fluid.create_domain|fluid.clear|flow_source.create",
+    "params": {
+      "seed_min": {
+        "description": "World-space box minimum in metres"
+      },
+      "seed_max": {
+        "description": "World-space box maximum in metres"
+      },
+      "particles_per_cell": {
+        "description": "Particle density per grid cell; 4 is standard"
+      },
+      "replace": {
+        "description": "Clear existing particles first"
+      },
+      "persistent": {
+        "description": "Re-apply this seed after every reset"
+      }
+    }
+  },
+  "fluid.clear": {
+    "summary": "Remove the particles from a fluid domain",
+    "tags": "simulation|reset"
+  },
+  "fluid.reset": {
+    "summary": "Reset every fluid and gas simulation to frame zero",
+    "tags": "simulation|reset|rewind"
+  },
+  "fluid.step": {
+    "summary": "Advance the fluid solver by one timestep",
+    "notes": "For scripted work prefer timeline.set_frame, which advances every solver consistently.",
+    "tags": "simulation|advance"
+  },
+  "fluid.set_param": {
+    "summary": "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, render mode and surface material",
+    "notes": "Overlay semantics - fields you do not send keep their value. Changing voxel_size or the bounds invalidates the bake for that domain.",
+    "tags": "simulation|configure|viscosity|granular|render-mode|backend",
+    "related": "fluid.get|fluid.set_substance_material"
+  },
+  "fluid.set_substance_material": {
+    "summary": "Bind a substance (its physical identity, phase and representation) to a fluid domain",
+    "notes": "Phase is what the matter IS; representation is how it is solved and drawn. They are separate axes - setting one does not imply the other.",
+    "tags": "simulation|substance|material|phase|msf",
+    "related": "msf.substances|fluid.set_splat_material|fluid.set_param",
+    "params": {
+      "domain": {
+        "description": "Fluid domain name"
+      },
+      "substance": {
+        "description": "Substance id from msf.substances"
+      },
+      "phase": {
+        "description": "Physical phase",
+        "enum": "liquid|solid|gas"
+      },
+      "representation": {
+        "description": "How the substance is solved and rendered"
+      }
+    }
+  },
+  "fluid.set_splat_material": {
+    "summary": "Set the material used for particle splat rendering of a domain",
+    "tags": "simulation|render|appearance"
+  },
+  "fluid.get_combustion": {
+    "summary": "Read a liquid domain's combustion settings",
+    "tags": "simulation|fire|burn",
+    "related": "fluid.set_combustion"
+  },
+  "fluid.set_combustion": {
+    "summary": "Configure a liquid domain as a combustible fuel: ignition temperature, heat release, smoke yield and evaporation",
+    "tags": "simulation|fire|burn|fuel|ignite|combustion",
+    "related": "gas.set_settings|fluid.set_substance_material"
+  },
+  "gas.create_domain": {
+    "summary": "Create a gas grid domain over a world-space box",
+    "notes": "Same handler as fluid.create_domain with type defaulting to gas.",
+    "tags": "simulation|smoke|fire|create|domain",
+    "related": "gas.set_settings|flow_source.create",
+    "returns": "FluidDomainInfo"
+  },
+  "gas.list_domains": {
+    "summary": "List every gas and fluid domain with its settings",
+    "tags": "simulation|inventory"
+  },
+  "gas.get": {
+    "summary": "Return one gas domain's complete settings and live counters",
+    "tags": "simulation"
+  },
+  "gas.remove_domain": {
+    "summary": "Delete a gas domain",
+    "tags": "simulation|remove"
+  },
+  "gas.get_settings": {
+    "summary": "Read a gas domain's solver settings: fire, buoyancy, turbulence, quality and resource budget",
+    "tags": "simulation|fire|smoke",
+    "related": "gas.set_settings"
+  },
+  "gas.set_settings": {
+    "summary": "Configure a gas domain's solver: fire and ignition, burn rate, heat release, buoyancy, turbulence, vorticity and resource budget",
+    "notes": "This is the SOLVER. Appearance - colour, emission, density scale - lives in gas.set_shader, and the two are read back separately; a fire that simulates but looks wrong is usually a shader setting, not a solver setting.",
+    "tags": "simulation|fire|smoke|ignite|burn|buoyancy|turbulence",
+    "related": "gas.get_settings|gas.set_shader|flow_source.create",
+    "params": {
+      "fire_enabled": {
+        "description": "Run combustion in this domain"
+      },
+      "ignition_temperature": {
+        "description": "Temperature at which fuel ignites, in Kelvin"
+      },
+      "burn_rate": {
+        "description": "How fast fuel is consumed once lit"
+      },
+      "heat_release": {
+        "description": "Temperature added per unit of fuel burned"
+      },
+      "smoke_generation": {
+        "description": "Smoke produced per unit of fuel burned"
+      }
+    }
+  },
+  "gas.get_shader": {
+    "summary": "Read a gas domain's volume shading settings",
+    "tags": "render|appearance|volume",
+    "related": "gas.set_shader"
+  },
+  "gas.set_shader": {
+    "summary": "Set a gas domain's volume appearance: preset, density and absorption/scattering, blackbody emission and the temperature range it maps",
+    "notes": "temperature_min/max define the window mapped to emission colour; a flame outside that window renders black however hot it is.",
+    "tags": "render|appearance|volume|fire|colour|emission|blackbody",
+    "related": "gas.get_shader|gas.set_settings"
+  },
+  "gas.set_param": {
+    "summary": "Update any field of a gas domain (same overlay setter as fluid.set_param)",
+    "tags": "simulation|configure"
+  },
+  "gas.step": {
+    "summary": "Advance the gas solver by one timestep",
+    "tags": "simulation|advance"
+  },
+  "gas.reset": {
+    "summary": "Reset every gas and fluid simulation to frame zero",
+    "tags": "simulation|reset"
+  },
+  "gas.clear": {
+    "summary": "Clear a gas domain's fields",
+    "tags": "simulation|reset"
+  },
+  "gas.pressure_pulse": {
+    "summary": "Inject a pressure pulse into a gas domain, as an explosion or blast wave",
+    "tags": "simulation|explosion|blast|shockwave|pressure"
+  },
+  "gas.structural_impulse_stats": {
+    "summary": "Report the blast impulses the gas solver handed to the structural/fracture side",
+    "tags": "diagnostics|blast|fracture|coupling"
+  },
+  "flow_source.create": {
+    "summary": "Create an emitter that feeds a fluid or gas domain with mass, heat, fuel or particles",
+    "notes": "An emitter belongs to a domain by name. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space.",
+    "tags": "simulation|emitter|source|inject|pour|jet|flame|inflow",
+    "related": "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
+    "returns": "FlowSourceInfo",
+    "params": {
+      "name": {
+        "description": "Emitter name",
+        "type": "string"
+      },
+      "domain": {
+        "description": "Target fluid or gas domain name",
+        "type": "string"
+      },
+      "source_mode": {
+        "description": "Emission shape/source kind",
+        "type": "string"
+      },
+      "source_object": {
+        "description": "Object whose surface or volume emits",
+        "type": "string"
+      },
+      "parent_object": {
+        "description": "Object the emitter follows",
+        "type": "string"
+      },
+      "position": {
+        "description": "Emitter position; parent-local when parented",
+        "type": "vec3"
+      },
+      "velocity": {
+        "description": "Emitted velocity in metres per second",
+        "type": "vec3"
+      },
+      "velocity_space": {
+        "description": "Frame the velocity is expressed in",
+        "type": "string"
+      },
+      "radius": {
+        "description": "Emission radius in metres",
+        "type": "float"
+      },
+      "temperature": {
+        "description": "Injected temperature in Kelvin",
+        "type": "float"
+      },
+      "fuel": {
+        "description": "Injected fuel density",
+        "type": "float"
+      },
+      "density": {
+        "description": "Injected smoke or liquid density",
+        "type": "float"
+      },
+      "fluid_substance": {
+        "description": "Substance id emitted into a liquid domain",
+        "type": "string"
+      },
+      "fluid_particles_per_second": {
+        "description": "Liquid particle emission rate",
+        "type": "float"
+      },
+      "enabled": {
+        "description": "Emitter active",
+        "type": "bool"
+      }
+    }
+  },
+  "flow_source.update": {
+    "summary": "Update fields of an existing emitter, keeping everything you do not send",
+    "notes": "Read-modify-write on purpose: sending only one field must not reset the rest.",
+    "tags": "simulation|emitter|configure",
+    "related": "flow_source.create|flow_source.get"
+  },
+  "flow_source.get": {
+    "summary": "Return one emitter's full settings",
+    "tags": "simulation|emitter",
+    "returns": "FlowSourceInfo"
+  },
+  "flow_source.list": {
+    "summary": "List every emitter with its settings",
+    "tags": "simulation|emitter|inventory",
+    "returns": "FlowSourceInfo[]"
+  },
+  "flow_source.remove": {
+    "summary": "Delete an emitter",
+    "tags": "simulation|emitter|remove"
+  },
+  "msf.substances": {
+    "summary": "List the material substance library: every substance an object or fluid can be made of",
+    "notes": "Substance ids from here are what fluid.set_substance_material and the combustion path expect.",
+    "tags": "substance|material|library|wood|water|metal|thermochemistry",
+    "related": "fluid.set_substance_material|msf.fields"
+  },
+  "msf.fields": {
+    "summary": "Report the live material state fields (temperature, moisture, char, mass) per object",
+    "notes": "This is the measurement side of burning and melting: mass loss, integrity and mass-conservation error are reported here.",
+    "tags": "substance|thermal|burn|melt|measure|verify|temperature|moisture",
+    "related": "msf.substances"
+  },
+  "physics.add_body": {
+    "summary": "Give an object a rigid-body with a mass, motion type and collision shape",
+    "tags": "simulation|rigid|collision|gravity|mass",
+    "related": "physics.set_gravity|physics.get_body|physics.step",
+    "params": {
+      "object": {
+        "description": "Object name"
+      },
+      "kind": {
+        "description": "Body family, e.g. rigid"
+      },
+      "motion_type": {
+        "description": "dynamic, kinematic or static"
+      },
+      "mass": {
+        "description": "Mass in kilograms"
+      },
+      "shape": {
+        "description": "Collision shape, e.g. box, sphere, mesh"
+      }
+    }
+  },
+  "physics.get_body": {
+    "summary": "Return a rigid body's mass, damping, friction, restitution and motion type",
+    "tags": "simulation|rigid"
+  },
+  "physics.remove_body": {
+    "summary": "Remove an object's rigid body",
+    "tags": "simulation|rigid|remove"
+  },
+  "physics.set_gravity": {
+    "summary": "Set the world gravity vector in metres per second squared",
+    "tags": "simulation|gravity"
+  },
+  "physics.step": {
+    "summary": "Advance the rigid-body solver by one timestep",
+    "tags": "simulation|advance"
+  },
+  "physics.reset": {
+    "summary": "Reset the rigid-body simulation to its initial state",
+    "tags": "simulation|reset"
+  },
+  "physics.fracture_object": {
+    "summary": "Shatter an object into Voronoi shards and return the shard objects",
+    "notes": "site_count sets how many shards; exact_surface clips shards against the real surface instead of approximating it. The shards are ordinary objects afterwards - group them with physics.make_fracture_group so they hold together until something breaks them.",
+    "tags": "destruction|shatter|break|voronoi|shards|debris",
+    "related": "physics.make_fracture_group|physics.fracture_cluster_groups|physics.unfracture_object",
+    "params": {
+      "object": {
+        "description": "Object to shatter",
+        "type": "string",
+        "required": true
+      },
+      "site_count": {
+        "description": "Number of Voronoi sites, i.e. shards"
+      },
+      "pattern": {
+        "description": "Fracture site distribution pattern"
+      },
+      "cluster_count": {
+        "description": "Number of shard clusters to form"
+      },
+      "exact_surface": {
+        "description": "Clip shards against the exact surface rather than an approximation"
+      },
+      "preview_gap": {
+        "description": "Visual gap between shards in metres, for preview only"
+      },
+      "seed": {
+        "description": "Random seed for reproducible shard layouts"
+      }
+    }
+  },
+  "physics.unfracture_object": {
+    "summary": "Restore a fractured object back to its unbroken form",
+    "tags": "destruction|undo|restore"
+  },
+  "physics.make_fracture_group": {
+    "summary": "Bond shards into a fracture group that holds together until the break threshold is exceeded",
+    "notes": "break_velocity is a velocity threshold, not an impulse - the group's mass is taken into account when the threshold is evaluated.",
+    "tags": "destruction|group|bond|threshold|collapse",
+    "related": "physics.fracture_object|physics.break_fracture_group|physics.apply_fracture_impulse"
+  },
+  "physics.break_fracture_group": {
+    "summary": "Break a fracture group apart immediately with a given strength",
+    "tags": "destruction|break|collapse"
+  },
+  "physics.apply_fracture_impulse": {
+    "summary": "Apply an impulse at a point on a fracture group and report whether it broke",
+    "tags": "destruction|impact|blast|impulse"
+  },
+  "physics.get_fracture_group": {
+    "summary": "Report a fracture group's mass, integrity and break thresholds",
+    "tags": "destruction|measure|verify"
+  },
+  "physics.fracture_cluster_groups": {
+    "summary": "List or build the cluster groups of a fractured object",
+    "tags": "destruction|group"
+  },
+  "forcefield.types": {
+    "summary": "List the available force-field types",
+    "tags": "simulation|wind|vortex|drag"
+  },
+  "forcefield.create": {
+    "summary": "Create a force field of the given type and return its name",
+    "tags": "simulation|wind|vortex|turbulence|gravity|create"
+  },
+  "forcefield.list": {
+    "summary": "List the force fields in the scene",
+    "tags": "simulation|inventory"
+  },
+  "forcefield.get": {
+    "summary": "Return one force field's full settings",
+    "tags": "simulation"
+  },
+  "forcefield.remove": {
+    "summary": "Delete a force field",
+    "tags": "simulation|remove"
+  },
+  "forcefield.set_param": {
+    "summary": "Update a force field: shape, strength, falloff, noise, drag and which solvers it affects",
+    "notes": "A force field is spatial - it is NOT attached to a domain. Which solvers feel it is decided by the affects_* flags.",
+    "tags": "simulation|wind|turbulence|drag|configure",
+    "related": "forcefield.evaluate"
+  },
+  "forcefield.evaluate": {
+    "summary": "Evaluate the combined force fields at a world position and return the resulting acceleration",
+    "notes": "The way to check a field really reaches a place, rather than inferring it from how a simulation looks.",
+    "tags": "measure|verify|probe|force",
+    "related": "forcefield.set_param"
+  },
+  "particle.list_systems": {
+    "summary": "List the particle systems with their emitter, domain and collider counts",
+    "tags": "particles|inventory"
+  },
+  "particle.emitters": {
+    "summary": "List the particle emitters",
+    "tags": "particles|inventory"
+  },
+  "particle.get_emitter": {
+    "summary": "Return one particle emitter's full settings",
+    "tags": "particles"
+  },
+  "particle.add_emitter": {
+    "summary": "Add a particle emitter and return it",
+    "tags": "particles|create|spawn|emit"
+  },
+  "particle.set_emitter": {
+    "summary": "Update fields of a particle emitter, keeping what you do not send",
+    "tags": "particles|configure"
+  },
+  "particle.remove_emitter": {
+    "summary": "Remove a particle emitter",
+    "tags": "particles|remove"
+  },
+  "particle.clear_emitters": {
+    "summary": "Remove every particle emitter",
+    "tags": "particles|remove"
+  },
+  "particle.clear_systems": {
+    "summary": "Remove every particle system",
+    "tags": "particles|remove"
+  },
+  "particle.clear": {
+    "summary": "Delete the live particles without touching the emitters",
+    "tags": "particles|reset"
+  },
+  "particle.spawn": {
+    "summary": "Spawn one particle with an explicit position, velocity, size, mass and lifetime",
+    "tags": "particles|manual|inject"
+  },
+  "particle.get_physics": {
+    "summary": "Read the particle solver settings",
+    "tags": "particles|solver"
+  },
+  "particle.set_physics": {
+    "summary": "Set the particle solver: mode, quality, rest density, viscosity, cohesion, self-collision and grid deposit rates",
+    "tags": "particles|solver|configure|sph"
+  },
+  "particle.stats": {
+    "summary": "Report live particle counts and per-stage solver timings",
+    "tags": "particles|measure|performance|verify"
+  },
+  "particle.step": {
+    "summary": "Advance the particle solver by one timestep",
+    "tags": "particles|advance"
+  },
+  "terrain.list": {
+    "summary": "List the terrain objects",
+    "tags": "landscape|inventory"
+  },
+  "terrain.get": {
+    "summary": "Return one terrain's size, resolution, height scale and node-graph state",
+    "tags": "landscape"
+  },
+  "terrain.create": {
+    "summary": "Create a terrain heightfield of a given world size and resolution",
+    "tags": "landscape|mountain|ground|create|heightmap",
+    "related": "terrain.apply_preset|terrain.erode|terrain.evaluate",
+    "params": {
+      "size": {
+        "description": "World-space extent in metres"
+      },
+      "resolution": {
+        "description": "Heightmap resolution in samples per side"
+      },
+      "height_scale": {
+        "description": "Vertical scale in metres"
+      }
+    }
+  },
+  "terrain.remove": {
+    "summary": "Delete a terrain",
+    "tags": "landscape|remove"
+  },
+  "terrain.apply_preset": {
+    "summary": "Apply a built-in terrain node preset",
+    "tags": "landscape|preset|mountain|snow|river",
+    "params": {
+      "preset": {
+        "description": "Preset name",
+        "enum": "default|snow_layer|snowy_mountain_valley|river_network"
+      }
+    }
+  },
+  "terrain.erode": {
+    "summary": "Run an erosion pass over a terrain",
+    "tags": "landscape|erosion|weathering|realism",
+    "params": {
+      "type": {
+        "description": "Erosion model",
+        "enum": "hydraulic|thermal|fluvial|wind"
+      },
+      "iterations": {
+        "description": "Solver iterations; 0 uses the model's own default"
+      },
+      "strength": {
+        "description": "Erosion strength"
+      },
+      "talus_angle": {
+        "description": "Repose angle for thermal erosion"
+      },
+      "backend": {
+        "description": "Compute backend; auto picks GPU when available"
+      }
+    }
+  },
+  "terrain.evaluate": {
+    "summary": "Evaluate the terrain node graph and bake the result into the heightfield",
+    "tags": "landscape|bake|apply",
+    "related": "terrain.evaluation_status|terrain.cancel_evaluation"
+  },
+  "terrain.evaluation_status": {
+    "summary": "Report terrain evaluation progress and the node being processed",
+    "tags": "landscape|progress"
+  },
+  "terrain.cancel_evaluation": {
+    "summary": "Cancel the running terrain evaluation",
+    "tags": "landscape|abort"
+  },
+  "terrain.sample_height": {
+    "summary": "Sample terrain height at a world position",
+    "tags": "landscape|measure|probe|placement"
+  },
+  "terrain.carve_river": {
+    "summary": "Carve a river channel along a path into the terrain",
+    "tags": "landscape|river|water|erosion"
+  },
+  "terrain.list_rivers": {
+    "summary": "List the rivers carved into a terrain",
+    "tags": "landscape|river|inventory"
+  },
+  "terrain.calculate_flow": {
+    "summary": "Compute the water flow map over a terrain",
+    "tags": "landscape|water|hydrology|flow"
+  },
+  "terrain.import_heightmap": {
+    "summary": "Import a heightmap image into a terrain",
+    "tags": "landscape|import|heightmap"
+  },
+  "terrain.export_heightmap": {
+    "summary": "Export a terrain heightfield to an image file",
+    "tags": "landscape|export|heightmap"
+  },
+  "scatter.list_groups": {
+    "summary": "List the scatter groups with their sources, counts and placement settings",
+    "tags": "instancing|vegetation|inventory"
+  },
+  "scatter.create_group": {
+    "summary": "Create a scatter group that instances objects over a target surface",
+    "tags": "instancing|vegetation|forest|rocks|create"
+  },
+  "scatter.add_source": {
+    "summary": "Add a source object that a scatter group may instance",
+    "tags": "instancing|vegetation"
+  },
+  "scatter.fill": {
+    "summary": "Populate a scatter group and report how many instances were spawned",
+    "tags": "instancing|vegetation|populate|spawn"
+  },
+  "scatter.clear": {
+    "summary": "Remove the instances of a scatter group, keeping the group",
+    "tags": "instancing|reset"
+  },
+  "scatter.delete_group": {
+    "summary": "Delete a scatter group",
+    "tags": "instancing|remove"
+  },
+  "hair.list": {
+    "summary": "List the hair grooms",
+    "tags": "hair|fur|grass|inventory"
+  },
+  "hair.get": {
+    "summary": "Return one hair groom's full settings",
+    "tags": "hair"
+  },
+  "hair.create": {
+    "summary": "Create a hair groom bound to a mesh",
+    "tags": "hair|fur|grass|create"
+  },
+  "hair.remove": {
+    "summary": "Delete a hair groom",
+    "tags": "hair|remove"
+  },
+  "hair.rename": {
+    "summary": "Rename a hair groom",
+    "tags": "hair"
+  },
+  "hair.update": {
+    "summary": "Update hair groom settings, keeping what you do not send",
+    "tags": "hair|configure"
+  },
+  "hair.grow": {
+    "summary": "Scale hair length by a factor",
+    "tags": "hair|length|style"
+  },
+  "hair.trim": {
+    "summary": "Trim hair strands",
+    "tags": "hair|length|style"
+  },
+  "hair.comb": {
+    "summary": "Comb hair strands towards a direction with a root stiffness",
+    "tags": "hair|style|direction"
+  },
+  "hair.smooth": {
+    "summary": "Smooth hair strand shapes",
+    "tags": "hair|style"
+  },
+  "hair.restyle": {
+    "summary": "Restyle a hair groom",
+    "tags": "hair|style"
+  },
+  "hair.apply_preset": {
+    "summary": "Apply a built-in hair preset to a groom",
+    "tags": "hair|preset|style"
+  },
+  "hair.list_presets": {
+    "summary": "List the available hair presets",
+    "tags": "hair|preset"
+  },
+  "hair.bake": {
+    "summary": "Bake a hair groom to its cached geometry",
+    "tags": "hair|bake"
+  },
+  "hair.reset_simulation": {
+    "summary": "Reset hair dynamics to the rest pose",
+    "tags": "hair|simulation|reset"
+  },
+  "paint.ensure": {
+    "summary": "Create or return the paint target (texture set) for an object",
+    "tags": "texture|paint|setup"
+  },
+  "paint.get": {
+    "summary": "Return an object's paint target: layers, channels and resolution",
+    "tags": "texture|paint"
+  },
+  "paint.add_layer": {
+    "summary": "Add a paint layer to an object's texture set",
+    "tags": "texture|paint|layer"
+  },
+  "paint.remove_layer": {
+    "summary": "Remove a paint layer",
+    "tags": "texture|paint|layer"
+  },
+  "paint.duplicate_layer": {
+    "summary": "Duplicate a paint layer",
+    "tags": "texture|paint|layer"
+  },
+  "paint.move_layer": {
+    "summary": "Reorder a paint layer in the stack",
+    "tags": "texture|paint|layer"
+  },
+  "paint.update_layer": {
+    "summary": "Set a paint layer's name, opacity, blend mode, visibility or lock",
+    "tags": "texture|paint|layer"
+  },
+  "paint.merge_down": {
+    "summary": "Merge a paint layer into the one below it",
+    "tags": "texture|paint|layer"
+  },
+  "paint.flatten": {
+    "summary": "Flatten every paint layer into one",
+    "tags": "texture|paint|layer"
+  },
+  "paint.fill": {
+    "summary": "Fill a paint layer channel with a value or colour",
+    "tags": "texture|paint|fill"
+  },
+  "paint.clear_channel": {
+    "summary": "Clear one channel of a paint layer",
+    "tags": "texture|paint"
+  },
+  "paint.apply_mask": {
+    "summary": "Apply a mask preset to a paint layer",
+    "tags": "texture|paint|mask|wear|dirt"
+  },
+  "paint.list_mask_presets": {
+    "summary": "List the available paint mask presets",
+    "tags": "texture|paint|mask"
+  },
+  "paint.bake_height_to_normal": {
+    "summary": "Bake a paint height channel into the normal channel",
+    "tags": "texture|paint|bake|normal"
+  },
+  "paint.import_channel": {
+    "summary": "Import an image into a paint layer channel",
+    "tags": "texture|paint|import"
+  },
+  "paint.export_channel": {
+    "summary": "Export a paint layer channel to an image file",
+    "tags": "texture|paint|export"
+  },
+  "sculpt.get": {
+    "summary": "Report an object's sculpt state: vertex count and mask range",
+    "tags": "sculpt|mesh"
+  },
+  "sculpt.stroke": {
+    "summary": "Apply a sculpt brush stroke to a mesh",
+    "tags": "sculpt|mesh|deform|brush"
+  },
+  "sculpt.paint_mask": {
+    "summary": "Paint the sculpt mask on a mesh",
+    "tags": "sculpt|mask"
+  },
+  "sculpt.mask_operation": {
+    "summary": "Run an operation over the sculpt mask (invert, clear, grow, ...)",
+    "tags": "sculpt|mask"
+  },
+  "modifiers.get_stack": {
+    "summary": "List an object's modifier stack",
+    "tags": "mesh|modifier"
+  },
+  "modifiers.add": {
+    "summary": "Add a modifier to an object and return the new stack entry",
+    "tags": "mesh|modifier|subdivide|create"
+  },
+  "modifiers.remove": {
+    "summary": "Remove a modifier from an object",
+    "tags": "mesh|modifier|remove"
+  },
+  "modifiers.apply": {
+    "summary": "Apply a modifier destructively into the mesh",
+    "tags": "mesh|modifier|bake"
+  },
+  "modifiers.set_param": {
+    "summary": "Set a modifier parameter: enabled, levels, render_levels or smooth_angle",
+    "tags": "mesh|modifier|configure"
+  },
+  "nodes.graphs": {
+    "summary": "List the node graphs that exist",
+    "tags": "nodes|graph|inventory"
+  },
+  "nodes.create_graph": {
+    "summary": "Create a node graph in a domain",
+    "tags": "nodes|graph|create"
+  },
+  "nodes.remove_graph": {
+    "summary": "Delete a node graph",
+    "tags": "nodes|graph|remove"
+  },
+  "nodes.types": {
+    "summary": "List every node type with its category and description",
+    "tags": "nodes|catalogue"
+  },
+  "nodes.list": {
+    "summary": "List the nodes of a graph with their inputs and outputs",
+    "tags": "nodes|graph"
+  },
+  "nodes.add": {
+    "summary": "Add a node of the given type to a graph",
+    "tags": "nodes|graph|create"
+  },
+  "nodes.remove": {
+    "summary": "Remove a node from a graph",
+    "tags": "nodes|graph|remove"
+  },
+  "nodes.link": {
+    "summary": "Connect one node's output to another node's input",
+    "tags": "nodes|graph|connect|wire"
+  },
+  "nodes.list_params": {
+    "summary": "List a node's parameters, their types, values and whether they are driven by a link",
+    "tags": "nodes|graph"
+  },
+  "nodes.get_param": {
+    "summary": "Read one node parameter",
+    "tags": "nodes|graph"
+  },
+  "nodes.set_param": {
+    "summary": "Set one node parameter",
+    "tags": "nodes|graph|configure"
+  },
+  "nodes.list_properties": {
+    "summary": "List a node's non-parameter properties",
+    "tags": "nodes|graph"
+  },
+  "nodes.get_property": {
+    "summary": "Read one node property",
+    "tags": "nodes|graph"
+  },
+  "nodes.set_property": {
+    "summary": "Set one node property",
+    "tags": "nodes|graph|configure"
+  },
+  "nodes.apply": {
+    "summary": "Evaluate a node graph and apply its result, reporting errors and warnings",
+    "tags": "nodes|graph|evaluate|bake"
+  },
+  "sim_graph.list": {
+    "summary": "List the simulation node graphs with their scope, owner and whether the owner still exists",
+    "notes": "owner_missing means the graph outlived the entity it was written for - it will not run.",
+    "tags": "simulation|nodes|graph|inventory|scope"
+  },
+  "sim_graph.create": {
+    "summary": "Create a simulation node graph for a scope and owner",
+    "notes": "Scope and owner are mandatory and identify what the graph drives; a graph is not global.",
+    "tags": "simulation|nodes|graph|create|scope"
+  },
+  "sim_graph.delete": {
+    "summary": "Delete a simulation node graph",
+    "tags": "simulation|nodes|remove"
+  },
+  "sim_graph.clear": {
+    "summary": "Remove every node from a simulation graph",
+    "tags": "simulation|nodes|reset"
+  },
+  "sim_graph.nodes": {
+    "summary": "List a simulation graph's nodes, their channels, sources and restart requirements",
+    "tags": "simulation|nodes|graph"
+  },
+  "sim_graph.add_node": {
+    "summary": "Add a node of the given type to a simulation graph",
+    "tags": "simulation|nodes|create"
+  },
+  "sim_graph.connect": {
+    "summary": "Connect two nodes in a simulation graph",
+    "tags": "simulation|nodes|connect|wire"
+  },
+  "sim_graph.set_node": {
+    "summary": "Set a text-valued key on a simulation node",
+    "tags": "simulation|nodes|configure"
+  },
+  "sim_graph.set_node_value": {
+    "summary": "Set a numeric key on a simulation node",
+    "tags": "simulation|nodes|configure"
+  },
+  "sim_graph.evaluate": {
+    "summary": "Evaluate a simulation graph and report the commands it would issue, without applying them",
+    "notes": "The graph DECLARES; the solver REPORTS. Evaluate first, then apply - that split is what makes a graph inspectable.",
+    "tags": "simulation|nodes|evaluate|dry-run|inspect",
+    "related": "sim_graph.apply|sim_graph.couplings"
+  },
+  "sim_graph.apply": {
+    "summary": "Apply an evaluated simulation graph, reporting what was applied, refused or held",
+    "tags": "simulation|nodes|apply|commit",
+    "related": "sim_graph.evaluate"
+  },
+  "sim_graph.clear_overrides": {
+    "summary": "Drop the overrides a simulation graph is holding",
+    "tags": "simulation|nodes|reset"
+  },
+  "sim_graph.couplings": {
+    "summary": "Report declared versus actually running couplings between simulation domains",
+    "notes": "declared_not_running and running_not_declared are the two ways a graph and the live solvers can disagree.",
+    "tags": "simulation|nodes|coupling|verify|diagnostics"
+  },
+  "sim_graph.attributes": {
+    "summary": "List the attributes a simulation domain exposes",
+    "tags": "simulation|nodes|attributes"
+  },
+  "sim_graph.surface_attributes": {
+    "summary": "List the surface attributes an object exposes to simulation nodes",
+    "tags": "simulation|nodes|attributes|surface"
+  },
+  "sim_cache.status": {
+    "summary": "Report the simulation cache: valid range, frames in RAM, cache directory and the config signature",
+    "notes": "The config signature is what decides whether a bake is still valid; when it changes, cached frames belong to a different setup.",
+    "tags": "simulation|cache|bake|verify"
+  },
+  "sim_cache.bake": {
+    "summary": "Bake a frame range of the simulation to the cache",
+    "tags": "simulation|cache|bake"
+  },
+  "sim_cache.clear": {
+    "summary": "Clear the simulation cache",
+    "tags": "simulation|cache|reset"
+  },
+  "debris.configure": {
+    "summary": "Enable and configure the ash/debris particle system",
+    "tags": "fire|ash|debris|particles"
+  },
+  "debris.emit_ash": {
+    "summary": "Emit ash debris of a given mass at a point",
+    "tags": "fire|ash|debris|emit"
+  },
+  "debris.stats": {
+    "summary": "Report ash debris counts, accepted mass and budget rejections",
+    "tags": "fire|ash|measure"
+  },
+  "anim.characters": {
+    "summary": "List the animated characters",
+    "tags": "animation|inventory"
+  },
+  "anim.character": {
+    "summary": "Return one character's animation state",
+    "tags": "animation"
+  },
+  "anim.clips": {
+    "summary": "List a character's animation clips with frame ranges and loop flags",
+    "tags": "animation|clip"
+  },
+  "anim.play": {
+    "summary": "Play an animation clip on a character layer with a blend time",
+    "tags": "animation|play|clip"
+  },
+  "anim.stop": {
+    "summary": "Stop playback on a character layer with a blend-out time",
+    "tags": "animation|stop"
+  },
+  "anim.set_paused": {
+    "summary": "Pause or resume a character's animation",
+    "tags": "animation|pause"
+  },
+  "anim.set_time": {
+    "summary": "Set playback time in seconds on a character layer",
+    "tags": "animation|time|scrub"
+  },
+  "anim.set_speed": {
+    "summary": "Set playback speed on a character layer",
+    "tags": "animation|speed"
+  },
+  "anim.set_loop": {
+    "summary": "Set whether a character layer loops",
+    "tags": "animation|loop"
+  },
+  "anim.status": {
+    "summary": "Report a character layer's playback state",
+    "tags": "animation|progress"
+  },
+  "anim.graph_status": {
+    "summary": "Report a character's animation graph state",
+    "tags": "animation|graph|statemachine"
+  },
+  "anim.set_graph_param": {
+    "summary": "Set a float or bool parameter on a character's animation graph",
+    "tags": "animation|graph|parameter"
+  },
+  "anim.trigger_graph_param": {
+    "summary": "Fire a trigger parameter on a character's animation graph",
+    "tags": "animation|graph|trigger"
+  },
+  "anim.insert_key": {
+    "summary": "Insert a keyframe on an object channel at a frame",
+    "tags": "animation|keyframe|channel",
+    "params": {
+      "channel": {
+        "description": "Animated channel",
+        "enum": "location|rotation|scale"
+      }
+    }
+  },
+  "anim.remove_key": {
+    "summary": "Remove an object's keyframe at a frame",
+    "tags": "animation|keyframe"
+  },
+  "anim.list_keys": {
+    "summary": "List an object's keyframes",
+    "tags": "animation|keyframe"
+  },
+  "post.get": {
+    "summary": "Read the post-processing settings: exposure, gamma, tone mapping, saturation, vignette and stylize",
+    "tags": "post|grade|look"
+  },
+  "post.set_exposure": {
+    "summary": "Set post-process exposure",
+    "notes": "Post changes must not reset sample accumulation.",
+    "tags": "post|brightness|grade"
+  },
+  "post.set_gamma": {
+    "summary": "Set post-process gamma",
+    "tags": "post|grade"
+  },
+  "post.set_tone_mapping": {
+    "summary": "Set the tone mapping operator",
+    "tags": "post|grade|filmic",
+    "params": {
+      "tone_mapping": {
+        "description": "Operator",
+        "enum": "agx|aces|uncharted|filmic|none"
+      }
+    }
+  },
+  "post.set_saturation": {
+    "summary": "Set post-process saturation",
+    "tags": "post|grade|colour"
+  },
+  "post.set_color_temperature": {
+    "summary": "Set post-process colour temperature",
+    "tags": "post|grade|white-balance"
+  },
+  "post.set_vignette_enabled": {
+    "summary": "Enable or disable the vignette",
+    "tags": "post|look"
+  },
+  "post.set_vignette_strength": {
+    "summary": "Set vignette strength",
+    "tags": "post|look"
+  },
+  "post.set_stylize_enabled": {
+    "summary": "Enable or disable the stylize pass",
+    "tags": "post|look|npr"
+  },
+  "post.set_stylize_strength": {
+    "summary": "Set stylize pass strength",
+    "tags": "post|look|npr"
+  },
+  "project.path": {
+    "summary": "Return the current project file path",
+    "tags": "project|file"
+  },
+  "project.open": {
+    "summary": "Open a project file, replacing the current scene",
+    "tags": "project|file|load"
+  },
+  "project.save": {
+    "summary": "Save the project, optionally to a new path",
+    "tags": "project|file|save"
+  },
+  "script.run_file": {
+    "summary": "Run a Python script file inside the application",
+    "tags": "script|python|automation"
+  },
+  "templates.list": {
+    "summary": "List the available scene templates",
+    "tags": "template|starter|scene"
+  },
+  "templates.get": {
+    "summary": "Return one template's metadata",
+    "tags": "template"
+  },
+  "templates.open": {
+    "summary": "Open a template as the current scene",
+    "tags": "template|load|start"
+  },
+  "templates.prepare": {
+    "summary": "Run a template's preflight without opening it",
+    "tags": "template|preflight|validate"
+  },
+  "templates.validate": {
+    "summary": "Validate a template and report the errors that would block it",
+    "tags": "template|validate"
+  },
+  "templates.refresh": {
+    "summary": "Rescan the template directories",
+    "tags": "template|reload"
+  },
+  "templates.save_user": {
+    "summary": "Save the current scene as a user template",
+    "tags": "template|save"
+  },
+  "templates.delete_user": {
+    "summary": "Delete a user template",
+    "tags": "template|remove"
+  },
+  "templates.show_hub": {
+    "summary": "Show the Template Hub window",
+    "tags": "template|ui"
+  },
+  "templates.hide_hub": {
+    "summary": "Hide the Template Hub window",
+    "tags": "template|ui"
+  },
+  "templates.is_hub_visible": {
+    "summary": "Report whether the Template Hub is visible",
+    "tags": "template|ui"
+  },
+  "editor.get_state": {
+    "summary": "Report which editors are open, the node editor's domain and the simulation graph scope being shown",
+    "notes": "Editor state is a VALUE, so it travels over IPC. Panel drawing does not - that is the rt.ui exemption.",
+    "tags": "ui|editor|state|context"
+  },
+  "editor.set_bottom_editor": {
+    "summary": "Choose which editor fills the bottom dock",
+    "tags": "ui|editor"
+  },
+  "editor.set_node_domain": {
+    "summary": "Choose which domain's graph the node editor shows",
+    "tags": "ui|editor|nodes",
+    "params": {
+      "name": {
+        "description": "Node editor domain",
+        "enum": "material|geometry|terrain"
+      }
+    }
+  },
+  "editor.set_sim_graph_scope": {
+    "summary": "Choose which scope and owner the simulation node editor shows",
+    "tags": "ui|editor|simulation|scope"
+  },
+  "addons.list": {
+    "summary": "List the installed addons with their load state",
+    "tags": "plugin|extension"
+  },
+  "addons.enable": {
+    "summary": "Enable an addon module",
+    "tags": "plugin|extension"
+  },
+  "addons.disable": {
+    "summary": "Disable an addon module",
+    "tags": "plugin|extension"
+  },
+  "addons.reload": {
+    "summary": "Reload an addon module from disk",
+    "tags": "plugin|extension|develop"
+  },
+  "ipc.admin.tokens.list": {
+    "summary": "List the remote IPC access tokens and their capabilities",
+    "tags": "security|admin|token"
+  },
+  "ipc.admin.tokens.create": {
+    "summary": "Create a remote IPC token with a capability mask and return the raw secret once",
+    "tags": "security|admin|token"
+  },
+  "ipc.admin.tokens.update": {
+    "summary": "Update a token's name, capabilities, expiry or address allowlist",
+    "tags": "security|admin|token"
+  },
+  "ipc.admin.tokens.rotate": {
+    "summary": "Rotate a token's secret and return the new one once",
+    "tags": "security|admin|token"
+  },
+  "ipc.admin.tokens.revoke": {
+    "summary": "Revoke a remote IPC token",
+    "tags": "security|admin|token"
+  },
+  "ipc.admin.sessions.list": {
+    "summary": "List the connected IPC sessions with traffic counters",
+    "tags": "security|admin|session"
+  },
+  "ipc.admin.sessions.get": {
+    "summary": "Return one IPC session's details",
+    "tags": "security|admin|session"
+  },
+  "ipc.admin.sessions.disconnect": {
+    "summary": "Disconnect one IPC session",
+    "tags": "security|admin|session"
+  },
+  "ipc.admin.sessions.disconnect_all": {
+    "summary": "Disconnect every IPC session except the caller",
+    "tags": "security|admin|session"
+  },
+  "ipc.admin.audit.list": {
+    "summary": "Return recent IPC audit events: method, caller, outcome and duration",
+    "tags": "security|admin|audit|log"
+  },
+  "ipc.admin.audit.clear": {
+    "summary": "Clear the IPC audit log",
+    "tags": "security|admin|audit"
+  },
+  "ipc.admin.audit.export": {
+    "summary": "Export the IPC audit log to a JSONL file",
+    "tags": "security|admin|audit|export"
+  }
+}

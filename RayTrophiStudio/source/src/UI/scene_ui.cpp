@@ -2321,6 +2321,7 @@ void SceneUI::drawDockSpaceHost(UIContext& ctx)
         ImGuiID dock_bottom = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Down, bottom_ratio, nullptr, &dock_main);
 
         ImGui::DockBuilderDockWindow("Properties", dock_left);
+        ImGui::DockBuilderDockWindow("Agent Chat", dock_left);
         ImGui::DockBuilderDockWindow("Timeline", dock_bottom);
         ImGui::DockBuilderDockWindow("Console", dock_bottom);
         ImGui::DockBuilderDockWindow("Terrain Graph", dock_bottom);
@@ -3802,6 +3803,11 @@ void SceneUI::draw(UIContext& ctx)
     drawPanels(ctx);
     left_offset = showSidePanel ? side_panel_width : 0.0f;
     drawPoppedPropertyWindows(ctx); // detachable Properties sub-tabs (floating/dockable)
+    
+    if (show_agent_chat) {
+        agentChatUI.draw(&show_agent_chat);
+    }
+    
     drawPaintBrushDock(ctx);
 
     float vp_width = ImGui::GetIO().DisplaySize.x;

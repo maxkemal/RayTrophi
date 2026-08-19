@@ -37,6 +37,7 @@ being paid for twice.
 | [API_SCRIPTING_ROADMAP.md](API_SCRIPTING_ROADMAP.md) | Scripting/IPC API waves and their status table |
 | [SIMULATION_NODE_OBJECT_MODEL.md](SIMULATION_NODE_OBJECT_MODEL.md) | Scope-based object model for the simulation node layer — scopes landed, steps 3-6 open |
 | [AGENT_VIEWPORT_MEASUREMENT_PLAN.md](AGENT_VIEWPORT_MEASUREMENT_PLAN.md) | Driving the viewport and reading render DATA over IPC — the substrate agents verify with |
+| [AGENT_DISCOVERY_LAYER_PLAN.md](AGENT_DISCOVERY_LAYER_PLAN.md) | Self-describing API layer — agent.* discovery, method registry, workflow recipes |
 | [TEMPLATE_HUB_UX_ROADMAP.md](TEMPLATE_HUB_UX_ROADMAP.md) | Canonical product direction for startup / template / guided-scene UX |
 | [GRANULAR_SIMULATION_ROADMAP.md](GRANULAR_SIMULATION_ROADMAP.md) | Sand and granular MPM/APIC constitutive solver |
 | [GRANULAR_GPU_FIRST_PLAN.md](GRANULAR_GPU_FIRST_PLAN.md) | GPU-first execution plan for the granular solver |
@@ -61,6 +62,7 @@ being paid for twice.
 | [VULKAN_SIMULATION_RESET_SAFETY.md](VULKAN_SIMULATION_RESET_SAFETY.md) | Reset/rewind safety rule — TDR avoidance |
 | [simulation_physics_foundation_plan.md](simulation_physics_foundation_plan.md) | Field-first physics stack direction |
 | [IPC_SECURITY_PERFORMANCE.md](IPC_SECURITY_PERFORMANCE.md) | IPC transport and local security model |
+| [AGENT_RUNTIME_PHASE4_REVIEW.md](AGENT_RUNTIME_PHASE4_REVIEW.md) | Review of the agent runtime + discovery layer before Phase 4 — what is real, what only looks real |
 | [REMOTE_IPC_GATEWAY.md](REMOTE_IPC_GATEWAY.md) | Remote gateway boundary (see also `docs/remote_ipc_gateway_openapi.yaml`) |
 | [TEMPLATE_REGISTRY_API.md](TEMPLATE_REGISTRY_API.md) | Template Registry script/IPC surface |
 | [INTERIOR_VOLUME.md](INTERIOR_VOLUME.md) | Procedural interior appearance model |

@@ -31,17 +31,55 @@
 
 #include "Api/RtApiInternal.h"
 #include "Backend/IBackend.h"
+#include "Backend/IViewportBackend.h"
+#include "globals.h"
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <mutex>
 #include <vector>
 
+// The interactive raster viewport. Owned by the UI layer; declared there as a
+// file-local extern, so it is re-declared rather than pulled from a header.
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+
 namespace rtapi {
 
 namespace {
+
+// One table, both directions. Two separate switch statements is how a name and
+// an int drift apart.
+struct ShadingEntry {
+    int mode;                        // SceneUI::ViewportDisplaySettings::shading_mode
+    const char* name;                // canonical name crossing the boundary
+    Backend::ViewportMode backend;   // what the backend has to support
+};
+constexpr ShadingEntry kShadingModes[] = {
+    { 0, "solid",    Backend::ViewportMode::Solid },
+    { 1, "material", Backend::ViewportMode::MaterialPreview },
+    { 2, "rendered", Backend::ViewportMode::Rendered },
+    { 3, "matcap",   Backend::ViewportMode::Matcap },
+};
+
+const char* shadingName(int mode) {
+    for (const ShadingEntry& e : kShadingModes)
+        if (e.mode == mode) return e.name;
+    return "unknown";
+}
+
+const ShadingEntry* shadingEntry(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // The panel labels mode 1 "Preview"; someone reading the UI will type that.
+    if (name == "preview") name = "material";
+    if (name == "render")  name = "rendered";
+    for (const ShadingEntry& e : kShadingModes)
+        if (name == e.name) return &e;
+    return nullptr;
+}
 
 // The captured frame. Guarded because the display loop writes it and IPC
 // queries read it; both run on the UI thread today, but the lock costs nothing
@@ -120,6 +158,50 @@ Result setViewportCapture(bool enabled) {
     return Result::success();
 }
 
+ViewportRenderResult renderViewportFrames(int count) {
+    ViewportRenderResult out;
+    if (!g_ctx) {
+        out.error = "Engine context not bound";
+        return out;
+    }
+    if (count <= 0) {
+        out.error = "Count must be positive";
+        return out;
+    }
+    if (!g_ctx->backend_ptr) {
+        out.error = "No backend available";
+        return out;
+    }
+    
+    Backend::IBackend* backend = g_ctx->backend_ptr;
+    
+    // We are on the IPC handler thread, which evaluates via enqueueResult on the main thread.
+    // We can block here and pump the backend for `count` progressive passes.
+    // However, since we aren't calling SDL_RenderPresent, the UI will freeze for this duration.
+    // For 16 frames this is practically instantaneous on modern GPUs.
+    
+    auto start_time = std::chrono::steady_clock::now();
+    
+    for (int i = 0; i < count; ++i) {
+        if (backend->isAccumulationComplete()) {
+            out.converged = true;
+            break;
+        }
+        // Force the renderer to step. We pass nullptr for surface/window since we're just
+        // accumulating internally in the backend, not presenting to SDL right this moment.
+        // The display loop will catch up on the next natural frame.
+        g_ctx->renderer.render_progressive_pass(nullptr, nullptr, g_ctx->scene, 1, 0);
+        out.samples_rendered++;
+    }
+    
+    auto end_time = std::chrono::steady_clock::now();
+    double total_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    
+    out.ms_per_frame = (out.samples_rendered > 0) ? static_cast<float>(total_ms / out.samples_rendered) : 0.0f;
+    out.success = true;
+    return out;
+}
+
 ViewportStatusInfo viewportStatus() {
     ViewportStatusInfo out;
     {
@@ -130,6 +212,8 @@ ViewportStatusInfo viewportStatus() {
         out.height = g_frame_height;
     }
     if (!g_ctx) return out;                 // available stays false
+    if (g_ctx->scene_ui_ptr)
+        out.shading = shadingName(g_ctx->scene_ui_ptr->viewport_settings.shading_mode);
     Backend::IBackend* backend = g_ctx->backend_ptr;
     if (!backend) return out;
 
@@ -140,6 +224,68 @@ ViewportStatusInfo viewportStatus() {
     out.ms_per_sample = backend->getMillisecondsPerSample();
     out.rendering_active = g_ctx->render_settings.is_rendering_active;
     return out;
+}
+
+ViewportShadingInfo viewportShading() {
+    ViewportShadingInfo out;
+    if (!g_ctx || !g_ctx->scene_ui_ptr) return out;   // mode stays empty
+    const auto& vs = g_ctx->scene_ui_ptr->viewport_settings;
+    out.mode = shadingName(vs.shading_mode);
+    out.matcap_preset = vs.matcap_preset;
+    out.interactive_available =
+        (g_viewport_backend != nullptr) ||
+        (g_ctx->backend_ptr &&
+         g_ctx->backend_ptr->supportsViewportMode(Backend::ViewportMode::Solid));
+    return out;
+}
+
+Result setViewportShading(const std::string& mode, int matcap_preset) {
+    if (!g_ctx) return Result::fail("Engine context not bound");
+    if (!g_ctx->scene_ui_ptr) return Result::fail("No UI bound");
+
+    const ShadingEntry* entry = shadingEntry(mode);
+    if (!entry)
+        return Result::fail("Unknown shading mode '" + mode +
+                               "'. Valid: solid, material, rendered, matcap.");
+
+    // Same support test the panel buttons run. Rendered always exists — it is
+    // the pathtracer itself; the other three need a raster viewport.
+    const bool supported =
+        (entry->mode == 2) ||
+        (g_viewport_backend != nullptr) ||
+        (g_ctx->backend_ptr && g_ctx->backend_ptr->supportsViewportMode(entry->backend));
+    if (!supported) {
+        // ★ Refuse loudly instead of silently falling back to Rendered like the
+        // panel does. A caller that asked for solid and got rendered without
+        // being told would go on to measure the wrong image.
+        return Result::fail(
+            std::string("Shading mode '") + entry->name +
+            "' needs the interactive raster viewport, which is not available on "
+            "this machine (no Vulkan viewport backend). Only 'rendered' works here.");
+    }
+
+    if (matcap_preset >= 0) {
+        if (matcap_preset > 9)
+            return Result::fail("matcap_preset must be 0..9");
+        g_ctx->scene_ui_ptr->viewport_settings.matcap_preset = matcap_preset;
+        Backend::IBackend* matcapBackend = g_ctx->backend_ptr;
+        if (entry->mode != 2 && g_viewport_backend &&
+            g_viewport_backend.get() != g_ctx->backend_ptr) {
+            matcapBackend = g_viewport_backend.get();
+        }
+        if (matcapBackend) matcapBackend->setInteractiveViewportMatcapPreset(matcap_preset);
+    }
+
+    g_ctx->scene_ui_ptr->viewport_settings.shading_mode = entry->mode;
+    if (entry->mode != 2 && g_viewport_backend != nullptr)
+        g_viewport_raster_rebuild_pending = true;
+
+    // ★★ Without this the next probe measures the frame accumulated in the mode
+    // you just LEFT, and reports it as a valid measurement of the new one.
+    g_ctx->start_render = true;
+    g_ctx->renderer.resetCPUAccumulation();
+    if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+    return Result::success();
 }
 
 ViewportProbeInfo probeViewportFrame(const ViewportProbeRegion& region,

@@ -105,10 +105,16 @@ PinValue DomainParamNodeBase::compute(int, EvaluationContext& ctx) {
     return PinValue{ *domain };
 }
 
-PinValue EmitterNode::compute(int, EvaluationContext&) {
-    // ★ The target is the emitter's OWN name, not something read off a pin.
-    // A flow source already knows which domain it feeds, so making this node
-    // take a Domain input would invite a second, disagreeing answer.
+PinValue EmitterNode::compute(int, EvaluationContext& ctx) {
+    // ★★★ No wire, no effect. The Domain pin is what puts this node IN the
+    // chain; without it the canvas would show an isolated box that still
+    // reconfigures a solver, and nobody reading the graph could tell.
+    PinValue upstream = getInputValue(0, ctx);
+    const auto* domain = std::get_if<std::string>(&upstream);
+    if (!domain || domain->empty()) return PinValue{};
+    // ★ The TARGET is still the emitter's own name, not the incoming domain: a
+    // flow source already knows which region it feeds, and overwriting that
+    // from the wire would silently move emission somewhere else.
     if (emitterName.empty()) return PinValue{};
 
     for (const auto& f : fields) {
@@ -128,7 +134,8 @@ PinValue EmitterNode::compute(int, EvaluationContext&) {
         cmd.text = substance;
         emit(std::move(cmd));
     }
-    return PinValue{};
+    // Pass the domain through so emitters chain like every other aspect node.
+    return PinValue{ *domain };
 }
 
 PinValue SetParameterNode::compute(int, EvaluationContext& ctx) {

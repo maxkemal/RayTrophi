@@ -1238,19 +1238,24 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
     fs::path final_json_path(filepath);
     fs::path final_bin_path = final_json_path;
     final_bin_path += ".bin";
+    fs::path final_shared_path = final_json_path;
+    final_shared_path += ".shared";
     
     fs::path temp_json_path = final_json_path;
     temp_json_path += ".tmp";
     fs::path temp_bin_path = final_bin_path;
     temp_bin_path += ".tmp";
+    fs::path temp_shared_path = final_shared_path;
+    temp_shared_path += ".tmp";
 
     loadPreviousEmbeddedTextureEntries(final_json_path, final_bin_path);
 
     // 2. Open Streams
     std::ofstream out_json(temp_json_path);
     std::ofstream out_bin(temp_bin_path, std::ios::binary);
+    std::ofstream out_shared(temp_shared_path);
 
-    if (!out_json.is_open() || !out_bin.is_open()) {
+    if (!out_json.is_open() || !out_bin.is_open() || !out_shared.is_open()) {
         SCENE_LOG_ERROR("Failed to create temporary save files.");
         return false;
     }
@@ -1291,7 +1296,9 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
 
         // 3. Write JSON 
         json root;
+        json shared_root;
         root["format_version"] = "3.0";
+        shared_root["format_version"] = "3.0";
         root["project_name"] = g_project.project_name;
         root["author"] = g_project.author;
         root["description"] = g_project.description;
@@ -1305,7 +1312,8 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             {"save_geometry", save_settings.save_geometry}
         };
 
-        json imported_models_arr = json::array();
+        json shared_models_arr = json::array();
+        json scene_instances_arr = json::array();
         for (const auto& model : g_project.imported_models) {
             json m;
             m["id"] = model.id;
@@ -1313,7 +1321,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             m["package_path"] = model.package_path;
             m["display_name"] = model.display_name;
             m["deleted_objects"] = model.deleted_objects;
+            shared_models_arr.push_back(m);
 
+            json si;
+            si["model_id"] = model.id;
             json objects_arr = json::array();
             for (const auto& inst : model.objects) {
                 json o;
@@ -1323,10 +1334,11 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                 o["visible"] = inst.visible;
                 objects_arr.push_back(o);
             }
-            m["objects"] = objects_arr;
-            imported_models_arr.push_back(m);
+            si["objects"] = objects_arr;
+            scene_instances_arr.push_back(si);
         }
-        root["imported_models"] = imported_models_arr;
+        shared_root["imported_models"] = shared_models_arr;
+        root["model_instances"] = scene_instances_arr;
         
         // Procedural objects (still saved for non-geometry mode)
         json procedurals_arr = json::array();
@@ -1344,11 +1356,11 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         
         if (progress_callback) progress_callback(50, "Saving materials...");
         
-        // Materials
+        // Materials (Library / Shared)
         auto& mat_mgr = MaterialManager::getInstance();
         {
             ScopedPerfTimer timer("saveProject serialize materials");
-            root["materials"] = mat_mgr.serialize(fs::path(filepath).parent_path().string());
+            shared_root["materials"] = mat_mgr.serialize(fs::path(filepath).parent_path().string());
         }
         
         if (progress_callback) progress_callback(60, "Saving lights...");
@@ -1718,7 +1730,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                 }
             }
             measureBinarySection("textures", [&]() {
-                root["textures"] = serializeTextures(out_bin, embed_textures, graph_textures);
+                shared_root["textures"] = serializeTextures(out_bin, embed_textures, graph_textures);
             });
         }
         
@@ -1727,12 +1739,14 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         {
             ScopedPerfTimer timer("saveProject dump json");
             out_json << root.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+            out_shared << shared_root.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         }
         
         {
             ScopedPerfTimer timer("saveProject flush streams");
             out_json.flush();
             out_bin.flush();
+            out_shared.flush();
         }
 
         const uint64_t total_bin_bytes = currentBinOffset();
@@ -1750,6 +1764,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
 
         out_json.close();
         out_bin.close();
+        out_shared.close();
         
         if (progress_callback) progress_callback(95, "Finalizing...");
 
@@ -1758,8 +1773,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             ScopedPerfTimer timer("saveProject atomic commit");
             if (fs::exists(final_json_path)) fs::remove(final_json_path);
             if (fs::exists(final_bin_path)) fs::remove(final_bin_path);
+            if (fs::exists(final_shared_path)) fs::remove(final_shared_path);
             fs::rename(temp_json_path, final_json_path);
             fs::rename(temp_bin_path, final_bin_path);
+            fs::rename(temp_shared_path, final_shared_path);
         } catch (const fs::filesystem_error& e) {
             SCENE_LOG_ERROR("FileSystem Error during rename: " + std::string(e.what()));
             return false;
@@ -1769,8 +1786,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         SCENE_LOG_ERROR("Save failed: " + std::string(e.what()));
         if (out_json.is_open()) out_json.close();
         if (out_bin.is_open()) out_bin.close();
+        if (out_shared.is_open()) out_shared.close();
         if (fs::exists(temp_json_path)) fs::remove(temp_json_path);
         if (fs::exists(temp_bin_path)) fs::remove(temp_bin_path);
+        if (fs::exists(temp_shared_path)) fs::remove(temp_shared_path);
         return false;
     }
     
@@ -1810,6 +1829,22 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                         " | path=" + filepath +
                         (read_error.empty() ? "" : " | read_error=" + read_error));
         return false;
+    }
+
+    simdjson::dom::parser shared_parser;
+    simdjson::dom::element shared_root;
+    bool has_shared = false;
+    fs::path shared_filepath = pathFromUtf8(filepath);
+    shared_filepath += ".shared";
+    if (fs::exists(shared_filepath)) {
+        std::string shared_read_error;
+        simdjson::error_code shared_err = loadJsonRootFromFile(shared_parser, shared_filepath.string(), shared_root, &shared_read_error);
+        if (!shared_err) {
+            has_shared = true;
+        } else {
+            SCENE_LOG_ERROR("Failed to parse shared library file: " + std::string(simdjson::error_message(shared_err)));
+            return false;
+        }
     }
 
     // 2. Prepare Binary Stream
@@ -1941,19 +1976,22 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         g_project.next_texture_id = (uint32_t)next_tex;
 
         g_project.imported_models.clear();
-        if (auto imported_models_el = root["imported_models"]; !imported_models_el.error()) {
+        simdjson::dom::element models_source;
+        simdjson::error_code models_err = has_shared ? shared_root["imported_models"].get(models_source) : root["imported_models"].get(models_source);
+        if (!models_err) {
             simdjson::dom::array imported_models_arr;
-            if (!imported_models_el.get(imported_models_arr)) {
+            if (!models_source.get(imported_models_arr)) {
                 for (auto j_model_el : imported_models_arr) {
                     auto j_model = sjsonToNlohmann(j_model_el);
                     ImportedModelData model;
-                    model.id = j_model.value("id", 0u);
+                    model.id = j_model.value("id", 0ull);
                     model.original_path = j_model.value("original_path", "");
                     model.package_path = j_model.value("package_path", "");
                     model.display_name = j_model.value("display_name", "");
                     model.deleted_objects = j_model.value("deleted_objects", std::vector<std::string>{});
 
-                    if (j_model.contains("objects") && j_model["objects"].is_array()) {
+                    // For backwards compatibility: If instances are embedded here, load them
+                    if (!has_shared && j_model.contains("objects") && j_model["objects"].is_array()) {
                         std::unordered_set<std::string> seen_nodes;
                         for (const auto& j_obj : j_model["objects"]) {
                             std::string node_name = j_obj.value("node_name", "");
@@ -1971,6 +2009,37 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     }
 
                     g_project.imported_models.push_back(std::move(model));
+                }
+            }
+        }
+        
+        // If has_shared, instances are in root["model_instances"]
+        if (has_shared) {
+            simdjson::dom::element instances_el;
+            if (!root["model_instances"].get(instances_el)) {
+                simdjson::dom::array instances_arr;
+                if (!instances_el.get(instances_arr)) {
+                    for (auto j_inst_el : instances_arr) {
+                        auto j_inst = sjsonToNlohmann(j_inst_el);
+                        uint64_t m_id = j_inst.value("model_id", 0ull);
+                        ImportedModelData* model = g_project.findModelById(m_id);
+                        if (model && j_inst.contains("objects") && j_inst["objects"].is_array()) {
+                            std::unordered_set<std::string> seen_nodes;
+                            for (const auto& j_obj : j_inst["objects"]) {
+                                std::string node_name = j_obj.value("node_name", "");
+                                if (seen_nodes.insert(node_name).second) {
+                                    ImportedModelData::ObjectInstance inst;
+                                    inst.node_name = std::move(node_name);
+                                    if (j_obj.contains("transform")) {
+                                        inst.transform = jsonToMat4(j_obj["transform"]);
+                                    }
+                                    inst.material_id = j_obj.value("material_id", static_cast<uint16_t>(0));
+                                    inst.visible = j_obj.value("visible", true);
+                                    model->objects.push_back(inst);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1993,7 +2062,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
 
             // Textures
             simdjson::dom::element tex_el;
-            if (!root["textures"].get(tex_el)) {
+            simdjson::error_code tex_err = has_shared ? shared_root["textures"].get(tex_el) : root["textures"].get(tex_el);
+            if (!tex_err) {
                 if (progress_callback) progress_callback(35, "Restoring textures...");
                 ScopedPerfTimer timer("openProject deserializeTextures");
                 deserializeTextures(sjsonToNlohmann(tex_el), in_bin, project_folder.string());
@@ -2001,7 +2071,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
 
             // Materials
             simdjson::dom::element mat_el;
-            if (!root["materials"].get(mat_el)) {
+            simdjson::error_code mat_err = has_shared ? shared_root["materials"].get(mat_el) : root["materials"].get(mat_el);
+            if (!mat_err) {
                 if (progress_callback) progress_callback(40, "Loading materials...");
                 ScopedPerfTimer timer("openProject deserialize materials");
                 MaterialManager::getInstance().deserialize(sjsonToNlohmann(mat_el), project_folder.string());
@@ -2020,11 +2091,14 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 if (progress_callback) progress_callback(60, "Loading cameras...");
                 deserializeCameras(sjsonToNlohmann(cams_el), scene);
             } else {
+                scene.cameras.clear();
+                scene.camera = nullptr;
                 auto default_cam = std::make_shared<Camera>(
                     Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0),
                     60.0f, 16.0f / 9.0f, 0.0f, 10.0f, 10);
                 default_cam->nodeName = "Default Camera";
                 scene.addCamera(default_cam);
+                scene.setActiveCamera(0);
             }
 
             // Render Settings
@@ -2851,10 +2925,10 @@ bool ProjectManager::importTexture(const std::string& filepath) {
     return true;
 }
 
-uint32_t ProjectManager::addProceduralObject(ProceduralMeshType type, const std::string& name,
+uint64_t ProjectManager::addProceduralObject(ProceduralMeshType type, const std::string& name,
                                               const Matrix4x4& transform, SceneData& scene,
                                               Renderer& renderer, Backend::IBackend* backend) {
-    uint32_t id = g_project.generateObjectId();
+    uint64_t id = g_project.generateObjectId();
     
     ProceduralObjectData proc;
     proc.id = id;
@@ -2870,7 +2944,7 @@ uint32_t ProjectManager::addProceduralObject(ProceduralMeshType type, const std:
     return id;
 }
 
-bool ProjectManager::removeProceduralObject(uint32_t id, SceneData& scene) {
+bool ProjectManager::removeProceduralObject(uint64_t id, SceneData& scene) {
     auto it = std::find_if(g_project.procedural_objects.begin(), 
                            g_project.procedural_objects.end(),
                            [id](const ProceduralObjectData& p) { return p.id == id; });

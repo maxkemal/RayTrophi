@@ -34,6 +34,9 @@
  */
 
 #include "scene_ui.h"
+// ★ scene_ui.h only forward-declares SceneSelection; reading the active
+// selection below needs the complete type.
+#include "SceneSelection.h"
 #include "Api/RtApi.h"
 #include "NodeSystem/SimulationNodes.h"
 #include "NodeSystem/NodeRegistry.h"
@@ -140,7 +143,42 @@ bool namePicker(const char* label, const std::string& current,
 
 void SceneUI::drawSimulationNodePanel(UIContext& ctx)
 {
-    (void)ctx;   // the simulation graphs are reached through rtapi, not the scene
+    // ctx is read for the scene SELECTION below; the graphs themselves still
+    // come from rtapi, never from the scene struct.
+
+    // ── Follow the scene selection ──────────────────────────────────────────
+    //
+    // ★★★ Reported by the user: "I select a domain in the scene and its graph
+    // does not come up -- it feels like two separate selections." It WAS two
+    // separate selections: the panel had its own owner picker and ignored the
+    // viewport entirely. Every other graph editor in this application follows
+    // the active item, so this one looked broken by comparison.
+    //
+    // ★★ Follows a CHANGE, not the live value. Mirroring every frame would drag
+    // the owner picker back the instant a user chose something else with it.
+    {
+        const auto& sel = ctx.selection.selected;
+        std::string want_scope, want_owner;
+        if (sel.type == SelectableType::SimulationDomain ||
+            sel.type == SelectableType::GasVolume) {
+            want_scope = "domain";
+            want_owner = sel.name;
+        } else if (sel.type == SelectableType::Object) {
+            want_scope = "object";
+            want_owner = sel.name;
+        }
+        // ★ The key includes the scope: an object and a domain can share a name,
+        // and keying on the name alone would miss the switch between them.
+        const std::string key = want_scope.empty() ? std::string()
+                                                   : (want_scope + "/" + want_owner);
+        if (!key.empty() && key != sim_graph_last_scene_selection) {
+            sim_graph_last_scene_selection = key;
+            // Through the API, exactly as a script would — the selection is a
+            // value the core owns.
+            const rtapi::Result r = rtapi::setSimGraphScope(want_scope, want_owner);
+            if (!r.ok) setReport(false, r.error);
+        }
+    }
 
     // -- Scope bar: whose graph is this? -------------------------------------
     //
@@ -438,14 +476,21 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
 
     ImGui::Separator();
 
-    // Selection comes from the canvas: NodeBase::selected is what the editor
-    // sets, so the sidebar follows the click instead of keeping its own idea of
-    // what is selected.
-    NodeBase* selected = nullptr;
-    int selected_count = 0;
-    for (auto& node : graph.nodes) {
-        if (node->selected) { ++selected_count; if (!selected) selected = node.get(); }
-    }
+    // ★★★ Selection comes from the EDITOR'S OWN state, not NodeBase::selected.
+    //
+    // The first cut looped over `node->selected` — and NodeEditorUIV2 never
+    // writes that field. It keeps selection in `selectedNodeId`/`selectedNodeIds`
+    // and leaves NodeBase::selected at its default false. So the sidebar found
+    // nothing selected no matter what the user clicked, and every node reported
+    // "Select a node on the canvas to edit it". Half the panel was dead, and it
+    // looked like the nodes themselves did nothing.
+    //
+    // ★★ The lesson is the repository's own: a field EXISTING is not proof
+    // anything WRITES it. `selected` reads like the obvious source of truth,
+    // which is exactly why nobody checked who sets it.
+    NodeBase* selected = graph.getNode(simulationNodeEditorUI.selectedNodeId);
+    const int selected_count =
+        static_cast<int>(simulationNodeEditorUI.selectedNodeIds.size());
 
     if (!selected) {
         if (graph.nodes.empty()) {

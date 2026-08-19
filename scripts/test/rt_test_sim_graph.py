@@ -311,9 +311,19 @@ else:
     rt.sim_graph.set_node_value(SCOPE, OWNER, emit_node, "radius",
                                 authored_src["radius"] * 2.0 + 0.1)
 
+    # ★★★ UNWIRED FIRST. A node whose effect does not follow its wiring makes
+    # the canvas unreadable: the reader sees an isolated box, the solver sees a
+    # command. Reported by the user against the first cut, which had no Domain
+    # pin at all -- so the rule is asserted before the wired case, not after.
     ev = rt.sim_graph.evaluate(SCOPE, OWNER)
     kinds = [c["kind"] for c in ev["commands"]]
-    check("emitter command emitted", "set_emitter" in kinds, "%s" % (kinds,))
+    check("an UNCONNECTED emitter emits nothing", "set_emitter" not in kinds,
+          "%s" % (kinds,))
+
+    rt.sim_graph.connect(SCOPE, OWNER, dom, emit_node)
+    ev = rt.sim_graph.evaluate(SCOPE, OWNER)
+    kinds = [c["kind"] for c in ev["commands"]]
+    check("emitter command emitted once wired", "set_emitter" in kinds, "%s" % (kinds,))
 
     applied = rt.sim_graph.apply(SCOPE, OWNER)
     log("   apply -> %s" % (applied,))

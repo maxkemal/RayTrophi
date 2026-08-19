@@ -63,6 +63,11 @@ struct Result {
 void bind(UIContext* ctx, SceneHistory* history);
 void unbind();
 bool isBound();
+// The bound context, for in-process callers that must run an IPC handler
+// directly (the rt.agent script bindings reuse the agent.* dispatch instead of
+// reimplementing it, so script and IPC cannot answer differently). Null when
+// unbound. Not an IPC-visible value: nothing here crosses the wire.
+UIContext* boundContext();
 
 // ---------------------------------------------------------------------------
 // Main-thread dispatch.
@@ -524,12 +529,52 @@ struct ViewportStatusInfo {
     bool rendering_active = false;
     bool capture_enabled = false;   // is the probe buffer being filled?
     bool frame_available = false;   // has a frame been captured yet?
+    // ★ WHICH viewport produced the numbers above. A probe taken in Solid mode
+    // and one taken in Rendered mode are different measurements of different
+    // images; reporting the counters without this field invites comparing them.
+    std::string shading;            // "solid" | "material" | "rendered" | "matcap"
 };
 ViewportStatusInfo viewportStatus();
+
+// ---------------------------------------------------------------------------
+// Viewport shading mode.
+//
+// ★★★ Panel-only until 2026-08-19, and it broke agent chains in the middle: an
+// agent could drive the scene, force frames and measure pixels, but could not
+// say which viewport it was measuring, so "switch to Rendered and check" always
+// ended in "please click the button" — exactly the manual step CLAUDE.md rule 1
+// forbids. Names cross the boundary, never the panel's integer.
+struct ViewportShadingInfo {
+    std::string mode;                    // current mode, as a name
+    int  matcap_preset = 0;              // 0..9, meaningful in matcap mode
+    // ★ false = this machine has no raster viewport (no Vulkan), so "rendered"
+    // is the ONLY reachable mode. Without this a caller reads a rejected
+    // set_shading as a bug in its own request.
+    bool interactive_available = false;
+};
+ViewportShadingInfo viewportShading();
+
+// `mode`: solid | material | rendered | matcap. "preview" is accepted as an
+// alias for material because the panel button reads Preview.
+// `matcap_preset`: 0..9, or -1 to leave it alone.
+// Resets accumulation exactly like the panel buttons do — otherwise the next
+// probe would measure the frame from the mode you just left.
+Result setViewportShading(const std::string& mode, int matcap_preset = -1);
 
 // Per-frame capture of the displayed frame costs a copy, so it is opt-in and
 // off by default. Enabling it does not change what is rendered.
 Result setViewportCapture(bool enabled);
+
+// Force the viewport to accumulate N frames synchronously.
+// Used by agents to artificially advance the viewport without waiting for UI loops.
+struct ViewportRenderResult {
+    bool success = false;
+    std::string error;
+    int samples_rendered = 0;
+    bool converged = false;
+    float ms_per_frame = 0.0f;
+};
+ViewportRenderResult renderViewportFrames(int count);
 
 // Rectangle in pixels. All zero = whole frame.
 struct ViewportProbeRegion {

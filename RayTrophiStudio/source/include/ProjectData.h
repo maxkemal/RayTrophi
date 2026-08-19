@@ -35,7 +35,7 @@ enum class ProceduralMeshType {
 
 // Represents an imported 3D model file
 struct ImportedModelData {
-    uint32_t id = 0;                        // Unique ID within project
+    uint64_t id = 0;                        // Unique ID within project
     std::string original_path;               // Original file path (for reference)
     std::string package_path;                // Path inside .rtp package (e.g., "models/0001_car.glb")
     std::string display_name;                // User-friendly name
@@ -56,7 +56,7 @@ struct ImportedModelData {
 
 // Represents a procedural object (created via Add > Cube, etc.)
 struct ProceduralObjectData {
-    uint32_t id = 0;                        // Unique ID
+    uint64_t id = 0;                        // Unique ID
     ProceduralMeshType mesh_type = ProceduralMeshType::None;
     std::string display_name;                // User-assigned name
     Matrix4x4 transform;                     // World transform
@@ -66,7 +66,7 @@ struct ProceduralObjectData {
 
 // Represents a texture file in the project
 struct TextureAssetData {
-    uint32_t id = 0;
+    uint64_t id = 0;
     std::string original_path;               // Original file path
     std::string package_path;                // Path inside package (e.g., "textures/0001_diffuse.png")
     std::string usage;                       // "diffuse", "normal", "roughness", etc.
@@ -85,7 +85,8 @@ struct ProjectData {
     std::vector<ProceduralObjectData> procedural_objects;
     std::vector<TextureAssetData> texture_assets;
     
-    // ID counters for unique assignment
+    // ID counters for unique assignment (per-worker)
+    uint32_t current_worker_id = 0;          // Which worker/agent is mutating the project
     uint32_t next_model_id = 1;
     uint32_t next_object_id = 1;
     uint32_t next_texture_id = 1;
@@ -108,12 +109,18 @@ struct ProjectData {
         current_file_path.clear();
     }
     
-    uint32_t generateModelId() { return next_model_id++; }
-    uint32_t generateObjectId() { return next_object_id++; }
-    uint32_t generateTextureId() { return next_texture_id++; }
+    uint64_t generateModelId() { 
+        return (static_cast<uint64_t>(current_worker_id) << 32) | (next_model_id++); 
+    }
+    uint64_t generateObjectId() { 
+        return (static_cast<uint64_t>(current_worker_id) << 32) | (next_object_id++); 
+    }
+    uint64_t generateTextureId() { 
+        return (static_cast<uint64_t>(current_worker_id) << 32) | (next_texture_id++); 
+    }
     
     // Find model by ID
-    ImportedModelData* findModelById(uint32_t id) {
+    ImportedModelData* findModelById(uint64_t id) {
         for (auto& m : imported_models) {
             if (m.id == id) return &m;
         }
@@ -121,7 +128,7 @@ struct ProjectData {
     }
     
     // Find procedural object by ID
-    ProceduralObjectData* findProceduralById(uint32_t id) {
+    ProceduralObjectData* findProceduralById(uint64_t id) {
         for (auto& p : procedural_objects) {
             if (p.id == id) return &p;
         }

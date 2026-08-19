@@ -113,6 +113,8 @@ TemplateOpenResult TemplateSession::open(const std::string& template_id,
     if (staged.mesh) context.scene.world.objects.push_back(staged.mesh);
     if (staged.light) context.scene.lights.push_back(staged.light);
     if (staged.camera) {
+        context.scene.cameras.clear();
+        context.scene.camera = nullptr;
         context.scene.addCamera(staged.camera);
         // addCamera() only auto-activates the first entry. Template creation
         // can follow a transient/default camera, so make the staged camera the
@@ -127,6 +129,8 @@ TemplateOpenResult TemplateSession::open(const std::string& template_id,
             Vec3(0.0f, 1.0f, 0.0f), 40.0f, 16.0f / 9.0f,
             0.0f, (Vec3(11.0f, 8.0f, 14.0f) - Vec3(0.0f, 0.25f, 0.0f)).length(), 0);
         fallback_camera->nodeName = "Startup Camera";
+        context.scene.cameras.clear();
+        context.scene.camera = nullptr;
         context.scene.addCamera(fallback_camera);
         context.scene.setActiveCamera(context.scene.cameras.size() - 1);
     }
