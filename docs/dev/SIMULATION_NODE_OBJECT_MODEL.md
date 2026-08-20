@@ -1,9 +1,14 @@
 # Simülasyon node katmanı — nesne modeli raporu
 
-> **Durum:** AKTİF — 2026-08-18. §8 adım **1, 2 ve 3 uygulandı** (derlenmedi;
-> derleme kullanıcıda). Kalan adımlar 4–6 aşağıda. `NODE_SIMULATION_ARCHITECTURE_PLAN.md`
+> **Durum:** AKTİF — 2026-08-20. §8 adım **1, 2, 3 ve 4 uygulandı** (derlenmedi;
+> derleme kullanıcıda). Kalan adımlar 5–6 aşağıda. `NODE_SIMULATION_ARCHITECTURE_PLAN.md`
 > BÖLÜM D'nin depolama/kapsam kısmını bu belge yeniden yazar. N0'ın yürütme
 > sözleşmesi değişmedi.
+
+★ **Önce [SIMULATION_NODE_CONCEPTUAL_MODEL.md](SIMULATION_NODE_CONCEPTUAL_MODEL.md)'i
+oku.** Bu belge kararları ve gerekçelerini taşır; katmanın *ne olduğunu*
+varsayar. Model olmadan buradaki her karar keyfî görünür — ve öyle göründüğü
+ölçülmüştür.
 
 Bu belge "node sistemi nasıl olmalı" sorusuna **mevcut veri modelinden yola
 çıkarak** cevap arar. Konuşmada dile getirilen öneriler burada ayrıca
@@ -220,7 +225,10 @@ yeniden yapılandırma, sessizce çalışmayan bir simülasyon üretir.
 
 Kapsam modeli bunları görünür kılar; hiçbiri node ile kapatılamaz:
 
-1. `WorldThermalState`'in **hiç** script yüzeyi yok → World kapsamı bugün boş.
+1. ~~`WorldThermalState`'in **hiç** script yüzeyi yok~~ — **DÜZELTME
+   (2026-08-20): var.** `rt.world.get_thermal` / `rt.world.set_thermal`
+   (IPC: `world.get_thermal` / `world.set_thermal`) ve `sim.world_thermal`
+   node'u eklendi — §8 adım 4. World graph'ı artık boş değil.
 2. Foam'un script yüzeyi yok (`foam_material_id`, aç/kapa).
 3. ~~`flow_source.delete` yok~~ — **DÜZELTME (2026-08-18): var.** Çekirdekte
    `removeSimulationFlowSource`, IPC'de `flow_source.remove`. Bu madde yazıldığı
@@ -416,7 +424,19 @@ hepsini hooklamış gibi yapmak yerine durum `sim_graph.list()` üzerinde
    `Create…` YAPILMADI: node hiçbir varlık yaratmaz, ve yaratma düğmesi tam da
    "node varlığı sahiplenir" izlenimini verirdi. Varlık yaratma kendi API'sinde
    (`fluid.create_domain`, `flow_source.create`) kalıyor.
-4. **World kapsamı** — önce `WorldThermalState`'in dört katmanı, sonra node'u.
+4. ✅ **World kapsamı** — `WorldThermalState`'in dört alanı (`ambient_kelvin`,
+   `kelvin_per_unit`, `convection_coefficient`, `oxygen_availability`) artık
+   `rt.world.get_thermal`/`set_thermal` üzerinden okunup yazılabiliyor, ve
+   `sim.world_thermal` node'u aynı opt-in sözleşmeyi (Solver/Domain Settings
+   ile birebir) World graph'ına taşıyor. `SimCommand::Scope`'a `World` eklendi;
+   apply/clear_overrides katmanı `readWorldThermalParameter`/
+   `writeWorldThermalParameter` ile ayrı bir yol izliyor çünkü world komutunun
+   hedefi yok (tek dünya var). Diferansiyel test:
+   `scripts/test/rt_test_sim_graph.py` "World scope" bölümü — graph'tan
+   uygulanan değer, doğrudan `rt.world.get_thermal()` okumasıyla karşılaştırılıyor.
+   ★ World graph'ı hâlâ sahip node'u YOK (§8 step 1 kararı korunuyor): tek
+   dünya var, isimlendirilecek bir kimlik yok — bu, script yüzeyinin
+   eksikliğinden değil, kapsamın doğasından kaynaklanıyor.
 5. **Object kapsamı** — MSF node'ları global graph'tan oraya taşınır.
 6. **Ölçüm ilişkileri** — domain ile kesişen collider/force raporu.
 

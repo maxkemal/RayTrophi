@@ -73,7 +73,7 @@ struct SimCommand {
     // ★ Objects and domains are both named, and a name alone cannot say which
     // one it is. Without this the apply layer would look "Crate" up among the
     // domains, fail, and report "unknown domain" for an object that exists.
-    enum class Scope : uint8_t { Domain = 0, Object };
+    enum class Scope : uint8_t { Domain = 0, Object, World };
     Scope       scope = Scope::Domain;
     std::string key;         // parameter or coupling name
     float       value = 0.0f;
@@ -574,6 +574,103 @@ public:
     const char* titleWord() const override { return "Domain Settings"; }
 };
 
+// ── WORLD THERMAL ────────────────────────────────────────────────────────────
+// Decision record: docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7 item 1
+// (closed) and section 8 step 4.
+//
+// ★★★ NOT a DomainParamNodeBase: that base wires a Domain pin in and out so
+// aspect nodes can chain onto the domain they configure. There is exactly one
+// world, so there is nothing to name and nothing to chain — the node's
+// presence in the World graph IS the reference, the same way DomainRefNode's
+// presence names a domain. No pins at all.
+//
+// Same opt-in contract as every other aspect node: an unticked field is a
+// parameter this graph has no opinion about, not a zero. And the same
+// asymmetry as everywhere else this ambient value appears — a domain's own
+// `thermal_override_enabled` (SimulationGridDomainDesc) still wins where a
+// domain has set it; this node changes only the default a domain has NOT
+// overridden.
+class WorldThermalNode : public SimNodeBase {
+public:
+    struct Field {
+        const char* key;
+        bool        use = false;
+        float       value = 0.0f;
+    };
+    std::vector<Field> fields;
+
+    WorldThermalNode() {
+        metadata.typeId = "sim.world_thermal";
+        metadata.displayName = "World Thermal";
+        metadata.description =
+            "The ambient thermal condition every uncoupled substance relaxes "
+            "toward: room temperature, the Kelvin-per-unit calibration, "
+            "passive cooling and the pyrolysis oxygen scale. A domain's own "
+            "thermal override still wins where it is set -- this changes only "
+            "the default a domain has not overridden. Every field is opt-in. ";
+        metadata.category = "Simulation";
+        fields = {
+            {"ambient_kelvin"},
+            {"kelvin_per_unit"},
+            {"convection_coefficient"},
+            {"oxygen_availability"},
+        };
+        refreshTitle();
+    }
+
+    Field* find(const std::string& key) {
+        for (auto& f : fields)
+            if (key == f.key) return &f;
+        return nullptr;
+    }
+
+    void refreshTitle() {
+        size_t count = 0;
+        for (const auto& f : fields) if (f.use) ++count;
+        metadata.displayName = std::string("World Thermal") +
+            (count == 0 ? ": nothing"
+                        : ": " + std::to_string(count) + " override" +
+                          (count == 1 ? "" : "s"));
+    }
+
+    bool wantsInlineContent() const override { return true; }
+    void drawContent() override {
+        bool any = false;
+        for (const auto& f : fields) {
+            if (!f.use) continue;
+            any = true;
+            ImGui::TextDisabled("%s", f.key);
+            ImGui::SameLine();
+            ImGui::Text("%g", static_cast<double>(f.value));
+        }
+        if (!any) ImGui::TextDisabled("no overrides");
+    }
+
+    // World keys never require a restart today -- see
+    // SetParameterNode::keyRequiresRestart, which this shares.
+    bool requiresRestart() const override {
+        for (const auto& f : fields)
+            if (f.use && SetParameterNode::keyRequiresRestart(f.key)) return true;
+        return false;
+    }
+
+    PinValue compute(int, EvaluationContext&) override {
+        for (const auto& f : fields) {
+            if (!f.use) continue;
+            SimCommand cmd;
+            cmd.kind = SimCommand::Kind::SetParameter;
+            cmd.scope = SimCommand::Scope::World;
+            // No target: there is exactly one world, so there is no name to
+            // carry. The apply layer keys its authored-value capture on scope
+            // alone for World commands.
+            cmd.key = f.key;
+            cmd.value = f.value;
+            emit(std::move(cmd));
+        }
+        return PinValue{};
+    }
+};
+
 // ── EMITTER ─────────────────────────────────────────────────────────────────
 //
 // ★★★ Emission is a property of MATTER (section 9.1): "this object emits
@@ -795,8 +892,10 @@ public:
 //     exposed as a READING instead, through Surface Inspect.
 //
 //   Thermal Transfer — WorldThermalState (ambient Kelvin, oxygen, convection)
-//     has no scripting surface AT ALL yet, so a node would be the fourth touch
-//     of a chain whose first three are missing. That is its own slice.
+//     now HAS a scripting surface (rt.world.get_thermal/set_thermal) and a
+//     node (WorldThermalNode, in the WORLD ASPECT NODE section below, next to
+//     the other domain/world aspect nodes rather than here among the N5
+//     object-scoped ones — it configures no object).
 //
 // Char / Ash stays out too: plan Faz 7 has not landed.
 

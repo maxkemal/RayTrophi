@@ -134,6 +134,32 @@ Result getObjectInfo(const std::string& name, ObjectInfo& out);
 Result getObjectTransform(const std::string& name, Matrix4x4& out);
 Result setObjectTransform(const std::string& name, const Matrix4x4& matrix);
 
+// ★★★ getObjectTransform above returns the AUTHORED pose, and no solver
+// writes there. Worse than that, and it cost a wrong fix first: the rigid
+// solver does not write a transform AT ALL. RigidBodySystem::step bakes the
+// world delta D = B(t)*inv(B0) into the MESH VERTICES and deliberately leaves
+// the transform handle untouched (moving an imported object's transform
+// corrupted it in the renderer). So `Transform::current` is empty too, and
+// composing final = current * base changes nothing.
+//
+// Measured 2026-08-19: physics.set_gravity + physics.add_body + 240 x
+// physics.step, over BOTH channels, and every transform reader still said
+// y = 50.0 - successfully, with entirely plausible numbers. The obvious
+// reading is "the solver is broken"; the truth was "the pose you are asking
+// for is not stored in a pose".
+//
+// This reader composes the rigid body's `last_rigid_delta` (the pose-tracking
+// authority) onto the spawn transform. `out_simulated`, when given, says
+// whether a solver actually contributed - false means the value is merely the
+// authored pose, which is exactly the distinction a validation case must not
+// have to guess. Free fall, buoyancy draft, restitution: none of them are
+// observable without this.
+//
+// Soft bodies and cloth own vertices rather than a pose; for those this
+// reports the authored transform with out_simulated = false.
+Result getObjectWorldTransform(const std::string& name, Matrix4x4& out,
+                               bool* out_simulated = nullptr);
+
 // ---------------------------------------------------------------------------
 // Object lifecycle (undoable). Delete hides + marks pending-delete (physical
 // purge happens at save time, same as the UI path); undo restores fully.
@@ -361,6 +387,29 @@ Result setWorldAtmosphereIntensity(float intensity);
 Result setWorldSunSize(float degrees);
 
 // ---------------------------------------------------------------------------
+// World thermal ambient (docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7
+// item 1). Distinct from WorldState above: that one is the render sky, this
+// is the ambient condition every uncoupled substance relaxes toward. Mirrors
+// WorldThermalState (MaterialStateField.h) field for field so a script sees
+// exactly what the solver reads -- this is the first scripting surface it has
+// ever had.
+// ---------------------------------------------------------------------------
+struct WorldThermalInfo {
+    float ambient_kelvin = 293.0f;
+    float kelvin_per_unit = 350.0f;
+    float convection_coefficient = 1.0f;
+    float oxygen_availability = 1.0f;
+};
+Result getWorldThermal(WorldThermalInfo& out);
+// Every field optional: nullptr leaves it unchanged. Same partial-update
+// shape as updateFluidDomain, so a caller (or a World node's opt-in fields)
+// can touch one field without first reading the other three.
+Result setWorldThermal(const float* ambient_kelvin = nullptr,
+                       const float* kelvin_per_unit = nullptr,
+                       const float* convection_coefficient = nullptr,
+                       const float* oxygen_availability = nullptr);
+
+// ---------------------------------------------------------------------------
 // Post-processing (Faz 5.1d). Exposure, tonemapping, color adjustment,
 // vignette, and stylize settings. CRITICAL RULE: Post-processing changes
 // MUST NEVER call resetAccumulation (accumulation is preserved).
@@ -567,6 +616,20 @@ Result setViewportCapture(bool enabled);
 
 // Force the viewport to accumulate N frames synchronously.
 // Used by agents to artificially advance the viewport without waiting for UI loops.
+//
+// ★★★ This ACCUMULATES but does not PUBLISH. The capture buffer is filled by the
+// display loop (Main.cpp), from the same SDL surface the viewport presents; this
+// call renders without a surface on purpose. Over IPC that is invisible, because
+// each request returns to the loop and the loop publishes before the next one
+// arrives. Inside a SINGLE script it is not: the script holds the main thread, so
+// no frame is ever published and frame_available stays false however many frames
+// were rendered. Measured 2026-08-19.
+//   script:  capture(true); render_frames(8); status() -> frame_available FALSE
+//   IPC:     the same three calls -> frame_available TRUE
+// A script that needs a measured frame has to hand control back - split it across
+// separate script.run_file calls, or drive the sequence over IPC.
+// This is the producer-vs-consumer split CLAUDE.md warns about: the producer is
+// the display loop, the consumer is the probe, and they are different loops.
 struct ViewportRenderResult {
     bool success = false;
     std::string error;
@@ -600,7 +663,10 @@ struct ViewportProbeInfo {
     uint32_t histogram[8] = {0};  // luminance buckets, 0..1 clamped
 };
 ViewportProbeInfo probeViewportFrame(const ViewportProbeRegion& region,
-                                     float black_threshold);
+                                     float black_threshold = 0.001f);
+
+// Captures the current viewport frame and returns it as a Base64 encoded JPEG string.
+std::string getViewportScreenshotAsBase64();
 
 // Engine-side hook. Called by the display loop with the SAME frame the viewport
 // shows, so a probe measures what the user sees rather than a re-render. Copies
@@ -625,6 +691,12 @@ bool viewportCaptureEnabled();
 // verify a graph's meaning without running a simulation.
 struct SimCommandInfo {
     std::string kind;        // "bind_domain", "set_parameter", "couple"
+    // "domain" | "object" | "world" — which storage this command targets.
+    // Only set_parameter reads this today: a World command carries no target
+    // name (there is exactly one world), so the apply layer needs this to
+    // tell "domain command with an empty target" (an error) apart from
+    // "world command, which has none by design".
+    std::string scope = "domain";
     std::string target;      // domain/object NAME — identity, never a handle
     std::string key;
     float       value = 0.0f;
@@ -1188,6 +1260,15 @@ struct ScatterGroupInfo {
     std::vector<ScatterSourceInfo> sources;
 };
 
+struct FoliageAssetInfo {
+    std::string name;
+    std::string category;
+    std::string relative_path;
+};
+
+Result listFoliageAssets(std::vector<FoliageAssetInfo>& out_assets);
+Result addLibraryScatterSource(const std::string& group_id_or_name, const std::string& relative_path);
+
 Result listScatterGroups(std::vector<ScatterGroupInfo>& out_groups);
 Result createScatterGroup(const std::string& name, const std::string& target_node_name,
                            const std::string& target_type, ScatterGroupInfo& out_info);
@@ -1238,7 +1319,34 @@ Result updatePhysicsBody(const std::string& object_name,
                         const float* gravity_scale = nullptr, const float* soft_stiffness = nullptr,
                         const float* soft_pressure = nullptr, const float* soft_damping = nullptr);
 Result resetPhysicsSimulation();
+// ★★★★ Advances the solver AND the playhead, and claims the timeline for
+// the caller until the user takes it back.
+//
+// It used to advance only the solver. The playhead stayed put, so the frame
+// loop saw a rigid state that disagreed with the displayed frame and corrected
+// it - resetting the runtime to the rest pose and erasing every scripted step,
+// while this call kept returning success. Measured over IPC 2026-08-19:
+// 0.29 m of real motion (exactly gravity, read inside one batch), 100% of it
+// gone one call later. A caller did real work, was told it worked, measured
+// nothing, and had every reason to blame the solver.
+//
+// The timeline is still the USER's: scrubbing, play or stop drop the claim on
+// the spot. What the caller gets is not ownership, it is NOTICE - see
+// getSimControlState.
 Result stepPhysicsSimulation(float dt = 0.0166667f);
+
+// Who last moved the solvers, and an epoch that changes whenever anything
+// does. Read it before and after a measurement: if it moved, the measurement
+// is void. Without it a reverted pose and an unmoved body read identically.
+struct SimControlStateInfo {
+    unsigned long long epoch = 0;
+    std::string driver = "none";   // none | user | playback | script
+    bool script_driving = false;
+    double script_sim_seconds = 0.0;
+    int frame = 0;
+    bool playing = false;
+};
+Result getSimControlState(SimControlStateInfo& out);
 Result setPhysicsGravity(Vec3 gravity);
 Result getPhysicsGravity(Vec3& out_gravity);
 
@@ -2068,7 +2176,21 @@ Result getFluidDomain(const std::string& domain_id_or_name, FluidDomainInfo& out
 // systems. Without this a script can only address domains whose names it
 // authored itself, so it can never clean up what a UI preset left behind.
 Result listFluidDomains(std::vector<FluidDomainInfo>& out_domains);
-Result seedFluidParticles(const std::string& domain_id_or_name, Vec3 seed_min, Vec3 seed_max,
+// ★★★ seed_min/seed_max are POINTERS, and null means "derive from the domain".
+//
+// Both channels used to substitute the same hardcoded box, (-0.5, 1.0, -0.5) to
+// (0.5, 1.5, 0.5), when the caller omitted the region. That box is not derived
+// from anything: any domain that does not happen to contain it seeds nothing.
+// Combined with the empty-overlap silence this produced a call that succeeded,
+// created no particles, and left the caller to blame the solver (measured
+// 2026-08-19).
+//
+// Null now fills the bottom half of the domain, inset by one voxel, which is
+// what "seed this tank" means and is correct for every domain rather than for
+// one. Passing a region explicitly is unchanged, and a region that does not
+// overlap the domain is now REFUSED with both boxes in the message.
+Result seedFluidParticles(const std::string& domain_id_or_name,
+                           const Vec3* seed_min, const Vec3* seed_max,
                            int particles_per_cell = 4, bool replace = true,
                            bool persistent = false);
 Result clearFluidParticles(const std::string& domain_id_or_name,

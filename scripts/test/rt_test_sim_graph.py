@@ -365,6 +365,65 @@ check("refused without permission", len(guarded["refused"]) == 1 and guarded["ap
 check("voxel size untouched", read_param(domain_name, "voxel_size") == voxel_before)
 rt.sim_graph.clear(SCOPE, OWNER)
 
+log("== World scope: WorldThermalNode overrides the ambient thermal state ==")
+# Decision record: docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7 item 1
+# (closed) and section 8 step 4.
+authored_thermal = rt.world.get_thermal()
+log("   authored world thermal = %s" % (authored_thermal,))
+
+wdom = rt_testlog.fresh_graph(rt, "world", "")
+check("the world graph opens with NO owner node (there is exactly one world, "
+      "so there is no identity to name)", wdom == 0, "got %s" % wdom)
+
+wnode = rt.sim_graph.add_node("world", "", "sim.world_thermal")
+
+wfields = None
+for n in rt.sim_graph.nodes("world", ""):
+    if n["type"] == "sim.world_thermal":
+        wfields = n.get("fields")
+check("the world thermal node publishes its fields", bool(wfields), "%s" % (wfields,))
+if wfields:
+    wkeys = [f["key"] for f in wfields]
+    check("ambient_kelvin is offered", "ambient_kelvin" in wkeys, "%s" % (wkeys,))
+    check("no field starts out in use",
+          not any(f["in_use"] for f in wfields), "%s" % (wfields,))
+
+# Touch exactly ONE field, same "opt-in" claim as the Solver test above.
+new_ambient = authored_thermal["ambient_kelvin"] + 12.0
+rt.sim_graph.set_node_value("world", "", wnode, "ambient_kelvin", new_ambient)
+
+ev = rt.sim_graph.evaluate("world", "")
+check("world graph emits a scoped set_parameter command",
+      any(c["kind"] == "set_parameter" for c in ev["commands"]),
+      "%s" % (ev["commands"],))
+
+applied = rt.sim_graph.apply("world", "")
+log("   apply -> %s" % (applied,))
+check("exactly one world override applied", applied["applied"] == 1, "%s" % (applied,))
+
+# ★★★ THE DIFFERENTIAL TEST that section 8 step 4 asked for: the graph path
+# must land on the EXACT number the direct rt.world.set_thermal/get_thermal
+# path would produce. An instrument that only ever agrees with itself is not a
+# measurement -- the reference has to come from outside the node layer.
+now_direct = rt.world.get_thermal()
+check("graph-applied ambient_kelvin matches the direct API reading exactly",
+      abs(now_direct["ambient_kelvin"] - new_ambient) < 1e-4,
+      "%.4f != %.4f" % (now_direct["ambient_kelvin"], new_ambient))
+# ★★★ THE ONE THAT MATTERS, same as the Solver test: an untouched field must
+# stay untouched, or every unticked World Thermal dial silently overwrites the
+# scene's ambient condition with a number nobody chose.
+check("an UNTOUCHED world field was not written",
+      abs(now_direct["kelvin_per_unit"] - authored_thermal["kelvin_per_unit"]) < 1e-6,
+      "%.6f != %.6f" % (now_direct["kelvin_per_unit"], authored_thermal["kelvin_per_unit"]))
+
+rt.sim_graph.clear_overrides()
+restored = rt.world.get_thermal()
+check("authored ambient_kelvin restored exactly",
+      abs(restored["ambient_kelvin"] - authored_thermal["ambient_kelvin"]) < 1e-6,
+      "%.6f != %.6f" % (restored["ambient_kelvin"], authored_thermal["ambient_kelvin"]))
+check("no overrides held after clear", rt.sim_graph.override_count() == 0)
+rt.sim_graph.clear("world", "")
+
 log("")
 if FAIL:
     log("RESULT: %d FAILED: %s" % (len(FAIL), FAIL))

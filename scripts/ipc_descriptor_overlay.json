@@ -2,7 +2,7 @@
   "$comment": "Hand-written half of the IPC method descriptors. Parameters, types, defaults and capabilities are extracted from the dispatch code by gen_ipc_descriptors.py - do NOT repeat them here unless you are adding a description, an enum hint or correcting a type the parser could only see as 'any'. Keys: summary (required, one line, present tense), notes, tags (extra search synonyms; the domain and the method name are added automatically), related (pipe-separated), returns, undoable, access, params{name:{description,enum,type,required,default}}.",
   "agent.discover": {
     "summary": "Identify the application and list every capability domain, agent role and coverage metric",
-    "notes": "First call for a new agent session. registered_coverage is registered/dispatched methods; documented_coverage is the share that carries a hand-written summary. A documented_coverage below 1.0 means agent.describe will answer some methods with parameters but no explanation.",
+    "notes": "First call for a new agent session. registered_methods is how many methods are dispatched; documented_coverage is the share that carries a hand-written summary. A documented_coverage below 1.0 means agent.describe will answer some methods with parameters but no explanation.",
     "tags": "bootstrap|handshake|capabilities|introspection",
     "related": "agent.list_methods|agent.describe|agent.search_capabilities",
     "returns": "DiscoveryInfo"
@@ -102,6 +102,15 @@
         "description": "Optional base64 image; the panel notes the attachment"
       }
     }
+  },
+  "agent.send_prompt": {
+    "summary": "Queue a task for another agent to pick up on its next poll, addressed by agent id or 'all'",
+    "notes": "Returns queued:true, NOT delivered - nothing has run yet and the target agent may never poll. Do not report the work as done on the strength of this call; ask for the result, or check the scene yourself. The target must match the id the other agent polls with (agent.chat_poll agent_id), and 'all' broadcasts.",
+    "tags": "agent|delegate|multi-agent|prompt|task|handoff",
+    "related": "agent.chat_poll|agent.chat_send|agent.roles",
+    "verify_with": [
+      "agent.get_state_summary"
+    ]
   },
   "agent.chat_poll": {
     "summary": "Take the user prompts queued in the Agent Chat panel and mark the agent as alive",
@@ -203,7 +212,17 @@
   "scene.get_transform": {
     "summary": "Return an object's translation, rotation, scale and full matrix",
     "returns": "TransformInfo",
-    "related": "scene.set_transform"
+    "related": "scene.set_transform|scene.get_world_transform",
+    "notes": "This is the AUTHORED transform and a solver never writes it: a rigid body can fall for a thousand steps while this keeps returning the spawn pose. To measure physics use scene.get_world_transform."
+  },
+  "scene.get_world_transform": {
+    "summary": "Return an object's SIMULATED world pose: the solver's motion composed onto the authored transform",
+    "notes": "The rigid solver bakes its motion into the mesh vertices and never writes a transform, so scene.get_transform reports the spawn pose for a body that has been falling for hundreds of steps. Every physics measurement - free fall, buoyancy draft, restitution, settling - has to read this one. The result carries simulated: false when no solver has contributed, which is not the same as the body having stayed still.",
+    "tags": "transform|physics|simulated|pose|measure|verify",
+    "related": "scene.get_transform|physics.step|physics.add_body",
+    "verify_with": [
+      "scene.get_transform"
+    ]
   },
   "scene.set_transform": {
     "summary": "Set an object's transform, either as a matrix or as translation/rotation/scale components",
@@ -337,7 +356,13 @@
   "lights.set_param": {
     "summary": "Set one numeric light parameter by name (radius, spot_angle, spot_falloff, width, height)",
     "notes": "spot_angle and spot_falloff apply to spot lights only; width and height to area lights only. The call fails rather than silently ignoring a mismatch.",
-    "tags": "lighting|softness|cone"
+    "tags": "lighting|softness|cone",
+    "params": {
+      "param": {
+        "enum": "intensity|radius|width|height|spot_angle|spot_falloff",
+        "description": "Which light property to set. Not every key applies to every light type - a key the light does not have is refused, not ignored."
+      }
+    }
   },
   "world.get": {
     "summary": "Return world mode, background colour, sun angles and atmosphere settings",
@@ -377,6 +402,33 @@
   "world.set_atmosphere_intensity": {
     "summary": "Set the strength of atmospheric scattering in the physical sky",
     "tags": "environment|sky|haze|fog"
+  },
+  "world.get_thermal": {
+    "summary": "Return the ambient thermal condition every uncoupled substance relaxes toward",
+    "notes": "Distinct from world.get: that is the render sky, this is WorldThermalState -- the room temperature (ambient_kelvin), the Kelvin-per-normalized-unit calibration a substance's MSF temperature is read against (kelvin_per_unit), the passive-cooling multiplier (convection_coefficient) and the pyrolysis rate scale (oxygen_availability). Formerly no scripting surface existed for any of this -- see docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7 item 1.",
+    "returns": "WorldThermalInfo",
+    "tags": "simulation|thermal|ambient|world|msf",
+    "related": "world.set_thermal|sim_graph.list"
+  },
+  "world.set_thermal": {
+    "summary": "Set the ambient thermal condition every uncoupled substance relaxes toward",
+    "notes": "Every field optional: omit a key to leave it unchanged. oxygen_availability is clamped to 0..1 rather than rejected. A domain's own thermal_override_enabled (SimulationGridDomainDesc) still wins over this where it is set -- this call changes only the default a domain has not overridden.",
+    "tags": "simulation|thermal|ambient|world|msf",
+    "related": "world.get_thermal",
+    "params": {
+      "ambient_kelvin": {
+        "description": "Room temperature everything relaxes toward, in Kelvin. Must be positive."
+      },
+      "kelvin_per_unit": {
+        "description": "Kelvin per normalized solver unit -- the calibration MSF temperature reads through. Must be positive."
+      },
+      "convection_coefficient": {
+        "description": "Scales every substance's passive cooling toward ambient: 1 = authored, higher = draughty, 0 = a perfect thermos."
+      },
+      "oxygen_availability": {
+        "description": "0..1, scales pyrolysis burn rate; 0 smothers combustion entirely. Clamped, not rejected, if out of range."
+      }
+    }
   },
   "timeline.get_frame": {
     "summary": "Return the current timeline frame",
@@ -466,18 +518,37 @@
   },
   "viewport.shading": {
     "summary": "Report which viewport shading mode is on screen and whether the interactive raster viewport exists",
-    "notes": "interactive_available false means this build has no raster viewport (no Vulkan), so 'rendered' is the only selectable mode - a rejected set_shading there is the machine, not a bad request.",
+    "notes": "interactive_available false means this build has no raster viewport (no Vulkan), so 'rendered' is the only selectable mode - a rejected viewport.set_shading there is the machine, not a bad request.",
     "tags": "viewport|shading|display|measure",
     "related": "viewport.set_shading|viewport.status"
+  },
+  "viewport.get_screenshot": {
+    "summary": "Return the captured viewport frame as a base64 JPEG, for a vision-capable model to look at",
+    "notes": "Requires viewport.capture(enabled=true) and at least one rendered frame; an empty result means NOT CAPTURED, never 'the screen is empty'. Looking is not measuring - pair it with render.probe when the question is numeric (is there a black band, did the frame change), because a model reading a JPEG cannot tell 0.001 luminance from 0.",
+    "tags": "viewport|screenshot|image|vision|look|see",
+    "related": "viewport.capture|render.probe|viewport.render_frames",
+    "requires": [
+      "viewport.capture",
+      "viewport.render_frames"
+    ],
+    "verify_with": [
+      "render.probe"
+    ]
   },
   "viewport.set_shading": {
     "summary": "Switch the viewport shading mode (solid, material, rendered, matcap) and optionally the matcap preset",
     "notes": "Resets accumulation like the panel buttons do, so probe AFTER switching - otherwise you measure the frame from the mode you left. Fails loudly when a mode is unavailable instead of silently falling back to rendered.",
-    "enums": {
-      "mode": "solid|material|rendered|matcap"
-    },
     "tags": "viewport|shading|display|solid|rendered|matcap|preview",
-    "related": "viewport.shading|viewport.render_frames|render.probe"
+    "related": "viewport.shading|viewport.render_frames|render.probe",
+    "params": {
+      "mode": {
+        "enum": "solid|material|rendered|matcap",
+        "description": "Canonical mode name. 'preview' is accepted as an alias for material because the panel button reads Preview."
+      },
+      "matcap_preset": {
+        "description": "0..9, meaningful in matcap mode; -1 leaves it unchanged."
+      }
+    }
   },
   "viewport.capture": {
     "summary": "Turn viewport frame capture on or off",
@@ -487,9 +558,9 @@
   },
   "viewport.render_frames": {
     "summary": "Render a fixed number of viewport frames and report timing and convergence",
-    "notes": "Use this to converge the viewport deliberately before probing it, instead of guessing how long to wait.",
+    "notes": "Use this to converge the viewport deliberately before probing it, instead of guessing how long to wait. Over IPC the captured frame is refreshed between calls by the display loop, so viewport.capture -> viewport.render_frames -> render.probe works. It does NOT work inside a single script.run_file: the script holds the main thread, the display loop never runs, and viewport.status frame_available stays false however many frames were rendered - measured 2026-08-19.",
     "tags": "measure|converge|samples|wait",
-    "related": "render.probe|viewport.capture"
+    "related": "render.probe|viewport.capture|viewport.status"
   },
   "material.list": {
     "summary": "List every material in the scene",
@@ -527,7 +598,13 @@
     "summary": "Set one material parameter on an object (base_color, roughness, metallic, emission, ior, transmission, ...)",
     "notes": "Colour parameters take a 3-element array, scalars take a number. An unknown parameter name is an error, not a silent no-op.",
     "tags": "shading|colour|roughness|metallic|emission",
-    "related": "material.get|material.info"
+    "related": "material.get|material.info",
+    "params": {
+      "param": {
+        "enum": "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y",
+        "description": "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission and opacity are clamped to [0,1]; ior to [1,10]."
+      }
+    }
   },
   "material.set_texture": {
     "summary": "Bind an image file to a material texture slot",
@@ -582,16 +659,16 @@
     "tags": "simulation|remove"
   },
   "fluid.seed": {
-    "summary": "Fill a box inside a liquid domain with particles",
-    "notes": "particles_per_cell of 4 is the standard APIC density; a thin jet seeded below that has no interior cells and therefore no pressure field, which reads as 'water that will not splash'. persistent=true re-seeds the box every reset.",
+    "summary": "Fill a liquid domain with particles - a given box, or the domain's lower half",
+    "notes": "Omit seed_min and seed_max to fill the bottom half of the domain; there is no fixed default box any more, because the old one was derived from nothing and seeded zero particles in any domain that did not contain it. A region that does not overlap the domain is now refused with both boxes in the error, instead of succeeding having created nothing. particles_per_cell of 4 is the standard APIC density; a thin jet seeded below that has no interior cells and therefore no pressure field, which reads as 'water that will not splash'. persistent=true re-seeds the box every reset.",
     "tags": "simulation|liquid|water|fill|particles|initial",
     "related": "fluid.create_domain|fluid.clear|flow_source.create",
     "params": {
       "seed_min": {
-        "description": "World-space box minimum in metres"
+        "description": "World-space box minimum in metres; omit to derive from the domain"
       },
       "seed_max": {
-        "description": "World-space box maximum in metres"
+        "description": "World-space box maximum in metres; omit to derive from the domain"
       },
       "particles_per_cell": {
         "description": "Particle density per grid cell; 4 is standard"
@@ -602,7 +679,10 @@
       "persistent": {
         "description": "Re-apply this seed after every reset"
       }
-    }
+    },
+    "verify_with": [
+      "fluid.get"
+    ]
   },
   "fluid.clear": {
     "summary": "Remove the particles from a fluid domain",
@@ -620,6 +700,19 @@
   "fluid.set_param": {
     "summary": "Update any field of a fluid or gas domain: bounds, voxel size, solver backend, viscosity, granular constitutive settings, render mode and surface material",
     "notes": "Overlay semantics - fields you do not send keep their value. Changing voxel_size or the bounds invalidates the bake for that domain.",
+    "requires": [
+      "fluid.create_domain"
+    ],
+    "next": [
+      "timeline.set_frame"
+    ],
+    "verify_with": [
+      "fluid.get",
+      "render.probe"
+    ],
+    "invalidates": [
+      "simulation_cache"
+    ],
     "tags": "simulation|configure|viscosity|granular|render-mode|backend",
     "related": "fluid.get|fluid.set_substance_material"
   },
@@ -685,6 +778,21 @@
   "gas.set_settings": {
     "summary": "Configure a gas domain's solver: fire and ignition, burn rate, heat release, buoyancy, turbulence, vorticity and resource budget",
     "notes": "This is the SOLVER. Appearance - colour, emission, density scale - lives in gas.set_shader, and the two are read back separately; a fire that simulates but looks wrong is usually a shader setting, not a solver setting.",
+    "requires": [
+      "gas.create_domain"
+    ],
+    "next": [
+      "gas.set_shader",
+      "flow_source.create",
+      "timeline.set_frame"
+    ],
+    "verify_with": [
+      "gas.get_settings",
+      "render.probe"
+    ],
+    "invalidates": [
+      "simulation_cache"
+    ],
     "tags": "simulation|fire|smoke|ignite|burn|buoyancy|turbulence",
     "related": "gas.get_settings|gas.set_shader|flow_source.create",
     "params": {
@@ -876,8 +984,15 @@
     "tags": "simulation|gravity"
   },
   "physics.step": {
-    "summary": "Advance the rigid-body solver by one timestep",
-    "tags": "simulation|advance"
+    "summary": "Advance the physics solver by dt and move the playhead with it",
+    "tags": "simulation|advance",
+    "notes": "Advances the solver AND the timeline playhead, and claims the timeline until the user scrubs, plays or stops. It used to advance only the solver: the playhead stayed put, the frame loop found a rigid state that disagreed with the displayed frame, and it reset the runtime to the rest pose - erasing every scripted step while this call returned success. Check sim.control_state around a measurement to learn whether the claim was taken back.",
+    "verify_with": [
+      "sim.control_state"
+    ],
+    "next": [
+      "scene.get_world_transform"
+    ]
   },
   "physics.reset": {
     "summary": "Reset the rigid-body simulation to its initial state",
@@ -1723,5 +1838,11 @@
   "ipc.admin.audit.export": {
     "summary": "Export the IPC audit log to a JSONL file",
     "tags": "security|admin|audit|export"
+  },
+  "sim.control_state": {
+    "summary": "Who is currently driving the solvers, and an epoch that changes whenever anything re-poses them",
+    "notes": "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops.",
+    "tags": "simulation|control|epoch|driver|timeline|measure|verify",
+    "related": "physics.step|timeline.set_frame|timeline.get_frame|scene.get_world_transform"
   }
 }

@@ -283,6 +283,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="source\src\Api\RtIpcAgentDiscovery.h" />
+    <ClInclude Include="source\src\Api\RtAgentLifecycleManager.h" />
     <ClInclude Include="source\src\Api\RtPythonAgent.h" />
     <ClInclude Include="source\src\Api\RtIpcWorkflowRecipes.h" />
     <ClInclude Include="source\src\Api\RtIpcMethodRegistry.h" />
@@ -1275,6 +1276,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\src\Api\RtIpcAgentDiscovery.cpp" />
+    <ClCompile Include="source\src\Api\RtAgentLifecycleManager.cpp" />
     <ClCompile Include="source\src\Api\RtIpcWorkflowRecipes.cpp" />
     <ClCompile Include="source\src\Api\RtIpcMethodDescriptors.cpp" />
     <ClCompile Include="source\src\Api\RtIpcMethodRegistry.cpp" />

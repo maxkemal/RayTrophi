@@ -481,10 +481,31 @@ def build(overlay, namespaces):
             "returns": entry.get("returns", "any"),
             "tags": "|".join(tags),
             "related": entry.get("related"),
+            "prerequisites": pipe_list(entry.get("requires")),
+            "next_steps": pipe_list(entry.get("next")),
+            "verify_with": pipe_list(entry.get("verify_with")),
+            "invalidates": pipe_list(entry.get("invalidates")),
             "params": rows,
             "documented": bool(entry.get("summary")),
         })
     return records
+
+
+def pipe_list(value):
+    """Overlay sequencing fields, written either as a list or a pipe string.
+
+    ★ Returning None for an empty value is deliberate: an empty string would
+    reach the agent as a present-but-blank field, which reads as "nothing has to
+    happen first" rather than "nobody wrote this down yet".
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        items = [v.strip() for v in value.split("|")]
+    else:
+        items = [str(v).strip() for v in value]
+    items = [v for v in items if v]
+    return "|".join(items) if items else None
 
 
 HEADER = """/*
@@ -541,6 +562,9 @@ def emit(records):
             c_string(record["returns"])))
         out.append("    %s,\n" % c_string(record["tags"]))
         out.append("    %s,\n" % c_string(record["related"]))
+        out.append("    %s, %s, %s, %s,\n" % (
+            c_string(record["prerequisites"]), c_string(record["next_steps"]),
+            c_string(record["verify_with"]), c_string(record["invalidates"])))
         if record["params"]:
             out.append("    params_%s, %d,\n" % (name, len(record["params"])))
         else:
@@ -550,6 +574,60 @@ def emit(records):
                    % (name, name))
     out.append("} // namespace\n")
     return "".join(out)
+
+
+# Every overlay key this generator actually reads. Anything else is a typo or
+# an invention, and both fail the same silent way.
+KNOWN_OVERLAY_KEYS = {
+    "summary", "notes", "access", "undoable", "returns", "tags", "related",
+    "requires", "next", "verify_with", "invalidates", "params",
+}
+KNOWN_PARAM_KEYS = {"type", "required", "description", "default", "enum"}
+
+
+def unknown_overlay_keys(overlay):
+    """★ An overlay key the generator does not read is DEAD DATA.
+
+    It sits in the JSON looking authoritative, never reaches agent.describe, and
+    reports no error - the same failure the hand-written catalogue had, one level
+    up. Caught in practice twice on 2026-08-19: `requires`/`next`/`verify_with`/
+    `invalidates` (written before the generator understood them) and a top-level
+    `enums`, which should have been params.<name>.enum.
+    """
+    bad = []
+    for method, entry in overlay.items():
+        if not isinstance(entry, dict):
+            continue
+        for key in entry:
+            if key not in KNOWN_OVERLAY_KEYS:
+                bad.append((method, key))
+        for name, spec in (entry.get("params") or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            for key in spec:
+                if key not in KNOWN_PARAM_KEYS:
+                    bad.append((method, "params.%s.%s" % (name, key)))
+    return bad
+
+
+def dangling_links(records):
+    """Cross-reference every method name the overlay points at.
+
+    ★ A `verify_with: viewport.probe` that should have said `render.probe` costs
+    a caller with no prior knowledge a whole round: it reads the field as fact,
+    calls a method that does not exist, and gets "unknown method" for a step the
+    documentation told it to take. The prose is unverifiable, but the LINKS are
+    just names — so they get checked. `invalidates` is deliberately excluded: it
+    names state (simulation_cache, tlas), not methods.
+    """
+    known = {r["method"] for r in records}
+    broken = []
+    for record in records:
+        for field in ("related", "prerequisites", "next_steps", "verify_with"):
+            for target in (record[field] or "").split("|"):
+                if target and target not in known:
+                    broken.append((record["method"], field, target))
+    return broken
 
 
 def main(argv):
@@ -564,6 +642,22 @@ def main(argv):
     stale = [m for m in overlay if m not in {r["method"] for r in records}]
     documented = sum(1 for r in records if r["documented"])
     with_params = sum(1 for r in records if r["params"])
+    dangling = dangling_links(records)
+    unknown = unknown_overlay_keys(overlay)
+
+    if unknown:
+        print("UNREAD KEYS in %s - written but never emitted, so no agent will "
+              "ever see them:" % os.path.basename(OVERLAY))
+        for method, key in unknown:
+            print("  %-34s %s" % (method, key))
+        return 1
+
+    if dangling:
+        print("BROKEN LINKS in %s - these name methods that are not "
+              "dispatched:" % os.path.basename(OVERLAY))
+        for method, field, target in dangling:
+            print("  %-34s %-13s -> %s" % (method, field, target))
+        return 1
 
     if "--check" in argv:
         current = read(OUTPUT) if os.path.exists(OUTPUT) else ""

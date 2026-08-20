@@ -13,6 +13,7 @@ PowerShell/pytest session can still attach alongside.
 """
 
 import logging
+import logging.handlers
 import os
 import queue
 import sys
@@ -21,7 +22,7 @@ import time
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from config import (GEMINI_API_KEY, IPC_PIPE_NAME, LLM_PROVIDER, LOCAL_LLM_MODEL,
+from config import (GEMINI_API_KEY, GEMINI_MODEL, IPC_PIPE_NAME, LLM_PROVIDER, LOCAL_LLM_MODEL,
                     LOCAL_LLM_URL, OPENAI_API_KEY, OPENAI_MODEL, POLL_INTERVAL_SEC)
 from core.ipc_client import IPCClient
 from core.orchestrator import Orchestrator
@@ -31,21 +32,26 @@ from core.tool_executor import ToolExecutor
 from providers.gemini_provider import GeminiProvider
 from providers.local_provider import LocalLLMProvider
 from providers.openai_provider import MockProvider, OpenAIProvider
+from providers.anthropic_provider import AnthropicProvider
 
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("agent.log", encoding="utf-8"),
+    handlers=[logging.handlers.RotatingFileHandler("agent.log", maxBytes=5*1024*1024, backupCount=3, encoding="utf-8"),
               logging.StreamHandler()])
 
 SENDER = "RayTrophi Agent"
 
 
 def build_provider():
+    from config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+    
     if LLM_PROVIDER == "openai":
         return OpenAIProvider(api_key=OPENAI_API_KEY, model=OPENAI_MODEL)
     if LLM_PROVIDER == "gemini":
-        return GeminiProvider(api_key=GEMINI_API_KEY)
+        return GeminiProvider(api_key=GEMINI_API_KEY, model=GEMINI_MODEL)
+    if LLM_PROVIDER == "anthropic":
+        return AnthropicProvider(api_key=ANTHROPIC_API_KEY, model=ANTHROPIC_MODEL)
     if LLM_PROVIDER == "local":
         return LocalLLMProvider(base_url=LOCAL_LLM_URL, model=LOCAL_LLM_MODEL)
     return MockProvider()
@@ -79,7 +85,9 @@ def main():
         outbox.put((kind, text))
 
     executor = ToolExecutor(ipc=tool_ipc, registry=registry, report=report)
-    orchestrator = Orchestrator(provider=build_provider(), executor=executor,
+    provider = build_provider()
+    provider.report = report
+    orchestrator = Orchestrator(provider=provider, executor=executor,
                                 report=report)
 
     stop = threading.Event()
@@ -110,7 +118,7 @@ def main():
     logging.info("entering poll loop")
     try:
         while True:
-            polled = chat_ipc.call("agent.chat_poll", {})
+            polled = chat_ipc.call("agent.chat_poll", {"agent_id": session.agent_id})
             if "error" in polled:
                 logging.warning("poll failed: %s", polled["error"])
                 # Only a dropped connection needs reconnecting; a dispatch error

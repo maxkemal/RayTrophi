@@ -1126,8 +1126,8 @@ void drawSimulationDomainControls(
                     if (ImGui::Button("Seed Fluid Now##SeedButton", ImVec2(-1, 30))) {
                         if (rtapi::seedFluidParticles(
                                 domain.name,
-                                domain.fluid_seed_min,
-                                domain.fluid_seed_max,
+                                &domain.fluid_seed_min,
+                                &domain.fluid_seed_max,
                                 domain.fluid_seed_particles_per_cell,
                                 domain.fluid_replace_on_seed,
                                 domain.fluid_reseed_on_reset).ok) {

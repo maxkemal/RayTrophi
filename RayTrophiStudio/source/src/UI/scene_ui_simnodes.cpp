@@ -644,6 +644,13 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
         helpText("Only ticked fields are written. Everything else keeps the "
                  "value authored on the domain.");
     }
+    else if (auto* world_thermal = dynamic_cast<WorldThermalNode*>(selected)) {
+        drawOptInFields(*world_thermal);
+        helpText("Only ticked fields are written. There is exactly one world, "
+                 "so nothing here is named -- and a domain's own thermal "
+                 "override still wins where it is set; this changes only the "
+                 "default a domain has not overridden.");
+    }
     else if (auto* emitter = dynamic_cast<EmitterNode*>(selected)) {
         ImGui::TextUnformatted("Flow source");
         std::vector<std::string> emitter_names;

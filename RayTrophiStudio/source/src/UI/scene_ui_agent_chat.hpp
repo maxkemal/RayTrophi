@@ -70,7 +70,16 @@ public:
 
     // Prompts waiting for the agent to collect.
     struct QueuedPrompt { std::string target; std::string content; };
-    bool popUserPrompt(QueuedPrompt& out_prompt);
+    bool popUserPrompt(const std::string& polling_agent_id, QueuedPrompt& out_prompt);
+
+    // Queue a prompt for an agent to collect on its next poll. `target` is an
+    // agent id or "all".
+    // ★ Reachable over IPC as agent.send_prompt, which is what makes agent-to-
+    // agent delegation testable: while this only existed behind the Send button,
+    // one agent could not hand work to another without a human retyping it.
+    // Thread-safe.
+    void queuePrompt(const std::string& sender, const std::string& target,
+                     const std::string& content);
 
     // Stop the agent process if this panel started one. Called from the
     // destructor too, so closing Studio does not leave an orphan behind.
@@ -100,22 +109,21 @@ private:
     bool scroll_to_bottom;
     bool reclaim_focus_next_frame;
 
-#ifdef _WIN32
-    void* agent_process_handle = nullptr;  // HANDLE
-    unsigned long agent_process_id = 0;
-#endif
+    bool last_frame_process_alive = false;
+
+    // Helper to pull the core audit log into the chat.
+    void pumpCoreActivity();
+    std::string active_agent_id = "local_qwen"; // Default active agent
+    bool show_settings_window = false;
+
     void startAgentProcess();
     bool isAgentProcessAlive();
-
-    // Mirror the core's own audit log into the panel, so "Core Activity" shows
-    // what the engine actually served rather than what the agent chose to
-    // report about itself.
-    void pumpCoreActivity();
 
     void submitPrompt();
     void drawMessageList();
     void drawInputArea();
     void drawStatusLine();
+    void drawAgentSettings();
     std::string getCurrentTimeStr();
 };
 

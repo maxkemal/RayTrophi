@@ -381,6 +381,9 @@ void registerSimulationNodeTypes() {
     reg.registerType("sim.domain_settings",
                      [] { return std::static_pointer_cast<NodeBase>(
                               std::make_shared<DomainSettingsNode>()); });
+    reg.registerType("sim.world_thermal",
+                     [] { return std::static_pointer_cast<NodeBase>(
+                              std::make_shared<WorldThermalNode>()); });
     reg.registerType("sim.emitter",
                      [] { return std::static_pointer_cast<NodeBase>(
                               std::make_shared<EmitterNode>()); });
