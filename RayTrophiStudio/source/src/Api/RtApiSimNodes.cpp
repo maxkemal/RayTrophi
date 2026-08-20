@@ -399,6 +399,29 @@ bool writeParameter(const std::string& domain, const std::string& key, float val
         /* granular_cohesion              */ granular_cohesion).ok;
 }
 
+// ── World thermal ambient (section 7 item 1, section 8 step 4) ─────────────
+//
+// ★ Reads and writes go through rt.world.get_thermal/set_thermal's own
+// implementation (getWorldThermal/setWorldThermal), not a second path into
+// WorldThermalState — one place owns the field list and its validation.
+bool readWorldThermalParameter(const std::string& key, float& out) {
+    WorldThermalInfo t;
+    if (!getWorldThermal(t).ok) return false;
+    if (key == "ambient_kelvin")         { out = t.ambient_kelvin;         return true; }
+    if (key == "kelvin_per_unit")        { out = t.kelvin_per_unit;        return true; }
+    if (key == "convection_coefficient") { out = t.convection_coefficient; return true; }
+    if (key == "oxygen_availability")    { out = t.oxygen_availability;    return true; }
+    return false;                        // unknown key: say so, do not guess
+}
+
+bool writeWorldThermalParameter(const std::string& key, float value) {
+    if (key == "ambient_kelvin")         return setWorldThermal(&value, nullptr, nullptr, nullptr).ok;
+    if (key == "kelvin_per_unit")        return setWorldThermal(nullptr, &value, nullptr, nullptr).ok;
+    if (key == "convection_coefficient") return setWorldThermal(nullptr, nullptr, &value, nullptr).ok;
+    if (key == "oxygen_availability")    return setWorldThermal(nullptr, nullptr, nullptr, &value).ok;
+    return false;
+}
+
 // ── N6: cache status seam ───────────────────────────────────────────────────
 bool resolveCacheStatus(NodeSystem::Sim::CacheStatusReading& out) {
     if (!g_ctx) return false;
@@ -872,6 +895,10 @@ SimApplyResult simGraphApply(const std::string& scope_text, const std::string& o
 
     for (const auto& cmd : evaluation.commands) {
         if (cmd.kind != "set_parameter") continue;
+        // ★ World commands carry no target — there is exactly one world — so
+        // they are told apart from a domain command by scope, not by an empty
+        // target string (which would otherwise read as a missing domain name).
+        const bool is_world = (cmd.scope == "world");
         const bool needs_restart =
             NodeSystem::Sim::SetParameterNode::keyRequiresRestart(cmd.key);
         if (needs_restart && !allow_restart) {
@@ -881,7 +908,26 @@ SimApplyResult simGraphApply(const std::string& scope_text, const std::string& o
                                   "' requires a simulation restart");
             continue;
         }
+        // cmd.target is empty for a world command, which is exactly the key
+        // this table already uses for "the world" — no real domain has an
+        // empty name, so there is no collision.
         OverrideKey ok{cmd.target, cmd.key};
+        if (is_world) {
+            if (g_authored_values.find(ok) == g_authored_values.end()) {
+                float authored = 0.0f;
+                if (!readWorldThermalParameter(cmd.key, authored)) {
+                    out.failed.push_back("cannot read authored value for " + cmd.key + " on the world");
+                    continue;
+                }
+                g_authored_values.emplace(ok, authored);
+            }
+            if (!writeWorldThermalParameter(cmd.key, cmd.value)) {
+                out.failed.push_back("cannot apply " + cmd.key + " on the world");
+                continue;
+            }
+            ++out.applied;
+            continue;
+        }
         if (g_authored_values.find(ok) == g_authored_values.end()) {
             float authored = 0.0f;
             if (!readParameter(cmd.target, cmd.key, authored)) {
@@ -1111,10 +1157,16 @@ SimApplyResult simGraphApply(const std::string& scope_text, const std::string& o
 Result simGraphClearOverrides() {
     std::string first_error;
     for (const auto& entry : g_authored_values) {
-        if (!writeParameter(entry.first.domain, entry.first.key, entry.second) &&
-            first_error.empty()) {
-            first_error = "cannot restore " + entry.first.key +
-                          " on '" + entry.first.domain + "'";
+        // Empty domain is the world command's own key (see simGraphApply) —
+        // not a domain nobody named.
+        const bool is_world = entry.first.domain.empty();
+        const bool restored = is_world
+            ? writeWorldThermalParameter(entry.first.key, entry.second)
+            : writeParameter(entry.first.domain, entry.first.key, entry.second);
+        if (!restored && first_error.empty()) {
+            first_error = is_world
+                ? "cannot restore " + entry.first.key + " on the world"
+                : "cannot restore " + entry.first.key + " on '" + entry.first.domain + "'";
         }
     }
     for (const auto& entry : g_authored_couplings) {
@@ -1601,6 +1653,33 @@ Result simGraphSetNodeValue(const std::string& scope_text, const std::string& ow
         return Result::fail("node " + std::to_string(node_id) +
                             " has no parameter '" + key + "'");
     }
+    if (auto* world = dynamic_cast<NodeSystem::Sim::WorldThermalNode*>(node)) {
+        // Same "<key>.use" / bare-key contract as DomainParamNodeBase above,
+        // duplicated rather than shared because WorldThermalNode carries no
+        // Domain pin and does not derive from that base — see its class
+        // comment. EmitterNode duplicates the same shape for the same reason.
+        const std::string suffix = ".use";
+        if (key.size() > suffix.size() &&
+            key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            const std::string base = key.substr(0, key.size() - suffix.size());
+            auto* f = world->find(base);
+            if (!f) return Result::fail("node " + std::to_string(node_id) +
+                                        " has no parameter '" + base + "'");
+            f->use = value > 0.5f;
+            world->refreshTitle();
+            node->dirty = true;
+            return Result::success();
+        }
+        if (auto* f = world->find(key)) {
+            f->value = value;
+            f->use = true;
+            world->refreshTitle();
+            node->dirty = true;
+            return Result::success();
+        }
+        return Result::fail("node " + std::to_string(node_id) +
+                            " has no parameter '" + key + "'");
+    }
     if (auto* setter = dynamic_cast<NodeSystem::Sim::SetParameterNode*>(node)) {
         if (key == "value") { setter->value = value; node->dirty = true; return Result::success(); }
     }
@@ -1690,6 +1769,11 @@ SimGraphEvaluation simGraphEvaluate(const std::string& scope_text,
             case NodeSystem::Sim::SimCommand::Kind::SetEmitter:   info.kind = "set_emitter"; break;
             default: info.kind = "none"; break;
         }
+        switch (cmd.scope) {
+            case NodeSystem::Sim::SimCommand::Scope::Domain: info.scope = "domain"; break;
+            case NodeSystem::Sim::SimCommand::Scope::Object: info.scope = "object"; break;
+            case NodeSystem::Sim::SimCommand::Scope::World:  info.scope = "world";  break;
+        }
         info.target = cmd.target;
         info.key = cmd.key;
         info.value = cmd.value;
@@ -1739,6 +1823,18 @@ Result simGraphNodes(const std::string& scope_text, const std::string& owner,
         if (const auto* aspect =
                 dynamic_cast<const NodeSystem::Sim::DomainParamNodeBase*>(node.get())) {
             for (const auto& f : aspect->fields) {
+                SimNodeField out_field;
+                out_field.key = f.key;
+                out_field.in_use = f.use;
+                out_field.value = f.value;
+                out_field.requires_restart =
+                    NodeSystem::Sim::SetParameterNode::keyRequiresRestart(f.key);
+                info.fields.push_back(std::move(out_field));
+            }
+        }
+        if (const auto* world =
+                dynamic_cast<const NodeSystem::Sim::WorldThermalNode*>(node.get())) {
+            for (const auto& f : world->fields) {
                 SimNodeField out_field;
                 out_field.key = f.key;
                 out_field.in_use = f.use;

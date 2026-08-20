@@ -130,6 +130,14 @@ void registerAgentBindings(py::module_& root) {
        py::arg("type") = std::string("reply"),
        "Post into the Agent Chat panel: reply|activity|thought|error.");
 
+    agent.def("send_prompt", [](const std::string& target, const std::string& content,
+                                const std::string& sender) {
+        return callAgent("agent.send_prompt",
+                         json{{"target", target}, {"content", content}, {"sender", sender}});
+    }, py::arg("target"), py::arg("content"), py::arg("sender") = std::string("Script"),
+       "Queue a task for another agent ('all' broadcasts). Returns queued:true, "
+       "not delivered - the target has to poll before anything happens.");
+
     agent.def("chat_poll", [] { return callAgent("agent.chat_poll", json::object()); },
               "Take the prompts queued in the Agent Chat panel. Also counts as a "
               "heartbeat, so the panel will report an agent as connected.");

@@ -42,8 +42,21 @@ class OpenAIProvider(LLMProvider):
                 tool_calls.append({"id": call.id, "name": call.function.name,
                                    "args": args})
 
+            # Reasoning models (qwen3 via Ollama, and others) put their
+            # thinking in a separate field and leave `content` EMPTY. Reading
+            # only `content` made an entire turn look like a silent success:
+            # the loop saw no tool call and no text and answered "Done."
+            # Measured 2026-08-19 - the model had reasoned about the task and
+            # said nothing the caller could see.
+            extra = getattr(message, "model_extra", None) or {}
+            reasoning = extra.get("reasoning") or extra.get("reasoning_content") or ""
+
             return {
                 "text": message.content or "",
+                # Kept separate on purpose: thinking is not an answer, and
+                # presenting it as one would put the model's scratchpad in front
+                # of the user as though it were a report.
+                "reasoning": reasoning,
                 "tool_calls": tool_calls,
                 "raw_message": message,   # appended verbatim to the history
             }

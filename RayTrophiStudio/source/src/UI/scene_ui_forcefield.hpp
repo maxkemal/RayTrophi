@@ -1459,8 +1459,8 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             // stepped seed from appearing beside the Vulkan/APIC state.
             if (rtapi::seedFluidParticles(
                     fluid->name,
-                    fluid->seed_min,
-                    fluid->seed_max,
+                    &fluid->seed_min,
+                    &fluid->seed_max,
                     fluid->seed_particles_per_cell,
                     fluid->replace_on_seed,
                     false).ok) {

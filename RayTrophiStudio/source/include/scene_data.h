@@ -2188,6 +2188,94 @@ struct SceneData {
     std::map<int, std::vector<ParticleFrameSnapshot>> particle_frame_cache_;
     int sim_timeline_frame_ = -1;
     int rigid_timeline_frame_ = -1;
+
+    // ---- Script/IPC physics driving (2026-08-19) --------------------------
+    //
+    // ★★★★ Measured over the IPC channel: 240 x physics.step moved a body
+    // 0.29 m (correct for gravity, read inside the same batch) and the next
+    // frame tick put ALL of it back - while the call returned success. Adding
+    // the body marks rigid_timeline_frame_ = -1, and the loop's next rigid
+    // re-sync sees the mismatch and resets the runtime to the rest pose.
+    //
+    // The contract is NOT "the script owns the timeline". The timeline stays
+    // the user's: they can scrub, play, pause or stop at any moment and that
+    // wins immediately. What was missing is the other half - the script had no
+    // way to know its work had been undone, and a reverted step is
+    // indistinguishable from a step that did nothing.
+    //
+    //   sim_epoch_   bumped every time ANYTHING re-poses the solvers. A caller
+    //                reads it around its measurement; if it changed, the
+    //                measurement is void and the caller KNOWS.
+    //   sim_driver_  who last drove them, so the answer is not just "something
+    //                moved" but "the user scrubbed" / "playback" / "a script".
+    //   script_driving_physics_ / script_claim_frame_
+    //                while a script is stepping and the playhead is still on
+    //                the frame the script itself put it on, the loop leaves
+    //                the rigid runtime alone. The moment tl_frame differs -
+    //                the user touched it - or playback starts, the claim is
+    //                dropped and the loop resumes control.
+    enum class SimDriver { None, User, Playback, Script };
+    unsigned long long sim_epoch_ = 0;
+    SimDriver sim_driver_ = SimDriver::None;
+    bool script_driving_physics_ = false;
+    int script_claim_frame_ = -1;
+    double script_sim_seconds_ = 0.0;   // sim time a script has stepped
+
+    // (SceneData is a struct with no access specifiers anywhere - adding one
+    // here would silently privatise every member below it.)
+    unsigned long long simEpoch() const { return sim_epoch_; }
+    const char* simDriverName() const {
+        switch (sim_driver_) {
+            case SimDriver::User:     return "user";
+            case SimDriver::Playback: return "playback";
+            case SimDriver::Script:   return "script";
+            default:                  return "none";
+        }
+    }
+    bool scriptDrivingPhysics() const { return script_driving_physics_; }
+    double scriptSimSeconds() const { return script_sim_seconds_; }
+
+    void bumpSimEpoch(SimDriver by) { ++sim_epoch_; sim_driver_ = by; }
+
+    // Called by physics.step. Advances the script's own sim clock and, when
+    // that crosses a frame boundary, the playhead with it.
+    //
+    // ★★ The playhead MOVES. Leaving it parked was the source of the
+    // disagreement: the script thought it was at t=0.24 s, the loop thought
+    // frame 0, and the loop corrected the world to match itself. Two clocks
+    // that disagree do not need an arbiter, they need to be one clock. The
+    // user independently reported the visible half of this - "the playhead
+    // does not follow when a script drives".
+    int claimPhysicsStep(double dt, float fps, int current_frame) {
+        if (!script_driving_physics_ || script_claim_frame_ != current_frame) {
+            // Fresh claim (or the user moved the playhead since the last one):
+            // start counting from where the playhead actually is.
+            script_driving_physics_ = true;
+            script_sim_seconds_ = current_frame / ((fps > 1.0f) ? fps : 24.0f);
+        }
+        script_sim_seconds_ += dt;
+        const float effective = (fps > 1.0f) ? fps : 24.0f;
+        int frame = (int)(script_sim_seconds_ * effective);
+        if (frame < 0) frame = 0;
+        script_claim_frame_ = frame;
+        // Keep the loop's bookkeeping in step so its next tick sees no gap to
+        // correct. Without this the loop resets the runtime to rest.
+        sim_timeline_frame_ = frame;
+        rigid_timeline_frame_ = frame;
+        bumpSimEpoch(SimDriver::Script);
+        return frame;
+    }
+
+    // The user (or playback) taking the timeline back.
+    void releaseScriptPhysicsClaim(SimDriver to) {
+        if (script_driving_physics_) {
+            script_driving_physics_ = false;
+            script_claim_frame_ = -1;
+            script_sim_seconds_ = 0.0;
+            bumpSimEpoch(to);
+        }
+    }
+
     static constexpr int kMaxCachedSimFrames = 600;
     // Config signature for automatic memory-cache invalidation: when the sim
     // SETUP changes (add/remove of any sim element, rigid-body param edits, …)
@@ -6087,6 +6175,27 @@ struct SceneData {
             processStructuralImpulseEvents();  // ...and by blast overpressure
             syncSimulationRenderVolumes();
             return;
+        }
+
+        // ★★★ A script is stepping physics: leave the rigid runtime alone.
+        //
+        // The claim is dropped the instant the timeline stops being where the
+        // script put it - the user scrubbed - or playback starts. The user is
+        // never blocked; the script is simply TOLD, by sim_epoch_ changing
+        // under it (rt.sim.get_control_state / sim.control_state).
+        //
+        // Without this the loop re-synced rigid to the playhead on the next
+        // tick and reset the runtime to the rest pose, erasing every scripted
+        // step while physics.step kept returning success. Measured 2026-08-19
+        // over IPC: 0.29 m of real motion, 100% of it put back.
+        if (script_driving_physics_) {
+            if (playing || tl_frame != script_claim_frame_) {
+                releaseScriptPhysicsClaim(playing ? SimDriver::Playback
+                                                  : SimDriver::User);
+            } else {
+                syncSimulationRenderVolumes();
+                return;
+            }
         }
 
         // Timeline-driven deterministic bake / scrub.

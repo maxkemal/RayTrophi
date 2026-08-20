@@ -89,3 +89,14 @@ imgui.ini
 raytracing_render_code.aps
 raytrac_sdl2.vcxproj.maxkemal.nvuser
 raytrac_sdl2.vcxproj.user
+
+# Agent runtime secrets. The repo is MIT and public; an API key committed once
+# is a key that has to be rotated. .env.example carries the shape, never a value.
+.env
+RayTrophiAgent/.env
+
+# Scripts the agent writes for script.run_file. Model output, not source.
+RayTrophiAgent/agent_scripts/
+
+# Measurement output from measure_horizon.py
+RayTrophiAgent/horizon_result.json

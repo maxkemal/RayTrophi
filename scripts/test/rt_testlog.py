@@ -33,9 +33,10 @@ def fresh_graph(rt, scope, owner):
     is created already naming its owner, and clear() re-seeds that node rather
     than leaving an ownerless canvas.
 
-    ★ Returns 0 for the World scope, which has no owner node -- WorldThermalState
-    has no scripting surface yet, so a world owner node would name something no
-    reader can query. A caller that needs the id must check, not assume.
+    ★ Returns 0 for the World scope, which has no owner node -- there is
+    exactly one world, so there is no identity to name (unlike a Domain or
+    Object graph, which can hold more than one). A caller that needs the id
+    must check, not assume.
     """
     rt.sim_graph.create(scope, owner)
     rt.sim_graph.clear(scope, owner)

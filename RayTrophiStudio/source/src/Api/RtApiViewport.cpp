@@ -41,6 +41,7 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
+#include "stb_image_write.h"
 
 // The interactive raster viewport. Owned by the UI layer; declared there as a
 // file-local extern, so it is re-declared rather than pulled from a header.
@@ -339,6 +340,62 @@ ViewportProbeInfo probeViewportFrame(const ViewportProbeRegion& region,
     out.black_fraction = total ? static_cast<float>(black) / static_cast<float>(total) : 0.0f;
     out.nan_fraction   = total ? static_cast<float>(nans)  / static_cast<float>(total) : 0.0f;
     return out;
+}
+
+namespace {
+    void write_to_vector_func(void* context, void* data, int size) {
+        auto* vec = static_cast<std::vector<unsigned char>*>(context);
+        const unsigned char* bytes = static_cast<const unsigned char*>(data);
+        vec->insert(vec->end(), bytes, bytes + size);
+    }
+}
+
+std::string getViewportScreenshotAsBase64() {
+    std::lock_guard<std::mutex> lock(g_frame_mutex);
+    if (!g_frame_available || g_frame_width <= 0 || g_frame_height <= 0 || g_frame_rgba.empty())
+        return "";
+
+    std::vector<unsigned char> jpeg_bytes;
+    int quality = 80;
+    stbi_write_jpg_to_func(write_to_vector_func, &jpeg_bytes, g_frame_width, g_frame_height, 4, g_frame_rgba.data(), quality);
+
+    if (jpeg_bytes.empty()) return "";
+
+    static const char base64_chars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+
+    std::string ret;
+    int i = 0, j = 0;
+    unsigned char char_array_3[3];
+    unsigned char char_array_4[4];
+
+    for (unsigned char byte : jpeg_bytes) {
+        char_array_3[i++] = byte;
+        if (i == 3) {
+            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+            char_array_4[3] = char_array_3[2] & 0x3f;
+
+            for (i = 0; i < 4; i++) ret += base64_chars[char_array_4[i]];
+            i = 0;
+        }
+    }
+
+    if (i > 0) {
+        for (j = i; j < 3; j++) char_array_3[j] = '\0';
+        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+        char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+        char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+        char_array_4[3] = char_array_3[2] & 0x3f;
+
+        for (j = 0; j < i + 1; j++) ret += base64_chars[char_array_4[j]];
+        while (i++ < 3) ret += '=';
+    }
+
+    return ret;
 }
 
 } // namespace rtapi

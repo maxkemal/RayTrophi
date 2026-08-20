@@ -790,6 +790,25 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"scale", vec3ToJson(s)}};
         });
     }
+    if (method == "scene.get_world_transform") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            Matrix4x4 m;
+            bool simulated = false;
+            rtapi::Result r = rtapi::getObjectWorldTransform(name, m, &simulated);
+            if (!r.ok) return json{{"__error", r.error}};
+            Vec3 t(0.0f), rot(0.0f), s(1.0f);
+            m.decompose(t, rot, s);
+            // ★ `simulated` false means no solver has contributed to this pose,
+            // so the numbers are the authored ones. Without it a caller cannot
+            // tell "the body did not move" from "nothing is driving this body".
+            return json{{"matrix", matrixToJson(m)},
+                        {"translation", vec3ToJson(t)},
+                        {"rotation", vec3ToJson(rot)},
+                        {"scale", vec3ToJson(s)},
+                        {"simulated", simulated}};
+        });
+    }
     if (method == "scene.set_transform") {
         std::string name = requireString(params, "name");
         // Matrix wins when given; otherwise the same component form the script
@@ -1174,6 +1193,30 @@ json dispatchMethod(const std::string& method, const json& params) {
         float d = requireFloat(params, "sun_size");
         return enqueueResult([d](UIContext&) { return rtapi::setWorldSunSize(d); });
     }
+    if (method == "world.get_thermal") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::WorldThermalInfo t;
+            rtapi::Result r = rtapi::getWorldThermal(t);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"ambient_kelvin", t.ambient_kelvin},
+                        {"kelvin_per_unit", t.kelvin_per_unit},
+                        {"convection_coefficient", t.convection_coefficient},
+                        {"oxygen_availability", t.oxygen_availability}};
+        });
+    }
+    if (method == "world.set_thermal") {
+        return enqueueResult([params](UIContext&) {
+            float ambient_val = 0.0f;      const float* p_ambient = nullptr;
+            float kelvin_val = 0.0f;       const float* p_kelvin = nullptr;
+            float convection_val = 0.0f;   const float* p_convection = nullptr;
+            float oxygen_val = 0.0f;       const float* p_oxygen = nullptr;
+            if (params.contains("ambient_kelvin")) { ambient_val = params.at("ambient_kelvin").get<float>(); p_ambient = &ambient_val; }
+            if (params.contains("kelvin_per_unit")) { kelvin_val = params.at("kelvin_per_unit").get<float>(); p_kelvin = &kelvin_val; }
+            if (params.contains("convection_coefficient")) { convection_val = params.at("convection_coefficient").get<float>(); p_convection = &convection_val; }
+            if (params.contains("oxygen_availability")) { oxygen_val = params.at("oxygen_availability").get<float>(); p_oxygen = &oxygen_val; }
+            return rtapi::setWorldThermal(p_ambient, p_kelvin, p_convection, p_oxygen);
+        });
+    }
 
     // ── Post-processing (Faz 5.1d) ──────────────────────────────────────
     if (method == "post.get") {
@@ -1353,6 +1396,25 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::addScatterSource(group, mesh_name, weight, scale_min, scale_max, rot_y, align);
         });
     }
+    if (method == "scatter.list_assets") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::FoliageAssetInfo> assets;
+            rtapi::Result r = rtapi::listFoliageAssets(assets);
+            if (!r.ok) return json{{"__error", r.error}};
+            json arr = json::array();
+            for (const auto& a : assets) {
+                arr.push_back({{"name", a.name}, {"category", a.category}, {"relative_path", a.relative_path}});
+            }
+            return arr;
+        });
+    }
+    if (method == "scatter.add_library_source") {
+        std::string group = requireString(params, "group");
+        std::string relative_path = requireString(params, "relative_path");
+        return enqueueResult([group, relative_path](UIContext&) {
+            return rtapi::addLibraryScatterSource(group, relative_path);
+        });
+    }
     if (method == "scatter.fill") {
         std::string group = requireString(params, "group");
         return enqueueQuery([group](UIContext&) {
@@ -1399,6 +1461,22 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "physics.reset") {
         return enqueueResult([](UIContext&) { return rtapi::resetPhysicsSimulation(); });
+    }
+    if (method == "sim.control_state") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::SimControlStateInfo info;
+            rtapi::Result r = rtapi::getSimControlState(info);
+            if (!r.ok) return json{{"__error", r.error}};
+            // ★ `epoch` is the load-bearing field. Read it before and after a
+            // measurement; if it changed, something re-posed the solvers under
+            // you and the numbers you just read are not a physics result.
+            return json{{"epoch", info.epoch},
+                        {"driver", info.driver},
+                        {"script_driving", info.script_driving},
+                        {"script_sim_seconds", info.script_sim_seconds},
+                        {"frame", info.frame},
+                        {"playing", info.playing}};
+        });
     }
     if (method == "physics.step") {
         float dt = optionalFloat(params, "dt", 0.0166667f);
@@ -1638,13 +1716,20 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "fluid.seed") {
         std::string domain = requireString(params, "domain");
-        Vec3 smin = optionalVec3(params, "seed_min", Vec3(-0.5f, 1.0f, -0.5f));
-        Vec3 smax = optionalVec3(params, "seed_max", Vec3(0.5f, 1.5f, 0.5f));
+        // ★ No hardcoded fallback box here any more. Omitting the region now
+        // means "derive it from the domain"; the old default was a fixed box at
+        // y 1.0-1.5 that silently seeded nothing in any domain not containing it.
+        const bool has_region = params.contains("seed_min") && params.contains("seed_max");
+        Vec3 smin = optionalVec3(params, "seed_min", Vec3(0.0f, 0.0f, 0.0f));
+        Vec3 smax = optionalVec3(params, "seed_max", Vec3(0.0f, 0.0f, 0.0f));
         int ppc = optionalInt(params, "particles_per_cell", 4);
         bool replace = optionalBool(params, "replace", true);
         bool persistent = optionalBool(params, "persistent", false);
-        return enqueueResult([domain, smin, smax, ppc, replace, persistent](UIContext&) {
-            return rtapi::seedFluidParticles(domain, smin, smax, ppc, replace, persistent);
+        return enqueueResult([domain, smin, smax, has_region, ppc, replace, persistent](UIContext&) {
+            return rtapi::seedFluidParticles(domain,
+                                             has_region ? &smin : nullptr,
+                                             has_region ? &smax : nullptr,
+                                             ppc, replace, persistent);
         });
     }
     if (method == "fluid.clear" || method == "gas.clear") {
@@ -2415,7 +2500,8 @@ json dispatchMethod(const std::string& method, const json& params) {
             const rtapi::SimGraphEvaluation e = rtapi::simGraphEvaluate(scope, owner);
             json commands = json::array();
             for (const auto& c : e.commands) {
-                commands.push_back(json{{"kind", c.kind}, {"target", c.target},
+                commands.push_back(json{{"kind", c.kind}, {"scope", c.scope},
+                                        {"target", c.target},
                                         {"key", c.key}, {"value", c.value},
                                         {"text", c.text}, {"source_node", c.source_node}});
             }
@@ -2651,6 +2737,15 @@ json dispatchMethod(const std::string& method, const json& params) {
         int matcap_preset = optionalInt(params, "matcap_preset", -1);
         return enqueueResult([mode, matcap_preset](UIContext&) {
             return rtapi::setViewportShading(mode, matcap_preset);
+        });
+    }
+    if (method == "viewport.get_screenshot") {
+        return enqueueQuery([](UIContext&) {
+            std::string base64_img = rtapi::getViewportScreenshotAsBase64();
+            if (base64_img.empty()) {
+                return json{{"error", "Frame capture is not enabled or no frame available. Run viewport.capture(enabled=True) first."}};
+            }
+            return json{{"image_base64", base64_img}};
         });
     }
     if (method == "viewport.capture") {

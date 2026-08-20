@@ -126,6 +126,16 @@ if crate:
     rt.sim_graph.connect("object", crate, sub, pyro)
     log("   node sayısı: %d" % len(rt.sim_graph.nodes("object", crate)))
 
+# ── Graph 4: world — ortam sıcaklığı ────────────────────────────────────────
+log("== graph: world ==")
+rt.sim_graph.create("world", "")
+rt.sim_graph.clear("world", "")
+world_thermal = rt.sim_graph.add_node("world", "", "sim.world_thermal")
+# ★ Sahip node'u YOK -- tek bir dünya var. Bu düğüm tek başına duruyor, bir
+# şeye BAĞLANMIYOR, çünkü zincirlenecek bir kimlik yok.
+rt.sim_graph.set_node_value("world", "", world_thermal, "ambient_kelvin", 305.0)
+log("   node sayısı: %d" % len(rt.sim_graph.nodes("world", "")))
+
 # ── Ne göreceksin ───────────────────────────────────────────────────────────
 log("")
 log("== kurulan graph'lar ==")
@@ -140,8 +150,9 @@ log("  1. Scope çubuğu: [domain] ve yanında sahip seçici.")
 log("     %s ile %s arasında geçiş yap; TUVAL DEĞİŞMELİ." % (FLUID, GAS))
 log("  2. Scope'u [object] yap -> sahip seçici sahne objelerini listeler.")
 log("  3. Scope'u [world] yap -> 'No graph for this world yet.' + Create graph.")
-log("     Dünyanın script yüzeyi yok, o yüzden sahip node'u da YOK -- boş graph")
-log("     dürüst olan.")
+log("     Sahip node'u YOK -- tek bir dünya var, isimlendirilecek bir kimlik")
+log("     yok. Ama artık bir World Thermal node eklenebilir: ambient_kelvin,")
+log("     kelvin_per_unit, convection_coefficient, oxygen_availability.")
 log("  4. Sahip node'unu seç: sağda isim SABİT yazılı, seçici YOK.")
 log("     (Yeniden hedeflenemez; kapsamı değiştirmek için Scope çubuğu.)")
 log("  5. Solver node'unu seç: tik kutulu kadranlar.")

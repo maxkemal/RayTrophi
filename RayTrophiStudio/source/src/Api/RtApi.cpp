@@ -48,6 +48,7 @@
 #include "MeshModifiers.h"          // Faz 5.2b: rt.modifiers
 #include "InstanceManager.h"        // Faz 5.2c: rt.scatter
 #include "InstanceGroup.h"          // Faz 5.2c: rt.scatter
+#include "FoliageAssetLibrary.h"
 #include "RigidBodySystem.h"        // Faz 5.3a: rt.physics
 #include "Fluid/FluidObject.h"      // Faz 5.3b: rt.fluid
 #include "Fluid/FluidSimulationSystem.h" // Faz 5.3b: rt.fluid
@@ -645,6 +646,40 @@ Result getObjectTransform(const std::string& name, Matrix4x4& out) {
     Transform* t = findObjectTransform(*g_ctx, name, err);
     if (!t) return err;
     out = t->base;
+    return Result::success();
+}
+
+// Forward declaration: the rigid body list lives with the physics section far
+// below, but the simulated-pose reader has to consult it.
+static RayTrophiSim::RigidBodyObject* findRigidBodyForNode(const std::string& object_name);
+
+Result getObjectWorldTransform(const std::string& name, Matrix4x4& out, bool* out_simulated) {
+    if (!g_ctx) return notBound();
+    if (out_simulated) *out_simulated = false;
+    Result err;
+    Transform* t = findObjectTransform(*g_ctx, name, err);
+    if (!t) return err;
+    out = t->getFinal();
+
+    // ★★★ Measured 2026-08-19, and it cost a wrong fix first: the rigid solver
+    // does not write a transform AT ALL. RigidBodySystem::step bakes the world
+    // delta D = B(t)*inv(B0) straight into the mesh vertices (rigid_baker_) and
+    // deliberately leaves the transform handle alone, because moving an
+    // imported object's transform corrupted it in the renderer. So both
+    // Transform::base AND Transform::current keep reading the spawn pose while
+    // the object visibly falls.
+    //
+    // `last_rigid_delta` is the pose-tracking authority (RigidBodySystem.h says
+    // so in as many words). Compose it onto the unchanged spawn transform.
+    // NOT last_written_pivot: that is D applied to the authored PIVOT POINT,
+    // which is identity for many objects and nowhere near the geometry on
+    // imported meshes.
+    if (const RayTrophiSim::RigidBodyObject* rb = findRigidBodyForNode(name)) {
+        if (rb->has_written && rb->kind == RayTrophiSim::BodyKind::Rigid) {
+            out = rb->last_rigid_delta * out;
+            if (out_simulated) *out_simulated = true;
+        }
+    }
     return Result::success();
 }
 
@@ -1513,6 +1548,14 @@ Result setFrame(int frame) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (frame < 0) return Result::fail("frame must be non-negative");
+    // ★★★ Moving the playhead from a script is a USER-equivalent action, so it
+    // takes the timeline back from any scripted stepping in progress. Without
+    // this the loop kept honouring a stale claim and the requested frame did
+    // not reach the solvers at all: setFrame wrote four frame variables and
+    // set start_render, but never touched syncRigidToFrame/restoreSimFrame.
+    // The number moved and the scene did not - reported from the panel side as
+    // "the viewport does not follow the timeline when IPC drives it".
+    g_ctx->scene.releaseScriptPhysicsClaim(SceneData::SimDriver::User);
     ui.timeline.setCurrentFrame(frame);
     g_ctx->scene.timeline.current_frame = frame;
     g_ctx->render_settings.animation_current_frame = frame;
@@ -1853,6 +1896,46 @@ Result setWorldSunSize(float degrees) {
     return Result::success();
 }
 
+Result getWorldThermal(WorldThermalInfo& out) {
+    if (!g_ctx) return notBound();
+    // ★ worldThermal() lives on ParticleSimulationSystem, not SceneData
+    // directly -- same reason every grid domain / flow source / collider
+    // creator goes through ensureParticleSimulationSystem(): it is the one
+    // canonical runtime the scene lazily creates, and it is where this state
+    // actually lives (ParticleSimulation.h).
+    const auto& t = g_ctx->scene.ensureParticleSimulationSystem().worldThermal();
+    out.ambient_kelvin = t.ambient_kelvin;
+    out.kelvin_per_unit = t.kelvin_per_unit;
+    out.convection_coefficient = t.convection_coefficient;
+    out.oxygen_availability = t.oxygen_availability;
+    return Result::success();
+}
+
+Result setWorldThermal(const float* ambient_kelvin, const float* kelvin_per_unit,
+                       const float* convection_coefficient, const float* oxygen_availability) {
+    if (!g_ctx) return notBound();
+    auto& t = g_ctx->scene.ensureParticleSimulationSystem().worldThermal();
+    if (ambient_kelvin) {
+        if (*ambient_kelvin <= 0.0f) return Result::fail("ambient_kelvin must be positive");
+        t.ambient_kelvin = *ambient_kelvin;
+    }
+    if (kelvin_per_unit) {
+        if (*kelvin_per_unit <= 0.0f) return Result::fail("kelvin_per_unit must be positive");
+        t.kelvin_per_unit = *kelvin_per_unit;
+    }
+    if (convection_coefficient) {
+        if (*convection_coefficient < 0.0f) return Result::fail("convection_coefficient must be non-negative");
+        t.convection_coefficient = *convection_coefficient;
+    }
+    if (oxygen_availability) {
+        // ★ Clamped, not rejected out of range: this is the cheap "seal the box"
+        // knob (MaterialStateField.h), and a script sweeping 0..1 should not have
+        // to know the exact edges to stay valid.
+        t.oxygen_availability = std::clamp(*oxygen_availability, 0.0f, 1.0f);
+    }
+    return Result::success();
+}
+
 // ---------------------------------------------------------------------------
 // Post-processing helpers (Faz 5.1d).
 // CRITICAL RULE: Post-processing changes MUST NEVER call resetAccumulation.
@@ -2145,6 +2228,44 @@ Result addScatterSource(const std::string& group_id_or_name, const std::string& 
     return Result::success();
 }
 
+Result listFoliageAssets(std::vector<FoliageAssetInfo>& out_assets) {
+    out_assets.clear();
+    const auto& registry = FoliageAssets::catalog(false);
+    for (const auto& asset : registry.getAssets()) {
+        if (asset.asset_kind != "model") continue;
+        FoliageAssetInfo info;
+        info.name = asset.name;
+        info.category = asset.category;
+        info.relative_path = asset.relative_entry_path.generic_string();
+        out_assets.push_back(std::move(info));
+    }
+    return Result::success();
+}
+
+Result addLibraryScatterSource(const std::string& group_id_or_name, const std::string& relative_path) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+
+    InstanceGroup* group = findScatterGroupHelper(group_id_or_name);
+    if (!group) return Result::fail("scatter group not found: " + group_id_or_name);
+
+    ScatterSource source;
+    std::string error;
+    if (!FoliageAssets::loadScatterSource(relative_path, "API_Library_Asset", 1.0f, source, &error)) {
+        return Result::fail("failed to load asset from library: " + error);
+    }
+    
+    // Attempt to autoconfigure placement like UI does, based on group name
+    const std::string layerType = group->name + " " + group->brush_settings.density_mask_attribute;
+    FoliageAssets::configurePlacement(source, FoliageAssets::defaultTargetHeight(layerType), 0.15f, false, 0.0f);
+    
+    group->brush_settings.use_global_settings = false;
+    group->sources.push_back(std::move(source));
+    group->gpu_dirty = true;
+    
+    return Result::success();
+}
+
 Result removeScatterSource(const std::string& group_id_or_name, int source_index) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
@@ -2220,10 +2341,14 @@ Result fillScatterGroup(const std::string& group_id_or_name, int& out_spawned) {
         if (surfaceTris.empty()) return Result::fail("target surface mesh has no triangles: " + group->target_node_name);
 
         out_spawned = group->scatterFillMesh(surfaceTris);
+    } else if (group->target_type == InstanceGroup::TargetType::TERRAIN) {
+        if (group->target_node_name.empty()) return Result::fail("scatter group has no target terrain node name");
+        TerrainObject* terrain = TerrainManager::getInstance().getTerrainByName(group->target_node_name);
+        if (!terrain) return Result::fail("target terrain not found: " + group->target_node_name);
+        out_spawned = group->scatterFillTerrain(terrain);
     } else {
-        return Result::fail("terrain fill via API requires selecting a valid terrain node name");
+        return Result::fail("unsupported scatter target type");
     }
-
     SceneUI::syncInstancesToScene(*g_ctx, *group, false);
 
     g_geometry_dirty = true;
@@ -2458,7 +2583,52 @@ Result stepPhysicsSimulation(float dt) {
         // taking turns being false.
         g_ctx->scene.emitCombustionStructuralImpulses(dt);
         g_ctx->scene.processStructuralImpulseEvents();
+
+        // ★★★★ Claim the step, and MOVE THE PLAYHEAD with it.
+        //
+        // Before this, a scripted step advanced the solver while the playhead
+        // stood still. Two clocks disagreed - the script at t = 0.24 s, the
+        // loop at frame 0 - and the loop corrected the world to match itself:
+        // the next tick reset the rigid runtime to the rest pose and erased
+        // every step, while physics.step kept returning success. Measured over
+        // IPC 2026-08-19: 0.29 m of real motion (exactly gravity), 100% of it
+        // put back one call later.
+        //
+        // Two clocks that disagree do not need an arbiter, they need to be one
+        // clock. The user reported the visible half independently: driving
+        // physics from a script did not move the playhead.
+        //
+        // The timeline still belongs to the USER. Scrubbing, play or stop drop
+        // this claim immediately (updateSimulationTimeline), and the script
+        // learns about it because sim_epoch_ changed under it - see
+        // getSimControlState. A reverted step and a step that did nothing used
+        // to be indistinguishable; that is the part that made this expensive.
+        //
+        // 24 fps matches the value scene_ui.cpp passes to
+        // updateSimulationTimeline. It is hardcoded there too; if that ever
+        // becomes a scene setting, both sites have to read it.
+        const int frame = g_ctx->scene.claimPhysicsStep(dt, 24.0f,
+                                                        ui.timeline.getCurrentFrame());
+        ui.timeline.setCurrentFrame(frame);
+        g_ctx->scene.timeline.current_frame = frame;
+        g_ctx->render_settings.animation_current_frame = frame;
+        g_ctx->render_settings.animation_playback_frame = frame;
     }
+    return Result::success();
+}
+
+// Who last moved the solvers, and a counter that changes whenever ANYTHING
+// does. A caller reads this around its own measurement: if the epoch moved,
+// the measurement is void - and, crucially, the caller KNOWS that instead of
+// reading a reverted pose as a physics result.
+Result getSimControlState(SimControlStateInfo& out) {
+    if (!g_ctx) return notBound();
+    out.epoch = g_ctx->scene.simEpoch();
+    out.driver = g_ctx->scene.simDriverName();
+    out.script_driving = g_ctx->scene.scriptDrivingPhysics();
+    out.script_sim_seconds = g_ctx->scene.scriptSimSeconds();
+    out.frame = ui.timeline.getCurrentFrame();
+    out.playing = ui.timeline.isPlaying();
     return Result::success();
 }
 

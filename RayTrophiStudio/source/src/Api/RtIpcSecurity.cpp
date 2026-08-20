@@ -211,11 +211,11 @@ bool loadLocked(std::string& error) {
 }
 
 uint32_t requiredCapabilities(const std::string& method) {
-    // ★ The one agent.* method that writes. The discovery plan says agent.* is
-    // read-only; rather than quietly break that rule, chat_send gets its own
-    // capability. A Read token can inspect the engine and must not be able to
-    // post a message signed "System" into the user's panel.
-    if (method == "agent.chat_send") return AgentChat;
+    // ★ The two agent.* methods that WRITE. The discovery plan says agent.* is
+    // read-only; rather than quietly break that rule they get their own
+    // capability. send_prompt queues work for another agent, so a Read token
+    // must not reach it either.
+    if (method == "agent.chat_send" || method == "agent.send_prompt") return AgentChat;
     if (method == "ipc.admin.audit.export") return Admin | FilesWrite;
     if (method.rfind("ipc.admin.", 0) == 0) return Admin;
     if (method == "script.run_file") return Scripts | FilesRead;
@@ -236,6 +236,11 @@ uint32_t requiredCapabilities(const std::string& method) {
     // scene, so Render is the whole requirement — and authorize() is
     // fail-closed, so a namespace missing from this table is silently refused.
     if (method.rfind("viewport.", 0) == 0) return Render;
+    // sim.control_state only reports WHO is driving the solvers and an epoch
+    // counter. It changes nothing, and an agent has to be able to read it to
+    // know whether its own measurement was invalidated - gating it any higher
+    // would make the honest path the privileged one.
+    if (method == "sim.control_state") return Read;
     // sim_graph.* builds and inspects the simulation graph. Reads are harmless,
     // but building/connecting alters what the graph will drive, so the whole
     // namespace takes SceneWrite. Queries are still gated by Read below via the

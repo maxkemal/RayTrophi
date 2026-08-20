@@ -405,9 +405,30 @@ Result applyTerrainPreset(const std::string& terrain_name, const std::string& pr
     } else if (kind == "river_network") {
         if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
         if (!graph.addRiverNetworkSetup()) return Result::fail("failed to add river network setup");
+    } else if (kind == "biome_temperate") {
+        if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
+        if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::TemperateMixed)) return Result::fail("failed to add biome setup");
+    } else if (kind == "biome_lush") {
+        if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
+        if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::LushValleys)) return Result::fail("failed to add biome setup");
+    } else if (kind == "biome_alpine") {
+        if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
+        if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::AlpineTundra)) return Result::fail("failed to add biome setup");
+    } else if (kind == "biome_arid") {
+        if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
+        if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::AridHighlands)) return Result::fail("failed to add biome setup");
+    } else if (kind == "biome_boreal") {
+        if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
+        if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::BorealMountains)) return Result::fail("failed to add biome setup");
+    } else if (kind == "biome_foliage") {
+        if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
+        if (!graph.addBiomeFoliageSetup()) return Result::fail("failed to add biome foliage setup");
+    } else if (kind == "geology_foundation") {
+        if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
+        if (!graph.addGeologyFoundationSetup()) return Result::fail("failed to add geology setup");
     } else {
         return Result::fail("unknown terrain preset '" + preset +
-                            "' (expected default|snow_layer|snowy_mountain_valley|river_network)");
+                            "' (expected default|snow_layer|snowy_mountain_valley|river_network|biome_boreal|biome_alpine|biome_foliage|geology_foundation|...)");
     }
     graph.markAllDirty();
     return Result::success();

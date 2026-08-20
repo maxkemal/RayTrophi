@@ -122,6 +122,17 @@ json serializeMethodDescriptor(const MethodDescriptor* desc) {
     if (desc->notes && desc->notes[0] != '\0') j["notes"] = desc->notes;
     if (desc->related && desc->related[0] != '\0') j["related"] = splitPipes(desc->related);
     if (desc->tags && desc->tags[0] != '\0') j["tags"] = splitPipes(desc->tags);
+    // ★★ Sequencing. Emitted only when written, so a caller can tell "nothing
+    // has to happen first" (field absent, nobody recorded an order) from an
+    // empty list, which would read as a measured "no prerequisites".
+    if (desc->prerequisites && desc->prerequisites[0] != '\0')
+        j["requires"] = splitPipes(desc->prerequisites);
+    if (desc->next_steps && desc->next_steps[0] != '\0')
+        j["next"] = splitPipes(desc->next_steps);
+    if (desc->verify_with && desc->verify_with[0] != '\0')
+        j["verify_with"] = splitPipes(desc->verify_with);
+    if (desc->invalidates && desc->invalidates[0] != '\0')
+        j["invalidates"] = splitPipes(desc->invalidates);
     if (!desc->documented) {
         j["documentation_note"] =
             "Parameters are extracted from the dispatch code and are exact; "
@@ -130,12 +141,26 @@ json serializeMethodDescriptor(const MethodDescriptor* desc) {
     return j;
 }
 
+json serializeSteps(const std::vector<WorkflowStep>& steps) {
+    json arr = json::array();
+    for (const auto& s : steps) {
+        arr.push_back({
+            {"action", s.action ? s.action : ""},
+            {"purpose", s.purpose ? s.purpose : ""},
+            {"requires", s.requires_state ? s.requires_state : ""},
+            {"verify", s.verify ? s.verify : ""},
+            {"on_failure", s.on_failure ? s.on_failure : ""}
+        });
+    }
+    return arr;
+}
+
 json serializeRecipe(const WorkflowRecipe* recipe) {
     return json{
         {"workflow", recipe->id},
         {"title", recipe->title},
         {"description", recipe->description},
-        {"steps", recipe->steps},
+        {"steps", serializeSteps(recipe->steps)},
         {"key_methods", recipe->key_methods}
     };
 }
@@ -400,7 +425,7 @@ bool dispatchAgentMethod(const std::string& method,
                     if (!uses) continue;
                     contexts.push_back(json{{"workflow", recipe.id},
                                             {"title", recipe.title},
-                                            {"steps", recipe.steps}});
+                                            {"steps", serializeSteps(recipe.steps)}});
                 }
                 json out = {{"method", target}, {"example_call", call}};
                 if (!contexts.empty()) out["used_by_workflows"] = contexts;
@@ -522,13 +547,29 @@ bool dispatchAgentMethod(const std::string& method,
             return true;
         }
 
+        if (method == "agent.send_prompt") {
+            const std::string target = requireString(params, "target");
+            const std::string content = requireString(params, "content");
+            const std::string sender = params.value("sender", std::string("Agent"));
+            out_result = enqueue([sender, target, content](UIContext& ctx) {
+                if (!ctx.scene_ui_ptr) return json{{"__error", "no UI bound"}};
+                ctx.scene_ui_ptr->agentChatUI.queuePrompt(sender, target, content);
+                // ★ "queued", not "delivered". Nothing has run yet - the target
+                // agent has to poll. Reporting delivery here would let a
+                // delegating agent claim work was done that nobody has started.
+                return json{{"queued", true}, {"target", target}};
+            });
+            return true;
+        }
+
         if (method == "agent.chat_poll") {
-            out_result = enqueue([](UIContext& ctx) {
+            std::string agent_id = params.value("agent_id", "");
+            out_result = enqueue([agent_id](UIContext& ctx) {
                 json prompts = json::array();
                 if (ctx.scene_ui_ptr) {
                     ctx.scene_ui_ptr->agentChatUI.markPoll();
                     rtui::AgentChatPanel::QueuedPrompt p;
-                    while (ctx.scene_ui_ptr->agentChatUI.popUserPrompt(p))
+                    while (ctx.scene_ui_ptr->agentChatUI.popUserPrompt(agent_id, p))
                         prompts.push_back({{"target", p.target}, {"content", p.content}});
                 }
                 return json{{"prompts", prompts}};

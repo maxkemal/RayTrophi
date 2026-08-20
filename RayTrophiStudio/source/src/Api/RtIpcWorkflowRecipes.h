@@ -12,6 +12,14 @@
 #include <string>
 #include <vector>
 
+struct WorkflowStep {
+    const char* action;
+    const char* purpose;
+    const char* requires_state;
+    const char* verify;
+    const char* on_failure;
+};
+
 struct WorkflowRecipe {
     const char* id;
     const char* title;
@@ -20,8 +28,8 @@ struct WorkflowRecipe {
     // Keywords to trigger this recipe in search
     std::vector<const char*> keywords;
     
-    // Human/Agent readable steps
-    std::vector<const char*> steps;
+    // Structural procedure steps
+    std::vector<WorkflowStep> steps;
     
     // The key IPC methods involved in this workflow
     std::vector<const char*> key_methods;

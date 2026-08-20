@@ -35,6 +35,7 @@ static const MethodDescriptor desc_addons_disable = {
     "write", "Addons", false, "any",
     "addons|disable|plugin|extension",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_addons_disable, 1,
     true
 };
@@ -50,6 +51,7 @@ static const MethodDescriptor desc_addons_enable = {
     "write", "Addons", false, "any",
     "addons|enable|plugin|extension",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_addons_enable, 1,
     true
 };
@@ -62,6 +64,7 @@ static const MethodDescriptor desc_addons_list = {
     "read", "Read", false, "any",
     "addons|list|plugin|extension",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -77,11 +80,15 @@ static const MethodDescriptor desc_addons_reload = {
     "write", "Addons", false, "any",
     "addons|reload|plugin|extension|develop",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_addons_reload, 1,
     true
 };
 static const MethodRegistration reg_addons_reload(desc_addons_reload);
 
+static const MethodParam params_agent_chat_poll[] = {
+    {"agent_id", "string", false, "", "", nullptr},
+};
 static const MethodDescriptor desc_agent_chat_poll = {
     "agent.chat_poll", "agent",
     "Take the user prompts queued in the Agent Chat panel and mark the agent as alive",
@@ -89,7 +96,8 @@ static const MethodDescriptor desc_agent_chat_poll = {
     "read", "Read", false, "QueuedPrompt[]",
     "agent|chat|poll|prompt|heartbeat",
     "agent.chat_send",
-    nullptr, 0,
+    nullptr, nullptr, nullptr, nullptr,
+    params_agent_chat_poll, 1,
     true
 };
 static const MethodRegistration reg_agent_chat_poll(desc_agent_chat_poll);
@@ -108,6 +116,7 @@ static const MethodDescriptor desc_agent_chat_send = {
     "write", "AgentChat", false, "bool",
     "agent|chat|send|message|ui|report|progress",
     "agent.chat_poll",
+    nullptr, nullptr, nullptr, nullptr,
     params_agent_chat_send, 5,
     true
 };
@@ -123,6 +132,7 @@ static const MethodDescriptor desc_agent_describe = {
     "read", "Read", false, "MethodDescriptor",
     "agent|describe|schema|introspection|parameters",
     "agent.list_methods|agent.get_examples",
+    nullptr, nullptr, nullptr, nullptr,
     params_agent_describe, 1,
     true
 };
@@ -131,10 +141,11 @@ static const MethodRegistration reg_agent_describe(desc_agent_describe);
 static const MethodDescriptor desc_agent_discover = {
     "agent.discover", "agent",
     "Identify the application and list every capability domain, agent role and coverage metric",
-    "First call for a new agent session. registered_coverage is registered/dispatched methods; documented_coverage is the share that carries a hand-written summary. A documented_coverage below 1.0 means agent.describe will answer some methods with parameters but no explanation.",
+    "First call for a new agent session. registered_methods is how many methods are dispatched; documented_coverage is the share that carries a hand-written summary. A documented_coverage below 1.0 means agent.describe will answer some methods with parameters but no explanation.",
     "read", "Read", false, "DiscoveryInfo",
     "agent|discover|bootstrap|handshake|capabilities|introspection",
     "agent.list_methods|agent.describe|agent.search_capabilities",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -151,6 +162,7 @@ static const MethodDescriptor desc_agent_get_examples = {
     "read", "Read", false, "ExampleSet",
     "agent|get|examples|example|sample|recipe",
     "agent.search_capabilities|agent.describe",
+    nullptr, nullptr, nullptr, nullptr,
     params_agent_get_examples, 2,
     true
 };
@@ -166,6 +178,7 @@ static const MethodDescriptor desc_agent_get_state_summary = {
     "read", "Read", false, "StateSummary",
     "agent|get|state|summary|context|snapshot|scene|verify",
     "viewport.status|render.probe|scene.list_objects",
+    nullptr, nullptr, nullptr, nullptr,
     params_agent_get_state_summary, 1,
     true
 };
@@ -181,6 +194,7 @@ static const MethodDescriptor desc_agent_list_methods = {
     "read", "Read", false, "MethodSummary[]",
     "agent|list|methods|catalogue|introspection",
     "agent.describe|agent.search_capabilities",
+    nullptr, nullptr, nullptr, nullptr,
     params_agent_list_methods, 1,
     true
 };
@@ -193,6 +207,7 @@ static const MethodDescriptor desc_agent_roles = {
     "read", "Read", false, "RoleSet",
     "agent|roles|role|hierarchy|delegation|multi-agent",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -209,10 +224,29 @@ static const MethodDescriptor desc_agent_search_capabilities = {
     "read", "Read", false, "SearchResult",
     "agent|search|capabilities|howto|recipe|workflow|goal",
     "agent.get_examples|agent.describe",
+    nullptr, nullptr, nullptr, nullptr,
     params_agent_search_capabilities, 2,
     true
 };
 static const MethodRegistration reg_agent_search_capabilities(desc_agent_search_capabilities);
+
+static const MethodParam params_agent_send_prompt[] = {
+    {"content", "string", true, "", nullptr, nullptr},
+    {"target", "string", true, "", nullptr, nullptr},
+    {"sender", "string", false, "", "Agent", nullptr},
+};
+static const MethodDescriptor desc_agent_send_prompt = {
+    "agent.send_prompt", "agent",
+    "Queue a task for another agent to pick up on its next poll, addressed by agent id or 'all'",
+    "Returns queued:true, NOT delivered - nothing has run yet and the target agent may never poll. Do not report the work as done on the strength of this call; ask for the result, or check the scene yourself. The target must match the id the other agent polls with (agent.chat_poll agent_id), and 'all' broadcasts.",
+    "write", "AgentChat", false, "any",
+    "agent|send|prompt|delegate|multi-agent|task|handoff",
+    "agent.chat_poll|agent.chat_send|agent.roles",
+    nullptr, nullptr, "agent.get_state_summary", nullptr,
+    params_agent_send_prompt, 3,
+    true
+};
+static const MethodRegistration reg_agent_send_prompt(desc_agent_send_prompt);
 
 static const MethodParam params_anim_character[] = {
     {"character", "string", true, "", nullptr, nullptr},
@@ -224,6 +258,7 @@ static const MethodDescriptor desc_anim_character = {
     "read", "Read", false, "any",
     "anim|character|animation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_character, 1,
     true
 };
@@ -236,6 +271,7 @@ static const MethodDescriptor desc_anim_characters = {
     "read", "Read", false, "any",
     "anim|characters|animation|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -251,6 +287,7 @@ static const MethodDescriptor desc_anim_clips = {
     "read", "Read", false, "any",
     "anim|clips|animation|clip",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_clips, 1,
     true
 };
@@ -266,6 +303,7 @@ static const MethodDescriptor desc_anim_graph_status = {
     "read", "Read", false, "any",
     "anim|graph|status|animation|statemachine",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_graph_status, 1,
     true
 };
@@ -284,6 +322,7 @@ static const MethodDescriptor desc_anim_insert_key = {
     "write", "SceneWrite", false, "any",
     "anim|insert|key|animation|keyframe|channel",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_insert_key, 4,
     true
 };
@@ -299,6 +338,7 @@ static const MethodDescriptor desc_anim_list_keys = {
     "read", "Read", false, "any",
     "anim|list|keys|animation|keyframe",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_list_keys, 1,
     true
 };
@@ -317,6 +357,7 @@ static const MethodDescriptor desc_anim_play = {
     "write", "SceneWrite", false, "any",
     "anim|play|animation|clip",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_play, 4,
     true
 };
@@ -333,6 +374,7 @@ static const MethodDescriptor desc_anim_remove_key = {
     "write", "SceneWrite", false, "any",
     "anim|remove|key|animation|keyframe",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_remove_key, 2,
     true
 };
@@ -350,6 +392,7 @@ static const MethodDescriptor desc_anim_set_graph_param = {
     "write", "SceneWrite", false, "any",
     "anim|set|graph|param|animation|parameter",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_set_graph_param, 3,
     true
 };
@@ -367,6 +410,7 @@ static const MethodDescriptor desc_anim_set_loop = {
     "write", "SceneWrite", false, "any",
     "anim|set|loop|animation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_set_loop, 3,
     true
 };
@@ -383,6 +427,7 @@ static const MethodDescriptor desc_anim_set_paused = {
     "write", "SceneWrite", false, "any",
     "anim|set|paused|animation|pause",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_set_paused, 2,
     true
 };
@@ -400,6 +445,7 @@ static const MethodDescriptor desc_anim_set_speed = {
     "write", "SceneWrite", false, "any",
     "anim|set|speed|animation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_set_speed, 3,
     true
 };
@@ -417,6 +463,7 @@ static const MethodDescriptor desc_anim_set_time = {
     "write", "SceneWrite", false, "any",
     "anim|set|time|animation|scrub",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_set_time, 3,
     true
 };
@@ -433,6 +480,7 @@ static const MethodDescriptor desc_anim_status = {
     "read", "Read", false, "any",
     "anim|status|animation|progress",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_status, 2,
     true
 };
@@ -450,6 +498,7 @@ static const MethodDescriptor desc_anim_stop = {
     "write", "SceneWrite", false, "any",
     "anim|stop|animation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_stop, 3,
     true
 };
@@ -466,6 +515,7 @@ static const MethodDescriptor desc_anim_trigger_graph_param = {
     "write", "SceneWrite", false, "any",
     "anim|trigger|graph|param|animation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_anim_trigger_graph_param, 2,
     true
 };
@@ -481,6 +531,7 @@ static const MethodDescriptor desc_batch = {
     "read", "Read", false, "any",
     "batch|sequence|bulk|transaction",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_batch, 1,
     true
 };
@@ -493,6 +544,7 @@ static const MethodDescriptor desc_camera_get = {
     "read", "Read", false, "CameraState",
     "camera|get|view",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -508,6 +560,7 @@ static const MethodDescriptor desc_camera_set_aperture = {
     "write", "SceneWrite", false, "any",
     "camera|set|aperture|view|lens|dof|blur|bokeh",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_camera_set_aperture, 1,
     true
 };
@@ -523,6 +576,7 @@ static const MethodDescriptor desc_camera_set_focus_distance = {
     "write", "SceneWrite", false, "any",
     "camera|set|focus|distance|view|lens|dof|blur",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_camera_set_focus_distance, 1,
     true
 };
@@ -538,6 +592,7 @@ static const MethodDescriptor desc_camera_set_fov = {
     "write", "SceneWrite", false, "any",
     "camera|set|fov|view|lens|zoom",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_camera_set_fov, 1,
     true
 };
@@ -553,6 +608,7 @@ static const MethodDescriptor desc_camera_set_position = {
     "write", "SceneWrite", false, "any",
     "camera|set|position|view|move",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_camera_set_position, 1,
     true
 };
@@ -568,6 +624,7 @@ static const MethodDescriptor desc_camera_set_target = {
     "write", "SceneWrite", false, "any",
     "camera|set|target|view|look|aim",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_camera_set_target, 1,
     true
 };
@@ -583,6 +640,7 @@ static const MethodDescriptor desc_debris_configure = {
     "write", "SceneWrite", false, "any",
     "debris|configure|fire|ash|particles",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_debris_configure, 1,
     true
 };
@@ -600,6 +658,7 @@ static const MethodDescriptor desc_debris_emit_ash = {
     "write", "SceneWrite", false, "any",
     "debris|emit|ash|fire",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_debris_emit_ash, 3,
     true
 };
@@ -612,6 +671,7 @@ static const MethodDescriptor desc_debris_stats = {
     "write", "SceneWrite", false, "any",
     "debris|stats|fire|ash|measure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -624,6 +684,7 @@ static const MethodDescriptor desc_editor_get_state = {
     "read", "Read", false, "any",
     "editor|get|state|ui|context",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -639,6 +700,7 @@ static const MethodDescriptor desc_editor_set_bottom_editor = {
     "write", "SceneWrite", false, "any",
     "editor|set|bottom|ui",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_editor_set_bottom_editor, 1,
     true
 };
@@ -654,6 +716,7 @@ static const MethodDescriptor desc_editor_set_node_domain = {
     "write", "SceneWrite", false, "any",
     "editor|set|node|domain|ui|nodes",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_editor_set_node_domain, 1,
     true
 };
@@ -670,6 +733,7 @@ static const MethodDescriptor desc_editor_set_sim_graph_scope = {
     "write", "SceneWrite", false, "any",
     "editor|set|sim|graph|scope|ui|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_editor_set_sim_graph_scope, 2,
     true
 };
@@ -709,6 +773,7 @@ static const MethodDescriptor desc_flow_source_create = {
     "write", "SceneWrite", false, "FlowSourceInfo",
     "flow_source|flow|source|create|simulation|emitter|inject|pour|jet|flame|inflow",
     "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
+    nullptr, nullptr, nullptr, nullptr,
     params_flow_source_create, 25,
     true
 };
@@ -724,6 +789,7 @@ static const MethodDescriptor desc_flow_source_get = {
     "read", "Read", false, "FlowSourceInfo",
     "flow_source|flow|source|get|simulation|emitter",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_flow_source_get, 1,
     true
 };
@@ -736,6 +802,7 @@ static const MethodDescriptor desc_flow_source_list = {
     "read", "Read", false, "FlowSourceInfo[]",
     "flow_source|flow|source|list|simulation|emitter|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -751,6 +818,7 @@ static const MethodDescriptor desc_flow_source_remove = {
     "write", "SceneWrite", false, "any",
     "flow_source|flow|source|remove|simulation|emitter",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_flow_source_remove, 1,
     true
 };
@@ -790,6 +858,7 @@ static const MethodDescriptor desc_flow_source_update = {
     "write", "SceneWrite", false, "any",
     "flow_source|flow|source|update|simulation|emitter|configure",
     "flow_source.create|flow_source.get",
+    nullptr, nullptr, nullptr, nullptr,
     params_flow_source_update, 25,
     true
 };
@@ -806,6 +875,7 @@ static const MethodDescriptor desc_fluid_clear = {
     "write", "SceneWrite", false, "any",
     "fluid|clear|simulation|reset",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_clear, 2,
     true
 };
@@ -825,6 +895,7 @@ static const MethodDescriptor desc_fluid_create_domain = {
     "write", "SceneWrite", false, "FluidDomainInfo",
     "fluid|create|domain|simulation|liquid|water|smoke|fire|grid",
     "fluid.seed|fluid.set_param|flow_source.create|fluid.list_domains",
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_create_domain, 5,
     true
 };
@@ -840,6 +911,7 @@ static const MethodDescriptor desc_fluid_get = {
     "read", "Read", false, "FluidDomainInfo",
     "fluid|get|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_get, 1,
     true
 };
@@ -855,6 +927,7 @@ static const MethodDescriptor desc_fluid_get_combustion = {
     "read", "Read", false, "any",
     "fluid|get|combustion|simulation|fire|burn",
     "fluid.set_combustion",
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_get_combustion, 1,
     true
 };
@@ -867,6 +940,7 @@ static const MethodDescriptor desc_fluid_list_domains = {
     "read", "Read", false, "FluidDomainInfo[]",
     "fluid|list|domains|simulation|inventory",
     "fluid.get",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -882,6 +956,7 @@ static const MethodDescriptor desc_fluid_remove_domain = {
     "write", "SceneWrite", false, "any",
     "fluid|remove|domain|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_remove_domain, 1,
     true
 };
@@ -894,6 +969,7 @@ static const MethodDescriptor desc_fluid_reset = {
     "write", "SceneWrite", false, "any",
     "fluid|reset|simulation|rewind",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -901,19 +977,20 @@ static const MethodRegistration reg_fluid_reset(desc_fluid_reset);
 
 static const MethodParam params_fluid_seed[] = {
     {"domain", "string", true, "", nullptr, nullptr},
-    {"seed_min", "vec3", false, "World-space box minimum in metres", nullptr, nullptr},
-    {"seed_max", "vec3", false, "World-space box maximum in metres", nullptr, nullptr},
+    {"seed_min", "vec3", false, "World-space box minimum in metres; omit to derive from the domain", nullptr, nullptr},
+    {"seed_max", "vec3", false, "World-space box maximum in metres; omit to derive from the domain", nullptr, nullptr},
     {"particles_per_cell", "int", false, "Particle density per grid cell; 4 is standard", "4", nullptr},
     {"replace", "bool", false, "Clear existing particles first", "true", nullptr},
     {"persistent", "bool", false, "Re-apply this seed after every reset", "false", nullptr},
 };
 static const MethodDescriptor desc_fluid_seed = {
     "fluid.seed", "fluid",
-    "Fill a box inside a liquid domain with particles",
-    "particles_per_cell of 4 is the standard APIC density; a thin jet seeded below that has no interior cells and therefore no pressure field, which reads as 'water that will not splash'. persistent=true re-seeds the box every reset.",
+    "Fill a liquid domain with particles - a given box, or the domain's lower half",
+    "Omit seed_min and seed_max to fill the bottom half of the domain; there is no fixed default box any more, because the old one was derived from nothing and seeded zero particles in any domain that did not contain it. A region that does not overlap the domain is now refused with both boxes in the error, instead of succeeding having created nothing. particles_per_cell of 4 is the standard APIC density; a thin jet seeded below that has no interior cells and therefore no pressure field, which reads as 'water that will not splash'. persistent=true re-seeds the box every reset.",
     "write", "SceneWrite", false, "any",
     "fluid|seed|simulation|liquid|water|fill|particles|initial",
     "fluid.create_domain|fluid.clear|flow_source.create",
+    nullptr, nullptr, "fluid.get", nullptr,
     params_fluid_seed, 6,
     true
 };
@@ -938,6 +1015,7 @@ static const MethodDescriptor desc_fluid_set_combustion = {
     "write", "SceneWrite", false, "any",
     "fluid|set|combustion|simulation|fire|burn|fuel|ignite",
     "gas.set_settings|fluid.set_substance_material",
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_set_combustion, 10,
     true
 };
@@ -994,6 +1072,7 @@ static const MethodDescriptor desc_fluid_set_param = {
     "write", "SceneWrite", false, "any",
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material",
+    "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
     params_fluid_set_param, 42,
     true
 };
@@ -1010,6 +1089,7 @@ static const MethodDescriptor desc_fluid_set_splat_material = {
     "write", "SceneWrite", false, "any",
     "fluid|set|splat|material|simulation|render|appearance",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_set_splat_material, 2,
     true
 };
@@ -1031,6 +1111,7 @@ static const MethodDescriptor desc_fluid_set_substance_material = {
     "write", "SceneWrite", false, "any",
     "fluid|set|substance|material|simulation|phase|msf",
     "msf.substances|fluid.set_splat_material|fluid.set_param",
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_set_substance_material, 7,
     true
 };
@@ -1046,6 +1127,7 @@ static const MethodDescriptor desc_fluid_step = {
     "write", "SceneWrite", false, "any",
     "fluid|step|simulation|advance",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_fluid_step, 1,
     true
 };
@@ -1062,6 +1144,7 @@ static const MethodDescriptor desc_forcefield_create = {
     "write", "SceneWrite", false, "any",
     "forcefield|create|simulation|wind|vortex|turbulence|gravity",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_forcefield_create, 2,
     true
 };
@@ -1079,6 +1162,7 @@ static const MethodDescriptor desc_forcefield_evaluate = {
     "read", "Read", false, "any",
     "forcefield|evaluate|measure|verify|probe|force",
     "forcefield.set_param",
+    nullptr, nullptr, nullptr, nullptr,
     params_forcefield_evaluate, 3,
     true
 };
@@ -1094,6 +1178,7 @@ static const MethodDescriptor desc_forcefield_get = {
     "read", "Read", false, "any",
     "forcefield|get|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_forcefield_get, 1,
     true
 };
@@ -1106,6 +1191,7 @@ static const MethodDescriptor desc_forcefield_list = {
     "read", "Read", false, "any",
     "forcefield|list|simulation|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1121,6 +1207,7 @@ static const MethodDescriptor desc_forcefield_remove = {
     "write", "SceneWrite", false, "any",
     "forcefield|remove|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_forcefield_remove, 1,
     true
 };
@@ -1175,6 +1262,7 @@ static const MethodDescriptor desc_forcefield_set_param = {
     "write", "SceneWrite", false, "any",
     "forcefield|set|param|simulation|wind|turbulence|drag|configure",
     "forcefield.evaluate",
+    nullptr, nullptr, nullptr, nullptr,
     params_forcefield_set_param, 40,
     true
 };
@@ -1187,6 +1275,7 @@ static const MethodDescriptor desc_forcefield_types = {
     "read", "Read", false, "any",
     "forcefield|types|simulation|wind|vortex|drag",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1203,6 +1292,7 @@ static const MethodDescriptor desc_gas_clear = {
     "write", "SceneWrite", false, "any",
     "gas|clear|simulation|reset",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_clear, 2,
     true
 };
@@ -1222,6 +1312,7 @@ static const MethodDescriptor desc_gas_create_domain = {
     "write", "SceneWrite", false, "FluidDomainInfo",
     "gas|create|domain|simulation|smoke|fire",
     "gas.set_settings|flow_source.create",
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_create_domain, 5,
     true
 };
@@ -1237,6 +1328,7 @@ static const MethodDescriptor desc_gas_get = {
     "read", "Read", false, "any",
     "gas|get|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_get, 1,
     true
 };
@@ -1252,6 +1344,7 @@ static const MethodDescriptor desc_gas_get_settings = {
     "read", "Read", false, "any",
     "gas|get|settings|simulation|fire|smoke",
     "gas.set_settings",
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_get_settings, 1,
     true
 };
@@ -1267,6 +1360,7 @@ static const MethodDescriptor desc_gas_get_shader = {
     "read", "Read", false, "any",
     "gas|get|shader|render|appearance|volume",
     "gas.set_shader",
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_get_shader, 1,
     true
 };
@@ -1279,6 +1373,7 @@ static const MethodDescriptor desc_gas_list_domains = {
     "read", "Read", false, "any",
     "gas|list|domains|simulation|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1299,6 +1394,7 @@ static const MethodDescriptor desc_gas_pressure_pulse = {
     "write", "SceneWrite", false, "any",
     "gas|pressure|pulse|simulation|explosion|blast|shockwave",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_pressure_pulse, 6,
     true
 };
@@ -1314,6 +1410,7 @@ static const MethodDescriptor desc_gas_remove_domain = {
     "write", "SceneWrite", false, "any",
     "gas|remove|domain|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_remove_domain, 1,
     true
 };
@@ -1326,6 +1423,7 @@ static const MethodDescriptor desc_gas_reset = {
     "write", "SceneWrite", false, "any",
     "gas|reset|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1382,6 +1480,7 @@ static const MethodDescriptor desc_gas_set_param = {
     "write", "SceneWrite", false, "any",
     "gas|set|param|simulation|configure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_set_param, 42,
     true
 };
@@ -1423,6 +1522,7 @@ static const MethodDescriptor desc_gas_set_settings = {
     "write", "SceneWrite", false, "any",
     "gas|set|settings|simulation|fire|smoke|ignite|burn|buoyancy|turbulence",
     "gas.get_settings|gas.set_shader|flow_source.create",
+    "gas.create_domain", "gas.set_shader|flow_source.create|timeline.set_frame", "gas.get_settings|render.probe", "simulation_cache",
     params_gas_set_settings, 27,
     true
 };
@@ -1446,6 +1546,7 @@ static const MethodDescriptor desc_gas_set_shader = {
     "write", "SceneWrite", false, "any",
     "gas|set|shader|render|appearance|volume|fire|colour|emission|blackbody",
     "gas.get_shader|gas.set_settings",
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_set_shader, 9,
     true
 };
@@ -1461,6 +1562,7 @@ static const MethodDescriptor desc_gas_step = {
     "write", "SceneWrite", false, "any",
     "gas|step|simulation|advance",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_gas_step, 1,
     true
 };
@@ -1473,6 +1575,7 @@ static const MethodDescriptor desc_gas_structural_impulse_stats = {
     "write", "SceneWrite", false, "any",
     "gas|structural|impulse|stats|diagnostics|blast|fracture|coupling",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1489,6 +1592,7 @@ static const MethodDescriptor desc_hair_apply_preset = {
     "write", "SceneWrite", false, "any",
     "hair|apply|preset|style",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_apply_preset, 2,
     true
 };
@@ -1504,6 +1608,7 @@ static const MethodDescriptor desc_hair_bake = {
     "write", "SceneWrite", false, "any",
     "hair|bake",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_bake, 1,
     true
 };
@@ -1522,6 +1627,7 @@ static const MethodDescriptor desc_hair_comb = {
     "write", "SceneWrite", false, "any",
     "hair|comb|style|direction",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_comb, 4,
     true
 };
@@ -1538,6 +1644,7 @@ static const MethodDescriptor desc_hair_create = {
     "write", "SceneWrite", false, "any",
     "hair|create|fur|grass",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_create, 2,
     true
 };
@@ -1553,6 +1660,7 @@ static const MethodDescriptor desc_hair_get = {
     "read", "Read", false, "any",
     "hair|get",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_get, 1,
     true
 };
@@ -1569,6 +1677,7 @@ static const MethodDescriptor desc_hair_grow = {
     "write", "SceneWrite", false, "any",
     "hair|grow|length|style",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_grow, 2,
     true
 };
@@ -1581,6 +1690,7 @@ static const MethodDescriptor desc_hair_list = {
     "read", "Read", false, "any",
     "hair|list|fur|grass|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1593,6 +1703,7 @@ static const MethodDescriptor desc_hair_list_presets = {
     "read", "Read", false, "any",
     "hair|list|presets|preset",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1608,6 +1719,7 @@ static const MethodDescriptor desc_hair_remove = {
     "write", "SceneWrite", false, "any",
     "hair|remove",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_remove, 1,
     true
 };
@@ -1624,6 +1736,7 @@ static const MethodDescriptor desc_hair_rename = {
     "write", "SceneWrite", false, "any",
     "hair|rename",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_rename, 2,
     true
 };
@@ -1639,6 +1752,7 @@ static const MethodDescriptor desc_hair_reset_simulation = {
     "write", "SceneWrite", false, "any",
     "hair|reset|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_reset_simulation, 1,
     true
 };
@@ -1654,6 +1768,7 @@ static const MethodDescriptor desc_hair_restyle = {
     "write", "SceneWrite", false, "any",
     "hair|restyle|style",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_restyle, 1,
     true
 };
@@ -1671,6 +1786,7 @@ static const MethodDescriptor desc_hair_smooth = {
     "write", "SceneWrite", false, "any",
     "hair|smooth|style",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_smooth, 3,
     true
 };
@@ -1687,6 +1803,7 @@ static const MethodDescriptor desc_hair_trim = {
     "write", "SceneWrite", false, "any",
     "hair|trim|length|style",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_trim, 2,
     true
 };
@@ -1703,6 +1820,7 @@ static const MethodDescriptor desc_hair_update = {
     "write", "SceneWrite", false, "any",
     "hair|update|configure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_hair_update, 2,
     true
 };
@@ -1715,6 +1833,7 @@ static const MethodDescriptor desc_ipc_admin_audit_clear = {
     "admin", "Admin", false, "any",
     "ipc|admin|audit|clear|security",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1730,6 +1849,7 @@ static const MethodDescriptor desc_ipc_admin_audit_export = {
     "admin", "Admin|FilesWrite", false, "any",
     "ipc|admin|audit|export|security",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_ipc_admin_audit_export, 1,
     true
 };
@@ -1745,6 +1865,7 @@ static const MethodDescriptor desc_ipc_admin_audit_list = {
     "admin", "Admin", false, "any",
     "ipc|admin|audit|list|security|log",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_ipc_admin_audit_list, 1,
     true
 };
@@ -1757,6 +1878,7 @@ static const MethodDescriptor desc_ipc_admin_sessions_disconnect = {
     "admin", "Admin", false, "any",
     "ipc|admin|sessions|disconnect|security|session",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1769,6 +1891,7 @@ static const MethodDescriptor desc_ipc_admin_sessions_disconnect_all = {
     "admin", "Admin", false, "any",
     "ipc|admin|sessions|disconnect|all|security|session",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1784,6 +1907,7 @@ static const MethodDescriptor desc_ipc_admin_sessions_get = {
     "admin", "Admin", false, "any",
     "ipc|admin|sessions|get|security|session",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_ipc_admin_sessions_get, 1,
     true
 };
@@ -1799,6 +1923,7 @@ static const MethodDescriptor desc_ipc_admin_sessions_list = {
     "admin", "Admin", false, "any",
     "ipc|admin|sessions|list|security|session",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_ipc_admin_sessions_list, 1,
     true
 };
@@ -1817,6 +1942,7 @@ static const MethodDescriptor desc_ipc_admin_tokens_create = {
     "admin", "Admin", false, "any",
     "ipc|admin|tokens|create|security|token",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_ipc_admin_tokens_create, 4,
     true
 };
@@ -1829,6 +1955,7 @@ static const MethodDescriptor desc_ipc_admin_tokens_list = {
     "admin", "Admin", false, "any",
     "ipc|admin|tokens|list|security|token",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1844,6 +1971,7 @@ static const MethodDescriptor desc_ipc_admin_tokens_revoke = {
     "admin", "Admin", false, "any",
     "ipc|admin|tokens|revoke|security|token",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_ipc_admin_tokens_revoke, 1,
     true
 };
@@ -1859,6 +1987,7 @@ static const MethodDescriptor desc_ipc_admin_tokens_rotate = {
     "admin", "Admin", false, "any",
     "ipc|admin|tokens|rotate|security|token",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_ipc_admin_tokens_rotate, 1,
     true
 };
@@ -1877,6 +2006,7 @@ static const MethodDescriptor desc_ipc_admin_tokens_update = {
     "admin", "Admin", false, "any",
     "ipc|admin|tokens|update|security|token",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_ipc_admin_tokens_update, 4,
     true
 };
@@ -1893,6 +2023,7 @@ static const MethodDescriptor desc_lights_add = {
     "write", "SceneWrite", true, "any",
     "lights|add|lighting|create|illuminate",
     "lights.set_intensity|lights.set_color|world.set_mode",
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_add, 2,
     true
 };
@@ -1908,6 +2039,7 @@ static const MethodDescriptor desc_lights_delete = {
     "write", "SceneWrite", true, "any",
     "lights|delete|lighting|remove",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_delete, 1,
     true
 };
@@ -1923,6 +2055,7 @@ static const MethodDescriptor desc_lights_get = {
     "read", "Read", false, "LightInfo",
     "lights|get|lighting",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_get, 1,
     true
 };
@@ -1935,6 +2068,7 @@ static const MethodDescriptor desc_lights_list = {
     "read", "Read", false, "LightSummary[]",
     "lights|list|lighting",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -1951,6 +2085,7 @@ static const MethodDescriptor desc_lights_rename = {
     "write", "SceneWrite", false, "any",
     "lights|rename|lighting",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_rename, 2,
     true
 };
@@ -1967,6 +2102,7 @@ static const MethodDescriptor desc_lights_set_color = {
     "write", "SceneWrite", false, "any",
     "lights|set|color|lighting|colour",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_set_color, 2,
     true
 };
@@ -1983,6 +2119,7 @@ static const MethodDescriptor desc_lights_set_direction = {
     "write", "SceneWrite", false, "any",
     "lights|set|direction|lighting|aim",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_set_direction, 2,
     true
 };
@@ -1999,14 +2136,15 @@ static const MethodDescriptor desc_lights_set_intensity = {
     "write", "SceneWrite", false, "any",
     "lights|set|intensity|lighting|brightness|exposure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_set_intensity, 2,
     true
 };
 static const MethodRegistration reg_lights_set_intensity(desc_lights_set_intensity);
 
 static const MethodParam params_lights_set_param[] = {
+    {"param", "string", true, "Which light property to set. Not every key applies to every light type - a key the light does not have is refused, not ignored.", nullptr, "intensity|radius|width|height|spot_angle|spot_falloff"},
     {"index", "int", true, "", nullptr, nullptr},
-    {"param", "string", true, "", nullptr, nullptr},
     {"value", "float", true, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_lights_set_param = {
@@ -2016,6 +2154,7 @@ static const MethodDescriptor desc_lights_set_param = {
     "write", "SceneWrite", false, "any",
     "lights|set|param|lighting|softness|cone",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_set_param, 3,
     true
 };
@@ -2032,6 +2171,7 @@ static const MethodDescriptor desc_lights_set_position = {
     "write", "SceneWrite", false, "any",
     "lights|set|position|lighting|move",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_set_position, 2,
     true
 };
@@ -2048,6 +2188,7 @@ static const MethodDescriptor desc_lights_set_visible = {
     "write", "SceneWrite", false, "any",
     "lights|set|visible|lighting|visibility",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_lights_set_visible, 2,
     true
 };
@@ -2064,6 +2205,7 @@ static const MethodDescriptor desc_material_assign = {
     "write", "SceneWrite", false, "any",
     "material|assign|shading|apply",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_material_assign, 2,
     true
 };
@@ -2080,6 +2222,7 @@ static const MethodDescriptor desc_material_clear_texture = {
     "write", "SceneWrite", false, "any",
     "material|clear|texture|shading",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_material_clear_texture, 2,
     true
 };
@@ -2096,6 +2239,7 @@ static const MethodDescriptor desc_material_create = {
     "write", "SceneWrite", false, "any",
     "material|create|shading",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_material_create, 2,
     true
 };
@@ -2112,6 +2256,7 @@ static const MethodDescriptor desc_material_get = {
     "read", "Read", false, "any",
     "material|get|shading",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_material_get, 2,
     true
 };
@@ -2127,6 +2272,7 @@ static const MethodDescriptor desc_material_info = {
     "read", "Read", false, "MaterialInfo",
     "material|info|shading",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_material_info, 1,
     true
 };
@@ -2139,6 +2285,7 @@ static const MethodDescriptor desc_material_list = {
     "read", "Read", false, "string[]",
     "material|list|shading",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2154,14 +2301,15 @@ static const MethodDescriptor desc_material_of_object = {
     "read", "Read", false, "string[]",
     "material|of|object|shading",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_material_of_object, 1,
     true
 };
 static const MethodRegistration reg_material_of_object(desc_material_of_object);
 
 static const MethodParam params_material_set[] = {
+    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission and opacity are clamped to [0,1]; ior to [1,10].", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y"},
     {"object_name", "string", true, "", nullptr, nullptr},
-    {"param", "string", true, "", nullptr, nullptr},
     {"value", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_material_set = {
@@ -2171,6 +2319,7 @@ static const MethodDescriptor desc_material_set = {
     "write", "SceneWrite", false, "any",
     "material|set|shading|colour|roughness|metallic|emission",
     "material.get|material.info",
+    nullptr, nullptr, nullptr, nullptr,
     params_material_set, 3,
     true
 };
@@ -2188,6 +2337,7 @@ static const MethodDescriptor desc_material_set_texture = {
     "write", "SceneWrite", false, "any",
     "material|set|texture|shading|image",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_material_set_texture, 3,
     true
 };
@@ -2203,6 +2353,7 @@ static const MethodDescriptor desc_material_textures = {
     "read", "Read", false, "any",
     "material|textures|shading|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_material_textures, 1,
     true
 };
@@ -2222,6 +2373,7 @@ static const MethodDescriptor desc_modifiers_add = {
     "write", "SceneWrite", false, "any",
     "modifiers|add|mesh|modifier|subdivide|create",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_modifiers_add, 5,
     true
 };
@@ -2238,6 +2390,7 @@ static const MethodDescriptor desc_modifiers_apply = {
     "write", "SceneWrite", false, "any",
     "modifiers|apply|mesh|modifier|bake",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_modifiers_apply, 2,
     true
 };
@@ -2253,6 +2406,7 @@ static const MethodDescriptor desc_modifiers_get_stack = {
     "read", "Read", false, "any",
     "modifiers|get|stack|mesh|modifier",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_modifiers_get_stack, 1,
     true
 };
@@ -2269,6 +2423,7 @@ static const MethodDescriptor desc_modifiers_remove = {
     "write", "SceneWrite", false, "any",
     "modifiers|remove|mesh|modifier",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_modifiers_remove, 2,
     true
 };
@@ -2290,6 +2445,7 @@ static const MethodDescriptor desc_modifiers_set_param = {
     "write", "SceneWrite", false, "any",
     "modifiers|set|param|mesh|modifier|configure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_modifiers_set_param, 7,
     true
 };
@@ -2302,6 +2458,7 @@ static const MethodDescriptor desc_msf_fields = {
     "read", "Read", false, "any",
     "msf|fields|substance|thermal|burn|melt|measure|verify|temperature|moisture",
     "msf.substances",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2314,6 +2471,7 @@ static const MethodDescriptor desc_msf_substances = {
     "read", "Read", false, "any",
     "msf|substances|substance|material|library|wood|water|metal|thermochemistry",
     "fluid.set_substance_material|msf.fields",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2331,6 +2489,7 @@ static const MethodDescriptor desc_nodes_add = {
     "write", "SceneWrite", false, "any",
     "nodes|add|graph|create",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_add, 3,
     true
 };
@@ -2347,6 +2506,7 @@ static const MethodDescriptor desc_nodes_apply = {
     "write", "SceneWrite", false, "any",
     "nodes|apply|graph|evaluate|bake",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_apply, 2,
     true
 };
@@ -2363,6 +2523,7 @@ static const MethodDescriptor desc_nodes_create_graph = {
     "write", "SceneWrite", false, "any",
     "nodes|create|graph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_create_graph, 2,
     true
 };
@@ -2381,6 +2542,7 @@ static const MethodDescriptor desc_nodes_get_param = {
     "read", "Read", false, "any",
     "nodes|get|param|graph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_get_param, 4,
     true
 };
@@ -2399,6 +2561,7 @@ static const MethodDescriptor desc_nodes_get_property = {
     "read", "Read", false, "any",
     "nodes|get|property|graph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_get_property, 4,
     true
 };
@@ -2414,6 +2577,7 @@ static const MethodDescriptor desc_nodes_graphs = {
     "read", "Read", false, "any",
     "nodes|graphs|graph|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_graphs, 1,
     true
 };
@@ -2434,6 +2598,7 @@ static const MethodDescriptor desc_nodes_link = {
     "write", "SceneWrite", false, "any",
     "nodes|link|graph|connect|wire",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_link, 6,
     true
 };
@@ -2450,6 +2615,7 @@ static const MethodDescriptor desc_nodes_list = {
     "read", "Read", false, "any",
     "nodes|list|graph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_list, 2,
     true
 };
@@ -2467,6 +2633,7 @@ static const MethodDescriptor desc_nodes_list_params = {
     "read", "Read", false, "any",
     "nodes|list|params|graph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_list_params, 3,
     true
 };
@@ -2484,6 +2651,7 @@ static const MethodDescriptor desc_nodes_list_properties = {
     "read", "Read", false, "any",
     "nodes|list|properties|graph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_list_properties, 3,
     true
 };
@@ -2501,6 +2669,7 @@ static const MethodDescriptor desc_nodes_remove = {
     "write", "SceneWrite", false, "any",
     "nodes|remove|graph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_remove, 3,
     true
 };
@@ -2517,6 +2686,7 @@ static const MethodDescriptor desc_nodes_remove_graph = {
     "write", "SceneWrite", false, "any",
     "nodes|remove|graph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_remove_graph, 2,
     true
 };
@@ -2536,6 +2706,7 @@ static const MethodDescriptor desc_nodes_set_param = {
     "write", "SceneWrite", false, "any",
     "nodes|set|param|graph|configure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_set_param, 5,
     true
 };
@@ -2555,6 +2726,7 @@ static const MethodDescriptor desc_nodes_set_property = {
     "write", "SceneWrite", false, "any",
     "nodes|set|property|graph|configure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_nodes_set_property, 5,
     true
 };
@@ -2567,6 +2739,7 @@ static const MethodDescriptor desc_nodes_types = {
     "read", "Read", false, "any",
     "nodes|types|catalogue",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2585,6 +2758,7 @@ static const MethodDescriptor desc_paint_add_layer = {
     "write", "SceneWrite", false, "any",
     "paint|add|layer|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_add_layer, 4,
     true
 };
@@ -2605,6 +2779,7 @@ static const MethodDescriptor desc_paint_apply_mask = {
     "write", "SceneWrite", false, "any",
     "paint|apply|mask|texture|wear|dirt",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_apply_mask, 6,
     true
 };
@@ -2623,6 +2798,7 @@ static const MethodDescriptor desc_paint_bake_height_to_normal = {
     "write", "SceneWrite", false, "any",
     "paint|bake|height|to|normal|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_bake_height_to_normal, 4,
     true
 };
@@ -2641,6 +2817,7 @@ static const MethodDescriptor desc_paint_clear_channel = {
     "write", "SceneWrite", false, "any",
     "paint|clear|channel|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_clear_channel, 4,
     true
 };
@@ -2658,6 +2835,7 @@ static const MethodDescriptor desc_paint_duplicate_layer = {
     "write", "SceneWrite", false, "any",
     "paint|duplicate|layer|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_duplicate_layer, 3,
     true
 };
@@ -2675,6 +2853,7 @@ static const MethodDescriptor desc_paint_ensure = {
     "write", "SceneWrite", false, "any",
     "paint|ensure|texture|setup",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_ensure, 3,
     true
 };
@@ -2694,6 +2873,7 @@ static const MethodDescriptor desc_paint_export_channel = {
     "write", "FilesWrite", false, "any",
     "paint|export|channel|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_export_channel, 5,
     true
 };
@@ -2713,6 +2893,7 @@ static const MethodDescriptor desc_paint_fill = {
     "write", "SceneWrite", false, "any",
     "paint|fill|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_fill, 5,
     true
 };
@@ -2729,6 +2910,7 @@ static const MethodDescriptor desc_paint_flatten = {
     "write", "SceneWrite", false, "any",
     "paint|flatten|texture|layer",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_flatten, 2,
     true
 };
@@ -2745,6 +2927,7 @@ static const MethodDescriptor desc_paint_get = {
     "read", "Read", false, "any",
     "paint|get|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_get, 2,
     true
 };
@@ -2764,6 +2947,7 @@ static const MethodDescriptor desc_paint_import_channel = {
     "write", "FilesRead|SceneWrite", false, "any",
     "paint|import|channel|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_import_channel, 5,
     true
 };
@@ -2776,6 +2960,7 @@ static const MethodDescriptor desc_paint_list_mask_presets = {
     "read", "Read", false, "any",
     "paint|list|mask|presets|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2793,6 +2978,7 @@ static const MethodDescriptor desc_paint_merge_down = {
     "write", "SceneWrite", false, "any",
     "paint|merge|down|texture|layer",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_merge_down, 3,
     true
 };
@@ -2811,6 +2997,7 @@ static const MethodDescriptor desc_paint_move_layer = {
     "write", "SceneWrite", false, "any",
     "paint|move|layer|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_move_layer, 4,
     true
 };
@@ -2828,6 +3015,7 @@ static const MethodDescriptor desc_paint_remove_layer = {
     "write", "SceneWrite", false, "any",
     "paint|remove|layer|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_remove_layer, 3,
     true
 };
@@ -2850,6 +3038,7 @@ static const MethodDescriptor desc_paint_update_layer = {
     "write", "SceneWrite", false, "any",
     "paint|update|layer|texture",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_paint_update_layer, 8,
     true
 };
@@ -2889,6 +3078,7 @@ static const MethodDescriptor desc_particle_add_emitter = {
     "write", "SceneWrite", false, "any",
     "particle|add|emitter|particles|create|spawn|emit",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_particle_add_emitter, 25,
     true
 };
@@ -2901,6 +3091,7 @@ static const MethodDescriptor desc_particle_clear = {
     "write", "SceneWrite", false, "any",
     "particle|clear|particles|reset",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2913,6 +3104,7 @@ static const MethodDescriptor desc_particle_clear_emitters = {
     "write", "SceneWrite", false, "any",
     "particle|clear|emitters|particles|remove",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2925,6 +3117,7 @@ static const MethodDescriptor desc_particle_clear_systems = {
     "write", "SceneWrite", false, "any",
     "particle|clear|systems|particles|remove",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2937,6 +3130,7 @@ static const MethodDescriptor desc_particle_emitters = {
     "read", "Read", false, "any",
     "particle|emitters|particles|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2952,6 +3146,7 @@ static const MethodDescriptor desc_particle_get_emitter = {
     "read", "Read", false, "any",
     "particle|get|emitter|particles",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_particle_get_emitter, 1,
     true
 };
@@ -2964,6 +3159,7 @@ static const MethodDescriptor desc_particle_get_physics = {
     "read", "Read", false, "any",
     "particle|get|physics|particles|solver",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2976,6 +3172,7 @@ static const MethodDescriptor desc_particle_list_systems = {
     "read", "Read", false, "any",
     "particle|list|systems|particles|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -2991,6 +3188,7 @@ static const MethodDescriptor desc_particle_remove_emitter = {
     "write", "SceneWrite", false, "any",
     "particle|remove|emitter|particles",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_particle_remove_emitter, 1,
     true
 };
@@ -3031,6 +3229,7 @@ static const MethodDescriptor desc_particle_set_emitter = {
     "write", "SceneWrite", false, "any",
     "particle|set|emitter|particles|configure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_particle_set_emitter, 26,
     true
 };
@@ -3062,6 +3261,7 @@ static const MethodDescriptor desc_particle_set_physics = {
     "write", "SceneWrite", false, "any",
     "particle|set|physics|particles|solver|configure|sph",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_particle_set_physics, 17,
     true
 };
@@ -3081,6 +3281,7 @@ static const MethodDescriptor desc_particle_spawn = {
     "write", "SceneWrite", false, "any",
     "particle|spawn|particles|manual|inject",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_particle_spawn, 5,
     true
 };
@@ -3093,6 +3294,7 @@ static const MethodDescriptor desc_particle_stats = {
     "read", "Read", false, "any",
     "particle|stats|particles|measure|performance|verify",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3108,6 +3310,7 @@ static const MethodDescriptor desc_particle_step = {
     "write", "SceneWrite", false, "any",
     "particle|step|particles|advance",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_particle_step, 1,
     true
 };
@@ -3127,6 +3330,7 @@ static const MethodDescriptor desc_physics_add_body = {
     "write", "SceneWrite", false, "any",
     "physics|add|body|simulation|rigid|collision|gravity|mass",
     "physics.set_gravity|physics.get_body|physics.step",
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_add_body, 5,
     true
 };
@@ -3145,6 +3349,7 @@ static const MethodDescriptor desc_physics_apply_fracture_impulse = {
     "write", "SceneWrite", false, "any",
     "physics|apply|fracture|impulse|destruction|impact|blast",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_apply_fracture_impulse, 4,
     true
 };
@@ -3161,6 +3366,7 @@ static const MethodDescriptor desc_physics_break_fracture_group = {
     "write", "SceneWrite", false, "any",
     "physics|break|fracture|group|destruction|collapse",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_break_fracture_group, 2,
     true
 };
@@ -3176,6 +3382,7 @@ static const MethodDescriptor desc_physics_fracture_cluster_groups = {
     "write", "SceneWrite", false, "any",
     "physics|fracture|cluster|groups|destruction|group",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_fracture_cluster_groups, 1,
     true
 };
@@ -3197,6 +3404,7 @@ static const MethodDescriptor desc_physics_fracture_object = {
     "write", "SceneWrite", false, "any",
     "physics|fracture|object|destruction|shatter|break|voronoi|shards|debris",
     "physics.make_fracture_group|physics.fracture_cluster_groups|physics.unfracture_object",
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_fracture_object, 7,
     true
 };
@@ -3212,6 +3420,7 @@ static const MethodDescriptor desc_physics_get_body = {
     "read", "Read", false, "any",
     "physics|get|body|simulation|rigid",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_get_body, 1,
     true
 };
@@ -3227,6 +3436,7 @@ static const MethodDescriptor desc_physics_get_fracture_group = {
     "read", "Read", false, "any",
     "physics|get|fracture|group|destruction|measure|verify",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_get_fracture_group, 1,
     true
 };
@@ -3248,6 +3458,7 @@ static const MethodDescriptor desc_physics_make_fracture_group = {
     "write", "SceneWrite", false, "any",
     "physics|make|fracture|group|destruction|bond|threshold|collapse",
     "physics.fracture_object|physics.break_fracture_group|physics.apply_fracture_impulse",
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_make_fracture_group, 7,
     true
 };
@@ -3263,6 +3474,7 @@ static const MethodDescriptor desc_physics_remove_body = {
     "write", "SceneWrite", false, "any",
     "physics|remove|body|simulation|rigid",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_remove_body, 1,
     true
 };
@@ -3275,6 +3487,7 @@ static const MethodDescriptor desc_physics_reset = {
     "write", "SceneWrite", false, "any",
     "physics|reset|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3290,6 +3503,7 @@ static const MethodDescriptor desc_physics_set_gravity = {
     "write", "SceneWrite", false, "any",
     "physics|set|gravity|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_set_gravity, 1,
     true
 };
@@ -3300,11 +3514,12 @@ static const MethodParam params_physics_step[] = {
 };
 static const MethodDescriptor desc_physics_step = {
     "physics.step", "physics",
-    "Advance the rigid-body solver by one timestep",
-    nullptr,
+    "Advance the physics solver by dt and move the playhead with it",
+    "Advances the solver AND the timeline playhead, and claims the timeline until the user scrubs, plays or stops. It used to advance only the solver: the playhead stayed put, the frame loop found a rigid state that disagreed with the displayed frame, and it reset the runtime to the rest pose - erasing every scripted step while this call returned success. Check sim.control_state around a measurement to learn whether the claim was taken back.",
     "write", "SceneWrite", false, "any",
     "physics|step|simulation|advance",
     nullptr,
+    nullptr, "scene.get_world_transform", "sim.control_state", nullptr,
     params_physics_step, 1,
     true
 };
@@ -3320,6 +3535,7 @@ static const MethodDescriptor desc_physics_unfracture_object = {
     "write", "SceneWrite", false, "any",
     "physics|unfracture|object|destruction|undo|restore",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_physics_unfracture_object, 1,
     true
 };
@@ -3332,6 +3548,7 @@ static const MethodDescriptor desc_post_get = {
     "read", "Read", false, "any",
     "post|get|grade|look",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3347,6 +3564,7 @@ static const MethodDescriptor desc_post_set_color_temperature = {
     "write", "SceneWrite", false, "any",
     "post|set|color|temperature|grade|white-balance",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_color_temperature, 1,
     true
 };
@@ -3362,6 +3580,7 @@ static const MethodDescriptor desc_post_set_exposure = {
     "write", "SceneWrite", false, "any",
     "post|set|exposure|brightness|grade",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_exposure, 1,
     true
 };
@@ -3377,6 +3596,7 @@ static const MethodDescriptor desc_post_set_gamma = {
     "write", "SceneWrite", false, "any",
     "post|set|gamma|grade",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_gamma, 1,
     true
 };
@@ -3392,6 +3612,7 @@ static const MethodDescriptor desc_post_set_saturation = {
     "write", "SceneWrite", false, "any",
     "post|set|saturation|grade|colour",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_saturation, 1,
     true
 };
@@ -3407,6 +3628,7 @@ static const MethodDescriptor desc_post_set_stylize_enabled = {
     "write", "SceneWrite", false, "any",
     "post|set|stylize|enabled|look|npr",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_stylize_enabled, 1,
     true
 };
@@ -3422,6 +3644,7 @@ static const MethodDescriptor desc_post_set_stylize_strength = {
     "write", "SceneWrite", false, "any",
     "post|set|stylize|strength|look|npr",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_stylize_strength, 1,
     true
 };
@@ -3437,6 +3660,7 @@ static const MethodDescriptor desc_post_set_tone_mapping = {
     "write", "SceneWrite", false, "any",
     "post|set|tone|mapping|grade|filmic",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_tone_mapping, 1,
     true
 };
@@ -3452,6 +3676,7 @@ static const MethodDescriptor desc_post_set_vignette_enabled = {
     "write", "SceneWrite", false, "any",
     "post|set|vignette|enabled|look",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_vignette_enabled, 1,
     true
 };
@@ -3467,6 +3692,7 @@ static const MethodDescriptor desc_post_set_vignette_strength = {
     "write", "SceneWrite", false, "any",
     "post|set|vignette|strength|look",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_post_set_vignette_strength, 1,
     true
 };
@@ -3482,6 +3708,7 @@ static const MethodDescriptor desc_project_open = {
     "write", "FilesRead|SceneWrite", false, "any",
     "project|open|file|load",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_project_open, 1,
     true
 };
@@ -3494,6 +3721,7 @@ static const MethodDescriptor desc_project_path = {
     "read", "Read", false, "any",
     "project|path|file",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3509,6 +3737,7 @@ static const MethodDescriptor desc_project_save = {
     "write", "FilesWrite", false, "any",
     "project|save|file",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_project_save, 1,
     true
 };
@@ -3521,6 +3750,7 @@ static const MethodDescriptor desc_redo = {
     "write", "SceneWrite", false, "any",
     "redo|history",
     "undo|redo_description",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3533,6 +3763,7 @@ static const MethodDescriptor desc_redo_description = {
     "read", "Read", false, "any",
     "redo_description|redo|description|history",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3545,6 +3776,7 @@ static const MethodDescriptor desc_render_cancel = {
     "render", "Render", false, "any",
     "render|cancel|abort",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3557,6 +3789,7 @@ static const MethodDescriptor desc_render_cancel_sequence = {
     "render", "Render", false, "any",
     "render|cancel|sequence|abort|animation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3576,6 +3809,7 @@ static const MethodDescriptor desc_render_probe = {
     "render", "Render", false, "ProbeInfo",
     "render|probe|measure|verify|luminance|black|nan|check",
     "viewport.capture|viewport.render_frames|viewport.status",
+    nullptr, nullptr, nullptr, nullptr,
     params_render_probe, 5,
     true
 };
@@ -3588,6 +3822,7 @@ static const MethodDescriptor desc_render_sequence_status = {
     "render", "Render", false, "SequenceInfo",
     "render|sequence|status|progress|animation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3601,9 +3836,10 @@ static const MethodDescriptor desc_render_start = {
     "render.start", "render",
     "Render one frame at the given sample count and write it to an image file",
     "Blocking work runs on the render job; poll render.status for progress. The written image can be read back, so visual checks can be automated.",
-    "render", "Render", false, "any",
+    "write", "Render|FilesWrite", false, "any",
     "render|start|output|image|final|save",
     "render.status|render.cancel|render.start_sequence",
+    nullptr, nullptr, nullptr, nullptr,
     params_render_start, 2,
     true
 };
@@ -3619,9 +3855,10 @@ static const MethodDescriptor desc_render_start_sequence = {
     "render.start_sequence", "render",
     "Render a frame range to an output directory",
     nullptr,
-    "render", "Render", false, "any",
+    "write", "Render|FilesWrite", false, "any",
     "render|start|sequence|animation|output|batch",
     "render.sequence_status|render.cancel_sequence",
+    nullptr, nullptr, nullptr, nullptr,
     params_render_start_sequence, 4,
     true
 };
@@ -3634,6 +3871,7 @@ static const MethodDescriptor desc_render_status = {
     "render", "Render", false, "RenderJobInfo",
     "render|status|progress",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3649,6 +3887,7 @@ static const MethodDescriptor desc_render_volume_counters = {
     "render", "Render", false, "any",
     "render|volume|counters|diagnostics|performance",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_render_volume_counters, 1,
     true
 };
@@ -3661,6 +3900,7 @@ static const MethodDescriptor desc_render_volume_stats = {
     "render", "Render", false, "any",
     "render|volume|stats|diagnostics|performance",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3673,6 +3913,7 @@ static const MethodDescriptor desc_request_render = {
     "render", "Render", false, "any",
     "request_render|request|render|viewport|refresh",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3685,10 +3926,28 @@ static const MethodDescriptor desc_reset_accumulation = {
     "render", "Render", false, "any",
     "reset_accumulation|reset|accumulation|viewport|samples|refresh",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
 static const MethodRegistration reg_reset_accumulation(desc_reset_accumulation);
+
+static const MethodParam params_scatter_add_library_source[] = {
+    {"group", "string", true, "", nullptr, nullptr},
+    {"relative_path", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_scatter_add_library_source = {
+    "scatter.add_library_source", "scatter",
+    nullptr,
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "scatter|add|library|source",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_scatter_add_library_source, 2,
+    false
+};
+static const MethodRegistration reg_scatter_add_library_source(desc_scatter_add_library_source);
 
 static const MethodParam params_scatter_add_source[] = {
     {"group", "string", true, "", nullptr, nullptr},
@@ -3706,6 +3965,7 @@ static const MethodDescriptor desc_scatter_add_source = {
     "write", "SceneWrite", false, "any",
     "scatter|add|source|instancing|vegetation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_scatter_add_source, 7,
     true
 };
@@ -3721,6 +3981,7 @@ static const MethodDescriptor desc_scatter_clear = {
     "write", "SceneWrite", false, "any",
     "scatter|clear|instancing|reset",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_scatter_clear, 1,
     true
 };
@@ -3738,6 +3999,7 @@ static const MethodDescriptor desc_scatter_create_group = {
     "write", "SceneWrite", false, "any",
     "scatter|create|group|instancing|vegetation|forest|rocks",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_scatter_create_group, 3,
     true
 };
@@ -3753,6 +4015,7 @@ static const MethodDescriptor desc_scatter_delete_group = {
     "write", "SceneWrite", false, "any",
     "scatter|delete|group|instancing|remove",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_scatter_delete_group, 1,
     true
 };
@@ -3768,10 +4031,24 @@ static const MethodDescriptor desc_scatter_fill = {
     "write", "SceneWrite", false, "any",
     "scatter|fill|instancing|vegetation|populate|spawn",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_scatter_fill, 1,
     true
 };
 static const MethodRegistration reg_scatter_fill(desc_scatter_fill);
+
+static const MethodDescriptor desc_scatter_list_assets = {
+    "scatter.list_assets", "scatter",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "scatter|list|assets",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    false
+};
+static const MethodRegistration reg_scatter_list_assets(desc_scatter_list_assets);
 
 static const MethodDescriptor desc_scatter_list_groups = {
     "scatter.list_groups", "scatter",
@@ -3780,6 +4057,7 @@ static const MethodDescriptor desc_scatter_list_groups = {
     "read", "Read", false, "any",
     "scatter|list|groups|instancing|vegetation|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3797,6 +4075,7 @@ static const MethodDescriptor desc_scene_add_primitive = {
     "write", "SceneWrite", true, "string",
     "scene|add|primitive|create|mesh|cube|sphere|plane|cylinder|torus",
     "scene.delete|scene.set_transform|material.assign",
+    nullptr, nullptr, nullptr, nullptr,
     params_scene_add_primitive, 3,
     true
 };
@@ -3812,6 +4091,7 @@ static const MethodDescriptor desc_scene_delete = {
     "write", "SceneWrite", true, "any",
     "scene|delete|remove",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_scene_delete, 1,
     true
 };
@@ -3827,6 +4107,7 @@ static const MethodDescriptor desc_scene_duplicate = {
     "write", "SceneWrite", true, "string",
     "scene|duplicate|copy|clone",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_scene_duplicate, 1,
     true
 };
@@ -3838,14 +4119,31 @@ static const MethodParam params_scene_get_transform[] = {
 static const MethodDescriptor desc_scene_get_transform = {
     "scene.get_transform", "scene",
     "Return an object's translation, rotation, scale and full matrix",
-    nullptr,
+    "This is the AUTHORED transform and a solver never writes it: a rigid body can fall for a thousand steps while this keeps returning the spawn pose. To measure physics use scene.get_world_transform.",
     "read", "Read", false, "TransformInfo",
     "scene|get|transform",
-    "scene.set_transform",
+    "scene.set_transform|scene.get_world_transform",
+    nullptr, nullptr, nullptr, nullptr,
     params_scene_get_transform, 1,
     true
 };
 static const MethodRegistration reg_scene_get_transform(desc_scene_get_transform);
+
+static const MethodParam params_scene_get_world_transform[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_scene_get_world_transform = {
+    "scene.get_world_transform", "scene",
+    "Return an object's SIMULATED world pose: the solver's motion composed onto the authored transform",
+    "The rigid solver bakes its motion into the mesh vertices and never writes a transform, so scene.get_transform reports the spawn pose for a body that has been falling for hundreds of steps. Every physics measurement - free fall, buoyancy draft, restitution, settling - has to read this one. The result carries simulated: false when no solver has contributed, which is not the same as the body having stayed still.",
+    "read", "Read", false, "any",
+    "scene|get|world|transform|physics|simulated|pose|measure|verify",
+    "scene.get_transform|physics.step|physics.add_body",
+    nullptr, nullptr, "scene.get_transform", nullptr,
+    params_scene_get_world_transform, 1,
+    true
+};
+static const MethodRegistration reg_scene_get_world_transform(desc_scene_get_world_transform);
 
 static const MethodParam params_scene_import_model[] = {
     {"path", "string", true, "", nullptr, nullptr},
@@ -3857,6 +4155,7 @@ static const MethodDescriptor desc_scene_import_model = {
     "write", "FilesRead|SceneWrite", false, "any",
     "scene|import|model|load|asset|mesh",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_scene_import_model, 1,
     true
 };
@@ -3869,6 +4168,7 @@ static const MethodDescriptor desc_scene_list_objects = {
     "read", "Read", false, "string[]",
     "scene|list|objects|inventory|browse",
     "scene.object_info|scene.object_exists",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -3884,6 +4184,7 @@ static const MethodDescriptor desc_scene_object_exists = {
     "read", "Read", false, "bool",
     "scene|object|exists",
     "scene.list_objects",
+    nullptr, nullptr, nullptr, nullptr,
     params_scene_object_exists, 1,
     true
 };
@@ -3899,6 +4200,7 @@ static const MethodDescriptor desc_scene_object_info = {
     "write", "SceneWrite", false, "ObjectInfo",
     "scene|object|info",
     "scene.list_objects",
+    nullptr, nullptr, nullptr, nullptr,
     params_scene_object_info, 1,
     true
 };
@@ -3918,6 +4220,7 @@ static const MethodDescriptor desc_scene_set_transform = {
     "write", "SceneWrite", true, "any",
     "scene|set|transform|move|rotate|scale|position|placement",
     "scene.get_transform",
+    nullptr, nullptr, nullptr, nullptr,
     params_scene_set_transform, 5,
     true
 };
@@ -3933,6 +4236,7 @@ static const MethodDescriptor desc_script_run_file = {
     "write", "Scripts|FilesRead", false, "any",
     "script|run|file|python|automation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_script_run_file, 1,
     true
 };
@@ -3948,6 +4252,7 @@ static const MethodDescriptor desc_sculpt_get = {
     "read", "Read", false, "any",
     "sculpt|get|mesh",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sculpt_get, 1,
     true
 };
@@ -3966,6 +4271,7 @@ static const MethodDescriptor desc_sculpt_mask_operation = {
     "write", "SceneWrite", false, "any",
     "sculpt|mask|operation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sculpt_mask_operation, 4,
     true
 };
@@ -3985,6 +4291,7 @@ static const MethodDescriptor desc_sculpt_paint_mask = {
     "write", "SceneWrite", false, "any",
     "sculpt|paint|mask",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sculpt_paint_mask, 5,
     true
 };
@@ -4008,6 +4315,7 @@ static const MethodDescriptor desc_sculpt_stroke = {
     "write", "SceneWrite", false, "any",
     "sculpt|stroke|mesh|deform|brush",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sculpt_stroke, 9,
     true
 };
@@ -4020,6 +4328,7 @@ static const MethodDescriptor desc_select_all_objects = {
     "write", "SceneWrite", false, "any",
     "select|all|objects|selection",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4032,6 +4341,7 @@ static const MethodDescriptor desc_select_clear = {
     "write", "SceneWrite", false, "any",
     "select|clear|selection",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4047,6 +4357,7 @@ static const MethodDescriptor desc_select_deselect_object = {
     "write", "SceneWrite", false, "any",
     "select|deselect|object|selection",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_select_deselect_object, 1,
     true
 };
@@ -4063,6 +4374,7 @@ static const MethodDescriptor desc_select_light = {
     "write", "SceneWrite", false, "any",
     "select|light|selection",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_select_light, 2,
     true
 };
@@ -4075,6 +4387,7 @@ static const MethodDescriptor desc_select_list = {
     "read", "Read", false, "SelectionEntry[]",
     "select|list|selection",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4091,10 +4404,24 @@ static const MethodDescriptor desc_select_object = {
     "write", "SceneWrite", false, "any",
     "select|object|selection",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_select_object, 2,
     true
 };
 static const MethodRegistration reg_select_object(desc_select_object);
+
+static const MethodDescriptor desc_sim_control_state = {
+    "sim.control_state", "sim",
+    "Who is currently driving the solvers, and an epoch that changes whenever anything re-poses them",
+    "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops.",
+    "read", "Read", false, "any",
+    "sim|control|state|simulation|epoch|driver|timeline|measure|verify",
+    "physics.step|timeline.set_frame|timeline.get_frame|scene.get_world_transform",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_sim_control_state(desc_sim_control_state);
 
 static const MethodParam params_sim_cache_bake[] = {
     {"cache_dir", "string", true, "", nullptr, nullptr},
@@ -4109,6 +4436,7 @@ static const MethodDescriptor desc_sim_cache_bake = {
     "write", "SceneWrite", false, "any",
     "sim_cache|sim|cache|bake|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_cache_bake, 4,
     true
 };
@@ -4121,6 +4449,7 @@ static const MethodDescriptor desc_sim_cache_clear = {
     "write", "SceneWrite", false, "any",
     "sim_cache|sim|cache|clear|simulation|reset",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4133,6 +4462,7 @@ static const MethodDescriptor desc_sim_cache_status = {
     "read", "Read", false, "any",
     "sim_cache|sim|cache|status|simulation|bake|verify",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4150,6 +4480,7 @@ static const MethodDescriptor desc_sim_graph_add_node = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|add|node|simulation|nodes|create",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_add_node, 3,
     true
 };
@@ -4167,6 +4498,7 @@ static const MethodDescriptor desc_sim_graph_apply = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|apply|simulation|nodes|commit",
     "sim_graph.evaluate",
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_apply, 3,
     true
 };
@@ -4182,6 +4514,7 @@ static const MethodDescriptor desc_sim_graph_attributes = {
     "read", "Read", false, "any",
     "sim_graph|sim|graph|attributes|simulation|nodes",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_attributes, 1,
     true
 };
@@ -4198,6 +4531,7 @@ static const MethodDescriptor desc_sim_graph_clear = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|clear|simulation|nodes|reset",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_clear, 2,
     true
 };
@@ -4210,6 +4544,7 @@ static const MethodDescriptor desc_sim_graph_clear_overrides = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|clear|overrides|simulation|nodes|reset",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4230,6 +4565,7 @@ static const MethodDescriptor desc_sim_graph_connect = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|connect|simulation|nodes|wire",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_connect, 6,
     true
 };
@@ -4239,9 +4575,10 @@ static const MethodDescriptor desc_sim_graph_couplings = {
     "sim_graph.couplings", "sim_graph",
     "Report declared versus actually running couplings between simulation domains",
     "declared_not_running and running_not_declared are the two ways a graph and the live solvers can disagree.",
-    "write", "SceneWrite", false, "any",
+    "read", "Read", false, "any",
     "sim_graph|sim|graph|couplings|simulation|nodes|coupling|verify|diagnostics",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4258,6 +4595,7 @@ static const MethodDescriptor desc_sim_graph_create = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|create|simulation|nodes|scope",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_create, 2,
     true
 };
@@ -4274,6 +4612,7 @@ static const MethodDescriptor desc_sim_graph_delete = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|delete|simulation|nodes|remove",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_delete, 2,
     true
 };
@@ -4290,6 +4629,7 @@ static const MethodDescriptor desc_sim_graph_evaluate = {
     "read", "Read", false, "any",
     "sim_graph|sim|graph|evaluate|simulation|nodes|dry-run|inspect",
     "sim_graph.apply|sim_graph.couplings",
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_evaluate, 2,
     true
 };
@@ -4299,9 +4639,10 @@ static const MethodDescriptor desc_sim_graph_list = {
     "sim_graph.list", "sim_graph",
     "List the simulation node graphs with their scope, owner and whether the owner still exists",
     "owner_missing means the graph outlived the entity it was written for - it will not run.",
-    "write", "SceneWrite", false, "any",
+    "read", "Read", false, "any",
     "sim_graph|sim|graph|list|simulation|nodes|inventory|scope",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4318,6 +4659,7 @@ static const MethodDescriptor desc_sim_graph_nodes = {
     "read", "Read", false, "any",
     "sim_graph|sim|graph|nodes|simulation",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_nodes, 2,
     true
 };
@@ -4337,6 +4679,7 @@ static const MethodDescriptor desc_sim_graph_set_node = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|set|node|simulation|nodes|configure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_set_node, 5,
     true
 };
@@ -4356,6 +4699,7 @@ static const MethodDescriptor desc_sim_graph_set_node_value = {
     "write", "SceneWrite", false, "any",
     "sim_graph|sim|graph|set|node|value|simulation|nodes|configure",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_set_node_value, 5,
     true
 };
@@ -4368,9 +4712,10 @@ static const MethodDescriptor desc_sim_graph_surface_attributes = {
     "sim_graph.surface_attributes", "sim_graph",
     "List the surface attributes an object exposes to simulation nodes",
     nullptr,
-    "write", "SceneWrite", false, "any",
+    "read", "Read", false, "any",
     "sim_graph|sim|graph|surface|attributes|simulation|nodes",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_sim_graph_surface_attributes, 1,
     true
 };
@@ -4386,6 +4731,7 @@ static const MethodDescriptor desc_templates_delete_user = {
     "write", "SceneWrite", false, "any",
     "templates|delete|user|template|remove",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_templates_delete_user, 1,
     true
 };
@@ -4401,6 +4747,7 @@ static const MethodDescriptor desc_templates_get = {
     "read", "Read", false, "any",
     "templates|get|template",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_templates_get, 1,
     true
 };
@@ -4413,6 +4760,7 @@ static const MethodDescriptor desc_templates_hide_hub = {
     "write", "SceneWrite", false, "any",
     "templates|hide|hub|template|ui",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4425,6 +4773,7 @@ static const MethodDescriptor desc_templates_is_hub_visible = {
     "write", "SceneWrite", false, "any",
     "templates|is|hub|visible|template|ui",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4440,6 +4789,7 @@ static const MethodDescriptor desc_templates_list = {
     "read", "Read", false, "any",
     "templates|list|template|starter|scene",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_templates_list, 1,
     true
 };
@@ -4456,6 +4806,7 @@ static const MethodDescriptor desc_templates_open = {
     "write", "SceneWrite", false, "any",
     "templates|open|template|load|start",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_templates_open, 2,
     true
 };
@@ -4472,6 +4823,7 @@ static const MethodDescriptor desc_templates_prepare = {
     "read", "Read", false, "any",
     "templates|prepare|template|preflight|validate",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_templates_prepare, 2,
     true
 };
@@ -4484,6 +4836,7 @@ static const MethodDescriptor desc_templates_refresh = {
     "read", "Read", false, "any",
     "templates|refresh|template|reload",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4501,6 +4854,7 @@ static const MethodDescriptor desc_templates_save_user = {
     "write", "SceneWrite", false, "any",
     "templates|save|user|template",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_templates_save_user, 3,
     true
 };
@@ -4513,6 +4867,7 @@ static const MethodDescriptor desc_templates_show_hub = {
     "write", "SceneWrite", false, "any",
     "templates|show|hub|template|ui",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4528,6 +4883,7 @@ static const MethodDescriptor desc_templates_validate = {
     "read", "Read", false, "any",
     "templates|validate|template",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_templates_validate, 1,
     true
 };
@@ -4545,6 +4901,7 @@ static const MethodDescriptor desc_terrain_apply_preset = {
     "write", "SceneWrite", false, "any",
     "terrain|apply|preset|landscape|mountain|snow|river",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_apply_preset, 3,
     true
 };
@@ -4560,6 +4917,7 @@ static const MethodDescriptor desc_terrain_calculate_flow = {
     "write", "SceneWrite", false, "any",
     "terrain|calculate|flow|landscape|water|hydrology",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_calculate_flow, 1,
     true
 };
@@ -4575,6 +4933,7 @@ static const MethodDescriptor desc_terrain_cancel_evaluation = {
     "write", "SceneWrite", false, "any",
     "terrain|cancel|evaluation|landscape|abort",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_cancel_evaluation, 1,
     true
 };
@@ -4602,6 +4961,7 @@ static const MethodDescriptor desc_terrain_carve_river = {
     "write", "SceneWrite", false, "any",
     "terrain|carve|river|landscape|water|erosion",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_carve_river, 13,
     true
 };
@@ -4620,6 +4980,7 @@ static const MethodDescriptor desc_terrain_create = {
     "write", "SceneWrite", false, "any",
     "terrain|create|landscape|mountain|ground|heightmap",
     "terrain.apply_preset|terrain.erode|terrain.evaluate",
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_create, 4,
     true
 };
@@ -4644,6 +5005,7 @@ static const MethodDescriptor desc_terrain_erode = {
     "write", "SceneWrite", false, "any",
     "terrain|erode|landscape|erosion|weathering|realism",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_erode, 10,
     true
 };
@@ -4659,6 +5021,7 @@ static const MethodDescriptor desc_terrain_evaluate = {
     "write", "SceneWrite", false, "any",
     "terrain|evaluate|landscape|bake|apply",
     "terrain.evaluation_status|terrain.cancel_evaluation",
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_evaluate, 1,
     true
 };
@@ -4674,6 +5037,7 @@ static const MethodDescriptor desc_terrain_evaluation_status = {
     "write", "SceneWrite", false, "any",
     "terrain|evaluation|status|landscape|progress",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_evaluation_status, 1,
     true
 };
@@ -4690,6 +5054,7 @@ static const MethodDescriptor desc_terrain_export_heightmap = {
     "write", "FilesWrite", false, "any",
     "terrain|export|heightmap|landscape",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_export_heightmap, 2,
     true
 };
@@ -4705,6 +5070,7 @@ static const MethodDescriptor desc_terrain_get = {
     "read", "Read", false, "any",
     "terrain|get|landscape",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_get, 1,
     true
 };
@@ -4724,6 +5090,7 @@ static const MethodDescriptor desc_terrain_import_heightmap = {
     "write", "FilesRead|SceneWrite", false, "any",
     "terrain|import|heightmap|landscape",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_import_heightmap, 5,
     true
 };
@@ -4736,6 +5103,7 @@ static const MethodDescriptor desc_terrain_list = {
     "read", "Read", false, "any",
     "terrain|list|landscape|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4748,6 +5116,7 @@ static const MethodDescriptor desc_terrain_list_rivers = {
     "read", "Read", false, "any",
     "terrain|list|rivers|landscape|river|inventory",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4763,6 +5132,7 @@ static const MethodDescriptor desc_terrain_remove = {
     "write", "SceneWrite", false, "any",
     "terrain|remove|landscape",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_remove, 1,
     true
 };
@@ -4780,6 +5150,7 @@ static const MethodDescriptor desc_terrain_sample_height = {
     "read", "Read", false, "any",
     "terrain|sample|height|landscape|measure|probe|placement",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_terrain_sample_height, 3,
     true
 };
@@ -4792,6 +5163,7 @@ static const MethodDescriptor desc_timeline_get_frame = {
     "read", "Read", false, "any",
     "timeline|get|frame|time|playhead",
     "timeline.set_frame",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4807,6 +5179,7 @@ static const MethodDescriptor desc_timeline_set_frame = {
     "write", "SceneWrite", false, "any",
     "timeline|set|frame|time|playhead|simulate|advance",
     "timeline.get_frame|sim_cache.bake",
+    nullptr, nullptr, nullptr, nullptr,
     params_timeline_set_frame, 1,
     true
 };
@@ -4819,6 +5192,7 @@ static const MethodDescriptor desc_undo = {
     "write", "SceneWrite", false, "any",
     "undo|history",
     "redo|undo_description",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4831,6 +5205,7 @@ static const MethodDescriptor desc_undo_description = {
     "read", "Read", false, "any",
     "undo_description|undo|description|history",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4843,6 +5218,7 @@ static const MethodDescriptor desc_version = {
     "read", "Read", false, "any",
     "version",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4858,10 +5234,24 @@ static const MethodDescriptor desc_viewport_capture = {
     "render", "Render", false, "any",
     "viewport|capture|measure|verify|enable",
     "render.probe|viewport.render_frames",
+    nullptr, nullptr, nullptr, nullptr,
     params_viewport_capture, 1,
     true
 };
 static const MethodRegistration reg_viewport_capture(desc_viewport_capture);
+
+static const MethodDescriptor desc_viewport_get_screenshot = {
+    "viewport.get_screenshot", "viewport",
+    "Return the captured viewport frame as a base64 JPEG, for a vision-capable model to look at",
+    "Requires viewport.capture(enabled=true) and at least one rendered frame; an empty result means NOT CAPTURED, never 'the screen is empty'. Looking is not measuring - pair it with render.probe when the question is numeric (is there a black band, did the frame change), because a model reading a JPEG cannot tell 0.001 luminance from 0.",
+    "render", "Render", false, "any",
+    "viewport|get|screenshot|image|vision|look|see",
+    "viewport.capture|render.probe|viewport.render_frames",
+    "viewport.capture|viewport.render_frames", nullptr, "render.probe", nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_viewport_get_screenshot(desc_viewport_get_screenshot);
 
 static const MethodParam params_viewport_render_frames[] = {
     {"count", "int", true, "", nullptr, nullptr},
@@ -4869,18 +5259,19 @@ static const MethodParam params_viewport_render_frames[] = {
 static const MethodDescriptor desc_viewport_render_frames = {
     "viewport.render_frames", "viewport",
     "Render a fixed number of viewport frames and report timing and convergence",
-    "Use this to converge the viewport deliberately before probing it, instead of guessing how long to wait.",
+    "Use this to converge the viewport deliberately before probing it, instead of guessing how long to wait. Over IPC the captured frame is refreshed between calls by the display loop, so viewport.capture -> viewport.render_frames -> render.probe works. It does NOT work inside a single script.run_file: the script holds the main thread, the display loop never runs, and viewport.status frame_available stays false however many frames were rendered - measured 2026-08-19.",
     "render", "Render", false, "any",
     "viewport|render|frames|measure|converge|samples|wait",
-    "render.probe|viewport.capture",
+    "render.probe|viewport.capture|viewport.status",
+    nullptr, nullptr, nullptr, nullptr,
     params_viewport_render_frames, 1,
     true
 };
 static const MethodRegistration reg_viewport_render_frames(desc_viewport_render_frames);
 
 static const MethodParam params_viewport_set_shading[] = {
-    {"mode", "string", true, "", nullptr, nullptr},
-    {"matcap_preset", "int", false, "", "-1", nullptr},
+    {"mode", "string", true, "Canonical mode name. 'preview' is accepted as an alias for material because the panel button reads Preview.", nullptr, "solid|material|rendered|matcap"},
+    {"matcap_preset", "int", false, "0..9, meaningful in matcap mode; -1 leaves it unchanged.", "-1", nullptr},
 };
 static const MethodDescriptor desc_viewport_set_shading = {
     "viewport.set_shading", "viewport",
@@ -4889,6 +5280,7 @@ static const MethodDescriptor desc_viewport_set_shading = {
     "render", "Render", false, "any",
     "viewport|set|shading|display|solid|rendered|matcap|preview",
     "viewport.shading|viewport.render_frames|render.probe",
+    nullptr, nullptr, nullptr, nullptr,
     params_viewport_set_shading, 2,
     true
 };
@@ -4897,10 +5289,11 @@ static const MethodRegistration reg_viewport_set_shading(desc_viewport_set_shadi
 static const MethodDescriptor desc_viewport_shading = {
     "viewport.shading", "viewport",
     "Report which viewport shading mode is on screen and whether the interactive raster viewport exists",
-    "interactive_available false means this build has no raster viewport (no Vulkan), so 'rendered' is the only selectable mode - a rejected set_shading there is the machine, not a bad request.",
+    "interactive_available false means this build has no raster viewport (no Vulkan), so 'rendered' is the only selectable mode - a rejected viewport.set_shading there is the machine, not a bad request.",
     "render", "Render", false, "any",
     "viewport|shading|display|measure",
     "viewport.set_shading|viewport.status",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4913,6 +5306,7 @@ static const MethodDescriptor desc_viewport_status = {
     "render", "Render", false, "ViewportStatusInfo",
     "viewport|status|measure|verify|backend|samples",
     "viewport.capture|render.probe",
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
@@ -4925,10 +5319,24 @@ static const MethodDescriptor desc_world_get = {
     "read", "Read", false, "WorldState",
     "world|get|environment|sky",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
 };
 static const MethodRegistration reg_world_get(desc_world_get);
+
+static const MethodDescriptor desc_world_get_thermal = {
+    "world.get_thermal", "world",
+    "Return the ambient thermal condition every uncoupled substance relaxes toward",
+    "Distinct from world.get: that is the render sky, this is WorldThermalState -- the room temperature (ambient_kelvin), the Kelvin-per-normalized-unit calibration a substance's MSF temperature is read against (kelvin_per_unit), the passive-cooling multiplier (convection_coefficient) and the pyrolysis rate scale (oxygen_availability). Formerly no scripting surface existed for any of this -- see docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7 item 1.",
+    "read", "Read", false, "WorldThermalInfo",
+    "world|get|thermal|simulation|ambient|msf",
+    "world.set_thermal|sim_graph.list",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_get_thermal(desc_world_get_thermal);
 
 static const MethodParam params_world_set_atmosphere_intensity[] = {
     {"atmosphere_intensity", "float", true, "", nullptr, nullptr},
@@ -4940,6 +5348,7 @@ static const MethodDescriptor desc_world_set_atmosphere_intensity = {
     "write", "SceneWrite", false, "any",
     "world|set|atmosphere|intensity|environment|sky|haze|fog",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_world_set_atmosphere_intensity, 1,
     true
 };
@@ -4955,6 +5364,7 @@ static const MethodDescriptor desc_world_set_background_color = {
     "write", "SceneWrite", false, "any",
     "world|set|background|color|environment|sky|colour",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_world_set_background_color, 1,
     true
 };
@@ -4970,6 +5380,7 @@ static const MethodDescriptor desc_world_set_mode = {
     "write", "SceneWrite", false, "any",
     "world|set|mode|environment|sky|background|hdri",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_world_set_mode, 1,
     true
 };
@@ -4985,6 +5396,7 @@ static const MethodDescriptor desc_world_set_sun_azimuth = {
     "write", "SceneWrite", false, "any",
     "world|set|sun|azimuth|environment|sky|direction",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_world_set_sun_azimuth, 1,
     true
 };
@@ -5000,6 +5412,7 @@ static const MethodDescriptor desc_world_set_sun_elevation = {
     "write", "SceneWrite", false, "any",
     "world|set|sun|elevation|environment|sky|time-of-day",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_world_set_sun_elevation, 1,
     true
 };
@@ -5015,6 +5428,7 @@ static const MethodDescriptor desc_world_set_sun_intensity = {
     "write", "SceneWrite", false, "any",
     "world|set|sun|intensity|environment|sky|brightness",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_world_set_sun_intensity, 1,
     true
 };
@@ -5030,9 +5444,29 @@ static const MethodDescriptor desc_world_set_sun_size = {
     "write", "SceneWrite", false, "any",
     "world|set|sun|size|environment|sky|shadow|softness",
     nullptr,
+    nullptr, nullptr, nullptr, nullptr,
     params_world_set_sun_size, 1,
     true
 };
 static const MethodRegistration reg_world_set_sun_size(desc_world_set_sun_size);
+
+static const MethodParam params_world_set_thermal[] = {
+    {"ambient_kelvin", "any", false, "Room temperature everything relaxes toward, in Kelvin. Must be positive.", nullptr, nullptr},
+    {"kelvin_per_unit", "any", false, "Kelvin per normalized solver unit -- the calibration MSF temperature reads through. Must be positive.", nullptr, nullptr},
+    {"convection_coefficient", "any", false, "Scales every substance's passive cooling toward ambient: 1 = authored, higher = draughty, 0 = a perfect thermos.", nullptr, nullptr},
+    {"oxygen_availability", "any", false, "0..1, scales pyrolysis burn rate; 0 smothers combustion entirely. Clamped, not rejected, if out of range.", nullptr, nullptr},
+};
+static const MethodDescriptor desc_world_set_thermal = {
+    "world.set_thermal", "world",
+    "Set the ambient thermal condition every uncoupled substance relaxes toward",
+    "Every field optional: omit a key to leave it unchanged. oxygen_availability is clamped to 0..1 rather than rejected. A domain's own thermal_override_enabled (SimulationGridDomainDesc) still wins over this where it is set -- this call changes only the default a domain has not overridden.",
+    "write", "SceneWrite", false, "any",
+    "world|set|thermal|simulation|ambient|msf",
+    "world.get_thermal",
+    nullptr, nullptr, nullptr, nullptr,
+    params_world_set_thermal, 4,
+    true
+};
+static const MethodRegistration reg_world_set_thermal(desc_world_set_thermal);
 
 } // namespace

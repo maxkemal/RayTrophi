@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file TerrainNodesV2.cpp
  * @brief Implementation of terrain nodes using V2 NodeSystem
  */
@@ -6280,6 +6280,14 @@ namespace TerrainNodesV2 {
             layer.scaleField = settings.scale_mask_attribute;
             layer.scaleFieldInfluence = settings.scale_mask_influence;
             layer.settingsCaptured = true;
+            
+            layer.useAssetLibrary = false;
+            for (const auto& src : group.sources) {
+                if (!src.asset_relative_path.empty()) {
+                    layer.useAssetLibrary = true;
+                    break;
+                }
+            }
         }
 
         void applyFoliageGroupSettings(const FoliageLayerNode& layer, InstanceGroup& group) {

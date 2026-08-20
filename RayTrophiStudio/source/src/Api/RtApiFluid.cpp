@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>     // std::sqrt, for the material-coordinate drift measurement
+#include <sstream>   // locale-independent numbers in the seed-overlap refusal
+#include <locale>
 
 namespace rtapi {
 
@@ -929,7 +931,8 @@ Result removeFluidDomain(const std::string& domain_id_or_name) {
     return Result::success();
 }
 
-Result seedFluidParticles(const std::string& domain_id_or_name, Vec3 seed_min, Vec3 seed_max,
+Result seedFluidParticles(const std::string& domain_id_or_name,
+                           const Vec3* in_seed_min, const Vec3* in_seed_max,
                            int particles_per_cell, bool replace, bool persistent) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
@@ -937,6 +940,65 @@ Result seedFluidParticles(const std::string& domain_id_or_name, Vec3 seed_min, V
     rtapi::FluidDomainInfo info;
     if (!getFluidDomain(domain_id_or_name, info).ok) {
         return Result::fail("fluid domain not found: " + domain_id_or_name);
+    }
+
+    // Null region = "fill this tank": the bottom half of the domain, inset by a
+    // voxel so the seed does not start inside the boundary cells. Derived from
+    // the domain that was actually resolved above, so it is right for every
+    // domain instead of for the one the old hardcoded box happened to fit.
+    Vec3 seed_min, seed_max;
+    if (in_seed_min && in_seed_max) {
+        seed_min = *in_seed_min;
+        seed_max = *in_seed_max;
+    } else {
+        const float inset = info.voxel_size;
+        seed_min = Vec3(info.domain_min.x + inset,
+                        info.domain_min.y + inset,
+                        info.domain_min.z + inset);
+        seed_max = Vec3(info.domain_max.x - inset,
+                        info.domain_min.y + 0.5f * (info.domain_max.y - info.domain_min.y),
+                        info.domain_max.z - inset);
+    }
+
+    // ★★★ An empty overlap is a FAILED seed, not a quiet one.
+    //
+    // The region is clamped to the domain, which is right. But when the clamp
+    // leaves nothing, this used to return success having created zero
+    // particles - measured 2026-08-19 on three independent regions (above the
+    // domain, below it, and starting exactly on the top face). For a caller
+    // driving this from a script that is silent lost work: it seeds, steps,
+    // measures nothing, and concludes the SOLVER is broken. The one thing that
+    // would have told it otherwise was the return value of the call it already
+    // made.
+    //
+    // Report the two boxes, not just the verdict: "outside the domain" sends
+    // the reader looking at the wrong end when the real mistake is a domain
+    // that is not where they think it is.
+    const Vec3 lo = Vec3::min(seed_min, seed_max);
+    const Vec3 hi = Vec3::max(seed_min, seed_max);
+    const bool overlaps =
+        lo.x < info.domain_max.x && hi.x > info.domain_min.x &&
+        lo.y < info.domain_max.y && hi.y > info.domain_min.y &&
+        lo.z < info.domain_max.z && hi.z > info.domain_min.z;
+    if (!overlaps) {
+        // ★★ The stream is imbued with the CLASSIC locale on purpose. Main.cpp
+        // calls setlocale(LC_ALL, "Turkish") at startup, so the printf family
+        // and any default-locale stream emit a decimal COMMA - measured here,
+        // this message first came out as "region (-0,400 5,000 ...". A number
+        // meant to be read by a script must not change shape with the UI
+        // language.
+        std::ostringstream msg;
+        msg.imbue(std::locale::classic());
+        msg.setf(std::ios::fixed);
+        msg.precision(3);
+        msg << "seed region does not overlap the domain, so it would create no "
+               "particles: region (" << lo.x << " " << lo.y << " " << lo.z
+            << ")-(" << hi.x << " " << hi.y << " " << hi.z
+            << ") vs domain '" << info.name << "' ("
+            << info.domain_min.x << " " << info.domain_min.y << " " << info.domain_min.z
+            << ")-(" << info.domain_max.x << " " << info.domain_max.y << " "
+            << info.domain_max.z << ")";
+        return Result::fail(msg.str());
     }
 
     // `fluid.get` and every simulation authoring facade resolve against the

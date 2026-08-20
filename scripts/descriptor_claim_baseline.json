@@ -1,0 +1,8 @@
+{
+  "$comment": "Ungrounded prose claims accepted as of the last --accept run. This file exists so the count can only go DOWN; a new entry means a note now names something the build does not have. sim_graph.list/owner_missing was VERIFIED BY HAND against RtIpc.cpp:2351 - it is a real result field that only appears once a graph exists, so the live pass cannot reach it on an empty scene. Accepting a claim without checking it turns this file into the thing it was built to prevent.",
+  "ungrounded": {
+    "sim_graph.list": [
+      "owner_missing"
+    ]
+  }
+}

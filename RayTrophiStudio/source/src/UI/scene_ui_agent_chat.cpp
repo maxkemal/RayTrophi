@@ -9,6 +9,7 @@
 
 #include "scene_ui_agent_chat.hpp"
 #include "../Api/RtIpcAudit.h"
+#include "../Api/RtAgentLifecycleManager.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -75,88 +76,25 @@ std::string AgentChatPanel::getCurrentTimeStr() {
 // ---------------------------------------------------------------------------
 
 void AgentChatPanel::startAgentProcess() {
-#ifdef _WIN32
     if (isAgentProcessAlive()) return;
-
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    ZeroMemory(&pi, sizeof(pi));
-
-    std::string work_dir = "RayTrophiAgent";
-    if (!std::filesystem::exists(work_dir)) {
-        if (std::filesystem::exists("../RayTrophiAgent")) {
-            work_dir = "../RayTrophiAgent";
-        } else if (std::filesystem::exists("../../RayTrophiAgent")) {
-            work_dir = "../../RayTrophiAgent";
-        } else if (std::filesystem::exists("../../../RayTrophiAgent")) {
-            work_dir = "../../../RayTrophiAgent";
-        } else {
-            pushMessage(AgentMessageType::SystemEvent, "System", kTargetName,
-                        "Cannot find the RayTrophiAgent directory next to the "
-                        "executable or up to three levels above it.");
-            return;
-        }
-    }
-    const std::string abs_work_dir = std::filesystem::absolute(work_dir).string();
-
-    // Run python directly. Not through cmd.exe: TerminateProcess would then
-    // kill the shell and leave python running as an orphan.
-    // -E makes python ignore PYTHON* environment variables, which is what made
-    // this launch differ from a working terminal launch.
-    std::string cmd = "python -E main.py";
-    std::vector<char> cmdBuffer(cmd.begin(), cmd.end());
-    cmdBuffer.push_back('\0');
-
-    if (CreateProcessA(NULL, cmdBuffer.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW,
-                       NULL, abs_work_dir.c_str(), &si, &pi)) {
-        agent_process_handle = pi.hProcess;
-        agent_process_id = pi.dwProcessId;
-        CloseHandle(pi.hThread);
+    
+    if (AgentLifecycleManager::instance().startAgent(active_agent_id)) {
         pushMessage(AgentMessageType::SystemEvent, "System", kTargetName,
-                    "Agent process started (pid " + std::to_string(pi.dwProcessId) +
-                    "). It reports connected once it polls.");
+                    "Agent process started via Lifecycle Manager. It reports connected once it polls.");
     } else {
         pushMessage(AgentMessageType::SystemEvent, "System", kTargetName,
-                    "Failed to start the agent process (error " +
-                    std::to_string(GetLastError()) +
-                    "). Is python on PATH?");
+                    "Failed to start the agent process. Check if RayTrophiAgent directory exists.");
     }
-#else
-    pushMessage(AgentMessageType::SystemEvent, "System", kTargetName,
-                "Starting the agent process is only implemented on Windows.");
-#endif
 }
 
 bool AgentChatPanel::isAgentProcessAlive() {
-#ifdef _WIN32
-    if (!agent_process_handle) return false;
-    // ★ Holding a handle is not the same as the process running. A crashed
-    // runtime kept the Stop button showing and the Start button hidden.
-    const DWORD state = WaitForSingleObject((HANDLE)agent_process_handle, 0);
-    if (state == WAIT_TIMEOUT) return true;
-    CloseHandle((HANDLE)agent_process_handle);
-    agent_process_handle = nullptr;
-    agent_process_id = 0;
-    return false;
-#else
-    return false;
-#endif
+    return AgentLifecycleManager::instance().isAgentRunning(active_agent_id);
 }
 
 void AgentChatPanel::stopAgentProcess() {
-#ifdef _WIN32
-    if (!agent_process_handle) return;
-    TerminateProcess((HANDLE)agent_process_handle, 0);
-    CloseHandle((HANDLE)agent_process_handle);
-    agent_process_handle = nullptr;
-    agent_process_id = 0;
+    AgentLifecycleManager::instance().stopAgent(active_agent_id);
     pushMessage(AgentMessageType::SystemEvent, "System", kTargetName,
                 "Agent process stopped.");
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -234,15 +172,40 @@ void AgentChatPanel::draw(bool* p_open) {
                           "not the agent's own account of itself.");
 
     ImGui::SameLine();
-#ifdef _WIN32
+    ImGui::SameLine();
+
+    std::vector<AgentConfig> configs = AgentLifecycleManager::instance().getConfigs();
+    AgentConfig current_config;
+    AgentLifecycleManager::instance().getConfig(active_agent_id, current_config);
+    
+    ImGui::SetNextItemWidth(150.0f);
+    if (ImGui::BeginCombo("##AgentSelector", current_config.name.c_str())) {
+        for (const auto& cfg : configs) {
+            bool is_selected = (active_agent_id == cfg.id);
+            if (ImGui::Selectable(cfg.name.c_str(), is_selected)) {
+                if (active_agent_id != cfg.id) {
+                    active_agent_id = cfg.id;
+                }
+            }
+            if (is_selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    
+    ImGui::SameLine();
+    ImGui::SameLine();
     if (isAgentProcessAlive()) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-        if (ImGui::Button("Stop Agent")) stopAgentProcess();
+        if (ImGui::Button("Stop Selected Agent")) stopAgentProcess();
         ImGui::PopStyleColor();
     } else {
-        if (ImGui::Button("Start AI Agent")) startAgentProcess();
+        if (ImGui::Button("Start Selected Agent")) startAgentProcess();
     }
-#endif
+    
+    ImGui::SameLine();
+    if (ImGui::Button("Settings")) {
+        show_settings_window = true;
+    }
 
     drawStatusLine();
     ImGui::Separator();
@@ -251,6 +214,10 @@ void AgentChatPanel::draw(bool* p_open) {
     drawInputArea();
 
     ImGui::End();
+
+    if (show_settings_window) {
+        drawAgentSettings();
+    }
 }
 
 void AgentChatPanel::drawStatusLine() {
@@ -264,6 +231,12 @@ void AgentChatPanel::drawStatusLine() {
                 std::chrono::steady_clock::now() - last_poll_time).count() < 5;
     }
     const bool process_alive = isAgentProcessAlive();
+
+    if (last_frame_process_alive && !process_alive) {
+        pushMessage(AgentMessageType::SystemEvent, "SYSTEM", "all",
+                    "Agent process terminated unexpectedly! Please check RayTrophiAgent/agent.log for errors (e.g. missing python packages like anthropic, or an invalid API key).");
+    }
+    last_frame_process_alive = process_alive;
 
     // ★ Three states, not two. "Busy" is not "gone": an agent working through a
     // model turn stops polling for as long as the turn takes.
@@ -347,13 +320,40 @@ void AgentChatPanel::drawMessageList() {
     ImGui::EndChild();
 }
 
+void AgentChatPanel::queuePrompt(const std::string& sender,
+                                 const std::string& target,
+                                 const std::string& content) {
+    if (content.empty()) return;
+    pushMessage(AgentMessageType::UserPrompt, sender, target, content);
+    std::lock_guard<std::mutex> lock(msg_mutex);
+    user_prompts_queue.push_back({target, content});
+}
+
 void AgentChatPanel::submitPrompt() {
     std::string content(input_buffer);
     if (content.empty()) return;
-    pushMessage(AgentMessageType::UserPrompt, "User", kTargetName, content);
+
+    std::string target = "all"; // Default broadcast
+    std::string text_to_send = content;
+
+    // Check for @agent_id tag
+    if (content.rfind("@", 0) == 0) { // starts with @
+        size_t space_pos = content.find(' ');
+        if (space_pos != std::string::npos) {
+            target = content.substr(1, space_pos - 1);
+            text_to_send = content.substr(space_pos + 1);
+        }
+    } else {
+        // Alternatively, use active_agent_id if it's explicitly set? No, let's keep broadcast default unless @ is used.
+    }
+
+    // ★ The queued text is the message WITHOUT the @tag: the tag is routing, and
+    // leaving it in makes the receiving model read its own address as part of
+    // the task. The panel still shows what the user typed.
+    pushMessage(AgentMessageType::UserPrompt, "User", target, content);
     {
         std::lock_guard<std::mutex> lock(msg_mutex);
-        user_prompts_queue.push_back({kTargetName, content});
+        user_prompts_queue.push_back({target, text_to_send});
     }
     memset(input_buffer, 0, sizeof(input_buffer));
     reclaim_focus_next_frame = true;
@@ -386,12 +386,109 @@ void AgentChatPanel::drawInputArea() {
         ImGui::TextDisabled("%zu prompt(s) waiting for the agent to collect", queued);
 }
 
-bool AgentChatPanel::popUserPrompt(QueuedPrompt& out_prompt) {
+bool AgentChatPanel::popUserPrompt(const std::string& polling_agent_id, QueuedPrompt& out_prompt) {
     std::lock_guard<std::mutex> lock(msg_mutex);
-    if (user_prompts_queue.empty()) return false;
-    out_prompt = user_prompts_queue.front();
-    user_prompts_queue.erase(user_prompts_queue.begin());
-    return true;
+    for (auto it = user_prompts_queue.begin(); it != user_prompts_queue.end(); ++it) {
+        // If target is empty/all, or matches the polling agent specifically, deliver it.
+        if (it->target.empty() || it->target == "all" || it->target == polling_agent_id) {
+            out_prompt = *it;
+            user_prompts_queue.erase(it);
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace rtui
+
+void rtui::AgentChatPanel::drawAgentSettings() {
+    ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Agent Configurations", &show_settings_window)) {
+        ImGui::End();
+        return;
+    }
+
+    auto& manager = AgentLifecycleManager::instance();
+    auto configs = manager.getConfigs();
+
+    static char input_id[64] = "";
+    static char input_name[128] = "";
+    static int provider_idx = 0;
+    static char input_model[128] = "";
+    static char input_apikey[256] = "";
+    static char input_baseurl[256] = "";
+
+    const char* providers[] = { "local", "gemini", "openai", "anthropic" };
+
+    if (ImGui::BeginTabBar("ConfigTabs")) {
+        if (ImGui::BeginTabItem("Existing Profiles")) {
+            if (ImGui::BeginListBox("##ProfilesList", ImVec2(-FLT_MIN, 150))) {
+                for (const auto& cfg : configs) {
+                    ImGui::PushID(cfg.id.c_str());
+                    if (ImGui::Selectable(cfg.name.c_str())) {
+                        strncpy_s(input_id, cfg.id.c_str(), sizeof(input_id));
+                        strncpy_s(input_name, cfg.name.c_str(), sizeof(input_name));
+                        strncpy_s(input_model, cfg.model.c_str(), sizeof(input_model));
+                        strncpy_s(input_apikey, cfg.api_key.c_str(), sizeof(input_apikey));
+                        strncpy_s(input_baseurl, cfg.base_url.c_str(), sizeof(input_baseurl));
+                        for (int i = 0; i < 4; ++i) {
+                            if (cfg.provider == providers[i]) provider_idx = i;
+                        }
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndListBox();
+            }
+
+            if (ImGui::Button("Delete Selected")) {
+                if (strlen(input_id) > 0) {
+                    manager.removeConfig(input_id);
+                    memset(input_id, 0, sizeof(input_id));
+                    memset(input_name, 0, sizeof(input_name));
+                    memset(input_model, 0, sizeof(input_model));
+                    memset(input_apikey, 0, sizeof(input_apikey));
+                    memset(input_baseurl, 0, sizeof(input_baseurl));
+                }
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Edit / Create Profile");
+
+    ImGui::InputText("ID (no spaces)", input_id, sizeof(input_id));
+    ImGui::InputText("Display Name", input_name, sizeof(input_name));
+    ImGui::Combo("Provider", &provider_idx, providers, 4);
+    ImGui::InputText("Model Name", input_model, sizeof(input_model));
+    ImGui::InputText("API Key", input_apikey, sizeof(input_apikey), ImGuiInputTextFlags_Password);
+
+    if (provider_idx == 0) { // local
+        ImGui::InputText("Base URL", input_baseurl, sizeof(input_baseurl));
+    }
+
+    if (ImGui::Button("Save Configuration")) {
+        if (strlen(input_id) > 0 && strlen(input_name) > 0) {
+            AgentConfig cfg;
+            cfg.id = input_id;
+            cfg.name = input_name;
+            cfg.provider = providers[provider_idx];
+            cfg.model = input_model;
+            cfg.api_key = input_apikey;
+            cfg.base_url = input_baseurl;
+            manager.addConfig(cfg);
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear Form")) {
+        memset(input_id, 0, sizeof(input_id));
+        memset(input_name, 0, sizeof(input_name));
+        memset(input_model, 0, sizeof(input_model));
+        memset(input_apikey, 0, sizeof(input_apikey));
+        memset(input_baseurl, 0, sizeof(input_baseurl));
+    }
+
+    ImGui::End();
+}

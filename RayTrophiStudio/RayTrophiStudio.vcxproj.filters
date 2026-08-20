@@ -75,6 +75,9 @@
     <ClInclude Include="source\src\Api\RtIpcAgentDiscovery.h">
       <Filter>Header Files\Api</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\Api\RtAgentLifecycleManager.h">
+      <Filter>Header Files\Api</Filter>
+    </ClInclude>
     <ClInclude Include="source\src\Api\RtIpcWorkflowRecipes.h">
       <Filter>Header Files\Api</Filter>
     </ClInclude>
@@ -638,6 +641,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\src\Api\RtIpcAgentDiscovery.cpp">
+      <Filter>Source Files\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtAgentLifecycleManager.cpp">
       <Filter>Source Files\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtIpcWorkflowRecipes.cpp">

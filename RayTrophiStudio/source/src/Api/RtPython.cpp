@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * File:          Api/RtPython.cpp
@@ -224,6 +224,33 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::addPrimitive(type, name, size, newName));
         return newName;
     }, py::arg("type"), py::arg("name") = std::string(), py::arg("size") = 1.0f);
+    // ★★★ The pose a SOLVER produced, not the one an author typed. The rigid
+    // solver bakes its motion into the MESH VERTICES and never touches the
+    // transform handle, so get_transform keeps reporting the spawn pose for a
+    // body that has been falling for a thousand steps - successfully, with
+    // plausible numbers. Any physics check (free fall, buoyancy draft,
+    // restitution) has to read this one, AND check its 'simulated' flag.
+    scene.def("get_world_transform", [](const std::string& name) -> py::dict {
+        Matrix4x4 m;
+        bool simulated = false;
+        requireResult(rtapi::getObjectWorldTransform(name, m, &simulated));
+        Vec3 t(0.0f), r(0.0f), s(1.0f);
+        m.decompose(t, r, s);
+        py::dict d;
+        d["matrix"] = matrixToPython(m);
+        d["translation"] = vec3ToPython(t);
+        d["rotation"] = vec3ToPython(r);
+        d["scale"] = vec3ToPython(s);
+        d["simulated"] = simulated;
+        return d;
+    }, py::arg("name"),
+       "The simulated world pose: the rigid solver's motion composed onto the "
+       "authored transform. Use this to measure physics; get_transform answers "
+       "what was authored and does not move when a solver runs. The returned "
+       "dict carries 'simulated': False means no solver has contributed, so "
+       "these are merely the authored numbers - a check must not read that as "
+       "'the body did not move'.");
+
     scene.def("get_transform", [](const std::string& name) -> py::dict {
         Matrix4x4 m;
         requireResult(rtapi::getObjectTransform(name, m));
@@ -442,6 +469,24 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::removeScatterSource(group, source_index));
     }, py::arg("group"), py::arg("source_index") = 0);
 
+    scatter.def("list_assets", []() -> py::list {
+        std::vector<rtapi::FoliageAssetInfo> assets;
+        requireResult(rtapi::listFoliageAssets(assets));
+        py::list result;
+        for (const auto& a : assets) {
+            py::dict d;
+            d["name"] = a.name;
+            d["category"] = a.category;
+            d["relative_path"] = a.relative_path;
+            result.append(d);
+        }
+        return result;
+    });
+
+    scatter.def("add_library_source", [](const std::string& group, const std::string& relative_path) {
+        requireResult(rtapi::addLibraryScatterSource(group, relative_path));
+    }, py::arg("group"), py::arg("relative_path"));
+
     scatter.def("set_settings", [](const std::string& group, const py::kwargs& kwargs) {
         int tcount_val = 0; const int* p_tcount = nullptr;
         if (kwargs.contains("target_count")) { tcount_val = py::cast<int>(kwargs["target_count"]); p_tcount = &tcount_val; }
@@ -583,9 +628,38 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::resetPhysicsSimulation());
     });
 
+    // ★★★★ Advances the solver AND the playhead. It used to move only the
+    // solver, so the frame loop found a rigid state that disagreed with the
+    // displayed frame and reset it to rest - erasing every step while this
+    // call returned success.
     physics.def("step", [](float dt) {
         requireResult(rtapi::stepPhysicsSimulation(dt));
-    }, py::arg("dt") = 0.0166667f);
+    }, py::arg("dt") = 0.0166667f,
+       "Advance the physics solver by dt and move the playhead with it. Claims "
+       "the timeline until the user scrubs, plays or stops; check "
+       "rt.sim.control_state()['epoch'] around a measurement to find out "
+       "whether that happened.");
+
+    // rt.sim - control state shared by every solver.
+    py::module_ sim = module.def_submodule(
+        "sim", "Simulation control state: who is driving the solvers.");
+    sim.def("control_state", []() -> py::dict {
+        rtapi::SimControlStateInfo info;
+        requireResult(rtapi::getSimControlState(info));
+        py::dict d;
+        d["epoch"] = info.epoch;
+        d["driver"] = info.driver;
+        d["script_driving"] = info.script_driving;
+        d["script_sim_seconds"] = info.script_sim_seconds;
+        d["frame"] = info.frame;
+        d["playing"] = info.playing;
+        return d;
+    },
+    "Who last moved the solvers, and an epoch that changes whenever anything "
+    "did. Read it before and after a measurement: if the epoch moved, the "
+    "solvers were re-posed under you and the numbers are not a physics "
+    "result. Without this a reverted pose and a body that never moved read "
+    "exactly the same.");
 
     physics.def("set_gravity", [](const py::handle& gravity) {
         requireResult(rtapi::setPhysicsGravity(vec3FromPython(gravity)));
@@ -1386,18 +1460,30 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return d;
     }, py::arg("domain"));
 
-    fluid.def("seed", [](const std::string& domain, const py::tuple& seed_min,
-                          const py::tuple& seed_max, int particles_per_cell,
+    // ★ seed_min/seed_max default to None, NOT to a box. The old defaults were
+    // a fixed region at y 1.0-1.5 derived from nothing, so any domain that did
+    // not contain it seeded zero particles and said so to nobody.
+    fluid.def("seed", [](const std::string& domain, const py::object& seed_min,
+                          const py::object& seed_max, int particles_per_cell,
                           bool replace, bool persistent) {
-        Vec3 smin = vec3FromPython(seed_min);
-        Vec3 smax = vec3FromPython(seed_max);
-        requireResult(rtapi::seedFluidParticles(domain, smin, smax,
+        const bool has_region = !seed_min.is_none() && !seed_max.is_none();
+        Vec3 smin, smax;
+        if (has_region) {
+            smin = vec3FromPython(seed_min.cast<py::tuple>());
+            smax = vec3FromPython(seed_max.cast<py::tuple>());
+        }
+        requireResult(rtapi::seedFluidParticles(domain,
+                                                 has_region ? &smin : nullptr,
+                                                 has_region ? &smax : nullptr,
                                                  particles_per_cell, replace,
                                                  persistent));
-    }, py::arg("domain"), py::arg("seed_min") = py::make_tuple(-0.5f, 1.0f, -0.5f),
-       py::arg("seed_max") = py::make_tuple(0.5f, 1.5f, 0.5f),
+    }, py::arg("domain"), py::arg("seed_min") = py::none(),
+       py::arg("seed_max") = py::none(),
        py::arg("particles_per_cell") = 4, py::arg("replace") = true,
-       py::arg("persistent") = false);
+       py::arg("persistent") = false,
+       "Fill a fluid domain with particles. Omit seed_min/seed_max to fill the "
+       "bottom half of the domain; a region that does not overlap the domain is "
+       "refused rather than silently creating nothing.");
 
     fluid.def("clear", [](const std::string& domain, bool clear_seed) {
         requireResult(rtapi::clearFluidParticles(domain, clear_seed));
@@ -2715,6 +2801,30 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             requireResult(rtapi::setWorldSunSize(py::cast<float>(kwargs["sun_size"])));
     });
 
+    // Ambient thermal condition every uncoupled substance relaxes toward.
+    // Distinct from world.get/set above (render sky) -- see WorldThermalInfo.
+    world.def("get_thermal", [] {
+        rtapi::WorldThermalInfo t;
+        requireResult(rtapi::getWorldThermal(t));
+        py::dict d;
+        d["ambient_kelvin"]          = t.ambient_kelvin;
+        d["kelvin_per_unit"]         = t.kelvin_per_unit;
+        d["convection_coefficient"]  = t.convection_coefficient;
+        d["oxygen_availability"]     = t.oxygen_availability;
+        return d;
+    });
+    world.def("set_thermal", [](const py::kwargs& kwargs) {
+        float ambient_val = 0.0f;      const float* p_ambient = nullptr;
+        float kelvin_val = 0.0f;       const float* p_kelvin = nullptr;
+        float convection_val = 0.0f;   const float* p_convection = nullptr;
+        float oxygen_val = 0.0f;       const float* p_oxygen = nullptr;
+        if (kwargs.contains("ambient_kelvin")) { ambient_val = py::cast<float>(kwargs["ambient_kelvin"]); p_ambient = &ambient_val; }
+        if (kwargs.contains("kelvin_per_unit")) { kelvin_val = py::cast<float>(kwargs["kelvin_per_unit"]); p_kelvin = &kelvin_val; }
+        if (kwargs.contains("convection_coefficient")) { convection_val = py::cast<float>(kwargs["convection_coefficient"]); p_convection = &convection_val; }
+        if (kwargs.contains("oxygen_availability")) { oxygen_val = py::cast<float>(kwargs["oxygen_availability"]); p_oxygen = &oxygen_val; }
+        requireResult(rtapi::setWorldThermal(p_ambient, p_kelvin, p_convection, p_oxygen));
+    });
+
     py::module_ post = module.def_submodule("post", "Post-processing: exposure, tonemap, vignette, stylize (Faz 5.1d)");
     post.def("get", [] {
         rtapi::PostState s;
@@ -3163,8 +3273,15 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["ms_per_frame"] = r.ms_per_frame;
         return d;
     }, py::arg("count"),
-       "Render this many viewport frames and report what was accumulated. Use it "
-       "to converge deliberately before render.probe instead of guessing a wait.");
+       "Render this many viewport frames and report what was accumulated. "
+       
+       "IMPORTANT: this accumulates but does not PUBLISH a frame for capture - "
+       "the display loop does that, and it cannot run while your script holds "
+       "the main thread. Inside one script, frame_available stays false no "
+       "matter how many frames you render here, so screenshot_base64 and "
+       "render.probe have nothing fresh to read. Split the sequence across "
+       "separate script runs, or drive it over IPC where each call returns to "
+       "the loop.");
 
     // ★ Was panel-only until 2026-08-19. Every chain that needed a specific
     // viewport ("switch to Rendered, then measure") had to stop and ask a human
@@ -3179,6 +3296,19 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, "Which viewport is on screen: solid | material | rendered | matcap. "
        "'interactive_available' false means this machine has no raster viewport "
        "and only 'rendered' can be selected.");
+    // Parity with viewport.get_screenshot over IPC. A script test that wants to
+    // check what a vision model would be handed must be able to ask for the same
+    // bytes; otherwise the only way to test the vision path is to run a model.
+    viewport.def("screenshot_base64", [] {
+        const std::string img = rtapi::getViewportScreenshotAsBase64();
+        if (img.empty())
+            throw std::runtime_error(
+                "No frame to encode. Enable rt.viewport.capture(True) and render "
+                "at least one frame first - an empty string here means 'not "
+                "measured', not 'the screen is empty'.");
+        return img;
+    }, "The captured viewport frame as a base64 JPEG (quality 80). This is what "
+       "a vision-capable model is shown. Requires rt.viewport.capture(True).");
     viewport.def("set_shading", [](const std::string& mode, int matcap_preset) {
         requireResult(rtapi::setViewportShading(mode, matcap_preset));
     }, py::arg("mode"), py::arg("matcap_preset") = -1,
