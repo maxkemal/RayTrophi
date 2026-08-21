@@ -17,12 +17,15 @@
 
 #include "Vec3.h"
 #include <vector>
+#include <cstdint>
 #include <cmath>
 #include <algorithm>
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// BEZIER CONTROL POINT
+// SPLINE CURVE TYPE
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+enum class SplineCurveType : uint8_t { Linear, Bezier, BSpline };
+
 struct BezierControlPoint {
     Vec3 position;           // World position
     Vec3 tangentIn;          // Incoming tangent handle (relative to position)
@@ -232,6 +235,7 @@ class BezierSpline {
 public:
     std::vector<BezierControlPoint> points;
     bool isClosed = false;  // Connect last point back to first
+    SplineCurveType curveType = SplineCurveType::Bezier;
     
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Control Point Management
@@ -264,6 +268,9 @@ public:
     size_t pointCount() const { return points.size(); }
     size_t segmentCount() const { 
         if (points.size() < 2) return 0;
+        if (curveType == SplineCurveType::BSpline) {
+            return points.size() >= 4 ? points.size() - 3 : 0;
+        }
         return isClosed ? points.size() : points.size() - 1;
     }
     
@@ -307,6 +314,10 @@ public:
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     Vec3 samplePosition(float t) const {
         if (points.size() < 2) return points.empty() ? Vec3(0) : points[0].position;
+        if (curveType == SplineCurveType::BSpline && points.size() < 4) {
+            t = std::clamp(t, 0.0f, 1.0f);
+            return points.front().position * (1.0f - t) + points.back().position * t;
+        }
         
         t = std::clamp(t, 0.0f, 1.0f);
         size_t segments = segmentCount();
@@ -317,6 +328,24 @@ public:
         
         size_t i0 = seg;
         size_t i1 = (seg + 1) % points.size();
+
+        if (curveType == SplineCurveType::Linear) {
+            return points[i0].position * (1.0f - localT) + points[i1].position * localT;
+        }
+
+        if (curveType == SplineCurveType::BSpline && points.size() >= 4) {
+            const size_t b0 = seg;
+            const size_t b1 = seg + 1;
+            const size_t b2 = seg + 2;
+            const size_t b3 = seg + 3;
+            const float u = localT;
+            const float u2 = u * u;
+            const float u3 = u2 * u;
+            return points[b0].position * ((1.0f - 3.0f * u + 3.0f * u2 - u3) / 6.0f) +
+                   points[b1].position * ((4.0f - 6.0f * u2 + 3.0f * u3) / 6.0f) +
+                   points[b2].position * ((1.0f + 3.0f * u + 3.0f * u2 - 3.0f * u3) / 6.0f) +
+                   points[b3].position * (u3 / 6.0f);
+        }
         
         const auto& p0 = points[i0];
         const auto& p1 = points[i1];
@@ -332,6 +361,9 @@ public:
     
     Vec3 sampleTangent(float t) const {
         if (points.size() < 2) return Vec3(1, 0, 0);
+        if (curveType == SplineCurveType::BSpline && points.size() < 4) {
+            return (points.back().position - points.front().position).normalize();
+        }
         
         t = std::clamp(t, 0.0f, 1.0f);
         size_t segments = segmentCount();
@@ -342,6 +374,21 @@ public:
         
         size_t i0 = seg;
         size_t i1 = (seg + 1) % points.size();
+
+        if (curveType == SplineCurveType::Linear) {
+            return (points[i1].position - points[i0].position).normalize();
+        }
+
+        if (curveType == SplineCurveType::BSpline && points.size() >= 4) {
+            const float u = localT;
+            const float u2 = u * u;
+            const Vec3 derivative =
+                points[seg].position * ((-3.0f + 6.0f * u - 3.0f * u2) / 6.0f) +
+                points[seg + 1].position * ((-12.0f * u + 9.0f * u2) / 6.0f) +
+                points[seg + 2].position * ((3.0f + 6.0f * u - 9.0f * u2) / 6.0f) +
+                points[seg + 3].position * ((3.0f * u2) / 6.0f);
+            return derivative.normalize();
+        }
         
         const auto& p0 = points[i0];
         const auto& p1 = points[i1];

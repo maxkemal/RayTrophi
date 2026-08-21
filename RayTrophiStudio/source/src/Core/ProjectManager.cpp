@@ -57,6 +57,7 @@
 #include "stb_image.h"
 #include "ColorProcessingParams.h"
 #include "ThermalFractureSerialization.h"
+#include "MeshEdit/SplineSerialization.h"
 
 // Helper for stbi_write_to_func
 namespace {
@@ -1353,6 +1354,14 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             procedurals_arr.push_back(p);
         }
         root["procedural_objects"] = procedurals_arr;
+
+        json spline_objects = json::array();
+        for (const auto& object : scene.world.objects) {
+            if (const auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object)) {
+                spline_objects.push_back(MeshEdit::serializeSpline(*spline));
+            }
+        }
+        root["spline_objects"] = std::move(spline_objects);
         
         if (progress_callback) progress_callback(50, "Saving materials...");
         
@@ -2050,6 +2059,27 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         bool has_geometry = false;
         root["has_geometry"].get(has_geometry);
         
+        auto loadSplineObjects = [&]() {
+            simdjson::dom::element spline_el;
+            if (!root["spline_objects"].get(spline_el)) {
+                simdjson::dom::array spline_arr;
+                if (!spline_el.get(spline_arr)) {
+                    for (auto spline_item : spline_arr) {
+                        auto payload = sjsonToNlohmann(spline_item);
+                        auto object = std::make_shared<MeshEdit::SplineObject>();
+                        std::string spline_error;
+                        if (MeshEdit::deserializeSpline(payload, *object, spline_error)) {
+                            object->visible = true;
+                            scene.world.objects.push_back(std::move(object));
+                        } else {
+                            SCENE_LOG_WARN("Skipping invalid spline during project load: " + spline_error);
+                        }
+                    }
+                }
+            }
+        };
+        loadSplineObjects();
+
         if (is_v3 && has_geometry && has_binary) {
             if (progress_callback) progress_callback(10, "Loading geometry...");
             {

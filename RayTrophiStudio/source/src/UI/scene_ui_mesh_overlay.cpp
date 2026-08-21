@@ -1,4 +1,4 @@
-#include "scene_ui.h"
+﻿#include "scene_ui.h"
 
 #include "Vec3SIMD.h"
 #include <omp.h>
@@ -8,9 +8,11 @@
 #include "Backend/VulkanBackend.h"
 #include "Viewport/ViewportSceneSync.h"
 #include "Triangle.h"
-#include "MeshProfileTimer.h"
+#include "PerfProfile.h"
 #include "HittableInstance.h"
 #include "GeometryNodesV2.h"   // sculpt-mask <-> Field attribute bridge (PositionValueLookup)
+#include "MeshEdit/PolygonTriangulation.h"
+#include "MeshEdit/FlatMeshGeometryCommand.h"
 #include "ProjectManager.h"    // g_ProjectManager.markModified()
 #include "WaterSystem.h"
 #include "ImGuizmo.h"
@@ -5099,7 +5101,7 @@ void applyShadingSettingsToTriangles(
     if (triangles.empty()) {
         return;
     }
-    MESH_PROFILE_SCOPE("applyShadingSettingsToTriangles (" + std::to_string(triangles.size()) + " tris)");
+    RTPERF_SCOPE("applyShadingSettingsToTriangles (" + std::to_string(triangles.size()) + " tris)");
 
     struct TriangleCornerRef {
         std::shared_ptr<Triangle> triangle;
@@ -6810,7 +6812,7 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
         return true;
     }
 
-    MESH_PROFILE_SCOPE(std::string("ensureEditableMeshCache.build[") +
+    RTPERF_SCOPE(std::string("ensureEditableMeshCache.build[") +
         (buildForSculpt ? "sculpt" : "edit") + "] (" + std::to_string(triangleCount) + " tris)");
 
     editable_mesh_cache = EditableMeshCache{};
@@ -7590,65 +7592,6 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     }
 
     SCENE_LOG_INFO("[ensureEditableMeshCache] Rebuild completed successfully.");
-    // TEMP memory breakdown (remove with the MESHPROF timers): how much of the working set is
-    // the per-face Triangle soup vs this editable cache, so the P-render effort can target the
-    // real bulk of the ~12GB-at-8M footprint.
-    {
-        const auto& c = editable_mesh_cache;
-        auto mb = [](size_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); };
-        const size_t soupBytes = c.source_triangles.size() * sizeof(Triangle);
-        size_t cacheBytes =
-            c.source_triangles.capacity() * sizeof(std::shared_ptr<Triangle>) +
-            c.vertices.capacity() * sizeof(SceneUI::EditableVertex) +
-            c.vertex_positions.capacity() * sizeof(Vec3) +
-            c.vertex_is_boundary.capacity() +
-            c.edges.capacity() * sizeof(SceneUI::EditableEdge) +
-            c.polygon_edges.capacity() * sizeof(SceneUI::EditableEdge) +
-            c.faces.capacity() * sizeof(SceneUI::EditableFace) +
-            c.vertex_ref_data.capacity() * sizeof(SceneUI::EditableVertexRef) +
-            c.vertex_neighbor_data.capacity() * sizeof(int) +
-            c.vertex_neighbors.capacity() * sizeof(SceneUI::CacheSpan<int>) +
-            c.face_to_mesh_index.capacity() * sizeof(int) +
-            c.vertex_mark_stamps.capacity() * sizeof(uint32_t) +
-            c.triangle_mark_stamps.capacity() * sizeof(uint32_t);
-        size_t bucketBytes = c.spatial_buckets.capacity() * sizeof(SceneUI::EditableMeshCache::SpatialBucket) +
-                             c.vertex_spatial_indices.capacity() * sizeof(int);
-
-        // Total process working set, and the "unaccounted" remainder = everything
-        // that is NOT the editable cache's soup+structures (Embree CPU BVH, undo
-        // history, GPU staging buffers, the pre-subdivision base cage, ImGui/app).
-        // This tells us whether eliminating the soup (G3) actually targets the bulk
-        // of the footprint or whether the real bloat lives elsewhere.
-        // base_mesh_cache holds each node's modifier BASE mesh. Normally tiny (the
-        // pre-subdivision cage), but an Apply bakes the subdivided result back into
-        // base — prime suspect for a retained DUPLICATE full-res soup. Report its
-        // size, and whether THIS object's base shares the same Triangle objects as
-        // the editable soup (shared = no extra RAM; separate = a real duplicate).
-        size_t baseTris = 0, baseBytes = 0;
-        for (const auto& kv : ctx.scene.base_mesh_cache) {
-            baseTris += kv.second.size();
-            baseBytes += kv.second.capacity() * sizeof(std::shared_ptr<Triangle>) +
-                         kv.second.size() * sizeof(Triangle);
-        }
-        const char* baseShare = "n/a";
-        auto bmcIt = ctx.scene.base_mesh_cache.find(objectName);
-        if (bmcIt != ctx.scene.base_mesh_cache.end() && !bmcIt->second.empty() && !c.source_triangles.empty())
-            baseShare = (bmcIt->second.front().get() == c.source_triangles.front().get())
-                ? "SHARED-with-soup" : "SEPARATE-COPY";
-
-        const size_t totalRSS = meshprof_detail::workingSetBytes();
-        const size_t accounted = soupBytes + cacheBytes + bucketBytes;
-        const double unaccountedMB = (totalRSS > accounted) ? mb(totalRSS - accounted) : 0.0;
-        char buf[512];
-        std::snprintf(buf, sizeof(buf),
-            "[MESHMEM] %zu tris: Triangle soup=%.0f MB, editable cache=%.0f MB (spatial buckets %.0f MB), "
-            "sizeof(Triangle)=%zu B | base_mesh_cache=%zu tris %.0f MB (%s) | process RSS=%.0f MB, "
-            "unaccounted=%.0f MB (Embree BVH/undo/GPU/app)",
-            c.source_triangles.size(), mb(soupBytes), mb(cacheBytes + bucketBytes), mb(bucketBytes),
-            sizeof(Triangle), baseTris, mb(baseBytes), baseShare, mb(totalRSS), unaccountedMB);
-        SCENE_LOG_INFO(buf);
-    }
-
     return !editable_mesh_cache.vertices.empty();
 }
 
@@ -9436,8 +9379,12 @@ bool SceneUI::bevelSelectedEdges(UIContext& ctx, float width, int segments, bool
         // where the old sharp edge was (which visually reads as "the edge is still
         // there" and hides the bevel).
         const bool smooth = poly.ptNormals.size() == poly.pts.size();
-        for (size_t i = 1; i + 1 < poly.pts.size(); ++i) {
-            const Vec3 c = Vec3::cross(poly.pts[i] - poly.pts[0], poly.pts[i + 1] - poly.pts[0]);
+        const auto triangles = MeshEdit::triangulatePlanarPolygon(poly.pts, poly.normal);
+        for (const auto& tri : triangles) {
+            const size_t i0 = static_cast<size_t>(tri[0]);
+            const size_t i1 = static_cast<size_t>(tri[1]);
+            const size_t i2 = static_cast<size_t>(tri[2]);
+            const Vec3 c = Vec3::cross(poly.pts[i1] - poly.pts[i0], poly.pts[i2] - poly.pts[i0]);
             if (c.length_squared() <= 1e-20f) {
                 continue;  // collinear sliver — skip
             }
@@ -9445,17 +9392,17 @@ bool SceneUI::bevelSelectedEdges(UIContext& ctx, float width, int segments, bool
             if (!newTriangle) {
                 continue;
             }
-            const Vec3 n0 = smooth ? poly.ptNormals[0] : poly.normal;
-            const Vec3 n1 = smooth ? poly.ptNormals[i] : poly.normal;
-            const Vec3 n2 = smooth ? poly.ptNormals[i + 1] : poly.normal;
-            newTriangle->setOriginalVertexPosition(0, poly.pts[0]);
-            newTriangle->setOriginalVertexPosition(1, poly.pts[i]);
-            newTriangle->setOriginalVertexPosition(2, poly.pts[i + 1]);
+            const Vec3 n0 = smooth ? poly.ptNormals[i0] : poly.normal;
+            const Vec3 n1 = smooth ? poly.ptNormals[i1] : poly.normal;
+            const Vec3 n2 = smooth ? poly.ptNormals[i2] : poly.normal;
+            newTriangle->setOriginalVertexPosition(0, poly.pts[i0]);
+            newTriangle->setOriginalVertexPosition(1, poly.pts[i1]);
+            newTriangle->setOriginalVertexPosition(2, poly.pts[i2]);
             newTriangle->setOriginalVertexNormal(0, n0);
             newTriangle->setOriginalVertexNormal(1, n1);
             newTriangle->setOriginalVertexNormal(2, n2);
             newTriangle->set_normals(n0, n1, n2);
-            newTriangle->setUVCoordinates(faceUVs[0], faceUVs[i], faceUVs[i + 1]);
+            newTriangle->setUVCoordinates(faceUVs[i0], faceUVs[i1], faceUVs[i2]);
             newTriangle->markAABBDirty();
             newTriangle->updateTransformedVertices();
             beveledMesh.push_back(newTriangle);
@@ -9473,11 +9420,35 @@ bool SceneUI::bevelSelectedEdges(UIContext& ctx, float width, int segments, bool
     const std::vector<std::shared_ptr<Triangle>> afterDisplayMesh = evaluateDisplayMeshFromBase(beveledMesh, beforeModifierStack);
     const std::vector<std::shared_ptr<Triangle>> afterBaseMesh = cloneTriangleVectorForEdit(beveledMesh);
     const MeshModifiers::ModifierStack afterModifierStack = beforeModifierStack;
+    std::shared_ptr<DNA::GeometryDetail> beforeFlatGeometry;
+    for (const auto& object : ctx.scene.world.objects) {
+        auto flat = std::dynamic_pointer_cast<TriangleMesh>(object);
+        if (flat && flat->nodeName == objectName && flat->geometry) {
+            beforeFlatGeometry = std::make_shared<DNA::GeometryDetail>(*flat->geometry);
+            break;
+        }
+    }
     auto command = std::make_unique<ReplaceMeshGeometryCommand>(
         objectName, beforeDisplayMesh, afterDisplayMesh, currentBaseMesh, afterBaseMesh,
         beforeModifierStack, afterModifierStack);
     command->execute(ctx);
-    history.record(std::move(command));
+    if (beforeFlatGeometry) {
+        std::shared_ptr<DNA::GeometryDetail> afterFlatGeometry;
+        for (const auto& object : ctx.scene.world.objects) {
+            auto flat = std::dynamic_pointer_cast<TriangleMesh>(object);
+            if (flat && flat->nodeName == objectName && flat->geometry) {
+                afterFlatGeometry = std::make_shared<DNA::GeometryDetail>(*flat->geometry);
+                break;
+            }
+        }
+        if (afterFlatGeometry) {
+            history.record(std::make_unique<FlatMeshGeometryCommand>(
+                objectName, std::move(beforeFlatGeometry), std::move(afterFlatGeometry),
+                "Bevel Selected Edges"));
+        }
+    } else {
+        history.record(std::move(command));
+    }
     rebuildMeshCache(ctx.scene.world.objects);
     applyMeshShadingSettings(ctx, objectName, true);
 

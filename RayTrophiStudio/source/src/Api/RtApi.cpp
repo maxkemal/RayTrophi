@@ -2629,6 +2629,7 @@ Result getSimControlState(SimControlStateInfo& out) {
     out.script_sim_seconds = g_ctx->scene.scriptSimSeconds();
     out.frame = ui.timeline.getCurrentFrame();
     out.playing = ui.timeline.isPlaying();
+    out.dropped_seeds = g_ctx->scene.lastResetDroppedFluidSeeds();
     return Result::success();
 }
 

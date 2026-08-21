@@ -21,6 +21,9 @@
 #include "scene_ui_gas.hpp"  // For GasUI::selected_gas_volume
 #include "scene_ui_forcefield.hpp"
 #include "scene_ui_fluid_billboards.hpp"
+#include "MeshEdit/SplineObject.h"
+#include "MeshEdit/ProfileSplineOverlay.h"
+#include "MeshEdit/ProfileSplinePointGizmo.h"
 #include "Backend/IViewportBackend.h"
 #include <Backend/VulkanBackend.h>
 #include <Backend/OptixBackend.h>
@@ -161,6 +164,10 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             ctx.selection.selected.object &&
             !ctx.selection.selected.object->getNodeName().empty()) {
             return ctx.selection.selected.object->getNodeName();
+        }
+        if (ctx.selection.selected.type == SelectableType::Object &&
+            ctx.selection.selected.spline_object) {
+            return ctx.selection.selected.spline_object->nodeName;
         }
         if (ctx.selection.selected.type == SelectableType::ForceField &&
             ctx.selection.selected.force_field) {
@@ -2850,6 +2857,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     if (sel.selected.type == SelectableType::Object && sel.selected.object) {
         is_visible = sel.selected.object->visible;
     }
+    else if (sel.selected.type == SelectableType::Object && sel.selected.spline_object) {
+        is_visible = sel.selected.spline_object->visible;
+    }
     else if (sel.selected.type == SelectableType::Light && sel.selected.light) is_visible = sel.selected.light->visible;
     else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) is_visible = sel.selected.vdb_volume->visible;
     else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) is_visible = sel.selected.gas_volume->visible;
@@ -3388,6 +3398,15 @@ mesh_edit_changed_confirmed:
             objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
         }
     }
+    else if (sel.selected.type == SelectableType::Object && sel.selected.spline_object) {
+        Matrix4x4 mat = sel.selected.spline_object->transform
+            ? sel.selected.spline_object->transform->getPivotMatrix()
+            : Matrix4x4::identity();
+        objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
+        objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
+        objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
+        objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
+    }
     else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
         Matrix4x4 mat = sel.selected.gas_volume->getPivotMatrix();
         objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
@@ -3426,7 +3445,7 @@ mesh_edit_changed_confirmed:
     // �������������������������������������������������������������������������
     const bool can_edit_single_pivot =
         sel.multi_selection.size() == 1 &&
-        ((sel.selected.type == SelectableType::Object && sel.selected.object) ||
+        ((sel.selected.type == SelectableType::Object && (sel.selected.object || sel.selected.spline_object)) ||
          (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
          (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
 
@@ -3719,6 +3738,12 @@ mesh_edit_changed_confirmed:
             drag_light = sel.selected.light;
             drag_start_light_state = LightState::capture(*drag_light);
         }
+        else if (sel.selected.type == SelectableType::Object && sel.selected.spline_object) {
+            if (!pivot_edit_mode && sel.selected.spline_object->transform) {
+                drag_start_state.matrix = sel.selected.spline_object->transform->base;
+                drag_object_name = sel.selected.spline_object->nodeName;
+            }
+        }
         else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             // START TRANSFORM RECORDING (Normal drag without Shift)
             if (!pivot_edit_mode) {
@@ -3733,7 +3758,19 @@ mesh_edit_changed_confirmed:
 
     // END DRAG (Release)
     if (!is_using && was_using_gizmo) {
-        if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+        if (sel.selected.type == SelectableType::Object && sel.selected.spline_object) {
+            if (!pivot_edit_mode && sel.selected.spline_object->transform) {
+                TransformState final_state;
+                final_state.matrix = sel.selected.spline_object->transform->base;
+                bool changed = false;
+                for (int i = 0; i < 4; ++i)
+                    for (int j = 0; j < 4; ++j)
+                        if (std::abs(final_state.matrix.m[i][j] - drag_start_state.matrix.m[i][j]) > 0.0001f)
+                            changed = true;
+                if (changed) ProjectManager::getInstance().markModified();
+            }
+        }
+        else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             // END TRANSFORM RECORDING
             if (pivot_edit_mode) {
                 ProjectManager::getInstance().markModified();
@@ -4305,6 +4342,20 @@ mesh_edit_changed_confirmed:
                  }
                  ctx.backend_ptr->resetAccumulation();
              }
+        }
+        else if (sel.selected.type == SelectableType::Object && sel.selected.spline_object) {
+            Matrix4x4 newMat;
+            newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
+            newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
+            newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
+            newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
+            const float deltaMagnitude = sqrtf(deltaPos.x * deltaPos.x + deltaPos.y * deltaPos.y + deltaPos.z * deltaPos.z);
+            if ((deltaMagnitude >= 0.0001f || operation != ImGuizmo::TRANSLATE) && sel.selected.spline_object->transform) {
+                sel.selected.spline_object->transform->setPivotMatrix(newMat);
+                sel.selected.has_cached_aabb = false;
+                sel.updatePositionFromSelection();
+                ProjectManager::getInstance().markModified();
+            }
         }
         else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             // SINGLE SELECTION or Rotate/Scale operations
@@ -4891,6 +4942,7 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
     // in both Solid and Rendered viewport modes (the GPU edit overlay is Edit +
     // Solid only). Self-guards on sculpt mode / mask presence.
     drawSculptMaskViewportOverlay(ctx);
+    MeshEdit::drawProfileSplineOverlay(ctx);
     // While a sculpt session owns the selected object, suppress the selection bbox /
     // outline / transform gizmo: the brush draws its own cursor + mask overlay, and the
     // selection outline kept re-tracing the brush-deformed dab edges (distracting + it
@@ -4906,7 +4958,9 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
         if (mesh_overlay_settings.enabled && mesh_workspace_mode == MeshWorkspaceMode::Edit) {
             drawEditableMeshOverlay(ctx);
         }
-        drawTransformGizmo(ctx);
+        if (!MeshEdit::drawProfileSplinePointGizmo(ctx)) {
+            drawTransformGizmo(ctx);
+        }
     } else if (auto* outline_vpb =
                    dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
         // Selection/gizmos gone this frame — drop the GPU outline too

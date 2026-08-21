@@ -43,6 +43,7 @@
 #include "FractureGenerator.h"  // Convex Voronoi pre-fracture (destruction Faz 1)
 #include "FractureSourceAdapter.h"
 #include "MeshModifiers.h"      // facadesToFlatMesh (add-object-flat collapse)
+#include "MeshEdit/SplineObjectService.h"
 #include "TriangleMesh.h"       // complete type for shared_ptr<TriangleMesh>→shared_ptr<Hittable> upcast
 #include "UI/TemplateHubUI.h"
 #include "Template/UserTemplateManager.h"
@@ -973,6 +974,32 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  ImGui::Separator();
                  if (ImGui::MenuItem("Procedural Generator...")) {
                      show_procedural_generator = true;
+                 }
+                 ImGui::EndMenu();
+             }
+
+             if (ImGui::BeginMenu("2D Spline")) {
+                 ImGui::TextDisabled("Authoring source only — no mesh is generated");
+                 ImGui::Separator();
+                 auto addSpline = [&](MeshEdit::SplinePrimitiveType type,
+                                      const char* label, const char* name,
+                                      MeshEdit::SplinePlane plane) {
+                     if (ImGui::MenuItem(label)) {
+                         MeshEdit::addSplinePrimitiveObject(
+                             ctx, history, type, name, plane);
+                         g_ProjectManager.markModified();
+                         addViewportMessage(std::string("Added 2D Spline: ") + name);
+                     }
+                 };
+                 // The engine is Y-up. Create the source in the canonical XZ
+                 // ground/curve plane; users orient it with the normal object
+                 // transform instead of duplicating Add entries for every plane.
+                 if (ImGui::BeginMenu("Profile Plane (XZ / Y Up)")) {
+                     addSpline(MeshEdit::SplinePrimitiveType::Circle, "Circle", "CircleSpline", MeshEdit::SplinePlane::XZ);
+                     addSpline(MeshEdit::SplinePrimitiveType::Rectangle, "Rectangle", "RectangleSpline", MeshEdit::SplinePlane::XZ);
+                     addSpline(MeshEdit::SplinePrimitiveType::OpenLine, "Open Line", "LineSpline", MeshEdit::SplinePlane::XZ);
+                     addSpline(MeshEdit::SplinePrimitiveType::OpenArc, "Open Arc", "ArcSpline", MeshEdit::SplinePlane::XZ);
+                     ImGui::EndMenu();
                  }
                  ImGui::EndMenu();
              }
@@ -2855,4 +2882,3 @@ void SceneUI::addProceduralStaircase(UIContext& ctx) {
 }
 
 #endif
-

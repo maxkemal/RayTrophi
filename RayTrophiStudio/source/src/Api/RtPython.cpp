@@ -35,6 +35,7 @@
 #include "RtPythonMassTransfer.h"
 #include "RtPythonTemplates.h"
 #include "RtPythonAgent.h"
+#include "RtPythonMeshEdit.h"
 
 namespace py = pybind11;
 
@@ -335,6 +336,48 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     mesh.def("recompute_normals", [](const std::string& name) {
         requireResult(rtapi::recomputeMeshNormals(name));
     }, py::arg("name"));
+    rtpy::registerMeshEditBindings(mesh);
+
+    // ── 2D Spline authoring (shared rtapi core) ─────────────────────────
+    py::module_ spline = module.def_submodule("spline", "2D spline authoring and evaluation source");
+    spline.def("list", []() {
+        std::vector<rtapi::SplineInfo> infos;
+        requireResult(rtapi::listSplines(infos));
+        py::list result;
+        for (const auto& info : infos) {
+            py::dict item;
+            item["name"] = info.name;
+            item["curve_type"] = info.curve_type;
+            item["plane"] = info.plane;
+            item["closed"] = info.closed;
+            item["point_count"] = info.point_count;
+            result.append(item);
+        }
+        return result;
+    });
+    spline.def("get", [](const std::string& name) {
+        std::string payload;
+        requireResult(rtapi::getSpline(name, payload));
+        return payload;
+    }, py::arg("name"));
+    spline.def("set", [](const std::string& name, const std::string& payload) {
+        requireResult(rtapi::setSpline(name, payload));
+    }, py::arg("name"), py::arg("payload"));
+    spline.def("insert_point", [](const std::string& name, int segment, float t) {
+        int index = -1;
+        requireResult(rtapi::insertSplinePoint(name, segment, t, index));
+        return index;
+    }, py::arg("name"), py::arg("segment"), py::arg("t"));
+    spline.def("subdivide", [](const std::string& name, const std::vector<int>& segments, int cuts) {
+        int index = -1;
+        requireResult(rtapi::subdivideSpline(name, segments, cuts, index));
+        return index;
+    }, py::arg("name"), py::arg("segments"), py::arg("cuts") = 1);
+    spline.def("extrude", [](const std::string& name, int endpoint, py::handle position) {
+        int index = -1;
+        requireResult(rtapi::extrudeSplineEndpoint(name, endpoint, vec3FromPython(position), index));
+        return index;
+    }, py::arg("name"), py::arg("endpoint"), py::arg("position"));
 
     // ── Mesh Modifiers (Faz 5.2b) ───────────────────────────────────────
     py::module_ modifiers = module.def_submodule("modifiers", "Mesh modifier stack: subdivision, simple, smooth");
@@ -653,13 +696,18 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["script_sim_seconds"] = info.script_sim_seconds;
         d["frame"] = info.frame;
         d["playing"] = info.playing;
+        // ★★★★ Fluid domains the most recent auto-reset wiped and did not
+        // refill (one-shot fluid.seed(), no reseed recipe) -- see
+        // docs/dev/NEXT_BUILD_CHECKS.md §A1. Usually empty.
+        d["dropped_seeds"] = info.dropped_seeds;
         return d;
     },
     "Who last moved the solvers, and an epoch that changes whenever anything "
     "did. Read it before and after a measurement: if the epoch moved, the "
     "solvers were re-posed under you and the numbers are not a physics "
     "result. Without this a reverted pose and a body that never moved read "
-    "exactly the same.");
+    "exactly the same. 'dropped_seeds' names any fluid domain whose one-shot "
+    "seed the most recent auto-reset wiped without refilling.");
 
     physics.def("set_gravity", [](const py::handle& gravity) {
         requireResult(rtapi::setPhysicsGravity(vec3FromPython(gravity)));
@@ -3294,6 +3342,29 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "step, in execution order. The graph does not schedule couplings -- "
        "comparing the two is the point. 'traced' false means the solver was "
        "never asked; an empty 'actual' with traced true is a measurement.");
+    sim_graph.def("domain_intersections", [](const std::string& domain) {
+        std::vector<rtapi::SimIntersectionEntry> entries;
+        requireResult(rtapi::simDomainIntersections(domain, entries));
+        py::list arr;
+        for (const auto& e : entries) {
+            py::dict d;
+            d["name"] = e.name;
+            d["kind"] = e.kind;
+            d["intersects"] = e.intersects;
+            d["measurable"] = e.measurable;
+            arr.append(d);
+        }
+        return arr;
+    }, py::arg("domain"),
+       "Force fields and colliders whose world-space bounds geometrically "
+       "overlap this domain's box -- a MEASUREMENT, never a declared link: "
+       "neither ForceFieldInfo nor SimulationColliderInfo carries a `domain` "
+       "field, because force is spatial, not declared to a region (section "
+       "9.1). Bounding-volume overlap, not exact clipping: an 'obb' collider's "
+       "box ignores rotation (can only over-report, never hide a real "
+       "intersection), and 'measurable' false means a mesh_sdf/convex/mesh_bvh "
+       "collider carried no box to test at all -- reported, not guessed as "
+       "non-intersecting.");
     // N6 — the bake, and the state a script needs to reason about it.
     py::module_ sim_cache = module.def_submodule(
         "sim_cache", "Simulation bake and timeline cache state");
@@ -3326,18 +3397,39 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::simClearCache());
     }, "Drop the timeline cache and unbind the disk bake (free-run preview).");
 
-    sim_graph.def("surface_attributes", [](const std::string& object) {
-        return rtapi::simListSurfaceAttributes(object);
-    }, py::arg("object"),
-       "Per-element MSF attributes on one object: temperature, char, melt, "
-       "moisture, fuel_remaining, mass_loss. Empty when the object carries no "
-       "Material State Field -- which means UNMEASURED, not zero.");
-    sim_graph.def("attributes", [](const std::string& domain) {
-        return rtapi::simListAttributes(domain);
-    }, py::arg("domain"),
-       "Per-particle attributes that actually exist on this domain. This is the "
-       "naming layer: until now the only way to learn an attribute existed was "
-       "to read the solver source.");
+    // ── rt.attr: unified attribute discovery + measurement (section 9.5-9.6) ──
+    // ★ Merges sim_graph.attributes (domain) and sim_graph.surface_attributes
+    // (object) into one surface that also covers world, and adds stats():
+    // until now, measuring a named attribute's value required placing a
+    // Field/Surface Inspect node in a graph and evaluating it.
+    py::module_ attr = module.def_submodule("attr",
+        "Attribute discovery and measurement across object/domain/world scope.");
+    attr.def("list", [](const std::string& scope, const std::string& id) {
+        return rtapi::listAttributes(scope, id);
+    }, py::arg("scope"), py::arg("id") = std::string(),
+       "Attribute names that actually exist for this scope ('object' | "
+       "'domain' | 'world', id ignored for world -- there is only one). "
+       "Discoverability: until now the only way to learn an attribute existed "
+       "was to read the solver source.");
+    attr.def("stats", [](const std::string& scope, const std::string& id,
+                         const std::string& name) {
+        rtapi::AttrStatsInfo s;
+        requireResult(rtapi::getAttributeStats(scope, id, name, s));
+        py::dict d;
+        d["available"] = s.available;
+        d["count"] = s.count;
+        d["array_size"] = s.array_size;
+        d["in_sync"] = s.in_sync;
+        d["min_value"] = s.min_value;
+        d["max_value"] = s.max_value;
+        d["mean_value"] = s.mean_value;
+        return d;
+    }, py::arg("scope"), py::arg("id"), py::arg("name"),
+       "Measure one named attribute directly, without building a graph around "
+       "it. 'available' false means it could NOT be measured (no live "
+       "particles, no MSF field, unknown name) -- not the same as a value that "
+       "measured zero. A world field is a single scalar: min/max/mean all read "
+       "the same number on purpose.");
 
     py::module_ viewport = module.def_submodule("viewport",
         "Viewport state and per-frame capture for render.probe().");

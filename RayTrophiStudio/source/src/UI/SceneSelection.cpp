@@ -3,6 +3,7 @@
 #include "Camera.h"
 #include "Triangle.h"
 #include "TriangleMesh.h"
+#include "MeshEdit/SplineObject.h"
 #include "Matrix4x4.h"
 #include "PointLight.h"
 #include "DirectionalLight.h"
@@ -22,11 +23,13 @@
 namespace {
 Transform* selectedObjectTransform(const SelectableItem& item) {
     if (item.mesh_object && item.mesh_object->transform) return item.mesh_object->transform.get();
+    if (item.spline_object && item.spline_object->transform) return item.spline_object->transform.get();
     return item.object ? item.object->getTransformPtr() : nullptr;
 }
 
 bool selectedObjectBounds(const SelectableItem& item, AABB& bounds) {
     if (item.mesh_object) return item.mesh_object->bounding_box(0, 0, bounds);
+    if (item.spline_object) return item.spline_object->bounding_box(0, 0, bounds);
     return item.object && item.object->bounding_box(0, 0, bounds);
 }
 }
@@ -61,7 +64,7 @@ void SceneSelection::updatePositionFromSelection() {
             break;
             
         case SelectableType::Object:
-            if (selected.mesh_object || selected.object) {
+            if (selected.mesh_object || selected.spline_object || selected.object) {
                 // Get transform from TransformHandle if available
                 Transform* transform = selectedObjectTransform(selected);
                 if (transform) {
@@ -170,7 +173,7 @@ static void ApplyTransformToItem(SelectableItem& item, const Matrix4x4& delta_tr
             break;
             
         case SelectableType::Object:
-            if (item.mesh_object || item.object) {
+            if (item.mesh_object || item.spline_object || item.object) {
                 Transform* transform = selectedObjectTransform(item);
                 if (transform) {
                     Matrix4x4 current = transform->getPivotMatrix();
@@ -286,7 +289,7 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
             break;
             
         case SelectableType::Object:
-            if (selected.mesh_object || selected.object) {
+            if (selected.mesh_object || selected.spline_object || selected.object) {
                 Transform* transform = selectedObjectTransform(selected);
                 if (transform) {
                     result = transform->getPivotMatrix();
@@ -618,6 +621,17 @@ void SceneSelection::selectSimulationDomain(int particle_system_index, int domai
     item.type = SelectableType::SimulationDomain;
     item.particle_system_index = particle_system_index;
     item.simulation_domain_index = domain_index;
+    item.name = name;
+    addToSelection(item);
+}
+
+void SceneSelection::selectObject(std::shared_ptr<MeshEdit::SplineObject> spline,
+                                  int index, const std::string& name) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::Object;
+    item.spline_object = std::move(spline);
+    item.object_index = index;
     item.name = name;
     addToSelection(item);
 }

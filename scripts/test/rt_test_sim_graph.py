@@ -55,7 +55,7 @@ log("domain: %s (%d particles)" % (
     next(d.get("particle_count", 0) for d in domains if d["name"] == domain_name)))
 
 log("== attribute discovery (the naming layer) ==")
-attrs = rt.sim_graph.attributes(domain_name)
+attrs = rt.attr.list("domain", domain_name)
 log("   %s" % (attrs,))
 if not attrs:
     # Legitimate for a domain that has never been stepped — but then the naming
@@ -156,6 +156,37 @@ for n in rt.sim_graph.nodes(SCOPE, OWNER):
     check("attribute array is in sync with the particle count",
           n.get("array_in_sync", True),
           "array=%d particles=%d" % (n.get("array_size", -1), n["particle_count"]))
+
+log("== rt.attr unifies discovery/measurement with the node-based reading ==")
+# ★ Differential test: rt.attr.list/stats must not just exist, they must AGREE
+# with the Field Inspect node reading taken above -- an instrument that only
+# ever agrees with itself is not a measurement.
+attr_list_domain = rt.attr.list("domain", domain_name)
+check("rt.attr.list('domain', ...) matches the naming layer's own list",
+      set(attr_list_domain) == set(attrs), "%s != %s" % (attr_list_domain, attrs))
+
+node_reading = None
+for n in rt.sim_graph.nodes(SCOPE, OWNER):
+    if n["type"] == "sim.field_inspect":
+        node_reading = n
+        break
+if node_reading and node_reading.get("stats_available"):
+    s = rt.attr.stats("domain", domain_name, node_reading["channel"])
+    check("rt.attr.stats is available for a channel the node measured",
+          s["available"], "%s" % (s,))
+    check("rt.attr.stats matches the Field Inspect node exactly",
+          s["available"] and
+          abs(s["min_value"] - node_reading["min_value"]) < 1e-6 and
+          abs(s["max_value"] - node_reading["max_value"]) < 1e-6 and
+          abs(s["mean_value"] - node_reading["mean_value"]) < 1e-6,
+          "%s vs node %s" % (s, node_reading))
+else:
+    vacuous("rt.attr.stats matches the Field Inspect node exactly",
+            "the node itself reported no measurable reading")
+
+unknown = rt.attr.stats("domain", domain_name, "no_such_attribute_xyz")
+check("an unknown attribute name reports unavailable, not zero",
+      not unknown["available"], "%s" % (unknown,))
 
 log("== evaluating twice must not disturb the solver ==")
 def particle_count(name):
@@ -423,6 +454,48 @@ check("authored ambient_kelvin restored exactly",
       "%.6f != %.6f" % (restored["ambient_kelvin"], authored_thermal["ambient_kelvin"]))
 check("no overrides held after clear", rt.sim_graph.override_count() == 0)
 rt.sim_graph.clear("world", "")
+
+log("== rt.attr on world scope: a single scalar, not a population ==")
+world_attrs = rt.attr.list("world", "")
+check("world exposes its four thermal fields",
+      set(world_attrs) == {"ambient_kelvin", "kelvin_per_unit",
+                           "convection_coefficient", "oxygen_availability"},
+      "%s" % (world_attrs,))
+ws = rt.attr.stats("world", "", "ambient_kelvin")
+check("world attr stats matches rt.world.get_thermal() exactly",
+      ws["available"] and abs(ws["mean_value"] - restored["ambient_kelvin"]) < 1e-6,
+      "%s vs %.6f" % (ws, restored["ambient_kelvin"]))
+check("a scalar world field reads min == max == mean",
+      ws["min_value"] == ws["max_value"] == ws["mean_value"], "%s" % (ws,))
+
+log("== sim_graph.domain_intersections: MEASURED, not declared (section 9.6) ==")
+# ★ Neither ForceFieldInfo nor SimulationColliderInfo carries a `domain` field
+# on purpose (section 1.3/9.1) -- so the only way to know a force reaches a
+# domain is to overlap their world-space bounds. Two fields, one clearly
+# inside the domain's box and one clearly far outside, prove the report tells
+# them apart rather than always reporting true or always false.
+dbox = rt.fluid.get(domain_name)
+dmin, dmax = dbox["domain_min"], dbox["domain_max"]
+center = tuple((dmin[i] + dmax[i]) * 0.5 for i in range(3))
+far = tuple(dmin[i] - 1000.0 for i in range(3))
+near_name = "IntersectTestNear_%d" % os.getpid()
+far_name = "IntersectTestFar_%d" % os.getpid()
+rt.forcefield.create("wind", near_name)
+rt.forcefield.set_param(near_name, shape="sphere", position=center, falloff_radius=0.1)
+rt.forcefield.create("wind", far_name)
+rt.forcefield.set_param(far_name, shape="sphere", position=far, falloff_radius=0.1)
+try:
+    report = rt.sim_graph.domain_intersections(domain_name)
+    by_name = {e["name"]: e for e in report}
+    check("a force field placed at the domain's center is reported intersecting",
+          near_name in by_name and by_name[near_name]["measurable"]
+          and by_name[near_name]["intersects"], "%s" % (by_name.get(near_name),))
+    check("a force field placed far outside is reported NOT intersecting",
+          far_name in by_name and by_name[far_name]["measurable"]
+          and not by_name[far_name]["intersects"], "%s" % (by_name.get(far_name),))
+finally:
+    rt.forcefield.remove(near_name)
+    rt.forcefield.remove(far_name)
 
 log("")
 if FAIL:

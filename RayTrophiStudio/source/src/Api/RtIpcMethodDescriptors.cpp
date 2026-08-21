@@ -521,6 +521,41 @@ static const MethodDescriptor desc_anim_trigger_graph_param = {
 };
 static const MethodRegistration reg_anim_trigger_graph_param(desc_anim_trigger_graph_param);
 
+static const MethodParam params_attr_list[] = {
+    {"scope", "string", true, "", nullptr, nullptr},
+    {"id", "string", false, "", "", nullptr},
+};
+static const MethodDescriptor desc_attr_list = {
+    "attr.list", "attr",
+    "List the attribute names that exist for an object/domain/world scope",
+    "Unifies the old sim_graph.attributes (domain) and sim_graph.surface_attributes (object) into one surface that also covers world.",
+    "read", "Read", false, "any",
+    "attr|list|simulation|attributes|discover",
+    "attr.stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_attr_list, 2,
+    true
+};
+static const MethodRegistration reg_attr_list(desc_attr_list);
+
+static const MethodParam params_attr_stats[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"scope", "string", true, "", nullptr, nullptr},
+    {"id", "string", false, "", "", nullptr},
+};
+static const MethodDescriptor desc_attr_stats = {
+    "attr.stats", "attr",
+    "Measure one named attribute directly: count, min, max, mean",
+    "available=false means the attribute could NOT be measured (no live particles, no MSF field, unknown name) - not the same as a value that measured zero. A world field is a single scalar: min/max/mean all read the same number.",
+    "read", "Read", false, "any",
+    "attr|stats|simulation|attributes|measure",
+    "attr.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_attr_stats, 3,
+    true
+};
+static const MethodRegistration reg_attr_stats(desc_attr_stats);
+
 static const MethodParam params_batch[] = {
     {"calls", "array", true, "Array of {method, params} objects", nullptr, nullptr},
 };
@@ -2358,6 +2393,229 @@ static const MethodDescriptor desc_material_textures = {
     true
 };
 static const MethodRegistration reg_material_textures(desc_material_textures);
+
+static const MethodParam params_mesh_asset_validate[] = {
+    {"object", "string", false, "", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_asset_validate = {
+    "mesh.asset.validate", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|asset|validate",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_asset_validate, 1,
+    false
+};
+static const MethodRegistration reg_mesh_asset_validate(desc_mesh_asset_validate);
+
+static const MethodParam params_mesh_operation_commit_positions[] = {
+    {"object", "string", false, "", "", nullptr},
+    {"positions", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_mesh_operation_commit_positions = {
+    "mesh.operation.commit_positions", "mesh",
+    nullptr,
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "mesh|operation|commit|positions",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_operation_commit_positions, 2,
+    false
+};
+static const MethodRegistration reg_mesh_operation_commit_positions(desc_mesh_operation_commit_positions);
+
+static const MethodParam params_mesh_operation_plan[] = {
+    {"backend", "string", false, "", "auto", nullptr},
+    {"object", "string", false, "", "", nullptr},
+    {"tool", "string", false, "", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_operation_plan = {
+    "mesh.operation.plan", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|operation|plan",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_operation_plan, 3,
+    false
+};
+static const MethodRegistration reg_mesh_operation_plan(desc_mesh_operation_plan);
+
+static const MethodDescriptor desc_mesh_operation_self_test = {
+    "mesh.operation.self_test", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|operation|self|test",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    false
+};
+static const MethodRegistration reg_mesh_operation_self_test(desc_mesh_operation_self_test);
+
+static const MethodParam params_mesh_profile_loft_commit[] = {
+    {"object", "string", true, "Destination mesh object name", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_profile_loft_commit = {
+    "mesh.profile.loft.commit", "mesh",
+    "Commit an undoable flat DNA SoA mesh generated from multiple spline sections",
+    nullptr,
+    "write", "SceneWrite", true, "any",
+    "mesh|profile|loft|commit|spline",
+    "mesh.profile.loft.preview|mesh.profile.loft.self_test",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_profile_loft_commit, 1,
+    true
+};
+static const MethodRegistration reg_mesh_profile_loft_commit(desc_mesh_profile_loft_commit);
+
+static const MethodDescriptor desc_mesh_profile_loft_preview = {
+    "mesh.profile.loft.preview", "mesh",
+    "Preview a loft between multiple closed spline sections",
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|profile|loft|preview|spline",
+    "mesh.profile.loft.commit|mesh.profile.loft.self_test",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_mesh_profile_loft_preview(desc_mesh_profile_loft_preview);
+
+static const MethodDescriptor desc_mesh_profile_loft_self_test = {
+    "mesh.profile.loft.self_test", "mesh",
+    "Run the deterministic profile loft core self-test",
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|profile|loft|self|test",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_mesh_profile_loft_self_test(desc_mesh_profile_loft_self_test);
+
+static const MethodParam params_mesh_profile_revolve_commit[] = {
+    {"object", "string", false, "", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_profile_revolve_commit = {
+    "mesh.profile.revolve.commit", "mesh",
+    nullptr,
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "mesh|profile|revolve|commit",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_profile_revolve_commit, 1,
+    false
+};
+static const MethodRegistration reg_mesh_profile_revolve_commit(desc_mesh_profile_revolve_commit);
+
+static const MethodDescriptor desc_mesh_profile_revolve_preview = {
+    "mesh.profile.revolve.preview", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|profile|revolve|preview",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    false
+};
+static const MethodRegistration reg_mesh_profile_revolve_preview(desc_mesh_profile_revolve_preview);
+
+static const MethodDescriptor desc_mesh_profile_revolve_self_test = {
+    "mesh.profile.revolve.self_test", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|profile|revolve|self|test",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    false
+};
+static const MethodRegistration reg_mesh_profile_revolve_self_test(desc_mesh_profile_revolve_self_test);
+
+static const MethodParam params_mesh_profile_sweep_commit[] = {
+    {"object", "string", false, "", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_profile_sweep_commit = {
+    "mesh.profile.sweep.commit", "mesh",
+    nullptr,
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "mesh|profile|sweep|commit",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_profile_sweep_commit, 1,
+    false
+};
+static const MethodRegistration reg_mesh_profile_sweep_commit(desc_mesh_profile_sweep_commit);
+
+static const MethodDescriptor desc_mesh_profile_sweep_preview = {
+    "mesh.profile.sweep.preview", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|profile|sweep|preview",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    false
+};
+static const MethodRegistration reg_mesh_profile_sweep_preview(desc_mesh_profile_sweep_preview);
+
+static const MethodDescriptor desc_mesh_profile_sweep_self_test = {
+    "mesh.profile.sweep.self_test", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|profile|sweep|self|test",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    false
+};
+static const MethodRegistration reg_mesh_profile_sweep_self_test(desc_mesh_profile_sweep_self_test);
+
+static const MethodParam params_mesh_tools_describe[] = {
+    {"tool", "string", false, "", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_tools_describe = {
+    "mesh.tools.describe", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|tools|describe",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_tools_describe, 1,
+    false
+};
+static const MethodRegistration reg_mesh_tools_describe(desc_mesh_tools_describe);
+
+static const MethodParam params_mesh_tools_list[] = {
+    {"include_unavailable", "bool", false, "", "false", nullptr},
+    {"workspace", "string", false, "", "edit", nullptr},
+};
+static const MethodDescriptor desc_mesh_tools_list = {
+    "mesh.tools.list", "mesh",
+    nullptr,
+    nullptr,
+    "read", "Read", false, "any",
+    "mesh|tools|list",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_tools_list, 2,
+    false
+};
+static const MethodRegistration reg_mesh_tools_list(desc_mesh_tools_list);
 
 static const MethodParam params_modifiers_add[] = {
     {"object", "string", true, "", nullptr, nullptr},
@@ -4471,10 +4729,10 @@ static const MethodRegistration reg_select_object(desc_select_object);
 static const MethodDescriptor desc_sim_control_state = {
     "sim.control_state", "sim",
     "Who is currently driving the solvers, and an epoch that changes whenever anything re-poses them",
-    "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops.",
+    "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops. dropped_seeds names any fluid domain whose one-shot fluid.seed() (no persistent=true) the most recent auto-reset wiped and did NOT refill -- that auto-reset fires from a config-signature change ANYWHERE in the scene (e.g. an unrelated fluid.create_domain), so a domain's particles can go to zero with no error at all; check this field when that happens instead of assuming a reader fault.",
     "read", "Read", false, "any",
-    "sim|control|state|simulation|epoch|driver|timeline|measure|verify",
-    "physics.step|timeline.set_frame|timeline.get_frame|scene.get_world_transform",
+    "sim|control|state|simulation|epoch|driver|timeline|measure|verify|fluid|seed",
+    "physics.step|timeline.set_frame|timeline.get_frame|scene.get_world_transform|fluid.seed|fluid.create_domain",
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
     true
@@ -4561,22 +4819,6 @@ static const MethodDescriptor desc_sim_graph_apply = {
     true
 };
 static const MethodRegistration reg_sim_graph_apply(desc_sim_graph_apply);
-
-static const MethodParam params_sim_graph_attributes[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-};
-static const MethodDescriptor desc_sim_graph_attributes = {
-    "sim_graph.attributes", "sim_graph",
-    "List the attributes a simulation domain exposes",
-    nullptr,
-    "read", "Read", false, "any",
-    "sim_graph|sim|graph|attributes|simulation|nodes",
-    nullptr,
-    nullptr, nullptr, nullptr, nullptr,
-    params_sim_graph_attributes, 1,
-    true
-};
-static const MethodRegistration reg_sim_graph_attributes(desc_sim_graph_attributes);
 
 static const MethodParam params_sim_graph_clear[] = {
     {"scope", "string", true, "", nullptr, nullptr},
@@ -4676,6 +4918,22 @@ static const MethodDescriptor desc_sim_graph_delete = {
 };
 static const MethodRegistration reg_sim_graph_delete(desc_sim_graph_delete);
 
+static const MethodParam params_sim_graph_domain_intersections[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_sim_graph_domain_intersections = {
+    "sim_graph.domain_intersections", "sim_graph",
+    "Report which force fields and colliders geometrically overlap a domain's box",
+    "A MEASUREMENT, not a declared link - neither force fields nor colliders carry a domain field, because force is spatial. Bounding-volume overlap, not exact clipping: an obb collider's box ignores rotation (over-reports only, never hides a real intersection); mesh_sdf/convex/mesh_bvh colliders report measurable=false rather than a guessed non-intersection.",
+    "read", "Read", false, "any",
+    "sim_graph|sim|graph|domain|intersections|simulation|nodes|forcefield|collider|measure|diagnostics",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_sim_graph_domain_intersections, 1,
+    true
+};
+static const MethodRegistration reg_sim_graph_domain_intersections(desc_sim_graph_domain_intersections);
+
 static const MethodParam params_sim_graph_evaluate[] = {
     {"scope", "string", true, "", nullptr, nullptr},
     {"owner", "string", false, "", "", nullptr},
@@ -4763,21 +5021,105 @@ static const MethodDescriptor desc_sim_graph_set_node_value = {
 };
 static const MethodRegistration reg_sim_graph_set_node_value(desc_sim_graph_set_node_value);
 
-static const MethodParam params_sim_graph_surface_attributes[] = {
-    {"object", "string", true, "", nullptr, nullptr},
+static const MethodParam params_spline_extrude[] = {
+    {"name", "string", true, "Spline object name", nullptr, nullptr},
+    {"endpoint", "int", true, "0 for first endpoint or last point index", nullptr, nullptr},
+    {"position", "float[3]", true, "New control point position", nullptr, nullptr},
 };
-static const MethodDescriptor desc_sim_graph_surface_attributes = {
-    "sim_graph.surface_attributes", "sim_graph",
-    "List the surface attributes an object exposes to simulation nodes",
-    nullptr,
-    "read", "Read", false, "any",
-    "sim_graph|sim|graph|surface|attributes|simulation|nodes",
-    nullptr,
+static const MethodDescriptor desc_spline_extrude = {
+    "spline.extrude", "spline",
+    "Extrude an open spline endpoint to a new control point",
+    "Only endpoint 0 or the final point is accepted, and closed splines are rejected.",
+    "write", "SceneWrite", false, "{index:int}",
+    "spline|extrude|endpoint|profile",
+    "spline.get|spline.insert_point",
     nullptr, nullptr, nullptr, nullptr,
-    params_sim_graph_surface_attributes, 1,
+    params_spline_extrude, 3,
     true
 };
-static const MethodRegistration reg_sim_graph_surface_attributes(desc_sim_graph_surface_attributes);
+static const MethodRegistration reg_spline_extrude(desc_spline_extrude);
+
+static const MethodParam params_spline_get[] = {
+    {"name", "string", true, "Spline object name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_spline_get = {
+    "spline.get", "spline",
+    "Read the versioned JSON authoring payload of a spline",
+    "The payload includes curve type, plane, closed state, transform and all point/handle data.",
+    "read", "Read", false, "SplinePayload",
+    "spline|get|serialize|profile|curve",
+    "spline.set|spline.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_get, 1,
+    true
+};
+static const MethodRegistration reg_spline_get(desc_spline_get);
+
+static const MethodParam params_spline_insert_point[] = {
+    {"name", "string", true, "Spline object name", nullptr, nullptr},
+    {"segment", "int", true, "Zero-based segment start index", nullptr, nullptr},
+    {"t", "float", true, "Segment parameter in [0,1]", "0.5", nullptr},
+};
+static const MethodDescriptor desc_spline_insert_point = {
+    "spline.insert_point", "spline",
+    "Insert a control point on a spline segment at normalized parameter t",
+    "Bezier insertion preserves the curve with De Casteljau; Linear insertion splits the segment. B-Spline knot insertion is intentionally rejected until its knot policy is active.",
+    "write", "SceneWrite", false, "{index:int}",
+    "spline|insert|point|subdivide|bezier|linear",
+    "spline.subdivide|spline.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_insert_point, 3,
+    true
+};
+static const MethodRegistration reg_spline_insert_point(desc_spline_insert_point);
+
+static const MethodDescriptor desc_spline_list = {
+    "spline.list", "spline",
+    "List editable 2D spline sources and their curve types",
+    "Returns names, plane, closed state and control-point counts. This is a read-only scene query.",
+    "read", "Read", false, "SplineInfo[]",
+    "spline|list|curve|profile|control-point|authoring",
+    "spline.get|spline.set|spline.insert_point|spline.subdivide|spline.extrude",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_spline_list(desc_spline_list);
+
+static const MethodParam params_spline_set[] = {
+    {"name", "string", true, "Spline object name", nullptr, nullptr},
+    {"spline", "object", true, "Versioned spline payload object", nullptr, nullptr},
+};
+static const MethodDescriptor desc_spline_set = {
+    "spline.set", "spline",
+    "Replace a spline authoring payload with validated JSON data",
+    "Rejects unknown curve types, malformed points, invalid transforms and B-Splines with fewer than four controls.",
+    "write", "SceneWrite", false, "bool",
+    "spline|set|serialize|edit|profile",
+    "spline.get|spline.insert_point|spline.subdivide",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_set, 2,
+    true
+};
+static const MethodRegistration reg_spline_set(desc_spline_set);
+
+static const MethodParam params_spline_subdivide[] = {
+    {"name", "string", true, "Spline object name", nullptr, nullptr},
+    {"segments", "int[]", true, "Segment start indices", nullptr, nullptr},
+    {"cuts", "int", true, "Cuts per segment, from 1 to 128", "1", nullptr},
+};
+static const MethodDescriptor desc_spline_subdivide = {
+    "spline.subdivide", "spline",
+    "Subdivide one or more spline segments with a fixed cut count",
+    "Segments are processed in descending index order so a batch request remains stable. The operation is validated as one mutation.",
+    "write", "SceneWrite", false, "{last_index:int}",
+    "spline|subdivide|batch|curve",
+    "spline.insert_point|spline.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_subdivide, 3,
+    true
+};
+static const MethodRegistration reg_spline_subdivide(desc_spline_subdivide);
 
 static const MethodParam params_templates_delete_user[] = {
     {"id", "string", false, "", "", nullptr},

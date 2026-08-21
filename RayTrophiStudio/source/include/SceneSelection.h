@@ -26,6 +26,7 @@ class Triangle;
 class TriangleMesh;
 class VDBVolume;
 class GasVolume;
+namespace MeshEdit { class SplineObject; }
 
 namespace Physics { class ForceField; }
 
@@ -78,6 +79,7 @@ struct SelectableItem {
     // Canonical flat selection identity. `object` remains a single representative
     // facade only while legacy property tools are migrated away from Triangle*.
     std::shared_ptr<TriangleMesh> mesh_object = nullptr;
+    std::shared_ptr<MeshEdit::SplineObject> spline_object = nullptr;
     uint32_t mesh_face_index = 0;
     std::shared_ptr<VDBVolume> vdb_volume = nullptr; // For VDB volumes
     std::shared_ptr<GasVolume> gas_volume = nullptr; // For Gas volumes
@@ -106,6 +108,7 @@ struct SelectableItem {
     bool operator==(const SelectableItem& other) const {
         if (type != other.type) return false;
         if (type == SelectableType::Object) {
+            if (spline_object || other.spline_object) return spline_object == other.spline_object;
             if (mesh_object || other.mesh_object) return mesh_object == other.mesh_object;
             return object == other.object;
         }
@@ -133,6 +136,7 @@ struct SelectableItem {
         camera = nullptr;
         object = nullptr;
         mesh_object = nullptr;
+        spline_object = nullptr;
         mesh_face_index = 0;
         vdb_volume = nullptr;
         gas_volume = nullptr;
@@ -174,6 +178,8 @@ public:
     void selectObject(std::shared_ptr<TriangleMesh> mesh, int index,
                       const std::string& name = "Object", uint32_t face_index = 0,
                       std::shared_ptr<Triangle> compatibility_facade = nullptr);
+    void selectObject(std::shared_ptr<MeshEdit::SplineObject> spline, int index,
+                      const std::string& name = "Spline");
     void selectLight(std::shared_ptr<Light> light, int index = -1, const std::string& name = "Light");
     void selectVDBVolume(std::shared_ptr<VDBVolume> vdb, int index = -1, const std::string& name = "VDB Volume");
     void selectGasVolume(std::shared_ptr<GasVolume> gas, int index = -1, const std::string& name = "Gas Volume");

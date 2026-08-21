@@ -25,6 +25,7 @@
 #include "scene_ui_animgraph.hpp"
 #include "Backend/IViewportBackend.h"
 #include "UI/HierarchyLiveObjectView.h"
+#include "MeshEdit/SplineObject.h"
 
 extern bool g_hasOptix;
 extern bool g_hasCUDA;
@@ -1478,6 +1479,40 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::TreePop();
                 }
                 ImGui::PopID();
+        }
+
+        // Mesh-free profile sources are first-class outliner objects. Keep this
+        // path independent from mesh_cache so adding a spline never manufactures
+        // a facade or routes selection through triangle editing code.
+        for (size_t spline_index = 0; spline_index < spline_ui_cache.size(); ++spline_index) {
+            auto& entry = spline_ui_cache[spline_index];
+            const std::string& name = entry.first;
+            auto spline = entry.second.second;
+            SelectableItem spline_item;
+            spline_item.type = SelectableType::Object;
+            spline_item.name = name;
+            spline_item.object_index = entry.second.first;
+            spline_item.spline_object = spline;
+            const bool spline_selected = sel.isSelected(spline_item);
+
+            ImGui::PushID(static_cast<int>(spline_index + 100000));
+            ImGuiTreeNodeFlags spline_flags = ImGuiTreeNodeFlags_Leaf |
+                ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (spline_selected) spline_flags |= ImGuiTreeNodeFlags_Selected;
+            ImGui::PushStyleColor(ImGuiCol_Text, spline_selected
+                ? ImVec4(0.25f, 1.0f, 0.85f, 1.0f)
+                : ImVec4(0.65f, 0.9f, 0.85f, 1.0f));
+            ImGui::TreeNodeEx((std::string("Spline  ") + name).c_str(), spline_flags);
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemClicked()) {
+                if (ImGui::GetIO().KeyCtrl) {
+                    sel.isSelected(spline_item) ? sel.removeFromSelection(spline_item)
+                                                : sel.addToSelection(spline_item);
+                } else {
+                    sel.selectObject(spline, entry.second.first, name);
+                }
+            }
+            ImGui::PopID();
         }
         ImGui::TreePop();
     }

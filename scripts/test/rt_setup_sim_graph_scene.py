@@ -44,7 +44,7 @@ print("emitter: %s" % ([src["name"] for src in rt.flow_source.list()],))
 d = rt.fluid.get(NAME)
 print("particles=%d backend=%s preset=%s live=%s" % (
     d["particle_count"], d["backend"], d["preset"], d.get("live_state")))
-print("attributes: %s" % (rt.sim_graph.attributes(NAME),))
+print("attributes: %s" % (rt.attr.list("domain", NAME),))
 
 if d["particle_count"] <= 0:
     print("SETUP FAILED: no particles after seeding -- graph test would be vacuous")

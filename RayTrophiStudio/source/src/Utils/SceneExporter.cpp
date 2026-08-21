@@ -272,6 +272,23 @@ TerrainBakeResult bakeTerrainMaterialForExport(const TerrainObject& terrain,
                 blendedNormal = blendedNormal.normalize();
             }
 
+            if (terrain.surfaceSemanticMap && terrain.surfaceSemanticMap->is_loaded()) {
+                const Vec3 semanticRgb = terrain.surfaceSemanticMap->get_color_bilinear(u, v);
+                const float hardness = terrain.surfaceSemanticMap->get_alpha_bilinear(u, v);
+                const float wetness = std::clamp((std::max)(
+                    static_cast<float>(semanticRgb.x), static_cast<float>(semanticRgb.y)), 0.0f, 1.0f);
+                const float ice = std::clamp(static_cast<float>(semanticRgb.z), 0.0f, 1.0f);
+                blendedAlbedo = blendedAlbedo * (1.0f - wetness * 0.28f);
+                blendedRoughness = blendedRoughness * (1.0f - wetness * 0.65f) +
+                    0.16f * wetness * 0.65f;
+                const float iceLuma = static_cast<float>(blendedAlbedo.x * 0.2126 +
+                    blendedAlbedo.y * 0.7152 + blendedAlbedo.z * 0.0722);
+                const Vec3 iceColor = Vec3(0.70f, 0.82f, 0.88f) * (std::max)(iceLuma, 0.35f);
+                blendedAlbedo = blendedAlbedo * (1.0f - ice * 0.55f) + iceColor * (ice * 0.55f);
+                blendedRoughness = blendedRoughness * (1.0f - ice * 0.65f) + 0.12f * ice * 0.65f;
+                blendedRoughness = std::clamp(blendedRoughness + hardness * 0.035f, 0.0f, 1.0f);
+            }
+
             const size_t idx = (static_cast<size_t>(y) * bakeResolution + x) * 4;
             // Albedo textures are stored as sRGB bytes for export. The sampled
             // layer colors above are already in linear space.

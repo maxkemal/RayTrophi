@@ -246,8 +246,11 @@ uint32_t requiredCapabilities(const std::string& method) {
     // namespace takes SceneWrite. Queries are still gated by Read below via the
     // caller's token, and authorize() is fail-closed either way.
     if (method == "sim_graph.nodes" || method == "sim_graph.evaluate" ||
-        method == "sim_graph.attributes" || method == "sim_graph.couplings" ||
-        method == "sim_graph.surface_attributes" ||
+        method == "sim_graph.couplings" ||
+        // Bounding-volume overlap of a domain against forces/colliders. A
+        // measurement, same shape as couplings above -- reads the scene,
+        // changes nothing.
+        method == "sim_graph.domain_intersections" ||
         // Enumerating which scoped graphs exist reads the scene and changes
         // nothing. create/delete/clear stay SceneWrite via the prefix below.
         method == "sim_graph.list") return Read;
@@ -262,10 +265,38 @@ uint32_t requiredCapabilities(const std::string& method) {
     // that array, so a namespace handled only here is invisible to the audit and
     // reads as unclassified. That is how this very method pair was caught.
     if (method == "sim_cache.status") return Read;
+    // perf.* — build/render timing counters. `perf.list` / `perf.get` fall
+    // through to Read via the substring heuristics below; the two mutators are
+    // named here because they change nothing a caller could observe as state:
+    // reset zeroes a diagnostic counter and set_logging only mirrors sections
+    // into the Scene Log. Neither touches the scene, the render, or a file.
+    //
+    // ★ Named `perf.` and NOT `profile.`: `mesh.profile.sweep.*` already exists
+    // and means a profile CURVE. Two unrelated meanings of one word in one
+    // method table is a reading trap, not a naming preference.
+    if (method == "perf.reset" || method == "perf.set_logging") return Read;
     if (method == "request_render" || method == "reset_accumulation") return Render;
+    // Profile sweep preview/self-test only allocate transient flat geometry; they
+    // do not publish to the scene and are therefore safe for read-capability IPC.
+    if (method == "mesh.profile.sweep.preview" ||
+        method == "mesh.profile.sweep.self_test" ||
+        method == "mesh.profile.revolve.preview" ||
+        method == "mesh.profile.revolve.self_test" ||
+        method == "mesh.profile.loft.preview" ||
+        method == "mesh.profile.loft.self_test") return Read;
+    if (method == "mesh.profile.sweep.commit" ||
+        method == "mesh.profile.revolve.commit" ||
+        method == "mesh.profile.loft.commit") return SceneWrite;
+    if (method == "mesh.asset.validate" || method == "mesh.operation.plan" ||
+        method == "mesh.operation.self_test" || method == "mesh.tools.describe") return Read;
+    if (method == "mesh.operation.commit_positions") return SceneWrite;
     // Read-only methods whose names miss the substring heuristics below.
     if (method == "material.info" || method == "material.of_object" ||
         method == "material.textures" || method == "nodes.graphs" ||
+        // Attribute measurement (rt.attr.stats): "stats" does not match the
+        // ".status" substring heuristic below, so it needs an explicit entry
+        // the same way particle.stats does.
+        method == "attr.stats" ||
         method == "forcefield.evaluate" || method == "particle.stats" ||
         method == "particle.emitters" || method == "anim.characters" ||
         method == "anim.character" || method == "anim.clips" ||
@@ -291,7 +322,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     // which cost 14 write methods; scripts/audit_ipc_capabilities.py now diffs
     // the two files so the pair cannot drift apart again.
     static const char* namespaces[] = {
-        "scene.", "select.", "material.", "lights.", "timeline.", "camera.",
+        "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "mesh.profile.",
         "world.", "post.", "anim.", "nodes.", "modifiers.",
         "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.",
         // Emitters. `flow_source.list`/`.get` fall through to Read above via the

@@ -759,8 +759,12 @@ namespace GeometryNodesV2 {
 
         // Cached face normals (Newell over the source topology).
         std::vector<Vec3> fN(nFaces, Vec3(0.0f, 1.0f, 0.0f));
+        std::vector<Vec3> fC(nFaces, Vec3(0.0f, 0.0f, 0.0f));
         for (MeshEdit::HEIndex f = 0; f < static_cast<MeshEdit::HEIndex>(nFaces); ++f) {
-            if (!he.faces[f].removed) fN[f] = he.faceNormal(f);
+            if (!he.faces[f].removed) {
+                fN[f] = he.faceNormal(f);
+                fC[f] = he.faceCentroid(f);
+            }
         }
 
         // 2. New corner per interior half-edge: intersection of its face's two adjacent
@@ -775,7 +779,17 @@ namespace GeometryNodesV2 {
                 const float len = std::sqrt(d.length_squared());
                 if (len > 1e-12f) {
                     const Vec3 dir = d * (1.0f / len);
-                    Vec3 inward = fN[he.half_edges[h].face].cross(dir);
+                    // Derive the face-side shift from the actual face centroid,
+                    // not from winding-dependent normal x edge. Imported meshes
+                    // can carry reversed face winding while still having valid
+                    // positions; centroid projection always points into the face.
+                    const MeshEdit::HEIndex face = he.half_edges[h].face;
+                    const Vec3 edgeMid = a + d * 0.5f;
+                    const Vec3 toFace = fC[face] - edgeMid;
+                    Vec3 inward = toFace - dir * dir.dot(toFace);
+                    if (inward.length_squared() <= 1e-20f) {
+                        inward = fN[face].cross(dir);
+                    }
                     const float il = std::sqrt(inward.length_squared());
                     if (il > 1e-12f) a = a + inward * (width / il);
                 }

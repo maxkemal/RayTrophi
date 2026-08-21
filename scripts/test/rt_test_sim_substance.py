@@ -158,15 +158,15 @@ if not source_object:
             "this collider is analytic (no source object), so there is only one "
             "name to resolve")
 else:
-    by_collider = rt.sim_graph.surface_attributes(obj)
-    by_object = rt.sim_graph.surface_attributes(source_object)
+    by_collider = rt.attr.list("object", obj)
+    by_object = rt.attr.list("object", source_object)
     log("   collider %r -> %d attrs, object %r -> %d attrs" % (
         obj, len(by_collider), source_object, len(by_object)))
     check("both names resolve to the same surface", by_collider == by_object,
           "%s != %s" % (by_collider, by_object))
 
 log("== the naming layer reaches per-TEXEL MSF data ==")
-attrs = rt.sim_graph.surface_attributes(obj)
+attrs = rt.attr.list("object", obj)
 log("   surface attributes: %s" % (attrs,))
 if not attrs:
     # ★ Legitimate before the object has ever been stepped with a live MSF --

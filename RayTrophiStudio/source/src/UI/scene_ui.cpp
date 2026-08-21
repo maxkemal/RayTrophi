@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 // NOTE: This file has been split into multiple modules for better maintainability.
@@ -14,6 +14,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "PerfProfile.h"
 #include <thread>
 #include <filesystem>
 #include <algorithm>
@@ -57,6 +58,7 @@
 #include "Triangle.h"  // For object hierarchy
 #include "HittableInstance.h"
 #include "InstanceManager.h"
+#include "MeshEdit/SplineObject.h"
 #include "PointLight.h"
 #include "DirectionalLight.h"
 #include "SpotLight.h"
@@ -2479,6 +2481,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
         static float s_sidebar_width = 44.0f;
         float sidebar_width = s_sidebar_width;
+        // UI LAYOUT GUARDRAIL: save the top before the sidebar child advances the
+        // parent cursor to its bottom edge. A full-height splitter is a hit-area,
+        // not a valid layout origin; see docs/dev/UI_LAYOUT_GUARDRAILS.md.
+        const float properties_content_y = ImGui::GetCursorPosY();
+        const float properties_content_x = sidebar_width + 4.0f;
         
         // --- 1. SIDEBAR (Fixed Width) ---
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
@@ -2742,7 +2749,10 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         ImGui::PopStyleVar(2);
 
         // Sidebar Splitter / Resizer (Invisible drag line on the right edge of sidebar)
-        ImGui::SameLine(0, 0);
+        // The full-height button is only a hit target. It must not become the
+        // layout cursor for the content child below; otherwise PropContentArea
+        // starts at the bottom edge and every Properties tab appears empty.
+        ImGui::SetCursorPos(ImVec2(sidebar_width, properties_content_y));
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
@@ -2758,7 +2768,9 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         }
         
-        ImGui::SameLine(0, 0);
+        // Do not inherit the full-height splitter's line metrics. Place the
+        // content child explicitly beside the splitter at the original Y.
+        ImGui::SetCursorPos(ImVec2(properties_content_x, properties_content_y));
         
         // --- 2. CONTENT AREA (Inspector Style) ---
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
@@ -7416,6 +7428,7 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
                    std::to_string(foliage_count) + " foliage skipped)");*/
     mesh_cache.clear();
     mesh_ui_cache.clear();
+    spline_ui_cache.clear();
     last_synced_transforms.clear();
     mesh_overlay_cache = MeshOverlayCache{};
     // Preserve the editable cache (and its sub-element selection) for the object that is
@@ -7454,6 +7467,11 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     std::vector<std::pair<int, std::shared_ptr<Triangle>>>* lastVector = nullptr;
 
     for (size_t i = 0; i < selectable_count; ++i) {
+        if (auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(objects[i])) {
+            const std::string& name = spline->nodeName.empty() ? "Unnamed Spline" : spline->nodeName;
+            spline_ui_cache.push_back({name, {(int)i, std::move(spline)}});
+            continue;
+        }
         if (objects[i]->isTriangle()) {
             auto tri = std::static_pointer_cast<Triangle>(objects[i]);
             const std::string& name = tri->getNodeName().empty() ? "Unnamed" : tri->getNodeName();
@@ -7683,6 +7701,7 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
 }
 
 void SceneUI::syncAllTransformedVertices(struct SceneData& scene) {
+    RTPERF_SCOPE("scene.sync_transformed_vertices");
     if (!mesh_cache_valid) {
         rebuildMeshCache(scene.world.objects);
     }
@@ -7784,6 +7803,7 @@ void SceneUI::invalidateCache() {
     mesh_cache_valid = false; 
     mesh_cache.clear();
     mesh_ui_cache.clear();
+    spline_ui_cache.clear();
     last_synced_transforms.clear();
     mesh_overlay_cache = MeshOverlayCache{};
     editable_mesh_cache = EditableMeshCache{};

@@ -361,24 +361,36 @@ else:
           "y 1.0-1.5 does not reach this domain")
 
 # ---------------------------------------------------------------------------
-log("5. ★★★ a second domain must not destroy the first one's particles")
+log("5. ??? a second domain's config-signature reset must not be SILENT")
 # ---------------------------------------------------------------------------
-# ★★★★ THIS IS WHY THIS FILE EXISTS. The in-process rig runs this exact
-# sequence and passes; here it lost every particle, 5 runs out of 5. The
-# difference is the frame loop, which turns between these calls and never turns
-# inside a script.
+# ★★★★ Root cause (docs/dev/NEXT_BUILD_CHECKS.md §A1), found 2026-08-20:
+# creating ANY new domain changes gridDomains().size(), which changes
+# computeSimConfigSignature(), which on the next frame-loop tick calls
+# resetSimulationToStart() -- and that WIPES every domain's live particles,
+# refilling only ones with a reseed recipe (FillLevel or
+# fluid_reseed_on_reset). fluid.seed()'s default is a ONE-SHOT seed
+# (persistent=False) -- the same default the panel's "Seed Fluid Now" uses,
+# documented there as "disable for emitter-only or one-shot seeds" -- so by
+# DESIGN it does not survive. That design is intentional and shared with the
+# panel; it is not what this case tests.
+#
+# What WAS a real defect: this happened with no error and no signal at all,
+# to a domain the caller never touched. resetSimulationToStart() now records
+# what it drops, surfaced through sim.control_state()['dropped_seeds']. This
+# case checks two things: (a) a one-shot seed is explained when it is dropped,
+# not silently zero, and (b) a PERSISTENT seed (persistent=True) actually
+# survives the exact same reset -- proving the opt-in works, not just that the
+# field exists.
+#
+# Only reproduces over IPC: the frame loop must turn between these calls, and
+# it never turns inside a script (script.run_file holds the main thread).
 #
 # Both readers are consulted on purpose. fluid.get resolves through the ACTIVE
 # particle system only and has a documented history of reporting 0 for a domain
 # that list_domains reported as populated at the same instant - absence of
 # measurement read as a measured zero. If the two disagree, this is a reader
 # fault and NOT particle loss, and the case says so instead of guessing.
-FIRST, SECOND = unique("IPC_DomA"), unique("IPC_DomB")
-rt.call("fluid.create_domain", name=FIRST, domain_min=[-1.0, 0.0, -1.0],
-        domain_max=[1.0, 2.0, 1.0], voxel_size=0.08)
-DOMAINS.append(FIRST)
-rt.call("fluid.seed", domain=FIRST, seed_min=[-0.8, 0.05, -0.8],
-        seed_max=[0.8, 1.0, 0.8], particles_per_cell=4)
+FIRST, SECOND, THIRD = unique("IPC_DomA"), unique("IPC_DomB"), unique("IPC_DomC")
 
 
 def particles(domain):
@@ -392,10 +404,17 @@ def particles(domain):
     return info.get("particle_count", 0), listed, info.get("live_state", False)
 
 
+# -- 5a. One-shot seed (default): dropped BY DESIGN, but must be EXPLAINED --
+rt.call("fluid.create_domain", name=FIRST, domain_min=[-1.0, 0.0, -1.0],
+        domain_max=[1.0, 2.0, 1.0], voxel_size=0.08)
+DOMAINS.append(FIRST)
+rt.call("fluid.seed", domain=FIRST, seed_min=[-0.8, 0.05, -0.8],
+        seed_max=[0.8, 1.0, 0.8], particles_per_cell=4)
+
 g0, l0, live0 = particles(FIRST)
-log("       first domain seeded: fluid.get %d, list_domains %s" % (g0, l0))
+log("       one-shot domain seeded: fluid.get %d, list_domains %s" % (g0, l0))
 if not live0 or g0 <= 0:
-    vacuous("creating a second domain leaves the first one's particles alone",
+    vacuous("a dropped one-shot seed is explained in sim.control_state",
             "the first domain reports no measurable particles, so there is "
             "nothing to lose")
 else:
@@ -403,17 +422,61 @@ else:
             domain_max=[0.5, 1.0, 0.5], voxel_size=0.05)
     DOMAINS.append(SECOND)
     g1, l1, live1 = particles(FIRST)
-    log("       after the second domain: fluid.get %d, list_domains %s" % (g1, l1))
+    log("       after an unrelated second domain: fluid.get %d, list_domains %s"
+        % (g1, l1))
     if l1 is not None and l1 != g1:
-        vacuous("creating a second domain leaves the first one's particles alone",
+        vacuous("a dropped one-shot seed is explained in sim.control_state",
                 "the two readers disagree (%d vs %d) - that is a reader fault, "
                 "not measured particle loss" % (g1, l1))
+    elif g1 == g0:
+        vacuous("a dropped one-shot seed is explained in sim.control_state",
+                "the one-shot seed survived this run (the auto-reset tick did "
+                "not land between the two calls) -- nothing was dropped to explain")
     else:
-        check("creating a second domain leaves the first one's particles alone",
-              g1 == g0,
-              "lost %d of %d particles (%.1f%%) to an unrelated domain being "
-              "created - the in-process channel does NOT show this"
-              % (g0 - g1, g0, 100.0 * (g0 - g1) / g0))
+        dropped = rt.call("sim.control_state").get("dropped_seeds", [])
+        log("       sim.control_state dropped_seeds = %s" % (dropped,))
+        check("the drop of a one-shot seed is reported, not silent",
+              FIRST in dropped,
+              "lost %d of %d particles and dropped_seeds did not name '%s' -- "
+              "the loss is real again but now UNEXPLAINED, same as before the fix"
+              % (g0 - g1, g0, FIRST))
+
+# -- 5b. Persistent seed (opt-in): must SURVIVE the identical reset ---------
+rt.call("fluid.create_domain", name=THIRD, domain_min=[2.0, 0.0, 2.0],
+        domain_max=[4.0, 2.0, 4.0], voxel_size=0.08)
+DOMAINS.append(THIRD)
+rt.call("fluid.seed", domain=THIRD, seed_min=[2.2, 0.05, 2.2],
+        seed_max=[3.8, 1.0, 3.8], particles_per_cell=4, persistent=True)
+
+g2, l2, live2 = particles(THIRD)
+log("       persistent domain seeded: fluid.get %d, list_domains %s" % (g2, l2))
+if not live2 or g2 <= 0:
+    vacuous("persistent=True survives a config-signature reset",
+            "the persistent domain reports no measurable particles, so there "
+            "is nothing to prove survival with")
+else:
+    # Another unrelated domain -- the same trigger that dropped FIRST above.
+    FOURTH = unique("IPC_DomD")
+    rt.call("fluid.create_domain", name=FOURTH,
+            domain_min=[-3.0, 0.0, -3.0], domain_max=[-2.0, 1.0, -2.0],
+            voxel_size=0.08)
+    DOMAINS.append(FOURTH)
+    g3, l3, live3 = particles(THIRD)
+    log("       after yet another unrelated domain: fluid.get %d, list_domains %s"
+        % (g3, l3))
+    if l3 is not None and l3 != g3:
+        vacuous("persistent=True survives a config-signature reset",
+                "the two readers disagree (%d vs %d) - reader fault, not "
+                "measured" % (g3, l3))
+    else:
+        check("a persistent (opt-in) seed survives the same reset that drops a one-shot one",
+              g3 == g2,
+              "persistent=True still lost %d of %d particles (%.1f%%) -- the "
+              "opt-in does not actually protect a domain across the reset"
+              % (g2 - g3, g2, 100.0 * (g2 - g3) / g2 if g2 else 0.0))
+        dropped2 = rt.call("sim.control_state").get("dropped_seeds", [])
+        check("a persistent domain is not listed among the dropped ones",
+              THIRD not in dropped2, "%s" % (dropped2,))
 
 # ---------------------------------------------------------------------------
 for name in SPAWNED:

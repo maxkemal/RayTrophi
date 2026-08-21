@@ -81,6 +81,23 @@ def required(method, namespaces):
         return "Render"
     if method in ("request_render", "reset_accumulation"):
         return "Render"
+    # perf.* timing counters. list/get fall through to the Read heuristics; the
+    # two mutators change nothing observable as state (a diagnostic counter and
+    # a Scene Log mirror), so the C++ classifies them Read explicitly.
+    if method in ("perf.reset", "perf.set_logging"):
+        return "Read"
+    if method in ("mesh.profile.sweep.preview", "mesh.profile.sweep.self_test",
+                  "mesh.profile.revolve.preview", "mesh.profile.revolve.self_test",
+                  "mesh.profile.loft.preview", "mesh.profile.loft.self_test"):
+        return "Read"
+    if method in ("mesh.profile.sweep.commit", "mesh.profile.revolve.commit",
+                  "mesh.profile.loft.commit"):
+        return "SceneWrite"
+    if method in ("mesh.asset.validate", "mesh.operation.plan",
+                  "mesh.operation.self_test", "mesh.tools.describe"):
+        return "Read"
+    if method == "mesh.operation.commit_positions":
+        return "SceneWrite"
     # viewport.* drives and measures the engine (not the rt.ui panel-drawing
     # exception). Must come BEFORE the ".status" read heuristic below, or only
     # the query half of the namespace is classified and the command half falls
@@ -96,14 +113,14 @@ def required(method, namespaces):
     # sim_graph.*: queries are Read, everything that builds the graph is
     # SceneWrite. Same ordering lesson as viewport.* — the read heuristics below
     # would otherwise classify only part of the namespace.
-    if method in ("sim_graph.nodes", "sim_graph.evaluate", "sim_graph.attributes",
-                  "sim_graph.couplings", "sim_graph.surface_attributes",
+    if method in ("sim_graph.nodes", "sim_graph.evaluate",
+                  "sim_graph.couplings", "sim_graph.domain_intersections",
                   "sim_graph.list"):
         return "Read"
     if method.startswith("sim_graph."):
         return "SceneWrite"
     if method in ("material.info", "material.of_object", "material.textures",
-                  "nodes.graphs", "forcefield.evaluate", "particle.stats",
+                  "nodes.graphs", "attr.stats", "forcefield.evaluate", "particle.stats",
                   "particle.emitters", "anim.characters", "anim.character",
                   "anim.clips", "anim.graph_status", "msf.substances",
                   "msf.fields", "templates.refresh", "templates.validate",

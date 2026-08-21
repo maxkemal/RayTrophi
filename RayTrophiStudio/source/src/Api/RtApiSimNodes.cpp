@@ -1412,6 +1412,92 @@ SimCouplingReport simGraphCouplings() {
     return out;
 }
 
+// ── Measured interaction: which forces/colliders geometrically reach a domain
+//
+// Decision record: SIMULATION_NODE_OBJECT_MODEL.md section 9.6 stage 3.
+//
+// ★ Bounding-volume overlap, not exact clipping. `ForceFieldInfo` and
+// `SimulationColliderInfo` are read-only info structs with no mesh data, so an
+// axis-aligned box is the honest limit of what they can answer -- an `obb`
+// collider's box is measured WITHOUT its rotation, which can only
+// over-report an intersection near a domain edge, never hide a real one.
+// mesh_sdf/convex/mesh_bvh colliders carry no box at all here and are
+// reported `measurable=false` rather than guessed as non-intersecting -- the
+// same "false, NOT zeros" rule as resolveAttributeStats above.
+bool simAabbOverlap(const Vec3& a_min, const Vec3& a_max,
+                    const Vec3& b_min, const Vec3& b_max) {
+    return a_min.x <= b_max.x && a_max.x >= b_min.x &&
+           a_min.y <= b_max.y && a_max.y >= b_min.y &&
+           a_min.z <= b_max.z && a_max.z >= b_min.z;
+}
+
+Result simDomainIntersections(const std::string& domain,
+                              std::vector<SimIntersectionEntry>& out) {
+    out.clear();
+    std::vector<FluidDomainInfo> domains;
+    if (!listFluidDomains(domains).ok) return Result::fail("could not list domains");
+    const FluidDomainInfo* dom = nullptr;
+    for (const auto& d : domains) if (d.name == domain) { dom = &d; break; }
+    if (!dom) return Result::fail("no such domain: '" + domain + "'");
+    const Vec3 d_min = dom->domain_min, d_max = dom->domain_max;
+
+    for (const auto& f : listForceFields()) {
+        SimIntersectionEntry e;
+        e.name = f.name;
+        e.kind = "force";
+        e.measurable = true;
+        if (f.shape == "infinite") {
+            e.intersects = true;   // unbounded by definition -- reaches every domain
+        } else {
+            const float r = std::max(f.falloff_radius, 0.0f);
+            const Vec3 f_min(f.position.x - r, f.position.y - r, f.position.z - r);
+            const Vec3 f_max(f.position.x + r, f.position.y + r, f.position.z + r);
+            e.intersects = simAabbOverlap(d_min, d_max, f_min, f_max);
+        }
+        out.push_back(std::move(e));
+    }
+
+    std::vector<SimulationColliderInfo> colliders;
+    if (listSimulationColliders(colliders).ok) {
+        for (const auto& c : colliders) {
+            SimIntersectionEntry e;
+            e.name = c.name;
+            e.kind = "collider";
+            if (c.source_mode == "plane") {
+                // An infinite plane in X/Z: only the Y band matters, and this is
+                // exact, not an approximation.
+                e.measurable = true;
+                e.intersects = c.plane_y >= d_min.y && c.plane_y <= d_max.y;
+            } else if (c.source_mode == "sphere") {
+                const float r = std::max(c.sphere_radius, 0.0f);
+                const Vec3 c_min(c.sphere_center.x - r, c.sphere_center.y - r, c.sphere_center.z - r);
+                const Vec3 c_max(c.sphere_center.x + r, c.sphere_center.y + r, c.sphere_center.z + r);
+                e.measurable = true;
+                e.intersects = simAabbOverlap(d_min, d_max, c_min, c_max);
+            } else if (c.source_mode == "capsule") {
+                const float r = std::max(c.capsule_radius, 0.0f);
+                const Vec3 c_min(std::min(c.capsule_start.x, c.capsule_end.x) - r,
+                                 std::min(c.capsule_start.y, c.capsule_end.y) - r,
+                                 std::min(c.capsule_start.z, c.capsule_end.z) - r);
+                const Vec3 c_max(std::max(c.capsule_start.x, c.capsule_end.x) + r,
+                                 std::max(c.capsule_start.y, c.capsule_end.y) + r,
+                                 std::max(c.capsule_start.z, c.capsule_end.z) + r);
+                e.measurable = true;
+                e.intersects = simAabbOverlap(d_min, d_max, c_min, c_max);
+            } else if (c.source_mode == "aabb" || c.source_mode == "obb") {
+                e.measurable = true;
+                e.intersects = simAabbOverlap(d_min, d_max, c.bounds_min, c.bounds_max);
+            } else {
+                // mesh_sdf | convex | mesh_bvh
+                e.measurable = false;
+                e.intersects = false;
+            }
+            out.push_back(std::move(e));
+        }
+    }
+    return Result::success();
+}
+
 void initSimulationNodes() {
     NodeSystem::Sim::registerSimulationNodeTypes();
     NodeSystem::Sim::setAttributeStatsResolver(&resolveAttributeStats);
@@ -1423,6 +1509,66 @@ void initSimulationNodes() {
 
 std::vector<std::string> simListAttributes(const std::string& domain) {
     return resolveAttributeList(domain);
+}
+
+// ── Unified attribute discovery + measurement (rt.attr, section 9.5-9.6) ────
+//
+// ★ Merges the domain/object halves the naming layer split above (kept split
+// there only because that is how the Field/Surface Inspect node pickers
+// happen to consume them), and adds the half that never had a caller-facing
+// path: measuring a named attribute required placing an Inspect node in a
+// graph and evaluating it. This calls the same resolvers directly.
+std::vector<std::string> listAttributes(const std::string& scope, const std::string& id) {
+    if (scope == "domain") return resolveAttributeList(id);
+    if (scope == "object") return resolveSurfaceList(id);
+    if (scope == "world")
+        return {"ambient_kelvin", "kelvin_per_unit", "convection_coefficient",
+                "oxygen_availability"};
+    return {};
+}
+
+Result getAttributeStats(const std::string& scope, const std::string& id,
+                         const std::string& name, AttrStatsInfo& out) {
+    out = AttrStatsInfo{};
+    // ★ "Could not measure this attribute" is a VALUE (`available=false`), not
+    // an error -- the same contract as `stats_available` on a Field/Surface
+    // Inspect node, which never throws for an unknown channel either. Only an
+    // unsupported SCOPE string is a genuine caller mistake and fails loudly;
+    // an unmeasurable attribute inside a valid scope must round-trip through
+    // rt.attr.stats() as a reading, not an exception, or a caller that probes
+    // for "does this attribute exist yet" would have to wrap every call in a
+    // try/except to ask a question this field already answers.
+    if (scope == "domain") {
+        NodeSystem::Sim::FieldStats s;
+        if (resolveAttributeStats(id, name, s)) {
+            out.available = true; out.count = s.count; out.array_size = s.array_size;
+            out.in_sync = s.in_sync; out.min_value = s.min_value;
+            out.max_value = s.max_value; out.mean_value = s.mean_value;
+        }
+        return Result::success();
+    }
+    if (scope == "object") {
+        NodeSystem::Sim::FieldStats s;
+        if (resolveSurfaceStats(id, name, s)) {
+            out.available = true; out.count = s.count; out.array_size = s.array_size;
+            out.in_sync = s.in_sync; out.min_value = s.min_value;
+            out.max_value = s.max_value; out.mean_value = s.mean_value;
+        }
+        return Result::success();
+    }
+    if (scope == "world") {
+        // ★ A world thermal field is a single scalar, not a population -- min,
+        // max and mean all read the same value on purpose, so a caller that
+        // treats every rt.attr.stats() result uniformly gets a coherent answer
+        // instead of a divide-by-zero mean over zero elements.
+        float v = 0.0f;
+        if (readWorldThermalParameter(name, v)) {
+            out.available = true; out.count = 1; out.array_size = 1; out.in_sync = true;
+            out.min_value = out.max_value = out.mean_value = static_cast<double>(v);
+        }
+        return Result::success();
+    }
+    return Result::fail("unsupported attribute scope '" + scope + "' (expected object|domain|world)");
 }
 
 // ── Graph lifecycle ─────────────────────────────────────────────────────────

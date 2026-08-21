@@ -2288,6 +2288,17 @@ struct SceneData {
     // doesn't, the change was a non-coupling rigid edit/move: the cheap rigid
     // re-sim runs but the expensive fluid cache is preserved.
     uint64_t last_fluid_coupling_sig_ = 0;
+    // ★★★★ Names of fluid domains resetSimulationToStart() just wiped and will
+    // NOT refill, because they had live particles but no reseed recipe
+    // (FillLevel / fluid_reseed_on_reset) — a one-shot `fluid.seed()` domain,
+    // by design. Overwritten on every call, so it always describes the MOST
+    // RECENT reset. Surfaced through rt.sim.control_state()['dropped_seeds']
+    // so a config-signature-triggered wipe (e.g. an unrelated new domain
+    // bumping gridDomains().size()) is reported instead of silent.
+    std::vector<std::string> last_reset_dropped_fluid_seeds_;
+    const std::vector<std::string>& lastResetDroppedFluidSeeds() const {
+        return last_reset_dropped_fluid_seeds_;
+    }
     // Frame rate the current bake was produced with. Every system steps once per
     // timeline frame at fixed_dt = 1/fps, so this IS a physics input — but it
     // arrives as an argument rather than as scene state, so it cannot live in
@@ -5750,6 +5761,42 @@ struct SceneData {
     void resetSimulationToStart(bool clear_cache = true, bool capture_frame = true) {
         if (clear_cache) {
             clearSimFrameCache();
+        }
+        // ★★★★ Measured 2026-08-20 (docs/dev/NEXT_BUILD_CHECKS.md §A1): this
+        // reset is not just a rewind, it is a WIPE — clear() below drops every
+        // live particle, and only a domain with a reseed recipe (FillLevel or
+        // fluid_reseed_on_reset) gets refilled. A one-shot `fluid.seed()`
+        // domain — the documented, INTENTIONAL default for "emitter-only or
+        // one-shot seeds" — stays empty forever, and this function runs
+        // automatically from a config-signature change ANYWHERE in the scene
+        // (see the `gridDomains().size()` hash), not just from an edit to that
+        // domain itself. So creating an unrelated second domain silently
+        // erases the first one's particles with no error and no signal.
+        //
+        // The design (one-shot = not part of the reproducible frame-0 recipe)
+        // is deliberate and shared with the panel — changing it would blur
+        // the deterministic-bake guarantee this function exists for. What was
+        // missing is visibility: the caller had no way to learn this had
+        // happened. Recorded here, BEFORE the wipe, and surfaced through
+        // rt.sim.control_state()['dropped_seeds'] (RtApi::getSimControlState) —
+        // see [BUG_DELETED_NAME_REUSE_GHOST.md]-style "make it visible" fix,
+        // same shape as `owner_missing` on sim_graph.list().
+        last_reset_dropped_fluid_seeds_.clear();
+        for (auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            const auto& domains = system.runtime->gridDomains();
+            const auto& states = system.runtime->gridDomainStates();
+            for (std::size_t i = 0; i < domains.size(); ++i) {
+                const auto& dom = domains[i];
+                if (dom.type != RayTrophiSim::SimulationDomainType::Fluid) continue;
+                const bool has_recipe =
+                    dom.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
+                    dom.fluid_reseed_on_reset;
+                if (has_recipe) continue;
+                const bool has_live_particles =
+                    i < states.size() && states[i].valid && !states[i].particles.empty();
+                if (has_live_particles) last_reset_dropped_fluid_seeds_.push_back(dom.name);
+            }
         }
         for (auto& system : particle_systems) {
             if (system.runtime) {

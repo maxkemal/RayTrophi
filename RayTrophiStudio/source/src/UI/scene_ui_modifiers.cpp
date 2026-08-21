@@ -1,10 +1,12 @@
 #include "scene_ui.h"
+#include "MeshEdit/ProfileSplineEditor.h"
 #include "ui_modern.h"
 #include "imgui_internal.h"
 #include "HittableInstance.h"
+#include "MeshEditToolDock.h"
 
 #include "MeshModifiers.h"
-#include "MeshProfileTimer.h"
+#include "PerfProfile.h"
 #include "ProjectManager.h"
 #include "globals.h"
 #include "Triangle.h"
@@ -2529,6 +2531,17 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
 
     UIWidgets::Divider();
 
+    // Spline sources are not Triangle meshes and must not enter the mesh
+    // modeling branch. Keep their authoring/edit workspace in this panel.
+    if (ctx.selection.selected.spline_object) {
+        if (UIWidgets::BeginSection("Spline Edit", ImVec4(0.35f, 1.0f, 0.85f, 1.0f))) {
+            MeshEdit::drawProfileSplineEditControls(ctx);
+            UIWidgets::EndSection();
+        }
+        UIWidgets::PopControlSurfaceStyle();
+        return;
+    }
+
     if (UIWidgets::BeginSection("Modeling", ImVec4(0.8f, 0.4f, 0.9f, 1.0f))) {
         bool hasSelection = (ctx.selection.selected.type == SelectableType::Object &&
                              ctx.selection.selected.object != nullptr);
@@ -2660,9 +2673,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         if (hasAnyOptions) ImGui::Spacing();
                         ImGui::SliderFloat("Loop Cut Pos", &mesh_loop_cut_position, 0.05f, 0.95f, "%.2f");
                         ImGui::TextDisabled("Relative position of the loop cut along ring edges.");
-                        // Bevel Width/Segments/Profile controls hidden while the Edit
-                        // Mode "Bevel Edge" tool is disabled (stale-cache issue — see the
-                        // commented-out EdgeBevel entry in edit_actions).
+                        ImGui::TextDisabled("Edge Bevel deferred: topology kernel migration in progress.");
                         hasAnyOptions = true;
                     }
 
@@ -2855,7 +2866,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         mesh_edit_layer = MeshEditLayer{};
                     }
 
-                    { MESH_PROFILE_SCOPE("replaceEvaluatedMesh.rebuildMeshCache");
+                    { RTPERF_SCOPE("replaceEvaluatedMesh.rebuildMeshCache");
                       rebuildMeshCache(ctx.scene.world.objects); }
 
                     if (hasEnabledSubdivisionPreview(modifierStack)) {
@@ -2873,14 +2884,14 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     if (mesh_overlay_settings.edit_mode &&
                         mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
                         !selectedNodeName.empty()) {
-                        MESH_PROFILE_SCOPE("replaceEvaluatedMesh.ensureEditableMeshCache");
+                        RTPERF_SCOPE("replaceEvaluatedMesh.ensureEditableMeshCache");
                         ensureEditableMeshCache(ctx, selectedNodeName);
                     }
-                    { MESH_PROFILE_SCOPE("replaceEvaluatedMesh.rebuildBVH(Embree)");
+                    { RTPERF_SCOPE("replaceEvaluatedMesh.rebuildBVH(Embree)");
                       ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree); }
                     ctx.renderer.resetCPUAccumulation();
                     if (ctx.backend_ptr) {
-                        MESH_PROFILE_SCOPE("replaceEvaluatedMesh.rebuildBackendGeometry(GPU)");
+                        RTPERF_SCOPE("replaceEvaluatedMesh.rebuildBackendGeometry(GPU)");
                         ctx.renderer.rebuildBackendGeometry(ctx.scene);
                     }
 
@@ -3123,7 +3134,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     bakedStack.edgeCreases = modifierStack.edgeCreases;
 
                     std::vector<std::shared_ptr<Triangle>> bakedMesh;
-                    { MESH_PROFILE_SCOPE("apply.evaluate(subdivision)");
+                    { RTPERF_SCOPE("apply.evaluate(subdivision)");
                       bakedMesh = bakedStack.evaluate(baseMesh); }
                     ctx.scene.base_mesh_cache[selectedNodeName] = bakedMesh;
                     modifierStack.modifiers.erase(
@@ -3167,7 +3178,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     const auto& baseMesh = ctx.scene.base_mesh_cache[selectedNodeName];
                     std::vector<std::shared_ptr<Triangle>> newMesh;
                     std::shared_ptr<TriangleMesh> newMeshObj;
-                    { MESH_PROFILE_SCOPE("stackChanged.evaluate(subdivision)");
+                    { RTPERF_SCOPE("stackChanged.evaluate(subdivision)");
                       // Viewport/Render level: match the active viewport mode.
                       newMesh = modifierStack.evaluate(baseMesh, !g_solid_viewport_active,
                                                        g_dense_mesh_as_hittable ? &newMeshObj : nullptr); }
@@ -3486,7 +3497,11 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
 }
 
 void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>& meshTriangle) {
-    if (!meshTriangle) {
+    // Direct flat-SoA TriangleMesh nodes intentionally have no per-face
+    // Triangle facade. In edit mode the active object name is sufficient for
+    // the tool dock; returning here made the entire right panel appear empty.
+    if (!meshTriangle && active_mesh_edit_object_name.empty() &&
+        ctx.selection.selected.object == nullptr) {
         ImGui::TextDisabled("Mesh target unavailable.");
         return;
     }
@@ -4465,8 +4480,7 @@ bool SceneUI::shouldShowPaintBrushDock() const {
 
     if (mesh_workspace_mode == MeshWorkspaceMode::Edit &&
         mesh_overlay_settings.enabled &&
-        mesh_overlay_settings.edit_mode &&
-        !active_mesh_edit_object_name.empty()) {
+        mesh_overlay_settings.edit_mode) {
         return true;
     }
 
@@ -5041,7 +5055,11 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
     TerrainObject* terrain = terrain_sculpt_proxy_active && terrain_brush.active_terrain_id != -1
         ? TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id)
         : nullptr;
-    if (!meshTriangle && !terrain) {
+    // Direct flat TriangleMesh targets intentionally have no Triangle facade.
+    // The active edit/sculpt object name is a valid target for the dock even
+    // when resolvePaintMesh() cannot return a per-face Triangle.
+    if (!meshTriangle && !terrain && active_mesh_edit_object_name.empty() &&
+        sculpt_mode_state.active_target_name.empty()) {
         if (!rightDockOnly) {
             ImGui::TextDisabled("Select a mesh or terrain object to configure sculpt brushes.");
         }
@@ -5081,7 +5099,11 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             ImGui::TextDisabled("Type: Terrain  |  Mode: Sculpting");
         } else {
             terrain_sculpt_proxy_active = false;
-            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.4f, 1.0f), "Target: %s", meshTriangle->getNodeName().empty() ? "(unknown)" : meshTriangle->getNodeName().c_str());
+            const std::string& target_name = meshTriangle
+                ? meshTriangle->getNodeName()
+                : (!sculpt_mode_state.active_target_name.empty()
+                    ? sculpt_mode_state.active_target_name : active_mesh_edit_object_name);
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.4f, 1.0f), "Target: %s", target_name.empty() ? "(unknown)" : target_name.c_str());
             ImGui::TextDisabled("Type: Mesh     |  Mode: Sculpting");
         }
         ImGui::Separator();
@@ -5696,7 +5718,21 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
 void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangle>& meshTriangle, bool rightDockOnly) {
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.38f, 0.72f, 0.92f, 1.0f));
 
-    if (!meshTriangle) {
+    if (ctx.selection.selected.spline_object) {
+        MeshEdit::drawProfileSplineEditControls(ctx);
+        UIWidgets::PopControlSurfaceStyle();
+        return;
+    }
+
+
+    const bool hasSelectedObject =
+        ctx.selection.selected.type == SelectableType::Object &&
+        ctx.selection.selected.object != nullptr;
+    const std::string selectedObjectName = hasSelectedObject
+        ? ctx.selection.selected.object->getNodeName() : std::string{};
+    // Flat TriangleMesh targets do not need a Triangle facade for the tool shelf.
+    // The edit service resolves the authoritative target by node name.
+    if (!meshTriangle && active_mesh_edit_object_name.empty() && selectedObjectName.empty()) {
         if (!rightDockOnly) {
             ImGui::TextDisabled("Select a mesh to configure edit tools.");
         }
@@ -5704,8 +5740,7 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
         return;
     }
 
-    bool hasSelection = (ctx.selection.selected.type == SelectableType::Object &&
-                         ctx.selection.selected.object != nullptr);
+    bool hasSelection = hasSelectedObject;
     const std::string selectedNodeName =
         hasSelection ? ctx.selection.selected.object->getNodeName() : std::string{};
     const std::string effectiveNodeName =
@@ -5715,6 +5750,17 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
     const bool isEdgeMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Edge);
     const bool isFaceMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Face);
     const bool isCombinedMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Combined);
+
+    const char* selectionMode = isVertexMode ? "Vertex" :
+        isEdgeMode ? "Edge" : isFaceMode ? "Face" :
+        isCombinedMode ? "Combined" : "Object";
+    MeshEditUI::drawMeshEditContextHeader(
+        effectiveNodeName, selectionMode,
+        editable_mesh_cache.vertices.size(), editable_mesh_cache.edges.size(),
+        editable_mesh_cache.faces.size(),
+        editable_mesh_cache.selection.vertex_ids.size(),
+        editable_mesh_cache.selection.edge_ids.size(),
+        editable_mesh_cache.selection.face_ids.size());
 
     auto activateMeshSelectMode = [&](MeshElementSelectMode mode) {
         mesh_overlay_settings.edit_mode = true;
@@ -5795,13 +5841,10 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
         { "VertexMerge", "Merge Center", "Merge Center\nCollapse selected vertices to their center point.", "Disabled: Requires at least 2 selected vertices.", UIWidgets::IconType::MergeVertices, ImVec4(0.78f, 0.70f, 1.0f, 1.0f), canMergeVertices, 4 },
         { "VertexWeldByDistance", "Weld Distance", "Weld Distance\nSnap nearby selected vertices together using the weld distance.", "Disabled: Requires at least 2 selected vertices.", UIWidgets::IconType::WeldVertices, ImVec4(0.72f, 0.84f, 1.0f, 1.0f), canWeldVertices, 5 },
         { "VertexDissolve", "Dissolve Vert", "Dissolve Vert\nRemove selected vertices, preserving surrounding faces.", "Disabled: Requires selected vertex/vertices.", UIWidgets::IconType::DissolveTopology, ImVec4(1.0f, 0.66f, 0.54f, 1.0f), (isVertexMode || isCombinedMode) && selectedVertexCount >= 1, 6 },
-        // "EdgeBevel" (action 14, SceneUI::bevelSelectedEdges) TEMPORARILY DISABLED
-        // (2026-07-04, user report): the bevel geometry itself is correct, but after the
-        // op the editable cache/overlay keeps showing the OLD topology — the new
-        // edges/faces never appear in the edit overlay, which reads as a broken result.
-        // Re-enable by restoring this entry once the post-op cache rebuild is fixed;
-        // the Geo-DAG Bevel node is unaffected and remains the supported path.
-        // { "EdgeBevel", "Bevel Edge", "Bevel Edge\nChamfer or round the selected edges (width, segments and profile in Tool Options).", "Disabled: Requires selected edge(s).", UIWidgets::IconType::LoopCutTool, ImVec4(0.98f, 0.80f, 0.42f, 1.0f), hasSelectedEdges, 14 },
+        // Deferred until the library-backed topology kernel replaces the current
+        // experimental path (multi-selection, corner cleanup and winding are not
+        // yet production-safe).
+        // { "EdgeBevel", "Bevel Edge", "Bevel Edge", "Deferred: topology kernel migration.", UIWidgets::IconType::LoopCutTool, ImVec4(0.98f, 0.80f, 0.42f, 1.0f), false, 14 },
         { "EdgeDissolve", "Dissolve Edge", "Dissolve Edge\nRemove selected edges, preserving polygon flow.", "Disabled: Requires selected edge(s).", UIWidgets::IconType::DissolveTopology, ImVec4(1.0f, 0.68f, 0.52f, 1.0f), hasSelectedEdges, 7 },
         { "FaceDelete", "Delete Face", "Delete Face\nRemove selected faces, leaving an open boundary.", "Disabled: Requires selected face(s).", UIWidgets::IconType::DeleteFaceTool, ImVec4(1.0f, 0.48f, 0.42f, 1.0f), hasSelectedFaces, 8 }
     };
@@ -6028,10 +6071,11 @@ void SceneUI::drawPaintBrushDock(UIContext& ctx) {
     const bool sculptDock = sculpt_mode_state.enabled &&
         (!sculpt_mode_state.active_target_name.empty() || terrain_sculpt_proxy_active);
     const bool paintDock = paint_mode_state.enabled && paint_mode_state.hasValidTarget();
-    const bool editDock = mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
-                          mesh_overlay_settings.enabled &&
-                          mesh_overlay_settings.edit_mode &&
-                          !active_mesh_edit_object_name.empty();
+    const bool splineEditDock = ctx.selection.selected.spline_object != nullptr;
+    const bool editDock = splineEditDock ||
+                          (mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
+                           mesh_overlay_settings.enabled &&
+                           mesh_overlay_settings.edit_mode);
     const bool hairDock = (active_properties_tab == 8);
     const bool slimDock = sculptDock || paintDock || editDock || hairDock;
 
@@ -6114,6 +6158,9 @@ void SceneUI::drawPaintBrushDock(UIContext& ctx) {
     
     // Invisible Drag Splitter on Left Edge of Brush Dock
     {
+        // InvisibleButton advances ImGui's cursor by its full height. Preserve the
+        // content cursor so the tool shelf is not submitted below the clipped window.
+        const ImVec2 content_cursor = ImGui::GetCursorPos();
         ImVec2 win_pos = ImGui::GetWindowPos();
         ImVec2 win_size = ImGui::GetWindowSize();
         ImVec2 p_min = ImVec2(win_pos.x - 2.0f, win_pos.y);
@@ -6131,6 +6178,7 @@ void SceneUI::drawPaintBrushDock(UIContext& ctx) {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             dl->AddRectFilled(p_min, p_max, IM_COL32(140, 140, 140, 180));
         }
+        ImGui::SetCursorPos(content_cursor);
     }
 
     bool is_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);

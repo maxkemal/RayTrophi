@@ -1556,13 +1556,22 @@
     "notes": "declared_not_running and running_not_declared are the two ways a graph and the live solvers can disagree.",
     "tags": "simulation|nodes|coupling|verify|diagnostics"
   },
-  "sim_graph.attributes": {
-    "summary": "List the attributes a simulation domain exposes",
-    "tags": "simulation|nodes|attributes"
+  "sim_graph.domain_intersections": {
+    "summary": "Report which force fields and colliders geometrically overlap a domain's box",
+    "notes": "A MEASUREMENT, not a declared link - neither force fields nor colliders carry a domain field, because force is spatial. Bounding-volume overlap, not exact clipping: an obb collider's box ignores rotation (over-reports only, never hides a real intersection); mesh_sdf/convex/mesh_bvh colliders report measurable=false rather than a guessed non-intersection.",
+    "tags": "simulation|nodes|forcefield|collider|measure|diagnostics"
   },
-  "sim_graph.surface_attributes": {
-    "summary": "List the surface attributes an object exposes to simulation nodes",
-    "tags": "simulation|nodes|attributes|surface"
+  "attr.list": {
+    "summary": "List the attribute names that exist for an object/domain/world scope",
+    "notes": "Unifies the old sim_graph.attributes (domain) and sim_graph.surface_attributes (object) into one surface that also covers world.",
+    "tags": "simulation|attributes|discover",
+    "related": "attr.stats"
+  },
+  "attr.stats": {
+    "summary": "Measure one named attribute directly: count, min, max, mean",
+    "notes": "available=false means the attribute could NOT be measured (no live particles, no MSF field, unknown name) - not the same as a value that measured zero. A world field is a single scalar: min/max/mean all read the same number.",
+    "tags": "simulation|attributes|measure",
+    "related": "attr.list"
   },
   "sim_cache.status": {
     "summary": "Report the simulation cache: valid range, frames in RAM, cache directory and the config signature",
@@ -1855,8 +1864,143 @@
   },
   "sim.control_state": {
     "summary": "Who is currently driving the solvers, and an epoch that changes whenever anything re-poses them",
-    "notes": "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops.",
-    "tags": "simulation|control|epoch|driver|timeline|measure|verify",
-    "related": "physics.step|timeline.set_frame|timeline.get_frame|scene.get_world_transform"
+    "notes": "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops. dropped_seeds names any fluid domain whose one-shot fluid.seed() (no persistent=true) the most recent auto-reset wiped and did NOT refill -- that auto-reset fires from a config-signature change ANYWHERE in the scene (e.g. an unrelated fluid.create_domain), so a domain's particles can go to zero with no error at all; check this field when that happens instead of assuming a reader fault.",
+    "tags": "simulation|control|epoch|driver|timeline|measure|verify|fluid|seed",
+    "related": "physics.step|timeline.set_frame|timeline.get_frame|scene.get_world_transform|fluid.seed|fluid.create_domain"
+  },
+  "perf.list": {
+    "summary": "List every recorded build/render timing section, newest write first",
+    "notes": "Sections are named by the code that performs the work: terrain.graph.evaluate/.height/.aux_outputs/.finalize_mesh, terrain.mesh_fill/.create/.update/.publish_fields, terrain.splat_resize, Renderer::rebuildBVH(...), Renderer::rebuildBackendGeometry(GPU). Each carries last/total/max ms, a call count and the process working-set delta across the scope - terrain build cost is dominated by allocation, so a timing without the memory figure next to it invites optimizing the wrong half.",
+    "tags": "performance|timing|profile|measure|slow|memory",
+    "related": "perf.get|perf.reset|perf.set_logging",
+    "returns": "PerfSection[]"
+  },
+  "perf.get": {
+    "summary": "Read one timing section by name",
+    "notes": "Returns found:false when the section has never been recorded. It never answers with zeros: a zeroed timing reads as 'measured, and it was free', which turns a missing measurement into a false one.",
+    "tags": "performance|timing|profile|measure",
+    "related": "perf.list",
+    "returns": "PerfSection"
+  },
+  "perf.reset": {
+    "summary": "Clear the timing counters before a measured run",
+    "notes": "Write ordering (seq) stays monotonic across a reset, so a section recorded after it cannot be confused with a stale one. Changes no scene, render or file state - which is why it carries the read capability.",
+    "tags": "performance|timing|profile|reset",
+    "related": "perf.list|perf.get"
+  },
+  "perf.set_logging": {
+    "summary": "Also mirror completed timing sections into the Scene Log",
+    "notes": "Off by default. The registry is the readable surface - script and IPC callers cannot read the Scene Log, which is exactly why the previous profiler produced no usable numbers.",
+    "tags": "performance|timing|profile|log",
+    "related": "perf.list"
+  },
+  "terrain.set_mesh_resolution": {
+    "summary": "Set the terrain vertex-grid resolution independently of the field (analysis) resolution",
+    "notes": "0 means the mesh follows the field, which is the historical behaviour. The field grid (heights, slope, flow, erosion, every analysisFields entry) is untouched; only the triangle count changes, and analysis fields are resampled onto the coarser vertex grid rather than dropped. Measured at 4096^2: mesh fill is 380 ms but the acceleration structures built from its 33.5 M triangles cost 6.4 s (Vulkan solid raster) + 2.6 s (Embree), and that cost is linear in triangle count - a 1024 mesh over a 4096 field is roughly 18x cheaper end to end. Normals are still sampled from the field, so shading detail largely survives; the silhouette does not. A value above the field resolution is REFUSED rather than clamped.",
+    "tags": "terrain|mesh|resolution|lod|performance|triangles|decimate",
+    "related": "terrain.get|terrain.create|perf.list",
+    "returns": "TerrainInfo",
+    "params": {
+      "name": {
+        "description": "Terrain name",
+        "required": true,
+        "type": "string"
+      },
+      "mesh_resolution": {
+        "description": "Vertices per side for the mesh grid, or 0 to follow the field resolution",
+        "required": true,
+        "type": "int"
+      }
+    }
+  },
+  "spline.list": {
+    "summary": "List editable 2D spline sources and their curve types",
+    "notes": "Returns names, plane, closed state and control-point counts. This is a read-only scene query.",
+    "tags": "spline|curve|profile|control-point|authoring",
+    "related": "spline.get|spline.set|spline.insert_point|spline.subdivide|spline.extrude",
+    "returns": "SplineInfo[]"
+  },
+  "spline.get": {
+    "summary": "Read the versioned JSON authoring payload of a spline",
+    "notes": "The payload includes curve type, plane, closed state, transform and all point/handle data.",
+    "tags": "spline|serialize|profile|curve",
+    "related": "spline.set|spline.list",
+    "returns": "SplinePayload",
+    "params": {"name": {"description": "Spline object name", "required": true, "type": "string"}}
+  },
+  "spline.set": {
+    "summary": "Replace a spline authoring payload with validated JSON data",
+    "notes": "Rejects unknown curve types, malformed points, invalid transforms and B-Splines with fewer than four controls.",
+    "tags": "spline|serialize|edit|profile",
+    "related": "spline.get|spline.insert_point|spline.subdivide",
+    "returns": "bool",
+    "params": {
+      "name": {"description": "Spline object name", "required": true, "type": "string"},
+      "spline": {"description": "Versioned spline payload object", "required": true, "type": "object"}
+    }
+  },
+  "spline.insert_point": {
+    "summary": "Insert a control point on a spline segment at normalized parameter t",
+    "notes": "Bezier insertion preserves the curve with De Casteljau; Linear insertion splits the segment. B-Spline knot insertion is intentionally rejected until its knot policy is active.",
+    "tags": "spline|insert|subdivide|bezier|linear",
+    "related": "spline.subdivide|spline.get",
+    "returns": "{index:int}",
+    "params": {
+      "name": {"description": "Spline object name", "required": true, "type": "string"},
+      "segment": {"description": "Zero-based segment start index", "required": true, "type": "int"},
+      "t": {"description": "Segment parameter in [0,1]", "required": true, "type": "float"}
+    }
+  },
+  "spline.subdivide": {
+    "summary": "Subdivide one or more spline segments with a fixed cut count",
+    "notes": "Segments are processed in descending index order so a batch request remains stable. The operation is validated as one mutation.",
+    "tags": "spline|subdivide|batch|curve",
+    "related": "spline.insert_point|spline.get",
+    "returns": "{last_index:int}",
+    "params": {
+      "name": {"description": "Spline object name", "required": true, "type": "string"},
+      "segments": {"description": "Segment start indices", "required": true, "type": "int[]"},
+      "cuts": {"description": "Cuts per segment, from 1 to 128", "required": true, "type": "int"}
+    }
+  },
+  "spline.extrude": {
+    "summary": "Extrude an open spline endpoint to a new control point",
+    "notes": "Only endpoint 0 or the final point is accepted, and closed splines are rejected.",
+    "tags": "spline|extrude|endpoint|profile",
+    "related": "spline.get|spline.insert_point",
+    "returns": "{index:int}",
+    "params": {
+      "name": {"description": "Spline object name", "required": true, "type": "string"},
+      "endpoint": {"description": "0 for first endpoint or last point index", "required": true, "type": "int"},
+      "position": {"description": "New control point position", "required": true, "type": "float[3]"}
+    }
+  },
+  "mesh.profile.loft.preview": {
+    "summary": "Preview a loft between multiple closed spline sections",
+    "tags": "mesh|profile|loft|spline|preview",
+    "related": "mesh.profile.loft.commit|mesh.profile.loft.self_test",
+    "params": {
+      "sections": {"description": "Ordered spline object names", "required": true, "type": "string[]"},
+      "samples_per_section": {"description": "Samples per loft ring", "type": "int"},
+      "cap_start": {"description": "Generate the first cap", "type": "bool"},
+      "cap_end": {"description": "Generate the final cap", "type": "bool"}
+    }
+  },
+  "mesh.profile.loft.commit": {
+    "summary": "Commit an undoable flat DNA SoA mesh generated from multiple spline sections",
+    "tags": "mesh|profile|loft|spline|commit",
+    "undoable": true,
+    "related": "mesh.profile.loft.preview|mesh.profile.loft.self_test",
+    "params": {
+      "sections": {"description": "Ordered spline object names", "required": true, "type": "string[]"},
+      "object": {"description": "Destination mesh object name", "required": true, "type": "string"},
+      "samples_per_section": {"description": "Samples per loft ring", "type": "int"},
+      "cap_start": {"description": "Generate the first cap", "type": "bool"},
+      "cap_end": {"description": "Generate the final cap", "type": "bool"}
+    }
+  },
+  "mesh.profile.loft.self_test": {
+    "summary": "Run the deterministic profile loft core self-test",
+    "tags": "mesh|profile|loft|test"
   }
 }

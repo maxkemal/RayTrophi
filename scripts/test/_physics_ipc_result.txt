@@ -1,0 +1,36 @@
+0. the application's frame loop actually turns between calls
+       viewport samples 1 -> 9 over up to 5 s
+  OK   the frame loop advances while this script waits
+1. ★★★ does physics.step SURVIVE to the next call?
+       read INSIDE the batch : y=49.70980 (fell 0.29020 m in 0.242 s)
+       read AFTER  the batch : y=49.70980 simulated=True
+  OK   a scripted physics.step survives to the next call
+1b. physics.step moves the PLAYHEAD, and the epoch says who is driving
+       frame 0 -> 4, driver=script script_driving=True epoch 59 -> 107
+  OK   physics.step advances the playhead and reports its driver
+       after a scrub: driver=user script_driving=False epoch=108
+  OK   a scrub takes the timeline back and the script can see it
+2. driving physics through the TIMELINE instead
+       frame   6 -> y=49.67790 simulated=True
+       frame  12 -> y=48.75071 simulated=True
+       frame  24 -> y=45.11103 simulated=True
+       frame  48 -> y=30.89523 simulated=True
+  OK   the timeline keeps advancing the body, frame after frame
+3. seeding honesty over the IPC dispatch (its own code path)
+       zero-overlap region -> 0 particles, call refused
+       fluid.seed: seed region does not overlap the domain, so it would create no particles: region (-0.400 50.000 -0.400)-(0.400 60.000 0.400) vs domain 'IP
+  OK   the refusal reports numbers a script can parse
+4. the default seed region comes from the domain, over IPC
+       domain at y 20-22, no region given -> 14440 particles
+  OK   omitting the seed region fills the domain rather than a fixed box
+5. ??? a second domain's config-signature reset must not be SILENT
+       one-shot domain seeded: fluid.get 22932, list_domains 22932
+       after an unrelated second domain: fluid.get 0, list_domains 0
+       sim.control_state dropped_seeds = ['IPC_DomA_221312']
+  OK   the drop of a one-shot seed is reported, not silent
+       persistent domain seeded: fluid.get 22932, list_domains 22932
+       after yet another unrelated domain: fluid.get 22932, list_domains 22932
+  OK   a persistent (opt-in) seed survives the same reset that drops a one-shot one
+  OK   a persistent domain is not listed among the dropped ones
+
+ALL PASSED

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Kaynak Dosyalar">
@@ -185,6 +185,75 @@
     </ClInclude>
     <ClInclude Include="source\include\MeshEdit\HalfEdgeMesh.h">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\MeshTool.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\MeshOperation.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\MeshTopologyTransaction.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\FlatMeshPublisher.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\FlatMeshUndoSnapshot.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\FlatMeshGeometryCommand.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\FlatMeshEditService.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\PolygonTriangulation.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\ProfileSweep.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\SplinePrimitive.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\SplineObject.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\SplineEditService.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\SplineSerialization.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\SplineObjectService.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\ProfileSweepService.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\ProfileRevolve.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\ProfileLoft.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\ProfileAuthoringService.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\ProfileSplineOverlay.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\ProfileSplineEditor.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\ProfileSplinePointGizmo.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\RtPythonMeshEdit.h">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEditToolDock.h">
+      <Filter>Kaynak Dosyalar</Filter>
     </ClInclude>
     <ClInclude Include="source\include\GridFluidSolver.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
@@ -719,6 +788,93 @@
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\MeshTool.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\MeshOperation.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\MeshTopologyTransaction.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshPublisher.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshUndoSnapshot.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshGeometryCommand.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshEditService.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\PolygonTriangulation.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileSweep.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplinePrimitive.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineObject.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineEditService.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineSerialization.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineObjectService.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileSweepService.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileRevolve.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileLoft.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileAuthoringService.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileSplineOverlay.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileSplineEditor.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileSplinePointGizmo.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonMeshEdit.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMeshTransaction.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\MeshEditToolDock.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMeshTools.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMeshToolDescriptors.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMeshEdit.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSpline.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshValidator.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\SimCache.cpp">
