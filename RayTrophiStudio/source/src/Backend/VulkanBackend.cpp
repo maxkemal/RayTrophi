@@ -1,4 +1,4 @@
-﻿/*
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          VulkanBackend.cpp
@@ -7,6 +7,8 @@
  * =========================================================================
  */
 #include "Backend/VulkanBackend.h"
+#include "PerfProfile.h"
+#include "TerrainSemanticMap.h"
 #include "Backend/vulkan_world_data.h"
 #include "VulkanBackend_Internal.h"
 #include "Core/RenderStateManager.h"
@@ -9736,6 +9738,7 @@ void VulkanBackendAdapter::recordHairPrepass(VkCommandBuffer cmd) {
 void VulkanBackendAdapter::updateMeshTransform(uint32_t h, const Matrix4x4& t) { (void)h; (void)t; }
 
 void VulkanBackendAdapter::rebuildAccelerationStructure() {
+    RTPERF_SCOPE("accel.vulkan_rt.rebuild");
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_meshRegistry.clear();
     m_blasMaterialBounds.clear();
@@ -10233,6 +10236,7 @@ void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, 
 // but unused so the approach can be revisited without re-plumbing the pipeline.
 
 void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    RTPERF_SCOPE("accel.vulkan_rt.update_geometry");
     if (!m_device || !m_device->isInitialized()) return;
 
     // [VULKAN THREAD SAFETY] Prevent background import thread from crashing main render thread.
@@ -13061,6 +13065,58 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
                 }
             }
         }
+
+        gld.macro_color_tex = 0;
+        if (ld.macroColorTexture) {
+            const auto* macroTex = reinterpret_cast<const Texture*>(ld.macroColorTexture);
+            const uint64_t cacheKey = (uint64_t)macroTex->m_uid;
+            auto it = m_uploadedImageIDs.find(cacheKey);
+            if (it != m_uploadedImageIDs.end()) {
+                gld.macro_color_tex = (uint32_t)it->second;
+            } else {
+                uint32_t upW = static_cast<uint32_t>(std::max(0, macroTex->width));
+                uint32_t upH = static_cast<uint32_t>(std::max(0, macroTex->height));
+                const std::vector<CompactVec4>& px = macroTex->pixels;
+                if (!px.empty()) {
+                    std::vector<uint8_t> tmp(static_cast<size_t>(upW) * upH * 4);
+                    for (size_t i = 0; i < px.size(); ++i) {
+                        tmp[i*4+0] = px[i].r; tmp[i*4+1] = px[i].g;
+                        tmp[i*4+2] = px[i].b; tmp[i*4+3] = px[i].a;
+                    }
+                    int64_t id = this->uploadTexture2D(tmp.data(), upW, upH, 4, false, false);
+                    if (id) {
+                        m_uploadedImageIDs[cacheKey] = id;
+                        m_textureIdToCacheKey[id] = cacheKey;
+                        gld.macro_color_tex = (uint32_t)id;
+                    }
+                }
+            }
+        }
+        gld.macro_color_strength = ld.macroColorStrength;
+        gld.semantic_map_tex = 0;
+        if (ld.semanticMapTexture) {
+            const auto* semanticTexture = reinterpret_cast<const Texture*>(ld.semanticMapTexture);
+            const uint64_t semanticKey = static_cast<uint64_t>(semanticTexture->m_uid);
+            auto semanticIt = m_uploadedImageIDs.find(semanticKey);
+            if (semanticIt != m_uploadedImageIDs.end()) {
+                gld.semantic_map_tex = static_cast<uint32_t>(semanticIt->second);
+            } else {
+                const std::vector<uint8_t> rgba = TerrainSemanticMap::rgbaBytes(*semanticTexture);
+                if (!rgba.empty()) {
+                    const int64_t id = this->uploadTexture2D(rgba.data(), semanticTexture->width,
+                        semanticTexture->height, 4, false, false);
+                    if (id > 0) {
+                        m_uploadedImageIDs[semanticKey] = id;
+                        m_textureIdToCacheKey[id] = semanticKey;
+                        gld.semantic_map_tex = static_cast<uint32_t>(id);
+                    }
+                }
+            }
+        }
+        gld.semantic_wet_darkening = ld.semanticWetDarkening;
+        gld.semantic_wet_roughness = ld.semanticWetRoughness;
+        gld.semantic_pad = 0.0f;
+
         gld.layer_count = ld.layer_count;
         gpuLayers.push_back(gld);
     }
@@ -14827,6 +14883,7 @@ void VulkanBackendAdapter::renderPass(bool accumulate) { (void)accumulate; /* TO
 // ============================================================================
 
 void VulkanBackendAdapter::buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    RTPERF_SCOPE("accel.vulkan_rt.raster_geometry");
     buildRasterGeometryImpl(objects);
 }
 

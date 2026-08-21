@@ -9,9 +9,13 @@
 #include "TerrainManager.h"
 #include "InstanceManager.h"
 #include "FoliageAssetLibrary.h"
+#include "TerrainSatMapNodes.h"
+#include "TerrainPaintEvaluation.h"
+#include "TerrainSemanticMap.h"
 #include "RiverSpline.h"
 #include "SnowComputeGPU.h"
 #include "globals.h"
+#include "PerfProfile.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
 #include <cmath>
@@ -25,6 +29,7 @@
 #include <queue>
 #include <deque>
 #include <functional>
+#include <utility>
 #include <unordered_set>
 #include "perlin.h" // Legacy gradient noise; terrain nodes use the landform substrate below
 #include <image_resample.h>
@@ -2902,6 +2907,15 @@ namespace TerrainNodesV2 {
             }
             terrain->splatMap->m_is_loaded = true;
             terrain->splatMap->updateGPU();
+
+            const auto semanticInput = getImageInput(1, ctx);
+            if (semanticInput.isValid()) {
+                std::string semanticError;
+                if (!TerrainSemanticMap::publish(*terrain, semanticInput, semanticError)) {
+                    ctx.addError(id, semanticError);
+                    return NodeSystem::PinValue{};
+                }
+            }
         }
         
         return NodeSystem::PinValue{};
@@ -3241,34 +3255,7 @@ namespace TerrainNodesV2 {
     }
     
     NodeSystem::PinValue CurvatureMaskNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
-        auto input = getHeightInput(0, ctx);
-        
-        if (!input.isValid()) {
-            ctx.addError(id, "Invalid input");
-            return NodeSystem::PinValue{};
-        }
-        
-        int w = input.width;
-        int h = input.height;
-        auto result = createMaskOutput(w, h);
-        
-        for (int y = 1; y < h - 1; y++) {
-            for (int x = 1; x < w - 1; x++) {
-                int idx = y * w + x;
-                
-                float center = (*input.data)[idx];
-                float laplacian = 
-                    (*input.data)[idx - 1] + (*input.data)[idx + 1] +
-                    (*input.data)[idx - w] + (*input.data)[idx + w] - 4.0f * center;
-                
-                // Positive = concave (valleys), Negative = convex (ridges)
-                float curv = selectConvex ? -laplacian : laplacian;
-                curv = clampValue((curv - minCurve) / (maxCurve - minCurve + 0.001f), 0.0f, 1.0f);
-                (*result.data)[idx] = curv;
-            }
-        }
-        
-        return result;
+        return computeAdaptiveCurvatureMask(*this, ctx);
     }
     
     void CurvatureMaskNode::drawContent() {
@@ -7339,153 +7326,44 @@ namespace TerrainNodesV2 {
     
     NodeSystem::PinValue AutoSplatNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
         auto* tctx = getTerrainContext(ctx);
-        auto input = getHeightInput(0, ctx);
+        const auto input = getHeightInput(0, ctx);
         const auto flow = getHeightInput(1, ctx);
-        
-        if (!input.isValid()) {
-            ctx.addError(id, "Height input required");
-            return NodeSystem::PinValue{};
-        }
-        if (flow.isValid() && (flow.width != input.width || flow.height != input.height)) {
-            ctx.addError(id, "Auto Splat Flow input must match height resolution");
-            return NodeSystem::PinValue{};
-        }
-        
-        int w = input.width;
-        int h = input.height;
-        if (w < 2 || h < 2) {
+        if (!input.isValid() || input.width < 2 || input.height < 2) {
             ctx.addError(id, "Auto Splat requires at least a 2x2 height image");
             return NodeSystem::PinValue{};
         }
-        
-        // Create 4-channel output (stored as 4 separate values per pixel)
-        NodeSystem::Image2DData result;
-        result.data = std::make_shared<std::vector<float>>(w * h * 4, 0.0f);
-        result.width = w;
-        result.height = h;
-        result.channels = 4;
-        result.semantic = NodeSystem::ImageSemantic::Mask;
-        
-        float cellSize = 1.0f;
-        float heightScale = 100.0f; // Default scale if no terrain context
-        
+
+        TerrainPaintEvaluation::PaintDomain domain;
+        domain.width = input.width;
+        domain.height = input.height;
+        domain.worldScale = static_cast<float>((std::max)(input.width - 1, 1));
+        domain.heightScale = 100.0f;
         if (tctx && tctx->terrain) {
-            cellSize = tctx->terrain->heightmap.scale_xz / w; // Assuming uniform grid
-            heightScale = tctx->terrain->heightmap.scale_y;
+            domain.width = tctx->terrain->paintGridWidth();
+            domain.height = tctx->terrain->paintGridHeight();
+            domain.worldScale = tctx->terrain->heightmap.scale_xz;
+            domain.heightScale = tctx->terrain->heightmap.scale_y;
         }
 
-        // Calculate weights for each pixel
-        for (int y = 1; y < h - 1; y++) {
-            for (int x = 1; x < w - 1; x++) {
-                int idx = y * w + x;
-                // De-normalize height for rule evaluation (0-1 -> 0-heightScale)
-                float height = (*input.data)[idx] * heightScale;
-                
-                // Calculate slope (degrees) using scaled heights
-                float h_l = (*input.data)[idx - 1] * heightScale;
-                float h_r = (*input.data)[idx + 1] * heightScale;
-                float h_u = (*input.data)[idx - w] * heightScale;
-                float h_d = (*input.data)[idx + w] * heightScale; // Down in image space is +Y
-                
-                float dzdx = (h_r - h_l) / (2.0f * cellSize);
-                float dzdy = (h_d - h_u) / (2.0f * cellSize);
-                float slope = std::atan(std::sqrt(dzdx * dzdx + dzdy * dzdy)) * 57.2957795f;
-                
-                float weights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                
-                // Calculate weight for each layer
-                for (int layer = 0; layer < 4; layer++) {
-                    if (!rules[layer].enabled) continue;
-                    
-                    const auto& rule = rules[layer];
-                    
-                    // Height contribution
-                    float heightWeight = 0.0f;
-                    if (height >= rule.heightMin && height <= rule.heightMax) {
-                        heightWeight = 1.0f;
-                    } else if (height < rule.heightMin) {
-                        heightWeight = smoothstepLocal(rule.heightMin - rule.falloff, rule.heightMin, height);
-                    } else {
-                        heightWeight = 1.0f - smoothstepLocal(rule.heightMax, rule.heightMax + rule.falloff, height);
-                    }
-                    
-                    // Slope contribution
-                    float slopeWeight = 0.0f;
-                    if (slope >= rule.slopeMin && slope <= rule.slopeMax) {
-                        slopeWeight = 1.0f;
-                    } else if (slope < rule.slopeMin) {
-                        slopeWeight = smoothstepLocal(rule.slopeMin - rule.falloff, rule.slopeMin, slope);
-                    } else {
-                        slopeWeight = 1.0f - smoothstepLocal(rule.slopeMax, rule.slopeMax + rule.falloff, slope);
-                    }
-                    
-                    // Combine height and slope
-                    float finalWeight = heightWeight * rule.heightWeight + slopeWeight * rule.slopeWeight;
-                    
-                    // Add noise variation
-                    if (rule.noiseAmount > 0.0f) {
-                        float noise = simpleNoise(x, y, noiseSeed + layer) * 2.0f - 1.0f;
-                        finalWeight += noise * rule.noiseAmount;
-                    }
-                    
-                    weights[layer] = clampValue(finalWeight, 0.0f, 1.0f);
-                }
-
-                // A is the shared Soil / Flow material. Union preserves the
-                // authored exposed-soil rule while guaranteeing that even
-                // narrow dry drainage masks survive into the splat map.
-                if (flow.isValid()) {
-                    const float flowWeight = clampValue(
-                        (*flow.data)[static_cast<size_t>(idx)], 0.0f, 1.0f);
-                    weights[3] = 1.0f - (1.0f - weights[3]) * (1.0f - flowWeight);
-                }
-                
-                // Normalize weights if requested
-                if (normalizeOutput) {
-                    // Soil/Flow is an overlay allocation. Preserve its authored
-                    // coverage and distribute only the remaining area between
-                    // Grass, Rock and Snow; a narrow flow mask must not be
-                    // diluted merely because several terrain rules overlap.
-                    weights[3] = clampValue(weights[3], 0.0f, 1.0f);
-                    const float remaining = 1.0f - weights[3];
-                    const float baseSum = weights[0] + weights[1] + weights[2];
-                    if (baseSum > 0.001f) {
-                        for (int i = 0; i < 3; ++i) weights[i] = weights[i] / baseSum * remaining;
-                    } else {
-                        weights[0] = remaining;
-                        weights[1] = 0.0f;
-                        weights[2] = 0.0f;
-                    }
-                }
-                
-                // Store as RGBA
-                (*result.data)[idx * 4 + 0] = weights[0];
-                (*result.data)[idx * 4 + 1] = weights[1];
-                (*result.data)[idx * 4 + 2] = weights[2];
-                (*result.data)[idx * 4 + 3] = weights[3];
-            }
+        TerrainPaintEvaluation::AutoSplatSettings settings;
+        settings.normalizeOutput = normalizeOutput;
+        settings.noiseSeed = noiseSeed;
+        for (int i = 0; i < 4; ++i) {
+            settings.rules[static_cast<size_t>(i)] = {
+                rules[i].heightMin, rules[i].heightMax, rules[i].slopeMin, rules[i].slopeMax,
+                rules[i].heightWeight, rules[i].slopeWeight, rules[i].falloff,
+                rules[i].noiseAmount, rules[i].enabled
+            };
         }
-        
-        // Fill edges
-        for (int x = 0; x < w; x++) {
-            for (int c = 0; c < 4; c++) {
-                (*result.data)[x * 4 + c] = (*result.data)[(w + x) * 4 + c];
-                (*result.data)[((h-1) * w + x) * 4 + c] = (*result.data)[((h-2) * w + x) * 4 + c];
-            }
+        if (outputIndex == 1) {
+            return TerrainPaintEvaluation::evaluateFlowSemantic(flow, domain);
         }
-        for (int y = 0; y < h; y++) {
-            for (int c = 0; c < 4; c++) {
-                (*result.data)[(y * w) * 4 + c] = (*result.data)[(y * w + 1) * 4 + c];
-                (*result.data)[(y * w + w - 1) * 4 + c] = (*result.data)[(y * w + w - 2) * 4 + c];
-            }
-        }
-        
-        return result;
+        return TerrainPaintEvaluation::evaluateAutoSplat(input, domain, settings);
     }
     
     void AutoSplatNode::drawContent() {
         const char* layerNames[] = {
-            "Grass (R)", "Rock / Gravel (G)", "Snow (B)", "Soil / Flow (A)"
+            "Grass (R)", "Rock / Gravel (G)", "Snow (B)", "Soil (A)"
         };
         
         for (int i = 0; i < 4; i++) {
@@ -8785,130 +8663,58 @@ namespace TerrainNodesV2 {
     }
 
     NodeSystem::PinValue SurfaceComposerNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
-        const auto height = getHeightInput(0, ctx);
-        const auto soil = getHeightInput(1, ctx);
-        const auto flow = getHeightInput(2, ctx);
-        const auto wetness = getHeightInput(3, ctx);
-        const auto hardness = getHeightInput(4, ctx);
-        const auto snow = getHeightInput(5, ctx);
-        const auto ice = getHeightInput(6, ctx);
-        const auto meltwater = getHeightInput(7, ctx);
-        const auto grass = getHeightInput(8, ctx);
-        const auto rock = getHeightInput(9, ctx);
-        if (!height.isValid() || height.width < 2 || height.height < 2) {
+        TerrainPaintEvaluation::SurfaceComposerInputs inputs;
+        inputs.height = getHeightInput(0, ctx);
+        inputs.soil = getHeightInput(1, ctx);
+        inputs.flow = getHeightInput(2, ctx);
+        inputs.wetness = getHeightInput(3, ctx);
+        inputs.hardness = getHeightInput(4, ctx);
+        inputs.snow = getHeightInput(5, ctx);
+        inputs.ice = getHeightInput(6, ctx);
+        inputs.meltwater = getHeightInput(7, ctx);
+        inputs.grass = getHeightInput(8, ctx);
+        inputs.rock = getHeightInput(9, ctx);
+        if (!inputs.height.isValid() || inputs.height.width < 2 || inputs.height.height < 2) {
             ctx.addError(id, "Surface Composer requires at least a 2x2 height input");
             return NodeSystem::PinValue{};
         }
-        if (!sameImageExtent(soil, height.width, height.height) || !sameImageExtent(flow, height.width, height.height) ||
-            !sameImageExtent(wetness, height.width, height.height) || !sameImageExtent(hardness, height.width, height.height) ||
-            !sameImageExtent(snow, height.width, height.height) || !sameImageExtent(ice, height.width, height.height) ||
-            !sameImageExtent(meltwater, height.width, height.height) ||
-            !sameImageExtent(grass, height.width, height.height) || !sameImageExtent(rock, height.width, height.height)) {
-            ctx.addError(id, "Surface Composer inputs must have matching resolutions");
-            return NodeSystem::PinValue{};
-        }
 
-        const int w = height.width;
-        const int h = height.height;
-        const TerrainMetricScale metric = resolveTerrainMetricScale(ctx, w);
-        NodeSystem::Image2DData result;
-        if (outputIndex == 0) {
-            result = createMaskOutput(w, h);
-        } else {
-            result.data = std::make_shared<std::vector<float>>(static_cast<size_t>(w) * h * 4, 0.0f);
-            result.width = w; result.height = h; result.channels = 4;
-            result.semantic = NodeSystem::ImageSemantic::Mask;
-        }
-
-        const float influenceTotal = (std::max)(patchiness + slopeInfluence + soilInfluence + flowInfluence +
-            wetnessInfluence + hardnessInfluence + (grass.isValid() ? grassInfluence : 0.0f) +
-            (rock.isValid() ? rockInfluence : 0.0f) + (snow.isValid() ? snowInfluence : 0.0f) +
-            (ice.isValid() ? iceInfluence : 0.0f), 1e-6f);
-        for (int y = 0; y < h; ++y) {
-            const float v = h > 1 ? static_cast<float>(y) / (h - 1) : 0.0f;
-            for (int x = 0; x < w; ++x) {
-                const float u = w > 1 ? static_cast<float>(x) / (w - 1) : 0.0f;
-                const size_t index = static_cast<size_t>(y) * w + x;
-                const float patch = interpolatedPatchNoise(u, v, textureScale, seed);
-                const float slope = surfaceSlope01(height, x, y, metric);
-                const float hard = hardness.isValid() ? clampValue((*hardness.data)[index], 0.0f, 1.0f) : 0.45f;
-                const float soilValue = soil.isValid() ? clampValue((*soil.data)[index], 0.0f, 1.0f)
-                    : clampValue((1.0f - slope) * (1.0f - hard), 0.0f, 1.0f);
-                const float grassValue = grass.isValid() ? clampValue((*grass.data)[index], 0.0f, 1.0f)
-                    : soilValue;
-                const float rockValue = rock.isValid() ? clampValue((*rock.data)[index], 0.0f, 1.0f)
-                    : clampValue(slope * 0.75f + hard * hardnessInfluence * 0.55f, 0.0f, 1.0f);
-                // Mask inputs already obey the 0..1 authoring contract. Re-
-                // normalizing each image by its own maximum amplified weak flow
-                // noise into full-strength rivers and changed masks that were
-                // already correct in their node previews / Generate Mask path.
-                const float erosionFlow = flow.isValid()
-                    ? clampValue((*flow.data)[index], 0.0f, 1.0f) : 0.0f;
-                const float climateFlow = meltwater.isValid()
-                    ? clampValue((*meltwater.data)[index], 0.0f, 1.0f) : 0.0f;
-                const float flowValue = 1.0f - (1.0f - erosionFlow) * (1.0f - climateFlow);
-                const float wetValue = wetness.isValid() ? clampValue((*wetness.data)[index], 0.0f, 1.0f)
-                    : flowValue * (1.0f - slope * 0.6f);
-                const float snowValue = snow.isValid() ? clampValue((*snow.data)[index], 0.0f, 1.0f) : 0.0f;
-                const float iceValue = ice.isValid() ? clampValue((*ice.data)[index], 0.0f, 1.0f) : 0.0f;
-                const float weightedSnow = clampValue(snowValue * snowInfluence, 0.0f, 1.0f);
-                const float weightedIce = clampValue(iceValue * iceInfluence, 0.0f, 1.0f);
-                const float frozenCover = 1.0f - (1.0f - weightedSnow) * (1.0f - weightedIce);
-
-                float surface = (patch * patchiness + slope * slopeInfluence + soilValue * soilInfluence +
-                    flowValue * flowInfluence + wetValue * wetnessInfluence + hard * hardnessInfluence +
-                    grassValue * grassInfluence + rockValue * rockInfluence +
-                    snowValue * snowInfluence + iceValue * iceInfluence) / influenceTotal;
-                surface = clampValue((surface - 0.5f) * contrast + 0.5f, 0.0f, 1.0f);
-                if (outputIndex == 0) {
-                    (*result.data)[index] = surface;
-                    continue;
-                }
-
-                // Four render layers carry five surface meanings by sharing A
-                // between exposed soil and flow beds:
-                // R=Grass, G=Rock, B=Snow, A=Soil/Flow. Allocate coverage by
-                // priority instead of normalizing every weak mask to a full
-                // terrain. This preserves authored strengths and leaves the
-                // genuine remainder as exposed soil.
-                float remaining = 1.0f - frozenCover;
-                const float requestedFlow = flow.isValid()
-                    ? flowValue
-                    : clampValue(flowValue * flowInfluence, 0.0f, 1.0f);
-                const float flowCoverage = (std::min)(requestedFlow, remaining);
-                remaining -= flowCoverage;
-
-                const float requestedRock = rock.isValid()
-                    ? rockValue
-                    : clampValue(rockValue * rockInfluence, 0.0f, 1.0f);
-                const float rockCoverage = (std::min)(requestedRock, remaining);
-                remaining -= rockCoverage;
-
-                // Soil Depth describes substrate capacity, not exposed soil.
-                // Without a biome-authored grass mask it becomes vegetation
-                // suitability only on flatter, wetter ground; it is never
-                // written directly into the Grass render channel.
-                const float requestedGrass = grass.isValid()
-                    ? grassValue
-                    : clampValue(soilValue * grassInfluence * (1.0f - slope) *
-                        (0.55f + 0.45f * wetValue) * (0.75f + 0.25f * patch), 0.0f, 1.0f);
-                const float grassCoverage = (std::min)(requestedGrass, remaining);
-                remaining -= grassCoverage;
-
-                const float soilCoverage = remaining;
-                (*result.data)[index * 4 + 0] = grassCoverage;
-                (*result.data)[index * 4 + 1] = rockCoverage;
-                (*result.data)[index * 4 + 2] = frozenCover;
-                (*result.data)[index * 4 + 3] = flowCoverage + soilCoverage;
+        TerrainPaintEvaluation::PaintDomain domain;
+        domain.width = inputs.height.width;
+        domain.height = inputs.height.height;
+        domain.worldScale = static_cast<float>((std::max)(inputs.height.width - 1, 1));
+        domain.heightScale = 1.0f;
+        if (auto* terrainCtx = getTerrainContext(ctx)) {
+            domain.worldScale = terrainCtx->scale_xz;
+            domain.heightScale = terrainCtx->scale_y;
+            if (terrainCtx->terrain) {
+                domain.width = terrainCtx->terrain->paintGridWidth();
+                domain.height = terrainCtx->terrain->paintGridHeight();
             }
         }
-        return result;
+
+        TerrainPaintEvaluation::SurfaceComposerSettings settings;
+        settings.textureScale = textureScale;
+        settings.patchiness = patchiness;
+        settings.slopeInfluence = slopeInfluence;
+        settings.soilInfluence = soilInfluence;
+        settings.flowInfluence = flowInfluence;
+        settings.wetnessInfluence = wetnessInfluence;
+        settings.hardnessInfluence = hardnessInfluence;
+        settings.grassInfluence = grassInfluence;
+        settings.rockInfluence = rockInfluence;
+        settings.snowInfluence = snowInfluence;
+        settings.iceInfluence = iceInfluence;
+        settings.contrast = contrast;
+        settings.seed = seed;
+        return TerrainPaintEvaluation::evaluateSurfaceComposer(
+            inputs, domain, settings, outputIndex);
     }
 
     void SurfaceComposerNode::drawContent() {
-        ImGui::TextDisabled("RGBA: Grass / Rock / Snow / Soil-Flow");
-        ImGui::TextDisabled("Exposed soil + dry/wet flow beds share A");
-        ImGui::TextDisabled("Connected Grass/Rock/Flow masks are preserved");
+        ImGui::TextDisabled("Material: Grass / Rock / Snow / Soil");
+        ImGui::TextDisabled("Semantic: Flow / Wetness / Ice / Hardness");
+        ImGui::TextDisabled("Grass fallback is biome suitability, not Soil copy");
         if (ImGui::DragFloat("Texture Scale", &textureScale, 0.25f, 1.0f, 256.0f)) dirty = true;
         if (ImGui::SliderFloat("Patchiness", &patchiness, 0.0f, 1.0f)) dirty = true;
         if (ImGui::SliderFloat("Slope", &slopeInfluence, 0.0f, 2.0f)) dirty = true;
@@ -10267,6 +10073,13 @@ namespace TerrainNodesV2 {
             case NodeType::AutoSplat: node = addNode<AutoSplatNode>(); break;
             case NodeType::MaskPaint: node = addNode<MaskPaintNode>(); break;
             case NodeType::MaskImage: node = addNode<MaskImageNode>(); break;
+            // NEW: SatMap Nodes
+            case NodeType::SatMapColorRamp: node = addNode<TerrainSatMapColorRampNode>(); break;
+            case NodeType::SatMapOutput: node = addNode<TerrainSatMapOutputNode>(); break;
+            case NodeType::SatMapBlend: node = addNode<TerrainSatMapBlendNode>(); break;
+            case NodeType::GrassMask: node = addNode<TerrainGrassMaskNode>(); break;
+            case NodeType::SurfaceMasks: node = addNode<TerrainSurfaceMasksNode>(); break;
+            case NodeType::PaintMaskCombine: node = addNode<TerrainPaintMaskCombineNode>(); break;
             // NEW: Geological Transform Nodes
             case NodeType::Fault: node = addNode<FaultNode>(); break;
             case NodeType::Mesa: node = addNode<MesaNode>(); break;
@@ -10386,6 +10199,7 @@ namespace TerrainNodesV2 {
     bool TerrainNodeGraphV2::evaluateTerrainHeightData(TerrainObject* terrain, NodeSystem::EvaluationContext& ctx,
                                                         uint32_t previewNodeId) {
         if (!terrain) return false;
+        RTPERF_SCOPE("terrain.graph.height");
 
         // TerrainManager erosion functions also serve direct/non-node callers and
         // normally refresh the mesh themselves.  A node chain must defer those
@@ -10506,6 +10320,7 @@ namespace TerrainNodesV2 {
     bool TerrainNodeGraphV2::evaluateTerrainAuxOutputs(
         TerrainObject* terrain, SceneData& scene, NodeSystem::EvaluationContext& ctx) {
         if (!terrain) return false;
+        RTPERF_SCOPE("terrain.graph.aux_outputs");
 
         // An auxiliary output can pull an erosion node that is not part of the
         // height-output chain (or pull it first in synchronous evaluation). Keep
@@ -10513,6 +10328,7 @@ namespace TerrainNodesV2 {
         ScopedTerrainMeshUpdateDeferral deferMeshUpdates(terrain);
 
         std::vector<SplatOutputNode*> splatOutputNodes;
+        std::vector<TerrainSatMapOutputNode*> satMapOutputNodes;
         std::vector<HardnessOutputNode*> hardnessOutputNodes;
         std::vector<TerrainFieldsOutputNode*> fieldOutputNodes;
         std::vector<FoliageOutputNode*> foliageOutputNodes;
@@ -10556,6 +10372,10 @@ namespace TerrainNodesV2 {
                 if (auto* riverOutput = dynamic_cast<RiverSplineOutputNode*>(node.get())) {
                     riverOutputNodes.push_back(riverOutput);
                 }
+            } else if (typeId == "Terrain.SatMapOutput") {
+                if (auto* satMapOutput = dynamic_cast<TerrainSatMapOutputNode*>(node.get())) {
+                    satMapOutputNodes.push_back(satMapOutput);
+                }
             }
         }
 
@@ -10577,6 +10397,13 @@ namespace TerrainNodesV2 {
             splatNode->compute(0, ctx);
             ctx.endNode();
             splatNode->dirty = false;
+        }
+        for (auto* satMapNode : satMapOutputNodes) {
+            if (!publicationAllowed(satMapNode)) continue;
+            ctx.beginNode(satMapNode->id);
+            satMapNode->compute(0, ctx);
+            ctx.endNode();
+            satMapNode->dirty = false;
         }
         for (auto* hardNode : hardnessOutputNodes) {
             if (!publicationAllowed(hardNode)) continue;
@@ -10694,7 +10521,8 @@ namespace TerrainNodesV2 {
                     type == "TerrainV2.RiverSplineOutput") {
                     return DirtyEvaluationImpact::GeometryOrScene;
                 }
-                if (type == "TerrainV2.SplatOutput") materialOnlySinkDirty = true;
+                if (type == "TerrainV2.SplatOutput" ||
+                    type == "Terrain.SatMapOutput") materialOnlySinkDirty = true;
                 if (type == "TerrainV2.FoliageOutput") foliageOnlySinkDirty = true;
             }
 
@@ -10736,16 +10564,20 @@ namespace TerrainNodesV2 {
 
         bool evaluatedAny = false;
         for (const auto& graphNode : nodes) {
-            auto* splat = dynamic_cast<SplatOutputNode*>(graphNode.get());
-            if (!splat || !splat->dirty || !splat->publicationEnabled) continue;
-            const NodeSystem::NodeGroup* group = splat->groupId ? getGroup(splat->groupId) : nullptr;
+            auto* terrainOutput = dynamic_cast<TerrainNodeBase*>(graphNode.get());
+            if (!terrainOutput || !terrainOutput->dirty || !terrainOutput->publicationEnabled) continue;
+            const std::string typeId = terrainOutput->getTypeId();
+            if (typeId != "TerrainV2.SplatOutput" &&
+                typeId != "Terrain.SatMapOutput") continue;
+            const NodeSystem::NodeGroup* group = terrainOutput->groupId
+                ? getGroup(terrainOutput->groupId) : nullptr;
             if (group && !group->publicationEnabled) continue;
 
-            ctx.beginNode(splat->id);
-            splat->compute(0, ctx);
+            ctx.beginNode(terrainOutput->id);
+            terrainOutput->compute(0, ctx);
             ctx.endNode();
             evaluatedAny = true;
-            if (!ctx.hasErrors()) splat->dirty = false;
+            if (!ctx.hasErrors()) terrainOutput->dirty = false;
         }
 
         if (ctx.hasErrors()) {
@@ -10866,6 +10698,7 @@ namespace TerrainNodesV2 {
     // lastFinalizeWasFullRebuild().
     void TerrainNodeGraphV2::finalizeTerrainMesh(SceneData& scene, TerrainObject* terrain, bool deferBackendSignal) {
         if (!terrain) return;
+        RTPERF_SCOPE("terrain.graph.finalize_mesh");
         if (terrain->heightmap.width < 2 || terrain->heightmap.height < 2) return;
 
         size_t expectedTriCount = static_cast<size_t>(terrain->heightmap.width - 1) *
@@ -10893,6 +10726,7 @@ namespace TerrainNodesV2 {
     bool TerrainNodeGraphV2::evaluateTerrainAtResolution(TerrainObject* terrain, SceneData& scene,
                                                           int targetWidth, int targetHeight) {
         if (!terrain) return false;
+        RTPERF_SCOPE("terrain.graph.evaluate");
         if (isEvaluatingAsync()) return false;
 
         if (previewActive_) {
@@ -11445,8 +11279,8 @@ namespace TerrainNodesV2 {
             addTerrainNode(NodeType::FlowMask, x - 300.0f, y + 500.0f));
         if (!soilDepth) soilDepth = dynamic_cast<SoilDepthNode*>(
             addTerrainNode(NodeType::SoilDepth, x - 40.0f, y + 500.0f));
-        if (!composer || !splatOutput || composer->inputs.size() < 10 || composer->outputs.size() < 2 ||
-            splatOutput->inputs.empty() || !analysis || analysis->inputs.empty() || analysis->outputs.size() < 5 ||
+        if (!composer || !splatOutput || composer->inputs.size() < 10 || composer->outputs.size() < 3 ||
+            splatOutput->inputs.size() < 2 || !analysis || analysis->inputs.empty() || analysis->outputs.size() < 5 ||
             !flowMask || flowMask->inputs.empty() || flowMask->outputs.empty() ||
             !soilDepth || soilDepth->inputs.size() < 2 || soilDepth->outputs.empty()) return false;
 
@@ -11468,6 +11302,7 @@ namespace TerrainNodesV2 {
         addLink(snow->outputs[2].id, composer->inputs[6].id);
         addLink(snow->outputs[3].id, composer->inputs[7].id);
         addLink(composer->outputs[1].id, splatOutput->inputs[0].id);
+        addLink(composer->outputs[2].id, splatOutput->inputs[1].id);
         ensureTerrainLayerGroup(*this, "01 Analysis", IM_COL32(70, 105, 135, 90),
                                 {analysis, flowMask, soilDepth});
         ensureTerrainLayerGroup(*this, "05 Snow", IM_COL32(100, 165, 205, 90), {snow});
@@ -11571,8 +11406,8 @@ namespace TerrainNodesV2 {
             biome->inputs.size() < 5 || biome->outputs.size() < 4 ||
             fields->inputs.size() < 9 || !flowMask || flowMask->inputs.empty() || flowMask->outputs.empty() ||
             !soilDepth || soilDepth->inputs.size() < 2 || soilDepth->outputs.empty() ||
-            !surfaceComposer || surfaceComposer->inputs.size() < 10 || surfaceComposer->outputs.size() < 2 ||
-            !splatOutput || splatOutput->inputs.empty()) {
+            !surfaceComposer || surfaceComposer->inputs.size() < 10 || surfaceComposer->outputs.size() < 3 ||
+            !splatOutput || splatOutput->inputs.size() < 2) {
             return false;
         }
 
@@ -11599,6 +11434,7 @@ namespace TerrainNodesV2 {
         addLink(biome->outputs[1].id, surfaceComposer->inputs[8].id);
         addLink(biome->outputs[2].id, surfaceComposer->inputs[9].id);
         addLink(surfaceComposer->outputs[1].id, splatOutput->inputs[0].id);
+        addLink(surfaceComposer->outputs[2].id, splatOutput->inputs[1].id);
 
         for (int i = 0; i < 5; ++i) {
             addLink(analysis->outputs[static_cast<size_t>(i)].id,
@@ -11788,8 +11624,8 @@ namespace TerrainNodesV2 {
             fold->inputs.size() < 2 || fold->outputs.size() < 3 ||
             lithology->inputs.size() < 2 || lithology->outputs.size() < 4 ||
             strata->inputs.size() < 3 || strata->outputs.size() < 4 ||
-            fields->inputs.size() < 38 || composer->inputs.size() < 5 || composer->outputs.size() < 2 ||
-            splatOutput->inputs.empty()) return false;
+            fields->inputs.size() < 38 || composer->inputs.size() < 5 || composer->outputs.size() < 3 ||
+            splatOutput->inputs.size() < 2) return false;
 
         addLink(baseHeightPin, fold->inputs[0].id);
         // The automatic foundation is a continuous heightfield workflow. Do not
@@ -11807,6 +11643,7 @@ namespace TerrainNodesV2 {
         addLink(strata->outputs[0].id, composer->inputs[0].id);
         addLink(strata->outputs[1].id, composer->inputs[4].id);
         addLink(composer->outputs[1].id, splatOutput->inputs[0].id);
+        addLink(composer->outputs[2].id, splatOutput->inputs[1].id);
 
         // Stable shared geology contract: downstream erosion, biome and export
         // nodes can consume these fields without knowing this setup's topology.
@@ -12014,8 +11851,8 @@ namespace TerrainNodesV2 {
             terrainAnalysis->inputs.empty() || terrainAnalysis->outputs.size() < 5 ||
             !flowMask || flowMask->inputs.empty() || flowMask->outputs.empty() ||
             !soilDepth || soilDepth->inputs.size() < 2 || soilDepth->outputs.empty() ||
-            !surfaceComposer || surfaceComposer->inputs.size() < 10 || surfaceComposer->outputs.size() < 2 ||
-            !splatOutput || splatOutput->inputs.empty()) return false;
+            !surfaceComposer || surfaceComposer->inputs.size() < 10 || surfaceComposer->outputs.size() < 3 ||
+            !splatOutput || splatOutput->inputs.size() < 2) return false;
 
         // Hydrology must analyze the terrain the rivers will actually inhabit.
         // The MAIN watershed and every downstream hydrology consumer read the
@@ -12094,6 +11931,7 @@ namespace TerrainNodesV2 {
             addLink(hydrologySnow->outputs[3].id, surfaceComposer->inputs[7].id);
         }
         addLink(surfaceComposer->outputs[1].id, splatOutput->inputs[0].id);
+        addLink(surfaceComposer->outputs[2].id, splatOutput->inputs[1].id);
         addLink(watershed->outputs[0].id, splineOutput->inputs[0].id);
         addLink(watershed->outputs[1].id, splineOutput->inputs[1].id);
         addLink(watershed->outputs[2].id, splineOutput->inputs[2].id);
@@ -12425,6 +12263,7 @@ namespace TerrainNodesV2 {
         addLink(snow->outputs[2].id, composer->inputs[6].id);
         addLink(snow->outputs[3].id, composer->inputs[7].id);
         addLink(composer->outputs[1].id, splatOutput->inputs[0].id);
+        addLink(composer->outputs[2].id, splatOutput->inputs[1].id);
         markAllDirty();
     }
 
@@ -12707,6 +12546,18 @@ namespace TerrainNodesV2 {
                     newNode = addTerrainNode(NodeType::RiverBedCarve, x, y);
                 } else if (typeId == "TerrainV2.RiverLakeEasy") {
                     newNode = addTerrainNode(NodeType::RiverLakeEasy, x, y);
+                } else if (typeId == "Terrain.SatMapColorRamp") {
+                    newNode = addTerrainNode(NodeType::SatMapColorRamp, x, y);
+                } else if (typeId == "Terrain.SatMapBlend") {
+                    newNode = addTerrainNode(NodeType::SatMapBlend, x, y);
+                } else if (typeId == "Terrain.GrassMask") {
+                    newNode = addTerrainNode(NodeType::GrassMask, x, y);
+                } else if (typeId == "Terrain.SurfaceMasks") {
+                    newNode = addTerrainNode(NodeType::SurfaceMasks, x, y);
+                } else if (typeId == "Terrain.PaintMaskCombine") {
+                    newNode = addTerrainNode(NodeType::PaintMaskCombine, x, y);
+                } else if (typeId == "Terrain.SatMapOutput") {
+                    newNode = addTerrainNode(NodeType::SatMapOutput, x, y);
                 }
                 
                 if (newNode) {
@@ -12788,6 +12639,62 @@ namespace TerrainNodesV2 {
             if (startPin == 0 || endPin == 0 || getInputSource(endPin)) return;
             addLink(startPin, endPin);
         };
+
+        // Schema migration: material and semantic fields are now separate
+        // RGBA maps. Preserve authored material wiring and only add the new
+        // semantic companion when its Splat Output input is still empty.
+        std::vector<std::pair<uint32_t, uint32_t>> semanticLinks;
+        for (const auto& node : nodes) {
+            auto* output = dynamic_cast<SplatOutputNode*>(node.get());
+            if (!output || output->inputs.size() < 2 || getInputSource(output->inputs[1].id)) continue;
+            for (const auto& link : links) {
+                if (link.endPinId != output->inputs[0].id) continue;
+                if (auto* composer = dynamic_cast<SurfaceComposerNode*>(getPinOwner(link.startPinId))) {
+                    if (composer->outputs.size() >= 3 && link.startPinId == composer->outputs[1].id)
+                        semanticLinks.emplace_back(composer->outputs[2].id, output->inputs[1].id);
+                } else if (auto* autoSplat = dynamic_cast<AutoSplatNode*>(getPinOwner(link.startPinId))) {
+                    if (autoSplat->outputs.size() >= 2 && link.startPinId == autoSplat->outputs[0].id)
+                        semanticLinks.emplace_back(autoSplat->outputs[1].id, output->inputs[1].id);
+                }
+                break;
+            }
+        }
+        for (const auto& semanticLink : semanticLinks)
+            ensureLink(semanticLink.first, semanticLink.second);
+
+        // SatMap schema v8 appended Grass after every legacy input. Migrate an
+        // existing authored biome/Surface Composer grass source without
+        // touching SatMap ramps or any manually connected input.
+        uint32_t authoredGrassPin = 0;
+        for (const auto& node : nodes) {
+            if (auto* composer = dynamic_cast<SurfaceComposerNode*>(node.get())) {
+                if (composer->inputs.size() >= 9) {
+                    for (const auto& link : links) {
+                        if (link.endPinId == composer->inputs[8].id) {
+                            authoredGrassPin = link.startPinId;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (authoredGrassPin != 0) break;
+        }
+        if (authoredGrassPin == 0) {
+            for (const auto& node : nodes) {
+                if (auto* biome = dynamic_cast<BiomeComposerNode*>(node.get())) {
+                    if (biome->outputs.size() >= 2) authoredGrassPin = biome->outputs[1].id;
+                    break;
+                }
+            }
+        }
+        if (authoredGrassPin != 0) {
+            for (const auto& node : nodes) {
+                auto* satMap = dynamic_cast<TerrainSatMapColorRampNode*>(node.get());
+                if (satMap && satMap->inputs.size() >= 9)
+                    ensureLink(authoredGrassPin, satMap->inputs[8].id);
+            }
+        }
+
         for (const auto& node : nodes) {
             auto* easy = dynamic_cast<RiverLakeEasyNode*>(node.get());
             if (!easy) continue;

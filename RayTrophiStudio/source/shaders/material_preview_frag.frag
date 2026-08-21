@@ -36,13 +36,18 @@ layout(set = 0, binding = 1) uniform sampler2D textures[];
 layout(set = 0, binding = 2) uniform sampler2D envMaps[2];
 
 // Terrain layer SSBO — mirrors RT pipeline binding 12.
-// Layout must match VkTerrainLayerData (48 bytes, 16-byte aligned).
+// Layout must match VkTerrainLayerData (64 bytes, 16-byte aligned).
 struct TerrainLayerData {
     uint  layer_mat_id[4];   // Material buffer indices for layers 0–3
     float layer_uv_scale[4]; // UV tiling per layer
     uint  splat_map_tex;     // RGBA splat map texture slot
     uint  layer_count;       // Active layers (1–4)
-    uint  _pad[2];
+    uint  macro_color_tex;   // Macro color map slot
+    float macro_color_strength; // Macro color blend strength
+    uint  semantic_map_tex;  // R=Flow, G=Wetness, B=Ice, A=Hardness
+    float semantic_wet_darkening;
+    float semantic_wet_roughness;
+    float semantic_pad;
 };
 layout(set = 0, binding = 3, std430) readonly buffer TerrainLayerBuffer {
     TerrainLayerData terrainLayers[];
@@ -331,6 +336,27 @@ void main() {
                 } else {
                     blendNormal_ts += weights[k] * vec3(0.0, 0.0, 1.0);
                 }
+            }
+
+            // Macro Color Map (SatMap) blending
+            if (validTexture(tl.macro_color_tex) && tl.macro_color_strength > 0.0) {
+                vec4 mColor = texture(textures[nonuniformEXT(tl.macro_color_tex)], uv);
+                blendAlbedo = mix(blendAlbedo, mColor.rgb, clamp(tl.macro_color_strength, 0.0, 1.0));
+            }
+
+            if (validTexture(tl.semantic_map_tex)) {
+                vec4 semantic = texture(textures[nonuniformEXT(tl.semantic_map_tex)], uv);
+                float wet = clamp(max(semantic.r, semantic.g), 0.0, 1.0);
+                float ice = clamp(semantic.b, 0.0, 1.0);
+                float hard = clamp(semantic.a, 0.0, 1.0);
+                blendAlbedo *= 1.0 - wet * clamp(tl.semantic_wet_darkening, 0.0, 0.8);
+                blendRoughness = mix(blendRoughness, 0.16,
+                    wet * clamp(tl.semantic_wet_roughness, 0.0, 1.0));
+                float iceLuma = dot(blendAlbedo, vec3(0.2126, 0.7152, 0.0722));
+                blendAlbedo = mix(blendAlbedo,
+                    vec3(0.70, 0.82, 0.88) * max(iceLuma, 0.35), ice * 0.55);
+                blendRoughness = mix(blendRoughness, 0.12, ice * 0.65);
+                blendRoughness = clamp(blendRoughness + hard * 0.035, 0.0, 1.0);
             }
 
             // Apply blended normal first (derivative TBN — no surfaceTBN available in raster)

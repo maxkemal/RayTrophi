@@ -1990,6 +1990,8 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                      rec.data.splat_map_tex = 0;
                      SCENE_LOG_WARN("[TERRAIN SBT] No splatMap for terrain '" + terrain.name + "'");
                 }
+                rec.data.semantic_map_tex = terrain.surfaceSemanticMap
+                    ? resolveSharedOptixTexture(terrain.surfaceSemanticMap) : 0;
                 
                 // 2. Layers - Use Material IDs for full PBR blending (Albedo, Rough, DISPLACEMENT, etc.)
                 for (int i = 0; i < 4; ++i) {
@@ -2302,6 +2304,8 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                     } else {
                         rec.data.splat_map_tex = 0;
                     }
+                    rec.data.semantic_map_tex = terrain.surfaceSemanticMap
+                        ? resolveSharedOptixTexture(terrain.surfaceSemanticMap) : 0;
 
                     // Sync Layers (Textured Layers) - Use Material IDs
                     for (int i = 0; i < 4; ++i) {

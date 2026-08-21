@@ -85,6 +85,7 @@ struct __align__(16) HitGroupData
     int pad3 = 0;                 // Alignment
     
     cudaTextureObject_t splat_map_tex = 0;
+    cudaTextureObject_t semantic_map_tex = 0; // R=Flow G=Wetness B=Ice A=Hardness
     
     // Arrays for 4 layers (Albedo, Normal, Roughness)
     // 4 * 8 bytes = 32 bytes (16-byte aligned)

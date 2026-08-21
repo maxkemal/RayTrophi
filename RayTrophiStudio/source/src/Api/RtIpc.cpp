@@ -2091,6 +2091,17 @@ json dispatchMethod(const std::string& method, const json& params) {
         return json{{"id", info.id}, {"name", info.name},
                     {"resolution", json::array({info.width, info.height})},
                     {"size", info.size}, {"height_scale", info.height_scale},
+                    // ★ `resolution` is the FIELD grid; `mesh_resolution` is the
+                    // vertex grid dial (0 = follow the field) and `mesh_grid` is
+                    // what was actually built, so a reader never re-derives the
+                    // 0 case and never confuses the two resolutions.
+                    {"mesh_resolution", info.mesh_resolution},
+                    {"mesh_grid", json::array({info.mesh_width, info.mesh_height})},
+                    {"paint_resolution", info.paint_resolution},
+                    {"paint_grid", json::array({info.paint_width, info.paint_height})},
+                    {"has_surface_semantic", info.has_surface_semantic},
+                    {"surface_semantic_channels", json::array({
+                        "flow", "wetness", "ice", "hardness"})},
                     {"has_node_graph", info.has_node_graph}, {"dirty", info.dirty}};
     };
     if (method == "terrain.list") {
@@ -2117,9 +2128,12 @@ json dispatchMethod(const std::string& method, const json& params) {
         int resolution = optionalInt(params, "resolution", 1024);
         float size = optionalFloat(params, "size", 1000.0f);
         float height_scale = optionalFloat(params, "height_scale", 100.0f);
-        return enqueueQuery([name, resolution, size, height_scale, terrainInfoJson](UIContext&) {
+        int mesh_resolution = optionalInt(params, "mesh_resolution", 0);
+        return enqueueQuery([name, resolution, size, height_scale, mesh_resolution,
+                             terrainInfoJson](UIContext&) {
             rtapi::TerrainInfo info;
-            rtapi::Result r = rtapi::createTerrain(name, resolution, size, height_scale, info);
+            rtapi::Result r = rtapi::createTerrain(name, resolution, size, height_scale,
+                                                   mesh_resolution, info);
             if (!r.ok) return json{{"__error", r.error}};
             return terrainInfoJson(info);
         });
@@ -2134,6 +2148,26 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::TerrainInfo info;
             rtapi::Result r = rtapi::importTerrainHeightmap(filepath, name, size, height_scale,
                                                             max_resolution, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return terrainInfoJson(info);
+        });
+    }
+    if (method == "terrain.set_mesh_resolution") {
+        std::string name = requireString(params, "name");
+        int mesh_resolution = requireInt(params, "mesh_resolution");
+        return enqueueQuery([name, mesh_resolution, terrainInfoJson](UIContext&) {
+            rtapi::TerrainInfo info;
+            rtapi::Result r = rtapi::setTerrainMeshResolution(name, mesh_resolution, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return terrainInfoJson(info);
+        });
+    }
+    if (method == "terrain.set_paint_resolution") {
+        std::string name = requireString(params, "name");
+        int paint_resolution = requireInt(params, "paint_resolution");
+        return enqueueQuery([name, paint_resolution, terrainInfoJson](UIContext&) {
+            rtapi::TerrainInfo info;
+            rtapi::Result r = rtapi::setTerrainPaintResolution(name, paint_resolution, info);
             if (!r.ok) return json{{"__error", r.error}};
             return terrainInfoJson(info);
         });
@@ -2194,8 +2228,32 @@ json dispatchMethod(const std::string& method, const json& params) {
         std::string name = requireString(params, "name");
         std::string preset = requireString(params, "preset");
         bool replace_graph = optionalBool(params, "replace_graph", false);
-        return enqueueResult([name, preset, replace_graph](UIContext&) {
-            return rtapi::applyTerrainPreset(name, preset, replace_graph);
+        bool add_satmap = optionalBool(params, "add_satmap", false);
+        return enqueueResult([name, preset, replace_graph, add_satmap](UIContext&) {
+            return rtapi::applyTerrainPreset(name, preset, replace_graph, add_satmap);
+        });
+    }
+    if (method == "terrain.list_satmap_presets") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::TerrainSatMapPresetInfo> presets;
+            const auto result = rtapi::listTerrainSatMapPresets(presets);
+            if (!result.ok) return json{{"__error", result.error}};
+            json items = json::array();
+            for (const auto& preset : presets) items.push_back({
+                {"id", preset.id}, {"label", preset.label}, {"category", preset.category},
+                {"description", preset.description}, {"version", preset.version},
+                {"layer_count", preset.layer_count}});
+            return items;
+        });
+    }
+    if (method == "terrain.apply_satmap_preset") {
+        std::string name = requireString(params, "name");
+        std::string preset = requireString(params, "preset");
+        return enqueueQuery([name, preset](UIContext&) {
+            std::vector<std::string> warnings;
+            const auto result = rtapi::applyTerrainSatMapPreset(name, preset, warnings);
+            if (!result.ok) return json{{"__error", result.error}};
+            return json{{"ok", true}, {"warnings", warnings}};
         });
     }
     if (method == "terrain.calculate_flow") {
@@ -2652,6 +2710,53 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"sim_graph_scope", s.sim_graph_scope},
                         {"sim_graph_owner", s.sim_graph_owner}};
         });
+    }
+    // ── rt.perf: where the time went ────────────────────────────────────────
+    // ★★ Deliberately NOT enqueued onto the frame loop. Every other query here
+    // is, because it reads scene state and must not race the UI thread. These
+    // read a self-locking counter registry instead, and the moment worth asking
+    // about is precisely when the frame loop is busy — an enqueued read would
+    // block behind the very work it is trying to describe, and only ever report
+    // finished builds.
+    if (method == "perf.list") {
+        json arr = json::array();
+        for (const rtapi::PerfSection& s : rtapi::perfSections()) {
+            arr.push_back({{"name", s.name},
+                           {"last_ms", s.last_ms},
+                           {"total_ms", s.total_ms},
+                           {"max_ms", s.max_ms},
+                           {"count", s.count},
+                           {"last_rss_delta_mb", s.last_rss_delta_mb},
+                           {"rss_after_mb", s.rss_after_mb},
+                           {"seq", s.seq}});
+        }
+        return arr;
+    }
+    if (method == "perf.get") {
+        const std::string name = requireString(params, "name");
+        rtapi::PerfSection s;
+        // ★ A missing section returns found:false, never zeros. A zeroed timing
+        // reads as "measured, and it was free" — the exact shape of silent
+        // failure this repository keeps paying for.
+        if (!rtapi::perfSection(name, s)) return json{{"found", false}, {"name", name}};
+        return json{{"found", true},
+                    {"name", s.name},
+                    {"last_ms", s.last_ms},
+                    {"total_ms", s.total_ms},
+                    {"max_ms", s.max_ms},
+                    {"count", s.count},
+                    {"last_rss_delta_mb", s.last_rss_delta_mb},
+                    {"rss_after_mb", s.rss_after_mb},
+                    {"seq", s.seq}};
+    }
+    if (method == "perf.reset") {
+        rtapi::perfReset();
+        return json{{"ok", true}};
+    }
+    if (method == "perf.set_logging") {
+        const bool enabled = requireBool(params, "enabled");
+        rtapi::perfSetLogging(enabled);
+        return json{{"ok", true}, {"logging", rtapi::perfLogging()}};
     }
     if (method == "editor.set_bottom_editor") {
         std::string name = requireString(params, "name");

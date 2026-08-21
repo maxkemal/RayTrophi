@@ -682,6 +682,21 @@
     <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainPaintEvaluation.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSemanticMap.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSatMapSetup.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSatMapPresetLibrary.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSatMapNodes.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\SnowComputeGPU.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
@@ -823,6 +838,9 @@
     <ClCompile Include="source\src\Api\RtApiTerrain.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPerf.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiSimNodes.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
@@ -872,6 +890,9 @@
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Utils\SceneCommand.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\PerfProfile.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Core\Main.cpp">

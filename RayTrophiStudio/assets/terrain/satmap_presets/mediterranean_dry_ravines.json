@@ -1,0 +1,18 @@
+{
+  "id":"mediterranean_dry_ravines","label":"Mediterranean Dry Ravines","category":"Mediterranean","version":1,
+  "description":"Sun-baked slopes, olive vegetation, pale ridges and dry ravines.","basePreset":"Mediterranean",
+  "layers":[
+    {"id":"sun_baked","label":"Sun-baked Slopes","primary":"exposure","opacity":0.64,"maskPower":0.82,"detailScale":220,
+     "conditions":[{"field":"exposure","min":0.48,"max":0.94},{"field":"slope","min":0.14,"max":0.75}],
+     "stops":[[0,0.31,0.20,0.08],[0.2,0.41,0.28,0.11],[0.4,0.52,0.37,0.16],[0.6,0.62,0.48,0.25],[0.8,0.70,0.59,0.40],[1,0.77,0.70,0.56]]},
+    {"id":"olive_grass","label":"Olive Grass","primary":"grass","opacity":0.58,"maskPower":0.95,"detailScale":300,
+     "conditions":[{"field":"grass","min":0.10,"max":0.76},{"field":"wetness","min":0.12,"max":0.72}],
+     "stops":[[0,0.12,0.11,0.035],[0.2,0.17,0.17,0.04],[0.4,0.21,0.23,0.055],[0.6,0.24,0.29,0.075],[0.8,0.29,0.35,0.11],[1,0.37,0.42,0.17]]},
+    {"id":"dry_ravines","label":"Dry Ravines","primary":"flow","opacity":0.62,"maskPower":0.68,"detailScale":340,
+     "conditions":[{"field":"flow","min":0.04,"max":0.58},{"field":"channel_width","min":0.3,"max":2.2,"invert":true}],
+     "stops":[[0,0.27,0.17,0.075],[0.25,0.22,0.15,0.07],[0.5,0.18,0.13,0.07],[0.75,0.14,0.115,0.075],[1,0.11,0.105,0.085]]},
+    {"id":"pale_rims","label":"Pale Rims","primary":"convexity","opacity":0.55,"maskPower":0.72,"detailScale":270,
+     "conditions":[{"field":"convexity","min":0.04,"max":0.56}],
+     "stops":[[0,0.35,0.28,0.18],[0.25,0.44,0.37,0.25],[0.5,0.53,0.47,0.34],[0.75,0.62,0.57,0.45],[1,0.70,0.67,0.57]]}
+  ]
+}

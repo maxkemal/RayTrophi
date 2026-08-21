@@ -902,6 +902,8 @@ static void releaseCudaSceneResidencyForBackendSwitch() {
     // Terrain splat maps are not necessarily referenced by a Material slot.
     for (TerrainObject& terrain : TerrainManager::getInstance().getTerrains()) {
         releaseTexture(terrain.splatMap);
+        releaseTexture(terrain.surfaceSemanticMap);
+        releaseTexture(terrain.macroColorMap);
     }
 }
 

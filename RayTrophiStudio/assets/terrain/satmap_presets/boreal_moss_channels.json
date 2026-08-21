@@ -1,0 +1,18 @@
+{
+  "id":"boreal_moss_channels","label":"Boreal Moss Channels","category":"Boreal","version":1,
+  "description":"Cool rock, dense moss, dark mud and broad blue-green drainage.","basePreset":"Boreal",
+  "layers":[
+    {"id":"forest_moss","label":"Forest Moss","primary":"moss","opacity":0.88,"maskPower":0.74,"detailScale":350,
+     "conditions":[{"field":"moss","min":0.06,"max":0.86},{"field":"exposure","min":0.28,"max":0.82,"invert":true}],
+     "stops":[[0,0.035,0.065,0.025],[0.2,0.05,0.10,0.03],[0.4,0.065,0.15,0.04],[0.6,0.08,0.20,0.055],[0.8,0.11,0.25,0.075],[1,0.17,0.31,0.11]]},
+    {"id":"peat_mud","label":"Peat Mud","primary":"mud","opacity":0.78,"maskPower":0.9,"detailScale":170,
+     "conditions":[{"field":"mud","min":0.08,"max":0.82},{"field":"wetness","min":0.28,"max":0.92}],
+     "stops":[[0,0.045,0.035,0.025],[0.25,0.065,0.045,0.03],[0.5,0.085,0.06,0.04],[0.75,0.09,0.075,0.06],[1,0.075,0.085,0.08]]},
+    {"id":"broad_channels","label":"Broad Channels","primary":"channel_width","autoNormalize":true,"opacity":0.86,"maskPower":0.78,"detailScale":210,
+     "conditions":[{"field":"flow","min":0.10,"max":0.82},{"field":"channel_width","min":0.7,"max":6.5}],
+     "stops":[[0,0.055,0.11,0.12],[0.2,0.045,0.15,0.17],[0.4,0.04,0.19,0.23],[0.6,0.05,0.23,0.29],[0.8,0.075,0.28,0.36],[1,0.12,0.33,0.42]]},
+    {"id":"cold_rock","label":"Cold Rock","primary":"slope","opacity":0.58,"maskPower":0.9,"detailScale":260,
+     "conditions":[{"field":"slope","min":0.24,"max":0.86},{"field":"convexity","min":0.02,"max":0.52}],
+     "stops":[[0,0.13,0.14,0.14],[0.25,0.19,0.21,0.22],[0.5,0.26,0.29,0.31],[0.75,0.34,0.38,0.40],[1,0.42,0.47,0.48]]}
+  ]
+}

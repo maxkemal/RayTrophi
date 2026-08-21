@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -127,8 +127,23 @@ struct TerrainObject {
     
     // Terrain Layer System
     std::shared_ptr<class Texture> splatMap;   // RGBA Splat Map (Control Texture)
+    // Non-normalized paint controls: R=Flow, G=Wetness, B=Ice, A=Hardness.
+    // Kept separate from normalized material weights so semantic fields remain
+    // independently recoverable by shading, scatter and export consumers.
+    std::shared_ptr<class Texture> surfaceSemanticMap;
     std::vector<std::shared_ptr<class Material>> layers; // Up to 4 layers
     std::vector<float> layer_uv_scales;      // UV tiling scale for each layer
+
+    // =========================================================================
+    // MACRO COLOR MAP (SatMap Colorizer — Faz 1 / Faz 2)
+    // =========================================================================
+    // Low-frequency color modulator evaluated at paint_resolution. Produced by
+    // the terrain node graph (SatMapNode → ColorOutputNode) and applied in the
+    // shader AFTER the splat-blend, preserving tile detail via luma ratio:
+    //   relit = macro * (blendAlbedo / luminance(blendAlbedo))
+    // macro_color_strength = 0 (default) → zero render cost, old scenes untouched.
+    std::shared_ptr<class Texture> macroColorMap; // RGBA8, paint_resolution
+    float macro_color_strength = 0.0f;            // 0 = off; 1 = full macro color
     
     // Foliage System
     std::vector<TerrainFoliageLayer> foliageLayers;
@@ -169,6 +184,56 @@ struct TerrainObject {
     // Dirty region tracking for incremental mesh updates
     DirtyRegion dirty_region;
     
+    // =========================================================================
+    // THREE-WAY RESOLUTION SPLIT (Faz 0 — fully separated 2026-08-21)
+    // =========================================================================
+    //
+    // Three numbers used to share one value (heightmap.width). Each serves a
+    // different optimum:
+    //
+    //   FIELD   — high: flow accumulation, erosion, valley/wetness analysis
+    //   MESH    — low:  BVH/BLAS is linear in triangle count; 1024 mesh over a
+    //             4096 field is ~18× cheaper with no analysis quality loss
+    //             (measured 2026-08-21: 6.4 s → 0.42 s Vulkan solid raster)
+    //   PAINT   — independent: splat + macro-color evaluation resolution.
+    //             Raising it only buys new information when procedural nodes
+    //             (noise, warp, threshold) run at that resolution.
+    //
+    // Convention: 0 means "follow the field" for both mesh and paint.
+    // Serialized as separate keys so old projects read 0 and stay unchanged.
+
+    // MESH RESOLUTION — vertex grid, separate from the field
+    // 0 = same as field (historical default, existing scenes untouched).
+    int mesh_resolution = 0;
+
+    int meshGridWidth() const {
+        return mesh_resolution >= 2 ? (std::min)(mesh_resolution, heightmap.width) : heightmap.width;
+    }
+    int meshGridHeight() const {
+        return mesh_resolution >= 2 ? (std::min)(mesh_resolution, heightmap.height) : heightmap.height;
+    }
+    // True when the vertex grid no longer matches the field grid.
+    bool meshMatchesField() const {
+        return meshGridWidth() == heightmap.width && meshGridHeight() == heightmap.height;
+    }
+
+    // PAINT RESOLUTION — splat map + macroColorMap evaluation grid.
+    // 0 = follow the field (max(512, field_width)), which is the historical
+    // behaviour of resizeSplatMap and keeps existing scenes unchanged.
+    // Values > field_resolution are valid: procedural nodes evaluate at paint
+    // resolution, buying real new frequency. Pure analysis chains (no procedural
+    // nodes) gain nothing beyond field resolution — the panel warns about this.
+    int paint_resolution = 0;
+
+    int paintGridWidth() const {
+        if (paint_resolution >= 2) return paint_resolution;
+        return (std::max)(512, heightmap.width);
+    }
+    int paintGridHeight() const {
+        if (paint_resolution >= 2) return paint_resolution;
+        return (std::max)(512, heightmap.height);
+    }
+
     // Normal calculation quality
     NormalQuality normal_quality = NormalQuality::Sobel;
     float normal_strength = 1.0f;  // Multiplier for normal intensity (0.1 - 3.0)
@@ -187,4 +252,3 @@ struct TerrainObject {
         dirty_region.markDirty(gridX, gridZ, heightmap.width, heightmap.height);
     }
 };
-

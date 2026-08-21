@@ -1,0 +1,18 @@
+{
+  "id":"eroded_badlands","label":"Eroded Badlands","category":"Arid","version":1,
+  "description":"Warm eroded ridges, dark deposition, dry gullies and layered cavities.","basePreset":"Desert",
+  "layers":[
+    {"id":"worn_ridges","label":"Worn Ridges","primary":"erosion","opacity":0.78,"maskPower":0.88,"detailScale":280,
+     "conditions":[{"field":"erosion","min":0.08,"max":0.78},{"field":"convexity","min":0.03,"max":0.55}],
+     "stops":[[0,0.28,0.13,0.055],[0.2,0.40,0.18,0.065],[0.4,0.54,0.25,0.08],[0.6,0.67,0.34,0.12],[0.8,0.76,0.47,0.20],[1,0.82,0.60,0.34]]},
+    {"id":"deposition_bands","label":"Deposition Bands","primary":"deposition","opacity":0.72,"maskPower":0.75,"detailScale":150,
+     "conditions":[{"field":"deposition","min":0.06,"max":0.82},{"field":"slope","min":0.18,"max":0.72,"invert":true}],
+     "stops":[[0,0.17,0.075,0.035],[0.2,0.24,0.10,0.04],[0.4,0.31,0.14,0.055],[0.6,0.39,0.20,0.08],[0.8,0.46,0.28,0.12],[1,0.54,0.37,0.19]]},
+    {"id":"dry_gullies","label":"Dry Gullies","primary":"flow","opacity":0.62,"maskPower":0.7,"detailScale":330,
+     "conditions":[{"field":"flow","min":0.04,"max":0.62},{"field":"channel_width","min":0.35,"max":2.4,"invert":true}],
+     "stops":[[0,0.24,0.13,0.065],[0.25,0.20,0.11,0.055],[0.5,0.16,0.10,0.06],[0.75,0.13,0.095,0.07],[1,0.10,0.09,0.08]]},
+    {"id":"shadow_cuts","label":"Shadow Cuts","primary":"cavity","opacity":0.55,"maskPower":1.2,"detailScale":240,
+     "conditions":[{"field":"cavity","min":0.10,"max":0.86}],
+     "stops":[[0,0.20,0.12,0.07],[0.25,0.16,0.095,0.06],[0.5,0.12,0.075,0.055],[0.75,0.085,0.06,0.05],[1,0.055,0.05,0.05]]}
+  ]
+}

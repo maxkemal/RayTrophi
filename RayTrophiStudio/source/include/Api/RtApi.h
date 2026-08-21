@@ -828,6 +828,42 @@ Result setNodeEditorDomain(const std::string& name);
 // an explicit empty state, which is how a user reaches graph creation at all.
 Result setSimGraphScope(const std::string& scope, const std::string& owner);
 
+// ── rt.perf: where the time went, as values ─────────────────────────────────
+//
+// ★★★ A timing that only reaches the Scene Log is not a measurement this project
+// can use. The single maintainer cannot sit in front of every build, and an
+// agent driving the app over IPC cannot read the log at all — so the previous
+// mesh profiler (MeshProfileTimer.h, macro compiled out to `((void)0)`) produced
+// exactly zero readable numbers. Sections are values now.
+//
+// ★ Section names are stable strings written by whoever performs the work, so a
+// caller reads a phase by name rather than by guessing at ordering:
+//   terrain.graph.evaluate / .height / .aux_outputs / .finalize_mesh
+//   terrain.mesh_fill / .create / .update / .publish_fields
+//   terrain.splat_resize
+//   Renderer::rebuildBVH(...) / Renderer::rebuildBackendGeometry(GPU)
+//
+// ★★ Reading does NOT go through the frame-loop queue (see PerfProfile.h): the
+// most useful moment to ask what a build is spending its time on is while the
+// UI thread is busy, and an enqueued read would wait behind that exact work.
+struct PerfSection {
+    std::string name;
+    double   last_ms = 0.0;
+    double   total_ms = 0.0;
+    double   max_ms = 0.0;
+    uint64_t count = 0;
+    double   last_rss_delta_mb = 0.0;   // working-set delta across the scope
+    double   rss_after_mb = 0.0;
+    uint64_t seq = 0;                   // monotonic write order, newest highest
+};
+// Newest write first.
+std::vector<PerfSection> perfSections();
+bool perfSection(const std::string& name, PerfSection& out);
+Result perfReset();
+// Mirror completed sections into the Scene Log as well. Off by default.
+Result perfSetLogging(bool enabled);
+bool perfLogging();
+
 void initSimulationNodes();   // register types + install the attribute resolver
 
 // ── Scoped simulation graphs ────────────────────────────────────────────────
@@ -2376,18 +2412,45 @@ Result stepFluidSimulation(float dt = 0.0166667f);
 struct TerrainInfo {
     int id = -1;
     std::string name;
+    // FIELD grid: heights and every analysis product live here.
     int width = 0;
     int height = 0;
     float size = 0.0f;
     float height_scale = 0.0f;
+    // MESH grid: the vertex/triangle resolution, which is a separate decision.
+    // mesh_resolution == 0 means "follow the field" (the historical behaviour);
+    // mesh_width/mesh_height report the grid that was actually built, so a
+    // caller never has to re-derive the 0 case.
+    int mesh_resolution = 0;
+    int mesh_width = 0;
+    int mesh_height = 0;
+    // PAINT grid: the splat map and macro color map resolution.
+    int paint_resolution = 0;
+    int paint_width = 0;
+    int paint_height = 0;
+    bool has_surface_semantic = false;
     bool has_node_graph = false;
     bool dirty = false;
 };
 
+// ★ Vertex-grid resolution, independent of the field. 0 restores "same as the
+// field". Values above the field resolution are clamped down to it: a mesh
+// denser than the data it samples invents detail it cannot have.
+Result setTerrainMeshResolution(const std::string& terrain_name, int mesh_resolution,
+                                TerrainInfo& out_info);
+
+// ★ Paint-grid resolution, independent of the field. 0 restores "same as the
+// field". This dictates the size of splatMap and macroColorMap.
+Result setTerrainPaintResolution(const std::string& terrain_name, int paint_resolution,
+                                 TerrainInfo& out_info);
+
 Result listTerrains(std::vector<TerrainInfo>& out_terrains);
 Result getTerrain(const std::string& terrain_name, TerrainInfo& out_info);
+// `resolution` is the FIELD grid; `mesh_resolution` is the vertex grid (0 =
+// follow the field). Both are creation parameters because decimating after the
+// fact still pays one full-resolution acceleration-structure build.
 Result createTerrain(const std::string& requested_name, int resolution, float size,
-                     float height_scale, TerrainInfo& out_info);
+                     float height_scale, int mesh_resolution, TerrainInfo& out_info);
 Result importTerrainHeightmap(const std::string& filepath, const std::string& requested_name,
                               float size, float height_scale, int max_resolution,
                               TerrainInfo& out_info);
@@ -2420,7 +2483,18 @@ struct TerrainErosionSettings {
 
 Result erodeTerrain(const std::string& terrain_name, const TerrainErosionSettings& settings);
 Result applyTerrainPreset(const std::string& terrain_name, const std::string& preset,
-                          bool replace_graph = false);
+                          bool replace_graph = false, bool add_satmap = false);
+struct TerrainSatMapPresetInfo {
+    std::string id;
+    std::string label;
+    std::string category;
+    std::string description;
+    int version = 1;
+    int layer_count = 0;
+};
+Result listTerrainSatMapPresets(std::vector<TerrainSatMapPresetInfo>& out_presets);
+Result applyTerrainSatMapPreset(const std::string& terrain_name, const std::string& preset_id,
+                                std::vector<std::string>& out_warnings);
 Result calculateTerrainFlow(const std::string& terrain_name);
 Result sampleTerrainHeight(const std::string& terrain_name, float world_x, float world_z,
                            float& out_height);

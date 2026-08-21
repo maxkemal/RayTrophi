@@ -1,0 +1,19 @@
+{
+  "id": "alpine_flow_ridges", "label": "Alpine Flow & Ridges", "category": "Alpine", "version": 1,
+  "description": "Cold ridges, narrow high channels, broad valley rivers and protected snow.",
+  "basePreset": "Alpine",
+  "layers": [
+    {"id":"exposed_ridges","label":"Exposed Ridges","primary":"convexity","opacity":0.72,"maskPower":0.82,"detailScale":260,
+     "conditions":[{"field":"slope","min":0.22,"max":0.82},{"field":"convexity","min":0.04,"max":0.48},{"field":"exposure","min":0.42,"max":0.92}],
+     "stops":[[0,0.16,0.15,0.14],[0.2,0.24,0.23,0.22],[0.4,0.32,0.33,0.34],[0.6,0.40,0.42,0.43],[0.8,0.31,0.34,0.38],[1,0.22,0.25,0.29]]},
+    {"id":"thin_high_flow","label":"Thin High Flow","primary":"flow","opacity":0.82,"maskPower":0.72,"detailScale":320,
+     "conditions":[{"field":"flow","min":0.05,"max":0.55},{"field":"channel_width","min":0.35,"max":2.2,"invert":true},{"field":"height","min":0.42,"max":0.82}],
+     "stops":[[0,0.18,0.17,0.13],[0.2,0.12,0.20,0.19],[0.4,0.08,0.25,0.27],[0.6,0.07,0.31,0.35],[0.8,0.10,0.38,0.44],[1,0.18,0.45,0.52]]},
+    {"id":"wide_low_flow","label":"Wide Valley Flow","primary":"channel_width","autoNormalize":true,"opacity":0.88,"maskPower":0.78,"detailScale":190,
+     "conditions":[{"field":"flow","min":0.12,"max":0.82},{"field":"channel_width","min":0.8,"max":6.0},{"field":"height","min":0.25,"max":0.68,"invert":true}],
+     "stops":[[0,0.11,0.17,0.16],[0.2,0.08,0.22,0.22],[0.4,0.07,0.27,0.30],[0.6,0.08,0.31,0.37],[0.8,0.12,0.36,0.44],[1,0.18,0.41,0.50]]},
+    {"id":"cold_cavities","label":"Cold Cavities","primary":"cavity","opacity":0.52,"maskPower":1.15,"detailScale":240,
+     "conditions":[{"field":"cavity","min":0.08,"max":0.78}],
+     "stops":[[0,0.23,0.23,0.22],[0.25,0.17,0.19,0.20],[0.5,0.12,0.16,0.18],[0.75,0.08,0.13,0.16],[1,0.05,0.10,0.14]]}
+  ]
+}

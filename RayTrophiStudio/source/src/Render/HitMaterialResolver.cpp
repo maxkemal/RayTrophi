@@ -115,9 +115,26 @@ void applyTerrainBlendIfNeeded(HitRecord& rec) {
     }
 
     float inv_weight = 1.0f / total_weight;
+    Vec3 resolvedAlbedo = blended_albedo * inv_weight;
+    float resolvedRoughness = blended_roughness * inv_weight;
+    if (terrain->surfaceSemanticMap && terrain->surfaceSemanticMap->is_loaded()) {
+        const Vec3 semanticRgb = terrain->surfaceSemanticMap->get_color_bilinear(rec.u, rec.v);
+        const float hardness = terrain->surfaceSemanticMap->get_alpha_bilinear(rec.u, rec.v);
+        const float wetness = std::clamp(
+            (std::max)(static_cast<float>(semanticRgb.x), static_cast<float>(semanticRgb.y)),
+            0.0f, 1.0f);
+        const float ice = std::clamp(static_cast<float>(semanticRgb.z), 0.0f, 1.0f);
+        resolvedAlbedo = resolvedAlbedo * (1.0f - wetness * 0.28f);
+        resolvedRoughness = resolvedRoughness * (1.0f - wetness * 0.65f) + 0.16f * wetness * 0.65f;
+        const float iceLuma = resolvedAlbedo.x * 0.2126f + resolvedAlbedo.y * 0.7152f + resolvedAlbedo.z * 0.0722f;
+        const Vec3 iceColor = Vec3(0.70f, 0.82f, 0.88f) * (std::max)(iceLuma, 0.35f);
+        resolvedAlbedo = resolvedAlbedo * (1.0f - ice * 0.55f) + iceColor * (ice * 0.55f);
+        resolvedRoughness = resolvedRoughness * (1.0f - ice * 0.65f) + 0.12f * ice * 0.65f;
+        resolvedRoughness = std::clamp(resolvedRoughness + hardness * 0.035f, 0.0f, 1.0f);
+    }
     rec.surface_override.valid = true;
-    rec.surface_override.albedo = blended_albedo * inv_weight;
-    rec.surface_override.roughness = blended_roughness * inv_weight;
+    rec.surface_override.albedo = resolvedAlbedo;
+    rec.surface_override.roughness = resolvedRoughness;
     rec.surface_override.metallic = blended_metallic * inv_weight;
     rec.surface_override.clearcoat = blended_clearcoat * inv_weight;
     rec.surface_override.clearcoat_roughness = blended_clearcoat_roughness * inv_weight;

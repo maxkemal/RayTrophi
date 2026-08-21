@@ -1154,7 +1154,7 @@
   "terrain.create": {
     "summary": "Create a terrain heightfield of a given world size and resolution",
     "tags": "landscape|mountain|ground|create|heightmap",
-    "related": "terrain.apply_preset|terrain.erode|terrain.evaluate",
+    "related": "terrain.set_mesh_resolution|terrain.get|perf.list",
     "params": {
       "size": {
         "description": "World-space extent in metres"
@@ -1165,7 +1165,8 @@
       "height_scale": {
         "description": "Vertical scale in metres"
       }
-    }
+    },
+    "notes": "resolution is the FIELD grid: heights and every analysis product (slope, flow, erosion, analysisFields) live at that resolution. mesh_resolution is the separate VERTEX grid; 0 follows the field. Set it at creation rather than decimating afterwards - creating at 4096 and decimating still pays one full-resolution acceleration-structure build (measured 5.6 s Vulkan solid raster + 2.8 s Embree). With a 1024 mesh over a 4096 field the same build is 0.42 s + 0.15 s."
   },
   "terrain.remove": {
     "summary": "Delete a terrain",
@@ -1177,9 +1178,22 @@
     "params": {
       "preset": {
         "description": "Preset name",
-        "enum": "default|snow_layer|snowy_mountain_valley|river_network"
+        "enum": "default|snow_layer|snowy_mountain_valley|river_network|biome_temperate|biome_lush|biome_alpine|biome_arid|biome_boreal|biome_foliage|geology_foundation"
+      },
+      "add_satmap": {
+        "description": "Also add and wire a matching SatMap colorizer",
+        "default": false
       }
     }
+  },
+  "terrain.list_satmap_presets": {
+    "summary": "List data-driven multi-field SatMap preset recipes",
+    "tags": "landscape|satmap|color|preset|flow|curvature"
+  },
+  "terrain.apply_satmap_preset": {
+    "summary": "Build a SatMap node recipe from flow, slope, curvature and other terrain fields",
+    "tags": "landscape|satmap|color|preset|flow|slope|curvature",
+    "related": "terrain.list_satmap_presets|terrain.evaluate"
   },
   "terrain.erode": {
     "summary": "Run an erosion pass over a terrain",

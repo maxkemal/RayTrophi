@@ -744,7 +744,12 @@ struct VkTerrainLayerData {
     float layer_uv_scale[4];  // UV tiling for each layer
     uint  splat_map_tex;       // Combined-image-sampler slot for RGBA splat map
     uint  layer_count;         // Active layer count (1-4)
-    uint  _pad[2];
+    uint  macro_color_tex;
+    float macro_color_strength;
+    uint  semantic_map_tex;
+    float semantic_wet_darkening;
+    float semantic_wet_roughness;
+    float semantic_pad;
 };
 layout(set = 0, binding = 12, scalar) readonly buffer TerrainLayerBuffer { VkTerrainLayerData d[]; } terrainLayers;
 
@@ -1628,6 +1633,31 @@ void main() {
                 } else {
                     blendNormal_ts += weights[k] * vec3(0.0, 0.0, 1.0); // flat contribution
                 }
+            }
+
+            // Macro Color Map (SatMap) blending
+            if (tl.macro_color_tex > 0u && tl.macro_color_strength > 0.0) {
+                vec4 mColor = texture(materialTextures[nonuniformEXT(int(tl.macro_color_tex))], hitUV);
+                blendAlbedo = mix(blendAlbedo, mColor.rgb, clamp(tl.macro_color_strength, 0.0, 1.0));
+            }
+
+            // Independent semantic controls: R=Flow, G=Wetness, B=Ice,
+            // A=Hardness. These are not material weights and are never
+            // normalized with the primary splat map.
+            if (tl.semantic_map_tex > 0u) {
+                vec4 semantic = texture(
+                    materialTextures[nonuniformEXT(int(tl.semantic_map_tex))], hitUV);
+                float wet = clamp(max(semantic.r, semantic.g), 0.0, 1.0);
+                float ice = clamp(semantic.b, 0.0, 1.0);
+                float hard = clamp(semantic.a, 0.0, 1.0);
+                blendAlbedo *= 1.0 - wet * clamp(tl.semantic_wet_darkening, 0.0, 0.8);
+                blendRoughness = mix(blendRoughness, 0.16,
+                    wet * clamp(tl.semantic_wet_roughness, 0.0, 1.0));
+                float iceLuma = dot(blendAlbedo, vec3(0.2126, 0.7152, 0.0722));
+                blendAlbedo = mix(blendAlbedo,
+                    vec3(0.70, 0.82, 0.88) * max(iceLuma, 0.35), ice * 0.55);
+                blendRoughness = mix(blendRoughness, 0.12, ice * 0.65);
+                blendRoughness = clamp(blendRoughness + hard * 0.035, 0.0, 1.0);
             }
 
             // Override local mat copy with blended values

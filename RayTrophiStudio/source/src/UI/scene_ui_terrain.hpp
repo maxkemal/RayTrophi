@@ -172,13 +172,18 @@ static bool ResampleTerrainCurrentState(TerrainObject* terrain, SceneData& scene
         else { *it->second = std::move(resized); ++it; }
     }
 
-    TerrainManager::getInstance().resizeSplatMap(terrain);
+    TerrainManager::getInstance().resizePaintMaps(terrain);
     TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
     terrain->dirty_mesh = false;
     terrain->dirty_region.clear();
     if (terrain->nodeGraph) terrain->nodeGraph->markAllDirty();
     return true;
 }
+
+// Faz 0 Parti A: 3-way resolution inspector (Field / Mesh / Paint).
+// Placed here so that DrawTerrainResolutionSection can call the static
+// helpers defined above (ScheduleTerrainTopologyRebuild, ResampleTerrainCurrentState).
+#include "scene_ui_terrain_resolution.hpp"
 
 static void SyncTerrainMaterialState(UIContext& ctx) {
     Backend::IViewportBackend* viewportBackend = GetTerrainViewportBackend(ctx);
@@ -418,100 +423,13 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
         UIWidgets::EndSection();
     }
 
-    // -----------------------------------------------------------------------------
-    // 2. MESH QUALITY SETTINGS
-    // -----------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 2. GEOMETRY & RESOLUTION  (Field / Mesh / Paint)
+    // ---------------------------------------------------------------------------
     if (terrain_brush.active_terrain_id != -1) {
         auto* t = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
         if (t) {
-            if (UIWidgets::BeginSection("Terrain Resolution", ImVec4(0.45f, 0.78f, 1.0f, 1.0f), true)) {
-                static std::unordered_map<int, int> requestedResolution;
-                static std::unordered_map<int, int> observedResolution;
-                static std::unordered_map<int, std::string> resolutionStatus;
-                int& requested = requestedResolution[t->id];
-                int& observed = observedResolution[t->id];
-                if (requested < 64 || (observed >= 64 && requested == observed && observed != t->heightmap.width))
-                    requested = (std::max)(64, t->heightmap.width);
-                observed = t->heightmap.width;
-
-                ImGui::Text("Current: %d x %d", t->heightmap.width, t->heightmap.height);
-                ImGui::SetNextItemWidth(160.0f);
-                ImGui::DragInt("Target", &requested, 1.0f, 64, 8192, "%d");
-                requested = (std::clamp)(requested, 64, 8192);
-
-                const uint64_t vertices = static_cast<uint64_t>(requested) * requested;
-                const uint64_t triangles = requested > 1
-                    ? 2ull * static_cast<uint64_t>(requested - 1) * (requested - 1) : 0ull;
-                const double cellMeters = t->heightmap.scale_xz / (double)(std::max)(1, requested - 1);
-                const uint64_t splatPixels = static_cast<uint64_t>((std::max)(512, requested)) *
-                                             (std::max)(512, requested);
-                const double baseMiB = (vertices * sizeof(float) + splatPixels * sizeof(CompactVec4)) /
-                                       (1024.0 * 1024.0);
-                ImGui::TextDisabled("Cell %.3f m | %.2f M vertices | %.2f M triangles",
-                                    cellMeters, vertices / 1000000.0, triangles / 1000000.0);
-                ImGui::TextDisabled("Base height + splat CPU data: ~%.1f MiB", baseMiB);
-
-                const bool changed = requested != t->heightmap.width || requested != t->heightmap.height;
-                const bool graphBusy = t->nodeGraph && t->nodeGraph->isEvaluatingAsync();
-                ImGui::BeginDisabled(!changed || graphBusy || !t->nodeGraph);
-                if (UIWidgets::PrimaryButton("Rebuild Procedural", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
-                    const int oldWidth = t->heightmap.width, oldHeight = t->heightmap.height;
-                    const auto oldHeightData = t->heightmap.data;
-                    const auto oldOriginal = t->original_heightmap_data;
-                    const auto oldHardness = t->hardnessMap;
-                    const auto oldFlow = t->flowMap;
-                    const auto oldErosion = t->erosionMapRGBA;
-                    try {
-                        const bool rebuilt = t->nodeGraph->evaluateTerrainAtResolution(
-                            t, ctx.scene, requested, requested);
-                        if (!rebuilt) {
-                            t->heightmap.width = oldWidth; t->heightmap.height = oldHeight;
-                            t->heightmap.data = oldHeightData; t->original_heightmap_data = oldOriginal;
-                            t->hardnessMap = oldHardness; t->flowMap = oldFlow; t->erosionMapRGBA = oldErosion;
-                            TerrainManager::getInstance().resizeSplatMap(t);
-                            TerrainManager::getInstance().rebuildTerrainMesh(ctx.scene, t);
-                            resolutionStatus[t->id] = "Graph produced no valid height output; terrain restored.";
-                        } else {
-                            requested = t->heightmap.width;
-                            resolutionStatus[t->id] = "Procedural terrain rebuilt.";
-                        }
-                    } catch (const std::exception& e) {
-                        t->heightmap.width = oldWidth; t->heightmap.height = oldHeight;
-                        t->heightmap.data = oldHeightData; t->original_heightmap_data = oldOriginal;
-                        t->hardnessMap = oldHardness; t->flowMap = oldFlow; t->erosionMapRGBA = oldErosion;
-                        TerrainManager::getInstance().resizeSplatMap(t);
-                        TerrainManager::getInstance().rebuildTerrainMesh(ctx.scene, t);
-                        resolutionStatus[t->id] = std::string("Rebuild failed: ") + e.what();
-                    }
-                    selectManagedMesh(ctx, t->flatMesh);
-                    ctx.renderer.resetCPUAccumulation();
-                    ScheduleTerrainTopologyRebuild(ctx);
-                    ResetTerrainBackendAccumulation(ctx);
-                }
-                ImGui::EndDisabled();
-                UIWidgets::HelpMarker("Re-evaluates procedural sources at the target grid. File and authored Terrain inputs keep their native source contract.");
-
-                ImGui::BeginDisabled(!changed || graphBusy);
-                if (ImGui::Button("Resample Current", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
-                    if (ResampleTerrainCurrentState(t, ctx.scene, requested, requested)) {
-                        selectManagedMesh(ctx, t->flatMesh);
-                        ctx.renderer.resetCPUAccumulation();
-                        ScheduleTerrainTopologyRebuild(ctx);
-                        ResetTerrainBackendAccumulation(ctx);
-                        resolutionStatus[t->id] = "Current terrain and maps resampled.";
-                    } else {
-                        resolutionStatus[t->id] = "Resample failed: current height data is invalid.";
-                    }
-                }
-                ImGui::EndDisabled();
-                UIWidgets::HelpMarker("Preserves the visible terrain by bilinearly resampling height, splat, hardness, flow, erosion and analysis fields. This becomes the new authored baseline.");
-
-                const auto statusIt = resolutionStatus.find(t->id);
-                if (statusIt != resolutionStatus.end() && !statusIt->second.empty())
-                    ImGui::TextWrapped("%s", statusIt->second.c_str());
-                if (graphBusy) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "Terrain graph is evaluating...");
-                UIWidgets::EndSection();
-            }
+            DrawTerrainResolutionSection(ctx, t);
 
             ImGui::Spacing();
             if (UIWidgets::BeginSection("Mesh Quality", ImVec4(0.6f, 1.0f, 0.8f, 1.0f), true)) {
@@ -568,7 +486,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             }
             else {
                 // Layer Editors
-                static const char* autoLayerNames[4] = {"Grass", "Rock", "Snow", "Flow"};
+                static const char* autoLayerNames[4] = {"Grass", "Rock", "Snow", "Soil"};
                 static const Vec3 autoLayerColors[4] = {
                     Vec3(0.3f, 0.5f, 0.2f),  // Grass
                     Vec3(0.4f, 0.4f, 0.4f),  // Rock
@@ -1448,7 +1366,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         
                         // Splat Map / Exclusion Mask (terrain only)
                         if (t) {
-                        const char* channels[] = { "None", "Red (Grass/Flat)", "Green (Slope/Rock)", "Blue (Height/Snow)", "Alpha (Flow Map)" };
+                        const char* channels[] = { "None", "Red (Grass)", "Green (Rock)", "Blue (Snow)", "Alpha (Soil)" };
                         int current_idx = group.brush_settings.splat_map_channel + 1;
                         ImGui::PushItemWidth(160.0f);
                         if (ImGui::Combo("Mask Channel", &current_idx, channels, 5)) {
@@ -2869,4 +2787,3 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
 
 
 #endif
-
