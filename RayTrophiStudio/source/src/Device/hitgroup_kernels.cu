@@ -260,7 +260,21 @@ extern "C" __global__ void __closesthit__ch() {
              blend_emis*= inv_w;
              blend_tra *= inv_w;
              blend_trn *= inv_w;
-             blend_ior *= inv_w; 
+             blend_ior *= inv_w;
+
+             if (hgd->semantic_map_tex) {
+                 const float4 semantic = tex2D<float4>(hgd->semantic_map_tex, uv.x, uv.y);
+                 const float wet = fminf(fmaxf(fmaxf(semantic.x, semantic.y), 0.0f), 1.0f);
+                 const float ice = fminf(fmaxf(semantic.z, 0.0f), 1.0f);
+                 const float hard = fminf(fmaxf(semantic.w, 0.0f), 1.0f);
+                 blend_alb *= 1.0f - wet * 0.28f;
+                 blend_rgh = blend_rgh * (1.0f - wet * 0.65f) + 0.16f * wet * 0.65f;
+                 const float iceLuma = blend_alb.x * 0.2126f + blend_alb.y * 0.7152f + blend_alb.z * 0.0722f;
+                 const float3 iceColor = make_float3(0.70f, 0.82f, 0.88f) * fmaxf(iceLuma, 0.35f);
+                 blend_alb = blend_alb * (1.0f - ice * 0.55f) + iceColor * (ice * 0.55f);
+                 blend_rgh = blend_rgh * (1.0f - ice * 0.65f) + 0.12f * ice * 0.65f;
+                 blend_rgh = fminf(fmaxf(blend_rgh + hard * 0.035f, 0.0f), 1.0f);
+             }
              
              if (length(blend_nrm) > 0.001f) {
                  blend_nrm = normalize(blend_nrm);

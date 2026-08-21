@@ -57,6 +57,8 @@ being paid for twice.
 | [volumetric_cloud_layer_roadmap.md](volumetric_cloud_layer_roadmap.md) | Layered procedural cloud volumes |
 | [gpu_foliage_scatter_roadmap.md](gpu_foliage_scatter_roadmap.md) | GPU foliage scatter migration |
 | [hydraulic_multipass_next_steps.md](hydraulic_multipass_next_steps.md) | Terrain hydraulic erosion multi-pass |
+| [TERRAIN_PERF_HANDOFF.md](TERRAIN_PERF_HANDOFF.md) | Terrain build cost: what was measured, what is verified, what is NOT, and the ordered next steps — start here before touching terrain performance |
+| [TERRAIN_SATMAP_COLORIZER_ROADMAP.md](TERRAIN_SATMAP_COLORIZER_ROADMAP.md) | Gaea-style SatMap macro colour over the existing 4-layer splat blend — why it must modulate rather than replace the albedo, and the Faz 0 split of field / mesh / paint resolution that has to land first |
 | [refactoring_implementation_plan.md](refactoring_implementation_plan.md) | DNA / flat-SoA data-oriented core migration |
 | [flat_mesh_facade_audit.md](flat_mesh_facade_audit.md) | Remaining `Triangle` facade call sites |
 

@@ -269,9 +269,14 @@ struct VK_GPU_ALIGN(16) VkTerrainLayerData {
     float    layer_uv_scale[4]; // UV tiling scales for layers 0-3
     uint32_t splat_map_tex;     // Combined-image-sampler slot for the RGBA splat map
     uint32_t layer_count;       // Number of active layers (1-4)
-    uint32_t _pad[2];           // Padding to 48 bytes
+    uint32_t macro_color_tex;   // Combined-image-sampler slot for macro color map
+    float    macro_color_strength; // Blend strength [0.0 - 1.0]
+    uint32_t semantic_map_tex;  // R=Flow, G=Wetness, B=Ice, A=Hardness
+    float    semantic_wet_darkening;
+    float    semantic_wet_roughness;
+    float    semantic_pad;
 };
-static_assert(sizeof(VkTerrainLayerData) == 48, "VkTerrainLayerData size mismatch");
+static_assert(sizeof(VkTerrainLayerData) == 64, "VkTerrainLayerData size mismatch");
 
 /**
  * @brief Vulkan-Specific GPU Light struct.

@@ -216,7 +216,15 @@ namespace TerrainNodesV2 {
         TerrainDetail,
         // Tectonic geology. Appended for serialized enum stability.
         PlateTectonics,
-        Fold
+        Fold,
+        SatMapColorRamp,
+        SatMapOutput,
+        // SatMap layer composition and reusable vegetation authoring.
+        // Appended for serialized enum stability.
+        SatMapBlend,
+        GrassMask,
+        SurfaceMasks,
+        PaintMaskCombine
     };
 
     // ============================================================================
@@ -1765,6 +1773,11 @@ namespace TerrainNodesV2 {
             // combined through Splat Compose first.
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, false, 4));
+            // Appended for serialized pin stability. This texture is not
+            // normalized with material weights.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Semantic (Flow/Wet/Ice/Hard)", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PackedData, true, 4));
             
             metadata.displayName = "Splat Output";
             metadata.category = "Output";
@@ -2576,26 +2589,29 @@ namespace TerrainNodesV2 {
             name = "Auto Splat";
             terrainNodeType = NodeType::AutoSplat;
             
-            // Default rules: Grass/Rock/Snow/Soil-Flow
+            // Default material rules: Grass/Rock/Snow/Soil.
             // Layer 0 (R): Grass - flat, low-mid height
             rules[0] = { 0.0f, 50.0f, 0.0f, 25.0f, 0.5f, 0.5f, 10.0f, 0.05f, true };
             // Layer 1 (G): Rock - steep slopes
             rules[1] = { 0.0f, 200.0f, 30.0f, 90.0f, 0.2f, 0.8f, 5.0f, 0.03f, true };
             // Layer 2 (B): Snow - high altitude
             rules[2] = { 80.0f, 200.0f, 0.0f, 45.0f, 0.9f, 0.1f, 15.0f, 0.02f, true };
-            // Layer 3 (A): exposed soil; optional Flow is merged in compute().
+            // Layer 3 (A): exposed soil. Flow is kept in the semantic output.
             rules[3] = { 0.0f, 20.0f, 0.0f, 15.0f, 0.6f, 0.4f, 8.0f, 0.1f, true };
             
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            // Appended for serialized pin-index stability. A combines the
-            // authored soil rule with dry/wet drainage channels.
+            // Appended for serialized pin-index stability. Flow remains an
+            // independent non-normalized semantic mask.
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             
             // 4-channel output for splat map
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, 4));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Semantic (Flow R)", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PackedData, 4));
             
             metadata.displayName = "Auto Splat";
             metadata.category = "Texture";
@@ -4531,7 +4547,7 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Ice", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             // Appended to preserve serialized pin-index compatibility. Erosion
-            // Flow and climate Meltwater are merged internally into splat A.
+            // Flow and climate Meltwater are merged into semantic Flow (R).
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Meltwater", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             // Explicit authored layers are appended so old serialized pin indices
@@ -4545,6 +4561,9 @@ namespace TerrainNodesV2 {
                 "Surface Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, 4));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Semantic (Flow/Wet/Ice/Hard)", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PackedData, 4));
             metadata.displayName = "Surface Composer";
             metadata.category = "Texture";
             metadata.headerColor = IM_COL32(190, 135, 52, 255);
@@ -5131,6 +5150,16 @@ namespace TerrainNodesV2 {
         // Adds four independent biome-driven foliage layers (forest, grass,
         // rock and alpine), grouped under one Foliage Set and output sink.
         bool addBiomeFoliageSetup(float x = 1120.0f, float y = 120.0f);
+
+        // Optional look-development companion for terrain presets. Reuses
+        // available analysis/erosion/biome/snow masks and leaves manually
+        // authored SatMap input links untouched.
+        bool addSatMapSetup(const std::string& preset = "Temperate",
+                            float x = 1320.0f, float y = 420.0f);
+        bool applySatMapPresetRecipe(const std::string& presetId,
+                                     std::string* error = nullptr,
+                                     std::vector<std::string>* warnings = nullptr,
+                                     float x = 1320.0f, float y = 420.0f);
 
         // Non-destructive hydrology branch from the active authored height.
         // The Height Output connection is not replaced; the new branch publishes

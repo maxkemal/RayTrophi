@@ -1,0 +1,18 @@
+{
+  "id":"temperate_wetland","label":"Temperate Wetland","category":"Temperate","version":1,
+  "description":"Separated grass, moss, mud, wet channels and shaded cavities.","basePreset":"Temperate",
+  "layers":[
+    {"id":"lush_grass","label":"Lush Grass","primary":"grass","opacity":0.68,"maskPower":0.9,"detailScale":230,
+     "conditions":[{"field":"grass","min":0.12,"max":0.88},{"field":"slope","min":0.18,"max":0.72,"invert":true}],
+     "stops":[[0,0.09,0.11,0.035],[0.2,0.11,0.17,0.04],[0.4,0.10,0.24,0.055],[0.6,0.09,0.31,0.075],[0.8,0.12,0.38,0.10],[1,0.20,0.44,0.15]]},
+    {"id":"moss_cavity","label":"Mossy Cavities","primary":"moss","opacity":0.84,"maskPower":0.78,"detailScale":310,
+     "conditions":[{"field":"moss","min":0.08,"max":0.82},{"field":"cavity","min":0.04,"max":0.72}],
+     "stops":[[0,0.04,0.07,0.02],[0.2,0.055,0.11,0.025],[0.4,0.07,0.16,0.035],[0.6,0.09,0.22,0.05],[0.8,0.13,0.28,0.075],[1,0.20,0.34,0.12]]},
+    {"id":"wet_mud","label":"Wet Mud","primary":"mud","opacity":0.86,"maskPower":0.82,"detailScale":180,
+     "conditions":[{"field":"mud","min":0.08,"max":0.86},{"field":"wetness","min":0.25,"max":0.9}],
+     "stops":[[0,0.07,0.045,0.025],[0.2,0.095,0.06,0.03],[0.4,0.12,0.08,0.04],[0.6,0.14,0.105,0.06],[0.8,0.12,0.115,0.085],[1,0.08,0.12,0.11]]},
+    {"id":"fine_flow","label":"Fine Flow","primary":"flow","opacity":0.58,"maskPower":0.66,"detailScale":360,
+     "conditions":[{"field":"flow","min":0.04,"max":0.55},{"field":"channel_width","min":0.3,"max":2.0,"invert":true}],
+     "stops":[[0,0.11,0.13,0.075],[0.25,0.08,0.18,0.11],[0.5,0.06,0.23,0.17],[0.75,0.055,0.27,0.24],[1,0.08,0.31,0.32]]}
+  ]
+}

@@ -11,6 +11,8 @@
 #include "TerrainManager.h"
 #include "TerrainNodesV2.h"
 #include "TerrainSystem.h"
+#include "TerrainSatMapPresetLibrary.h"
+#include "Texture.h"
 #include "RiverSpline.h"
 #include <algorithm>
 #include <cctype>
@@ -82,6 +84,14 @@ TerrainInfo terrainInfo(const TerrainObject& terrain) {
     info.height = terrain.heightmap.height;
     info.size = terrain.heightmap.scale_xz;
     info.height_scale = terrain.heightmap.scale_y;
+    info.mesh_resolution = terrain.mesh_resolution;
+    info.mesh_width = terrain.meshGridWidth();
+    info.mesh_height = terrain.meshGridHeight();
+    info.paint_resolution = terrain.paint_resolution;
+    info.paint_width = terrain.paintGridWidth();
+    info.paint_height = terrain.paintGridHeight();
+    info.has_surface_semantic = terrain.surfaceSemanticMap &&
+        terrain.surfaceSemanticMap->is_loaded();
     info.has_node_graph = static_cast<bool>(terrain.nodeGraph);
     info.dirty = terrain.dirty_mesh;
     return info;
@@ -139,7 +149,7 @@ Result getTerrain(const std::string& terrain_name, TerrainInfo& out_info) {
 }
 
 Result createTerrain(const std::string& requested_name, int resolution, float size,
-                     float height_scale, TerrainInfo& out_info) {
+                     float height_scale, int mesh_resolution, TerrainInfo& out_info) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (resolution < 64 || resolution > 4096)
@@ -149,14 +159,22 @@ Result createTerrain(const std::string& requested_name, int resolution, float si
     if (!std::isfinite(height_scale) || height_scale <= 0.0f)
         return Result::fail("height_scale must be finite and positive");
 
+    if (mesh_resolution != 0 && (mesh_resolution < 2 || mesh_resolution > resolution))
+        return Result::fail("mesh_resolution must be 0 (follow the field) or in the range [2, "
+                            + std::to_string(resolution) + "]");
+
     const std::string name = uniqueTerrainName(requested_name);
-    TerrainObject* terrain = TerrainManager::getInstance().createTerrain(g_ctx->scene, resolution, size);
+    TerrainObject* terrain = TerrainManager::getInstance().createTerrain(g_ctx->scene, resolution,
+                                                                        size, height_scale,
+                                                                        mesh_resolution);
     if (!terrain) return Result::fail("failed to create terrain: " + name);
 
     terrain->name = name;
-    terrain->heightmap.scale_y = height_scale;
+    // ★ No second updateTerrainMesh() here. It used to exist only to re-apply
+    // height_scale after the fact, which meant every scripted terrain built its
+    // vertex+normal grid TWICE -- 156 ms of pure waste at 4096^2, and it scales
+    // with the square of the resolution. createTerrain() now takes the scale.
     if (terrain->flatMesh) terrain->flatMesh->nodeName = name;
-    TerrainManager::getInstance().updateTerrainMesh(terrain, false);
 
     ui.terrain_brush.active_terrain_id = terrain->id;
     ui.mesh_cache_valid = false;
@@ -184,6 +202,65 @@ Result importTerrainHeightmap(const std::string& filepath, const std::string& re
     ui.terrain_brush.active_terrain_id = terrain->id;
     ui.mesh_cache_valid = false;
     scheduleSceneMutationRebuilds(*g_ctx, true);
+    out_info = terrainInfo(*terrain);
+    return Result::success();
+}
+
+Result setTerrainMeshResolution(const std::string& terrain_name, int mesh_resolution,
+                                TerrainInfo& out_info) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (terrain_name.empty()) return Result::fail("terrain name must not be empty");
+    if (mesh_resolution != 0 && (mesh_resolution < 2 || mesh_resolution > 16384))
+        return Result::fail("mesh_resolution must be 0 (follow the field) or in the range [2, 16384]");
+
+    TerrainObject* terrain = TerrainManager::getInstance().getTerrainByName(terrain_name);
+    if (!terrain) return Result::fail("terrain not found: " + terrain_name);
+    if (terrain->nodeGraph && terrain->nodeGraph->isEvaluatingAsync())
+        return Result::fail("terrain evaluation is still running: " + terrain_name);
+
+    // ★ Report the clamp instead of applying it silently. Asking for a mesh
+    // denser than the field is a real mistake -- it would interpolate detail the
+    // data does not contain -- and a silent clamp would let the caller keep
+    // believing it got what it asked for.
+    const int field = (std::min)(terrain->heightmap.width, terrain->heightmap.height);
+    if (mesh_resolution > field)
+        return Result::fail("mesh_resolution " + std::to_string(mesh_resolution) +
+                            " exceeds the field resolution " + std::to_string(field) +
+                            "; a mesh denser than the field invents detail it cannot have");
+
+    terrain->mesh_resolution = mesh_resolution;
+    // Vertex count changes, so this is a topology change: the mesh has to be
+    // rebuilt and re-registered, not updated in place.
+    TerrainManager::getInstance().rebuildTerrainMesh(g_ctx->scene, terrain);
+    ui.mesh_cache_valid = false;
+    scheduleSceneMutationRebuilds(*g_ctx, true);
+    out_info = terrainInfo(*terrain);
+    return Result::success();
+}
+
+Result setTerrainPaintResolution(const std::string& terrain_name, int paint_resolution,
+                                 TerrainInfo& out_info) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (terrain_name.empty()) return Result::fail("terrain name must not be empty");
+    if (paint_resolution != 0 && (paint_resolution < 64 || paint_resolution > 16384))
+        return Result::fail("paint_resolution must be 0 (follow the field) or in the range [64, 16384]");
+
+    TerrainObject* terrain = TerrainManager::getInstance().getTerrainByName(terrain_name);
+    if (!terrain) return Result::fail("terrain not found: " + terrain_name);
+    if (terrain->nodeGraph && terrain->nodeGraph->isEvaluatingAsync())
+        return Result::fail("terrain evaluation is still running: " + terrain_name);
+
+    terrain->paint_resolution = paint_resolution;
+    TerrainManager::getInstance().resizePaintMaps(terrain);
+
+    // Unlike mesh resolution, paint resolution doesn't change the BVH topology,
+    // but the API pattern is to schedule a full mutation rebuild to ensure
+    // textures and accumulators are fully refreshed.
+    ui.mesh_cache_valid = false;
+    scheduleSceneMutationRebuilds(*g_ctx, true);
+
     out_info = terrainInfo(*terrain);
     return Result::success();
 }
@@ -378,7 +455,7 @@ Result erodeTerrain(const std::string& terrain_name, const TerrainErosionSetting
 }
 
 Result applyTerrainPreset(const std::string& terrain_name, const std::string& preset,
-                          bool replace_graph) {
+                          bool replace_graph, bool add_satmap) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     TerrainObject* terrain = TerrainManager::getInstance().getTerrainByName(terrain_name);
@@ -391,6 +468,7 @@ Result applyTerrainPreset(const std::string& terrain_name, const std::string& pr
         terrain->nodeGraph = std::make_shared<TerrainNodesV2::TerrainNodeGraphV2>();
     }
     auto& graph = *terrain->nodeGraph;
+    std::string satMapPreset = "Temperate";
     if (kind == "default") {
         if (!replace_graph && graph.nodeCount() != 0)
             return Result::fail("default preset requires replace_graph=True for a non-empty graph");
@@ -399,9 +477,11 @@ Result applyTerrainPreset(const std::string& terrain_name, const std::string& pr
         if (!replace_graph && graph.nodeCount() != 0)
             return Result::fail("snowy_mountain_valley requires replace_graph=True for a non-empty graph");
         graph.createSnowyMountainValleyGraph(terrain);
+        satMapPreset = "Alpine";
     } else if (kind == "snow_layer") {
         if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
         if (!graph.addSnowLayerSetup()) return Result::fail("failed to add snow layer setup");
+        satMapPreset = "Alpine";
     } else if (kind == "river_network") {
         if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
         if (!graph.addRiverNetworkSetup()) return Result::fail("failed to add river network setup");
@@ -411,15 +491,19 @@ Result applyTerrainPreset(const std::string& terrain_name, const std::string& pr
     } else if (kind == "biome_lush") {
         if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
         if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::LushValleys)) return Result::fail("failed to add biome setup");
+        satMapPreset = "Tropical";
     } else if (kind == "biome_alpine") {
         if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
         if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::AlpineTundra)) return Result::fail("failed to add biome setup");
+        satMapPreset = "Alpine";
     } else if (kind == "biome_arid") {
         if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
         if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::AridHighlands)) return Result::fail("failed to add biome setup");
+        satMapPreset = "Desert";
     } else if (kind == "biome_boreal") {
         if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
         if (!graph.addBiomeFieldsSetup(TerrainNodesV2::BiomeClimatePreset::BorealMountains)) return Result::fail("failed to add biome setup");
+        satMapPreset = "Boreal";
     } else if (kind == "biome_foliage") {
         if (graph.nodeCount() == 0) graph.createDefaultGraph(terrain);
         if (!graph.addBiomeFoliageSetup()) return Result::fail("failed to add biome foliage setup");
@@ -430,7 +514,41 @@ Result applyTerrainPreset(const std::string& terrain_name, const std::string& pr
         return Result::fail("unknown terrain preset '" + preset +
                             "' (expected default|snow_layer|snowy_mountain_valley|river_network|biome_boreal|biome_alpine|biome_foliage|geology_foundation|...)");
     }
+    if (add_satmap && !graph.addSatMapSetup(satMapPreset))
+        return Result::fail("terrain preset was applied but SatMap setup could not find a connected Height Output");
     graph.markAllDirty();
+    return Result::success();
+}
+
+Result listTerrainSatMapPresets(std::vector<TerrainSatMapPresetInfo>& out_presets) {
+    out_presets.clear();
+    auto& library = TerrainNodesV2::SatMapPresetLibrary::instance();
+    std::string error;
+    if (!library.reload(&error)) return Result::fail(error);
+    for (const auto& preset : library.presets()) {
+        out_presets.push_back({preset.id, preset.label, preset.category,
+                               preset.description, preset.version,
+                               static_cast<int>(preset.layers.size())});
+    }
+    return Result::success();
+}
+
+Result applyTerrainSatMapPreset(const std::string& terrain_name, const std::string& preset_id,
+                                std::vector<std::string>& out_warnings) {
+    out_warnings.clear();
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    TerrainObject* terrain = TerrainManager::getInstance().getTerrainByName(terrain_name);
+    if (!terrain) return Result::fail("terrain not found: " + terrain_name);
+    if (terrain->nodeGraph && terrain->nodeGraph->isEvaluatingAsync())
+        return Result::fail("terrain evaluation is still running: " + terrain_name);
+    if (!terrain->nodeGraph) {
+        terrain->nodeGraph = std::make_shared<TerrainNodesV2::TerrainNodeGraphV2>();
+        terrain->nodeGraph->createDefaultGraph(terrain);
+    }
+    std::string error;
+    if (!terrain->nodeGraph->applySatMapPresetRecipe(
+            preset_id, &error, &out_warnings)) return Result::fail(error);
     return Result::success();
 }
 

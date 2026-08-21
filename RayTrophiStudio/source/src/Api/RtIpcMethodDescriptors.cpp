@@ -3316,6 +3316,64 @@ static const MethodDescriptor desc_particle_step = {
 };
 static const MethodRegistration reg_particle_step(desc_particle_step);
 
+static const MethodParam params_perf_get[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_perf_get = {
+    "perf.get", "perf",
+    "Read one timing section by name",
+    "Returns found:false when the section has never been recorded. It never answers with zeros: a zeroed timing reads as 'measured, and it was free', which turns a missing measurement into a false one.",
+    "read", "Read", false, "PerfSection",
+    "perf|get|performance|timing|profile|measure",
+    "perf.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_perf_get, 1,
+    true
+};
+static const MethodRegistration reg_perf_get(desc_perf_get);
+
+static const MethodDescriptor desc_perf_list = {
+    "perf.list", "perf",
+    "List every recorded build/render timing section, newest write first",
+    "Sections are named by the code that performs the work: terrain.graph.evaluate/.height/.aux_outputs/.finalize_mesh, terrain.mesh_fill/.create/.update/.publish_fields, terrain.splat_resize, Renderer::rebuildBVH(...), Renderer::rebuildBackendGeometry(GPU). Each carries last/total/max ms, a call count and the process working-set delta across the scope - terrain build cost is dominated by allocation, so a timing without the memory figure next to it invites optimizing the wrong half.",
+    "read", "Read", false, "PerfSection[]",
+    "perf|list|performance|timing|profile|measure|slow|memory",
+    "perf.get|perf.reset|perf.set_logging",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_perf_list(desc_perf_list);
+
+static const MethodDescriptor desc_perf_reset = {
+    "perf.reset", "perf",
+    "Clear the timing counters before a measured run",
+    "Write ordering (seq) stays monotonic across a reset, so a section recorded after it cannot be confused with a stale one. Changes no scene, render or file state - which is why it carries the read capability.",
+    "read", "Read", false, "any",
+    "perf|reset|performance|timing|profile",
+    "perf.list|perf.get",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_perf_reset(desc_perf_reset);
+
+static const MethodParam params_perf_set_logging[] = {
+    {"enabled", "bool", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_perf_set_logging = {
+    "perf.set_logging", "perf",
+    "Also mirror completed timing sections into the Scene Log",
+    "Off by default. The registry is the readable surface - script and IPC callers cannot read the Scene Log, which is exactly why the previous profiler produced no usable numbers.",
+    "read", "Read", false, "any",
+    "perf|set|logging|performance|timing|profile|log",
+    "perf.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_perf_set_logging, 1,
+    true
+};
+static const MethodRegistration reg_perf_set_logging(desc_perf_set_logging);
+
 static const MethodParam params_physics_add_body[] = {
     {"object", "string", true, "Object name", nullptr, nullptr},
     {"kind", "string", false, "Body family, e.g. rigid", "rigid", nullptr},
@@ -4890,8 +4948,9 @@ static const MethodDescriptor desc_templates_validate = {
 static const MethodRegistration reg_templates_validate(desc_templates_validate);
 
 static const MethodParam params_terrain_apply_preset[] = {
-    {"preset", "string", true, "Preset name", nullptr, "default|snow_layer|snowy_mountain_valley|river_network"},
+    {"preset", "string", true, "Preset name", nullptr, "default|snow_layer|snowy_mountain_valley|river_network|biome_temperate|biome_lush|biome_alpine|biome_arid|biome_boreal|biome_foliage|geology_foundation"},
     {"name", "string", true, "", nullptr, nullptr},
+    {"add_satmap", "bool", false, "Also add and wire a matching SatMap colorizer", "False", nullptr},
     {"replace_graph", "bool", false, "", "false", nullptr},
 };
 static const MethodDescriptor desc_terrain_apply_preset = {
@@ -4902,10 +4961,27 @@ static const MethodDescriptor desc_terrain_apply_preset = {
     "terrain|apply|preset|landscape|mountain|snow|river",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_terrain_apply_preset, 3,
+    params_terrain_apply_preset, 4,
     true
 };
 static const MethodRegistration reg_terrain_apply_preset(desc_terrain_apply_preset);
+
+static const MethodParam params_terrain_apply_satmap_preset[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"preset", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_apply_satmap_preset = {
+    "terrain.apply_satmap_preset", "terrain",
+    "Build a SatMap node recipe from flow, slope, curvature and other terrain fields",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "terrain|apply|satmap|preset|landscape|color|flow|slope|curvature",
+    "terrain.list_satmap_presets|terrain.evaluate",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_apply_satmap_preset, 2,
+    true
+};
+static const MethodRegistration reg_terrain_apply_satmap_preset(desc_terrain_apply_satmap_preset);
 
 static const MethodParam params_terrain_calculate_flow[] = {
     {"name", "string", true, "", nullptr, nullptr},
@@ -4971,17 +5047,18 @@ static const MethodParam params_terrain_create[] = {
     {"size", "float", false, "World-space extent in metres", "1000.0", nullptr},
     {"resolution", "int", false, "Heightmap resolution in samples per side", "1024", nullptr},
     {"height_scale", "float", false, "Vertical scale in metres", "100.0", nullptr},
+    {"mesh_resolution", "int", false, "", "0", nullptr},
     {"name", "string", false, "", "Terrain", nullptr},
 };
 static const MethodDescriptor desc_terrain_create = {
     "terrain.create", "terrain",
     "Create a terrain heightfield of a given world size and resolution",
-    nullptr,
+    "resolution is the FIELD grid: heights and every analysis product (slope, flow, erosion, analysisFields) live at that resolution. mesh_resolution is the separate VERTEX grid; 0 follows the field. Set it at creation rather than decimating afterwards - creating at 4096 and decimating still pays one full-resolution acceleration-structure build (measured 5.6 s Vulkan solid raster + 2.8 s Embree). With a 1024 mesh over a 4096 field the same build is 0.42 s + 0.15 s.",
     "write", "SceneWrite", false, "any",
     "terrain|create|landscape|mountain|ground|heightmap",
-    "terrain.apply_preset|terrain.erode|terrain.evaluate",
+    "terrain.set_mesh_resolution|terrain.get|perf.list",
     nullptr, nullptr, nullptr, nullptr,
-    params_terrain_create, 4,
+    params_terrain_create, 5,
     true
 };
 static const MethodRegistration reg_terrain_create(desc_terrain_create);
@@ -5122,6 +5199,19 @@ static const MethodDescriptor desc_terrain_list_rivers = {
 };
 static const MethodRegistration reg_terrain_list_rivers(desc_terrain_list_rivers);
 
+static const MethodDescriptor desc_terrain_list_satmap_presets = {
+    "terrain.list_satmap_presets", "terrain",
+    "List data-driven multi-field SatMap preset recipes",
+    nullptr,
+    "read", "Read", false, "any",
+    "terrain|list|satmap|presets|landscape|color|preset|flow|curvature",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_terrain_list_satmap_presets(desc_terrain_list_satmap_presets);
+
 static const MethodParam params_terrain_remove[] = {
     {"name", "string", true, "", nullptr, nullptr},
 };
@@ -5155,6 +5245,40 @@ static const MethodDescriptor desc_terrain_sample_height = {
     true
 };
 static const MethodRegistration reg_terrain_sample_height(desc_terrain_sample_height);
+
+static const MethodParam params_terrain_set_mesh_resolution[] = {
+    {"name", "string", true, "Terrain name", nullptr, nullptr},
+    {"mesh_resolution", "int", true, "Vertices per side for the mesh grid, or 0 to follow the field resolution", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_set_mesh_resolution = {
+    "terrain.set_mesh_resolution", "terrain",
+    "Set the terrain vertex-grid resolution independently of the field (analysis) resolution",
+    "0 means the mesh follows the field, which is the historical behaviour. The field grid (heights, slope, flow, erosion, every analysisFields entry) is untouched; only the triangle count changes, and analysis fields are resampled onto the coarser vertex grid rather than dropped. Measured at 4096^2: mesh fill is 380 ms but the acceleration structures built from its 33.5 M triangles cost 6.4 s (Vulkan solid raster) + 2.6 s (Embree), and that cost is linear in triangle count - a 1024 mesh over a 4096 field is roughly 18x cheaper end to end. Normals are still sampled from the field, so shading detail largely survives; the silhouette does not. A value above the field resolution is REFUSED rather than clamped.",
+    "write", "SceneWrite", false, "TerrainInfo",
+    "terrain|set|mesh|resolution|lod|performance|triangles|decimate",
+    "terrain.get|terrain.create|perf.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_set_mesh_resolution, 2,
+    true
+};
+static const MethodRegistration reg_terrain_set_mesh_resolution(desc_terrain_set_mesh_resolution);
+
+static const MethodParam params_terrain_set_paint_resolution[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"paint_resolution", "int", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_set_paint_resolution = {
+    "terrain.set_paint_resolution", "terrain",
+    nullptr,
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "terrain|set|paint|resolution",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_set_paint_resolution, 2,
+    false
+};
+static const MethodRegistration reg_terrain_set_paint_resolution(desc_terrain_set_paint_resolution);
 
 static const MethodDescriptor desc_timeline_get_frame = {
     "timeline.get_frame", "timeline",

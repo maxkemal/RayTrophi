@@ -9,7 +9,7 @@
 #include <imgui_impl_sdlrenderer2.h>
 #include <scene_ui.h>
 #include "OptixWrapper.h"
-#include "MeshProfileTimer.h" // TEMP: RSS-delta profiling of BVH/backend rebuild
+#include "PerfProfile.h"
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 #include <future>
@@ -3815,7 +3815,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
         SCENE_LOG_WARN("Scene not initialized, BVH rebuild skipped.");
         return;
     }
-    MESH_PROFILE_SCOPE(std::string("Renderer::rebuildBVH(") + (use_embree ? "Embree" : "internal") + ")");
+    RTPERF_SCOPE(std::string("Renderer::rebuildBVH(") + (use_embree ? "Embree" : "internal") + ")");
 
     // Keep CPU geometry in sync with transform handles before building BVH.
     // Open-project deserialization already does this for static meshes, but
@@ -3927,7 +3927,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
     const bool needPointiness = MeshAttr::anyMaterialUsesPointiness();
     const bool needAttributes = MeshAttr::anyMaterialUsesAttributes();
     if (needPointiness || needAttributes) {
-        MESH_PROFILE_SCOPE("Renderer::rebuildBVH(vertex attributes)");
+        RTPERF_SCOPE("Renderer::rebuildBVH(vertex attributes)");
         std::unordered_set<TriangleMesh*> meshes;
         for (const auto& obj : scene.world.objects) {
             if (!obj) continue;
@@ -9155,7 +9155,7 @@ std::vector<std::shared_ptr<Hittable>> filterVisibleGeometryObjects(
 
 // Rebuild OptiX geometry after scene modifications (deletion/addition)
 void Renderer::rebuildBackendGeometry(SceneData& scene) {
-    MESH_PROFILE_SCOPE("Renderer::rebuildBackendGeometry(GPU)");
+    RTPERF_SCOPE("Renderer::rebuildBackendGeometry(GPU)");
     // Rebuild geometry TLAS
     rebuildBackendGeometryWithList(filterVisibleGeometryObjects(scene.world.objects));
     // Sync all volumes (VDB/Gas)
@@ -9636,6 +9636,14 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
             }
             ld.splatMapTexture = reinterpret_cast<int64_t>(t.splatMap.get());
             ld.layer_count = activeCount;
+            // SatMap is a second terrain paint texture.  Keep it in the same
+            // descriptor as the splat map so both Vulkan paths can bind it
+            // during terrain-layer shading.
+            ld.macroColorTexture = t.macroColorMap
+                ? reinterpret_cast<int64_t>(t.macroColorMap.get()) : 0;
+            ld.macroColorStrength = t.macro_color_strength;
+            ld.semanticMapTexture = t.surfaceSemanticMap
+                ? reinterpret_cast<int64_t>(t.surfaceSemanticMap.get()) : 0;
 
             uint32_t layerIdx = (uint32_t)terrainLayers.size();
             terrainLayers.push_back(ld);

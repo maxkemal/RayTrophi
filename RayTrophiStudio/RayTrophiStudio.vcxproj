@@ -1387,6 +1387,7 @@
     <ClCompile Include="source\src\Utils\image_filters.cpp" />
     <ClCompile Include="source\src\Utils\image_resample.cpp" />
     <ClCompile Include="source\src\Utils\SceneCommand.cpp" />
+    <ClCompile Include="source\src\Utils\PerfProfile.cpp" />
     <ClCompile Include="source\src\Utils\MeshModifiers.cpp" />
     <ClCompile Include="source\src\Utils\SceneExporter.cpp" />
     <ClCompile Include="source\src\Api\RtApi.cpp" />
@@ -1420,6 +1421,7 @@
     <ClCompile Include="source\src\Api\RtApiParticle.cpp" />
     <ClCompile Include="source\src\Api\RtApiAnim.cpp" />
     <ClCompile Include="source\src\Api\RtApiTerrain.cpp" />
+    <ClCompile Include="source\src\Api\RtApiPerf.cpp" />
     <ClCompile Include="source\src\Api\RtApiSimNodes.cpp" />
     <ClCompile Include="source\src\Api\RtApiViewport.cpp" />
     <ClCompile Include="source\src\Api\RtApiHair.cpp" />
@@ -1523,6 +1525,11 @@
     <ClCompile Include="source\src\Physics\SurfaceFlowField.cpp" />
     <ClCompile Include="source\src\Physics\TerrainManager.cpp" />
     <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainPaintEvaluation.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainSemanticMap.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainSatMapSetup.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainSatMapPresetLibrary.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainSatMapNodes.cpp" />
     <ClCompile Include="source\src\Physics\SnowComputeGPU.cpp" />
     <ClCompile Include="source\src\Physics\TerrainFFT.cpp" />
     <ClCompile Include="source\src\Render\Texture.cpp" />

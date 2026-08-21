@@ -1,0 +1,18 @@
+{
+  "id":"river_network_detailed","label":"River Network Detailed","category":"Hydrology","version":1,
+  "description":"Four-way separation of fine tributaries, broad rivers, wet banks and muddy cavities.","basePreset":"Temperate",
+  "layers":[
+    {"id":"fine_tributaries","label":"Fine Tributaries","primary":"flow","opacity":0.82,"maskPower":0.62,"detailScale":420,
+     "conditions":[{"field":"flow","min":0.035,"max":0.5},{"field":"channel_width","min":0.25,"max":1.8,"invert":true}],
+     "stops":[[0,0.10,0.13,0.075],[0.2,0.075,0.17,0.11],[0.4,0.055,0.21,0.16],[0.6,0.045,0.25,0.22],[0.8,0.055,0.29,0.29],[1,0.085,0.33,0.36]]},
+    {"id":"broad_rivers","label":"Broad Rivers","primary":"channel_width","autoNormalize":true,"opacity":0.92,"maskPower":0.82,"detailScale":180,
+     "conditions":[{"field":"flow","min":0.13,"max":0.88},{"field":"channel_width","min":0.75,"max":8.0}],
+     "stops":[[0,0.055,0.12,0.15],[0.2,0.04,0.16,0.21],[0.4,0.035,0.20,0.28],[0.6,0.045,0.24,0.35],[0.8,0.07,0.29,0.42],[1,0.12,0.35,0.49]]},
+    {"id":"wet_banks","label":"Wet Banks","primary":"wetness","opacity":0.70,"maskPower":0.9,"detailScale":250,
+     "conditions":[{"field":"wetness","min":0.30,"max":0.92},{"field":"flow","min":0.04,"max":0.66}],
+     "stops":[[0,0.10,0.11,0.065],[0.2,0.085,0.14,0.085],[0.4,0.07,0.18,0.115],[0.6,0.065,0.21,0.15],[0.8,0.075,0.24,0.19],[1,0.10,0.28,0.24]]},
+    {"id":"muddy_cavities","label":"Muddy Cavities","primary":"mud","opacity":0.72,"maskPower":1.0,"detailScale":210,
+     "conditions":[{"field":"mud","min":0.08,"max":0.82},{"field":"cavity","min":0.04,"max":0.72}],
+     "stops":[[0,0.075,0.045,0.025],[0.25,0.095,0.06,0.03],[0.5,0.115,0.08,0.045],[0.75,0.12,0.10,0.07],[1,0.095,0.11,0.10]]}
+  ]
+}

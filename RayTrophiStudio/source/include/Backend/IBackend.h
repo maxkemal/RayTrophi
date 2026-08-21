@@ -509,6 +509,11 @@ public:
         float    layer_uv_scale[4] = {1, 1, 1, 1};  // UV tiling for layers 0-3
         int64_t  splatMapTexture   = 0;              // Texture pointer/handle for RGBA splat map
         uint32_t layer_count       = 0;              // Active layer count (0 = no terrain)
+        int64_t  macroColorTexture = 0;              // Texture pointer/handle for macro color map
+        float    macroColorStrength= 0.0f;           // Blend strength [0.0 - 1.0]
+        int64_t  semanticMapTexture= 0;              // R=Flow G=Wetness B=Ice A=Hardness
+        float    semanticWetDarkening = 0.28f;
+        float    semanticWetRoughness = 0.65f;
     };
 
     virtual void uploadMaterials(const std::vector<MaterialData>& materials) = 0;

@@ -1,0 +1,18 @@
+{
+  "id":"volcanic_basalt_wet","label":"Volcanic Basalt Wet","category":"Volcanic","version":1,
+  "description":"Basalt ridges, oxidized deposition, wet channels and moss in cavities.","basePreset":"Volcanic",
+  "layers":[
+    {"id":"hard_basalt","label":"Hard Basalt","primary":"convexity","opacity":0.74,"maskPower":0.85,"detailScale":340,
+     "conditions":[{"field":"slope","min":0.18,"max":0.86},{"field":"convexity","min":0.03,"max":0.55}],
+     "stops":[[0,0.055,0.05,0.048],[0.2,0.09,0.085,0.08],[0.4,0.14,0.135,0.13],[0.6,0.20,0.20,0.195],[0.8,0.27,0.28,0.28],[1,0.35,0.37,0.38]]},
+    {"id":"oxidized_soil","label":"Oxidized Soil","primary":"deposition","opacity":0.68,"maskPower":0.8,"detailScale":190,
+     "conditions":[{"field":"deposition","min":0.05,"max":0.76}],
+     "stops":[[0,0.12,0.045,0.025],[0.2,0.20,0.065,0.025],[0.4,0.30,0.09,0.03],[0.6,0.40,0.14,0.04],[0.8,0.50,0.22,0.07],[1,0.58,0.34,0.13]]},
+    {"id":"wet_lava_channels","label":"Wet Lava Channels","primary":"flow","opacity":0.80,"maskPower":0.72,"detailScale":270,
+     "conditions":[{"field":"flow","min":0.08,"max":0.78},{"field":"wetness","min":0.18,"max":0.86}],
+     "stops":[[0,0.08,0.07,0.06],[0.2,0.065,0.085,0.08],[0.4,0.05,0.11,0.11],[0.6,0.045,0.14,0.15],[0.8,0.055,0.18,0.21],[1,0.08,0.23,0.28]]},
+    {"id":"basalt_moss","label":"Basalt Moss","primary":"moss","opacity":0.54,"maskPower":1.0,"detailScale":380,
+     "conditions":[{"field":"moss","min":0.10,"max":0.78}],
+     "stops":[[0,0.04,0.055,0.02],[0.25,0.055,0.09,0.025],[0.5,0.07,0.13,0.035],[0.75,0.09,0.18,0.05],[1,0.13,0.23,0.075]]}
+  ]
+}

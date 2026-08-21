@@ -1,5 +1,6 @@
 ﻿#include "EmbreeBVH.h"
 #include "HittableInstance.h"
+#include "PerfProfile.h"
 #include "VDBVolume.h" // Add VDB support
 #include "VDBVolumeManager.h"
 #include "MeshPointiness.h"
@@ -123,6 +124,7 @@ void EmbreeBVH::shutdown() {
 }
 
 void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    RTPERF_SCOPE("accel.cpu.embree_build");
     auto build_start = std::chrono::high_resolution_clock::now();
     Vec3 build_audit_min(0.0f);
     Vec3 build_audit_max(0.0f);

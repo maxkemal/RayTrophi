@@ -20,6 +20,7 @@
 
 #include "imgui.h"
 #include "TerrainNodesV2.h"
+#include "TerrainSatMapPresetLibrary.h"
 #include "TerrainManager.h"
 #include "NodeSystem/NodeEditorUIV2.h"
 #include "ProjectManager.h" // Added for markModified
@@ -131,7 +132,10 @@ public:
                 {NodeType::MaskCombine, "Mask Combine"},
                 {NodeType::MaskMorphology, "Dilate / Erode / Blur"},
                 {NodeType::MaskPaint, "Mask Paint"},
-                {NodeType::MaskImage, "Mask Image"}
+                {NodeType::MaskImage, "Mask Image"},
+                {NodeType::PaintMaskCombine, "Paint Mask Combine"},
+                {NodeType::GrassMask, "Grass Mask"},
+                {NodeType::SurfaceMasks, "Surface Detail Masks"}
             }},
             {"Data Maps", ImVec4(0.25f, 0.55f, 0.72f, 1.0f), {
                 {NodeType::TerrainAnalysis, "Terrain Analysis"},
@@ -173,6 +177,7 @@ public:
             {"Output", ImVec4(0.9f, 0.3f, 0.3f, 1.0f), {
                 {NodeType::HeightOutput, "Height Output"},
                 {NodeType::SplatOutput, "Splat Output"},
+                {NodeType::SatMapOutput, "SatMap Output"},
                 {NodeType::HardnessOutput, "Hardness Output"},
                 {NodeType::TerrainFieldsOutput, "Terrain Fields Output"},
                 {NodeType::FoliageOutput, "Foliage Output"},
@@ -187,6 +192,10 @@ public:
             {"Utility", ImVec4(0.35f, 0.62f, 0.72f, 1.0f), {
                 {NodeType::Resample, "Resample"},
                 {NodeType::ChannelExtract, "Channel Extract"}
+            }},
+            {"SatMap", ImVec4(0.85f, 0.35f, 0.65f, 1.0f), {
+                {NodeType::SatMapColorRamp, "SatMap ColorRamp"},
+                {NodeType::SatMapBlend, "SatMap Blend"}
             }},
             {"Geology", ImVec4(0.7f, 0.45f, 0.35f, 1.0f), {
                 {NodeType::Fault, "Fault Line"},
@@ -946,6 +955,7 @@ private:
     static bool isPublicationSink(const TerrainNodeBase& node) {
         const std::string type = node.getTypeId();
         return type == "TerrainV2.SplatOutput" ||
+               type == "Terrain.SatMapOutput" ||
                type == "TerrainV2.HardnessOutput" ||
                type == "TerrainV2.TerrainFieldsOutput" ||
                type == "TerrainV2.FoliageOutput" ||
@@ -1596,10 +1606,14 @@ private:
         }
         ImGui::SameLine();
 
+        static bool includeSatMapWithSetup = false;
         if (ImGui::Button("Setups")) ImGui::OpenPopup("TerrainSetupsMenu");
         if (ImGui::BeginPopup("TerrainSetupsMenu")) {
+            ImGui::Checkbox("Include SatMap Colorizer", &includeSatMapWithSetup);
+            ImGui::Separator();
             if (ImGui::MenuItem("Add Snow Layer")) {
                 if (graph.addSnowLayerSetup()) {
+                    if (includeSatMapWithSetup) graph.addSatMapSetup("Alpine");
                     frameAllNodes(graph);
                     setupStatus = "Snow layer added: base masks preserved";
                     ProjectManager::getInstance().markModified();
@@ -1610,6 +1624,7 @@ private:
             }
             if (ImGui::MenuItem("Add River & Lake (Easy)")) {
                 if (graph.addRiverNetworkSetup()) {
+                    if (includeSatMapWithSetup) graph.addSatMapSetup("Temperate");
                     frameAllNodes(graph);
                     setupStatus = "Hydrology ready: one-control presets + detailed river/lake layers";
                     ProjectManager::getInstance().markModified();
@@ -1620,6 +1635,7 @@ private:
             }
             if (ImGui::MenuItem("Add Geological Foundation")) {
                 if (graph.addGeologyFoundationSetup()) {
+                    if (includeSatMapWithSetup) graph.addSatMapSetup("Temperate");
                     frameAllNodes(graph);
                     setupStatus = "Geology ready: folds, lithology, strata and reusable fields";
                     ProjectManager::getInstance().markModified();
@@ -1669,6 +1685,14 @@ private:
                 auto addBiomePreset = [&](const char* label, BiomeClimatePreset preset) {
                     if (!ImGui::MenuItem(label)) return;
                     if (graph.addBiomeFieldsSetup(preset)) {
+                        if (includeSatMapWithSetup) {
+                            const char* satPreset = "Temperate";
+                            if (preset == BiomeClimatePreset::LushValleys) satPreset = "Tropical";
+                            else if (preset == BiomeClimatePreset::AlpineTundra) satPreset = "Alpine";
+                            else if (preset == BiomeClimatePreset::AridHighlands) satPreset = "Desert";
+                            else if (preset == BiomeClimatePreset::BorealMountains) satPreset = "Boreal";
+                            graph.addSatMapSetup(satPreset);
+                        }
                         frameAllNodes(graph);
                         setupStatus = std::string("Biome fields ready: ") +
                             BiomeComposerNode::getPresetName(preset);
@@ -1695,6 +1719,41 @@ private:
                 }
                 setupStatusUntil = ImGui::GetTime() + 4.0;
             }
+            if (ImGui::MenuItem("Add SatMap Colorizer")) {
+                if (graph.addSatMapSetup("Temperate")) {
+                    frameAllNodes(graph);
+                    setupStatus = "SatMap ready: available terrain masks connected";
+                    ProjectManager::getInstance().markModified();
+                } else setupStatus = "SatMap setup needs a connected Height Output";
+                setupStatusUntil = ImGui::GetTime() + 4.0;
+            }
+            if (ImGui::BeginMenu("SatMap Preset Library")) {
+                auto& library = SatMapPresetLibrary::instance();
+                std::string libraryError;
+                if (!library.reload(&libraryError)) {
+                    ImGui::TextDisabled("%s", libraryError.c_str());
+                } else {
+                    std::string activeCategory;
+                    for (const auto& preset : library.presets()) {
+                        if (preset.category != activeCategory) {
+                            if (!activeCategory.empty()) ImGui::Separator();
+                            activeCategory = preset.category;
+                            ImGui::TextDisabled("%s", activeCategory.c_str());
+                        }
+                        if (!ImGui::MenuItem(preset.label.c_str())) continue;
+                        std::string recipeError;
+                        std::vector<std::string> warnings;
+                        if (graph.applySatMapPresetRecipe(preset.id, &recipeError, &warnings)) {
+                            frameAllNodes(graph);
+                            setupStatus = "SatMap preset applied: " + preset.label;
+                            if (!warnings.empty()) setupStatus += " (" + std::to_string(warnings.size()) + " layer warning)";
+                            ProjectManager::getInstance().markModified();
+                        } else setupStatus = "SatMap preset failed: " + recipeError;
+                        setupStatusUntil = ImGui::GetTime() + 6.0;
+                    }
+                }
+                ImGui::EndMenu();
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Example: Snowy Mountain Valley...")) {
                 requestSnowyMountainValleyPopup = true;
@@ -1717,6 +1776,7 @@ private:
             ImGui::BeginDisabled(graph.isEvaluatingAsync());
             if (ImGui::Button("Create", ImVec2(110.0f, 0.0f))) {
                 graph.createSnowyMountainValleyGraph(terrain);
+                if (includeSatMapWithSetup) graph.addSatMapSetup("Alpine");
                 editor.scrollX = 0.0f;
                 editor.scrollY = 0.0f;
                 editor.zoom = 0.85f;

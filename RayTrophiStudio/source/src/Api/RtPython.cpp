@@ -2114,7 +2114,14 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         py::dict d;
         d["id"] = info.id;
         d["name"] = info.name;
-        d["resolution"] = py::make_tuple(info.width, info.height);
+        d["resolution"] = py::make_tuple(info.width, info.height);   // FIELD grid
+        d["mesh_resolution"] = info.mesh_resolution;                 // 0 = follow the field
+        d["mesh_grid"] = py::make_tuple(info.mesh_width, info.mesh_height);
+        d["paint_resolution"] = info.paint_resolution;               // 0 = follow the field
+        d["paint_grid"] = py::make_tuple(info.paint_width, info.paint_height);
+        d["has_surface_semantic"] = info.has_surface_semantic;
+        d["surface_semantic_channels"] = py::make_tuple(
+            "flow", "wetness", "ice", "hardness");
         d["size"] = info.size;
         d["height_scale"] = info.height_scale;
         d["has_node_graph"] = info.has_node_graph;
@@ -2134,12 +2141,18 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return terrain_info_to_dict(info);
     }, py::arg("name"));
     terrain.def("create", [terrain_info_to_dict](const std::string& name, int resolution,
-                                                   float size, float height_scale) -> py::dict {
+                                                   float size, float height_scale,
+                                                   int mesh_resolution) -> py::dict {
         rtapi::TerrainInfo info;
-        requireResult(rtapi::createTerrain(name, resolution, size, height_scale, info));
+        requireResult(rtapi::createTerrain(name, resolution, size, height_scale,
+                                           mesh_resolution, info));
         return terrain_info_to_dict(info);
     }, py::arg("name") = "Terrain", py::arg("resolution") = 1024,
-       py::arg("size") = 1000.0f, py::arg("height_scale") = 100.0f);
+       py::arg("size") = 1000.0f, py::arg("height_scale") = 100.0f,
+       py::arg("mesh_resolution") = 0,
+       "resolution is the FIELD (analysis) grid; mesh_resolution is the vertex "
+       "grid, 0 to follow the field. Both are creation parameters because "
+       "decimating afterwards still pays one full-resolution build.");
     terrain.def("import_heightmap", [terrain_info_to_dict](const std::string& filepath,
                          const std::string& name, float size, float height_scale,
                          int max_resolution) -> py::dict {
@@ -2150,6 +2163,24 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, py::arg("filepath"), py::arg("name") = "TerrainImported",
        py::arg("size") = 1000.0f, py::arg("height_scale") = 100.0f,
        py::arg("max_resolution") = 2048);
+    terrain.def("set_mesh_resolution", [terrain_info_to_dict](const std::string& name,
+                                                              int mesh_resolution) -> py::dict {
+        rtapi::TerrainInfo info;
+        requireResult(rtapi::setTerrainMeshResolution(name, mesh_resolution, info));
+        return terrain_info_to_dict(info);
+    }, py::arg("name"), py::arg("mesh_resolution"),
+       "Vertex-grid resolution, independent of the field (analysis) resolution. "
+       "0 follows the field, which is the historical behaviour. Asking for more "
+       "than the field is refused, not clamped -- a mesh denser than its data "
+       "would interpolate detail that does not exist.");
+    terrain.def("set_paint_resolution", [terrain_info_to_dict](const std::string& name,
+                                                               int paint_resolution) -> py::dict {
+        rtapi::TerrainInfo info;
+        requireResult(rtapi::setTerrainPaintResolution(name, paint_resolution, info));
+        return terrain_info_to_dict(info);
+    }, py::arg("name"), py::arg("paint_resolution"),
+       "Set the independent splat/SatMap evaluation grid. 0 follows the field; "
+       "higher values let procedural paint nodes generate real high-frequency detail.");
     terrain.def("remove", [](const std::string& name) {
         requireResult(rtapi::removeTerrain(name));
     }, py::arg("name"));
@@ -2193,9 +2224,28 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::erodeTerrain(name, settings));
     }, py::arg("name"), py::arg("type") = "hydraulic", py::arg("backend") = "auto");
     terrain.def("apply_preset", [](const std::string& name, const std::string& preset,
-                                    bool replace_graph) {
-        requireResult(rtapi::applyTerrainPreset(name, preset, replace_graph));
-    }, py::arg("name"), py::arg("preset"), py::arg("replace_graph") = false);
+                                    bool replace_graph, bool add_satmap) {
+        requireResult(rtapi::applyTerrainPreset(name, preset, replace_graph, add_satmap));
+    }, py::arg("name"), py::arg("preset"), py::arg("replace_graph") = false,
+       py::arg("add_satmap") = false);
+    terrain.def("list_satmap_presets", []() {
+        std::vector<rtapi::TerrainSatMapPresetInfo> presets;
+        requireResult(rtapi::listTerrainSatMapPresets(presets));
+        py::list result;
+        for (const auto& preset : presets) {
+            py::dict item;
+            item["id"] = preset.id; item["label"] = preset.label;
+            item["category"] = preset.category; item["description"] = preset.description;
+            item["version"] = preset.version; item["layer_count"] = preset.layer_count;
+            result.append(item);
+        }
+        return result;
+    });
+    terrain.def("apply_satmap_preset", [](const std::string& name, const std::string& preset) {
+        std::vector<std::string> warnings;
+        requireResult(rtapi::applyTerrainSatMapPreset(name, preset, warnings));
+        return warnings;
+    }, py::arg("name"), py::arg("preset"));
     terrain.def("calculate_flow", [](const std::string& name) {
         requireResult(rtapi::calculateTerrainFlow(name));
     }, py::arg("name"));
@@ -2967,6 +3017,58 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "Numeric statistics of the captured viewport frame. Requires "
        "rt.viewport.capture(True); 'available' is false until a frame has been "
        "captured, and that is NOT the same as a black frame.");
+
+    // ── rt.perf: where the time went ────────────────────────────────────────
+    //
+    // ★★★ The predecessor of this surface wrote its numbers to the Scene Log
+    // and then had its macro compiled out. Both halves defeat the way this
+    // project is actually tested: a script cannot read the Scene Log, and a
+    // disabled macro measures nothing. Sections are values.
+    py::module_ perf = module.def_submodule("perf",
+        "Build/render phase timings as values: name, last/total/max ms, call "
+        "count and the working-set delta across the scope.");
+    perf.def("list", [] {
+        py::list out;
+        for (const rtapi::PerfSection& s : rtapi::perfSections()) {
+            py::dict d;
+            d["name"] = s.name;
+            d["last_ms"] = s.last_ms;
+            d["total_ms"] = s.total_ms;
+            d["max_ms"] = s.max_ms;
+            d["count"] = s.count;
+            d["last_rss_delta_mb"] = s.last_rss_delta_mb;
+            d["rss_after_mb"] = s.rss_after_mb;
+            d["seq"] = s.seq;
+            out.append(std::move(d));
+        }
+        return out;
+    }, "Every recorded section, newest write first.");
+    perf.def("get", [](const std::string& name) -> py::object {
+        rtapi::PerfSection s;
+        // ★ None, not a zeroed record. A zero reads as "measured, and it cost
+        // nothing", which is how a missing measurement becomes a false one.
+        if (!rtapi::perfSection(name, s)) return py::none();
+        py::dict d;
+        d["name"] = s.name;
+        d["last_ms"] = s.last_ms;
+        d["total_ms"] = s.total_ms;
+        d["max_ms"] = s.max_ms;
+        d["count"] = s.count;
+        d["last_rss_delta_mb"] = s.last_rss_delta_mb;
+        d["rss_after_mb"] = s.rss_after_mb;
+        d["seq"] = s.seq;
+        return d;
+    }, py::arg("name"),
+       "One section by name, or None when it has never been recorded.");
+    perf.def("reset", [] {
+        requireResult(rtapi::perfReset());
+    }, "Clear the counters. Write ordering (seq) stays monotonic across it.");
+    perf.def("set_logging", [](bool enabled) {
+        requireResult(rtapi::perfSetLogging(enabled));
+    }, py::arg("enabled"),
+       "Also mirror completed sections into the Scene Log. Off by default.");
+    perf.def("logging", [] { return rtapi::perfLogging(); },
+       "Whether Scene Log mirroring is on.");
 
     // ── rt.editor: the application's own editor view state ──────────────────
     //

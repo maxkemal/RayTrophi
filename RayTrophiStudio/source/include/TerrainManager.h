@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -23,7 +23,7 @@ class Material;
 class Texture;
 
 // Serialization version - increment when format changes
-static constexpr int TERRAIN_SERIALIZATION_VERSION = 2;
+static constexpr int TERRAIN_SERIALIZATION_VERSION = 3;
 
 // ===========================================================================
 // EROSION PARAMETERS
@@ -126,7 +126,17 @@ public:
     void updateFromTrack(TerrainObject* terrain, const struct ObjectAnimationTrack& track, int currentFrame);
 
     // Create a flat terrain grid
-    TerrainObject* createTerrain(SceneData& scene, int resolution, float size);
+    // ★ height_scale is a CREATION parameter, not a post-edit. Callers used to
+    // create the terrain, then assign heightmap.scale_y and call
+    // updateTerrainMesh() a second time -- a full extra vertex+normal pass
+    // (156 ms measured at 4096^2) whose only job was to re-apply a scalar the
+    // first pass could have used.
+    // ★ mesh_resolution is a CREATION parameter too, for the same reason
+    // height_scale is: creating at the field resolution and decimating after
+    // means paying the full acceleration-structure build once (5.6 s at 4096^2)
+    // before saving anything. 0 = vertex grid follows the field.
+    TerrainObject* createTerrain(SceneData& scene, int resolution, float size,
+                                 float height_scale = 10.0f, int mesh_resolution = 0);
     
     // Create terrain from heightmap image (using stb_image)
     TerrainObject* createTerrainFromHeightmap(SceneData& scene, const std::string& filepath, float size, float maxHeight, int max_resolution = 1024);
@@ -166,7 +176,10 @@ public:
     
     // Internal helper to sync CPU splat data to GPU texture
     void updateSplatMapTexture(TerrainObject* terrain);
-    void resizeSplatMap(TerrainObject* terrain);
+    // resizePaintMaps resizes both splatMap and macroColorMap to paintGridWidth/Height.
+    // This is the canonical name; resizeSplatMap below is a compatibility forwarder.
+    void resizePaintMaps(TerrainObject* terrain);
+    inline void resizeSplatMap(TerrainObject* terrain) { resizePaintMaps(terrain); }
     void exportSplatMap(TerrainObject* terrain, const std::string& filepath);
     void importSplatMap(TerrainObject* terrain, const std::string& filepath);
     void exportHeightmap(TerrainObject* terrain, const std::string& filepath);
@@ -460,4 +473,3 @@ private:
     bool cudaInitialized = false;
     void initCuda();
 };
-

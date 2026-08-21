@@ -1,4 +1,5 @@
-﻿#include "TerrainManager.h"
+#include "TerrainManager.h"
+#include "TerrainSemanticMap.h"
 #include "scene_data.h"
 #include "Triangle.h" // Added for explicit type visibility
 #include "Hittable.h" // Added for explicit type visibility
@@ -8,6 +9,7 @@
 #include "stb_image.h"
 #include "stb_image_write.h"
 #include "globals.h"
+#include "PerfProfile.h"
 #include <algorithm>
 #include <cmath>
 #include <random>
@@ -175,65 +177,6 @@ TerrainObject* TerrainManager::getTerrain(int id) {
 }
 
 namespace {
-// Builds a WELDED flat TriangleMesh from a regular (w x h) vertex grid + explicit
-// index buffer. Terrain (and, in a later phase, Water/River) grids are regular
-// meshes where adjacent quads legitimately share vertices/normals/UVs — unlike
-// the unwelded per-corner soup used by podToFlatMesh (MeshModifiers.cpp).
-std::shared_ptr<TriangleMesh> gridToFlatMesh(
-    const std::vector<Vec3>& positions,   // local space, w*h
-    const std::vector<Vec3>& normals,     // local space, w*h
-    const std::vector<Vec2>& uvs,         // w*h
-    const std::vector<uint32_t>& indices, // 3 * triCount, welded grid indices
-    uint16_t materialID,
-    const std::shared_ptr<Transform>& transform,
-    const std::string& nodeName) {
-    const size_t vCount = positions.size();
-    if (vCount == 0 || indices.empty()) return nullptr;
-
-    auto tm = std::make_shared<TriangleMesh>();
-    tm->transform = transform;
-    tm->nodeName = nodeName;
-    tm->geometry->resize_vertices(vCount);
-
-    tm->geometry->add_attribute<Vec3>("P");
-    tm->geometry->add_attribute<Vec3>("N");
-    tm->geometry->add_attribute<Vec3>("P_orig");
-    tm->geometry->add_attribute<Vec3>("N_orig");
-    tm->geometry->add_attribute<Vec2>("uv");
-    tm->geometry->add_attribute<uint16_t>("materialID");
-
-    Vec3* P  = tm->geometry->get_attribute_data_mut<Vec3>("P");
-    Vec3* N  = tm->geometry->get_attribute_data_mut<Vec3>("N");
-    Vec3* Po = tm->geometry->get_attribute_data_mut<Vec3>("P_orig");
-    Vec3* No = tm->geometry->get_attribute_data_mut<Vec3>("N_orig");
-    Vec2* UV = tm->geometry->get_attribute_data_mut<Vec2>("uv");
-    uint16_t* M = tm->geometry->get_attribute_data_mut<uint16_t>("materialID");
-
-    Matrix4x4 finalT = Matrix4x4::identity();
-    Matrix4x4 normalT = Matrix4x4::identity();
-    if (transform) {
-        finalT = transform->getFinal();
-        normalT = transform->getNormalTransform();
-    }
-
-    #pragma omp parallel for schedule(static) if(vCount >= 2048)
-    for (int i = 0; i < (int)vCount; ++i) {
-        const Vec3& lp = positions[(size_t)i];
-        const Vec3& ln = normals[(size_t)i];
-        if (Po) Po[i] = lp;
-        if (No) No[i] = ln;
-        if (P)  P[i]  = finalT.transform_point(lp);
-        if (N)  N[i]  = normalT.transform_vector(ln).normalize();
-        if (UV && !uvs.empty()) UV[i] = uvs[(size_t)i];
-        if (M)  M[i]  = materialID;
-    }
-
-    tm->geometry->indices.resize(indices.size());
-    for (size_t i = 0; i < indices.size(); ++i) tm->geometry->indices[i] = indices[i];
-
-    return tm;
-}
-
 // A TerrainObject owns exactly one scene object.  Keep this invariant centralized:
 // graph evaluation may rebuild/register the mesh before a load/create path reaches
 // its own finalization step, so a blind push_back can otherwise register the same
@@ -301,7 +244,8 @@ void TerrainManager::removeAllTerrains(SceneData& scene) {
     next_id = 1;
 }
 
-TerrainObject* TerrainManager::createTerrain(SceneData& scene, int resolution, float size) {
+TerrainObject* TerrainManager::createTerrain(SceneData& scene, int resolution, float size,
+                                             float height_scale, int mesh_resolution) {
     TerrainObject terrain;
     terrain.id = next_id++;
     terrain.name = "Terrain_" + std::to_string(terrain.id);
@@ -313,7 +257,11 @@ TerrainObject* TerrainManager::createTerrain(SceneData& scene, int resolution, f
     terrain.heightmap.width = resolution;
     terrain.heightmap.height = resolution;
     terrain.heightmap.scale_xz = size;
-    terrain.heightmap.scale_y = 10.0f; // Default range
+    terrain.heightmap.scale_y = height_scale;
+    // Set before the first updateTerrainMesh below, so the expensive grid is
+    // built once at the size the caller actually wants.
+    terrain.mesh_resolution = (mesh_resolution >= 2 && mesh_resolution < resolution)
+                                  ? mesh_resolution : 0;
     terrain.heightmap.data.resize(resolution * resolution, 0.0f);
     terrain.original_heightmap_data = terrain.heightmap.data;
     
@@ -930,10 +878,58 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuil
         return;
     }
 
-    int w = terrain->heightmap.width;
-    int h = terrain->heightmap.height;
+    RTPERF_SCOPE("terrain.mesh_fill");
+
+    // fw/fh: the FIELD grid (heights + analysis). w/h: the MESH grid (vertices).
+    // These were the same number until the resolutions were split; every use
+    // below is deliberately one or the other. See TerrainObject::mesh_resolution.
+    const int fw = terrain->heightmap.width;
+    const int fh = terrain->heightmap.height;
+    int w = terrain->meshGridWidth();
+    int h = terrain->meshGridHeight();
+    const bool mesh_is_field = terrain->meshMatchesField();
     float scale = terrain->heightmap.scale_xz;
     float max_h = terrain->heightmap.scale_y;
+
+    // Mesh vertex (x,z) -> field cell. A decimated mesh BOX-FILTERS its footprint
+    // rather than point-sampling: a 4096 field point-sampled onto a 1024 grid
+    // aliases, and the artefact reads as "the terrain shimmers when the camera
+    // moves", which nobody files as a resolution bug.
+    const float field_step_x = (w > 1) ? (float)(fw - 1) / (float)(w - 1) : 0.0f;
+    const float field_step_z = (h > 1) ? (float)(fh - 1) / (float)(h - 1) : 0.0f;
+    auto field_index = [&](int mx, int mz, int& fx, int& fz) {
+        fx = std::clamp((int)std::lround(mx * field_step_x), 0, fw - 1);
+        fz = std::clamp((int)std::lround(mz * field_step_z), 0, fh - 1);
+    };
+    auto sample_height = [&](int mx, int mz) -> float {
+        int fx = 0, fz = 0;
+        field_index(mx, mz, fx, fz);
+        if (mesh_is_field) return terrain->heightmap.data[(size_t)fz * fw + fx];
+        const int rx = std::max(0, (int)(field_step_x * 0.5f));
+        const int rz = std::max(0, (int)(field_step_z * 0.5f));
+        float sum = 0.0f;
+        int count = 0;
+        for (int dz = -rz; dz <= rz; ++dz) {
+            const int sz = std::clamp(fz + dz, 0, fh - 1);
+            for (int dx = -rx; dx <= rx; ++dx) {
+                const int sx = std::clamp(fx + dx, 0, fw - 1);
+                sum += terrain->heightmap.data[(size_t)sz * fw + sx];
+                ++count;
+            }
+        }
+        return count > 0 ? sum / (float)count : 0.0f;
+    };
+    // ★ Normals are taken from the FIELD, not from the decimated vertex grid.
+    // calculateNormal() reads heightmap neighbours, so a 1024 mesh over a 4096
+    // field still gets gradients computed at full field spacing. This does not
+    // fully replace a field-resolution normal map (detail BETWEEN vertices is
+    // still lost, and the silhouette is genuinely lower) -- it just refuses to
+    // throw away the accuracy that costs nothing.
+    auto sample_normal = [&](int mx, int mz) -> Vec3 {
+        int fx = 0, fz = 0;
+        field_index(mx, mz, fx, fz);
+        return calculateNormal(terrain, fx, fz);
+    };
 
     if (!terrain->heightmap.data.empty()) {
         const auto bounds = std::minmax_element(
@@ -956,86 +952,113 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuil
     float step_x = scale / (float)(std::max(1, w - 1));
     float step_z = scale / (float)(std::max(1, h - 1));
 
-    // Pre-calculate vertices for grid
-    std::vector<Vec3> positions;
-    std::vector<Vec3> normals;
-    positions.resize((size_t)w * (size_t)h);
-    normals.resize((size_t)w * (size_t)h);
-
-    // 1. Calculate Positions (Local) - Parallelized
-    #pragma omp parallel for
-    for (int z = 0; z < h; z++) {
-        for (int x = 0; x < w; x++) {
-            float height_val = terrain->heightmap.data[z * w + x];
-            positions[z * w + x] = Vec3(x * step_x, height_val * max_h, z * step_z);
-        }
+    // ★ Vertex positions and normals are NOT staged into temporary vectors any
+    // more. They used to be built into two std::vector<Vec3> (plus a uv vector
+    // and an index vector) and then copied a second time into the geometry
+    // attributes inside gridToFlatMesh. At 4096x4096 that staging alone was
+    // ~940 MB of allocate-fill-copy-free, on top of the ~1.37 GB the geometry
+    // itself needs, and this build is bound by page faults rather than by
+    // arithmetic. Both branches now compute each vertex once and write it
+    // straight into its attribute array.
+    //
+    // calculateNormal() reads the heightmap directly, so nothing here depended
+    // on the staged positions.
+    Matrix4x4 finalT = Matrix4x4::identity();
+    Matrix4x4 normalT = Matrix4x4::identity();
+    if (terrain->transform) {
+        finalT = terrain->transform->getFinal();
+        normalT = terrain->transform->getNormalTransform();
     }
 
-    // 2. Calculate Normals (Quality-based) - Parallelized
-    #pragma omp parallel for
-    for (int z = 0; z < h; z++) {
-        for (int x = 0; x < w; x++) {
-            normals[z * w + x] = calculateNormal(terrain, x, z);
-        }
-    }
+    const size_t vertex_count = (size_t)w * (size_t)h;
 
-    // 3. Build or update the flat (SoA) mesh
     if (create_new) {
-        // Standard 0..1 UV mapping, one welded vertex per grid cell.
-        float divW = (float)(w > 1 ? w - 1 : 1);
-        float divH = (float)(h > 1 ? h - 1 : 1);
-        std::vector<Vec2> uvs((size_t)w * (size_t)h);
+        RTPERF_SCOPE("terrain.mesh_fill.create");
+
+        auto tm = std::make_shared<TriangleMesh>();
+        tm->transform = terrain->transform;
+        tm->nodeName = terrain->name + "_Chunk";
+
+        auto& geo = *tm->geometry;
+        geo.resize_vertices(vertex_count);
+        geo.add_attribute<Vec3>("P");
+        geo.add_attribute<Vec3>("N");
+        geo.add_attribute<Vec3>("P_orig");
+        geo.add_attribute<Vec3>("N_orig");
+        geo.add_attribute<Vec2>("uv");
+        geo.add_attribute<uint16_t>("materialID");
+
+        Vec3* P  = geo.get_attribute_data_mut<Vec3>("P");
+        Vec3* N  = geo.get_attribute_data_mut<Vec3>("N");
+        Vec3* Po = geo.get_attribute_data_mut<Vec3>("P_orig");
+        Vec3* No = geo.get_attribute_data_mut<Vec3>("N_orig");
+        Vec2* UV = geo.get_attribute_data_mut<Vec2>("uv");
+        uint16_t* M = geo.get_attribute_data_mut<uint16_t>("materialID");
+
+        // Standard 0..1 UV mapping, one welded vertex per grid cell. The UV is
+        // resolution-independent by construction, which is what lets the splat /
+        // macro-colour maps carry their own resolution.
+        const float divW = (float)(w > 1 ? w - 1 : 1);
+        const float divH = (float)(h > 1 ? h - 1 : 1);
+
         #pragma omp parallel for
         for (int z = 0; z < h; z++) {
             for (int x = 0; x < w; x++) {
-                uvs[z * w + x] = Vec2((float)x / divW, (float)z / divH);
+                const size_t vIdx = (size_t)z * (size_t)w + (size_t)x;
+                const Vec3 lp(x * step_x, sample_height(x, z) * max_h, z * step_z);
+                const Vec3 ln = sample_normal(x, z);
+                if (Po) Po[vIdx] = lp;
+                if (No) No[vIdx] = ln;
+                if (P)  P[vIdx]  = finalT.transform_point(lp);
+                if (N)  N[vIdx]  = normalT.transform_vector(ln).normalize();
+                if (UV) UV[vIdx] = Vec2((float)x / divW, (float)z / divH);
+                if (M)  M[vIdx]  = terrain->material_id;
             }
         }
 
-        std::vector<uint32_t> indices(required_triangle_count * 3ull);
+        // Indices are generated straight into the geometry buffer. The previous
+        // path built a std::vector<uint32_t> and then copied it across ELEMENT BY
+        // ELEMENT in a serial loop -- 100.66 M iterations at 4k -- because the
+        // geometry buffer uses an aligned allocator and would not accept a plain
+        // vector assignment.
+        geo.indices.resize(required_triangle_count * 3ull);
+        uint32_t* I = geo.indices.data();
         #pragma omp parallel for collapse(2)
         for (int z = 0; z < (h - 1); z++) {
             for (int x = 0; x < (w - 1); x++) {
-                size_t tri_idx = (static_cast<size_t>(z) * (w - 1) + x) * 2;
+                const size_t tri_idx = (static_cast<size_t>(z) * (w - 1) + x) * 2;
 
-                uint32_t i0 = z * w + x;
-                uint32_t i1 = z * w + (x + 1);
-                uint32_t i2 = (z + 1) * w + (x + 1);
-                uint32_t i3 = (z + 1) * w + x;
+                const uint32_t i0 = z * w + x;
+                const uint32_t i1 = z * w + (x + 1);
+                const uint32_t i2 = (z + 1) * w + (x + 1);
+                const uint32_t i3 = (z + 1) * w + x;
 
-                size_t o1 = tri_idx * 3ull;
-                indices[o1 + 0] = i0; indices[o1 + 1] = i2; indices[o1 + 2] = i1;
-                size_t o2 = (tri_idx + 1) * 3ull;
-                indices[o2 + 0] = i0; indices[o2 + 1] = i3; indices[o2 + 2] = i2;
+                const size_t o1 = tri_idx * 3ull;
+                I[o1 + 0] = i0; I[o1 + 1] = i2; I[o1 + 2] = i1;
+                const size_t o2 = (tri_idx + 1) * 3ull;
+                I[o2 + 0] = i0; I[o2 + 1] = i3; I[o2 + 2] = i2;
             }
         }
 
-        terrain->flatMesh = gridToFlatMesh(positions, normals, uvs, indices,
-                                            terrain->material_id, terrain->transform,
-                                            terrain->name + "_Chunk");
-        if (terrain->flatMesh) terrain->flatMesh->terrain_id = terrain->id;
+        terrain->flatMesh = std::move(tm);
+        terrain->flatMesh->terrain_id = terrain->id;
     }
     else {
         // In-place update: same topology, only heights (and derived normals) changed.
+        RTPERF_SCOPE("terrain.mesh_fill.update");
+
         auto& geo = *terrain->flatMesh->geometry;
         Vec3* P  = geo.get_attribute_data_mut<Vec3>("P");
         Vec3* N  = geo.get_attribute_data_mut<Vec3>("N");
         Vec3* Po = geo.get_attribute_data_mut<Vec3>("P_orig");
         Vec3* No = geo.get_attribute_data_mut<Vec3>("N_orig");
 
-        Matrix4x4 finalT = Matrix4x4::identity();
-        Matrix4x4 normalT = Matrix4x4::identity();
-        if (terrain->transform) {
-            finalT = terrain->transform->getFinal();
-            normalT = terrain->transform->getNormalTransform();
-        }
-
         #pragma omp parallel for
         for (int z = 0; z < h; z++) {
             for (int x = 0; x < w; x++) {
-                size_t vIdx = (size_t)z * w + x;
-                const Vec3& lp = positions[vIdx];
-                const Vec3& ln = normals[vIdx];
+                const size_t vIdx = (size_t)z * (size_t)w + (size_t)x;
+                const Vec3 lp(x * step_x, sample_height(x, z) * max_h, z * step_z);
+                const Vec3 ln = sample_normal(x, z);
                 if (Po) Po[vIdx] = lp;
                 if (No) No[vIdx] = ln;
                 if (P)  P[vIdx]  = finalT.transform_point(lp);
@@ -1048,6 +1071,7 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuil
     // exists and on the main-thread finalize path. This keeps worker evaluation
     // height/data-only while giving foliage a zero-conversion vertex-field bridge.
     if (terrain->flatMesh && terrain->flatMesh->geometry) {
+        RTPERF_SCOPE("terrain.mesh_fill.publish_fields");
         auto& geometry = *terrain->flatMesh->geometry;
         static const std::array<const char*, 22> knownTerrainFields = {
             "terrain.slope", "terrain.concavity", "terrain.convexity",
@@ -1060,20 +1084,55 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuil
             "hydrology.lake_spill", "hydrology.lake_id"
         };
         const size_t vertexCount = geometry.get_vertex_count();
+        const size_t fieldCount = (size_t)fw * (size_t)fh;
         for (const char* fieldName : knownTerrainFields) {
             const auto fieldIt = terrain->analysisFields.find(fieldName);
+            // ★★★ The size test is against the FIELD, not against the vertex
+            // count. It used to compare with vertexCount, which was the same
+            // number only because the mesh grid WAS the field grid. Once the two
+            // were split, every analysis field would have failed this test and
+            // been silently removed -- foliage and scatter would have lost their
+            // masks with no error, no log, and no visible cause. This is exactly
+            // the failure the resolution split was warned about.
             const bool valid = fieldIt != terrain->analysisFields.end() &&
-                fieldIt->second && fieldIt->second->size() == vertexCount;
+                fieldIt->second && fieldIt->second->size() == fieldCount;
             if (!valid) {
                 geometry.remove_custom_attribute(fieldName);
                 continue;
             }
             if (!geometry.has_attribute(fieldName)) geometry.add_attribute<float>(fieldName);
             float* destination = geometry.get_attribute_data_mut<float>(fieldName);
-            if (destination) {
+            if (!destination) continue;
+            if (mesh_is_field) {
                 std::copy(fieldIt->second->begin(), fieldIt->second->end(), destination);
+                continue;
+            }
+            // Decimated mesh: resample the field onto the vertex grid. Bilinear,
+            // because a mask read per-vertex and interpolated across a triangle
+            // must not step.
+            const std::vector<float>& src = *fieldIt->second;
+            #pragma omp parallel for
+            for (int z = 0; z < h; z++) {
+                for (int x = 0; x < w; x++) {
+                    const float sxf = x * field_step_x;
+                    const float szf = z * field_step_z;
+                    const int x0 = std::clamp((int)sxf, 0, fw - 1);
+                    const int z0 = std::clamp((int)szf, 0, fh - 1);
+                    const int x1 = std::min(x0 + 1, fw - 1);
+                    const int z1 = std::min(z0 + 1, fh - 1);
+                    const float tx = sxf - (float)x0;
+                    const float tz = szf - (float)z0;
+                    const float v00 = src[(size_t)z0 * fw + x0];
+                    const float v10 = src[(size_t)z0 * fw + x1];
+                    const float v01 = src[(size_t)z1 * fw + x0];
+                    const float v11 = src[(size_t)z1 * fw + x1];
+                    destination[(size_t)z * w + x] =
+                        (1.0f - tz) * ((1.0f - tx) * v00 + tx * v10) +
+                                 tz  * ((1.0f - tx) * v01 + tx * v11);
+                }
             }
         }
+        (void)vertexCount;
     }
 
     // Clear dirty regions after full update
@@ -1131,6 +1190,18 @@ void TerrainManager::rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain
 // ===========================================================================
 void TerrainManager::updateDirtySectors(TerrainObject* terrain, bool clearRegion) {
     if (!terrain || !terrain->dirty_region.has_any_dirty || !terrain->flatMesh) return;
+
+    // ★★★ Incremental sector updates index the vertex array with FIELD cell
+    // coordinates. That is only valid while the vertex grid IS the field grid.
+    // With a decimated mesh the same indices address the wrong vertices, which
+    // would move geometry in the wrong place -- a corruption that looks like a
+    // sculpt bug, not a resolution bug. Fall back to the full path, which knows
+    // how to resample.
+    if (!terrain->meshMatchesField()) {
+        updateTerrainMesh(terrain);
+        if (clearRegion) terrain->dirty_region.clear();
+        return;
+    }
 
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
@@ -1420,12 +1491,12 @@ void TerrainManager::initLayers(TerrainObject* terrain) {
         terrain->layers.resize(4, nullptr);
         terrain->layer_uv_scales.resize(4, 50.0f); // Default tiling
         
-        static const char* defLayerNames[4] = {"Grass", "Rock", "Snow", "Soil / Flow"};
+        static const char* defLayerNames[4] = {"Grass", "Rock", "Snow", "Soil"};
         static const Vec3 defLayerColors[4] = {
             Vec3(0.3f, 0.5f, 0.2f),  // Grass
             Vec3(0.4f, 0.4f, 0.4f),  // Rock
             Vec3(0.9f, 0.9f, 0.95f), // Snow
-            Vec3(0.5f, 0.35f, 0.2f)  // Flow
+            Vec3(0.5f, 0.35f, 0.2f)  // Soil
         };
 
         for (int i = 0; i < 4; ++i) {
@@ -1447,105 +1518,123 @@ void TerrainManager::initLayers(TerrainObject* terrain) {
     }
 }
 
-// Resize splatmap to match heightmap dimensions (bilinear interpolation)
-void TerrainManager::resizeSplatMap(TerrainObject* terrain) {
-    if (!terrain || !terrain->splatMap) return;
-    
-    int targetW = std::max(512, terrain->heightmap.width);
-    int targetH = std::max(512, terrain->heightmap.height);
-    
-    int srcW = terrain->splatMap->width;
-    int srcH = terrain->splatMap->height;
-    
-    const size_t targetPixelCount = static_cast<size_t>(targetW) * static_cast<size_t>(targetH);
-    const bool sourceStorageValid =
-        srcW > 0 && srcH > 0 &&
-        terrain->splatMap->pixels.size() ==
-            static_cast<size_t>(srcW) * static_cast<size_t>(srcH);
+// Resize splatMap (and macroColorMap if present) to match paint_resolution.
+// paint_resolution == 0 means max(512, field_width), which is the historical
+// default \u2014 so calling this function on old projects produces the exact same
+// result as the old resizeSplatMap.
+void TerrainManager::resizePaintMaps(TerrainObject* terrain) {
+    if (!terrain) return;
 
-    // Metadata alone is not sufficient: a resolution transition or interrupted
-    // import can leave width/height current while the CPU pixel vector still has
-    // the old allocation.
-    if (srcW == targetW && srcH == targetH &&
-        terrain->splatMap->pixels.size() == targetPixelCount) return;
-    
-    SCENE_LOG_INFO("[TerrainManager] Resizing splatmap from " + std::to_string(srcW) + "x" + std::to_string(srcH) + 
-                   " to " + std::to_string(targetW) + "x" + std::to_string(targetH));
-    
-    // Create new pixel buffer. If the old metadata/storage pair is inconsistent,
-    // it cannot be sampled safely; reset to the base layer instead of indexing an
-    // unknown layout.
-    std::vector<CompactVec4> newPixels(targetPixelCount);
-    if (!sourceStorageValid) {
-        for (auto& p : newPixels) {
-            p.r = 255;
-            p.g = 0;
-            p.b = 0;
-            p.a = 0;
+    const int targetW = terrain->paintGridWidth();
+    const int targetH = terrain->paintGridHeight();
+
+    // ---- splatMap ----------------------------------------------------------------
+    if (terrain->splatMap) {
+        int srcW = terrain->splatMap->width;
+        int srcH = terrain->splatMap->height;
+
+        const size_t targetPixelCount = static_cast<size_t>(targetW) * static_cast<size_t>(targetH);
+        const bool sourceStorageValid =
+            srcW > 0 && srcH > 0 &&
+            terrain->splatMap->pixels.size() ==
+                static_cast<size_t>(srcW) * static_cast<size_t>(srcH);
+
+        if (!(srcW == targetW && srcH == targetH &&
+              terrain->splatMap->pixels.size() == targetPixelCount)) {
+
+            RTPERF_SCOPE("terrain.splat_resize");
+            SCENE_LOG_INFO("[TerrainManager] Resizing splatmap from " + std::to_string(srcW) + "x" + std::to_string(srcH) +
+                           " to " + std::to_string(targetW) + "x" + std::to_string(targetH));
+
+            std::vector<CompactVec4> newPixels(targetPixelCount);
+            if (!sourceStorageValid) {
+                for (auto& p : newPixels) { p.r = 255; p.g = 0; p.b = 0; p.a = 0; }
+            }
+
+            for (int y = 0; sourceStorageValid && y < targetH; ++y) {
+                for (int x = 0; x < targetW; ++x) {
+                    float u = (float)x / (float)(targetW > 1 ? targetW - 1 : 1);
+                    float v = (float)y / (float)(targetH > 1 ? targetH - 1 : 1);
+                    float srcX = u * (srcW - 1);
+                    float srcY = v * (srcH - 1);
+                    int x0 = (int)srcX, y0 = (int)srcY;
+                    int x1 = std::min(x0 + 1, srcW - 1), y1 = std::min(y0 + 1, srcH - 1);
+                    float fx = srcX - x0, fy = srcY - y0;
+                    auto& p00 = terrain->splatMap->pixels[y0 * srcW + x0];
+                    auto& p10 = terrain->splatMap->pixels[y0 * srcW + x1];
+                    auto& p01 = terrain->splatMap->pixels[y1 * srcW + x0];
+                    auto& p11 = terrain->splatMap->pixels[y1 * srcW + x1];
+                    float r = (1-fx)*(1-fy)*p00.r + fx*(1-fy)*p10.r + (1-fx)*fy*p01.r + fx*fy*p11.r;
+                    float g = (1-fx)*(1-fy)*p00.g + fx*(1-fy)*p10.g + (1-fx)*fy*p01.g + fx*fy*p11.g;
+                    float b = (1-fx)*(1-fy)*p00.b + fx*(1-fy)*p10.b + (1-fx)*fy*p01.b + fx*fy*p11.b;
+                    float a = (1-fx)*(1-fy)*p00.a + fx*(1-fy)*p10.a + (1-fx)*fy*p01.a + fx*fy*p11.a;
+                    newPixels[y * targetW + x].r = (uint8_t)std::clamp(r, 0.0f, 255.0f);
+                    newPixels[y * targetW + x].g = (uint8_t)std::clamp(g, 0.0f, 255.0f);
+                    newPixels[y * targetW + x].b = (uint8_t)std::clamp(b, 0.0f, 255.0f);
+                    newPixels[y * targetW + x].a = (uint8_t)std::clamp(a, 0.0f, 255.0f);
+                }
+            }
+
+            terrain->splatMap->pixels = std::move(newPixels);
+            terrain->splatMap->width  = targetW;
+            terrain->splatMap->height = targetH;
+            terrain->splatMap->cleanup_gpu();
+            terrain->splatMap->upload_to_gpu();
+            if (g_hasOptix) g_optix_rebuild_pending = true;
         }
     }
-    
-    // Bilinear interpolation
-    for (int y = 0; sourceStorageValid && y < targetH; ++y) {
-        for (int x = 0; x < targetW; ++x) {
-            // Normalized coordinates [0, 1]
-            float u = (float)x / (float)(targetW > 1 ? targetW - 1 : 1);
-            float v = (float)y / (float)(targetH > 1 ? targetH - 1 : 1);
-            
-            // Source coordinates
-            float srcX = u * (srcW - 1);
-            float srcY = v * (srcH - 1);
-            
-            int x0 = (int)srcX;
-            int y0 = (int)srcY;
-            int x1 = std::min(x0 + 1, srcW - 1);
-            int y1 = std::min(y0 + 1, srcH - 1);
-            
-            float fx = srcX - x0;
-            float fy = srcY - y0;
-            
-            // Sample 4 corners
-            auto& p00 = terrain->splatMap->pixels[y0 * srcW + x0];
-            auto& p10 = terrain->splatMap->pixels[y0 * srcW + x1];
-            auto& p01 = terrain->splatMap->pixels[y1 * srcW + x0];
-            auto& p11 = terrain->splatMap->pixels[y1 * srcW + x1];
-            
-            // Interpolate
-            float r = (1-fx)*(1-fy)*p00.r + fx*(1-fy)*p10.r + (1-fx)*fy*p01.r + fx*fy*p11.r;
-            float g = (1-fx)*(1-fy)*p00.g + fx*(1-fy)*p10.g + (1-fx)*fy*p01.g + fx*fy*p11.g;
-            float b = (1-fx)*(1-fy)*p00.b + fx*(1-fy)*p10.b + (1-fx)*fy*p01.b + fx*fy*p11.b;
-            float a = (1-fx)*(1-fy)*p00.a + fx*(1-fy)*p10.a + (1-fx)*fy*p01.a + fx*fy*p11.a;
-            
-            newPixels[y * targetW + x].r = (uint8_t)std::clamp(r, 0.0f, 255.0f);
-            newPixels[y * targetW + x].g = (uint8_t)std::clamp(g, 0.0f, 255.0f);
-            newPixels[y * targetW + x].b = (uint8_t)std::clamp(b, 0.0f, 255.0f);
-            newPixels[y * targetW + x].a = (uint8_t)std::clamp(a, 0.0f, 255.0f);
+
+    // ---- macroColorMap -----------------------------------------------------------
+    // Only resize if the map already exists; creation is the caller's responsibility
+    // (Faz 1: ColorOutputNode, or manual bake). An absent map is not an error.
+    if (terrain->macroColorMap) {
+        int srcW = terrain->macroColorMap->width;
+        int srcH = terrain->macroColorMap->height;
+        const size_t targetPixelCount = static_cast<size_t>(targetW) * static_cast<size_t>(targetH);
+        const bool storageValid = srcW > 0 && srcH > 0 &&
+            terrain->macroColorMap->pixels.size() == static_cast<size_t>(srcW) * static_cast<size_t>(srcH);
+
+        if (!(srcW == targetW && srcH == targetH &&
+              terrain->macroColorMap->pixels.size() == targetPixelCount)) {
+
+            SCENE_LOG_INFO("[TerrainManager] Resizing macroColorMap from " +
+                           std::to_string(srcW) + "x" + std::to_string(srcH) +
+                           " to " + std::to_string(targetW) + "x" + std::to_string(targetH));
+
+            std::vector<CompactVec4> newPix(targetPixelCount, CompactVec4{128, 128, 128, 255});
+            if (storageValid) {
+                for (int y = 0; y < targetH; ++y) {
+                    for (int x = 0; x < targetW; ++x) {
+                        float u = (float)x / (float)(targetW > 1 ? targetW - 1 : 1);
+                        float v = (float)y / (float)(targetH > 1 ? targetH - 1 : 1);
+                        float srcX = u * (srcW - 1), srcY = v * (srcH - 1);
+                        int x0 = (int)srcX, y0 = (int)srcY;
+                        int x1 = std::min(x0 + 1, srcW - 1), y1 = std::min(y0 + 1, srcH - 1);
+                        float fx = srcX - x0, fy = srcY - y0;
+                        auto& p00 = terrain->macroColorMap->pixels[y0 * srcW + x0];
+                        auto& p10 = terrain->macroColorMap->pixels[y0 * srcW + x1];
+                        auto& p01 = terrain->macroColorMap->pixels[y1 * srcW + x0];
+                        auto& p11 = terrain->macroColorMap->pixels[y1 * srcW + x1];
+                        auto lerp8 = [](uint8_t a, uint8_t b, float t) {
+                            return (uint8_t)std::clamp(a + t * (b - a), 0.0f, 255.0f);
+                        };
+                        newPix[y * targetW + x].r = lerp8(lerp8(p00.r, p10.r, fx), lerp8(p01.r, p11.r, fx), fy);
+                        newPix[y * targetW + x].g = lerp8(lerp8(p00.g, p10.g, fx), lerp8(p01.g, p11.g, fx), fy);
+                        newPix[y * targetW + x].b = lerp8(lerp8(p00.b, p10.b, fx), lerp8(p01.b, p11.b, fx), fy);
+                        newPix[y * targetW + x].a = 255;
+                    }
+                }
+            }
+            terrain->macroColorMap->pixels = std::move(newPix);
+            terrain->macroColorMap->width  = targetW;
+            terrain->macroColorMap->height = targetH;
+            terrain->macroColorMap->cleanup_gpu();
+            terrain->macroColorMap->upload_to_gpu();
         }
     }
-    
-    // Swap in new data
-    terrain->splatMap->pixels = std::move(newPixels);
-    terrain->splatMap->width = targetW;
-    terrain->splatMap->height = targetH;
-    
-    // If dimensions changed, we MUST re-allocate
-    // Texture class handles updateGPU by memcpy if allocated, but we resized pixels vector.
-    // If we just resized, the GPU array size is wrong.
-    
-    // Check if we need full re-allocation
-    // We can assume that if we are here, dimensions likely changed (due to check at top of function).
-    // However, importSplatMap manipulates pixels then calls this.
-    
-    // Force re-allocation on GPU to match new size
-    terrain->splatMap->cleanup_gpu();
-    terrain->splatMap->upload_to_gpu();
-    
-    // Rebuild SBT only if dimensions changed significantly enough to require new texture handle
-    // Since we destroyed the handle, we MUST update SBT.
-    if (g_hasOptix) {
-        g_optix_rebuild_pending = true;
-    }
+    TerrainSemanticMap::resizeToPaintGrid(*terrain);
 }
+
 
 void TerrainManager::updateSplatMapTexture(TerrainObject* terrain) {
     if (terrain && terrain->splatMap) {
@@ -3629,6 +3718,23 @@ json TerrainManager::serialize(const std::string& terrainDir) const {
             tJson["splatmap_width"] = tw;
             tJson["splatmap_height"] = th;
         }
+
+        if (t.surfaceSemanticMap && t.surfaceSemanticMap->m_is_loaded) {
+            std::string semanticSafeName = g_project.project_name;
+            std::replace_if(semanticSafeName.begin(), semanticSafeName.end(),
+                [](char c){ return !isalnum(c) && c != '-' && c != '_' && c != ' '; }, '_');
+            std::replace(semanticSafeName.begin(), semanticSafeName.end(), ' ', '_');
+            const std::string semanticFilename = semanticSafeName + "_" + t.name +
+                "_terrain_semantic_" + std::to_string(t.id) + ".png";
+            const std::string semanticPath =
+                (std::filesystem::path(terrainDir) / semanticFilename).string();
+            std::string semanticError;
+            if (TerrainSemanticMap::savePng(t, semanticPath, semanticError)) {
+                tJson["surface_semantic_file"] = semanticFilename;
+            } else {
+                SCENE_LOG_ERROR("[TerrainManager] " + semanticError + ": " + semanticPath);
+            }
+        }
         
         // Layers (material IDs)
         json layersJson = json::array();
@@ -3697,7 +3803,10 @@ json TerrainManager::serialize(const std::string& terrainDir) const {
         
         // Quality settings
         tJson["normal_quality"] = static_cast<int>(t.normal_quality);
+        tJson["mesh_resolution"]  = t.mesh_resolution;
+        tJson["paint_resolution"] = t.paint_resolution; // 0 = follow field (legacy default)
         tJson["normal_strength"] = t.normal_strength;
+        tJson["macro_color_strength"] = t.macro_color_strength;
 
         // Auto-mask settings
         tJson["am_height_min"] = t.am_height_min;
@@ -3843,7 +3952,14 @@ void TerrainManager::deserialize(const json& data, const std::string& terrainDir
         
         // Quality
         terrain.normal_quality = static_cast<NormalQuality>(tJson.value("normal_quality", 1));
-        terrain.normal_strength = tJson.value("normal_strength", 1.0f);
+        // 0 = vertex grid follows the field, which is what every project saved
+        // before the split meant. Defaulting to anything else would silently
+        // change the geometry of existing scenes.
+        terrain.mesh_resolution  = tJson.value("mesh_resolution", 0);
+        // 0 = paint follows field (max(512, field)), same as historical resizeSplatMap.
+        terrain.paint_resolution = tJson.value("paint_resolution", 0);
+        terrain.normal_strength  = tJson.value("normal_strength", 1.0f);
+        terrain.macro_color_strength = tJson.value("macro_color_strength", 0.0f);
         
         terrain.am_height_min = tJson.value("am_height_min", 5.0f);
         terrain.am_height_max = tJson.value("am_height_max", 20.0f);
@@ -3898,6 +4014,15 @@ void TerrainManager::deserialize(const json& data, const std::string& terrainDir
                     SCENE_LOG_INFO("[TerrainManager] Loaded splatmap: " + std::to_string(w) + "x" + std::to_string(h) + 
                                    " for " + ptr->name);
                 }
+            }
+        }
+
+        if (tJson.contains("surface_semantic_file")) {
+            const std::string semanticPath = (std::filesystem::path(terrainDir) /
+                tJson["surface_semantic_file"].get<std::string>()).string();
+            std::string semanticError;
+            if (!TerrainSemanticMap::loadPng(*ptr, semanticPath, semanticError)) {
+                SCENE_LOG_WARN("[TerrainManager] " + semanticError + ": " + semanticPath);
             }
         }
         
