@@ -51,7 +51,7 @@ c = rt.collider.get(COLLIDER)
 print("collider %s: substance=%r ignite=%s burn_rate_scale=%.3f" % (
     c["name"], c["msf_substance"], c["gas_ignite_on_contact"],
     c["msf_burn_rate_scale"]))
-attrs = rt.sim_graph.surface_attributes(COLLIDER)
+attrs = rt.attr.list("object", COLLIDER)
 print("surface attributes: %s" % (attrs,))
 print("known substances: %s" % (rt.msf.substances(),))
 # ★ Say which of the two states this is. An empty attribute list means the field

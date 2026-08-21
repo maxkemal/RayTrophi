@@ -55,6 +55,14 @@ def send_command(pipe, method, params=None, request_id=1):
 
 
 def main():
+    # Windows consoles may use cp1254/cp1252 and cannot print the box-drawing
+    # characters used by the smoke-test headings. Keep the IPC payload UTF-8
+    # while making console diagnostics robust on every active code page.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     import ctypes
     import ctypes.wintypes as wintypes
 
@@ -127,7 +135,62 @@ def main():
             tests_failed += 1
             return None
 
+    def assert_result_flag(method, params, field, expected, label):
+        nonlocal test_id, tests_passed, tests_failed
+        test_id += 1
+        try:
+            resp = send_command(handle, method, params, request_id=test_id)
+            actual = resp.get("result", {}).get(field)
+            if "error" not in resp and actual == expected:
+                print(f"  [{test_id}] {label}: OK — {field}={actual}")
+                tests_passed += 1
+            else:
+                print(f"  [{test_id}] {label}: FAIL — expected {field}={expected}, response={resp}")
+                tests_failed += 1
+        except Exception as e:
+            print(f"  [{test_id}] {label}: EXCEPTION — {e}")
+            tests_failed += 1
+
     print("─── IPC Smoke Tests ───────────────────────────────────────────")
+
+    if "--mesh-tools-only" in sys.argv:
+        print("Mesh Tool IPC Read-Only Tests")
+        run_test("mesh.tools.list", {"workspace": "edit"}, "mesh.tools.list(edit)")
+        run_test("mesh.tools.describe", {"tool": "edit.extrude"},
+                 "mesh.tools.describe(edit.extrude)")
+        run_test("mesh.tools.describe", {"tool": "edit.edge_bevel"},
+                 "mesh.tools.describe(planned edge bevel)")
+        run_test("mesh.asset.validate", {"object": "Default_Cube"},
+                 "mesh.asset.validate(Default_Cube)")
+        assert_result_flag("mesh.operation.plan",
+                           {"object": "Default_Cube", "tool": "edit.extrude", "preview": True},
+                           "ok", True, "mesh.operation.plan(extrude preview)")
+        assert_result_flag("mesh.operation.plan",
+                           {"object": "Default_Cube", "tool": "edit.edge_bevel", "commit": True},
+                           "ok", False, "mesh.operation.plan(planned bevel commit blocked)")
+        run_test("mesh.operation.plan",
+                 {"object": "NO_SUCH_MESH", "tool": "edit.extrude", "preview": True},
+                 "mesh.operation.plan(missing object) -> error", expect_error=True)
+        assert_result_flag("mesh.operation.self_test", {}, "ok", True,
+                           "mesh.operation.self_test(transaction extrude)")
+        assert_result_flag("mesh.operation.self_test", {}, "undo_ok", True,
+                           "mesh.operation.self_test(undo redo)")
+        run_test("mesh.tools.list", {"workspace": "not_a_workspace"},
+                 "invalid workspace -> error", expect_error=True)
+        run_test("mesh.tools.describe", {"tool": "not.a.tool"},
+                 "unknown tool -> error", expect_error=True)
+        print(f"Results: {tests_passed} PASS, {tests_failed} FAIL")
+        kernel32.CloseHandle(handle)
+        sys.exit(0 if tests_failed == 0 else 1)
+
+    if "--mesh-python-only" in sys.argv:
+        run_test("script.run_file", {"path": os.path.abspath("scripts/test/rt_test_mesh_bindings.py")},
+                 "Python mesh binding smoke test")
+        run_test("undo", {}, "undo(mesh position commit)")
+        run_test("redo", {}, "redo(mesh position commit)")
+        print(f"Results: {tests_passed} PASS, {tests_failed} FAIL")
+        kernel32.CloseHandle(handle)
+        sys.exit(0 if tests_failed == 0 else 1)
 
     # Basic queries
     run_test("version")
@@ -135,18 +198,28 @@ def main():
     run_test("timeline.get_frame")
     run_test("project.path")
     run_test("lights.list")
+    # Mesh tool discovery (read-only; planned tools must not be executable by implication)
+    run_test("mesh.tools.list", {"workspace": "edit"}, "mesh.tools.list(edit)")
+    run_test("mesh.tools.describe", {"tool": "edit.extrude"},
+             "mesh.tools.describe(edit.extrude)")
+    run_test("mesh.tools.describe", {"tool": "edit.edge_bevel"},
+             "mesh.tools.describe(planned edge bevel)")
+    run_test("mesh.tools.list", {"workspace": "not_a_workspace"},
+             "mesh.tools.list(invalid workspace) -> error", expect_error=True)
+    run_test("mesh.tools.describe", {"tool": "not.a.tool"},
+             "mesh.tools.describe(unknown tool) -> error", expect_error=True)
     run_test("batch", {"calls": [
         {"method": "version", "params": {}},
         {"method": "timeline.get_frame", "params": {}},
-        {"method": "scene.object_exists", "params": {"name": "default_Cube"}},
+        {"method": "scene.object_exists", "params": {"name": "Default_Cube"}},
     ]}, "batch(single main-thread hop)")
 
     # Object existence check
-    run_test("scene.object_exists", {"name": "default_Cube"}, "exists(default_Cube)")
+    run_test("scene.object_exists", {"name": "Default_Cube"}, "exists(Default_Cube)")
     run_test("scene.object_exists", {"name": "NONEXISTENT_OBJ"}, "exists(nonexistent)")
 
     # Object info
-    run_test("scene.object_info", {"name": "default_Cube"}, "info(default_Cube)")
+    run_test("scene.object_info", {"name": "Default_Cube"}, "info(Default_Cube)")
 
     # Procedural primitive creation (Faz 5.2a)
     run_test("scene.add_primitive", {"type": "cube", "name": "IpcTestCube", "size": 1.0}, "add_primitive(cube)")
@@ -185,6 +258,10 @@ def main():
     run_test("terrain.calculate_flow", {"name": "IpcTerrain"}, "terrain.calculate_flow")
     run_test("terrain.apply_preset", {"name": "IpcTerrain", "preset": "default"},
              "terrain.apply_preset(default)")
+    run_test("terrain.list_satmap_presets", {}, "terrain.list_satmap_presets")
+    run_test("terrain.apply_satmap_preset",
+             {"name": "IpcTerrain", "preset": "temperate_wetland"},
+             "terrain.apply_satmap_preset(temperate_wetland)")
     run_test("terrain.list_rivers", {}, "terrain.list_rivers")
     run_test("nodes.list", {"graph_type": "terrain", "graph_name": "IpcTerrain"},
              "nodes.list(terrain)")

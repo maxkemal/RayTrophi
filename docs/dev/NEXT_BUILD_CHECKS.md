@@ -1,202 +1,186 @@
-# Sıradaki build — sıralı kontrol listesi
+# Sıradaki build kontrolleri
 
-> **Durum:** AKTİF — 2026-08-20 dördüncü partisi (sim node §B: World kapsamı).
-> Her partide üzerine yazılır.
->
-> ★★ **Bu parti DERLENMEDİ** — derleme kullanıcıda (CLAUDE.md kural 2). Aşağıki
-> §0 bu partinin ilk derlemede sırayla kontrol edilmesi gereken maddeleri
-> listeliyor. §A önceki partiden devralınan açık arızalar, §B bir sonraki
-> oturumun devraldığı iş. Kapanmış işi açık göstermek bu depoda iki kez
-> pahalıya patladı, o yüzden burada yalnızca **gerçekten açık/kontrol
-> edilmemiş** olanlar var.
+> **Durum:** CANLI — her iş partisinde üzerine yazılır. Son güncelleme: 2026-08-21.
 
-## §0 — BU PARTİ: ilk derlemede sırayla kontrol et
+**Parti 3 + 4 birlikte derlenecek.** Parti 3 = Faz 0 çekirdeği
+(`mesh_resolution`) — ilk derlemesi canlı doğrulandı, sonrasında
+`terrain.create(mesh_resolution=)` eklendi. Parti 4 = Solid raster indeksli
+çizim (aşağıda, §P4).
 
-Sıra: bağımsız ve hızlı görülen önce, diğerlerinin sonucunu maskeleyen sonra.
+**Parti 3 — Faz 0 çekirdeği: `mesh_resolution`.** Vertex ızgarası artık alan
+(analiz) ızgarasından bağımsız. Ölçülen kazanç: alan 4096 + mesh 1024 ⇒ kare
+döngüsü tıkanması **7 142 ms → ~398 ms (~18×)**, analiz çözünürlüğü kaybı yok.
 
-### 0.1 Derleme (bağımsız, en hızlı)
+★ **Bilerek KAPSAM DIŞI:** `paint_resolution` (splat/satmap kadranı). Maske
+grafiği o çözünürlükte **değerlendirilmeden** o kadranı açmak, yalnızca yukarı
+örnekleme satın alır ve panelin yalan söylemesi demektir — yol haritası bunu
+açıkça reddediyor. Ayrı parti.
 
-`RtApi.h/.cpp`, `RtIpc.cpp`, `RtPython.cpp`, `RtIpcSecurity.cpp` (dokunulmadı,
-sadece namespace tekrar kullanıldı), `SimulationNodes.h/.cpp`,
-`RtApiSimNodes.cpp`, `scene_ui_simnodes.cpp` değişti — yeni `.cpp` dosyası
-**yok**, `.vcxproj`'a dokunmaya gerek olmamalı. **Ne görmen gerek:** temiz
-derleme. **Bozuksa ne demek:** muhtemelen `SimCommand::Scope`'a `World`
-eklenmesi bir `switch` ifadesini eksik bıraktı (derleyici uyarır) veya
-`WorldThermalNode`/`DomainParamNodeBase` dynamic_cast zincirinde bir imza
-uyuşmazlığı var.
+## Değişenler
 
-### 0.2 Descriptor/audit betikleri (bağımsız, hızlı, KOŞULDU ve GEÇTİ)
-
-```powershell
-python scripts\gen_ipc_descriptors.py --check
-python scripts\audit_ipc_capabilities.py
-```
-
-★ Bu partide zaten koşuldu ve geçti (315 metot, %100 belgeli, `world.`
-namespace'i mirror'da zaten vardı). Yeniden koşmak yalnızca derlemeden SONRA
-kaynağın değişmediğini doğrular.
-
-### 0.3 IPC yolundan `rt_test_sim_graph.py` (uygulama açık olmalı)
-
-```powershell
-.\scripts\ipc\Start-RayTrophi.ps1
-Import-Module .\scripts\ipc\RtIpc.psm1 -Force
-Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_test_sim_graph.py' }
-type x64\Release\scripts\test\_sim_graph_result.txt
-```
-
-**Ne görmen gerek:** `RESULT: ALL PASSED`, özellikle yeni "World scope: World
-ThermalNode overrides the ambient thermal state" bölümü — ★★★ diferansiyel
-test satırı (`graph-applied ambient_kelvin matches the direct API reading
-exactly`) bu partinin asıl iddiasını doğruluyor: graph yolu, doğrudan
-`rt.world.set_thermal` yolunun ürettiği SAYININ AYNISINI üretiyor mu.
-**Bozuksa ne demek:** `simGraphApply`'nin `is_world` dalı ya hiç
-tetiklenmiyor (scope string'i "world" olarak gelmiyor — `simGraphEvaluate`'in
-switch'ini kontrol et) ya da `readWorldThermalParameter`/
-`writeWorldThermalParameter` anahtar eşlemesi `WorldThermalNode::fields`
-listesiyle uyuşmuyor.
-
-### 0.4 ★ En sinsi olası başarısızlık: sessizce makul görünen sonuç
-
-`world.get_thermal`/`set_thermal` doğrudan çağrıldığında (node'suz) doğru
-çalışabilir ama `sim.world_thermal` node'u üzerinden hiçbir şey YAZMAZ ve
-`sim_graph.apply` yine de `applied: 0, failed: [], refused: []` ile "başarılı"
-görünebilir — çünkü hiçbir alan tiklenmemişse bu **doğru** davranış (opt-in),
-ama field hiç tiklenemiyor da olabilir (UI'da `WorldThermalNode` dynamic_cast
-dalı tetiklenmiyorsa sağ panel boş kalır ve kimse "node bir işe yaramıyor"
-dışında bir belirti görmez — bu depoda bu TAM OLARAK daha önce olmuş arıza).
-**Kontrol:** panelde World scope'a geç, World Thermal node'u ekle, sağ panelde
-tik kutuları GÖRÜNMELİ (bkz. `scene_ui_simnodes.cpp`'deki yeni
-`WorldThermalNode` dalı).
-
-## Bu partide kapanan (kayıt — aksiyon yok)
-
-| iş | doğrulama |
+| Dosya | İş |
 |---|---|
-| Çözücü analitik doğrulaması | 6 vaka + 1b, **ALL PASSED** — bkz. [PHYSICS_VALIDATION.md](PHYSICS_VALIDATION.md) |
-| `scene.get_world_transform` (+ `simulated` bayrağı) | serbest düşüş 4.84370 m okunuyor |
-| `fluid.seed` sıfır örtüşme reddi + türetilmiş varsayılan bölge | IPC 3 ve 4 yeşil, panel "Seed Fluid Now" kullanıcı tarafından test edildi |
-| Türkçe locale ondalık virgül (ret mesajı) | `region (-0.400 50.000 -0.400)` — nokta |
-| **Sim kontrol sözleşmesi** (`physics.step` playhead + `sim.control_state`) | IPC 1 / 1b yeşil; **normal Play panelden doğrulandı** |
-| IPC test kanalı | `rt_ipc.py` + süit koşuyor — bkz. [IPC_TEST_CHANNEL.md](IPC_TEST_CHANNEL.md) |
-| Sıralama alanları ajana ulaşıyor | `physics.step` → `verify_with: [sim.control_state]`, `next: [scene.get_world_transform]` |
-| Yetki aynası | `sim.control_state` = `Read`, audit yeşil, 313 metot %100 belgeli |
-| **Sim node §B step 4: World kapsamı** | `WorldThermalState` script yüzeyine kavuştu (`world.get_thermal`/`set_thermal`) + `sim.world_thermal` node; descriptor/audit betikleri koşuldu ve GEÇTİ; **derlenmedi, IPC test yolu koşulmadı** — bkz. §0 |
+| `TerrainSystem.h` | `mesh_resolution` + `meshGridWidth/Height()` + `meshMatchesField()` |
+| `TerrainManager.cpp` | Mesh alandan **örneklenerek** kuruluyor (yükseklik box-filter, normal alandan); analiz alanları vertex ızgarasına **yeniden örnekleniyor**; dirty-sector yolu ayrık meshte tam yola düşüyor; serileştirme |
+| `RtApi.h` / `RtApiTerrain.cpp` | `TerrainInfo.mesh_resolution/mesh_width/mesh_height`, `setTerrainMeshResolution` |
+| `RtIpc.cpp` / `RtPython.cpp` | `terrain.set_mesh_resolution`, `rt.terrain.set_mesh_resolution`, `mesh_grid` alanı |
+| `scene_ui_terrain.hpp` | Panelde "Mesh Resolution" kadranı + üçgen sayısı + **ne kaybedildiği** |
+| `RtIpcMethodDescriptors.cpp` | ÜRETİLDİ |
+| `scripts/test/rt_test_terrain_mesh_resolution.py` **(YENİ)** | + `x64/Release/` kopyası |
+
+Yeşil: `audit_ipc_capabilities.py` OK · `gen_ipc_descriptors.py` 335/321 ·
+`verify_descriptor_claims.py` OK.
 
 ---
 
-## §A — AÇIK ARIZALAR (ölçülü, kök bulunmadı)
+## Parti 3'ün canlı sonuçları (ilk derleme)
 
-Sıra: bağımsız ve hızlı görülen önce.
+| Kontrol | Sonuç |
+|---|---|
+| 1. Kimlik kapısı (`mesh_resolution: 0`, `mesh_grid` = alan) | ✅ |
+| Alan ayrık meshte kıpırdamıyor | ✅ 4096² sabit, `sample_height` 103.227 → 103.227 |
+| Alandan büyük mesh reddediliyor | ✅ kırpılmıyor, mesajla reddediliyor |
+| 0 geri yüklüyor | ✅ |
+| 3. Kazanç | ✅ **6 323 ms → 33 ms**; solid raster 5 587 → 422 ms, embree 2 821 → 155 ms |
+| 2. Analiz maskeleri | ⚠ **DOĞRULANMADI** — vertex attribute'ları IPC'den okunmuyor |
 
-### A1. ★★★★ İkinci domain birincinin parçacıklarını SİLİYOR
-
-```powershell
-python scripts\test\rt_test_physics_ipc.py     # 5. vaka
-```
-
-**Ölçüldü:** `fluid.get` 22932 → **0**, `list_domains` da 22932 → 0. İki okuyucu
-hemfikir olduğu için bu **okuyucu arızası değil**, gerçek kayıp.
-
-★★★ Yalnızca **IPC yolunda** görünüyor; script içinden aynı dizi 6760 → 6760
-koruyor. Yani kare döngüsünün yeni domain'i görünce yaptığı bir şey.
-
-**Neden önce bu:** bu motorun etrafında kurulduğu her coupling senaryosu
-("Fuel yanar, Smoke'u besler") aynı anda iki domain istiyor.
-
-### A2. ★★ Timeline ile sürülen düşüş DURUYOR
-
-```
-frame  6 -> 49.678     frame 24 -> 49.436
-frame 12 -> 49.436     frame 48 -> 49.436
-```
-
-Bir koşuda frame 24'te `y=50.0, simulated=False` döndü — yani sadece durmuyor,
-**arada rest'e sıfırlanıyor**. `physics.step` yolundan bağımsız; timeline'ın
-kendi yakalama/cache yolunda (`syncRigidToFrame` → `advanceRigidTimelineToFrame`,
-UI tick başına `kMaxStepsPerTick = 8` ile sınırlı).
-
-★ Yalnızca son kareyi okuyan bir çağıran **havada durmuş** bir gövde görür —
-makul görünen, tamamen yanlış bir gözlem.
-
-### A3. ★★★ Silinmiş adı tekrar kullanmak HAYALET nesne üretiyor
-
-`scene.delete` yalnızca **pending-delete** işaretliyor; fiziksel kaldırmayı kare
-döngüsü yapıyor, ve script ana thread'i tuttuğu için o döngü hiç dönmüyor. Aynı
-adı hemen geri eklemek bir cesetle çakışıyor: `add_primitive` başarı dönüyor,
-sonraki `set_transform` **"object not found"** diyor.
-
-Ayrıntı: [BUG_DELETED_NAME_REUSE_GHOST.md](BUG_DELETED_NAME_REUSE_GHOST.md).
-
-★★ Her iki test rig'i de koşu-benzersiz ad kullanarak bunu **dolaşıyor,
-çözmüyor** — yeşil bir koşu ad tekrarı hakkında hiçbir şey söylemiyor.
-
-### A4. ★★★ `viewport.render_frames` kareyi YAYIMLAMIYOR
-
-Ölçüldü ve belgelendi, düzeltilmedi. Ajan tarafında "render ettim ama
-göremiyorum" olarak görünür.
-
-### A5. Ergonomi: script sürerken araya girmek pratikte zor
-
-Adımlar 1/240 s'lik paketler hâlinde çok hızlı akıyor. Kontrol scrub anında
-**derhal** kullanıcıya geçiyor (IPC 1b bunu ölçüyor), ama kullanıcının o
-pencereyi bulması ayrı bir iş. Arıza değil, eksik.
+⚠ **Bu derlemeye eklenen:** `terrain.create(mesh_resolution=)`. İlk ölçüm
+gösterdi ki sonradan küçültmek pahalı yapıyı bir kez yine de kurduruyor.
 
 ---
 
-## §B — SIRADAKİ İŞ: sim node
+## Sıralı kontroller
 
-Fizik referansı **artık hazır**, ve sim node'un bitti tanımı buna dayanıyor:
+### 1. Eski sahneler DEĞİŞMEDİ mi (kimlik kapısı)
 
-1. [SIMULATION_NODE_CONCEPTUAL_MODEL.md](SIMULATION_NODE_CONCEPTUAL_MODEL.md)
-   okunmadan başlanmaz — *graph BEYAN EDİLMİŞ NİYETTİR*.
-2. Fizik vakalarını **node graph'ı olarak yeniden ifade et**.
-3. Diferansiyel test: *"graph, doğrudan yolun ürettiği sayının aynısını
-   üretiyor mu?"* — ★★ enstrüman özneyle aynı arıza kipini paylaşmamalı, o
-   yüzden referans dosyası node'dan GEÇMEZ.
-4. ✅ **World kapsamı — BU PARTİDE YAPILDI, DERLENMEDİ.** Bkz.
-   [SIMULATION_NODE_OBJECT_MODEL.md](SIMULATION_NODE_OBJECT_MODEL.md) §8 adım
-   4 ve §0 yukarıda. `rt.world.get_thermal`/`set_thermal` + `sim.world_thermal`
-   node, diferansiyel testiyle birlikte.
-5. **Sıradaki: Object kapsamı göçü** — MSF node'ları (`sim.substance`,
-   `sim.pyrolysis`, `sim.phase_change`, `sim.surface_inspect`) zaten object
-   kapsamında yaşıyor (bkz. §8 step 1-3, `simulation_object_graphs`); asıl kalan
-   iş global/eski bir graph'tan göç edecek bir şey kalmadıysa bu adımı
-   **ölçmeden** ✅ işaretleme — önce `object_sim_graphs` dışında hâlâ MSF
-   yazan bir yol olup olmadığını doğrula.
-6. **Ölçüm ilişkileri** — domain ile kesişen collider/force raporu, `rt.attr.*`.
+Kaydedilmiş bir terrain projesi aç, ya da `mesh_resolution` dokunmadan yeni bir
+terrain üret.
 
-★★★ **Node testini IPC kanalından koştur.** Script içinden koşarsan aynı
-körlüğü miras alır: kare döngüsünün yaptığı hiçbir şeyi göremez.
-`rt_test_sim_graph.py` `script.run_file` üzerinden zaten IPC kanalından koşuyor
-(bkz. §0.3) — yeni testler eklerken bu dosyaya ekle, ayrı bir script açma.
+- **Görmen gereken:** `terrain.get` → `mesh_resolution: 0`, `mesh_grid` alan
+  ızgarasıyla **aynı**; görüntü öncekiyle aynı.
+- **Bozuksa ne demek:** varsayılan 0 olmaktan çıkmış demektir; her eski sahnenin
+  geometrisi sessizce değişir. Bu bozuksa aşağıdaki her ölçüm kirlidir.
+
+### 2. ★★★ Analiz maskeleri hayatta mı (EN SİNSİ MADDE)
+
+`scripts/test/rt_test_terrain_mesh_resolution.py` çalıştır, sonra **foliage'lı**
+bir terrain'de mesh'i düşürüp bitki dağılımına bak.
+
+- **Görmen gereken:** bitkiler aynı yerlerde; sadece biraz daha kaba.
+- **Bozuksa ne demek:** bitkiler **kaybolduysa** veya tamamen düzgün dağıldıysa,
+  analiz alanları vertex aynasına ulaşmıyordur. Eski kod boyut testini
+  `vertexCount`'a göre yapıyordu ve ayrık meshte her maskeyi **sessizce
+  siliyordu** — hatasız, logsuz. Yeniden örnekleme kodu buna karşı yazıldı;
+  bu madde onun testidir.
+
+### 3. Kazanç gerçek mi
+
+```
+Invoke-RtIpc perf.reset
+Invoke-RtIpc terrain.create @{ name='F4k'; resolution=4096; height_scale=120.0 }
+Measure-Command { Invoke-RtIpc scene.list_objects }      # ~7 s bekleniyor
+Invoke-RtIpc terrain.set_mesh_resolution @{ name='F4k'; mesh_resolution=1024 }
+Invoke-RtIpc perf.reset
+Invoke-RtIpc terrain.create @{ name='F4kB'; resolution=4096; height_scale=120.0 }
+Invoke-RtIpc terrain.set_mesh_resolution @{ name='F4kB'; mesh_resolution=1024 }
+Measure-Command { Invoke-RtIpc scene.list_objects }
+Invoke-RtIpc perf.list
+```
+
+- **Görmen gereken:** `accel.vulkan_solid.raster_geometry` ~6 400 ms'den
+  ~320 ms'ye düşmeli; `terrain.mesh_fill` de düşmeli ama o zaten küçüktü.
+- **Bozuksa ne demek:** hızlandırma yapısı düşmediyse mesh gerçekten
+  küçülmemiştir — `terrain.get` ile `mesh_grid`'i doğrula.
+
+### 4. Görsel: gölgeleme yaşıyor mu, siluet düşüyor mu
+
+Aynı dağ sahnesini mesh 1024 ve mesh 256 ile render et.
+
+- **Görmen gereken:** gölgeleme detayı büyük ölçüde **duruyor** (normaller
+  alandan örnekleniyor); **siluet** gözle görülür kabalaşıyor.
+- ★ Siluet farkı **beklenen ve dürüstçe ilan edilmiş** bir kayıp, bug değil.
+  Alan çözünürlüğünde normal map bu partide **yok** — vertex arası detay hâlâ
+  kayıp. Gölgeleme de yassılaştıysa `sample_normal` alan yerine mesh ızgarasını
+  okuyordur.
+
+### 5. Sculpt / dirty-sector yolu
+
+Ayrık mesh'li (`mesh_resolution` düşük) bir terrain'i fırçayla sculpt et.
+
+- **Görmen gereken:** doğru yerde deformasyon.
+- **Bozuksa ne demek:** yanlış yerde tümsek çıkıyorsa `updateDirtySectors`
+  koruması devreye girmiyordur — o yol alan koordinatlarıyla vertex indeksliyor
+  ve ayrık meshte **başka vertex'leri** oynatır. Belirtisi bir sculpt hatası
+  gibi görünür, çözünürlük hatası gibi değil.
+
+### 6. Kaydet/yükle turu
+
+`mesh_resolution = 512` ayarla, kaydet, yükle.
+
+- **Görmen gereken:** 512 geri geliyor.
+- **Bozuksa ne demek:** sidecar alanı yazılmıyor; sahne her açılışta tam
+  çözünürlüklü mesh'e dönerek yavaşlar ve kimse sebebini bağlamaz.
 
 ---
 
-## Nasıl koşulur
+## §P4 — Solid raster indeksli çizim (YAZILDI, derlenmedi)
 
-```powershell
-# 1) uygulama açık, pencere görünür olmalı
-.\scripts\ipc\Start-RayTrophi.ps1
+`VulkanViewportBackend::buildRasterGeometry`'nin flat `TriangleMesh` dalı,
+mesh'in **zaten sahip olduğu** indeks tamponunu atıp geometriyi köşe başına
+açıyordu. 4096² terrain'de ölçülen maliyet **+7.4 GB** — mesh'in kendisinin
+(1.31 GB) 5.6 katı ve bu partilerin en büyük tek tahsisatı.
 
-# 2) çekirdek mantık (hızlı, döngüye kör)
-Import-Module .\scripts\ipc\RtIpc.psm1 -Force
-Invoke-RtIpc script.run_file @{ path = 'scripts/test/rt_test_physics_validation.py' }
-type x64\Release\scripts\test\_physics_validation_result.txt
+Artık kaynaklı vertex + indeks yükleniyor. Çizim yolu `indexCount > 0` iken
+zaten `vkCmdDrawIndexed` seçiyordu, yani shader/pipeline tarafı değişmedi.
 
-# 3) uygulamayı gerçekten sürer (döngü arızalarını görür)
-python scripts\test\rt_test_physics_ipc.py
+Beklenen: 100.6 M köşe → **16.8 M vertex (6×)**; ~3.6 GB CPU staging → ~600 MB.
 
-# 4) descriptor denetimleri
-python scripts\audit_ipc_capabilities.py
-python scripts\verify_descriptor_claims.py --live
-```
+| Değişen | İş |
+|---|---|
+| `RasterTriGroup` | `indices` alanı |
+| flat dal | skin'siz mesh'te kaynaklı+indeks; **skinli mesh de-index KALIYOR** |
+| yükleme bloğu | indeks tamponu oluştur+yükle, `indexCount` ata |
+| `updateRasterMeshFromMeshSoA` | kaynaklı düzeni tanıyor |
 
-★★★ **IPC süitinin 0. vakası kare döngüsünün döndüğünü ÖLÇER** ve dönmüyorsa
-koşuyu durdurur. Bu doğru davranıştır: dönmeyen bir döngüde o dosya sessizce
-in-process rig'in yavaş bir kopyasına dönüşür ve yeşili göründüğünün **tam
-tersini** anlatır.
+★ Facade `Triangle` dalına **dokunulmadı** ve dokunulmamalı: o gerçekten
+kaynaksız bir soup. Temizlik fırsatçı — flat SoA yolu düzeldi, facade yolu
+kendi göçünde ölecek.
 
-★ Test scriptleri **iki yere** kopyalanır (`scripts/` + `x64/Release/scripts/`)
-— ama `rt_test_physics_ipc.py` ve `rt_ipc.py` **kopyalanmaz**: onlar
-uygulamanın yüklediği scriptler değil, uygulamayı dışarıdan süren istemciler.
+### P4.1 — Solid modda her şey görünüyor mu
+
+Terrain + normal mesh + import edilmiş model + scatter'lı bir sahne, Solid mod.
+
+- **Görmen gereken:** hepsi eskisi gibi.
+- **★ En sinsi hâli: bir nesnenin YARISI çizilir.** Bir grup hem kaynaklı hem
+  açılmış vertex alırsa indeksli çizim gerisini atlar — hata yok, eksik üçgen.
+  Buna karşı `groupCanWeld` koruması kondu; eksik geometri görürsen ilk oraya bak.
+
+### P4.2 — Bellek gerçekten düştü mü
+
+4096² terrain üret, `perf.list`.
+
+- **Görmen gereken:** `accel.vulkan_solid.raster_geometry` RSS deltası
+  **+7.4 GB → ~+1.5 GB**.
+- **Bozuksa ne demek:** düşmediyse flat dal kaynaklı yola hiç girmiyordur
+  (`meshHasSkinning` yanlış true, ya da `groupCanWeld` false).
+
+### P4.3 — ★ Sculpt hızı (sessiz regresyon riski)
+
+Ayrık olmayan bir terrain'i fırçayla sculpt et.
+
+- **Görmen gereken:** eskisi gibi akıcı.
+- **Bozuksa ne demek:** takılıyorsa `updateRasterMeshFromMeshSoA` `false`
+  dönüyor ve her fırça darbesi tam `buildRasterGeometry` tetikliyordur. Bu bir
+  **yavaşlama** olarak görünür, hata olarak değil — kimse bunu indeksleme
+  değişikliğine bağlamaz.
+
+### P4.4 — Skinli karakter
+
+Animasyonlu bir karakteri Solid modda oynat.
+
+- **Görmen gereken:** deformasyon çalışıyor. Skinli yol bilerek de-index kaldı
+  (`syncRasterSkinnedVertices` `vertexCount == indices.size()` kapısına bakıyor).
+
+### P4.5 — Seçim konturu
+
+Bir flat mesh seç. Kontur çizimi de `indexCount`'a bakıyor; kontur kaybolduysa orası.

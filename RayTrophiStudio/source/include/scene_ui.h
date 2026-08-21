@@ -51,6 +51,8 @@ namespace NodeSystem { namespace Sim { class SimulationNodeGraph; } }
 #include <future>
 #include <string>
 #include <memory>
+
+namespace MeshEdit { class SplineObject; }
 #include <vector>
 #include <array>
 #include <unordered_map>
@@ -1559,6 +1561,10 @@ private:
     void deserialize(const std::string& data); // Deserialize and apply UI state
 
     std::map<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>> mesh_cache;
+    // Mesh-free profile sources live beside mesh entries in the outliner. They are
+    // deliberately kept in a separate cache so no Triangle facade becomes the
+    // authority for spline authoring data.
+    std::vector<std::pair<std::string, std::pair<int, std::shared_ptr<MeshEdit::SplineObject>>>> spline_ui_cache;
   
     size_t cached_scene_triangle_count = 0;
     std::unordered_map<std::string, size_t> cached_triangle_count_by_object;
@@ -1717,5 +1723,3 @@ public:
 };
 
 float getMainMenuReservedHeight();
-
-

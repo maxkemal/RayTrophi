@@ -29,6 +29,7 @@
 #include "RtIpcSecurity.h"
 #include "RtIpcTemplates.h"
 #include "RtIpcAgentDiscovery.h"
+#include "RtIpcMeshTools.h"
 #include "scene_ui.h"
 
 #include <algorithm>
@@ -593,6 +594,9 @@ rtapi::NodeParamValue nodeParamFromJson(const json& value) {
 // Method dispatch. Every rtapi function that is not mesh-binary gets a handler.
 // ---------------------------------------------------------------------------
 json dispatchMethod(const std::string& method, const json& params) {
+    json mesh_tool_result;
+    if (dispatchMeshToolMethod(method, params, mesh_tool_result)) return mesh_tool_result;
+
     json template_result;
     if (dispatchTemplateIpc(
             method, params,
@@ -739,6 +743,73 @@ json dispatchMethod(const std::string& method, const json& params) {
                 }
             }
             return output;
+        });
+    }
+
+    // ── 2D spline authoring (shared rtapi core) ────────────────────────
+    if (method == "spline.list") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::SplineInfo> infos;
+            const auto r = rtapi::listSplines(infos);
+            if (!r.ok) return json{{"__error", r.error}};
+            json result = json::array();
+            for (const auto& info : infos) {
+                result.push_back({{"name", info.name}, {"curve_type", info.curve_type},
+                                  {"plane", info.plane}, {"closed", info.closed},
+                                  {"point_count", info.point_count}});
+            }
+            return result;
+        });
+    }
+    if (method == "spline.get") {
+        const std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            std::string payload;
+            const auto r = rtapi::getSpline(name, payload);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json::parse(payload);
+        });
+    }
+    if (method == "spline.set") {
+        const std::string name = requireString(params, "name");
+        if (!params.contains("spline")) return json{{"__error", "spline payload is required"}};
+        const std::string payload = params["spline"].dump();
+        return enqueueQuery([name, payload](UIContext&) {
+            const auto r = rtapi::setSpline(name, payload);
+            return r.ok ? json(true) : json{{"__error", r.error}};
+        });
+    }
+    if (method == "spline.insert_point") {
+        const std::string name = requireString(params, "name");
+        const int segment = requireInt(params, "segment");
+        const float t = params.value("t", 0.5f);
+        return enqueueQuery([name, segment, t](UIContext&) {
+            int index = -1;
+            const auto r = rtapi::insertSplinePoint(name, segment, t, index);
+            return r.ok ? json{{"index", index}} : json{{"__error", r.error}};
+        });
+    }
+    if (method == "spline.subdivide") {
+        const std::string name = requireString(params, "name");
+        const auto segments = params.value("segments", std::vector<int>{});
+        const int cuts = params.value("cuts", 1);
+        return enqueueQuery([name, segments, cuts](UIContext&) {
+            int index = -1;
+            const auto r = rtapi::subdivideSpline(name, segments, cuts, index);
+            return r.ok ? json{{"last_index", index}} : json{{"__error", r.error}};
+        });
+    }
+    if (method == "spline.extrude") {
+        const std::string name = requireString(params, "name");
+        const int endpoint = requireInt(params, "endpoint");
+        if (!params.contains("position") || !params["position"].is_array() || params["position"].size() != 3)
+            return json{{"__error", "position must be a three-component array"}};
+        const Vec3 position(params["position"][0].get<float>(), params["position"][1].get<float>(),
+                            params["position"][2].get<float>());
+        return enqueueQuery([name, endpoint, position](UIContext&) {
+            int index = -1;
+            const auto r = rtapi::extrudeSplineEndpoint(name, endpoint, position, index);
+            return r.ok ? json{{"index", index}} : json{{"__error", r.error}};
         });
     }
     // ── Version ─────────────────────────────────────────────────────────
@@ -1475,7 +1546,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"script_driving", info.script_driving},
                         {"script_sim_seconds", info.script_sim_seconds},
                         {"frame", info.frame},
-                        {"playing", info.playing}};
+                        {"playing", info.playing},
+                        // ★★★★ Fluid domains the most recent auto-reset wiped
+                        // and did not refill (one-shot seed, no reseed
+                        // recipe) — see docs/dev/NEXT_BUILD_CHECKS.md §A1.
+                        {"dropped_seeds", info.dropped_seeds}};
         });
     }
     if (method == "physics.step") {
@@ -2689,10 +2764,44 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"running_not_declared", r.running_not_declared}};
         });
     }
-    if (method == "sim_graph.attributes") {
+    // ── rt.attr: unified attribute discovery + measurement (section 9.5-9.6) ──
+    // Replaces the split sim_graph.attributes/surface_attributes pair: one
+    // surface for object|domain|world, and the measurement half that used to
+    // require placing a Field/Surface Inspect node in a graph just to read a
+    // number.
+    if (method == "attr.list") {
+        std::string scope = requireString(params, "scope");
+        std::string id = optionalString(params, "id", "");
+        return enqueueQuery([scope, id](UIContext&) {
+            return json{{"attributes", rtapi::listAttributes(scope, id)}};
+        });
+    }
+    if (method == "attr.stats") {
+        std::string scope = requireString(params, "scope");
+        std::string id = optionalString(params, "id", "");
+        std::string name = requireString(params, "name");
+        return enqueueQuery([scope, id, name](UIContext&) {
+            rtapi::AttrStatsInfo s;
+            const rtapi::Result r = rtapi::getAttributeStats(scope, id, name, s);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"available", s.available}, {"count", s.count},
+                        {"array_size", s.array_size}, {"in_sync", s.in_sync},
+                        {"min_value", s.min_value}, {"max_value", s.max_value},
+                        {"mean_value", s.mean_value}};
+        });
+    }
+    if (method == "sim_graph.domain_intersections") {
         std::string domain = requireString(params, "domain");
         return enqueueQuery([domain](UIContext&) {
-            return json{{"attributes", rtapi::simListAttributes(domain)}};
+            std::vector<rtapi::SimIntersectionEntry> entries;
+            const rtapi::Result r = rtapi::simDomainIntersections(domain, entries);
+            if (!r.ok) return json{{"__error", r.error}};
+            json arr = json::array();
+            for (const auto& e : entries)
+                arr.push_back(json{{"name", e.name}, {"kind", e.kind},
+                                   {"intersects", e.intersects},
+                                   {"measurable", e.measurable}});
+            return json{{"entries", arr}};
         });
     }
     // ── rt.editor: which editor is on screen, as values ─────────────────────
@@ -2800,12 +2909,6 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "sim_cache.clear") {
         return enqueueResult([](UIContext&) { return rtapi::simClearCache(); });
-    }
-    if (method == "sim_graph.surface_attributes") {
-        std::string object = requireString(params, "object");
-        return enqueueQuery([object](UIContext&) {
-            return json{{"attributes", rtapi::simListSurfaceAttributes(object)}};
-        });
     }
     if (method == "viewport.status") {
         return enqueueQuery([](UIContext&) {

@@ -20,7 +20,7 @@ if not colliders:
     log("no collider -- run rt_setup_sim_substance_scene.py first")
     raise SystemExit(0)
 obj = colliders[0]["name"]
-attrs = rt.sim_graph.surface_attributes(obj)
+attrs = rt.attr.list("object", obj)
 log("object: %s" % obj)
 log("attributes: %s" % (attrs,))
 if not attrs:

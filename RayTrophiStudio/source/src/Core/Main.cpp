@@ -47,6 +47,7 @@
 #include "CameraPresets.h"
 #include "Jolt/JoltSmokeTest.h"  // Faz 0: --jolt-selftest link/runtime proof
 #include "MeshEdit/HalfEdgeMesh.h"  // edit mode Faz 1: --hemesh-selftest
+#include "MeshEdit/MeshTool.h"      // shared edit tool discovery registry
 #include "scene_data.h"       // Added explicit include
 #include "AnimationNodes.h"
 #include "OptixWrapper.h"     // Added explicit include
@@ -2883,6 +2884,9 @@ int main(int argc, char* argv[]) try {
     // Simulation node types + the attribute resolver they read through. Must
     // follow bind(): the resolver reaches the scene via rtapi's context.
     rtapi::initSimulationNodes();
+    // Register only implemented mesh tools. Planned operations remain hidden from
+    // UI/IPC/agents until their canonical flat-SoA operation is complete.
+    MeshEdit::registerBuiltInMeshTools();
 
     std::string python_error;
     if (!rtpython::initialize(python_error)) {

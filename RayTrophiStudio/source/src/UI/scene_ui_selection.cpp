@@ -9,6 +9,8 @@
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
 #include "SceneSelection.h"
+#include "MeshEdit/ProfileSplineOverlay.h"
+#include "MeshEdit/SplineObject.h"
 #include "globals.h"
 #include "Backend/VulkanBackend.h"
 #include "Backend/OptixBackend.h"
@@ -309,6 +311,14 @@ void syncSelectionSceneState(UIContext& ctx, bool syncLights, bool syncCamera) {
 void SceneUI::handleMarqueeSelection(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
 
+    // Profile spline authoring owns right-drag selection for its control cage.
+    // Do not let the mesh marquee consume the gesture before the spline
+    // overlay sees it.
+    if (ctx.selection.selected.spline_object &&
+        ctx.selection.selected.spline_object->edit_mode) {
+        return;
+    }
+
     // Only handle when not interacting with UI windows and not using gizmo
     if (io.WantCaptureMouse || ImGuizmo::IsOver() || ImGuizmo::IsUsing()) {
         return;
@@ -420,6 +430,14 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         //               ", Dragging=" + std::to_string(is_dragging) +
         //               ", BVH=" + std::string(ctx.scene.bvh ? "yes" : "no"));
                        
+        // Spline sources are mesh-free and must be offered the click before
+        // the generic ImGui capture guard. The viewport itself is an ImGui
+        // window, so WantCaptureMouse is normally true while the cursor is
+        // over the valid authoring surface.
+        if (MeshEdit::pickProfileSpline(ctx)) {
+            return;
+        }
+
         if (!is_dragging) {
             // Ignore click if over UI elements (Window/Panel), Gizmo, or HUD overlay
             if (capture || gizmo_over || hud_captured_mouse) {

@@ -1,9 +1,11 @@
 # Simülasyon node katmanı — nesne modeli raporu
 
-> **Durum:** AKTİF — 2026-08-20. §8 adım **1, 2, 3 ve 4 uygulandı** (derlenmedi;
-> derleme kullanıcıda). Kalan adımlar 5–6 aşağıda. `NODE_SIMULATION_ARCHITECTURE_PLAN.md`
-> BÖLÜM D'nin depolama/kapsam kısmını bu belge yeniden yazar. N0'ın yürütme
-> sözleşmesi değişmedi.
+> **Durum:** AKTİF — 2026-08-20. §8 adım **1–6 TAMAMLANDI, hepsi derlendi ve
+> canlı test edildi** (`rt_test_sim_graph.py` + `rt_probe_sim_attributes.py` +
+> `rt_probe_surface_attributes.py` + `rt_test_sim_substance.py` → hepsi
+> `ALL PASSED`). 5 bir "ölçüm" işiydi, kod değişikliği gerekmedi.
+> `NODE_SIMULATION_ARCHITECTURE_PLAN.md` BÖLÜM D'nin depolama/kapsam kısmını
+> bu belge yeniden yazar. N0'ın yürütme sözleşmesi değişmedi.
 
 ★ **Önce [SIMULATION_NODE_CONCEPTUAL_MODEL.md](SIMULATION_NODE_CONCEPTUAL_MODEL.md)'i
 oku.** Bu belge kararları ve gerekçelerini taşır; katmanın *ne olduğunu*
@@ -437,8 +439,32 @@ hepsini hooklamış gibi yapmak yerine durum `sim_graph.list()` üzerinde
    ★ World graph'ı hâlâ sahip node'u YOK (§8 step 1 kararı korunuyor): tek
    dünya var, isimlendirilecek bir kimlik yok — bu, script yüzeyinin
    eksikliğinden değil, kapsamın doğasından kaynaklanıyor.
-5. **Object kapsamı** — MSF node'ları global graph'tan oraya taşınır.
-6. **Ölçüm ilişkileri** — domain ile kesişen collider/force raporu.
+5. ✅ **Object kapsamı — ÖLÇÜLDÜ, göç edecek eski yol yoktu.** `SubstanceNode`/
+   `PyrolysisNode`/`PhaseChangeNode`/`SurfaceInspectNode` zaten sabit olarak
+   `SimCommand::Scope::Object` emit ediyor (`SimulationNodes.cpp:189,205,216`);
+   uygulama yolu tek sink'e gidiyor: `writeSurfaceParameter`/`writeSurfaceText`
+   (`RtApiSimNodes.cpp`), `simulation_object_graphs` üzerinden. `msf_*`/
+   `MaterialStateField` grep'i 12 dosyada tek yazma noktası dışında ikinci bir
+   yol göstermedi; eski tekil/scope'suz `simulation_graphs` alanı `scene_data.h`
+   içinde artık yok — ölü kod bile değil. Bu madde "taşıma" değil "doğrulama"
+   işiydi, ölçüldü ve kapandı.
+6. ✅ **Ölçüm ilişkileri — UYGULANDI, DERLENMEDİ.** İki parça:
+   - **9.5 — `rt.attr.list`/`rt.attr.stats`.** Eski `sim_graph.attributes`
+     (domain) ve `sim_graph.surface_attributes` (object) tek yüzeyde birleşti
+     ve `world` kapsamı eklendi; `stats()` şimdiye kadar yalnızca bir
+     Field/Surface Inspect node'u graph'a koyup evaluate ederek elde edilebilen
+     ölçümü doğrudan çağrıya açıyor. `available=false` "ölçülemedi" demek,
+     sıfır değil — aynı "false, NOT zeros" kuralı.
+   - **9.6 aşama 3 — `sim_graph.domain_intersections`.** Bir domain'in kutusuyla
+     hangi force field/collider'ların geometrik olarak kesiştiğini raporluyor.
+     ★ Sınır kutusu (bounding-volume) testi, TAM clipping değil:
+     `ForceFieldInfo`/`SimulationColliderInfo` mesh verisi taşımıyor, `obb`
+     collider'ın kutusu rotasyonu YOK sayarak ölçülüyor (yalnızca
+     fazla-raporlayabilir, gerçek bir kesişimi asla gizleyemez), ve
+     `mesh_sdf`/`convex`/`mesh_bvh` collider'lar için kutu yok —
+     `measurable=false` ile bildiriliyor, kesişmiyor diye tahmin edilmiyor.
+     Bu bilinçli bir yaklaşıklık, `project_fracture_exact_surface_clipping`
+     dersiyle aynı: yaklaşıklığı reddetme, İŞARETLE.
 
 ★ 3'ten önce 1–2 yapılmazsa dört node yanlış temele yazılmış olur.
 
@@ -555,10 +581,10 @@ var olan iki fonksiyonun ortak adı.
 
 | Aşama | İş | Ön koşulu |
 |---|---|---|
-| 0 | Kapsamlı graph'lar (§8) | — |
-| 1 | `rt.attr.*` — iki özel hâli birleştir | 0 |
+| 0 | ✅ Kapsamlı graph'lar (§8) | — |
+| 1 | ✅ `rt.attr.*` — iki özel hâli birleştir (§8 adım 6) | 0 |
 | 2 | Varlık node'ları attribute varsa attribute üzerinden okur/yazar | 1 |
-| 3 | Etkileşim **ölçülür**: domain ile kesişen force/collider raporu | 0 |
+| 3 | ✅ Etkileşim **ölçülür**: `sim_graph.domain_intersections` (§8 adım 6) | 0 |
 | 4 | Emitter'ın açık `domain` bağlaması geometrik olabilir mi — **yalnızca** 3 çalıştıktan sonra tartışılır | 3 |
 
 ★ 4'ü şimdi tartışmak erken: geometrik etkileşim raporu (3) çalışmadan,

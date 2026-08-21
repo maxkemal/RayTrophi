@@ -182,6 +182,7 @@ namespace { // reopen: the remaining helpers stay file-local (internal linkage)
 std::string getHittableNodeName(const std::shared_ptr<Hittable>& obj) {
     if (!obj) return "";
     if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) return tri->getNodeName();
+    if (auto flat = std::dynamic_pointer_cast<TriangleMesh>(obj)) return flat->nodeName;
     if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) return inst->node_name;
     return "";
 }
@@ -203,19 +204,52 @@ void replaceSceneObjectsForNode(UIContext& ctx,
                                 const std::string& object_name,
                                 const std::vector<std::shared_ptr<Triangle>>& mesh) {
     auto& objects = ctx.scene.world.objects;
+    std::shared_ptr<TriangleMesh> previousFlat;
+    for (const auto& obj : objects) {
+        if (auto flat = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (flat->nodeName == object_name) {
+                previousFlat = flat;
+                break;
+            }
+        }
+    }
+
     objects.erase(
         std::remove_if(objects.begin(), objects.end(), [&](const auto& obj) {
             return getHittableNodeName(obj) == object_name;
         }),
         objects.end());
 
-    for (const auto& tri : mesh) {
-        if (tri) {
-            objects.push_back(tri);
+    if (previousFlat) {
+        // Flat TriangleMesh is the authoritative scene representation. A legacy
+        // Triangle replacement must be repacked into one flat object; otherwise
+        // the old flat mesh survives beside the new bevel faces and the edit
+        // cache rebuilds the stale topology.
+        std::shared_ptr<TriangleMesh> replacement = MeshModifiers::facadesToFlatMesh(mesh);
+        if (replacement) {
+            replacement->nodeName = object_name;
+            replacement->transform = previousFlat->transform;
+            GeometryNodesV2::rebakeFromOrig(*replacement);
+            objects.push_back(replacement);
+            if (ctx.selection.selected.type == SelectableType::Object &&
+                ctx.selection.selected.object &&
+                getHittableNodeName(ctx.selection.selected.object) == object_name) {
+                // SelectableItem::object is the legacy Triangle slot. Keep that
+                // representative facade untouched and update the canonical flat
+                // selection slot instead.
+                ctx.selection.selected.mesh_object = replacement;
+                ctx.selection.selected.name = object_name;
+            }
+        }
+    } else {
+        for (const auto& tri : mesh) {
+            if (tri) {
+                objects.push_back(tri);
+            }
         }
     }
 
-    if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
+    if (!previousFlat && ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
         if (getHittableNodeName(ctx.selection.selected.object) == object_name && !mesh.empty()) {
             ctx.selection.selected.object = mesh.front();
         }

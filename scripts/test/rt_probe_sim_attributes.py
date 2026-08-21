@@ -23,7 +23,7 @@ if not domains:
 name = domains[0]["name"]
 log("domain: %s (%d particles)" % (name, domains[0]["particle_count"]))
 
-attrs = rt.sim_graph.attributes(name)
+attrs = rt.attr.list("domain", name)
 log("attributes: %s" % (attrs,))
 
 SCOPE = "domain"

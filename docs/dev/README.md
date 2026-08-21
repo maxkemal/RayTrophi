@@ -38,7 +38,7 @@ being paid for twice.
 | [PHYSICS_VALIDATION.md](PHYSICS_VALIDATION.md) | Is the solver RIGHT, not merely running — analytical cases, and why a script test is blind to the frame loop |
 | [IPC_TEST_CHANNEL.md](IPC_TEST_CHANNEL.md) | The second test channel: drives the app from outside so it can see the frame loop — and the first thing it found is that physics.step is reverted 100% before you can read it |
 | [SIMULATION_NODE_CONCEPTUAL_MODEL.md](SIMULATION_NODE_CONCEPTUAL_MODEL.md) | What the simulation node layer IS — read this before the object-model report |
-| [SIMULATION_NODE_OBJECT_MODEL.md](SIMULATION_NODE_OBJECT_MODEL.md) | Scope-based object model for the simulation node layer — scopes + World thermal landed (steps 1-4), steps 5-6 open |
+| [SIMULATION_NODE_OBJECT_MODEL.md](SIMULATION_NODE_OBJECT_MODEL.md) | Scope-based object model for the simulation node layer — steps 1-6 done, compiled, and live-verified |
 | [AGENT_VIEWPORT_MEASUREMENT_PLAN.md](AGENT_VIEWPORT_MEASUREMENT_PLAN.md) | Driving the viewport and reading render DATA over IPC — the substrate agents verify with |
 | [AGENT_DISCOVERY_LAYER_PLAN.md](AGENT_DISCOVERY_LAYER_PLAN.md) | Self-describing API layer — agent.* discovery, method registry, workflow recipes |
 | [DESCRIPTOR_TRUTH_VERIFICATION.md](DESCRIPTOR_TRUTH_VERIFICATION.md) | Whether the descriptor prose is TRUE — claim grounding, capability mirror drift |

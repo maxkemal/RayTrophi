@@ -128,6 +128,26 @@ bool objectExists(const std::string& name);
 Result getObjectInfo(const std::string& name, ObjectInfo& out);
 
 // ---------------------------------------------------------------------------
+// 2D Spline authoring. The JSON payload is versioned by SplineSerialization
+// and is shared by project files, Python and IPC.
+// ---------------------------------------------------------------------------
+struct SplineInfo {
+    std::string name;
+    std::string curve_type;
+    int plane = 1;
+    bool closed = false;
+    size_t point_count = 0;
+};
+Result listSplines(std::vector<SplineInfo>& out);
+Result getSpline(const std::string& name, std::string& out_json);
+Result setSpline(const std::string& name, const std::string& json_payload);
+Result insertSplinePoint(const std::string& name, int segment, float t, int& out_index);
+Result subdivideSpline(const std::string& name, const std::vector<int>& segments,
+                       int cuts, int& out_last_index);
+Result extrudeSplineEndpoint(const std::string& name, int endpoint, const Vec3& position,
+                             int& out_index);
+
+// ---------------------------------------------------------------------------
 // Transform (undoable via TransformCommand, which is flat-aware).
 // Flat-only: reads/writes the TriangleMesh's own transform handle.
 // ---------------------------------------------------------------------------
@@ -329,6 +349,9 @@ Result getMeshUVs(const std::string& name, MeshBufferView& out);
 // `vertex_count` must match the object's current vertex count. Triggers the
 // same CPU BVH / Vulkan / OptiX rebuild path as other scene-geometry edits.
 Result setMeshPositions(const std::string& name, const float* data, size_t vertex_count);
+// Undoable flat-SoA position commit. Uses the shared geometry command and
+// schedules the same BVH/backend refresh as other scene mutations.
+Result setMeshPositionsUndoable(const std::string& name, const float* data, size_t vertex_count);
 Result setMeshNormals(const std::string& name, const float* data, size_t vertex_count);
 Result setMeshUVs(const std::string& name, const float* data, size_t vertex_count);
 
@@ -336,6 +359,43 @@ Result setMeshUVs(const std::string& name, const float* data, size_t vertex_coun
 // then re-bakes world N. Useful after setMeshPositions() when the caller does
 // not want to compute normals itself.
 Result recomputeMeshNormals(const std::string& name);
+
+struct MeshValidationInfo {
+    bool valid = false;
+    size_t vertex_count = 0;
+    size_t triangle_count = 0;
+    size_t non_finite_vertices = 0;
+    size_t out_of_range_indices = 0;
+    size_t degenerate_triangles = 0;
+    size_t non_finite_normals = 0;
+};
+
+// Read-only structural validation of the canonical flat SoA mesh.
+Result validateMesh(const std::string& name, MeshValidationInfo& out);
+
+struct MeshOperationPlanInfo {
+    bool ok = false;
+    std::string operation_id;
+    std::string object_name;
+    std::string backend;
+    bool preview = false;
+    bool commit = false;
+    bool undoable = false;
+    bool requires_cpu_fallback = false;
+    uint64_t expected_revision = 0;
+    std::vector<std::string> diagnostic_codes;
+    std::vector<std::string> diagnostic_messages;
+    std::vector<bool> diagnostic_warnings;
+};
+
+// Side-effect-free preflight shared by UI/IPC/agent callers. It never commits
+// geometry; commit remains blocked until a real operation implementation exists.
+Result planMeshOperation(const std::string& object_name,
+                         const std::string& operation_id,
+                         const std::string& backend,
+                         bool preview,
+                         bool commit,
+                         MeshOperationPlanInfo& out);
 
 // ---------------------------------------------------------------------------
 // Camera (Faz 5.1a). Operates on the scene's active camera. position=lookfrom,
@@ -883,7 +943,8 @@ struct SimGraphRef {
     std::string owner;
     uint32_t    node_count = 0;
     // The implicit node naming this graph's owner. 0 means the scope has none —
-    // World, whose thermal state has no scripting surface yet (section 7).
+    // World, which has no owner node by design (there is only one world, so
+    // there is no name to pick between; see section 8 step 4).
     uint32_t    owner_node = 0;
     // ★★★ The named entity is GONE, but the graph is still here. Removing a
     // domain drops its graph at that one call site; objects are deleted through
@@ -917,6 +978,34 @@ std::vector<std::string> simListAttributes(const std::string& domain);
 // Same, for per-object surface (MSF) attributes: temperature, char, melt,
 // moisture, fuel_remaining, mass_loss. N5.
 std::vector<std::string> simListSurfaceAttributes(const std::string& object);
+
+// ── Unified attribute discovery + measurement (rt.attr) ─────────────────────
+//
+// Decision record: docs/dev/SIMULATION_NODE_OBJECT_MODEL.md, section 9.5-9.6.
+// `simListAttributes`/`simListSurfaceAttributes` above are the domain/object
+// halves of the SAME naming layer, kept split because that is how the panel's
+// Field Inspect / Surface Inspect node pickers happen to consume them. This is
+// the one script/IPC surface that merges them, and adds the half that never
+// had a caller-facing path at all: measuring a named attribute did not exist
+// outside placing a Field/Surface Inspect node in a graph and evaluating it.
+//
+// scope is "object" | "domain" | "world"; id is the entity's name, ignored for
+// "world" because there is only one.
+struct AttrStatsInfo {
+    // ★ false means the value could NOT be measured — no live particles, no
+    // MSF field, unknown name. Not the same as a field that measured zero;
+    // collapsing the two is the "a default is not a measurement" mistake.
+    bool     available = false;
+    uint32_t count = 0;         // elements actually counted
+    uint32_t array_size = 0;    // backing array length
+    bool     in_sync = true;    // array_size == count; false = solver arrays disagree
+    double   min_value = 0.0;
+    double   max_value = 0.0;
+    double   mean_value = 0.0;
+};
+std::vector<std::string> listAttributes(const std::string& scope, const std::string& id);
+Result getAttributeStats(const std::string& scope, const std::string& id,
+                         const std::string& name, AttrStatsInfo& out);
 // ★ clear() empties the canvas but re-seeds the owner node: a scoped graph is
 // never ownerless, because a node authored on an ownerless canvas would name
 // nothing.
@@ -1000,6 +1089,27 @@ struct SimCouplingReport {
     std::vector<std::string> running_not_declared;
 };
 SimCouplingReport simGraphCouplings();
+
+// ── Measured interaction: which forces/colliders geometrically reach a domain
+//
+// Decision record: SIMULATION_NODE_OBJECT_MODEL.md section 9.6 stage 3 (and
+// 1.3/9.1: a force field and a collider carry no `domain` field, and that is
+// the correct ontology — force is spatial, not declared to a region). The only
+// honest answer to "does this affect that domain" is a geometric overlap of
+// world-space bounds, never a name lookup, so this is a REPORT, not a link a
+// script can author.
+struct SimIntersectionEntry {
+    std::string name;
+    std::string kind;          // "force" | "collider"
+    bool        intersects = false;
+    // ★ false when this entry's world extent could not be bounded from the
+    // fields available (a mesh_sdf/convex/mesh_bvh collider carries no box in
+    // SimulationColliderInfo) — reported as unmeasurable, never guessed as
+    // non-intersecting. Same shape as "false, NOT zeros" elsewhere in this file.
+    bool        measurable = true;
+};
+Result simDomainIntersections(const std::string& domain,
+                              std::vector<SimIntersectionEntry>& out);
 
 // N6 — the bake, and the state a script needs to reason about it.
 //
@@ -1381,6 +1491,15 @@ struct SimControlStateInfo {
     double script_sim_seconds = 0.0;
     int frame = 0;
     bool playing = false;
+    // ★★★★ Names of fluid domains the MOST RECENT resetSimulationToStart()
+    // wiped and did not refill — a one-shot fluid.seed() domain (the default:
+    // no `persistent`/`fluid_reseed_on_reset`), by design, does not survive a
+    // reset. That reset runs automatically whenever the scene's sim config
+    // signature changes ANYWHERE (e.g. an unrelated new domain), so without
+    // this a domain's particles could vanish with no error at all. Empty most
+    // of the time; check it after creating a domain if another one just went
+    // quiet. See docs/dev/NEXT_BUILD_CHECKS.md §A1.
+    std::vector<std::string> dropped_seeds;
 };
 Result getSimControlState(SimControlStateInfo& out);
 Result setPhysicsGravity(Vec3 gravity);
