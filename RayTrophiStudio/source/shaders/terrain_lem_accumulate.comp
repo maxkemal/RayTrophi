@@ -1,0 +1,50 @@
+// terrain_lem_accumulate.comp
+// One relaxation pass of multiple-flow-direction (MFD) drainage accumulation on
+// the depression-filled surface. Fixed point: A = rainArea + W^T A. On a DAG
+// this iteration is nilpotent, so it reaches the exact answer after as many
+// passes as the longest flow path; the cascadic pyramid supplies a close
+// initial guess so a bounded refinement budget suffices at each level.
+//
+// Weights come from the packed table (terrain_lem_weights.comp), one byte per
+// direction. The earlier version recomputed each neighbour's weight row inline,
+// which meant touching the neighbour's own eight neighbours -- 64 scattered
+// loads per cell per pass, over a pass count in the hundreds, at every pyramid
+// level. That single decision was most of the cost the new cycle added.
+//
+// NOTE: deliberately NO self-retention term here, unlike terrain_lem_route.
+// A cell with no outflow is a terminal sink for area; giving it self-retention
+// would turn the fixed point into A = rain + A and diverge to infinity.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC { int width; int height; } pc;
+
+layout(set = 0, binding = 0) readonly  buffer Weights  { uint packedWeights[]; };
+layout(set = 0, binding = 1) readonly  buffer RainArea { float rainArea[]; };
+layout(set = 0, binding = 2) readonly  buffer FlowIn   { float flowIn[]; };
+layout(set = 0, binding = 3) writeonly buffer FlowOut  { float flowOut[]; };
+
+const int dx8[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+
+// Weight of cell `index` toward direction `d`, unpacked from the byte table.
+float weightOf(int index, int d) {
+    uint word = packedWeights[index * 2 + (d >> 2)];
+    return float((word >> (8 * (d & 3))) & 0xFFu) * (1.0 / 255.0);
+}
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int x = int(ui) % pc.width;
+    int y = int(ui) / pc.width;
+
+    float acc = rainArea[ui];
+    for (int d = 0; d < 8; ++d) {
+        int nx = x + dx8[d], ny = y + dy8[d];
+        if (nx < 0 || nx >= pc.width || ny < 0 || ny >= pc.height) continue;
+        int ni = ny * pc.width + nx;
+        acc += flowIn[ni] * weightOf(ni, 7 - d);
+    }
+    flowOut[ui] = acc;
+}

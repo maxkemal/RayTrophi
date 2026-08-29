@@ -230,7 +230,9 @@ public:
     bool show_agent_chat = false;
     
     // Persisted open/closed state for terrain subsections
-    bool terrain_layer_open[4] = { true, true, true, true };
+    // Eight terrain layer slots: 0-3 splat, 4-7 semantic overlays. The
+    // overlays start collapsed because most terrains leave them empty.
+    bool terrain_layer_open[8] = { true, true, true, true, false, false, false, false };
     bool foliage_section_open = true;
 
     // Static Helpers (Shared across modules)
@@ -306,7 +308,9 @@ public:
      void drawSceneHierarchy(UIContext& ctx);  // Scene hierarchy / outliner panel
      void drawModifiersPanel(UIContext& ctx);  // Modifiers & Sculpting panel
      void drawGeometryGraphToolbar(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph); // Faz 8a: Add Node combo + Evaluate button
-     bool evaluateGeometryGraph(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph); // Faz 8a: runs the graph and swaps the object's TriangleMesh in world.objects
+     bool evaluateGeometryGraph(UIContext& ctx, const std::string& objectName,
+                                GeometryNodesV2::GeometryNodeGraphV2& graph,
+                                bool livePreview = false, bool deferScenePublish = false);
      // Simulation node editor contents (D.4) — scene_ui_simnodes.cpp.
      // ★ Every action here goes through the same rtapi:: calls a script makes,
      // so the panel cannot grow a behaviour the script surface does not have.

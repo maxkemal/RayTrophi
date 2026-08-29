@@ -1,4 +1,5 @@
-#include "scene_ui.h"
+﻿#include "scene_ui.h"
+#include "Api/RtApi.h"
 #include "MeshEdit/ProfileSplineEditor.h"
 #include "ui_modern.h"
 #include "imgui_internal.h"
@@ -905,7 +906,14 @@ void syncPaintBrushToTerrain(SceneUI& ui, TerrainObject* terrain) {
     ui.terrain_brush.active_terrain_id = terrain->id;
     ui.terrain_brush.mode = 5;
     ui.terrain_brush.paint_channel = ui.paint_mode_state.active_layer_index;
-    ui.terrain_brush.radius = ui.paint_mode_state.brush.radius;
+    // ★★ RADIUS IS NOT COPIED, and that is the point. Paint::BrushSettings::radius
+    // is a MESH brush radius in the object's own units (the presets set 0.09-0.30);
+    // terrain_brush.radius is METRES on a tile that is typically 1000 m across.
+    // Copying one into the other turned a perfectly ordinary mesh-paint radius into
+    // a 25 cm terrain brush: the preview circle was a sub-pixel dot and the dab
+    // touched one splat texel, which reads as "the brush does not show up".
+    // The terrain paint panel edits terrain_brush.radius directly (metres), exactly
+    // like the terrain sculpt panel does.
     ui.terrain_brush.strength = ui.paint_mode_state.brush.strength;
     ui.terrain_brush.curve = 0.25f + (ui.paint_mode_state.brush.falloff * 3.75f);
     ui.terrain_brush.show_preview = ui.paint_mode_state.brush.show_preview;
@@ -3264,6 +3272,13 @@ void SceneUI::drawPaintPanel(UIContext& ctx) {
         if (!terrain_adapter || terrain_adapter->getTerrain() != terrain) {
             paint_mode_state.setAdapter(std::make_shared<Paint::TerrainPaintAdapter>(terrain));
         }
+        // ★ Publish the viewport brush HERE, at the point the terrain target is
+        // bound — not only at the bottom of drawTerrainPaintPanel. Everything
+        // between the two is an early return (collapsed "Paint Mode" section,
+        // missing layers/splat map), and each one left terrain_brush.enabled
+        // false, i.e. paint mode was on, the panel said "Target: <terrain>",
+        // and no brush ever appeared in the viewport.
+        syncPaintBrushToTerrain(*this, terrain);
     } else {
         paint_mode_state.clearAdapter();
         paint_mode_state.enabled = false;
@@ -3382,7 +3397,11 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
 
     UIWidgets::Divider();
     UIWidgets::ColoredHeader("Brush", ImVec4(1.0f, 0.70f, 0.45f, 1.0f));
-    ImGui::SliderFloat("Radius", &paint_mode_state.brush.radius, 1.0f, 200.0f, "%.1f m");
+    // Metres, and stored on the TERRAIN brush: paint_mode_state.brush.radius is the
+    // mesh brush's object-space radius and is shared with every mesh paint session
+    // (see syncPaintBrushToTerrain). Writing metres into it made switching between a
+    // mesh and a terrain carry the wrong scale in whichever direction it was moved.
+    ImGui::SliderFloat("Radius", &terrain_brush.radius, 1.0f, 200.0f, "%.1f m");
     ImGui::SliderFloat("Strength", &paint_mode_state.brush.strength, 0.01f, 10.0f, "%.2f");
     ImGui::SliderFloat("Falloff", &paint_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
     if (!paint_mode_state.compact_ui) {
@@ -4488,6 +4507,12 @@ bool SceneUI::shouldShowPaintBrushDock() const {
         return false;
     }
 
+    // ★ Mesh paint ONLY. Terrain splat paint deliberately has no brush dock: its
+    // whole UI (layers, radius, strength, falloff, mask tools) already lives in
+    // the Paint panel, and a dock built from the same fields was a second copy of
+    // the same controls -- two places to change one value. What terrain paint
+    // needed was never the dock; it was the viewport brush, which is published in
+    // drawPaintPanel the moment the terrain target binds.
     const auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
     return adapter && adapter->isValid();
 }
@@ -4501,6 +4526,10 @@ float SceneUI::getPaintBrushDockWidth() const {
 
 void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Triangle>& meshTriangle, bool rightDockOnly) {
     syncHeightMaskPaintToggles(paint_mode_state);
+
+    // Terrain splat paint has no brush dock (see shouldShowPaintBrushDock): its
+    // controls live in the Paint panel, and the viewport brush is published from
+    // drawPaintPanel when the terrain target binds. Nothing to draw here.
     auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
     if (!adapter && meshTriangle) {
         paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, meshTriangle));
@@ -7115,11 +7144,14 @@ void SceneUI::drawGeometryGraphToolbar(UIContext& ctx, const std::string& object
         else if (n->getTypeId() == "GeoV2.Output") hasOutput = true;
     }
 
-    static int addNodeChoice = 2;
-    const char* nodeChoices[] = { "Base Mesh", "Object Source", "Subdivide", "Transform", "Mirror", "Array", "Extrude", "Inset", "Bevel", "Remesh", "Noise Displace", "Merge (Join)", "Weld", "Mask by Height", "Mask by Slope", "Mask by Noise", "Mask Remap", "Mask Math", "Scatter Instances", "Output" };
+    static int addNodeChoice = 5;
+    const char* nodeChoices[] = { "Base Mesh", "Object Source", "Spline Object", "Resample Curve", "Curve to Mesh", "Subdivide", "Transform", "Mirror", "Array", "Extrude", "Inset", "Bevel", "Remesh", "Noise Displace", "Merge (Join)", "Weld", "Mask by Height", "Mask by Slope", "Mask by Noise", "Mask Remap", "Mask Math", "Scatter Instances", "Output" };
     static const GeometryNodesV2::NodeType nodeChoiceTypes[] = {
         GeometryNodesV2::NodeType::BaseMesh,
         GeometryNodesV2::NodeType::ObjectSource,
+        GeometryNodesV2::NodeType::SplineObject,
+        GeometryNodesV2::NodeType::ResampleCurve,
+        GeometryNodesV2::NodeType::CurveToMesh,
         GeometryNodesV2::NodeType::SubdivideCC,
         GeometryNodesV2::NodeType::Transform,
         GeometryNodesV2::NodeType::Mirror,
@@ -7139,7 +7171,7 @@ void SceneUI::drawGeometryGraphToolbar(UIContext& ctx, const std::string& object
         GeometryNodesV2::NodeType::ScatterInstances,
         GeometryNodesV2::NodeType::Output,
     };
-    if (hasBaseMesh && addNodeChoice == 0) addNodeChoice = 2;
+    if (hasBaseMesh && addNodeChoice == 0) addNodeChoice = 5;
     ImGui::SetNextItemWidth(160.0f);
     ImGui::Combo("##GeoDagAddNode", &addNodeChoice, nodeChoices, IM_ARRAYSIZE(nodeChoices));
     ImGui::SameLine();
@@ -7161,6 +7193,8 @@ void SceneUI::drawGeometryGraphToolbar(UIContext& ctx, const std::string& object
         evaluateGeometryGraph(ctx, objectName, graph);
     }
     ImGui::SameLine();
+    ImGui::Checkbox("Live Curve Preview", &graph.liveCurvePreview);
+    ImGui::SameLine();
     // Blender modifier-Apply semantics: bake the current result as the object's NEW base
     // mesh and reset the graph. Until Apply, every Evaluate re-runs from the pristine
     // originalBaseMesh snapshot — which also means any manual work done on the evaluated
@@ -7169,6 +7203,18 @@ void SceneUI::drawGeometryGraphToolbar(UIContext& ctx, const std::string& object
     // follow-up work safe. graph.clear() empties nodes/links/groups; the window block
     // re-creates the default Base Mesh -> Output pair next frame, and nulling
     // originalBaseMesh makes the next Evaluate snapshot the APPLIED result as its base.
+    bool hasAnimatedSplineSource = false;
+    for (const auto& node : graph.nodes) {
+        const auto* source = dynamic_cast<const GeometryNodesV2::SplineObjectNode*>(node.get());
+        if (!source || !source->objectName[0]) continue;
+        const auto trackIt = ctx.scene.timeline.tracks.find(source->objectName);
+        if (trackIt == ctx.scene.timeline.tracks.end()) continue;
+        hasAnimatedSplineSource = std::any_of(
+            trackIt->second.keyframes.begin(), trackIt->second.keyframes.end(),
+            [](const Keyframe& key) { return key.has_spline || key.has_transform; });
+        if (hasAnimatedSplineSource) break;
+    }
+    ImGui::BeginDisabled(hasAnimatedSplineSource);
     if (UIWidgets::SecondaryButton("Apply", ImVec2(100, 0))) {
         if (evaluateGeometryGraph(ctx, objectName, graph)) {
             graph.clear();
@@ -7176,10 +7222,46 @@ void SceneUI::drawGeometryGraphToolbar(UIContext& ctx, const std::string& object
             addViewportMessage("Geometry Graph applied: result is now '" + objectName + "'s base mesh", 3.0f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
         }
     }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Evaluate, bake the result as the new base mesh, and reset the graph.\nUse before sculpting/editing the result — plain Evaluate always restarts\nfrom the original mesh and would discard such changes.");
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (hasAnimatedSplineSource) {
+            ImGui::SetTooltip("Animated spline source: Apply would destroy the live curve link.\nKeep the graph live for rendering. Vertex Cache Bake will be a separate operation.");
+        } else {
+            ImGui::SetTooltip("Evaluate, bake the result as the new base mesh, and reset the graph.\nUse before sculpting/editing the result — plain Evaluate always restarts\nfrom the original mesh and would discard such changes.");
+        }
     }
-    
+
+    ImGui::SameLine();
+    auto cacheIt = ctx.scene.geometry_caches.find(objectName);
+    if (UIWidgets::SecondaryButton(cacheIt == ctx.scene.geometry_caches.end()
+            ? "Bake Cache" : "Rebake Cache", ImVec2(110, 0))) {
+        rtapi::GeometryCacheInfo info;
+        const auto result = rtapi::bakeGeometryCache(
+            objectName, ctx.render_settings.animation_start_frame,
+            ctx.render_settings.animation_end_frame, 1, info);
+        if (result.ok) {
+            addViewportMessage("Geometry Cache baked: " + std::to_string(info.sample_count) +
+                " frames, " + std::to_string(info.memory_bytes / 1024) + " KiB", 4.0f,
+                ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+        } else {
+            addViewportMessage("Geometry Cache: " + result.error, 5.0f,
+                               ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        }
+    }
+    cacheIt = ctx.scene.geometry_caches.find(objectName);
+    if (cacheIt != ctx.scene.geometry_caches.end()) {
+        ImGui::SameLine();
+        bool cacheEnabled = cacheIt->second.enabled;
+        if (ImGui::Checkbox("Cache", &cacheEnabled))
+            rtapi::setGeometryCacheEnabled(objectName, cacheEnabled);
+        ImGui::SameLine();
+        if (UIWidgets::SecondaryButton("Clear Cache", ImVec2(100, 0)))
+            rtapi::clearGeometryCache(objectName);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Stores only local vertex positions. UV, material and topology stay on the base mesh.");
+        }
+    }
+
     ImGui::SameLine();
     float availX = ImGui::GetContentRegionAvail().x;
     const float buttonW = 120.0f;
@@ -7191,7 +7273,10 @@ void SceneUI::drawGeometryGraphToolbar(UIContext& ctx, const std::string& object
     }
 }
 
-bool SceneUI::evaluateGeometryGraph(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph) {
+bool SceneUI::evaluateGeometryGraph(UIContext& ctx, const std::string& objectName,
+                                    GeometryNodesV2::GeometryNodeGraphV2& graph,
+                                    bool livePreview, bool deferScenePublish) {
+    const bool preserveSplineSelection = livePreview || static_cast<bool>(ctx.selection.selected.spline_object);
     // 1. Resolve the PRISTINE base mesh. Must come from graph.originalBaseMesh (snapshotted once
     // when the graph was first created — see the "Geometry Graph" window block in scene_ui.cpp),
     // NOT from a fresh direct_mesh_nodes lookup: after the first Evaluate, the scene's copy of
@@ -7233,6 +7318,23 @@ bool SceneUI::evaluateGeometryGraph(UIContext& ctx, const std::string& objectNam
         if (name == objectName) return graph.originalBaseMesh;
         auto it = direct_mesh_nodes.find(name);
         return (it != direct_mesh_nodes.end()) ? it->second.mesh : nullptr;
+    };
+    gctx.resolveSpline = [&](const std::string& name) -> NodeSystem::CurveValue {
+        for (const auto& object : ctx.scene.world.objects) {
+            auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object);
+            if (!spline || spline->nodeName != name) continue;
+            auto value = std::make_shared<MeshEdit::CurveNodeData>();
+            value->spline = spline->spline;
+            value->plane = spline->plane;
+            value->source_name = spline->nodeName;
+            if (spline->transform) {
+                value->local_to_world = spline->transform->getFinal();
+                value->object_scale = spline->transform->scale;
+                value->pivot_offset = spline->transform->pivot_offset;
+            }
+            return value;
+        }
+        return {};
     };
     // Multi-material-aware facade gather (ScatterInstancesNode sources): one nodeName
     // can own SEVERAL sibling TriangleMesh entries (multi-material import) and/or
@@ -7399,28 +7501,31 @@ bool SceneUI::evaluateGeometryGraph(UIContext& ctx, const std::string& objectNam
     // stayed at the pre-evaluate position/shape since it was tracking a now-orphaned object that
     // no longer visually exists, instead of the new evaluated result.
     auto reselectIt = mesh_cache.find(objectName);
-    if (reselectIt != mesh_cache.end() && !reselectIt->second.empty()) {
+    if (!preserveSplineSelection && reselectIt != mesh_cache.end() && !reselectIt->second.empty()) {
         // selectObject() internally calls updatePositionFromSelection(), which decomposes
         // result->transform->getPivotMatrix() — since TransformNode now moves the actual
         // pivot (not just the vertex data), the gizmo lands on the correct new position with
         // no extra bbox math needed here.
         ctx.selection.selectObject(reselectIt->second[0].second, -1, objectName);
         updateBBoxCache(objectName);
+    } else {
+        updateBBoxCache(objectName);
     }
 
-    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-    ctx.renderer.resetCPUAccumulation();
-    if (ctx.backend_ptr) {
-        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    if (!deferScenePublish) {
+        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+        g_geometry_dirty = true;
+        g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+        g_optix_rebuild_pending = true;
+        g_vulkan_rebuild_pending = true;
+        g_viewport_raster_rebuild_pending = true;
     }
 
-    g_geometry_dirty = true;
-    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
-    g_optix_rebuild_pending = true;
-    g_vulkan_rebuild_pending = true;
-    g_viewport_raster_rebuild_pending = true;
-
-    addViewportMessage("Geometry Graph evaluated: " + objectName, 2.5f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
-    g_ProjectManager.markModified();
+    if (!livePreview && !deferScenePublish) {
+        addViewportMessage("Geometry Graph evaluated: " + objectName, 2.5f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+        g_ProjectManager.markModified();
+    }
     return true;
 }

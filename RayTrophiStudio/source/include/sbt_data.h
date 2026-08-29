@@ -87,14 +87,21 @@ struct __align__(16) HitGroupData
     cudaTextureObject_t splat_map_tex = 0;
     cudaTextureObject_t semantic_map_tex = 0; // R=Flow G=Wetness B=Ice A=Hardness
     
-    // Arrays for 4 layers (Albedo, Normal, Roughness)
-    // 4 * 8 bytes = 32 bytes (16-byte aligned)
-    // Arrays for 4 layers (Material IDs)
-    int layer_material_ids[4] = {-1, -1, -1, -1}; // 16 bytes
+    // Eight layer slots. 0-3 are weighted by the splat map and normalized
+    // against each other; 4-7 are semantic overlays (Flow/Wetness/Ice/
+    // Hardness) composited over that blend by their own unnormalized weight.
+    // -1 means the slot is unbound, which for an overlay slot keeps the
+    // built-in shading for that channel.
+    int layer_material_ids[8] = {-1, -1, -1, -1, -1, -1, -1, -1}; // 32 bytes
 
-    
-    // Tiling scales for each layer
-    float layer_uv_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // 16 bytes
+    // Tiling scales for each slot
+    float layer_uv_scale[8] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f}; // 32 bytes
+    // Artist dial for the semantic overlay slots 4-7
+    float layer_overlay_strength[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // 16 bytes
+    /// Bit s set = semantic slot 4+s is exempt from snow burial. Overlays
+    /// composite UNDER the snow the splat map placed, because a semantic
+    /// value is a measurement and its coverage is a visibility decision.
+    unsigned int layer_overlay_ignore_cover_mask = 0u;
     
     // Multi-Scattering parameters (NEW)
     

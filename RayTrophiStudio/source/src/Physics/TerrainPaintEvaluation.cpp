@@ -1,4 +1,5 @@
 #include "TerrainPaintEvaluation.h"
+#include "TerrainFieldMath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -74,27 +75,39 @@ namespace {
         return top + (bottom - top) * ty;
     }
 
-    float slopeDegrees(const NodeSystem::Image2DData& height, int x, int y,
-                       const PaintDomain& domain) {
+    /**
+     * @brief Gradient (rise/run, meters) of the height field under the domain.
+     *
+     * Every angle in this file derives from this one number through
+     * TerrainFieldMath, so degrees and 0-1 mask space can never drift apart
+     * the way they did when each consumer carried its own conversion.
+     */
+    float heightGradient(const NodeSystem::Image2DData& height, int x, int y,
+                         const PaintDomain& domain) {
         const int w = (std::max)(domain.width, 2);
         const int h = (std::max)(domain.height, 2);
-        const int xl = (std::max)(x - 1, 0);
-        const int xr = (std::min)(x + 1, w - 1);
-        const int yu = (std::max)(y - 1, 0);
-        const int yd = (std::min)(y + 1, h - 1);
-        const float uLeft = static_cast<float>(xl) / (w - 1);
-        const float uRight = static_cast<float>(xr) / (w - 1);
-        const float vUp = static_cast<float>(yu) / (h - 1);
-        const float vDown = static_cast<float>(yd) / (h - 1);
+        const auto metric = TerrainFieldMath::makeFieldMetric(
+            domain.worldScale, domain.heightScale, w);
         const float u = static_cast<float>(x) / (w - 1);
         const float v = static_cast<float>(y) / (h - 1);
-        const float dxDistance = (std::max)((uRight - uLeft) * domain.worldScale, 1e-6f);
-        const float dyDistance = (std::max)((vDown - vUp) * domain.worldScale, 1e-6f);
-        const float dx = (sampleScalar(height, uRight, v) - sampleScalar(height, uLeft, v)) *
-            domain.heightScale / dxDistance;
-        const float dy = (sampleScalar(height, u, vDown) - sampleScalar(height, u, vUp)) *
-            domain.heightScale / dyDistance;
-        return std::atan(std::sqrt(dx * dx + dy * dy)) * 57.2957795f;
+        return TerrainFieldMath::gradientAtUV(
+            [&](float su, float sv) { return sampleScalar(height, su, sv); },
+            u, v, w, h, metric);
+    }
+
+    /**
+     * @brief Slope in 0-1, preferring the shared field over a local derivation.
+     *
+     * A wired Slope pin and an unwired one must classify the same pixel the
+     * same way, otherwise connecting Terrain Analysis silently restyles the
+     * terrain. Both paths land on TerrainFieldMath::slope01.
+     */
+    float resolveSlope01(const NodeSystem::Image2DData& slopeField,
+                         const NodeSystem::Image2DData& height,
+                         int x, int y, float u, float v,
+                         const PaintDomain& domain) {
+        if (slopeField.isValid()) return clamp01(sampleScalar(slopeField, u, v));
+        return TerrainFieldMath::slope01(heightGradient(height, x, y, domain));
     }
 
     NodeSystem::Image2DData createOutput(int width, int height, int channels) {
@@ -114,6 +127,7 @@ namespace {
 
 NodeSystem::Image2DData evaluateAutoSplat(
     const NodeSystem::Image2DData& height,
+    const NodeSystem::Image2DData& slopeField,
     const PaintDomain& requestedDomain,
     const AutoSplatSettings& settings) {
     PaintDomain domain = requestedDomain;
@@ -130,7 +144,10 @@ NodeSystem::Image2DData evaluateAutoSplat(
             const float u = static_cast<float>(x) / (domain.width - 1);
             const size_t index = static_cast<size_t>(y) * domain.width + x;
             const float worldHeight = sampleScalar(height, u, v) * domain.heightScale;
-            const float slope = slopeDegrees(height, x, y, domain);
+            // Rules are authored in degrees, so the shared 0-1 slope is
+            // converted back through the canonical curve rather than being
+            // compared against a second, privately-scaled angle.
+            const float slope = resolveSlope01(slopeField, height, x, y, u, v, domain) * 90.0f;
             float weights[4] = {};
 
             for (int layer = 0; layer < 4; ++layer) {
@@ -172,23 +189,30 @@ NodeSystem::Image2DData evaluateAutoSplat(
     return result;
 }
 
-NodeSystem::Image2DData evaluateFlowSemantic(
-    const NodeSystem::Image2DData& flow,
+NodeSystem::Image2DData evaluateSemanticControls(
+    const SemanticInputs& inputs,
     const PaintDomain& requestedDomain) {
     PaintDomain domain = requestedDomain;
     domain.width = (std::max)(domain.width, 2);
     domain.height = (std::max)(domain.height, 2);
     auto result = createOutput(domain.width, domain.height, 4);
+
+    // Only R used to be written; G/B/A were hard-zeroed, so a material bound
+    // to Wetness, Ice or Hardness behind this node could never appear. All
+    // four are packed now, and an unconnected one stays 0 rather than being
+    // filled with a guess: these channels reach erosion resistance and soil
+    // capacity, and an invented value there is a guess steering a solver.
+    // terrain.list_layers reports the empty case as channel_coverage 0.
 #pragma omp parallel for
     for (int y = 0; y < domain.height; ++y) {
         const float v = static_cast<float>(y) / (domain.height - 1);
         for (int x = 0; x < domain.width; ++x) {
             const float u = static_cast<float>(x) / (domain.width - 1);
             const size_t index = static_cast<size_t>(y) * domain.width + x;
-            (*result.data)[index * 4 + 0] = clamp01(sampleScalar(flow, u, v));
-            (*result.data)[index * 4 + 1] = 0.0f;
-            (*result.data)[index * 4 + 2] = 0.0f;
-            (*result.data)[index * 4 + 3] = 0.0f;
+            (*result.data)[index * 4 + 0] = clamp01(sampleScalar(inputs.flow, u, v));
+            (*result.data)[index * 4 + 1] = clamp01(sampleScalar(inputs.wetness, u, v));
+            (*result.data)[index * 4 + 2] = clamp01(sampleScalar(inputs.ice, u, v));
+            (*result.data)[index * 4 + 3] = clamp01(sampleScalar(inputs.hardness, u, v));
         }
     }
     return result;
@@ -222,7 +246,7 @@ NodeSystem::Image2DData evaluateSurfaceComposer(
             const size_t index = static_cast<size_t>(y) * domain.width + x;
             const float patch = fractalPatchNoise(
                 u, v, settings.textureScale, settings.seed);
-            const float slope = clamp01(slopeDegrees(inputs.height, x, y, domain) / 60.0f);
+            const float slope = resolveSlope01(inputs.slope, inputs.height, x, y, u, v, domain);
             const float hard = inputs.hardness.isValid()
                 ? clamp01(sampleScalar(inputs.hardness, u, v)) : 0.45f;
             const float soil = inputs.soil.isValid()
@@ -231,9 +255,16 @@ NodeSystem::Image2DData evaluateSurfaceComposer(
             const bool authoredGrass = inputs.grass.isValid();
             const float authoredGrassValue = authoredGrass
                 ? clamp01(sampleScalar(inputs.grass, u, v)) : 0.0f;
-            const float rock = inputs.rock.isValid()
+            // Loose debris at a cliff base is rock too, so it raises the rock
+            // claim wherever it lands - including on ground flat enough that
+            // slope alone would never have called it rocky, which is exactly
+            // where a talus cone sits.
+            const float talus = inputs.talus.isValid()
+                ? clamp01(sampleScalar(inputs.talus, u, v)) : 0.0f;
+            const float rockBase = inputs.rock.isValid()
                 ? clamp01(sampleScalar(inputs.rock, u, v))
                 : clamp01(slope * 0.75f + hard * settings.hardnessInfluence * 0.55f);
+            const float rock = (std::max)(rockBase, talus);
             const float erosionFlow = inputs.flow.isValid()
                 ? clamp01(sampleScalar(inputs.flow, u, v)) : 0.0f;
             const float climateFlow = inputs.meltwater.isValid()
@@ -256,7 +287,10 @@ NodeSystem::Image2DData evaluateSurfaceComposer(
             const float generatedGrass = clamp01(
                 (0.22f + soil * 0.78f) * std::pow(flatness, 1.55f) *
                 (0.48f + wet * 0.52f) * (1.0f - flow * 0.88f) *
-                (1.0f - hard * 0.62f) * (0.68f + patch * 0.32f));
+                (1.0f - hard * 0.62f) * (0.68f + patch * 0.32f) *
+                // Active scree is bare by definition: the cone keeps shedding,
+                // so nothing gets long enough to root.
+                (1.0f - talus * 0.92f));
             const float grass = authoredGrass ? authoredGrassValue : generatedGrass;
 
             float surface = (patch * settings.patchiness + slope * settings.slopeInfluence +
@@ -279,20 +313,70 @@ NodeSystem::Image2DData evaluateSurfaceComposer(
                 continue;
             }
 
-            float remaining = 1.0f - frozenCover;
-            const float requestedRock = inputs.rock.isValid()
-                ? rock : clamp01(rock * settings.rockInfluence);
-            const float rockCoverage = (std::min)(requestedRock, remaining);
-            remaining -= rockCoverage;
+            // The influence dials used to shape only the single-channel
+            // surface mask; in Splat mode the weighted sum above was computed
+            // and then discarded, so five sliders moved nothing. They drive
+            // the channel they name here too.
+            const float patchBreak = clamp01(
+                1.0f + (patch * 2.0f - 1.0f) * settings.patchiness);
+            // Deep, wet soil buries rock rather than competing with it.
+            const float soilCapacity = clamp01(soil * settings.soilInfluence +
+                wet * settings.wetnessInfluence * 0.35f);
+
+            const bool authoredRock = inputs.rock.isValid();
+            const float requestedRock = authoredRock
+                ? rock
+                : clamp01((slope * settings.slopeInfluence +
+                           hard * settings.hardnessInfluence +
+                           flow * settings.flowInfluence * 0.5f) *
+                          settings.rockInfluence * patchBreak) *
+                  (1.0f - soilCapacity * 0.65f);
             const float requestedGrass = authoredGrass
                 ? grass
-                : clamp01(grass * settings.grassInfluence);
-            const float grassCoverage = (std::min)(requestedGrass, remaining);
-            remaining -= grassCoverage;
-            (*result.data)[index * 4 + 0] = grassCoverage;
-            (*result.data)[index * 4 + 1] = rockCoverage;
-            (*result.data)[index * 4 + 2] = frozenCover;
-            (*result.data)[index * 4 + 3] = remaining;
+                : clamp01(grass * settings.grassInfluence * patchBreak);
+
+            // Snow and ice are cover laid over the substrate, so they claim
+            // budget first regardless of what lies beneath.
+            float wSnow = clamp01(frozenCover);
+            float remaining = 1.0f - wSnow;
+            float wGrass = 0.0f;
+            float wRock = 0.0f;
+
+            // An authored mask is a statement of intent; a synthesized one is
+            // a guess. The old fixed snow->rock->grass order let generated
+            // rock consume the budget an explicitly wired grass mask needed,
+            // which is why authored masks looked overwritten.
+            const auto grantClaim = [&remaining](float request, float& target) {
+                target = (std::min)(clamp01(request), (std::max)(remaining, 0.0f));
+                remaining -= target;
+            };
+            if (authoredRock && !authoredGrass) {
+                grantClaim(requestedRock, wRock);
+                grantClaim(requestedGrass, wGrass);
+            } else if (authoredGrass && !authoredRock) {
+                grantClaim(requestedGrass, wGrass);
+                grantClaim(requestedRock, wRock);
+            } else {
+                // Equal standing: scale both against the contested budget
+                // instead of letting a fixed order starve the second layer.
+                const float total = requestedRock + requestedGrass;
+                if (total > 1e-6f) {
+                    const float scale = (std::min)(1.0f, (std::max)(remaining, 0.0f) / total);
+                    wRock = requestedRock * scale;
+                    wGrass = requestedGrass * scale;
+                    remaining -= wRock + wGrass;
+                }
+            }
+
+            // Soil is the substrate: whatever no other layer claimed is soil.
+            // Turning this off publishes the raw claims instead, which Splat
+            // Output now preserves rather than silently renormalizing.
+            float wSoil = settings.soilFillsRemainder ? (std::max)(remaining, 0.0f) : 0.0f;
+
+            (*result.data)[index * 4 + 0] = wGrass;
+            (*result.data)[index * 4 + 1] = wRock;
+            (*result.data)[index * 4 + 2] = wSnow;
+            (*result.data)[index * 4 + 3] = wSoil;
         }
     }
     return result;

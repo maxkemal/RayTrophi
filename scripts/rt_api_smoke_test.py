@@ -205,6 +205,14 @@ try:
 except RuntimeError:
     raised = True
 assert raised, "rt.nodes.add with an unknown graph_type must raise"
+assert callable(rt.nodes.list_ports) and callable(rt.nodes.set_port_visible)
+assert callable(rt.nodes.link_by_key)
+try:
+    rt.nodes.list_ports("material", "__rt_smoke_missing__", 1)
+    raised = False
+except RuntimeError:
+    raised = True
+assert raised, "rt.nodes.list_ports on a missing graph must raise"
 print(f"[rt-smoke] node graph API surface: OK ({len(node_types)} registered types)")
 
 # ── 5.1b — Node parameters (surface + missing-graph raise) ──────────────────

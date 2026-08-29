@@ -55,7 +55,10 @@ struct HydraulicErosionParams {
     float minSpeed = 0.01f;        // Droplet termination velocity threshold
     bool removeSpikes = true;
     bool fillPits = true;
-    bool smoothSurface = true;
+    // Broad 3x3 smoothing erases first-order tributaries after the LEM has
+    // protected and incised them. Channel-aware hillslopeDiffusion is the
+    // physical smoother; keep this legacy cleanup opt-in.
+    bool smoothSurface = false;
     unsigned int seed = 1337u;     // Deterministic CPU/GPU droplet distribution
     ErosionBoundaryMode boundaryMode = ErosionBoundaryMode::Preserve;
     int boundaryWidth = 0;         // Cells; 0 selects a resolution-aware width
@@ -66,11 +69,204 @@ struct HydraulicErosionParams {
     float channelDeposition = 0.22f; // Low-energy sediment settling
     float channelWidthScale = 1.0f;  // Hydraulic geometry width multiplier
     float channelDepthScale = 1.0f;  // Hydraulic geometry depth multiplier
+    // DEPRECATED (2026-08-23): the macro stage carves a fixed valley depth from
+    // a one-shot coarse catchment solve. It is a decoration, not a feedback --
+    // the carved valley never changes the flow that carved it. `fluvialCycle`
+    // supersedes it and the two are mutually exclusive; the macro path is kept
+    // only until the LEM cycle has been validated on real projects.
     bool macroDrainage = true;
     float macroValleyScaleMeters = 140.0f;
     float macroHeadwaterAreaKm2 = 0.012f;
     float macroValleyDepthMeters = 10.0f;
     float macroValleyFloor = 0.35f;
+
+    // ---------------------------------------------------------------------
+    // Landscape Evolution Model cycle
+    // ---------------------------------------------------------------------
+    // The droplet solver sees only the local slope, so a valley floor and a
+    // hillside obey identical physics per droplet and the difference between
+    // them stays linear -- that is the whole reason eroded terrain came out
+    // radially symmetric. This cycle adds the three couplings a real landscape
+    // has and a Monte-Carlo droplet walk structurally cannot have:
+    //   1. drainage-area feedback  (E ~ A^m S^n : superlinear, builds hierarchy)
+    //   2. depression conditioning (lakes spill, the outlet incises, they drain)
+    //   3. downstream sediment transport (load reaches standing water -> delta)
+    // plus in-loop mass wasting and hillslope creep.
+    bool  fluvialCycle = true;
+    int   fluvialIterations = 16;
+    float fluvialTimeStep = 1.0f;     // whole-cycle multiplier; dt = this/iterations
+
+    // Rain. rainRate is a runoff depth per unit time; only its ratio to
+    // settlingVelocity has physical meaning. Orographic rain is the second
+    // symmetry breaker after drainage area: uniform rain gives every catchment
+    // identical input, so only terrain shape can distinguish them.
+    float rainRate = 1.0f;
+    float orographicRain = 0.0f;      // 0 = uniform
+    float rainWindDegrees = 45.0f;
+
+    // Stream power. incisionK is metres of incision at A = 1 km^2 and slope 1
+    // over the WHOLE cycle (dt already divides by the iteration count, so
+    // changing fluvialIterations refines the solve without changing how much
+    // material moves). It scales with terrain size because A is physical.
+    float incisionK = 150.0f;
+    float streamPowerM = 0.5f;
+    float streamPowerN = 1.0f;
+    float slopeMin = 1.0e-4f;         // pow() guard, not a physical floor
+    float slopeMax = 4.0f;
+
+    // Sediment. transportK is the capacity coefficient in the same units as
+    // incisionK; sedimentCover is the strength of the cover effect (a bed
+    // already carrying its capacity is armoured -> alluvial valley floors).
+    float transportK = 240.0f;
+    float sedimentCover = 0.6f;
+    float settlingVelocity = 0.35f;   // larger -> sediment drops sooner
+    int   sedimentRouteSteps = 96;    // cells of downstream travel per iteration
+
+    // ★★★ AVULSION. Route steps between rebuilds of the MFD weights from the
+    // LIVE bed (max(conditioned, bed)) instead of the conditioned surface the
+    // drainage solve produced. 0 disables it and restores the old behaviour.
+    //
+    // Without this the weights are frozen for a whole refresh interval while
+    // the bed aggrades beneath them, so flow keeps using a channel it has
+    // already buried. That is not a small error: an alluvial fan is MADE of
+    // avulsions -- the channel silts up, stops being the lowest path, swings
+    // aside, and the abandoned lobe is left behind. With frozen weights the
+    // load stacks into one ridge, and "a new channel cutting through its own
+    // deposit" cannot happen at all. It is cheap: one local dispatch, no
+    // drainage re-solve, and discharge deliberately stays frozen (a catchment
+    // does not change because a bar grew; a flow path does).
+    int   avulsionInterval = 8;
+
+    // ★★★ ALLUVIAL SPREADING. Fresh deposit relaxes toward a stable low
+    // angle instead of standing where the water happened to drop it. This is
+    // the depositional half of water erosion, and it was absent: the route
+    // pass put material exactly under the channel, so a fan came out as a
+    // narrow ridge and a footslope apron never formed. Real fan surfaces sit
+    // at roughly 1-5 degrees.
+    //
+    // Only loose material moves (bounded by the alluvium thickness). Without
+    // that bound the pass is "relax everything to 2 degrees", which does not
+    // look slightly wrong -- it dissolves the mountains.
+    float alluviumSlopeDegrees = 2.0f;
+    float alluviumRate = 0.5f;
+    int   alluviumSteps = 4;          // 0 disables spreading
+    float alluviumConsolidation = 0.15f;  // mobility lost per spread step
+
+    // Drainage solve. The fill and accumulation are relaxations on the GPU, so
+    // these are convergence budgets, not quality dials: too low leaves basins
+    // over-filled (spurious lakes) and long trunks under-counted (weak main
+    // rivers). The CPU path solves both exactly and is the reference.
+    int   drainageRefreshInterval = 6;
+    int   drainageFillPasses = 96;
+    int   drainageAccumulatePasses = 192;
+    int   drainageCoarsestSize = 128;
+
+    // Mass wasting and creep.
+    bool  massWasting = true;
+    float reposeAngleDegrees = 34.0f;
+    float massWastingRate = 0.5f;
+    int   massWastingSteps = 4;
+    float hillslopeDiffusion = 0.02f; // D in m^2 per whole cycle.
+                                      // 0.35 was erasing small channels every iteration:
+                                      // incision opened them, diffusion closed them, net = blur.
+                                      // 0.02 preserves physical creep on hillslopes without
+                                      // competing against incisionK on tributary channels.
+    float channelRefAreaKm2 = 0.005f; // creep is halved at this catchment area.
+                                      // 0.05 km^2 left tributaries unprotected (full diffusion);
+                                      // 0.005 km^2 shields streams from ~5000 m^2 upward.
+
+    // Numerical limits. These are the difference between a landscape and a
+    // field of spikes, so they are exposed rather than hidden constants.
+    float incisionSafety = 0.5f;      // never cut past this fraction of the
+                                      // drop to the receiver (anti-pit)
+    // ★★★ Total height one cell may gain over the whole run. The per-pass
+    // accommodation limit is `depositionSafety * rise + depositFloor`, and on
+    // FLAT ground `rise` is zero - which is exactly where the anti-dam guard
+    // was supposed to bite. `depositFloor` (1 % of a cell) then applies
+    // unconditionally, every route pass: 16 iterations x 96 route steps x 3
+    // erosion stages is roughly 45 m of unopposed building. Meanwhile incision
+    // is capped at `incisionSafety * dropNorm`, which is also zero on a flat.
+    // A flat cell can therefore only ever GAIN height - a ratchet - and the
+    // river dams itself with its own load, closing a depression upstream.
+    // Measured on the scene that exposed this: deepest fill 38.5 m, a quarter
+    // of the map inside closed depressions.
+    float maxDepositionMeters = 4.0f;
+    float depositionSafety = 0.5f;    // never build past this fraction of the
+                                      // rise to the donor (anti-spike)
+    float maxStepMeters = 0.0f;       // 0 = auto (half a cell)
+    float lakeEpsilonMeters = 0.01f;  // below this a fill residue is not a lake
+
+    // Hydraulic geometry for the published fields.
+    float fluvialWidthScale = 1.0f;
+    float fluvialDepthScale = 1.0f;
+    float fluvialHeadwaterAreaKm2 = 0.01f;
+};
+
+// Convergence budget presets. These set ONLY the cost dials -- iteration count,
+// relaxation pass budgets, transport steps, pyramid depth -- and never the
+// shape dials, so switching quality refines the same landscape instead of
+// producing a different one. Everything they touch is still individually
+// reachable from the panel and from script under Custom.
+enum class FluvialQuality : int { Draft = 0, Balanced = 1, High = 2, Custom = 3 };
+const char* fluvialQualityName(FluvialQuality quality);
+void applyFluvialQuality(HydraulicErosionParams& params, FluvialQuality quality);
+// Reports which preset a parameter set corresponds to, or Custom when it
+// matches none. Used so a loaded project does not claim a preset it has since
+// been edited away from.
+FluvialQuality detectFluvialQuality(const HydraulicErosionParams& params);
+
+// Mass ledger and shape diagnostics for one erosion run. This exists because
+// the failure mode of every stage below is silent: a leak in transport, an
+// under-converged fill, a talus pass that quietly does nothing, all produce a
+// plausible-looking heightfield. Nobody reports those as bugs.
+struct HydraulicErosionStats {
+    double eroded = 0.0;        // normalized height units, summed over cells
+    double deposited = 0.0;
+    double exported = 0.0;      // left the domain through the open boundary
+    double carried = 0.0;       // still in transit when the cycle ended
+    double massError = 0.0;     // eroded - (deposited + exported + carried)
+    double massErrorFraction = 0.0;
+    int    lakeCells = 0;       // cells still under standing water at the end
+    int    closedDepressions = 0;
+    float  lakeAreaFraction = 0.0f;
+    float  maxDrainageAreaKm2 = 0.0f;
+    // ★★★ The largest catchment as a FRACTION of the map. km2 alone cannot be
+    // read - 0.03 km2 is a shredded network on a 1 km terrain and a healthy
+    // trunk on a 100 m one. Single digits mean no trunk river exists, however
+    // convincing the render looks.
+    float  maxDrainageAreaFraction = 0.0f;
+
+    // ★★★ SHAPE OF THE DEPOSIT. The point of alluvial spreading is that the
+    // load stops standing where the water dropped it, and nothing in the mass
+    // ledger can tell those apart: a ridge and a fan of the same volume book
+    // identically. These three do tell them apart, and they must be read
+    // TOGETHER - one of them alone says nothing:
+    //
+    //   * A ridge is a few cells, thick. Small depositedAreaFraction, and
+    //     deepestDepositMeters many times meanDepositMeters (ratio 10+).
+    //   * A fan is many cells, thin. Larger area fraction and a ratio near 2-4,
+    //     because a cone's peak is a small multiple of its mean thickness.
+    //
+    // ★ The insidious reading is a HIGH area fraction with a LOW ratio across
+    // the whole map: that is not a fan, that is the spreading pass having
+    // escaped its loose-material bound and started smoothing bedrock. Check it
+    // against erosion patterns, not against how good the render looks.
+    int    depositedCells = 0;            // deposit thicker than 1 cm
+    float  depositedAreaFraction = 0.0f;
+    float  deepestDepositMeters = 0.0f;
+    float  meanDepositMeters = 0.0f;      // averaged over depositedCells only
+    // lakeCells counts ANY standing water, including the conditioning ladder's
+    // few-ulp lift, so it can read a quarter of the map and mean nothing. These
+    // three carry a physical threshold and are the ones to act on.
+    int    deepLakeCells = 0;        // deeper than 10 cm
+    float  deepLakeAreaFraction = 0.0f;
+    float  deepestLakeMeters = 0.0f;
+    float  drainageDensity = 0.0f;   // channel cells / total cells
+    float  cycleMilliseconds = 0.0f;
+    int    cycleIterations = 0;
+    bool   gpuPath = false;
+
+    void reset() { *this = HydraulicErosionStats(); }
 };
 
 // Optional transient products emitted by the hydraulic solver. These are
@@ -87,6 +283,11 @@ struct HydraulicErosionFields {
     std::vector<float> channelWidth;
     std::vector<float> waterDepth;
     std::vector<float> waterLevel;
+    // LEM products. drainageArea is in m^2 (resolution independent), lakeDepth
+    // in metres of standing water above the bed.
+    std::vector<float> drainageArea;
+    std::vector<float> lakeDepth;
+    HydraulicErosionStats stats;
 
     void reset(int w, int h) {
         width = w; height = h;
@@ -96,6 +297,8 @@ struct HydraulicErosionFields {
         directionX.assign(n, 0.0f); directionY.assign(n, 0.0f);
         channelWidth.assign(n, 0.0f); waterDepth.assign(n, 0.0f);
         waterLevel.assign(n, 0.0f);
+        drainageArea.assign(n, 0.0f); lakeDepth.assign(n, 0.0f);
+        stats.reset();
     }
 };
 
@@ -452,7 +655,23 @@ private:
 
     int next_id = 1;
 
-    // CUDA Driver API Handles
+    // =====================================================================
+    // DEPRECATED (2026-08-23): CUDA erosion back end.
+    // ---------------------------------------------------------------------
+    // Vulkan compute is the primary GPU path for this project and now carries
+    // every erosion stage, including the LEM cycle, which was never ported to
+    // CUDA and will not be. Nothing in the UI selects CUDA; it is reachable
+    // only as a fallback after the Vulkan path has already failed, which means
+    // it is effectively untested on every run. Keeping two solvers alive "just
+    // in case" is exactly how this codebase has produced silent divergence
+    // before, so these handles, initCuda(), erosion_kernels.cu and the
+    // erosion_kernels.ptx build step are all scheduled for removal.
+    //
+    // REMOVAL PLAN: once the LEM cycle has been validated on real projects,
+    // delete this block, the `cuda*`/`*KernelFunc` members, initCuda(), every
+    // `if (cudaInitialized)` branch in TerrainManager.cpp, erosion_kernels.cu
+    // and its .ptx packaging. Do not add anything new below this line.
+    // =====================================================================
     void* cudaModule = nullptr;
     void* erosionKernelFunc = nullptr;
     void* smoothKernelFunc = nullptr;
@@ -471,5 +690,19 @@ private:
     void* edgePreservationKernelFunc = nullptr;
     void* thermalWithHardnessKernelFunc = nullptr;
     bool cudaInitialized = false;
+    [[deprecated("CUDA erosion is deprecated; Vulkan compute is the primary and only "
+                 "maintained GPU erosion path. Scheduled for removal.")]]
     void initCuda();
+
+    // Ledger of the most recent erosion run, published so a script can assert
+    // on mass balance and drainage shape instead of eyeballing a render.
+    HydraulicErosionStats lastStats;
+
+public:
+    const HydraulicErosionStats& lastErosionStats() const { return lastStats; }
+    // A terrain node may refine the public, spatial diagnostics after the
+    // solver returns (for example, net aggradation rather than the gross
+    // transport ledger). Keep RTAPI's last-run report aligned with the node
+    // products without changing the conservative mass totals.
+    void publishLastErosionStats(const HydraulicErosionStats& stats) { lastStats = stats; }
 };

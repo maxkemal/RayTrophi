@@ -110,6 +110,8 @@ public:
     IconSettings& getIconSettings() { return iconSettings_; }
     const IconSettings& getIconSettings() const { return iconSettings_; }
 
+    ImVec4 getCategoryColor(const std::string& categoryName, const ImVec4& defaultColor) const;
+
 private:
     ThemeManager() { registerDefaultThemes(); }
     std::vector<Theme> themes_;

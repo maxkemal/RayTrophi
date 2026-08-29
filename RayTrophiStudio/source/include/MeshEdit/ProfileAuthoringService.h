@@ -6,6 +6,7 @@
 
 struct UIContext;
 class SceneHistory;
+class Matrix4x4;
 namespace DNA { class GeometryDetail; }
 
 namespace MeshEdit {
@@ -20,6 +21,7 @@ struct ProfilePublishResult {
 ProfilePublishResult publishGeneratedProfile(UIContext& ctx, SceneHistory& history,
                                              std::shared_ptr<DNA::GeometryDetail> geometry,
                                              const std::string& requested_name,
-                                             const std::string& operation_id);
+                                             const std::string& operation_id,
+                                             const Matrix4x4* initial_transform = nullptr);
 
 } // namespace MeshEdit

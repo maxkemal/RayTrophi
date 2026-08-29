@@ -69,6 +69,11 @@ namespace NodeSystem {
         
         // Destructor
         virtual ~NodeBase() = default;
+
+        /// Called after the graph has assigned node/pin identities. Domains
+        /// use this to attach presentation metadata without putting domain
+        /// policy into the generic graph container.
+        virtual void onRegisteredToGraph() {}
         
         // ========================================================================
         // PIN MANAGEMENT
@@ -83,6 +88,7 @@ namespace NodeSystem {
                       ImageUnit unit = ImageUnit::Unknown) {
             Pin pin;
             pin.name = name;
+            pin.stableKey = name;
             pin.kind = PinKind::Input;
             pin.dataType = type;
             pin.imageSemantic = semantic;
@@ -101,6 +107,7 @@ namespace NodeSystem {
                        ImageUnit unit = ImageUnit::Unknown) {
             Pin pin;
             pin.name = name;
+            pin.stableKey = name;
             pin.kind = PinKind::Output;
             pin.dataType = type;
             pin.imageSemantic = semantic;

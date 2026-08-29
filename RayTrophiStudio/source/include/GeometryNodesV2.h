@@ -80,6 +80,7 @@
 #include "Triangle.h"
 #include "MeshModifiers.h"
 #include "MeshEdit/HalfEdgeMesh.h"   // Extrude/Inset — same half-edge core the facade Edit Mode uses
+#include "MeshEdit/CurveNodeData.h"
 #include "Transform.h"
 #include "CurlNoise.h"   // Physics::Noise::fbm3D — same host noise force fields/emitters use
 #include <memory>
@@ -115,6 +116,9 @@ namespace GeometryNodesV2 {
         /// bound object, to avoid compounding on the previous Evaluate's output).
         std::function<std::shared_ptr<TriangleMesh>(const std::string&)> resolveObjectMesh;
 
+        /// Resolve an editable scene spline into a fresh immutable snapshot.
+        std::function<NodeSystem::CurveValue(const std::string&)> resolveSpline;
+
         /// Gather per-face Triangle facades for EVERY scene object sharing a nodeName —
         /// unlike resolveObjectMesh (single flat mesh), this handles multi-material
         /// imports, where one nodeName owns SEVERAL sibling TriangleMesh entries (and
@@ -142,6 +146,7 @@ namespace GeometryNodesV2 {
     /// zero until the user opens the picker — and because it re-reads the scene on
     /// every open, freshly added/deleted objects show up with no polling/tracking.
     inline std::function<std::vector<std::string>()> g_sceneObjectListProvider;
+    inline std::function<std::vector<std::string>()> g_splineObjectListProvider;
 
     // ============================================================================
     // NODE TYPES ENUM
@@ -168,6 +173,12 @@ namespace GeometryNodesV2 {
         Inset,
         Bevel,
         Remesh,
+        SplineObject,
+        ResampleCurve,
+        CurveTaper,
+        CurveTwist,
+        CurveWave,
+        CurveToMesh,
     };
 
     // ============================================================================
@@ -3454,12 +3465,22 @@ namespace GeometryNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
     };
 
+    // Curve nodes live in a focused module; this large legacy header receives
+    // declarations and factory wiring only.
+#include "MeshEdit/GeometryCurveNodes.h"
+
     // ============================================================================
     // GEOMETRY GRAPH V2
     // ============================================================================
 
     class GeometryNodeGraphV2 : public NodeSystem::GraphBase {
     public:
+        // Transient live-preview state. Curve sources are re-snapshotted when
+        // this signature changes; it is intentionally not serialized.
+        std::size_t curvePreviewSignature = 0;
+        bool curvePreviewInitialized = false;
+        bool liveCurvePreview = true;
+
         // Snapshot of the object's PRISTINE mesh, captured once when this graph is first
         // created/bound (see the "Geometry Graph" window block in scene_ui.cpp). Evaluation
         // always reads from here, never from whatever is currently live in the scene —
@@ -3493,6 +3514,12 @@ namespace GeometryNodesV2 {
                 case NodeType::Inset:         node = addNode<InsetNode>(); break;
                 case NodeType::Bevel:         node = addNode<BevelNode>(); break;
                 case NodeType::Remesh:        node = addNode<RemeshNode>(); break;
+                case NodeType::SplineObject:  node = addNode<SplineObjectNode>(); break;
+                case NodeType::ResampleCurve: node = addNode<ResampleCurveNode>(); break;
+                case NodeType::CurveTaper:    node = addNode<CurveTaperNode>(); break;
+                case NodeType::CurveTwist:    node = addNode<CurveTwistNode>(); break;
+                case NodeType::CurveWave:     node = addNode<CurveWaveNode>(); break;
+                case NodeType::CurveToMesh:   node = addNode<CurveToMeshNode>(); break;
             }
             if (node) {
                 node->x = x;

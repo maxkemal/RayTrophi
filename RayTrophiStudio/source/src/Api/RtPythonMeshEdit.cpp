@@ -25,6 +25,13 @@ MeshEdit::SplinePrimitiveType parseSplinePrimitive(const std::string& value) {
     throw std::invalid_argument("primitive must be circle, rectangle, line or arc");
 }
 
+MeshEdit::ProfileRevolveAxis parseProfileRevolveAxis(const std::string& value) {
+    if (value == "x" || value == "X") return MeshEdit::ProfileRevolveAxis::X;
+    if (value == "y" || value == "Y") return MeshEdit::ProfileRevolveAxis::Y;
+    if (value == "z" || value == "Z") return MeshEdit::ProfileRevolveAxis::Z;
+    throw std::invalid_argument("axis must be x, y or z");
+}
+
 py::dict profileSweepPreviewDict(const MeshEdit::ProfileSweepResult& result) {
     py::dict out;
     out["ok"] = result.report.ok;
@@ -245,31 +252,53 @@ void registerMeshEditBindings(py::module_& mesh) {
                                              int angle_segments,
                                              int profile_samples,
                                              float start_angle,
-                                             float end_angle) {
+                                             float end_angle,
+                                             float radius_offset,
+                                             const std::string& axis,
+                                             float pivot_x, float pivot_y, float pivot_z) {
         MeshEdit::ProfileRevolveSettings settings;
         settings.angle_segments = angle_segments;
         settings.profile_samples = profile_samples;
         settings.start_angle = start_angle;
         settings.end_angle = end_angle;
+        settings.axis = parseProfileRevolveAxis(axis);
+        settings.radius_offset = radius_offset;
+        settings.axis_pivot = Vec3(pivot_x, pivot_y, pivot_z);
         return profileRevolvePreviewDict(MeshEdit::previewProfileRevolve(preset, settings));
     }, py::arg("preset") = "bottle", py::arg("angle_segments") = 32,
        py::arg("profile_samples") = 24, py::arg("start_angle") = 0.0f,
-       py::arg("end_angle") = 2.0f * M_PI);
+       py::arg("end_angle") = 2.0f * M_PI, py::arg("radius_offset") = 0.0f,
+       py::arg("axis") = "y", py::arg("pivot_x") = 0.0f,
+       py::arg("pivot_y") = 0.0f, py::arg("pivot_z") = 0.0f);
 
     mesh.def("profile_revolve_commit", [](const std::string& preset,
                                             const std::string& object,
                                             int angle_segments,
-                                            int profile_samples) {
+                                            int profile_samples,
+                                            float start_angle,
+                                            float end_angle,
+                                            float radius_offset,
+                                            const std::string& axis,
+                                            float pivot_x, float pivot_y, float pivot_z) {
         if (!rtapi::g_ctx || !rtapi::g_history) throw std::runtime_error("rtapi scene binding is unavailable");
         MeshEdit::ProfileRevolveSettings settings;
         settings.angle_segments = angle_segments;
         settings.profile_samples = profile_samples;
+        settings.start_angle = start_angle;
+        settings.end_angle = end_angle;
+        settings.axis = parseProfileRevolveAxis(axis);
+        settings.radius_offset = radius_offset;
+        settings.axis_pivot = Vec3(pivot_x, pivot_y, pivot_z);
         const auto preview = MeshEdit::previewProfileRevolve(preset, settings);
         if (!preview.report.ok) return profileRevolvePreviewDict(preview);
         return profilePublishDict(MeshEdit::publishGeneratedProfile(
             *rtapi::g_ctx, *rtapi::g_history, preview.geometry, object, "profile.revolve"));
     }, py::arg("preset") = "bottle", py::arg("object") = "",
-       py::arg("angle_segments") = 32, py::arg("profile_samples") = 24);
+       py::arg("angle_segments") = 32, py::arg("profile_samples") = 24,
+       py::arg("start_angle") = 0.0f, py::arg("end_angle") = 2.0f * M_PI,
+       py::arg("radius_offset") = 0.0f, py::arg("axis") = "y",
+       py::arg("pivot_x") = 0.0f, py::arg("pivot_y") = 0.0f,
+       py::arg("pivot_z") = 0.0f);
 
     mesh.def("profile_loft_preview", [](const std::vector<std::string>& sections,
                                          int samples_per_section,

@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * File:          Api/RtPython.cpp
@@ -340,6 +340,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     // ── 2D Spline authoring (shared rtapi core) ─────────────────────────
     py::module_ spline = module.def_submodule("spline", "2D spline authoring and evaluation source");
+    spline.def("create", [](const std::string& primitive, const std::string& name,
+                              const std::string& plane) {
+        std::string created;
+        requireResult(rtapi::createSpline(primitive, name, plane, created));
+        return created;
+    }, py::arg("primitive") = "open_line", py::arg("name") = "Spline",
+       py::arg("plane") = "xy");
     spline.def("list", []() {
         std::vector<rtapi::SplineInfo> infos;
         requireResult(rtapi::listSplines(infos));
@@ -378,6 +385,135 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::extrudeSplineEndpoint(name, endpoint, vec3FromPython(position), index));
         return index;
     }, py::arg("name"), py::arg("endpoint"), py::arg("position"));
+    spline.def("insert_keyframe", [](const std::string& name, int frame,
+                                      bool object_transform, bool points) {
+        requireResult(rtapi::insertSplineKeyframe(name, frame, object_transform, points));
+    }, py::arg("name"), py::arg("frame"), py::arg("object_transform") = true,
+       py::arg("points") = true);
+    spline.def("remove_keyframe", [](const std::string& name, int frame,
+                                      bool object_transform, bool points) {
+        requireResult(rtapi::removeSplineKeyframe(name, frame, object_transform, points));
+    }, py::arg("name"), py::arg("frame"), py::arg("object_transform") = true,
+       py::arg("points") = true);
+    spline.def("list_keyframes", [](const std::string& name) {
+        std::vector<rtapi::SplineKeyInfo> keys;
+        requireResult(rtapi::listSplineKeyframes(name, keys));
+        py::list result;
+        for (const auto& key : keys) {
+            py::dict item;
+            item["frame"] = key.frame;
+            item["object_transform"] = key.has_object_transform;
+            item["points"] = key.has_points;
+            item["point_count"] = key.point_count;
+            result.append(item);
+        }
+        return result;
+    }, py::arg("name"));
+    spline.def("animation_self_test", []() {
+        std::string details;
+        requireResult(rtapi::splineAnimationSelfTest(details));
+        return details;
+    });
+    spline.def("create_skin", [](const std::string& splineName,
+                                  const std::string& outputName, float radius,
+                                  int pathSamples, int radialSegments,
+                                  bool capStart, bool capEnd, bool usePointRadius,
+                                  float taperStart, float taperEnd, float taperFalloff,
+                                  float twistStart, float twistEnd, float waveAmplitude,
+                                  float waveCycles, float wavePhase, float waveNoise,
+                                  int waveSeed, int waveAxis,
+                                  const std::string& customProfile) {
+        rtapi::SplineSkinSettings settings;
+        settings.custom_profile = customProfile;
+        settings.radius = radius; settings.path_samples = pathSamples;
+        settings.radial_segments = radialSegments; settings.cap_start = capStart;
+        settings.cap_end = capEnd; settings.use_point_radius = usePointRadius;
+        settings.taper_start = taperStart; settings.taper_end = taperEnd;
+        settings.taper_falloff = taperFalloff;
+        settings.twist_start_degrees = twistStart;
+        settings.twist_end_degrees = twistEnd;
+        settings.wave_amplitude = waveAmplitude; settings.wave_cycles = waveCycles;
+        settings.wave_phase_degrees = wavePhase; settings.wave_noise = waveNoise;
+        settings.wave_seed = waveSeed; settings.wave_axis = waveAxis;
+        rtapi::SplineSkinInfo info;
+        requireResult(rtapi::createSplineSkinAdvanced(splineName, outputName, settings, info));
+        py::dict result;
+        result["object_name"] = info.object_name;
+        result["source_node"] = info.source_node;
+        result["profile_node"] = info.profile_node;
+        result["taper_node"] = info.taper_node;
+        result["twist_node"] = info.twist_node;
+        result["wave_node"] = info.wave_node;
+        result["skin_node"] = info.skin_node;
+        result["output_node"] = info.output_node;
+        result["vertex_count"] = info.vertex_count;
+        result["triangle_count"] = info.triangle_count;
+        return result;
+    }, py::arg("spline"), py::arg("output") = "", py::arg("radius") = 0.1f,
+       py::arg("path_samples") = 48, py::arg("radial_segments") = 12,
+       py::arg("cap_start") = true, py::arg("cap_end") = true,
+       py::arg("use_point_radius") = true,
+       py::arg("taper_start") = 1.0f, py::arg("taper_end") = 1.0f,
+       py::arg("taper_falloff") = 1.0f,
+       py::arg("twist_start_degrees") = 0.0f, py::arg("twist_end_degrees") = 0.0f,
+       py::arg("wave_amplitude") = 0.0f, py::arg("wave_cycles") = 1.0f,
+       py::arg("wave_phase_degrees") = 0.0f, py::arg("wave_noise") = 0.0f,
+       py::arg("wave_seed") = 0, py::arg("wave_axis") = 1,
+       py::arg("custom_profile") = "");
+    spline.def("finalize_skin", [](const std::string& splineName) {
+        rtapi::SplineSkinInfo info;
+        requireResult(rtapi::finalizeSplineSkinPreview(splineName, info));
+        py::dict result;
+        result["object_name"] = info.object_name;
+        result["vertex_count"] = info.vertex_count;
+        result["triangle_count"] = info.triangle_count;
+        return result;
+    }, py::arg("spline"));
+    spline.def("clear_skin", [](const std::string& splineName) {
+        requireResult(rtapi::clearSplineSkinPreview(splineName));
+    }, py::arg("spline"));
+
+    py::module_ geometryCache = module.def_submodule(
+        "geometry_cache", "Fixed-topology flat-mesh deformation cache");
+    auto geometryCacheDict = [](const rtapi::GeometryCacheInfo& info) {
+        py::dict item;
+        item["object_name"] = info.object_name;
+        item["start_frame"] = info.start_frame;
+        item["end_frame"] = info.end_frame;
+        item["frame_step"] = info.frame_step;
+        item["vertex_count"] = info.vertex_count;
+        item["sample_count"] = info.sample_count;
+        item["memory_bytes"] = info.memory_bytes;
+        item["enabled"] = info.enabled;
+        item["topology_valid"] = info.topology_valid;
+        item["source_stale"] = info.source_stale;
+        return item;
+    };
+    geometryCache.def("bake", [geometryCacheDict](const std::string& objectName,
+                                                    int startFrame, int endFrame,
+                                                    int frameStep) {
+        rtapi::GeometryCacheInfo info;
+        requireResult(rtapi::bakeGeometryCache(
+            objectName, startFrame, endFrame, frameStep, info));
+        return geometryCacheDict(info);
+    }, py::arg("object_name"), py::arg("start_frame"), py::arg("end_frame"),
+       py::arg("frame_step") = 1);
+    geometryCache.def("status", [geometryCacheDict](const std::string& objectName) {
+        rtapi::GeometryCacheInfo info;
+        requireResult(rtapi::getGeometryCacheInfo(objectName, info));
+        return geometryCacheDict(info);
+    }, py::arg("object_name"));
+    geometryCache.def("set_enabled", [](const std::string& objectName, bool enabled) {
+        requireResult(rtapi::setGeometryCacheEnabled(objectName, enabled));
+    }, py::arg("object_name"), py::arg("enabled"));
+    geometryCache.def("clear", [](const std::string& objectName) {
+        requireResult(rtapi::clearGeometryCache(objectName));
+    }, py::arg("object_name"));
+    geometryCache.def("self_test", []() {
+        std::string details;
+        requireResult(rtapi::geometryCacheSelfTest(details));
+        return details;
+    });
 
     // ── Mesh Modifiers (Faz 5.2b) ───────────────────────────────────────
     py::module_ modifiers = module.def_submodule("modifiers", "Mesh modifier stack: subdivision, simple, smooth");
@@ -2269,13 +2405,159 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if (kwargs.contains("talus_angle")) settings.talus_angle = py::cast<float>(kwargs["talus_angle"]);
         if (kwargs.contains("amount")) settings.amount = py::cast<float>(kwargs["amount"]);
         if (kwargs.contains("undo")) settings.undo = py::cast<bool>(kwargs["undo"]);
+        // Landscape Evolution Model cycle. Absent keywords keep the solver
+        // default rather than resetting it, so tuning one dial from a script
+        // does not quietly clear the other twenty.
+        auto optInt = [&](const char* key, int& dst) {
+            if (kwargs.contains(key)) dst = py::cast<int>(kwargs[key]);
+        };
+        auto optBool = [&](const char* key, int& dst) {
+            if (kwargs.contains(key)) dst = py::cast<bool>(kwargs[key]) ? 1 : 0;
+        };
+        auto optFloat = [&](const char* key, float& dst) {
+            if (kwargs.contains(key)) dst = py::cast<float>(kwargs[key]);
+        };
+        optBool("fluvial_cycle", settings.fluvial_cycle);
+        if (kwargs.contains("fluvial_quality"))
+            settings.fluvial_quality = py::cast<std::string>(kwargs["fluvial_quality"]);
+        optBool("mass_wasting", settings.mass_wasting);
+        optInt("fluvial_iterations", settings.fluvial_iterations);
+        optInt("sediment_route_steps", settings.sediment_route_steps);
+        optInt("avulsion_interval", settings.avulsion_interval);
+        optInt("alluvium_steps", settings.alluvium_steps);
+        optInt("drainage_refresh_interval", settings.drainage_refresh_interval);
+        optInt("drainage_fill_passes", settings.drainage_fill_passes);
+        optInt("drainage_accumulate_passes", settings.drainage_accumulate_passes);
+        optInt("drainage_coarsest_size", settings.drainage_coarsest_size);
+        optInt("mass_wasting_steps", settings.mass_wasting_steps);
+        optFloat("fluvial_time_step", settings.fluvial_time_step);
+        optFloat("rain_rate", settings.rain_rate);
+        optFloat("orographic_rain", settings.orographic_rain);
+        optFloat("rain_wind_degrees", settings.rain_wind_degrees);
+        optFloat("incision_k", settings.incision_k);
+        optFloat("stream_power_m", settings.stream_power_m);
+        optFloat("stream_power_n", settings.stream_power_n);
+        optFloat("transport_k", settings.transport_k);
+        optFloat("sediment_cover", settings.sediment_cover);
+        optFloat("settling_velocity", settings.settling_velocity);
+        optFloat("repose_angle_degrees", settings.repose_angle_degrees);
+        optFloat("alluvium_slope_degrees", settings.alluvium_slope_degrees);
+        optFloat("alluvium_rate", settings.alluvium_rate);
+        optFloat("alluvium_consolidation", settings.alluvium_consolidation);
+        optFloat("mass_wasting_rate", settings.mass_wasting_rate);
+        optFloat("hillslope_diffusion", settings.hillslope_diffusion);
+        optFloat("incision_safety", settings.incision_safety);
+        optFloat("deposition_safety", settings.deposition_safety);
+        optFloat("max_step_meters", settings.max_step_meters);
+        optFloat("lake_epsilon_meters", settings.lake_epsilon_meters);
+        optFloat("headwater_area_km2", settings.headwater_area_km2);
         requireResult(rtapi::erodeTerrain(name, settings));
     }, py::arg("name"), py::arg("type") = "hydraulic", py::arg("backend") = "auto");
+    terrain.def("erosion_stats", []() {
+        rtapi::TerrainErosionStats stats;
+        requireResult(rtapi::getTerrainErosionStats(stats));
+        py::dict out;
+        out["eroded"] = stats.eroded;
+        out["deposited"] = stats.deposited;
+        out["exported"] = stats.exported;
+        out["carried"] = stats.carried;
+        out["mass_error"] = stats.mass_error;
+        out["mass_error_fraction"] = stats.mass_error_fraction;
+        out["lake_cells"] = stats.lake_cells;
+        out["lake_area_fraction"] = stats.lake_area_fraction;
+        out["max_drainage_area_km2"] = stats.max_drainage_area_km2;
+        out["max_drainage_area_fraction"] = stats.max_drainage_area_fraction;
+        out["deep_lake_cells"] = stats.deep_lake_cells;
+        out["deep_lake_area_fraction"] = stats.deep_lake_area_fraction;
+        out["deepest_lake_meters"] = stats.deepest_lake_meters;
+        out["deposited_cells"] = stats.deposited_cells;
+        out["deposited_area_fraction"] = stats.deposited_area_fraction;
+        out["deepest_deposit_meters"] = stats.deepest_deposit_meters;
+        out["mean_deposit_meters"] = stats.mean_deposit_meters;
+        out["drainage_density"] = stats.drainage_density;
+        out["cycle_iterations"] = stats.cycle_iterations;
+        out["gpu_path"] = stats.gpu_path;
+        return out;
+    });
     terrain.def("apply_preset", [](const std::string& name, const std::string& preset,
                                     bool replace_graph, bool add_satmap) {
-        requireResult(rtapi::applyTerrainPreset(name, preset, replace_graph, add_satmap));
+        std::vector<std::string> faults;
+        requireResult(rtapi::applyTerrainPreset(name, preset, faults, replace_graph, add_satmap));
+        // Returned rather than raised: a partially wired setup is a real
+        // result the caller must be able to assert on.
+        py::list result;
+        for (const auto& fault : faults) result.append(fault);
+        return result;
     }, py::arg("name"), py::arg("preset"), py::arg("replace_graph") = false,
-       py::arg("add_satmap") = false);
+       py::arg("add_satmap") = false,
+       "Apply a terrain preset. Returns the list of links the setup could not "
+       "make; an empty list means the graph was wired completely.");
+    terrain.def("list_layers", [](const std::string& name) {
+        std::vector<rtapi::TerrainLayerInfo> layers;
+        requireResult(rtapi::listTerrainLayers(name, layers));
+        py::list result;
+        for (const auto& l : layers) {
+            py::dict d;
+            d["slot"] = l.slot;
+            d["channel"] = l.channel;
+            d["semantic_overlay"] = l.semantic_overlay;
+            d["bound"] = l.bound;
+            d["material"] = l.material;
+            d["uv_scale"] = l.uv_scale;
+            d["overlay_strength"] = l.overlay_strength;
+            // Overlays render UNDER the snow the splat map placed; this
+            // exempts a slot from that burial.
+            d["overlay_ignore_cover"] = l.overlay_ignore_cover;
+            // channel_coverage 0 on a bound overlay = the graph never fills
+            // that channel; the material cannot appear at any strength.
+            d["channel_measured"] = l.channel_measured;
+            // channel_constant: min==max, a flat fill that selects nothing
+            // while still reporting full coverage.
+            d["channel_constant"] = l.channel_constant;
+            d["channel_min"] = l.channel_min;
+            d["channel_max"] = l.channel_max;
+            d["channel_mean"] = l.channel_mean;
+            d["channel_coverage"] = l.channel_coverage;
+            result.append(d);
+        }
+        return result;
+    }, py::arg("name"),
+       "List the eight terrain layer slots. Slots 0-3 are splat-weighted and "
+       "normalized against each other; slots 4-7 are semantic overlays "
+       "(Flow/Wetness/Ice/Hardness) composited over that blend.");
+    terrain.def("set_layer", [](const std::string& name, int slot,
+                                py::object material, py::object uv_scale,
+                                py::object overlay_strength,
+                                py::object overlay_ignore_cover) {
+        // None means "leave alone"; an empty string clears the slot. Merging
+        // the two would leave no way to unbind a material.
+        std::string materialName;
+        const bool hasMaterial = !material.is_none();
+        if (hasMaterial) materialName = material.cast<std::string>();
+        float uvScale = 1.0f;
+        const bool hasUvScale = !uv_scale.is_none();
+        if (hasUvScale) uvScale = uv_scale.cast<float>();
+        float strength = 1.0f;
+        const bool hasStrength = !overlay_strength.is_none();
+        if (hasStrength) strength = overlay_strength.cast<float>();
+        bool ignoreCover = false;
+        const bool hasIgnoreCover = !overlay_ignore_cover.is_none();
+        if (hasIgnoreCover) ignoreCover = overlay_ignore_cover.cast<bool>();
+        requireResult(rtapi::setTerrainLayer(name, slot,
+                                             hasMaterial ? &materialName : nullptr,
+                                             hasUvScale ? &uvScale : nullptr,
+                                             hasStrength ? &strength : nullptr,
+                                             hasIgnoreCover ? &ignoreCover : nullptr));
+    }, py::arg("name"), py::arg("slot"), py::arg("material") = py::none(),
+       py::arg("uv_scale") = py::none(), py::arg("overlay_strength") = py::none(),
+       py::arg("overlay_ignore_cover") = py::none(),
+       "Bind or edit one terrain layer slot. material=\"\" clears the slot; "
+       "clearing a semantic overlay restores the built-in shading for that "
+       "channel. overlay_strength applies to slots 4-7 only. "
+       "overlay_ignore_cover exempts a slot from snow burial - overlays "
+       "normally render UNDER the snow the splat map placed, because a "
+       "semantic value is a measurement and its coverage is a visibility "
+       "decision.");
     terrain.def("list_satmap_presets", []() {
         std::vector<rtapi::TerrainSatMapPresetInfo> presets;
         requireResult(rtapi::listTerrainSatMapPresets(presets));
@@ -2294,14 +2576,208 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::applyTerrainSatMapPreset(name, preset, warnings));
         return warnings;
     }, py::arg("name"), py::arg("preset"));
+    terrain.def("slope_area_fit", [](const std::string& name) {
+        rtapi::TerrainSlopeAreaFit fit;
+        requireResult(rtapi::getTerrainSlopeAreaFit(name, fit));
+        py::dict out;
+        out["measured"] = fit.measured;
+        out["r_squared"] = fit.r_squared;
+        out["concavity_index"] = fit.concavity_index;
+        out["intercept"] = fit.intercept;
+        out["bin_count"] = fit.bin_count;
+        out["channel_cells"] = fit.channel_cells;
+        out["flow_peak"] = fit.flow_peak;
+        out["status"] = fit.status;
+        return out;
+    }, py::arg("name"),
+       "Fit S = k * A^-theta over the channel network. A fluvially graded "
+       "landscape gives a straight log-log line with theta near 0.4-0.6; "
+       "noise and diffusion scatter. Judge r_squared before theta - a "
+       "confident theta fitted to scatter is worse than no number.");
+    terrain.def("landform_stats", [](const std::string& name) {
+        rtapi::TerrainLandformStats st;
+        requireResult(rtapi::getTerrainLandformStats(name, st));
+        py::dict out;
+        out["measured"] = st.measured;
+        out["status"] = st.status;
+        out["width"] = st.width;
+        out["height"] = st.height;
+        out["size_meters"] = st.size_meters;
+        out["cell_meters"] = st.cell_meters;
+        out["relief_meters"] = st.relief_meters;
+        out["flat_fraction"] = st.flat_fraction;
+        out["gentle_fraction"] = st.gentle_fraction;
+        out["median_slope_deg"] = st.median_slope_deg;
+        out["p95_slope_deg"] = st.p95_slope_deg;
+        out["cliff_fraction"] = st.cliff_fraction;
+        out["roughness_slope_ratio"] = st.roughness_slope_ratio;
+        out["steep_roughness_meters"] = st.steep_roughness_meters;
+        out["gentle_roughness_meters"] = st.gentle_roughness_meters;
+        out["relief_window_meters"] = st.relief_window_meters;
+        out["relief_window_relief"] = st.relief_window_relief;
+        out["broad_growth"] = st.broad_growth;
+        out["landform_scale_meters"] = st.landform_scale_meters;
+        out["landform_scale_saturated"] = st.landform_scale_saturated;
+        out["realised_hurst"] = st.realised_hurst;
+        out["hurst_sample_count"] = st.hurst_sample_count;
+        out["spectrum_kink"] = st.spectrum_kink;
+        out["spectrum_kink_signed"] = st.spectrum_kink_signed;
+        out["spectrum_kink_meters"] = st.spectrum_kink_meters;
+        out["local_relief_p10"] = st.local_relief_p10;
+        out["local_relief_p90"] = st.local_relief_p90;
+        out["local_relief_ratio"] = st.local_relief_ratio;
+        out["lowland_fraction"] = st.lowland_fraction;
+        out["midland_fraction"] = st.midland_fraction;
+        out["hypsometric_integral"] = st.hypsometric_integral;
+        return out;
+    }, py::arg("name"),
+       "Shape statistics measured on the BAKED heightfield, never read back "
+       "from a generator's own settings. relief_window_meters and "
+       "relief_window_relief are the relief-vs-window ladder itself; "
+       "broad_growth is the relief added by the last doubling of the window "
+       "and is the sharpest read on it: near 1.0 the field is already "
+       "uncorrelated at a quarter of the tile, so there are no landforms at "
+       "the tile's own scale and the map reads as one texture repeated. "
+       "landform_scale_meters is the growth knee, coarse and octave-quantised, "
+       "and it is NOT expected to equal the authored Feature Size. "
+       "cliff_fraction is the area over 40 degrees - ground too steep to "
+       "hold soil, so the share that must read as bare rock - and "
+       "roughness_slope_ratio is cell-scale roughness on the steepest fifth "
+       "over the gentlest fifth. Read those two TOGETHER: a terrain with no "
+       "steep ground still scores a high ratio, because its steepest fifth is "
+       "only its least flat fifth. "
+       "local_relief_ratio near 1 "
+       "means every part of the map is equally rugged - no massifs, no basins. "
+       "lowland_fraction well under midland_fraction means the hypsometry is "
+       "gaussian rather than depositional, which is what a fitted fBm gives "
+       "and what a landscape does not. "
+       "spectrum_kink is macro-micro coherence in one number: the largest "
+       "departure of any octave from the fitted power law, in the same units "
+       "as realised_hurst. A landscape whose layers agree has ONE law from "
+       "the grid to the landform, so a detail pass that does not match what "
+       "it sits on, or a band guard quietly dropping octaves, shows up here "
+       "and ONLY here - slope, relief and hypsometry all stay healthy while "
+       "it is there. Under about 0.05 the scales are one landscape. "
+       "spectrum_kink_meters names the window it sits at and "
+       "spectrum_kink_signed says which way: negative is starved of detail "
+       "at that scale, positive is carrying too much. "
+       "realised_hurst is fitted only below "
+       "landform_scale_meters; above it the curve flattens by construction and "
+       "including those windows drags any exponent toward 0.5.");
+    terrain.def("flow_authority", [](const std::string& name) {
+        rtapi::TerrainFlowAuthority authority;
+        requireResult(rtapi::getTerrainFlowAuthority(name, authority));
+        py::dict out;
+        out["has_flow_node"] = authority.has_flow_node;
+        out["evaluated"] = authority.evaluated;
+        out["discharge_measured"] = authority.discharge_measured;
+        out["erosion_unwired"] = authority.erosion_unwired;
+        out["source"] = authority.source;
+        out["has_river_network"] = authority.has_river_network;
+        out["river_network_source"] = authority.river_network_source;
+        out["river_area_physical"] = authority.river_area_physical;
+        out["river_direction_channels"] = authority.river_direction_channels;
+        out["river_lake_mask_connected"] = authority.river_lake_mask_connected;
+        out["river_lake_spill_connected"] = authority.river_lake_spill_connected;
+        return out;
+    }, py::arg("name"),
+       "Report which field the graph's Flow node classified. source == "
+       "\"derived_erosion_unwired\" means the graph has an erosion sim whose "
+       "discharge is not wired into Flow, so channels come from bare geometry "
+       "while the render shows the eroded surface. river_network_source reports "
+       "whether River Network reads one paired authority (\"watershed\") or two "
+       "different producers (\"mixed\"). It no longer answers \"hydraulic\": the "
+       "compact port contract moved Drainage Area and Flow Direction off "
+       "Hydraulic Erosion, so a network fed from its Flow pin (sediment "
+       "transport, not discharge) reads as mixed. "
+       "river_lake_mask_connected and river_lake_spill_connected diagnose the "
+       "accepted-lake exclusion and inlet-to-outlet transfer contract.");
     terrain.def("calculate_flow", [](const std::string& name) {
-        requireResult(rtapi::calculateTerrainFlow(name));
+        rtapi::TerrainFlowStats stats;
+        requireResult(rtapi::calculateTerrainFlow(name, stats));
+        py::dict out;
+        out["width"] = stats.width;
+        out["height"] = stats.height;
+        out["max_accumulation"] = stats.max_accumulation;
+        out["mean_accumulation"] = stats.mean_accumulation;
+        out["channel_cells"] = stats.channel_cells;
+        out["border_terminations"] = stats.border_terminations;
+        out["inland_terminations"] = stats.inland_terminations;
+        out["inland_termination_ratio"] = stats.inland_termination_ratio;
+        return out;
     }, py::arg("name"));
     terrain.def("sample_height", [](const std::string& name, float world_x, float world_z) {
         float height = 0.0f;
         requireResult(rtapi::sampleTerrainHeight(name, world_x, world_z, height));
         return height;
     }, py::arg("name"), py::arg("world_x"), py::arg("world_z"));
+    // Terrain brush strokes. `dabs` is a sequence of (world_x, world_z) pairs;
+    // a stroke is a drag, so the surface takes the whole path rather than one
+    // point. Returns the before/after measurement, not just success.
+    auto read_terrain_dabs = [](const py::sequence& dabs) {
+        std::vector<rtapi::TerrainBrushDab> out;
+        for (const auto& item : dabs) {
+            py::sequence pair = py::cast<py::sequence>(item);
+            if (py::len(pair) != 2)
+                throw std::runtime_error("each terrain dab must be (world_x, world_z)");
+            rtapi::TerrainBrushDab dab;
+            dab.world_x = py::cast<float>(pair[0]);
+            dab.world_z = py::cast<float>(pair[1]);
+            out.push_back(dab);
+        }
+        if (out.empty()) throw std::runtime_error("a terrain stroke needs at least one dab");
+        return out;
+    };
+    terrain.def("sculpt", [read_terrain_dabs](const std::string& name, const py::sequence& dabs,
+                                              const py::kwargs& kwargs) -> py::dict {
+        rtapi::TerrainSculptSettings settings;
+        if (kwargs.contains("mode")) settings.mode = py::cast<std::string>(kwargs["mode"]);
+        if (kwargs.contains("radius")) settings.radius = py::cast<float>(kwargs["radius"]);
+        if (kwargs.contains("strength")) settings.strength = py::cast<float>(kwargs["strength"]);
+        if (kwargs.contains("curve")) settings.curve = py::cast<float>(kwargs["curve"]);
+        if (kwargs.contains("dt")) settings.dt = py::cast<float>(kwargs["dt"]);
+        if (kwargs.contains("use_fixed_height")) settings.use_fixed_height = py::cast<bool>(kwargs["use_fixed_height"]);
+        if (kwargs.contains("flatten_target")) settings.flatten_target = py::cast<float>(kwargs["flatten_target"]);
+        if (kwargs.contains("stamp_texture")) settings.stamp_texture_path = py::cast<std::string>(kwargs["stamp_texture"]);
+        if (kwargs.contains("stamp_rotation")) settings.stamp_rotation = py::cast<float>(kwargs["stamp_rotation"]);
+        if (kwargs.contains("undo")) settings.undo = py::cast<bool>(kwargs["undo"]);
+        rtapi::TerrainBrushResult out;
+        requireResult(rtapi::sculptTerrain(name, read_terrain_dabs(dabs), settings, out));
+        py::dict d;
+        d["dab_count"] = out.dab_count;
+        d["height_before"] = out.height_before;
+        d["height_after"] = out.height_after;
+        d["height_delta"] = out.height_after - out.height_before;
+        d["field_min_before"] = out.field_min_before;
+        d["field_max_before"] = out.field_max_before;
+        d["field_min_after"] = out.field_min_after;
+        d["field_max_after"] = out.field_max_after;
+        return d;
+    }, py::arg("name"), py::arg("dabs"),
+       "Run a terrain sculpt stroke. mode=raise|lower|flatten|smooth|stamp. "
+       "Returns the world height under the first dab before and after, so a "
+       "raise that does not raise is visible as height_delta <= 0.");
+    terrain.def("paint_splat", [read_terrain_dabs](const std::string& name, const py::sequence& dabs,
+                                                   const py::kwargs& kwargs) -> py::dict {
+        rtapi::TerrainSplatPaintSettings settings;
+        if (kwargs.contains("channel")) settings.channel = py::cast<int>(kwargs["channel"]);
+        if (kwargs.contains("radius")) settings.radius = py::cast<float>(kwargs["radius"]);
+        if (kwargs.contains("strength")) settings.strength = py::cast<float>(kwargs["strength"]);
+        if (kwargs.contains("dt")) settings.dt = py::cast<float>(kwargs["dt"]);
+        if (kwargs.contains("undo")) settings.undo = py::cast<bool>(kwargs["undo"]);
+        rtapi::TerrainSplatPaintResult out;
+        requireResult(rtapi::paintTerrainSplat(name, read_terrain_dabs(dabs), settings, out));
+        py::dict d;
+        d["dab_count"] = out.dab_count;
+        d["channel"] = out.channel;
+        d["coverage_before"] = out.coverage_before;
+        d["coverage_after"] = out.coverage_after;
+        d["coverage_delta"] = out.coverage_after - out.coverage_before;
+        return d;
+    }, py::arg("name"), py::arg("dabs"),
+       "Paint one terrain splat channel along a stroke. Returns the mean channel "
+       "weight over the splat map before and after: a stroke that leaves "
+       "coverage_delta at 0 did not paint.");
     terrain.def("carve_river", [](const std::string& name, const std::string& river,
                                    const py::kwargs& kwargs) {
         rtapi::TerrainRiverCarveSettings settings;
@@ -2745,6 +3221,15 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return link_id;
     }, py::arg("graph_type"), py::arg("graph_name"), py::arg("from_node"),
        py::arg("from_output"), py::arg("to_node"), py::arg("to_input"));
+    nodes.def("link_by_key", [](const std::string& graph_type, const std::string& graph_name,
+                                 unsigned int from_node, const std::string& from_output,
+                                 unsigned int to_node, const std::string& to_input) {
+        unsigned int link_id = 0;
+        requireResult(rtapi::linkNodesByKey(graph_type, graph_name, from_node, from_output,
+                                            to_node, to_input, link_id));
+        return link_id;
+    }, py::arg("graph_type"), py::arg("graph_name"), py::arg("from_node"),
+       py::arg("from_output"), py::arg("to_node"), py::arg("to_input"));
     nodes.def("list", [](const std::string& graph_type, const std::string& graph_name) {
         std::vector<rtapi::NodeDesc> descs;
         requireResult(rtapi::listNodes(graph_type, graph_name, descs));
@@ -2760,6 +3245,37 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         return result;
     }, py::arg("graph_type"), py::arg("graph_name"));
+
+    nodes.def("list_ports", [](const std::string& graph_type, const std::string& graph_name,
+                                unsigned int node_id) {
+        std::vector<rtapi::NodePortInfo> ports;
+        requireResult(rtapi::listNodePorts(graph_type, graph_name, node_id, ports));
+        py::list result;
+        for (const auto& p : ports) {
+            py::dict item;
+            item["index"] = p.index;
+            item["direction"] = p.direction;
+            item["key"] = p.key;
+            item["name"] = p.name;
+            item["type"] = p.data_type;
+            item["exposure"] = p.exposure;
+            item["section"] = p.section;
+            item["visible"] = p.visible;
+            item["connected"] = p.connected;
+            result.append(std::move(item));
+        }
+        return result;
+    }, py::arg("graph_type"), py::arg("graph_name"), py::arg("node_id"));
+    nodes.def("set_port_visible", [](const std::string& graph_type,
+                                      const std::string& graph_name,
+                                      unsigned int node_id,
+                                      const std::string& direction,
+                                      const std::string& port_key,
+                                      bool visible) {
+        requireResult(rtapi::setNodePortVisible(graph_type, graph_name, node_id,
+                                                direction, port_key, visible));
+    }, py::arg("graph_type"), py::arg("graph_name"), py::arg("node_id"),
+       py::arg("direction"), py::arg("port_key"), py::arg("visible"));
 
     // Node parameters (Faz 5.1b): a node's input-pin default values. list_params
     // enumerates them (index/name/type/connected/value); get/set_param address a

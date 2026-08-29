@@ -1,4 +1,4 @@
-#include "SceneSelection.h"
+﻿#include "SceneSelection.h"
 #include "Light.h"
 #include "Camera.h"
 #include "Triangle.h"
@@ -360,6 +360,30 @@ bool SceneSelection::hasSelection() const {
     return !multi_selection.empty();
 }
 
+// ★★★ AN INDEX IS A SLOT, NOT AN IDENTITY.
+//
+// world.objects is reordered under the UI's feet: the terrain re-registers its
+// own mesh, deletions compact the vector, imports append. Every cached
+// object_index (mesh_cache, tri_to_index, SelectableItem) is therefore a guess
+// about a MOMENT, and two different objects can carry the same number.
+//
+// The index comparison below is kept because purely index-addressed items still
+// exist, but any stronger identity that DISAGREES now vetoes it. Without the
+// veto the hierarchy drew one object as selected while the selection — and so
+// the gizmo — held another: click the cube, drag, and the terrain moves.
+//
+// A differing Triangle pointer is deliberately NOT a veto: several facades of
+// one mesh are different pointers to the same object.
+static bool selectionIndexMatchIsContradicted(const SelectableItem& a,
+                                              const SelectableItem& b) {
+    if (!a.name.empty() && !b.name.empty() && a.name != b.name) return true;
+    if (a.mesh_object && b.mesh_object && a.mesh_object != b.mesh_object) return true;
+    Transform* a_trans = selectedObjectTransform(a);
+    Transform* b_trans = selectedObjectTransform(b);
+    if (a_trans && b_trans && a_trans != b_trans) return true;
+    return false;
+}
+
 bool SceneSelection::isSelected(const SelectableItem& item) const {
     for (const auto& s : multi_selection) {
         if (s.type != item.type) continue;
@@ -375,13 +399,19 @@ bool SceneSelection::isSelected(const SelectableItem& item) const {
                 Transform* item_trans = selectedObjectTransform(item);
                 if (s_trans && s_trans == item_trans) return true;
             }
-            if (s.object_index >= 0 && s.object_index == item.object_index) return true;
+            if (s.object_index >= 0 && s.object_index == item.object_index &&
+                !selectionIndexMatchIsContradicted(s, item)) return true;
             if (s.object && item.object) {
                 Transform* s_trans = selectedObjectTransform(s);
                 Transform* item_trans = selectedObjectTransform(item);
                 if (s_trans && s_trans == item_trans) return true;
             }
-            if (s.object == item.object) return true;
+            // Splines carry no Triangle facade, so without this the null==null
+            // fall-through below reported EVERY spline as the selected one.
+            if (s.spline_object || item.spline_object) {
+                return s.spline_object == item.spline_object;
+            }
+            if (s.object && s.object == item.object) return true;
         }
         else if (s.type == SelectableType::Light) {
             if (s.light == item.light) return true;
@@ -449,13 +479,17 @@ void SceneSelection::removeFromSelection(const SelectableItem& item) {
                     Transform* item_trans = selectedObjectTransform(item);
                     if (s_trans && s_trans == item_trans) return true;
                 }
-                if (s.object_index >= 0 && s.object_index == item.object_index) return true;
+                if (s.object_index >= 0 && s.object_index == item.object_index &&
+                !selectionIndexMatchIsContradicted(s, item)) return true;
                 if (s.object && item.object) {
                     Transform* s_trans = selectedObjectTransform(s);
                     Transform* item_trans = selectedObjectTransform(item);
                     if (s_trans && s_trans == item_trans) return true;
                 }
-                return s.object == item.object;
+                if (s.spline_object || item.spline_object) {
+                    return s.spline_object == item.spline_object;
+                }
+                return s.object && s.object == item.object;
             }
             else if (s.type == SelectableType::Light) {
                 return s.light == item.light;

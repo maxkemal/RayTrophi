@@ -20,6 +20,8 @@
 
 #include "imgui.h"
 #include "TerrainNodesV2.h"
+#include "TerrainNodePortPanel.h"
+#include "scene_ui_node_palette.hpp"
 #include "TerrainSatMapPresetLibrary.h"
 #include "TerrainManager.h"
 #include "NodeSystem/NodeEditorUIV2.h"
@@ -71,6 +73,12 @@ public:
     // Mask preview cache and controls
     uint32_t lastPreviewedNodeId = 0;
     std::vector<float> lastPreviewedData;
+    /// The field's own range and unit, kept separate from the display range so
+    /// the readout describes the data rather than the instrument.
+    float lastPreviewTrueMin = 0.0f;
+    float lastPreviewTrueMax = 1.0f;
+    bool lastPreviewLogScaled = false;
+    NodeSystem::ImageUnit lastPreviewUnit = NodeSystem::ImageUnit::Unknown;
     int lastPreviewedWidth = 0;
     int lastPreviewedHeight = 0;
     float lastPreviewMin = 0.0f;
@@ -107,7 +115,8 @@ public:
             {"Landform", ImVec4(0.58f, 0.42f, 0.30f, 1.0f), {
                 {NodeType::MountainRange, "Mountain Range / Orogeny"},
                 {NodeType::BasinValley, "Basin & Valley"},
-                {NodeType::TerrainDetail, "Terrain Detail"}
+                {NodeType::TerrainDetail, "Terrain Detail"},
+                {NodeType::SurfaceRelief, "Surface Relief"}
             }},
             {"Erosion", ImVec4(0.3f, 0.5f, 0.9f, 1.0f), {
                 {NodeType::HydraulicErosion, "Hydraulic"},
@@ -127,7 +136,7 @@ public:
                 {NodeType::HeightMask, "Height Mask"},
                 {NodeType::SlopeMask, "Slope Mask"},
                 {NodeType::CurvatureMask, "Curvature Mask"},
-                {NodeType::FlowMask, "Flow / Soil"},
+                {NodeType::FlowMask, "Flow"},
                 {NodeType::ExposureMask, "Sun Exposure"},
                 {NodeType::MaskCombine, "Mask Combine"},
                 {NodeType::MaskMorphology, "Dilate / Erode / Blur"},
@@ -191,7 +200,8 @@ public:
             }},
             {"Utility", ImVec4(0.35f, 0.62f, 0.72f, 1.0f), {
                 {NodeType::Resample, "Resample"},
-                {NodeType::ChannelExtract, "Channel Extract"}
+                {NodeType::ChannelExtract, "Channel Extract"},
+                {NodeType::Transform, "Transform"}
             }},
             {"SatMap", ImVec4(0.85f, 0.35f, 0.65f, 1.0f), {
                 {NodeType::SatMapColorRamp, "SatMap ColorRamp"},
@@ -204,7 +214,9 @@ public:
                 {NodeType::PlateTectonics, "Plate Tectonics"},
                 {NodeType::Fold, "Fold / Compression"},
                 {NodeType::Lithology, "Lithology"},
-                {NodeType::Strata, "Strata"}
+                {NodeType::Strata, "Strata"},
+                {NodeType::StructuralHardness, "Structural Hardness"},
+                {NodeType::CraterCaldera, "Crater / Caldera"}
             }}
         };
         
@@ -585,6 +597,7 @@ public:
         auto* foliageLayer = dynamic_cast<FoliageLayerNode*>(node);
         if (foliageLayer) foliageLayer->propertyThumbnailProvider = onFoliageThumbnail;
         node->drawContent();
+        const bool portPresentationChanged = drawTerrainNodePortPanel(*node, graph);
         if (foliageLayer) foliageLayer->propertyThumbnailProvider = {};
         const bool parameterChanged = node->dirty;
         node->dirty = wasDirty || parameterChanged;
@@ -603,6 +616,9 @@ public:
             pendingAutoPreviewNodeId = node->id;
             pendingAutoPreviewSince = ImGui::GetTime();
             ++maskPreviewRevision;
+        }
+        if (portPresentationChanged) {
+            ProjectManager::getInstance().markModified();
         }
         
         // Pop all styling
@@ -739,15 +755,42 @@ public:
                     lastPreviewedHeight = imgData->height;
                     lastPreviewedRevision = maskPreviewRevision;
                     const auto previewSemantic = node->outputs[maskOutputIndex].imageSemantic;
+                    lastPreviewUnit = image.unit;
+                    lastPreviewLogScaled = false;
                     if (previewSemantic == NodeSystem::ImageSemantic::Mask) {
                         // Masks have an authored absolute range. Auto-normalizing
                         // every frame can visually cancel Contrast/Multiply edits.
                         lastPreviewMin = 0.0f;
                         lastPreviewMax = 1.0f;
+                        lastPreviewTrueMin = 0.0f;
+                        lastPreviewTrueMax = 1.0f;
                     } else {
                         auto minMax = std::minmax_element(lastPreviewedData.begin(), lastPreviewedData.end());
-                        lastPreviewMin = *minMax.first;
-                        lastPreviewMax = *minMax.second;
+                        lastPreviewTrueMin = *minMax.first;
+                        lastPreviewTrueMax = *minMax.second;
+                        lastPreviewMin = lastPreviewTrueMin;
+                        lastPreviewMax = lastPreviewTrueMax;
+
+                        // A linear stretch is the wrong instrument for a
+                        // heavy-tailed field, and it fails in the direction
+                        // that hides the bug: drainage area, discharge and
+                        // grain size all put nearly every cell near the floor
+                        // with a handful of cells carrying the peak, so the
+                        // preview renders black and the node looks dead while
+                        // the Range readout says the numbers are fine.
+                        //
+                        // asMaskField is the same log compression the pin
+                        // boundary already applies. The inspector was the one
+                        // consumer that never got it.
+                        if (imgData->channels == 1) {
+                            const auto compressed = TerrainFieldMath::asMaskField(image);
+                            if (compressed.isValid() && compressed.data->size() == pixels) {
+                                lastPreviewedData = *compressed.data;
+                                lastPreviewMin = 0.0f;
+                                lastPreviewMax = 1.0f;
+                                lastPreviewLogScaled = true;
+                            }
+                        }
                     }
                     updateMaskPreviewTexture();
                     previewDisplayColors.clear();
@@ -923,7 +966,24 @@ public:
             ImGui::TextDisabled("Size: %dx%d", srcW, srcH);
             ImGui::TextDisabled("Preview: %dx%d GPU texture", MASK_PREVIEW_TEXTURE_SIZE,
                                 MASK_PREVIEW_TEXTURE_SIZE);
-            ImGui::TextDisabled("Range: %.3f - %.3f", minVal, maxVal);
+            // The readout reports the FIELD's range in its own unit, not the
+            // display range. Printing 0..1 for a 64 mm grain-size map would be
+            // a measurement that describes the instrument.
+            const char* unitName = NodeSystem::getImageUnitName(lastPreviewUnit);
+            if (unitName && unitName[0] != '\0') {
+                ImGui::TextDisabled("Range: %.4g - %.4g %s",
+                                    lastPreviewTrueMin, lastPreviewTrueMax, unitName);
+            } else {
+                ImGui::TextDisabled("Range: %.4g - %.4g", lastPreviewTrueMin, lastPreviewTrueMax);
+            }
+            if (lastPreviewLogScaled) {
+                ImGui::TextColored(ImVec4(0.65f, 0.75f, 0.90f, 1.0f), "Display: log scale");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("This field is heavy-tailed, so the preview is log\n"
+                                      "compressed. A linear stretch would render it almost\n"
+                                      "entirely black and the node would look dead.");
+                }
+            }
         } else if (lastPreviewedNodeId == node->id && lastPreviewedWidth == 0) {
             ImGui::TextDisabled("No evaluated mask cache.");
             ImGui::TextDisabled("Press Refresh to compute an isolated preview.");
@@ -1542,56 +1602,16 @@ private:
     }
 
     void drawNodeLibrary(TerrainNodeGraphV2& graph, TerrainObject* terrain) {
-        ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "Node Library");
-        ImGui::Separator();
-        
-        // Search box
-        ImGui::PushItemWidth(-1);
-        ImGui::InputTextWithHint("##Search", "Search...", searchBuffer, sizeof(searchBuffer));
-        ImGui::PopItemWidth();
-        ImGui::Spacing();
-        
-        std::string searchStr = searchBuffer;
-        std::transform(searchStr.begin(), searchStr.end(), searchStr.begin(), ::tolower);
-        
-        for (auto& category : categories) {
-            ImGui::PushStyleColor(ImGuiCol_Header, category.color);
-            bool categoryOpen = ImGui::CollapsingHeader(category.name, ImGuiTreeNodeFlags_DefaultOpen);
-            ImGui::PopStyleColor();
-            
-            if (categoryOpen) {
-                ImGui::Indent(8);
-                for (auto& [type, name] : category.nodes) {
-                    std::string nameLower = name;
-                    std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
-                    
-                    if (!searchStr.empty() && nameLower.find(searchStr) == std::string::npos) continue;
-                    
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.25f, 1.0f));
-                    
-                    // Make button a drag source
-                    ImGui::Button(name, ImVec2(-1, 0));
-                    
-                    // Begin drag source when button is clicked and dragged
-                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-                        // Store the node type being dragged
-                        ImGui::SetDragDropPayload("TERRAIN_NODE_TYPE", &type, sizeof(NodeType));
-                        
-                        // Show preview tooltip
-                        ImGui::Text("+ %s", name);
-                        ImGui::EndDragDropSource();
-                    }
-                    
-                    // Tooltip on hover
-                    if (ImGui::IsItemHovered() && !ImGui::IsMouseDragging(0)) {
-                        ImGui::SetTooltip("Drag to canvas");
-                    }
-                    
-                    ImGui::PopStyleColor();
-                }
-                ImGui::Unindent(8);
-            }
-        }
+        // Wire up the click-to-add callback from the modern palette
+        ModernTerrainNodePalette::instance().onNodeClicked = [&](NodeType type) {
+            // Spawn node in the center of the view
+            float spawnX = (-editor.scrollX + ImGui::GetWindowSize().x * 0.5f) / editor.zoom;
+            float spawnY = (-editor.scrollY + ImGui::GetWindowSize().y * 0.5f) / editor.zoom;
+            NodeSystem::NodeBase* node = graph.addTerrainNode(type, spawnX, spawnY);
+            addNodeToActiveLayer(graph, node);
+            ProjectManager::getInstance().markModified();
+        };
+        ModernTerrainNodePalette::instance().render(graph, terrain, searchBuffer, sizeof(searchBuffer));
     }
     
     template<typename ContextT>
@@ -1607,6 +1627,21 @@ private:
         ImGui::SameLine();
 
         static bool includeSatMapWithSetup = false;
+        // A setup that could not make a link used to say nothing at all: the
+        // graph looked built, the composer fell back to synthesized values,
+        // and the render merely looked plausible. Surface the count here and
+        // the detail in the log so a half-wired setup is visible immediately.
+        const auto reportSetupWiring = [&graph](std::string& status) {
+            const auto& faults = graph.lastSetupWiringFaults();
+            if (faults.empty()) return;
+            status += " - " + std::to_string(faults.size()) + " link(s) REFUSED";
+            for (const auto& fault : faults) {
+                std::fprintf(stderr, "[Terrain Setup] refused %s.%s -> %s.%s: %s\n",
+                             fault.fromNode.c_str(), fault.fromPin.c_str(),
+                             fault.toNode.c_str(), fault.toPin.c_str(),
+                             fault.reason.c_str());
+            }
+        };
         if (ImGui::Button("Setups")) ImGui::OpenPopup("TerrainSetupsMenu");
         if (ImGui::BeginPopup("TerrainSetupsMenu")) {
             ImGui::Checkbox("Include SatMap Colorizer", &includeSatMapWithSetup);
@@ -1616,6 +1651,7 @@ private:
                     if (includeSatMapWithSetup) graph.addSatMapSetup("Alpine");
                     frameAllNodes(graph);
                     setupStatus = "Snow layer added: base masks preserved";
+                    reportSetupWiring(setupStatus);
                     ProjectManager::getInstance().markModified();
                 } else {
                     setupStatus = "Snow setup needs a connected Height Output";
@@ -1627,6 +1663,7 @@ private:
                     if (includeSatMapWithSetup) graph.addSatMapSetup("Temperate");
                     frameAllNodes(graph);
                     setupStatus = "Hydrology ready: one-control presets + detailed river/lake layers";
+                    reportSetupWiring(setupStatus);
                     ProjectManager::getInstance().markModified();
                 } else {
                     setupStatus = "River setup needs a connected Height Output";
@@ -1638,6 +1675,7 @@ private:
                     if (includeSatMapWithSetup) graph.addSatMapSetup("Temperate");
                     frameAllNodes(graph);
                     setupStatus = "Geology ready: folds, lithology, strata and reusable fields";
+                    reportSetupWiring(setupStatus);
                     ProjectManager::getInstance().markModified();
                 } else {
                     setupStatus = "Geology setup needs a connected Height Output";
@@ -1696,6 +1734,7 @@ private:
                         frameAllNodes(graph);
                         setupStatus = std::string("Biome fields ready: ") +
                             BiomeComposerNode::getPresetName(preset);
+                        reportSetupWiring(setupStatus);
                         ProjectManager::getInstance().markModified();
                     } else {
                         setupStatus = "Biome setup needs a connected Height Output";
@@ -1713,6 +1752,7 @@ private:
                 if (graph.addBiomeFoliageSetup()) {
                     frameAllNodes(graph);
                     setupStatus = "Biome foliage ready: bind any unmatched foliage layers";
+                    reportSetupWiring(setupStatus);
                     ProjectManager::getInstance().markModified();
                 } else {
                     setupStatus = "Could not create biome foliage setup";

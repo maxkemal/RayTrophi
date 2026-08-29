@@ -260,23 +260,41 @@ static constexpr uint32_t VK_MAT_FLAG_WATER_RIVER = (1u << 23); // UV-flow-align
 static constexpr uint32_t VK_MAT_FLAG_VOLUME = (1u << 24); // Closed triangle mesh volume boundary
 
 /**
- * @brief Per-terrain splat-layer descriptor uploaded to binding 12.
- *        Contains up to 4 material layer indices, per-layer UV scales,
- *        and the splat map texture handle used for blending weights.
+ * @brief Per-terrain layer descriptor uploaded to binding 12.
+ *
+ * Eight slots. Slots 0-3 are weighted by the RGBA splat map and normalized
+ * against each other - they partition the surface. Slots 4-7 are weighted
+ * by the semantic map (Flow, Wetness, Ice, Hardness) and composited OVER
+ * that blend, each by its own unnormalized weight, because a semantic
+ * weight states how strongly a condition holds rather than what share of
+ * the pixel it owns.
+ *
+ * overlay_mask says which semantic slots actually carry a material. It
+ * cannot be inferred from layer_mat_id, because 0 is a valid material id -
+ * testing for a non-zero id would silently bind material 0 to every
+ * unbound overlay.
+ *
+ * Bits 8-11 mirror it for a second question: whether slot 4+s is exempt from
+ * snow burial. Overlays composite UNDER the snow the splat map placed,
+ * because a semantic value is a measurement and its coverage is a visibility
+ * decision - flow reads 0.9 under two metres of snow, and painting it there
+ * put a river across a snow-filled valley. The spare bits of a field that was
+ * already a mask cost nothing, so this needs no ABI change.
  */
 struct VK_GPU_ALIGN(16) VkTerrainLayerData {
-    uint32_t layer_mat_id[4];   // Material buffer indices for layers 0-3
-    float    layer_uv_scale[4]; // UV tiling scales for layers 0-3
+    uint32_t layer_mat_id[8];   // 0-3 splat-weighted, 4-7 semantic overlays
+    float    layer_uv_scale[8]; // UV tiling scale per slot
+    float    overlay_strength[4]; // Artist dial for slots 4-7
     uint32_t splat_map_tex;     // Combined-image-sampler slot for the RGBA splat map
-    uint32_t layer_count;       // Number of active layers (1-4)
+    uint32_t layer_count;       // Number of active splat layers (1-4)
     uint32_t macro_color_tex;   // Combined-image-sampler slot for macro color map
     float    macro_color_strength; // Blend strength [0.0 - 1.0]
     uint32_t semantic_map_tex;  // R=Flow, G=Wetness, B=Ice, A=Hardness
     float    semantic_wet_darkening;
     float    semantic_wet_roughness;
-    float    semantic_pad;
+    uint32_t overlay_mask;      // bit s = slot 4+s bound; bit 8+s = exempt from snow burial
 };
-static_assert(sizeof(VkTerrainLayerData) == 64, "VkTerrainLayerData size mismatch");
+static_assert(sizeof(VkTerrainLayerData) == 112, "VkTerrainLayerData size mismatch");
 
 /**
  * @brief Vulkan-Specific GPU Light struct.

@@ -10,6 +10,8 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "World.h"
+#include "MeshEdit/SplineAnimation.h"
+#include "MeshEdit/SplineObject.h"
 
 // Helper to apply transform to an object (or group of triangles with same name)
 
@@ -74,13 +76,34 @@ void SceneUI::processAnimations(UIContext& ctx) {
 
     bool anything_changed = false;
     bool tlas_dirty = false;
+    bool spline_geometry_changed = false;
 
     // 2. Iterate Tracks
     for (auto& [name, track] : ctx.scene.timeline.tracks) {
         // Evaluate track at current frame
         Keyframe kf = track.evaluate(current_frame);
+
+        std::shared_ptr<MeshEdit::SplineObject> splineTarget;
+        if (kf.has_transform || kf.has_spline) {
+            for (const auto& object : ctx.scene.world.objects) {
+                auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object);
+                if (spline && spline->nodeName == name) { splineTarget = std::move(spline); break; }
+            }
+        }
+        if (splineTarget) {
+            bool transformChanged = false;
+            bool pointsChanged = false;
+            std::string splineError;
+            if (MeshEdit::applySplineAnimationTrack(*splineTarget, track, current_frame,
+                    &transformChanged, &pointsChanged, &splineError)) {
+                anything_changed = anything_changed || transformChanged || pointsChanged;
+                spline_geometry_changed = spline_geometry_changed || transformChanged || pointsChanged;
+            } else if (!splineError.empty()) {
+                SCENE_LOG_ERROR("Spline animation '" + name + "': " + splineError);
+            }
+        }
         
-        if (kf.has_transform) {
+        if (kf.has_transform && !splineTarget) {
              const auto& tk = kf.transform;
              if (tk.has_position || tk.has_rotation || tk.has_scale) {
                  // Use mesh_cache for fast lookup
@@ -243,6 +266,40 @@ void SceneUI::processAnimations(UIContext& ctx) {
             }
         }
     } // End Track Loop
+
+    if (spline_geometry_changed) {
+        for (auto& [hostName, graph] : ctx.scene.geometry_node_graphs) {
+            if (!graph || !graph->liveCurvePreview) continue;
+            const auto cacheIt = ctx.scene.geometry_caches.find(hostName);
+            if (cacheIt != ctx.scene.geometry_caches.end() && cacheIt->second.enabled &&
+                !cacheIt->second.samples.empty()) continue;
+            bool usesCurves = false;
+            const std::size_t signature = GeometryNodesV2::curveGraphSourceSignature(
+                *graph, ctx.scene.world.objects, &usesCurves);
+            if (!usesCurves || (graph->curvePreviewInitialized &&
+                                graph->curvePreviewSignature == signature)) continue;
+            graph->curvePreviewInitialized = true;
+            graph->curvePreviewSignature = signature;
+            evaluateGeometryGraph(ctx, hostName, *graph, true);
+        }
+    }
+
+    // Geometry caches are evaluated after procedural/keyframe sources and win
+    // for their host mesh. They mutate only canonical flat P/P_orig (+ derived
+    // normals); topology, UVs and materials stay on the mesh.
+    for (auto& [objectName, clip] : ctx.scene.geometry_caches) {
+        if (!clip.enabled || clip.samples.empty()) continue;
+        std::shared_ptr<TriangleMesh> target;
+        for (const auto& object : ctx.scene.world.objects) {
+            auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object);
+            if (mesh && mesh->nodeName == objectName) { target = std::move(mesh); break; }
+        }
+        if (!target) continue;
+        const auto applied = Animation::applyGeometryCacheFrame(clip, *target, current_frame);
+        if (!applied.changed) continue;
+        anything_changed = true;
+        if (ctx.backend_ptr) ctx.backend_ptr->updateFlatMeshBLAS(objectName, target.get());
+    }
     
     // 3. Trigger General Updates if changed
     if (anything_changed) {

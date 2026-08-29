@@ -3,7 +3,8 @@
 struct UIContext;
 
 namespace MeshEdit {
-// Draws and applies the transform gizmo for the selected spline control point.
+// Draws the gizmo at the active point and applies its translation delta to all
+// selected spline control points.
 // Returns true while spline point editing owns the gizmo for this frame.
 bool drawProfileSplinePointGizmo(UIContext& ctx);
 }

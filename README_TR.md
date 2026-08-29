@@ -230,9 +230,10 @@ Hapsolmuş hava ve dalga tepesi potansiyellerinden üretilen ikincil **sprey** (
 ### 🏔️ Arazi, biome & hidroloji grafiği
 
 - Gerçek zamanlı sculpt fırçaları (yükselt, alçalt, yumuşat, düzleştir, stamp) ve World Machine / Gaea iş akışları için 16-bit heightmap içe/dışa aktarımı
-- **Terrain Nodes V2** — 66 kayıtlı node, canlı property düzenleme, önizleme, gruplama, tekrar kullanılabilir kurulumlar ve Apply ile sahneye çıktı sunan, serileştirilen tahribatsız grafik
+- **Terrain Nodes V2** — 78 kayıtlı node, canlı property düzenleme, önizleme, gruplama, tekrar kullanılabilir kurulumlar ve Apply ile sahneye çıktı sunan, serileştirilen tahribatsız grafik
 - **Üretim & şekillendirme** — heightmap/hardness girdileri; prosedürel noise, fault, mesa, shear, terrace, smooth, normalize, resample, remap, blend, math, clamp, overlay ve screen işlemleri
 - **Erozyon & jeoloji** — hidrolik, termal, fluvial ve rüzgâr erozyonu; sediman birikimi, alüvyon yelpazesi, delta, ıslaklık, toprak derinliği, litoloji ve katman sentezi
+- **Yapısal sertlik & yüzey relief'i** — eğim/dışbükeylikten çıkarılan açık kaya direnci erozyonu yönlendirir; hidrolik akış yönü, toprak ve sertlik ise tekdüze generator noise yerine çözünürlük güvenli kaya dokusu ve ince akış olukları üretir
 - **Arazi analizi & adlandırılmış alanlar** — eğim, yükseklik, eğrilik, akış, exposure, watershed, concavity, convexity, valley ve wetness verileri bir kez üretilip yüzey, biome ve foliage node'larında yeniden kullanılabilir
 - **Biome Composer** — Temperate Mixed, Lush Valleys, Alpine Tundra, Arid Highlands ve Boreal Mountains preset'leri normalize Forest / Grass / Rock / Alpine maskeleri ile paketlenmiş biome splat haritası üretir
 - **Hidroloji** — watershed analizi, nehir ağları ve hidroliği, nehir yatağı oyma, spline çıktısı, göl havzası algılama, göl yüzeyleri, kanal, kıyı ve köpük maskeleri

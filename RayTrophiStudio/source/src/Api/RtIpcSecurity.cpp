@@ -275,6 +275,8 @@ uint32_t requiredCapabilities(const std::string& method) {
     // and means a profile CURVE. Two unrelated meanings of one word in one
     // method table is a reading trap, not a naming preference.
     if (method == "perf.reset" || method == "perf.set_logging") return Read;
+    if (method == "spline.animation.self_test") return Read;
+    if (method == "geometry_cache.self_test") return Read;
     if (method == "request_render" || method == "reset_accumulation") return Render;
     // Profile sweep preview/self-test only allocate transient flat geometry; they
     // do not publish to the scene and are therefore safe for read-capability IPC.
@@ -297,6 +299,17 @@ uint32_t requiredCapabilities(const std::string& method) {
         // ".status" substring heuristic below, so it needs an explicit entry
         // the same way particle.stats does.
         method == "attr.stats" ||
+        // Erosion mass ledger and drainage diagnostics: read-only, and the
+        // name matches none of the substring heuristics below, so without this
+        // entry it would fall through to the terrain. namespace and be graded
+        // SceneWrite -- a measurement that needs write authority is a
+        // measurement scripts stop taking.
+        method == "terrain.erosion_stats" ||
+        // Landform shape statistics, measured on the baked heightfield.
+        // Same reason as erosion_stats: "stats" matches none of the
+        // substring heuristics, so without this line it falls through to
+        // the terrain. namespace and is graded SceneWrite.
+        method == "terrain.landform_stats" ||
         method == "forcefield.evaluate" || method == "particle.stats" ||
         method == "particle.emitters" || method == "anim.characters" ||
         method == "anim.character" || method == "anim.clips" ||
@@ -322,7 +335,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     // which cost 14 write methods; scripts/audit_ipc_capabilities.py now diffs
     // the two files so the pair cannot drift apart again.
     static const char* namespaces[] = {
-        "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "mesh.profile.",
+        "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "geometry_cache.", "mesh.profile.",
         "world.", "post.", "anim.", "nodes.", "modifiers.",
         "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.",
         // Emitters. `flow_source.list`/`.get` fall through to Read above via the

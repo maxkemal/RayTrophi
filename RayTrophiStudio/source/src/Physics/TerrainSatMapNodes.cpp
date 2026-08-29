@@ -1,4 +1,5 @@
 #include "TerrainSatMapNodes.h"
+#include "TerrainFieldMath.h"
 #include <imgui.h>
 #include <algorithm>
 #include <array>
@@ -190,12 +191,34 @@ namespace TerrainNodesV2 {
             result.values.resize(static_cast<size_t>(result.width) * result.height, 0.0f);
             const bool physical = image.semantic == NodeSystem::ImageSemantic::Height ||
                                   image.semantic == NodeSystem::ImageSemantic::PhysicalScalar;
+
+            // A drainage accumulation is heavy tailed: hillslopes sit near 1
+            // while a trunk channel reaches six figures. Stretched linearly,
+            // every channel lands inside the top shoulder - a 500x range
+            // compressed into 0.92..1.0 - so the whole river network reads as
+            // one flat band with a hard step at the high percentile. That is
+            // the "flow gets cut at the edge" artifact. Run the percentile
+            // machinery in log space instead, which is the same transform the
+            // flow overlay and the erosion solver already use on this field.
+            const bool accumulation = physical &&
+                image.semantic == NodeSystem::ImageSemantic::PhysicalScalar &&
+                (TerrainFieldMath::isAccumulationUnit(image.unit) ||
+                 [&image]() {
+                     const float peak = TerrainFieldMath::maximumMagnitude(image);
+                     const float mean = TerrainFieldMath::meanMagnitude(image);
+                     return mean > 1e-9f && peak / mean > TerrainFieldMath::kHeavyTailRatio;
+                 }());
+            const auto compress = [accumulation](float value) {
+                return accumulation ? std::log1p(std::abs(value)) : value;
+            };
+
             float lo = 0.0f, hi = 1.0f;
             float minimum = 0.0f, maximum = 1.0f;
             if (autoNormalize && physical) {
                 std::vector<float> finite;
                 finite.reserve(image.data->size());
-                for (float value : *image.data) if (std::isfinite(value)) finite.push_back(value);
+                for (float value : *image.data)
+                    if (std::isfinite(value)) finite.push_back(compress(value));
                 if (!finite.empty()) {
                     const auto limits = std::minmax_element(finite.begin(), finite.end());
                     minimum = *limits.first;
@@ -216,10 +239,15 @@ namespace TerrainNodesV2 {
             }
             const float span = hi - lo;
             const bool collapsed = physical && !(span > 1e-6f);
+            // Hoisted: the fallback path below needs it per pixel, and
+            // scanning the field once per pixel would make this quadratic.
+            const float accumulationPeak = accumulation
+                ? std::log1p(TerrainFieldMath::maximumMagnitude(image)) : 0.0f;
             for (size_t i = 0; i < result.values.size(); ++i) {
                 float value = (*image.data)[i];
                 if (!std::isfinite(value)) value = 0.0f;
                 else if (autoNormalize && physical && span > 1e-6f) {
+                    value = compress(value);
                     // Percentiles define soft distribution shoulders, not hard
                     // clipping planes. The old mapping sent every sample above
                     // `hi` to 1.0, turning the top 5-10% of a mountain into one
@@ -238,6 +266,13 @@ namespace TerrainNodesV2 {
                     }
                 }
                 else if (collapsed) value = 0.5f;
+                else if (accumulation) {
+                    // Auto-normalize off still cannot mean "clamp an
+                    // accumulation to 0-1": drainage starts at 1.0 per cell,
+                    // so a raw clamp yields a field that is exactly 1.0
+                    // everywhere - a uniform suppression with no symptom.
+                    value = accumulationPeak > 1e-6f ? compress(value) / accumulationPeak : 0.0f;
+                }
                 result.values[i] = std::clamp(value, 0.0f, 1.0f);
             }
             result.valid = true;
@@ -439,6 +474,27 @@ namespace TerrainNodesV2 {
             slopeR = .10f; slopeG = .10f; slopeB = .10f;
             flowR = .06f; flowG = .08f; flowB = .09f;
             soilR = .12f; soilG = .09f; soilB = .06f;
+        } else if (name == "Tundra") {
+            stops = {{0.0f, 0.12f, 0.13f, 0.11f, 1.0f}, {0.25f, 0.16f, 0.17f, 0.13f, 1.0f},
+                     {0.50f, 0.22f, 0.23f, 0.17f, 1.0f}, {0.75f, 0.28f, 0.28f, 0.24f, 1.0f},
+                     {0.90f, 0.35f, 0.36f, 0.35f, 1.0f}, {1.0f, 0.45f, 0.48f, 0.49f, 1.0f}};
+            slopeR = 0.25f; slopeG = 0.26f; slopeB = 0.27f;
+            flowR = 0.08f; flowG = 0.16f; flowB = 0.22f;
+            soilR = 0.18f; soilG = 0.16f; soilB = 0.12f;
+        } else if (name == "Savannah") {
+            stops = {{0.0f, 0.18f, 0.15f, 0.08f, 1.0f}, {0.30f, 0.28f, 0.24f, 0.12f, 1.0f},
+                     {0.60f, 0.45f, 0.38f, 0.20f, 1.0f}, {0.80f, 0.58f, 0.48f, 0.28f, 1.0f},
+                     {1.0f, 0.65f, 0.56f, 0.35f, 1.0f}};
+            slopeR = 0.35f; slopeG = 0.30f; slopeB = 0.22f;
+            flowR = 0.12f; flowG = 0.22f; flowB = 0.14f;
+            soilR = 0.48f; soilG = 0.35f; soilB = 0.18f;
+        } else if (name == "Canyon") {
+            stops = {{0.0f, 0.15f, 0.08f, 0.05f, 1.0f}, {0.20f, 0.28f, 0.14f, 0.08f, 1.0f},
+                     {0.45f, 0.45f, 0.22f, 0.12f, 1.0f}, {0.70f, 0.65f, 0.32f, 0.18f, 1.0f},
+                     {0.85f, 0.78f, 0.45f, 0.25f, 1.0f}, {1.0f, 0.88f, 0.58f, 0.35f, 1.0f}};
+            slopeR = 0.55f; slopeG = 0.25f; slopeB = 0.15f;
+            flowR = 0.15f; flowG = 0.10f; flowB = 0.08f;
+            soilR = 0.65f; soilG = 0.28f; soilB = 0.12f;
         } else { // Temperate
             preset = "Temperate";
             stops = {{0.00f, 0.10f, 0.075f, 0.04f, 1.0f}, {0.18f, 0.17f, 0.12f, 0.06f, 1.0f},
@@ -506,22 +562,16 @@ namespace TerrainNodesV2 {
             derivedSlope.semantic = NodeSystem::ImageSemantic::Mask;
             derivedSlope.data = std::make_shared<std::vector<float>>(
                 static_cast<size_t>(derivedSlope.width) * derivedSlope.height, 0.0f);
-            const float cellSize = terrainContext
-                ? terrainContext->scale_xz / static_cast<float>(std::max(derivedSlope.width, derivedSlope.height))
-                : 1.0f;
-            const float heightScale = terrainContext ? terrainContext->scale_y : 1.0f;
+            const auto metric = TerrainFieldMath::makeFieldMetric(
+                terrainContext ? terrainContext->scale_xz : static_cast<float>(derivedSlope.width - 1),
+                terrainContext ? terrainContext->scale_y : 1.0f,
+                derivedSlope.width);
             for (int y = 0; y < derivedSlope.height; ++y) {
-                const int y0 = std::max(0, y - 1), y1 = std::min(derivedSlope.height - 1, y + 1);
                 for (int x = 0; x < derivedSlope.width; ++x) {
-                    const int x0 = std::max(0, x - 1), x1 = std::min(derivedSlope.width - 1, x + 1);
-                    const float dx = ((*heightImage.data)[static_cast<size_t>(y) * derivedSlope.width + x1] -
-                                      (*heightImage.data)[static_cast<size_t>(y) * derivedSlope.width + x0]) *
-                                     heightScale / std::max(2.0f * cellSize, 1e-6f);
-                    const float dz = ((*heightImage.data)[static_cast<size_t>(y1) * derivedSlope.width + x] -
-                                      (*heightImage.data)[static_cast<size_t>(y0) * derivedSlope.width + x]) *
-                                     heightScale / std::max(2.0f * cellSize, 1e-6f);
                     (*derivedSlope.data)[static_cast<size_t>(y) * derivedSlope.width + x] =
-                        std::atan(std::sqrt(dx * dx + dz * dz)) / 1.57079632679f;
+                        TerrainFieldMath::slope01(TerrainFieldMath::gradientAt(
+                            *heightImage.data, derivedSlope.width, derivedSlope.height,
+                            x, y, metric));
                 }
             }
             slopeImage = derivedSlope;
@@ -530,6 +580,11 @@ namespace TerrainNodesV2 {
             terrain->flowMap.size() == static_cast<size_t>(terrain->heightmap.width) * terrain->heightmap.height) {
             terrainFlow.width = terrain->heightmap.width; terrainFlow.height = terrain->heightmap.height;
             terrainFlow.channels = 1; terrainFlow.semantic = NodeSystem::ImageSemantic::PhysicalScalar;
+            // flowMap is contributing drainage area: every cell seeds 1.0 and
+            // gathers downstream, so it spans ridge=1 to trunk channel=1e5+.
+            // Declaring the unit makes the log compression deterministic
+            // instead of relying on the heavy-tail measurement to notice.
+            terrainFlow.unit = NodeSystem::ImageUnit::SquareMeters;
             terrainFlow.data = std::make_shared<std::vector<float>>(terrain->flowMap);
             flowImage = terrainFlow;
         }
@@ -600,21 +655,19 @@ namespace TerrainNodesV2 {
                 const float detail = detailSignal * detailStrength;
                 const SatStop base = sampleSatRamp(
                     stops, std::clamp(heightValue + detail * 0.80f, 0.0f, 1.0f));
-                float r = base.r, g = base.g, b = base.b;
+                float r = base.r, g = base.g, b = base.b, a = base.a;
                 const auto mixChannel = [](float a, float overlay, float amount) {
                     return a + (overlay - a) * std::clamp(amount, 0.0f, 1.0f);
                 };
                 if (slopeField.valid) {
                     const float slopeGate = std::clamp((slope - 0.20f) / 0.68f, 0.0f, 1.0f);
                     const float smoothGate = slopeGate * slopeGate * (3.0f - 2.0f * slopeGate);
-                    // Keep at least 22% of the height/detail color even on a
-                    // vertical face. Full replacement was the main source of
-                    // broad monochrome slope patches.
                     const float amount = smoothGate * slopeBlend * 0.78f;
                     const float slopeCoordinate = std::clamp(
                         slope + detail * 0.45f + (heightValue - 0.5f) * 0.08f, 0.0f, 1.0f);
                     const SatStop color = sampleSatRamp(slopeStops, slopeCoordinate);
-                    r = mixChannel(r, color.r, amount); g = mixChannel(g, color.g, amount); b = mixChannel(b, color.b, amount);
+                    r = mixChannel(r, color.r, amount); g = mixChannel(g, color.g, amount); 
+                    b = mixChannel(b, color.b, amount); a = mixChannel(a, color.a, amount);
                 }
                 if (flowField.valid) {
                     const float flowCoordinate = std::clamp(
@@ -623,45 +676,36 @@ namespace TerrainNodesV2 {
                     r = mixChannel(r, color.r, flow * flowBlend);
                     g = mixChannel(g, color.g, flow * flowBlend);
                     b = mixChannel(b, color.b, flow * flowBlend);
+                    a = mixChannel(a, color.a, flow * flowBlend);
                 }
                 if (soilField.valid) {
                     const float soilCoordinate = std::clamp(
                         soil + detail * 0.36f - slope * 0.045f, 0.0f, 1.0f);
                     const SatStop color = sampleSatRamp(soilStops, soilCoordinate);
-                    // Soil is substrate capacity, not a full steep-face coat.
-                    // Attenuating it with slope prevents Soil + Rock from
-                    // converging into one dominant high-altitude color.
                     const float steepness = std::clamp((slope - 0.20f) / 0.68f, 0.0f, 1.0f);
                     const float soilAmount = soil * soilBlend * (1.0f - steepness * 0.48f);
                     r = mixChannel(r, color.r, soilAmount);
                     g = mixChannel(g, color.g, soilAmount);
                     b = mixChannel(b, color.b, soilAmount);
+                    a = mixChannel(a, color.a, soilAmount);
                 }
                 if (grassField.valid || autoDeriveMasks) {
                     const float grassCoordinate = std::clamp(
                         grass + detail * 0.30f + (0.5f - heightValue) * 0.035f, 0.0f, 1.0f);
                     const SatStop color = sampleSatRamp(grassStops, grassCoordinate);
-                    // Vegetation coats suitable substrate but retreats from
-                    // exposed cliffs and active drainage. Explicit Biome Grass
-                    // remains authoritative; these gates only soften boundaries.
                     const float grassAmount = grass * grassBlend *
                         (1.0f - slope * 0.62f) * (1.0f - flow * 0.58f);
                     r = mixChannel(r, color.r, grassAmount);
                     g = mixChannel(g, color.g, grassAmount);
                     b = mixChannel(b, color.b, grassAmount);
+                    a = mixChannel(a, color.a, grassAmount);
                 }
-                // A second decorrelated field breaks up broad exposed rock
-                // even when no Snow overlay is connected. It is applied to
-                // the base material before protected snow/ice composition.
                 const float breakupSignal = (satFbm(nx * 0.43f + 31.7f, ny * 0.47f - 18.2f) - 0.5f) * 2.0f;
                 const float rockPresence = std::clamp((slope - 0.18f) / 0.72f, 0.0f, 1.0f);
                 const float breakup = breakupSignal * detailStrength * (0.20f + rockPresence * 0.42f);
                 r = std::clamp(r + breakup * 0.20f, 0.0f, 1.0f);
                 g = std::clamp(g + breakup * 0.055f, 0.0f, 1.0f);
                 b = std::clamp(b - breakup * 0.14f, 0.0f, 1.0f);
-                // Apply paint-grid contrast to the substrate first, then enforce
-                // the named-preset contract. Snow is composed afterwards and is
-                // therefore the only path allowed into the near-white range.
                 const float microContrast = 1.0f + detail * 0.24f;
                 r = std::clamp(r * microContrast, 0.0f, 1.0f);
                 g = std::clamp(g * microContrast, 0.0f, 1.0f);
@@ -679,11 +723,14 @@ namespace TerrainNodesV2 {
                     const float coverage = std::clamp(
                         (snow + ice * (1.0f - snow)) * snowBlend * (1.0f - melt * 0.45f), 0.0f, 1.0f);
                     r = mixChannel(r, sr, coverage); g = mixChannel(g, sg, coverage); b = mixChannel(b, sb, coverage);
+                    // Snow overlay uses a solid alpha so it overrides the underlying color
+                    a = mixChannel(a, 1.0f, coverage); 
                 }
                 (*outputData)[pixel * 4 + 0] = std::clamp(r, 0.0f, 1.0f);
                 (*outputData)[pixel * 4 + 1] = std::clamp(g, 0.0f, 1.0f);
                 (*outputData)[pixel * 4 + 2] = std::clamp(b, 0.0f, 1.0f);
-                (*outputData)[pixel * 4 + 3] = 1.0f;
+                (*outputData)[pixel * 4 + 3] = std::clamp(a, 0.0f, 1.0f);
+
             }
         }
 
@@ -860,16 +907,64 @@ namespace TerrainNodesV2 {
 
     void TerrainSatMapColorRampNode::drawContent() {
         bool edited = false;
-        const char* presets[] = {"Temperate", "Alpine", "Desert", "Tropical", "Boreal", "Volcanic", "Mediterranean", "Autumn",
+        const char* presets[] = {"Temperate", "Alpine", "Desert", "Tropical", "Boreal", "Volcanic", "Mediterranean", "Autumn", "Tundra", "Savannah", "Canyon",
                                  "Layer: Soil", "Layer: Flow", "Layer: Grass", "Layer: Rock",
                                  "Layer: Mud", "Layer: Moss", "Layer: Cavity", "Custom"};
-        int presetIndex = 0;
-        for (int i = 0; i < 16; ++i) if (preset == presets[i]) presetIndex = i;
+        int numPresets = 19;
+        
         ImGui::Text("Terrain Color Preset");
-        if (ImGui::Combo("##terrain_preset", &presetIndex, presets, 16)) {
-            if (presetIndex < 15) applyPreset(presets[presetIndex]);
-            else preset = "Custom";
-            edited = true;
+        if (ImGui::BeginCombo("##terrain_preset", preset.c_str())) {
+            for (int i = 0; i < numPresets; ++i) {
+                bool is_selected = (preset == presets[i]);
+                if (ImGui::Selectable(presets[i], is_selected)) {
+                    if (i < numPresets - 1) applyPreset(presets[i]);
+                    else preset = "Custom";
+                    edited = true;
+                }
+                
+                if (ImGui::IsItemHovered()) {
+                    const char* desc = "";
+                    if (strcmp(presets[i], "Temperate") == 0) desc = "Balanced climate with rich green valleys and rocky peaks.";
+                    else if (strcmp(presets[i], "Alpine") == 0) desc = "High altitude mountains with snow, dark rock, and sparse grass.";
+                    else if (strcmp(presets[i], "Desert") == 0) desc = "Hot and dry with red/orange sand and sun-baked rock.";
+                    else if (strcmp(presets[i], "Tropical") == 0) desc = "Lush, dark green vegetation with dark rich soil.";
+                    else if (strcmp(presets[i], "Boreal") == 0) desc = "Cold pine forests with muted greens and dark brown soil.";
+                    else if (strcmp(presets[i], "Volcanic") == 0) desc = "Dark basalt rock, ash, and sparse harsh vegetation.";
+                    else if (strcmp(presets[i], "Mediterranean") == 0) desc = "Warm coastal climate with dry grass, shrubs, and bright rock.";
+                    else if (strcmp(presets[i], "Autumn") == 0) desc = "Fall colors with orange/red foliage and brown soil.";
+                    else if (strcmp(presets[i], "Tundra") == 0) desc = "Cold, harsh plains with pale greens, grays, and icy soil.";
+                    else if (strcmp(presets[i], "Savannah") == 0) desc = "Dry grassland with yellowish tones and dusty soil.";
+                    else if (strcmp(presets[i], "Canyon") == 0) desc = "Deep reddish rock formations and dry riverbeds.";
+                    else if (strncmp(presets[i], "Layer:", 6) == 0) desc = "Single material layer preset (disables multi-biome blending).";
+                    else if (strcmp(presets[i], "Custom") == 0) desc = "User defined custom color ramp.";
+                    
+                    if (desc[0] != '\0') ImGui::SetTooltip("%s", desc);
+                }
+                
+                if (i < numPresets - 1) {
+                    ImVec2 pMin = ImGui::GetItemRectMin();
+                    ImVec2 pMax = ImGui::GetItemRectMax();
+                    float w = 120.0f;
+                    float padding = 4.0f;
+                    ImVec2 gMin(pMax.x - w - padding, pMin.y + 2.0f);
+                    ImVec2 gMax(pMax.x - padding, pMax.y - 2.0f);
+                    
+                    TerrainSatMapColorRampNode dummy;
+                    dummy.applyPreset(presets[i]);
+                    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+                    if (!dummy.stops.empty()) {
+                        for (size_t k = 0; k < dummy.stops.size() - 1; ++k) {
+                            float x0 = gMin.x + dummy.stops[k].pos * w;
+                            float x1 = gMin.x + dummy.stops[k+1].pos * w;
+                            ImU32 c0 = IM_COL32(dummy.stops[k].r*255, dummy.stops[k].g*255, dummy.stops[k].b*255, 255);
+                            ImU32 c1 = IM_COL32(dummy.stops[k+1].r*255, dummy.stops[k+1].g*255, dummy.stops[k+1].b*255, 255);
+                            draw_list->AddRectFilledMultiColor(ImVec2(x0, gMin.y), ImVec2(x1, gMax.y), c0, c1, c1, c0);
+                        }
+                    }
+                }
+                if (is_selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
         }
         ImGui::TextDisabled("Height + optional Slope / Flow / Soil / Grass; Snow inputs are protected overlays.");
         if (ImGui::Checkbox("Auto Derive Missing Masks", &autoDeriveMasks)) edited = true;
@@ -983,54 +1078,106 @@ namespace TerrainNodesV2 {
         }
 
         bool heightRampEdited = false;
-        int deleteIdx = -1;
-        for (size_t i = 0; i < stops.size(); ++i) {
-            ImGui::PushID((int)i);
+        
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float width = (std::max)(100.0f, ImGui::GetContentRegionAvail().x);
+        float height = 24.0f;
+        float marker_size = 6.0f;
+        
+        static int selected_stop = -1;
+        static int dragging_stop = -1;
 
-            float pos = stops[i].pos;
-            ImGui::SetNextItemWidth(100.0f);
-            if (ImGui::SliderFloat("##pos", &pos, 0.0f, 1.0f, "Pos: %.2f")) {
-                stops[i].pos = pos;
-                edited = true;
-                heightRampEdited = true;
+        ImGui::InvisibleButton("gradient_bar", ImVec2(width, height + marker_size * 2));
+        bool is_clicked = ImGui::IsItemClicked(0);
+        ImVec2 mouse_pos = ImGui::GetIO().MousePos;
+        float mouse_t = (std::max)(0.0f, (std::min)(1.0f, (mouse_pos.x - p.x) / width));
+
+        if (is_clicked) {
+            bool hit = false;
+            for(size_t i=0; i<stops.size(); ++i) {
+                if(fabs(p.x + stops[i].pos * width - mouse_pos.x) < 8) {
+                    selected_stop = (int)i; dragging_stop = (int)i; hit = true; break;
+                }
             }
-
-            ImGui::SameLine();
-            float col[4] = { stops[i].r, stops[i].g, stops[i].b, stops[i].a };
-            if (ImGui::ColorEdit4("##col", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha)) {
-                stops[i].r = col[0];
-                stops[i].g = col[1];
-                stops[i].b = col[2];
-                stops[i].a = col[3];
-                edited = true;
-                heightRampEdited = true;
+            if(!hit) {
+                // Find interpolated color
+                float cr=1, cg=1, cb=1, ca=1;
+                if (!stops.empty()) {
+                    if (mouse_t <= stops.front().pos) {
+                        cr = stops.front().r; cg = stops.front().g; cb = stops.front().b; ca = stops.front().a;
+                    } else if (mouse_t >= stops.back().pos) {
+                        cr = stops.back().r; cg = stops.back().g; cb = stops.back().b; ca = stops.back().a;
+                    } else {
+                        for (size_t k = 0; k < stops.size() - 1; ++k) {
+                            if (mouse_t >= stops[k].pos && mouse_t <= stops[k+1].pos) {
+                                float t = (mouse_t - stops[k].pos) / (std::max)(1e-5f, stops[k+1].pos - stops[k].pos);
+                                cr = stops[k].r + (stops[k+1].r - stops[k].r) * t;
+                                cg = stops[k].g + (stops[k+1].g - stops[k].g) * t;
+                                cb = stops[k].b + (stops[k+1].b - stops[k].b) * t;
+                                ca = stops[k].a + (stops[k+1].a - stops[k].a) * t;
+                                break;
+                            }
+                        }
+                    }
+                }
+                Stop stop; stop.pos = mouse_t; stop.r = cr; stop.g = cg; stop.b = cb; stop.a = ca;
+                stops.push_back(stop);
+                std::sort(stops.begin(), stops.end(), [](const Stop& a, const Stop& b){ return a.pos < b.pos; });
+                edited = true; heightRampEdited = true;
+                for(size_t i=0; i<stops.size(); ++i) if(stops[i].pos == mouse_t) { selected_stop = (int)i; dragging_stop = (int)i; break; }
             }
+        }
+        
+        if (dragging_stop != -1 && ImGui::IsMouseDown(0)) {
+            stops[dragging_stop].pos = mouse_t;
+            std::sort(stops.begin(), stops.end(), [](const Stop& a, const Stop& b){ return a.pos < b.pos; });
+            for(size_t i=0; i<stops.size(); ++i) if(stops[i].pos == mouse_t) dragging_stop = (int)i;
+            edited = true; heightRampEdited = true;
+        } else dragging_stop = -1;
 
-            ImGui::SameLine();
-            if (ImGui::Button("X")) {
-                deleteIdx = (int)i;
+        // Draw Ramp (approximate by linear chunks to save CPU instead of per pixel)
+        if (!stops.empty()) {
+            for (size_t i = 0; i < stops.size() - 1; ++i) {
+                float x0 = p.x + stops[i].pos * width;
+                float x1 = p.x + stops[i+1].pos * width;
+                if (x1 > x0) {
+                    ImU32 c0 = IM_COL32(stops[i].r*255, stops[i].g*255, stops[i].b*255, 255);
+                    ImU32 c1 = IM_COL32(stops[i+1].r*255, stops[i+1].g*255, stops[i+1].b*255, 255);
+                    draw_list->AddRectFilledMultiColor(ImVec2(x0, p.y), ImVec2(x1, p.y+height), c0, c1, c1, c0);
+                }
             }
-            ImGui::PopID();
+            // Fill edges
+            if (stops.front().pos > 0.0f) {
+                ImU32 c0 = IM_COL32(stops.front().r*255, stops.front().g*255, stops.front().b*255, 255);
+                draw_list->AddRectFilled(ImVec2(p.x, p.y), ImVec2(p.x + stops.front().pos * width, p.y+height), c0);
+            }
+            if (stops.back().pos < 1.0f) {
+                ImU32 c1 = IM_COL32(stops.back().r*255, stops.back().g*255, stops.back().b*255, 255);
+                draw_list->AddRectFilled(ImVec2(p.x + stops.back().pos * width, p.y), ImVec2(p.x + width, p.y+height), c1);
+            }
         }
-
-        if (deleteIdx >= 0 && stops.size() > 2) {
-            stops.erase(stops.begin() + deleteIdx);
-            edited = true;
-            heightRampEdited = true;
+        
+        // Draw Markers
+        for(size_t i=0; i<stops.size(); ++i) {
+            float x = p.x + stops[i].pos * width;
+            draw_list->AddTriangleFilled(ImVec2(x, p.y+height+marker_size*2), ImVec2(x-marker_size, p.y+height), ImVec2(x+marker_size, p.y+height), ((int)i==selected_stop)?IM_COL32(255,255,0,255):IM_COL32(255,255,255,255));
         }
+        ImGui::Dummy(ImVec2(width, marker_size * 2 + 5));
 
-        if (ImGui::Button("+ Add Stop")) {
-            // Copy last stop, or create a neutral stop if the serialized
-            // gradient was empty.
-            Stop newStop = stops.empty()
-                ? Stop{0.0f, 1.0f, 1.0f, 1.0f, 1.0f} : stops.back();
-            newStop.pos = (std::min)(1.0f, newStop.pos + 0.1f);
-            stops.push_back(newStop);
-            edited = true;
-            heightRampEdited = true;
+        if (selected_stop >= 0 && selected_stop < (int)stops.size()) {
+            if (ImGui::SliderFloat("Stop Pos", &stops[selected_stop].pos, 0, 1)) { edited = true; heightRampEdited = true; }
+            float c[4] = { stops[selected_stop].r, stops[selected_stop].g, stops[selected_stop].b, stops[selected_stop].a };
+            if (ImGui::ColorEdit4("Stop Color", c)) { 
+                stops[selected_stop].r = c[0]; stops[selected_stop].g = c[1]; stops[selected_stop].b = c[2]; stops[selected_stop].a = c[3];
+                edited = true; heightRampEdited = true;
+            }
+            if (stops.size() > 2 && ImGui::Button("Delete Stop")) { 
+                stops.erase(stops.begin()+selected_stop); 
+                selected_stop = -1; 
+                edited = true; heightRampEdited = true;
+            }
         }
-
-        if (heightRampEdited) preset = "Custom";
 
         if (edited) {
             sortStops();
@@ -1054,6 +1201,7 @@ namespace TerrainNodesV2 {
         outputs.push_back(NodeSystem::Pin::createOutput(
             "Grass", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
         metadata.displayName = "Grass Mask";
+        metadata.iconType = (int)UIWidgets::IconType::Hair;
         metadata.category = "Mask";
         metadata.description = "Reusable vegetation suitability from terrain fields";
         metadata.headerColor = IM_COL32(72, 154, 78, 255);
@@ -1098,11 +1246,15 @@ namespace TerrainNodesV2 {
             ctx.addError(id, "Grass Mask requires a scalar Height input");
             return NodeSystem::PinValue{};
         }
-        const auto soilImage = getImageInput(1, ctx);
-        const auto flowImage = getImageInput(2, ctx);
-        const auto slopeImage = getImageInput(3, ctx);
-        const auto wetImage = getImageInput(4, ctx);
-        const auto hardImage = getImageInput(5, ctx);
+        // getMaskInput brings an SI field into 0-1 (log-compressed when it is
+        // an accumulation). Read raw, drainage flow clamps to exactly 1.0
+        // everywhere - it starts at 1.0 per cell - so flowAvoidance used to
+        // suppress grass uniformly across the whole terrain with no symptom.
+        const auto soilImage = getMaskInput(1, ctx);
+        const auto flowImage = getMaskInput(2, ctx);
+        const auto slopeImage = getMaskInput(3, ctx);
+        const auto wetImage = getMaskInput(4, ctx);
+        const auto hardImage = getMaskInput(5, ctx);
         TerrainContext* tctx = getTerrainContext(ctx);
         TerrainObject* terrain = tctx ? tctx->terrain : nullptr;
         const int w = terrain ? terrain->paintGridWidth() : height.width;
@@ -1134,14 +1286,13 @@ namespace TerrainNodesV2 {
                 float slope = 0.0f;
                 if (slopeImage.isValid()) slope = std::clamp(sampleImageChannel(slopeImage, u, v), 0.0f, 1.0f);
                 else {
-                    const float du = 1.0f / (w - 1), dv = 1.0f / (h - 1);
-                    const float dx = (sampleImageChannel(height, u + du, v) -
-                                      sampleImageChannel(height, u - du, v)) * heightScale /
-                                     std::max(2.0f * cell, 1e-6f);
-                    const float dz = (sampleImageChannel(height, u, v + dv) -
-                                      sampleImageChannel(height, u, v - dv)) * heightScale /
-                                     std::max(2.0f * cell, 1e-6f);
-                    slope = std::atan(std::sqrt(dx * dx + dz * dz)) / 1.57079632679f;
+                    TerrainFieldMath::FieldMetric metric;
+                    metric.worldScale = std::max(worldScale, 1e-3f);
+                    metric.heightScale = heightScale;
+                    metric.cellSize = std::max(cell, 1e-5f);
+                    slope = TerrainFieldMath::slope01(TerrainFieldMath::gradientAtUV(
+                        [&](float su, float sv) { return sampleImageChannel(height, su, sv); },
+                        u, v, w, h, metric));
                 }
                 const float slopeLo = std::max(0.0f, maxSlope - slopeSoftness);
                 const float slopeHi = std::min(1.0f, maxSlope + slopeSoftness);
@@ -1228,6 +1379,7 @@ namespace TerrainNodesV2 {
         outputs.push_back(NodeSystem::Pin::createOutput(
             "Color", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Albedo));
         metadata.displayName = "SatMap Blend";
+        metadata.iconType = (int)UIWidgets::IconType::LayerTool;
         metadata.category = "Texture";
         metadata.description = "Blend two SatMap RGBA colors through a scalar mask";
         metadata.headerColor = IM_COL32(188, 112, 62, 255);
@@ -1347,6 +1499,7 @@ namespace TerrainNodesV2 {
             outputs.push_back(NodeSystem::Pin::createOutput(
                 label, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
         metadata.displayName = "Surface Detail Masks";
+        metadata.iconType = (int)UIWidgets::IconType::MaskTool;
         metadata.category = "Mask";
         metadata.description = "Paint-resolution cavity, mud and moss material masks";
         metadata.headerColor = IM_COL32(84, 132, 92, 255);
@@ -1375,10 +1528,12 @@ namespace TerrainNodesV2 {
             ctx.addError(id, "Surface Detail Masks requires at least a 2x2 Height input");
             return NodeSystem::PinValue{};
         }
-        const auto wetImage = getImageInput(1, ctx);
-        const auto flowImage = getImageInput(2, ctx);
-        const auto soilImage = getImageInput(3, ctx);
-        const auto exposureImage = getImageInput(4, ctx);
+        // Same reconciliation as Grass Mask: an SI field reaching a Mask pin
+        // is normalized once here rather than clamped into a stencil.
+        const auto wetImage = getMaskInput(1, ctx);
+        const auto flowImage = getMaskInput(2, ctx);
+        const auto soilImage = getMaskInput(3, ctx);
+        const auto exposureImage = getMaskInput(4, ctx);
         TerrainContext* tctx = getTerrainContext(ctx);
         TerrainObject* terrain = tctx ? tctx->terrain : nullptr;
         const int w = terrain ? terrain->paintGridWidth() : height.width;
@@ -1421,12 +1576,13 @@ namespace TerrainNodesV2 {
         for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
             const float u = static_cast<float>(x) / std::max(w - 1, 1);
             const float v = static_cast<float>(y) / std::max(h - 1, 1);
-            const float du = 1.0f / std::max(w - 1, 1), dv = 1.0f / std::max(h - 1, 1);
-            const float dx = (sampleImageChannel(height, u + du, v) - sampleImageChannel(height, u - du, v)) *
-                heightScale / std::max(2.0f * cell, 1e-6f);
-            const float dz = (sampleImageChannel(height, u, v + dv) - sampleImageChannel(height, u, v - dv)) *
-                heightScale / std::max(2.0f * cell, 1e-6f);
-            const float slope = std::atan(std::sqrt(dx * dx + dz * dz)) / 1.57079632679f;
+            TerrainFieldMath::FieldMetric metric;
+            metric.worldScale = std::max(worldScale, 1e-3f);
+            metric.heightScale = heightScale;
+            metric.cellSize = std::max(cell, 1e-5f);
+            const float slope = TerrainFieldMath::slope01(TerrainFieldMath::gradientAtUV(
+                [&](float su, float sv) { return sampleImageChannel(height, su, sv); },
+                u, v, w, h, metric));
             const float cavity = std::pow(std::clamp(
                 sampleScalarField(cavityField, x, y, w, h), 0.0f, 1.0f), cavityPower);
             const float flow = flowImage.isValid() ? std::clamp(sampleImageChannel(flowImage, u, v), 0.0f, 1.0f) : 0.0f;
@@ -1501,6 +1657,7 @@ namespace TerrainNodesV2 {
         outputs.push_back(NodeSystem::Pin::createOutput(
             "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
         metadata.displayName = "Paint Mask Combine";
+        metadata.iconType = (int)UIWidgets::IconType::LayerTool;
         metadata.category = "Mask";
         metadata.description = "Multiply masks at terrain paint resolution, resampling inputs as needed";
         metadata.headerColor = IM_COL32(171, 120, 194, 255);

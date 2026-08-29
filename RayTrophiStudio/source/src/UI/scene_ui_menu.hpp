@@ -991,14 +991,25 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          addViewportMessage(std::string("Added 2D Spline: ") + name);
                      }
                  };
-                 // The engine is Y-up. Create the source in the canonical XZ
-                 // ground/curve plane; users orient it with the normal object
-                 // transform instead of duplicating Add entries for every plane.
-                 if (ImGui::BeginMenu("Profile Plane (XZ / Y Up)")) {
+                 if (ImGui::BeginMenu("Front Plane (XY)")) {
+                     addSpline(MeshEdit::SplinePrimitiveType::Circle, "Circle", "CircleSpline", MeshEdit::SplinePlane::XY);
+                     addSpline(MeshEdit::SplinePrimitiveType::Rectangle, "Rectangle", "RectangleSpline", MeshEdit::SplinePlane::XY);
+                     addSpline(MeshEdit::SplinePrimitiveType::OpenLine, "Open Line", "LineSpline", MeshEdit::SplinePlane::XY);
+                     addSpline(MeshEdit::SplinePrimitiveType::OpenArc, "Open Arc", "ArcSpline", MeshEdit::SplinePlane::XY);
+                     ImGui::EndMenu();
+                 }
+                 if (ImGui::BeginMenu("Top Plane (XZ)")) {
                      addSpline(MeshEdit::SplinePrimitiveType::Circle, "Circle", "CircleSpline", MeshEdit::SplinePlane::XZ);
                      addSpline(MeshEdit::SplinePrimitiveType::Rectangle, "Rectangle", "RectangleSpline", MeshEdit::SplinePlane::XZ);
                      addSpline(MeshEdit::SplinePrimitiveType::OpenLine, "Open Line", "LineSpline", MeshEdit::SplinePlane::XZ);
                      addSpline(MeshEdit::SplinePrimitiveType::OpenArc, "Open Arc", "ArcSpline", MeshEdit::SplinePlane::XZ);
+                     ImGui::EndMenu();
+                 }
+                 if (ImGui::BeginMenu("Right / Left Plane (YZ)")) {
+                     addSpline(MeshEdit::SplinePrimitiveType::Circle, "Circle", "CircleSpline", MeshEdit::SplinePlane::YZ);
+                     addSpline(MeshEdit::SplinePrimitiveType::Rectangle, "Rectangle", "RectangleSpline", MeshEdit::SplinePlane::YZ);
+                     addSpline(MeshEdit::SplinePrimitiveType::OpenLine, "Open Line", "LineSpline", MeshEdit::SplinePlane::YZ);
+                     addSpline(MeshEdit::SplinePrimitiveType::OpenArc, "Open Arc", "ArcSpline", MeshEdit::SplinePlane::YZ);
                      ImGui::EndMenu();
                  }
                  ImGui::EndMenu();

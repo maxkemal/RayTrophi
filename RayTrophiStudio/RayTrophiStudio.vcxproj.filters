@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Kaynak Dosyalar">
@@ -213,6 +213,18 @@
     <ClInclude Include="source\include\MeshEdit\ProfileSweep.h">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\CurveNodeData.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\GeometryCurveNodes.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\SplineAnimation.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\GeometryCache.h">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\MeshEdit\SplinePrimitive.h">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClInclude>
@@ -226,6 +238,12 @@
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClInclude>
     <ClInclude Include="source\include\MeshEdit\SplineObjectService.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\SplineObjectLifecycle.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\SplineEvaluationService.h">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClInclude>
     <ClInclude Include="source\include\MeshEdit\ProfileSweepService.h">
@@ -510,12 +528,36 @@
     <ClInclude Include="source\include\TerrainFFT.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\TerrainRiverNetworkCore.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainFieldMath.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainErosionLem.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainSurfaceNodes.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainNodePortPanel.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainNodePortPresentation.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\VDBVolumeManager.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\UI\scene_ui_node_palette.hpp">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\UI\scene_ui_node_palette.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -745,10 +787,22 @@
     <ClCompile Include="source\src\Physics\RiverManager.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainErosionLem.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\TerrainManager.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRiverNetworkCore.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSurfaceNodes.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainNodePortPresentation.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\TerrainPaintEvaluation.cpp">
@@ -817,6 +871,15 @@
     <ClCompile Include="source\src\MeshEdit\ProfileSweep.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\GeometryCurveNodes.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineAnimation.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\GeometryCache.cpp">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\MeshEdit\SplinePrimitive.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
@@ -826,10 +889,16 @@
     <ClCompile Include="source\src\MeshEdit\SplineEditService.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineEvaluationService.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\MeshEdit\SplineSerialization.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
     <ClCompile Include="source\src\MeshEdit\SplineObjectService.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineObjectLifecycle.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
     <ClCompile Include="source\src\MeshEdit\ProfileSweepService.cpp">
@@ -872,6 +941,12 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiSpline.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSplineSkin.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGeometryCache.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\MeshEdit\FlatMeshValidator.cpp">

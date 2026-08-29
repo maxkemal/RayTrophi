@@ -20,6 +20,7 @@
 #include "material_gpu.h"  // For GpuMaterial
 #include "json.hpp"
 #include "world.h"
+#include "MeshEdit/SplineAnimation.h"
 using json = nlohmann::json;
 
 // Vec3 Serialization
@@ -2075,12 +2076,14 @@ struct Keyframe {
     bool has_terrain = false;
     bool has_water = false;     // NEW: Water animation support
     bool has_anim_graph = false;
+    bool has_spline = false;
     
     TerrainKeyframe terrain;
     WaterKeyframe water;        // NEW
     bool has_emitter = false;   // NEW: Gas Emitter support
     EmitterKeyframe emitter;    // NEW
     AnimGraphKeyframe anim_graph;
+    MeshEdit::SplineAnimationSnapshot spline;
     
     Keyframe() = default;
     Keyframe(int f) : frame(f) {}
@@ -2158,6 +2161,10 @@ struct ObjectAnimationTrack {
             if (kf.has_emitter) {
                 it->emitter = kf.emitter;
                 it->has_emitter = true;
+            }
+            if (kf.has_spline) {
+                it->spline = kf.spline;
+                it->has_spline = true;
             }
         } else {
             keyframes.insert(it, kf);
@@ -2437,6 +2444,10 @@ struct ObjectAnimationTrack {
         }
         result.transform.refreshCompoundFlags();
         result.has_transform = result.transform.has_position || result.transform.has_rotation || result.transform.has_scale;
+
+        // Focused spline service owns point/radius deformation interpolation.
+        result.has_spline = MeshEdit::evaluateSplineAnimationSnapshot(
+            *this, current_frame, result.spline);
         
         // --- MATERIAL CHANNELS (per-axis, curve-aware) ---
         result.material.clearAllChannels();
@@ -3516,7 +3527,7 @@ inline void to_json(json& j, const Keyframe& k) {
         {"ftr", k.has_transform}, {"fmat", k.has_material},
         {"fli", k.has_light}, {"fcam", k.has_camera},
         {"fwor", k.has_world}, {"fter", k.has_terrain}, {"femi", k.has_emitter},
-        {"fagr", k.has_anim_graph}
+        {"fagr", k.has_anim_graph}, {"fspl", k.has_spline}
     };
     if(k.has_transform) j["tr"] = k.transform;
     if(k.has_material) j["mat"] = k.material;
@@ -3526,6 +3537,7 @@ inline void to_json(json& j, const Keyframe& k) {
     if(k.has_terrain) j["ter"] = k.terrain;
     if(k.has_emitter) j["emi"] = k.emitter;
     if(k.has_anim_graph) j["agr"] = k.anim_graph;
+    if(k.has_spline) j["spl"] = k.spline;
 }
 
 inline void from_json(const json& j, Keyframe& k) {
@@ -3540,6 +3552,7 @@ inline void from_json(const json& j, Keyframe& k) {
     k.has_terrain = j.value("fter", j.contains("ter"));
     k.has_emitter = j.value("femi", j.contains("emi"));
     k.has_anim_graph = j.value("fagr", j.contains("agr"));
+    k.has_spline = j.value("fspl", j.contains("spl"));
     
     if(k.has_transform && j.contains("tr")) j.at("tr").get_to(k.transform);
     if(k.has_material && j.contains("mat")) j.at("mat").get_to(k.material);
@@ -3549,6 +3562,7 @@ inline void from_json(const json& j, Keyframe& k) {
     if(k.has_terrain && j.contains("ter")) j.at("ter").get_to(k.terrain);
     if(k.has_emitter && j.contains("emi")) j.at("emi").get_to(k.emitter);
     if(k.has_anim_graph && j.contains("agr")) j.at("agr").get_to(k.anim_graph);
+    if(k.has_spline && j.contains("spl")) j.at("spl").get_to(k.spline);
 }
 
 // ObjectAnimationTrack

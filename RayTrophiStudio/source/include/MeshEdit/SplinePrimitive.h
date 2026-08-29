@@ -15,7 +15,7 @@ enum class SplinePrimitiveType : uint8_t {
 struct SplinePrimitiveSettings {
     Vec3 center = Vec3(0.0f);
     float radius = 1.0f;
-    float width = 2.0f;
+    float width = 2.0f; // Rectangle width; also Open Line total length.
     float height = 2.0f;
     float start_angle = 0.0f;
     float end_angle = M_PI;

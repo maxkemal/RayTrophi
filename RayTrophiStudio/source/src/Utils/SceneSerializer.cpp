@@ -975,6 +975,10 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         root["geometry_node_graphs"][nodeName] = jg;
     }
 
+    // JSON-only exchange path. Full project saves use the binary sidecar.
+    Animation::serializeGeometryCaches(scene.geometry_caches,
+                                       root["geometry_caches"], nullptr);
+
     // 8.7 Material Node Graphs (MaterialNodesV2 Faz 1) — structure only; textures
     // are referenced by name. Graphs with just the default Output node are skipped
     // (equivalent to the material itself).
@@ -1378,6 +1382,15 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                 auto graph = GeometryNodesV2::deserializeGeometryGraph(it.value(), nullptr);
                 if (graph) scene.geometry_node_graphs[it.key()] = graph;
             }
+        }
+    }
+
+    scene.geometry_caches.clear();
+    {
+        simdjson::dom::element geometryCachesRoot;
+        if (!root["geometry_caches"].get(geometryCachesRoot)) {
+            Animation::deserializeGeometryCaches(sjsonToNlohmann(geometryCachesRoot),
+                                                 scene.geometry_caches, nullptr);
         }
     }
 

@@ -47,7 +47,7 @@ It is not a render farm plugin or a library. It is an interactive editor with a 
 | **GPU kernel & shader files** | 56 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
 | **UI control points** | 1,278+ |
 | **Render backends** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
-| **Node systems** | Terrain (66), Animation (14+), Material (11+) |
+| **Node systems** | Terrain (78), Animation (14+), Material (11+) |
 | **Last verified** | 2026-07-30 — Vulkan GPU gas/fluid/particle force fields, moving colliders, cache replay, and backend switching |
 <!-- STATS_END -->
 
@@ -230,9 +230,10 @@ Secondary **spray** (airborne), **foam** (surface), and **bubbles** (submerged) 
 ### 🏔️ Terrain, biome & hydrology graph
 
 - Real-time sculpting brushes (raise, lower, smooth, flatten, stamp) plus 16-bit heightmap import/export for World Machine / Gaea workflows
-- **Terrain Nodes V2** — a serialized, non-destructive graph with 66 registered nodes, live property editing, previews, grouping, reusable setups, and Apply-to-scene output
+- **Terrain Nodes V2** — a serialized, non-destructive graph with 78 registered nodes, live property editing, previews, grouping, reusable setups, and Apply-to-scene output
 - **Generation & shaping** — heightmap/hardness inputs, procedural noise, fault, mesa, shear, terrace, smooth, normalize, resample, remap, blend, math, clamp, overlay, and screen operations
 - **Erosion & geology** — hydraulic, thermal, fluvial, and wind erosion; sediment deposition, alluvial fans, deltas, wetness, soil depth, lithology, and strata synthesis
+- **Structural hardness & surface relief** — slope/convexity-aware exposed-rock resistance drives erosion, while hydraulic flow direction, soil and hardness produce resolution-safe rock fabric and rills instead of uniform generator noise
 - **Terrain analysis & named fields** — slope, height, curvature, flow, exposure, watershed, concavity, convexity, valley, and wetness data can be published once and reused by downstream surface, biome, and foliage nodes
 - **Biome Composer** — Temperate Mixed, Lush Valleys, Alpine Tundra, Arid Highlands, and Boreal Mountains presets generate normalized Forest / Grass / Rock / Alpine masks and a packed biome splat map
 - **Hydrology** — watershed analysis, river networks and hydraulics, river-bed carving, spline output, lake-basin detection, lake surfaces, channels, shoreline, and foam masks

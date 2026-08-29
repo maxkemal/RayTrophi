@@ -38,6 +38,7 @@ being paid for twice.
 | [PHYSICS_VALIDATION.md](PHYSICS_VALIDATION.md) | Is the solver RIGHT, not merely running — analytical cases, and why a script test is blind to the frame loop |
 | [IPC_TEST_CHANNEL.md](IPC_TEST_CHANNEL.md) | The second test channel: drives the app from outside so it can see the frame loop — and the first thing it found is that physics.step is reverted 100% before you can read it |
 | [SIMULATION_NODE_CONCEPTUAL_MODEL.md](SIMULATION_NODE_CONCEPTUAL_MODEL.md) | What the simulation node layer IS — read this before the object-model report |
+| [PROFILE_SPLINE_NEXT_PHASE_ROADMAP.md](PROFILE_SPLINE_NEXT_PHASE_ROADMAP.md) | 2D profile spline authoring core; Faz 3.6 generalizes it into a shared 3D curve for road/scatter-mask/mesh-surface consumers |
 | [SIMULATION_NODE_OBJECT_MODEL.md](SIMULATION_NODE_OBJECT_MODEL.md) | Scope-based object model for the simulation node layer — steps 1-6 done, compiled, and live-verified |
 | [AGENT_VIEWPORT_MEASUREMENT_PLAN.md](AGENT_VIEWPORT_MEASUREMENT_PLAN.md) | Driving the viewport and reading render DATA over IPC — the substrate agents verify with |
 | [AGENT_DISCOVERY_LAYER_PLAN.md](AGENT_DISCOVERY_LAYER_PLAN.md) | Self-describing API layer — agent.* discovery, method registry, workflow recipes |
@@ -57,6 +58,9 @@ being paid for twice.
 | [volumetric_cloud_layer_roadmap.md](volumetric_cloud_layer_roadmap.md) | Layered procedural cloud volumes |
 | [gpu_foliage_scatter_roadmap.md](gpu_foliage_scatter_roadmap.md) | GPU foliage scatter migration |
 | [hydraulic_multipass_next_steps.md](hydraulic_multipass_next_steps.md) | Terrain hydraulic erosion multi-pass |
+| [TERRAIN_NODE_CONTRACT_REDESIGN.md](TERRAIN_NODE_CONTRACT_REDESIGN.md) | Compact terrain ports, authoritative field ownership, node pruning and setup migration |
+| [TERRAIN_LANDFORM_SHAPE.md](TERRAIN_LANDFORM_SHAPE.md) | Measured: the Noise Generator was producing a homogeneous fractal, not a landscape - no landform wider than a quarter tile, 4.4% flat ground, gaussian hypsometry. Feature Size sized to the terrain, dissection driven by an authored lowland area, and terrain.landform_stats to judge it |
+| [TERRAIN_BUILD_CAP_SCOPE.md](TERRAIN_BUILD_CAP_SCOPE.md) | Measured: maxDepositionMeters bounds only the route pass, talus escapes it and never saturates — plus the two instruments that were reporting zeros as success |
 | [TERRAIN_PERF_HANDOFF.md](TERRAIN_PERF_HANDOFF.md) | Terrain build cost: what was measured, what is verified, what is NOT, and the ordered next steps — start here before touching terrain performance |
 | [TERRAIN_SATMAP_COLORIZER_ROADMAP.md](TERRAIN_SATMAP_COLORIZER_ROADMAP.md) | Gaea-style SatMap macro colour over the existing 4-layer splat blend — why it must modulate rather than replace the albedo, and the Faz 0 split of field / mesh / paint resolution that has to land first |
 | [refactoring_implementation_plan.md](refactoring_implementation_plan.md) | DNA / flat-SoA data-oriented core migration |
@@ -81,6 +85,8 @@ being paid for twice.
 | [terrain_river_lake_snow_notes.md](terrain_river_lake_snow_notes.md) | Snowmelt water budget and river visibility |
 | [fire_burns_down_a_structure_recipe.md](fire_burns_down_a_structure_recipe.md) | End-to-end scenario recipe, built from panels only |
 | [raytrophi_manifesto_and_plan.md](raytrophi_manifesto_and_plan.md) | Project direction manifesto — the "world kernel" idea |
+| [TERRAIN_EROSION_FLUVIAL_REWRITE.md](TERRAIN_EROSION_FLUVIAL_REWRITE.md) | Landscape-evolution cycle: drainage-area feedback, lake spill and sediment transport — live-tested and closed 2026-08-23 |
+| [TERRAIN_DEPOSITION_MODEL.md](TERRAIN_DEPOSITION_MODEL.md) | Why the LEM transport pass was kept over the redundant channel carvers, and the avulsion + alluvial-spreading passes added on top of it |
 
 ## Closed — postmortems and audits (ARSIV)
 

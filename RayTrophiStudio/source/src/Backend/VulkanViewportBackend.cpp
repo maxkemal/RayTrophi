@@ -220,10 +220,13 @@ void VulkanViewportBackend::uploadTerrainLayerMaterials(const std::vector<Terrai
 
     for (const auto& ld : layers) {
         VulkanRT::VkTerrainLayerData gld{};
-        for (int k = 0; k < 4; ++k) {
+        // Eight slots: 0-3 splat-weighted, 4-7 semantic overlays.
+        for (int k = 0; k < 8; ++k) {
             gld.layer_mat_id[k]   = ld.layer_mat_id[k];
             gld.layer_uv_scale[k] = ld.layer_uv_scale[k];
         }
+        for (int k = 0; k < 4; ++k) gld.overlay_strength[k] = ld.overlayStrength[k];
+        gld.overlay_mask = ld.overlayMask;
         gld.layer_count = ld.layer_count;
 
         // Resolve splat map: check viewport texture cache first, upload if missing.
@@ -343,7 +346,8 @@ void VulkanViewportBackend::uploadTerrainLayerMaterials(const std::vector<Terrai
         }
         gld.semantic_wet_darkening = ld.semanticWetDarkening;
         gld.semantic_wet_roughness = ld.semanticWetRoughness;
-        gld.semantic_pad = 0.0f;
+        // The trailing pad became overlay_mask, written above from
+        // ld.overlayMask. Zeroing it here would clear every overlay binding.
 
         gpuLayers.push_back(gld);
     }

@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -139,6 +139,8 @@ struct SplineInfo {
     size_t point_count = 0;
 };
 Result listSplines(std::vector<SplineInfo>& out);
+Result createSpline(const std::string& primitive, const std::string& name,
+                    const std::string& plane, std::string& out_name);
 Result getSpline(const std::string& name, std::string& out_json);
 Result setSpline(const std::string& name, const std::string& json_payload);
 Result insertSplinePoint(const std::string& name, int segment, float t, int& out_index);
@@ -146,6 +148,86 @@ Result subdivideSpline(const std::string& name, const std::vector<int>& segments
                        int cuts, int& out_last_index);
 Result extrudeSplineEndpoint(const std::string& name, int endpoint, const Vec3& position,
                              int& out_index);
+struct SplineKeyInfo {
+    int frame = 0;
+    bool has_object_transform = false;
+    bool has_points = false;
+    size_t point_count = 0;
+};
+Result insertSplineKeyframe(const std::string& name, int frame,
+                            bool include_object_transform = true,
+                            bool include_points = true);
+Result removeSplineKeyframe(const std::string& name, int frame,
+                            bool remove_object_transform = true,
+                            bool remove_points = true);
+Result listSplineKeyframes(const std::string& name, std::vector<SplineKeyInfo>& out);
+Result splineAnimationSelfTest(std::string& out_details);
+struct SplineSkinInfo {
+    std::string object_name;
+    unsigned int source_node = 0;
+    unsigned int profile_node = 0;
+    unsigned int taper_node = 0;
+    unsigned int twist_node = 0;
+    unsigned int wave_node = 0;
+    unsigned int skin_node = 0;
+    unsigned int output_node = 0;
+    size_t vertex_count = 0;
+    size_t triangle_count = 0;
+};
+struct SplineSkinSettings {
+    std::string custom_profile;
+    float radius = 0.1f;
+    int path_samples = 48;
+    int radial_segments = 12;
+    bool cap_start = true;
+    bool cap_end = true;
+    bool use_point_radius = true;
+    float taper_start = 1.0f;
+    float taper_end = 1.0f;
+    float taper_falloff = 1.0f;
+    float twist_start_degrees = 0.0f;
+    float twist_end_degrees = 0.0f;
+    float wave_amplitude = 0.0f;
+    float wave_cycles = 1.0f;
+    float wave_phase_degrees = 0.0f;
+    float wave_noise = 0.0f;
+    int wave_seed = 0;
+    int wave_axis = 1;
+};
+Result createSplineSkin(const std::string& spline_name, const std::string& output_name,
+                        float radius, int path_samples, int radial_segments,
+                        bool cap_start, bool cap_end, bool use_point_radius,
+                        SplineSkinInfo& out);
+Result createSplineSkinAdvanced(const std::string& spline_name,
+                                const std::string& output_name,
+                                const SplineSkinSettings& settings,
+                                SplineSkinInfo& out);
+Result finalizeSplineSkinPreview(const std::string& spline_name,
+                                 SplineSkinInfo& out);
+Result clearSplineSkinPreview(const std::string& spline_name);
+
+// ---------------------------------------------------------------------------
+// Fixed-topology geometry deformation cache. Samples contain only local-space
+// flat-mesh positions; UV/material/topology remain canonical on TriangleMesh.
+// ---------------------------------------------------------------------------
+struct GeometryCacheInfo {
+    std::string object_name;
+    int start_frame = 0;
+    int end_frame = 0;
+    int frame_step = 1;
+    size_t vertex_count = 0;
+    size_t sample_count = 0;
+    size_t memory_bytes = 0;
+    bool enabled = false;
+    bool topology_valid = false;
+    bool source_stale = false;
+};
+Result bakeGeometryCache(const std::string& object_name, int start_frame,
+                         int end_frame, int frame_step, GeometryCacheInfo& out);
+Result getGeometryCacheInfo(const std::string& object_name, GeometryCacheInfo& out);
+Result setGeometryCacheEnabled(const std::string& object_name, bool enabled);
+Result clearGeometryCache(const std::string& object_name);
+Result geometryCacheSelfTest(std::string& out_details);
 
 // ---------------------------------------------------------------------------
 // Transform (undoable via TransformCommand, which is flat-aware).
@@ -1269,6 +1351,18 @@ struct NodeDesc {
     int output_count = 0;
 };
 
+struct NodePortInfo {
+    int index = 0;
+    std::string direction;  // input|output
+    std::string key;
+    std::string name;
+    std::string data_type;
+    std::string exposure;   // primary|optional|diagnostic
+    std::string section;
+    bool visible = true;
+    bool connected = false;
+};
+
 // Graph lifecycle (Faz 5.5b). A material graph is keyed by material name and is
 // seeded from that material the way the node editor seeds it; a geometry graph
 // is keyed by object nodeName and starts empty. Terrain graphs are owned by the
@@ -1307,8 +1401,17 @@ Result removeNode(const std::string& graph_type, const std::string& graph_name,
 Result linkNodes(const std::string& graph_type, const std::string& graph_name,
                  unsigned int from_node, int from_output, unsigned int to_node,
                  int to_input, unsigned int& out_link_id);
+Result linkNodesByKey(const std::string& graph_type, const std::string& graph_name,
+                      unsigned int from_node, const std::string& from_output,
+                      unsigned int to_node, const std::string& to_input,
+                      unsigned int& out_link_id);
 Result listNodes(const std::string& graph_type, const std::string& graph_name,
                  std::vector<NodeDesc>& out);
+Result listNodePorts(const std::string& graph_type, const std::string& graph_name,
+                     unsigned int node_id, std::vector<NodePortInfo>& out);
+Result setNodePortVisible(const std::string& graph_type, const std::string& graph_name,
+                          unsigned int node_id, const std::string& direction,
+                          const std::string& port_key, bool visible);
 
 // ---------------------------------------------------------------------------
 // Node parameters (Faz 5.1b). A node's scriptable parameters are its input
@@ -2565,6 +2668,91 @@ Result setTerrainPaintResolution(const std::string& terrain_name, int paint_reso
 
 Result listTerrains(std::vector<TerrainInfo>& out_terrains);
 Result getTerrain(const std::string& terrain_name, TerrainInfo& out_info);
+
+// ============================================================================
+// TERRAIN LAYER SLOTS
+// ============================================================================
+// Eight slots. 0-3 are weighted by the splat map and normalized against each
+// other: they partition the surface, so raising one lowers the rest. 4-7 are
+// weighted by the semantic map (Flow, Wetness, Ice, Hardness) and composited
+// OVER that blend by their own unnormalized weight.
+//
+// The two families cannot share one normalization. A semantic weight states
+// how strongly a condition holds at a pixel, not what share of it that
+// condition owns - Flow=0.8 means "strong current here", not "80% river" -
+// and a river bed material covers the substrate rather than competing with it
+// for area.
+//
+// An empty semantic slot keeps the built-in shading for that channel (wetness
+// darkening, ice tint, hardness roughness), so binding a material is opt-in
+// and a terrain authored before overlays existed renders unchanged.
+
+struct TerrainLayerInfo {
+    int slot = 0;                  ///< 0-7
+    std::string channel;           ///< "Splat R".."Splat A", "Semantic Flow".."Semantic Hardness"
+    bool semantic_overlay = false; ///< true for slots 4-7
+    bool bound = false;            ///< false = no material; overlays fall back to built-in shading
+    std::string material;          ///< Material name, empty when unbound
+    float uv_scale = 1.0f;
+    float overlay_strength = 1.0f; ///< Only meaningful for semantic overlay slots
+    /// Overlays render UNDER what covers them, because a semantic value is a
+    /// MEASUREMENT and its coverage is a VISIBILITY decision. Per channel:
+    ///   Flow, Wetness - buried by snow. Flow reads 0.9 under two metres of
+    ///     snow, and painting it there put a river across a snow-filled valley.
+    ///   Ice           - a cover in its own right, never buried. Flag refused.
+    ///   Hardness      - gated by ROCK EXPOSURE, not merely by snow. It is a
+    ///     substrate property: 0.8 under two metres of valley soil is still
+    ///     0.8, so an unmasked material painted granite across meadows. The
+    ///     gate turns the slot into a bedrock VARIANT - hard outcrops against
+    ///     soft ones - while the unmasked field keeps driving erosion
+    ///     resistance and soil capacity.
+    /// Set this to paint the slot regardless of what covers it.
+    bool overlay_ignore_cover = false;
+
+    // ---- Measured drive signal (semantic overlay slots only) ----
+    // Binding a material to a channel the graph never fills does nothing, and
+    // nothing says so: the slot reports bound=true and the render is simply
+    // unchanged. Auto Splat's semantic output fills R (Flow) and hard-zeroes
+    // G/B/A, so an Ice material behind it is inert. These numbers make that
+    // visible instead of leaving it to be discovered by elimination.
+    bool channel_measured = false; ///< false when no semantic map exists yet
+    float channel_min = 0.0f;      ///< Lowest weight over the paint grid
+    float channel_max = 0.0f;      ///< Peak weight over the paint grid
+    float channel_mean = 0.0f;     ///< Mean weight over the paint grid
+    /// Fraction of the surface where this channel exceeds 1/255. A bound slot
+    /// with coverage 0 is a material that cannot appear.
+    float channel_coverage = 0.0f;
+    /// min == max: the channel is a flat fill and carries no spatial
+    /// information, so it cannot select anything. This is the WORSE of the
+    /// two dead cases: an unwired Surface Composer Hardness input falls back
+    /// to a constant 0.45, which reports coverage 1.0 and looks healthy while
+    /// washing the bound material evenly over the entire terrain.
+    bool channel_constant = false;
+};
+
+Result listTerrainLayers(const std::string& terrain_name,
+                         std::vector<TerrainLayerInfo>& out_layers);
+
+/**
+ * @brief Bind or edit one terrain layer slot.
+ *
+ * @param material Material name to bind. Pass "" to CLEAR the slot; clearing a
+ *        semantic overlay restores the built-in shading for that channel.
+ *        Pass nullptr to leave the current binding alone.
+ * @param uv_scale Tiling scale, or nullptr to leave unchanged.
+ * @param overlay_strength Overlay dial for slots 4-7, or nullptr to leave
+ *        unchanged. Rejected for slots 0-3, which are normalized against each
+ *        other and have no independent strength.
+ * @param overlay_ignore_cover Exempt slots 4-7 from burial, or nullptr to
+ *        leave unchanged. Rejected for slots 0-3 and for slot 6 (Ice), which
+ *        is a cover in its own right and is never buried. See
+ *        TerrainLayerInfo::overlay_ignore_cover for what buries each channel.
+ */
+Result setTerrainLayer(const std::string& terrain_name, int slot,
+                       const std::string* material,
+                       const float* uv_scale,
+                       const float* overlay_strength,
+                       const bool* overlay_ignore_cover);
 // `resolution` is the FIELD grid; `mesh_resolution` is the vertex grid (0 =
 // follow the field). Both are creation parameters because decimating after the
 // fact still pays one full-resolution acceleration-structure build.
@@ -2598,10 +2786,311 @@ struct TerrainErosionSettings {
     float talus_angle = 0.5f;        // thermal
     float amount = 0.3f;             // thermal erosion amount
     bool undo = true;
+
+    // ---- Landscape Evolution Model cycle (hydraulic only) ----------------
+    // Every one of these also exists on the Hydraulic Erosion panel. They are
+    // here because a solver whose behaviour can only be changed by hand cannot
+    // be swept, asserted on, or bisected -- which in this repo has repeatedly
+    // meant it was never actually tested. A negative value keeps the solver
+    // default, so a caller only states what it means to change.
+    int fluvial_cycle = -1;              // <0 default, 0 off, 1 on
+    // draft|balanced|high; empty keeps whatever the budgets already are.
+    // Applied BEFORE the individual budget fields below, so a call may pick a
+    // preset and then override one dial of it.
+    std::string fluvial_quality;
+    int fluvial_iterations = -1;
+    float fluvial_time_step = -1.0f;
+    float rain_rate = -1.0f;
+    float orographic_rain = -1.0f;
+    float rain_wind_degrees = -1000.0f;  // sentinel: bearings may be negative
+    float incision_k = -1.0f;
+    float stream_power_m = -1.0f;
+    float stream_power_n = -1.0f;
+    float transport_k = -1.0f;
+    float sediment_cover = -1.0f;
+    float settling_velocity = -1.0f;
+    int sediment_route_steps = -1;
+    // Avulsion: route steps between rebuilds of the flow directions from the
+    // live bed. 0 disables it, which restores the pre-2026-08-26 behaviour of
+    // routing sediment along a channel the deposit has already buried.
+    int avulsion_interval = -1;
+    // Alluvial spreading: fresh deposit relaxing toward a stable fan slope.
+    float alluvium_slope_degrees = -1.0f;
+    float alluvium_rate = -1.0f;
+    int alluvium_steps = -1;
+    float alluvium_consolidation = -1.0f;
+    int drainage_refresh_interval = -1;
+    int drainage_fill_passes = -1;
+    int drainage_accumulate_passes = -1;
+    int drainage_coarsest_size = -1;
+    int mass_wasting = -1;               // <0 default, 0 off, 1 on
+    float repose_angle_degrees = -1.0f;
+    float mass_wasting_rate = -1.0f;
+    int mass_wasting_steps = -1;
+    float hillslope_diffusion = -1.0f;
+    float incision_safety = -1.0f;
+    float deposition_safety = -1.0f;
+    float max_step_meters = -1.0f;
+    float lake_epsilon_meters = -1.0f;
+    float headwater_area_km2 = -1.0f;
 };
 
+// Mass ledger and shape diagnostics of the last erosion run. Exposed so a
+// script can assert on physics instead of on a screenshot: the ledger closing
+// proves sediment transport does not leak, lake coverage on slopes exposes an
+// under-converged depression fill, and drainage density plus the largest
+// catchment describe whether a river hierarchy formed at all.
+struct TerrainErosionStats {
+    double eroded = 0.0;
+    double deposited = 0.0;
+    double exported = 0.0;
+    double carried = 0.0;
+    double mass_error = 0.0;
+    double mass_error_fraction = 0.0;
+    int lake_cells = 0;
+    float lake_area_fraction = 0.0f;
+    float max_drainage_area_km2 = 0.0f;
+    /// Largest catchment as a fraction of the whole map. READ THIS ONE: the
+    /// km2 figure alone is not interpretable without the terrain's size, and a
+    /// shredded drainage graph still renders as a convincing river network.
+    /// Single digits mean no trunk river exists.
+    float max_drainage_area_fraction = 0.0f;
+    /// lake_cells / lake_area_fraction count ANY standing water, including the
+    /// depression-fill ladder's few-ulp lift, so they can report a quarter of
+    /// the map and mean nothing. These carry a 10 cm threshold.
+    int   deep_lake_cells = 0;
+    float deep_lake_area_fraction = 0.0f;
+    float deepest_lake_meters = 0.0f;
+    // Deposit shape - read together, never one alone. A ridge is few cells and
+    // thick (deepest / mean above ~10); a fan is many cells and thin (ratio
+    // 2-4). A high area fraction WITH a low ratio across the whole map means
+    // the spreading pass is smoothing bedrock, not building fans.
+    int deposited_cells = 0;
+    float deposited_area_fraction = 0.0f;
+    float deepest_deposit_meters = 0.0f;
+    float mean_deposit_meters = 0.0f;
+    float drainage_density = 0.0f;
+    int cycle_iterations = 0;
+    bool gpu_path = false;
+};
+
+/**
+ * @brief Which field the graph's Flow node classified, and whether that is
+ *        the same landscape the render shows.
+ *
+ * Two quantities were both called flow: DISCHARGE, a physical field the
+ * erosion sim measures against the terrain it is carving, and CHANNEL, a 0-1
+ * selection of which cells read as a watercourse. Consumers used to be wired
+ * to whichever happened to be available, per pin.
+ *
+ * The state worth catching is erosion_unwired: the graph HAS an erosion sim
+ * and the Flow node is not reading it, so channels are classified from bare
+ * geometry - no lakes, no infiltration, no erosion history - while the render
+ * shows the eroded surface. The output still looks like a river network,
+ * which is why nothing else reports it.
+ *
+ * river_network_source separately verifies that River Network receives area
+ * and direction from one producer. "mixed" is never a stylistic choice: it
+ * means catchment magnitude and downstream receivers describe different
+ * drainage graphs.
+ *
+ * It reported "hydraulic" until the compact terrain port contract moved
+ * Drainage Area and Flow Direction to Watershed Analysis. Hydraulic Erosion
+ * cannot own that pair any more, so a network fed from its remaining Flow pin
+ * -- sediment transport, not discharge -- reports "mixed".
+ */
+struct TerrainFlowAuthority {
+    bool has_flow_node = false;
+    /// False before the graph has been evaluated once; the rest is then stale.
+    bool evaluated = false;
+    bool discharge_measured = false;
+    bool erosion_unwired = false;
+    /// "none" | "not_evaluated" | "measured" | "derived" | "derived_erosion_unwired"
+    std::string source = "none";
+    bool has_river_network = false;
+    bool river_area_physical = false;
+    int river_direction_channels = 0;
+    bool river_lake_mask_connected = false;
+    bool river_lake_spill_connected = false;
+    /// "none" | "unwired" | "watershed" | "mixed"
+    std::string river_network_source = "none";
+};
+
+Result getTerrainFlowAuthority(const std::string& terrain_name,
+                               TerrainFlowAuthority& out_authority);
+
+/**
+ * @brief The slope-area relation: does this landscape look fluvially graded?
+ *
+ * A river network cut by stream-power erosion satisfies S = k * A^-theta, so
+ * on log-log axes channel cells fall on a straight line with a negative
+ * slope. Noise, diffusion and hand-sculpted relief do not - they scatter.
+ * This is the cheapest check that separates "an erosion pass ran" from "the
+ * erosion pass produced real fluvial form", and nothing else in the app
+ * distinguishes those two: both render as plausible terrain.
+ *
+ * concavity_index is theta. Real landscapes sit near 0.4-0.6; values far
+ * outside that, or a low r_squared, say the network is not graded whatever it
+ * looks like. Judge r_squared FIRST: a confident-looking theta fitted to
+ * scatter is exactly the kind of number that ends a debugging session early.
+ */
+struct TerrainSlopeAreaFit {
+    bool measured = false;         ///< False when no flow field has been computed yet
+    float concavity_index = 0.0f;  ///< theta, from the log-log regression
+    float intercept = 0.0f;        ///< log(k)
+    float r_squared = 0.0f;        ///< Fit quality over the binned medians
+    int bin_count = 0;             ///< Bins that held enough cells to count
+    int channel_cells = 0;         ///< Cells above the channel threshold
+    /// Largest value in the flow field this fit read. Reported because the
+    /// field is filled by terrain.calculate_flow, NOT by evaluating the node
+    /// graph: without that call the buffer is the right SIZE and all zero, so
+    /// the fit used to pass its size guard and answer "too_few_channels" --
+    /// an empty input dressed as a statement about the landscape.
+    float flow_peak = 0.0f;
+    /// "no_flow_field" | "flow_field_empty" | "too_few_channels" | "ok"
+    std::string status = "no_flow_field";
+};
+
+Result getTerrainSlopeAreaFit(const std::string& terrain_name,
+                              TerrainSlopeAreaFit& out_fit);
+
+/**
+ * @brief Shape statistics of a terrain's realised heightfield.
+ *
+ * Every number here is measured on the baked heightmap, never read back from a
+ * generator's own bookkeeping. That distinction is the point: a node can only
+ * report the exponent it was ASKED for, and the gap between the two is exactly
+ * where "the panel looks right and the terrain does not" lives.
+ */
+struct TerrainLandformStats {
+    bool measured = false;
+    int width = 0, height = 0;
+    float size_meters = 0.0f;       ///< World extent of one side
+    float cell_meters = 0.0f;
+    float relief_meters = 0.0f;     ///< p99.5 - p0.5 of elevation
+
+    /// Slope distribution. Gentle ground is not a cosmetic property: it is
+    /// where sediment settles, where foliage and roads go, and the first thing
+    /// missing when a generator spends all of its relief on high-frequency
+    /// dissection instead of on landforms.
+    float flat_fraction = 0.0f;     ///< Cells under 3 degrees
+    float gentle_fraction = 0.0f;   ///< Cells under 8 degrees
+    float median_slope_deg = 0.0f;
+    float p95_slope_deg = 0.0f;
+    /// Area steeper than 40 degrees. Soil and scree cannot hold that angle, so
+    /// this is the share of the map that has to read as bare rock. Zero means
+    /// there is no rock in the terrain no matter what the shader does.
+    float cliff_fraction = 0.0f;
+
+    /// Cell-scale roughness in the steepest fifth of the map divided by the
+    /// same in the gentlest fifth. Rock is rough BECAUSE it is steep - bare,
+    /// jointed, shedding blocks - while soil creeps smooth, so a landscape
+    /// with rock in it sits well above 1.
+    ///
+    /// Read it WITH cliff_fraction, never alone: a terrain with no steep
+    /// ground at all still scores high here, because its "steepest fifth" is
+    /// merely its least flat fifth. That pairing is the whole reading.
+    float roughness_slope_ratio = 0.0f;
+    float steep_roughness_meters = 0.0f;   ///< Absolute, so "rough" has a size
+    float gentle_roughness_meters = 0.0f;
+
+    /// Mean local relief against window width, one entry per octave from 8
+    /// cells up to half the tile. THE LADDER IS PUBLISHED, not just the scalar
+    /// derived from it: a single "landform scale" number is a threshold
+    /// pretending to be a measurement, and the shape of this curve is what
+    /// actually says whether the terrain has broad country in it.
+    std::vector<float> relief_window_meters;
+    std::vector<float> relief_window_relief;
+
+    /// How much relief the LAST doubling of the window adds: R(half tile) /
+    /// R(quarter tile). This is the sharpest thing the ladder says and it needs
+    /// no threshold to read. Near 1.0 the field is already uncorrelated at a
+    /// quarter of the tile - there are no landforms at the tile's own scale,
+    /// and the map reads as one texture repeated however the relief is scaled.
+    /// Measured on the shipped generator: 1.05 with Feature Size at 600 m on a
+    /// 4096 m terrain, against 1.37 at 2048 m.
+    float broad_growth = 0.0f;
+
+    /// Correlation length: the first window past which doubling buys under 15%
+    /// more relief - the width of the broadest landform present. Coarse by
+    /// construction (the ladder is octave-spaced, so this is quantised to
+    /// powers of two) and it is NOT expected to equal the authored Feature
+    /// Size; read broad_growth and the ladder for the sharper answer.
+    ///
+    /// NOT defined as "where relief reaches most of the tile's total": mean
+    /// window relief never approaches the tile's tail-to-tail relief, so that
+    /// criterion reports the full tile for every terrain and measures nothing.
+    float landform_scale_meters = 0.0f;
+    bool landform_scale_saturated = false;  ///< True when the growth knee was found inside the ladder
+
+    /// Slope of log(local relief) against log(window size), fitted over the
+    /// WELL-SAMPLED band only: windows below landform_scale_meters and no wider
+    /// than an eighth of the tile. Both exclusions matter. Above the landform
+    /// scale the curve flattens by construction; near the tile the statistic is
+    /// averaged over a handful of windows and rolls off because the tile ends,
+    /// not because the field does. Including either drags the exponent toward
+    /// 0.5 whatever the field is doing - a mistake that reads as "the roughness
+    /// dial is dead" when the dial is fine and the range is not.
+    float realised_hurst = 0.0f;
+    int hurst_sample_count = 0;
+
+    /// MACRO-MICRO COHERENCE, in one number.
+    ///
+    /// A landscape built from layers that agree with each other has a single
+    /// power law from the grid to the landform: every doubling of the window
+    /// multiplies relief by the same factor. A layer pasted on at one scale -
+    /// a detail pass that does not match the landform it sits on, or a band
+    /// guard that quietly drops octaves - shows up as a KINK, and only as a
+    /// kink. Slope, relief and hypsometry all stay perfectly healthy while it
+    /// is there, which is why it needs its own reading.
+    ///
+    /// spectrum_kink is the largest departure of any octave from the fitted
+    /// exponent, in the same units as realised_hurst, measured over the
+    /// well-sampled band. Under about 0.05 the scales are one landscape.
+    /// spectrum_kink_meters names the window where the worst departure sits,
+    /// so the offending layer can be found by its scale.
+    float spectrum_kink = 0.0f;
+    float spectrum_kink_meters = 0.0f;
+    /// Signed: negative means that octave is STARVED of detail relative to the
+    /// law (a missing band), positive means it carries too much (a pasted-on
+    /// layer). The sign is what tells you which way to look.
+    float spectrum_kink_signed = 0.0f;
+
+    /// Local relief across an 8x8 grid of tiles, in metres, and the p90/p10
+    /// ratio. A homogeneous fractal gives every tile the same relief (ratio
+    /// near 1). A landscape has massifs and basins, so the ratio is several.
+    float local_relief_p10 = 0.0f;
+    float local_relief_p90 = 0.0f;
+    float local_relief_ratio = 0.0f;
+
+    /// Hypsometry: area fraction in the lowest and middle fifths of the
+    /// elevation range, and the hypsometric integral (mean - min)/(max - min).
+    /// Deposition makes real landscapes bottom-heavy; an unshaped fractal is
+    /// gaussian, so its area piles into the MIDDLE band instead.
+    float lowland_fraction = 0.0f;
+    float midland_fraction = 0.0f;
+    float hypsometric_integral = 0.0f;
+
+    /// "no_heightfield" | "flat" | "ok"
+    std::string status = "no_heightfield";
+};
+
+Result getTerrainLandformStats(const std::string& terrain_name,
+                               TerrainLandformStats& out_stats);
+
 Result erodeTerrain(const std::string& terrain_name, const TerrainErosionSettings& settings);
+Result getTerrainErosionStats(TerrainErosionStats& out_stats);
+/**
+ * @brief Build a terrain node setup from a named preset.
+ *
+ * @param out_wiring_faults Links the setup asked for and did not get, one
+ *        readable line each. A refused connection leaves the graph looking
+ *        complete while the consumer quietly falls back to a synthesized
+ *        value, so this list is the only way to see a half-wired setup from
+ *        outside the app. An empty list means every wire landed.
+ */
 Result applyTerrainPreset(const std::string& terrain_name, const std::string& preset,
+                          std::vector<std::string>& out_wiring_faults,
                           bool replace_graph = false, bool add_satmap = false);
 struct TerrainSatMapPresetInfo {
     std::string id;
@@ -2614,9 +3103,114 @@ struct TerrainSatMapPresetInfo {
 Result listTerrainSatMapPresets(std::vector<TerrainSatMapPresetInfo>& out_presets);
 Result applyTerrainSatMapPreset(const std::string& terrain_name, const std::string& preset_id,
                                 std::vector<std::string>& out_warnings);
-Result calculateTerrainFlow(const std::string& terrain_name);
+/**
+ * @brief Statistics of the drainage accumulation field, reported so a script
+ *        can tell a connected network from one that dies in its own pits.
+ *
+ * inland_terminations is the diagnostic that matters. A cell is a termination
+ * when it carries channel-grade discharge and no neighbour carries more, i.e.
+ * the channel ends there. A healthy network terminates only where it leaves
+ * the map, so every inland termination is a reach whose water went nowhere -
+ * exactly what an unfilled depression or a mis-ordered accumulation pass
+ * produces, and exactly what looks like a river cut off at a lake shore.
+ */
+struct TerrainFlowStats {
+    int width = 0;
+    int height = 0;
+    float max_accumulation = 0.0f;
+    float mean_accumulation = 0.0f;
+    /// Cells above the channel threshold (1% of peak accumulation).
+    int channel_cells = 0;
+    /// Terminations on the map border - these are legitimate outlets.
+    int border_terminations = 0;
+    /// Terminations away from the border - these are lost reaches.
+    int inland_terminations = 0;
+    /// inland_terminations / channel_cells, 0 when there are no channels.
+    float inland_termination_ratio = 0.0f;
+};
+
+Result calculateTerrainFlow(const std::string& terrain_name, TerrainFlowStats& out_stats);
 Result sampleTerrainHeight(const std::string& terrain_name, float world_x, float world_z,
                            float& out_height);
+
+// ---------------------------------------------------------------------------
+// Terrain brush strokes (sculpt + splat paint).
+//
+// ★★★ These exist because the brushes were PANEL ONLY. The whole terrain sculpt
+// and splat stack could be driven by nothing but a mouse drag, so nothing could
+// regression-test it — which is how a 0..1 clamp inside TerrainManager::sculpt
+// survived: on a metre-authored (graph) terrain every dab crushed the touched
+// cells to 1.0, i.e. the brush flattened the landform instead of raising it,
+// and no script could see it.
+//
+// A stroke is a LIST of world-space dabs, not one point: a real brush stroke is
+// a drag, and single-dab-only would test a case the artist never produces.
+// ---------------------------------------------------------------------------
+struct TerrainBrushDab {
+    float world_x = 0.0f;
+    float world_z = 0.0f;
+};
+
+struct TerrainSculptSettings {
+    /// raise|lower|flatten|smooth|stamp - the five modes the Sculpt dock shows.
+    std::string mode = "raise";
+    float radius = 5.0f;    ///< metres
+    float strength = 0.5f;  ///< metres of height change per second at full falloff
+    float curve = 2.0f;     ///< falloff exponent, 0.25..4 (dock range)
+    /// Seconds this dab represents. The panel feeds one frame (1/60); a script
+    /// gets the same per-dab displacement by keeping the default.
+    float dt = 1.0f / 60.0f;
+    /// Flatten only. With use_fixed_height false the terrain's own height under
+    /// the first dab is the target, which is what the panel does on click.
+    bool use_fixed_height = false;
+    float flatten_target = 0.0f;
+    /// Stamp only: greyscale image used as the imprint (empty = no stamp, and
+    /// the dab then does nothing, exactly like the panel with no stamp loaded).
+    std::string stamp_texture_path;
+    float stamp_rotation = 0.0f; ///< degrees
+    bool undo = true;
+};
+
+struct TerrainBrushResult {
+    int dab_count = 0;
+    /// World height (metres) at the FIRST dab, before and after the stroke.
+    /// This is the measurement that separates "the brush ran" from "the brush
+    /// moved the ground the way it was asked to" - a raise stroke that reports
+    /// after <= before is the clamp bug class, not a slow brush.
+    float height_before = 0.0f;
+    float height_after = 0.0f;
+    /// Raw field bounds (metres / scale_y) over the whole terrain.
+    float field_min_before = 0.0f;
+    float field_max_before = 0.0f;
+    float field_min_after = 0.0f;
+    float field_max_after = 0.0f;
+};
+
+struct TerrainSplatPaintSettings {
+    int channel = 0;        ///< splat channel / layer index 0..3
+    float radius = 5.0f;    ///< metres
+    float strength = 1.0f;
+    float dt = 1.0f / 60.0f;
+    bool undo = true;
+};
+
+struct TerrainSplatPaintResult {
+    int dab_count = 0;
+    int channel = 0;
+    /// Mean weight of the painted channel over the splat map, 0..1, before and
+    /// after. A paint stroke that leaves coverage unchanged did not paint.
+    float coverage_before = 0.0f;
+    float coverage_after = 0.0f;
+};
+
+Result sculptTerrain(const std::string& terrain_name,
+                     const std::vector<TerrainBrushDab>& dabs,
+                     const TerrainSculptSettings& settings,
+                     TerrainBrushResult& out_result);
+Result paintTerrainSplat(const std::string& terrain_name,
+                         const std::vector<TerrainBrushDab>& dabs,
+                         const TerrainSplatPaintSettings& settings,
+                         TerrainSplatPaintResult& out_result);
 
 struct TerrainRiverCarveSettings {
     std::string mode = "natural"; // simple|natural

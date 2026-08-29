@@ -1,0 +1,49 @@
+// terrain_lem_rain.comp
+// Per-cell water input for the LEM drainage solve, expressed as a VOLUME
+// (rain factor * cell area in m^2) rather than "1.0 per cell". Two reasons:
+//   1. Drainage area then comes out in m^2 and is resolution independent, so a
+//      2K and a 4K bake select the same trunk rivers.
+//   2. Orographic rain becomes a real physical weighting instead of a texture.
+//
+// Uniform rain is the single largest remaining source of radial symmetry once
+// drainage-area feedback exists: every catchment receives identical input, so
+// only the terrain shape distinguishes them. Windward slopes get more rain,
+// lee slopes less; `orographic` is the strength of that split.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float cellArea;      // m^2 per cell
+    float orographic;    // 0 = uniform rain
+    float windX; float windY;
+    float cellSize; float heightScale;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Height   { float heightField[]; };
+layout(set = 0, binding = 1) writeonly buffer RainArea { float rainArea[]; };
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int x = int(ui) % pc.width;
+    int y = int(ui) / pc.width;
+
+    float rain = 1.0;
+    if (pc.orographic > 0.0 && x > 0 && y > 0 && x < pc.width - 1 && y < pc.height - 1) {
+        float inv = 1.0 / max(pc.cellSize, 1.0e-3);
+        // Gradient in metres of rise per metre of ground.
+        float gx = (heightField[ui + 1u] - heightField[ui - 1u]) * 0.5 * pc.heightScale * inv;
+        float gy = (heightField[ui + uint(pc.width)] - heightField[ui - uint(pc.width)]) *
+                   0.5 * pc.heightScale * inv;
+        vec2 wind = vec2(pc.windX, pc.windY);
+        float wl = length(wind);
+        if (wl > 1.0e-6) {
+            wind /= wl;
+            // Positive when the wind climbs the slope (windward) -> more rain.
+            float ascent = clamp(dot(wind, vec2(gx, gy)) * 4.0, -1.0, 1.0);
+            rain = clamp(1.0 + pc.orographic * ascent, 0.05, 4.0);
+        }
+    }
+    rainArea[ui] = rain * max(pc.cellArea, 1.0e-6);
+}

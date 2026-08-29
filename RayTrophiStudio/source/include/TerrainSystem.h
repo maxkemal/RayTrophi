@@ -131,8 +131,77 @@ struct TerrainObject {
     // Kept separate from normalized material weights so semantic fields remain
     // independently recoverable by shading, scatter and export consumers.
     std::shared_ptr<class Texture> surfaceSemanticMap;
-    std::vector<std::shared_ptr<class Material>> layers; // Up to 4 layers
+
+    // -------------------------------------------------------------------
+    // Layer slots
+    //
+    // Slots 0-3 are driven by the splat map and *partition* the surface:
+    // their weights are normalized to sum to 1, so adding one takes cover
+    // away from the others. Slots 4-7 are driven by the semantic map and
+    // *overlay* that blend, each composited by its own unnormalized weight.
+    //
+    // The two families cannot share one normalization. A semantic weight is
+    // not a share of the surface - Flow=0.8 means "strong current here", not
+    // "80% of this pixel is river" - and a river bed material covers the
+    // substrate rather than competing with it for area.
+    //
+    // An empty overlay slot keeps the built-in shading tweak for that
+    // channel, so a terrain authored before overlays looks unchanged.
+    // -------------------------------------------------------------------
+    static constexpr int kSplatLayerSlots = 4;      ///< 0-3: Grass/Rock/Snow/Soil by convention
+    static constexpr int kSemanticLayerSlots = 4;   ///< 4-7: Flow/Wetness/Ice/Hardness
+    static constexpr int kMaxLayerSlots = kSplatLayerSlots + kSemanticLayerSlots;
+
+    std::vector<std::shared_ptr<class Material>> layers; // kMaxLayerSlots slots
     std::vector<float> layer_uv_scales;      // UV tiling scale for each layer
+    /// Overlay strength for slots 4-7. Ignored by the splat-driven slots,
+    /// which are normalized against each other instead.
+    std::vector<float> layer_overlay_strength;
+    /// Per-slot opt-out of snow burial, for slots 4-7.
+    ///
+    /// A semantic channel value is a MEASUREMENT; an overlay's coverage is a
+    /// VISIBILITY decision. Flow can read 0.9 under two metres of snow - the
+    /// measurement is right, and erosion and soil capacity must keep reading
+    /// it. What is wrong is painting it, which is how a river ended up drawn
+    /// across a snow-filled valley with nothing to mask it. So overlays are
+    /// composited UNDER the snow the splat map already placed.
+    ///
+    /// Setting this for a slot says the author means it to show through:
+    /// open water cutting a snowfield, say. Ice (slot 6) is a cover in its
+    /// own right and is never buried.
+    std::vector<uint8_t> layer_overlay_ignore_cover;
+
+    /// Human-readable name of a slot, for panels, logs and the script API.
+    /// Hardness is the odd channel and the name says so.
+    ///
+    /// Flow, Wetness and Ice are SURFACE CONDITIONS - water, moisture and rime
+    /// are literally at the surface, so painting a material by their weight is
+    /// meaningful. Hardness is a SUBSTRATE PROPERTY: it says how resistant the
+    /// bedrock is, not that bedrock is visible. Hardness 0.8 under two metres
+    /// of valley soil is still 0.8, and a material bound to it used to paint
+    /// granite across meadows.
+    ///
+    /// So the Hardness overlay is gated by ROCK EXPOSURE (splat G), which
+    /// turns it into what it is actually useful for: a bedrock VARIANT, hard
+    /// granite outcrops against soft shale ones, appearing only where rock
+    /// shows. As a control it keeps its full unmasked value - erosion
+    /// resistance and soil capacity read the field, not the paint.
+    static const char* layerSlotName(int slot) {
+        switch (slot) {
+            case 0: return "Splat R";
+            case 1: return "Splat G";
+            case 2: return "Splat B";
+            case 3: return "Splat A";
+            case 4: return "Semantic Flow";
+            case 5: return "Semantic Wetness";
+            case 6: return "Semantic Ice";
+            case 7: return "Semantic Hardness (exposed rock)";
+            default: return "Invalid";
+        }
+    }
+    static bool isSemanticLayerSlot(int slot) {
+        return slot >= kSplatLayerSlots && slot < kMaxLayerSlots;
+    }
 
     // =========================================================================
     // MACRO COLOR MAP (SatMap Colorizer — Faz 1 / Faz 2)

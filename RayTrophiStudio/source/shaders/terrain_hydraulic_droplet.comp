@@ -31,6 +31,9 @@ layout(push_constant) uniform PC {
     float velocitySettling; float minWater; float minSpeed;
     int spawnMargin;
     float maxCellErosionPerBatch;
+    // Reference catchment area (m^2) for the per-batch erosion allowance.
+    // 0 disables the scaling and restores the former uniform cap.
+    float capAreaRef;
 } pc;
 
 layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
@@ -44,6 +47,13 @@ layout(set = 0, binding = 7) buffer DirectionXField { float directionXField[]; }
 layout(set = 0, binding = 8) buffer DirectionYField { float directionYField[]; };
 layout(set = 0, binding = 9) buffer ErosionClaim { float erosionClaim[]; };
 layout(set = 0, binding = 10) buffer BrushCenterErosion { float brushCenterErosion[]; };
+// Drainage area (m^2) from the LEM solve; all zeros when the LEM cycle is off.
+layout(set = 0, binding = 11) readonly buffer DrainageArea { float drainageArea[]; };
+// Authored surface at the start of this complete hydraulic run. A per-batch
+// claim closes atomic overdraw inside one dispatch, but without this persistent
+// reference every later batch receives a fresh allowance and a large catchment
+// can excavate a 100 m numerical shaft over several batches.
+layout(set = 0, binding = 12) readonly buffer OriginalHeight { float originalHeight[]; };
 
 // ---- PRNG (per-invocation xorshift32, hash-seeded to avoid low-bit correlation
 // between sequential droplet indices) ----
@@ -83,8 +93,27 @@ float bilinearInterpolate(int width, int height, float x, float y) {
 
 float claimAndApplyErosion(int index, float requested) {
     if (requested <= 0.0) return 0.0;
+    // The per-batch allowance used to be one flat number for the whole map,
+    // which capped a trunk river at exactly the same depth as a first-order
+    // rill and actively flattened the drainage hierarchy the LEM had just
+    // built. Scale it with sqrt(catchment area) so a big channel is allowed to
+    // stay a big channel; the cap still closes the stale-read atomic hole.
+    float hierarchyScale = 1.0;
+    if (pc.capAreaRef > 0.0)
+        hierarchyScale = clamp(1.0 + sqrt(max(drainageArea[index], 0.0) / pc.capAreaRef),
+                               1.0, 4.0);
+    float cellCap = pc.maxCellErosionPerBatch * hierarchyScale;
+
+    // Droplets add fine channel texture; the LEM owns catchment-scale relief.
+    // Bound the TOTAL downward excursion across every batch in physical units.
+    // The cap scales gently with terrain relief, but never permits the old
+    // hundred-metre lake pits on an ordinary scene.
+    float totalCapMeters = clamp(pc.heightScale * 0.04, 2.0, 25.0);
+    float totalCap = totalCapMeters / max(pc.heightScale, 1.0e-3);
+    float alreadyBelowSource = max(originalHeight[index] - heightmap[index], 0.0);
+    cellCap = min(cellCap, max(totalCap - alreadyBelowSource, 0.0));
     float previous = atomicAdd(erosionClaim[index], requested);
-    float allowed = min(requested, max(pc.maxCellErosionPerBatch - previous, 0.0));
+    float allowed = min(requested, max(cellCap - previous, 0.0));
     if (allowed > 0.0) {
         atomicAdd(heightmap[index], -allowed);
         atomicAdd(erosionField[index], allowed);
@@ -236,7 +265,8 @@ void main() {
         float maskValue = sampleMask(pc.mapWidth, pc.mapHeight, posX, posY, 1.0);
         if (maskValue < 0.001) {
             if (sediment > 0.0) {
-                updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, sediment * 0.5);
+                updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, sediment);
+                sediment = 0.0;
             }
             break;
         }
@@ -316,8 +346,17 @@ void main() {
         if (water < pc.minWater || speed < pc.minSpeed) {
             if (sediment > 0.0) {
                 updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, sediment);
+                sediment = 0.0;
             }
             break;
         }
+    }
+
+    // Lifetime exhaustion and boundary exits used to discard the remaining
+    // load silently. Settle it at the last valid interior position. The
+    // explicit terrain boundary policy may reshape that strip later, but the
+    // hydraulic transport itself no longer destroys material invisibly.
+    if (sediment > 0.0) {
+        updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, sediment);
     }
 }

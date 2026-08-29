@@ -46,15 +46,34 @@ SRC = os.path.join(ROOT, "RayTrophiStudio", "source")
 # 4-byte scalars are interchangeable for LAYOUT purposes (int/uint/float all
 # occupy one slot); only the width and the count matter.
 TYPES = {
-    "uint64_t": (8, 1), "float": (4, 1), "int": (4, 1), "uint": (4, 1),
+    "uint64_t": (8, 1), "int64_t": (8, 1), "double": (8, 1),
+    "float": (4, 1), "int": (4, 1), "uint": (4, 1),
+    # ★ uint32_t/int32_t were missing until 2026-08-25, and an unknown type
+    # was SKIPPED rather than reported. VkTerrainLayerData is declared almost
+    # entirely in uint32_t, so this script measured five of its twelve fields
+    # and printed a confident byte count for the rest. A mirror that drifted
+    # only in its uint fields would have been waved through - the instrument
+    # was reporting coverage it did not have. Unknown types now fail loudly.
+    "uint32_t": (4, 1), "int32_t": (4, 1),
+    "uint16_t": (2, 1), "int16_t": (2, 1),
+    "uint8_t": (1, 1), "int8_t": (1, 1),
     "vec2": (4, 2), "vec3": (4, 3), "vec4": (4, 4),
     "ivec2": (4, 2), "ivec3": (4, 3), "ivec4": (4, 4),
     "uvec2": (4, 2), "uvec3": (4, 3), "uvec4": (4, 4),
 }
 
+# Declarations that are legitimately not layout-bearing fields.
+NON_FIELD_KEYWORDS = {"static", "constexpr", "using", "typedef", "return", "friend"}
 
-def parse_fields(body):
-    """Flatten a struct body into [(width_bytes, count), ...] plus names."""
+
+def parse_fields(body, where="<unknown>"):
+    """Flatten a struct body into [(width_bytes, count), ...] plus names.
+
+    An unrecognized type raises instead of being skipped. Skipping is how
+    this script previously measured a struct while ignoring most of it and
+    still printed a byte count, which is worse than not checking at all: a
+    silent pass reads as evidence.
+    """
     out = []
     for raw in body.split("\n"):
         line = raw.split("//")[0].strip()
@@ -64,8 +83,13 @@ def parse_fields(body):
         if not m:
             continue
         ty, rest = m.group(1), m.group(2)
-        if ty not in TYPES:
+        if ty in NON_FIELD_KEYWORDS:
             continue
+        if ty not in TYPES:
+            raise ValueError(
+                "{}: unknown field type '{}' in '{}'. Add it to TYPES with its "
+                "width - skipping it would make every size below meaningless."
+                .format(where, ty, line))
         width, mult = TYPES[ty]
         for decl in rest.split(","):
             decl = decl.strip()
@@ -100,7 +124,7 @@ def extract(path, pattern):
     m = re.search(pattern, text, re.S)
     if not m:
         return None
-    return parse_fields(m.group(1))
+    return parse_fields(m.group(1), path)
 
 
 GROUPS = [
@@ -114,6 +138,25 @@ GROUPS = [
             ("shaders/closesthit.rchit",          r"struct VkVolumeInstance \{(.*?)\n\};"),
             ("shaders/raygen.rgen",               r"struct VkVolumeInstance \{(.*?)\n\};"),
             ("shaders/volume_intersection.rint",  r"struct VkVolumeInstance \{(.*?)\n\};"),
+        ],
+    },
+    {
+        # Added 2026-08-25 with the semantic overlay slots. This struct was
+        # outside the audit while it was being grown from 4 to 8 layer slots,
+        # which is exactly the window where a mirror drifts: the C++ side is
+        # rebuilt by the compiler, the GLSL side is a hand-edited file whose
+        # .spv is committed separately and can simply be forgotten.
+        "name": "VkTerrainLayerData",
+        "align": 16,
+        "reference": ("include/Backend/vulkan_material_types.h",
+                      r"struct VK_GPU_ALIGN\(16\) VkTerrainLayerData \{(.*?)\n\};"),
+        "mirrors": [
+            ("shaders/closesthit.rchit", r"struct VkTerrainLayerData \{(.*?)\n\};"),
+            # The preview shader names its copy TerrainLayerData and reads it
+            # through std430 rather than scalar. Every member here is a 4-byte
+            # scalar or an array of them, so the two layouts agree; adding a
+            # vec3 would break that equivalence and this note with it.
+            ("shaders/material_preview_frag.frag", r"struct TerrainLayerData \{(.*?)\n\};"),
         ],
     },
 ]

@@ -36,18 +36,21 @@ layout(set = 0, binding = 1) uniform sampler2D textures[];
 layout(set = 0, binding = 2) uniform sampler2D envMaps[2];
 
 // Terrain layer SSBO — mirrors RT pipeline binding 12.
-// Layout must match VkTerrainLayerData (64 bytes, 16-byte aligned).
+// Layout must match VkTerrainLayerData (112 bytes, 16-byte aligned).
+// Every member is a 4-byte scalar or an array of them, so std430 and scalar
+// layout agree here; do not add a vec3 without re-checking that.
 struct TerrainLayerData {
-    uint  layer_mat_id[4];   // Material buffer indices for layers 0–3
-    float layer_uv_scale[4]; // UV tiling per layer
+    uint  layer_mat_id[8];   // 0–3 splat-weighted, 4–7 semantic overlays
+    float layer_uv_scale[8]; // UV tiling per slot
+    float overlay_strength[4]; // Artist dial for slots 4–7
     uint  splat_map_tex;     // RGBA splat map texture slot
-    uint  layer_count;       // Active layers (1–4)
+    uint  layer_count;       // Active splat layers (1–4)
     uint  macro_color_tex;   // Macro color map slot
     float macro_color_strength; // Macro color blend strength
     uint  semantic_map_tex;  // R=Flow, G=Wetness, B=Ice, A=Hardness
     float semantic_wet_darkening;
     float semantic_wet_roughness;
-    float semantic_pad;
+    uint  overlay_mask;      // bit s = slot 4+s bound; bit 8+s = exempt from snow burial
 };
 layout(set = 0, binding = 3, std430) readonly buffer TerrainLayerBuffer {
     TerrainLayerData terrainLayers[];
@@ -346,17 +349,36 @@ void main() {
 
             if (validTexture(tl.semantic_map_tex)) {
                 vec4 semantic = texture(textures[nonuniformEXT(tl.semantic_map_tex)], uv);
-                float wet = clamp(max(semantic.r, semantic.g), 0.0, 1.0);
+                // Snow burial, matching the ray-traced paths: a semantic value
+                // is a measurement, its coverage is a visibility decision.
+                // Flow reads 0.9 under two metres of snow and must not be
+                // painted there.
+                float exposed = 1.0 - clamp(weights[2], 0.0, 1.0);
+                float wet = clamp(max(semantic.r, semantic.g), 0.0, 1.0) * exposed;
                 float ice = clamp(semantic.b, 0.0, 1.0);
-                float hard = clamp(semantic.a, 0.0, 1.0);
-                blendAlbedo *= 1.0 - wet * clamp(tl.semantic_wet_darkening, 0.0, 0.8);
-                blendRoughness = mix(blendRoughness, 0.16,
-                    wet * clamp(tl.semantic_wet_roughness, 0.0, 1.0));
-                float iceLuma = dot(blendAlbedo, vec3(0.2126, 0.7152, 0.0722));
-                blendAlbedo = mix(blendAlbedo,
-                    vec3(0.70, 0.82, 0.88) * max(iceLuma, 0.35), ice * 0.55);
-                blendRoughness = mix(blendRoughness, 0.12, ice * 0.65);
-                blendRoughness = clamp(blendRoughness + hard * 0.035, 0.0, 1.0);
+                // Hardness is a substrate property, so it is gated by rock
+                // EXPOSURE (splat G) rather than merely buried by snow.
+                float hard = clamp(semantic.a, 0.0, 1.0) * clamp(weights[1], 0.0, 1.0);
+                // A bound overlay replaces the built-in tweak for its channel.
+                // The viewport preview does not composite overlay MATERIALS
+                // yet, so a bound channel simply keeps the plain splat blend
+                // here rather than showing the built-in effect on top of a
+                // material the ray-traced view is already drawing.
+                if ((tl.overlay_mask & 3u) == 0u) {
+                    blendAlbedo *= 1.0 - wet * clamp(tl.semantic_wet_darkening, 0.0, 0.8);
+                    blendRoughness = mix(blendRoughness, 0.16,
+                        wet * clamp(tl.semantic_wet_roughness, 0.0, 1.0));
+                }
+                if ((tl.overlay_mask & (1u << 2u)) == 0u) {
+                    float iceLuma = dot(blendAlbedo, vec3(0.2126, 0.7152, 0.0722));
+                    blendAlbedo = mix(blendAlbedo,
+                        vec3(0.70, 0.82, 0.88) * max(iceLuma, 0.35), ice * 0.55);
+                    blendRoughness = mix(blendRoughness, 0.12, ice * 0.65);
+                }
+                if ((tl.overlay_mask & (1u << 3u)) == 0u) {
+                    blendRoughness = blendRoughness + hard * 0.035;
+                }
+                blendRoughness = clamp(blendRoughness, 0.0, 1.0);
             }
 
             // Apply blended normal first (derivative TBN — no surfaceTBN available in raster)

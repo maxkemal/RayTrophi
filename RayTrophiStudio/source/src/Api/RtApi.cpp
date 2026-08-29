@@ -30,6 +30,8 @@
 #include "Backend/VulkanBackend.h"     // VulkanBackendAdapter volume instrumentation
 #include <memory>
 #include "TriangleMesh.h"
+#include "MeshEdit/SplineObject.h"
+#include "MeshEdit/SplineObjectLifecycle.h"
 #include "Camera.h"            // Faz 5.1a: active-camera get/set
 #include "World.h"             // Faz 5.1c: NishitaSkyParams / background (rt.world)
 #include "GeometryNodesV2.h"   // rebakeFromOrig / recomputeOrigNormals; GeometryNodeGraphV2 (Faz 3d)
@@ -493,6 +495,9 @@ bool objectExists(const std::string& name) {
     if (g_ctx->scene.isEditorPendingDeleteObjectName(name)) return false;
     if (findFlatMesh(*g_ctx, name)) return true;
     for (const auto& obj : g_ctx->scene.world.objects) {
+        if (auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(obj)) {
+            if (spline->nodeName == name) return true;
+        }
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (tri->getNodeName() == name) return true;
         }
@@ -626,6 +631,16 @@ namespace {
 // Flat-only transform lookup: every scene node type (skinned, terrain, water,
 // procedural, imported) is a flat SoA TriangleMesh — the API has no facade path.
 Transform* findObjectTransform(UIContext& ctx, const std::string& name, Result& err) {
+    for (const auto& object : ctx.scene.world.objects) {
+        auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object);
+        if (spline && spline->nodeName == name) {
+            if (!spline->transform) {
+                err = Result::fail("spline has no transform handle: " + name);
+                return nullptr;
+            }
+            return spline->transform.get();
+        }
+    }
     TriangleMesh* fm = findFlatMesh(ctx, name);
     if (!fm) {
         err = Result::fail("object not found: " + name);
@@ -710,6 +725,13 @@ Result deleteObject(const std::string& name) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (!g_history) return Result::fail("rtapi has no SceneHistory bound");
+    for (const auto& object : g_ctx->scene.world.objects) {
+        auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object);
+        if (spline && spline->nodeName == name) {
+            return MeshEdit::deleteSplineObject(*g_ctx, *g_history, spline)
+                ? Result::success() : Result::fail("failed to delete spline: " + name);
+        }
+    }
     if (!objectExists(name)) return Result::fail("object not found: " + name);
 
     // Empty facade list: flat nodes are captured inside the command's execute().

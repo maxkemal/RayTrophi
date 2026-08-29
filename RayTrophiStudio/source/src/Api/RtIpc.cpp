@@ -1,4 +1,4 @@
-/*
+﻿/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          Api/RtIpc.cpp
@@ -761,6 +761,16 @@ json dispatchMethod(const std::string& method, const json& params) {
             return result;
         });
     }
+    if (method == "spline.create") {
+        const std::string primitive = params.value("primitive", std::string("open_line"));
+        const std::string name = params.value("name", std::string("Spline"));
+        const std::string plane = params.value("plane", std::string("xy"));
+        return enqueueQuery([primitive, name, plane](UIContext&) {
+            std::string created;
+            const auto result = rtapi::createSpline(primitive, name, plane, created);
+            return result.ok ? json(created) : json{{"__error", result.error}};
+        });
+    }
     if (method == "spline.get") {
         const std::string name = requireString(params, "name");
         return enqueueQuery([name](UIContext&) {
@@ -810,6 +820,150 @@ json dispatchMethod(const std::string& method, const json& params) {
             int index = -1;
             const auto r = rtapi::extrudeSplineEndpoint(name, endpoint, position, index);
             return r.ok ? json{{"index", index}} : json{{"__error", r.error}};
+        });
+    }
+    if (method == "spline.keyframe.insert") {
+        const std::string name = requireString(params, "name");
+        const int frame = requireInt(params, "frame");
+        const bool objectTransform = params.value("object_transform", true);
+        const bool points = params.value("points", true);
+        return enqueueResult([name, frame, objectTransform, points](UIContext&) {
+            return rtapi::insertSplineKeyframe(name, frame, objectTransform, points);
+        });
+    }
+    if (method == "spline.keyframe.remove") {
+        const std::string name = requireString(params, "name");
+        const int frame = requireInt(params, "frame");
+        const bool objectTransform = params.value("object_transform", true);
+        const bool points = params.value("points", true);
+        return enqueueResult([name, frame, objectTransform, points](UIContext&) {
+            return rtapi::removeSplineKeyframe(name, frame, objectTransform, points);
+        });
+    }
+    if (method == "spline.keyframe.list") {
+        const std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            std::vector<rtapi::SplineKeyInfo> keys;
+            const auto result = rtapi::listSplineKeyframes(name, keys);
+            if (!result.ok) return json{{"__error", result.error}};
+            json output = json::array();
+            for (const auto& key : keys) {
+                output.push_back({{"frame", key.frame},
+                                  {"object_transform", key.has_object_transform},
+                                  {"points", key.has_points},
+                                  {"point_count", key.point_count}});
+            }
+            return output;
+        });
+    }
+    if (method == "spline.animation.self_test") {
+        return enqueueQuery([](UIContext&) {
+            std::string details;
+            const auto result = rtapi::splineAnimationSelfTest(details);
+            return result.ok ? json{{"ok", true}, {"details", details}}
+                             : json{{"__error", result.error}, {"details", details}};
+        });
+    }
+    if (method == "spline.skin.create") {
+        const std::string spline = requireString(params, "spline");
+        const std::string output = params.value("output", std::string());
+        const float radius = params.value("radius", 0.1f);
+        const int pathSamples = params.value("path_samples", 48);
+        const int radialSegments = params.value("radial_segments", 12);
+        const bool capStart = params.value("cap_start", true);
+        const bool capEnd = params.value("cap_end", true);
+        const bool pointRadius = params.value("use_point_radius", true);
+        rtapi::SplineSkinSettings settings;
+        settings.custom_profile = params.value("custom_profile", std::string());
+        settings.radius = radius; settings.path_samples = pathSamples;
+        settings.radial_segments = radialSegments; settings.cap_start = capStart;
+        settings.cap_end = capEnd; settings.use_point_radius = pointRadius;
+        settings.taper_start = params.value("taper_start", 1.0f);
+        settings.taper_end = params.value("taper_end", 1.0f);
+        settings.taper_falloff = params.value("taper_falloff", 1.0f);
+        settings.twist_start_degrees = params.value("twist_start_degrees", 0.0f);
+        settings.twist_end_degrees = params.value("twist_end_degrees", 0.0f);
+        settings.wave_amplitude = params.value("wave_amplitude", 0.0f);
+        settings.wave_cycles = params.value("wave_cycles", 1.0f);
+        settings.wave_phase_degrees = params.value("wave_phase_degrees", 0.0f);
+        settings.wave_noise = params.value("wave_noise", 0.0f);
+        settings.wave_seed = params.value("wave_seed", 0);
+        settings.wave_axis = params.value("wave_axis", 1);
+        return enqueueQuery([spline, output, settings](UIContext&) {
+            rtapi::SplineSkinInfo info;
+            const auto result = rtapi::createSplineSkinAdvanced(spline, output, settings, info);
+            if (!result.ok) return json{{"__error", result.error}};
+            return json{{"object_name", info.object_name},
+                        {"source_node", info.source_node}, {"profile_node", info.profile_node},
+                        {"taper_node", info.taper_node},
+                        {"twist_node", info.twist_node}, {"wave_node", info.wave_node},
+                        {"skin_node", info.skin_node},
+                        {"output_node", info.output_node}, {"vertex_count", info.vertex_count},
+                        {"triangle_count", info.triangle_count}};
+        });
+    }
+    if (method == "spline.skin.finalize") {
+        const std::string spline = requireString(params, "spline");
+        return enqueueQuery([spline](UIContext&) {
+            rtapi::SplineSkinInfo info;
+            const auto result = rtapi::finalizeSplineSkinPreview(spline, info);
+            return result.ok
+                ? json{{"object_name", info.object_name}, {"vertex_count", info.vertex_count},
+                       {"triangle_count", info.triangle_count}}
+                : json{{"__error", result.error}};
+        });
+    }
+    if (method == "spline.skin.clear") {
+        const std::string spline = requireString(params, "spline");
+        return enqueueResult([spline](UIContext&) {
+            return rtapi::clearSplineSkinPreview(spline);
+        });
+    }
+    // ── Fixed-topology geometry deformation cache ─────────────────────────
+    auto geometryCacheJson = [](const rtapi::GeometryCacheInfo& info) {
+        return json{{"object_name", info.object_name},
+                    {"start_frame", info.start_frame}, {"end_frame", info.end_frame},
+                    {"frame_step", info.frame_step}, {"vertex_count", info.vertex_count},
+                    {"sample_count", info.sample_count}, {"memory_bytes", info.memory_bytes},
+                    {"enabled", info.enabled}, {"topology_valid", info.topology_valid},
+                    {"source_stale", info.source_stale}};
+    };
+    if (method == "geometry_cache.bake") {
+        const std::string name = requireString(params, "object_name");
+        const int start = requireInt(params, "start_frame");
+        const int end = requireInt(params, "end_frame");
+        const int step = params.value("frame_step", 1);
+        return enqueueQuery([name, start, end, step, geometryCacheJson](UIContext&) {
+            rtapi::GeometryCacheInfo info;
+            const auto result = rtapi::bakeGeometryCache(name, start, end, step, info);
+            return result.ok ? geometryCacheJson(info) : json{{"__error", result.error}};
+        });
+    }
+    if (method == "geometry_cache.status") {
+        const std::string name = requireString(params, "object_name");
+        return enqueueQuery([name, geometryCacheJson](UIContext&) {
+            rtapi::GeometryCacheInfo info;
+            const auto result = rtapi::getGeometryCacheInfo(name, info);
+            return result.ok ? geometryCacheJson(info) : json{{"__error", result.error}};
+        });
+    }
+    if (method == "geometry_cache.set_enabled") {
+        const std::string name = requireString(params, "object_name");
+        const bool enabled = requireBool(params, "enabled");
+        return enqueueResult([name, enabled](UIContext&) {
+            return rtapi::setGeometryCacheEnabled(name, enabled);
+        });
+    }
+    if (method == "geometry_cache.clear") {
+        const std::string name = requireString(params, "object_name");
+        return enqueueResult([name](UIContext&) { return rtapi::clearGeometryCache(name); });
+    }
+    if (method == "geometry_cache.self_test") {
+        return enqueueQuery([](UIContext&) {
+            std::string details;
+            const auto result = rtapi::geometryCacheSelfTest(details);
+            return result.ok ? json{{"ok", true}, {"details", details}}
+                             : json{{"__error", result.error}, {"details", details}};
         });
     }
     // ── Version ─────────────────────────────────────────────────────────
@@ -2297,15 +2451,144 @@ json dispatchMethod(const std::string& method, const json& params) {
         settings.talus_angle = optionalFloat(params, "talus_angle", 0.5f);
         settings.amount = optionalFloat(params, "amount", 0.3f);
         settings.undo = optionalBool(params, "undo", true);
+        // Landscape Evolution Model cycle. The negative defaults are sentinels
+        // meaning "leave the solver default alone", so a caller that tunes one
+        // dial does not silently reset the other twenty.
+        settings.fluvial_cycle = optionalInt(params, "fluvial_cycle", -1);
+        settings.fluvial_quality = optionalString(params, "fluvial_quality", "");
+        settings.fluvial_iterations = optionalInt(params, "fluvial_iterations", -1);
+        settings.fluvial_time_step = optionalFloat(params, "fluvial_time_step", -1.0f);
+        settings.rain_rate = optionalFloat(params, "rain_rate", -1.0f);
+        settings.orographic_rain = optionalFloat(params, "orographic_rain", -1.0f);
+        settings.rain_wind_degrees = optionalFloat(params, "rain_wind_degrees", -1000.0f);
+        settings.incision_k = optionalFloat(params, "incision_k", -1.0f);
+        settings.stream_power_m = optionalFloat(params, "stream_power_m", -1.0f);
+        settings.stream_power_n = optionalFloat(params, "stream_power_n", -1.0f);
+        settings.transport_k = optionalFloat(params, "transport_k", -1.0f);
+        settings.sediment_cover = optionalFloat(params, "sediment_cover", -1.0f);
+        settings.settling_velocity = optionalFloat(params, "settling_velocity", -1.0f);
+        settings.sediment_route_steps = optionalInt(params, "sediment_route_steps", -1);
+        settings.avulsion_interval = optionalInt(params, "avulsion_interval", -1);
+        settings.alluvium_steps = optionalInt(params, "alluvium_steps", -1);
+        settings.drainage_refresh_interval = optionalInt(params, "drainage_refresh_interval", -1);
+        settings.drainage_fill_passes = optionalInt(params, "drainage_fill_passes", -1);
+        settings.drainage_accumulate_passes = optionalInt(params, "drainage_accumulate_passes", -1);
+        settings.drainage_coarsest_size = optionalInt(params, "drainage_coarsest_size", -1);
+        settings.mass_wasting = optionalInt(params, "mass_wasting", -1);
+        settings.repose_angle_degrees = optionalFloat(params, "repose_angle_degrees", -1.0f);
+        settings.alluvium_slope_degrees = optionalFloat(params, "alluvium_slope_degrees", -1.0f);
+        settings.alluvium_rate = optionalFloat(params, "alluvium_rate", -1.0f);
+        settings.alluvium_consolidation = optionalFloat(params, "alluvium_consolidation", -1.0f);
+        settings.mass_wasting_rate = optionalFloat(params, "mass_wasting_rate", -1.0f);
+        settings.mass_wasting_steps = optionalInt(params, "mass_wasting_steps", -1);
+        settings.hillslope_diffusion = optionalFloat(params, "hillslope_diffusion", -1.0f);
+        settings.incision_safety = optionalFloat(params, "incision_safety", -1.0f);
+        settings.deposition_safety = optionalFloat(params, "deposition_safety", -1.0f);
+        settings.max_step_meters = optionalFloat(params, "max_step_meters", -1.0f);
+        settings.lake_epsilon_meters = optionalFloat(params, "lake_epsilon_meters", -1.0f);
+        settings.headwater_area_km2 = optionalFloat(params, "headwater_area_km2", -1.0f);
         return enqueueResult([name, settings](UIContext&) { return rtapi::erodeTerrain(name, settings); });
+    }
+    if (method == "terrain.erosion_stats") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::TerrainErosionStats stats;
+            const auto result = rtapi::getTerrainErosionStats(stats);
+            if (!result.ok) return json{{"__error", result.error}};
+            return json{
+                {"eroded", stats.eroded},
+                {"deposited", stats.deposited},
+                {"exported", stats.exported},
+                {"carried", stats.carried},
+                {"mass_error", stats.mass_error},
+                {"mass_error_fraction", stats.mass_error_fraction},
+                {"lake_cells", stats.lake_cells},
+                {"lake_area_fraction", stats.lake_area_fraction},
+                {"max_drainage_area_km2", stats.max_drainage_area_km2},
+                {"max_drainage_area_fraction", stats.max_drainage_area_fraction},
+                {"deep_lake_cells", stats.deep_lake_cells},
+                {"deep_lake_area_fraction", stats.deep_lake_area_fraction},
+                {"deepest_lake_meters", stats.deepest_lake_meters},
+                {"deposited_cells", stats.deposited_cells},
+                {"deposited_area_fraction", stats.deposited_area_fraction},
+                {"deepest_deposit_meters", stats.deepest_deposit_meters},
+                {"mean_deposit_meters", stats.mean_deposit_meters},
+                {"drainage_density", stats.drainage_density},
+                {"cycle_iterations", stats.cycle_iterations},
+                {"gpu_path", stats.gpu_path}};
+        });
     }
     if (method == "terrain.apply_preset") {
         std::string name = requireString(params, "name");
         std::string preset = requireString(params, "preset");
         bool replace_graph = optionalBool(params, "replace_graph", false);
         bool add_satmap = optionalBool(params, "add_satmap", false);
-        return enqueueResult([name, preset, replace_graph, add_satmap](UIContext&) {
-            return rtapi::applyTerrainPreset(name, preset, replace_graph, add_satmap);
+        return enqueueQuery([name, preset, replace_graph, add_satmap](UIContext&) {
+            std::vector<std::string> faults;
+            const auto result = rtapi::applyTerrainPreset(
+                name, preset, faults, replace_graph, add_satmap);
+            if (!result.ok) return json{{"__error", result.error}};
+            // wiring_faults is the measurement, not decoration: an empty list
+            // is the only evidence the setup actually connected everything.
+            return json{{"applied", true},
+                        {"wiring_faults", faults},
+                        {"wiring_fault_count", static_cast<int>(faults.size())}};
+        });
+    }
+    if (method == "terrain.list_layers") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            std::vector<rtapi::TerrainLayerInfo> layers;
+            const auto result = rtapi::listTerrainLayers(name, layers);
+            if (!result.ok) return json{{"__error", result.error}};
+            json out = json::array();
+            for (const auto& l : layers) {
+                out.push_back({{"slot", l.slot},
+                               {"channel", l.channel},
+                               {"semantic_overlay", l.semantic_overlay},
+                               {"bound", l.bound},
+                               {"material", l.material},
+                               {"uv_scale", l.uv_scale},
+                               {"overlay_strength", l.overlay_strength},
+                               // Overlays render UNDER the snow the splat map
+                               // placed; this exempts a slot from that burial.
+                               {"overlay_ignore_cover", l.overlay_ignore_cover},
+                               // channel_coverage 0 on a bound overlay means
+                               // the graph never fills that channel, so the
+                               // material cannot appear no matter the dials.
+                               {"channel_measured", l.channel_measured},
+                               // channel_constant: min==max, a flat fill that
+                               // selects nothing while reporting full coverage.
+                               {"channel_constant", l.channel_constant},
+                               {"channel_min", l.channel_min},
+                               {"channel_max", l.channel_max},
+                               {"channel_mean", l.channel_mean},
+                               {"channel_coverage", l.channel_coverage}});
+            }
+            return json{{"layers", out}};
+        });
+    }
+    if (method == "terrain.set_layer") {
+        std::string name = requireString(params, "name");
+        int slot = requireInt(params, "slot");
+        // Absent means "leave alone"; an explicit empty material clears the
+        // slot. Collapsing those two would make clearing impossible.
+        const bool hasMaterial = params.contains("material") && !params["material"].is_null();
+        std::string material = hasMaterial ? params["material"].get<std::string>() : std::string();
+        const bool hasUvScale = params.contains("uv_scale") && !params["uv_scale"].is_null();
+        float uvScale = hasUvScale ? params["uv_scale"].get<float>() : 1.0f;
+        const bool hasStrength = params.contains("overlay_strength") &&
+            !params["overlay_strength"].is_null();
+        float strength = hasStrength ? params["overlay_strength"].get<float>() : 1.0f;
+        const bool hasIgnoreCover = params.contains("overlay_ignore_cover") &&
+            !params["overlay_ignore_cover"].is_null();
+        bool ignoreCover = hasIgnoreCover ? params["overlay_ignore_cover"].get<bool>() : false;
+        return enqueueResult([name, slot, hasMaterial, material, hasUvScale, uvScale,
+                              hasStrength, strength, hasIgnoreCover, ignoreCover](UIContext&) {
+            return rtapi::setTerrainLayer(name, slot,
+                                          hasMaterial ? &material : nullptr,
+                                          hasUvScale ? &uvScale : nullptr,
+                                          hasStrength ? &strength : nullptr,
+                                          hasIgnoreCover ? &ignoreCover : nullptr);
         });
     }
     if (method == "terrain.list_satmap_presets") {
@@ -2331,9 +2614,111 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"ok", true}, {"warnings", warnings}};
         });
     }
+    if (method == "terrain.slope_area_fit") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            rtapi::TerrainSlopeAreaFit fit;
+            const auto result = rtapi::getTerrainSlopeAreaFit(name, fit);
+            if (!result.ok) return json{{"__error", result.error}};
+            return json{
+                {"measured", fit.measured},
+                // Read r_squared FIRST: a confident theta fitted to scatter is
+                // exactly the number that ends a debugging session early.
+                {"r_squared", fit.r_squared},
+                {"concavity_index", fit.concavity_index},
+                {"intercept", fit.intercept},
+                {"bin_count", fit.bin_count},
+                {"channel_cells", fit.channel_cells},
+                {"flow_peak", fit.flow_peak},
+                {"status", fit.status}};
+        });
+    }
+    if (method == "terrain.landform_stats") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            rtapi::TerrainLandformStats st;
+            const auto result = rtapi::getTerrainLandformStats(name, st);
+            if (!result.ok) return json{{"__error", result.error}};
+            return json{
+                {"measured", st.measured},
+                {"status", st.status},
+                {"width", st.width},
+                {"height", st.height},
+                {"size_meters", st.size_meters},
+                {"cell_meters", st.cell_meters},
+                {"relief_meters", st.relief_meters},
+                {"flat_fraction", st.flat_fraction},
+                {"gentle_fraction", st.gentle_fraction},
+                {"median_slope_deg", st.median_slope_deg},
+                {"p95_slope_deg", st.p95_slope_deg},
+                // Rock: how much of the map is too steep to hold soil, and
+                // whether the steep part is rough. Read the two together.
+                {"cliff_fraction", st.cliff_fraction},
+                {"roughness_slope_ratio", st.roughness_slope_ratio},
+                {"steep_roughness_meters", st.steep_roughness_meters},
+                {"gentle_roughness_meters", st.gentle_roughness_meters},
+                // The ladder the scalar below is derived from. Published so
+                // the reader can see the curve rather than trust a threshold.
+                {"relief_window_meters", st.relief_window_meters},
+                {"relief_window_relief", st.relief_window_relief},
+                // Relief added by the last doubling of the window: the
+                // sharpest read on whether the tile has broad landforms.
+                {"broad_growth", st.broad_growth},
+                {"landform_scale_meters", st.landform_scale_meters},
+                {"landform_scale_saturated", st.landform_scale_saturated},
+                {"realised_hurst", st.realised_hurst},
+                {"hurst_sample_count", st.hurst_sample_count},
+                // Macro-micro coherence: the worst octave's departure from the
+                // fitted power law, and the scale it sits at.
+                {"spectrum_kink", st.spectrum_kink},
+                {"spectrum_kink_signed", st.spectrum_kink_signed},
+                {"spectrum_kink_meters", st.spectrum_kink_meters},
+                {"local_relief_p10", st.local_relief_p10},
+                {"local_relief_p90", st.local_relief_p90},
+                {"local_relief_ratio", st.local_relief_ratio},
+                {"lowland_fraction", st.lowland_fraction},
+                {"midland_fraction", st.midland_fraction},
+                {"hypsometric_integral", st.hypsometric_integral}};
+        });
+    }
+    if (method == "terrain.flow_authority") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            rtapi::TerrainFlowAuthority authority;
+            const auto result = rtapi::getTerrainFlowAuthority(name, authority);
+            if (!result.ok) return json{{"__error", result.error}};
+            return json{
+                {"has_flow_node", authority.has_flow_node},
+                {"evaluated", authority.evaluated},
+                {"discharge_measured", authority.discharge_measured},
+                // The state nothing else reports: geometry-derived channels
+                // rendered over an eroded surface, still looking like rivers.
+                {"erosion_unwired", authority.erosion_unwired},
+                {"source", authority.source},
+                {"has_river_network", authority.has_river_network},
+                {"river_network_source", authority.river_network_source},
+                {"river_area_physical", authority.river_area_physical},
+                {"river_direction_channels", authority.river_direction_channels},
+                {"river_lake_mask_connected", authority.river_lake_mask_connected},
+                {"river_lake_spill_connected", authority.river_lake_spill_connected}};
+        });
+    }
     if (method == "terrain.calculate_flow") {
         std::string name = requireString(params, "name");
-        return enqueueResult([name](UIContext&) { return rtapi::calculateTerrainFlow(name); });
+        return enqueueQuery([name](UIContext&) {
+            rtapi::TerrainFlowStats stats;
+            const auto result = rtapi::calculateTerrainFlow(name, stats);
+            if (!result.ok) return json{{"__error", result.error}};
+            return json{
+                {"width", stats.width},
+                {"height", stats.height},
+                {"max_accumulation", stats.max_accumulation},
+                {"mean_accumulation", stats.mean_accumulation},
+                {"channel_cells", stats.channel_cells},
+                {"border_terminations", stats.border_terminations},
+                {"inland_terminations", stats.inland_terminations},
+                {"inland_termination_ratio", stats.inland_termination_ratio}};
+        });
     }
     if (method == "terrain.sample_height") {
         std::string name = requireString(params, "name");
@@ -2344,6 +2729,73 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::Result r = rtapi::sampleTerrainHeight(name, world_x, world_z, height);
             if (!r.ok) return json{{"__error", r.error}};
             return json(height);
+        });
+    }
+    // Terrain brush strokes. `dabs` is a list of [world_x, world_z] pairs: a
+    // stroke is a drag, and a single-point-only surface would only ever test a
+    // case the artist does not produce.
+    auto readTerrainDabs = [](const json& p) {
+        if (!p.contains("dabs") || !p.at("dabs").is_array() || p.at("dabs").empty())
+            throw std::runtime_error("missing/invalid parameter: dabs");
+        std::vector<rtapi::TerrainBrushDab> dabs;
+        for (const auto& value : p.at("dabs")) {
+            if (!value.is_array() || value.size() != 2)
+                throw std::runtime_error("each terrain dab must be [world_x, world_z]");
+            rtapi::TerrainBrushDab dab;
+            dab.world_x = value[0].get<float>();
+            dab.world_z = value[1].get<float>();
+            dabs.push_back(dab);
+        }
+        return dabs;
+    };
+    if (method == "terrain.sculpt") {
+        std::string name = requireString(params, "name");
+        auto dabs = readTerrainDabs(params);
+        rtapi::TerrainSculptSettings settings;
+        settings.mode = optionalString(params, "mode", "raise");
+        settings.radius = optionalFloat(params, "radius", 5.0f);
+        settings.strength = optionalFloat(params, "strength", 0.5f);
+        settings.curve = optionalFloat(params, "curve", 2.0f);
+        settings.dt = optionalFloat(params, "dt", 1.0f / 60.0f);
+        settings.use_fixed_height = optionalBool(params, "use_fixed_height", false);
+        settings.flatten_target = optionalFloat(params, "flatten_target", 0.0f);
+        settings.stamp_texture_path = optionalString(params, "stamp_texture", "");
+        settings.stamp_rotation = optionalFloat(params, "stamp_rotation", 0.0f);
+        settings.undo = optionalBool(params, "undo", true);
+        return enqueueQuery([name, dabs, settings](UIContext&) {
+            rtapi::TerrainBrushResult out;
+            const auto r = rtapi::sculptTerrain(name, dabs, settings, out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{
+                {"dab_count", out.dab_count},
+                {"height_before", out.height_before},
+                {"height_after", out.height_after},
+                {"height_delta", out.height_after - out.height_before},
+                {"field_min_before", out.field_min_before},
+                {"field_max_before", out.field_max_before},
+                {"field_min_after", out.field_min_after},
+                {"field_max_after", out.field_max_after}};
+        });
+    }
+    if (method == "terrain.paint_splat") {
+        std::string name = requireString(params, "name");
+        auto dabs = readTerrainDabs(params);
+        rtapi::TerrainSplatPaintSettings settings;
+        settings.channel = optionalInt(params, "channel", 0);
+        settings.radius = optionalFloat(params, "radius", 5.0f);
+        settings.strength = optionalFloat(params, "strength", 1.0f);
+        settings.dt = optionalFloat(params, "dt", 1.0f / 60.0f);
+        settings.undo = optionalBool(params, "undo", true);
+        return enqueueQuery([name, dabs, settings](UIContext&) {
+            rtapi::TerrainSplatPaintResult out;
+            const auto r = rtapi::paintTerrainSplat(name, dabs, settings, out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{
+                {"dab_count", out.dab_count},
+                {"channel", out.channel},
+                {"coverage_before", out.coverage_before},
+                {"coverage_after", out.coverage_after},
+                {"coverage_delta", out.coverage_after - out.coverage_before}};
         });
     }
     if (method == "terrain.carve_river") {
@@ -3289,6 +3741,20 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json(lid);
         });
     }
+    if (method == "nodes.link_by_key") {
+        std::string gt = requireString(params, "graph_type");
+        std::string gn = requireString(params, "graph_name");
+        unsigned int fn = params.value("from_node", 0u);
+        std::string fo = requireString(params, "from_output");
+        unsigned int tn = params.value("to_node", 0u);
+        std::string ti = requireString(params, "to_input");
+        return enqueueQuery([gt, gn, fn, fo, tn, ti](UIContext&) {
+            unsigned int lid = 0;
+            rtapi::Result r = rtapi::linkNodesByKey(gt, gn, fn, fo, tn, ti, lid);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json(lid);
+        });
+    }
     if (method == "nodes.list") {
         std::string gt = requireString(params, "graph_type");
         std::string gn = requireString(params, "graph_name");
@@ -3305,6 +3771,36 @@ json dispatchMethod(const std::string& method, const json& params) {
                 });
             }
             return result;
+        });
+    }
+    if (method == "nodes.list_ports") {
+        std::string gt = requireString(params, "graph_type");
+        std::string gn = requireString(params, "graph_name");
+        unsigned int nid = params.value("node_id", 0u);
+        return enqueueQuery([gt, gn, nid](UIContext&) {
+            std::vector<rtapi::NodePortInfo> ports;
+            rtapi::Result r = rtapi::listNodePorts(gt, gn, nid, ports);
+            if (!r.ok) return json{{"__error", r.error}};
+            json result = json::array();
+            for (const auto& p : ports) {
+                result.push_back(json{
+                    {"index", p.index}, {"direction", p.direction}, {"key", p.key},
+                    {"name", p.name}, {"type", p.data_type}, {"exposure", p.exposure},
+                    {"section", p.section}, {"visible", p.visible}, {"connected", p.connected}
+                });
+            }
+            return result;
+        });
+    }
+    if (method == "nodes.set_port_visible") {
+        std::string gt = requireString(params, "graph_type");
+        std::string gn = requireString(params, "graph_name");
+        unsigned int nid = params.value("node_id", 0u);
+        std::string direction = requireString(params, "direction");
+        std::string key = requireString(params, "port_key");
+        bool visible = params.value("visible", true);
+        return enqueueResult([gt, gn, nid, direction, key, visible](UIContext&) {
+            return rtapi::setNodePortVisible(gt, gn, nid, direction, key, visible);
         });
     }
 

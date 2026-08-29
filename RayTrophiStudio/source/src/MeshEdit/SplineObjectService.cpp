@@ -1,6 +1,8 @@
 #include "MeshEdit/SplineObjectService.h"
 
 #include "SceneCommand.h"
+#include "Triangle.h"
+#include "TriangleMesh.h"
 #include "scene_ui.h"
 
 namespace MeshEdit {
@@ -8,7 +10,7 @@ namespace {
 Vec3 mapPlane(const Vec3& value, SplinePlane plane) {
     switch (plane) {
     case SplinePlane::XZ: return Vec3(value.x, 0.0f, value.y);
-    case SplinePlane::YZ: return Vec3(0.0f, value.x, value.y);
+    case SplinePlane::YZ: return Vec3(0.0f, value.y, value.x);
     case SplinePlane::XY:
     default: return value; // X = lateral/radius, Y = up, Z = plane normal
     }
@@ -28,9 +30,17 @@ std::string uniqueName(const UIContext& ctx, const std::string& requested) {
     std::string candidate = base;
     int suffix = 1;
     auto exists = [&](const std::string& name) {
-        for (const auto& object : ctx.scene.world.objects)
-            if (const auto spline = std::dynamic_pointer_cast<SplineObject>(object))
+        for (const auto& object : ctx.scene.world.objects) {
+            if (!object) continue;
+            if (const auto spline = std::dynamic_pointer_cast<SplineObject>(object)) {
                 if (spline->nodeName == name) return true;
+            } else if (const auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object)) {
+                if (mesh->nodeName == name) return true;
+            } else if (const auto triangle = std::dynamic_pointer_cast<Triangle>(object);
+                       triangle && triangle->getNodeName() == name) {
+                return true;
+            }
+        }
         return false;
     };
     while (exists(candidate)) candidate = base + "." + std::to_string(suffix++);

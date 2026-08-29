@@ -4849,7 +4849,17 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                     ImGui::SetWindowFocus();
                 }
                 terrain_graph_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
-                terrain_brush.enabled = false;
+                // ★★★ FOCUS, not VISIBILITY. This used to clear the brush every frame the
+                // Terrain Graph panel was merely OPEN -- and this block runs AFTER the
+                // properties panel enabled it, so terrain splat paint could never survive
+                // into the next frame's handleTerrainBrush: paint mode was on, the panel
+                // showed the target, and no brush ever appeared in the viewport. Sculpt was
+                // unaffected only because it reaches handleTerrainBrush through
+                // terrain_sculpt_proxy_active instead of this flag, which is exactly why
+                // "sculpt works, paint does not" looked like a paint bug.
+                // Painting while the cursor is over ANY panel is already refused by the
+                // io.WantCaptureMouse guard in handleTerrainBrush.
+                if (terrain_graph_focused) terrain_brush.enabled = false;
                 TerrainObject* activeTerrain = nullptr;
                 if (terrain_brush.active_terrain_id != -1) {
                     activeTerrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
@@ -4938,7 +4948,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                     if (!curSel.empty() && curSel != geometry_graph_active_object_name) {
                         geometry_graph_active_object_name = curSel;
                     }
-                } else {
+                } else if (!ctx.selection.selected.spline_object) {
                     geometry_graph_active_object_name.clear();
                 }
 
@@ -5005,8 +5015,20 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                             if (ImGui::MenuItem("Object Source")) {
                                 addNodeHelper(GeometryNodesV2::NodeType::ObjectSource);
                             }
+                            if (ImGui::MenuItem("Spline Object")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::SplineObject);
+                            }
                             if (ImGui::MenuItem("Output", nullptr, false, !hasOutput)) {
                                 addNodeHelper(GeometryNodesV2::NodeType::Output);
+                            }
+                            ImGui::EndMenu();
+                        }
+                        if (ImGui::BeginMenu("Curve")) {
+                            if (ImGui::MenuItem("Resample Curve")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::ResampleCurve);
+                            }
+                            if (ImGui::MenuItem("Curve to Mesh")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::CurveToMesh);
                             }
                             ImGui::EndMenu();
                         }
@@ -5094,6 +5116,29 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                         std::sort(names.begin(), names.end());
                         return names;
                     };
+                    GeometryNodesV2::g_splineObjectListProvider = [&ctx]() {
+                        std::vector<std::string> names;
+                        for (const auto& object : ctx.scene.world.objects) {
+                            auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object);
+                            if (spline && !spline->nodeName.empty()) names.push_back(spline->nodeName);
+                        }
+                        std::sort(names.begin(), names.end());
+                        return names;
+                    };
+
+                    // Curve graphs are procedural previews: editing a source control point,
+                    // radius, transform, or node parameter republishes the flat result. Keep
+                    // the host graph bound while the artist selects/edits the source spline.
+                    bool usesCurves = false;
+                    const std::size_t curveSignature = GeometryNodesV2::curveGraphSourceSignature(
+                        *graphPtr, ctx.scene.world.objects, &usesCurves);
+                    if (usesCurves && graphPtr->liveCurvePreview &&
+                        (!graphPtr->curvePreviewInitialized ||
+                         graphPtr->curvePreviewSignature != curveSignature)) {
+                        graphPtr->curvePreviewInitialized = true;
+                        graphPtr->curvePreviewSignature = curveSignature;
+                        evaluateGeometryGraph(ctx, objName, *graphPtr, true);
+                    }
 
                     if (geometry_graph_show_properties) {
                         float availWidth = ImGui::GetContentRegionAvail().x;
@@ -5312,7 +5357,11 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 drawLogPanelEmbedded();
             }
             else if (show_terrain_graph) {
-                terrain_brush.enabled = false;
+                // See the docked Terrain Graph block above: visibility is not focus, and
+                // clearing here every frame killed the terrain paint brush outright.
+                // This is the shared BottomPanel host, so focus is read from IT.
+                terrain_graph_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+                if (terrain_graph_focused) terrain_brush.enabled = false;
                 TerrainObject* activeTerrain = nullptr;
                 if (terrain_brush.active_terrain_id != -1) {
                     activeTerrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
@@ -9736,7 +9785,7 @@ std::string SceneUI::serialize() {
 
     // Persist terrain subsection open states
     j["terrain_layer_open"] = nlohmann::json::array();
-    for (int i = 0; i < 4; ++i) j["terrain_layer_open"].push_back(terrain_layer_open[i]);
+    for (int i = 0; i < 8; ++i) j["terrain_layer_open"].push_back(terrain_layer_open[i]);
     j["foliage_section_open"] = foliage_section_open;
 
     // Save panel dimensions
@@ -9972,7 +10021,7 @@ void SceneUI::deserialize(const std::string& data) {
 
         // Restore terrain subsection open states
         if (j.contains("terrain_layer_open") && j["terrain_layer_open"].is_array()) {
-            for (int i = 0; i < 4 && i < (int)j["terrain_layer_open"].size(); ++i) {
+            for (int i = 0; i < 8 && i < (int)j["terrain_layer_open"].size(); ++i) {
                 terrain_layer_open[i] = j["terrain_layer_open"][i];
             }
         }

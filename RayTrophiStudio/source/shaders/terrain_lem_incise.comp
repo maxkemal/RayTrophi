@@ -1,0 +1,116 @@
+// terrain_lem_incise.comp
+// Detachment step of the LEM: stream-power incision E = K * A^m * S^n.
+//
+// This is the pass that breaks radial symmetry. The droplet solver's erosion
+// depends only on the LOCAL slope, so a valley floor carrying ten thousand
+// droplets and a hillside carrying three see identical physics per droplet and
+// the difference between them stays linear. A^m with m ~ 0.5 is a superlinear
+// positive feedback: a channel that captures slightly more area incises faster,
+// captures more area, and a dendritic hierarchy (rill -> creek -> river)
+// separates out of an initially uniform surface.
+//
+// Numerical limits, all load bearing:
+//  * A cell is NEVER cut below its own receiver (`incisionSafety`). Cutting past
+//    the receiver is how an incision scheme manufactures new closed depressions,
+//    which then read as lakes, which the next drainage solve has to fill again.
+//  * `maxStep` bounds a single step in absolute height units, so one pathological
+//    slope cannot punch a spike-deep hole.
+//  * Slope is clamped into [minSlope, maxSlope] before pow(): S^n with an
+//    unclamped S is the classic route to inf/NaN on a vertical cell pair.
+//  * Standing water does not incise. A lake cell is skipped entirely; its spill
+//    cell is not, which is exactly what drains the lake.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float cellSize; float heightScale;
+    float dt;
+    float incisionK; float exponentM; float exponentN;
+    float minSlope; float maxSlope;
+    float coverFactor; float transportK;
+    float incisionSafety; float maxStep;
+    float lakeEps;
+} pc;
+
+// Ping-pong rather than in-place. The anti-pit clamp reads the RECEIVER's
+// height, and a receiver that is being incised by its own invocation in the
+// same pass would hand this one a stale drop -- weakening the single limit
+// that stops incision from manufacturing new closed depressions. Reading a
+// frozen surface also makes the pass deterministic.
+layout(set = 0, binding = 0) readonly  buffer HeightIn  { float heightIn[]; };
+layout(set = 0, binding = 1) writeonly buffer HeightOut { float heightOut[]; };
+layout(set = 0, binding = 2) readonly buffer Filled { float filledField[]; };
+layout(set = 0, binding = 3) readonly buffer Area   { float areaField[]; };
+layout(set = 0, binding = 4) readonly buffer Hard   { float hardnessField[]; };
+layout(set = 0, binding = 5) readonly buffer Mask   { float maskField[]; };
+layout(set = 0, binding = 6) readonly buffer FluxIn { float fluxIn[]; };
+layout(set = 0, binding = 7) writeonly buffer FluxOut { float fluxOut[]; };
+layout(set = 0, binding = 8) buffer Erosion         { float erosionField[]; };
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+    int x = i % pc.width, y = i / pc.width;
+
+    float carried = max(fluxIn[i], 0.0);
+    float hCur = heightIn[i];
+    if (x < 1 || y < 1 || x >= pc.width - 1 || y >= pc.height - 1) {
+        heightOut[i] = hCur;
+        fluxOut[i] = carried;   // border: routed out of the domain next pass
+        return;
+    }
+
+    float lakeDepth = max(filledField[i] - hCur, 0.0);
+    if (lakeDepth > pc.lakeEps) { heightOut[i] = hCur; fluxOut[i] = carried; return; }
+
+    // Receiver: steepest descent on the FILLED surface (guaranteed to exist and
+    // to point out of any conditioned depression).
+    const int dx[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+    const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+    const float dist[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                   1.0, 1.41421356, 1.0, 1.41421356);
+    float fCur = filledField[i];
+    int receiver = -1;
+    float bestGrade = 0.0, receiverDist = 1.0;
+    for (int d = 0; d < 8; ++d) {
+        int ni = (y + dy[d]) * pc.width + (x + dx[d]);
+        float grade = (fCur - filledField[ni]) / dist[d];
+        if (grade > bestGrade) { bestGrade = grade; receiver = ni; receiverDist = dist[d]; }
+    }
+    if (receiver < 0) { heightOut[i] = hCur; fluxOut[i] = carried; return; }
+
+    float run = max(receiverDist * pc.cellSize, 1.0e-3);
+    float dropNorm = max(hCur - heightIn[receiver], 0.0);
+    float slope = clamp(dropNorm * max(pc.heightScale, 1.0e-3) / run, pc.minSlope, pc.maxSlope);
+
+    float areaKm2 = max(areaField[i], 0.0) * 1.0e-6;
+    float shape = pow(max(areaKm2, 1.0e-9), pc.exponentM) * pow(slope, pc.exponentN);
+    if (!(shape > 0.0)) shape = 0.0;
+
+    // Metres of bedrock detached this step, converted to normalized height.
+    float erode = pc.incisionK * shape * pc.dt / max(pc.heightScale, 1.0e-3);
+
+    // Cover effect: a bed already carrying its transport capacity in sediment
+    // is armoured. This is what produces alluvial (depositing) valley floors
+    // instead of bedrock gorges all the way to the sea.
+    if (pc.coverFactor > 0.0) {
+        float capacity = pc.transportK * shape * pc.dt / max(pc.heightScale, 1.0e-3);
+        float cover = (capacity > 1.0e-9) ? clamp(1.0 - pc.coverFactor * carried / capacity, 0.0, 1.0)
+                                          : 0.0;
+        erode *= cover;
+    }
+
+    erode *= (1.0 - clamp(hardnessField[i], 0.0, 1.0) * 0.9);
+    erode *= clamp(maskField[i], 0.0, 1.0);
+
+    // Anti-pit and anti-spike limits.
+    erode = min(erode, pc.incisionSafety * dropNorm);
+    erode = min(erode, pc.maxStep);
+    if (!(erode > 0.0)) erode = 0.0;
+
+    heightOut[i] = hCur - erode;
+    erosionField[i] += erode;
+    fluxOut[i] = carried + erode;
+}

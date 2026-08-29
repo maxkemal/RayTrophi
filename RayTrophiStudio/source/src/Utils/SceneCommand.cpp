@@ -8,6 +8,7 @@
 #include "Paint/MeshPaintAdapter.h"
 #include "HittableInstance.h"
 #include "TriangleMesh.h"  // FlatSculptEditCommand: SoA GeometryDetail write-back
+#include "MeshEdit/SplineObject.h"
 #include "GeometryNodesV2.h"  // rebakeFromOrig: flat-node transform restores P = getFinal() * P_orig
 #include "Backend/OptixBackend.h"
 #include "Backend/VulkanBackend.h"
@@ -560,6 +561,15 @@ std::string AddObjectCommand::getDescription() const {
 void TransformCommand::applyState(UIContext& ctx, const TransformState& state) {
     // Find objects by name
     bool found = false;
+
+    for (auto& object : ctx.scene.world.objects) {
+        auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object);
+        if (spline && spline->nodeName == object_name_ && spline->transform) {
+            spline->transform->setBase(state.matrix);
+            found = true;
+            break;
+        }
+    }
 
     // Flat (direct-SoA) node: no per-face facades to iterate — drive the mesh's own
     // pivot and restore the P = getFinal() * P_orig invariant so the CPU-side world

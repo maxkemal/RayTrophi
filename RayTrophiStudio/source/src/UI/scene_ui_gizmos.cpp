@@ -3443,11 +3443,14 @@ mesh_edit_changed_confirmed:
     }
 
     // �������������������������������������������������������������������������
-    const bool can_edit_single_pivot =
-        sel.multi_selection.size() == 1 &&
-        ((sel.selected.type == SelectableType::Object && (sel.selected.object || sel.selected.spline_object)) ||
+    const bool activeSplinePivot =
+        sel.selected.type == SelectableType::Object && sel.selected.spline_object &&
+        sel.selected.spline_object->transform;
+    const bool can_edit_single_pivot = activeSplinePivot ||
+        (sel.multi_selection.size() == 1 &&
+        ((sel.selected.type == SelectableType::Object && sel.selected.object) ||
          (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
-         (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
+         (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume)));
 
     // Keyboard Shortcuts for Transform Mode
     // �������������������������������������������������������������������������
@@ -3472,7 +3475,8 @@ mesh_edit_changed_confirmed:
             case TransformMode::Scale: sel.transform_mode = TransformMode::Translate; break;
             }
         }
-        else if (can_edit_single_pivot && ImGui::IsKeyPressed(ImGuiKey_P)) {
+        else if (can_edit_single_pivot && !sel.selected.spline_object &&
+                 ImGui::IsKeyPressed(ImGuiKey_P)) {
             pivot_edit_mode = !pivot_edit_mode;
         }
 
@@ -3759,7 +3763,9 @@ mesh_edit_changed_confirmed:
     // END DRAG (Release)
     if (!is_using && was_using_gizmo) {
         if (sel.selected.type == SelectableType::Object && sel.selected.spline_object) {
-            if (!pivot_edit_mode && sel.selected.spline_object->transform) {
+            if (pivot_edit_mode) {
+                ProjectManager::getInstance().markModified();
+            } else if (sel.selected.spline_object->transform) {
                 TransformState final_state;
                 final_state.matrix = sel.selected.spline_object->transform->base;
                 bool changed = false;
@@ -3767,7 +3773,11 @@ mesh_edit_changed_confirmed:
                     for (int j = 0; j < 4; ++j)
                         if (std::abs(final_state.matrix.m[i][j] - drag_start_state.matrix.m[i][j]) > 0.0001f)
                             changed = true;
-                if (changed) ProjectManager::getInstance().markModified();
+                if (changed) {
+                    history.record(std::make_unique<TransformCommand>(
+                        drag_object_name, drag_start_state, final_state));
+                    ProjectManager::getInstance().markModified();
+                }
             }
         }
         else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
@@ -3823,6 +3833,29 @@ mesh_edit_changed_confirmed:
     // Save old position BEFORE manipulation for delta calculation (multi-selection)
     // Save old position & MATRIX BEFORE manipulation for delta calculation
     Vec3 oldGizmoPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
+
+    // Mesh objects use the same explicit pivot language as spline authoring
+    // sources. The marker remains visible outside P mode so the origin used by
+    // transforms is never confused with the geometry bounds center.
+    if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+        const ImVec2 pivotScreen = Project(oldGizmoPos);
+        if (pivotScreen.x > -5000.0f) {
+            ImDrawList* pivotDraw = ImGui::GetBackgroundDrawList();
+            const ImU32 pivotColor = pivot_edit_mode
+                ? IM_COL32(255, 175, 55, 255) : IM_COL32(255, 145, 45, 230);
+            constexpr float pivotArm = 8.0f;
+            pivotDraw->AddLine(ImVec2(pivotScreen.x - pivotArm, pivotScreen.y),
+                               ImVec2(pivotScreen.x + pivotArm, pivotScreen.y),
+                               pivotColor, 2.0f);
+            pivotDraw->AddLine(ImVec2(pivotScreen.x, pivotScreen.y - pivotArm),
+                               ImVec2(pivotScreen.x, pivotScreen.y + pivotArm),
+                               pivotColor, 2.0f);
+            pivotDraw->AddCircle(pivotScreen, 3.0f,
+                                 IM_COL32(255, 220, 150, 255), 12, 1.0f);
+            pivotDraw->AddText(ImVec2(pivotScreen.x + 11.0f, pivotScreen.y - 9.0f),
+                               pivotColor, "Pivot");
+        }
+    }
 
     Matrix4x4 oldMat;
     oldMat.m[0][0] = objectMatrix[0]; oldMat.m[1][0] = objectMatrix[1]; oldMat.m[2][0] = objectMatrix[2]; oldMat.m[3][0] = objectMatrix[3];
@@ -4045,6 +4078,12 @@ mesh_edit_changed_confirmed:
                             updateGizmoObjectTransformOnActiveBackends(ctx, targetName, th->base);
                             // CPU mode handled on release
                         }
+                        item.has_cached_aabb = false;
+                    }
+                    else if (item.type == SelectableType::Object && item.spline_object &&
+                             item.spline_object->transform) {
+                        Matrix4x4 pivotMat = item.spline_object->transform->getPivotMatrix();
+                        item.spline_object->transform->setPivotMatrix(deltaMat * pivotMat);
                         item.has_cached_aabb = false;
                     }
                     else if (item.type == SelectableType::Light && item.light) {
@@ -4351,7 +4390,13 @@ mesh_edit_changed_confirmed:
             newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
             const float deltaMagnitude = sqrtf(deltaPos.x * deltaPos.x + deltaPos.y * deltaPos.y + deltaPos.z * deltaPos.z);
             if ((deltaMagnitude >= 0.0001f || operation != ImGuizmo::TRANSLATE) && sel.selected.spline_object->transform) {
-                sel.selected.spline_object->transform->setPivotMatrix(newMat);
+                if (pivot_edit_mode) {
+                    const Matrix4x4 renderMatrix = sel.selected.spline_object->transform->getFinal();
+                    const Vec3 newPivotLocal = renderMatrix.inverse().transform_point(newPos);
+                    sel.selected.spline_object->transform->setPivotOffset(newPivotLocal, true);
+                } else {
+                    sel.selected.spline_object->transform->setPivotMatrix(newMat);
+                }
                 sel.selected.has_cached_aabb = false;
                 sel.updatePositionFromSelection();
                 ProjectManager::getInstance().markModified();
@@ -4957,6 +5002,12 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
         drawSelectionBoundingBox(ctx);
         if (mesh_overlay_settings.enabled && mesh_workspace_mode == MeshWorkspaceMode::Edit) {
             drawEditableMeshOverlay(ctx);
+        }
+        // The point gizmo normally owns spline edit mode, so let P switch
+        // ownership to the object-pivot gizmo before asking it to draw.
+        if (ctx.selection.selected.spline_object && !ImGui::GetIO().WantTextInput &&
+            ImGui::IsKeyPressed(ImGuiKey_P)) {
+            pivot_edit_mode = !pivot_edit_mode;
         }
         if (!MeshEdit::drawProfileSplinePointGizmo(ctx)) {
             drawTransformGizmo(ctx);

@@ -1616,6 +1616,87 @@ static const MethodDescriptor desc_gas_structural_impulse_stats = {
 };
 static const MethodRegistration reg_gas_structural_impulse_stats(desc_gas_structural_impulse_stats);
 
+static const MethodParam params_geometry_cache_bake[] = {
+    {"object_name", "string", true, "Flat mesh / Geometry Graph host object", nullptr, nullptr},
+    {"start_frame", "int", true, "First sampled timeline frame", nullptr, nullptr},
+    {"end_frame", "int", true, "Last sampled timeline frame", nullptr, nullptr},
+    {"frame_step", "int", false, "Distance between stored samples", "1", nullptr},
+};
+static const MethodDescriptor desc_geometry_cache_bake = {
+    "geometry_cache.bake", "geometry_cache",
+    "Bake a fixed-topology mesh deformation clip from the canonical evaluated geometry",
+    "Stores only local vertex positions. Bake is rejected if vertex count or index connectivity changes.",
+    "write", "SceneWrite", false, "any",
+    "geometry_cache|geometry|cache|bake|animation|deformation|vertex",
+    "geometry_cache.status|geometry_cache.set_enabled|geometry_cache.clear|nodes.apply",
+    nullptr, nullptr, nullptr, nullptr,
+    params_geometry_cache_bake, 4,
+    true
+};
+static const MethodRegistration reg_geometry_cache_bake(desc_geometry_cache_bake);
+
+static const MethodParam params_geometry_cache_clear[] = {
+    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr},
+};
+static const MethodDescriptor desc_geometry_cache_clear = {
+    "geometry_cache.clear", "geometry_cache",
+    "Remove a baked deformation clip and restore live Geometry Graph evaluation",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "geometry_cache|geometry|cache|clear|animation",
+    "geometry_cache.bake|geometry_cache.status",
+    nullptr, nullptr, nullptr, nullptr,
+    params_geometry_cache_clear, 1,
+    true
+};
+static const MethodRegistration reg_geometry_cache_clear(desc_geometry_cache_clear);
+
+static const MethodDescriptor desc_geometry_cache_self_test = {
+    "geometry_cache.self_test", "geometry_cache",
+    "Run fixed-topology position capture, interpolation and memory-accounting tests",
+    nullptr,
+    "read", "Read", false, "any",
+    "geometry_cache|geometry|cache|self|test|animation|selftest|validation",
+    "geometry_cache.bake|geometry_cache.status",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_geometry_cache_self_test(desc_geometry_cache_self_test);
+
+static const MethodParam params_geometry_cache_set_enabled[] = {
+    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr},
+    {"enabled", "bool", true, "Use cached positions when true", nullptr, nullptr},
+};
+static const MethodDescriptor desc_geometry_cache_set_enabled = {
+    "geometry_cache.set_enabled", "geometry_cache",
+    "Switch an existing geometry cache between cached and live procedural playback",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "geometry_cache|geometry|cache|set|enabled|animation|playback|toggle",
+    "geometry_cache.status|geometry_cache.bake",
+    nullptr, nullptr, nullptr, nullptr,
+    params_geometry_cache_set_enabled, 2,
+    true
+};
+static const MethodRegistration reg_geometry_cache_set_enabled(desc_geometry_cache_set_enabled);
+
+static const MethodParam params_geometry_cache_status[] = {
+    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr},
+};
+static const MethodDescriptor desc_geometry_cache_status = {
+    "geometry_cache.status", "geometry_cache",
+    "Inspect deformation-cache range, memory, topology validity and source staleness",
+    nullptr,
+    "read", "Read", false, "any",
+    "geometry_cache|geometry|cache|status|animation|memory",
+    "geometry_cache.bake|geometry_cache.set_enabled|geometry_cache.clear",
+    nullptr, nullptr, nullptr, nullptr,
+    params_geometry_cache_status, 1,
+    true
+};
+static const MethodRegistration reg_geometry_cache_status(desc_geometry_cache_status);
+
 static const MethodParam params_hair_apply_preset[] = {
     {"name", "string", true, "", nullptr, nullptr},
     {"preset", "string", true, "", nullptr, nullptr},
@@ -1670,7 +1751,31 @@ static const MethodRegistration reg_hair_comb(desc_hair_comb);
 
 static const MethodParam params_hair_create[] = {
     {"mesh", "string", true, "", nullptr, nullptr},
+    {"child_radius", "float", false, "", nullptr, nullptr},
+    {"children_per_guide", "int", false, "", nullptr, nullptr},
+    {"clumpiness", "float", false, "", nullptr, nullptr},
+    {"curl_frequency", "float", false, "", nullptr, nullptr},
+    {"curl_radius", "float", false, "", nullptr, nullptr},
+    {"force_influence", "float", false, "", nullptr, nullptr},
+    {"frizz", "float", false, "", nullptr, nullptr},
+    {"gravity", "float", false, "", nullptr, nullptr},
+    {"guide_count", "int", false, "", nullptr, nullptr},
+    {"length", "float", false, "", nullptr, nullptr},
+    {"length_variation", "float", false, "", nullptr, nullptr},
     {"name", "string", false, "", "HairGroom", nullptr},
+    {"physics_damping", "float", false, "", nullptr, nullptr},
+    {"physics_mass", "float", false, "", nullptr, nullptr},
+    {"physics_stiffness", "float", false, "", nullptr, nullptr},
+    {"points_per_strand", "int", false, "", nullptr, nullptr},
+    {"root_radius", "float", false, "", nullptr, nullptr},
+    {"roughness", "float", false, "", nullptr, nullptr},
+    {"subdivisions", "int", false, "", nullptr, nullptr},
+    {"tip_radius", "float", false, "", nullptr, nullptr},
+    {"use_bspline", "bool", false, "", nullptr, nullptr},
+    {"use_dynamics", "bool", false, "", nullptr, nullptr},
+    {"use_tangent_shading", "bool", false, "", nullptr, nullptr},
+    {"wave_amplitude", "float", false, "", nullptr, nullptr},
+    {"wave_frequency", "float", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_hair_create = {
     "hair.create", "hair",
@@ -1680,7 +1785,7 @@ static const MethodDescriptor desc_hair_create = {
     "hair|create|fur|grass",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_hair_create, 2,
+    params_hair_create, 26,
     true
 };
 static const MethodRegistration reg_hair_create(desc_hair_create);
@@ -1846,7 +1951,31 @@ static const MethodRegistration reg_hair_trim(desc_hair_trim);
 
 static const MethodParam params_hair_update[] = {
     {"name", "string", true, "", nullptr, nullptr},
+    {"child_radius", "float", false, "", nullptr, nullptr},
+    {"children_per_guide", "int", false, "", nullptr, nullptr},
+    {"clumpiness", "float", false, "", nullptr, nullptr},
+    {"curl_frequency", "float", false, "", nullptr, nullptr},
+    {"curl_radius", "float", false, "", nullptr, nullptr},
+    {"force_influence", "float", false, "", nullptr, nullptr},
+    {"frizz", "float", false, "", nullptr, nullptr},
+    {"gravity", "float", false, "", nullptr, nullptr},
+    {"guide_count", "int", false, "", nullptr, nullptr},
+    {"length", "float", false, "", nullptr, nullptr},
+    {"length_variation", "float", false, "", nullptr, nullptr},
+    {"physics_damping", "float", false, "", nullptr, nullptr},
+    {"physics_mass", "float", false, "", nullptr, nullptr},
+    {"physics_stiffness", "float", false, "", nullptr, nullptr},
+    {"points_per_strand", "int", false, "", nullptr, nullptr},
+    {"root_radius", "float", false, "", nullptr, nullptr},
+    {"roughness", "float", false, "", nullptr, nullptr},
+    {"subdivisions", "int", false, "", nullptr, nullptr},
+    {"tip_radius", "float", false, "", nullptr, nullptr},
+    {"use_bspline", "bool", false, "", nullptr, nullptr},
+    {"use_dynamics", "bool", false, "", nullptr, nullptr},
+    {"use_tangent_shading", "bool", false, "", nullptr, nullptr},
     {"visible", "any", false, "", nullptr, nullptr},
+    {"wave_amplitude", "float", false, "", nullptr, nullptr},
+    {"wave_frequency", "float", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_hair_update = {
     "hair.update", "hair",
@@ -1856,7 +1985,7 @@ static const MethodDescriptor desc_hair_update = {
     "hair|update|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_hair_update, 2,
+    params_hair_update, 26,
     true
 };
 static const MethodRegistration reg_hair_update(desc_hair_update);
@@ -2501,44 +2630,44 @@ static const MethodDescriptor desc_mesh_profile_loft_self_test = {
 static const MethodRegistration reg_mesh_profile_loft_self_test(desc_mesh_profile_loft_self_test);
 
 static const MethodParam params_mesh_profile_revolve_commit[] = {
-    {"object", "string", false, "", "", nullptr},
+    {"object", "string", false, "Destination mesh object name", "", nullptr},
 };
 static const MethodDescriptor desc_mesh_profile_revolve_commit = {
     "mesh.profile.revolve.commit", "mesh",
-    nullptr,
-    nullptr,
-    "write", "SceneWrite", false, "any",
-    "mesh|profile|revolve|commit",
-    nullptr,
+    "Commit an undoable partial or full revolve mesh",
+    "Uses the same open/closed profile, axis and angle contract as preview.",
+    "write", "SceneWrite", true, "any",
+    "mesh|profile|revolve|commit|screw|axis",
+    "mesh.profile.revolve.preview|mesh.profile.revolve.self_test",
     nullptr, nullptr, nullptr, nullptr,
     params_mesh_profile_revolve_commit, 1,
-    false
+    true
 };
 static const MethodRegistration reg_mesh_profile_revolve_commit(desc_mesh_profile_revolve_commit);
 
 static const MethodDescriptor desc_mesh_profile_revolve_preview = {
     "mesh.profile.revolve.preview", "mesh",
-    nullptr,
-    nullptr,
+    "Preview a partial or full revolve around a selected axis",
+    "The radial side profile may be open or closed. start_angle/end_angle are radians; partial ranges keep their angular seams open.",
     "read", "Read", false, "any",
-    "mesh|profile|revolve|preview",
-    nullptr,
+    "mesh|profile|revolve|preview|screw|axis",
+    "mesh.profile.revolve.commit|mesh.profile.revolve.self_test",
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
-    false
+    true
 };
 static const MethodRegistration reg_mesh_profile_revolve_preview(desc_mesh_profile_revolve_preview);
 
 static const MethodDescriptor desc_mesh_profile_revolve_self_test = {
     "mesh.profile.revolve.self_test", "mesh",
-    nullptr,
+    "Run full closed and partial open-profile revolve core tests",
     nullptr,
     "read", "Read", false, "any",
-    "mesh|profile|revolve|self|test",
+    "mesh|profile|revolve|self|test|screw",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
-    false
+    true
 };
 static const MethodRegistration reg_mesh_profile_revolve_self_test(desc_mesh_profile_revolve_self_test);
 
@@ -2862,6 +2991,27 @@ static const MethodDescriptor desc_nodes_link = {
 };
 static const MethodRegistration reg_nodes_link(desc_nodes_link);
 
+static const MethodParam params_nodes_link_by_key[] = {
+    {"from_output", "string", true, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr},
+    {"graph_type", "string", true, "", nullptr, nullptr},
+    {"to_input", "string", true, "", nullptr, nullptr},
+    {"from_node", "any", false, "", nullptr, nullptr},
+    {"to_node", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_nodes_link_by_key = {
+    "nodes.link_by_key", "nodes",
+    "Connect nodes using stable input and output port keys",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "nodes|link|by|key|graph|connect|wire|port",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_nodes_link_by_key, 6,
+    true
+};
+static const MethodRegistration reg_nodes_link_by_key(desc_nodes_link_by_key);
+
 static const MethodParam params_nodes_list[] = {
     {"graph_name", "string", true, "", nullptr, nullptr},
     {"graph_type", "string", true, "", nullptr, nullptr},
@@ -2896,6 +3046,24 @@ static const MethodDescriptor desc_nodes_list_params = {
     true
 };
 static const MethodRegistration reg_nodes_list_params(desc_nodes_list_params);
+
+static const MethodParam params_nodes_list_ports[] = {
+    {"graph_name", "string", true, "", nullptr, nullptr},
+    {"graph_type", "string", true, "", nullptr, nullptr},
+    {"node_id", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_nodes_list_ports = {
+    "nodes.list_ports", "nodes",
+    "List stable node ports, exposure tiers, visibility and connection state",
+    nullptr,
+    "read", "Read", false, "any",
+    "nodes|list|ports|graph",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_nodes_list_ports, 3,
+    true
+};
+static const MethodRegistration reg_nodes_list_ports(desc_nodes_list_ports);
 
 static const MethodParam params_nodes_list_properties[] = {
     {"graph_name", "string", true, "", nullptr, nullptr},
@@ -2969,6 +3137,27 @@ static const MethodDescriptor desc_nodes_set_param = {
     true
 };
 static const MethodRegistration reg_nodes_set_param(desc_nodes_set_param);
+
+static const MethodParam params_nodes_set_port_visible[] = {
+    {"direction", "string", true, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr},
+    {"graph_type", "string", true, "", nullptr, nullptr},
+    {"port_key", "string", true, "", nullptr, nullptr},
+    {"node_id", "any", false, "", nullptr, nullptr},
+    {"visible", "bool", false, "", "true", nullptr},
+};
+static const MethodDescriptor desc_nodes_set_port_visible = {
+    "nodes.set_port_visible", "nodes",
+    "Show or hide an optional node port without changing evaluation",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "nodes|set|port|visible|graph|ports|configure",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_nodes_set_port_visible, 6,
+    true
+};
+static const MethodRegistration reg_nodes_set_port_visible(desc_nodes_set_port_visible);
 
 static const MethodParam params_nodes_set_property[] = {
     {"graph_name", "string", true, "", nullptr, nullptr},
@@ -4597,6 +4786,7 @@ static const MethodParam params_sculpt_paint_mask[] = {
     {"object", "string", true, "", nullptr, nullptr},
     {"radius", "float", true, "", nullptr, nullptr},
     {"value", "float", true, "", nullptr, nullptr},
+    {"points", "any", false, "", nullptr, nullptr},
     {"strength", "float", false, "", "1.0", nullptr},
     {"undo", "bool", false, "", "true", nullptr},
 };
@@ -4608,7 +4798,7 @@ static const MethodDescriptor desc_sculpt_paint_mask = {
     "sculpt|paint|mask",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_sculpt_paint_mask, 5,
+    params_sculpt_paint_mask, 6,
     true
 };
 static const MethodRegistration reg_sculpt_paint_mask(desc_sculpt_paint_mask);
@@ -4616,6 +4806,7 @@ static const MethodRegistration reg_sculpt_paint_mask(desc_sculpt_paint_mask);
 static const MethodParam params_sculpt_stroke[] = {
     {"object", "string", true, "", nullptr, nullptr},
     {"tool", "string", true, "", nullptr, nullptr},
+    {"points", "array", true, "Stroke path: list of [x, y, z] world points. Required - a stroke with no points does nothing.", nullptr, nullptr},
     {"direction", "vec3", false, "", nullptr, nullptr},
     {"falloff", "float", false, "", "0.75", nullptr},
     {"radius", "float", false, "", "0.25", nullptr},
@@ -4632,7 +4823,7 @@ static const MethodDescriptor desc_sculpt_stroke = {
     "sculpt|stroke|mesh|deform|brush",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_sculpt_stroke, 9,
+    params_sculpt_stroke, 10,
     true
 };
 static const MethodRegistration reg_sculpt_stroke(desc_sculpt_stroke);
@@ -5021,6 +5212,37 @@ static const MethodDescriptor desc_sim_graph_set_node_value = {
 };
 static const MethodRegistration reg_sim_graph_set_node_value(desc_sim_graph_set_node_value);
 
+static const MethodDescriptor desc_spline_animation_self_test = {
+    "spline.animation.self_test", "spline",
+    "Run the deterministic spline transform, control-point and radius interpolation self-test",
+    nullptr,
+    "read", "Read", false, "{ok:bool,details:string}",
+    "spline|animation|self|test|selftest|validation",
+    "spline.keyframe.insert|spline.keyframe.list",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_spline_animation_self_test(desc_spline_animation_self_test);
+
+static const MethodParam params_spline_create[] = {
+    {"primitive", "string", false, "Initial spline shape", "open_line", "circle|rectangle|open_line|open_arc"},
+    {"name", "string", false, "Requested object name; made unique when necessary", "Spline", nullptr},
+    {"plane", "string", false, "Authoring plane", "xy", "xy|xz|yz"},
+};
+static const MethodDescriptor desc_spline_create = {
+    "spline.create", "spline",
+    "Create an editable spline source through the canonical scene-object service",
+    "Returns the unique scene name. The operation is undoable and produces the same SplineObject used by the viewport UI, Python and Geometry Nodes.",
+    "write", "SceneWrite", true, "string",
+    "spline|create|curve|authoring|undo",
+    "spline.list|spline.get|scene.delete|nodes.create_graph",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_create, 3,
+    true
+};
+static const MethodRegistration reg_spline_create(desc_spline_create);
+
 static const MethodParam params_spline_extrude[] = {
     {"name", "string", true, "Spline object name", nullptr, nullptr},
     {"endpoint", "int", true, "0 for first endpoint or last point index", nullptr, nullptr},
@@ -5045,7 +5267,7 @@ static const MethodParam params_spline_get[] = {
 static const MethodDescriptor desc_spline_get = {
     "spline.get", "spline",
     "Read the versioned JSON authoring payload of a spline",
-    "The payload includes curve type, plane, closed state, transform and all point/handle data.",
+    "The payload includes curve type, plane, closed state, render transform, pivot_offset, optional cubic B-Spline knots and all point/handle data.",
     "read", "Read", false, "SplinePayload",
     "spline|get|serialize|profile|curve",
     "spline.set|spline.list",
@@ -5063,7 +5285,7 @@ static const MethodParam params_spline_insert_point[] = {
 static const MethodDescriptor desc_spline_insert_point = {
     "spline.insert_point", "spline",
     "Insert a control point on a spline segment at normalized parameter t",
-    "Bezier insertion preserves the curve with De Casteljau; Linear insertion splits the segment. B-Spline knot insertion is intentionally rejected until its knot policy is active.",
+    "Bezier insertion preserves the curve with De Casteljau; Linear insertion splits the segment; cubic B-Spline insertion uses shape-preserving Boehm knot insertion.",
     "write", "SceneWrite", false, "{index:int}",
     "spline|insert|point|subdivide|bezier|linear",
     "spline.subdivide|spline.get",
@@ -5072,6 +5294,60 @@ static const MethodDescriptor desc_spline_insert_point = {
     true
 };
 static const MethodRegistration reg_spline_insert_point(desc_spline_insert_point);
+
+static const MethodParam params_spline_keyframe_insert[] = {
+    {"name", "string", true, "Spline object name", nullptr, nullptr},
+    {"frame", "int", true, "Non-negative timeline frame", nullptr, nullptr},
+    {"object_transform", "bool", false, "Capture the spline object's location, rotation and scale", "True", nullptr},
+    {"points", "bool", false, "Capture all control positions, handles, radius/user data and colors", "True", nullptr},
+};
+static const MethodDescriptor desc_spline_keyframe_insert = {
+    "spline.keyframe.insert", "spline",
+    "Capture spline object transform and control-point deformation at a timeline frame",
+    "Point keys include Linear, Bezier and B-Spline controls, Bezier handles, radius/user data and color. Point count, curve type, open/closed state and knot topology must remain stable between keys.",
+    "write", "SceneWrite", false, "bool",
+    "spline|keyframe|insert|animation|deform|hose|cable|radius",
+    "spline.keyframe.list|spline.keyframe.remove|timeline.set_frame|spline.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_keyframe_insert, 4,
+    true
+};
+static const MethodRegistration reg_spline_keyframe_insert(desc_spline_keyframe_insert);
+
+static const MethodParam params_spline_keyframe_list[] = {
+    {"name", "string", true, "Spline object name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_spline_keyframe_list = {
+    "spline.keyframe.list", "spline",
+    "List spline animation keys and the channels captured at each frame",
+    nullptr,
+    "read", "Read", false, "SplineKeyInfo[]",
+    "spline|keyframe|list|animation",
+    "spline.keyframe.insert|spline.keyframe.remove|timeline.set_frame",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_keyframe_list, 1,
+    true
+};
+static const MethodRegistration reg_spline_keyframe_list(desc_spline_keyframe_list);
+
+static const MethodParam params_spline_keyframe_remove[] = {
+    {"name", "string", true, "Spline object name", nullptr, nullptr},
+    {"frame", "int", true, "Timeline frame containing the key", nullptr, nullptr},
+    {"object_transform", "bool", false, "Remove the object transform portion", "True", nullptr},
+    {"points", "bool", false, "Remove the control-point deformation portion", "True", nullptr},
+};
+static const MethodDescriptor desc_spline_keyframe_remove = {
+    "spline.keyframe.remove", "spline",
+    "Remove spline transform and/or point channels from one timeline key",
+    "Other keyframe domains stored at the same frame are preserved.",
+    "write", "SceneWrite", false, "bool",
+    "spline|keyframe|remove|animation",
+    "spline.keyframe.insert|spline.keyframe.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_keyframe_remove, 4,
+    true
+};
+static const MethodRegistration reg_spline_keyframe_remove(desc_spline_keyframe_remove);
 
 static const MethodDescriptor desc_spline_list = {
     "spline.list", "spline",
@@ -5093,7 +5369,7 @@ static const MethodParam params_spline_set[] = {
 static const MethodDescriptor desc_spline_set = {
     "spline.set", "spline",
     "Replace a spline authoring payload with validated JSON data",
-    "Rejects unknown curve types, malformed points, invalid transforms and B-Splines with fewer than four controls.",
+    "Rejects unknown curve types, malformed points, invalid transforms, pivot_offset or knot vectors, and B-Splines with fewer than four controls.",
     "write", "SceneWrite", false, "bool",
     "spline|set|serialize|edit|profile",
     "spline.get|spline.insert_point|spline.subdivide",
@@ -5102,6 +5378,73 @@ static const MethodDescriptor desc_spline_set = {
     true
 };
 static const MethodRegistration reg_spline_set(desc_spline_set);
+
+static const MethodParam params_spline_skin_clear[] = {
+    {"spline", "string", true, "Spline source owning the live skin display", nullptr, nullptr},
+};
+static const MethodDescriptor desc_spline_skin_clear = {
+    "spline.skin.clear", "spline",
+    "Remove a spline's non-destructive skin display",
+    "Deletes only the linked preview host and graph; the editable spline source remains unchanged.",
+    "write", "SceneWrite", false, "any",
+    "spline|skin|clear|preview|remove",
+    "spline.skin.create|spline.skin.finalize",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_skin_clear, 1,
+    true
+};
+static const MethodRegistration reg_spline_skin_clear(desc_spline_skin_clear);
+
+static const MethodParam params_spline_skin_create[] = {
+    {"spline", "string", true, "Open spline path object", nullptr, nullptr},
+    {"output", "string", false, "Requested output mesh name; blank derives one from the spline", "", nullptr},
+    {"radius", "float", false, "Global bevel radius", "0.1", nullptr},
+    {"path_samples", "int", false, "Samples along the spline", "48", nullptr},
+    {"radial_segments", "int", false, "Circular cross-section segments", "12", nullptr},
+    {"cap_start", "bool", false, "Cap the first endpoint", "True", nullptr},
+    {"cap_end", "bool", false, "Cap the final endpoint", "True", nullptr},
+    {"use_point_radius", "bool", false, "Multiply bevel radius by interpolated per-point Curve Radius", "True", nullptr},
+    {"custom_profile", "string", false, "Optional closed spline used as the swept cross-section", "", nullptr},
+    {"taper_start", "float", false, "Radius scale at the first control", "1.0", nullptr},
+    {"taper_end", "float", false, "Radius scale at the final control", "1.0", nullptr},
+    {"taper_falloff", "float", false, "Taper interpolation exponent", "1.0", nullptr},
+    {"twist_start_degrees", "float", false, "Profile rotation at the first control", "0.0", nullptr},
+    {"twist_end_degrees", "float", false, "Profile rotation at the final control", "0.0", nullptr},
+    {"wave_amplitude", "float", false, "Wave displacement amplitude", "0.0", nullptr},
+    {"wave_cycles", "float", false, "Wave cycles along the controls", "1.0", nullptr},
+    {"wave_phase_degrees", "float", false, "Wave phase in degrees", "0.0", nullptr},
+    {"wave_noise", "float", false, "Deterministic noise amplitude", "0.0", nullptr},
+    {"wave_seed", "int", false, "Deterministic noise seed", "0", nullptr},
+    {"wave_axis", "int", false, "Local offset axis: 0=X, 1=Y, 2=Z", "1", nullptr},
+};
+static const MethodDescriptor desc_spline_skin_create = {
+    "spline.skin.create", "spline",
+    "Create or update a non-destructive skin display on an open spline",
+    "Reuses one linked preview host while parameters change. Builds Spline Object to Taper to Twist to Wave/Noise to Curve to Mesh to Output; an optional closed custom_profile drives the cross-section.",
+    "write", "SceneWrite", false, "any",
+    "spline|skin|create|bevel|cable|tube|curve-to-mesh|geometry-nodes",
+    "spline.get|spline.keyframe.insert|geometry_cache.bake|nodes.set_property",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_skin_create, 20,
+    true
+};
+static const MethodRegistration reg_spline_skin_create(desc_spline_skin_create);
+
+static const MethodParam params_spline_skin_finalize[] = {
+    {"spline", "string", true, "Open spline source owning the live skin display", nullptr, nullptr},
+};
+static const MethodDescriptor desc_spline_skin_finalize = {
+    "spline.skin.finalize", "spline",
+    "Convert a spline's live skin display into an ordinary mesh",
+    "Evaluates the current frame, removes the procedural Geometry Graph link and keeps the existing flat preview host as the final mesh.",
+    "write", "SceneWrite", false, "any",
+    "spline|skin|finalize|preview|convert|apply|mesh",
+    "spline.skin.create|spline.skin.clear|geometry_cache.bake",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_skin_finalize, 1,
+    true
+};
+static const MethodRegistration reg_spline_skin_finalize(desc_spline_skin_finalize);
 
 static const MethodParam params_spline_subdivide[] = {
     {"name", "string", true, "Spline object name", nullptr, nullptr},
@@ -5297,12 +5640,12 @@ static const MethodParam params_terrain_apply_preset[] = {
 };
 static const MethodDescriptor desc_terrain_apply_preset = {
     "terrain.apply_preset", "terrain",
-    "Apply a built-in terrain node preset",
-    nullptr,
+    "Apply a built-in terrain node preset and report links it could not wire",
+    "Returns wiring_faults: links the setup asked for and did not get. A refused link leaves the graph looking complete while the consumer falls back to a synthesized value, so an empty wiring_faults list is the only evidence the setup actually connected everything. wiring_fault_count > 0 means the resulting splat/biome masks are partly synthesized, not driven by the graph.",
     "write", "SceneWrite", false, "any",
     "terrain|apply|preset|landscape|mountain|snow|river",
     nullptr,
-    nullptr, nullptr, nullptr, nullptr,
+    nullptr, nullptr, "nodes.list", nullptr,
     params_terrain_apply_preset, 4,
     true
 };
@@ -5330,12 +5673,12 @@ static const MethodParam params_terrain_calculate_flow[] = {
 };
 static const MethodDescriptor desc_terrain_calculate_flow = {
     "terrain.calculate_flow", "terrain",
-    "Compute the water flow map over a terrain",
-    nullptr,
+    "Reconstruct final-height flow diagnostics and report likely inland stalls",
+    "Reconstructs a diagnostic accumulation field from the final heightmap, then returns channel cells with no greater-accumulation neighbour as inland_terminations. This does not inspect Watershed Analysis's authoritative direction/receiver raster (Hydraulic Erosion stopped publishing one when the compact port contract moved flow direction to its authoritative owner), so it detects wholesale depression-routing failures but is not an exact river-topology measurement. Use terrain.flow_authority to identify the graph's real source.",
     "write", "SceneWrite", false, "any",
-    "terrain|calculate|flow|landscape|water|hydrology",
-    nullptr,
-    nullptr, nullptr, nullptr, nullptr,
+    "terrain|calculate|flow|landscape|water|hydrology|measurement",
+    "terrain.erosion_stats|terrain.erode",
+    nullptr, nullptr, "terrain.erosion_stats", nullptr,
     params_terrain_calculate_flow, 1,
     true
 };
@@ -5408,27 +5751,73 @@ static const MethodRegistration reg_terrain_create(desc_terrain_create);
 static const MethodParam params_terrain_erode[] = {
     {"name", "string", true, "", nullptr, nullptr},
     {"type", "string", false, "Erosion model", "hydraulic", "hydraulic|thermal|fluvial|wind"},
-    {"iterations", "int", false, "Solver iterations; 0 uses the model's own default", "0", nullptr},
+    {"iterations", "int", false, "Droplet count for the hydraulic model; 0 uses the model's own default", "0", nullptr},
     {"strength", "float", false, "Erosion strength", "0.2", nullptr},
     {"talus_angle", "float", false, "Repose angle for thermal erosion", "0.5", nullptr},
+    {"fluvial_cycle", "int", false, "Enable the landscape-evolution cycle (1/0); omit to keep the solver setting", "-1", nullptr},
+    {"fluvial_quality", "string", false, "Convergence budget preset. Sets iteration count, relaxation passes, transport steps and pyramid depth ONLY - never the shape parameters - so raising it refines the same landscape instead of producing a different one. Applied before any explicit budget parameter in the same call, so you can pick a preset and override one dial of it.", "", "draft|balanced|high"},
+    {"fluvial_iterations", "int", false, "Cycle iterations. Refines the solve; does NOT change how much material moves", "-1", nullptr},
+    {"fluvial_time_step", "float", false, "Whole-cycle time multiplier: this is the dial for how much material moves", "-1.0", nullptr},
+    {"rain_rate", "float", false, "Runoff depth per unit time; only its ratio to settling_velocity matters", "-1.0", nullptr},
+    {"orographic_rain", "float", false, "Windward/lee rain split, 0..1. The second symmetry breaker after drainage area", "-1.0", nullptr},
+    {"rain_wind_degrees", "float", false, "Prevailing wind bearing in degrees for orographic rain", "-1000.0", nullptr},
+    {"incision_k", "float", false, "Stream-power coefficient, in metres of incision at 1 km2 catchment and slope 1", "-1.0", nullptr},
+    {"stream_power_m", "float", false, "Drainage-area exponent, near 0.5. This is what makes rivers cut faster than rills", "-1.0", nullptr},
+    {"stream_power_n", "float", false, "Slope exponent, near 1.0", "-1.0", nullptr},
+    {"transport_k", "float", false, "Sediment transport capacity coefficient, same units as incision_k", "-1.0", nullptr},
+    {"sediment_cover", "float", false, "Cover effect 0..1: a bed already carrying its capacity is armoured", "-1.0", nullptr},
+    {"settling_velocity", "float", false, "How readily suspended load drops. Larger settles sooner and shortens deltas", "-1.0", nullptr},
+    {"sediment_route_steps", "int", false, "Cells of downstream sediment travel per iteration", "-1", nullptr},
+    {"drainage_refresh_interval", "int", false, "Iterations between depression-fill and drainage-area re-solves", "-1", nullptr},
+    {"drainage_fill_passes", "int", false, "GPU depression-fill budget per pyramid level. Too low leaves spurious lakes", "-1", nullptr},
+    {"drainage_accumulate_passes", "int", false, "GPU area-accumulation budget. Too low under-counts long trunk rivers", "-1", nullptr},
+    {"drainage_coarsest_size", "int", false, "Coarsest pyramid grid for the GPU drainage solve", "-1", nullptr},
+    {"mass_wasting", "int", false, "Enable in-loop landslides (1/0). Off means valley walls never collapse", "-1", nullptr},
+    {"repose_angle_degrees", "float", false, "Angle of repose for mass wasting", "-1.0", nullptr},
+    {"mass_wasting_rate", "float", false, "Fraction of the excess above repose shed per pass, 0..1", "-1.0", nullptr},
+    {"mass_wasting_steps", "int", false, "Talus relaxation passes per iteration", "-1", nullptr},
+    {"hillslope_diffusion", "float", false, "Creep coefficient in m2 over the whole cycle; rounds ridges, keeps channels", "-1.0", nullptr},
+    {"incision_safety", "float", false, "Anti-pit limit: max fraction of the drop to the receiver cut in one step", "-1.0", nullptr},
+    {"deposition_safety", "float", false, "Anti-spike limit: max fraction of the rise to the donor built in one step", "-1.0", nullptr},
+    {"max_step_meters", "float", false, "Absolute per-step height change limit; 0 selects half a cell", "-1.0", nullptr},
+    {"lake_epsilon_meters", "float", false, "Fill residue below this is not treated as standing water", "-1.0", nullptr},
+    {"headwater_area_km2", "float", false, "Catchment area at which a cell counts as a channel", "-1.0", nullptr},
     {"backend", "string", false, "Compute backend; auto picks GPU when available", "auto", nullptr},
+    {"alluvium_consolidation", "float", false, "", "-1.0", nullptr},
+    {"alluvium_rate", "float", false, "", "-1.0", nullptr},
+    {"alluvium_slope_degrees", "float", false, "", "-1.0", nullptr},
+    {"alluvium_steps", "int", false, "", "-1", nullptr},
     {"amount", "float", false, "", "0.3", nullptr},
+    {"avulsion_interval", "int", false, "", "-1", nullptr},
     {"direction", "float", false, "", "45.0", nullptr},
     {"seed", "int", false, "", "1337", nullptr},
     {"undo", "bool", false, "", "true", nullptr},
 };
 static const MethodDescriptor desc_terrain_erode = {
     "terrain.erode", "terrain",
-    "Run an erosion pass over a terrain",
-    nullptr,
+    "Run an erosion pass over a terrain; the hydraulic model brackets its droplet stages with the fluvial cycle - drainage-area feedback, lake spill and outlet incision, downstream sediment transport",
+    "Every fluvial_* parameter defaults to leaving the solver setting alone, so tuning one dial does not reset the other twenty. The cycle is what produces a river hierarchy and deltas; with fluvial_cycle=0 erosion falls back to the local-slope droplet walk, which is statistically isotropic and leaves closed basins undrained. Check the result with terrain.erosion_stats rather than by eye.",
     "write", "SceneWrite", false, "any",
-    "terrain|erode|landscape|erosion|weathering|realism",
-    nullptr,
-    nullptr, nullptr, nullptr, nullptr,
-    params_terrain_erode, 10,
+    "terrain|erode|landscape|erosion|weathering|realism|river|delta|lake|sediment",
+    "terrain.erosion_stats|terrain.calculate_flow|terrain.evaluate",
+    nullptr, nullptr, "terrain.erosion_stats", nullptr,
+    params_terrain_erode, 43,
     true
 };
 static const MethodRegistration reg_terrain_erode(desc_terrain_erode);
+
+static const MethodDescriptor desc_terrain_erosion_stats = {
+    "terrain.erosion_stats", "terrain",
+    "Read the sediment mass ledger and drainage diagnostics of the last erosion run",
+    "This is how an erosion result is checked without a screenshot, and the field to read FIRST is max_drainage_area_fraction: the largest catchment as a share of the map. Single digits mean the drainage graph is in fragments and no trunk river exists - a state that still renders as a convincing river network, which is why looking at the picture has repeatedly sent debugging the wrong way. max_drainage_area_km2 alone is NOT interpretable: 0.03 km2 is a shredded network on a 1 km terrain and a healthy trunk on a 100 m one. lake_cells and lake_area_fraction count ANY standing water including the depression-fill ladder's few-ulp lift, so they can report a quarter of the map and mean nothing; act on deep_lake_cells / deep_lake_area_fraction (10 cm threshold) and deepest_lake_meters instead. A high deep_lake_area_fraction on sloping terrain means the surface fed to the solver is genuinely full of pits - suspect the droplet stage, not the fill. mass_error_fraction away from zero means sediment transport is leaking. cycle_iterations == 0 is not a measurement, it is a cleared default.",
+    "read", "Read", false, "any",
+    "terrain|erosion|stats|landscape|hydrology|measurement|validation|mass-balance|drainage|lakes",
+    "terrain.erode|terrain.calculate_flow|terrain.flow_authority|terrain.evaluate",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_terrain_erosion_stats(desc_terrain_erosion_stats);
 
 static const MethodParam params_terrain_evaluate[] = {
     {"name", "string", true, "", nullptr, nullptr},
@@ -5479,6 +5868,22 @@ static const MethodDescriptor desc_terrain_export_heightmap = {
 };
 static const MethodRegistration reg_terrain_export_heightmap(desc_terrain_export_heightmap);
 
+static const MethodParam params_terrain_flow_authority[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_flow_authority = {
+    "terrain.flow_authority", "terrain",
+    "Report which discharge field the graph's Flow node classified",
+    "Two quantities were both called flow: DISCHARGE, the physical field the erosion sim measures against the terrain it is carving, and CHANNEL, a 0-1 selection of which cells read as a watercourse. Flow is now the single authority - measured discharge goes into it and every consumer reads out of it. source == 'derived_erosion_unwired' is the state nothing else reports: the graph HAS an erosion sim whose discharge is not wired into Flow, so channels come from bare geometry (no lakes, no infiltration, no erosion history) while the render shows the eroded surface, and the result still looks like a river network.",
+    "write", "SceneWrite", false, "any",
+    "terrain|flow|authority|landscape|hydrology|measurement",
+    "terrain.calculate_flow|terrain.erosion_stats|terrain.apply_preset",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_flow_authority, 1,
+    true
+};
+static const MethodRegistration reg_terrain_flow_authority(desc_terrain_flow_authority);
+
 static const MethodParam params_terrain_get[] = {
     {"name", "string", true, "", nullptr, nullptr},
 };
@@ -5515,6 +5920,22 @@ static const MethodDescriptor desc_terrain_import_heightmap = {
 };
 static const MethodRegistration reg_terrain_import_heightmap(desc_terrain_import_heightmap);
 
+static const MethodParam params_terrain_landform_stats[] = {
+    {"name", "string", true, "Terrain name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_landform_stats = {
+    "terrain.landform_stats", "terrain",
+    "Measure the realised shape of a terrain: slope distribution, landform width, local-relief spread and hypsometry",
+    "Measured on the BAKED heightfield, never read back from a generator's own settings, so it can see the gap between what a node was asked for and what the terrain became. relief_window_meters / relief_window_relief are the relief-vs-window ladder itself; broad_growth is the relief added by its last doubling and is the sharpest read on whether the tile has landforms at its own scale - near 1.0 the field is already uncorrelated at a quarter of the tile and the map is one texture repeated (measured 1.05 with Feature Size 600 m on a 4096 m terrain, against 1.37 at 2048 m). landform_scale_meters is the ladder's growth knee, octave-quantised and NOT expected to equal the authored Feature Size. cliff_fraction is the area over 40 degrees - ground too steep to hold soil, so the share that must read as bare rock - and roughness_slope_ratio is cell-scale roughness on the steepest fifth over the gentlest fifth. Read those two TOGETHER: a terrain with no steep ground still scores a high ratio because its steepest fifth is only its least flat fifth. local_relief_ratio near 1 means every part of the map is equally rugged - no massifs, no basins. lowland_fraction below midland_fraction means the hypsometry is gaussian rather than depositional. spectrum_kink is macro-micro coherence in one number: the largest departure of any octave from the fitted power law. A landscape whose layers agree has ONE law from the grid to the landform, so a detail pass that does not match what it sits on, or a band guard quietly dropping octaves, shows up here and ONLY here - slope, relief and hypsometry all stay healthy while it is there. Under about 0.05 the scales are one landscape; spectrum_kink_meters names the window and spectrum_kink_signed says whether that scale is starved of detail (negative) or carrying too much (positive). realised_hurst is fitted only below landform_scale_meters; include the saturated windows and any exponent is dragged toward 0.5 regardless of the field.",
+    "read", "Read", false, "any",
+    "terrain|landform|stats|landscape|measure|diagnostic|shape|slope|relief",
+    "terrain.slope_area_fit|terrain.flow_authority|terrain.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_landform_stats, 1,
+    true
+};
+static const MethodRegistration reg_terrain_landform_stats(desc_terrain_landform_stats);
+
 static const MethodDescriptor desc_terrain_list = {
     "terrain.list", "terrain",
     "List the terrain objects",
@@ -5527,6 +5948,22 @@ static const MethodDescriptor desc_terrain_list = {
     true
 };
 static const MethodRegistration reg_terrain_list(desc_terrain_list);
+
+static const MethodParam params_terrain_list_layers[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_list_layers = {
+    "terrain.list_layers", "terrain",
+    "List the eight terrain layer slots and what drives each one",
+    "Slots 0-3 are weighted by the splat map and normalized against each other - they partition the surface. Slots 4-7 are weighted by the semantic map (Flow, Wetness, Ice, Hardness) and composited OVER that blend by their own unnormalized weight. bound=false on a semantic slot means the built-in shading still applies to that channel. TWO dead cases to check on a bound overlay: channel_coverage 0 means the graph never fills that channel (Auto Splat's semantic output writes Flow and hard-zeroes the other three, while Surface Composer writes all four); channel_constant true means min==max, a flat fill that reports full coverage yet selects nothing and washes the material evenly over the terrain - this is how an unwired Surface Composer Hardness input presents, falling back to a constant 0.45. Hardness is produced by Lithology or Strata.",
+    "read", "Read", false, "any",
+    "terrain|list|layers|landscape|material|layer|splat|semantic",
+    "terrain.set_layer|material.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_list_layers, 1,
+    true
+};
+static const MethodRegistration reg_terrain_list_layers(desc_terrain_list_layers);
 
 static const MethodDescriptor desc_terrain_list_rivers = {
     "terrain.list_rivers", "terrain",
@@ -5553,6 +5990,28 @@ static const MethodDescriptor desc_terrain_list_satmap_presets = {
     true
 };
 static const MethodRegistration reg_terrain_list_satmap_presets(desc_terrain_list_satmap_presets);
+
+static const MethodParam params_terrain_paint_splat[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"dabs", "array", true, "Stroke path: list of [world_x, world_z] pairs, all of which must land on the tile.", nullptr, nullptr},
+    {"channel", "int", false, "Splat channel / layer index 0..3", "0", nullptr},
+    {"dt", "float", false, "Seconds one dab represents; the panel feeds one frame", "0.0166667", nullptr},
+    {"radius", "float", false, "", "5.0", nullptr},
+    {"strength", "float", false, "", "1.0", nullptr},
+    {"undo", "bool", false, "", "true", nullptr},
+};
+static const MethodDescriptor desc_terrain_paint_splat = {
+    "terrain.paint_splat", "terrain",
+    "Paint one terrain splat channel (layer) along a list of world-space dabs",
+    "Fails rather than initialising when the terrain has no splat map or layers: an auto-created layer stack would hide the missing setup step. coverage_before/after are the mean weight of the painted channel over the whole splat map, which is what separates 'the stroke ran' from 'the stroke painted'; a stroke fully outside the tile is refused, not silently ignored.",
+    "write", "SceneWrite", false, "any",
+    "terrain|paint|splat|landscape|brush",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_paint_splat, 7,
+    true
+};
+static const MethodRegistration reg_terrain_paint_splat(desc_terrain_paint_splat);
 
 static const MethodParam params_terrain_remove[] = {
     {"name", "string", true, "", nullptr, nullptr},
@@ -5588,6 +6047,54 @@ static const MethodDescriptor desc_terrain_sample_height = {
 };
 static const MethodRegistration reg_terrain_sample_height(desc_terrain_sample_height);
 
+static const MethodParam params_terrain_sculpt[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+    {"dabs", "array", true, "Stroke path: list of [world_x, world_z] pairs. One dab is a click, several are a drag; every dab must land on the tile or the call is refused.", nullptr, nullptr},
+    {"mode", "string", false, "", "raise", "raise|lower|flatten|smooth|stamp"},
+    {"dt", "float", false, "Seconds one dab represents; the panel feeds one frame", "0.0166667", nullptr},
+    {"strength", "float", false, "Metres of height change per second at full falloff", "0.5", nullptr},
+    {"radius", "float", false, "Brush radius in metres", "5.0", nullptr},
+    {"curve", "float", false, "Falloff exponent, 0.25..4", "2.0", nullptr},
+    {"flatten_target", "float", false, "", "0.0", nullptr},
+    {"stamp_rotation", "float", false, "", "0.0", nullptr},
+    {"stamp_texture", "string", false, "", "", nullptr},
+    {"undo", "bool", false, "", "true", nullptr},
+    {"use_fixed_height", "bool", false, "", "false", nullptr},
+};
+static const MethodDescriptor desc_terrain_sculpt = {
+    "terrain.sculpt", "terrain",
+    "Run a terrain sculpt stroke (raise|lower|flatten|smooth|stamp) over a list of world-space dabs",
+    "The panel brush and this method share TerrainManager::sculpt, so this is the only way to regression-test terrain sculpting. Read height_delta, NOT ok: the height field is metres/scale_y and a graph-authored landform routinely exceeds 1.0, so a bug that clamps the field reports success while flattening the ground under the brush. dt is the seconds one dab represents (the panel feeds 1/60); strength is metres per second at full falloff, so a visible bump needs either a large strength or many dabs. flatten samples its target from the surface under the first dab unless use_fixed_height is set.",
+    "write", "SceneWrite", false, "any",
+    "terrain|sculpt|landscape|brush|authoring",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_sculpt, 12,
+    true
+};
+static const MethodRegistration reg_terrain_sculpt(desc_terrain_sculpt);
+
+static const MethodParam params_terrain_set_layer[] = {
+    {"slot", "int", true, "0-3 splat-weighted, 4-7 semantic overlay (4=Flow 5=Wetness 6=Ice 7=Hardness)", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr},
+    {"material", "any", false, "Material name to bind; \"\" clears the slot; omit to leave unchanged", nullptr, nullptr},
+    {"uv_scale", "any", false, "Tiling scale; omit to leave unchanged", nullptr, nullptr},
+    {"overlay_strength", "any", false, "Overlay dial [0,1] for slots 4-7; omit to leave unchanged", nullptr, nullptr},
+    {"overlay_ignore_cover", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_set_layer = {
+    "terrain.set_layer", "terrain",
+    "Bind or edit one terrain layer slot",
+    "Omit a field to leave it unchanged. material=\"\" CLEARS the slot; clearing a semantic overlay restores the built-in shading for that channel. overlay_strength applies to slots 4-7 only and is refused on 0-3, which are normalized against each other and have no independent strength.",
+    "write", "SceneWrite", false, "any",
+    "terrain|set|layer|landscape|material|splat|semantic|river",
+    "terrain.list_layers",
+    nullptr, nullptr, "terrain.list_layers", nullptr,
+    params_terrain_set_layer, 6,
+    true
+};
+static const MethodRegistration reg_terrain_set_layer(desc_terrain_set_layer);
+
 static const MethodParam params_terrain_set_mesh_resolution[] = {
     {"name", "string", true, "Terrain name", nullptr, nullptr},
     {"mesh_resolution", "int", true, "Vertices per side for the mesh grid, or 0 to follow the field resolution", nullptr, nullptr},
@@ -5621,6 +6128,22 @@ static const MethodDescriptor desc_terrain_set_paint_resolution = {
     false
 };
 static const MethodRegistration reg_terrain_set_paint_resolution(desc_terrain_set_paint_resolution);
+
+static const MethodParam params_terrain_slope_area_fit[] = {
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_slope_area_fit = {
+    "terrain.slope_area_fit", "terrain",
+    "Fit the slope-area relation over the channel network to test for real fluvial form",
+    "Stream-power erosion gives S = k * A^-theta, so on log-log axes channel cells fall on a straight line. Noise, diffusion and sculpted relief scatter instead. This is the only measurement that separates 'an erosion pass ran' from 'the erosion pass produced fluvial form' - both render as plausible terrain. Read r_squared BEFORE concavity_index: a confident theta fitted to scatter is exactly the number that ends a debugging session early. Real landscapes sit near theta 0.4-0.6. MEASURED: the flow field is filled by terrain.calculate_flow ONLY. Evaluating the node graph does not fill it - the buffer ends up allocated, correctly sized and entirely zero, which used to sail past the size guard and answer too_few_channels, an empty input dressed as a statement about the landscape. Call terrain.calculate_flow first; status flow_field_empty now names that case and flow_peak reports what the fit actually read. status no_flow_field means the buffer is missing or the wrong size.",
+    "write", "SceneWrite", false, "any",
+    "terrain|slope|area|fit|landscape|hydrology|erosion|measurement|validation",
+    "terrain.calculate_flow|terrain.erosion_stats|terrain.flow_authority",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_slope_area_fit, 1,
+    true
+};
+static const MethodRegistration reg_terrain_slope_area_fit(desc_terrain_slope_area_fit);
 
 static const MethodDescriptor desc_timeline_get_frame = {
     "timeline.get_frame", "timeline",

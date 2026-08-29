@@ -1,0 +1,50 @@
+// terrain_lem_prolongate.comp
+// Cascadic pyramid prolongation: lift a coarse solve to the next finer level as
+// an initial guess (see terrain_lem_restrict.comp for why the pyramid exists).
+//
+//   0 = FILL SEED. Nearest-neighbour lift, then max() against the fine cell's
+//       own height. Nearest is required, not a nicety: bilinear can dip BELOW
+//       the coarse value and would destroy the upper-bound property that makes
+//       Planchon-Darboux converge from this seed. `reference` is the fine
+//       height field.
+//   1 = AREA SEED. Bilinear lift of drainage area. Area is carried in physical
+//       m^2, so it is resolution independent and needs no rescaling here.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int coarseWidth; int coarseHeight;
+    int fineWidth; int fineHeight;
+    int mode;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Coarse    { float coarseData[]; };
+layout(set = 0, binding = 1) readonly  buffer Reference { float referenceData[]; };
+layout(set = 0, binding = 2) writeonly buffer Fine      { float fineData[]; };
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.fineWidth * pc.fineHeight)) return;
+    int fx = int(ui) % pc.fineWidth;
+    int fy = int(ui) / pc.fineWidth;
+
+    if (pc.mode == 0) {
+        int cx = clamp(int(float(fx) * float(pc.coarseWidth) / float(pc.fineWidth)),
+                       0, pc.coarseWidth - 1);
+        int cy = clamp(int(float(fy) * float(pc.coarseHeight) / float(pc.fineHeight)),
+                       0, pc.coarseHeight - 1);
+        fineData[ui] = max(coarseData[cy * pc.coarseWidth + cx], referenceData[ui]);
+        return;
+    }
+
+    vec2 p = (vec2(fx, fy) + 0.5) / vec2(pc.fineWidth, pc.fineHeight) *
+             vec2(pc.coarseWidth, pc.coarseHeight) - 0.5;
+    ivec2 a = ivec2(floor(p));
+    vec2 f = clamp(p - vec2(a), 0.0, 1.0);
+    a = clamp(a, ivec2(0), ivec2(pc.coarseWidth - 2, pc.coarseHeight - 2));
+    float v00 = coarseData[a.y * pc.coarseWidth + a.x];
+    float v10 = coarseData[a.y * pc.coarseWidth + a.x + 1];
+    float v01 = coarseData[(a.y + 1) * pc.coarseWidth + a.x];
+    float v11 = coarseData[(a.y + 1) * pc.coarseWidth + a.x + 1];
+    fineData[ui] = max(mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y), 0.0);
+}

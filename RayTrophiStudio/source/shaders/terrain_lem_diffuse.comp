@@ -1,0 +1,49 @@
+// terrain_lem_diffuse.comp
+// Hillslope creep: dz/dt = D * laplacian(z).
+//
+// This is what gives a landscape its convex-ridge / concave-valley signature.
+// It is NOT the same thing as the existing `smoothSurface` post-pass, which is
+// an isotropic 3x3 blur that erases channels just as happily as ridges. Here
+// the coefficient is gated down inside channels (1 / (1 + A/Aref)) and switched
+// off under standing water, so ridges round while rivers stay sharp.
+//
+// Explicit 5-point Laplacian: stable for coeff = D*dt/dx^2 <= 0.25. The host
+// sub-steps to honour that bound rather than clamping the result afterwards --
+// a diffusion scheme run past its stability limit does not merely look wrong,
+// it oscillates and diverges into a checkerboard of spikes.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float coeff;            // D * dt / cellSize^2, host-clamped to <= 0.25
+    float channelRefArea;   // m^2 at which creep is halved
+    float lakeEps;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer HeightIn  { float heightIn[]; };
+layout(set = 0, binding = 1) writeonly buffer HeightOut { float heightOut[]; };
+layout(set = 0, binding = 2) readonly  buffer Area      { float areaField[]; };
+layout(set = 0, binding = 3) readonly  buffer Mask      { float maskField[]; };
+layout(set = 0, binding = 4) readonly  buffer Filled    { float filledField[]; };
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+    int x = i % pc.width, y = i / pc.width;
+    float hCur = heightIn[i];
+
+    if (x < 1 || y < 1 || x >= pc.width - 1 || y >= pc.height - 1) {
+        heightOut[i] = hCur;
+        return;
+    }
+    if (filledField[i] - hCur > pc.lakeEps) { heightOut[i] = hCur; return; }
+
+    float lap = heightIn[i - 1] + heightIn[i + 1] +
+                heightIn[i - pc.width] + heightIn[i + pc.width] - 4.0 * hCur;
+
+    float channel = 1.0 / (1.0 + max(areaField[i], 0.0) / max(pc.channelRefArea, 1.0));
+    float gate = clamp(maskField[i], 0.0, 1.0) * channel;
+    heightOut[i] = hCur + clamp(pc.coeff, 0.0, 0.25) * gate * lap;
+}

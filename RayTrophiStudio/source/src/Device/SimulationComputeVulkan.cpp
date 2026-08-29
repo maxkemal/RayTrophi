@@ -981,10 +981,10 @@ private:
             { "terrain_thermal_apply",              "terrain_thermal_apply.spv",           3, 52 },
             { "terrain_stream_power",               "terrain_stream_power.spv",            5, 36 },
             { "terrain_apply_stream_power",         "terrain_apply_stream_power.spv",      2, 36 },
-            { "terrain_pit_fill",                   "terrain_pit_fill.spv",                1, 28 },
-            { "terrain_spike_removal",              "terrain_spike_removal.spv",           1, 28 },
+            { "terrain_pit_fill",                   "terrain_pit_fill.spv",                2, 28 },
+            { "terrain_spike_removal",              "terrain_spike_removal.spv",           2, 28 },
             { "terrain_edge_preservation",          "terrain_edge_preservation.spv",       2, 28 },
-            { "terrain_smooth",                     "terrain_smooth.spv",                  1, 8  },
+            { "terrain_smooth",                     "terrain_smooth.spv",                  2, 8  },
             // Shallow-water "virtual pipes" hydraulic model (revived dead CUDA code —
             // never had a working host caller — replaces the droplet Monte-Carlo model).
             // FluvialErosionParamsGPU (no ptrs) = 11 fields x 4 bytes = 44.
@@ -996,11 +996,11 @@ private:
             { "terrain_wind",                       "terrain_wind.spv",                    1, 40 },
             // Monte-Carlo droplet hydraulic erosion (replaces the pipe-model attempt for
             // the "Hydraulic" node — user found droplet's organic channel character
-            // clearly better). 26 fields x 4 bytes = 104.
-            { "terrain_hydraulic_droplet",          "terrain_hydraulic_droplet.spv",       11, 108 },
+            // clearly better). 28 scalar fields x 4 bytes = 112.
+            { "terrain_hydraulic_droplet",          "terrain_hydraulic_droplet.spv",       13, 112 },
             { "terrain_erosion_claim_clear",        "terrain_erosion_claim_clear.spv",      1, 8 },
             { "terrain_erosion_gather",             "terrain_erosion_gather.spv",           2, 16 },
-            { "terrain_erosion_gather_apply",       "terrain_erosion_gather_apply.spv",     4, 8 },
+            { "terrain_erosion_gather_apply",       "terrain_erosion_gather_apply.spv",     5, 12 },
             { "terrain_hydraulic_channel_evolve",   "terrain_hydraulic_channel_evolve.spv", 12, 48 },
             { "terrain_hydraulic_channel_apply",    "terrain_hydraulic_channel_apply.spv",   4, 8 },
             { "terrain_hydraulic_route_init",       "terrain_hydraulic_route_init.spv",      4, 20 },
@@ -1020,6 +1020,22 @@ private:
             { "terrain_flow_fill",                  "terrain_flow_fill.spv",               3, 16 },
             { "terrain_flow_weights",                "terrain_flow_weights.spv",             2, 12 },
             { "terrain_flow_accumulate",             "terrain_flow_accumulate.spv",          3, 8  },
+            // Landscape-Evolution-Model cycle: drainage-area feedback, lake
+            // spill/outlet incision, downstream sediment transport, in-loop
+            // mass wasting and hillslope creep. See docs/dev/
+            // TERRAIN_EROSION_FLUVIAL_REWRITE.md for the pass order and for
+            // which numbers are physical and which are stability limits.
+            { "terrain_lem_restrict",                "terrain_lem_restrict.spv",             2, 20 },
+            { "terrain_lem_prolongate",              "terrain_lem_prolongate.spv",           3, 20 },
+            { "terrain_lem_rain",                    "terrain_lem_rain.spv",                 2, 32 },
+            { "terrain_lem_weights",                 "terrain_lem_weights.spv",              3, 16 },
+            { "terrain_lem_accumulate",              "terrain_lem_accumulate.spv",           4, 8  },
+            { "terrain_lem_incise",                  "terrain_lem_incise.spv",               9, 60 },
+            { "terrain_lem_route",                   "terrain_lem_route.spv",               10, 44 },
+            { "terrain_lem_talus",                   "terrain_lem_talus.spv",                6, 32 },
+            { "terrain_lem_alluvium",                "terrain_lem_alluvium.spv",             6, 32 },
+            { "terrain_lem_diffuse",                 "terrain_lem_diffuse.spv",              5, 20 },
+            { "terrain_lem_finalize",                "terrain_lem_finalize.spv",            10, 40 },
             // Phase 1 GPU foliage parity kernel. Surface producers (terrain/mesh)
             // share these include/exclude semantics and deterministic candidate RNG.
             { "foliage_scatter_parity",              "foliage_scatter_parity.spv",           2, 48 },

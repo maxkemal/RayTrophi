@@ -64,6 +64,18 @@ void main() {
 
     float noisedH = origHeight[id] + coherentNoise(x, y) * pc.noiseAmplitude;
 
+    // A constant epsilon makes a wide filled flat an almost perfect plane.
+    // Steepest descent over that plane produces parallel, grid-aligned rivers
+    // instead of tributaries that merge. Vary the LADDER STEP per destination
+    // cell (never the authored surface) just like the CPU priority flood. The
+    // factor stays >= 1, so every filled cell remains strictly above its
+    // parent and cannot turn into a dither-created sink.
+    uint tie = uint(id);
+    tie ^= tie >> 16u; tie *= 0x7feb352du;
+    tie ^= tie >> 15u; tie *= 0x846ca68bu;
+    tie ^= tie >> 16u;
+    float ladderJitter = 1.0 + 0.5 * (float(tie & 0xffffu) / 65535.0);
+
     if (x == 0 || x == pc.mapWidth - 1 || y == 0 || y == pc.mapHeight - 1) {
         filledOut[id] = noisedH;
         return;
@@ -75,7 +87,18 @@ void main() {
     float best = 1e18;
     for (int d = 0; d < 8; d++) {
         int nIdx = (y + dy[d]) * pc.mapWidth + (x + dx[d]);
-        float candidate = max(noisedH, filledIn[nIdx] + pc.eps);
+        float nf = filledIn[nIdx];
+        // The ladder has to stay above float resolution at the height it is
+        // actually walking, not at the one the constant was calibrated for.
+        // The host passes ~2e-7, which is about three ulp near h = 0.5 but
+        // only 1.7 near h = 1 - so on a tall terrain a long flat run stops
+        // stepping at all, the filled surface goes bitwise flat, and every
+        // cell of it becomes a terminal sink for drainage. Skipped while the
+        // relaxation is still seeded at +infinity, where it would be nonsense.
+        float stepEps = pc.eps;
+        if (nf < 1.0e6) stepEps = max(pc.eps, abs(nf) * 4.0 * 1.1920929e-7);
+        stepEps *= ladderJitter;
+        float candidate = max(noisedH, nf + stepEps);
         best = min(best, candidate);
     }
     filledOut[id] = min(filledIn[id], best);

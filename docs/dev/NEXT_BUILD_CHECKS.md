@@ -1,186 +1,131 @@
-# Sıradaki build kontrolleri
+# Siradaki build kontrolleri — TERRAIN FIRCA + SECIM KIMLIGI
 
-> **Durum:** CANLI — her iş partisinde üzerine yazılır. Son güncelleme: 2026-08-21.
+> **Durum:** REFERANS — 2026-08-29, dokuzuncu parti. **Hepsi canli dogrulandi**,
+> asagisi bundan sonraki degisiklikler icin REGRESYON listesidir.
+>
+> Sekizinci parti: terrain sculpt clamp'i (dogrulandi). Dokuzuncu parti:
+> (1) terrain splat paint fircasi cikmiyordu — iki kok, **dogrulandi**,
+> (2) sag firca dock'u sol panelin kopyasiydi — kaldirildi, **dogrulandi**,
+> (3) "kup secili ama terrain tasiniyor" — iki yapisal kok, **dogrulandi**
+> (dogru obje ekleniyor/seciliyor, terrain tasinmiyor).
 
-**Parti 3 + 4 birlikte derlenecek.** Parti 3 = Faz 0 çekirdeği
-(`mesh_resolution`) — ilk derlemesi canlı doğrulandı, sonrasında
-`terrain.create(mesh_resolution=)` eklendi. Parti 4 = Solid raster indeksli
-çizim (aşağıda, §P4).
+Bu partide degisen dosyalar:
 
-**Parti 3 — Faz 0 çekirdeği: `mesh_resolution`.** Vertex ızgarası artık alan
-(analiz) ızgarasından bağımsız. Ölçülen kazanç: alan 4096 + mesh 1024 ⇒ kare
-döngüsü tıkanması **7 142 ms → ~398 ms (~18×)**, analiz çözünürlüğü kaybı yok.
+- `UI/scene_ui.cpp` — ★★★ Terrain Graph paneli **acik olmasi** degil **odakta
+  olmasi** fircayi kapatiyor (iki yerde); `allow_paint_bridge` eski haline dondu
+- `UI/scene_ui_modifiers.cpp` — terrain paint dock'u kaldirildi;
+  `syncPaintBrushToTerrain` artik **radius kopyalamiyor**; terrain paint paneli
+  `terrain_brush.radius`'u (metre) duzenliyor
+- `Physics/TerrainManager.cpp` — ★★★ `registerTerrainMeshOnce` zaten kayitliysa
+  **yerinden oynatmiyor**; her world.objects mutasyonunda `g_mesh_cache_dirty`
+- `UI/SceneSelection.cpp` — ★★★ `object_index` esitligi artik tek basina KIMLIK
+  degil; spline oğeleri icin null==null tuzagi kapatildi
+- `scripts/terrain_scene_selection_check.py` (+ `x64/Release/scripts/`) — yeni
 
-★ **Bilerek KAPSAM DIŞI:** `paint_resolution` (splat/satmap kadranı). Maske
-grafiği o çözünürlükte **değerlendirilmeden** o kadranı açmak, yalnızca yukarı
-örnekleme satın alır ve panelin yalan söylemesi demektir — yol haritası bunu
-açıkça reddediyor. Ayrı parti.
-
-## Değişenler
-
-| Dosya | İş |
-|---|---|
-| `TerrainSystem.h` | `mesh_resolution` + `meshGridWidth/Height()` + `meshMatchesField()` |
-| `TerrainManager.cpp` | Mesh alandan **örneklenerek** kuruluyor (yükseklik box-filter, normal alandan); analiz alanları vertex ızgarasına **yeniden örnekleniyor**; dirty-sector yolu ayrık meshte tam yola düşüyor; serileştirme |
-| `RtApi.h` / `RtApiTerrain.cpp` | `TerrainInfo.mesh_resolution/mesh_width/mesh_height`, `setTerrainMeshResolution` |
-| `RtIpc.cpp` / `RtPython.cpp` | `terrain.set_mesh_resolution`, `rt.terrain.set_mesh_resolution`, `mesh_grid` alanı |
-| `scene_ui_terrain.hpp` | Panelde "Mesh Resolution" kadranı + üçgen sayısı + **ne kaybedildiği** |
-| `RtIpcMethodDescriptors.cpp` | ÜRETİLDİ |
-| `scripts/test/rt_test_terrain_mesh_resolution.py` **(YENİ)** | + `x64/Release/` kopyası |
-
-Yeşil: `audit_ipc_capabilities.py` OK · `gen_ipc_descriptors.py` 335/321 ·
-`verify_descriptor_claims.py` OK.
+Yeni `.cpp` yok, `.vcxproj` degismedi. IPC yuzeyi degismedi
+(`python scripts/gen_ipc_descriptors.py --check` yine `up to date` demeli).
 
 ---
 
-## Parti 3'ün canlı sonuçları (ilk derleme)
+## 0. Derleme
 
-| Kontrol | Sonuç |
-|---|---|
-| 1. Kimlik kapısı (`mesh_resolution: 0`, `mesh_grid` = alan) | ✅ |
-| Alan ayrık meshte kıpırdamıyor | ✅ 4096² sabit, `sample_height` 103.227 → 103.227 |
-| Alandan büyük mesh reddediliyor | ✅ kırpılmıyor, mesajla reddediliyor |
-| 0 geri yüklüyor | ✅ |
-| 3. Kazanç | ✅ **6 323 ms → 33 ms**; solid raster 5 587 → 422 ms, embree 2 821 → 155 ms |
-| 2. Analiz maskeleri | ⚠ **DOĞRULANMADI** — vertex attribute'ları IPC'den okunmuyor |
+**Ne gormen gerek:** temiz build.
+**Bozuksa ne demek:** `TerrainManager.cpp`'de `g_mesh_cache_dirty` icin
+"declared but not defined" (C7631) cikarsa `extern` yine `namespace {}` icine
+kaymis demektir — dosya kapsaminda durmali (kod icinde not var).
 
-⚠ **Bu derlemeye eklenen:** `terrain.create(mesh_resolution=)`. İlk ölçüm
-gösterdi ki sonradan küçültmek pahalı yapıyı bir kez yine de kurduruyor.
+## 1. ★★★ Terrain splat paint fircasi (asil sikayet)
 
----
+Terrain sec → **Paint** sekmesi → panel `Target: <terrain>` demeli.
 
-## Sıralı kontroller
+**Ne gormen gerek:** viewport'ta **sari** firca cemberi; sol tik surukleyince
+splat degisiyor. **Sag tarafta ek bir firca paneli CIKMAMALI.**
 
-### 1. Eski sahneler DEĞİŞMEDİ mi (kimlik kapısı)
+**Bozuksa ne demek — sirayla:**
+1. Cember hic yoksa: `terrain_brush.enabled` yine her kare kapaniyordur.
+   ★ Kok buydu: `Terrain Graph` panelini **acik** birakmak yetiyordu; o blok
+   `handleTerrainBrush`'tan SONRA calisip bayragi siliyordu. Sculpt etkilenmiyordu
+   cunku o `terrain_sculpt_proxy_active` uzerinden geciyor — "sculpt calisiyor,
+   paint calismiyor" asimetrisinin tek sebebi buydu.
+2. Cember **cok kucuk / nokta gibi**yse: yaricap birimi yine mesh fircasindan
+   kopyalaniyordur. `Paint::BrushSettings::radius` obje birimidir (presetler
+   0.09–0.30), `terrain_brush.radius` **metredir**; 1 km'lik arazide 0.25 m
+   fircadir ve "firca cikmiyor" diye gorunur.
+3. Panelde `Paint target: none` yaziyorsa secim terrain'i baglamiyordur
+   (`terrain_brush.active_terrain_id == -1`).
 
-Kaydedilmiş bir terrain projesi aç, ya da `mesh_resolution` dokunmadan yeni bir
-terrain üret.
+★ **En sinsi hali:** cember var, boyuyor gibi ama splat degismiyor — o zaman
+`radius` degil `strength`/kanal bakilir. Ölçum:
 
-- **Görmen gereken:** `terrain.get` → `mesh_resolution: 0`, `mesh_grid` alan
-  ızgarasıyla **aynı**; görüntü öncekiyle aynı.
-- **Bozuksa ne demek:** varsayılan 0 olmaktan çıkmış demektir; her eski sahnenin
-  geometrisi sessizce değişir. Bu bozuksa aşağıdaki her ölçüm kirlidir.
-
-### 2. ★★★ Analiz maskeleri hayatta mı (EN SİNSİ MADDE)
-
-`scripts/test/rt_test_terrain_mesh_resolution.py` çalıştır, sonra **foliage'lı**
-bir terrain'de mesh'i düşürüp bitki dağılımına bak.
-
-- **Görmen gereken:** bitkiler aynı yerlerde; sadece biraz daha kaba.
-- **Bozuksa ne demek:** bitkiler **kaybolduysa** veya tamamen düzgün dağıldıysa,
-  analiz alanları vertex aynasına ulaşmıyordur. Eski kod boyut testini
-  `vertexCount`'a göre yapıyordu ve ayrık meshte her maskeyi **sessizce
-  siliyordu** — hatasız, logsuz. Yeniden örnekleme kodu buna karşı yazıldı;
-  bu madde onun testidir.
-
-### 3. Kazanç gerçek mi
-
+```powershell
+Invoke-RtIpc terrain.paint_splat @{ name='Terrain_1'; dabs=@(@(0,0),@(20,0)); channel=1; radius=50 }
 ```
-Invoke-RtIpc perf.reset
-Invoke-RtIpc terrain.create @{ name='F4k'; resolution=4096; height_scale=120.0 }
-Measure-Command { Invoke-RtIpc scene.list_objects }      # ~7 s bekleniyor
-Invoke-RtIpc terrain.set_mesh_resolution @{ name='F4k'; mesh_resolution=1024 }
-Invoke-RtIpc perf.reset
-Invoke-RtIpc terrain.create @{ name='F4kB'; resolution=4096; height_scale=120.0 }
-Invoke-RtIpc terrain.set_mesh_resolution @{ name='F4kB'; mesh_resolution=1024 }
-Measure-Command { Invoke-RtIpc scene.list_objects }
-Invoke-RtIpc perf.list
+`coverage_delta > 0` olmali.
+
+## 2. Regresyon: mesh boyama ve mesh firca dock'u
+
+Bir kup sec → Paint → boya.
+
+**Ne gormen gerek:** sag firca dock'u ESKISI GIBI aciliyor (mesh paint), aletler
+ve katmanlar calisiyor.
+**Bozuksa ne demek:** dock kapisi (`shouldShowPaintBrushDock`) fazla daraltilmis.
+
+★ Ayrica: mesh boyadiktan sonra terrain'e gec, sonra tekrar mesh'e don.
+**Ne gormen gerek:** her iki fircanin yaricapi kendi olceginde kaliyor
+(mesh ~0.25, terrain ~5–50 m). Birbirine bulasiyorsa radius yine paylasiliyor.
+
+## 3. ★★★ "Kup secili, terrain tasiniyor" — once OLC
+
+```powershell
+python scripts/terrain_scene_selection_check.py
 ```
 
-- **Görmen gereken:** `accel.vulkan_solid.raster_geometry` ~6 400 ms'den
-  ~320 ms'ye düşmeli; `terrain.mesh_fill` de düşmeli ama o zaten küçüktü.
-- **Bozuksa ne demek:** hızlandırma yapısı düşmediyse mesh gerçekten
-  küçülmemiştir — `terrain.get` ile `mesh_grid`'i doğrula.
+**Ne gormen gerek:** hepsi PASS. Ozellikle `the TERRAIN did NOT move`.
+**Bozuksa ne demek:** ariza **kimlik hattinda** (isim/indeks/transform handle) —
+UI'de degil. O zaman `select.list` ciktisi hangi nesnenin gercekten secili
+oldugunu soyler.
+**Hepsi PASS ise:** deger katmani temiz; kalan ariza **hiyerarsi tiklamasi →
+secim → gizmo** zincirindedir (scene_ui_hierarchy.cpp / scene_ui_gizmos.cpp).
 
-### 4. Görsel: gölgeleme yaşıyor mu, siluet düşüyor mu
+Sonra UI'da tekrarla: terrain-only sahne → `Add > Mesh > Cube` → hiyerarside
+kupe tikla → tasi.
 
-Aynı dağ sahnesini mesh 1024 ve mesh 256 ile render et.
+**Ne gormen gerek:** kup tasiniyor, terrain duruyor; hiyerarside YALNIZ kup
+satiri secili gorunuyor.
+**Bozuksa ne demek:**
+- Iki satir birden secili gorunuyorsa `object_index` esitligi hala kimlik
+  sayiliyordur (`SceneSelection::isSelected`).
+- Kup satiri secili ama terrain tasiniyorsa gizmo'nun tuttugu
+  `sel.selected.object->getTransformHandle()` yanlis nesnenin handle'idir —
+  o zaman kupun flat mesh'inin `transform`'una bak (`scene.get_transform`).
 
-- **Görmen gereken:** gölgeleme detayı büyük ölçüde **duruyor** (normaller
-  alandan örnekleniyor); **siluet** gözle görülür kabalaşıyor.
-- ★ Siluet farkı **beklenen ve dürüstçe ilan edilmiş** bir kayıp, bug değil.
-  Alan çözünürlüğünde normal map bu partide **yok** — vertex arası detay hâlâ
-  kayıp. Gölgeleme de yassılaştıysa `sample_normal` alan yerine mesh ızgarasını
-  okuyordur.
+★ Terrain'in mesh cozunurlugunu degistirip (Terrain > Resolution > Apply)
+tekrar dene: eski kod bu anda `world.objects`'i yeniden siraliyordu ve
+UI'nin cache'ledigi her slot indeksi kayiyordu.
 
-### 5. Sculpt / dirty-sector yolu
+## 4. Terrain mesh yeniden kaydi hala tek kopya
 
-Ayrık mesh'li (`mesh_resolution` düşük) bir terrain'i fırçayla sculpt et.
+Terrain graph'i birkac kez Evaluate et, sonra:
 
-- **Görmen gereken:** doğru yerde deformasyon.
-- **Bozuksa ne demek:** yanlış yerde tümsek çıkıyorsa `updateDirtySectors`
-  koruması devreye girmiyordur — o yol alan koordinatlarıyla vertex indeksliyor
-  ve ayrık meshte **başka vertex'leri** oynatır. Belirtisi bir sculpt hatası
-  gibi görünür, çözünürlük hatası gibi değil.
+```powershell
+Invoke-RtIpc scene.list_objects | Select-String Chunk
+```
 
-### 6. Kaydet/yükle turu
+**Ne gormen gerek:** `<terrain>_Chunk` **bir kez** listeleniyor.
+**Bozuksa ne demek:** `registerTerrainMeshOnce`'in "zaten kayitli => dokunma"
+kisayolu cift kayit birakiyor demektir (eski kod her seferinde sil+ekle yapip
+bunu maskeliyordu).
 
-`mesh_resolution = 512` ayarla, kaydet, yükle.
+## 5. Sculpt regresyonu (gecen parti)
 
-- **Görmen gereken:** 512 geri geliyor.
-- **Bozuksa ne demek:** sidecar alanı yazılmıyor; sahne her açılışta tam
-  çözünürlüklü mesh'e dönerek yavaşlar ve kimse sebebini bağlamaz.
+```powershell
+python scripts/terrain_brush_check.py
+```
+**Ne gormen gerek:** hepsi PASS (`raise RAISES the ground it touches`).
 
----
+## 6. ✔ Kapandi: "terrain-only sahnede Add gorunmuyor"
 
-## §P4 — Solid raster indeksli çizim (YAZILDI, derlenmedi)
-
-`VulkanViewportBackend::buildRasterGeometry`'nin flat `TriangleMesh` dalı,
-mesh'in **zaten sahip olduğu** indeks tamponunu atıp geometriyi köşe başına
-açıyordu. 4096² terrain'de ölçülen maliyet **+7.4 GB** — mesh'in kendisinin
-(1.31 GB) 5.6 katı ve bu partilerin en büyük tek tahsisatı.
-
-Artık kaynaklı vertex + indeks yükleniyor. Çizim yolu `indexCount > 0` iken
-zaten `vkCmdDrawIndexed` seçiyordu, yani shader/pipeline tarafı değişmedi.
-
-Beklenen: 100.6 M köşe → **16.8 M vertex (6×)**; ~3.6 GB CPU staging → ~600 MB.
-
-| Değişen | İş |
-|---|---|
-| `RasterTriGroup` | `indices` alanı |
-| flat dal | skin'siz mesh'te kaynaklı+indeks; **skinli mesh de-index KALIYOR** |
-| yükleme bloğu | indeks tamponu oluştur+yükle, `indexCount` ata |
-| `updateRasterMeshFromMeshSoA` | kaynaklı düzeni tanıyor |
-
-★ Facade `Triangle` dalına **dokunulmadı** ve dokunulmamalı: o gerçekten
-kaynaksız bir soup. Temizlik fırsatçı — flat SoA yolu düzeldi, facade yolu
-kendi göçünde ölecek.
-
-### P4.1 — Solid modda her şey görünüyor mu
-
-Terrain + normal mesh + import edilmiş model + scatter'lı bir sahne, Solid mod.
-
-- **Görmen gereken:** hepsi eskisi gibi.
-- **★ En sinsi hâli: bir nesnenin YARISI çizilir.** Bir grup hem kaynaklı hem
-  açılmış vertex alırsa indeksli çizim gerisini atlar — hata yok, eksik üçgen.
-  Buna karşı `groupCanWeld` koruması kondu; eksik geometri görürsen ilk oraya bak.
-
-### P4.2 — Bellek gerçekten düştü mü
-
-4096² terrain üret, `perf.list`.
-
-- **Görmen gereken:** `accel.vulkan_solid.raster_geometry` RSS deltası
-  **+7.4 GB → ~+1.5 GB**.
-- **Bozuksa ne demek:** düşmediyse flat dal kaynaklı yola hiç girmiyordur
-  (`meshHasSkinning` yanlış true, ya da `groupCanWeld` false).
-
-### P4.3 — ★ Sculpt hızı (sessiz regresyon riski)
-
-Ayrık olmayan bir terrain'i fırçayla sculpt et.
-
-- **Görmen gereken:** eskisi gibi akıcı.
-- **Bozuksa ne demek:** takılıyorsa `updateRasterMeshFromMeshSoA` `false`
-  dönüyor ve her fırça darbesi tam `buildRasterGeometry` tetikliyordur. Bu bir
-  **yavaşlama** olarak görünür, hata olarak değil — kimse bunu indeksleme
-  değişikliğine bağlamaz.
-
-### P4.4 — Skinli karakter
-
-Animasyonlu bir karakteri Solid modda oynat.
-
-- **Görmen gereken:** deformasyon çalışıyor. Skinli yol bilerek de-index kaldı
-  (`syncRasterSkinnedVertices` `vertexCount == indices.size()` kapısına bakıyor).
-
-### P4.5 — Seçim konturu
-
-Bir flat mesh seç. Kontur çizimi de `indexCount`'a bakıyor; kontur kaybolduysa orası.
+Ayri bir cizim arizasi degildi. Nesne sahnedeydi; **kimligi** yanlis nesneye
+aitti (bkz. §3). Bir parti raster hattinda bosa arandi — ders: "gorunmuyor"
+raporunda once nesnenin KIMLIGINI dogrula (outliner + secim + transform),
+sonra render hattina in.

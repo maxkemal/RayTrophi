@@ -87,6 +87,8 @@ namespace NodeSystem {
                 pin.id = nextPinId++;
                 pin.nodeId = node->id;
             }
+
+            node->onRegisteredToGraph();
             
             nodes.push_back(std::move(node));
             return nodes.back().get();
@@ -246,6 +248,11 @@ namespace NodeSystem {
             link.id = nextLinkId++;
             link.startPinId = startPinId;
             link.endPinId = endPinId;
+            // Optional ports become visible as soon as they participate in
+            // authored topology. Hiding a live endpoint would leave a cable
+            // with no truthful socket location.
+            start->hidden = false;
+            end->hidden = false;
             links.push_back(link);
             
             // Mark consumer as dirty

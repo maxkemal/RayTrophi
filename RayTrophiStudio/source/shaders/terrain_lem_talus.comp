@@ -1,0 +1,96 @@
+// terrain_lem_talus.comp
+// Mass wasting (landslide / talus) INSIDE the erosion loop.
+//
+// Thermal erosion already existed in this project, but as a separate node that
+// runs once before or after the hydraulic solver. That ordering removes the
+// feedback that actually shapes a mountain: a channel incises -> the valley
+// wall steepens past the angle of repose -> the wall collapses -> the debris
+// enters the channel -> the channel carries it away and incises further. Run
+// once at the end it only rounds off whatever shape the water already made,
+// which is precisely why valley walls come out smooth and symmetric and why
+// there is no headwall retreat.
+//
+// Formulation is a GATHER, not a scatter: each invocation recomputes its
+// neighbours' distributions and writes only its own cell, so it needs no
+// atomics and is bit-deterministic. Stability: a cell may shed at most
+// rate * 0.5 * maxExcess per pass, which cannot invert its ordering with the
+// neighbour that defined maxExcess (that pair's difference shrinks by at most
+// maxExcess, and maxExcess <= their actual difference).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float cellSize; float heightScale;
+    float tanRepose;
+    float rate;
+    float hardnessRepose;   // hard rock stands at a steeper angle
+    float maxStep;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer HeightIn   { float heightIn[]; };
+layout(set = 0, binding = 1) writeonly buffer HeightOut  { float heightOut[]; };
+layout(set = 0, binding = 2) readonly  buffer Hardness   { float hardnessField[]; };
+layout(set = 0, binding = 3) readonly  buffer Mask       { float maskField[]; };
+layout(set = 0, binding = 4) buffer Erosion              { float erosionField[]; };
+layout(set = 0, binding = 5) buffer Deposition           { float depositionField[]; };
+
+const int dx8[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+const float dist8[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                1.0, 1.41421356, 1.0, 1.41421356);
+
+// Maximum stable drop (in normalized height units) over one neighbour step.
+float reposeDrop(int idx, float dist) {
+    float hard = clamp(hardnessField[idx], 0.0, 1.0);
+    float t = pc.tanRepose * (1.0 + hard * pc.hardnessRepose);
+    return t * dist * pc.cellSize / max(pc.heightScale, 1.0e-3);
+}
+
+// Material shed by cell (cx,cy). If `target` is >= 0 the share bound for that
+// specific neighbour index is returned, otherwise the cell's total outflow.
+float shed(int cx, int cy, int target) {
+    if (cx < 1 || cy < 1 || cx >= pc.width - 1 || cy >= pc.height - 1) return 0.0;
+    int ci = cy * pc.width + cx;
+    float hc = heightIn[ci];
+    float sumExcess = 0.0, maxExcess = 0.0, want = 0.0;
+    for (int d = 0; d < 8; ++d) {
+        int ni = (cy + dy8[d]) * pc.width + (cx + dx8[d]);
+        float excess = max((hc - heightIn[ni]) - reposeDrop(ci, dist8[d]), 0.0);
+        sumExcess += excess;
+        maxExcess = max(maxExcess, excess);
+        if (d == target) want = excess;
+    }
+    if (sumExcess <= 0.0) return 0.0;
+    float total = min(pc.rate * 0.5 * maxExcess, pc.maxStep) *
+                  clamp(maskField[ci], 0.0, 1.0);
+    if (target < 0) return total;
+    return total * (want / sumExcess);
+}
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+    int x = i % pc.width, y = i / pc.width;
+    float hCur = heightIn[i];
+
+    // A border cell never sheds (shed() rejects it as a source) but it MUST
+    // still accept what its interior neighbours shed into it. Dropping that
+    // inflow would leak mass out of the domain on every pass without anything
+    // recording it, and the only symptom would be a sediment ledger that fails
+    // to close by a hair -- which is exactly the kind of finding that gets
+    // written off as float noise. The boundary policy restores the border
+    // afterwards anyway; that is a deliberate, accounted-for override.
+    float inflow = 0.0;
+    for (int d = 0; d < 8; ++d) {
+        int nx = x + dx8[d], ny = y + dy8[d];
+        if (nx < 0 || ny < 0 || nx >= pc.width || ny >= pc.height) continue;
+        inflow += shed(nx, ny, 7 - d);
+    }
+    float outflow = shed(x, y, -1);
+
+    heightOut[i] = hCur + inflow - outflow;
+    if (outflow > 0.0) erosionField[i] += outflow;
+    if (inflow > 0.0) depositionField[i] += inflow;
+}

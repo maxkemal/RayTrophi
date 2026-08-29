@@ -1,8 +1,9 @@
 // terrain_smooth.comp
 // Vulkan port of smoothTerrainKernel (erosion_kernels.cu). Simple center-weighted
 // 3x3 box blur used as a post-process pass after wind/hydraulic erosion. In-place
-// (reads neighbors that may already be updated by other invocations this dispatch —
-// accepted benign race, same as the CUDA original; each cell only ever writes itself).
+// Ping-ponged: every invocation reads one frozen surface and writes only its
+// own output cell. The former in-place version was dispatch-order dependent
+// and could erase narrow channels differently across GPU vendors.
 #version 450
 layout(local_size_x = 256) in;
 
@@ -10,7 +11,8 @@ layout(push_constant) uniform PC {
     int width; int height;
 } pc;
 
-layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
+layout(set = 0, binding = 0) readonly  buffer HeightIn  { float heightIn[]; };
+layout(set = 0, binding = 1) writeonly buffer HeightOut { float heightOut[]; };
 
 void main() {
     int id = int(gl_GlobalInvocationID.x);
@@ -28,12 +30,14 @@ void main() {
             int ny = y + dy;
             if (nx >= 0 && nx < pc.width && ny >= 0 && ny < pc.height) {
                 float w = (dx == 0 && dy == 0) ? 2.0 : 1.0;
-                sum += heightmap[ny * pc.width + nx] * w;
+                sum += heightIn[ny * pc.width + nx] * w;
                 weightSum += w;
             }
         }
     }
     if (weightSum > 0.0) {
-        heightmap[id] = sum / weightSum;
+        heightOut[id] = sum / weightSum;
+    } else {
+        heightOut[id] = heightIn[id];
     }
 }

@@ -3226,6 +3226,28 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // We only need CPU skinning for CPU rendering or if we need to update CPU BVH
         bool geometry_changed = this->updateAnimationState(scene, current_time, !run_gpu);
 
+        // Fixed-topology deformation playback is independent of the authoring
+        // source (spline, modifier, simulation or future shape keys). Apply the
+        // cached local P samples before any backend sync for this render frame.
+        bool cache_geometry_changed = false;
+        for (auto& [objectName, clip] : scene.geometry_caches) {
+            if (!clip.enabled || clip.samples.empty()) continue;
+            std::shared_ptr<TriangleMesh> target;
+            for (const auto& object : scene.world.objects) {
+                auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object);
+                if (mesh && mesh->nodeName == objectName) { target = std::move(mesh); break; }
+            }
+            if (!target) continue;
+            const auto applied = Animation::applyGeometryCacheFrame(clip, *target, frame);
+            if (!applied.changed) continue;
+            geometry_changed = true;
+            cache_geometry_changed = true;
+            if (run_gpu && m_backend)
+                m_backend->updateFlatMeshBLAS(objectName, target.get());
+        }
+        if (cache_geometry_changed && !run_gpu)
+            this->refitBVH(scene, render_settings.UI_use_embree);
+
         // --- SIMULATION (fluid / gas / particles) PER-FRAME DRIVE ---
         // The sequence-render worker is the SOLE owner of the sim timeline here
         // (the UI driver is gated off by render_owns_sim in SceneUI::draw).
@@ -9632,6 +9654,31 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                 } else {
                     ld.layer_mat_id[k] = 0;
                     ld.layer_uv_scale[k] = 1.0f;
+                }
+            }
+            // Semantic overlay slots 4-7 (Flow/Wetness/Ice/Hardness). They do
+            // not count toward layer_count: that is the splat partition size,
+            // and an overlay adds cover rather than taking a share of it.
+            for (int s = 0; s < 4; ++s) {
+                const int slot = 4 + s;
+                ld.overlayStrength[s] = (slot < (int)t.layer_overlay_strength.size())
+                    ? t.layer_overlay_strength[slot] : 1.0f;
+                if (slot >= (int)t.layers.size() || !t.layers[slot]) continue;
+                ld.layer_mat_id[slot] = mgr.getMaterialID(t.layers[slot]->materialName);
+                ld.layer_uv_scale[slot] = (slot < (int)t.layer_uv_scales.size())
+                    ? t.layer_uv_scales[slot] : 1.0f;
+                // Material id 0 is valid, so a bound overlay is recorded in
+                // the mask rather than inferred from a non-zero id.
+                ld.overlayMask |= (1u << s);
+                // Bit 8+s: this slot is not buried by snow. Overlays render
+                // UNDER the snow the splat map placed, because a semantic
+                // value is a measurement and its coverage is a visibility
+                // decision - flow reads 0.9 under two metres of snow and must
+                // not be painted there. Setting this says the author means it
+                // to show through anyway (open water cutting a snowfield).
+                if (slot < (int)t.layer_overlay_ignore_cover.size() &&
+                    t.layer_overlay_ignore_cover[slot]) {
+                    ld.overlayMask |= (1u << (8 + s));
                 }
             }
             ld.splatMapTexture = reinterpret_cast<int64_t>(t.splatMap.get());

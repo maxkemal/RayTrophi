@@ -1,4 +1,5 @@
 #include "MeshEdit/ProfileLoft.h"
+#include "MeshEdit/SplineEvaluationService.h"
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +35,11 @@ ProfileLoftResult buildProfileLoft(const std::vector<const BezierSpline*>& secti
             result.report.addError("section_not_closed", "Every loft section must be a closed spline with three points.");
             return result;
         }
+        std::string splineError;
+        if (!SplineEvaluationService::validate(*section, &splineError)) {
+            result.report.addError("invalid_spline", splineError);
+            return result;
+        }
     }
 
     const uint32_t sectionCount = static_cast<uint32_t>(sections.size());
@@ -60,7 +66,7 @@ ProfileLoftResult buildProfileLoft(const std::vector<const BezierSpline*>& secti
         for (uint32_t j = 0; j < ringSize; ++j) {
             const float t = static_cast<float>(j) / static_cast<float>(ringSize);
             const uint32_t index = s * ringSize + j;
-            const Vec3 value = sections[s]->samplePosition(t);
+            const Vec3 value = SplineEvaluationService::evaluate(*sections[s], t).position;
             if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z)) {
                 result.report.addError("non_finite_section", "Loft sampling produced a non-finite point.");
                 result.geometry.reset();
@@ -104,6 +110,22 @@ ProfileLoftResult buildProfileLoft(const std::vector<const BezierSpline*>& secti
     };
     cap(true); cap(false);
 
+    // Normalize winding against the generated volume instead of trusting the
+    // order in which the two authoring sections were selected.
+    Vec3 meshCenter(0.0f);
+    const uint32_t vertexCount = sectionCount * ringSize + capCount;
+    for (uint32_t i = 0; i < vertexCount; ++i) meshCenter += p[i];
+    meshCenter = meshCenter / static_cast<float>(vertexCount);
+    for (size_t i = 0; i + 2 < result.geometry->indices.size(); i += 3) {
+        const uint32_t a = result.geometry->indices[i];
+        const uint32_t b = result.geometry->indices[i + 1];
+        const uint32_t c = result.geometry->indices[i + 2];
+        const Vec3 face = (p[b] - p[a]).cross(p[c] - p[a]);
+        const Vec3 center = (p[a] + p[b] + p[c]) / 3.0f;
+        if (face.dot(center - meshCenter) < 0.0f)
+            std::swap(result.geometry->indices[i + 1], result.geometry->indices[i + 2]);
+    }
+
     for (size_t i = 0; i + 2 < result.geometry->indices.size(); i += 3) {
         const uint32_t a = result.geometry->indices[i], b = result.geometry->indices[i + 1], c = result.geometry->indices[i + 2];
         const Vec3 face = (p[b] - p[a]).cross(p[c] - p[a]);
@@ -126,8 +148,15 @@ bool runProfileLoftSelfTest(std::string* details) {
     const std::vector<const BezierSpline*> sections{&a, &b};
     ProfileLoftSettings settings; settings.samples_per_section = 4;
     const auto result = buildProfileLoft(sections, settings);
-    const bool pass = result.report.ok && result.geometry && result.geometry->get_vertex_count() == 10;
-    if (details) { std::ostringstream out; out << (pass ? "PASS" : "FAIL") << " vertices=" << (result.geometry ? result.geometry->get_vertex_count() : 0); *details = out.str(); }
+    bool outwardNormals = result.geometry != nullptr;
+    if (outwardNormals) {
+        const Vec3* positions = result.geometry->get_attribute_data<Vec3>("P");
+        const Vec3* normals = result.geometry->get_attribute_data<Vec3>("N");
+        outwardNormals = positions && normals && normals[0].dot(positions[0]) > 0.0f;
+    }
+    const bool pass = result.report.ok && result.geometry &&
+        result.geometry->get_vertex_count() == 10 && outwardNormals;
+    if (details) { std::ostringstream out; out << (pass ? "PASS" : "FAIL") << " vertices=" << (result.geometry ? result.geometry->get_vertex_count() : 0) << " outward_normals=" << (outwardNormals ? "true" : "false"); *details = out.str(); }
     return pass;
 }
 

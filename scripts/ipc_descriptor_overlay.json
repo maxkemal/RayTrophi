@@ -1173,7 +1173,7 @@
     "tags": "landscape|remove"
   },
   "terrain.apply_preset": {
-    "summary": "Apply a built-in terrain node preset",
+    "summary": "Apply a built-in terrain node preset and report links it could not wire",
     "tags": "landscape|preset|mountain|snow|river",
     "params": {
       "preset": {
@@ -1184,7 +1184,9 @@
         "description": "Also add and wire a matching SatMap colorizer",
         "default": false
       }
-    }
+    },
+    "notes": "Returns wiring_faults: links the setup asked for and did not get. A refused link leaves the graph looking complete while the consumer falls back to a synthesized value, so an empty wiring_faults list is the only evidence the setup actually connected everything. wiring_fault_count > 0 means the resulting splat/biome masks are partly synthesized, not driven by the graph.",
+    "verify_with": "nodes.list"
   },
   "terrain.list_satmap_presets": {
     "summary": "List data-driven multi-field SatMap preset recipes",
@@ -1196,15 +1198,20 @@
     "related": "terrain.list_satmap_presets|terrain.evaluate"
   },
   "terrain.erode": {
-    "summary": "Run an erosion pass over a terrain",
-    "tags": "landscape|erosion|weathering|realism",
+    "summary": "Run an erosion pass over a terrain; the hydraulic model brackets its droplet stages with the fluvial cycle - drainage-area feedback, lake spill and outlet incision, downstream sediment transport",
+    "notes": "Every fluvial_* parameter defaults to leaving the solver setting alone, so tuning one dial does not reset the other twenty. The cycle is what produces a river hierarchy and deltas; with fluvial_cycle=0 erosion falls back to the local-slope droplet walk, which is statistically isotropic and leaves closed basins undrained. Check the result with terrain.erosion_stats rather than by eye.",
+    "tags": "landscape|erosion|weathering|realism|river|delta|lake|sediment",
+    "related": "terrain.erosion_stats|terrain.calculate_flow|terrain.evaluate",
+    "verify_with": [
+      "terrain.erosion_stats"
+    ],
     "params": {
       "type": {
         "description": "Erosion model",
         "enum": "hydraulic|thermal|fluvial|wind"
       },
       "iterations": {
-        "description": "Solver iterations; 0 uses the model's own default"
+        "description": "Droplet count for the hydraulic model; 0 uses the model's own default"
       },
       "strength": {
         "description": "Erosion strength"
@@ -1212,10 +1219,101 @@
       "talus_angle": {
         "description": "Repose angle for thermal erosion"
       },
+      "fluvial_cycle": {
+        "description": "Enable the landscape-evolution cycle (1/0); omit to keep the solver setting"
+      },
+      "fluvial_quality": {
+        "description": "Convergence budget preset. Sets iteration count, relaxation passes, transport steps and pyramid depth ONLY - never the shape parameters - so raising it refines the same landscape instead of producing a different one. Applied before any explicit budget parameter in the same call, so you can pick a preset and override one dial of it.",
+        "enum": "draft|balanced|high"
+      },
+      "fluvial_iterations": {
+        "description": "Cycle iterations. Refines the solve; does NOT change how much material moves"
+      },
+      "fluvial_time_step": {
+        "description": "Whole-cycle time multiplier: this is the dial for how much material moves"
+      },
+      "rain_rate": {
+        "description": "Runoff depth per unit time; only its ratio to settling_velocity matters"
+      },
+      "orographic_rain": {
+        "description": "Windward/lee rain split, 0..1. The second symmetry breaker after drainage area"
+      },
+      "rain_wind_degrees": {
+        "description": "Prevailing wind bearing in degrees for orographic rain"
+      },
+      "incision_k": {
+        "description": "Stream-power coefficient, in metres of incision at 1 km2 catchment and slope 1"
+      },
+      "stream_power_m": {
+        "description": "Drainage-area exponent, near 0.5. This is what makes rivers cut faster than rills"
+      },
+      "stream_power_n": {
+        "description": "Slope exponent, near 1.0"
+      },
+      "transport_k": {
+        "description": "Sediment transport capacity coefficient, same units as incision_k"
+      },
+      "sediment_cover": {
+        "description": "Cover effect 0..1: a bed already carrying its capacity is armoured"
+      },
+      "settling_velocity": {
+        "description": "How readily suspended load drops. Larger settles sooner and shortens deltas"
+      },
+      "sediment_route_steps": {
+        "description": "Cells of downstream sediment travel per iteration"
+      },
+      "drainage_refresh_interval": {
+        "description": "Iterations between depression-fill and drainage-area re-solves"
+      },
+      "drainage_fill_passes": {
+        "description": "GPU depression-fill budget per pyramid level. Too low leaves spurious lakes"
+      },
+      "drainage_accumulate_passes": {
+        "description": "GPU area-accumulation budget. Too low under-counts long trunk rivers"
+      },
+      "drainage_coarsest_size": {
+        "description": "Coarsest pyramid grid for the GPU drainage solve"
+      },
+      "mass_wasting": {
+        "description": "Enable in-loop landslides (1/0). Off means valley walls never collapse"
+      },
+      "repose_angle_degrees": {
+        "description": "Angle of repose for mass wasting"
+      },
+      "mass_wasting_rate": {
+        "description": "Fraction of the excess above repose shed per pass, 0..1"
+      },
+      "mass_wasting_steps": {
+        "description": "Talus relaxation passes per iteration"
+      },
+      "hillslope_diffusion": {
+        "description": "Creep coefficient in m2 over the whole cycle; rounds ridges, keeps channels"
+      },
+      "incision_safety": {
+        "description": "Anti-pit limit: max fraction of the drop to the receiver cut in one step"
+      },
+      "deposition_safety": {
+        "description": "Anti-spike limit: max fraction of the rise to the donor built in one step"
+      },
+      "max_step_meters": {
+        "description": "Absolute per-step height change limit; 0 selects half a cell"
+      },
+      "lake_epsilon_meters": {
+        "description": "Fill residue below this is not treated as standing water"
+      },
+      "headwater_area_km2": {
+        "description": "Catchment area at which a cell counts as a channel"
+      },
       "backend": {
         "description": "Compute backend; auto picks GPU when available"
       }
     }
+  },
+  "terrain.erosion_stats": {
+    "summary": "Read the sediment mass ledger and drainage diagnostics of the last erosion run",
+    "notes": "This is how an erosion result is checked without a screenshot, and the field to read FIRST is max_drainage_area_fraction: the largest catchment as a share of the map. Single digits mean the drainage graph is in fragments and no trunk river exists - a state that still renders as a convincing river network, which is why looking at the picture has repeatedly sent debugging the wrong way. max_drainage_area_km2 alone is NOT interpretable: 0.03 km2 is a shredded network on a 1 km terrain and a healthy trunk on a 100 m one. lake_cells and lake_area_fraction count ANY standing water including the depression-fill ladder's few-ulp lift, so they can report a quarter of the map and mean nothing; act on deep_lake_cells / deep_lake_area_fraction (10 cm threshold) and deepest_lake_meters instead. A high deep_lake_area_fraction on sloping terrain means the surface fed to the solver is genuinely full of pits - suspect the droplet stage, not the fill. mass_error_fraction away from zero means sediment transport is leaking. cycle_iterations == 0 is not a measurement, it is a cleared default.",
+    "tags": "landscape|erosion|hydrology|measurement|validation|mass-balance|drainage|lakes",
+    "related": "terrain.erode|terrain.calculate_flow|terrain.flow_authority|terrain.evaluate"
   },
   "terrain.evaluate": {
     "summary": "Evaluate the terrain node graph and bake the result into the heightfield",
@@ -1242,9 +1340,56 @@
     "summary": "List the rivers carved into a terrain",
     "tags": "landscape|river|inventory"
   },
+  "terrain.set_layer": {
+    "summary": "Bind or edit one terrain layer slot",
+    "notes": "Omit a field to leave it unchanged. material=\"\" CLEARS the slot; clearing a semantic overlay restores the built-in shading for that channel. overlay_strength applies to slots 4-7 only and is refused on 0-3, which are normalized against each other and have no independent strength.",
+    "tags": "landscape|material|layer|splat|semantic|river",
+    "related": "terrain.list_layers",
+    "verify_with": "terrain.list_layers",
+    "params": {
+      "slot": {
+        "description": "0-3 splat-weighted, 4-7 semantic overlay (4=Flow 5=Wetness 6=Ice 7=Hardness)"
+      },
+      "material": {
+        "description": "Material name to bind; \"\" clears the slot; omit to leave unchanged"
+      },
+      "uv_scale": {
+        "description": "Tiling scale; omit to leave unchanged"
+      },
+      "overlay_strength": {
+        "description": "Overlay dial [0,1] for slots 4-7; omit to leave unchanged"
+      }
+    }
+  },
+  "terrain.slope_area_fit": {
+    "summary": "Fit the slope-area relation over the channel network to test for real fluvial form",
+    "notes": "Stream-power erosion gives S = k * A^-theta, so on log-log axes channel cells fall on a straight line. Noise, diffusion and sculpted relief scatter instead. This is the only measurement that separates 'an erosion pass ran' from 'the erosion pass produced fluvial form' - both render as plausible terrain. Read r_squared BEFORE concavity_index: a confident theta fitted to scatter is exactly the number that ends a debugging session early. Real landscapes sit near theta 0.4-0.6. MEASURED: the flow field is filled by terrain.calculate_flow ONLY. Evaluating the node graph does not fill it - the buffer ends up allocated, correctly sized and entirely zero, which used to sail past the size guard and answer too_few_channels, an empty input dressed as a statement about the landscape. Call terrain.calculate_flow first; status flow_field_empty now names that case and flow_peak reports what the fit actually read. status no_flow_field means the buffer is missing or the wrong size.",
+    "tags": "landscape|hydrology|erosion|measurement|validation",
+    "related": "terrain.calculate_flow|terrain.erosion_stats|terrain.flow_authority"
+  },
+  "terrain.flow_authority": {
+    "summary": "Report which discharge field the graph's Flow node classified",
+    "notes": "Two quantities were both called flow: DISCHARGE, the physical field the erosion sim measures against the terrain it is carving, and CHANNEL, a 0-1 selection of which cells read as a watercourse. Flow is now the single authority - measured discharge goes into it and every consumer reads out of it. source == 'derived_erosion_unwired' is the state nothing else reports: the graph HAS an erosion sim whose discharge is not wired into Flow, so channels come from bare geometry (no lakes, no infiltration, no erosion history) while the render shows the eroded surface, and the result still looks like a river network.",
+    "tags": "landscape|hydrology|flow|measurement|authority",
+    "related": "terrain.calculate_flow|terrain.erosion_stats|terrain.apply_preset"
+  },
+  "terrain.landform_stats": {
+    "summary": "Measure the realised shape of a terrain: slope distribution, landform width, local-relief spread and hypsometry",
+    "tags": "landscape|terrain|measure|diagnostic|shape|slope|relief",
+    "related": "terrain.slope_area_fit|terrain.flow_authority|terrain.get",
+    "notes": "Measured on the BAKED heightfield, never read back from a generator's own settings, so it can see the gap between what a node was asked for and what the terrain became. relief_window_meters / relief_window_relief are the relief-vs-window ladder itself; broad_growth is the relief added by its last doubling and is the sharpest read on whether the tile has landforms at its own scale - near 1.0 the field is already uncorrelated at a quarter of the tile and the map is one texture repeated (measured 1.05 with Feature Size 600 m on a 4096 m terrain, against 1.37 at 2048 m). landform_scale_meters is the ladder's growth knee, octave-quantised and NOT expected to equal the authored Feature Size. cliff_fraction is the area over 40 degrees - ground too steep to hold soil, so the share that must read as bare rock - and roughness_slope_ratio is cell-scale roughness on the steepest fifth over the gentlest fifth. Read those two TOGETHER: a terrain with no steep ground still scores a high ratio because its steepest fifth is only its least flat fifth. local_relief_ratio near 1 means every part of the map is equally rugged - no massifs, no basins. lowland_fraction below midland_fraction means the hypsometry is gaussian rather than depositional. spectrum_kink is macro-micro coherence in one number: the largest departure of any octave from the fitted power law. A landscape whose layers agree has ONE law from the grid to the landform, so a detail pass that does not match what it sits on, or a band guard quietly dropping octaves, shows up here and ONLY here - slope, relief and hypsometry all stay healthy while it is there. Under about 0.05 the scales are one landscape; spectrum_kink_meters names the window and spectrum_kink_signed says whether that scale is starved of detail (negative) or carrying too much (positive). realised_hurst is fitted only below landform_scale_meters; include the saturated windows and any exponent is dragged toward 0.5 regardless of the field.",
+    "params": {
+      "name": {
+        "description": "Terrain name"
+      }
+    }
+  },
   "terrain.calculate_flow": {
-    "summary": "Compute the water flow map over a terrain",
-    "tags": "landscape|water|hydrology|flow"
+    "summary": "Reconstruct final-height flow diagnostics and report likely inland stalls",
+    "notes": "Reconstructs a diagnostic accumulation field from the final heightmap, then returns channel cells with no greater-accumulation neighbour as inland_terminations. This does not inspect Watershed Analysis's authoritative direction/receiver raster (Hydraulic Erosion stopped publishing one when the compact port contract moved flow direction to its authoritative owner), so it detects wholesale depression-routing failures but is not an exact river-topology measurement. Use terrain.flow_authority to identify the graph's real source.",
+    "tags": "landscape|water|hydrology|flow|measurement",
+    "related": "terrain.erosion_stats|terrain.erode",
+    "verify_with": "terrain.erosion_stats"
   },
   "terrain.import_heightmap": {
     "summary": "Import a heightmap image into a terrain",
@@ -1408,7 +1553,14 @@
   },
   "sculpt.stroke": {
     "summary": "Apply a sculpt brush stroke to a mesh",
-    "tags": "sculpt|mesh|deform|brush"
+    "tags": "sculpt|mesh|deform|brush",
+    "params": {
+      "points": {
+        "type": "array",
+        "required": true,
+        "description": "Stroke path: list of [x, y, z] world points. Required - a stroke with no points does nothing."
+      }
+    }
   },
   "sculpt.paint_mask": {
     "summary": "Paint the sculpt mask on a mesh",
@@ -1469,6 +1621,18 @@
   "nodes.link": {
     "summary": "Connect one node's output to another node's input",
     "tags": "nodes|graph|connect|wire"
+  },
+  "nodes.link_by_key": {
+    "summary": "Connect nodes using stable input and output port keys",
+    "tags": "nodes|graph|connect|wire|port"
+  },
+  "nodes.list_ports": {
+    "summary": "List stable node ports, exposure tiers, visibility and connection state",
+    "tags": "nodes|graph|ports"
+  },
+  "nodes.set_port_visible": {
+    "summary": "Show or hide an optional node port without changing evaluation",
+    "tags": "nodes|graph|ports|configure"
   },
   "nodes.list_params": {
     "summary": "List a node's parameters, their types, values and whether they are driven by a link",
@@ -1920,35 +2084,88 @@
     "related": "spline.get|spline.set|spline.insert_point|spline.subdivide|spline.extrude",
     "returns": "SplineInfo[]"
   },
+  "spline.create": {
+    "summary": "Create an editable spline source through the canonical scene-object service",
+    "notes": "Returns the unique scene name. The operation is undoable and produces the same SplineObject used by the viewport UI, Python and Geometry Nodes.",
+    "tags": "spline|curve|create|authoring|undo",
+    "related": "spline.list|spline.get|scene.delete|nodes.create_graph",
+    "returns": "string",
+    "undoable": true,
+    "params": {
+      "primitive": {
+        "description": "Initial spline shape",
+        "type": "string",
+        "enum": "circle|rectangle|open_line|open_arc",
+        "default": "open_line"
+      },
+      "name": {
+        "description": "Requested object name; made unique when necessary",
+        "type": "string",
+        "default": "Spline"
+      },
+      "plane": {
+        "description": "Authoring plane",
+        "type": "string",
+        "enum": "xy|xz|yz",
+        "default": "xy"
+      }
+    }
+  },
   "spline.get": {
     "summary": "Read the versioned JSON authoring payload of a spline",
-    "notes": "The payload includes curve type, plane, closed state, transform and all point/handle data.",
+    "notes": "The payload includes curve type, plane, closed state, render transform, pivot_offset, optional cubic B-Spline knots and all point/handle data.",
     "tags": "spline|serialize|profile|curve",
     "related": "spline.set|spline.list",
     "returns": "SplinePayload",
-    "params": {"name": {"description": "Spline object name", "required": true, "type": "string"}}
+    "params": {
+      "name": {
+        "description": "Spline object name",
+        "required": true,
+        "type": "string"
+      }
+    }
   },
   "spline.set": {
     "summary": "Replace a spline authoring payload with validated JSON data",
-    "notes": "Rejects unknown curve types, malformed points, invalid transforms and B-Splines with fewer than four controls.",
+    "notes": "Rejects unknown curve types, malformed points, invalid transforms, pivot_offset or knot vectors, and B-Splines with fewer than four controls.",
     "tags": "spline|serialize|edit|profile",
     "related": "spline.get|spline.insert_point|spline.subdivide",
     "returns": "bool",
     "params": {
-      "name": {"description": "Spline object name", "required": true, "type": "string"},
-      "spline": {"description": "Versioned spline payload object", "required": true, "type": "object"}
+      "name": {
+        "description": "Spline object name",
+        "required": true,
+        "type": "string"
+      },
+      "spline": {
+        "description": "Versioned spline payload object",
+        "required": true,
+        "type": "object"
+      }
     }
   },
   "spline.insert_point": {
     "summary": "Insert a control point on a spline segment at normalized parameter t",
-    "notes": "Bezier insertion preserves the curve with De Casteljau; Linear insertion splits the segment. B-Spline knot insertion is intentionally rejected until its knot policy is active.",
+    "notes": "Bezier insertion preserves the curve with De Casteljau; Linear insertion splits the segment; cubic B-Spline insertion uses shape-preserving Boehm knot insertion.",
     "tags": "spline|insert|subdivide|bezier|linear",
     "related": "spline.subdivide|spline.get",
     "returns": "{index:int}",
     "params": {
-      "name": {"description": "Spline object name", "required": true, "type": "string"},
-      "segment": {"description": "Zero-based segment start index", "required": true, "type": "int"},
-      "t": {"description": "Segment parameter in [0,1]", "required": true, "type": "float"}
+      "name": {
+        "description": "Spline object name",
+        "required": true,
+        "type": "string"
+      },
+      "segment": {
+        "description": "Zero-based segment start index",
+        "required": true,
+        "type": "int"
+      },
+      "t": {
+        "description": "Segment parameter in [0,1]",
+        "required": true,
+        "type": "float"
+      }
     }
   },
   "spline.subdivide": {
@@ -1958,9 +2175,21 @@
     "related": "spline.insert_point|spline.get",
     "returns": "{last_index:int}",
     "params": {
-      "name": {"description": "Spline object name", "required": true, "type": "string"},
-      "segments": {"description": "Segment start indices", "required": true, "type": "int[]"},
-      "cuts": {"description": "Cuts per segment, from 1 to 128", "required": true, "type": "int"}
+      "name": {
+        "description": "Spline object name",
+        "required": true,
+        "type": "string"
+      },
+      "segments": {
+        "description": "Segment start indices",
+        "required": true,
+        "type": "int[]"
+      },
+      "cuts": {
+        "description": "Cuts per segment, from 1 to 128",
+        "required": true,
+        "type": "int"
+      }
     }
   },
   "spline.extrude": {
@@ -1970,20 +2199,211 @@
     "related": "spline.get|spline.insert_point",
     "returns": "{index:int}",
     "params": {
-      "name": {"description": "Spline object name", "required": true, "type": "string"},
-      "endpoint": {"description": "0 for first endpoint or last point index", "required": true, "type": "int"},
-      "position": {"description": "New control point position", "required": true, "type": "float[3]"}
+      "name": {
+        "description": "Spline object name",
+        "required": true,
+        "type": "string"
+      },
+      "endpoint": {
+        "description": "0 for first endpoint or last point index",
+        "required": true,
+        "type": "int"
+      },
+      "position": {
+        "description": "New control point position",
+        "required": true,
+        "type": "float[3]"
+      }
     }
+  },
+  "spline.keyframe.insert": {
+    "summary": "Capture spline object transform and control-point deformation at a timeline frame",
+    "notes": "Point keys include Linear, Bezier and B-Spline controls, Bezier handles, radius/user data and color. Point count, curve type, open/closed state and knot topology must remain stable between keys.",
+    "tags": "spline|animation|keyframe|deform|hose|cable|radius",
+    "related": "spline.keyframe.list|spline.keyframe.remove|timeline.set_frame|spline.get",
+    "returns": "bool",
+    "params": {
+      "name": {
+        "description": "Spline object name",
+        "type": "string",
+        "required": true
+      },
+      "frame": {
+        "description": "Non-negative timeline frame",
+        "type": "int",
+        "required": true
+      },
+      "object_transform": {
+        "description": "Capture the spline object's location, rotation and scale",
+        "type": "bool",
+        "default": true
+      },
+      "points": {
+        "description": "Capture all control positions, handles, radius/user data and colors",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "spline.keyframe.remove": {
+    "summary": "Remove spline transform and/or point channels from one timeline key",
+    "notes": "Other keyframe domains stored at the same frame are preserved.",
+    "tags": "spline|animation|keyframe|remove",
+    "related": "spline.keyframe.insert|spline.keyframe.list",
+    "returns": "bool",
+    "params": {
+      "name": {
+        "description": "Spline object name",
+        "type": "string",
+        "required": true
+      },
+      "frame": {
+        "description": "Timeline frame containing the key",
+        "type": "int",
+        "required": true
+      },
+      "object_transform": {
+        "description": "Remove the object transform portion",
+        "type": "bool",
+        "default": true
+      },
+      "points": {
+        "description": "Remove the control-point deformation portion",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "spline.keyframe.list": {
+    "summary": "List spline animation keys and the channels captured at each frame",
+    "tags": "spline|animation|keyframe|list",
+    "related": "spline.keyframe.insert|spline.keyframe.remove|timeline.set_frame",
+    "returns": "SplineKeyInfo[]",
+    "params": {
+      "name": {
+        "description": "Spline object name",
+        "type": "string",
+        "required": true
+      }
+    }
+  },
+  "spline.animation.self_test": {
+    "summary": "Run the deterministic spline transform, control-point and radius interpolation self-test",
+    "tags": "spline|animation|selftest|validation",
+    "related": "spline.keyframe.insert|spline.keyframe.list",
+    "returns": "{ok:bool,details:string}"
+  },
+  "mesh.profile.revolve.preview": {
+    "summary": "Preview a partial or full revolve around a selected axis",
+    "notes": "The radial side profile may be open or closed. start_angle/end_angle are radians; partial ranges keep their angular seams open.",
+    "tags": "mesh|profile|revolve|screw|axis|preview",
+    "related": "mesh.profile.revolve.commit|mesh.profile.revolve.self_test",
+    "params": {
+      "preset": {
+        "description": "Built-in radial profile preset: cup or bottle",
+        "type": "string"
+      },
+      "axis": {
+        "description": "Revolution axis: x, y or z",
+        "type": "string"
+      },
+      "start_angle": {
+        "description": "Start angle in radians",
+        "type": "float"
+      },
+      "end_angle": {
+        "description": "End angle in radians; span must be <= 2*pi",
+        "type": "float"
+      },
+      "radius_offset": {
+        "description": "Added to profile X before revolving; use a positive value for torus-style closed profiles",
+        "type": "float"
+      },
+      "axis_pivot": {
+        "description": "Geometry-space revolution axis pivot [x, y, z]",
+        "type": "float[3]"
+      },
+      "angle_segments": {
+        "description": "Angular subdivisions",
+        "type": "int"
+      },
+      "profile_samples": {
+        "description": "Samples along the radial profile",
+        "type": "int"
+      }
+    }
+  },
+  "mesh.profile.revolve.commit": {
+    "summary": "Commit an undoable partial or full revolve mesh",
+    "notes": "Uses the same open/closed profile, axis and angle contract as preview.",
+    "tags": "mesh|profile|revolve|screw|axis|commit",
+    "undoable": true,
+    "related": "mesh.profile.revolve.preview|mesh.profile.revolve.self_test",
+    "params": {
+      "preset": {
+        "description": "Built-in radial profile preset: cup or bottle",
+        "type": "string"
+      },
+      "object": {
+        "description": "Destination mesh object name",
+        "type": "string"
+      },
+      "axis": {
+        "description": "Revolution axis: x, y or z",
+        "type": "string"
+      },
+      "start_angle": {
+        "description": "Start angle in radians",
+        "type": "float"
+      },
+      "end_angle": {
+        "description": "End angle in radians; span must be <= 2*pi",
+        "type": "float"
+      },
+      "radius_offset": {
+        "description": "Added to profile X before revolving; use a positive value for torus-style closed profiles",
+        "type": "float"
+      },
+      "axis_pivot": {
+        "description": "Geometry-space revolution axis pivot [x, y, z]",
+        "type": "float[3]"
+      },
+      "angle_segments": {
+        "description": "Angular subdivisions",
+        "type": "int"
+      },
+      "profile_samples": {
+        "description": "Samples along the radial profile",
+        "type": "int"
+      }
+    }
+  },
+  "mesh.profile.revolve.self_test": {
+    "summary": "Run full closed and partial open-profile revolve core tests",
+    "tags": "mesh|profile|revolve|screw|test"
   },
   "mesh.profile.loft.preview": {
     "summary": "Preview a loft between multiple closed spline sections",
     "tags": "mesh|profile|loft|spline|preview",
     "related": "mesh.profile.loft.commit|mesh.profile.loft.self_test",
     "params": {
-      "sections": {"description": "Ordered spline object names", "required": true, "type": "string[]"},
-      "samples_per_section": {"description": "Samples per loft ring", "type": "int"},
-      "cap_start": {"description": "Generate the first cap", "type": "bool"},
-      "cap_end": {"description": "Generate the final cap", "type": "bool"}
+      "sections": {
+        "description": "Ordered spline object names",
+        "required": true,
+        "type": "string[]"
+      },
+      "samples_per_section": {
+        "description": "Samples per loft ring",
+        "type": "int"
+      },
+      "cap_start": {
+        "description": "Generate the first cap",
+        "type": "bool"
+      },
+      "cap_end": {
+        "description": "Generate the final cap",
+        "type": "bool"
+      }
     }
   },
   "mesh.profile.loft.commit": {
@@ -1992,15 +2412,294 @@
     "undoable": true,
     "related": "mesh.profile.loft.preview|mesh.profile.loft.self_test",
     "params": {
-      "sections": {"description": "Ordered spline object names", "required": true, "type": "string[]"},
-      "object": {"description": "Destination mesh object name", "required": true, "type": "string"},
-      "samples_per_section": {"description": "Samples per loft ring", "type": "int"},
-      "cap_start": {"description": "Generate the first cap", "type": "bool"},
-      "cap_end": {"description": "Generate the final cap", "type": "bool"}
+      "sections": {
+        "description": "Ordered spline object names",
+        "required": true,
+        "type": "string[]"
+      },
+      "object": {
+        "description": "Destination mesh object name",
+        "required": true,
+        "type": "string"
+      },
+      "samples_per_section": {
+        "description": "Samples per loft ring",
+        "type": "int"
+      },
+      "cap_start": {
+        "description": "Generate the first cap",
+        "type": "bool"
+      },
+      "cap_end": {
+        "description": "Generate the final cap",
+        "type": "bool"
+      }
     }
   },
   "mesh.profile.loft.self_test": {
     "summary": "Run the deterministic profile loft core self-test",
     "tags": "mesh|profile|loft|test"
+  },
+  "geometry_cache.bake": {
+    "summary": "Bake a fixed-topology mesh deformation clip from the canonical evaluated geometry",
+    "notes": "Stores only local vertex positions. Bake is rejected if vertex count or index connectivity changes.",
+    "tags": "geometry|cache|animation|bake|deformation|vertex",
+    "related": "geometry_cache.status|geometry_cache.set_enabled|geometry_cache.clear|nodes.apply",
+    "params": {
+      "object_name": {
+        "description": "Flat mesh / Geometry Graph host object",
+        "required": true,
+        "type": "string"
+      },
+      "start_frame": {
+        "description": "First sampled timeline frame",
+        "required": true,
+        "type": "int"
+      },
+      "end_frame": {
+        "description": "Last sampled timeline frame",
+        "required": true,
+        "type": "int"
+      },
+      "frame_step": {
+        "description": "Distance between stored samples",
+        "type": "int",
+        "default": 1
+      }
+    }
+  },
+  "spline.skin.create": {
+    "summary": "Create or update a non-destructive skin display on an open spline",
+    "notes": "Reuses one linked preview host while parameters change. Builds Spline Object to Taper to Twist to Wave/Noise to Curve to Mesh to Output; an optional closed custom_profile drives the cross-section.",
+    "tags": "spline|skin|bevel|cable|tube|curve-to-mesh|geometry-nodes",
+    "related": "spline.get|spline.keyframe.insert|geometry_cache.bake|nodes.set_property",
+    "params": {
+      "spline": {
+        "description": "Open spline path object",
+        "required": true,
+        "type": "string"
+      },
+      "output": {
+        "description": "Requested output mesh name; blank derives one from the spline",
+        "type": "string",
+        "default": ""
+      },
+      "radius": {
+        "description": "Global bevel radius",
+        "type": "float",
+        "default": 0.1
+      },
+      "path_samples": {
+        "description": "Samples along the spline",
+        "type": "int",
+        "default": 48
+      },
+      "radial_segments": {
+        "description": "Circular cross-section segments",
+        "type": "int",
+        "default": 12
+      },
+      "cap_start": {
+        "description": "Cap the first endpoint",
+        "type": "bool",
+        "default": true
+      },
+      "cap_end": {
+        "description": "Cap the final endpoint",
+        "type": "bool",
+        "default": true
+      },
+      "use_point_radius": {
+        "description": "Multiply bevel radius by interpolated per-point Curve Radius",
+        "type": "bool",
+        "default": true
+      },
+      "custom_profile": {
+        "description": "Optional closed spline used as the swept cross-section",
+        "type": "string",
+        "default": ""
+      },
+      "taper_start": {
+        "description": "Radius scale at the first control",
+        "type": "float",
+        "default": 1.0
+      },
+      "taper_end": {
+        "description": "Radius scale at the final control",
+        "type": "float",
+        "default": 1.0
+      },
+      "taper_falloff": {
+        "description": "Taper interpolation exponent",
+        "type": "float",
+        "default": 1.0
+      },
+      "twist_start_degrees": {
+        "description": "Profile rotation at the first control",
+        "type": "float",
+        "default": 0.0
+      },
+      "twist_end_degrees": {
+        "description": "Profile rotation at the final control",
+        "type": "float",
+        "default": 0.0
+      },
+      "wave_amplitude": {
+        "description": "Wave displacement amplitude",
+        "type": "float",
+        "default": 0.0
+      },
+      "wave_cycles": {
+        "description": "Wave cycles along the controls",
+        "type": "float",
+        "default": 1.0
+      },
+      "wave_phase_degrees": {
+        "description": "Wave phase in degrees",
+        "type": "float",
+        "default": 0.0
+      },
+      "wave_noise": {
+        "description": "Deterministic noise amplitude",
+        "type": "float",
+        "default": 0.0
+      },
+      "wave_seed": {
+        "description": "Deterministic noise seed",
+        "type": "int",
+        "default": 0
+      },
+      "wave_axis": {
+        "description": "Local offset axis: 0=X, 1=Y, 2=Z",
+        "type": "int",
+        "default": 1
+      }
+    }
+  },
+  "spline.skin.finalize": {
+    "summary": "Convert a spline's live skin display into an ordinary mesh",
+    "notes": "Evaluates the current frame, removes the procedural Geometry Graph link and keeps the existing flat preview host as the final mesh.",
+    "tags": "spline|skin|preview|convert|apply|mesh",
+    "related": "spline.skin.create|spline.skin.clear|geometry_cache.bake",
+    "params": {
+      "spline": {
+        "description": "Open spline source owning the live skin display",
+        "required": true,
+        "type": "string"
+      }
+    }
+  },
+  "spline.skin.clear": {
+    "summary": "Remove a spline's non-destructive skin display",
+    "notes": "Deletes only the linked preview host and graph; the editable spline source remains unchanged.",
+    "tags": "spline|skin|preview|remove|clear",
+    "related": "spline.skin.create|spline.skin.finalize",
+    "params": {
+      "spline": {
+        "description": "Spline source owning the live skin display",
+        "required": true,
+        "type": "string"
+      }
+    }
+  },
+  "geometry_cache.status": {
+    "summary": "Inspect deformation-cache range, memory, topology validity and source staleness",
+    "tags": "geometry|cache|animation|status|memory",
+    "related": "geometry_cache.bake|geometry_cache.set_enabled|geometry_cache.clear",
+    "params": {
+      "object_name": {
+        "description": "Cached flat mesh object",
+        "required": true,
+        "type": "string"
+      }
+    }
+  },
+  "geometry_cache.set_enabled": {
+    "summary": "Switch an existing geometry cache between cached and live procedural playback",
+    "tags": "geometry|cache|animation|playback|toggle",
+    "related": "geometry_cache.status|geometry_cache.bake",
+    "params": {
+      "object_name": {
+        "description": "Cached flat mesh object",
+        "required": true,
+        "type": "string"
+      },
+      "enabled": {
+        "description": "Use cached positions when true",
+        "required": true,
+        "type": "bool"
+      }
+    }
+  },
+  "geometry_cache.clear": {
+    "summary": "Remove a baked deformation clip and restore live Geometry Graph evaluation",
+    "tags": "geometry|cache|animation|clear",
+    "related": "geometry_cache.bake|geometry_cache.status",
+    "params": {
+      "object_name": {
+        "description": "Cached flat mesh object",
+        "required": true,
+        "type": "string"
+      }
+    }
+  },
+  "geometry_cache.self_test": {
+    "summary": "Run fixed-topology position capture, interpolation and memory-accounting tests",
+    "tags": "geometry|cache|animation|selftest|validation",
+    "related": "geometry_cache.bake|geometry_cache.status"
+  },
+  "terrain.list_layers": {
+    "summary": "List the eight terrain layer slots and what drives each one",
+    "notes": "Slots 0-3 are weighted by the splat map and normalized against each other - they partition the surface. Slots 4-7 are weighted by the semantic map (Flow, Wetness, Ice, Hardness) and composited OVER that blend by their own unnormalized weight. bound=false on a semantic slot means the built-in shading still applies to that channel. TWO dead cases to check on a bound overlay: channel_coverage 0 means the graph never fills that channel (Auto Splat's semantic output writes Flow and hard-zeroes the other three, while Surface Composer writes all four); channel_constant true means min==max, a flat fill that reports full coverage yet selects nothing and washes the material evenly over the terrain - this is how an unwired Surface Composer Hardness input presents, falling back to a constant 0.45. Hardness is produced by Lithology or Strata.",
+    "tags": "landscape|material|layer|splat|semantic",
+    "related": "terrain.set_layer|material.list"
+  },
+  "terrain.sculpt": {
+    "summary": "Run a terrain sculpt stroke (raise|lower|flatten|smooth|stamp) over a list of world-space dabs",
+    "tags": "landscape|brush|authoring",
+    "notes": "The panel brush and this method share TerrainManager::sculpt, so this is the only way to regression-test terrain sculpting. Read height_delta, NOT ok: the height field is metres/scale_y and a graph-authored landform routinely exceeds 1.0, so a bug that clamps the field reports success while flattening the ground under the brush. dt is the seconds one dab represents (the panel feeds 1/60); strength is metres per second at full falloff, so a visible bump needs either a large strength or many dabs. flatten samples its target from the surface under the first dab unless use_fixed_height is set.",
+    "params": {
+      "dabs": {
+        "type": "array",
+        "required": true,
+        "description": "Stroke path: list of [world_x, world_z] pairs. One dab is a click, several are a drag; every dab must land on the tile or the call is refused."
+      },
+      "mode": {
+        "type": "string",
+        "enum": "raise|lower|flatten|smooth|stamp"
+      },
+      "dt": {
+        "description": "Seconds one dab represents; the panel feeds one frame",
+        "default": "0.0166667"
+      },
+      "strength": {
+        "description": "Metres of height change per second at full falloff"
+      },
+      "radius": {
+        "description": "Brush radius in metres"
+      },
+      "curve": {
+        "description": "Falloff exponent, 0.25..4"
+      }
+    }
+  },
+  "terrain.paint_splat": {
+    "summary": "Paint one terrain splat channel (layer) along a list of world-space dabs",
+    "tags": "landscape|brush|paint",
+    "notes": "Fails rather than initialising when the terrain has no splat map or layers: an auto-created layer stack would hide the missing setup step. coverage_before/after are the mean weight of the painted channel over the whole splat map, which is what separates 'the stroke ran' from 'the stroke painted'; a stroke fully outside the tile is refused, not silently ignored.",
+    "params": {
+      "dabs": {
+        "type": "array",
+        "required": true,
+        "description": "Stroke path: list of [world_x, world_z] pairs, all of which must land on the tile."
+      },
+      "channel": {
+        "description": "Splat channel / layer index 0..3"
+      },
+      "dt": {
+        "description": "Seconds one dab represents; the panel feeds one frame",
+        "default": "0.0166667"
+      }
+    }
   }
 }

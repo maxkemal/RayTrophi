@@ -504,11 +504,18 @@ public:
      * @brief Per-terrain layer descriptor for splat-map based blending.
      *        Used by the Vulkan backend (binding 12).
      */
+    /// Eight layer slots: 0-3 splat-weighted (normalized partition of the
+    /// surface), 4-7 semantic overlays (Flow/Wetness/Ice/Hardness) composited
+    /// over that blend by their own unnormalized weight.
     struct TerrainLayerData {
-        uint32_t layer_mat_id[4]   = {0, 0, 0, 0};  // Material indices for layers 0-3
-        float    layer_uv_scale[4] = {1, 1, 1, 1};  // UV tiling for layers 0-3
+        uint32_t layer_mat_id[8]   = {0, 0, 0, 0, 0, 0, 0, 0};
+        float    layer_uv_scale[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+        float    overlayStrength[4] = {1, 1, 1, 1};  // Artist dial for slots 4-7
+        /// Bit s set means semantic slot 4+s carries a material. Material id 0
+        /// is valid, so a bound slot cannot be detected from layer_mat_id.
+        uint32_t overlayMask       = 0;
         int64_t  splatMapTexture   = 0;              // Texture pointer/handle for RGBA splat map
-        uint32_t layer_count       = 0;              // Active layer count (0 = no terrain)
+        uint32_t layer_count       = 0;              // Active splat layer count (0 = no terrain)
         int64_t  macroColorTexture = 0;              // Texture pointer/handle for macro color map
         float    macroColorStrength= 0.0f;           // Blend strength [0.0 - 1.0]
         int64_t  semanticMapTexture= 0;              // R=Flow G=Wetness B=Ice A=Hardness

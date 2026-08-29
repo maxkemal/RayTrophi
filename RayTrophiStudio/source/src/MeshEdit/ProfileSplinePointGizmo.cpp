@@ -11,8 +11,20 @@
 #include <cmath>
 
 namespace MeshEdit {
+namespace {
+void flattenToPlane(Vec3& value, SplinePlane plane) {
+    if (plane == SplinePlane::XY) value.z = 0.0f;
+    else if (plane == SplinePlane::XZ) value.y = 0.0f;
+    else if (plane == SplinePlane::YZ) value.x = 0.0f;
+    // Free: unconstrained 3D authoring, no axis is zeroed.
+}
+}
 
 bool drawProfileSplinePointGizmo(UIContext& ctx) {
+    // Pivot edit owns the object gizmo even while spline point-edit mode is
+    // enabled. Otherwise the point gizmo would consume the frame and make P
+    // appear to do nothing for spline objects.
+    if (ctx.scene_ui_ptr && ctx.scene_ui_ptr->pivot_edit_mode) return false;
     auto splineObject = ctx.selection.selected.spline_object;
     if (!splineObject || !splineObject->edit_mode || splineObject->selected_point < 0 ||
         splineObject->selected_point >= static_cast<int>(splineObject->spline.points.size()) ||
@@ -83,8 +95,31 @@ bool drawProfileSplinePointGizmo(UIContext& ctx) {
 
     if (ImGuizmo::IsUsing() && splineObject->transform) {
         const Vec3 movedWorld(gizmo[12], gizmo[13], gizmo[14]);
-        splineObject->spline.points[splineObject->selected_point].position =
-            objectTransform.inverse().transform_point(movedWorld);
+        const Vec3 movedLocal = objectTransform.inverse().transform_point(movedWorld);
+        Vec3 delta = movedLocal - localPoint;
+        // A 2D authoring spline must never accumulate depth from the screen
+        // plane or a world-axis gizmo handle. Constrain in object-local space,
+        // so the lock remains correct when the spline object is transformed.
+        if (splineObject->plane == SplinePlane::XY) delta.z = 0.0f;
+        else if (splineObject->plane == SplinePlane::XZ) delta.y = 0.0f;
+        else if (splineObject->plane == SplinePlane::YZ) delta.x = 0.0f;
+        // Free: unconstrained 3D authoring, no axis is zeroed.
+        bool activeIncluded = false;
+        for (const int index : splineObject->selected_points) {
+            if (index < 0 || index >= static_cast<int>(splineObject->spline.points.size())) continue;
+            splineObject->spline.points[static_cast<size_t>(index)].position += delta;
+            flattenToPlane(splineObject->spline.points[static_cast<size_t>(index)].position,
+                           splineObject->plane);
+            activeIncluded |= index == splineObject->selected_point;
+        }
+        // Older selections and scripted state can contain only selected_point.
+        // Keep the active anchor authoritative without applying its delta twice.
+        if (!activeIncluded) {
+            splineObject->spline.points[static_cast<size_t>(splineObject->selected_point)].position += delta;
+            flattenToPlane(
+                splineObject->spline.points[static_cast<size_t>(splineObject->selected_point)].position,
+                splineObject->plane);
+        }
         splineObject->point_drag_dirty = true;
         ProjectManager::getInstance().markModified();
     } else if (splineObject->point_drag_dirty) {

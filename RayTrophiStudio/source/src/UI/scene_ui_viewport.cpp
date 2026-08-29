@@ -1935,6 +1935,22 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 }
             }
 
+            const bool is_mesh_edit_active = (mesh_workspace_mode == MeshWorkspaceMode::Edit) &&
+                                             mesh_overlay_settings.edit_mode;
+            if (is_mesh_edit_active) {
+                const char* selMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Vertex) ? "Vertex" :
+                                      (ctx.selection.mesh_element_mode == MeshElementSelectMode::Edge) ? "Edge" :
+                                      (ctx.selection.mesh_element_mode == MeshElementSelectMode::Face) ? "Face" : "Combined";
+                char meshHudBuf[256];
+                snprintf(meshHudBuf, sizeof(meshHudBuf),
+                         "Mesh Edit [%s]  |  Mode: %s  |  V: %zu/%zu  E: %zu/%zu  F: %zu/%zu  (DNA SoA)",
+                         ctx.selection.hasSelection() ? ctx.selection.selected.name.c_str() : "<none>", selMode,
+                         editable_mesh_cache.selection.vertex_ids.size(), editable_mesh_cache.vertices.size(),
+                         editable_mesh_cache.selection.edge_ids.size(), editable_mesh_cache.edges.size(),
+                         editable_mesh_cache.selection.face_ids.size(), editable_mesh_cache.faces.size());
+                drawHudLine(meshHudBuf, IM_COL32(80, 220, 180, 230));
+            }
+
             const bool is_sculpt_active = (mesh_workspace_mode == MeshWorkspaceMode::Sculpt) &&
                                           mesh_overlay_settings.edit_mode &&
                                           !sculpt_mode_state.active_target_name.empty();

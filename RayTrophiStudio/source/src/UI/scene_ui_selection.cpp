@@ -1,4 +1,4 @@
-// ===============================================================================
+﻿// ===============================================================================
 // SCENE UI - SELECTION & INTERACTION
 // ===============================================================================
 // This file handles Mouse picking, Marquee selection, and Delete operations.
@@ -11,6 +11,7 @@
 #include "SceneSelection.h"
 #include "MeshEdit/ProfileSplineOverlay.h"
 #include "MeshEdit/SplineObject.h"
+#include "MeshEdit/SplineObjectLifecycle.h"
 #include "globals.h"
 #include "Backend/VulkanBackend.h"
 #include "Backend/OptixBackend.h"
@@ -1563,6 +1564,26 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                             else ctx.selection.addToSelection(item);
                         } else {
                             ctx.selection.selectObject(found_mesh, index, name, rec.tri_face, found_tri);
+
+                            // ★ Terrain is a FLAT mesh, so a viewport click on it lands here —
+                            // not in the facade branch above, which is the only other place that
+                            // bound the terrain tools. Bind by the persistent id carried on the
+                            // mesh (the facade inherits it), with the legacy name path kept for
+                            // old data, exactly like the facade and hierarchy paths do.
+                            const int terrainId = rec.tri_mesh->terrain_id;
+                            TerrainObject* terrain = terrainId >= 0
+                                ? TerrainManager::getInstance().getTerrain(terrainId)
+                                : nullptr;
+                            if (!terrain && name.rfind("Terrain_", 0) == 0) {
+                                std::string tName = name;
+                                const size_t chunkPos = tName.find("_Chunk");
+                                if (chunkPos != std::string::npos) tName = tName.substr(0, chunkPos);
+                                terrain = TerrainManager::getInstance().getTerrainByName(tName);
+                            }
+                            if (terrain) {
+                                terrain_brush.active_terrain_id = terrain->id;
+                                show_terrain_tab = true;
+                            }
                         }
                     }
                 }
@@ -1630,6 +1651,14 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     std::unordered_set<Hittable*> objects_to_delete;
     std::vector<std::string> deleted_names;
     std::vector<std::pair<std::string, std::vector<std::shared_ptr<Triangle>>>> undo_data;
+
+    int deleted_spline_count = 0;
+    for (const auto& item : items_to_delete) {
+        if (item.type == SelectableType::Object && item.spline_object &&
+            MeshEdit::deleteSplineObject(ctx, history, item.spline_object)) {
+            ++deleted_spline_count;
+        }
+    }
 
     // ===========================================================================
     // VDB VOLUME DELETION
@@ -1999,7 +2028,8 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     // Only rebuild once after all deletions are done
     int deleted_objects = static_cast<int>(deleted_names.size());
     if (deleted_objects > 0 || deleted_lights > 0 || deleted_cameras > 0 ||
-        particle_system_deleted_count > 0 || simulation_domain_deleted_count > 0) {
+        particle_system_deleted_count > 0 || simulation_domain_deleted_count > 0 ||
+        deleted_spline_count > 0) {
         ctx.selection.clearSelection();
         g_ProjectManager.markModified();
 
