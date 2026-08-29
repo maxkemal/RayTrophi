@@ -4481,7 +4481,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Which node graph the Nodes editor edits.");
         
-        // (AnimGraph / Geometry / Material tabs folded into "Nodes" above.)
+        ImGui::SameLine();
 
         if (UIWidgets::HorizontalTab("Assets", UIWidgets::IconType::Assets, show_asset_browser))
         {

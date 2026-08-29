@@ -2944,7 +2944,7 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             break;
         case UIWidgets::IconType::World:
             {
-                float r = is * 0.42f;
+                float r = is * 0.36f;
                 // Deep Cyan Ocean Globe Body
                 dl->AddCircleFilled(cp, r, IM_COL32(12, 130, 210, 255));
 
@@ -2970,13 +2970,13 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                 dl->AddLine(ImVec2(cp.x - r, cp.y), ImVec2(cp.x + r, cp.y), IM_COL32(255, 255, 255, 130), thickness * 0.9f);
 
                 // Outer Glowing Sky Atmosphere Layer Ring
-                dl->AddCircle(cp, r * 1.16f, IM_COL32(100, 225, 255, 220), 32, thickness * 2.2f);
-                dl->AddCircle(cp, r * 1.16f, IM_COL32(255, 255, 255, 180), 32, thickness * 0.8f);
+                dl->AddCircle(cp, r * 1.15f, IM_COL32(100, 225, 255, 220), 32, thickness * 1.8f);
+                dl->AddCircle(cp, r * 1.15f, IM_COL32(255, 255, 255, 180), 32, thickness * 0.8f);
 
                 // Sun Corona Light Arc on top-right edge
                 dl->PathClear();
-                dl->PathArcTo(cp, r * 1.16f, -1.2f, 0.2f, 16);
-                dl->PathStroke(IM_COL32(255, 215, 60, 255), false, thickness * 2.5f);
+                dl->PathArcTo(cp, r * 1.15f, -1.2f, 0.2f, 16);
+                dl->PathStroke(IM_COL32(255, 215, 60, 255), false, thickness * 2.0f);
             }
             break;
         case UIWidgets::IconType::System:
