@@ -2,11 +2,15 @@
 
 #include "MeshEdit/SplineObject.h"
 #include "MeshEdit/SplineEditService.h"
+#include "MeshEdit/SplineEvaluationService.h"
+#include "MeshEdit/SplineAnimation.h"
+#include "DNA/GeometryDetail.h"
 #include "SceneSelection.h"
 #include "scene_data.h"
 #include "scene_ui.h"
 #include "globals.h"
 #include "Camera.h"
+#include "TerrainManager.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
 
@@ -35,6 +39,92 @@ bool project(const Camera& camera, const Vec3& point, float width, float height,
     out.y = (0.5f - (delta.dot(up) / halfHeight) * 0.5f) * height;
     return true;
 }
+
+// Surface Snap: reuses the same scene BVH (+ linear fallback) the viewport
+// selection tool queries, the terrain raycast River already uses, and
+// River's own Y=0 ground fallback when neither is under the cursor - so a
+// new spline point always lands where the cursor is actually aiming, the
+// same River-style "click to place the next point" model. Only returns
+// false in the genuinely degenerate case (ray nearly parallel to Y=0,
+// looking at the horizon with nothing behind it).
+bool surfaceSnapPosition(UIContext& ctx, const ImVec2& mousePos, Vec3& outPosition) {
+    if (!ctx.scene.camera) return false;
+    ImGuiIO& io = ImGui::GetIO();
+    const float viewportWidth = std::max(1.0f, io.DisplaySize.x);
+    const float viewportHeight = std::max(1.0f, io.DisplaySize.y);
+    const float u = mousePos.x / viewportWidth;
+    const float v = 1.0f - (mousePos.y / viewportHeight);
+    const Ray ray = ctx.scene.camera->get_ray(u, v);
+
+    float closestT = 1e9f;
+    bool hitMesh = false;
+    HitRecord hitRecord;
+    if (ctx.scene.bvh) {
+        HitRecord temp;
+        if (ctx.scene.bvh->hit(ray, 0.001f, closestT, temp)) {
+            hitMesh = true;
+            closestT = temp.t;
+            hitRecord = temp;
+        }
+    }
+    if (!hitMesh) {
+        for (const auto& object : ctx.scene.world.objects) {
+            if (!object) continue;
+            HitRecord temp;
+            if (object->hit(ray, 0.001f, closestT, temp)) {
+                hitMesh = true;
+                closestT = temp.t;
+                hitRecord = temp;
+            }
+        }
+    }
+    if (hitMesh) {
+        outPosition = ray.origin + ray.direction * hitRecord.t;
+        return true;
+    }
+
+    if (TerrainManager::getInstance().hasActiveTerrain()) {
+        float closestTerrainT = 1e20f;
+        bool hitTerrain = false;
+        for (auto& terrain : TerrainManager::getInstance().getTerrains()) {
+            float terrainT = 0.0f;
+            Vec3 terrainNormal;
+            if (TerrainManager::getInstance().intersectRay(&terrain, ray, terrainT, terrainNormal) &&
+                terrainT < closestTerrainT) {
+                closestTerrainT = terrainT;
+                hitTerrain = true;
+            }
+        }
+        if (hitTerrain) {
+            outPosition = ray.origin + ray.direction * closestTerrainT;
+            return true;
+        }
+    }
+
+    // No mesh/terrain under the cursor: fall back to the same Y=0 ground
+    // plane the River tool uses when no terrain is active, so clicking past
+    // the edge of the world still places a point where the cursor is aiming.
+    if (std::fabs(ray.direction.y) > 0.01f) {
+        const float t = -ray.origin.y / ray.direction.y;
+        if (t > 0.0f) {
+            outPosition = ray.origin + ray.direction * t;
+            return true;
+        }
+    }
+    return false;
+}
+
+void addSmoothTriangle(ImDrawList* draw, const ImVec2& a, const ImVec2& b,
+                       const ImVec2& c, ImU32 colorA, ImU32 colorB, ImU32 colorC) {
+    const ImVec2 uv = draw->_Data->TexUvWhitePixel;
+    draw->PrimReserve(3, 3);
+    draw->PrimWriteIdx(static_cast<ImDrawIdx>(draw->_VtxCurrentIdx));
+    draw->PrimWriteIdx(static_cast<ImDrawIdx>(draw->_VtxCurrentIdx + 1));
+    draw->PrimWriteIdx(static_cast<ImDrawIdx>(draw->_VtxCurrentIdx + 2));
+    draw->PrimWriteVtx(a, uv, colorA);
+    draw->PrimWriteVtx(b, uv, colorB);
+    draw->PrimWriteVtx(c, uv, colorC);
+}
 }
 
 void drawProfileSplineOverlay(UIContext& ctx) {
@@ -59,6 +149,27 @@ void drawProfileSplineOverlay(UIContext& ctx) {
                            io.DisplaySize.x, io.DisplaySize.y, screen);
         };
 
+        if (selected && splineObject->transform) {
+            const Vec3 pivotWorld =
+                splineObject->transform->getPivotMatrix().getTranslation();
+            ImVec2 pivotScreen;
+            if (project(*ctx.scene.camera, pivotWorld, io.DisplaySize.x,
+                        io.DisplaySize.y, pivotScreen)) {
+                constexpr float arm = 8.0f;
+                const ImU32 pivotColor = IM_COL32(255, 145, 45, 255);
+                draw->AddLine(ImVec2(pivotScreen.x - arm, pivotScreen.y),
+                              ImVec2(pivotScreen.x + arm, pivotScreen.y),
+                              pivotColor, 2.0f);
+                draw->AddLine(ImVec2(pivotScreen.x, pivotScreen.y - arm),
+                              ImVec2(pivotScreen.x, pivotScreen.y + arm),
+                              pivotColor, 2.0f);
+                draw->AddCircle(pivotScreen, 3.0f, IM_COL32(255, 220, 150, 255),
+                                12, 1.0f);
+                draw->AddText(ImVec2(pivotScreen.x + 11.0f, pivotScreen.y - 9.0f),
+                              pivotColor, "Pivot");
+            }
+        }
+
         // Rendered shading already spends the frame budget on the path tracer.
         // The source overlay is authoring feedback, not render geometry: use a
         // lighter screen approximation there while keeping the solid/edit view
@@ -68,7 +179,9 @@ void drawProfileSplineOverlay(UIContext& ctx) {
         curve.reserve(kSamples + 1);
         for (int i = 0; i <= kSamples; ++i) {
             ImVec2 screen;
-            if (projectLocal(spline.samplePosition(static_cast<float>(i) / kSamples), screen)) {
+            const SplineEvaluation sample = SplineEvaluationService::evaluate(
+                spline, static_cast<float>(i) / kSamples);
+            if (sample.valid && projectLocal(sample.position, screen)) {
                 curve.push_back(screen);
             }
         }
@@ -79,6 +192,74 @@ void drawProfileSplineOverlay(UIContext& ctx) {
         }
         if (spline.isClosed && curve.size() > 2) {
             draw->AddLine(curve.back(), curve.front(), curveColor, selected ? 2.5f : 1.8f);
+        }
+
+        if (selected && splineObject->profile_preview_geometry) {
+            const auto& preview = *splineObject->profile_preview_geometry;
+            const Vec3* positions = preview.get_attribute_data<Vec3>("P");
+            const Vec3* normals = preview.get_attribute_data<Vec3>("N");
+            const size_t triangleCount = preview.indices.size() / 3;
+            const size_t stride = std::max<size_t>(1, triangleCount / 12000);
+            if (positions) {
+                struct SurfaceTriangle {
+                    ImVec2 a, b, c;
+                    float depth = 0.0f;
+                    ImU32 colorA = 0, colorB = 0, colorC = 0;
+                };
+                std::vector<SurfaceTriangle> surface;
+                surface.reserve((triangleCount + stride - 1) / stride);
+                const Vec3 cameraForward =
+                    (ctx.scene.camera->lookat - ctx.scene.camera->lookfrom).normalize();
+                const Vec3 lightDirection = Vec3(-0.35f, 0.8f, -0.45f).normalize();
+                for (size_t triangle = 0; triangle < triangleCount; triangle += stride) {
+                    const size_t base = triangle * 3;
+                    const uint32_t ia = preview.indices[base];
+                    const uint32_t ib = preview.indices[base + 1];
+                    const uint32_t ic = preview.indices[base + 2];
+                    if (ia >= preview.get_vertex_count() || ib >= preview.get_vertex_count() ||
+                        ic >= preview.get_vertex_count()) continue;
+                    const Vec3 wa = splineObject->profile_preview_transform.transform_point(positions[ia]);
+                    const Vec3 wb = splineObject->profile_preview_transform.transform_point(positions[ib]);
+                    const Vec3 wc = splineObject->profile_preview_transform.transform_point(positions[ic]);
+                    ImVec2 a, b, c;
+                    if (!project(*ctx.scene.camera, wa, io.DisplaySize.x, io.DisplaySize.y, a) ||
+                        !project(*ctx.scene.camera, wb, io.DisplaySize.x, io.DisplaySize.y, b) ||
+                        !project(*ctx.scene.camera, wc, io.DisplaySize.x, io.DisplaySize.y, c)) continue;
+                    const Vec3 face = (wb - wa).cross(wc - wa);
+                    if (face.length_squared() <= 1.0e-12f) continue;
+                    const Vec3 faceNormal = face.normalize();
+                    auto previewColor = [&](uint32_t vertex) {
+                        Vec3 normal = faceNormal;
+                        if (normals && normals[vertex].length_squared() > 1.0e-12f) {
+                            normal = splineObject->profile_preview_transform
+                                .transform_vector(normals[vertex]).normalize();
+                        }
+                        const float diffuse = std::clamp(
+                            0.24f + 0.76f * std::abs(normal.dot(lightDirection)), 0.0f, 1.0f);
+                        // Neutral studio clay: preview no longer reads as a yellow
+                        // selection mask, while per-vertex colour interpolation avoids
+                        // the faceted look of one colour per projected triangle.
+                        const int red = static_cast<int>(58.0f + 157.0f * diffuse);
+                        const int green = static_cast<int>(64.0f + 158.0f * diffuse);
+                        const int blue = static_cast<int>(72.0f + 160.0f * diffuse);
+                        return IM_COL32(red, green, blue, 232);
+                    };
+                    const Vec3 center = (wa + wb + wc) / 3.0f;
+                    surface.push_back({a, b, c,
+                        (center - ctx.scene.camera->lookfrom).dot(cameraForward),
+                        previewColor(ia), previewColor(ib), previewColor(ic)});
+                }
+                // Painter ordering gives the transient surface coherent occlusion without
+                // publishing it into world.objects or polluting hierarchy/serialization.
+                std::sort(surface.begin(), surface.end(),
+                    [](const SurfaceTriangle& lhs, const SurfaceTriangle& rhs) {
+                        return lhs.depth > rhs.depth;
+                });
+                for (const auto& triangle : surface) {
+                    addSmoothTriangle(draw, triangle.a, triangle.b, triangle.c,
+                                      triangle.colorA, triangle.colorB, triangle.colorC);
+                }
+            }
         }
 
         std::vector<ImVec2> controls;
@@ -162,7 +343,6 @@ void drawProfileSplineOverlay(UIContext& ctx) {
 
         if (selected && pointEditing && splineObject->edit_tool == SplineEditTool::InsertPoint &&
             !curve.empty() && spline.segmentCount() > 0 &&
-            spline.curveType != SplineCurveType::BSpline &&
             !ImGui::GetIO().WantTextInput && !ImGuizmo::IsOver()) {
             float previewDistance = 10.0f;
             int previewSample = -1;
@@ -186,17 +366,19 @@ void drawProfileSplineOverlay(UIContext& ctx) {
                     static_cast<int>(std::floor(scaledT)),
                     static_cast<int>(spline.segmentCount()) - 1);
                 const float previewT = scaledT - static_cast<float>(previewSegment);
-                splineObject->insert_preview_position = spline.samplePosition(globalT);
+                splineObject->insert_preview_position =
+                    SplineEvaluationService::evaluate(spline, globalT).position;
                 splineObject->has_insert_preview = true;
                 if (ImGui::IsMouseClicked(0)) {
                     const int segment = previewSegment;
                     const float t = previewT;
                     int inserted = -1;
-                    if (SplineEditService::insertBezierPoint(
+                    if (SplineEditService::insertPoint(
                             spline, segment, t, &inserted)) {
+                        propagateSplineInsertToKeys(
+                            ctx.scene.timeline, splineObject->nodeName, segment, t);
                         splineObject->selected_point = inserted;
                         splineObject->selected_points = {inserted};
-                        splineObject->edit_tool = SplineEditTool::Select;
                         ProjectManager::getInstance().markModified();
                         return;
                     }
@@ -232,31 +414,48 @@ void drawProfileSplineOverlay(UIContext& ctx) {
             }
             if (ImGui::IsMouseClicked(0) && pointEditing &&
                 splineObject->edit_tool == SplineEditTool::Subdivide && hitCurve >= 0 &&
-                spline.segmentCount() > 0 && spline.curveType != SplineCurveType::BSpline) {
+                spline.segmentCount() > 0) {
                 const float globalT = static_cast<float>(hitCurve) /
                     static_cast<float>(std::max<size_t>(1, curve.size() - 1));
                 const float scaledT = globalT * static_cast<float>(spline.segmentCount());
                 const int segment = std::min(static_cast<int>(std::floor(scaledT)),
                                              static_cast<int>(spline.segmentCount()) - 1);
                 int inserted = -1;
-                if (SplineEditService::subdivideBezierSegment(
+                if (SplineEditService::subdivideSegment(
                         spline, segment, splineObject->subdivide_cuts, &inserted)) {
+                    propagateSplineSubdivideToKeys(
+                        ctx.scene.timeline, splineObject->nodeName, segment,
+                        splineObject->subdivide_cuts);
                     splineObject->selected_point = inserted;
                     splineObject->selected_points = {inserted};
                     ProjectManager::getInstance().markModified();
                 }
                 return;
             }
-            if (ImGui::IsMouseClicked(0) && pointEditing &&
-                splineObject->edit_tool == SplineEditTool::Extrude && hitPoint >= 0 &&
+            // Extrude follows River's "Add" model: once the tool is active on a
+            // valid open-spline endpoint, every click lays down the next point
+            // wherever the cursor is aiming (surface/terrain/ground snap) and
+            // that new point becomes the endpoint for the next click - it does
+            // not require re-aiming at the tiny endpoint marker each time.
+            const int extrudeEndpoint = splineObject->selected_point;
+            const bool extrudeToolActive = pointEditing &&
+                splineObject->edit_tool == SplineEditTool::Extrude &&
                 !spline.isClosed && spline.points.size() >= 2 &&
-                (hitPoint == 0 || hitPoint == static_cast<int>(spline.points.size()) - 1)) {
-                const size_t pointIndex = static_cast<size_t>(hitPoint);
-                const size_t neighbor = hitPoint == 0 ? 1u : spline.points.size() - 2u;
-                const Vec3 direction = spline.points[pointIndex].position - spline.points[neighbor].position;
+                extrudeEndpoint >= 0 &&
+                (extrudeEndpoint == 0 ||
+                 extrudeEndpoint == static_cast<int>(spline.points.size()) - 1);
+            if (ImGui::IsMouseClicked(0) && extrudeToolActive) {
+                Vec3 targetPosition;
+                if (!surfaceSnapPosition(ctx, io.MousePos, targetPosition)) {
+                    targetPosition = spline.points[static_cast<size_t>(extrudeEndpoint)].position;
+                }
+                const BezierSpline beforeSpline = spline;
                 int inserted = -1;
                 if (SplineEditService::extrudeEndpoint(
-                        spline, hitPoint, spline.points[pointIndex].position + direction, &inserted)) {
+                        spline, extrudeEndpoint, targetPosition, &inserted)) {
+                    propagateSplineExtrudeToKeys(
+                        ctx.scene.timeline, splineObject->nodeName, beforeSpline,
+                        extrudeEndpoint, targetPosition);
                     splineObject->selected_point = inserted;
                     splineObject->selected_points = {inserted};
                     ProjectManager::getInstance().markModified();
@@ -315,7 +514,9 @@ bool pickProfileSpline(UIContext& ctx) {
             constexpr int kSamples = 64;
             for (int i = 0; i <= kSamples; ++i) {
                 ImVec2 screen;
-                if (!projectLocal(splineObject->spline.samplePosition(static_cast<float>(i) / kSamples), screen)) continue;
+                const SplineEvaluation sample = SplineEvaluationService::evaluate(
+                    splineObject->spline, static_cast<float>(i) / kSamples);
+                if (!sample.valid || !projectLocal(sample.position, screen)) continue;
                 const float dx = io.MousePos.x - screen.x;
                 const float dy = io.MousePos.y - screen.y;
                 best = (std::min)(best, std::sqrt(dx * dx + dy * dy));

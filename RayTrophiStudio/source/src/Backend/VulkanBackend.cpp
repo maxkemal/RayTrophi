@@ -12951,10 +12951,13 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
 
     for (const auto& ld : layers) {
         VulkanRT::VkTerrainLayerData gld{};
-        for (int k = 0; k < 4; ++k) {
+        // Eight slots: 0-3 splat-weighted, 4-7 semantic overlays.
+        for (int k = 0; k < 8; ++k) {
             gld.layer_mat_id[k]   = ld.layer_mat_id[k];
             gld.layer_uv_scale[k] = ld.layer_uv_scale[k];
         }
+        for (int k = 0; k < 4; ++k) gld.overlay_strength[k] = ld.overlayStrength[k];
+        gld.overlay_mask = ld.overlayMask;
         // Resolve splat map texture to a Vulkan sampler slot
         if (ld.splatMapTexture) {
             Texture* splatTex = reinterpret_cast<Texture*>(ld.splatMapTexture);
@@ -13115,7 +13118,9 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
         }
         gld.semantic_wet_darkening = ld.semanticWetDarkening;
         gld.semantic_wet_roughness = ld.semanticWetRoughness;
-        gld.semantic_pad = 0.0f;
+        // The trailing pad became overlay_mask, which is written above from
+        // ld.overlayMask. Zeroing it here would clear every overlay binding
+        // and the terrain would render as if the feature did not exist.
 
         gld.layer_count = ld.layer_count;
         gpuLayers.push_back(gld);

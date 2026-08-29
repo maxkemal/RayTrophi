@@ -1,0 +1,125 @@
+// terrain_lem_alluvium.comp
+// Spreading of FRESH, UNCONSOLIDATED sediment toward a stable alluvial slope.
+//
+// This is the pass the solver was missing. The route pass decides how much
+// load drops at a cell, but it drops it exactly where the water was, so an
+// alluvial fan came out as a narrow ridge following the old channel and a
+// footslope apron never formed at all. In the field the opposite happens: a
+// stream leaving a confined valley loses its confinement, the deposit cannot
+// hold a channel-scale slope, and it relaxes outward into the low-angle cone
+// that everyone recognises as a fan. Fan surfaces sit at roughly one to five
+// degrees; a debris apron at the base of a slope sits a little steeper.
+//
+// So this is the talus pass with two changes, and both are load bearing:
+//
+//  1. The stable angle is the ALLUVIAL angle, not the bedrock angle of
+//     repose. A wet, unconsolidated deposit will not stand at thirty degrees.
+//
+//  2. Only material that is actually loose may move. The shed amount is
+//     clamped by the alluvium thickness at the source cell. Without that
+//     clamp this pass is simply "relax the whole landscape to two degrees",
+//     which does not look like a slightly wrong fan -- it dissolves the
+//     mountains. The clamp is what makes the pass a sediment process rather
+//     than a smoothing filter.
+//
+// Ledger note: this pass RELOCATES material that terrain_lem_route already
+// booked as deposited. Relocation must subtract at the source and add at the
+// destination: the global sum stays unchanged, while the published deposition
+// map and the total-build cap continue to describe where the material actually
+// is. Adding inflow without subtracting outflow would double count.
+//
+// Formulation is a GATHER for the same reason as talus: each invocation
+// recomputes its neighbours' shed distributions and writes only its own cell,
+// so it needs no atomics and is bit-deterministic. Both fields it reads are
+// ping-ponged, so no invocation can observe another's write.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float cellSize; float heightScale;
+    float tanAlluvium;
+    float rate;
+    float maxStep;
+    // Fraction of the loose store that stops being mobile per spread step.
+    // A deposit does not stay fluid forever: it dewaters, compacts and is
+    // overprinted, and without this the alluvium field only ever grows, so
+    // late iterations spread the landscape more aggressively than early ones
+    // and depositional areas flatten out. It reduces MOBILITY, never height
+    // -- no mass leaves the domain here.
+    float consolidation;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer HeightIn    { float heightIn[]; };
+layout(set = 0, binding = 1) writeonly buffer HeightOut   { float heightOut[]; };
+layout(set = 0, binding = 2) readonly  buffer AlluviumIn  { float alluviumIn[]; };
+layout(set = 0, binding = 3) writeonly buffer AlluviumOut { float alluviumOut[]; };
+layout(set = 0, binding = 4) readonly  buffer Mask        { float maskField[]; };
+layout(set = 0, binding = 5) buffer Deposition { float depositionField[]; };
+
+const int dx8[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+const float dist8[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                1.0, 1.41421356, 1.0, 1.41421356);
+
+// Maximum drop a loose deposit holds over one neighbour step, normalized.
+float stableDrop(float dist) {
+    return pc.tanAlluvium * dist * pc.cellSize / max(pc.heightScale, 1.0e-3);
+}
+
+// Material shed by cell (cx,cy). `target` >= 0 returns that neighbour's share,
+// otherwise the cell's total outflow.
+float shed(int cx, int cy, int target) {
+    if (cx < 1 || cy < 1 || cx >= pc.width - 1 || cy >= pc.height - 1) return 0.0;
+    int ci = cy * pc.width + cx;
+
+    // Nothing loose here: bedrock does not flow, however steep it is.
+    float loose = max(alluviumIn[ci], 0.0);
+    if (loose <= 0.0) return 0.0;
+
+    float hc = heightIn[ci];
+    float sumExcess = 0.0, maxExcess = 0.0, want = 0.0;
+    for (int d = 0; d < 8; ++d) {
+        int ni = (cy + dy8[d]) * pc.width + (cx + dx8[d]);
+        float excess = max((hc - heightIn[ni]) - stableDrop(dist8[d]), 0.0);
+        sumExcess += excess;
+        maxExcess = max(maxExcess, excess);
+        if (d == target) want = excess;
+    }
+    if (sumExcess <= 0.0) return 0.0;
+
+    // Same stability bound as talus: shedding at most rate*0.5*maxExcess
+    // cannot invert this cell's ordering with the neighbour that defined
+    // maxExcess. The `loose` term additionally forbids moving more than is
+    // actually there, which is what keeps the alluvium field non-negative
+    // without a clamp after the fact.
+    float total = min(min(pc.rate * 0.5 * maxExcess, pc.maxStep), loose) *
+                  clamp(maskField[ci], 0.0, 1.0);
+    if (target < 0) return total;
+    return total * (want / sumExcess);
+}
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+    int x = i % pc.width, y = i / pc.width;
+
+    // A border cell never sheds but must still accept inflow, or the pass
+    // leaks mass at the rim with no symptom but a ledger residual. Same
+    // policy, and same reasoning, as terrain_lem_talus.
+    float inflow = 0.0;
+    for (int d = 0; d < 8; ++d) {
+        int nx = x + dx8[d], ny = y + dy8[d];
+        if (nx < 0 || ny < 0 || nx >= pc.width || ny >= pc.height) continue;
+        inflow += shed(nx, ny, 7 - d);
+    }
+    float outflow = shed(x, y, -1);
+
+    heightOut[i]   = heightIn[i] + inflow - outflow;
+    alluviumOut[i] = max(alluviumIn[i] + inflow - outflow, 0.0) *
+                     clamp(1.0 - pc.consolidation, 0.0, 1.0);
+    // Each invocation writes only its own ledger cell, so this is race-free.
+    // The update is conservative and therefore leaves the mass check intact.
+    depositionField[i] = max(depositionField[i] + inflow - outflow, 0.0);
+}

@@ -1616,6 +1616,16 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(savedGraphCount) + " geometry node graphs.");
         }
 
+        // Fixed-topology deformation clips use the project binary sidecar. The
+        // JSON stores only clip metadata/frame numbers; payload is tightly packed Vec3 P samples.
+        {
+            root["geometry_caches"] = json::object();
+            measureBinarySection("geometry_caches", [&]() {
+                Animation::serializeGeometryCaches(scene.geometry_caches,
+                                                   root["geometry_caches"], &out_bin);
+            });
+        }
+
         // Material Node Graphs (MaterialNodesV2 Faz 1) — structure only (no binary
         // payload; textures are referenced by name and re-resolved on load). A graph
         // with just the default Output node still carries the user's seeded values,
@@ -2329,6 +2339,17 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                         if (graph) scene.geometry_node_graphs[it.key()] = graph;
                     }
                     SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.geometry_node_graphs.size()) + " geometry node graphs.");
+                }
+            }
+
+            scene.geometry_caches.clear();
+            {
+                simdjson::dom::element geometry_caches_el;
+                if (!root["geometry_caches"].get(geometry_caches_el)) {
+                    Animation::deserializeGeometryCaches(
+                        sjsonToNlohmann(geometry_caches_el), scene.geometry_caches, &in_bin);
+                    SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                        std::to_string(scene.geometry_caches.size()) + " geometry caches.");
                 }
             }
 

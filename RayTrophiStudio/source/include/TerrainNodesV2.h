@@ -22,9 +22,12 @@
 #include "NodeSystem/NodeCore.h"
 #include "NodeSystem/Node.h"
 #include "NodeSystem/Graph.h"
+#include "TerrainNodePortPresentation.h"
 #include "NodeSystem/EvaluationContext.h"
 #include "TerrainManager.h"
+#include "TerrainFieldMath.h"
 #include "json.hpp"
+#include "ui_modern.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <cmath>
@@ -160,9 +163,6 @@ namespace TerrainNodesV2 {
         Stacks,          // Sea stacks / hoodoos
         Anastomosing,    // Braided channel patterns
         // NEW: Sediment Deposition Nodes
-        SedimentDeposition,  // Sediment accumulation in valleys
-        AlluvialFan,         // Fan-shaped deposits at mountain bases
-        DeltaFormation,      // River delta formation
         // NEW: Erosion Wizard
         ErosionWizard,       // All-in-one erosion with presets
         // Outputs
@@ -224,7 +224,16 @@ namespace TerrainNodesV2 {
         SatMapBlend,
         GrassMask,
         SurfaceMasks,
-        PaintMaskCombine
+        PaintMaskCombine,
+        // Volcanic landforms. Appended for serialized enum stability.
+        CraterCaldera,
+        // XZ-plane placement transform (offset/scale/rotate) for an Image2D
+        // field. Appended for serialized enum stability.
+        Transform,
+        // Terrain-aware detail and erosion resistance. Appended for serialized
+        // enum stability; implementations live in TerrainSurfaceNodes.*.
+        StructuralHardness,
+        SurfaceRelief
     };
 
     // ============================================================================
@@ -242,6 +251,10 @@ namespace TerrainNodesV2 {
         // Explicit side-effect/output publication gate. Computational nodes
         // remain pull-driven; terrain/scene sink nodes are skipped when false.
         bool publicationEnabled = true;
+
+        void onRegisteredToGraph() override {
+            configureTerrainNodePorts(*this);
+        }
         
         TerrainContext* getTerrainContext(NodeSystem::EvaluationContext& ctx) {
             return ctx.getDomainContext<TerrainContext>();
@@ -264,7 +277,32 @@ namespace TerrainNodesV2 {
             NodeSystem::Image2DData img = getImageInput(inputIndex, ctx);
             return (img.isValid() && img.channels == 1) ? img : NodeSystem::Image2DData{};
         }
-        
+
+        /**
+         * @brief Read a Mask pin, reconciling an unbounded field into 0-1.
+         *
+         * Mask pins accept PhysicalScalar sources (discharge, drainage area,
+         * water depth) because the hydrology nodes genuinely produce the
+         * fields the biome and surface nodes want. Those fields carry SI
+         * values, so a consumer that clamps them to 0-1 collapses them into
+         * a binary stencil - every channel pixel exactly 1, everything else
+         * exactly 0, which is what "the masks look crushed" actually was.
+         * Normalizing here, at the single input boundary, keeps every
+         * downstream consumer honest without each one re-deriving a range.
+         */
+        NodeSystem::Image2DData getMaskInput(int inputIndex, NodeSystem::EvaluationContext& ctx) {
+            return TerrainFieldMath::asMaskField(getHeightInput(inputIndex, ctx));
+        }
+
+        /// Sample metric for a field of @p width samples in the active terrain.
+        TerrainFieldMath::FieldMetric getFieldMetric(NodeSystem::EvaluationContext& ctx, int width) {
+            if (auto* tctx = getTerrainContext(ctx)) {
+                return TerrainFieldMath::makeFieldMetric(tctx->scale_xz, tctx->scale_y, width);
+            }
+            return TerrainFieldMath::makeFieldMetric(static_cast<float>((std::max)(width - 1, 1)),
+                                                     1.0f, width);
+        }
+
         // Helper to create output image
         NodeSystem::Image2DData createHeightOutput(int w, int h) {
             NodeSystem::Image2DData result;
@@ -366,6 +404,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Heightmap Input";
             metadata.category = "Input";
             metadata.headerColor = IM_COL32(50, 150, 75, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Terrain;
             headerColor = ImVec4(0.2f, 0.6f, 0.3f, 1.0f);
         }
         
@@ -593,6 +632,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Hardness Input";
             metadata.category = "Input";
             metadata.headerColor = IM_COL32(50, 100, 150, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ClayTool;
             headerColor = ImVec4(0.2f, 0.4f, 0.6f, 1.0f);
         }
         
@@ -639,12 +679,15 @@ namespace TerrainNodesV2 {
         // distribution to that range instead of assuming a normalised FBM ever
         // reaches its own theoretical extremes.
         float featureSizeMeters = 600.0f;
+        // Auto resolves Feature Size against the terrain the node is evaluated
+        // on. A fixed metre value cannot be right for both: 600 m is a broad
+        // valley on a 1 km tile and one of seven repeats on a 4 km one, and
+        // past that repeat count nothing in the tile is wider than 600 m at any
+        // other setting. Old projects carry an authored value and keep it -
+        // deserializeFromJson turns Auto OFF when the saved node predates it.
+        bool autoFeatureSize = true;
         float baseElevationMeters = 0.0f;
         float reliefMeters = 140.0f;
-        // Absolute metre amplitude of the finest band. Kept independent of
-        // Relief on purpose: as a fraction it disappears on tall terrain, which
-        // is how the valley floors ended up featureless.
-        float groundDetailMeters = 1.5f;
         int octaves = 10;
         float persistance = 0.5f;
         float jitter = 1.0f;           // Voronoi specific
@@ -660,13 +703,21 @@ namespace TerrainNodesV2 {
         float slopeLimitDegrees = 60.0f;
         TerrainNoiseModel terrainModel = TerrainNoiseModel::Orogenic;
         float terrainRoughness = 0.45f;
+        // Fraction of the tile that stays gentle country. Authored as an AREA,
+        // delivered as an area: the uplift field is thresholded at its own
+        // quantile, so the number means the same thing whatever the seed does.
+        // Not a look dial - it is the difference between a landscape and a
+        // fractal, and 0 does not restore the old behaviour because the old
+        // behaviour had no lowland at any setting.
+        float lowlandFraction = 0.35f;
         // Diagnostics published by compute() for the panel. The resolution guard
         // silently drops bands the grid cannot carry, so "Detail Bands 12" can
         // mean 7; without this readout that gap is invisible and the control
         // looks broken. Not serialized, not authored.
         int lastEffectiveBands = 0;
         float lastFinestBandMeters = 0.0f;
-        float lastGroundWavelengthMeters = 0.0f;
+        float lastFeatureMeters = 0.0f;
+        float lastLowlandFraction = 0.0f;
         float terrainDirection = 25.0f;
         float valleyStrength = 0.35f;
 
@@ -686,6 +737,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Terrain Noise Generator";
             metadata.category = "Input";
             metadata.headerColor = IM_COL32(50, 150, 125, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Noise;
             headerColor = ImVec4(0.2f, 0.6f, 0.5f, 1.0f);
         }
         
@@ -709,39 +761,50 @@ namespace TerrainNodesV2 {
                 }
             }
             if (ImGui::DragInt("Seed", &seed)) dirty = true;
-            if (ImGui::DragFloat("Feature Size", &featureSizeMeters, 5.0f, 4.0f, 100000.0f, "%.0f m")) dirty = true;
+            if (ImGui::Checkbox("Feature Size from terrain", &autoFeatureSize)) dirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                "World-space wavelength of the largest landform.\n"
-                "Aim for roughly terrain size / 2 to / 20; above the terrain size\n"
-                "the whole tile falls inside one landform and reads as a single blob.");
+                "Size the largest landform to the terrain it sits on, about half\n"
+                "the tile. Turn this off only to author the wavelength in metres\n"
+                "directly, for instance to keep two terrains of different sizes\n"
+                "carrying the same landform scale.");
+            if (autoFeatureSize) {
+                if (lastFeatureMeters > 0.0f)
+                    ImGui::TextDisabled("  largest landform %.0f m", lastFeatureMeters);
+            } else {
+                if (ImGui::DragFloat("Feature Size", &featureSizeMeters, 5.0f, 4.0f, 100000.0f, "%.0f m")) dirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "World-space wavelength of the largest landform.\n"
+                    "Keep it near terrain size / 1.5 to / 4. Much below that and\n"
+                    "the tile carries no landform wider than this value, which\n"
+                    "reads as one texture repeated rather than as country.\n"
+                    "terrain.landform_stats measures what you actually got.");
+            }
             if (ImGui::DragFloat("Base Elevation", &baseElevationMeters, 1.0f, -10000.0f, 10000.0f, "%.1f m")) dirty = true;
             if (ImGui::DragFloat("Relief", &reliefMeters, 1.0f, 0.0f, 20000.0f, "%.1f m")) dirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(
                 "Peak-to-trough range of this node in world metres.\n"
                 "The generated distribution is fitted to it, so the value is delivered, not approximated.");
-            if (ImGui::DragFloat("Ground Detail", &groundDetailMeters, 0.05f, 0.0f, 50.0f, "%.2f m")) dirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                "Amplitude of the finest band, in absolute metres.\n"
-                "Independent of Relief on purpose: as a fraction it vanishes on tall\n"
-                "terrain and the valley floors read as featureless. 0 disables it.");
-            if (lastGroundWavelengthMeters > 0.0f && groundDetailMeters > 0.0f) {
-                // Amplitude alone says nothing; what the eye reads is amplitude
-                // against the wavelength it sits on. Past ~25 deg this band stops
-                // being ground texture and becomes sandpaper over the landforms.
-                const float groundSlope = std::atan(groundDetailMeters /
-                    (lastGroundWavelengthMeters * 0.5f)) * 57.2957795f;
-                const bool harsh = groundSlope > 25.0f;
-                ImGui::TextColored(harsh ? ImVec4(0.95f, 0.78f, 0.35f, 1.0f)
-                                         : ImVec4(0.55f, 0.55f, 0.55f, 1.0f),
-                    "  %.0f m wavelength -> %.0f deg texture", lastGroundWavelengthMeters, groundSlope);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                    "Local slope this band adds. Above ~25 deg it reads as uniform\n"
-                    "roughness and hides the larger landforms underneath.");
-            }
             if (ImGui::SliderFloat("Roughness", &terrainRoughness, 0.0f, 1.0f)) dirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                "Hurst exponent of the multifractal.\n"
-                "Low gives smooth, broadly dissected relief; high gives fine, hairy ruggedness.");
+                "Fineness of the multifractal. Low gives smooth, broadly\n"
+                "dissected relief; high gives fine, hairy ruggedness.\n"
+                "It FEEDS a Hurst exponent rather than being one: the\n"
+                "mapped range is 1.05..0.65 but the delivered range\n"
+                "measures about a third of that, so both ends are\n"
+                "milder than the numbers suggest. terrain.landform_stats\n"
+                "reports realised_hurst.");
+            if (terrainModel != TerrainNoiseModel::RawNoise) {
+                if (ImGui::SliderFloat("Lowland", &lowlandFraction, 0.0f, 0.80f)) dirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Fraction of the tile that stays gentle country between the\n"
+                    "massifs. Raise it for sparse mountains over wide ground;\n"
+                    "lower it for a tile that is uplifted edge to edge.\n"
+                    "It is an area, not a strength: the uplift field is cut at\n"
+                    "its own quantile, so the number holds across seeds.");
+                if (lastLowlandFraction > 0.0f)
+                    ImGui::TextDisabled("  %.0f%% of the tile at the dissection floor",
+                        lastLowlandFraction * 100.0f);
+            }
             if (ImGui::SliderFloat("Warp", &warp_strength, 0.0f, 1.0f)) dirty = true;
             if (terrainModel == TerrainNoiseModel::Orogenic) {
                 if (ImGui::SliderFloat("Direction", &terrainDirection, 0.0f, 360.0f, "%.0f deg")) dirty = true;
@@ -790,9 +853,9 @@ namespace TerrainNodesV2 {
             j["noiseType"] = static_cast<int>(noiseType);
             j["seed"] = seed;
             j["featureSizeMeters"] = featureSizeMeters;
+            j["autoFeatureSize"] = autoFeatureSize;
             j["baseElevationMeters"] = baseElevationMeters;
             j["reliefMeters"] = reliefMeters;
-            j["groundDetailMeters"] = groundDetailMeters;
             j["octaves"] = octaves;
             j["persistance"] = persistance;
             j["jitter"] = jitter;
@@ -803,6 +866,7 @@ namespace TerrainNodesV2 {
             j["slopeLimitDegrees"] = slopeLimitDegrees;
             j["terrainModel"] = static_cast<int>(terrainModel);
             j["terrainRoughness"] = terrainRoughness;
+            j["lowlandFraction"] = lowlandFraction;
             j["terrainDirection"] = terrainDirection;
             j["valleyStrength"] = valleyStrength;
         }
@@ -821,9 +885,15 @@ namespace TerrainNodesV2 {
             }
             if (j.contains("seed")) seed = j["seed"].get<int>();
             featureSizeMeters = (std::max)(j.value("featureSizeMeters", featureSizeMeters), 1.0f);
+            // A node saved before Auto existed has an authored wavelength and
+            // no flag. Defaulting the flag to its member value would silently
+            // discard that wavelength and re-shape every old terrain on load,
+            // so absence of the key IS the answer: this node authored metres.
+            autoFeatureSize = j.contains("autoFeatureSize")
+                ? j["autoFeatureSize"].get<bool>()
+                : !j.contains("featureSizeMeters");
             baseElevationMeters = j.value("baseElevationMeters", baseElevationMeters);
             reliefMeters = (std::max)(j.value("reliefMeters", reliefMeters), 0.0f);
-            groundDetailMeters = clampValue(j.value("groundDetailMeters", groundDetailMeters), 0.0f, 50.0f);
             if (j.contains("octaves")) octaves = clampValue(j["octaves"].get<int>(), 1, 12);
             persistance = clampValue(j.value("persistance", persistance), 0.05f, 0.95f);
             jitter = clampValue(j.value("jitter", jitter), 0.0f, 1.0f);
@@ -836,6 +906,7 @@ namespace TerrainNodesV2 {
                 ? static_cast<TerrainNoiseModel>(clampValue(j["terrainModel"].get<int>(), 0, 3))
                 : TerrainNoiseModel::RawNoise;
             terrainRoughness = clampValue(j.value("terrainRoughness", terrainRoughness), 0.0f, 1.0f);
+            lowlandFraction = clampValue(j.value("lowlandFraction", lowlandFraction), 0.0f, 0.80f);
             terrainDirection = j.value("terrainDirection", terrainDirection);
             valleyStrength = clampValue(j.value("valleyStrength", valleyStrength), 0.0f, 1.0f);
         }
@@ -857,7 +928,12 @@ namespace TerrainNodesV2 {
         float direction = 25.0f;
         float centerX = 0.5f, centerY = 0.5f;
         float lengthFraction = 1.05f;
-        float widthMeters = 420.0f;
+        // Fraction of the terrain, the same unit Length already used. Width was
+        // the only absolute metre value on this node, and the mismatch was the
+        // whole failure: on a 4096 m tile the default 420 m gave a full-length
+        // ribbon 420 m wide, measured at 0.01 degrees median slope - a welt on
+        // a flat plate, not a mountain range.
+        float widthFraction = 0.28f;
         float reliefMeters = 120.0f;
         float ridgeSharpness = 3.2f;
         float warp = 0.32f;
@@ -893,6 +969,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Landform";
             metadata.description = "Metre-scaled orogeny with catchments, ridge hierarchy and geological detail";
             metadata.headerColor = IM_COL32(155, 105, 72, 255);
+            metadata.iconType = (int)UIWidgets::IconType::DrawTool;
             headerColor = ImVec4(0.61f, 0.41f, 0.28f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -905,7 +982,7 @@ namespace TerrainNodesV2 {
             j["landformPreset"] = static_cast<int>(preset);
             j["seed"] = seed; j["direction"] = direction;
             j["centerX"] = centerX; j["centerY"] = centerY;
-            j["lengthFraction"] = lengthFraction; j["widthMeters"] = widthMeters;
+            j["lengthFraction"] = lengthFraction; j["widthFraction"] = widthFraction;
             j["reliefMeters"] = reliefMeters; j["ridgeSharpness"] = ridgeSharpness;
             j["warp"] = warp; j["branches"] = branches; j["detail"] = detail;
             j["massif"] = massif; j["foothills"] = foothills;
@@ -919,7 +996,16 @@ namespace TerrainNodesV2 {
             centerX = clampValue(j.value("centerX", centerX), 0.0f, 1.0f);
             centerY = clampValue(j.value("centerY", centerY), 0.0f, 1.0f);
             lengthFraction = clampValue(j.value("lengthFraction", lengthFraction), 0.05f, 1.5f);
-            widthMeters = (std::max)(j.value("widthMeters", widthMeters), 1.0f);
+            // Renamed rather than reinterpreted: a stored `widthMeters` means
+            // metres and must not be read as a fraction. Legacy values are
+            // converted at the 1500 m reference the five landform presets
+            // imply - a stated assumption, so a project authored on a very
+            // different tile needs its Range Width looked at once.
+            if (j.contains("widthFraction"))
+                widthFraction = clampValue(j["widthFraction"].get<float>(), 0.005f, 2.0f);
+            else if (j.contains("widthMeters"))
+                widthFraction = clampValue(j["widthMeters"].get<float>() / 1500.0f,
+                                           0.005f, 2.0f);
             reliefMeters = (std::max)(j.value("reliefMeters", reliefMeters), 0.0f);
             ridgeSharpness = clampValue(j.value("ridgeSharpness", ridgeSharpness), 0.5f, 8.0f);
             warp = clampValue(j.value("warp", warp), 0.0f, 1.0f);
@@ -963,6 +1049,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Landform";
             metadata.description = "World-scale V/U valley profile with a meandering axis";
             metadata.headerColor = IM_COL32(92, 128, 104, 255);
+            metadata.iconType = (int)UIWidgets::IconType::FlattenTool;
             headerColor = ImVec4(0.36f, 0.50f, 0.41f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -1012,6 +1099,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Landform";
             metadata.description = "Independent macro, medium and micro world-scale relief";
             metadata.headerColor = IM_COL32(116, 112, 150, 255);
+            metadata.iconType = (int)UIWidgets::IconType::DrawSharpTool;
             headerColor = ImVec4(0.45f, 0.44f, 0.59f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -1063,46 +1151,36 @@ namespace TerrainNodesV2 {
         double lastSedimentFlux = 0.0;
         float lastSolveMs = 0.0f;
         int lastExecutedPasses = 0;
-        
+        HydraulicErosionStats lastStats;
+
         // Edge Falloff Settings
         float edgeFalloffWidth = 0.0f;
         float edgeFalloffValue = 0.0f;
-        
+
         HydraulicErosionNode() {
             name = "Hydraulic Erosion";
             terrainNodeType = NodeType::HydraulicErosion;
             
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+                "Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Erosion", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Wear", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Deposition", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Deposits", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Discharge", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar));
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Sediment Flux", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar));
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction, 2));
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Channel Width", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
-                1, NodeSystem::ImageUnit::Meters));
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Water Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
-                1, NodeSystem::ImageUnit::Meters));
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Water Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            
+                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar));
+
             metadata.displayName = "Hydraulic Erosion";
             metadata.category = "Erosion";
             metadata.headerColor = IM_COL32(75, 125, 200, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Water;
             headerColor = ImVec4(0.3f, 0.5f, 0.8f, 1.0f);
         }
         
@@ -1152,7 +1230,45 @@ namespace TerrainNodesV2 {
                 {"macroValleyScaleMeters", params.macroValleyScaleMeters},
                 {"macroHeadwaterAreaKm2", params.macroHeadwaterAreaKm2},
                 {"macroValleyDepthMeters", params.macroValleyDepthMeters},
-                {"macroValleyFloor", params.macroValleyFloor}
+                {"macroValleyFloor", params.macroValleyFloor},
+                {"fluvialCycle", params.fluvialCycle},
+                {"fluvialIterations", params.fluvialIterations},
+                {"fluvialTimeStep", params.fluvialTimeStep},
+                {"rainRate", params.rainRate},
+                {"orographicRain", params.orographicRain},
+                {"rainWindDegrees", params.rainWindDegrees},
+                {"incisionK", params.incisionK},
+                {"streamPowerM", params.streamPowerM},
+                {"streamPowerN", params.streamPowerN},
+                {"slopeMin", params.slopeMin},
+                {"slopeMax", params.slopeMax},
+                {"transportK", params.transportK},
+                {"sedimentCover", params.sedimentCover},
+                {"settlingVelocity", params.settlingVelocity},
+                {"sedimentRouteSteps", params.sedimentRouteSteps},
+                {"avulsionInterval", params.avulsionInterval},
+                {"alluviumSlopeDegrees", params.alluviumSlopeDegrees},
+                {"alluviumRate", params.alluviumRate},
+                {"alluviumSteps", params.alluviumSteps},
+                {"alluviumConsolidation", params.alluviumConsolidation},
+                {"drainageRefreshInterval", params.drainageRefreshInterval},
+                {"maxDepositionMeters", params.maxDepositionMeters},
+                {"drainageFillPasses", params.drainageFillPasses},
+                {"drainageAccumulatePasses", params.drainageAccumulatePasses},
+                {"drainageCoarsestSize", params.drainageCoarsestSize},
+                {"massWasting", params.massWasting},
+                {"reposeAngleDegrees", params.reposeAngleDegrees},
+                {"massWastingRate", params.massWastingRate},
+                {"massWastingSteps", params.massWastingSteps},
+                {"hillslopeDiffusion", params.hillslopeDiffusion},
+                {"channelRefAreaKm2", params.channelRefAreaKm2},
+                {"incisionSafety", params.incisionSafety},
+                {"depositionSafety", params.depositionSafety},
+                {"maxStepMeters", params.maxStepMeters},
+                {"lakeEpsilonMeters", params.lakeEpsilonMeters},
+                {"fluvialWidthScale", params.fluvialWidthScale},
+                {"fluvialDepthScale", params.fluvialDepthScale},
+                {"fluvialHeadwaterAreaKm2", params.fluvialHeadwaterAreaKm2}
             };
             j["edgeFalloffWidth"] = edgeFalloffWidth;
             j["edgeFalloffValue"] = edgeFalloffValue;
@@ -1202,6 +1318,48 @@ namespace TerrainNodesV2 {
                 params.macroHeadwaterAreaKm2 = clampValue(p.value("macroHeadwaterAreaKm2", params.macroHeadwaterAreaKm2), 0.0005f, 25.0f);
                 params.macroValleyDepthMeters = clampValue(p.value("macroValleyDepthMeters", params.macroValleyDepthMeters), 0.0f, 500.0f);
                 params.macroValleyFloor = clampValue(p.value("macroValleyFloor", params.macroValleyFloor), 0.0f, 1.0f);
+
+                // Landscape Evolution Model cycle. Absent keys keep the
+                // defaults, so an older project opens with the cycle ON: the
+                // whole point is that the previous behaviour was the bug.
+                params.fluvialCycle = p.value("fluvialCycle", params.fluvialCycle);
+                params.fluvialIterations = clampValue(p.value("fluvialIterations", params.fluvialIterations), 0, 512);
+                params.fluvialTimeStep = clampValue(p.value("fluvialTimeStep", params.fluvialTimeStep), 0.0f, 16.0f);
+                params.rainRate = clampValue(p.value("rainRate", params.rainRate), 1.0e-4f, 100.0f);
+                params.orographicRain = clampValue(p.value("orographicRain", params.orographicRain), 0.0f, 1.0f);
+                params.rainWindDegrees = p.value("rainWindDegrees", params.rainWindDegrees);
+                params.incisionK = clampValue(p.value("incisionK", params.incisionK), 0.0f, 20000.0f);
+                params.streamPowerM = clampValue(p.value("streamPowerM", params.streamPowerM), 0.0f, 2.0f);
+                params.streamPowerN = clampValue(p.value("streamPowerN", params.streamPowerN), 0.1f, 4.0f);
+                params.slopeMin = clampValue(p.value("slopeMin", params.slopeMin), 1.0e-6f, 1.0f);
+                params.slopeMax = clampValue(p.value("slopeMax", params.slopeMax), 1.0e-3f, 100.0f);
+                params.transportK = clampValue(p.value("transportK", params.transportK), 0.0f, 20000.0f);
+                params.sedimentCover = clampValue(p.value("sedimentCover", params.sedimentCover), 0.0f, 1.0f);
+                params.settlingVelocity = clampValue(p.value("settlingVelocity", params.settlingVelocity), 0.0f, 100.0f);
+                params.sedimentRouteSteps = clampValue(p.value("sedimentRouteSteps", params.sedimentRouteSteps), 0, 4096);
+                params.avulsionInterval = clampValue(p.value("avulsionInterval", params.avulsionInterval), 0, 4096);
+                params.alluviumSlopeDegrees = clampValue(p.value("alluviumSlopeDegrees", params.alluviumSlopeDegrees), 0.1f, 20.0f);
+                params.alluviumRate = clampValue(p.value("alluviumRate", params.alluviumRate), 0.0f, 1.0f);
+                params.alluviumSteps = clampValue(p.value("alluviumSteps", params.alluviumSteps), 0, 64);
+                params.alluviumConsolidation = clampValue(p.value("alluviumConsolidation", params.alluviumConsolidation), 0.0f, 1.0f);
+                params.drainageRefreshInterval = clampValue(p.value("drainageRefreshInterval", params.drainageRefreshInterval), 1, 64);
+                params.maxDepositionMeters = clampValue(p.value("maxDepositionMeters", params.maxDepositionMeters), 0.0f, 500.0f);
+                params.drainageFillPasses = clampValue(p.value("drainageFillPasses", params.drainageFillPasses), 8, 4096);
+                params.drainageAccumulatePasses = clampValue(p.value("drainageAccumulatePasses", params.drainageAccumulatePasses), 8, 4096);
+                params.drainageCoarsestSize = clampValue(p.value("drainageCoarsestSize", params.drainageCoarsestSize), 32, 512);
+                params.massWasting = p.value("massWasting", params.massWasting);
+                params.reposeAngleDegrees = clampValue(p.value("reposeAngleDegrees", params.reposeAngleDegrees), 1.0f, 80.0f);
+                params.massWastingRate = clampValue(p.value("massWastingRate", params.massWastingRate), 0.0f, 1.0f);
+                params.massWastingSteps = clampValue(p.value("massWastingSteps", params.massWastingSteps), 0, 64);
+                params.hillslopeDiffusion = clampValue(p.value("hillslopeDiffusion", params.hillslopeDiffusion), 0.0f, 100.0f);
+                params.channelRefAreaKm2 = clampValue(p.value("channelRefAreaKm2", params.channelRefAreaKm2), 1.0e-6f, 100.0f);
+                params.incisionSafety = clampValue(p.value("incisionSafety", params.incisionSafety), 0.0f, 0.95f);
+                params.depositionSafety = clampValue(p.value("depositionSafety", params.depositionSafety), 0.0f, 0.95f);
+                params.maxStepMeters = clampValue(p.value("maxStepMeters", params.maxStepMeters), 0.0f, 1000.0f);
+                params.lakeEpsilonMeters = clampValue(p.value("lakeEpsilonMeters", params.lakeEpsilonMeters), 0.0f, 100.0f);
+                params.fluvialWidthScale = clampValue(p.value("fluvialWidthScale", params.fluvialWidthScale), 0.0f, 100.0f);
+                params.fluvialDepthScale = clampValue(p.value("fluvialDepthScale", params.fluvialDepthScale), 0.0f, 100.0f);
+                params.fluvialHeadwaterAreaKm2 = clampValue(p.value("fluvialHeadwaterAreaKm2", params.fluvialHeadwaterAreaKm2), 1.0e-6f, 100.0f);
             }
             if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
             if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
@@ -1251,6 +1409,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Thermal Erosion";
             metadata.category = "Erosion";
             metadata.headerColor = IM_COL32(75, 125, 200, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ScrapeTool;
             headerColor = ImVec4(0.3f, 0.5f, 0.8f, 1.0f);
         }
         
@@ -1346,6 +1505,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Fluvial Erosion";
             metadata.category = "Erosion";
             metadata.headerColor = IM_COL32(75, 150, 230, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Vortex;
             headerColor = ImVec4(0.3f, 0.6f, 0.9f, 1.0f);
         }
         
@@ -1419,6 +1579,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Wind Erosion";
             metadata.category = "Erosion";
             metadata.headerColor = IM_COL32(180, 150, 100, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Wind;
             headerColor = ImVec4(0.7f, 0.6f, 0.4f, 1.0f);
         }
         
@@ -1444,172 +1605,6 @@ namespace TerrainNodesV2 {
             if (j.contains("iterations")) iterations = j["iterations"].get<int>();
             if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
             if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
-        }
-    };
-
-    // ============================================================================
-    // SEDIMENT DEPOSITION NODES
-    // ============================================================================
-    
-    /**
-     * @brief Sediment Deposition - Simulates sediment accumulation in low-slope areas
-     * 
-     * Flow-based sediment transport: erodes high slopes, deposits in valleys.
-     */
-    class SedimentDepositionNode : public TerrainNodeBase {
-    public:
-        int iterations = 20;              // Simulation iterations
-        float depositionRate = 0.3f;      // Rate of sediment settling
-        float transportCapacity = 1.0f;   // Max sediment per flow unit
-        float settlingSpeed = 0.5f;       // How fast sediment settles
-        bool useGPU = false;              // GPU acceleration (future)
-        
-        SedimentDepositionNode() {
-            name = "Sediment Deposition";
-            terrainNodeType = NodeType::SedimentDeposition;
-            
-            inputs.push_back(NodeSystem::Pin::createInput(
-                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
-            
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Sediment Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
-            
-            metadata.displayName = "Sediment Deposit";
-            metadata.category = "Erosion";
-            metadata.headerColor = IM_COL32(150, 120, 80, 255);
-            headerColor = ImVec4(0.6f, 0.5f, 0.3f, 1.0f);
-        }
-        
-        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
-        void drawContent() override;
-        std::string getTypeId() const override { return "TerrainV2.SedimentDeposition"; }
-
-        void serializeToJson(nlohmann::json& j) const override {
-            TerrainNodeBase::serializeToJson(j);
-            j["iterations"] = iterations;
-            j["depositionRate"] = depositionRate;
-            j["transportCapacity"] = transportCapacity;
-            j["settlingSpeed"] = settlingSpeed;
-            j["useGPU"] = useGPU;
-        }
-
-        void deserializeFromJson(const nlohmann::json& j) override {
-            TerrainNodeBase::deserializeFromJson(j);
-            if (j.contains("iterations")) iterations = j["iterations"].get<int>();
-            if (j.contains("depositionRate")) depositionRate = j["depositionRate"].get<float>();
-            if (j.contains("transportCapacity")) transportCapacity = j["transportCapacity"].get<float>();
-            if (j.contains("settlingSpeed")) settlingSpeed = j["settlingSpeed"].get<float>();
-            if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
-        }
-    };
-    
-    /**
-     * @brief Alluvial Fan - Creates fan-shaped deposits at mountain bases
-     * 
-     * Detects steep-to-flat transitions and spreads sediment in a fan pattern.
-     */
-    class AlluvialFanNode : public TerrainNodeBase {
-    public:
-        float slopeThreshold = 30.0f;     // Degrees: steep-to-flat transition
-        float fanSpreadAngle = 60.0f;     // Fan opening angle (degrees)
-        float depositionStrength = 0.5f;  // Strength of deposition
-        int fanLength = 50;               // Max fan length in pixels
-        
-        AlluvialFanNode() {
-            name = "Alluvial Fan";
-            terrainNodeType = NodeType::AlluvialFan;
-            
-            inputs.push_back(NodeSystem::Pin::createInput(
-                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            inputs.push_back(NodeSystem::Pin::createInput(
-                "Slope Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
-            
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Fan Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
-            
-            metadata.displayName = "Alluvial Fan";
-            metadata.category = "Erosion";
-            metadata.headerColor = IM_COL32(180, 140, 90, 255);
-            headerColor = ImVec4(0.7f, 0.55f, 0.35f, 1.0f);
-        }
-        
-        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
-        void drawContent() override;
-        std::string getTypeId() const override { return "TerrainV2.AlluvialFan"; }
-
-        void serializeToJson(nlohmann::json& j) const override {
-            TerrainNodeBase::serializeToJson(j);
-            j["slopeThreshold"] = slopeThreshold;
-            j["fanSpreadAngle"] = fanSpreadAngle;
-            j["depositionStrength"] = depositionStrength;
-            j["fanLength"] = fanLength;
-        }
-
-        void deserializeFromJson(const nlohmann::json& j) override {
-            TerrainNodeBase::deserializeFromJson(j);
-            if (j.contains("slopeThreshold")) slopeThreshold = j["slopeThreshold"].get<float>();
-            if (j.contains("fanSpreadAngle")) fanSpreadAngle = j["fanSpreadAngle"].get<float>();
-            if (j.contains("depositionStrength")) depositionStrength = j["depositionStrength"].get<float>();
-            if (j.contains("fanLength")) fanLength = j["fanLength"].get<int>();
-        }
-    };
-    
-    /**
-     * @brief Delta Formation - Creates river delta patterns at low elevations
-     * 
-     * Uses flow accumulation to identify river mouths and builds branching deltas.
-     */
-    class DeltaFormationNode : public TerrainNodeBase {
-    public:
-        float seaLevel = 0.1f;            // Height threshold for delta formation
-        float deltaSpread = 45.0f;        // Delta spreading angle
-        int branchingFactor = 3;          // Number of delta branches
-        float sedimentRatio = 0.4f;       // Sediment deposit height ratio
-        
-        DeltaFormationNode() {
-            name = "Delta Formation";
-            terrainNodeType = NodeType::DeltaFormation;
-            
-            inputs.push_back(NodeSystem::Pin::createInput(
-                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
-            
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            outputs.push_back(NodeSystem::Pin::createOutput(
-                "Delta Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
-            
-            metadata.displayName = "Delta Formation";
-            metadata.category = "Erosion";
-            metadata.headerColor = IM_COL32(100, 140, 180, 255);
-            headerColor = ImVec4(0.4f, 0.55f, 0.7f, 1.0f);
-        }
-        
-        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
-        void drawContent() override;
-        std::string getTypeId() const override { return "TerrainV2.DeltaFormation"; }
-
-        void serializeToJson(nlohmann::json& j) const override {
-            TerrainNodeBase::serializeToJson(j);
-            j["seaLevel"] = seaLevel;
-            j["deltaSpread"] = deltaSpread;
-            j["branchingFactor"] = branchingFactor;
-            j["sedimentRatio"] = sedimentRatio;
-        }
-
-        void deserializeFromJson(const nlohmann::json& j) override {
-            TerrainNodeBase::deserializeFromJson(j);
-            if (j.contains("seaLevel")) seaLevel = j["seaLevel"].get<float>();
-            if (j.contains("deltaSpread")) deltaSpread = j["deltaSpread"].get<float>();
-            if (j.contains("branchingFactor")) branchingFactor = j["branchingFactor"].get<int>();
-            if (j.contains("sedimentRatio")) sedimentRatio = j["sedimentRatio"].get<float>();
         }
     };
     
@@ -1690,6 +1685,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Erosion Wizard";
             metadata.category = "Erosion";
             metadata.headerColor = IM_COL32(255, 180, 50, 255);  // Gold - stands out
+            metadata.iconType = (int)UIWidgets::IconType::World;
             headerColor = ImVec4(1.0f, 0.7f, 0.2f, 1.0f);
         }
         
@@ -1744,6 +1740,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Height Output";
             metadata.category = "Output";
             metadata.headerColor = IM_COL32(200, 100, 75, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Render;
             headerColor = ImVec4(0.8f, 0.4f, 0.3f, 1.0f);
         }
         
@@ -1782,6 +1779,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Splat Output";
             metadata.category = "Output";
             metadata.headerColor = IM_COL32(200, 75, 125, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ViewMatcap;
             headerColor = ImVec4(0.8f, 0.3f, 0.5f, 1.0f);
         }
         
@@ -1827,6 +1825,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Hardness Output";
             metadata.category = "Output";
             metadata.headerColor = IM_COL32(120, 130, 140, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ShadeFlatTool;
             headerColor = ImVec4(0.5f, 0.55f, 0.6f, 1.0f);
         }
         
@@ -1851,7 +1850,15 @@ namespace TerrainNodesV2 {
     class MathNode : public TerrainNodeBase {
     public:
         MathOp operation = MathOp::Add;
-        float factor = 1.0f;
+
+        // B is an OPERAND, not a modifier: a two-input operator with one input
+        // is not an operation. It was declared optional so a missing B could
+        // fall back to a `factor` scalar, and that second path cost exactly
+        // what silent dual paths cost in this repo. Once every terrain node
+        // received a default exposure profile, "optional" meant the socket
+        // drew only while connected - so Math showed ONE input and the second
+        // one could not be wired at all. Scaling a field by a constant is
+        // Remap's job, and `factor` is gone rather than left as a dead dial.
         
         MathNode() {
             name = "Math";
@@ -1860,7 +1867,7 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "A", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "B", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+                "B", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Result", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
@@ -1868,6 +1875,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Math";
             metadata.category = "Math";
             metadata.headerColor = IM_COL32(100, 100, 150, 255);
+            metadata.iconType = (int)UIWidgets::IconType::AddKey;
             headerColor = ImVec4(0.4f, 0.4f, 0.6f, 1.0f);
         }
         
@@ -1878,13 +1886,15 @@ namespace TerrainNodesV2 {
         void serializeToJson(nlohmann::json& j) const override {
             TerrainNodeBase::serializeToJson(j);
             j["operation"] = static_cast<int>(operation);
-            j["factor"] = factor;
         }
 
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
             if (j.contains("operation")) operation = static_cast<MathOp>(j["operation"].get<int>());
-            if (j.contains("factor")) factor = j["factor"].get<float>();
+            // `factor` is deliberately not read back. A project that leaned on
+            // the scalar path now reports a missing input naming this node -
+            // which is the point: it used to produce a plausible-looking
+            // result out of half a graph.
         }
     };
 
@@ -1909,6 +1919,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Blend";
             metadata.category = "Math";
             metadata.headerColor = IM_COL32(125, 100, 150, 255);
+            metadata.iconType = (int)UIWidgets::IconType::LayerTool;
             headerColor = ImVec4(0.5f, 0.4f, 0.6f, 1.0f);
         }
         
@@ -1945,6 +1956,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Clamp";
             metadata.category = "Math";
             metadata.headerColor = IM_COL32(100, 100, 100, 255);
+            metadata.iconType = (int)UIWidgets::IconType::PivotEdit;
             headerColor = ImVec4(0.4f, 0.4f, 0.4f, 1.0f);
         }
         
@@ -1980,6 +1992,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Invert";
             metadata.category = "Math";
             metadata.headerColor = IM_COL32(100, 100, 100, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ViewSolid;
             headerColor = ImVec4(0.4f, 0.4f, 0.4f, 1.0f);
         }
         
@@ -2019,6 +2032,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Slope Mask";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(180, 180, 75, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Rotate;
             headerColor = ImVec4(0.7f, 0.7f, 0.3f, 1.0f);
         }
         
@@ -2061,6 +2075,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Height Mask";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(180, 180, 75, 255);
+            metadata.iconType = (int)UIWidgets::IconType::MaskTool;
             headerColor = ImVec4(0.7f, 0.7f, 0.3f, 1.0f);
         }
         
@@ -2102,6 +2117,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Curvature Mask";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(180, 180, 75, 255);
+            metadata.iconType = (int)UIWidgets::IconType::CreaseTool;
             headerColor = ImVec4(0.7f, 0.7f, 0.3f, 1.0f);
         }
         
@@ -2129,6 +2145,30 @@ namespace TerrainNodesV2 {
      * 
      * Uses flow accumulation algorithm to find valleys and depressions.
      */
+    /**
+     * @brief The single authority for "how much water is here".
+     *
+     * Two different quantities were both called flow, and consumers got
+     * whichever happened to be wired:
+     *   DISCHARGE - a physical field (drainage area / m3 per s). Hydraulic
+     *     Erosion measures it against the landscape it is actually carving.
+     *   CHANNEL   - a 0-1 selection: which cells read as a visible
+     *     watercourse. detailLevel/softness/bankSpread are STYLE dials on
+     *     that selection, not physics.
+     *
+     * This node now owns both, and states which source the discharge came
+     * from. Wire Hydraulic Erosion's Discharge into it and the classification
+     * runs on the measured field; leave it empty and the field is derived
+     * from the height alone - a defensible drainage-area proxy, but it knows
+     * nothing about lakes, infiltration or erosion history, so a graph that
+     * HAS an erosion sim and does not wire it here is classifying one
+     * landscape while rendering another. That case is called out in the panel
+     * rather than left to look plausible.
+     *
+     * Renamed from "Flow / Soil": it stopped feeding Soil Depth's deposition
+     * when flow and deposition were separated, and a name that outlives its
+     * job is how the next reader gets misled.
+     */
     class FlowMaskNode : public TerrainNodeBase {
     public:
         int detailLevel = 6;          // 1=main rivers, 8=finest tributaries
@@ -2137,20 +2177,48 @@ namespace TerrainNodesV2 {
         float decay = 0.995f;         // Discharge retained at each downstream step
         float channelSoftness = 0.06f;// Soft transition around the selected detail threshold
         bool normalize = true;        // Normalize output to 0-1
-        
+
+        /// Set by compute() so the panel can report which source was used
+        /// instead of leaving the artist to guess. Not serialized: these are
+        /// observations, not settings, and a stale observation restored from
+        /// disk would be worse than none.
+        bool lastEvaluated = false;
+        bool lastDischargeMeasured = false;
+        /// The expensive case: the graph HAS an erosion sim and this node is
+        /// not reading it, so the channels are classified from bare geometry
+        /// while the render shows an eroded landscape. It still looks like a
+        /// river network, which is why it needs saying out loud.
+        bool lastErosionUnwired = false;
+
         FlowMaskNode() {
-            name = "Flow Mask";
+            name = "Flow";
             terrainNodeType = NodeType::FlowMask;
-            
+
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
-            
+            // Appended, so serialized graphs keep their pin indices. Measured
+            // discharge takes over from the derived accumulation entirely -
+            // this is an authority, not a blend.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Discharge", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PhysicalScalar, true));
+            inputs[1].acceptImageSemantic(NodeSystem::ImageSemantic::Mask);
+
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
-            
-            metadata.displayName = "Flow / Soil";
+                "Channel", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            // The canonical flow-magnitude field. It carries measured m3/s
+            // when Hydraulic Erosion is connected, or derived drainage area
+            // in m2 otherwise. Every consumer reads it here so a graph has one
+            // source of truth; the runtime image unit states which quantity.
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Discharge", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::Unknown));
+
+            metadata.displayName = "Flow";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(100, 150, 200, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Water;
             headerColor = ImVec4(0.4f, 0.6f, 0.8f, 1.0f);
         }
         
@@ -2210,6 +2278,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Sun Exposure";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(220, 180, 80, 255);
+            metadata.iconType = (int)UIWidgets::IconType::LightDir;
             headerColor = ImVec4(0.85f, 0.7f, 0.3f, 1.0f);
         }
         
@@ -2262,6 +2331,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Smooth";
             metadata.category = "Filter";
             metadata.headerColor = IM_COL32(100, 150, 200, 255);
+            metadata.iconType = (int)UIWidgets::IconType::SmoothTool;
             headerColor = ImVec4(0.4f, 0.6f, 0.8f, 1.0f);
         }
         
@@ -2306,6 +2376,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Normalize";
             metadata.category = "Filter";
             metadata.headerColor = IM_COL32(100, 150, 200, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ScaleAxis;
             headerColor = ImVec4(0.4f, 0.6f, 0.8f, 1.0f);
         }
         
@@ -2352,6 +2423,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Terrace";
             metadata.category = "Filter";
             metadata.headerColor = IM_COL32(150, 120, 180, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ShadeFlatTool;
             headerColor = ImVec4(0.6f, 0.5f, 0.7f, 1.0f);
         }
         
@@ -2398,6 +2470,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Edge Falloff";
             metadata.category = "Filter";
             metadata.headerColor = IM_COL32(180, 100, 100, 255);
+            metadata.iconType = (int)UIWidgets::IconType::PinchTool;
             headerColor = ImVec4(0.7f, 0.4f, 0.4f, 1.0f);
         }
 
@@ -2452,6 +2525,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Mask Combine";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(180, 180, 75, 255);
+            metadata.iconType = (int)UIWidgets::IconType::MergeVertices;
             headerColor = ImVec4(0.7f, 0.7f, 0.3f, 1.0f);
         }
         
@@ -2495,6 +2569,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Overlay";
             metadata.category = "Blend";
             metadata.headerColor = IM_COL32(150, 100, 180, 255);
+            metadata.iconType = (int)UIWidgets::IconType::LayerTool;
             headerColor = ImVec4(0.6f, 0.4f, 0.7f, 1.0f);
         }
         
@@ -2538,6 +2613,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Screen";
             metadata.category = "Blend";
             metadata.headerColor = IM_COL32(150, 100, 180, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ViewRendered;
             headerColor = ImVec4(0.6f, 0.4f, 0.7f, 1.0f);
         }
         
@@ -2605,17 +2681,38 @@ namespace TerrainNodesV2 {
             // independent non-normalized semantic mask.
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
-            
+            // Appended: the rules below are authored in degrees, but the angle
+            // used to be re-derived here on a private stencil. Wiring the
+            // shared Terrain Analysis slope makes Auto Splat and Surface
+            // Composer classify the same pixel the same way.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Slope", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Appended: the semantic output wrote Flow and hard-zeroed the
+            // other three, so an Auto Splat graph was structurally unable to
+            // drive a Wetness, Ice or Hardness material - a dead end with no
+            // symptom. These pass through; nothing is synthesized, because
+            // these channels reach erosion resistance and soil capacity.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Wetness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Ice", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            for (size_t index = 1; index < inputs.size(); ++index) {
+                inputs[index].acceptImageSemantic(NodeSystem::ImageSemantic::PhysicalScalar);
+            }
+
             // 4-channel output for splat map
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PackedData, 4));
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Semantic (Flow R)", NodeSystem::DataType::Image2D,
+                "Semantic (Flow/Wet/Ice/Hard)", NodeSystem::DataType::Image2D,
                 NodeSystem::ImageSemantic::PackedData, 4));
             
             metadata.displayName = "Auto Splat";
             metadata.category = "Texture";
             metadata.headerColor = IM_COL32(200, 150, 50, 255);
+            metadata.iconType = (int)UIWidgets::IconType::PaintTool;
             headerColor = ImVec4(0.8f, 0.6f, 0.2f, 1.0f);
         }
         
@@ -2702,6 +2799,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Mask Paint";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(220, 100, 150, 255);
+            metadata.iconType = (int)UIWidgets::IconType::PaintTool;
             headerColor = ImVec4(0.85f, 0.4f, 0.6f, 1.0f);
         }
         
@@ -2783,6 +2881,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Mask Image";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(150, 200, 100, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Assets;
             headerColor = ImVec4(0.6f, 0.8f, 0.4f, 1.0f);
         }
         
@@ -2846,6 +2945,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Fault Line";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(180, 100, 80, 255);
+            metadata.iconType = (int)UIWidgets::IconType::DissolveTopology;
             headerColor = ImVec4(0.7f, 0.4f, 0.3f, 1.0f);
         }
         
@@ -2900,6 +3000,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Mesa / Plateau";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(160, 120, 80, 255);
+            metadata.iconType = (int)UIWidgets::IconType::FlattenTool;
             headerColor = ImVec4(0.6f, 0.5f, 0.3f, 1.0f);
         }
         
@@ -2954,6 +3055,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Shear Zone";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(140, 100, 120, 255);
+            metadata.iconType = (int)UIWidgets::IconType::NudgeTool;
             headerColor = ImVec4(0.55f, 0.4f, 0.5f, 1.0f);
         }
         
@@ -3007,6 +3109,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Resample";
             metadata.category = "Utility";
             metadata.headerColor = IM_COL32(80, 145, 180, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Sensitivity;
             headerColor = ImVec4(0.3f, 0.55f, 0.7f, 1.0f);
         }
 
@@ -3040,6 +3143,90 @@ namespace TerrainNodesV2 {
         }
     };
 
+    /**
+     * @brief Moves/scales/rotates an Image2D field in the XZ plane.
+     *
+     * Samples the source field at the inverse-transformed position of each
+     * output pixel, so a positive offset moves content in the +X/+Z world
+     * direction rather than sliding the sampling window the other way.
+     * Offsets are authored in world meters (via the terrain's scale_xz),
+     * not pixels, so the same node setting behaves consistently across
+     * resolution changes.
+     */
+    enum class TransformEdgeMode { Clamp = 0, Wrap = 1, Zero = 2 };
+
+    class TransformNode : public TerrainNodeBase {
+    public:
+        float offsetXMeters = 0.0f;
+        float offsetZMeters = 0.0f;
+        float scaleX = 1.0f;
+        float scaleZ = 1.0f;
+        float rotationDegrees = 0.0f;
+        TransformEdgeMode edgeMode = TransformEdgeMode::Clamp;
+        ResampleSemantic semanticMode = ResampleSemantic::Height;
+
+        TransformNode() {
+            name = "Transform";
+            terrainNodeType = NodeType::Transform;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            // 1.0 where a pixel came from real source data, 0.0 in the padding
+            // a downscale/offset opens up. Independent of Edge mode below, so
+            // it stays correct whichever padding Out uses - wire it into a
+            // downstream Blend's Mask input to composite this transformed
+            // field onto a base (e.g. a mountain) WITHOUT the base being
+            // overwritten/summed in the area the shrunk content no longer
+            // covers. Without this, Add/Blend-without-a-mask paints the
+            // padding (0, or a smeared edge value under Clamp) straight over
+            // the base there - "boşalan alanların bozulması".
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Coverage", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Transform";
+            metadata.category = "Utility";
+            metadata.headerColor = IM_COL32(80, 145, 180, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Move;
+            headerColor = ImVec4(0.3f, 0.55f, 0.7f, 1.0f);
+        }
+
+        void syncSemantic() {
+            const auto semantic = semanticMode == ResampleSemantic::Height
+                ? NodeSystem::ImageSemantic::Height : NodeSystem::ImageSemantic::Mask;
+            inputs[0].imageSemantic = semantic;
+            inputs[0].updateVisualCache();
+            outputs[0].imageSemantic = semantic;
+            outputs[0].updateVisualCache();
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Transform"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["offsetXMeters"] = offsetXMeters;
+            j["offsetZMeters"] = offsetZMeters;
+            j["scaleX"] = scaleX;
+            j["scaleZ"] = scaleZ;
+            j["rotationDegrees"] = rotationDegrees;
+            j["edgeMode"] = static_cast<int>(edgeMode);
+            j["semanticMode"] = static_cast<int>(semanticMode);
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            offsetXMeters = j.value("offsetXMeters", offsetXMeters);
+            offsetZMeters = j.value("offsetZMeters", offsetZMeters);
+            scaleX = clampValue(j.value("scaleX", scaleX), 0.01f, 100.0f);
+            scaleZ = clampValue(j.value("scaleZ", scaleZ), 0.01f, 100.0f);
+            rotationDegrees = j.value("rotationDegrees", rotationDegrees);
+            edgeMode = static_cast<TransformEdgeMode>(clampValue(j.value("edgeMode", 0), 0, 2));
+            semanticMode = static_cast<ResampleSemantic>(clampValue(j.value("semanticMode", 0), 0, 1));
+            syncSemantic();
+        }
+    };
+
     class ChannelExtractNode : public TerrainNodeBase {
     public:
         int channel = 0;
@@ -3054,6 +3241,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Channel Extract";
             metadata.category = "Utility";
             metadata.headerColor = IM_COL32(150, 95, 175, 255);
+            metadata.iconType = (int)UIWidgets::IconType::EyedropperTool;
             headerColor = ImVec4(0.58f, 0.38f, 0.68f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -3084,6 +3272,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Splat Compose";
             metadata.category = "Texture";
             metadata.headerColor = IM_COL32(195, 135, 55, 255);
+            metadata.iconType = (int)UIWidgets::IconType::LayerTool;
             headerColor = ImVec4(0.76f, 0.52f, 0.22f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -3116,6 +3305,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Remap";
             metadata.category = "Filter";
             metadata.headerColor = IM_COL32(90, 150, 195, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Settings;
             headerColor = ImVec4(0.35f, 0.58f, 0.76f, 1.0f);
         }
         void syncSemantic() {
@@ -3165,6 +3355,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Mask Adjust";
             metadata.category = "Filter";
             metadata.headerColor = IM_COL32(130, 105, 190, 255);
+            metadata.iconType = (int)UIWidgets::IconType::DodgeTool;
             headerColor = ImVec4(0.51f, 0.41f, 0.75f, 1.0f);
         }
 
@@ -3205,6 +3396,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Mask Morphology";
             metadata.category = "Mask";
             metadata.headerColor = IM_COL32(165, 95, 185, 255);
+            metadata.iconType = (int)UIWidgets::IconType::InflateTool;
             headerColor = ImVec4(0.64f, 0.37f, 0.72f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -3247,6 +3439,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Data Maps";
             metadata.description = "Cached slope, curvature, valley and wetness fields";
             metadata.headerColor = IM_COL32(62, 145, 180, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Graph;
             headerColor = ImVec4(0.24f, 0.57f, 0.71f, 1.0f);
         }
 
@@ -3273,7 +3466,47 @@ namespace TerrainNodesV2 {
     class WatershedAnalysisNode : public TerrainNodeBase {
     public:
         float rainfall = 1.0f;
+        // Numerical ladder of the priority flood ONLY. It has to stay above
+        // float resolution near h = 0.5 (one ulp is about 6e-8) or the fill
+        // becomes bitwise flat and steepest descent lays down parallel
+        // "power line" channels. It is NOT a slope threshold - see
+        // flatSlopePercent, which used to be derived from this and therefore
+        // scaled with heightScale and mesh resolution instead of with terrain.
         float flatEpsilon = 0.00001f;
+        // Below this PHYSICAL slope a cell is routed as a flat (Garbrecht &
+        // Martz exit-distance BFS) instead of by steepest descent. A natural
+        // alluvial valley floor runs 0.05-0.5 %, so anything at or above that
+        // swallows real river reaches. Percent, resolution independent.
+        float flatSlopePercent = 0.02f;
+        // Hybrid breach-fill (Lindsay 2016). A pit whose outlet can be cut for
+        // less than this many cubic metres is BREACHED - the sill is carved
+        // down along the drainage path - instead of the basin being raised to
+        // meet it. Filling is what puts a fictitious surface under the river
+        // mesh and hides real hills from routing; breaching leaves the routed
+        // path inside terrain that actually exists. Set to 0 to fill only
+        // (the pre-2026-08-26 behaviour).
+        // ★ The discriminating variable is DEPTH, not volume: a numerical pit
+        // has a sill under a metre, a real lake basin sits many metres below
+        // its sill. The first defaults (25000 m3 / 40 m) were so permissive
+        // that every basin on a 1 km terrain was breachable and the scene
+        // produced NO lakes at all.
+        float breachBudgetCubicMeters = 2000.0f;
+        // A breach may never cut deeper than this below the original surface.
+        // Without it one pathological rim turns into a canyon.
+        float breachMaximumDepthMeters = 3.0f;
+        // ★ A volume budget alone does NOT bound the LENGTH of the cut, and
+        // length is what makes a breach look wrong. On a 1 km / 2048 field the
+        // cell is 0.24 m2, so 2000 m3 buys a one-metre-deep trench over eight
+        // thousand cells - a canal ruled straight across the valley, through
+        // whatever ridges were in the way. A sill notch is tens of metres.
+        float breachMaximumLengthMeters = 60.0f;
+
+        // Last solve's outcome. Deliberately NOT serialized - these are a
+        // measurement, and a measurement restored from a file is a default
+        // wearing a measurement's clothes.
+        int   lastBreachedPits = 0;
+        int   lastFilledPits = 0;
+        float lastBreachVolumeCubicMeters = 0.0f;
 
         WatershedAnalysisNode() {
             name = "Watershed Analysis";
@@ -3288,8 +3521,12 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Water Input Depth", NodeSystem::DataType::Image2D,
                 NodeSystem::ImageSemantic::PhysicalScalar, true, 1, NodeSystem::ImageUnit::Meters));
+            // NOT "Filled Height" any more: with breaching enabled this surface
+            // can sit BELOW the input height as well as above it. The rename is
+            // deliberate - a consumer that still wants "the lake surface" must
+            // be re-read rather than silently handed a different quantity.
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Filled Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                "Conditioned Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
                 1, NodeSystem::ImageUnit::Unitless));
@@ -3305,10 +3542,21 @@ namespace TerrainNodesV2 {
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Runoff Volume", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
                 1, NodeSystem::ImageUnit::CubicMeters));
+            // Appended output: serialized graphs map pins by index, so it stays
+            // last. How deep the breach cut the sill, in metres, zero where the
+            // pit was filled instead. This has to LEAVE the node: a breach that
+            // only exists in the conditioning surface removes the pit for
+            // routing while the ridge still stands in the rendered terrain, so
+            // the extracted river climbs over a ridge that is really there.
+            // Wire it into River Bed Carve so the cut is committed.
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Breach Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::Meters));
             metadata.displayName = "Watershed Analysis";
             metadata.category = "Hydrology";
             metadata.description = "Depression-safe D8 drainage, accumulation and catchments";
             metadata.headerColor = IM_COL32(48, 132, 190, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Console;
             headerColor = ImVec4(0.19f, 0.52f, 0.75f, 1.0f);
         }
 
@@ -3319,11 +3567,22 @@ namespace TerrainNodesV2 {
             TerrainNodeBase::serializeToJson(j);
             j["rainfall"] = rainfall;
             j["flatEpsilon"] = flatEpsilon;
+            j["flatSlopePercent"] = flatSlopePercent;
+            j["breachBudgetCubicMeters"] = breachBudgetCubicMeters;
+            j["breachMaximumDepthMeters"] = breachMaximumDepthMeters;
+            j["breachMaximumLengthMeters"] = breachMaximumLengthMeters;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
             rainfall = clampValue(j.value("rainfall", rainfall), 0.001f, 100.0f);
             flatEpsilon = clampValue(j.value("flatEpsilon", flatEpsilon), 0.0000001f, 0.01f);
+            flatSlopePercent = clampValue(j.value("flatSlopePercent", flatSlopePercent), 0.0f, 25.0f);
+            breachBudgetCubicMeters = clampValue(
+                j.value("breachBudgetCubicMeters", breachBudgetCubicMeters), 0.0f, 1.0e9f);
+            breachMaximumDepthMeters = clampValue(
+                j.value("breachMaximumDepthMeters", breachMaximumDepthMeters), 0.0f, 500.0f);
+            breachMaximumLengthMeters = clampValue(
+                j.value("breachMaximumLengthMeters", breachMaximumLengthMeters), 0.0f, 100000.0f);
         }
     };
 
@@ -3347,7 +3606,7 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Original Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Filled Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                "Conditioned Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction, true,
                 1, NodeSystem::ImageUnit::Unitless));
@@ -3371,6 +3630,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Hydrology";
             metadata.description = "Extracts lake levels, shorelines, storage and spill outlets";
             metadata.headerColor = IM_COL32(35, 145, 190, 255);
+            metadata.iconType = (int)UIWidgets::IconType::FillTool;
             headerColor = ImVec4(0.14f, 0.57f, 0.75f, 1.0f);
         }
 
@@ -3436,6 +3696,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Output";
             metadata.description = "Builds owned WaterSurface meshes from analytical lakes";
             metadata.headerColor = IM_COL32(25, 155, 198, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ViewPreview;
             headerColor = ImVec4(0.10f, 0.61f, 0.78f, 1.0f);
         }
 
@@ -3530,10 +3791,10 @@ namespace TerrainNodesV2 {
             terrainNodeType = NodeType::RiverNetwork;
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
-                false, 1, NodeSystem::ImageUnit::Unitless));
+                false, 1, NodeSystem::ImageUnit::Unknown));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction,
-                false, 1, NodeSystem::ImageUnit::Unitless));
+                false, 0, NodeSystem::ImageUnit::Unitless));
             // Appended for pin-index serialization stability. When connected,
             // this physical area replaces the domain-relative legacy threshold.
             inputs.push_back(NodeSystem::Pin::createInput(
@@ -3543,6 +3804,12 @@ namespace TerrainNodesV2 {
             // complete footprint, so extracted channels must leave it empty.
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Optional explicit outlet authority for vector flow fields that
+            // are intentionally still inside standing water. Appended for
+            // pin-index serialization stability.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Spill Points", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::Mask, true));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -3554,6 +3821,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Hydrology";
             metadata.description = "Extracts and prunes a connected stream hierarchy";
             metadata.headerColor = IM_COL32(42, 151, 203, 255);
+            metadata.iconType = (int)UIWidgets::IconType::AnimGraph;
             headerColor = ImVec4(0.16f, 0.59f, 0.80f, 1.0f);
         }
 
@@ -3593,6 +3861,11 @@ namespace TerrainNodesV2 {
         float bankSideSlope = 1.5f;
         float minimumBedSlope = 0.0001f;
         float minimumSurfaceSlope = 0.00002f;
+        // How far above its own bed a backwater may stand, as a multiple of the
+        // locally solved normal depth. This replaces the flat maximumDepthMeters
+        // ceiling, which let a lake surface ride 12 m over the valley floor no
+        // matter how small the river was.
+        float backwaterDepthRatio = 2.5f;
         float surfaceOffsetMeters = 0.03f;
         float bankFreeboardRatio = 0.35f;
         float minimumFreeboardMeters = 0.08f;
@@ -3609,7 +3882,7 @@ namespace TerrainNodesV2 {
                 false, 1, NodeSystem::ImageUnit::SquareMeters));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction,
-                false, 1, NodeSystem::ImageUnit::Unitless));
+                false, 0, NodeSystem::ImageUnit::Unitless));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             inputs.push_back(NodeSystem::Pin::createInput(
@@ -3640,6 +3913,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Hydrology";
             metadata.description = "Manning discharge, normal depth, velocity and whitewater state";
             metadata.headerColor = IM_COL32(28, 126, 176, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Water;
             headerColor = ImVec4(0.11f, 0.49f, 0.69f, 1.0f);
         }
 
@@ -3661,6 +3935,7 @@ namespace TerrainNodesV2 {
             j["bankSideSlope"] = bankSideSlope;
             j["minimumBedSlope"] = minimumBedSlope;
             j["minimumSurfaceSlope"] = minimumSurfaceSlope;
+            j["backwaterDepthRatio"] = backwaterDepthRatio;
             j["surfaceOffsetMeters"] = surfaceOffsetMeters;
             j["bankFreeboardRatio"] = bankFreeboardRatio;
             j["minimumFreeboardMeters"] = minimumFreeboardMeters;
@@ -3682,6 +3957,7 @@ namespace TerrainNodesV2 {
             bankSideSlope = clampValue(j.value("bankSideSlope", bankSideSlope), 0.0f, 10.0f);
             minimumBedSlope = clampValue(j.value("minimumBedSlope", minimumBedSlope), 0.000001f, 1.0f);
             minimumSurfaceSlope = clampValue(j.value("minimumSurfaceSlope", minimumSurfaceSlope), 0.0f, 0.1f);
+            backwaterDepthRatio = clampValue(j.value("backwaterDepthRatio", backwaterDepthRatio), 1.0f, 50.0f);
             surfaceOffsetMeters = clampValue(j.value("surfaceOffsetMeters", surfaceOffsetMeters), 0.0f, 10.0f);
             bankFreeboardRatio = clampValue(j.value("bankFreeboardRatio", bankFreeboardRatio), 0.0f, 5.0f);
             minimumFreeboardMeters = clampValue(j.value("minimumFreeboardMeters", minimumFreeboardMeters), 0.0f, 20.0f);
@@ -3702,6 +3978,16 @@ namespace TerrainNodesV2 {
         float minimumDepth = 0.08f;
         float maximumDepth = 0.65f;
         float bankSoftness = 0.65f;
+        /// Cross-section shape is a RESULT, not a dial.
+        ///
+        /// A young fluvial valley is V-shaped because water cuts a line; a
+        /// glaciated one is U-shaped because ice cuts a plane. Exposing "pick
+        /// V or U" as a free choice would make the panel lie about the cause,
+        /// which is this repository's most expensive failure class. So the
+        /// floor widens only where the Glacial input says ice worked, and the
+        /// unwired case reproduces the old profile exactly.
+        float glacialFloorFraction = 0.55f;
+        float glacialWidening = 0.8f;
 
         RiverBedCarveNode() {
             name = "River Bed Carve";
@@ -3724,6 +4010,18 @@ namespace TerrainNodesV2 {
             // graph may cross a lake, but visible bed carving must stop there.
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Appended. Glacier Flow already publishes where ice worked and
+            // nothing read it; this is the pin that turns that into form.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Glacial", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Appended. Commits the watershed's breach cut to the terrain. It
+            // is deliberately NOT gated on channel strength or on the lake
+            // mask: the sill a breach removes is often below the accumulation
+            // threshold, and skipping it there is what leaves the ridge
+            // standing while the drainage solve believes it is gone.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Breach Depth", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PhysicalScalar, true, 1, NodeSystem::ImageUnit::Meters));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Carved Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -3732,6 +4030,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Hydrology";
             metadata.description = "Area-scaled, non-destructive channel and bank carving";
             metadata.headerColor = IM_COL32(38, 139, 184, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Sculpt;
             headerColor = ImVec4(0.15f, 0.55f, 0.72f, 1.0f);
         }
 
@@ -3743,6 +4042,8 @@ namespace TerrainNodesV2 {
             j["minimumWidth"] = minimumWidth; j["maximumWidth"] = maximumWidth;
             j["minimumDepth"] = minimumDepth; j["maximumDepth"] = maximumDepth;
             j["bankSoftness"] = bankSoftness;
+            j["glacialFloorFraction"] = glacialFloorFraction;
+            j["glacialWidening"] = glacialWidening;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
@@ -3751,6 +4052,8 @@ namespace TerrainNodesV2 {
             minimumDepth = clampValue(j.value("minimumDepth", minimumDepth), 0.0f, 50.0f);
             maximumDepth = clampValue(j.value("maximumDepth", maximumDepth), minimumDepth, 200.0f);
             bankSoftness = clampValue(j.value("bankSoftness", bankSoftness), 0.05f, 1.0f);
+            glacialFloorFraction = clampValue(j.value("glacialFloorFraction", glacialFloorFraction), 0.0f, 0.9f);
+            glacialWidening = clampValue(j.value("glacialWidening", glacialWidening), 0.0f, 3.0f);
         }
     };
 
@@ -3794,10 +4097,10 @@ namespace TerrainNodesV2 {
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar,
-                false, 1, NodeSystem::ImageUnit::Unitless));
+                false, 1, NodeSystem::ImageUnit::Unknown));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Direction,
-                false, 1, NodeSystem::ImageUnit::Unitless));
+                false, 0, NodeSystem::ImageUnit::Unitless));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             inputs.push_back(NodeSystem::Pin::createInput(
@@ -3827,6 +4130,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Output";
             metadata.description = "Creates owned RiverSpline branches from a river network";
             metadata.headerColor = IM_COL32(35, 167, 214, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Gizmo;
             headerColor = ImVec4(0.14f, 0.65f, 0.84f, 1.0f);
         }
 
@@ -3898,6 +4202,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Hydrology";
             metadata.description = "One-control presets for the detailed physical river/lake layer";
             metadata.headerColor = IM_COL32(30, 151, 205, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Water;
             headerColor = ImVec4(0.12f, 0.59f, 0.80f, 1.0f);
         }
 
@@ -3944,8 +4249,7 @@ namespace TerrainNodesV2 {
                                           "Lake Spill Points", "Lake IDs", "Catchment Area",
                                           "River Discharge", "River Width", "River Water Depth", "River Flow Speed",
                                           "River Water Level", "River Froude", "River Foam Potential",
-                                          "Hydraulic Erosion", "Hydraulic Deposition",
-                                          "Hydraulic Discharge", "Hydraulic Sediment Flux",
+                                          "Erosion Wear", "Erosion Deposits",
                                           "Geology Hardness", "Geology Permeability",
                                           "Geology Fracture", "Geology ID"}) {
                 inputs.push_back(NodeSystem::Pin::createInput(
@@ -3973,12 +4277,11 @@ namespace TerrainNodesV2 {
                              NodeSystem::ImageUnit::MetersPerSecond);
             setFieldContract(27, NodeSystem::ImageSemantic::Height);
             setFieldContract(28, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Unitless);
-            setFieldContract(32, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Unitless);
-            setFieldContract(33, NodeSystem::ImageSemantic::PhysicalScalar, NodeSystem::ImageUnit::Unitless);
             metadata.displayName = "Terrain Fields Output";
             metadata.category = "Output";
             metadata.description = "Publishes terrain, biome and hydrology fields for downstream systems";
             metadata.headerColor = IM_COL32(55, 170, 135, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Console;
             headerColor = ImVec4(0.22f, 0.67f, 0.53f, 1.0f);
         }
 
@@ -4016,6 +4319,10 @@ namespace TerrainNodesV2 {
             for (const char* inputName : {"Slope", "Valley", "Wetness", "Exposure"}) {
                 inputs.push_back(NodeSystem::Pin::createInput(
                     inputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+                // Wetness is routinely driven by hydraulic discharge, an SI
+                // field. Accept it here and normalize at getMaskInput() rather
+                // than letting the link be silently refused.
+                inputs.back().acceptImageSemantic(NodeSystem::ImageSemantic::PhysicalScalar);
             }
             for (const char* outputName : {"Forest", "Grass", "Rock", "Alpine"}) {
                 outputs.push_back(NodeSystem::Pin::createOutput(
@@ -4026,6 +4333,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Biome Composer";
             metadata.category = "Data Maps";
             metadata.headerColor = IM_COL32(74, 154, 92, 255);
+            metadata.iconType = (int)UIWidgets::IconType::World;
             headerColor = ImVec4(0.29f, 0.60f, 0.36f, 1.0f);
         }
 
@@ -4118,6 +4426,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Foliage";
             metadata.description = "Binds one distribution rule to an existing foliage layer";
             metadata.headerColor = IM_COL32(74, 145, 78, 255);
+            metadata.iconType = (int)UIWidgets::IconType::HairCombTool;
             headerColor = ImVec4(0.29f, 0.57f, 0.31f, 1.0f);
         }
 
@@ -4152,6 +4461,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Foliage";
             metadata.description = "Groups independent foliage rules for batch control";
             metadata.headerColor = IM_COL32(52, 126, 64, 255);
+            metadata.iconType = (int)UIWidgets::IconType::HairClumpTool;
             headerColor = ImVec4(0.20f, 0.49f, 0.25f, 1.0f);
         }
 
@@ -4183,6 +4493,7 @@ namespace TerrainNodesV2 {
             metadata.category = "Output";
             metadata.description = "Applies node recipes to existing foliage instance groups";
             metadata.headerColor = IM_COL32(42, 158, 91, 255);
+            metadata.iconType = (int)UIWidgets::IconType::HairAddTool;
             headerColor = ImVec4(0.16f, 0.62f, 0.36f, 1.0f);
         }
 
@@ -4218,6 +4529,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Wetness Map";
             metadata.category = "Data Map";
             metadata.headerColor = IM_COL32(60, 135, 180, 255);
+            metadata.iconType = (int)UIWidgets::IconType::EyedropperTool;
             headerColor = ImVec4(0.24f, 0.53f, 0.71f, 1.0f);
         }
 
@@ -4246,21 +4558,55 @@ namespace TerrainNodesV2 {
         float depositionInfluence = 0.35f;
         float concavityInfluence = 0.30f;
         float slopeLoss = 0.55f;
+        /// Discharge that has slowed down leaves its load behind, and discharge
+        /// that has not scours the bed. One accumulation field, two opposite
+        /// effects separated by slope - this is what makes valley floors thick
+        /// and channel beds thin without an erosion sim in the graph.
+        float transportInfluence = 0.45f;
+        float channelScour = 0.35f;
+        /// How much bedrock hardness suppresses soil PRODUCTION. Left at 1.0,
+        /// which is what the term did before it was a dial - it exists because
+        /// Strata hardness is banded by elevation by construction, so a graph
+        /// that wants soil to stop reading as a contour map has somewhere to
+        /// turn. Transported soil in valleys keeps no memory of the rock
+        /// beneath it either way.
+        float hardnessInfluence = 1.0f;
 
         SoilDepthNode() {
             name = "Soil Depth";
             terrainNodeType = NodeType::SoilDepth;
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            // Renamed from "Flow". The pin is consumed as DEPOSITION -
+            // `soilDepth += depositionInfluence * value * flatness`, i.e. it
+            // BUILDS soil. Feeding flow accumulation here made channels the
+            // thickest soil on the terrain, which is backwards: channels are
+            // scoured, not filled. Hydraulic Erosion's Deposition output is
+            // the correct source; with no erosion sim there is no deposition
+            // field and the pin belongs empty.
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+                "Deposition", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Erosion publishes deposition/discharge as SI fields; accept them
+            // and normalize once at the input boundary.
+            // Appended, so existing serialized graphs keep their pin indices.
+            // Deposition is the erosion sim's answer; Flow is the accumulation
+            // field every graph already has. Flow is NOT deposition - it is
+            // split into a deposition and a scour term by local slope, which
+            // is why it needs its own pin rather than being wired into the one
+            // above.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs[1].acceptImageSemantic(NodeSystem::ImageSemantic::PhysicalScalar);
+            inputs[2].acceptImageSemantic(NodeSystem::ImageSemantic::PhysicalScalar);
+            inputs[3].acceptImageSemantic(NodeSystem::ImageSemantic::PhysicalScalar);
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Soil Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             metadata.displayName = "Soil Depth";
             metadata.category = "Data Map";
             metadata.headerColor = IM_COL32(135, 105, 65, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ClayStripsTool;
             headerColor = ImVec4(0.53f, 0.41f, 0.25f, 1.0f);
         }
 
@@ -4273,6 +4619,9 @@ namespace TerrainNodesV2 {
             j["depositionInfluence"] = depositionInfluence;
             j["concavityInfluence"] = concavityInfluence;
             j["slopeLoss"] = slopeLoss;
+            j["transportInfluence"] = transportInfluence;
+            j["channelScour"] = channelScour;
+            j["hardnessInfluence"] = hardnessInfluence;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
@@ -4280,6 +4629,101 @@ namespace TerrainNodesV2 {
             depositionInfluence = clampValue(j.value("depositionInfluence", depositionInfluence), 0.0f, 2.0f);
             concavityInfluence = clampValue(j.value("concavityInfluence", concavityInfluence), 0.0f, 2.0f);
             slopeLoss = clampValue(j.value("slopeLoss", slopeLoss), 0.0f, 2.0f);
+            transportInfluence = clampValue(j.value("transportInfluence", transportInfluence), 0.0f, 2.0f);
+            channelScour = clampValue(j.value("channelScour", channelScour), 0.0f, 2.0f);
+            hardnessInfluence = clampValue(j.value("hardnessInfluence", hardnessInfluence), 0.0f, 1.0f);
+        }
+    };
+
+    /**
+     * @brief Volcanic cones, craters and collapsed calderas.
+     *
+     * The one macro landform the generator could not make: every other node
+     * here builds ranges, folds and basins, all of which are elongated or
+     * tectonic. A volcano is radial, and nothing radial could be authored
+     * except by hand.
+     *
+     * The profile is built from the real thing rather than a bump: a cone,
+     * an excavated bowl with a flat floor, a raised rim at the crater edge,
+     * and an ejecta blanket outside it decaying with distance. A caldera is
+     * the same shape with the summit collapsed - the ratio is a dial, not a
+     * second node, because a caldera IS a crater whose roof fell in.
+     */
+    class CraterCalderaNode : public TerrainNodeBase {
+    public:
+        int count = 1;
+        int seed = 1337;
+        /// Metres. Radius is the crater rim crest, not the cone base.
+        float craterRadius = 300.0f;
+        float radiusVariation = 0.35f;
+        float craterDepth = 120.0f;
+        float rimHeight = 45.0f;
+        float coneHeight = 400.0f;
+        /// Cone base radius as a multiple of the crater radius. 1.0 gives a
+        /// bare crater in flat ground; larger values grow a volcano under it.
+        float coneRadiusScale = 4.0f;
+        /// Fraction of the crater radius that is flat floor.
+        float floorFraction = 0.35f;
+        /// 0 = simple crater. Above 0 the summit collapses into a caldera of
+        /// this fraction of the crater radius, with a terrace at its edge.
+        float calderaRatio = 0.0f;
+        /// How fast the ejecta blanket decays outside the rim.
+        float ejectaFalloff = 2.6f;
+        float ejectaStrength = 0.35f;
+
+        CraterCalderaNode() {
+            name = "Crater / Caldera";
+            terrainNodeType = NodeType::CraterCaldera;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            // Where craters are ALLOWED, not where they are placed: placement
+            // stays deterministic from the seed so the same graph rebuilds the
+            // same mountain.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Placement Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Crater", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Rim", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            // Fresh volcanic rock is hard and unweathered, so the chain that
+            // already consumes hardness can consume this too.
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Crater / Caldera";
+            metadata.category = "Landform";
+            metadata.headerColor = IM_COL32(170, 85, 70, 255);
+            metadata.iconType = (int)UIWidgets::IconType::BlobTool;
+            headerColor = ImVec4(0.67f, 0.33f, 0.27f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.CraterCaldera"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["count"] = count; j["seed"] = seed;
+            j["craterRadius"] = craterRadius; j["radiusVariation"] = radiusVariation;
+            j["craterDepth"] = craterDepth; j["rimHeight"] = rimHeight;
+            j["coneHeight"] = coneHeight; j["coneRadiusScale"] = coneRadiusScale;
+            j["floorFraction"] = floorFraction; j["calderaRatio"] = calderaRatio;
+            j["ejectaFalloff"] = ejectaFalloff; j["ejectaStrength"] = ejectaStrength;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            count = clampValue(j.value("count", count), 1, 64);
+            seed = j.value("seed", seed);
+            craterRadius = clampValue(j.value("craterRadius", craterRadius), 1.0f, 100000.0f);
+            radiusVariation = clampValue(j.value("radiusVariation", radiusVariation), 0.0f, 0.95f);
+            craterDepth = clampValue(j.value("craterDepth", craterDepth), 0.0f, 20000.0f);
+            rimHeight = clampValue(j.value("rimHeight", rimHeight), 0.0f, 20000.0f);
+            coneHeight = clampValue(j.value("coneHeight", coneHeight), 0.0f, 20000.0f);
+            coneRadiusScale = clampValue(j.value("coneRadiusScale", coneRadiusScale), 1.0f, 20.0f);
+            floorFraction = clampValue(j.value("floorFraction", floorFraction), 0.0f, 0.9f);
+            calderaRatio = clampValue(j.value("calderaRatio", calderaRatio), 0.0f, 0.95f);
+            ejectaFalloff = clampValue(j.value("ejectaFalloff", ejectaFalloff), 0.5f, 8.0f);
+            ejectaStrength = clampValue(j.value("ejectaStrength", ejectaStrength), 0.0f, 2.0f);
         }
     };
 
@@ -4316,6 +4760,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Lithology";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(150, 100, 72, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ViewMatcap;
             headerColor = ImVec4(0.59f, 0.39f, 0.28f, 1.0f);
         }
 
@@ -4384,6 +4829,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Plate Tectonics";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(135, 82, 62, 255);
+            metadata.iconType = (int)UIWidgets::IconType::GrabTool;
             headerColor = ImVec4(0.53f, 0.32f, 0.24f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -4434,6 +4880,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Fold / Compression";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(155, 92, 66, 255);
+            metadata.iconType = (int)UIWidgets::IconType::SnakeHookTool;
             headerColor = ImVec4(0.61f, 0.36f, 0.26f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -4487,6 +4934,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Strata";
             metadata.category = "Geology";
             metadata.headerColor = IM_COL32(165, 110, 70, 255);
+            metadata.iconType = (int)UIWidgets::IconType::FaceMode;
             headerColor = ImVec4(0.65f, 0.43f, 0.27f, 1.0f);
         }
 
@@ -4528,6 +4976,11 @@ namespace TerrainNodesV2 {
         float iceInfluence = 0.85f;
         float contrast = 1.25f;
         int seed = 73;
+        // Renamed from normalizeOutput: Splat Output normalized regardless, so
+        // the old name described an operation this node never controlled. The
+        // dial now names what it actually does, and old files are not silently
+        // reinterpreted because the key changed with the meaning.
+        bool soilFillsRemainder = true;
 
         SurfaceComposerNode() {
             name = "Surface Composer";
@@ -4557,6 +5010,23 @@ namespace TerrainNodesV2 {
                 "Grass / Base", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Rock / Slope", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Appended: without a Slope pin this node could not consume the
+            // shared Terrain Analysis solve, so it re-derived its own slope on
+            // a different curve and disagreed with every other splat author.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Slope", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Appended: Thermal Erosion has published a Talus mask all along
+            // and nothing consumed it. Debris cones at a cliff base ARE rock -
+            // loose, angular rock - so talus joins the rock claim and clears
+            // the grass off itself rather than needing a layer of its own.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Talus", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Hydrology publishes discharge, drainage area and water depth as
+            // SI fields. They are the correct sources for these pins; the
+            // normalization into 0-1 happens once, at getMaskInput().
+            for (size_t index = 1; index < inputs.size(); ++index) {
+                inputs[index].acceptImageSemantic(NodeSystem::ImageSemantic::PhysicalScalar);
+            }
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Surface Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -4567,6 +5037,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Surface Composer";
             metadata.category = "Texture";
             metadata.headerColor = IM_COL32(190, 135, 52, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ViewMatcap;
             headerColor = ImVec4(0.75f, 0.53f, 0.20f, 1.0f);
         }
 
@@ -4582,6 +5053,7 @@ namespace TerrainNodesV2 {
             j["hardnessInfluence"] = hardnessInfluence; j["snowInfluence"] = snowInfluence;
             j["grassInfluence"] = grassInfluence; j["rockInfluence"] = rockInfluence;
             j["iceInfluence"] = iceInfluence; j["contrast"] = contrast; j["seed"] = seed;
+            j["soilFillsRemainder"] = soilFillsRemainder;
         }
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
@@ -4598,6 +5070,7 @@ namespace TerrainNodesV2 {
             iceInfluence = clampValue(j.value("iceInfluence", iceInfluence), 0.0f, 2.0f);
             contrast = clampValue(j.value("contrast", contrast), 0.1f, 4.0f);
             seed = j.value("seed", seed);
+            soilFillsRemainder = j.value("soilFillsRemainder", soilFillsRemainder);
         }
     };
 
@@ -4665,6 +5138,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Snow Layer";
             metadata.category = "Snow & Ice";
             metadata.headerColor = IM_COL32(105, 180, 220, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Wind;
             headerColor = ImVec4(0.41f, 0.71f, 0.86f, 1.0f);
         }
 
@@ -4769,6 +5243,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Climate";
             metadata.category = "Snow & Ice";
             metadata.headerColor = IM_COL32(80, 145, 190, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Volumetric;
             headerColor = ImVec4(0.31f, 0.57f, 0.75f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -4823,6 +5298,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Snowfall";
             metadata.category = "Snow & Ice";
             metadata.headerColor = IM_COL32(175, 210, 230, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Volumetric;
             headerColor = ImVec4(0.68f, 0.82f, 0.90f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -4873,6 +5349,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Snow Settle";
             metadata.category = "Snow & Ice";
             metadata.headerColor = IM_COL32(145, 190, 220, 255);
+            metadata.iconType = (int)UIWidgets::IconType::SmudgeTool;
             headerColor = ImVec4(0.57f, 0.75f, 0.86f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -4923,6 +5400,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Snow Melt / Freeze";
             metadata.category = "Snow & Ice";
             metadata.headerColor = IM_COL32(90, 170, 210, 255);
+            metadata.iconType = (int)UIWidgets::IconType::BurnTool;
             headerColor = ImVec4(0.35f, 0.67f, 0.82f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -4966,6 +5444,7 @@ namespace TerrainNodesV2 {
             metadata.displayName = "Glacier Flow";
             metadata.category = "Snow & Ice";
             metadata.headerColor = IM_COL32(70, 155, 200, 255);
+            metadata.iconType = (int)UIWidgets::IconType::ElasticDeformTool;
             headerColor = ImVec4(0.27f, 0.61f, 0.78f, 1.0f);
         }
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
@@ -5133,6 +5612,40 @@ namespace TerrainNodesV2 {
         // Create a default graph with basic nodes
         void createDefaultGraph(TerrainObject* terrain);
 
+        // ====================================================================
+        // SETUP WIRING DIAGNOSTICS
+        // ====================================================================
+
+        /**
+         * @brief One link a setup asked for and did not get.
+         *
+         * addLink() answers a refused connection with 0, and every setup
+         * ignored that answer. A pin-semantic mismatch therefore produced a
+         * graph that looked built but had holes in it: the composer fell back
+         * to synthesized values and the result merely looked plausible, which
+         * is the one failure nobody reports as a bug.
+         */
+        struct SetupWiringFault {
+            std::string fromNode;
+            std::string fromPin;
+            std::string toNode;
+            std::string toPin;
+            std::string reason;
+        };
+
+        /// Faults recorded by the most recent add*Setup call.
+        const std::vector<SetupWiringFault>& lastSetupWiringFaults() const {
+            return setupWiringFaults_;
+        }
+
+        /**
+         * @brief addLink that records what it could not connect.
+         *
+         * Setups must use this rather than addLink so a refused connection is
+         * a reported fault instead of a missing wire nobody notices.
+         */
+        uint32_t addCheckedLink(uint32_t startPinId, uint32_t endPinId);
+
         // Non-destructive authoring helper: inserts a Snow Climate node before
         // the active Height Output and wires its material outputs to the active
         // Surface Composer/Splat Output chain. Existing grass/rock/flow inputs
@@ -5193,6 +5706,7 @@ namespace TerrainNodesV2 {
         void fromJson(const nlohmann::json& j, TerrainObject* terrain = nullptr);
 
     private:
+        std::vector<SetupWiringFault> setupWiringFaults_;
         std::future<void> evalFuture_;
         TerrainObject* pendingFinalizeTerrain_ = nullptr;
         struct ::SceneData* pendingFinalizeScene_ = nullptr;

@@ -1188,13 +1188,23 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         static ImGuiTextFilter filter;
         filter.Draw("Filter##objects");
 
+        auto isLinkedSplineSkinDisplay = [&](const std::string& objectName) {
+            for (const auto& splineEntry : spline_ui_cache) {
+                const auto& spline = splineEntry.second.second;
+                if (spline && spline->skin_display.enabled &&
+                    spline->skin_display.host_name == objectName) return true;
+            }
+            return false;
+        };
+
         const auto visible_object_indices = HierarchyUI::buildLiveObjectView(
             mesh_ui_cache,
             [&ctx](const std::string& name) {
                 return ctx.scene.hasLiveSimulationObject(name);
             },
-            [](const std::string& name) {
-                return !filter.IsActive() || filter.PassFilter(name.c_str());
+            [&](const std::string& name) {
+                return !isLinkedSplineSkinDisplay(name) &&
+                    (!filter.IsActive() || filter.PassFilter(name.c_str()));
             },
             [&ctx](const std::string& name) {
                 for (const auto& group : ctx.scene.object_groups) {
@@ -1502,7 +1512,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             ImGui::PushStyleColor(ImGuiCol_Text, spline_selected
                 ? ImVec4(0.25f, 1.0f, 0.85f, 1.0f)
                 : ImVec4(0.65f, 0.9f, 0.85f, 1.0f));
-            ImGui::TreeNodeEx((std::string("Spline  ") + name).c_str(), spline_flags);
+            const std::string splineLabel = std::string("Spline  ") + name +
+                (spline->skin_display.enabled ? "  [Skin]" : "");
+            ImGui::TreeNodeEx(splineLabel.c_str(), spline_flags);
             ImGui::PopStyleColor();
             if (ImGui::IsItemClicked()) {
                 if (ImGui::GetIO().KeyCtrl) {
@@ -1639,7 +1651,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             item.rotation = sel.selected.rotation;
                             item.scale = sel.selected.scale;
 
-                            if (item.type == SelectableType::Object && item.object) {
+                            if (item.type == SelectableType::Object && item.spline_object &&
+                                item.spline_object->transform) {
+                                item.spline_object->transform->setPivotMatrix(
+                                    Matrix4x4::fromTRS(item.position, item.rotation, item.scale));
+                                item.has_cached_aabb = false;
+                            } else if (item.type == SelectableType::Object && item.object) {
                                 auto transform = item.object->getTransformHandle();
                                 if (transform) {
                                     transform->setPivotMatrix(Matrix4x4::fromTRS(item.position, item.rotation, item.scale));
@@ -1719,8 +1736,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
 
                     if (sel.selected.type == SelectableType::Object &&
-                        sel.selected.object &&
-                        sel.multi_selection.size() == 1) {
+                        (sel.selected.object || sel.selected.spline_object) &&
+                        (sel.multi_selection.size() == 1 || sel.selected.spline_object)) {
                         ImGui::Separator();
                         ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.35f, 1.0f), "Pivot");
 
@@ -1738,9 +1755,22 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                         ImGui::SameLine();
                         if (ImGui::Button("Center Pivot")) {
-                            std::string object_name = !sel.selected.name.empty() ? sel.selected.name : sel.selected.object->getNodeName();
-                            if (object_name.empty()) object_name = "Unnamed";
-                            recenterObjectPivotToBoundsCenter(ctx, object_name);
+                            if (sel.selected.spline_object && sel.selected.spline_object->transform) {
+                                AABB bounds;
+                                if (sel.selected.spline_object->bounding_box(0.0f, 0.0f, bounds)) {
+                                    const Vec3 center = (bounds.min + bounds.max) * 0.5f;
+                                    const Matrix4x4 geometryTransform =
+                                        sel.selected.spline_object->transform->getFinal();
+                                    sel.selected.spline_object->transform->setPivotOffset(
+                                        geometryTransform.inverse().transform_point(center), true);
+                                    sel.updatePositionFromSelection();
+                                }
+                            } else if (sel.selected.object) {
+                                std::string object_name = !sel.selected.name.empty()
+                                    ? sel.selected.name : sel.selected.object->getNodeName();
+                                if (object_name.empty()) object_name = "Unnamed";
+                                recenterObjectPivotToBoundsCenter(ctx, object_name);
+                            }
                             pivot_edit_mode = false;
                             ProjectManager::getInstance().markModified();
                         }
@@ -1748,9 +1778,18 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                         Vec3 pivot_world = sel.selected.position;
                         if (ImGui::DragFloat3("Pivot Pos", &pivot_world.x, 0.1f)) {
-                            std::string object_name = !sel.selected.name.empty() ? sel.selected.name : sel.selected.object->getNodeName();
-                            if (object_name.empty()) object_name = "Unnamed";
-                            moveObjectPivot(ctx, object_name, pivot_world - sel.selected.position);
+                            if (sel.selected.spline_object && sel.selected.spline_object->transform) {
+                                const Matrix4x4 geometryTransform =
+                                    sel.selected.spline_object->transform->getFinal();
+                                sel.selected.spline_object->transform->setPivotOffset(
+                                    geometryTransform.inverse().transform_point(pivot_world), true);
+                                sel.updatePositionFromSelection();
+                            } else if (sel.selected.object) {
+                                std::string object_name = !sel.selected.name.empty()
+                                    ? sel.selected.name : sel.selected.object->getNodeName();
+                                if (object_name.empty()) object_name = "Unnamed";
+                                moveObjectPivot(ctx, object_name, pivot_world - sel.selected.position);
+                            }
                             ProjectManager::getInstance().markModified();
                         }
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Set pivot world position directly");

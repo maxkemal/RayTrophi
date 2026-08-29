@@ -26,6 +26,7 @@
 #include "world.h"
 #include "OptixWrapper.h"  // For direct instance transform updates
 #include "ui_modern.h"
+#include "MeshEdit/SplineAnimation.h"
 
 #include <thread>
 
@@ -2142,6 +2143,7 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
                     if (kf.has_camera) ImGui::BulletText("Camera");
                     if (kf.has_world) ImGui::BulletText("World");
                     if (kf.has_anim_graph) ImGui::BulletText("AnimGraph");
+                    if (kf.has_spline) ImGui::BulletText("Spline Controls (%zu points)", kf.spline.points.size());
                     ImGui::Separator();
 
                     if (kf.has_anim_graph) {
@@ -2646,7 +2648,7 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
         // We don't check objects against valid_entities because that was the slow part
         
         // Determine group based on keyframe types
-        bool has_transform = false, has_material = false, has_light = false, has_camera = false, has_world = false, has_terrain = false, has_emitter = false, has_anim_graph = false;
+        bool has_transform = false, has_material = false, has_light = false, has_camera = false, has_world = false, has_terrain = false, has_emitter = false, has_anim_graph = false, has_spline = false;
         std::vector<int> keyframes;
         
         for (auto& kf : track.keyframes) {
@@ -2658,6 +2660,7 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
             has_terrain |= kf.has_terrain;
             has_emitter |= kf.has_emitter;
             has_anim_graph |= kf.has_anim_graph;
+            has_spline |= kf.has_spline;
             keyframes.push_back(kf.frame);
         }
         
@@ -2845,7 +2848,7 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
                 t.keyframe_frames = keyframes;
                 t.expanded = true;
                 tracks.push_back(t);
-            } else if (has_transform || has_material) {
+            } else if (has_transform || has_material || has_spline) {
                 // Object with L/R/S sub-tracks
                 bool is_selected = (entity_name == selected_entity);
                 ImU32 color = has_material ? COLOR_MATERIAL : COLOR_TRANSFORM;
@@ -2931,6 +2934,9 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
                 viewport_selection = "Object_" + std::to_string(ctx.selection.selected.object_index);
             }
             viewport_selection = resolveCharacterTrackName(ctx.scene, viewport_selection);
+        } else if (ctx.selection.selected.type == SelectableType::Object &&
+                   ctx.selection.selected.spline_object) {
+            viewport_selection = ctx.selection.selected.spline_object->nodeName;
         } else if (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light) {
             viewport_selection = ctx.selection.selected.light->nodeName;
         } else if (ctx.selection.selected.type == SelectableType::Camera && ctx.selection.selected.camera) {
@@ -3124,6 +3130,20 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
     }
 
     if (!ctx.selection.hasSelection()) return;
+
+    // A spline is an object-level animation target too. The parent row keys its
+    // transform and every control field together; channel rows key only TRS.
+    if (ctx.selection.selected.type == SelectableType::Object &&
+        ctx.selection.selected.spline_object &&
+        ctx.selection.selected.spline_object->nodeName == entity_name) {
+        const bool include_points = channel == ChannelType::None;
+        std::string error;
+        MeshEdit::insertSplineAnimationKey(
+            ctx.scene.timeline, *ctx.selection.selected.spline_object, frame,
+            true, include_points, &error);
+        tracks_dirty = true;
+        return;
+    }
     
     // Validate entity name against selection (to ensure we are keying what is selected)
     // Actually, we should allow keying ANY entity if it matches the track?
@@ -3463,7 +3483,7 @@ void TimelineWidget::deleteKeyframe(UIContext& ctx, const std::string& track_nam
                 if (it_kf->has_material && !it_kf->material.has_albedo && !it_kf->material.has_opacity && !it_kf->material.has_roughness && !it_kf->material.has_metallic && !it_kf->material.has_clearcoat && !it_kf->material.has_transmission && !it_kf->material.has_ior && !it_kf->material.has_emission && !it_kf->material.has_normal) it_kf->has_material = false;
 
                 // Check if keyframe is now completely empty
-                bool has_any_data = it_kf->has_transform || it_kf->has_material || it_kf->has_light || it_kf->has_camera || it_kf->has_world || it_kf->has_terrain;
+                bool has_any_data = it_kf->has_transform || it_kf->has_material || it_kf->has_light || it_kf->has_camera || it_kf->has_world || it_kf->has_terrain || it_kf->has_spline;
                 
                 if (!has_any_data) {
                     // Remove mostly empty keyframe
@@ -3849,7 +3869,7 @@ void TimelineWidget::moveKeyframe(UIContext& ctx, const std::string& track_name,
                 !(src_kf->has_light && (src_kf->light.has_position || src_kf->light.has_color || src_kf->light.has_intensity || src_kf->light.has_direction)) &&
                 !(src_kf->has_camera && (src_kf->camera.has_position || src_kf->camera.has_target || src_kf->camera.has_fov || src_kf->camera.has_focus || src_kf->camera.has_aperture)) &&
                 !(src_kf->has_material && (src_kf->material.has_albedo || src_kf->material.has_opacity || src_kf->material.has_roughness || src_kf->material.has_metallic || src_kf->material.has_clearcoat || src_kf->material.has_transmission || src_kf->material.has_ior || src_kf->material.has_emission || src_kf->material.has_normal)) &&
-                !src_kf->has_world && !src_kf->has_terrain;
+                !src_kf->has_world && !src_kf->has_terrain && !src_kf->has_spline;
                 
              if (src_empty) {
                   keyframes.erase(

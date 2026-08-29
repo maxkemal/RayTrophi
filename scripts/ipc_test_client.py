@@ -265,6 +265,16 @@ def main():
     run_test("terrain.list_rivers", {}, "terrain.list_rivers")
     run_test("nodes.list", {"graph_type": "terrain", "graph_name": "IpcTerrain"},
              "nodes.list(terrain)")
+    run_test("nodes.list_ports", {"graph_type": "terrain", "graph_name": "IpcTerrain", "node_id": 1},
+             "nodes.list_ports(terrain)")
+    run_test("nodes.set_port_visible",
+             {"graph_type": "terrain", "graph_name": "IpcTerrain", "node_id": 1,
+              "direction": "output", "port_key": "height", "visible": False},
+             "nodes.set_port_visible(primary) -> error", expect_error=True)
+    run_test("nodes.link_by_key",
+             {"graph_type": "terrain", "graph_name": "IpcTerrain", "from_node": 1,
+              "from_output": "__missing__", "to_node": 1, "to_input": "__missing__"},
+             "nodes.link_by_key(missing port) -> error", expect_error=True)
     run_test("nodes.list_properties", {"graph_type": "terrain", "graph_name": "IpcTerrain", "node_id": 1},
              "nodes.list_properties(terrain noise)")
     run_test("terrain.erode", {"name": "IpcTerrain", "type": "invalid"},

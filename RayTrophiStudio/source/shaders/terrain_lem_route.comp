@@ -1,0 +1,180 @@
+// terrain_lem_route.comp
+// Transport step of the LEM: one cell-length of downstream sediment advection
+// with settling. This is the pass that makes deltas possible.
+//
+// Why it has to exist at all: the droplet solver carries sediment inside a
+// droplet whose lifetime is ~64 steps, i.e. about 1.5% of a 4K map, and the
+// channel stage's sediment term is purely local (in and out at the same cell).
+// So no grain of material could ever travel from a ridge to the coast, and a
+// delta is by definition "the load of a whole catchment arriving at standing
+// water". Here material moves along the MFD weights and drops a fraction
+//     fdep = 1 - exp(-Vs * L / q)
+// per cell, where q is unit-width discharge. Consequences that come for free:
+//  * A steep narrow channel has large q, fdep near 0, material passes through.
+//  * A wide flat valley floor has small q -> floodplain / alluvial fan.
+//  * Standing water adds depth-dependent capture. A shallow/transient hollow
+//    retains part of the load and can fill through repeated refreshes; a lake
+//    about one metre deep captures effectively all of it at the water line.
+//    As the bed rises the water line moves outward and the mouth progrades.
+//
+// Mass conservation is explicit. Every unit of flux either deposits, moves on,
+// is retained by a terminal sink, or is booked in exportField on its way out of
+// the domain. The host cross-checks eroded == deposited + exported + carried;
+// a mismatch is a leak, not a rounding artifact.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float cellSize; float heightScale;
+    float settlingVelocity;
+    float rainRate;
+    float depositionSafety;
+    float minDischarge;
+    float lakeEps;
+    float depositFloor;
+    float maxBuildNorm;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Weights    { uint packedWeights[]; };
+layout(set = 0, binding = 1) readonly  buffer Filled     { float filledField[]; };
+layout(set = 0, binding = 2) readonly  buffer Area       { float areaField[]; };
+layout(set = 0, binding = 3) readonly  buffer FluxIn     { float fluxIn[]; };
+layout(set = 0, binding = 4) writeonly buffer FluxOut    { float fluxOut[]; };
+layout(set = 0, binding = 5) readonly  buffer HeightIn   { float heightIn[]; };
+layout(set = 0, binding = 6) writeonly buffer HeightOut  { float heightOut[]; };
+layout(set = 0, binding = 7) buffer Deposition           { float depositionField[]; };
+layout(set = 0, binding = 8) buffer Exported             { float exportField[]; };
+// Loose material available to the alluvial spreading pass. Written at this
+// invocation's own index only, so it stays race free and needs no ping-pong
+// here. It is NOT the deposition ledger: see terrain_lem_alluvium.comp.
+layout(set = 0, binding = 9) buffer Alluvium             { float alluviumField[]; };
+
+const int dx8[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+
+// One byte per direction from terrain_lem_weights.comp. The byte sum is exactly
+// 255 for a cell with outflow and exactly 0 for a terminal sink, so the
+// self-retention below is exact rather than a rounding residue.
+float weightOf(int index, int d) {
+    uint word = packedWeights[index * 2 + (d >> 2)];
+    return float((word >> (8 * (d & 3))) & 0xFFu) * (1.0 / 255.0);
+}
+
+float outflowSum(int index) {
+    uint lo = packedWeights[index * 2];
+    uint hi = packedWeights[index * 2 + 1];
+    uint total = (lo & 0xFFu) + ((lo >> 8) & 0xFFu) + ((lo >> 16) & 0xFFu) + ((lo >> 24) & 0xFFu)
+               + (hi & 0xFFu) + ((hi >> 8) & 0xFFu) + ((hi >> 16) & 0xFFu) + ((hi >> 24) & 0xFFu);
+    return float(total) * (1.0 / 255.0);
+}
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+    int x = i % pc.width, y = i / pc.width;
+
+    // Gather what arrives this pass. The self-retention term is not cosmetic:
+    // a cell with no strictly lower neighbour has an all-zero weight row, and
+    // without self-retention its load would simply cease to exist between
+    // passes -- a silent mass leak whose only symptom is a delta smaller than
+    // the mountain it came from.
+    float selfRetain = clamp(1.0 - clamp(outflowSum(i), 0.0, 1.0), 0.0, 1.0);
+
+    float arriving = max(fluxIn[i], 0.0) * selfRetain;
+    for (int d = 0; d < 8; ++d) {
+        int nx = x + dx8[d], ny = y + dy8[d];
+        if (nx < 0 || nx >= pc.width || ny < 0 || ny >= pc.height) continue;
+        int ni = ny * pc.width + nx;
+        arriving += max(fluxIn[ni], 0.0) * weightOf(ni, 7 - d);
+    }
+
+    float hCur = heightIn[i];
+    if (x < 1 || y < 1 || x >= pc.width - 1 || y >= pc.height - 1) {
+        // Open boundary: the load leaves the map and is booked, not dropped.
+        heightOut[i] = hCur;
+        fluxOut[i] = 0.0;
+        exportField[i] += arriving;
+        return;
+    }
+
+    float lakeDepth = max(filledField[i] - hCur, 0.0);
+    // Unit-width discharge proxy: catchment area times rain rate, spread over
+    // one cell width. Only its ratio to the settling velocity matters.
+    float q = max(areaField[i], 0.0) * pc.rainRate / max(pc.cellSize, 1.0e-3);
+    float e = pc.settlingVelocity * pc.cellSize / max(q, pc.minDischarge);
+    float throughFlowDeposit = clamp(1.0 - exp(-clamp(e, 0.0, 60.0)), 0.0, 1.0);
+    float fdep = throughFlowDeposit;
+    if (lakeDepth > pc.lakeEps) {
+        // A conditioning delta one epsilon deep is not automatically a lake.
+        // Blend toward full capture over a physical metre: tiny hollows retain
+        // some sediment, fill, and pass the remainder downstream; established
+        // standing water still behaves as the settling basin a delta needs.
+        float lakeDepthMeters = lakeDepth * max(pc.heightScale, 1.0e-3);
+        float lakeEpsMeters = pc.lakeEps * max(pc.heightScale, 1.0e-3);
+        float fullCaptureMeters = max(1.0, lakeEpsMeters * 5.0);
+        float lakeCapture = smoothstep(lakeEpsMeters, fullCaptureMeters, lakeDepthMeters);
+        fdep = 1.0 - (1.0 - throughFlowDeposit) * (1.0 - lakeCapture);
+    }
+
+    float deposit = arriving * fdep;
+
+    // Accommodation limit. Deposition must never build a cell into a spike or
+    // into a dam higher than whatever feeds it; in standing water it must never
+    // build above the water surface.
+    float room;
+    if (lakeDepth > pc.lakeEps) {
+        room = lakeDepth;
+    } else {
+        // ★★★ TWO bounds, and only one of them used to be here.
+        //
+        // `rise` (the highest neighbour above this cell) bounds aggradation
+        // against whatever FEEDS the cell. `fall` (the drop to the lowest
+        // neighbour) bounds it against what the cell DRAINS INTO, and that is
+        // the one that matters: inside a carved channel `rise` is the bank
+        // height, so the old limit happily allowed building half a bank per
+        // pass - straight over the downstream neighbour, which creates a pit
+        // on the spot. The flood then fills that pit, lakeDepth exceeds
+        // lakeEps, lake capture rises, and too much of the catchment load can
+        // settle there. A runaway, and it lands on the biggest channel because
+        // that is where the sediment is: the corruption traces the mature
+        // river mask exactly.
+        //
+        // This is the mirror of the incision clamp - incision may not cut below
+        // its receiver, deposition may not build above what receives it - and
+        // the asymmetry was the bug.
+        float rise = 0.0;
+        float fall = 0.0;
+        for (int d = 0; d < 8; ++d) {
+            int ni = (y + dy8[d]) * pc.width + (x + dx8[d]);
+            rise = max(rise, heightIn[ni] - hCur);
+            // Largest positive drop = the lowest available receiver. Higher
+            // banks must not collapse this to zero; the previous min() did
+            // exactly that in almost every valley cell, leaving only the
+            // resolution-dependent depositFloor as accommodation.
+            fall = max(fall, hCur - heightIn[ni]);
+        }
+        room = pc.depositionSafety * min(rise, fall) + pc.depositFloor;
+    }
+    // ★★★ Bound TOTAL build-up, not only this pass.
+    //
+    // On flat ground `rise` is zero, so the anti-dam term vanishes exactly
+    // where it was meant to bite, and `depositFloor` - one percent of a cell -
+    // then applies unconditionally on EVERY route pass. Sixteen iterations x
+    // ninety-six route steps x three erosion stages is about forty-five metres
+    // of unopposed building. Incision cannot undo it: it is capped at
+    // `incisionSafety * dropNorm`, which is also zero on a flat. So a flat cell
+    // can only ever gain height, the river dams itself with its own load, and
+    // a closed depression forms upstream. Measured before this cap: deepest
+    // fill 38.5 m, a quarter of the map inside closed depressions, and the
+    // drainage graph shredded into fragments as a result.
+    if (pc.maxBuildNorm > 0.0)
+        room = min(room, max(pc.maxBuildNorm - depositionField[i], 0.0));
+    deposit = clamp(deposit, 0.0, max(room, 0.0));
+
+    heightOut[i] = hCur + deposit;
+    depositionField[i] += deposit;
+    alluviumField[i] += deposit;
+    fluxOut[i] = max(arriving - deposit, 0.0);
+}

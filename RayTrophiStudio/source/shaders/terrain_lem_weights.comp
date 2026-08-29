@@ -1,0 +1,115 @@
+// terrain_lem_weights.comp
+// Packs each cell's eight normalized MFD outflow weights into 8 bytes.
+//
+// This table used to not exist. The accumulate and route passes recomputed a
+// neighbour's weight row inline, which meant reading the neighbour's OWN eight
+// neighbours -- 64 to 72 scattered loads per cell per pass, and those passes run
+// thousands of times. The measured result was a cycle that produced a better
+// landscape at a cost the old solver never had.
+//
+// A float table would be 32 bytes per cell, over half a gigabyte at 4K, which
+// is why it was rejected the first time. Quantizing to a byte per direction
+// costs 8 bytes per cell (134 MB at 4K, 8 MB at 1K) and loses nothing that
+// matters: these weights only decide how runoff SPREADS between neighbours.
+//
+// The quantization is made exact rather than approximate, and that is load
+// bearing. terrain_lem_route derives self-retention as 1 - sum(weights); if the
+// bytes summed to 253 instead of 255, every cell would silently retain 0.8% of
+// its load per pass, which over a hundred passes is most of the sediment. So the
+// rounding remainder is folded into the largest weight, and the byte sum is
+// exactly 255 whenever the cell has any outflow at all, exactly 0 when it has
+// none (a terminal sink, which must retain everything).
+//
+// ---------------------------------------------------------------------------
+// AVULSION (useBedMax = 1)
+// ---------------------------------------------------------------------------
+// The drainage solve conditions a surface once and then the morphology loop
+// runs hundreds of route passes against these weights. While that happens the
+// bed AGGRADES, and the weights do not know. That single fact is why this
+// solver could never build an alluvial fan: a fan is not made by depositing,
+// it is made by deposition REROUTING the flow that caused it -- the channel
+// silts up, ceases to be the lowest path, the flow swings to a neighbour, and
+// the abandoned lobe is left behind. With frozen weights the flow keeps using
+// a channel it has already buried, so the load piles into a single ridge and
+// the fan, the delta lobe and the "new channel cut through its own deposit"
+// all become structurally impossible rather than merely rare.
+//
+// The fix is to route on max(conditioned, bed) instead of the conditioned
+// surface. Two properties make it safe rather than a second guess:
+//
+//  * Where nothing has aggraded, filled >= bed by construction, so the routing
+//    surface is bit-identical to today. The drainage network, the flat
+//    handling and the ladder all behave exactly as before -- this cannot
+//    introduce the rectilinear artifacts that a flat-cell fallback did.
+//  * A cell can never rise above ALL its neighbours and become a terminal
+//    sink, because terrain_lem_route bounds one pass of deposition by
+//    depositionSafety * (drop to the LOWEST neighbour) with safety < 1. The
+//    downstream bound is what licenses this pass; without it, aggradation
+//    could seal a cell off and its load would be retained forever.
+//
+// Note it is the UPSTREAM cell that reacts: as this cell rises, its upstream
+// neighbour's slope toward it falls, slope^1.5 shifts that share to the other
+// neighbours, and the flow leaves the reach. Avulsion is emergent here in the
+// same way the delta is emergent in the route pass; nothing models "a fan".
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float cellSize;
+    int useBedMax;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Filled  { float filledField[]; };
+layout(set = 0, binding = 1) writeonly buffer Weights { uint packedWeights[]; };
+layout(set = 0, binding = 2) readonly  buffer Bed     { float bedField[]; };
+
+const int dx8[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+const float dist8[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                1.0, 1.41421356, 1.0, 1.41421356);
+
+// The conditioned surface, raised wherever the bed has since aggraded past it.
+float routingSurface(int index) {
+    float f = filledField[index];
+    return (pc.useBedMax != 0) ? max(f, bedField[index]) : f;
+}
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+    int x = i % pc.width, y = i / pc.width;
+
+    float hc = routingSurface(i);
+    float power[8];
+    float total = 0.0;
+    for (int d = 0; d < 8; ++d) {
+        int nx = x + dx8[d], ny = y + dy8[d];
+        if (nx < 0 || nx >= pc.width || ny < 0 || ny >= pc.height) { power[d] = 0.0; continue; }
+        float slope = (hc - routingSurface(ny * pc.width + nx)) / (dist8[d] * max(pc.cellSize, 1.0e-3));
+        power[d] = (slope > 0.0) ? pow(slope, 1.5) : 0.0;
+        total += power[d];
+    }
+
+    int bytes[8];
+    for (int d = 0; d < 8; ++d) bytes[d] = 0;
+    if (total > 0.0) {
+        int sum = 0, maxIndex = 0;
+        float maxPower = -1.0;
+        for (int d = 0; d < 8; ++d) {
+            bytes[d] = int(floor((power[d] / total) * 255.0 + 0.5));
+            sum += bytes[d];
+            if (power[d] > maxPower) { maxPower = power[d]; maxIndex = d; }
+        }
+        // Eight roundings can drift the sum by at most 4 either way, and the
+        // largest share is at least 255/8, so folding the remainder into it can
+        // never underflow.
+        bytes[maxIndex] = clamp(bytes[maxIndex] + (255 - sum), 0, 255);
+    }
+
+    packedWeights[i * 2u] =
+        uint(bytes[0]) | (uint(bytes[1]) << 8) | (uint(bytes[2]) << 16) | (uint(bytes[3]) << 24);
+    packedWeights[i * 2u + 1u] =
+        uint(bytes[4]) | (uint(bytes[5]) << 8) | (uint(bytes[6]) << 16) | (uint(bytes[7]) << 24);
+}

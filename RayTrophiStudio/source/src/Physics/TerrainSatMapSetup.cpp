@@ -64,7 +64,11 @@ bool TerrainNodeGraphV2::addSatMapSetup(const std::string& preset, float x, floa
 
     uint32_t flowSource = 0;
     if (composer && composer->inputs.size() >= 3) flowSource = sourceForInput(composer->inputs[2].id);
-    if (flowSource == 0 && hydraulic && hydraulic->outputs.size() >= 4) flowSource = hydraulic->outputs[3].id;
+    // Stable key, not slot 3: that slot published Discharge before the compact
+    // port contract and publishes Flow (sediment transport) after it. Same
+    // shape, same 0..1 range, different magnitude.
+    if (flowSource == 0)
+        flowSource = terrainPortId(hydraulic, NodeSystem::PinKind::Output, "flow");
     if (flowSource == 0 && flowMask && !flowMask->outputs.empty()) flowSource = flowMask->outputs[0].id;
     ensureLink(flowSource, colorRamp->inputs[2].id);
 

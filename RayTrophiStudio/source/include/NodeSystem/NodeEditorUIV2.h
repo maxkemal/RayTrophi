@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -28,6 +28,7 @@
 #include "NodeEditorChrome.h"
 #include "Graph.h"
 #include "imgui.h"
+#include "ui_modern.h"
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
@@ -80,6 +81,26 @@ namespace NodeSystem {
             bool inlineNodeContent = true;
             float inlineContentMinZoom = 0.8f;
         } config;
+
+        // Dynamic theme synchronization
+        void syncWithThemeManager() {
+            ThemeManager& tm = ThemeManager::instance();
+            const Theme& t = tm.current();
+            
+            config.bgColor = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(t.colors.background.x * 0.72f, t.colors.background.y * 0.72f, t.colors.background.z * 0.76f, 1.0f));
+            config.gridColorMajor = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(t.colors.border.x * 0.45f, t.colors.border.y * 0.45f, t.colors.border.z * 0.55f, 0.40f));
+            config.gridColorMinor = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(t.colors.border.x * 0.25f, t.colors.border.y * 0.25f, t.colors.border.z * 0.35f, 0.20f));
+            config.nodeBodyColor = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(t.colors.surface.x * 0.90f, t.colors.surface.y * 0.90f, t.colors.surface.z * 0.94f, 0.96f));
+            config.nodeBorderColor = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(t.colors.border.x * 0.75f, t.colors.border.y * 0.75f, t.colors.border.z * 0.85f, 0.55f));
+            config.nodeSelectedColor = IM_COL32(145, 155, 170, 255); // Serious matte steel/blue
+            config.linkThickness = 0.8f;
+            config.linkSelectedThickness = 1.6f;
+        }
 
         // ========================================================================
         // STATE
@@ -217,6 +238,7 @@ namespace NodeSystem {
         // ========================================================================
         
         void draw(GraphBase& graph, const ImVec2& size = ImVec2(0, 0)) {
+            syncWithThemeManager();
             ImGui::BeginChild("NodeEditorV2Canvas", size, true, 
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
             
@@ -1211,17 +1233,17 @@ namespace NodeSystem {
                                           float rowHeight, float padding,
                                           float rightInset = 0.0f, float labelAlpha = 1.0f) {
             const float cy = rowTopLeft.y + rowHeight * 0.5f;
-            const float x0 = rowTopLeft.x + padding;
+            const float x0 = rowTopLeft.x;
 
-            const float s = std::max(3.0f, 3.5f * zoom);
-            const int la = static_cast<int>(255.0f * labelAlpha);
-            const ImU32 chev = IM_COL32(190, 195, 205, la);
+            const float s = std::max(1.8f, 2.0f * zoom); // Smaller chevron
+            const int la = static_cast<int>(120.0f * labelAlpha); // Fainter, matte color
+            const ImU32 chev = IM_COL32(140, 145, 155, la);
             if (open) {
-                dl->AddTriangleFilled(ImVec2(x0, cy - s * 0.6f), ImVec2(x0 + s * 2.0f, cy - s * 0.6f),
-                                      ImVec2(x0 + s, cy + s * 0.8f), chev);
+                dl->AddTriangleFilled(ImVec2(x0, cy - s * 0.4f), ImVec2(x0 + s * 2.0f, cy - s * 0.4f),
+                                      ImVec2(x0 + s, cy + s), chev);
             } else {
-                dl->AddTriangleFilled(ImVec2(x0, cy - s), ImVec2(x0 + s * 1.6f, cy),
-                                      ImVec2(x0, cy + s), chev);
+                dl->AddTriangleFilled(ImVec2(x0 + s * 0.3f, cy - s * 0.8f), ImVec2(x0 + s * 1.5f, cy),
+                                      ImVec2(x0 + s * 0.3f, cy + s * 0.8f), chev);
             }
 
             const float tx = x0 + s * 2.0f + 6.0f * zoom;
@@ -1343,15 +1365,37 @@ namespace NodeSystem {
             }
 
             if (showTitle) {
+                // Icon rendering (when metadata.iconType is set)
+                float iconOffset = 0.0f;
+                if (node.metadata.iconType >= 0) {
+                    const float iconSz = std::max(16.0f, headerH * 0.85f);
+                    const ImVec2 iconPos(pos.x + padding * 0.6f,
+                                         pos.y + (headerH - iconSz) * 0.5f);
+                    // Vibrant tint blended with header color for rich aesthetics
+                    ImVec4 headerVec = ImGui::ColorConvertU32ToFloat4(
+                        node.metadata.headerColor ? node.metadata.headerColor
+                            : ImGui::ColorConvertFloat4ToU32(node.headerColor));
+                    ImU32 iconCol = ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(headerVec.x * 0.4f + 0.6f,
+                               headerVec.y * 0.4f + 0.6f,
+                               headerVec.z * 0.4f + 0.6f, 0.95f));
+                    UIWidgets::DrawIcon(
+                        static_cast<UIWidgets::IconType>(node.metadata.iconType),
+                        iconPos, iconSz, iconCol, 1.5f);
+                    iconOffset = iconSz + padding * 0.4f;
+                }
+
                 const std::string fullTitle = node.metadata.displayName.empty()
                     ? node.name
                     : node.metadata.displayName;
-                const std::string title = fitTextToWidth(fullTitle, finalWidth - padding * 2.0f);
+                const std::string title = fitTextToWidth(fullTitle,
+                    finalWidth - padding * 2.0f - iconOffset);
                 if (!title.empty()) {
-                    ImVec2 titleMin(pos.x + padding, pos.y + 4.0f);
+                    ImVec2 titleMin(pos.x + padding + iconOffset, pos.y + 4.0f);
                     ImVec2 titleMax(pos.x + finalWidth - padding, pos.y + headerH - 4.0f);
                     dl->PushClipRect(titleMin, titleMax, true);
-                    dl->AddText(ImVec2(pos.x + padding, pos.y + (headerH - ImGui::GetTextLineHeight()) * 0.5f - 1.0f),
+                    dl->AddText(ImVec2(pos.x + padding + iconOffset,
+                        pos.y + (headerH - ImGui::GetTextLineHeight()) * 0.5f - 1.0f),
                         IM_COL32(245, 247, 250, 255), title.c_str());
                     dl->PopClipRect();
                 }
@@ -1362,13 +1406,27 @@ namespace NodeSystem {
             
             bool isSelected = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), node.id) != selectedNodeIds.end();
             
-            ImU32 headerCol = node.metadata.headerColor;
-            if (headerCol == 0) {
-                headerCol = ImGui::ColorConvertFloat4ToU32(node.headerColor);
+            ImU32 rawHeaderCol = node.metadata.headerColor;
+            if (rawHeaderCol == 0) {
+                rawHeaderCol = ImGui::ColorConvertFloat4ToU32(node.headerColor);
             }
             
+            // Sync header color with dark matte theme
+            ImVec4 headerVec = ImGui::ColorConvertU32ToFloat4(rawHeaderCol);
+            ThemeManager& tm = ThemeManager::instance();
+            ImVec4 surface = tm.current().colors.surface;
+            
+            // Blend 85% surface color with 15% header color (desaturated) for a darker matte tone
+            ImVec4 blendedCol(
+                surface.x * 0.85f + headerVec.x * 0.15f * 0.8f,
+                surface.y * 0.85f + headerVec.y * 0.15f * 0.8f,
+                surface.z * 0.85f + headerVec.z * 0.15f * 0.8f,
+                0.96f
+            );
+            ImU32 headerCol = ImGui::ColorConvertFloat4ToU32(blendedCol);
+            
             ImU32 borderCol = isSelected ? config.nodeSelectedColor : config.nodeBorderColor;
-            float borderW = isSelected ? config.nodeBorderWidth * 1.25f : config.nodeBorderWidth;
+            float borderW = isSelected ? config.nodeBorderWidth * 1.15f : config.nodeBorderWidth;
             
             // Multi-layered soft drop shadows
             dl->AddRectFilled(
@@ -1406,9 +1464,8 @@ namespace NodeSystem {
                 }
             }
 
-            // Modern category color strip at the very top of the node (thin, Gaea/Houdini-style)
-            // Drawn first with a taller height to prevent ImGui from clamping the corner rounding due to height constraints
-            float stripeHeight = 3.5f * zoom;
+            // Modern category color strip at the very top of the node (sleek, thin line)
+            float stripeHeight = 1.5f * zoom;
             float stripeDrawHeight = std::max(stripeHeight, cornerRadius);
             dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + stripeDrawHeight),
                 headerCol, cornerRadius, ImDrawFlags_RoundCornersTop);
@@ -1416,20 +1473,20 @@ namespace NodeSystem {
             // Header Base (Integrated Dark Charcoal)
             // Drawn on top of the stripe, starting from stripeHeight, to overlay/clip the excess height of the stripe
             dl->AddRectFilled(ImVec2(pos.x, pos.y + stripeHeight), ImVec2(pos.x + finalWidth, pos.y + headerH),
-                IM_COL32(26, 28, 33, 250), isCollapsed ? cornerRadius : 0.0f, isCollapsed ? ImDrawFlags_RoundCornersBottom : 0);
+                IM_COL32(22, 24, 28, 250), isCollapsed ? cornerRadius : 0.0f, isCollapsed ? ImDrawFlags_RoundCornersBottom : 0);
             
             // Subtle premium accent line just below the color stripe
             dl->AddLine(
                 ImVec2(pos.x + 1.0f, pos.y + stripeHeight),
                 ImVec2(pos.x + finalWidth - 1.0f, pos.y + stripeHeight),
-                IM_COL32(255, 255, 255, 30),
+                IM_COL32(255, 255, 255, 12),
                 1.0f
             );
 
             dl->AddLine(
                 ImVec2(pos.x + 1.0f, pos.y + headerH),
                 ImVec2(pos.x + finalWidth - 1.0f, pos.y + headerH),
-                IM_COL32(255, 255, 255, 12),
+                IM_COL32(255, 255, 255, 8),
                 1.0f);
             
             // Border
@@ -1446,9 +1503,9 @@ namespace NodeSystem {
                 (evalState == NodeEvaluationState::Running || graph.currentAsyncNodeId() == node.id);
             if (nodeRunning) {
                 float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 6.0f);
-                ImU32 glowCol = IM_COL32(120, 220, 255, (int)(120 + 100 * pulse));
+                ImU32 glowCol = IM_COL32(140, 150, 160, (int)(80 + 80 * pulse)); // matte pulse
                 dl->AddRect(ImVec2(pos.x - 2.0f, pos.y - 2.0f), ImVec2(pos.x + finalWidth + 2.0f, pos.y + finalHeight + 2.0f),
-                    glowCol, cornerRadius, 0, std::max(2.0f, borderW * zoom * 1.5f));
+                    glowCol, cornerRadius, 0, std::max(1.5f, borderW * zoom * 1.2f));
 
                 float barH = std::max(3.0f, 4.0f * zoom);
                 float progress = std::clamp(graph.asyncEvalProgress(), 0.0f, 1.0f);
@@ -1456,7 +1513,7 @@ namespace NodeSystem {
                 dl->AddRectFilled(barMin, ImVec2(pos.x + finalWidth - 1.0f, pos.y + finalHeight - 1.0f),
                     IM_COL32(20, 24, 30, 200));
                 dl->AddRectFilled(barMin, ImVec2(pos.x + 1.0f + (finalWidth - 2.0f) * progress, pos.y + finalHeight - 1.0f),
-                    IM_COL32(120, 220, 255, 235));
+                    IM_COL32(145, 155, 170, 220)); // serious progress bar
             }
 
             // Persist per-node state after the active cursor moves on. This makes
@@ -1765,7 +1822,7 @@ namespace NodeSystem {
         // ========================================================================
         
         void drawPin(ImDrawList* dl, ImVec2 center, Pin& pin, bool isInput, float maxLabelWidth = 0.0f) {
-            float r = scaleNodeChromeMetric(zoom, 6.0f, 4.5f, 9.0f);
+            float r = scaleNodeChromeMetric(zoom, 2.5f, 2.0f, 4.0f); // More polite, smaller pins
             
             // Get color and shape from pin's cached values or compute
             ImU32 col = pin.cachedColor;
@@ -1781,14 +1838,14 @@ namespace NodeSystem {
             switch (shape) {
                 case PinShape::Circle:
                     dl->AddCircleFilled(center, r, col);
-                    dl->AddCircle(center, r, IM_COL32(255, 255, 255, 180), 0, 1.0f * zoom);
+                    dl->AddCircle(center, r, IM_COL32(255, 255, 255, 60), 0, 1.0f * zoom);
                     break;
                     
                 case PinShape::Square: {
                     ImVec2 p1(center.x - r * 0.7f, center.y - r * 0.7f);
                     ImVec2 p2(center.x + r * 0.7f, center.y + r * 0.7f);
                     dl->AddRectFilled(p1, p2, col);
-                    dl->AddRect(p1, p2, IM_COL32(255, 255, 255, 180), 0, 0, 1.0f * zoom);
+                    dl->AddRect(p1, p2, IM_COL32(255, 255, 255, 60), 0, 0, 1.0f * zoom);
                     break;
                 }
                     
@@ -1800,7 +1857,7 @@ namespace NodeSystem {
                         {center.x - r, center.y}
                     };
                     dl->AddConvexPolyFilled(pts, 4, col);
-                    dl->AddPolyline(pts, 4, IM_COL32(255, 255, 255, 180), 
+                    dl->AddPolyline(pts, 4, IM_COL32(255, 255, 255, 60), 
                         ImDrawFlags_Closed, 1.0f * zoom);
                     break;
                 }
@@ -1812,7 +1869,7 @@ namespace NodeSystem {
                         {center.x - r * 0.75f, center.y + r}
                     };
                     dl->AddConvexPolyFilled(pts, 3, col);
-                    dl->AddPolyline(pts, 3, IM_COL32(255, 255, 255, 180),
+                    dl->AddPolyline(pts, 3, IM_COL32(255, 255, 255, 60),
                                     ImDrawFlags_Closed, 1.0f * zoom);
                     break;
                 }
@@ -2055,16 +2112,26 @@ namespace NodeSystem {
             float thickness = isSelected ? config.linkSelectedThickness : config.linkThickness;
             thickness = std::max(1.0f, thickness * zoom);
             
+            // Matte Link colors - Desaturate and darken
+            ImVec4 c = ImGui::ColorConvertU32ToFloat4(col);
+            float luminance = c.x * 0.299f + c.y * 0.587f + c.z * 0.114f;
+            c.x = c.x * 0.4f + luminance * 0.6f;
+            c.y = c.y * 0.4f + luminance * 0.6f;
+            c.z = c.z * 0.4f + luminance * 0.6f;
+            c.w = 0.8f; // Slightly transparent
+            ImU32 matteCol = ImGui::ColorConvertFloat4ToU32(c);
+            
             // 1. Draw glowing background shadow if selected or hovered
+            ImU32 lineCol = matteCol;
             if (isSelected) {
-                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x30000000, thickness + 3.0f * zoom);
-                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x60000000, thickness + 1.2f * zoom);
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (matteCol & 0x00FFFFFF) | 0x30000000, thickness + 3.0f * zoom);
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (matteCol & 0x00FFFFFF) | 0x50000000, thickness + 1.2f * zoom);
             } else if (isHovered) {
-                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x20000000, thickness + 2.0f * zoom);
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (matteCol & 0x00FFFFFF) | 0x20000000, thickness + 2.0f * zoom);
             }
             
             // 2. Draw core link line
-            dl->AddBezierCubic(p1, cp1, cp2, p2, col, thickness);
+            dl->AddBezierCubic(p1, cp1, cp2, p2, lineCol, thickness);
             
             // 3. Draw moving data flow particles (only if there is active data flowing through the link)
             bool isFlowActive = sourcePin && sourcePin->hasValue();

@@ -1994,9 +1994,21 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                     ? resolveSharedOptixTexture(terrain.surfaceSemanticMap) : 0;
                 
                 // 2. Layers - Use Material IDs for full PBR blending (Albedo, Rough, DISPLACEMENT, etc.)
-                for (int i = 0; i < 4; ++i) {
+                // Eight slots: 0-3 splat-weighted, 4-7 semantic overlays.
+                // An overlay left at -1 keeps the built-in shading for its
+                // channel, which is what a pre-overlay terrain expects.
+                for (int i = 0; i < 8; ++i) {
                     rec.data.layer_material_ids[i] = -1; // Default to invalid
-                    
+                    if (i >= 4 && (i - 4) < 4) {
+                        rec.data.layer_overlay_strength[i - 4] =
+                            (i < (int)terrain.layer_overlay_strength.size())
+                                ? terrain.layer_overlay_strength[i] : 1.0f;
+                        if (i < (int)terrain.layer_overlay_ignore_cover.size() &&
+                            terrain.layer_overlay_ignore_cover[i]) {
+                            rec.data.layer_overlay_ignore_cover_mask |= (1u << (i - 4));
+                        }
+                    }
+
                     if (i < terrain.layers.size() && terrain.layers[i]) {
                         // Get Material ID from Manager
                         // Note: Material name is crucial here. 
@@ -2307,10 +2319,24 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                     rec.data.semantic_map_tex = terrain.surfaceSemanticMap
                         ? resolveSharedOptixTexture(terrain.surfaceSemanticMap) : 0;
 
-                    // Sync Layers (Textured Layers) - Use Material IDs
-                    for (int i = 0; i < 4; ++i) {
-                        rec.data.layer_uv_scale[i] = terrain.layer_uv_scales[i];
+                    // Sync Layers - eight slots: 0-3 splat, 4-7 semantic overlays.
+                    // This path updates a record in place, so the burial mask
+                    // is rebuilt from scratch rather than OR-ed onto a stale one.
+                    rec.data.layer_overlay_ignore_cover_mask = 0u;
+                    for (int i = 0; i < 8; ++i) {
+                        rec.data.layer_uv_scale[i] =
+                            (i < (int)terrain.layer_uv_scales.size())
+                                ? terrain.layer_uv_scales[i] : 1.0f;
                         rec.data.layer_material_ids[i] = -1;
+                        if (i >= 4) {
+                            rec.data.layer_overlay_strength[i - 4] =
+                                (i < (int)terrain.layer_overlay_strength.size())
+                                    ? terrain.layer_overlay_strength[i] : 1.0f;
+                            if (i < (int)terrain.layer_overlay_ignore_cover.size() &&
+                                terrain.layer_overlay_ignore_cover[i]) {
+                                rec.data.layer_overlay_ignore_cover_mask |= (1u << (i - 4));
+                            }
+                        }
 
                         if (i < terrain.layers.size() && terrain.layers[i]) {
                              // Get Material ID from Manager

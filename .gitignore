@@ -43,6 +43,7 @@ cmake_install.cmake
 # Temporary Scripts & Backups
 *.ps1
 !scripts/install_python_scripting_deps.ps1
+!scripts/test/rt_test_spline_curve_ipc.ps1
 __pycache__/
 *.py[cod]
 *.bak

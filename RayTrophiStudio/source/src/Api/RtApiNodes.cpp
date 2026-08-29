@@ -23,6 +23,7 @@
 #include "RtApiInternal.h"
 
 #include <algorithm>
+#include <cctype>
 #include <memory>
 #include <string>
 #include <vector>
@@ -290,6 +291,31 @@ Result linkNodes(const std::string& graph_type, const std::string& graph_name,
     return Result::success();
 }
 
+Result linkNodesByKey(const std::string& graph_type, const std::string& graph_name,
+                      unsigned int from_node, const std::string& from_output,
+                      unsigned int to_node, const std::string& to_input,
+                      unsigned int& out_link_id) {
+    if (!g_ctx) return notBound();
+    Result err;
+    NodeSystem::GraphBase* graph = findNodeGraph(*g_ctx, graph_type, graph_name, err);
+    if (!graph) return err;
+    NodeSystem::NodeBase* src = graph->getNode(from_node);
+    NodeSystem::NodeBase* dst = graph->getNode(to_node);
+    if (!src) return Result::fail("from_node not found: " + std::to_string(from_node));
+    if (!dst) return Result::fail("to_node not found: " + std::to_string(to_node));
+    const auto outIt = std::find_if(src->outputs.begin(), src->outputs.end(),
+        [&from_output](const NodeSystem::Pin& pin) { return pin.stableKey == from_output; });
+    const auto inIt = std::find_if(dst->inputs.begin(), dst->inputs.end(),
+        [&to_input](const NodeSystem::Pin& pin) { return pin.stableKey == to_input; });
+    if (outIt == src->outputs.end()) return Result::fail("output port key not found: " + from_output);
+    if (inIt == dst->inputs.end()) return Result::fail("input port key not found: " + to_input);
+    const uint32_t linkId = graph->addLink(outIt->id, inIt->id);
+    if (linkId == 0)
+        return Result::fail("link rejected (type/semantic mismatch, cycle, or invalid ports)");
+    out_link_id = linkId;
+    return Result::success();
+}
+
 Result listNodes(const std::string& graph_type, const std::string& graph_name,
                  std::vector<NodeDesc>& out) {
     out.clear();
@@ -330,6 +356,7 @@ const char* nodeDataTypeName(NodeSystem::DataType t) {
         case DT::String:   return "string";
         case DT::Image2D:  return "image2d";
         case DT::Geometry: return "geometry";
+        case DT::Curve:    return "curve";
         case DT::Material: return "material";
         default:           return "none";
     }
@@ -408,6 +435,69 @@ Result setPinDefault(NodeSystem::Pin& pin, const NodeParamValue& val) {
 }
 
 } // namespace
+
+Result listNodePorts(const std::string& graph_type, const std::string& graph_name,
+                     unsigned int node_id, std::vector<NodePortInfo>& out) {
+    out.clear();
+    if (!g_ctx) return notBound();
+    Result err;
+    NodeSystem::GraphBase* graph = findNodeGraph(*g_ctx, graph_type, graph_name, err);
+    if (!graph) return err;
+    NodeSystem::NodeBase* node = graph->getNode(node_id);
+    if (!node) return Result::fail("node id not found: " + std::to_string(node_id));
+
+    const auto append = [&](const std::vector<NodeSystem::Pin>& pins, const char* direction) {
+        for (size_t i = 0; i < pins.size(); ++i) {
+            const auto& pin = pins[i];
+            bool connected = false;
+            for (const auto& link : graph->links)
+                connected |= link.startPinId == pin.id || link.endPinId == pin.id;
+            NodePortInfo info;
+            info.index = static_cast<int>(i);
+            info.direction = direction;
+            info.key = pin.stableKey;
+            info.name = pin.name;
+            info.data_type = nodeDataTypeName(pin.dataType);
+            info.exposure = TerrainNodesV2::pinExposureName(pin.exposure);
+            std::transform(info.exposure.begin(), info.exposure.end(), info.exposure.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            info.section = pin.section;
+            info.visible = !pin.hidden || connected;
+            info.connected = connected;
+            out.push_back(std::move(info));
+        }
+    };
+    append(node->inputs, "input");
+    append(node->outputs, "output");
+    return Result::success();
+}
+
+Result setNodePortVisible(const std::string& graph_type, const std::string& graph_name,
+                          unsigned int node_id, const std::string& direction,
+                          const std::string& port_key, bool visible) {
+    if (!g_ctx) return notBound();
+    Result err;
+    NodeSystem::GraphBase* graph = findNodeGraph(*g_ctx, graph_type, graph_name, err);
+    if (!graph) return err;
+    NodeSystem::NodeBase* node = graph->getNode(node_id);
+    if (!node) return Result::fail("node id not found: " + std::to_string(node_id));
+    std::vector<NodeSystem::Pin>* pins = nullptr;
+    if (direction == "input") pins = &node->inputs;
+    else if (direction == "output") pins = &node->outputs;
+    else return Result::fail("direction must be 'input' or 'output'");
+    const auto it = std::find_if(pins->begin(), pins->end(),
+        [&port_key](const NodeSystem::Pin& pin) { return pin.stableKey == port_key; });
+    if (it == pins->end()) return Result::fail("port key not found: " + port_key);
+    if (!visible) {
+        for (const auto& link : graph->links)
+            if (link.startPinId == it->id || link.endPinId == it->id)
+                return Result::fail("connected port cannot be hidden: " + port_key);
+        if (it->exposure == NodeSystem::PinExposure::Primary)
+            return Result::fail("primary port cannot be hidden: " + port_key);
+    }
+    it->hidden = !visible;
+    return Result::success();
+}
 
 Result listNodeParams(const std::string& graph_type, const std::string& graph_name,
                       unsigned int node_id, std::vector<NodeParamInfo>& out) {
@@ -636,7 +726,32 @@ Result setNodeProperty(const std::string& graph_type, const std::string& graph_n
         return Result::fail("node property not found or not scalar: " + property);
     if (target->is_boolean() && value.kind == NodeParamValue::Kind::Bool) *target = value.bool_value;
     else if ((target->is_number_integer() || target->is_number_unsigned()) && value.kind == NodeParamValue::Kind::Int) *target = value.int_value;
-    else if (target->is_number() && value.kind == NodeParamValue::Kind::Float) *target = value.floats[0];
+    else if (target->is_number_float() && value.kind == NodeParamValue::Kind::Float) *target = value.floats[0];
+    // A float property must accept a whole number. JSON has one number type and
+    // most encoders emit `4`, not `4.0`, for a value that happens to be whole --
+    // PowerShell's ConvertTo-Json always does. Without this branch every float
+    // dial in every graph is unsettable from the shipped IPC client at exactly
+    // the values a single-variable test needs most: 0 to switch a stage off, 1
+    // for a unit rate, 4 for maxDepositionMeters. Widening cannot lose
+    // information.
+    else if (target->is_number_float() && value.kind == NodeParamValue::Kind::Int)
+        *target = static_cast<double>(value.int_value);
+    // The narrowing direction is allowed only when nothing is lost. Python's
+    // json emits 8.0 for a float variable and that must keep working, but 1.5
+    // must not: the test above this line used to read is_number(), which is
+    // true for an integer target too, so a fractional value was written into
+    // the JSON, deserialized back to 1, and answered with success. A mistyped
+    // dial became a silently different setting -- the failure this file exists
+    // to prevent.
+    else if ((target->is_number_integer() || target->is_number_unsigned()) &&
+             value.kind == NodeParamValue::Kind::Float) {
+        const float given = value.floats[0];
+        const long long truncated = static_cast<long long>(given);
+        if (given != static_cast<float>(truncated))
+            return Result::fail("node property '" + property + "' is an integer; "
+                                "refusing a fractional value that would be truncated");
+        *target = truncated;
+    }
     else if (target->is_string() && value.kind == NodeParamValue::Kind::String) *target = value.string_value;
     else return Result::fail("node property type mismatch: " + property);
 

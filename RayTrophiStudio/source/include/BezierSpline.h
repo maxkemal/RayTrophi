@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <utility>
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SPLINE CURVE TYPE
@@ -234,6 +235,10 @@ namespace BezierMath {
 class BezierSpline {
 public:
     std::vector<BezierControlPoint> points;
+    // Optional cubic B-spline knot vector. Empty means the legacy uniform
+    // vector [0..pointCount+3]. Knot insertion materializes this vector so the
+    // edited curve can retain its exact shape.
+    std::vector<float> knots;
     bool isClosed = false;  // Connect last point back to first
     SplineCurveType curveType = SplineCurveType::Bezier;
     
@@ -241,6 +246,7 @@ public:
     // Control Point Management
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     void addPoint(const Vec3& position, float userData1 = 1.0f) {
+        knots.clear();
         points.emplace_back(position, userData1);
         if (points.size() > 1) {
             calculateAutoTangents();
@@ -248,6 +254,7 @@ public:
     }
     
     void insertPoint(int index, const Vec3& position, float userData1 = 1.0f) {
+        knots.clear();
         if (index < 0) index = 0;
         if (index > (int)points.size()) index = (int)points.size();
         points.insert(points.begin() + index, BezierControlPoint(position, userData1));
@@ -256,6 +263,7 @@ public:
     
     void removePoint(int index) {
         if (index >= 0 && index < (int)points.size()) {
+            knots.clear();
             points.erase(points.begin() + index);
             calculateAutoTangents();
         }
@@ -263,13 +271,96 @@ public:
     
     void clear() {
         points.clear();
+        knots.clear();
     }
     
     size_t pointCount() const { return points.size(); }
+
+    std::vector<float> effectiveBSplineKnots() const {
+        const size_t required = points.size() + 4;
+        bool valid = knots.size() == required;
+        for (size_t i = 1; valid && i < knots.size(); ++i)
+            valid = std::isfinite(knots[i]) && knots[i] >= knots[i - 1];
+        if (valid && !knots.empty()) valid = std::isfinite(knots.front());
+        if (valid) return knots;
+        std::vector<float> uniform(required);
+        for (size_t i = 0; i < required; ++i) uniform[i] = static_cast<float>(i);
+        return uniform;
+    }
+
+    size_t bsplineSpanForSegment(size_t segment) const {
+        if (points.size() < 4) return 0;
+        const std::vector<float> values = effectiveBSplineKnots();
+        size_t active = 0;
+        for (size_t span = 3; span < points.size(); ++span) {
+            if (values[span + 1] <= values[span]) continue;
+            if (active == segment) return span;
+            ++active;
+        }
+        return points.size() - 1;
+    }
+
+    Vec3 evaluateBSplineSegment(size_t segment, float t) const {
+        if (points.size() < 4) return points.empty() ? Vec3(0.0f) : points.front().position;
+        const std::vector<float> values = effectiveBSplineKnots();
+        const size_t segmentTotal = segmentCount();
+        if (segment >= segmentTotal || values.size() != points.size() + 4)
+            return points.front().position;
+        const size_t span = bsplineSpanForSegment(segment);
+        if (span < 3 || span + 1 >= values.size()) return points.front().position;
+        const float local = std::clamp(t, 0.0f, 1.0f);
+        float u = values[span] + (values[span + 1] - values[span]) * local;
+        // Cubic B-spline domain ends at knot[pointCount]. Basis intervals are
+        // half-open, so evaluate its left-hand limit at the final endpoint.
+        if (segment + 1 == segmentTotal && local >= 1.0f)
+            u = std::nextafter(values[span + 1], values[span]);
+
+        // Cox-de Boor basis evaluation. Keeping the arrays sized from the knot
+        // vector removes the hand-derived span offsets that previously allowed
+        // an out-of-range read while changing a spline to B-Spline.
+        std::vector<float> basis(values.size() - 1, 0.0f);
+        for (size_t i = 0; i + 1 < values.size(); ++i) {
+            if (u >= values[i] && u < values[i + 1]) basis[i] = 1.0f;
+        }
+        for (size_t degree = 1; degree <= 3; ++degree) {
+            std::vector<float> elevated(basis.size() - 1, 0.0f);
+            for (size_t i = 0; i < elevated.size(); ++i) {
+                const float leftDenominator = values[i + degree] - values[i];
+                const float rightDenominator = values[i + degree + 1] - values[i + 1];
+                const float left = leftDenominator > 1.0e-12f
+                    ? (u - values[i]) * basis[i] / leftDenominator : 0.0f;
+                const float right = rightDenominator > 1.0e-12f
+                    ? (values[i + degree + 1] - u) * basis[i + 1] /
+                        rightDenominator : 0.0f;
+                elevated[i] = left + right;
+            }
+            basis = std::move(elevated);
+        }
+        if (basis.size() != points.size()) return points.front().position;
+        Vec3 result(0.0f);
+        for (size_t i = 0; i < points.size(); ++i)
+            result += points[i].position * basis[i];
+        return result;
+    }
+
+    Vec3 evaluateBSplineTangentSegment(size_t segment, float t) const {
+        const float epsilon = 1.0e-4f;
+        const float a = std::max(0.0f, t - epsilon);
+        const float b = std::min(1.0f, t + epsilon);
+        if (b <= a) return Vec3(1.0f, 0.0f, 0.0f);
+        return (evaluateBSplineSegment(segment, b) -
+                evaluateBSplineSegment(segment, a)) / (b - a);
+    }
+
     size_t segmentCount() const { 
         if (points.size() < 2) return 0;
         if (curveType == SplineCurveType::BSpline) {
-            return points.size() >= 4 ? points.size() - 3 : 0;
+            if (points.size() < 4) return 0;
+            const std::vector<float> values = effectiveBSplineKnots();
+            size_t count = 0;
+            for (size_t span = 3; span < points.size(); ++span)
+                if (values[span + 1] > values[span]) ++count;
+            return count;
         }
         return isClosed ? points.size() : points.size() - 1;
     }
@@ -334,17 +425,7 @@ public:
         }
 
         if (curveType == SplineCurveType::BSpline && points.size() >= 4) {
-            const size_t b0 = seg;
-            const size_t b1 = seg + 1;
-            const size_t b2 = seg + 2;
-            const size_t b3 = seg + 3;
-            const float u = localT;
-            const float u2 = u * u;
-            const float u3 = u2 * u;
-            return points[b0].position * ((1.0f - 3.0f * u + 3.0f * u2 - u3) / 6.0f) +
-                   points[b1].position * ((4.0f - 6.0f * u2 + 3.0f * u3) / 6.0f) +
-                   points[b2].position * ((1.0f + 3.0f * u + 3.0f * u2 - 3.0f * u3) / 6.0f) +
-                   points[b3].position * (u3 / 6.0f);
+            return evaluateBSplineSegment(seg, localT);
         }
         
         const auto& p0 = points[i0];
@@ -380,14 +461,7 @@ public:
         }
 
         if (curveType == SplineCurveType::BSpline && points.size() >= 4) {
-            const float u = localT;
-            const float u2 = u * u;
-            const Vec3 derivative =
-                points[seg].position * ((-3.0f + 6.0f * u - 3.0f * u2) / 6.0f) +
-                points[seg + 1].position * ((-12.0f * u + 9.0f * u2) / 6.0f) +
-                points[seg + 2].position * ((3.0f + 6.0f * u - 9.0f * u2) / 6.0f) +
-                points[seg + 3].position * ((3.0f * u2) / 6.0f);
-            return derivative.normalize();
+            return evaluateBSplineTangentSegment(seg, localT).normalize();
         }
         
         const auto& p0 = points[i0];
@@ -457,6 +531,20 @@ public:
         
         float total = 0.0f;
         size_t segments = segmentCount();
+
+        if (curveType == SplineCurveType::BSpline) {
+            const int samples = std::max(1, samplesPerSegment);
+            for (size_t seg = 0; seg < segments; ++seg) {
+                Vec3 previous = evaluateBSplineSegment(seg, 0.0f);
+                for (int i = 1; i <= samples; ++i) {
+                    const Vec3 current = evaluateBSplineSegment(
+                        seg, static_cast<float>(i) / static_cast<float>(samples));
+                    total += (current - previous).length();
+                    previous = current;
+                }
+            }
+            return total;
+        }
         
         for (size_t seg = 0; seg < segments; ++seg) {
             size_t i0 = seg;

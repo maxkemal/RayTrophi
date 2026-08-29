@@ -238,8 +238,35 @@ def helper_table(source):
 
     Without following the call, `flow_source.create` reports zero parameters
     while actually accepting twenty-five.
+
+    Local reader LAMBDAS count as helpers too. `sculpt.stroke` and
+    `terrain.sculpt` each read their one REQUIRED parameter (the point / dab
+    list) inside an `auto readX = [](const json& p) {...}` defined next to the
+    dispatch, so a scan that only followed named functions documented every
+    optional knob and omitted the parameter without which the call cannot be
+    made at all -- the table looked complete and was unusable.
     """
     helpers = {}
+    def body_after(open_brace):
+        depth, index = 0, open_brace
+        while index < len(source):
+            if source[index] == "{":
+                depth += 1
+            elif source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            index += 1
+        return source[open_brace:index]
+
+    for match in re.finditer(
+            r'auto\s+(\w+)\s*=\s*\[[^\]]*\]\s*\(([^;{}]*)\)\s*(?:->[^{;]*)?\{',
+            source):
+        name, args = match.group(1), match.group(2)
+        root = re.search(r'(?:const\s+)?(?:nlohmann::)?json\s*&\s*(\w+)', args)
+        if not root:
+            continue
+        helpers[name] = (body_after(match.end() - 1), root.group(1))
     for match in re.finditer(r'\b(\w+)\s*\(([^;{}]*)\)\s*\{', source):
         name, args = match.group(1), match.group(2)
         if name in ("if", "for", "while", "switch", "catch", "return"):

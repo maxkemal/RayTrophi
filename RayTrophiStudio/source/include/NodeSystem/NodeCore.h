@@ -40,6 +40,7 @@
 // with an incomplete type (the deleter is captured at construction). Keeps NodeCore.h — included
 // by every node-system consumer — free of the Hittable/DNA::GeometryDetail include chain.
 class TriangleMesh;
+namespace MeshEdit { struct CurveNodeData; }
 
 // Same forward-declare pattern for DataType::Material's payload: a CPU-side snapshot of a full
 // material parameter set + texture bindings (defined in MaterialNodesV2.h). Keeps NodeCore.h
@@ -92,6 +93,7 @@ namespace NodeSystem {
         ParticleSet,    ///< Particle collection of a referenced domain
         SurfaceField,   ///< Material State Field (per-object surface state)
         Substance,      ///< SubstanceProfile selection, by name
+        Curve,          ///< Editable spline/curve snapshot (Geometry Nodes)
         Custom = 255    ///< Domain-specific extension point
     };
 
@@ -125,7 +127,11 @@ namespace NodeSystem {
         MillimetersPerHour,
         Degrees,
         Identifier,
-        CubicMeters
+        CubicMeters,
+        /// Appended: grain size (D50). A sediment deposit is not one substance
+        /// - gravel drops where the flow is still strong, silt only in still
+        /// water - and that difference is a length, not a ratio.
+        Millimeters
     };
 
     inline const char* getImageUnitName(ImageUnit unit) {
@@ -139,6 +145,7 @@ namespace NodeSystem {
             case ImageUnit::Degrees: return "deg";
             case ImageUnit::Identifier: return "ID";
             case ImageUnit::CubicMeters: return "m3";
+            case ImageUnit::Millimeters: return "mm";
             default: return "";
         }
     }
@@ -183,6 +190,7 @@ namespace NodeSystem {
     /// scene.world.objects, hand to Vulkan/OptiX/Embree BLAS builders, etc.) — no new wrapper
     /// type, and sharing the shared_ptr between DAG nodes is inherently zero-copy.
     using GeometryValue = std::shared_ptr<TriangleMesh>;
+    using CurveValue = std::shared_ptr<MeshEdit::CurveNodeData>;
 
     /// Material payload: full shading parameter set + texture bindings snapshot
     /// (MaterialNodesV2::ShadeState). Shared between MaterialRef / MixMaterial /
@@ -201,6 +209,7 @@ namespace NodeSystem {
         Image2DData,                // Image2D
         std::string,                // String
         GeometryValue,              // Geometry (DataType::Geometry)
+        CurveValue,                 // Curve (DataType::Curve)
         MaterialValue,              // Material (DataType::Material)
         VolumeMaterialValue         // Volume closure (DataType::Volume)
     >;
@@ -231,69 +240,71 @@ namespace NodeSystem {
     inline DataTypeVisual getDataTypeVisual(DataType type, ImageSemantic semantic = ImageSemantic::Generic) {
         switch (type) {
             case DataType::Float:
-                return { IM_COL32(100, 180, 255, 255), PinShape::Circle, "Float" };
+                return { IM_COL32(95, 125, 160, 255), PinShape::Circle, "Float" }; // Matte steel blue
             case DataType::Int:
-                return { IM_COL32(80, 200, 180, 255), PinShape::Circle, "Int" };
+                return { IM_COL32(85, 135, 125, 255), PinShape::Circle, "Int" }; // Matte teal
             case DataType::Bool:
-                return { IM_COL32(200, 80, 80, 255), PinShape::Square, "Bool" };
+                return { IM_COL32(160, 95, 95, 255), PinShape::Square, "Bool" }; // Matte red
             case DataType::Vector2:
-                return { IM_COL32(255, 200, 100, 255), PinShape::Circle, "Vector2" };
+                return { IM_COL32(180, 145, 95, 255), PinShape::Circle, "Vector2" }; // Matte gold
             case DataType::Vector3:
-                return { IM_COL32(255, 180, 50, 255), PinShape::Circle, "Vector3" };
+                return { IM_COL32(185, 135, 75, 255), PinShape::Circle, "Vector3" }; // Matte orange
             case DataType::Vector4:
             case DataType::Color:
-                return { IM_COL32(255, 150, 200, 255), PinShape::Circle, "Color" };
+                return { IM_COL32(185, 115, 145, 255), PinShape::Circle, "Color" }; // Matte pink/purple
             case DataType::Image2D:
                 // Different colors based on semantic
                 switch (semantic) {
                     case ImageSemantic::Height:
-                        return { IM_COL32(100, 200, 100, 255), PinShape::Circle, "Height" };
+                        return { IM_COL32(110, 145, 110, 255), PinShape::Circle, "Height" }; // Matte green
                     case ImageSemantic::Mask:
-                        return { IM_COL32(180, 100, 200, 255), PinShape::Diamond, "Mask" };
+                        return { IM_COL32(145, 115, 155, 255), PinShape::Diamond, "Mask" }; // Matte purple
                     case ImageSemantic::Normal:
-                        return { IM_COL32(130, 130, 255, 255), PinShape::Circle, "Normal" };
+                        return { IM_COL32(115, 115, 175, 255), PinShape::Circle, "Normal" }; // Matte blue/indigo
                     case ImageSemantic::Albedo:
-                        return { IM_COL32(255, 180, 180, 255), PinShape::Circle, "Albedo" };
+                        return { IM_COL32(175, 135, 135, 255), PinShape::Circle, "Albedo" }; // Matte rose
                     case ImageSemantic::PhysicalScalar:
-                        return { IM_COL32(65, 180, 225, 255), PinShape::Circle, "Physical Scalar" };
+                        return { IM_COL32(90, 145, 170, 255), PinShape::Circle, "Physical Scalar" }; // Matte cyan
                     case ImageSemantic::Direction:
-                        return { IM_COL32(45, 210, 195, 255), PinShape::Arrow, "Direction" };
+                        return { IM_COL32(80, 150, 140, 255), PinShape::Arrow, "Direction" }; // Matte dark teal
                     case ImageSemantic::Categorical:
-                        return { IM_COL32(235, 185, 65, 255), PinShape::Square, "Categorical" };
+                        return { IM_COL32(170, 140, 85, 255), PinShape::Square, "Categorical" }; // Matte amber
                     case ImageSemantic::PackedData:
-                        return { IM_COL32(235, 105, 165, 255), PinShape::Circle, "Packed Data" };
+                        return { IM_COL32(165, 100, 130, 255), PinShape::Circle, "Packed Data" }; // Matte dark pink
                     default:
-                        return { IM_COL32(150, 150, 150, 255), PinShape::Circle, "Image" };
+                        return { IM_COL32(130, 130, 130, 255), PinShape::Circle, "Image" };
                 }
             case DataType::String:
-                return { IM_COL32(200, 200, 100, 255), PinShape::Circle, "String" };
+                return { IM_COL32(150, 150, 100, 255), PinShape::Circle, "String" }; // Matte yellow-green
             case DataType::Geometry:
-                return { IM_COL32(76, 175, 80, 255), PinShape::Circle, "Geometry" };
+                return { IM_COL32(90, 135, 95, 255), PinShape::Circle, "Geometry" }; // Matte leaf green
+            case DataType::Curve:
+                return { IM_COL32(85, 155, 145, 255), PinShape::Circle, "Curve" }; // Matte aquamarine
             case DataType::Instances:
-                return { IM_COL32(255, 235, 59, 255), PinShape::Circle, "Instances" };
+                return { IM_COL32(175, 165, 85, 255), PinShape::Circle, "Instances" }; // Matte yellow
             case DataType::Volume:
-                return { IM_COL32(156, 39, 176, 255), PinShape::Circle, "Volume" };
+                return { IM_COL32(135, 75, 145, 255), PinShape::Circle, "Volume" }; // Matte plum
             case DataType::Simulation:
-                return { IM_COL32(255, 87, 34, 255), PinShape::Square, "Simulation" };
+                return { IM_COL32(175, 95, 65, 255), PinShape::Square, "Simulation" }; // Matte burnt orange
             case DataType::Material:
-                return { IM_COL32(233, 30, 99, 255), PinShape::Circle, "Material" };
+                return { IM_COL32(165, 70, 105, 255), PinShape::Circle, "Material" }; // Matte crimson
             case DataType::Light:
-                return { IM_COL32(255, 193, 7, 255), PinShape::Circle, "Light" };
+                return { IM_COL32(175, 145, 70, 255), PinShape::Circle, "Light" }; // Matte honey gold
             // Simulation graph types. Given distinct shapes as well as colours:
             // a DomainRef must never be mistaken for a Field at a glance, and
             // colour alone fails exactly the users who need the distinction.
             case DataType::DomainRef:
-                return { IM_COL32(0, 200, 190, 255), PinShape::Square, "Domain" };
+                return { IM_COL32(65, 145, 140, 255), PinShape::Square, "Domain" }; // Matte dark cyan
             case DataType::Field:
-                return { IM_COL32(120, 220, 130, 255), PinShape::Diamond, "Field" };
+                return { IM_COL32(100, 155, 105, 255), PinShape::Diamond, "Field" }; // Matte sage green
             case DataType::ParticleSet:
-                return { IM_COL32(200, 160, 255, 255), PinShape::Arrow, "Particles" };
+                return { IM_COL32(145, 125, 175, 255), PinShape::Arrow, "Particles" }; // Matte lavender
             case DataType::SurfaceField:
-                return { IM_COL32(255, 140, 90, 255), PinShape::Diamond, "Surface" };
+                return { IM_COL32(175, 115, 85, 255), PinShape::Diamond, "Surface" }; // Matte terracotta
             case DataType::Substance:
-                return { IM_COL32(220, 200, 120, 255), PinShape::Square, "Substance" };
+                return { IM_COL32(160, 145, 100, 255), PinShape::Square, "Substance" }; // Matte bronze
             default:
-                return { IM_COL32(128, 128, 128, 255), PinShape::Circle, "Unknown" };
+                return { IM_COL32(110, 110, 110, 255), PinShape::Circle, "Unknown" };
         }
     }
 
@@ -304,6 +315,15 @@ namespace NodeSystem {
     enum class PinKind : uint8_t {
         Input = 0,
         Output = 1
+    };
+
+    // Editor/API presentation tier. This does not alter evaluation: a compact
+    // node may keep optional expert data available without presenting every
+    // solver product as an equally important authoring choice.
+    enum class PinExposure : uint8_t {
+        Primary = 0,
+        Optional,
+        Diagnostic
     };
 
     // ============================================================================
@@ -322,6 +342,9 @@ namespace NodeSystem {
         uint32_t nodeId = 0;
         std::string name;
         std::string tooltip;            ///< Hover help text
+        std::string stableKey;           ///< Durable script/IPC/setup identity
+        std::string section;             ///< Properties-panel port group
+        PinExposure exposure = PinExposure::Primary;
         
         // Type information
         PinKind kind = PinKind::Input;
@@ -434,6 +457,7 @@ namespace NodeSystem {
                                ImageUnit unit = ImageUnit::Unknown) {
             Pin pin;
             pin.name = name;
+            pin.stableKey = name;
             pin.kind = PinKind::Input;
             pin.dataType = type;
             pin.imageSemantic = semantic;
@@ -453,6 +477,7 @@ namespace NodeSystem {
                                 ImageUnit unit = ImageUnit::Unknown) {
             Pin pin;
             pin.name = name;
+            pin.stableKey = name;
             pin.kind = PinKind::Output;
             pin.dataType = type;
             pin.imageSemantic = semantic;
@@ -495,6 +520,7 @@ namespace NodeSystem {
         std::vector<std::string> tags;  ///< Searchable keywords
         
         const char* iconName = nullptr; ///< Icon identifier (optional)
+        int iconType = -1;              ///< UIWidgets::IconType value (-1 = none)
         std::string helpUrl;            ///< Link to documentation
         
         ImU32 headerColor = IM_COL32(60, 80, 100, 255);
@@ -543,6 +569,14 @@ namespace NodeSystem {
         if (auto* mesh = std::get_if<GeometryValue>(&value)) {
             out = *mesh;
             return static_cast<bool>(*mesh);
+        }
+        return false;
+    }
+
+    inline bool tryGetCurve(const PinValue& value, CurveValue& out) {
+        if (auto* curve = std::get_if<CurveValue>(&value)) {
+            out = *curve;
+            return static_cast<bool>(*curve);
         }
         return false;
     }
@@ -599,4 +633,5 @@ namespace NodeSystem {
     }
 
 } // namespace NodeSystem
+
 

@@ -1,0 +1,92 @@
+// terrain_lem_finalize.comp
+// Publishes the LEM's hydrology as terrain fields, from the FINAL surface.
+//
+// The droplet solver's Discharge output is a residence histogram: how often a
+// random walker happened to visit a cell. It has no unit and it is not the
+// water that a downstream consumer (River, Lake Basin, Snow, Biome) needs.
+// Here Discharge is catchment area times rain rate, Channel Width and Water
+// Depth come from hydraulic geometry (w ~ Q^0.5, d ~ Q^0.4), and Flow Direction
+// is the drainage direction of the conditioned surface rather than the average
+// heading of whatever droplets went past.
+//
+// Water Level is the one field with two meanings, and they must not be mixed:
+// over a lake it is the lake surface (the depression-filled elevation), over a
+// channel it is bed + flow depth.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float cellSize; float heightScale;
+    float rainRate;
+    float widthScale; float depthScale;
+    float headwaterAreaKm2;
+    float lakeEps;
+    float dischargeScale;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Height       { float heightField[]; };
+layout(set = 0, binding = 1) readonly  buffer Filled       { float filledField[]; };
+layout(set = 0, binding = 2) readonly  buffer Area         { float areaField[]; };
+layout(set = 0, binding = 3) writeonly buffer Discharge    { float dischargeField[]; };
+layout(set = 0, binding = 4) writeonly buffer ChannelWidth { float channelWidth[]; };
+layout(set = 0, binding = 5) writeonly buffer WaterDepth   { float waterDepth[]; };
+layout(set = 0, binding = 6) writeonly buffer WaterLevel   { float waterLevel[]; };
+layout(set = 0, binding = 7) writeonly buffer DirectionX   { float directionX[]; };
+layout(set = 0, binding = 8) writeonly buffer DirectionY   { float directionY[]; };
+layout(set = 0, binding = 9) writeonly buffer LakeDepth    { float lakeDepth[]; };
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+    int x = i % pc.width, y = i / pc.width;
+
+    float hCur = heightField[i];
+    float lake = max(filledField[i] - hCur, 0.0);
+    float areaM2 = max(areaField[i], 0.0);
+    float areaKm2 = areaM2 * 1.0e-6;
+
+    // Volumetric discharge proxy. rainRate is metres of runoff per unit time,
+    // so area * rainRate is a volume rate; dischargeScale carries the caller's
+    // unit convention without changing the field's shape.
+    float discharge = areaM2 * pc.rainRate * pc.dischargeScale;
+    dischargeField[i] = discharge;
+    lakeDepth[i] = lake * max(pc.heightScale, 1.0e-3);
+
+    float channelStrength = smoothstep(pc.headwaterAreaKm2, pc.headwaterAreaKm2 * 5.0, areaKm2);
+    float qref = max(discharge, 1.0e-6);
+    float width = pc.widthScale * 2.5 * pow(qref, 0.5) * channelStrength;
+    float depth = pc.depthScale * 0.30 * pow(qref, 0.40) * channelStrength;
+    width = clamp(width, 0.0, pc.cellSize * 512.0);
+    depth = clamp(depth, 0.0, max(pc.heightScale, 1.0));
+
+    if (lake > pc.lakeEps) {
+        channelWidth[i] = max(width, pc.cellSize);
+        waterDepth[i] = lake * max(pc.heightScale, 1.0e-3);
+        waterLevel[i] = filledField[i];
+    } else {
+        channelWidth[i] = width;
+        waterDepth[i] = depth;
+        waterLevel[i] = hCur + depth / max(pc.heightScale, 1.0e-3);
+    }
+
+    // Drainage direction from the conditioned surface: always defined, always
+    // downstream, unlike a discharge-weighted average of droplet headings.
+    vec2 dir = vec2(0.0);
+    if (x > 0 && y > 0 && x < pc.width - 1 && y < pc.height - 1) {
+        const int dx[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+        const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+        const float dist[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                       1.0, 1.41421356, 1.0, 1.41421356);
+        float fCur = filledField[i];
+        float best = 0.0;
+        for (int d = 0; d < 8; ++d) {
+            int ni = (y + dy[d]) * pc.width + (x + dx[d]);
+            float grade = (fCur - filledField[ni]) / dist[d];
+            if (grade > best) { best = grade; dir = vec2(dx[d], dy[d]) / dist[d]; }
+        }
+    }
+    directionX[i] = dir.x;
+    directionY[i] = dir.y;
+}

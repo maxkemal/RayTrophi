@@ -264,16 +264,108 @@ extern "C" __global__ void __closesthit__ch() {
 
              if (hgd->semantic_map_tex) {
                  const float4 semantic = tex2D<float4>(hgd->semantic_map_tex, uv.x, uv.y);
-                 const float wet = fminf(fmaxf(fmaxf(semantic.x, semantic.y), 0.0f), 1.0f);
-                 const float ice = fminf(fmaxf(semantic.z, 0.0f), 1.0f);
-                 const float hard = fminf(fmaxf(semantic.w, 0.0f), 1.0f);
-                 blend_alb *= 1.0f - wet * 0.28f;
-                 blend_rgh = blend_rgh * (1.0f - wet * 0.65f) + 0.16f * wet * 0.65f;
-                 const float iceLuma = blend_alb.x * 0.2126f + blend_alb.y * 0.7152f + blend_alb.z * 0.0722f;
-                 const float3 iceColor = make_float3(0.70f, 0.82f, 0.88f) * fmaxf(iceLuma, 0.35f);
-                 blend_alb = blend_alb * (1.0f - ice * 0.55f) + iceColor * (ice * 0.55f);
-                 blend_rgh = blend_rgh * (1.0f - ice * 0.65f) + 0.12f * ice * 0.65f;
-                 blend_rgh = fminf(fmaxf(blend_rgh + hard * 0.035f, 0.0f), 1.0f);
+                 float semantic_w[4];
+                 semantic_w[0] = fminf(fmaxf(semantic.x, 0.0f), 1.0f); // Flow
+                 semantic_w[1] = fminf(fmaxf(semantic.y, 0.0f), 1.0f); // Wetness
+                 semantic_w[2] = fminf(fmaxf(semantic.z, 0.0f), 1.0f); // Ice
+                 semantic_w[3] = fminf(fmaxf(semantic.w, 0.0f), 1.0f); // Hardness
+
+                 // A semantic value is a MEASUREMENT; an overlay's coverage is
+                 // a VISIBILITY decision. Flow reads 0.9 under two metres of
+                 // snow - the measurement is right and erosion must keep
+                 // reading it, but painting it there drew a river across a
+                 // snow-filled valley. Overlays composite UNDER the snow the
+                 // splat map placed.
+                 const float splat_total = fmaxf(mask.x + mask.y + mask.z + mask.w, 0.001f);
+                 const float snow_cover = fminf(fmaxf(mask.z / splat_total, 0.0f), 1.0f);
+                 const float exposed = 1.0f - snow_cover;
+                 // Hardness is a SUBSTRATE property, not a surface condition:
+                 // 0.8 under two metres of valley soil is still 0.8, so a
+                 // material bound to it painted granite across meadows. Gated
+                 // by rock exposure it becomes a bedrock VARIANT instead. The
+                 // unmasked field still drives erosion and soil capacity.
+                 const float rock_exposure = fminf(fmaxf(mask.y / splat_total, 0.0f), 1.0f);
+
+                 // Bottom to top: Hardness (bedrock), Flow, Wetness, Ice as
+                 // cover. The old loop ran 0,1,2,3, putting bedrock over both
+                 // water and ice.
+                 const int overlay_order[4] = {3, 0, 1, 2};
+                 const bool overlay_wet = hgd->layer_material_ids[4] >= 0 ||
+                                          hgd->layer_material_ids[5] >= 0;
+                 const bool overlay_ice = hgd->layer_material_ids[6] >= 0;
+                 for (int i = 0; i < 4; ++i) {
+                     const int s = overlay_order[i];
+                     const int matID = hgd->layer_material_ids[4 + s];
+                     if (matID < 0) continue;
+                     float coverage = fminf(fmaxf(
+                         semantic_w[s] * hgd->layer_overlay_strength[s], 0.0f), 1.0f);
+                     // Ice is a cover in its own right and is never buried.
+                     // Hardness is gated by exposure, already net of snow.
+                     const bool ignores_cover =
+                         (hgd->layer_overlay_ignore_cover_mask & (1u << s)) != 0u;
+                     if (!ignores_cover) {
+                         if (s == 3)      coverage *= rock_exposure;
+                         else if (s != 2) coverage *= exposed;
+                     }
+                     if (coverage < 0.001f) continue;
+
+                     const GpuMaterial& om = optixLaunchParams.materials[matID];
+                     float2 o_uv = uv * hgd->layer_uv_scale[4 + s];
+                     o_uv = apply_material_uv_transform(om, o_uv);
+
+                     float3 o_col = om.albedo;
+                     if (om.albedo_tex) {
+                         const float4 c = tex2D<float4>(om.albedo_tex, o_uv.x, o_uv.y);
+                         o_col = make_float3(c.x, c.y, c.z);
+                     }
+                     blend_alb = blend_alb * (1.0f - coverage) + o_col * coverage;
+
+                     float o_rgh = om.roughness;
+                     if (om.roughness_tex) {
+                         o_rgh = tex2D<float4>(om.roughness_tex, o_uv.x, o_uv.y).x;
+                     }
+                     blend_rgh = blend_rgh * (1.0f - coverage) + o_rgh * coverage;
+
+                     float o_met = om.metallic;
+                     if (om.metallic_tex) {
+                         o_met = tex2D<float4>(om.metallic_tex, o_uv.x, o_uv.y).z;
+                     }
+                     blend_met = blend_met * (1.0f - coverage) + o_met * coverage;
+                     blend_ior = blend_ior * (1.0f - coverage) + om.ior * coverage;
+                     blend_tra = blend_tra * (1.0f - coverage) + om.transmission * coverage;
+
+                     if (om.normal_tex) {
+                         const float4 n = tex2D<float4>(om.normal_tex, o_uv.x, o_uv.y);
+                         float3 o_nts = make_float3(n.x, n.y, n.z) * 2.0f - make_float3(1.0f);
+                         o_nts.x *= om.normal_strength;
+                         o_nts.y *= om.normal_strength;
+                         blend_nrm = blend_nrm * (1.0f - coverage) + o_nts * coverage;
+                     }
+
+                 }
+
+                 // Built-in shading remains for every channel without a bound
+                 // material, so a terrain authored before overlays renders
+                 // unchanged. It is buried by snow for the same reason the
+                 // overlays are.
+                 if (!overlay_wet) {
+                     const float wet = fmaxf(semantic_w[0], semantic_w[1]) * exposed;
+                     blend_alb *= 1.0f - wet * 0.28f;
+                     blend_rgh = blend_rgh * (1.0f - wet * 0.65f) + 0.16f * wet * 0.65f;
+                 }
+                 if (!overlay_ice) {
+                     const float ice = semantic_w[2];
+                     const float iceLuma = blend_alb.x * 0.2126f + blend_alb.y * 0.7152f + blend_alb.z * 0.0722f;
+                     const float3 iceColor = make_float3(0.70f, 0.82f, 0.88f) * fmaxf(iceLuma, 0.35f);
+                     blend_alb = blend_alb * (1.0f - ice * 0.55f) + iceColor * (ice * 0.55f);
+                     blend_rgh = blend_rgh * (1.0f - ice * 0.65f) + 0.12f * ice * 0.65f;
+                 }
+                 if (hgd->layer_material_ids[7] < 0) {
+                     // Same gate: hard bedrock only roughens the surface where
+                     // bedrock IS the surface.
+                     blend_rgh = blend_rgh + semantic_w[3] * 0.035f * rock_exposure;
+                 }
+                 blend_rgh = fminf(fmaxf(blend_rgh, 0.0f), 1.0f);
              }
              
              if (length(blend_nrm) > 0.001f) {

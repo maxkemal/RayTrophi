@@ -739,17 +739,23 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
     return transmittance;
 }
 // ════════════════════════════════════════════════════════════════════════════════
+// Mirror of VkTerrainLayerData in include/Backend/vulkan_material_types.h.
+// Slots 0-3 are splat-weighted and normalized against each other; slots 4-7
+// are semantic overlays (Flow/Wetness/Ice/Hardness) composited over that
+// blend by their own unnormalized weight. overlay_mask marks which overlay
+// slots are bound - material id 0 is valid, so a zero id cannot mean "empty".
 struct VkTerrainLayerData {
-    uint  layer_mat_id[4];    // Material indices for layers 0-3
-    float layer_uv_scale[4];  // UV tiling for each layer
+    uint  layer_mat_id[8];    // 0-3 splat, 4-7 semantic overlays
+    float layer_uv_scale[8];  // UV tiling per slot
+    float overlay_strength[4];// Artist dial for slots 4-7
     uint  splat_map_tex;       // Combined-image-sampler slot for RGBA splat map
-    uint  layer_count;         // Active layer count (1-4)
+    uint  layer_count;         // Active splat layer count (1-4)
     uint  macro_color_tex;
     float macro_color_strength;
     uint  semantic_map_tex;
     float semantic_wet_darkening;
     float semantic_wet_roughness;
-    float semantic_pad;
+    uint  overlay_mask;
 };
 layout(set = 0, binding = 12, scalar) readonly buffer TerrainLayerBuffer { VkTerrainLayerData d[]; } terrainLayers;
 
@@ -1638,7 +1644,7 @@ void main() {
             // Macro Color Map (SatMap) blending
             if (tl.macro_color_tex > 0u && tl.macro_color_strength > 0.0) {
                 vec4 mColor = texture(materialTextures[nonuniformEXT(int(tl.macro_color_tex))], hitUV);
-                blendAlbedo = mix(blendAlbedo, mColor.rgb, clamp(tl.macro_color_strength, 0.0, 1.0));
+                blendAlbedo = mix(blendAlbedo, mColor.rgb, clamp(tl.macro_color_strength * mColor.a, 0.0, 1.0));
             }
 
             // Independent semantic controls: R=Flow, G=Wetness, B=Ice,
@@ -1647,17 +1653,134 @@ void main() {
             if (tl.semantic_map_tex > 0u) {
                 vec4 semantic = texture(
                     materialTextures[nonuniformEXT(int(tl.semantic_map_tex))], hitUV);
-                float wet = clamp(max(semantic.r, semantic.g), 0.0, 1.0);
-                float ice = clamp(semantic.b, 0.0, 1.0);
-                float hard = clamp(semantic.a, 0.0, 1.0);
-                blendAlbedo *= 1.0 - wet * clamp(tl.semantic_wet_darkening, 0.0, 0.8);
-                blendRoughness = mix(blendRoughness, 0.16,
-                    wet * clamp(tl.semantic_wet_roughness, 0.0, 1.0));
-                float iceLuma = dot(blendAlbedo, vec3(0.2126, 0.7152, 0.0722));
-                blendAlbedo = mix(blendAlbedo,
-                    vec3(0.70, 0.82, 0.88) * max(iceLuma, 0.35), ice * 0.55);
-                blendRoughness = mix(blendRoughness, 0.12, ice * 0.65);
-                blendRoughness = clamp(blendRoughness + hard * 0.035, 0.0, 1.0);
+                float semanticW[4];
+                semanticW[0] = clamp(semantic.r, 0.0, 1.0); // Flow
+                semanticW[1] = clamp(semantic.g, 0.0, 1.0); // Wetness
+                semanticW[2] = clamp(semantic.b, 0.0, 1.0); // Ice
+                semanticW[3] = clamp(semantic.a, 0.0, 1.0); // Hardness
+
+                // Overlay slots 4-7 composite OVER the normalized splat blend,
+                // each by its own weight. They are deliberately outside that
+                // normalization: a semantic weight says how strongly a
+                // condition holds here, not what share of the pixel it owns,
+                // and a river bed covers the substrate rather than competing
+                // with it for area.
+                //
+                // Two things that are NOT the same number:
+                //   the semantic value  = a measurement (flow is 0.9 here)
+                //   the overlay coverage = a visibility decision (is it seen?)
+                // Flow can read 0.9 under two metres of snow. The measurement
+                // is right and erosion must keep reading it - what is wrong is
+                // PAINTING it, which is how a river ended up drawn across a
+                // snow-filled valley. Burial belongs here, at compositing,
+                // never in the field the solvers consume.
+                float snowCover = weights[2];
+
+                // Hardness is not a surface condition at all - it is a
+                // SUBSTRATE property. Hardness 0.8 under two metres of valley
+                // soil is still 0.8, so a material bound to it painted granite
+                // across meadows. Gated by rock exposure it becomes what it is
+                // actually good for: a bedrock VARIANT, hard outcrops against
+                // soft ones, visible only where rock shows. The unmasked field
+                // still drives erosion resistance and soil capacity.
+                float rockExposure = weights[1];
+
+                // Bottom to top: Hardness (bedrock substrate), Flow, Wetness,
+                // then Ice as cover. The old loop ran 0,1,2,3, which put
+                // bedrock over both water and ice.
+                const uint kOverlayOrder[4] = uint[4](3u, 0u, 1u, 2u);
+                bool overlayWet = (tl.overlay_mask & 3u) != 0u;
+                bool overlayIce = (tl.overlay_mask & (1u << 2u)) != 0u;
+                for (uint i = 0u; i < 4u; i++) {
+                    uint s = kOverlayOrder[i];
+                    if ((tl.overlay_mask & (1u << s)) == 0u) continue;
+                    float coverage = clamp(semanticW[s] * tl.overlay_strength[s], 0.0, 1.0);
+                    // Bit 8+s opts a slot out of burial, for the case the
+                    // author means: open water cutting through snow.
+                    bool ignoresCover = (tl.overlay_mask & (1u << (8u + s))) != 0u;
+                    if (!ignoresCover) {
+                        // Ice is a cover in its own right and is never buried.
+                        // Hardness is gated by exposure, which is already net
+                        // of snow. The rest are buried by snow.
+                        if (s == 3u)      coverage *= clamp(rockExposure, 0.0, 1.0);
+                        else if (s != 2u) coverage *= 1.0 - clamp(snowCover, 0.0, 1.0);
+                    }
+                    if (coverage < 0.001) continue;
+
+                    Material om = materials.m[tl.layer_mat_id[4u + s]];
+                    vec2 overlayUV = hitUV * tl.layer_uv_scale[4u + s];
+                    overlayUV = applyMaterialUVTransform(om, overlayUV);
+
+                    vec3 oAlbedo = max(vec3(om.albedo_r, om.albedo_g, om.albedo_b), vec3(0.0));
+                    if (int(om.albedo_tex) > 0) {
+                        oAlbedo = texture(materialTextures[nonuniformEXT(int(om.albedo_tex))], overlayUV).rgb;
+                    }
+                    blendAlbedo = mix(blendAlbedo, oAlbedo, coverage);
+
+                    float oRough = clamp(om.roughness, 0.0, 1.0);
+                    if (int(om.roughness_tex) > 0) {
+                        oRough = samplePackedRoughness(
+                            texture(materialTextures[nonuniformEXT(int(om.roughness_tex))], overlayUV),
+                            0.0, om.flags);
+                    }
+                    blendRoughness = mix(blendRoughness, oRough, coverage);
+
+                    float oMetal = clamp(om.metallic, 0.0, 1.0);
+                    if (int(om.metallic_tex) > 0) {
+                        oMetal = samplePackedMetallic(
+                            texture(materialTextures[nonuniformEXT(int(om.metallic_tex))], overlayUV),
+                            om.flags);
+                    }
+                    blendMetallic = mix(blendMetallic, oMetal, coverage);
+
+                    float oTransmission = clamp(om.transmission, 0.0, 1.0);
+                    if (int(om.transmission_tex) > 0) {
+                        oTransmission = texture(materialTextures[nonuniformEXT(int(om.transmission_tex))], overlayUV).r;
+                    }
+                    blendTransmission = mix(blendTransmission, oTransmission, coverage);
+                    blendIor = mix(blendIor, max(om.ior, 1.0), coverage);
+
+                    if (int(om.normal_tex) > 0) {
+                        vec3 ons = decodeNormalMapSample(
+                            texture(materialTextures[nonuniformEXT(int(om.normal_tex))], overlayUV).rgb,
+                            om.flags);
+                        ons.x *= om.normal_strength;
+                        ons.y *= om.normal_strength;
+                        blendNormal_ts = mix(blendNormal_ts, ons, coverage);
+                        anyNormalTex = true;
+                    } else {
+                        blendNormal_ts = mix(blendNormal_ts, vec3(0.0, 0.0, 1.0), coverage);
+                    }
+
+                }
+
+                // Built-in shading survives for every channel WITHOUT a bound
+                // material, so a terrain authored before overlays existed is
+                // shaded exactly as before. Running both would double the
+                // effect the artist just authored.
+                // The built-in tweaks are buried by snow for the same reason
+                // the overlays are: wet ground under snow is not wet-looking.
+                float exposed = 1.0 - clamp(snowCover, 0.0, 1.0);
+                if (!overlayWet) {
+                    float wet = clamp(max(semanticW[0], semanticW[1]), 0.0, 1.0) * exposed;
+                    blendAlbedo *= 1.0 - wet * clamp(tl.semantic_wet_darkening, 0.0, 0.8);
+                    blendRoughness = mix(blendRoughness, 0.16,
+                        wet * clamp(tl.semantic_wet_roughness, 0.0, 1.0));
+                }
+                if (!overlayIce) {
+                    float iceLuma = dot(blendAlbedo, vec3(0.2126, 0.7152, 0.0722));
+                    blendAlbedo = mix(blendAlbedo,
+                        vec3(0.70, 0.82, 0.88) * max(iceLuma, 0.35), semanticW[2] * 0.55);
+                    blendRoughness = mix(blendRoughness, 0.12, semanticW[2] * 0.65);
+                }
+                if ((tl.overlay_mask & (1u << 3u)) == 0u) {
+                    // Same gate as the overlay: hard bedrock only roughens the
+                    // surface where bedrock IS the surface.
+                    blendRoughness = clamp(
+                        blendRoughness + semanticW[3] * 0.035 * clamp(rockExposure, 0.0, 1.0),
+                        0.0, 1.0);
+                }
+                blendRoughness = clamp(blendRoughness, 0.0, 1.0);
             }
 
             // Override local mat copy with blended values

@@ -12,6 +12,6 @@ namespace MeshEdit {
 
 std::shared_ptr<SplineObject> addSplinePrimitiveObject(
     UIContext& ctx, SceneHistory& history, SplinePrimitiveType type,
-    const std::string& requested_name, SplinePlane plane = SplinePlane::XZ);
+    const std::string& requested_name, SplinePlane plane = SplinePlane::XY);
 
 } // namespace MeshEdit

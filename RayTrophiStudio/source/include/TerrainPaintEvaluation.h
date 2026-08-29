@@ -45,6 +45,10 @@ namespace TerrainPaintEvaluation {
         float iceInfluence = 0.85f;
         float contrast = 1.25f;
         int seed = 73;
+        /// Renamed from normalizeOutput, which named an operation Splat Output
+        /// performed unconditionally anyway. This dial has a real effect:
+        /// soil absorbs whatever budget no other layer claimed.
+        bool soilFillsRemainder = true;
     };
 
     struct SurfaceComposerInputs {
@@ -58,15 +62,49 @@ namespace TerrainPaintEvaluation {
         NodeSystem::Image2DData meltwater;
         NodeSystem::Image2DData grass;
         NodeSystem::Image2DData rock;
+        /// Shared Terrain Analysis slope in 0-1. Empty falls back to a local
+        /// gradient computed with the same canonical curve.
+        NodeSystem::Image2DData slope;
+        /// Thermal Erosion's talus mask: loose angular debris at cliff bases.
+        /// It joins the rock claim rather than getting a layer of its own,
+        /// because in a four-way Grass/Rock/Snow/Soil partition talus IS rock.
+        NodeSystem::Image2DData talus;
     };
 
+    /**
+     * @param slope Optional shared slope field in 0-1 mask space. When empty
+     *              the angle is derived from @p height using the same curve,
+     *              so a wired and an unwired graph classify identically.
+     */
     NodeSystem::Image2DData evaluateAutoSplat(
         const NodeSystem::Image2DData& height,
+        const NodeSystem::Image2DData& slope,
         const PaintDomain& domain,
         const AutoSplatSettings& settings);
 
-    NodeSystem::Image2DData evaluateFlowSemantic(
-        const NodeSystem::Image2DData& flow,
+    /// The four independent semantic controls, packed as R/G/B/A.
+    struct SemanticInputs {
+        NodeSystem::Image2DData flow;
+        NodeSystem::Image2DData wetness;
+        NodeSystem::Image2DData ice;
+        NodeSystem::Image2DData hardness;
+    };
+
+    /**
+     * @brief Pack the semantic control texture. Renamed from
+     *        evaluateFlowSemantic, which wrote R and hard-zeroed G/B/A.
+     *
+     * Nothing is synthesized here. An unconnected channel stays 0, which
+     * terrain.list_layers reports as channel_coverage 0, rather than being
+     * filled with a plausible guess: these channels drive erosion resistance
+     * and soil capacity, so an invented value would be a guess steering a
+     * solver.
+     *
+     * The four are deliberately NOT normalized against each other. They are
+     * independent measurements of conditions, not shares of a surface.
+     */
+    NodeSystem::Image2DData evaluateSemanticControls(
+        const SemanticInputs& inputs,
         const PaintDomain& domain);
 
     NodeSystem::Image2DData evaluateSurfaceComposer(

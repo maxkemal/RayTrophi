@@ -211,6 +211,7 @@ bool TerrainNodeGraphV2::applySatMapPresetRecipe(
     TerrainSurfaceMasksNode* surfaceMasks = nullptr;
     ExposureMaskNode* exposure = nullptr;
     SnowClimateNode* snow = nullptr;
+    RiverHydraulicsNode* riverHydraulics = nullptr;
     TerrainSatMapOutputNode* output = nullptr;
     for (const auto& node : nodes) {
         if (!heightOutput) heightOutput = dynamic_cast<HeightOutputNode*>(node.get());
@@ -224,6 +225,7 @@ bool TerrainNodeGraphV2::applySatMapPresetRecipe(
         if (!surfaceMasks) surfaceMasks = dynamic_cast<TerrainSurfaceMasksNode*>(node.get());
         if (!exposure) exposure = dynamic_cast<ExposureMaskNode*>(node.get());
         if (!snow) snow = dynamic_cast<SnowClimateNode*>(node.get());
+        if (!riverHydraulics) riverHydraulics = dynamic_cast<RiverHydraulicsNode*>(node.get());
         if (!output) output = dynamic_cast<TerrainSatMapOutputNode*>(node.get());
     }
     if (!heightOutput || heightOutput->inputs.empty())
@@ -245,8 +247,15 @@ bool TerrainNodeGraphV2::applySatMapPresetRecipe(
     };
     const bool hydraulicConnected = hydraulic && !hydraulic->inputs.empty() &&
         sourceForInput(hydraulic->inputs[0].id) != 0;
-    uint32_t flowSource = hydraulicConnected && hydraulic->outputs.size() > 3
-        ? hydraulic->outputs[3].id : (flowMask && !flowMask->outputs.empty() ? flowMask->outputs[0].id : 0);
+    // Ports are looked up by stable key, not slot. Hydraulic Erosion used to
+    // publish nine outputs and now publishes four; slot 3 was Discharge and is
+    // now Flow. Both are normalised 0..1 fields of the same shape, so a slot
+    // read would have kept compiling and quietly swapped water discharge for
+    // sediment transport underneath every recipe that reads "flow".
+    const uint32_t hydraulicFlowPin =
+        terrainPortId(hydraulic, NodeSystem::PinKind::Output, "flow");
+    uint32_t flowSource = hydraulicConnected && hydraulicFlowPin != 0
+        ? hydraulicFlowPin : (flowMask && !flowMask->outputs.empty() ? flowMask->outputs[0].id : 0);
     if (!flowSource && recipeUses(*recipe, "flow")) {
         flowMask = dynamic_cast<FlowMaskNode*>(addTerrainNode(NodeType::FlowMask, x - 620.0f, y + 240.0f));
         if (flowMask) {
@@ -307,9 +316,17 @@ bool TerrainNodeGraphV2::applySatMapPresetRecipe(
     std::unordered_map<std::string, uint32_t> fields;
     fields["height"] = heightSource;
     fields["flow"] = flowSource;
-    fields["channel_width"] = hydraulicConnected && hydraulic->outputs.size() > 6 ? hydraulic->outputs[6].id : 0;
-    fields["erosion"] = hydraulicConnected && hydraulic->outputs.size() > 1 ? hydraulic->outputs[1].id : 0;
-    fields["deposition"] = hydraulicConnected && hydraulic->outputs.size() > 2 ? hydraulic->outputs[2].id : 0;
+    // Channel width is metres of wetted river and its authoritative owner is
+    // River Hydraulics, which solves it from discharge. Hydraulic Erosion used
+    // to republish a second copy on slot 6; that pin is gone, and reading the
+    // old slot behind a size() guard would leave this field silently at zero --
+    // recipes would keep rendering, just without their channel term.
+    fields["channel_width"] =
+        terrainPortId(riverHydraulics, NodeSystem::PinKind::Output, "river_width");
+    fields["erosion"] = hydraulicConnected
+        ? terrainPortId(hydraulic, NodeSystem::PinKind::Output, "wear") : 0;
+    fields["deposition"] = hydraulicConnected
+        ? terrainPortId(hydraulic, NodeSystem::PinKind::Output, "deposits") : 0;
     fields["soil"] = soilSource;
     fields["grass"] = grassSource;
     fields["exposure"] = exposure && !exposure->outputs.empty() ? exposure->outputs[0].id : 0;

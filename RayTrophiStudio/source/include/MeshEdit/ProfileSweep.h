@@ -16,6 +16,10 @@ struct ProfileSweepSettings {
     bool cap_start = true;
     bool cap_end = true;
     float profile_scale = 1.0f;
+    // Multiplies each path ring by interpolated control-point userData1.
+    // Default off preserves existing Sweep results; Curve to Mesh enables it
+    // for animatable cable/hose thickness.
+    bool use_path_radius = false;
     Vec3 up = Vec3(0.0f, 1.0f, 0.0f);
 };
 

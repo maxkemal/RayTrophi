@@ -51,8 +51,14 @@ BezierSpline makeSplinePrimitive(SplinePrimitiveType type,
     case SplinePrimitiveType::OpenLine: {
         spline.isClosed = false;
         const float halfWidth = std::max(0.0001f, std::abs(settings.width) * 0.5f);
-        addPointWithHandle(spline, settings.center + Vec3(-halfWidth, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f), halfWidth / 3.0f);
-        addPointWithHandle(spline, settings.center + Vec3( halfWidth, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f), halfWidth / 3.0f);
+        // Canonical 2D coordinates are X=lateral and Y=height. A one-axis
+        // Open Line is the vertical/spine primitive, so it must use canonical
+        // Y; the plane remap then yields XY->Y, XZ->Z and YZ->Y. The previous
+        // X-only definition could never create a world-Y line.
+        addPointWithHandle(spline, settings.center + Vec3(0.0f, -halfWidth, 0.0f),
+                           Vec3(0.0f, 1.0f, 0.0f), halfWidth / 3.0f);
+        addPointWithHandle(spline, settings.center + Vec3(0.0f,  halfWidth, 0.0f),
+                           Vec3(0.0f, 1.0f, 0.0f), halfWidth / 3.0f);
         break;
     }
     case SplinePrimitiveType::OpenArc: {

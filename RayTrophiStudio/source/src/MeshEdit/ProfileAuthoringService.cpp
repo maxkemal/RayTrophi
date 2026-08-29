@@ -40,7 +40,8 @@ std::string uniqueName(const UIContext& ctx, const std::string& requested,
 ProfilePublishResult publishGeneratedProfile(UIContext& ctx, SceneHistory& history,
                                              std::shared_ptr<DNA::GeometryDetail> geometry,
                                              const std::string& requested_name,
-                                             const std::string& operation_id) {
+                                             const std::string& operation_id,
+                                             const Matrix4x4* initial_transform) {
     ProfilePublishResult result;
     result.report.operation_id = operation_id;
     if (!geometry || geometry->get_vertex_count() == 0 || geometry->indices.empty()) {
@@ -55,6 +56,7 @@ ProfilePublishResult publishGeneratedProfile(UIContext& ctx, SceneHistory& histo
     // handle null for low-level/import paths. Scene-authored objects must own a
     // handle so hierarchy selection, gizmos and transform commands can operate.
     mesh->transform = std::make_shared<Transform>();
+    if (initial_transform) mesh->transform->setBase(*initial_transform);
     mesh->geometry = std::move(geometry);
     mesh->build_local_bvh();
 

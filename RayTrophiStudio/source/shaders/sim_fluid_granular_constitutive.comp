@@ -1,0 +1,40 @@
+#version 450
+
+// Standalone first-pass constitutive kernel. It is intentionally independent
+// from the existing P2G/G2P ABI until the buffer contract is reviewed.
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer MeanPressure { float pressure[]; };
+layout(std430, binding = 1) readonly buffer ShearMeasure { float shear[]; };
+layout(std430, binding = 2) readonly buffer PlasticVolume { float volume[]; };
+layout(std430, binding = 3) writeonly buffer YieldValue { float yield_value[]; };
+layout(std430, binding = 4) writeonly buffer PlasticIncrement { float plastic_increment[]; };
+layout(std430, binding = 5) writeonly buffer StateFlags { uint state_flags[]; };
+
+layout(push_constant) uniform Params {
+    uint count;
+    float friction_tangent;
+    float cohesion;
+    float hardening;
+    float tensile_cutoff;
+    float detach_pressure;
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= count) return;
+    float p = pressure[i];
+    float positive_p = max(p, 0.0);
+    float strength = max(cohesion + positive_p * friction_tangent, 0.0);
+    float y = max(shear[i], 0.0) - strength;
+    bool yielded = y > 0.0;
+    float inc = yielded ? y / max(1.0 + hardening, 1.0e-6) : 0.0;
+    bool detached = p < -max(tensile_cutoff, 0.0) ||
+                    (p <= detach_pressure && volume[i] < 0.5);
+    bool finite_state = !(isnan(y) || isinf(y) || isnan(inc) || isinf(inc));
+    if (!finite_state) { y = 0.0; inc = 0.0; detached = true; yielded = false; }
+    yield_value[i] = y;
+    plastic_increment[i] = inc;
+    state_flags[i] = (yielded ? 1u : 0u) | (detached ? 2u : 0u) |
+                     (finite_state ? 0u : 4u);
+}

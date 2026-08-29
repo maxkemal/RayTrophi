@@ -195,6 +195,48 @@ std::vector<const char*> ThemeManager::getAllThemeNames() const {
     return names;
 }
 
+ImVec4 ThemeManager::getCategoryColor(const std::string& categoryName, const ImVec4& defaultColor) const {
+    (void)categoryName;
+    if (!iconSettings_.overridePanelAccentsWithTheme) {
+        return defaultColor;
+    }
+    const Theme& t = current();
+    const ImVec4& accent = t.colors.accent;
+
+    if (iconSettings_.style == IconStyle::NeonGlow) {
+        return ImVec4(
+            std::clamp(defaultColor.x * 0.4f + accent.x * 0.6f, 0.0f, 1.0f),
+            std::clamp(defaultColor.y * 0.4f + accent.y * 0.6f, 0.0f, 1.0f),
+            std::clamp(defaultColor.z * 0.4f + accent.z * 0.6f, 0.0f, 1.0f),
+            defaultColor.w
+        );
+    } else if (iconSettings_.style == IconStyle::ClayMatcap) {
+        const ImVec4& matcap = iconSettings_.matcapColor;
+        return ImVec4(
+            std::clamp(defaultColor.x * 0.7f + matcap.x * 0.3f, 0.0f, 1.0f),
+            std::clamp(defaultColor.y * 0.7f + matcap.y * 0.3f, 0.0f, 1.0f),
+            std::clamp(defaultColor.z * 0.7f + matcap.z * 0.3f, 0.0f, 1.0f),
+            defaultColor.w
+        );
+    } else if (iconSettings_.style == IconStyle::CustomPalette) {
+        const ImVec4& custom = iconSettings_.customColor;
+        return ImVec4(
+            std::clamp(defaultColor.x * 0.6f + custom.x * 0.4f, 0.0f, 1.0f),
+            std::clamp(defaultColor.y * 0.6f + custom.y * 0.4f, 0.0f, 1.0f),
+            std::clamp(defaultColor.z * 0.6f + custom.z * 0.4f, 0.0f, 1.0f),
+            defaultColor.w
+        );
+    }
+
+    // Default blended accent
+    return ImVec4(
+        std::clamp(defaultColor.x * 0.75f + accent.x * 0.25f, 0.0f, 1.0f),
+        std::clamp(defaultColor.y * 0.75f + accent.y * 0.25f, 0.0f, 1.0f),
+        std::clamp(defaultColor.z * 0.75f + accent.z * 0.25f, 0.0f, 1.0f),
+        defaultColor.w
+    );
+}
+
 void ThemeManager::saveThemeSettings(const std::string& filepath, float panelAlpha) {
     std::ofstream file(filepath);
     if (!file.is_open()) return;
@@ -1111,27 +1153,9 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
 
 
     auto drawBaseClaySphere = [&](ImVec2 center, float radius) {
-        if (settings.style == IconStyle::FlatMinimalist) {
-            dl->AddCircleFilled(center, radius, ImGui::ColorConvertFloat4ToU32(settings.customBgColor));
-            dl->AddCircle(center, radius, col, 32, thickness * 0.7f);
-        }
-        else if (settings.style == IconStyle::NeonGlow) {
-            dl->AddCircleFilled(center, radius, IM_COL32(10, 15, 25, 120));
-            ImVec4 neon = ImGui::ColorConvertU32ToFloat4(col);
-            for (int i = 1; i <= 3; ++i) {
-                dl->AddCircle(center, radius + i * 0.8f, ImGui::ColorConvertFloat4ToU32(ImVec4(neon.x, neon.y, neon.z, 0.18f / i)), 32, thickness * 1.5f);
-            }
-            dl->AddCircle(center, radius, col, 32, thickness);
-        }
-        else if (settings.style == IconStyle::CustomPalette) {
-            dl->AddCircleFilled(center, radius, ImGui::ColorConvertFloat4ToU32(settings.customBgColor));
-            dl->AddCircle(center, radius, ImGui::ColorConvertFloat4ToU32(settings.customColor), 32, thickness);
-        }
-        else {
-            dl->AddCircleFilled(center, radius, clay_shadow);
-            dl->AddCircleFilled(ImVec2(center.x - radius * 0.12f, center.y - radius * 0.12f), radius * 0.85f, clay_diffuse);
-            dl->AddCircleFilled(ImVec2(center.x - radius * 0.25f, center.y - radius * 0.25f), radius * 0.22f, clay_specular);
-        }
+        (void)center;
+        (void)radius;
+        // Clean transparent background so vector icon shapes render sharply and distinctively
     };
 
     switch (type) {
@@ -1178,96 +1202,147 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
         case IconType::Terrain:
             {
                 float r = is * 0.48f;
-                // Deformed mountain/terrain shape instead of a clean sphere
-                ImVec2 t_top(cp.x, cp.y - r * 0.6f);
-                ImVec2 t_left(cp.x - r * 0.8f, cp.y + r * 0.6f);
-                ImVec2 t_right(cp.x + r * 0.8f, cp.y + r * 0.6f);
-                ImVec2 t_mid(cp.x - r * 0.2f, cp.y + r * 0.2f);
-                
-                // Base mountain shadow (left side dark, right side light)
-                ImVec2 faceL[] = { t_top, t_mid, t_left };
-                ImVec2 faceR[] = { t_top, t_mid, t_right };
-                
-                dl->AddConvexPolyFilled(faceL, 3, IM_COL32(80, 110, 80, 255)); // Forest green shadow side
-                dl->AddConvexPolyFilled(faceR, 3, IM_COL32(110, 140, 100, 255)); // Lighter green side
-                
-                // Wireframe terrain grid lines on top of the mountain
-                dl->AddTriangle(t_top, t_left, t_mid, IM_COL32(255, 255, 255, 60), 0.8f);
-                dl->AddTriangle(t_top, t_right, t_mid, IM_COL32(255, 255, 255, 80), 0.8f);
-                
-                // Draw mountain outlines
-                dl->AddLine(t_top, t_left, IM_COL32(200, 220, 200, 255), thickness);
-                dl->AddLine(t_top, t_right, IM_COL32(200, 220, 200, 255), thickness);
-                dl->AddLine(t_left, t_right, IM_COL32(150, 180, 150, 255), thickness);
-                dl->AddLine(t_top, t_mid, IM_COL32(200, 220, 200, 255), thickness);
+                // Multi-peak 3D Mountain Range & Elevation Relief
+                ImVec2 p_peak(cp.x - r * 0.15f, cp.y - r * 0.65f); // Main peak
+                ImVec2 p_midL(cp.x - r * 0.85f, cp.y + r * 0.55f);
+                ImVec2 p_midR(cp.x + r * 0.85f, cp.y + r * 0.55f);
+                ImVec2 p_ridge(cp.x - r * 0.25f, cp.y + r * 0.20f);
+
+                ImVec2 p_subPeak(cp.x + r * 0.40f, cp.y - r * 0.25f); // Secondary peak
+
+                // Left Shadow Facets (Deep Alpine Slate Green)
+                ImVec2 faceL1[] = { p_peak, p_ridge, p_midL };
+                ImVec2 faceL2[] = { p_subPeak, p_midR, p_ridge };
+                dl->AddConvexPolyFilled(faceL1, 3, IM_COL32(50, 95, 75, 255));
+                dl->AddConvexPolyFilled(faceL2, 3, IM_COL32(85, 140, 105, 255));
+
+                // Right Sunlit Facets (Emerald Green & Alpine Sun)
+                ImVec2 faceR1[] = { p_peak, p_ridge, p_subPeak };
+                dl->AddConvexPolyFilled(faceR1, 3, IM_COL32(110, 180, 125, 255));
+
+                // Snow Cap on Main Peak
+                ImVec2 snowCap[] = {
+                    p_peak,
+                    ImVec2(p_peak.x - r * 0.20f, p_peak.y + r * 0.30f),
+                    ImVec2(p_peak.x - r * 0.05f, p_peak.y + r * 0.22f),
+                    ImVec2(p_peak.x + r * 0.20f, p_peak.y + r * 0.35f)
+                };
+                dl->AddConvexPolyFilled(snowCap, 4, IM_COL32(245, 250, 255, 255));
+
+                // High-Contrast Mountain Ridge Contours
+                dl->AddLine(p_peak, p_midL, IM_COL32(255, 255, 255, 255), thickness * 1.4f);
+                dl->AddLine(p_peak, p_subPeak, IM_COL32(255, 255, 255, 255), thickness * 1.4f);
+                dl->AddLine(p_subPeak, p_midR, IM_COL32(255, 255, 255, 255), thickness * 1.4f);
+                dl->AddLine(p_peak, p_ridge, IM_COL32(200, 240, 210, 200), thickness * 1.0f);
             }
             break;
         case IconType::Sculpt:
             {
                 float r = is * 0.48f;
-                drawBaseClaySphere(cp, r);
-                
-                // Golden carving wire loop tool scraping the sphere
-                ImVec2 loopCenter = ImVec2(cp.x + r * 0.1f, cp.y - r * 0.1f);
-                float loopR = r * 0.45f;
-                
-                // Scraped clay crease/mark
-                dl->PathClear();
-                dl->PathArcTo(cp, r * 0.8f, 1.8f, 3.5f);
-                dl->PathStroke(clay_detail_shadow, false, thickness * 2.0f);
-                
-                // Tool metal wire loop
-                dl->AddCircle(loopCenter, loopR, IM_COL32(255, 200, 50, 255), 16, thickness * 1.5f);
-                
-                // Tool shaft/handle
-                ImVec2 handleStart = ImVec2(loopCenter.x + cosf(0.78f) * loopR, loopCenter.y - sinf(0.78f) * loopR);
-                ImVec2 handleEnd = ImVec2(handleStart.x + r * 0.6f, handleStart.y - r * 0.6f);
-                dl->AddLine(handleStart, handleEnd, IM_COL32(180, 180, 180, 255), thickness * 2.0f);
+                // 3D Terracotta Clay Block being carved
+                ImVec2 b_top(cp.x - r * 0.1f, cp.y - r * 0.35f);
+                ImVec2 b_bot(cp.x - r * 0.1f, cp.y + r * 0.55f);
+                ImVec2 b_tl(cp.x - r * 0.75f, cp.y - r * 0.05f);
+                ImVec2 b_tr(cp.x + r * 0.40f, cp.y - r * 0.15f);
+                ImVec2 b_bl(cp.x - r * 0.75f, cp.y + r * 0.35f);
+                ImVec2 b_br(cp.x + r * 0.40f, cp.y + r * 0.25f);
+
+                ImVec2 topFace[] = { cp, b_tl, b_top, b_tr };
+                ImVec2 leftFace[] = { cp, b_tl, b_bl, b_bot };
+                ImVec2 rightFace[] = { cp, b_tr, b_br, b_bot };
+
+                // Terracotta Clay Block Facets
+                dl->AddConvexPolyFilled(topFace, 4, IM_COL32(235, 120, 95, 255));
+                dl->AddConvexPolyFilled(leftFace, 4, IM_COL32(195, 85, 65, 255));
+                dl->AddConvexPolyFilled(rightFace, 4, IM_COL32(140, 55, 40, 255));
+
+                // Carved Groove Line in the clay
+                dl->AddLine(b_tl, cp, IM_COL32(80, 25, 20, 255), thickness * 2.0f);
+
+                // Sharp Steel Carving Chisel (Wooden Handle + Angled Metal Blade)
+                ImVec2 chiselTip(cp.x - r * 0.05f, cp.y - r * 0.05f);
+                ImVec2 ferruleEnd(cp.x + r * 0.45f, cp.y - r * 0.55f);
+                ImVec2 handleEnd(cp.x + r * 0.85f, cp.y - r * 0.95f);
+
+                // Steel blade body
+                dl->AddLine(chiselTip, ferruleEnd, IM_COL32(220, 225, 235, 255), thickness * 2.6f);
+                // Wooden handle
+                dl->AddLine(ferruleEnd, handleEnd, IM_COL32(180, 110, 45, 255), thickness * 2.2f);
+
+                // Golden carving sparks
+                dl->AddCircleFilled(chiselTip, thickness * 1.5f, IM_COL32(255, 215, 0, 255));
+                dl->AddLine(chiselTip, ImVec2(chiselTip.x - r * 0.2f, chiselTip.y - r * 0.25f), IM_COL32(255, 200, 50, 200), thickness * 0.8f);
+                dl->AddLine(chiselTip, ImVec2(chiselTip.x - r * 0.35f, chiselTip.y - r * 0.10f), IM_COL32(255, 200, 50, 200), thickness * 0.8f);
             }
             break;
         case IconType::Hair:
             {
                 float r = is * 0.48f;
-                drawBaseClaySphere(cp, r);
                 
-                // Three flowing golden strands wrapping the sphere
-                ImU32 hairCol = IM_COL32(255, 180, 70, 230);
-                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.8f, cp.y + r * 0.4f),
-                                       ImVec2(cp.x - r * 0.2f, cp.y - r * 0.6f),
-                                       ImVec2(cp.x + r * 0.6f, cp.y - r * 0.4f), hairCol, thickness * 1.5f);
-                                       
-                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.7f),
-                                       ImVec2(cp.x + r * 0.1f, cp.y - r * 0.5f),
-                                       ImVec2(cp.x + r * 0.7f, cp.y - r * 0.1f), hairCol, thickness * 1.2f);
-                                       
-                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.8f, cp.y - r * 0.1f),
-                                       ImVec2(cp.x - r * 0.3f, cp.y - r * 0.8f),
-                                       ImVec2(cp.x + r * 0.4f, cp.y - r * 0.7f), IM_COL32(255, 210, 120, 180), thickness * 0.9f);
+                // Hair Scalp/Root Emitter Base Line
+                dl->AddLine(ImVec2(cp.x - r * 0.8f, cp.y + r * 0.6f), ImVec2(cp.x + r * 0.8f, cp.y + r * 0.6f), IM_COL32(180, 140, 90, 240), thickness * 2.0f);
+
+                // Flowing Golden-Amber Hair Strands Bundle
+                ImU32 hairGold = IM_COL32(255, 195, 60, 255);
+                ImU32 hairShine = IM_COL32(255, 235, 160, 255);
+
+                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.6f), ImVec2(cp.x - r * 0.8f, cp.y - r * 0.2f), ImVec2(cp.x - r * 0.2f, cp.y - r * 0.7f), hairGold, thickness * 1.6f);
+                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.2f, cp.y + r * 0.6f), ImVec2(cp.x - r * 0.3f, cp.y - r * 0.1f), ImVec2(cp.x + r * 0.2f, cp.y - r * 0.75f), hairGold, thickness * 1.6f);
+                dl->AddBezierQuadratic(ImVec2(cp.x + r * 0.2f, cp.y + r * 0.6f), ImVec2(cp.x + r * 0.3f, cp.y + r * 0.0f), ImVec2(cp.x + r * 0.65f, cp.y - r * 0.65f), hairGold, thickness * 1.6f);
+
+                // Glossy Highlight Curves across strands
+                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.5f, cp.y + r * 0.4f), ImVec2(cp.x - r * 0.6f, cp.y - r * 0.1f), ImVec2(cp.x - r * 0.1f, cp.y - r * 0.5f), hairShine, thickness * 1.0f);
+                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.1f, cp.y + r * 0.4f), ImVec2(cp.x - r * 0.15f, cp.y + r * 0.0f), ImVec2(cp.x + r * 0.3f, cp.y - r * 0.55f), hairShine, thickness * 1.0f);
+
+                // Follicle Root Dots
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.6f), thickness * 1.4f, IM_COL32(255, 255, 255, 255));
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.2f, cp.y + r * 0.6f), thickness * 1.4f, IM_COL32(255, 255, 255, 255));
+                dl->AddCircleFilled(ImVec2(cp.x + r * 0.2f, cp.y + r * 0.6f), thickness * 1.4f, IM_COL32(255, 255, 255, 255));
             }
             break;
-        case IconType::Brush: // Used as Stylize Mode / Mix Behavior
+        case IconType::Brush:
             {
                 float r = is * 0.48f;
-                drawBaseClaySphere(cp, r);
                 
-                // Mix blend strokes (Violet and Orange semi-transparent waves)
-                dl->PathClear();
-                dl->PathArcTo(cp, r * 0.65f, 2.2f, 4.2f);
-                dl->PathStroke(IM_COL32(180, 100, 255, 180), false, thickness * 2.2f);
-                
-                dl->PathClear();
-                dl->PathArcTo(cp, r * 0.65f, 3.2f, 5.2f);
-                dl->PathStroke(IM_COL32(255, 170, 50, 180), false, thickness * 2.2f);
-                
-                // Magic Wand overlay (slanted gold stick with white star spark)
-                ImVec2 wandStart = ImVec2(cp.x - r * 0.5f, cp.y + r * 0.5f);
-                ImVec2 wandEnd = ImVec2(cp.x + r * 0.3f, cp.y - r * 0.3f);
-                dl->AddLine(wandStart, wandEnd, IM_COL32(220, 220, 220, 255), thickness * 1.5f); // metal shaft
-                dl->AddLine(ImVec2(wandEnd.x - r * 0.15f, wandEnd.y + r * 0.15f), wandEnd, IM_COL32(255, 215, 0, 255), thickness * 1.5f); // golden tip
-                
-                // Sparkle at wand tip
-                dl->AddCircleFilled(wandEnd, 1.8f, IM_COL32(255, 255, 255, 255));
-                dl->AddCircle(wandEnd, 3.0f, IM_COL32(255, 255, 255, 150), 8, 1.0f);
+                // Curved Magic Stylize Aura Arcs (Vibrant Violet & Gold)
+                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.7f, cp.y + r * 0.5f),
+                                       ImVec2(cp.x - r * 0.3f, cp.y + r * 0.8f),
+                                       ImVec2(cp.x + r * 0.4f, cp.y + r * 0.3f), IM_COL32(180, 90, 255, 220), thickness * 2.0f);
+
+                // Slanted Stylize Magic Gem Wand
+                ImVec2 wandStart = ImVec2(cp.x - r * 0.65f, cp.y + r * 0.65f);
+                ImVec2 wandTip   = ImVec2(cp.x + r * 0.35f, cp.y - r * 0.35f);
+
+                // Golden wand shaft
+                dl->AddLine(wandStart, wandTip, IM_COL32(235, 175, 50, 255), thickness * 2.4f);
+                dl->AddLine(wandStart, wandTip, IM_COL32(255, 245, 180, 255), thickness * 1.0f);
+
+                // Diamond Crystal Gem at wand head
+                float gSize = is * 0.16f;
+                ImVec2 gemPts[] = {
+                    ImVec2(wandTip.x, wandTip.y - gSize),
+                    ImVec2(wandTip.x + gSize, wandTip.y),
+                    ImVec2(wandTip.x, wandTip.y + gSize),
+                    ImVec2(wandTip.x - gSize, wandTip.y)
+                };
+                dl->AddConvexPolyFilled(gemPts, 4, IM_COL32(0, 220, 255, 255));
+                dl->AddPolyline(gemPts, 4, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, thickness * 1.2f);
+
+                // Glowing 4-Point Magic Star Sparkle at gem tip
+                ImVec2 sc = ImVec2(wandTip.x + gSize * 0.8f, wandTip.y - gSize * 0.8f);
+                float sr = is * 0.22f;
+                ImVec2 star_pts[] = {
+                    ImVec2(sc.x, sc.y - sr),
+                    ImVec2(sc.x + sr * 0.20f, sc.y - sr * 0.20f),
+                    ImVec2(sc.x + sr, sc.y),
+                    ImVec2(sc.x + sr * 0.20f, sc.y + sr * 0.20f),
+                    ImVec2(sc.x, sc.y + sr),
+                    ImVec2(sc.x - sr * 0.20f, sc.y + sr * 0.20f),
+                    ImVec2(sc.x - sr, sc.y),
+                    ImVec2(sc.x - sr * 0.20f, sc.y - sr * 0.20f)
+                };
+                dl->AddConvexPolyFilled(star_pts, 8, IM_COL32(255, 240, 150, 255));
+                dl->AddPolyline(star_pts, 8, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, 1.0f);
             }
             break;
         case IconType::Move:
@@ -1367,7 +1442,6 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             break;
         case IconType::ViewSolid:
             {
-                // Solid Mode: 3D Matte Clay Cube
                 ImVec2 V_top(cp.x, cp.y - is * 0.42f);
                 ImVec2 V_bottom(cp.x, cp.y + is * 0.42f);
                 ImVec2 V_tl(cp.x - is * 0.36f, cp.y - is * 0.21f);
@@ -1379,110 +1453,98 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                 ImVec2 left_face[] = { cp, V_tl, V_bl, V_bottom };
                 ImVec2 right_face[] = { cp, V_tr, V_br, V_bottom };
 
-                // Shaded faces using the Matcap Clay Palette
-                dl->AddConvexPolyFilled(top_face, 4, clay_buildup);
-                dl->AddConvexPolyFilled(left_face, 4, clay_diffuse);
-                dl->AddConvexPolyFilled(right_face, 4, clay_shadow);
+                // High-Contrast Steel Gray 3D Solid Cube Facets
+                dl->AddConvexPolyFilled(top_face, 4, IM_COL32(230, 235, 245, 240));
+                dl->AddConvexPolyFilled(left_face, 4, IM_COL32(130, 140, 155, 240));
+                dl->AddConvexPolyFilled(right_face, 4, IM_COL32(65, 72, 85, 240));
 
-                // Highlight/Border lines
+                // 100% Opacity Crisp White Contour & Internal Facet Wireframe
                 ImVec2 hex[] = { V_top, V_tr, V_br, V_bottom, V_bl, V_tl };
-                dl->AddPolyline(hex, 6, clay_highlight, ImDrawFlags_Closed, thickness * 0.8f);
-                dl->AddLine(cp, V_bottom, clay_highlight, thickness * 0.8f);
-                dl->AddLine(cp, V_tl, clay_highlight, thickness * 0.8f);
-                dl->AddLine(cp, V_tr, clay_highlight, thickness * 0.8f);
+                dl->AddPolyline(hex, 6, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, thickness * 1.5f);
+                dl->AddLine(cp, V_bottom, IM_COL32(255, 255, 255, 255), thickness * 1.2f);
+                dl->AddLine(cp, V_tl, IM_COL32(255, 255, 255, 255), thickness * 1.2f);
+                dl->AddLine(cp, V_tr, IM_COL32(255, 255, 255, 255), thickness * 1.2f);
                 
-                // Add a small specular highlight dot on the top-left face to simulate the matcap light source
-                dl->AddCircleFilled(ImVec2(cp.x - is * 0.12f, cp.y - is * 0.18f), is * 0.05f, clay_specular);
+                // Specular highlight dot
+                dl->AddCircleFilled(ImVec2(cp.x - is * 0.12f, cp.y - is * 0.18f), is * 0.06f, IM_COL32(255, 255, 255, 255));
             }
             break;
         case IconType::ViewMatcap:
             {
                 float rad = is * 0.44f;
-                // Terracotta clay matcap colors
-                const ImU32 terracotta_shadow = IM_COL32(90, 40, 30, 255);
-                const ImU32 terracotta_diffuse = IM_COL32(185, 95, 75, 255);
-                const ImU32 terracotta_specular = IM_COL32(255, 215, 195, 180);
+                // Terracotta Red Clay Matcap Sphere with High Contrast
+                const ImU32 terracotta_shadow = IM_COL32(80, 25, 20, 255);
+                const ImU32 terracotta_diffuse = IM_COL32(225, 95, 75, 255);
+                const ImU32 terracotta_specular = IM_COL32(255, 235, 220, 255);
                 
-                // Draw shaded sphere
+                // Draw shaded terracotta sphere
                 dl->AddCircleFilled(cp, rad, terracotta_shadow);
                 dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, terracotta_diffuse);
-                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.22f, terracotta_specular);
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.25f, terracotta_specular);
                 
-                // Thin golden-orange outline
-                dl->AddCircle(cp, rad, IM_COL32(255, 140, 80, 100), 32, thickness * 0.8f);
+                // High-Contrast White/Orange Double Contour Ring
+                dl->AddCircle(cp, rad, IM_COL32(255, 120, 50, 255), 32, thickness * 1.6f);
+                dl->AddCircle(cp, rad * 0.98f, IM_COL32(255, 255, 255, 200), 32, thickness * 0.8f);
             }
             break;
         case IconType::ViewPreview:
             {
-                float rad = is * 0.44f;
-                // Base shadow
-                dl->AddCircleFilled(cp, rad, clay_shadow);
-                
-                // Left half: Glossy blue metallic
-                dl->PathClear();
-                dl->PathArcTo(cp, rad, 0.5f * 3.14159f, 1.5f * 3.14159f);
-                dl->PathFillConvex(IM_COL32(20, 80, 160, 255));
-                
-                dl->PathClear();
-                dl->PathArcTo(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, 0.5f * 3.14159f, 1.5f * 3.14159f);
-                dl->PathFillConvex(IM_COL32(60, 160, 250, 255));
-                
-                // Right half: Neutral clay gray
-                dl->PathClear();
-                dl->PathArcTo(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, -0.5f * 3.14159f, 0.5f * 3.14159f);
-                dl->PathFillConvex(clay_diffuse);
-                
-                // Grid lines (UV coordinate layout)
-                ImU32 gridCol = IM_COL32(255, 255, 255, 80);
-                dl->AddLine(ImVec2(cp.x - rad, cp.y), ImVec2(cp.x + rad, cp.y), gridCol, thickness * 0.7f);
-                dl->AddLine(ImVec2(cp.x, cp.y - rad), ImVec2(cp.x, cp.y + rad), gridCol, thickness * 0.7f);
-                
-                // Curved longitude grid lines
-                dl->AddBezierQuadratic(ImVec2(cp.x, cp.y - rad), ImVec2(cp.x - rad * 0.4f, cp.y), ImVec2(cp.x, cp.y + rad), gridCol, thickness * 0.7f);
-                dl->AddBezierQuadratic(ImVec2(cp.x, cp.y - rad), ImVec2(cp.x + rad * 0.4f, cp.y), ImVec2(cp.x, cp.y + rad), gridCol, thickness * 0.7f);
-                
-                // Specular highlight overlapping the boundary
-                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.22f, clay_specular);
-                
-                // Outer ring
-                dl->AddCircle(cp, rad, clay_highlight, 32, thickness * 0.8f);
+                // 3D High-Contrast UV Checkerboard Cylinder (Material Preview)
+                float w = is * 0.38f;
+                float h = is * 0.38f;
+                ImVec2 topC(cp.x, cp.y - h * 0.45f);
+                ImVec2 botC(cp.x, cp.y + h * 0.45f);
+
+                // Cylinder body background (Deep Cyan/Blue)
+                dl->AddRectFilled(ImVec2(cp.x - w, topC.y), ImVec2(cp.x + w, botC.y), IM_COL32(15, 120, 190, 255));
+
+                // High-Contrast Black & White Checkerboard Squares
+                dl->AddRectFilled(ImVec2(cp.x - w, topC.y), ImVec2(cp.x, cp.y), IM_COL32(255, 255, 255, 240));
+                dl->AddRectFilled(ImVec2(cp.x, cp.y), ImVec2(cp.x + w, botC.y), IM_COL32(255, 255, 255, 240));
+                dl->AddRectFilled(ImVec2(cp.x - w, cp.y), ImVec2(cp.x, botC.y), IM_COL32(20, 30, 40, 240));
+                dl->AddRectFilled(ImVec2(cp.x, topC.y), ImVec2(cp.x + w, cp.y), IM_COL32(20, 30, 40, 240));
+
+                // Top & Bottom Ellipse caps
+                dl->AddEllipseFilled(topC, ImVec2(w, h * 0.35f), IM_COL32(0, 210, 255, 255), 0.0f, 32);
+                dl->AddEllipse(topC, ImVec2(w, h * 0.35f), IM_COL32(255, 255, 255, 255), 0.0f, 32, thickness * 1.2f);
+                dl->AddEllipse(botC, ImVec2(w, h * 0.35f), IM_COL32(0, 210, 255, 240), 0.0f, 32, thickness * 1.2f);
+
+                // 100% Opacity White Contour Border Lines
+                dl->AddLine(ImVec2(cp.x - w, topC.y), ImVec2(cp.x - w, botC.y), IM_COL32(255, 255, 255, 255), thickness * 1.6f);
+                dl->AddLine(ImVec2(cp.x + w, topC.y), ImVec2(cp.x + w, botC.y), IM_COL32(255, 255, 255, 255), thickness * 1.6f);
             }
             break;
         case IconType::ViewRendered:
             {
                 float rad = is * 0.42f;
-                // Soft ground shadow under the sphere
+                // Dark Ground Contact Shadow
                 dl->PathClear();
                 const int num_segments = 16;
-                const float rx = is * 0.35f;
-                const float ry = is * 0.08f;
+                const float rx = is * 0.40f;
+                const float ry = is * 0.10f;
                 const ImVec2 shadow_center(cp.x, cp.y + is * 0.38f);
                 for (int i = 0; i < num_segments; ++i) {
                     float a = i * (6.283185f / num_segments);
                     dl->PathLineTo(ImVec2(shadow_center.x + cosf(a) * rx, shadow_center.y + sinf(a) * ry));
                 }
-                dl->PathFillConvex(IM_COL32(0, 0, 0, 150));
+                dl->PathFillConvex(IM_COL32(0, 0, 0, 220));
                 
-                // Base clay sphere shadow
-                dl->AddCircleFilled(cp, rad, clay_shadow);
+                // Base shaded PBR sphere
+                dl->AddCircleFilled(cp, rad, IM_COL32(30, 35, 50, 255));
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, IM_COL32(170, 160, 145, 255));
                 
-                // Warm studio light diffuse overlay (offset top-left)
-                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, IM_COL32(145, 140, 135, 255));
-                
-                // Cool cyan bounce light on the bottom-right edge
+                // Cool cyan bounce light arc
                 dl->PathClear();
                 dl->PathArcTo(cp, rad - 1.0f, 0.0f, 1.57f, 16);
-                dl->PathStroke(IM_COL32(100, 220, 255, 120), false, thickness * 1.8f);
+                dl->PathStroke(IM_COL32(0, 220, 255, 220), false, thickness * 2.2f);
                 
-                // Warm golden-white specular highlight spot (offset top-left)
-                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.22f, IM_COL32(255, 245, 220, 200));
+                // High-Contrast Golden Specular Spot & Outer Contour Ring
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.25f, IM_COL32(255, 255, 230, 255));
+                dl->AddCircle(cp, rad, IM_COL32(255, 200, 30, 255), 32, thickness * 1.6f);
                 
-                // Outer ring
-                dl->AddCircle(cp, rad, clay_highlight, 32, thickness * 0.8f);
-                
-                // Beautiful 4-point golden star/sparkle at top-right (monochrome ray reflection)
-                ImVec2 sc = ImVec2(cp.x + rad * 0.45f, cp.y - rad * 0.45f);
-                float sr = is * 0.24f;
+                // 100% Opacity Golden 4-point raytraced star highlight at top-right
+                ImVec2 sc = ImVec2(cp.x + rad * 0.50f, cp.y - rad * 0.50f);
+                float sr = is * 0.28f;
                 ImVec2 star_pts[] = {
                     ImVec2(sc.x, sc.y - sr),
                     ImVec2(sc.x + sr * 0.22f, sc.y - sr * 0.22f),
@@ -1493,8 +1555,8 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                     ImVec2(sc.x - sr, sc.y),
                     ImVec2(sc.x - sr * 0.22f, sc.y - sr * 0.22f)
                 };
-                dl->AddConvexPolyFilled(star_pts, 8, IM_COL32(255, 220, 100, 240));
-                dl->AddPolyline(star_pts, 8, IM_COL32(255, 240, 180, 200), ImDrawFlags_Closed, 1.0f);
+                dl->AddConvexPolyFilled(star_pts, 8, IM_COL32(255, 215, 0, 255));
+                dl->AddPolyline(star_pts, 8, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, 1.2f);
             }
             break;
         case IconType::CameraHud:
@@ -1696,48 +1758,65 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
         case IconType::PaintTool:
             {
                 float r = is * 0.48f;
-                drawBaseClaySphere(cp, r);
-                
-                // Curved paint stroke in vibrant cyan/magenta across the sphere
-                dl->PathClear();
-                dl->PathArcTo(cp, r * 0.65f, 2.5f, 5.0f);
-                dl->PathStroke(IM_COL32(0, 220, 255, 255), false, thickness * 2.2f);
-                
-                // Brush tip at the end of the stroke (top-right)
-                ImVec2 brushPos = ImVec2(cp.x + cosf(5.0f) * r * 0.65f, cp.y + sinf(5.0f) * r * 0.65f);
-                // Paint brush handle and bristle shape
-                dl->AddLine(brushPos, ImVec2(brushPos.x + r * 0.4f, brushPos.y - r * 0.4f), IM_COL32(230, 160, 50, 255), thickness * 1.5f);
-                dl->AddCircleFilled(brushPos, thickness * 1.8f, IM_COL32(0, 220, 255, 255));
+                // Artist Palette Oval Body
+                const ImVec2 paletteCenter(cp.x - r * 0.15f, cp.y + r * 0.10f);
+                const float palRx = r * 0.75f;
+                const float palRy = r * 0.55f;
+
+                // Draw filled palette shape
+                dl->AddEllipseFilled(paletteCenter, ImVec2(palRx, palRy), IM_COL32(225, 155, 70, 255), 0.3f, 32);
+                dl->AddEllipse(paletteCenter, ImVec2(palRx, palRy), IM_COL32(140, 85, 30, 255), 0.3f, 32, thickness * 1.0f);
+
+                // Palette Thumb Hole
+                ImVec2 thumbHole(paletteCenter.x + palRx * 0.45f, paletteCenter.y + palRy * 0.30f);
+                dl->AddCircleFilled(thumbHole, r * 0.15f, IM_COL32(30, 32, 38, 255));
+
+                // 3 Colorful Paint Dabs on Palette (Cyan, Magenta, Gold)
+                dl->AddCircleFilled(ImVec2(paletteCenter.x - palRx * 0.45f, paletteCenter.y - palRy * 0.20f), r * 0.16f, IM_COL32(0, 210, 255, 255));
+                dl->AddCircleFilled(ImVec2(paletteCenter.x - palRx * 0.10f, paletteCenter.y - palRy * 0.50f), r * 0.16f, IM_COL32(255, 80, 160, 255));
+                dl->AddCircleFilled(ImVec2(paletteCenter.x + palRx * 0.25f, paletteCenter.y - palRy * 0.40f), r * 0.16f, IM_COL32(255, 215, 0, 255));
+
+                // Slanted Painter's Brush resting diagonally across palette
+                ImVec2 tip(cp.x - r * 0.50f, cp.y + r * 0.45f);
+                ImVec2 ferruleEnd(cp.x + r * 0.25f, cp.y - r * 0.20f);
+                ImVec2 handleEnd(cp.x + r * 0.85f, cp.y - r * 0.75f);
+
+                // Wooden handle
+                dl->AddLine(ferruleEnd, handleEnd, IM_COL32(180, 110, 45, 255), thickness * 2.2f);
+                // Metal ferrule collar
+                dl->AddLine(ImVec2(tip.x + r * 0.20f, tip.y - r * 0.18f), ferruleEnd, IM_COL32(210, 215, 225, 255), thickness * 2.8f);
+                // Wet Paint Tip
+                dl->AddTriangleFilled(tip,
+                    ImVec2(tip.x + r * 0.22f, tip.y - r * 0.05f),
+                    ImVec2(tip.x + r * 0.05f, tip.y - r * 0.22f),
+                    IM_COL32(0, 210, 255, 255));
             }
             break;
         case IconType::EraseTool:
             {
                 float r = is * 0.48f;
-                drawBaseClaySphere(cp, r);
                 
-                // Faded stroke under the eraser
-                dl->PathClear();
-                dl->PathArcTo(cp, r * 0.65f, 2.2f, 3.8f);
-                dl->PathStroke(IM_COL32(255, 60, 60, 90), false, thickness * 2.0f);
+                // Red dashed stroke being erased
+                dl->AddLine(ImVec2(cp.x - r * 0.8f, cp.y + r * 0.4f), ImVec2(cp.x - r * 0.2f, cp.y + r * 0.4f), IM_COL32(255, 75, 75, 120), thickness * 1.8f);
                 
-                // Shaded Eraser block at top-right
-                ImVec2 er = ImVec2(cp.x + r * 0.2f, cp.y - r * 0.2f);
-                float esw = is * 0.24f;
-                float esh = is * 0.14f;
+                // 3D Angled Eraser Block (Pink body + White wrapper)
+                ImVec2 er = ImVec2(cp.x + r * 0.1f, cp.y - r * 0.1f);
+                float esw = is * 0.28f;
+                float esh = is * 0.16f;
                 
                 ImVec2 p0 = ImVec2(er.x, er.y);
                 ImVec2 p1 = ImVec2(er.x + esw, er.y - esh);
-                ImVec2 p2 = ImVec2(er.x + esw * 0.7f, er.y - esh - esh * 0.5f);
-                ImVec2 p3 = ImVec2(er.x - esw * 0.3f, er.y - esh * 0.5f);
+                ImVec2 p2 = ImVec2(er.x + esw * 0.6f, er.y - esh - esh * 0.6f);
+                ImVec2 p3 = ImVec2(er.x - esw * 0.4f, er.y - esh * 0.6f);
                 
                 ImVec2 topFace[] = { p0, p1, p2, p3 };
-                dl->AddConvexPolyFilled(topFace, 4, IM_COL32(255, 120, 150, 255));
-                dl->AddPolyline(topFace, 4, IM_COL32(255, 150, 180, 255), ImDrawFlags_Closed, 1.0f);
+                dl->AddConvexPolyFilled(topFace, 4, IM_COL32(255, 110, 145, 255));
+                dl->AddPolyline(topFace, 4, IM_COL32(255, 170, 195, 255), ImDrawFlags_Closed, 1.0f);
                 
-                ImVec2 p0_b = ImVec2(er.x, er.y + esh * 0.4f);
-                ImVec2 p1_b = ImVec2(er.x + esw, er.y - esh + esh * 0.4f);
+                ImVec2 p0_b = ImVec2(er.x, er.y + esh * 0.5f);
+                ImVec2 p1_b = ImVec2(er.x + esw, er.y - esh + esh * 0.5f);
                 ImVec2 sideFace[] = { p0, p1, p1_b, p0_b };
-                dl->AddConvexPolyFilled(sideFace, 4, IM_COL32(240, 240, 240, 255));
+                dl->AddConvexPolyFilled(sideFace, 4, IM_COL32(245, 245, 250, 255));
                 dl->AddPolyline(sideFace, 4, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, 1.0f);
             }
             break;
@@ -2812,59 +2891,92 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
         case IconType::Volumetric:
             {
                 float r = is * 0.48f;
-                drawBaseClaySphere(cp, r);
                 
-                // Soft translucent clouds layered on top of the sphere
-                dl->AddCircleFilled(ImVec2(cp.x - r * 0.3f, cp.y + r * 0.2f), r * 0.45f, IM_COL32(255, 255, 255, 90));
-                dl->AddCircleFilled(ImVec2(cp.x + r * 0.3f, cp.y + r * 0.2f), r * 0.40f, IM_COL32(255, 255, 255, 90));
-                dl->AddCircleFilled(ImVec2(cp.x, cp.y - r * 0.2f), r * 0.50f, IM_COL32(255, 255, 255, 120));
-                
-                dl->AddCircle(ImVec2(cp.x, cp.y - r * 0.2f), r * 0.50f, IM_COL32(255, 255, 255, 180), 16, 1.0f);
+                // Volumetric Simulation Domain Box Boundary
+                ImVec2 bMin(cp.x - r * 0.85f, cp.y - r * 0.70f);
+                ImVec2 bMax(cp.x + r * 0.85f, cp.y + r * 0.70f);
+                dl->AddRect(bMin, bMax, IM_COL32(0, 200, 255, 180), 3.0f, 0, thickness * 1.1f);
+
+                // Fluffy Cumulus Volumetric Cloud Puffs (Layered Alpha Density)
+                ImVec2 c1(cp.x - r * 0.35f, cp.y + r * 0.15f);
+                ImVec2 c2(cp.x + r * 0.30f, cp.y + r * 0.20f);
+                ImVec2 c3(cp.x - r * 0.05f, cp.y - r * 0.20f);
+                ImVec2 c4(cp.x + r * 0.15f, cp.y - r * 0.05f);
+
+                // Cloud Density Fills
+                dl->AddCircleFilled(c1, r * 0.42f, IM_COL32(190, 215, 245, 180));
+                dl->AddCircleFilled(c2, r * 0.38f, IM_COL32(190, 215, 245, 180));
+                dl->AddCircleFilled(c3, r * 0.48f, IM_COL32(245, 250, 255, 220));
+                dl->AddCircleFilled(c4, r * 0.40f, IM_COL32(245, 250, 255, 220));
+
+                // High-Contrast White Cloud Top Contours
+                dl->AddCircle(c3, r * 0.48f, IM_COL32(255, 255, 255, 255), 32, thickness * 1.2f);
+                dl->AddCircle(c1, r * 0.42f, IM_COL32(255, 255, 255, 180), 32, thickness * 1.0f);
+
+                // Golden Sunbeams breaking through volume density
+                dl->AddLine(ImVec2(cp.x - r * 0.5f, cp.y - r * 0.55f), ImVec2(cp.x - r * 0.2f, cp.y + r * 0.55f), IM_COL32(255, 220, 80, 180), thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x + r * 0.1f, cp.y - r * 0.55f), ImVec2(cp.x + r * 0.4f, cp.y + r * 0.55f), IM_COL32(255, 220, 80, 180), thickness * 1.5f);
             }
             break;
         case IconType::Force:
             {
-                float r = is * 0.48f;
-                drawBaseClaySphere(cp, r);
-                
-                // Orbiting / swirling force field rings in glowing orange/red
-                float rx1 = r * 1.1f;
-                float ry1 = r * 0.35f;
-                
-                dl->PathClear();
-                for (int i = 0; i <= 20; ++i) {
-                    float a = i * (6.28318f / 20.0f);
-                    float rot = 0.6f;
-                    float x = cp.x + cosf(a) * rx1 * cosf(rot) - sinf(a) * ry1 * sinf(rot);
-                    float y = cp.y + cosf(a) * rx1 * sinf(rot) + sinf(a) * ry1 * cosf(rot);
-                    dl->PathLineTo(ImVec2(x, y));
-                }
-                dl->PathStroke(IM_COL32(255, 120, 40, 220), false, thickness * 1.2f);
-                
-                dl->PathClear();
-                for (int i = 0; i <= 20; ++i) {
-                    float a = i * (6.28318f / 20.0f);
-                    float rot = -0.6f;
-                    float x = cp.x + cosf(a) * rx1 * cosf(rot) - sinf(a) * ry1 * sinf(rot);
-                    float y = cp.y + cosf(a) * rx1 * sinf(rot) + sinf(a) * ry1 * cosf(rot);
-                    dl->PathLineTo(ImVec2(x, y));
-                }
-                dl->PathStroke(IM_COL32(255, 60, 40, 180), false, thickness * 1.0f);
+                float r = is * 0.44f;
+                float nucR = is * 0.16f;
+
+                // LAYER 1 (Background): Glowing Atomic Nucleus Core
+                dl->AddCircleFilled(cp, nucR * 1.3f, IM_COL32(255, 160, 20, 180));
+                dl->AddCircleFilled(cp, nucR, IM_COL32(255, 215, 50, 255));
+                dl->AddCircleFilled(cp, nucR * 0.5f, IM_COL32(255, 255, 255, 255));
+
+                // LAYER 2 (Middle): Continuous Unbroken Intersecting Orbital Rings
+                ImU32 ringCol = IM_COL32(0, 210, 255, 240);
+                dl->AddEllipse(cp, ImVec2(r, r * 0.38f), ringCol, -0.65f, 32, thickness * 1.4f);
+                dl->AddEllipse(cp, ImVec2(r, r * 0.38f), ringCol, 0.65f, 32, thickness * 1.4f);
+
+                // LAYER 3 (Top): Orbiting Electron Particles
+                ImVec2 e1(cp.x + cosf(-0.65f) * r * 0.85f - sinf(-0.65f) * r * 0.25f,
+                           cp.y + sinf(-0.65f) * r * 0.85f + cosf(-0.65f) * r * 0.25f);
+                ImVec2 e2(cp.x - cosf(0.65f) * r * 0.85f + sinf(0.65f) * r * 0.25f,
+                           cp.y - sinf(0.65f) * r * 0.85f - cosf(0.65f) * r * 0.25f);
+                dl->AddCircleFilled(e1, thickness * 1.8f, IM_COL32(0, 230, 255, 255));
+                dl->AddCircleFilled(e2, thickness * 1.8f, IM_COL32(255, 80, 180, 255));
             }
             break;
         case UIWidgets::IconType::World:
             {
-                float r = is * 0.48f;
-                drawBaseClaySphere(cp, r);
-                
-                // Latitude/longitude glow lines on the globe
-                dl->AddEllipse(cp, ImVec2(r * 0.4f, r * 0.95f), IM_COL32(0, 220, 255, 130), 0.0f, 0, thickness * 0.8f); // vertical grid
-                dl->AddLine(ImVec2(cp.x - r, cp.y), ImVec2(cp.x + r, cp.y), IM_COL32(0, 220, 255, 130), thickness * 0.8f); // equator
-                
-                // Sun crescent glow on top-right edge
+                float r = is * 0.42f;
+                // Deep Cyan Ocean Globe Body
+                dl->AddCircleFilled(cp, r, IM_COL32(12, 130, 210, 255));
+
+                // Green Landmass / Continent Silhouettes on Globe
+                ImVec2 land1[] = {
+                    ImVec2(cp.x - r * 0.6f, cp.y - r * 0.3f),
+                    ImVec2(cp.x - r * 0.1f, cp.y - r * 0.6f),
+                    ImVec2(cp.x + r * 0.1f, cp.y - r * 0.2f),
+                    ImVec2(cp.x - r * 0.3f, cp.y + r * 0.3f)
+                };
+                dl->AddConvexPolyFilled(land1, 4, IM_COL32(75, 195, 110, 240));
+
+                ImVec2 land2[] = {
+                    ImVec2(cp.x + r * 0.1f, cp.y + r * 0.1f),
+                    ImVec2(cp.x + r * 0.6f, cp.y - r * 0.1f),
+                    ImVec2(cp.x + r * 0.5f, cp.y + r * 0.6f),
+                    ImVec2(cp.x + r * 0.2f, cp.y + r * 0.4f)
+                };
+                dl->AddConvexPolyFilled(land2, 4, IM_COL32(75, 195, 110, 240));
+
+                // Latitude & Longitude Grid Lines
+                dl->AddEllipse(cp, ImVec2(r * 0.45f, r * 0.95f), IM_COL32(255, 255, 255, 130), 0.0f, 32, thickness * 0.9f);
+                dl->AddLine(ImVec2(cp.x - r, cp.y), ImVec2(cp.x + r, cp.y), IM_COL32(255, 255, 255, 130), thickness * 0.9f);
+
+                // Outer Glowing Sky Atmosphere Layer Ring
+                dl->AddCircle(cp, r * 1.16f, IM_COL32(100, 225, 255, 220), 32, thickness * 2.2f);
+                dl->AddCircle(cp, r * 1.16f, IM_COL32(255, 255, 255, 180), 32, thickness * 0.8f);
+
+                // Sun Corona Light Arc on top-right edge
                 dl->PathClear();
-                dl->PathArcTo(cp, r, -1.2f, 0.2f);
-                dl->PathStroke(IM_COL32(255, 220, 60, 240), false, thickness * 1.5f);
+                dl->PathArcTo(cp, r * 1.16f, -1.2f, 0.2f, 16);
+                dl->PathStroke(IM_COL32(255, 215, 60, 255), false, thickness * 2.5f);
             }
             break;
         case UIWidgets::IconType::System:
@@ -2898,8 +3010,28 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             dl->AddLine(cp, ImVec2(cp.x + is*0.5f, cp.y - is*0.5f), col, thickness);
             break;
         case IconType::Physics:
-            dl->AddCircleFilled(ImVec2(cp.x-4, cp.y-4), 4, col);
-            dl->AddRect(ImVec2(cp.x+2, cp.y+2), ImVec2(cp.x+10, cp.y+10), col, 0, 0, thickness);
+            {
+                float r = is * 0.44f;
+                float nucR = is * 0.16f;
+
+                // LAYER 1 (Background): Glowing Atomic Nucleus Core
+                dl->AddCircleFilled(cp, nucR * 1.3f, IM_COL32(255, 160, 20, 180));
+                dl->AddCircleFilled(cp, nucR, IM_COL32(255, 215, 50, 255));
+                dl->AddCircleFilled(cp, nucR * 0.5f, IM_COL32(255, 255, 255, 255));
+
+                // LAYER 2 (Middle): Continuous Unbroken Intersecting Orbital Rings
+                ImU32 ringCol = IM_COL32(0, 210, 255, 240);
+                dl->AddEllipse(cp, ImVec2(r, r * 0.38f), ringCol, -0.65f, 32, thickness * 1.4f);
+                dl->AddEllipse(cp, ImVec2(r, r * 0.38f), ringCol, 0.65f, 32, thickness * 1.4f);
+
+                // LAYER 3 (Top): Orbiting Electron Particles
+                ImVec2 e1(cp.x + cosf(-0.65f) * r * 0.85f - sinf(-0.65f) * r * 0.25f,
+                           cp.y + sinf(-0.65f) * r * 0.85f + cosf(-0.65f) * r * 0.25f);
+                ImVec2 e2(cp.x - cosf(0.65f) * r * 0.85f + sinf(0.65f) * r * 0.25f,
+                           cp.y - sinf(0.65f) * r * 0.85f - cosf(0.65f) * r * 0.25f);
+                dl->AddCircleFilled(e1, thickness * 1.8f, IM_COL32(0, 230, 255, 255));
+                dl->AddCircleFilled(e2, thickness * 1.8f, IM_COL32(255, 80, 180, 255));
+            }
             break;
         case IconType::Magnet:
             dl->AddRect(p, ImVec2(p.x+is, p.y+is*0.4f), col, 5.0f, ImDrawFlags_RoundCornersTop, thickness*2);
@@ -2908,16 +3040,38 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             break;
         case IconType::Noise:
             {
-                const int steps = 10;
-                ImVec2 prevPt(p.x, cp.y);
+                // Multi-octave procedural noise wave visualization (Perlin/Simplex FBM)
+                const int steps = 24;
+                ImVec2 prevLow(p.x, cp.y + is * 0.05f);
+                ImVec2 prevHigh(p.x, cp.y - is * 0.05f);
+
+                ImVec4 cVec = ImGui::ColorConvertU32ToFloat4(col);
+                ImU32 dimCol = ImGui::ColorConvertFloat4ToU32(ImVec4(cVec.x, cVec.y, cVec.z, cVec.w * 0.45f));
+
                 for (int i = 1; i <= steps; ++i) {
                     float t = (float)i / (float)steps;
                     float x = p.x + t * is;
-                    float offset = (i % 2 == 0 ? 1.0f : -1.0f) * (is * 0.22f) * (t > 0.1f && t < 0.9f ? 1.0f : 0.2f);
-                    ImVec2 currPt(x, cp.y + offset);
-                    dl->AddLine(prevPt, currPt, col, thickness * 1.2f);
-                    prevPt = currPt;
+                    // Low frequency macro wave + high frequency detail octave
+                    float waveLow = sinf(t * 6.28318f * 1.25f) * (is * 0.24f);
+                    float waveHigh = waveLow + sinf(t * 6.28318f * 3.75f) * (is * 0.11f);
+
+                    ImVec2 currLow(x, cp.y + waveLow + is * 0.05f);
+                    ImVec2 currHigh(x, cp.y + waveHigh - is * 0.05f);
+
+                    // High octave detail line (primary bright)
+                    dl->AddLine(prevHigh, currHigh, col, thickness * 1.5f);
+                    // Low octave base wave line (subtle secondary)
+                    dl->AddLine(prevLow, currLow, dimCol, thickness * 1.0f);
+
+                    prevLow = currLow;
+                    prevHigh = currHigh;
                 }
+
+                // Procedural sampling peak points
+                ImVec2 peak1(p.x + is * 0.25f, cp.y - is * 0.25f);
+                ImVec2 peak2(p.x + is * 0.72f, cp.y + is * 0.22f);
+                dl->AddCircleFilled(peak1, is * 0.07f, col, 10);
+                dl->AddCircleFilled(peak2, is * 0.06f, col, 10);
             }
             break;
         case IconType::Camera:
@@ -3283,7 +3437,7 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
 }
 
 bool IconActionButton(const char* id,
-                      UIWidgets::IconType icon,
+                      IconType icon,
                       const char* label,
                       bool active,
                       const ImVec4& accent,
@@ -3405,7 +3559,7 @@ void PopControlSurfaceStyle() {
     ImGui::PopStyleVar(5);
 }
 
-bool HorizontalTab(const char* label, UIWidgets::IconType icon, bool active, float width) {
+bool HorizontalTab(const char* label, IconType icon, bool active, float width) {
     ImGuiIO& io = ImGui::GetIO();
     ImGuiStyle& style = ImGui::GetStyle();
     ImDrawList* dl = ImGui::GetWindowDrawList();

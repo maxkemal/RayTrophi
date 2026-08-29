@@ -12,6 +12,7 @@
 #include <HittableList.h>
 #include <AssimpLoader.h>
 #include "AnimationController.h"
+#include "Animation/GeometryCache.h"
 #include "KeyframeSystem.h"
 #include "VDBVolume.h"
 #include "GasVolume.h"
@@ -145,6 +146,9 @@ struct SceneData {
     // Fully additive alongside mesh_modifiers above — the linear ModifierStack panel is untouched
     // and keeps working; this is a separate, opt-in way to build the same kind of geometry chain.
     std::unordered_map<std::string, std::shared_ptr<GeometryNodesV2::GeometryNodeGraphV2>> geometry_node_graphs; // nodeName -> Geo-DAG graph
+    // Fixed-topology mesh deformation clips. Only local vertex positions are
+    // sampled; topology/UV/material/custom attributes remain on TriangleMesh.
+    std::unordered_map<std::string, Animation::GeometryCacheClip> geometry_caches;
     // Material node graphs (Faz 1): per-MATERIAL (not per-object) graph that folds
     // into the existing PrincipledBSDF on Apply — see MaterialNodesV2.h header.
     std::unordered_map<std::string, std::shared_ptr<MaterialNodesV2::MaterialNodeGraphV2>> material_node_graphs; // materialName -> graph
@@ -265,6 +269,7 @@ struct SceneData {
 
         for (const auto& nodeName : editor_pending_delete_object_names) {
             base_mesh_cache.erase(nodeName);
+            geometry_caches.erase(nodeName);
             invalidateSurfaceMeshCache(nodeName);
             removeParticleBindingsForObjectName(nodeName);
         }
@@ -9151,6 +9156,7 @@ public:
         
         base_mesh_cache.clear();
         mesh_modifiers.clear();
+        geometry_caches.clear();
         mesh_paint_texture_sets.clear();
         mesh_paint_layer_stacks.clear();
         object_groups.clear();

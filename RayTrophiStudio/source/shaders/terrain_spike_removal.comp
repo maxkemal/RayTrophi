@@ -11,7 +11,8 @@ layout(push_constant) uniform PC {
     int edgeFadeWidth;
 } pc;
 
-layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
+layout(set = 0, binding = 0) readonly  buffer HeightIn  { float heightIn[]; };
+layout(set = 0, binding = 1) writeonly buffer HeightOut { float heightOut[]; };
 
 void main() {
     int id = int(gl_GlobalInvocationID.x);
@@ -20,19 +21,23 @@ void main() {
 
     int x = id % pc.mapWidth;
     int y = id / pc.mapWidth;
-    if (x <= 0 || x >= pc.mapWidth - 1 || y <= 0 || y >= pc.mapHeight - 1) return;
+    if (x <= 0 || x >= pc.mapWidth - 1 || y <= 0 || y >= pc.mapHeight - 1) {
+        heightOut[id] = heightIn[id];
+        return;
+    }
 
     int idx = id;
-    float h = heightmap[idx];
+    float h = heightIn[idx];
 
-    float hL = heightmap[idx - 1];
-    float hR = heightmap[idx + 1];
-    float hU = heightmap[idx - pc.mapWidth];
-    float hD = heightmap[idx + pc.mapWidth];
+    float hL = heightIn[idx - 1];
+    float hR = heightIn[idx + 1];
+    float hU = heightIn[idx - pc.mapWidth];
+    float hD = heightIn[idx + pc.mapWidth];
 
     float avgNeighbor = (hL + hR + hU + hD) * 0.25;
 
     if (h > avgNeighbor + pc.spikeThreshold) {
-        heightmap[idx] = avgNeighbor * 0.3 + h * 0.7;
+        h = avgNeighbor * 0.3 + h * 0.7;
     }
+    heightOut[idx] = h;
 }

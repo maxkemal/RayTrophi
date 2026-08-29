@@ -99,6 +99,13 @@ bool parsePrimitiveType(const std::string& value, MeshEdit::SplinePrimitiveType&
     return false;
 }
 
+bool parseRevolveAxis(const std::string& value, MeshEdit::ProfileRevolveAxis& out) {
+    if (value == "x" || value == "X") { out = MeshEdit::ProfileRevolveAxis::X; return true; }
+    if (value == "y" || value == "Y") { out = MeshEdit::ProfileRevolveAxis::Y; return true; }
+    if (value == "z" || value == "Z") { out = MeshEdit::ProfileRevolveAxis::Z; return true; }
+    return false;
+}
+
 json profileSweepResultJson(const MeshEdit::ProfileSweepResult& result) {
     json diagnostics = json::array();
     for (const auto& diagnostic : result.report.diagnostics) {
@@ -365,6 +372,20 @@ bool dispatchMeshToolMethod(const std::string& method,
         settings.profile_samples = params.value("profile_samples", settings.profile_samples);
         settings.start_angle = params.value("start_angle", settings.start_angle);
         settings.end_angle = params.value("end_angle", settings.end_angle);
+        settings.radius_offset = params.value("radius_offset", settings.radius_offset);
+        if (params.contains("axis_pivot")) {
+            const auto& pivot = params["axis_pivot"];
+            if (!pivot.is_array() || pivot.size() != 3) {
+                out_result = {{"__error", "axis_pivot must be [x, y, z]"}};
+                return true;
+            }
+            settings.axis_pivot = Vec3(
+                pivot[0].get<float>(), pivot[1].get<float>(), pivot[2].get<float>());
+        }
+        if (!parseRevolveAxis(params.value("axis", "y"), settings.axis)) {
+            out_result = {{"__error", "axis must be x, y or z"}};
+            return true;
+        }
         const MeshEdit::ProfileRevolveResult preview = MeshEdit::previewProfileRevolve(
             params.value("preset", "bottle"), settings);
         if (method == "mesh.profile.revolve.commit") {

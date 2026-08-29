@@ -69,16 +69,54 @@ CPU yolu deterministik referans olarak kalır.
 
 - [x] 2D closed profile spline + 3D open path spline veri modeli
 - [x] Editable başlangıç primitive'leri: circle, rectangle, open line, open arc
-- [ ] Viewport point/handle selection ve drag gizmosu
+- [x] Viewport point selection, çoklu point translation ve point gizmo akışı
+- [ ] Ortak anchor/handle selection kimliği ve handle gizmo polish
 - [x] Sweep mesh üretimi, cap, transported frame ve deterministic triangulation çekirdeği (`MeshEdit/ProfileSweep`)
 - [x] Flat SoA publish, validation, undo/redo ile AddObjectCommand scene commit
-- [ ] Contextual dock ve numeric value bubble
+- [x] Contextual spline dock: Shape, Skin/Deform, Animation ve Advanced Surface Tools
+- [ ] Viewport numeric value bubble
 - [x] Python + IPC `mesh.profile.sweep.preview` ve `mesh.profile.sweep.self_test`
 - [x] Rotational profile preview: editable cup/bottle radial profile + Screw/Revolve
 - [x] IPC `mesh.profile.revolve.preview` ve `mesh.profile.revolve.self_test`
 - [x] Python + IPC `mesh.profile.sweep.commit`
 - [x] Python + IPC `mesh.profile.revolve.commit`
 - [ ] CPU/GPU preview ayrımı ve self-test fixture'ları
+
+## 2026-08-22 UI checkpoint
+
+Spline dock debug-panel görünümünden üç aşamalı authoring akışına geçirildi:
+
+1. `Shape & Controls`
+2. `Skin & Deform`
+3. `Animation`
+
+Point listesi ve point operasyonları yalnız Edit Mode açıkken gösterilir. Quick Skin;
+Taper, Twist ve Wave + Noise ayarlarını kapalı alt gruplarda sunar ve canlı Geometry
+Graph oluşturur. Sweep/Revolve/Loft, ana akışı kalabalıklaştırmamak için varsayılan kapalı
+`Advanced Surface Tools` altında kalır.
+
+Quick Skin artık action-style mesh üreticisi değildir. `Enable Skin Display` spline'a
+bağlı tek bir canlı host oluşturur; bütün parametre değişiklikleri aynı hostu günceller.
+Circular veya kapalı custom spline profile seçilebilir. `Convert to Mesh` graph bağını
+koparıp mevcut hostu final mesh yapar; `Remove Skin Display` yalnız preview'u kaldırır.
+Bağlı preview hostu hierarchy'de ayrı bir mesh satırı olarak gösterilmez; spline satırı
+`[Skin]` durumunu taşır. Convert sonrasında aynı host normal mesh satırı olarak görünür.
+
+Sonraki UI turu kaynak kod düzenlemesiyle değil, Release ekranında gerçek kullanım
+gözlemiyle başlamalıdır. Özellikle dar dock genişliği, label/value hizası, uzun yardım
+metinleri, disabled action görünümü, modifier reset/preset davranışı ve viewport ile
+dock arasındaki seçim odağı kontrol edilmelidir. Kalıcı büyük shelf eklenmemeli;
+viewport-first ve contextual dock kararı korunmalıdır.
+
+Contextual dock ilerlemesi: seçili editable spline için Sweep, Revolve/Screw ve
+iki kesitli Loft ayarları eklendi. Operation önce transient viewport wireframe
+preview üretir; ilişkili profile/path/loft section spline'larından hangisi edit
+edilirse edilsin source signature değişimi preview'u yeniden değerlendirir. Kaynak
+obje transform/scale'i evaluation'a katılır, diagnostics dock'ta kalıcı gösterilir
+ve yalnız açık `Apply as Mesh` işlemi undoable flat mesh commit yapar. `Cancel
+Preview` kaynak spline'lara dokunmadan sonucu bırakır. Viewport numeric value bubble
+ve kalıcı non-destructive modifier stack bağlantısı henüz açık olduğundan üstteki
+birleşik madde tamamlanmış sayılmıyor.
 
 ## 2026-08-20 ilerleme notu
 

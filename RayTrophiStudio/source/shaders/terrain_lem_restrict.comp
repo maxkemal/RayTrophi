@@ -1,0 +1,65 @@
+// terrain_lem_restrict.comp
+// Landscape-Evolution-Model (LEM) pyramid restriction.
+//
+// The LEM's drainage solve is a relaxation: information travels one cell per
+// pass, so a converged solve on a 4K grid would need thousands of passes. The
+// cascadic pyramid solves the coarsest level to convergence and then uses each
+// level as the *initial guess* for the next finer one, which needs only a
+// bounded refinement budget.
+//
+// mode selects the pooling operator, and the choice is load bearing:
+//   0 = MAX   for the height field. Max-pooling can only close a narrow pass,
+//             never open one, so the coarse depression-filled surface is a
+//             valid UPPER BOUND of the fine one. Planchon-Darboux only ever
+//             decreases its working value, so seeding it from an upper bound
+//             still converges to the correct answer. Seeding it from an
+//             average (which can sit below a fine ridge) would leave the fill
+//             permanently under-filled with no symptom other than pits that
+//             never drain.
+//   1 = SUM   for rain volume / physical area: a coarse cell must carry the
+//             total of the fine cells it covers, otherwise catchment area is
+//             not resolution independent.
+//   2 = AVG   for masks and hardness (intensive quantities).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int fineWidth; int fineHeight;
+    int coarseWidth; int coarseHeight;
+    int mode;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Fine   { float fineData[]; };
+layout(set = 0, binding = 1) writeonly buffer Coarse { float coarseData[]; };
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.coarseWidth * pc.coarseHeight)) return;
+    int cx = int(ui) % pc.coarseWidth;
+    int cy = int(ui) / pc.coarseWidth;
+
+    float sx = float(pc.fineWidth) / float(pc.coarseWidth);
+    float sy = float(pc.fineHeight) / float(pc.coarseHeight);
+    int x0 = clamp(int(floor(float(cx) * sx)), 0, pc.fineWidth - 1);
+    int x1 = clamp(int(ceil(float(cx + 1) * sx)) - 1, x0, pc.fineWidth - 1);
+    int y0 = clamp(int(floor(float(cy) * sy)), 0, pc.fineHeight - 1);
+    int y1 = clamp(int(ceil(float(cy + 1) * sy)) - 1, y0, pc.fineHeight - 1);
+    // Guard against a pathological ratio (a hand-set pyramid step): never scan
+    // more than an 8x8 window, the pyramid itself always halves.
+    x1 = min(x1, x0 + 7);
+    y1 = min(y1, y0 + 7);
+
+    float acc = (pc.mode == 0) ? -3.4e38 : 0.0;
+    int taps = 0;
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            float v = fineData[y * pc.fineWidth + x];
+            if (pc.mode == 0) acc = max(acc, v);
+            else acc += v;
+            ++taps;
+        }
+    }
+    if (pc.mode == 2 && taps > 0) acc /= float(taps);
+    if (pc.mode == 0 && taps == 0) acc = 0.0;
+    coarseData[ui] = acc;
+}

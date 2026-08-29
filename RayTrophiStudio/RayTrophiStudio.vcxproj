@@ -348,6 +348,8 @@
     <ClInclude Include="external\xatlas\xatlas.h" Condition="Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
     <ClInclude Include="external\xatlas\source\xatlas\xatlas.h" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
+    <ClInclude Include="source\src\UI\scene_ui_node_palette.hpp" />
+    <ClCompile Include="source\src\UI\scene_ui_node_palette.cpp" />
     <ClInclude Include="source\src\UI\scene_ui_river.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_water_v2.hpp" />
@@ -436,11 +438,17 @@
     <ClInclude Include="source\include\MeshEdit\FlatMeshEditService.h" />
     <ClInclude Include="source\include\MeshEdit\PolygonTriangulation.h" />
     <ClInclude Include="source\include\MeshEdit\ProfileSweep.h" />
+    <ClInclude Include="source\include\MeshEdit\CurveNodeData.h" />
+    <ClInclude Include="source\include\MeshEdit\GeometryCurveNodes.h" />
+    <ClInclude Include="source\include\MeshEdit\SplineAnimation.h" />
+    <ClInclude Include="source\include\Animation\GeometryCache.h" />
     <ClInclude Include="source\include\MeshEdit\SplinePrimitive.h" />
     <ClInclude Include="source\include\MeshEdit\SplineObject.h" />
     <ClInclude Include="source\include\MeshEdit\SplineEditService.h" />
+    <ClInclude Include="source\include\MeshEdit\SplineEvaluationService.h" />
     <ClInclude Include="source\include\MeshEdit\SplineSerialization.h" />
     <ClInclude Include="source\include\MeshEdit\SplineObjectService.h" />
+    <ClInclude Include="source\include\MeshEdit\SplineObjectLifecycle.h" />
     <ClInclude Include="source\include\MeshEdit\ProfileSweepService.h" />
     <ClInclude Include="source\include\MeshEdit\ProfileRevolve.h" />
     <ClInclude Include="source\include\MeshEdit\ProfileLoft.h" />
@@ -474,6 +482,12 @@
     <ClInclude Include="source\include\Transform.h" />
     <ClInclude Include="source\include\World.h" />
     <ClInclude Include="source\include\TerrainFFT.h" />
+    <ClInclude Include="source\include\TerrainFieldMath.h" />
+    <ClInclude Include="source\include\TerrainErosionLem.h" />
+    <ClInclude Include="source\include\TerrainRiverNetworkCore.h" />
+    <ClInclude Include="source\include\TerrainSurfaceNodes.h" />
+    <ClInclude Include="source\include\TerrainNodePortPanel.h" />
+    <ClInclude Include="source\include\TerrainNodePortPresentation.h" />
     <ClInclude Include="source\include\unified_types.h" />
     <ClInclude Include="source\include\unified_brdf.h" />
     <ClInclude Include="source\include\unified_light_sampling.h" />
@@ -1522,11 +1536,16 @@
     <ClCompile Include="source\src\MeshEdit\FlatMeshEditService.cpp" />
     <ClCompile Include="source\src\MeshEdit\PolygonTriangulation.cpp" />
     <ClCompile Include="source\src\MeshEdit\ProfileSweep.cpp" />
+    <ClCompile Include="source\src\MeshEdit\GeometryCurveNodes.cpp" />
+    <ClCompile Include="source\src\MeshEdit\SplineAnimation.cpp" />
+    <ClCompile Include="source\src\Animation\GeometryCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplinePrimitive.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineObject.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineEditService.cpp" />
+    <ClCompile Include="source\src\MeshEdit\SplineEvaluationService.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineSerialization.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineObjectService.cpp" />
+    <ClCompile Include="source\src\MeshEdit\SplineObjectLifecycle.cpp" />
     <ClCompile Include="source\src\MeshEdit\ProfileSweepService.cpp" />
     <ClCompile Include="source\src\MeshEdit\ProfileRevolve.cpp" />
     <ClCompile Include="source\src\MeshEdit\ProfileLoft.cpp" />
@@ -1541,6 +1560,8 @@
     <ClCompile Include="source\src\Api\RtIpcMeshToolDescriptors.cpp" />
     <ClCompile Include="source\src\Api\RtApiMeshEdit.cpp" />
     <ClCompile Include="source\src\Api\RtApiSpline.cpp" />
+    <ClCompile Include="source\src\Api\RtApiSplineSkin.cpp" />
+    <ClCompile Include="source\src\Api\RtApiGeometryCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshValidator.cpp" />
     <ClCompile Include="source\src\Physics\FractureGenerator.cpp" />
     <ClCompile Include="source\src\Physics\GridFluidSolver.cpp" />
@@ -1575,8 +1596,12 @@
     <ClCompile Include="source\src\Physics\Jolt\JoltWorld.cpp" />
     <ClCompile Include="source\src\Physics\Jolt\RigidBodySystem.cpp" />
     <ClCompile Include="source\src\Physics\SurfaceFlowField.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainErosionLem.cpp" />
     <ClCompile Include="source\src\Physics\TerrainManager.cpp" />
     <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainRiverNetworkCore.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainSurfaceNodes.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainNodePortPresentation.cpp" />
     <ClCompile Include="source\src\Physics\TerrainPaintEvaluation.cpp" />
     <ClCompile Include="source\src\Physics\TerrainSemanticMap.cpp" />
     <ClCompile Include="source\src\Physics\TerrainSatMapSetup.cpp" />

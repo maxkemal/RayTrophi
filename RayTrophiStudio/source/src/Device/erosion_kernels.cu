@@ -1,3 +1,21 @@
+// =============================================================================
+// DEPRECATED (2026-08-23) -- CUDA terrain erosion kernels.
+//
+// Vulkan compute is this project's primary GPU path and now owns every erosion
+// stage. The Landscape Evolution Model cycle (drainage-area feedback, lake
+// spill and outlet incision, downstream sediment transport, in-loop mass
+// wasting, hillslope creep) exists ONLY as Vulkan compute plus a CPU reference
+// and was deliberately not ported here.
+//
+// Nothing in the UI selects this back end: it is reached only after the Vulkan
+// path has already failed, so in practice it never runs and is never tested.
+// A second solver that nobody exercises is how silent divergence gets into a
+// code base, so this file is scheduled for deletion together with initCuda(),
+// the `*KernelFunc` handles in TerrainManager, every `if (cudaInitialized)`
+// branch, and the erosion_kernels.ptx build step.
+//
+// Do not extend this file. Fix the Vulkan shader and the CPU reference.
+// =============================================================================
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <curand.h>

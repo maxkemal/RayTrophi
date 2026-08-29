@@ -86,6 +86,10 @@ def required(method, namespaces):
     # a Scene Log mirror), so the C++ classifies them Read explicitly.
     if method in ("perf.reset", "perf.set_logging"):
         return "Read"
+    if method == "spline.animation.self_test":
+        return "Read"
+    if method == "geometry_cache.self_test":
+        return "Read"
     if method in ("mesh.profile.sweep.preview", "mesh.profile.sweep.self_test",
                   "mesh.profile.revolve.preview", "mesh.profile.revolve.self_test",
                   "mesh.profile.loft.preview", "mesh.profile.loft.self_test"):
@@ -120,7 +124,9 @@ def required(method, namespaces):
     if method.startswith("sim_graph."):
         return "SceneWrite"
     if method in ("material.info", "material.of_object", "material.textures",
-                  "nodes.graphs", "attr.stats", "forcefield.evaluate", "particle.stats",
+                  "nodes.graphs", "attr.stats", "terrain.erosion_stats",
+                  "terrain.landform_stats",
+                  "forcefield.evaluate", "particle.stats",
                   "particle.emitters", "anim.characters", "anim.character",
                   "anim.clips", "anim.graph_status", "msf.substances",
                   "msf.fields", "templates.refresh", "templates.validate",

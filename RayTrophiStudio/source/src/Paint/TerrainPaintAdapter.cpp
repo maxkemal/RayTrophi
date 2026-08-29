@@ -7,11 +7,14 @@
 namespace Paint {
 
 namespace {
+// Splat channel A carries soil, not flow. Auto Splat and Surface Composer
+// both write soil there and keep flow in the semantic map, so naming this
+// "Flow" pointed painters at a channel that never fed the flow shading.
 const std::array<const char*, 4> kFallbackLayerNames = {
     "Grass",
     "Rock",
     "Snow",
-    "Flow"
+    "Soil"
 };
 }
 

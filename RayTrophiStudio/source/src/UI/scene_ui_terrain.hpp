@@ -485,23 +485,53 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 }
             }
             else {
-                // Layer Editors
-                static const char* autoLayerNames[4] = {"Grass", "Rock", "Snow", "Soil"};
-                static const Vec3 autoLayerColors[4] = {
-                    Vec3(0.3f, 0.5f, 0.2f),  // Grass
-                    Vec3(0.4f, 0.4f, 0.4f),  // Rock
-                    Vec3(0.9f, 0.9f, 0.95f), // Snow
-                    Vec3(0.5f, 0.35f, 0.2f)  // Flow (Riverbeds)
+                // Layer Editors. Slots 0-3 are splat-weighted and normalized
+                // against each other; 4-7 are semantic overlays composited
+                // over that blend, each by its own unnormalized weight.
+                static const char* autoLayerNames[8] = {
+                    "Grass", "Rock", "Snow", "Soil",
+                    "RiverBed", "WetGround", "Ice", "BareRock"
                 };
-                
-                for (int i = 0; i < 4; i++) {
+                static const Vec3 autoLayerColors[8] = {
+                    Vec3(0.3f, 0.5f, 0.2f),   // Grass
+                    Vec3(0.4f, 0.4f, 0.4f),   // Rock
+                    Vec3(0.9f, 0.9f, 0.95f),  // Snow
+                    Vec3(0.5f, 0.35f, 0.2f),  // Soil
+                    Vec3(0.32f, 0.30f, 0.26f),// Flow overlay: river bed
+                    Vec3(0.28f, 0.26f, 0.20f),// Wetness overlay
+                    Vec3(0.70f, 0.82f, 0.88f),// Ice overlay
+                    Vec3(0.45f, 0.43f, 0.40f) // Hardness overlay
+                };
+
+                const int layerSlotCount = (std::min)(
+                    static_cast<int>(t->layers.size()), TerrainObject::kMaxLayerSlots);
+                for (int i = 0; i < layerSlotCount; i++) {
                     ImGui::PushID(i);
+                    const bool semanticSlot = TerrainObject::isSemanticLayerSlot(i);
+                    if (i == TerrainObject::kSplatLayerSlots) {
+                        ImGui::Spacing();
+                        UIWidgets::ColoredHeader("Semantic Overlays",
+                                                 ImVec4(0.55f, 0.75f, 1.0f, 1.0f));
+                        ImGui::TextWrapped(
+                            "Composited OVER the splat blend, each by its own weight from the "
+                            "semantic map. Leave a slot empty to keep the built-in shading for "
+                            "that channel.");
+                        ImGui::Spacing();
+                    }
                     std::string layerName = "";
                     ImVec4 layerColor;
-                    if (i == 0) { layerName = "Layer 0 (Grass/Flat)"; layerColor = ImVec4(0.5, 0.8, 0.5, 1); }
-                    else if (i == 1) { layerName = "Layer 1 (Rock/Slope)"; layerColor = ImVec4(0.6, 0.6, 0.6, 1); }
-                    else if (i == 2) { layerName = "Layer 2 (Snow/Peak)"; layerColor = ImVec4(0.9, 0.9, 1.0, 1); }
-                    else { layerName = "Layer 3 (Flow/River)"; layerColor = ImVec4(0.5, 0.7, 1.0, 1); }
+                    // Slot 3 is Soil, not Flow. The panel used to label it
+                    // "Flow/River" while Auto Splat and Surface Composer both
+                    // wrote soil there and kept flow in the semantic map, so
+                    // the label sent artists to the wrong channel.
+                    if (i == 0) { layerName = "Layer 0 - Splat R (Grass/Flat)"; layerColor = ImVec4(0.5, 0.8, 0.5, 1); }
+                    else if (i == 1) { layerName = "Layer 1 - Splat G (Rock/Slope)"; layerColor = ImVec4(0.6, 0.6, 0.6, 1); }
+                    else if (i == 2) { layerName = "Layer 2 - Splat B (Snow/Peak)"; layerColor = ImVec4(0.9, 0.9, 1.0, 1); }
+                    else if (i == 3) { layerName = "Layer 3 - Splat A (Soil)"; layerColor = ImVec4(0.75, 0.6, 0.4, 1); }
+                    else if (i == 4) { layerName = "Overlay 4 - Flow (River Bed)"; layerColor = ImVec4(0.5, 0.7, 1.0, 1); }
+                    else if (i == 5) { layerName = "Overlay 5 - Wetness"; layerColor = ImVec4(0.45, 0.6, 0.8, 1); }
+                    else if (i == 6) { layerName = "Overlay 6 - Ice"; layerColor = ImVec4(0.7, 0.85, 0.95, 1); }
+                    else { layerName = "Overlay 7 - Hardness"; layerColor = ImVec4(0.65, 0.62, 0.58, 1); }
 
                     // Use a plain collapsing header here because the embedded material
                     // editor already manages its own section stack and styling.
@@ -573,7 +603,101 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         }
                         ImGui::PopItemWidth();
                     
-                    // Fill Button
+                    // Overlay strength. Only the semantic slots have one: the
+                    // splat slots are normalized against each other, so an
+                    // independent strength there would be a dial that moves
+                    // nothing.
+                    if (semanticSlot && i < static_cast<int>(t->layer_overlay_strength.size())) {
+                        ImGui::PushItemWidth(160.0f);
+                        if (ImGui::SliderFloat("Overlay Strength",
+                                               &t->layer_overlay_strength[i], 0.0f, 1.0f)) {
+                            ctx.renderer.resetCPUAccumulation();
+                            if (GetTerrainRenderBackend(ctx) || GetTerrainViewportBackend(ctx)) {
+                                SyncTerrainMaterialState(ctx);
+                            }
+                        }
+                        ImGui::PopItemWidth();
+                        // Ice is a cover in its own right and is never buried,
+                        // so it gets no dial rather than a dial that does
+                        // nothing.
+                        const int semanticChannel = i - TerrainObject::kSplatLayerSlots;
+                        if (semanticChannel != 2 &&
+                            i < static_cast<int>(t->layer_overlay_ignore_cover.size())) {
+                            bool ignoreCover = t->layer_overlay_ignore_cover[i] != 0;
+                            const bool hardnessSlot = (semanticChannel == 3);
+                            if (ImGui::Checkbox(hardnessSlot ? "Show off exposed rock"
+                                                             : "Show through snow", &ignoreCover)) {
+                                t->layer_overlay_ignore_cover[i] = ignoreCover ? 1 : 0;
+                                ctx.renderer.resetCPUAccumulation();
+                                if (GetTerrainRenderBackend(ctx) || GetTerrainViewportBackend(ctx)) {
+                                    SyncTerrainMaterialState(ctx);
+                                }
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(hardnessSlot ?
+                                    "Hardness is a SUBSTRATE property, not a surface\n"
+                                    "condition: 0.8 under two metres of valley soil is\n"
+                                    "still 0.8. A material bound here is gated by rock\n"
+                                    "exposure, which makes it a bedrock VARIANT - hard\n"
+                                    "outcrops against soft ones. The unmasked field still\n"
+                                    "drives erosion resistance and soil capacity.\n"
+                                    "Tick this to paint it over soil and grass too."
+                                    :
+                                    "Overlays render UNDER the snow the splat map placed.\n"
+                                    "A semantic value is a measurement, its coverage is a\n"
+                                    "visibility decision: flow reads 0.9 under two metres of\n"
+                                    "snow, and painting it there draws a river across the\n"
+                                    "snowfield. Tick this when you mean it to show anyway\n"
+                                    "(open water cutting a snowfield).");
+                            }
+                        }
+                        if (!t->layers[i]) {
+                            ImGui::TextColored(ImVec4(0.70f, 0.70f, 0.75f, 1.0f),
+                                               "Empty - built-in shading drives this channel");
+                        } else if (t->surfaceSemanticMap && t->surfaceSemanticMap->is_loaded()) {
+                            // A material bound to a channel the graph never
+                            // fills renders nothing and reports nothing. Auto
+                            // Splat's semantic output writes Flow (R) and
+                            // hard-zeroes the other three, so an Ice material
+                            // behind it is inert with no symptom at all.
+                            const int ch = i - TerrainObject::kSplatLayerSlots;
+                            uint8_t peak = 0, trough = 255;
+                            for (const auto& px : t->surfaceSemanticMap->pixels) {
+                                const uint8_t v = (ch == 0) ? px.r : (ch == 1) ? px.g
+                                                : (ch == 2) ? px.b : px.a;
+                                if (v > peak) peak = v;
+                                if (v < trough) trough = v;
+                            }
+                            const ImVec4 warn(1.0f, 0.55f, 0.35f, 1.0f);
+                            if (peak == 0) {
+                                ImGui::TextColored(warn,
+                                    "This channel is EMPTY in the semantic map -");
+                                ImGui::TextColored(warn,
+                                    "the material cannot appear. Auto Splat emits");
+                                ImGui::TextColored(warn,
+                                    "Flow only; use Surface Composer's Semantic");
+                                ImGui::TextColored(warn,
+                                    "output for Wetness/Ice/Hardness.");
+                            } else if (peak == trough) {
+                                // The worse case: a flat fill covers the whole
+                                // terrain evenly, so the material looks washed
+                                // out rather than absent and nothing says why.
+                                ImGui::TextColored(warn,
+                                    "This channel is CONSTANT (%.2f) - it selects", peak / 255.0f);
+                                ImGui::TextColored(warn,
+                                    "nothing and washes the material evenly over");
+                                ImGui::TextColored(warn,
+                                    "the terrain. Wire Surface Composer's matching");
+                                ImGui::TextColored(warn,
+                                    "input (Hardness comes from Lithology/Strata).");
+                            }
+                        }
+                    }
+
+                    // Fill Button. Painting a mask channel only applies to the
+                    // splat map; the semantic channels are produced by the
+                    // node graph, not painted here.
+                     if (!semanticSlot) {
                      ImGui::SameLine();
                      if (ImGui::SmallButton("Fill Mask")) {
                         if (t->splatMap && t->splatMap->is_loaded()) {
@@ -593,6 +717,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             SCENE_LOG_INFO("Filled mask for Layer " + std::to_string(i));
                         }
                      }
+                     } // splat-only Fill Mask
 
                     // Inline Material Editing (Full PrincipledBSDF)
                     if (t->layers[i]) {
