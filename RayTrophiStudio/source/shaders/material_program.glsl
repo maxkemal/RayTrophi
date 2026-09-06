@@ -25,7 +25,10 @@
 #ifndef MATERIAL_PROGRAM_GLSL
 #define MATERIAL_PROGRAM_GLSL
 
-layout(set = 0, binding = 23, std430) readonly buffer MatProgramBuffer { uint w[]; } matprog;
+#ifndef MATERIAL_PROGRAM_BINDING
+#define MATERIAL_PROGRAM_BINDING 23
+#endif
+layout(set = 0, binding = MATERIAL_PROGRAM_BINDING, std430) readonly buffer MatProgramBuffer { uint w[]; } matprog;
 
 const uint MATPROG_NONE = 0xFFFFFFFFu;
 const uint MP_END       = 0xFFFFu;

@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <unordered_map>
 
 namespace rtapi {
@@ -148,6 +149,132 @@ Result getTerrain(const std::string& terrain_name, TerrainInfo& out_info) {
     TerrainObject* terrain = TerrainManager::getInstance().getTerrainByName(terrain_name);
     if (!terrain) return Result::fail("terrain not found: " + terrain_name);
     out_info = terrainInfo(*terrain);
+    return Result::success();
+}
+
+Result listTerrainAnalysisFields(const std::string& terrain_name,
+                                 std::vector<std::string>& out_fields) {
+    out_fields.clear();
+    if (!g_ctx) return notBound();
+    TerrainObject* terrain = TerrainManager::getInstance().getTerrainByName(terrain_name);
+    if (!terrain) return Result::fail("terrain not found: " + terrain_name);
+
+    // Only fields that carry data for THIS terrain's field grid. A stale entry
+    // of the wrong size is exactly what the scatter shader falls back away from
+    // (resolveField returns its neutral fallback), so reporting it would name a
+    // mask that silently does nothing.
+    const size_t expected = static_cast<size_t>(terrain->heightmap.width) *
+                            static_cast<size_t>(terrain->heightmap.height);
+    for (const auto& [name, data] : terrain->analysisFields) {
+        if (name.empty() || !data || data->size() != expected) continue;
+        out_fields.push_back(name);
+    }
+    std::sort(out_fields.begin(), out_fields.end());
+    return Result::success();
+}
+
+Result getTerrainFieldStats(const std::string& terrain_name,
+                            const std::string& field_name,
+                            int histogram_bins,
+                            const std::vector<TerrainFieldCoordinate>& coordinates,
+                            TerrainFieldStats& out_stats) {
+    out_stats = {};
+    if (!g_ctx) return notBound();
+    if (terrain_name.empty()) return Result::fail("terrain name must not be empty");
+    if (field_name.empty()) return Result::fail("field name must not be empty");
+    if (histogram_bins != 0 && (histogram_bins < 2 || histogram_bins > 256)) {
+        return Result::fail("histogram_bins must be 0 or between 2 and 256");
+    }
+
+    TerrainObject* terrain = TerrainManager::getInstance().getTerrainByName(terrain_name);
+    if (!terrain) return Result::fail("terrain not found: " + terrain_name);
+    const auto fieldIt = terrain->analysisFields.find(field_name);
+    if (fieldIt == terrain->analysisFields.end() || !fieldIt->second) {
+        return Result::fail("terrain analysis field not found: " + field_name);
+    }
+
+    const int width = terrain->heightmap.width;
+    const int height = terrain->heightmap.height;
+    if (width <= 0 || height <= 0) {
+        return Result::fail("terrain field grid has invalid dimensions");
+    }
+    const size_t expected = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const std::vector<float>& values = *fieldIt->second;
+    if (values.size() != expected) {
+        return Result::fail("terrain analysis field size mismatch: expected " +
+                            std::to_string(expected) + ", got " +
+                            std::to_string(values.size()));
+    }
+    for (const TerrainFieldCoordinate& coordinate : coordinates) {
+        if (coordinate.x < 0 || coordinate.x >= width ||
+            coordinate.y < 0 || coordinate.y >= height) {
+            return Result::fail("field sample coordinate out of range: (" +
+                                std::to_string(coordinate.x) + ", " +
+                                std::to_string(coordinate.y) + ")");
+        }
+    }
+
+    out_stats.terrain = terrain_name;
+    out_stats.field = field_name;
+    out_stats.width = width;
+    out_stats.height = height;
+    out_stats.channels = 1;
+    out_stats.value_count = values.size();
+    out_stats.minimum = std::numeric_limits<double>::infinity();
+    out_stats.maximum = -std::numeric_limits<double>::infinity();
+
+    double sum = 0.0;
+    for (float value : values) {
+        if (!std::isfinite(value)) {
+            ++out_stats.non_finite_count;
+            continue;
+        }
+        const double measured = static_cast<double>(value);
+        out_stats.minimum = std::min(out_stats.minimum, measured);
+        out_stats.maximum = std::max(out_stats.maximum, measured);
+        sum += measured;
+        ++out_stats.finite_count;
+        if (value != 0.0f) ++out_stats.nonzero_count;
+    }
+    if (out_stats.finite_count == 0) {
+        return Result::fail("terrain analysis field contains no finite values: " + field_name);
+    }
+
+    out_stats.mean = sum / static_cast<double>(out_stats.finite_count);
+    out_stats.nonzero_fraction = static_cast<double>(out_stats.nonzero_count) /
+                                 static_cast<double>(out_stats.finite_count);
+    out_stats.constant = out_stats.non_finite_count == 0 &&
+                         out_stats.minimum == out_stats.maximum;
+    out_stats.histogram_min = out_stats.minimum;
+    out_stats.histogram_max = out_stats.maximum;
+
+    if (histogram_bins > 0) {
+        out_stats.histogram.assign(static_cast<size_t>(histogram_bins), 0);
+        const double range = out_stats.maximum - out_stats.minimum;
+        if (range == 0.0) {
+            out_stats.histogram.front() = out_stats.finite_count;
+        } else {
+            for (float value : values) {
+                if (!std::isfinite(value)) continue;
+                const double unit = (static_cast<double>(value) - out_stats.minimum) / range;
+                size_t bin = static_cast<size_t>(unit * histogram_bins);
+                if (bin >= out_stats.histogram.size()) bin = out_stats.histogram.size() - 1;
+                ++out_stats.histogram[bin];
+            }
+        }
+    }
+
+    out_stats.samples.reserve(coordinates.size());
+    for (const TerrainFieldCoordinate& coordinate : coordinates) {
+        const size_t index = static_cast<size_t>(coordinate.y) * width + coordinate.x;
+        const float value = values[index];
+        if (!std::isfinite(value)) {
+            return Result::fail("requested field sample is non-finite at (" +
+                                std::to_string(coordinate.x) + ", " +
+                                std::to_string(coordinate.y) + ")");
+        }
+        out_stats.samples.push_back({coordinate.x, coordinate.y, value});
+    }
     return Result::success();
 }
 
@@ -573,6 +700,7 @@ static void applyFluvialCycleSettings(HydraulicErosionParams& params,
     setInt(params.drainageFillPasses, s.drainage_fill_passes, 8, 4096);
     setInt(params.drainageAccumulatePasses, s.drainage_accumulate_passes, 8, 4096);
     setInt(params.drainageCoarsestSize, s.drainage_coarsest_size, 32, 512);
+    setInt(params.flatResolvePasses, s.flat_resolve_passes, 0, 8192);
     setInt(params.massWastingSteps, s.mass_wasting_steps, 0, 64);
     setFloat(params.fluvialTimeStep, s.fluvial_time_step, 0.0f, 16.0f);
     setFloat(params.rainRate, s.rain_rate, 1.0e-4f, 100.0f);
@@ -590,6 +718,9 @@ static void applyFluvialCycleSettings(HydraulicErosionParams& params,
     setFloat(params.massWastingRate, s.mass_wasting_rate, 0.0f, 1.0f);
     setFloat(params.hillslopeDiffusion, s.hillslope_diffusion, 0.0f, 100.0f);
     setFloat(params.incisionSafety, s.incision_safety, 0.0f, 0.95f);
+    // 0 is a MEANINGFUL value here (ramp off), and setFloat's sentinel is
+    // "negative means unset", so 0 passes through as intended.
+    setFloat(params.flatGradient, s.flat_gradient, 0.0f, 0.05f);
     setFloat(params.depositionSafety, s.deposition_safety, 0.0f, 0.95f);
     setFloat(params.maxStepMeters, s.max_step_meters, 0.0f, 1000.0f);
     setFloat(params.lakeEpsilonMeters, s.lake_epsilon_meters, 0.0f, 100.0f);
@@ -620,6 +751,8 @@ Result getTerrainErosionStats(TerrainErosionStats& out_stats) {
     out_stats.deepest_deposit_meters = s.deepestDepositMeters;
     out_stats.mean_deposit_meters = s.meanDepositMeters;
     out_stats.drainage_density = s.drainageDensity;
+    out_stats.unresolved_flat_cells = s.unresolvedFlatCells;
+    out_stats.unresolved_flat_fraction = s.unresolvedFlatFraction;
     out_stats.cycle_iterations = s.cycleIterations;
     out_stats.gpu_path = s.gpuPath;
     return Result::success();

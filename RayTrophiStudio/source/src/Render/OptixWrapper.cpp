@@ -1,3 +1,5 @@
+#include "PostProcess/Exposure.h"
+#include "oidn_blend_cuda.h"
 #include "OptixWrapper.h"
 #include "fft_ocean.cuh"
 #include "Stylize/StylizeKernel.h"
@@ -9,6 +11,7 @@
 #include <algorithm>    // std::min ve std::max için
 #include <unordered_set>
 #include <cstring>      // memcpy for camera hash
+#include "globals.h"    // g_display_post (display-transform signature)
 #include <cmath>        // std::isfinite for hair validation
 #include <set>          // for unique_nodes in TLAS building
 #include <atomic>
@@ -467,6 +470,9 @@ void OptixWrapper::launch(int w, int h) {
     }
 
     OPTIX_CHECK(optixLaunch(pipeline, stream, d_params, sizeof(RayGenParams), &sbt, w, h, 1));
+    if (params.accumulation_buffer)
+        CUDA_CHECK(launchOptixDisplayPost(params.accumulation_buffer, d_framebuffer, w, h, stream,
+            params.camera.vignetting_enabled ? params.camera.vignetting_amount : 0.0f, params.camera.vignetting_falloff) ? cudaSuccess : cudaErrorLaunchFailure);
 }
 
 void OptixWrapper::downloadFramebuffer(uchar4* host_ptr, int width, int height) {
@@ -1526,6 +1532,22 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
 // ------------------------------------------------------------------
 
 // Helper function to compute camera hash for change detection
+uint64_t OptixWrapper::computeDisplayPostSignature() const {
+    const auto& dp = g_display_post;
+    uint64_t sig = 1469598103934665603ull;
+    auto mix = [&sig](uint32_t bits) { sig = (sig ^ bits) * 1099511628211ull; };
+    auto mixFloat = [&](float v) { uint32_t bits; std::memcpy(&bits, &v, sizeof(bits)); mix(bits); };
+    mixFloat(dp.exposure);
+    mixFloat(dp.gamma);
+    mixFloat(dp.saturation);
+    mixFloat(dp.color_temperature);
+    mixFloat(dp.vignette_strength);
+    mix(static_cast<uint32_t>(dp.tone_mapping));
+    mix(static_cast<uint32_t>(dp.vignette_enabled));
+    mixFloat(dp.camera_exposure);
+    return sig;
+}
+
 uint64_t OptixWrapper::computeCameraHash() const {
     // Simple FNV-1a style hash of camera parameters
     uint64_t hash = 14695981039346656037ULL;
@@ -1696,10 +1718,30 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // Max samples from settings (default to 100 if not set)
     int target_max_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
 
-    // If we've reached max samples, don't render more
+    // ★★★★ A post-processing edit made AFTER convergence must still reach the
+    // presented frame. This early-return used to skip EVERYTHING, including the
+    // display encode — so once accumulated_samples hit the target, changing
+    // exposure did nothing on OptiX, forever. (Vulkan had the same class of bug;
+    // measured there over IPC: exposure 0.82 -> 4.00 on a converged frame left a
+    // BYTE-IDENTICAL image.) Main.cpp now raises a render request on a post edit;
+    // this is the other half — turn that request into a resolve-only launch that
+    // re-encodes the existing accumulation with the current display values,
+    // adding no sample and touching no accumulation or variance state.
+    bool resolve_only = false;
     if (accumulated_samples >= target_max_samples) {
+        const uint64_t sig = computeDisplayPostSignature();
+        const bool displayChanged = (sig != last_display_post_signature);
+        // Nothing to re-encode without an accumulation buffer to read from.
+        if ((!displayChanged && !rtpost::meterEnabled()) || !d_accumulation_float4) {
+            rendering_in_progress = false;
+            return;
+        }
+        last_display_post_signature = sig;
+        resolve_only = true;
+        // The RENDER is genuinely finished; this pass only re-encodes pixels.
         rendering_in_progress = false;
-        return;
+    } else {
+        last_display_post_signature = computeDisplayPostSignature();
     }
 
     // Samples per pass: 1 for smooth progressive updates
@@ -1752,6 +1794,9 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.frame_number = accumulated_samples;  // Was: accumulated_samples + 1
     params.current_pass = accumulated_samples;
     params.is_final_render = render_settings.is_final_render_mode ? 1 : 0;
+    // Resolve-only: re-encode the existing accumulation with the current display
+    // values, trace nothing, add no sample (see raygen.cu's early branch).
+    params.display_resolve_only = resolve_only ? 1 : 0;
     params.grid_enabled = render_settings.grid_enabled ? 1 : 0;
     params.grid_fade_distance = render_settings.grid_fade_distance;
     params.clip_near = render_settings.viewport_near_clip;
@@ -1843,6 +1888,8 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
             &sbt,
             width, height, 1
         ));
+        CUDA_CHECK(launchOptixDisplayPost(d_accumulation_float4, d_framebuffer, width, height, stream,
+            params.camera.vignetting_enabled ? params.camera.vignetting_amount : 0.0f, params.camera.vignetting_falloff) ? cudaSuccess : cudaErrorLaunchFailure);
     } else {
         // Empty scene or invalid state - evaluate world/atmosphere on CPU.
         partial_framebuffer.resize(pixel_count);
@@ -1898,8 +1945,12 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     auto pass_end = high_resolution_clock::now();
     float pass_ms = duration<float, std::milli>(pass_end - pass_start).count();
 
-    // Update accumulated sample count
-    accumulated_samples += samples_this_pass;
+    // Update accumulated sample count. A resolve-only pass traced nothing, so it
+    // must NOT advance the count - otherwise every post edit would silently push
+    // the frame past its own sample target.
+    if (!resolve_only) {
+        accumulated_samples += samples_this_pass;
+    }
     
     // ═══════════════════════════════════════════════════════════════════════════
     // ADAPTIVE SAMPLING DEBUG - Read converged pixel count

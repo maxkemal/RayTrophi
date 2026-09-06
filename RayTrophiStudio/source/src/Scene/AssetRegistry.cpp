@@ -2,9 +2,7 @@
 #include "globals.h"
 #include "VDBVolume.h"
 
-#include <assimp/Importer.hpp>
-#include <assimp/postprocess.h>
-#include <assimp/scene.h>
+#include "Import/ModelProbe.h"   // model metadata without Assimp
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
@@ -33,24 +31,6 @@ bool isSupportedAssetExtension(const std::filesystem::path& path) {
 bool isPreviewExtension(const std::filesystem::path& path) {
     const std::string ext = AssetRegistry::toLowerCopy(path.extension().string());
     return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp";
-}
-
-bool readBinaryFileBytes(const std::filesystem::path& path, std::vector<unsigned char>& out_bytes) {
-    out_bytes.clear();
-
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        return false;
-    }
-
-    const std::streamsize size = file.tellg();
-    if (size <= 0) {
-        return false;
-    }
-
-    out_bytes.resize(static_cast<size_t>(size));
-    file.seekg(0, std::ios::beg);
-    return file.read(reinterpret_cast<char*>(out_bytes.data()), size).good();
 }
 
 std::string pathToUtf8(const std::filesystem::path& path) {
@@ -101,38 +81,6 @@ std::filesystem::path getExecutableDirectory() {
 
     buffer.resize(length);
     return std::filesystem::path(buffer).parent_path();
-}
-
-std::uint64_t countMaterialTextureRefs(const aiMaterial* material) {
-    if (!material) {
-        return 0;
-    }
-
-    static const aiTextureType texture_types[] = {
-        aiTextureType_DIFFUSE,
-        aiTextureType_SPECULAR,
-        aiTextureType_AMBIENT,
-        aiTextureType_EMISSIVE,
-        aiTextureType_HEIGHT,
-        aiTextureType_NORMALS,
-        aiTextureType_SHININESS,
-        aiTextureType_OPACITY,
-        aiTextureType_DISPLACEMENT,
-        aiTextureType_LIGHTMAP,
-        aiTextureType_REFLECTION,
-        aiTextureType_BASE_COLOR,
-        aiTextureType_NORMAL_CAMERA,
-        aiTextureType_EMISSION_COLOR,
-        aiTextureType_METALNESS,
-        aiTextureType_DIFFUSE_ROUGHNESS,
-        aiTextureType_AMBIENT_OCCLUSION
-    };
-
-    std::uint64_t count = 0;
-    for (aiTextureType type : texture_types) {
-        count += material->GetTextureCount(type);
-    }
-    return count;
 }
 
 std::string safeReadString(const nlohmann::json& json, const char* key, const std::string& fallback = "") {
@@ -1008,68 +956,38 @@ AssetAnalysisInfo AssetRegistry::analyzeAssetFile(const std::filesystem::path& e
         return info;
     }
 
-    Assimp::Importer importer;
-    unsigned int import_flags =
-        aiProcess_Triangulate |
-        aiProcess_JoinIdenticalVertices |
-        aiProcess_ImproveCacheLocality;
-
-    const std::string ext = toLowerCopy(entry_path.extension().string());
-    if (ext == ".fbx") {
-        import_flags |= aiProcess_GlobalScale;
-    }
-
-    std::vector<unsigned char> file_bytes;
-    const aiScene* scene = nullptr;
-    if (readBinaryFileBytes(entry_path, file_bytes)) {
-        scene = importer.ReadFileFromMemory(file_bytes.data(), file_bytes.size(), import_flags, ext.c_str());
-    }
-    if (!scene) {
-        scene = importer.ReadFile(entry_path.string(), import_flags);
-    }
-    if (!scene) {
+    // ★★ ONE PROBE FOR EVERY MODEL FORMAT (Faz 3). This used to be a glTF
+    // branch in front of an Assimp branch; the Assimp side fully decoded every
+    // buffer and ran aiProcess_ImproveCacheLocality — a Tipsify reorder — to
+    // produce A COUNT AND A BOX. Now each format answers from its own container:
+    // glTF reads the POSITION min/max the spec requires, FBX loads through ufbx
+    // with embedded images skipped, OBJ is a text scan.
+    //
+    // ★ A failed probe reports NOTHING rather than falling back. A file the
+    // probe cannot read is a file the IMPORTER cannot read either, and showing
+    // plausible numbers for a file that will fail to open is precisely the
+    // "panel lies" failure this repo keeps paying for.
+    rtimport::ModelProbe probe;
+    if (!rtimport::probeModel(entry_path.string(), /*applyNodeTransforms=*/false, probe)) {
+        SCENE_LOG_WARN("[AssetRegistry] model probe failed, no metadata for: " + entry_path.string());
         return info;
     }
 
-    info.mesh_count = scene->mNumMeshes;
-    info.material_count = scene->mNumMaterials;
-    info.animation_clip_count = scene->mNumAnimations;
-
-    aiVector3D bb_min(1e30f, 1e30f, 1e30f);
-    aiVector3D bb_max(-1e30f, -1e30f, -1e30f);
-    bool found_vertex = false;
-
-    for (unsigned int i = 0; i < scene->mNumMeshes; ++i) {
-        const aiMesh* mesh = scene->mMeshes[i];
-        if (!mesh) {
-            continue;
-        }
-
-        info.triangle_count += mesh->mNumFaces;
-        for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
-            const aiVector3D& p = mesh->mVertices[v];
-            bb_min.x = (std::min)(bb_min.x, p.x);
-            bb_min.y = (std::min)(bb_min.y, p.y);
-            bb_min.z = (std::min)(bb_min.z, p.z);
-            bb_max.x = (std::max)(bb_max.x, p.x);
-            bb_max.y = (std::max)(bb_max.y, p.y);
-            bb_max.z = (std::max)(bb_max.z, p.z);
-            found_vertex = true;
-        }
-    }
-
-    for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
-        info.texture_reference_count += countMaterialTextureRefs(scene->mMaterials[i]);
-    }
-
-    if (found_vertex) {
+    info.mesh_count = static_cast<decltype(info.mesh_count)>(probe.mesh_count);
+    info.material_count = static_cast<decltype(info.material_count)>(probe.material_count);
+    info.animation_clip_count =
+        static_cast<decltype(info.animation_clip_count)>(probe.animation_count);
+    info.triangle_count = static_cast<decltype(info.triangle_count)>(probe.triangle_count);
+    info.texture_reference_count =
+        static_cast<decltype(info.texture_reference_count)>(probe.texture_reference_count);
+    if (probe.has_bounds) {
         info.has_dimensions = true;
-        info.width = static_cast<double>(bb_max.x - bb_min.x);
-        info.height = static_cast<double>(bb_max.y - bb_min.y);
-        info.depth = static_cast<double>(bb_max.z - bb_min.z);
-        info.pivot_x = static_cast<double>((bb_min.x + bb_max.x) * 0.5f);
-        info.pivot_y = static_cast<double>(bb_min.y);
-        info.pivot_z = static_cast<double>((bb_min.z + bb_max.z) * 0.5f);
+        info.width  = static_cast<double>(probe.bounds_max[0] - probe.bounds_min[0]);
+        info.height = static_cast<double>(probe.bounds_max[1] - probe.bounds_min[1]);
+        info.depth  = static_cast<double>(probe.bounds_max[2] - probe.bounds_min[2]);
+        info.pivot_x = static_cast<double>((probe.bounds_min[0] + probe.bounds_max[0]) * 0.5f);
+        info.pivot_y = static_cast<double>(probe.bounds_min[1]);
+        info.pivot_z = static_cast<double>((probe.bounds_min[2] + probe.bounds_max[2]) * 0.5f);
     }
 
     return info;

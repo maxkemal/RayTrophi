@@ -1,0 +1,261 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+// ===========================================================================
+// Raster viewport GPU culling + LOD split.
+//
+// Neyi degistirdi: production instancing (global instance buffer) devreye
+// girdiginde CPU frustum culling'i ve scatter proxy ayrimi tamamen devre disi
+// kaliyordu -- uploadVisibleRasterInstances global yolda erken donuyor ve
+// mesh.instanceCount = TUM instance sayisi oluyordu. Yani kamera nereye
+// bakarsa baksin her instance her kare gonderiliyordu.
+//
+// Bu shader o iki karari GPU'ya tasir:
+//   pass 0 (mesh basina bir dispatch): frustum testi + LOD ayrimi, hayatta
+//           kalanlarin matrisini SIKISTIRILMIS cikti bolgesine kopyalar.
+//   pass 1 (tek dispatch, mesh basina bir is parcacigi): indirect draw
+//           komutlarini yazar ve LOD mesafe esigini gunceller.
+//
+// ★★★ ANLAM DEGISIKLIGI -- bilerek, ve adi da degisti.
+// Eski CPU yolu ucgen butcesini "kameraya EN YAKIN N instance tam, gerisi
+// proxy" diye uyguluyordu (nth_element ile sira secimi). GPU'da tek gecisde
+// tam siralama yapilamaz. Bunun yerine bir MESAFE ESIGI tutuluyor
+// (state.x = lodDistSq) ve her kare butceye gore cozuluyor.
+//
+// Cozum tek adimda yakinsar cunku scatter bir YUZEYE dagilir: D mesafesi
+// icindeki instance sayisi ~ D^2 ile buyur, ve lodDistSq zaten D^2'dir. Yani
+// gorunen sayi ~ lodDistSq ile DOGRUSALDIR ve
+//     yeniLodDistSq = lodDistSq * (izinVerilen / gorulen)
+// dogrudan cozumdur. Kare basina degisim yine de [0.5, 1.5] ile sinirlanir ki
+// bir kare geriden gelen sayaclar salinim uretmesin.
+//
+// ★ Bunun iki gozlenebilir sonucu var, ikisi de kasitli:
+//   1. Butce artik SERT BIR TAVAN DEGIL, bir HEDEFtir. Hizli kamera
+//      hareketinde bir-iki kare boyunca asilabilir. Alan adi bu yuzden
+//      m_rasterScatterTriangleTarget; "budget" degil.
+//   2. Buna karsilik POP AZALIR: eski sira tabanli secimde iki instance'in
+//      sirasi yer degistirince biri aniden proxy olurdu. Mesafe esigi
+//      temporal olarak duzgun.
+// ===========================================================================
+
+layout(local_size_x = 256) in;
+
+// --- pass 0 icin mesh basina, pass 1 icin tum mesh'ler uzerinde ------------
+layout(push_constant) uniform PC {
+    uint pass;       // 0 = classify+compact, 1 = finalize commands + LOD state
+    uint meshIndex;  // pass 0 icin gecerli
+} pc;
+
+struct MeshParam {
+    uint firstInstance;        // kaynak matris/bounds dizisindeki taban
+    uint instanceCount;        // bu mesh'in sahip oldugu instance sayisi
+    uint outBase;              // sikistirilmis ciktidaki taban
+    uint outCapacity;          // == instanceCount (tam onden, proxy arkadan)
+    uint drawSlot;             // cmds[] icindeki TAM cizim yuvasi
+    uint proxyDrawSlot;        // cmds[] icindeki PROXY yuvasi (yoksa 0xFFFFFFFF)
+    uint flags;                // bit0: LOD ayrimi acik, bit1: indexli cizim
+    uint trianglesPerInstance;
+    uint elementCount;         // indexli ise indexCount, degilse vertexCount
+    uint proxyElementCount;    // proxy mesh'in indexCount/vertexCount'u
+    uint proxyFlags;           // bit1: proxy indexli cizim
+    uint proxyOutBase;         // proxy'nin KENDI cikti bolgesinin tabani
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer SrcMatrices { vec4 srcMat[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Bounds      { vec4 bounds[]; };
+layout(set = 0, binding = 2, std430) readonly buffer MeshParams  { MeshParam meshes[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer DstMatrices { vec4 dstMat[]; };
+layout(set = 0, binding = 4, std430) buffer Counters             { uint counters[]; };
+layout(set = 0, binding = 5, std430) writeonly buffer Commands   { uint cmds[]; };
+layout(set = 0, binding = 6, std430) readonly buffer Globals {
+    vec4  planes[6];               // xyz = normalize edilmis normal, w = d
+    vec4  cameraPos;               // xyz
+    uint  scatterTriangleTarget;
+    float lodMinDistSq;
+    float lodMaxDistSq;
+    uint  meshCount;
+    // ★★ Gecis bandinin YARI genisligi, esigin carpani olarak (0.35 => esik
+    //   instance basina [0.65x, 1.35x] araliginda dagitilir). 0 = sert
+    //   anahtar, yani eski davranis. Gerekce classify() icinde.
+    float lodBandWidth;
+} g;
+layout(set = 0, binding = 7, std430) buffer MeshState {
+    // x = lodDistSq (kareler arasi tasinir), y = son tam sayisi,
+    // z = son proxy sayisi, w = son gorunen sayisi
+    vec4 state[];
+};
+
+// ★★★ FLAG_LOD_SPLIT ile FLAG_HAS_PROXY AYRI olmak ZORUNDA.
+//
+// Eski CPU yolu ucgen butcesini HER scatter grubuna uyguluyordu; proxy mesh'i
+// olmayan grupta butce disi instance'lar basitce CIZILMIYORDU (kirpma
+// kosulsuzdu, yalnizca proxy YUKLEMESI kosulluydu). Bunu GPU'ya tasirken tum
+// mekanizmayi proxy varligina baglamak, proxy'si olmayan gruplarda butceyi
+// tamamen ETKISIZ birakti -- ve flat SoA scatter kaynaklarinin proxy'si hic
+// uretilmiyor, yani modern yogun sahnelerin cogu tam olarak bu durumda.
+const uint FLAG_LOD_SPLIT = 1u;   // butce/mesafe esigi uygulanir
+const uint FLAG_INDEXED   = 2u;
+const uint FLAG_HAS_PROXY = 4u;   // demote edilenler proxy olarak CIZILIR
+const uint NO_SLOT        = 0xFFFFFFFFu;
+
+// Instance basina KARARLI sozde-rastgele sayi (Lowbias32).
+// ★★★ Girdi KAYNAK INDEKSTIR, kare sayaci DEGIL. Kareler arasi degisen bir
+//   hash pop'u titremeye cevirirdi -- ki daha kotudur: pop bir kez olur,
+//   titreme her kare olur.
+float hash01(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return float(x) * (1.0 / 4294967296.0);
+}
+
+// CPU tarafindaki isAABBInFrustum ile AYNI davranis:
+//  - near plane (indeks 4) BILEREK atlanir. Kamera bir yuzeye cok
+//    yaklastiginda kutu near plane'i keser ve tum mesh dusurulurdu; kirpmayi
+//    GPU clipper'ina birakiyoruz. Bunu buradan kaldirirsan yakin plan
+//    nesneleri kaybolur.
+//  - kure testi AABB testinden daha TUTUCUDUR: fazladan tutabilir, gorunur
+//    olani asla dusurmez. Guvenli yon budur.
+bool insideFrustum(vec3 center, float radius) {
+    float slack = max(radius * 0.75, 0.05) + radius;
+    for (int i = 0; i < 6; ++i) {
+        if (i == 4) continue;
+        if (dot(g.planes[i].xyz, center) + g.planes[i].w < -slack) return false;
+    }
+    return true;
+}
+
+void classify(uint meshIndex) {
+    MeshParam p = meshes[meshIndex];
+    uint local = gl_GlobalInvocationID.x;
+    if (local >= p.instanceCount) return;
+
+    uint src = p.firstInstance + local;
+    vec4 b = bounds[src];
+
+    // radius < 0 => gizli instance (mask == 0). Eskiden sifir matris yazilip
+    // dejenere ucgen olarak GPU'ya gonderiliyordu; artik hic gonderilmiyor.
+    if (b.w < 0.0) return;
+    if (!insideFrustum(b.xyz, b.w)) return;
+
+    // ★ Gorunen en uzak mesafeyi olc. Bu, LOD esiginin TOHUMDAN kurtulmasini
+    //   saglar: esik 1e18 ile basliyor ve butceye yalnizca oranla inseydi
+    //   ~47 kare surerdi -- sahne yuklenirken saniyelik bir TAM DETAY
+    //   takilmasi. Gozlenen en uzak degere kirpmak bunu ilk karede bitirir.
+    //   floatBitsToUint negatif olmayan floatlarda SIRA KORUYUCUDUR, yani
+    //   bit deseni uzerinde atomicMax dogru maksimumu verir.
+    vec3 dcam = b.xyz - g.cameraPos.xyz;
+    float distSq = dot(dcam, dcam);
+    atomicMax(counters[meshIndex * 4u + 2u], floatBitsToUint(distSq));
+
+    bool toProxy = false;
+    if ((p.flags & FLAG_LOD_SPLIT) != 0u) {
+        // ★★★ GECIS BANDI. Sert bir esikte bir kumenin TAMAMI ayni karede
+        //   takla atar; sahnede suprulen gorunur bir cizgi olusur. Daha
+        //   kotusu: butun instance'lar yaklasik AYNI mesafede olan TEKDUZE
+        //   bir kumede sayim esik gecince 0 ile total arasinda SALINIR ve
+        //   oran cozumu hic yakinsamaz (bu, 2026-09-01'de NEXT_BUILD_CHECKS
+        //   A5'te acik kayitli belirtiydi).
+        //
+        //   Esigi instance basina sabit bir carpanla dagitmak ikisini birden
+        //   cozer: gecis bir cizgi degil bir cozunme olur, ve gorunen sayi
+        //   esigin SUREKLI ve monoton bir fonksiyonu haline gelir -- yani
+        //   finalize()'daki oran cozumu tekduze kumede de yakinsar.
+        //
+        //   Yuzey dagilimi varsayimi bozulmaz: jitter'in ortalamasi 1.0'dir,
+        //   yani "sayi ~ lodDistSq" bagintisi beklenen deger olarak aynen
+        //   kalir; yalnizca basamak yumusar.
+        float jitter = 1.0 + g.lodBandWidth * (hash01(src) * 2.0 - 1.0);
+        toProxy = (distSq > state[meshIndex].x * jitter);
+    }
+
+    // ★★★ Tam ve proxy AYRI cikti bolgelerine, ikisi de ONDEN doldurulur.
+    //     Tabanlarin ikisi de CPU'da BILINIR, ve bu bilerek boyle:
+    //     vkCmdDraw*Indirect'te firstInstance != 0 kullanmak
+    //     drawIndirectFirstInstance cihaz ozelligini gerektirir ve o ozellik
+    //     bu projede etkin DEGIL. Bunun yerine cizim, instance vertex
+    //     buffer'ini bolge tabanindan BAYT OFSETIYLE baglar ve komuttaki
+    //     firstInstance her zaman 0 kalir. Boylece cihaz ozelligine hic
+    //     bagimlilik yok.
+    uint slot;
+    if (toProxy) {
+        // Demote edilenler her halukarda SAYILIR: kontrolcu ve telemetri bunu
+        // gorur. Ama proxy mesh'i yoksa CIZILMEZ -- eski CPU davranisinin
+        // aynisi: butce disi instance dusurulur.
+        uint n = atomicAdd(counters[meshIndex * 4u + 1u], 1u);
+        if ((p.flags & FLAG_HAS_PROXY) == 0u) return;
+        slot = p.proxyOutBase + n;
+    } else {
+        uint n = atomicAdd(counters[meshIndex * 4u + 0u], 1u);
+        slot = p.outBase + n;
+    }
+
+    uint s = src * 4u;
+    uint d0 = slot * 4u;
+    dstMat[d0 + 0u] = srcMat[s + 0u];
+    dstMat[d0 + 1u] = srcMat[s + 1u];
+    dstMat[d0 + 2u] = srcMat[s + 2u];
+    dstMat[d0 + 3u] = srcMat[s + 3u];
+}
+
+// cmds[] tek bir 5-uint kayit dizisidir (20 bayt adim).
+//   indexli    : indexCount, instanceCount, firstIndex, vertexOffset, firstInstance
+//   indexsiz   : vertexCount, instanceCount, firstVertex, firstInstance, (kullanilmaz)
+// vkCmdDraw*Indirect drawCount=1 ile cagrildigi icin adim onemsizdir; onemli
+// olan her kaydin BASINDAN itibaren dogru alan sirasidir.
+void writeCommand(uint slot, bool indexed, uint elementCount, uint instanceCount) {
+    if (slot == NO_SLOT) return;
+    uint o = slot * 5u;
+    cmds[o + 0u] = elementCount;
+    cmds[o + 1u] = instanceCount;
+    cmds[o + 2u] = 0u;
+    // ★ firstInstance HER ZAMAN 0 -- bkz. classify()'daki gerekce. Instance
+    //   ofseti vertex buffer bind ofsetiyle veriliyor.
+    cmds[o + 3u] = 0u;
+    cmds[o + 4u] = 0u;
+}
+
+void finalize(uint meshIndex) {
+    MeshParam p = meshes[meshIndex];
+
+    uint full  = counters[meshIndex * 4u + 0u];
+    uint proxy = counters[meshIndex * 4u + 1u];
+    float maxObservedDistSq = uintBitsToFloat(counters[meshIndex * 4u + 2u]);
+
+    writeCommand(p.drawSlot, (p.flags & FLAG_INDEXED) != 0u,
+                 p.elementCount, full);
+    writeCommand(p.proxyDrawSlot, (p.proxyFlags & FLAG_INDEXED) != 0u,
+                 p.proxyElementCount, proxy);
+
+    vec4 st = state[meshIndex];
+    st.y = float(full);
+    st.z = float(proxy);
+    st.w = float(full + proxy);
+
+    if ((p.flags & FLAG_LOD_SPLIT) != 0u && p.trianglesPerInstance > 0u) {
+        float d = st.x;
+        // ★ ONCE gozlenen en uzak mesafeye kirp. Esigin sahnenin otesinde
+        //   olmasinin bir anlami yok, ve orada "sayi ~ lodDistSq" varsayimi da
+        //   GECERSIZDIR (esigi buyutmek yeni instance getirmez). Bu kirpma
+        //   olmadan oran cozumu tohumdan asagi cok yavas inerdi.
+        if (maxObservedDistSq > 0.0) d = min(d, maxObservedDistSq);
+
+        uint allowed = max(1u, g.scatterTriangleTarget / p.trianglesPerInstance);
+        uint seen    = max(1u, full);
+        // Yuzey dagilimi varsayimi (bkz. dosya basi): sayi ~ lodDistSq, yani
+        // bu tek adimlik bir cozumdur. Kirpma yalnizca salinimi bastirir.
+        float scale = clamp(float(allowed) / float(seen), 0.5, 1.5);
+        st.x = clamp(d * scale, g.lodMinDistSq, g.lodMaxDistSq);
+    }
+    state[meshIndex] = st;
+}
+
+void main() {
+    if (pc.pass == 0u) {
+        classify(pc.meshIndex);
+    } else {
+        uint i = gl_GlobalInvocationID.x;
+        if (i >= g.meshCount) return;
+        finalize(i);
+    }
+}

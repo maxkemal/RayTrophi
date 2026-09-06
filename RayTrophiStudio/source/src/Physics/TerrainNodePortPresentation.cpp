@@ -119,10 +119,22 @@ void applyDefaultProfile(NodeSystem::NodeBase& node) {
 
 void configureHydraulic(NodeSystem::NodeBase& node) {
     compact(node.inputs, {"Height", "Area"}, "Material Control");
-    compact(node.outputs, {"Height", "Wear", "Deposits", "Flow"}, "Products");
+    // "Flow" was renamed to "Sediment" and a real "Discharge" added. These
+    // lists match by pin NAME, so leaving "Flow" here would have silently
+    // demoted both pins out of Products into the collapsed optional section -
+    // the fix would have shipped invisible.
+    compact(node.outputs, {"Height", "Wear", "Deposits", "Sediment", "Discharge"}, "Products");
 
-    if (auto* p = named(node.outputs, "Flow")) {
-        p->tooltip = "Artist-facing sediment transport path. Physical water discharge remains optional.";
+    if (auto* p = named(node.outputs, "Sediment")) {
+        p->tooltip = "Suspended sediment transport, normalised 0-1. This pin was "
+                     "called Flow and that name cost a wiring bug: it is NOT the "
+                     "water, it is what the water is carrying.";
+    }
+    if (auto* p = named(node.outputs, "Discharge")) {
+        p->tooltip = "Measured water discharge in m3/s (catchment area x runoff). "
+                     "Wire this into Flow.Discharge - otherwise the Flow mask "
+                     "re-derives drainage from the height and flats come out "
+                     "straight and angular.";
     }
 }
 
@@ -143,12 +155,20 @@ int legacyTerrainPortSlot(const std::string& typeId,
     if (typeId == "TerrainV2.HydraulicErosion" && kind == NodeSystem::PinKind::Output) {
         // Legacy order: Height Out, Erosion, Deposition, Discharge,
         // Sediment Flux, Flow Direction, Channel Width, Water Depth,
-        // Water Level. Sediment Flux is the field the new Flow pin actually
-        // carries, so it moves to slot 3; Discharge does NOT -- it is published
-        // by River Hydraulics in cubic metres per second and has no equivalent
-        // here. The rest belong to Watershed, River Hydraulics and Lake Basin.
+        // Water Level. Sediment Flux is the field the pin formerly called Flow
+        // actually carries, so it maps to slot 3 (now named "Sediment").
+        //
+        // ★★★ Legacy Discharge is NO LONGER "Removed". It used to map to
+        // nothing on the stated grounds that discharge "has no equivalent here"
+        // and belonged to River Hydraulics. That was true of the pin list and
+        // false of the solver: the LEM has computed a real m3/s discharge all
+        // along and simply had nowhere to publish it, which is why the Flow
+        // mask fell back to re-deriving drainage from geometry in every graph
+        // without a river network. Slot 4 is that pin, so a project saved
+        // before the pruning gets its Discharge link back instead of having it
+        // counted as dropped.
         static const int kOutputSlots[] = {0, 1, 2,
-                                           kTerrainPortSlotRemoved, 3,
+                                           4, 3,
                                            kTerrainPortSlotRemoved,
                                            kTerrainPortSlotRemoved,
                                            kTerrainPortSlotRemoved,
@@ -174,6 +194,32 @@ void configureTerrainNodePorts(NodeSystem::NodeBase& node) {
         compact(node.outputs, {"Height Out", "Erosion", "Deposition"}, "Surface Products");
     } else if (type == "TerrainV2.NoiseGenerator") {
         compact(node.outputs, {"Height"}, "Derived Masks");
+    } else if (type == "TerrainV2.CurveToMask") {
+        compact(node.inputs, {"Curve"}, "Curve Inputs");
+        compact(node.outputs, {"Mask"}, "Mask Products");
+    } else if (type == "TerrainV2.RoadCarve") {
+        compact(node.inputs, {"Height", "Curve"}, "Road Inputs");
+        // Every one of these outputs is REQUIRED by Road Fields Output, which
+        // publishes the bundle atomically or not at all. Tiering them away as
+        // diagnostics hid pins the author has to connect for the node to do
+        // anything - a pin that must be wired and cannot be seen is the worst
+        // of the two failure directions this file weighs.
+        compact(node.outputs, {"Height", "Road Core", "Shoulder", "Cut", "Fill",
+                               "Foliage Exclusion", "Ditch", "Snapshot Revision"},
+                "Infrastructure Fields");
+    } else if (type == "TerrainV2.RoadNetwork") {
+        // Water is Primary despite being optional: it is the only pin that tells
+        // the solver where a crossing IS, and a Ford whose Water pin is empty
+        // reports that it could not be resolved. A hidden pin would make that
+        // message read as a bug in the crossing rather than a missing wire.
+        compact(node.inputs, {"Height", "Water"}, "Road Inputs");
+        compact(node.outputs, {"Height", "Road Core", "Shoulder", "Cut", "Fill",
+                               "Foliage Exclusion", "Ditch", "Snapshot Revision"},
+                "Infrastructure Fields");
+    } else if (type == "TerrainV2.RoadFieldsOutput") {
+        compact(node.inputs, {"Road Core", "Shoulder", "Cut", "Fill",
+                              "Foliage Exclusion", "Snapshot Revision", "Ditch"},
+                "Physical Diagnostics");
     } else if (type == "TerrainV2.MountainRange") {
         compact(node.inputs, {"Base Height", "Mask"}, "Optional Inputs");
         compact(node.outputs, {"Height", "Ridge", "Valley Seed"}, "Geology Products");
@@ -186,7 +232,8 @@ void configureTerrainNodePorts(NodeSystem::NodeBase& node) {
         compact(node.inputs, {"Original Height", "Conditioned Height"}, "Hydrology Inputs");
         compact(node.outputs, {"Lake Mask", "Lake Depth", "Water Level"}, "Lake Diagnostics", {"Lake IDs"});
     } else if (type == "TerrainV2.RiverNetwork") {
-        compact(node.inputs, {"Accumulation", "Flow Direction", "Lake Mask"}, "Network Inputs");
+        compact(node.inputs, {"Accumulation", "Flow Direction", "Lake Mask"}, "Network Inputs",
+                {"Catchment Area", "Lake Spill Points", "Channel Exclusion"});
         compact(node.outputs, {"Channels", "Stream Order", "Sources"}, "Network Products");
     } else if (type == "TerrainV2.RiverHydraulics") {
         compact(node.inputs, {"Bed Height", "Catchment Area", "Channels"}, "Hydrology Inputs");

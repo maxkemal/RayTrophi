@@ -38,19 +38,36 @@ std::size_t workingSetBytes() {
     return 0;
 }
 
-void record(const std::string& name, double ms, double rss_delta_mb, double rss_after_mb) {
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        Section& s = g_sections[name];
-        s.name = name;
-        s.last_ms = ms;
-        s.total_ms += ms;
-        s.max_ms = (std::max)(s.max_ms, ms);
-        s.count += 1;
+namespace {
+// Ortak kayit govdesi. `rssMeasured` false ise rss alanlarina DOKUNULMAZ ve
+// bayrak dusurulur -- eski bir olcumu sifirla ezmek, "olcmedim"i "sifir olctum"
+// diye raporlamak olurdu.
+void recordImpl(const std::string& name, double ms,
+                bool rssMeasured, double rss_delta_mb, double rss_after_mb) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Section& s = g_sections[name];
+    s.name = name;
+    s.last_ms = ms;
+    s.total_ms += ms;
+    s.max_ms = (std::max)(s.max_ms, ms);
+    s.count += 1;
+    if (rssMeasured) {
         s.last_rss_delta_mb = rss_delta_mb;
         s.rss_after_mb = rss_after_mb;
-        s.seq = ++g_seq;
     }
+    s.rss_measured = rssMeasured;
+    s.seq = ++g_seq;
+}
+} // namespace
+
+void recordFast(const std::string& name, double ms) {
+    recordImpl(name, ms, false, 0.0, 0.0);
+    // ★ Bilerek log'lamiyor: kare basina kosan bir bolum, logging acikken
+    //   Scene Log'u saniyede yuzlerce satirla doldurup okunmaz hale getirirdi.
+}
+
+void record(const std::string& name, double ms, double rss_delta_mb, double rss_after_mb) {
+    recordImpl(name, ms, true, rss_delta_mb, rss_after_mb);
     if (g_logging.load(std::memory_order_relaxed)) {
         char buf[128];
         std::snprintf(buf, sizeof(buf), "%.1f ms (RSS %+.0f MB, now %.0f MB)",

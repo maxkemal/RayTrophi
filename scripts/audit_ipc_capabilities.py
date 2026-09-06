@@ -69,8 +69,11 @@ def required(method, namespaces):
     if method in ("project.open", "scene.import_model",
                   "terrain.import_heightmap", "paint.import_channel"):
         return "FilesRead|SceneWrite"
+    # scene.export_gltf sits in the "scene." namespace but reads the scene and
+    # writes a FILE, so it must be named here or the namespace table below would
+    # mirror it as SceneWrite and disagree with RtIpcSecurity.cpp.
     if method in ("project.save", "terrain.export_heightmap",
-                  "paint.export_channel"):
+                  "paint.export_channel", "scene.export_gltf"):
         return "FilesWrite"
     if method.startswith("render."):
         # These two write an image file; the C++ says Render|FilesWrite and a
@@ -87,6 +90,15 @@ def required(method, namespaces):
     if method in ("perf.reset", "perf.set_logging"):
         return "Read"
     if method == "spline.animation.self_test":
+        return "Read"
+    # Measures what is under a ray, mutates nothing. Without this the "scene."
+    # namespace below would call it SceneWrite.
+    if method == "scene.raycast":
+        return "Read"
+    # Reports what an export WOULD cost. Writes neither the scene nor a file, so
+    # it is neither SceneWrite (the "scene." namespace default) nor FilesWrite
+    # (what scene.export_gltf needs).
+    if method == "scene.export_estimate":
         return "Read"
     if method == "geometry_cache.self_test":
         return "Read"
@@ -126,9 +138,11 @@ def required(method, namespaces):
     if method in ("material.info", "material.of_object", "material.textures",
                   "nodes.graphs", "attr.stats", "terrain.erosion_stats",
                   "terrain.landform_stats",
+                  "terrain.field_stats",
                   "forcefield.evaluate", "particle.stats",
                   "particle.emitters", "anim.characters", "anim.character",
-                  "anim.clips", "anim.graph_status", "msf.substances",
+                  "anim.clips", "anim.graph_status",
+                  "anim.source_clips", "anim.source_channels", "msf.substances",
                   "msf.fields", "templates.refresh", "templates.validate",
                   "templates.prepare"):
         return "Read"

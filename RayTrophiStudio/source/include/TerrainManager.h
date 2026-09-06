@@ -161,6 +161,45 @@ struct HydraulicErosionParams {
     int   drainageAccumulatePasses = 192;
     int   drainageCoarsestSize = 128;
 
+    // ★★★★ FLAT ROUTING GRADIENT (Garbrecht & Martz 1997).
+    //
+    // In a flat or a filled depression the terrain has NO gradient, so the
+    // direction flow takes there is a property of the conditioning algorithm,
+    // not of the landscape. The old scheme raised each flood ring by a few
+    // ulp, which is a geodesic distance field from the outlet -- and because
+    // the fill charged a diagonal the same as a cardinal step, the level sets
+    // of that field are SQUARES. Steepest descent over squares runs along 0
+    // and 45 degrees: straight, angular channels that never merge, on exactly
+    // the low-gradient ground where real rivers braid and converge. Dithering
+    // the ladder cannot fix it (the dither is summed along the path, so its
+    // relative spread falls as 1/sqrt(N) and a long flat converges back to a
+    // linear ramp); only building the gradient from a SECOND distance field --
+    // distance from where higher ground meets the flat -- makes tributaries
+    // enter where they actually arrive and converge instead of running
+    // parallel to the outlet rings.
+    //
+    // ★★★ This is a SLOPE IN m/m, not an epsilon, and the magnitude is load
+    // bearing. A few ulp of drop is numerically zero drop, and incision is
+    // clamped to incisionSafety * (drop to the receiver) -- so with the old
+    // ladder a flat could not incise by any amount, for any parameter setting.
+    // No first cut means no A^m feedback, which means the pattern the first
+    // drainage solve drew on the flat was the FINAL pattern. At a real
+    // floodplain gradient the channel cuts a bed, the bed takes over, and the
+    // synthetic ramp stops mattering. That handover is the point.
+    //
+    // Raising it makes flat drainage more decisive and more incised; lowering
+    // it toward zero restores the frozen behaviour. 0 disables the ramp.
+    float flatGradient = 2.0e-4f;     // m/m, a real low-gradient floodplain
+
+    // GPU only. The geodesic fronts advance one cell per pass, so this is
+    // literally "the widest flat, in cells, that can be resolved". Cells the
+    // front never reaches keep no gradient and stay terminal sinks -- they are
+    // COUNTED (stats.unresolvedFlatCells), never silently treated as drained,
+    // because an unresolved flat renders perfectly plausibly while truncating
+    // every catchment upstream of it. The CPU path solves both fronts exactly
+    // and ignores this budget.
+    int   flatResolvePasses = 256;
+
     // Mass wasting and creep.
     bool  massWasting = true;
     float reposeAngleDegrees = 34.0f;
@@ -262,6 +301,17 @@ struct HydraulicErosionStats {
     float  deepLakeAreaFraction = 0.0f;
     float  deepestLakeMeters = 0.0f;
     float  drainageDensity = 0.0f;   // channel cells / total cells
+
+    // ★★★ Flat cells the outlet front never reached, so they carry no routing
+    // gradient and are terminal sinks for drainage area. NOT a cosmetic
+    // number: an unresolved flat renders as perfectly ordinary ground while
+    // silently truncating every catchment upstream of it, which reads
+    // downstream as "the trunk river is weaker than its tributaries deserve".
+    // Non-zero means flatResolvePasses is below the widest flat on the map.
+    // GPU path only; the CPU reference resolves every flat exactly.
+    int    unresolvedFlatCells = 0;
+    float  unresolvedFlatFraction = 0.0f;
+
     float  cycleMilliseconds = 0.0f;
     int    cycleIterations = 0;
     bool   gpuPath = false;

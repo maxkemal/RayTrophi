@@ -1,3 +1,4 @@
+#include "PostProcess/ColorMath.h"
 #include "oidn_blend_cuda.h"
 
 namespace {
@@ -89,10 +90,62 @@ bool launchVulkanDenoiserPrepKernel(void* dstFloat4Dev,
 
 namespace {
 
+// ── post_chain.glsl ported to CUDA, 1:1 ─────────────────────────────────────
+// Keep this block in the same order as source/shaders/post_chain.glsl's
+// operators/rtApplyPost. See OidnPostParams in oidn_blend_cuda.h for why this
+// duplication (a third language, not a fourth divergent implementation) is
+// deliberate and must stay math-identical to the GLSL.
+
+// Plain device-side mirror of OidnPostParams (host struct, see
+// oidn_blend_cuda.h) — kept separate so this .cu doesn't need the host
+// header's non-CUDA default-member-initializer syntax inside a __device__
+// context.
+struct OidnPostParamsDevice {
+    float exposure, cameraExposure, gamma, saturation, colorTemperature, vignetteStrength;
+    uint32_t toneMapping, vignetteEnabled;
+};
+
+__device__ __forceinline__ float rtLinearToSRGB(float c) {
+    c = fminf(fmaxf(c, 0.0f), 1.0f);
+    return (c <= 0.0031308f) ? (12.92f * c) : (1.055f * __powf(c, 1.0f / 2.4f) - 0.055f);
+}
+
+__device__ __forceinline__ float3 rtLinearToSRGB(float3 c) {
+    return make_float3(rtLinearToSRGB(c.x), rtLinearToSRGB(c.y), rtLinearToSRGB(c.z));
+}
+
+__device__ __forceinline__ float rtSanitizeChannel(float v) {
+    if (isnan(v)) return 0.0f;
+    if (isinf(v)) return v > 0.0f ? 65504.0f : 0.0f;
+    return fmaxf(v, 0.0f);
+}
+
+// uv01: pixel's 0..1 screen position. Vignette matches post_chain.glsl /
+// the CPU applyVignette formula: u=(x/w-0.5)*2, falloff = 1-strength*(u^2+v^2).
+__device__ __forceinline__ float3 rtApplyPost(float3 linearColor, const OidnPostParamsDevice& p,
+                                              float u01, float v01) {
+    float3 c = make_float3(rtSanitizeChannel(linearColor.x), rtSanitizeChannel(linearColor.y),
+                            rtSanitizeChannel(linearColor.z));
+    const float ex = p.exposure * p.cameraExposure;
+    c = make_float3(c.x * ex, c.y * ex, c.z * ex);
+
+    auto graded=rtPcGrade(RtColor(c.x,c.y,c.z),int(p.toneMapping),p.colorTemperature,p.saturation,p.gamma);
+    c=make_float3(graded.x,graded.y,graded.z);
+
+    if (p.vignetteEnabled != 0u && p.vignetteStrength > 0.0f) {
+        const float uu = (u01 - 0.5f) * 2.0f;
+        const float vv = (v01 - 0.5f) * 2.0f;
+        const float falloff = fminf(fmaxf(1.0f - p.vignetteStrength * (uu * uu + vv * vv), 0.0f), 1.0f);
+        c = make_float3(c.x * falloff, c.y * falloff, c.z * falloff);
+    }
+
+    return rtLinearToSRGB(c);
+}
+
 __global__ void oidnTonemapKernel(const float* __restrict__ hdrFloat3,
                                   uint32_t* __restrict__ packedDst,
                                   int width, int height,
-                                  float exposure,
+                                  OidnPostParamsDevice p,
                                   uint32_t aMaskOr,
                                   int rShift, int gShift, int bShift,
                                   bool flipY) {
@@ -101,23 +154,15 @@ __global__ void oidnTonemapKernel(const float* __restrict__ hdrFloat3,
     if (x >= width || y >= height) return;
 
     const int srcIdx = (y * width + x) * 3;
-    float r = fmaxf(hdrFloat3[srcIdx + 0] * exposure, 0.0f);
-    float g = fmaxf(hdrFloat3[srcIdx + 1] * exposure, 0.0f);
-    float b = fmaxf(hdrFloat3[srcIdx + 2] * exposure, 0.0f);
+    const float3 hdr = make_float3(hdrFloat3[srcIdx + 0], hdrFloat3[srcIdx + 1], hdrFloat3[srcIdx + 2]);
 
-    // Reinhard
-    r = r / (1.0f + r);
-    g = g / (1.0f + g);
-    b = b / (1.0f + b);
+    const float u01 = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+    const float v01 = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+    const float3 srgb = rtApplyPost(hdr, p, u01, v01);
 
-    // sRGB approximation matching the displaced CPU loop (Main.cpp).
-    r = __powf(r, 1.0f / 2.2f);
-    g = __powf(g, 1.0f / 2.2f);
-    b = __powf(b, 1.0f / 2.2f);
-
-    const uint32_t ri = static_cast<uint32_t>(fminf(r, 1.0f) * 255.0f + 0.5f);
-    const uint32_t gi = static_cast<uint32_t>(fminf(g, 1.0f) * 255.0f + 0.5f);
-    const uint32_t bi = static_cast<uint32_t>(fminf(b, 1.0f) * 255.0f + 0.5f);
+    const uint32_t ri = static_cast<uint32_t>(fminf(srgb.x, 1.0f) * 255.0f + 0.5f);
+    const uint32_t gi = static_cast<uint32_t>(fminf(srgb.y, 1.0f) * 255.0f + 0.5f);
+    const uint32_t bi = static_cast<uint32_t>(fminf(srgb.z, 1.0f) * 255.0f + 0.5f);
 
     const int dstY = flipY ? (height - 1 - y) : y;
     const int dstIdx = dstY * width + x;
@@ -132,12 +177,14 @@ __global__ void oidnTonemapKernel(const float* __restrict__ hdrFloat3,
 bool launchOidnTonemapKernel(const float* hdrFloat3Dev,
                              void* packedDstDev,
                              int width, int height,
-                             float exposure,
-                             uint32_t aMaskOr,
-                             int rShift, int gShift, int bShift,
-                             bool flipY,
+                             const OidnPostParams& p,
                              cudaStream_t stream) {
     if (!hdrFloat3Dev || !packedDstDev || width <= 0 || height <= 0) return false;
+
+    launchPostHistogram(hdrFloat3Dev, width, height, 3, stream);
+    OidnPostParamsDevice dp{ p.exposure, p.cameraExposure, p.gamma, p.saturation,
+                             p.colorTemperature, p.vignetteStrength,
+                             p.toneMapping, p.vignetteEnabled };
 
     const dim3 block(16, 16);
     const dim3 grid((width + block.x - 1) / block.x,
@@ -146,9 +193,11 @@ bool launchOidnTonemapKernel(const float* hdrFloat3Dev,
         hdrFloat3Dev,
         static_cast<uint32_t*>(packedDstDev),
         width, height,
-        exposure,
-        aMaskOr,
-        rShift, gShift, bShift,
-        flipY);
+        dp,
+        p.aMaskOr,
+        p.rShift, p.gShift, p.bShift,
+        p.flipY);
     return cudaGetLastError() == cudaSuccess;
 }
+
+#include "post_exposure.cuh"

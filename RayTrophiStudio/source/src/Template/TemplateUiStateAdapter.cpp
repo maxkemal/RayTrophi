@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 extern bool g_solid_viewport_active;
+extern bool g_material_preview_viewport_active;
 
 namespace raytrophi::templates {
 
@@ -68,6 +69,7 @@ TemplateUiApplyResult TemplateUiStateAdapter::apply(const TemplateUiState& state
     if (shading != shading_modes.end()) {
         ui.viewport_settings.shading_mode = shading->second;
         g_solid_viewport_active = shading->second != 2;
+        g_material_preview_viewport_active = shading->second == 1;
     } else {
         result.warnings.push_back("viewport shading was not applied: " + state.viewport_shading);
     }

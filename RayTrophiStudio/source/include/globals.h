@@ -48,14 +48,105 @@ enum class RasterViewportQualityPreset {
     Auto = 0,
     Performance = 1,
     Balanced = 2,
-    Quality = 3
+    Quality = 3,
+    // ★★★ Full, Quality'nin "biraz dahasi" DEGILDIR -- baska bir seydir.
+    //   Quality yalnizca ucgen hedefini buyutur, scatter LOD ayrimi hala
+    //   caliskan: uzaktaki instance'lar proxy impostor'a duser. Full o ayrimi
+    //   TAMAMEN kapatir, yani her instance kendi tam mesh'iyle cizilir.
+    //   Frustum culling kapanmaz -- kamera arkasini cizmemek bir kalite
+    //   kaybi degildir, ve onu da kapatmak yalnizca maliyet uretirdi.
+    //   Maliyeti sahneyle DOGRU ORANTILI buyur: milyarlarca ucgenli scatter
+    //   sahnelerinde bu mod kasitli olarak cok yavastir.
+    Full = 4
 };
 
+// Live raster Scene preset contract. The atlas stays allocated at 4096 so a
+// quality change never destroys an image referenced by an in-flight frame.
+// Presets vary tile resolution, receiver filtering and caster-light budget.
+inline constexpr int rasterShadowAtlasSize() { return 4096; }
+inline constexpr int rasterShadowTileSize(RasterViewportQualityPreset preset) {
+    switch (preset) {
+        case RasterViewportQualityPreset::Performance: return 256;
+        case RasterViewportQualityPreset::Quality:
+        case RasterViewportQualityPreset::Full: return 1024;
+        case RasterViewportQualityPreset::Auto:
+        case RasterViewportQualityPreset::Balanced:
+        default: return 512;
+    }
+}
+inline constexpr int rasterShadowLightBudget(RasterViewportQualityPreset preset) {
+    switch (preset) {
+        case RasterViewportQualityPreset::Performance: return 4;
+        case RasterViewportQualityPreset::Quality:
+        case RasterViewportQualityPreset::Full: return 16;
+        case RasterViewportQualityPreset::Auto:
+        case RasterViewportQualityPreset::Balanced:
+        default: return 8;
+    }
+}
+inline constexpr int rasterShadowPcfSamples(RasterViewportQualityPreset preset) {
+    return preset == RasterViewportQualityPreset::Quality ||
+           preset == RasterViewportQualityPreset::Full ? 25 : 9;
+}
+inline constexpr int rasterDirectionalShadowCascades(
+    RasterViewportQualityPreset preset) {
+    return preset == RasterViewportQualityPreset::Performance ? 2 : 3;
+}
+
 enum class MaterialPreviewLightingPreset {
+    // Legacy numeric values stay stable for project migration. The authoring
+    // surface exposes only Three Point (Classic) and Scene; Studio/Outdoor load
+    // as Three Point instead of keeping three near-duplicate preview rigs.
     Classic = 0,
     Studio = 1,
-    Outdoor = 2
+    Outdoor = 2,
+    // ★★★ Scene, "daha iyi bir studyo isigi" DEGIL: digerleri sahnede olmayan
+    //   sabit isiklarla (ya da baked env haritasiyla) aydinlatir, Scene ise
+    //   RT hattinin okudugu ISIK BUFFER'ININ AYNISINI okur. Yani onizleme ile
+    //   Rendered arasinda "hangi isiklar var" sorusunda ayrisma mumkun degil.
+    //   Scene shadow atlas, world/HDRI IBL and Physical Sky'i birlikte kullanir.
+    Scene = 3
 };
+
+// ★★ Scene preset'inde onizlemenin kullandigi EN FAZLA isik sayisi.
+//   Ayni sayi material_preview_frag.frag icinde de yazili (shader bu basligi
+//   include edemez); orada bu sabitin adi yorumda geciyor. Birini degistirip
+//   otekini birakmak, panelin "N isik kullaniliyor" deyip shader'in baskasini
+//   kullanmasi demektir -- yani panelin yalan soylemesi.
+inline constexpr int kMaterialPreviewMaxSceneLights = 32;
+
+// ★★★ Goruntuleme donusumunun (post) GPU'ya gecen aynasi.
+//
+//   Sahibi ColorProcessor'dur (`g_ctx->color_processor.params`); burasi
+//   yalnizca ONUN kopyasidir ve her karede Main tarafindan yazilir. Backend'ler
+//   `g_ctx`'i gormedigi icin bu ayna olmadan post ayarlari GPU'ya HIC
+//   ulasmiyordu: Rendered sabit Reinhard uyguluyor, Realtime sabit ACES
+//   uyguluyor, ve CPU tarafi bunlarin USTUNE zaten sRGB'ye kodlanmis 8-bit
+//   degerlere exposure uyguluyordu (cift kodlama).
+//
+//   ★★ Bu bir IKINCI DOGRULUK KAYNAGI DEGILDIR: tek yonlu ayna, yalnizca
+//   ColorProcessor'dan buraya yazilir. Ters yone yazan kod eklersen iki taraf
+//   ayrisir ve belirti "renk biraz farkli" olur -- teshis edilemez.
+struct DisplayPostParams {
+    float exposure = 1.0f;
+    float gamma = 1.0f;
+    float saturation = 1.0f;
+    float color_temperature = 6500.0f;
+    float vignette_strength = 0.0f;
+    // ToneMappingType ile ayni sira: 0=AGX 1=ACES 2=Uncharted 3=Filmic 4=None.
+    // ★ int tutuluyor cunku globals.h ColorProcessingParams.h'i include EDEMEZ
+    //   (o baslik bu basligi include ediyor -- dongu olurdu).
+    int   tone_mapping = 0;
+    int   vignette_enabled = 1;
+
+    // ★★ Bu alanin sahibi ColorProcessor DEGIL, Camera'dir (pozlama ucgeni).
+    //   Ayni transport yapisinda tasiniyor cunku ayni shader zincirine, ayni
+    //   noktada giriyor -- ama AYRI bir buyukluk: bu kamera, yukaridaki
+    //   `exposure` renk derecelendirmesi. Ikisini tek alanda toplamak, bu
+    //   depoda adi konmus hatadir (ayni isim != ayni is).
+    float camera_exposure = 1.0f;
+};
+extern DisplayPostParams g_display_post;
 
 // Helper to get sample count from timeline quality preset
 inline int getTimelineSamplesFromPreset(TimelineQualityPreset preset) {
@@ -115,7 +206,9 @@ struct RenderSettings {
     // Quality Preset
     QualityPreset quality_preset = QualityPreset::Preview;
     RasterViewportQualityPreset raster_viewport_quality_preset = RasterViewportQualityPreset::Auto;
-    MaterialPreviewLightingPreset material_preview_lighting_preset = MaterialPreviewLightingPreset::Classic;
+    // Vulkan acilista Material/Realtime raster yoluna girdigi icin varsayilan
+    // gercek sahne isigidir. Three Point yalniz materyal inceleme secenegidir.
+    MaterialPreviewLightingPreset material_preview_lighting_preset = MaterialPreviewLightingPreset::Scene;
 
     // Solid/Matcap viewport reference grid
     float grid_fade_distance = 1.0f; // multiplier on the fog horizon where grid lines dissolve (~19x viewScale at 1.0)
@@ -491,7 +584,23 @@ extern bool g_optix_rebuild_pending;
 // into the CPU BVH each frame. Left unconsumed during GPU sessions (those refit via
 // g_gpu_refit_pending / g_*_rebuild_pending), so it never burns CPU off-path.
 extern bool g_particle_cpu_geometry_dirty;
-extern bool g_solid_viewport_active; // true in Solid/Matcap shading (not Rendered); fluid bridge shows splat-sphere proxy
+extern bool g_solid_viewport_active; // true for every interactive raster shading mode (not Rendered)
+// Material Preview has a native NanoVDB SurfaceSDF pass. The fluid bridge uses
+// this distinction to suppress only its compatibility sphere proxy there while
+// keeping that proxy available in Solid/Matcap until those modes share the pass.
+extern bool g_material_preview_viewport_active;
+// ★★★ TWO Vulkan DEVICES, ONE SET OF DEVICE ADDRESSES. A live dense gas domain
+// publishes raw VkDeviceAddresses owned by the simulation compute device. When a
+// SECOND Vulkan consumer exists that does not own that device — the dedicated
+// raster viewport backend — those addresses read as zero density there, which is
+// indistinguishable from "no smoke". This flag asks the producer to also keep a
+// HOST mirror of the dense grids so that consumer can upload its own copy.
+//
+// It is a flag rather than an always-on copy because the readback is real work
+// (a full grid per changed step) that a single-device session must not pay.
+// Set by Main next to the viewport-mode flags; false whenever one backend serves
+// both roles.
+extern bool g_dense_gas_host_mirror_needed;
 // Simulation drive mode for grid-domain gas. true = Timeline (default): the sim
 // is driven by the timeline (play bakes into the memory cache, scrub restores,
 // stopped = frozen/idle → cheap). false = Live Update: continuous free-run

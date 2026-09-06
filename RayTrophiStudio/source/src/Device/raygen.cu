@@ -36,7 +36,41 @@ extern "C" __global__ void __raygen__rg() {
 
     float4* accum_buffer = reinterpret_cast<float4*>(optixLaunchParams.accumulation_buffer);
     float* variance_buffer = optixLaunchParams.variance_buffer;
-    
+
+    // ── DISPLAY RESOLVE ONLY ─────────────────────────────────────────────────
+    // A post-processing edit made after accumulation converged must still reach
+    // the screen. Re-encode the EXISTING accumulation with the current display
+    // values and return: no trace, no sample added, accumulation and variance
+    // untouched. Mirrors VulkanBackend's tonemap-only refresh path.
+    if (optixLaunchParams.display_resolve_only) {
+        if (accum_buffer != nullptr) {
+            // accum_buffer.xyz is the ALREADY-AVERAGED colour and .w is the sample
+            // count (see the running-average write below) - do not divide by .w,
+            // that would darken the frame by the sample count.
+            const float4 acc = accum_buffer[pixel_index];
+            float3 color = make_float3(acc.x, acc.y, acc.z) *
+                           optixLaunchParams.camera.exposure_factor;
+
+            if (optixLaunchParams.camera.vignetting_enabled) {
+                float norm_x = (float(i) / float(optixLaunchParams.image_width)) * 2.0f - 1.0f;
+                float norm_y = (float(j) / float(optixLaunchParams.image_height)) * 2.0f - 1.0f;
+                float normalized_dist = sqrtf(norm_x * norm_x + norm_y * norm_y) / 1.414f;
+                float vignette_factor = 1.0f - optixLaunchParams.camera.vignetting_amount *
+                    powf(normalized_dist, optixLaunchParams.camera.vignetting_falloff);
+                color *= fmaxf(vignette_factor, 0.0f);
+            }
+
+            // Keep the alpha channel the previous pass wrote — it carries primary-hit
+            // coverage for transparent-background output, and this pass traces nothing.
+            const unsigned char coverage = optixLaunchParams.framebuffer[pixel_index].w;
+            uchar4 display = make_color(color);
+            display.w = coverage;
+            optixLaunchParams.framebuffer[pixel_index] = display;
+        }
+        return;
+    }
+
+
     if (optixLaunchParams.use_adaptive_sampling && accum_buffer != nullptr && variance_buffer != nullptr) {
         float4 prev = accum_buffer[pixel_index];
         float prev_samples = prev.w;

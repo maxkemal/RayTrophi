@@ -1,4 +1,5 @@
-﻿/*
+#include "RtPostBindings.h"
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * File:          Api/RtPython.cpp
@@ -212,6 +213,20 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         return result;
     });
+    scene.def("raycast", [](py::handle origin, py::handle direction,
+                            const std::string& filter) -> py::dict {
+        rtapi::RaycastHit hit;
+        requireResult(rtapi::raycastScene(vec3FromPython(origin), vec3FromPython(direction),
+                                          filter, hit));
+        py::dict out;
+        out["hit"] = hit.hit;
+        out["kind"] = hit.kind;
+        out["object"] = hit.object;
+        out["position"] = py::make_tuple(hit.position.x, hit.position.y, hit.position.z);
+        out["normal"] = py::make_tuple(hit.normal.x, hit.normal.y, hit.normal.z);
+        out["distance"] = hit.distance;
+        return out;
+    }, py::arg("origin"), py::arg("direction"), py::arg("filter") = "mesh_and_terrain");
     scene.def("exists", &rtapi::objectExists, py::arg("name"));
     scene.def("delete", [](const std::string& name) { requireResult(rtapi::deleteObject(name)); });
     scene.def("duplicate", [](const std::string& name) {
@@ -220,6 +235,86 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return newName;
     });
     scene.def("import_model", [](const std::string& path) { requireResult(rtapi::importModel(path)); });
+    scene.def("export_gltf", [](const std::string& path, bool geometry, bool materials,
+                                bool cameras, bool lights, bool animations, bool skinning,
+                                bool selected_only, bool bake_terrain_materials,
+                                int terrain_bake_resolution, bool gpu_instancing) -> py::dict {
+        rtapi::SceneExportOptions opt;
+        opt.geometry = geometry;
+        opt.materials = materials;
+        opt.cameras = cameras;
+        opt.lights = lights;
+        opt.animations = animations;
+        opt.skinning = skinning;
+        opt.selected_only = selected_only;
+        opt.bake_terrain_materials = bake_terrain_materials;
+        opt.terrain_bake_resolution = terrain_bake_resolution;
+        opt.gpu_instancing = gpu_instancing;
+
+        rtapi::SceneExportStats st;
+        requireResult(rtapi::exportSceneGltf(path, opt, st));
+
+        py::dict out;
+        out["path"] = path;
+        out["meshes"] = st.meshes;
+        out["primitives"] = st.primitives;
+        out["triangles"] = st.triangles;
+        out["vertices"] = st.vertices;
+        out["nodes"] = st.nodes;
+        out["instances"] = st.instances;
+        out["instanced_groups"] = st.instanced_groups;
+        out["materials"] = st.materials;
+        out["images"] = st.images;
+        out["file_bytes"] = st.file_bytes;
+        out["peak_writer_mb"] = st.peak_writer_mb;
+        out["seconds_total"] = st.seconds_total;
+        out["seconds_collect"] = st.seconds_collect;
+        out["seconds_materials"] = st.seconds_materials;
+        out["seconds_plan"] = st.seconds_plan;
+        out["seconds_write"] = st.seconds_write;
+        return out;
+    }, py::arg("path"), py::arg("geometry") = true, py::arg("materials") = true,
+       py::arg("cameras") = false, py::arg("lights") = false,
+       py::arg("animations") = true, py::arg("skinning") = true,
+       py::arg("selected_only") = false, py::arg("bake_terrain_materials") = true,
+       py::arg("terrain_bake_resolution") = 1024, py::arg("gpu_instancing") = true);
+    // The PRE-export estimate the Export Settings panel shows. Compare it with
+    // export_gltf's MEASURED reply: a gap means the panel and the writer have
+    // drifted apart, which is how scatter went missing from the panel once.
+    scene.def("export_estimate", [](bool geometry, bool materials,
+                                    bool cameras, bool lights, bool animations, bool skinning,
+                                    bool selected_only, bool bake_terrain_materials,
+                                    int terrain_bake_resolution, bool gpu_instancing) -> py::dict {
+        rtapi::SceneExportOptions opt;
+        opt.geometry = geometry;
+        opt.materials = materials;
+        opt.cameras = cameras;
+        opt.lights = lights;
+        opt.animations = animations;
+        opt.skinning = skinning;
+        opt.selected_only = selected_only;
+        opt.bake_terrain_materials = bake_terrain_materials;
+        opt.terrain_bake_resolution = terrain_bake_resolution;
+        opt.gpu_instancing = gpu_instancing;
+
+        rtapi::SceneExportEstimate est;
+        requireResult(rtapi::sceneExportEstimate(opt, est));
+
+        py::dict out;
+        out["objects"] = est.objects;
+        out["triangles"] = est.triangles;
+        out["legacy_triangles"] = est.legacy_triangles;
+        out["instances"] = est.instances;
+        out["unique_instance_sources"] = est.unique_instance_sources;
+        out["instance_triangles"] = est.instance_triangles;
+        out["materialised_instance_triangles"] = est.materialised_instance_triangles;
+        out["estimated_peak_mb"] = est.estimated_peak_mb;
+        return out;
+    }, py::arg("geometry") = true, py::arg("materials") = true,
+       py::arg("cameras") = false, py::arg("lights") = false,
+       py::arg("animations") = true, py::arg("skinning") = true,
+       py::arg("selected_only") = false, py::arg("bake_terrain_materials") = true,
+       py::arg("terrain_bake_resolution") = 1024, py::arg("gpu_instancing") = true);
     scene.def("add_primitive", [](const std::string& type, const std::string& name, float size) {
         std::string newName;
         requireResult(rtapi::addPrimitive(type, name, size, newName));
@@ -385,6 +480,198 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::extrudeSplineEndpoint(name, endpoint, vec3FromPython(position), index));
         return index;
     }, py::arg("name"), py::arg("endpoint"), py::arg("position"));
+    // One shape for profiles, assignments and the override echo, so a caller
+    // never reads carve numbers in two different layouts.
+    auto roadCarveValuesToPython = [](const rtapi::RoadCarveValues& c) {
+        py::dict carve;
+        carve["road_width"] = c.road_width;
+        carve["shoulder_width"] = c.shoulder_width;
+        carve["grading_falloff"] = c.grading_falloff;
+        carve["foliage_margin"] = c.foliage_margin;
+        carve["max_grade_percent"] = c.max_grade_percent;
+        carve["elevation_offset"] = c.elevation_offset;
+        carve["max_cut_meters"] = c.max_cut_meters;
+        carve["max_fill_meters"] = c.max_fill_meters;
+        carve["crown_meters"] = c.crown_meters;
+        carve["ditch_width"] = c.ditch_width;
+        carve["ditch_depth"] = c.ditch_depth;
+        carve["use_point_width"] = c.use_point_width;
+        return carve;
+    };
+    spline.def("list_road_profiles", [roadCarveValuesToPython] {
+        std::vector<rtapi::RoadProfileInfo> profiles;
+        requireResult(rtapi::listRoadProfiles(profiles));
+        py::list out;
+        for (const auto& p : profiles) {
+            py::dict row;
+            row["id"] = p.id;
+            row["display_name"] = p.display_name;
+            row["carve"] = roadCarveValuesToPython(p.carve);
+            out.append(row);
+        }
+        return out;
+    });
+    spline.def("assign_road_profile", [](const std::string& spline_object,
+                                          const std::string& profile_id) {
+        requireResult(rtapi::assignRoadProfile(spline_object, profile_id));
+    }, py::arg("spline"), py::arg("profile"));
+    spline.def("clear_road_profile", [](const std::string& spline_object) {
+        requireResult(rtapi::clearRoadProfile(spline_object));
+    }, py::arg("spline"));
+    spline.def("list_road_assignments", [roadCarveValuesToPython] {
+        std::vector<rtapi::RoadAssignmentInfo> rows;
+        requireResult(rtapi::listRoadAssignments(rows));
+        py::list out;
+        for (const auto& info : rows) {
+            py::dict row;
+            row["spline_object"] = info.spline_object;
+            row["profile_id"] = info.profile_id;
+            row["crossing_mode"] = info.crossing_mode;
+            row["enabled"] = info.enabled;
+            row["has_override"] = info.has_override;
+            row["curve_exists"] = info.curve_exists;
+            row["effective"] = roadCarveValuesToPython(info.effective);
+            out.append(row);
+        }
+        return out;
+    });
+    spline.def("get_road_assignment", [roadCarveValuesToPython](
+                                          const std::string& spline_object) {
+        rtapi::RoadAssignmentInfo info;
+        requireResult(rtapi::getRoadAssignment(spline_object, info));
+        py::dict row;
+        row["spline_object"] = info.spline_object;
+        row["profile_id"] = info.profile_id;
+        row["crossing_mode"] = info.crossing_mode;
+        row["enabled"] = info.enabled;
+        row["has_override"] = info.has_override;
+        row["curve_exists"] = info.curve_exists;
+        // What the solve will ACTUALLY use. Without it, "the road came out
+        // wrong" and "the override never landed" are the same observation.
+        row["effective"] = roadCarveValuesToPython(info.effective);
+        return row;
+    }, py::arg("spline"));
+    spline.def("set_road_carve_override", [roadCarveValuesToPython](
+            const std::string& spline_object, py::kwargs kwargs) {
+        // Partial: the base is what this assignment solves with today, so
+        // widening one segment is one call. An empty call is refused, because a
+        // mistyped keyword would otherwise pin the current values and look like
+        // a write that landed.
+        rtapi::RoadAssignmentInfo info;
+        requireResult(rtapi::getRoadAssignment(spline_object, info));
+        rtapi::RoadCarveValues values = info.effective;
+        bool anyField = false;
+        auto takeFloat = [&](const char* key, float& target) {
+            if (!kwargs.contains(key)) return;
+            target = kwargs[key].cast<float>();
+            anyField = true;
+        };
+        takeFloat("road_width", values.road_width);
+        takeFloat("shoulder_width", values.shoulder_width);
+        takeFloat("grading_falloff", values.grading_falloff);
+        takeFloat("foliage_margin", values.foliage_margin);
+        takeFloat("max_grade_percent", values.max_grade_percent);
+        takeFloat("elevation_offset", values.elevation_offset);
+        takeFloat("max_cut_meters", values.max_cut_meters);
+        takeFloat("max_fill_meters", values.max_fill_meters);
+        takeFloat("crown_meters", values.crown_meters);
+        takeFloat("ditch_width", values.ditch_width);
+        takeFloat("ditch_depth", values.ditch_depth);
+        if (kwargs.contains("use_point_width")) {
+            values.use_point_width = kwargs["use_point_width"].cast<bool>();
+            anyField = true;
+        }
+        if (!anyField) {
+            throw std::runtime_error(
+                "set_road_carve_override needs at least one of: road_width, "
+                "shoulder_width, grading_falloff, foliage_margin, "
+                "max_grade_percent, elevation_offset, max_cut_meters, "
+                "max_fill_meters, crown_meters, ditch_width, ditch_depth, "
+                "use_point_width");
+        }
+        requireResult(rtapi::setRoadCarveOverride(spline_object, values));
+        return roadCarveValuesToPython(values);
+    }, py::arg("spline"));
+    spline.def("clear_road_carve_override", [](const std::string& spline_object) {
+        requireResult(rtapi::clearRoadCarveOverride(spline_object));
+    }, py::arg("spline"));
+    spline.def("set_road_crossing_mode", [](const std::string& spline_object,
+                                             const std::string& mode) {
+        requireResult(rtapi::setRoadCrossingMode(spline_object, mode));
+    }, py::arg("spline"), py::arg("mode"));
+    spline.def("set_road_enabled", [](const std::string& spline_object, bool enabled) {
+        requireResult(rtapi::setRoadEnabled(spline_object, enabled));
+    }, py::arg("spline"), py::arg("enabled") = true);
+    spline.def("get_road_route", [](const std::string& spline_object, int max_samples) {
+        rtapi::RoadRouteInfo info;
+        requireResult(rtapi::getRoadRoute(spline_object, max_samples, info));
+        py::dict out;
+        out["spline_object"] = info.spline_object;
+        out["terrain"] = info.terrain;
+        out["sample_count"] = info.sample_count;
+        out["bridge_samples"] = info.bridge_samples;
+        out["ford_samples"] = info.ford_samples;
+        out["tunnel_samples"] = info.tunnel_samples;
+        out["length_meters"] = info.length_meters;
+        out["peak_cut_meters"] = info.peak_cut_meters;
+        out["peak_fill_meters"] = info.peak_fill_meters;
+        out["revision"] = info.revision;
+        out["crossing_diagnostic"] = info.crossing_diagnostic;
+        py::list samples;
+        for (const auto& sample : info.samples) {
+            py::dict row;
+            row["x"] = sample.x;
+            row["z"] = sample.z;
+            row["height_meters"] = sample.height_meters;
+            row["ground_meters"] = sample.ground_meters;
+            row["distance_meters"] = sample.distance_meters;
+            row["crossing"] = sample.crossing;
+            samples.append(row);
+        }
+        out["samples"] = samples;
+        return out;
+    }, py::arg("spline"), py::arg("max_samples") = 0);
+    spline.def("build_road_mesh", [](const std::string& spline_object, py::kwargs kwargs) {
+        rtapi::RoadMeshOptions options;
+        if (kwargs.contains("object"))
+            options.object = kwargs["object"].cast<std::string>();
+        if (kwargs.contains("include_shoulder"))
+            options.include_shoulder = kwargs["include_shoulder"].cast<bool>();
+        if (kwargs.contains("surface_offset"))
+            options.surface_offset = kwargs["surface_offset"].cast<float>();
+        if (kwargs.contains("uv_meters_per_tile"))
+            options.uv_meters_per_tile = kwargs["uv_meters_per_tile"].cast<float>();
+        if (kwargs.contains("skip_tunnels"))
+            options.skip_tunnels = kwargs["skip_tunnels"].cast<bool>();
+        rtapi::RoadMeshInfo info;
+        requireResult(rtapi::buildRoadMesh(spline_object, options, info));
+        py::dict out;
+        out["object"] = info.object_name;
+        out["vertex_count"] = info.vertex_count;
+        out["triangle_count"] = info.triangle_count;
+        out["span_count"] = info.span_count;
+        out["length_meters"] = info.length_meters;
+        out["replaced_existing"] = info.replaced_existing;
+        return out;
+    }, py::arg("spline"));
+    spline.def("clear_road_mesh", [](const std::string& spline_object) {
+        requireResult(rtapi::clearRoadMesh(spline_object));
+    }, py::arg("spline"));
+    spline.def("road_diagnostics", [] {
+        rtapi::RoadDiagnostics diagnostics;
+        requireResult(rtapi::getRoadDiagnostics(diagnostics));
+        py::dict out;
+        out["assignment_count"] = diagnostics.assignment_count;
+        out["enabled_count"] = diagnostics.enabled_count;
+        out["dangling"] = diagnostics.dangling;
+        out["unknown_profiles"] = diagnostics.unknown_profiles;
+        return out;
+    });
+    spline.def("append_point", [](const std::string& name, py::handle position) {
+        int index = -1;
+        requireResult(rtapi::appendSplinePoint(name, vec3FromPython(position), index));
+        return index;
+    }, py::arg("name"), py::arg("position"));
     spline.def("insert_keyframe", [](const std::string& name, int frame,
                                       bool object_transform, bool points) {
         requireResult(rtapi::insertSplineKeyframe(name, frame, object_transform, points));
@@ -667,32 +954,36 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, py::arg("group"), py::arg("relative_path"));
 
     scatter.def("set_settings", [](const std::string& group, const py::kwargs& kwargs) {
-        int tcount_val = 0; const int* p_tcount = nullptr;
-        if (kwargs.contains("target_count")) { tcount_val = py::cast<int>(kwargs["target_count"]); p_tcount = &tcount_val; }
-
-        int seed_val = 0; const int* p_seed = nullptr;
-        if (kwargs.contains("seed")) { seed_val = py::cast<int>(kwargs["seed"]); p_seed = &seed_val; }
-
-        float min_dist_val = 0.0f; const float* p_min_dist = nullptr;
-        if (kwargs.contains("min_distance")) { min_dist_val = py::cast<float>(kwargs["min_distance"]); p_min_dist = &min_dist_val; }
-
-        float slope_max_val = 0.0f; const float* p_slope_max = nullptr;
-        if (kwargs.contains("slope_max")) { slope_max_val = py::cast<float>(kwargs["slope_max"]); p_slope_max = &slope_max_val; }
-
-        float hmin_val = 0.0f; const float* p_hmin = nullptr;
-        if (kwargs.contains("height_min")) { hmin_val = py::cast<float>(kwargs["height_min"]); p_hmin = &hmin_val; }
-
-        float hmax_val = 0.0f; const float* p_hmax = nullptr;
-        if (kwargs.contains("height_max")) { hmax_val = py::cast<float>(kwargs["height_max"]); p_hmax = &hmax_val; }
-
-        std::string dmask_val; const std::string* p_dmask = nullptr;
-        if (kwargs.contains("density_mask")) { dmask_val = py::cast<std::string>(kwargs["density_mask"]); p_dmask = &dmask_val; }
-
-        std::string smask_val; const std::string* p_smask = nullptr;
-        if (kwargs.contains("scale_mask")) { smask_val = py::cast<std::string>(kwargs["scale_mask"]); p_smask = &smask_val; }
-
-        requireResult(rtapi::setScatterGroupSettings(group, p_tcount, p_seed, p_min_dist, p_slope_max, p_hmin, p_hmax, p_dmask, p_smask));
-    }, py::arg("group"));
+        rtapi::ScatterGroupSettingsPatch patch;
+        const auto readInt = [&](const char* key, std::optional<int>& slot) {
+            if (kwargs.contains(key)) slot = py::cast<int>(kwargs[key]);
+        };
+        const auto readFloat = [&](const char* key, std::optional<float>& slot) {
+            if (kwargs.contains(key)) slot = py::cast<float>(kwargs[key]);
+        };
+        const auto readString = [&](const char* key, std::optional<std::string>& slot) {
+            if (kwargs.contains(key)) slot = py::cast<std::string>(kwargs[key]);
+        };
+        readInt("target_count", patch.target_count);
+        readInt("seed", patch.seed);
+        readFloat("min_distance", patch.min_distance);
+        readFloat("slope_max", patch.slope_max);
+        readFloat("height_min", patch.height_min);
+        readFloat("height_max", patch.height_max);
+        readString("density_mask", patch.density_mask);
+        readString("exclusion_mask", patch.exclusion_mask);
+        readFloat("exclusion_threshold", patch.exclusion_threshold);
+        readString("scale_mask", patch.scale_mask);
+        readFloat("scale_mask_influence", patch.scale_mask_influence);
+        readInt("splat_include_channel", patch.splat_include_channel);
+        readInt("splat_exclude_channel", patch.splat_exclude_channel);
+        requireResult(rtapi::setScatterGroupSettings(group, patch));
+    }, py::arg("group"),
+       "Keywords: target_count, seed, min_distance, slope_max, height_min, height_max, "
+       "density_mask, exclusion_mask, exclusion_threshold, scale_mask, scale_mask_influence, "
+       "splat_include_channel, splat_exclude_channel. Omitted keys are left alone. "
+       "density_mask includes probabilistically; exclusion_mask forbids at/above "
+       "exclusion_threshold. Mask names come from rt.terrain.list_fields().");
 
     scatter.def("fill", [](const std::string& group) -> int {
         int spawned = 0;
@@ -2429,6 +2720,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         optInt("drainage_fill_passes", settings.drainage_fill_passes);
         optInt("drainage_accumulate_passes", settings.drainage_accumulate_passes);
         optInt("drainage_coarsest_size", settings.drainage_coarsest_size);
+        optInt("flat_resolve_passes", settings.flat_resolve_passes);
         optInt("mass_wasting_steps", settings.mass_wasting_steps);
         optFloat("fluvial_time_step", settings.fluvial_time_step);
         optFloat("rain_rate", settings.rain_rate);
@@ -2446,6 +2738,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         optFloat("alluvium_consolidation", settings.alluvium_consolidation);
         optFloat("mass_wasting_rate", settings.mass_wasting_rate);
         optFloat("hillslope_diffusion", settings.hillslope_diffusion);
+        optFloat("flat_gradient", settings.flat_gradient);
         optFloat("incision_safety", settings.incision_safety);
         optFloat("deposition_safety", settings.deposition_safety);
         optFloat("max_step_meters", settings.max_step_meters);
@@ -2475,6 +2768,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         out["deepest_deposit_meters"] = stats.deepest_deposit_meters;
         out["mean_deposit_meters"] = stats.mean_deposit_meters;
         out["drainage_density"] = stats.drainage_density;
+        out["unresolved_flat_cells"] = stats.unresolved_flat_cells;
+        out["unresolved_flat_fraction"] = stats.unresolved_flat_fraction;
         out["cycle_iterations"] = stats.cycle_iterations;
         out["gpu_path"] = stats.gpu_path;
         return out;
@@ -2492,6 +2787,65 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        py::arg("add_satmap") = false,
        "Apply a terrain preset. Returns the list of links the setup could not "
        "make; an empty list means the graph was wired completely.");
+    terrain.def("list_fields", [](const std::string& name) {
+        std::vector<std::string> fields;
+        requireResult(rtapi::listTerrainAnalysisFields(name, fields));
+        return fields;
+    }, py::arg("terrain"),
+       "Named analysis fields this terrain is currently publishing, sorted. "
+       "A name is present only because an output node wrote it this evaluation, "
+       "so this measures the live terrain rather than listing what the node "
+       "library could produce. Use these for scatter mask names.");
+
+    terrain.def("field_stats", [](const std::string& terrainName,
+                                   const std::string& fieldName,
+                                   int histogramBins,
+                                   const std::vector<std::vector<int>>& sampleCoordinates) {
+        std::vector<rtapi::TerrainFieldCoordinate> coordinates;
+        coordinates.reserve(sampleCoordinates.size());
+        for (const auto& coordinate : sampleCoordinates) {
+            if (coordinate.size() != 2) {
+                throw std::runtime_error("each sample must be [x, y]");
+            }
+            coordinates.push_back({coordinate[0], coordinate[1]});
+        }
+        rtapi::TerrainFieldStats stats;
+        requireResult(rtapi::getTerrainFieldStats(
+            terrainName, fieldName, histogramBins, coordinates, stats));
+        py::dict out;
+        out["terrain"] = stats.terrain;
+        out["field"] = stats.field;
+        out["width"] = stats.width;
+        out["height"] = stats.height;
+        out["channels"] = stats.channels;
+        out["value_count"] = stats.value_count;
+        out["finite_count"] = stats.finite_count;
+        out["non_finite_count"] = stats.non_finite_count;
+        out["nonzero_count"] = stats.nonzero_count;
+        out["nonzero_fraction"] = stats.nonzero_fraction;
+        out["min"] = stats.minimum;
+        out["max"] = stats.maximum;
+        out["mean"] = stats.mean;
+        out["constant"] = stats.constant;
+        out["histogram_min"] = stats.histogram_min;
+        out["histogram_max"] = stats.histogram_max;
+        out["histogram"] = stats.histogram;
+        py::list samples;
+        for (const auto& sample : stats.samples) {
+            py::dict item;
+            item["x"] = sample.x;
+            item["y"] = sample.y;
+            item["value"] = sample.value;
+            samples.append(item);
+        }
+        out["samples"] = samples;
+        return out;
+    }, py::arg("terrain"), py::arg("field"), py::arg("histogram_bins") = 0,
+       py::arg("samples") = std::vector<std::vector<int>>{},
+       "Measure one live scalar terrain analysis field. Returns dimensions, "
+       "finite/non-finite counts, min/max/mean, nonzero coverage, optional "
+       "histogram bins and requested [x, y] samples.");
+
     terrain.def("list_layers", [](const std::string& name) {
         std::vector<rtapi::TerrainLayerInfo> layers;
         requireResult(rtapi::listTerrainLayers(name, layers));
@@ -3123,6 +3477,47 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         return out;
     }, py::arg("character"));
+    // Raw loader output, no character required. See RtApi.h: this is the number
+    // an importer replacement has to reproduce exactly.
+    anim.def("source_clips", []() -> py::list {
+        std::vector<rtapi::AnimSourceClipInfo> clips;
+        requireResult(rtapi::listAnimSourceClips(clips));
+        py::list out;
+        for (const rtapi::AnimSourceClipInfo& c : clips) {
+            py::dict d;
+            d["name"] = c.name;
+            d["model_name"] = c.model_name;
+            d["duration_ticks"] = c.duration_ticks;
+            d["ticks_per_second"] = c.ticks_per_second;
+            d["duration_seconds"] = c.duration_seconds;
+            d["start_frame"] = c.start_frame;
+            d["end_frame"] = c.end_frame;
+            d["position_channels"] = c.position_channels;
+            d["rotation_channels"] = c.rotation_channels;
+            d["scaling_channels"] = c.scaling_channels;
+            d["position_keys"] = c.position_keys;
+            d["rotation_keys"] = c.rotation_keys;
+            d["scaling_keys"] = c.scaling_keys;
+            d["first_key_time"] = c.first_key_time;
+            d["last_key_time"] = c.last_key_time;
+            out.append(d);
+        }
+        return out;
+    });
+    anim.def("source_channels", [](const std::string& clip) -> py::list {
+        std::vector<rtapi::AnimSourceChannelInfo> channels;
+        requireResult(rtapi::listAnimSourceChannels(clip, channels));
+        py::list out;
+        for (const rtapi::AnimSourceChannelInfo& c : channels) {
+            py::dict d;
+            d["node_name"] = c.node_name;
+            d["position_keys"] = c.position_keys;
+            d["rotation_keys"] = c.rotation_keys;
+            d["scaling_keys"] = c.scaling_keys;
+            out.append(d);
+        }
+        return out;
+    }, py::arg("clip") = std::string());
     anim.def("play", [](const std::string& character, const std::string& clip,
                         float blend, int layer) {
         requireResult(rtapi::playAnimClip(character, clip, blend, layer));
@@ -3367,6 +3762,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fov"]            = s.fov;
         d["focus_distance"] = s.focus_distance;
         d["aperture"]       = s.aperture;
+        d["auto_exposure"]          = s.auto_exposure;
+        d["use_physical_exposure"]  = s.use_physical_exposure;
+        d["iso_preset_index"]       = s.iso_preset_index;
+        d["shutter_preset_index"]   = s.shutter_preset_index;
+        d["fstop_preset_index"]     = s.fstop_preset_index;
+        d["ev_compensation"]        = s.ev_compensation;
+        // Cozulmus + uygulanan: AYAR DEGIL SONUC.
+        d["iso_value"]              = s.iso_value;
+        d["shutter_seconds"]        = s.shutter_seconds;
+        d["f_number"]               = s.f_number;
+        d["exposure_factor"]        = s.exposure_factor;
         return d;
     });
     camera.def("set", [](const py::kwargs& kwargs) {
@@ -3381,6 +3787,20 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             requireResult(rtapi::setCameraFocusDistance(py::cast<float>(kwargs["focus_distance"])));
         if (kwargs.contains("aperture"))
             requireResult(rtapi::setCameraAperture(py::cast<float>(kwargs["aperture"])));
+        // ★★ auto_exposure ACIKKEN preset'ler okunmaz; ikisini birlikte
+        //   gecmek isteyenler icin auto_exposure ONCE uygulanir.
+        if (kwargs.contains("auto_exposure"))
+            requireResult(rtapi::setCameraAutoExposure(py::cast<bool>(kwargs["auto_exposure"])));
+        if (kwargs.contains("use_physical_exposure"))
+            requireResult(rtapi::setCameraUsePhysicalExposure(py::cast<bool>(kwargs["use_physical_exposure"])));
+        if (kwargs.contains("iso_preset_index"))
+            requireResult(rtapi::setCameraIsoPreset(py::cast<int>(kwargs["iso_preset_index"])));
+        if (kwargs.contains("shutter_preset_index"))
+            requireResult(rtapi::setCameraShutterPreset(py::cast<int>(kwargs["shutter_preset_index"])));
+        if (kwargs.contains("fstop_preset_index"))
+            requireResult(rtapi::setCameraFStopPreset(py::cast<int>(kwargs["fstop_preset_index"])));
+        if (kwargs.contains("ev_compensation"))
+            requireResult(rtapi::setCameraEvCompensation(py::cast<float>(kwargs["ev_compensation"])));
     });
 
     py::module_ world = module.def_submodule("world", "World/environment: background + Nishita sun (Faz 5.1c)");
@@ -3415,6 +3835,64 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             requireResult(rtapi::setWorldSunSize(py::cast<float>(kwargs["sun_size"])));
     });
 
+    // Physical atmosphere -- the parameters the SkyView/transmittance LUT is
+    // BAKED FROM. Separate from world.get/set on purpose: those are the sun and
+    // the two intensities, these are the medium. Every one of them dirties the
+    // LUT, so this is also the surface a timing probe drives.
+    world.def("get_atmosphere", [] {
+        rtapi::WorldAtmosphereInfo a;
+        requireResult(rtapi::getWorldAtmosphere(a));
+        py::dict d;
+        d["air_density"]            = a.air_density;
+        d["dust_density"]           = a.dust_density;
+        d["ozone_density"]          = a.ozone_density;
+        d["ozone_absorption_scale"] = a.ozone_absorption_scale;
+        d["humidity"]               = a.humidity;
+        d["temperature"]            = a.temperature;
+        d["altitude"]               = a.altitude;
+        d["mie_anisotropy"]         = a.mie_anisotropy;
+        d["planet_radius"]          = a.planet_radius;
+        d["atmosphere_height"]      = a.atmosphere_height;
+        d["rayleigh_scattering"]    = vec3ToPython(a.rayleigh_scattering);
+        d["mie_scattering"]         = vec3ToPython(a.mie_scattering);
+        d["rayleigh_density"]       = a.rayleigh_density;
+        d["mie_density"]            = a.mie_density;
+        return d;
+    });
+    world.def("set_atmosphere", [](const py::kwargs& kwargs) {
+        rtapi::WorldAtmosphereUpdate u;
+        float air = 0.0f, dust = 0.0f, ozone = 0.0f, ozoneAbs = 0.0f;
+        float humidity = 0.0f, temperature = 0.0f, altitude = 0.0f;
+        float mieG = 0.0f, planetR = 0.0f, atmoH = 0.0f, rayH = 0.0f, mieH = 0.0f;
+        Vec3 rayS, mieS;
+        auto grab = [&](const char* key, float& slot, const float*& ptr) {
+            if (!kwargs.contains(key)) return;
+            slot = py::cast<float>(kwargs[key]);
+            ptr = &slot;
+        };
+        grab("air_density", air, u.air_density);
+        grab("dust_density", dust, u.dust_density);
+        grab("ozone_density", ozone, u.ozone_density);
+        grab("ozone_absorption_scale", ozoneAbs, u.ozone_absorption_scale);
+        grab("humidity", humidity, u.humidity);
+        grab("temperature", temperature, u.temperature);
+        grab("altitude", altitude, u.altitude);
+        grab("mie_anisotropy", mieG, u.mie_anisotropy);
+        grab("planet_radius", planetR, u.planet_radius);
+        grab("atmosphere_height", atmoH, u.atmosphere_height);
+        grab("rayleigh_density", rayH, u.rayleigh_density);
+        grab("mie_density", mieH, u.mie_density);
+        if (kwargs.contains("rayleigh_scattering")) {
+            rayS = vec3FromPython(kwargs["rayleigh_scattering"]);
+            u.rayleigh_scattering = &rayS;
+        }
+        if (kwargs.contains("mie_scattering")) {
+            mieS = vec3FromPython(kwargs["mie_scattering"]);
+            u.mie_scattering = &mieS;
+        }
+        requireResult(rtapi::updateWorldAtmosphere(u));
+    });
+
     // Ambient thermal condition every uncoupled substance relaxes toward.
     // Distinct from world.get/set above (render sky) -- see WorldThermalInfo.
     world.def("get_thermal", [] {
@@ -3440,6 +3918,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     });
 
     py::module_ post = module.def_submodule("post", "Post-processing: exposure, tonemap, vignette, stylize (Faz 5.1d)");
+    registerPostExposurePython(post);
     post.def("get", [] {
         rtapi::PostState s;
         requireResult(rtapi::getPost(s));
@@ -3554,6 +4033,29 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "(Vulkan backend present) and 'enabled' before reading any number — an "
        "all-zero result means one of those is false far more often than it "
        "means the volume was free.");
+    render.def("volume_tables", [] {
+        const rtapi::VolumeTablesInfo t = rtapi::volumeTables();
+        py::dict d;
+        py::list backends;
+        for (const auto& b : t.backends) {
+            py::dict e;
+            e["role"] = b.role;
+            e["is_vulkan"] = b.is_vulkan;
+            e["instance_count"] = b.instance_count;
+            e["buffer_allocated"] = b.buffer_allocated;
+            e["sim_device_is_this_backends"] = b.sim_device_is_this_backends;
+            e["dense_gas_mirror_buffers"] = b.dense_gas_mirror_buffers;
+            backends.append(e);
+        }
+        d["available"] = t.available;
+        d["backends"] = backends;
+        return d;
+    }, "What the volume SSBO actually CONTAINS, per backend. The raster viewport "
+       "can be a second VulkanBackendAdapter with its own VkDevice and its own "
+       "volume table; a 'viewport' row with instance_count 0 while 'render' is "
+       "non-zero means the realtime viewport was never given the volumes and "
+       "will draw none. volume_stats() cannot see this — a pass that never ran "
+       "counts zero, exactly like a scene with no volumes.");
 
     // ── Viewport measurement ────────────────────────────────────────────────
     // ★ Reading a render's DATA instead of saving it and looking. See
@@ -3602,6 +4104,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["count"] = s.count;
             d["last_rss_delta_mb"] = s.last_rss_delta_mb;
             d["rss_after_mb"] = s.rss_after_mb;
+            d["rss_measured"] = s.rss_measured;
             d["seq"] = s.seq;
             out.append(std::move(d));
         }
@@ -3620,6 +4123,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["count"] = s.count;
         d["last_rss_delta_mb"] = s.last_rss_delta_mb;
         d["rss_after_mb"] = s.rss_after_mb;
+        d["rss_measured"] = s.rss_measured;
         d["seq"] = s.seq;
         return d;
     }, py::arg("name"),
@@ -4019,6 +4523,160 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return img;
     }, "The captured viewport frame as a base64 JPEG (quality 80). This is what "
        "a vision-capable model is shown. Requires rt.viewport.capture(True).");
+    // ★★★ Realtime yol haritasi Faz 0.5a. Asenkron sunum koprüsünün BASARISI
+    // GORUNMEZ: goruntu ayni, yalnizca seri stall kalkar. Gozle dogrulanamayan
+    // bir degisiklik, olculemiyorsa test edilemez.
+    viewport.def("frame_telemetry", [] {
+        const rtapi::ViewportFrameTelemetryInfo t = rtapi::viewportFrameTelemetry();
+        py::dict d;
+        d["available"] = t.available;
+        // ★★ Ekran yolu raster telemetrisinden BAGIMSIZ: Rendered modunda
+        // raster viewport yok ama ana dongu pikselleri yine CPU'da tasiyor.
+        d["display_available"] = t.display_available;
+        if (t.display_available) {
+            d["display_post_ms"] = t.display_post_ms;
+            d["display_texture_upload_ms"] = t.display_texture_upload_ms;
+            d["display_loop_period_ms"] = t.display_loop_period_ms;
+            d["display_post_was_noop_copy"] = t.display_post_was_noop_copy;
+            d["display_frames"] = t.display_frames;
+        }
+        if (!t.available) return d;
+        d["async_present"] = t.async_present;
+        d["synchronous_present"] = t.synchronous_present;
+        d["slot_count"] = t.slot_count;
+        d["width"] = t.width;
+        d["height"] = t.height;
+        d["frame_ms"] = t.frame_ms;
+        d["cpu_record_ms"] = t.cpu_record_ms;
+        d["slot_wait_ms"] = t.slot_wait_ms;
+        d["submit_ms"] = t.submit_ms;
+        d["image_readback_ms"] = t.image_readback_ms;
+        d["host_read_ms"] = t.host_read_ms;
+        d["present_ms"] = t.present_ms;
+        d["frames_submitted"] = t.frames_submitted;
+        d["frames_consumed"] = t.frames_consumed;
+        d["stale_presents"] = t.stale_presents;
+        d["slot_waits"] = t.slot_waits;
+        d["blocking_seeds"] = t.blocking_seeds;
+        d["resource_drains"] = t.resource_drains;
+        d["present_latency_frames"] = t.present_latency_frames;
+        d["global_instance_buffer"] = t.global_instance_buffer;
+        d["gpu_culling"] = t.gpu_culling;
+        d["total_instances"] = t.total_instances;
+        d["cull_mesh_count"] = t.cull_mesh_count;
+        d["draw_calls"] = t.draw_calls;
+        d["visible_triangles"] = t.visible_triangles;
+        d["full_triangles"] = t.full_triangles;
+        d["proxy_triangles"] = t.proxy_triangles;
+        d["full_instances"] = t.full_instances;
+        d["proxy_instances"] = t.proxy_instances;
+        d["scatter_triangle_target"] = t.scatter_triangle_target;
+        return d;
+    }, "Raster/Realtime viewport frame presentation telemetry. 'available' "
+       "false means no raster frame has ever been presented (Rendered mode, no "
+       "Vulkan viewport backend, or nothing drawn yet) - the missing keys are "
+       "ABSENCE, not zeros. 'async_present' false means the driver refused "
+       "persistent frame slots and the old synchronous readback path is live. "
+       "'image_readback_ms' is non-zero ONLY on that fallback path. Watch "
+       "'stale_presents': raster work ran but no completed slot was ready, so "
+       "the viewer saw older pixels - small and constant is normal, growing "
+       "with frame count is not. Note that rt.viewport.capture(True) forces "
+       "synchronous presentation so a probe reads the frame just recorded; "
+       "timings taken with capture on are NOT the interactive timings.");
+
+    // Panel-only until 2026-09-01. Without it the scatter LOD numbers in
+    // frame_telemetry had no reference point: a script could read
+    // full_triangles/proxy_triangles but could not turn the proxy substitution
+    // OFF to see what the scene costs at full detail.
+    viewport.def("quality", [] {
+        const rtapi::ViewportQualityInfo q = rtapi::viewportQuality();
+        py::dict d;
+        d["preset"] = q.preset;
+        d["scatter_lod_split"] = q.scatter_lod_split;
+        d["raster_viewport_available"] = q.raster_viewport_available;
+        d["shadow_atlas_resolution"] = q.shadow_atlas_resolution;
+        d["shadow_tile_resolution"] = q.shadow_tile_resolution;
+        d["shadow_tile_capacity"] = q.shadow_tile_capacity;
+        d["shadow_light_budget"] = q.shadow_light_budget;
+        d["shadow_pcf_samples"] = q.shadow_pcf_samples;
+        d["directional_shadow_cascades"] = q.directional_shadow_cascades;
+        d["scene_pbr_shader"] = q.scene_pbr_shader;
+        d["opaque_core_parity"] = q.opaque_core_parity;
+        d["material_graph_surface"] = q.material_graph_surface;
+        d["clearcoat"] = q.clearcoat;
+        d["subsurface"] = q.subsurface;
+        d["translucency"] = q.translucency;
+        d["surface_anisotropy"] = q.surface_anisotropy;
+        d["transparency"] = q.transparency;
+        d["transmission"] = q.transmission;
+        d["resin_interior"] = q.resin_interior;
+        d["sdf_surface"] = q.sdf_surface;
+        d["volumes"] = q.volumes;
+        return d;
+    }, "Raster viewport quality preset: auto | performance | balanced | quality "
+       "| full. 'scatter_lod_split' is the behaviour that actually matters and "
+       "is reported as a VALUE: false (only in 'full') means NO instance is "
+       "replaced by a proxy impostor, so proxy_instances in frame_telemetry "
+       "will be 0 and the frame costs what the scene really is. "
+       "'raster_viewport_available' false means the preset is stored but "
+       "nothing reads it on this machine.");
+
+    viewport.def("set_quality", [](const std::string& preset) {
+        requireResult(rtapi::setViewportQuality(preset));
+    }, py::arg("preset"),
+       "Set the raster viewport quality preset: auto | performance | balanced | "
+       "quality | full. 'full' disables scatter proxy substitution entirely - "
+       "frustum culling stays on, but every visible instance draws its own mesh, "
+       "so on dense scatter scenes this is deliberately slow. Rebuilds the "
+       "raster scene and resets accumulation, so probe again after switching.");
+
+    viewport.def("preview_lighting", [] {
+        const rtapi::ViewportPreviewLightingInfo p = rtapi::viewportPreviewLighting();
+        py::dict d;
+        d["preset"] = p.preset;
+        d["uses_scene_lights"] = p.uses_scene_lights;
+        d["scene_light_count"] = p.scene_light_count;
+        d["scene_light_total"] = p.scene_light_total;
+        d["shadows"] = p.shadows;
+        d["shadowed_light_count"] = p.shadowed_light_count;
+        d["world_ambient"] = p.world_ambient;
+        d["world_background"] = p.world_background;
+        d["world_sun_direct"] = p.world_sun_direct;
+        d["world_sun_shadow"] = p.world_sun_shadow;
+        d["world_ibl_supported"] = p.world_ibl_supported;
+        d["world_ibl_ready"] = p.world_ibl_ready;
+        d["world_ibl_fallback"] = p.world_ibl_fallback;
+        d["material_preview_active"] = p.material_preview_active;
+        // post.get AYARI verir; bunlar shader'a GIDEN degerler.
+        d["display_tone_mapping"] = p.display_tone_mapping;
+        d["display_exposure"] = p.display_exposure;
+        d["display_gamma"] = p.display_gamma;
+        d["display_saturation"] = p.display_saturation;
+        d["display_color_temperature"] = p.display_color_temperature;
+        d["display_vignette_enabled"] = p.display_vignette_enabled;
+        d["display_vignette_strength"] = p.display_vignette_strength;
+        return d;
+    }, "Realtime/material raster lighting mode: three_point | scene. "
+       "'scene' is the default and reads the renderer's own light buffer; "
+       "'three_point' uses a fixed material-inspection rig, so "
+       "comparing preview against Rendered is only meaningful in 'scene'. "
+       "Scene reports its shared shadow-atlas allocation, canonical world "
+       "background/ambient, HDRI IBL readiness and Nishita direct-sun shadow "
+       "state. world_ibl_fallback reports the raw-environment approximation. "
+       "A gap between "
+       "shadowed_light_count and scene_light_count means "
+       "later lights still illuminate but have no atlas tile. A gap "
+       "between scene_light_count and scene_light_total means the preview is "
+       "clamped to fewer lights than the renderer uses.");
+
+    viewport.def("set_preview_lighting", [](const std::string& preset) {
+        requireResult(rtapi::setViewportPreviewLighting(preset));
+    }, py::arg("preset"),
+       "Set realtime/material raster lighting: three_point | scene. Legacy "
+       "classic/studio/outdoor names are accepted as three_point aliases. "
+       "Resets accumulation, so render frames again before probing. Only takes "
+       "visible effect in Material Preview shading mode.");
+
     viewport.def("set_shading", [](const std::string& mode, int matcap_preset) {
         requireResult(rtapi::setViewportShading(mode, matcap_preset));
     }, py::arg("mode"), py::arg("matcap_preset") = -1,

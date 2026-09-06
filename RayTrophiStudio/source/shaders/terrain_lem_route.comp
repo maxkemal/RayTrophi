@@ -37,7 +37,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 layout(set = 0, binding = 0) readonly  buffer Weights    { uint packedWeights[]; };
-layout(set = 0, binding = 1) readonly  buffer Filled     { float filledField[]; };
+layout(set = 0, binding = 1) readonly  buffer LakeSurf   { float lakeSurfaceField[]; };
 layout(set = 0, binding = 2) readonly  buffer Area       { float areaField[]; };
 layout(set = 0, binding = 3) readonly  buffer FluxIn     { float fluxIn[]; };
 layout(set = 0, binding = 4) writeonly buffer FluxOut    { float fluxOut[]; };
@@ -99,7 +99,7 @@ void main() {
         return;
     }
 
-    float lakeDepth = max(filledField[i] - hCur, 0.0);
+    float lakeDepth = max(lakeSurfaceField[i] - hCur, 0.0);
     // Unit-width discharge proxy: catchment area times rain rate, spread over
     // one cell width. Only its ratio to the settling velocity matters.
     float q = max(areaField[i], 0.0) * pc.rainRate / max(pc.cellSize, 1.0e-3);

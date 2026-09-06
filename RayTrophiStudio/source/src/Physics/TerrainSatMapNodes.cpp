@@ -1727,7 +1727,13 @@ namespace TerrainNodesV2 {
         }
 
         if (!terrain->macroColorMap) {
-            terrain->macroColorMap = std::make_shared<Texture>(nullptr, TextureType::Albedo, "MacroColorMap");
+            // ★ This used to be `Texture(nullptr, TextureType::Albedo, "MacroColorMap")`.
+            // That was the ASSIMP constructor, called with a null aiTexture purely to
+            // get an empty texture back — it logged "Texture pointer null, skip" on
+            // every terrain paint, and it returned BEFORE assigning `name`, so the
+            // "MacroColorMap" argument was silently thrown away. The sized
+            // constructor is what this code always wanted.
+            terrain->macroColorMap = std::make_shared<Texture>("MacroColorMap", w, h, TextureType::Albedo);
         }
         terrain->macroColorMap->width = w;
         terrain->macroColorMap->height = h;

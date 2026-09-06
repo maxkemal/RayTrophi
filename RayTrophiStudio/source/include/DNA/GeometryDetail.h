@@ -583,6 +583,20 @@ namespace DNA {
             const auto& p = core[static_cast<size_t>(Attr::P)];
             return p ? p->element_count() : 0;
         }
+
+        // Elements actually stored for ONE core attribute — the general form of
+        // get_positions_orig_count() above, and subject to the same warning: this
+        // is NOT vertex_count. Any reader that walks a raw attribute pointer by
+        // length (rather than through indices) must size its loop with this, or a
+        // regenerating surface whose snapshot buffer lagged behind vertex_count
+        // reads off the end. Added for the glTF writer, which streams these
+        // buffers to disk verbatim and therefore cannot rely on the count alone.
+        size_t get_core_attribute_count(Attr a) const noexcept {
+            if (cached_pointers_dirty) evaluate_active_state();
+            const CoreSlots& core = delta_stack.empty() ? core_base : core_active;
+            const auto& buf = core[static_cast<size_t>(a)];
+            return buf ? buf->element_count() : 0;
+        }
     };
 
 } // namespace DNA

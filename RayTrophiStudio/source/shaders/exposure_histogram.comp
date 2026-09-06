@@ -1,0 +1,29 @@
+#version 460
+#extension GL_EXT_shader_image_load_formatted : require
+layout(local_size_x=256) in;
+layout(binding=0) uniform readonly image2D hdr;
+layout(std430,binding=1) buffer Histogram { uint bins[256]; } result;
+layout(push_constant) uniform Settings { float centerWeight; } pc;
+shared uint localBins[256];
+void main() {
+    uint lane=gl_LocalInvocationID.x;
+    localBins[lane]=0u;
+    barrier();
+    ivec2 size=imageSize(hdr), grid=min(size,ivec2(128));
+    uint count=uint(grid.x*grid.y);
+    for(uint i=lane;i<count;i+=256u) {
+        ivec2 q=ivec2(int(i)%grid.x,int(i)/grid.x);
+        ivec2 pixel=(2*q+1)*size/(2*grid);
+        vec3 c=imageLoad(hdr,pixel).rgb;
+        if(any(isnan(c)) || any(isinf(c))) continue;
+        float lum=dot(max(c,vec3(0)),vec3(.2126,.7152,.0722));
+        if(lum<=1e-8) continue;
+        uint bin=uint(clamp(int((log2(lum)+16.0)*8.0),0,255));
+        vec2 uv=(vec2(q)+.5)/vec2(grid)*2.0-1.0;
+        float center=max(0.0,1.0-.5*dot(uv,uv));
+        uint weight=uint(1.0+255.0*((1.0-pc.centerWeight)+pc.centerWeight*center*center));
+        atomicAdd(localBins[bin],weight);
+    }
+    barrier();
+    result.bins[lane]=localBins[lane];
+}

@@ -26,7 +26,8 @@ THE SOFTWARE.
 
 RayTrophi utilizes the following third-party libraries which are subject to their own licenses:
 
-- **Assimp** → BSD / MIT License
+- **cgltf** → MIT License (glTF 2.0 import/export)
+- **ufbx** → MIT License or public domain, at your option (FBX import)
 - **Embree** → Apache License 2.0
 - **OIDN (Open Image Denoise)** → Apache License 2.0
 - **OptiX** → NVIDIA proprietary license

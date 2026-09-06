@@ -40,6 +40,19 @@ namespace TerrainHydrology {
                            const std::vector<float>* catchmentArea,
                            const std::vector<float>* lakeMask,
                            const std::vector<float>* lakeSpillPoints,
+                           // Cells that must never be NAMED a river channel:
+                           // authored infrastructure. A carved road is a linear
+                           // depression and therefore a perfect channel from
+                           // this function's point of view, which is how roads
+                           // came to be classified as river beds.
+                           //
+                           // It excludes only the CLASSIFICATION. Flow direction,
+                           // parentage and accumulation are untouched, so the
+                           // water an excluded cell receives still reaches the
+                           // same downstream cells. Cutting the routing instead
+                           // would be the plausible-looking failure: no river on
+                           // the road, and a downstream basin quietly underfed.
+                           const std::vector<float>* channelExclusion,
                            const RiverNetworkParams& params,
                            RiverNetworkResult& result,
                            std::string* error = nullptr);

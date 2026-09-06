@@ -1,8 +1,11 @@
 #include "FoliageAssetLibrary.h"
 
-#include "AssimpLoader.h"
+#include "Import/ModelImport.h"
+#include "Triangle.h"   // CachedGeometry stores facades; ModelImport.h only forward-declares
+#include "MaterialManager.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cctype>
 #include <system_error>
 #include <unordered_map>
@@ -12,6 +15,13 @@ namespace {
 
 struct CachedGeometry {
     std::filesystem::file_time_type timestamp{};
+    // The material registry generation these triangles were loaded under. A
+    // Triangle stores a material ID, not a material; MaterialManager::clear()
+    // (New Project, and every project open via deserialize) retires every ID
+    // while this cache survives, so a later cache hit would hand out geometry
+    // pointing at whatever now occupies those slots -- terrain layers, usually.
+    // Cheap to reload, impossible to notice when wrong.
+    uint64_t material_generation = 0;
     std::vector<std::shared_ptr<Triangle>> triangles;
 };
 
@@ -35,6 +45,30 @@ bool containsToken(const AssetRecord& asset, const std::vector<std::string>& tok
         if (!token.empty() && haystack.find(token) != std::string::npos) return true;
     }
     return false;
+}
+
+// One import namespace PER ASSET.
+//
+// AssimpLoader derives two global keys from the import name: the material
+// registry key (currentImportName + "_" + material name) and the embedded
+// texture key ("embedded_" + currentImportName + "_" + <texture> + "_" + type).
+// The second one is consulted against the process-wide TextureCache, whose hit
+// path SKIPS THE DECODE and adopts the cached entry. So a shared import name
+// makes two different assets' embedded textures collide, and the second tree
+// silently wears the first tree's pixels.
+//
+// The whole library used to import under the single literal "foliage_asset",
+// which disarmed exactly the guard AssimpLoader documents as critical. Keyed by
+// the relative entry path: unique per asset and stable across sessions, so
+// material names survive a project round-trip.
+std::string importPrefixForAsset(const std::string& relativeEntryPath) {
+    std::string prefix = "foliage_";
+    prefix.reserve(prefix.size() + relativeEntryPath.size());
+    for (const char raw : relativeEntryPath) {
+        const unsigned char c = static_cast<unsigned char>(raw);
+        prefix += std::isalnum(c) ? static_cast<char>(std::tolower(c)) : '_';
+    }
+    return prefix;
 }
 
 std::vector<std::string> typeTokens(const std::string& layerType) {
@@ -135,21 +169,55 @@ bool loadScatterSource(const std::string& relativeEntryPath,
     }
 
     const std::string key = fullPath.lexically_normal().generic_string();
+    // ★ A `fbx_reader` field used to take part in this cache key: while both
+    // Assimp and ufbx could read FBX, switching readers had to invalidate the
+    // cached geometry. There is one reader per format now, so the key would be
+    // constant — removed rather than left as a field that can never differ
+    // (CLAUDE.md rule 5).
     const auto timestamp = std::filesystem::last_write_time(fullPath, ec);
+    const uint64_t materialGeneration = MaterialManager::getInstance().generation();
     auto cached = g_geometryCache.find(key);
-    if (cached == g_geometryCache.end() || (!ec && cached->second.timestamp != timestamp)) {
-        AssimpLoader loader;
-        auto [triangles, animations, boneData] = loader.loadModelToTriangles(
-            fullPath.string(), nullptr, "foliage_asset", true);
-        (void)animations;
-        (void)boneData;
-        if (triangles.empty()) {
+    if (cached == g_geometryCache.end() ||
+        (!ec && cached->second.timestamp != timestamp) ||
+        cached->second.material_generation != materialGeneration) {
+        // ★★★ THE WHOLE VEGETATION LIBRARY IS .glb, AND IT USED TO GO THROUGH
+        // ASSIMP. Faz 2 removed the Assimp fallback in Renderer::create_scene and
+        // the batch was written up as "glTF never reaches Assimp" — but this call
+        // site was never checked, so every planted tree kept the OLD convention:
+        // AssimpLoader sets no aiProcess_FlipUVs, so raw glTF UVs (v down) met a
+        // sampler that already flips — i.e. every scattered tree sampled its atlas
+        // upside down while the SAME file dragged in as a model came out correct.
+        rtimport::ImportOptions opts;
+        opts.importPrefix   = importPrefixForAsset(relativeEntryPath);
+        opts.loadGeometry   = true;
+        opts.loadAnimations = false;   // foliage is static; these were discarded anyway
+        opts.loadSkinning   = false;
+        opts.loadCameras    = false;
+        opts.loadLights     = false;
+        // ★★ PER-FACE FACADES ARE REQUIRED HERE, not representative ones.
+        // A library prototype is NOT a scene world object, so it has no entry in
+        // the backend mesh registry — and that registry is where
+        // ScatterSource::flat_meshes gets its BLAS from (VulkanBackend.cpp: no
+        // registry hit -> `continue` -> an invisible forest, which is exactly the
+        // EXT_mesh_gpu_instancing failure this batch already paid for once).
+        // Library foliage therefore uses the facade shape, and InstanceManager
+        // bakes its centred copies by walking source.triangles ONE AT A TIME.
+        opts.emitSingleFacadePerMesh = false;
+
+        rtimport::ImportedModel imported;
+        std::string importError;
+        if (!rtimport::loadModel(fullPath.string(), opts, imported, importError)) {
+            if (errorMessage) *errorMessage = "Failed to load foliage asset: " + importError;
+            return false;
+        }
+        if (imported.objects.empty()) {
             if (errorMessage) *errorMessage = "No renderable triangles in foliage asset: " + fullPath.string();
             return false;
         }
         CachedGeometry geometry;
         geometry.timestamp = timestamp;
-        geometry.triangles = std::move(triangles);
+        geometry.material_generation = materialGeneration;
+        geometry.triangles = std::move(imported.objects);
         cached = g_geometryCache.insert_or_assign(key, std::move(geometry)).first;
     }
 

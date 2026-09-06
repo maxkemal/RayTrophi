@@ -159,6 +159,68 @@ GROUPS = [
             ("shaders/material_preview_frag.frag", r"struct TerrainLayerData \{(.*?)\n\};"),
         ],
     },
+    {
+        # Added 2026-09-01 with the material preview's Scene lighting preset,
+        # which made a SIXTH copy of this struct. Five shaders already mirrored
+        # it and none were checked. The preview reads the same buffer the RT
+        # path reads, so a drift here would light the viewport from fields that
+        # mean something else - and it would look like a plausible lighting
+        # difference, not like corruption.
+        "name": "VkGpuLight",
+        "align": 16,
+        "reference": ("include/Backend/vulkan_material_types.h",
+                      r"struct VK_GPU_ALIGN\(16\) VkGpuLight \{(.*?)\n\};"),
+        "mirrors": [
+            ("shaders/closesthit.rchit",        r"struct LightData \{(.*?)\n\};"),
+            ("shaders/raygen.rgen",             r"struct LightData \{(.*?)\n\};"),
+            ("shaders/photon.rgen",             r"struct LightData \{(.*?)\n\};"),
+            ("shaders/hair_closesthit.rchit",   r"struct LightData \{(.*?)\n\};"),
+            ("shaders/volume_closesthit.rchit", r"struct LightData \{(.*?)\n\};"),
+            ("shaders/material_preview_frag.frag", r"struct LightData \{(.*?)\n\};"),
+        ],
+    },
+    {
+        # Added 2026-09-01, in the same batch that grew Globals by one field.
+        # These two mirrors had been outside the audit since the GPU culling
+        # module was written, and they are the exact shape this script exists
+        # for: MeshParam is indexed as a flat SSBO array, so a C++ side that
+        # gains a field the GLSL side does not gets NO error - mesh 0 reads
+        # correctly and every mesh after it reads its neighbour's bytes. The
+        # symptom would be one scatter group drawn with another's proxy slot.
+        "name": "RasterCull.MeshParam",
+        "align": 4,
+        "reference": ("include/Viewport/RasterGpuCull.h",
+                      r"struct MeshBinding \{(.*?)\n    \};"),
+        "mirrors": [
+            ("shaders/raster_cull.comp", r"struct MeshParam \{(.*?)\n\};"),
+        ],
+    },
+    {
+        # The Globals block is an interface block rather than a struct, but it
+        # is uploaded from a plain C++ struct with memcpy, so the same drift
+        # applies - and unlike MeshParam it is read by BOTH passes.
+        "name": "RasterCull.Globals",
+        "align": 4,
+        "reference": ("src/Viewport/RasterGpuCull.cpp",
+                      r"struct GlobalsGPU \{(.*?)\n\};"),
+        "mirrors": [
+            ("shaders/raster_cull.comp", r"readonly buffer Globals \{(.*?)\n\} g;"),
+        ],
+    },
+    {
+        # HDRI convolution dispatches reuse one push ABI for irradiance,
+        # prefilter mips and BRDF integration. A phase/size offset drift writes
+        # a valid image with the wrong operation, so visual output alone is a
+        # poor diagnostic.
+        "name": "MaterialPreviewIBL.Push",
+        "align": 4,
+        "reference": ("src/Viewport/MaterialPreviewIbl.cpp",
+                      r"struct IblPush \{(.*?)\n\};"),
+        "mirrors": [
+            ("shaders/material_preview_ibl.comp",
+             r"layout\(push_constant\) uniform IblPushConstants \{(.*?)\n\} pc;"),
+        ],
+    },
 ]
 
 # GLSL structs with no C++ struct to diff against field-for-field, but with a

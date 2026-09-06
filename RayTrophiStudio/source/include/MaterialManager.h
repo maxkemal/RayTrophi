@@ -12,6 +12,7 @@
 #define MATERIAL_MANAGER_H
 
 #include <vector>
+#include <cstdint>
 #include <unordered_map>
 #include <string>
 #include <memory>
@@ -104,6 +105,21 @@ public:
     void clear();
 
     /**
+     * @brief Monotonic id of the current registry population.
+     *
+     * Bumped by clear() -- which deserialize() also calls, so it covers every
+     * project open as well as New Project. A material ID only means anything
+     * within one generation; anything that CACHES resolved IDs across a scene
+     * change (foliage asset geometry, for one) must record the generation it
+     * resolved under and reload when it no longer matches. Without that the
+     * stale IDs still index a live table, so the failure is silent.
+     */
+    uint64_t generation() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return registry_generation;
+    }
+
+    /**
      * @brief Serialize all materials to JSON
      * @param sceneDir Directory to save material data (for relative texture paths)
      * @return JSON object containing all materials
@@ -143,6 +159,7 @@ private:
 
     std::vector<std::shared_ptr<Material>> materials;
     std::unordered_map<std::string, uint16_t> nameToID;
+    uint64_t registry_generation = 1;
     mutable std::mutex mutex;
 };
 

@@ -38,6 +38,14 @@ struct InstanceTransform {
     
     // Convert to 4x4 matrix
     Matrix4x4 toMatrix() const;
+
+    // ★ EXACT inverse of toMatrix(). It lives beside it ON PURPOSE: toMatrix uses
+    // a Y*X*Z Euler order and scales the matrix ROWS, which is neither what
+    // Matrix4x4::decompose() assumes (Z*Y*X, column scaling) nor what
+    // Quaternion::toEuler() returns (radians, a third order). Reconstructing this
+    // triple anywhere else means re-deriving that convention from the entries,
+    // and a wrong Euler order does not fail — it produces a plausible pose.
+    static InstanceTransform fromMatrix(const Matrix4x4& m);
     
     // Multi-Source Support
     int source_index = 0;

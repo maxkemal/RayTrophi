@@ -1,4 +1,4 @@
-#include "renderer.h"
+﻿#include "renderer.h"
 #include <SDL_image.h>
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
@@ -9,6 +9,7 @@
 #include <imgui_impl_sdlrenderer2.h>
 #include <scene_ui.h>
 #include "OptixWrapper.h"
+#include "OptixMaterialTables.h"
 #include "PerfProfile.h"
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
@@ -40,6 +41,7 @@
 #include "VolumeShader.h"
 #include "Triangle.h"
 #include "TriangleMesh.h"   // import-flat collapse in create_scene (upcast TriangleMesh -> Hittable)
+#include "Import/ModelImport.h"
 #include "MeshPointiness.h" // Geometry-node Pointiness: per-vertex cache + hit-time sampling
 #include "Mesh.h"
 #include "AABB.h"
@@ -47,7 +49,14 @@
 #include "Hittable.h"
 #include "HittableList.h"
 #include "ParallelBVHNode.h"
-#include "AnimatedObject.h"
+// AnimatedObject was DELETED (Faz 0, Assimp import replacement): the class
+// was never instantiated anywhere - Renderer.cpp:~4307 already notes the
+// wrappers were removed - yet it held three of the animation system's
+// Assimp-typed entry points (interpolatePosition/Rotation/Scaling took
+// std::vector<aiVectorKey>/<aiQuatKey>). Migrating dead code would have
+// made the type change look three times larger than it is (CLAUDE.md rule 5).
+// Its interpolateRotation also built Quaternion(x, y, z, w) against a
+// (w, x, y, z) constructor, so it could never have been correct if used.
 #include "AnimationController.h"
 #include "OzzRuntime.h"
 #include "AnimationNodes.h"
@@ -74,6 +83,7 @@
 #include "FoliageWindSystem.h"
 #include <Backend/VulkanBackend.h>
 #include "Backend/IViewportBackend.h"
+#include <EmbreeBVH.h>
 
 namespace {
 float rt_world_voxel_size(const VDBVolume& vdb) {
@@ -1369,15 +1379,27 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             }
         }
 
-        // Fused tonemap + sRGB + pack-to-uint32. Replaces the per-pixel CPU
-        // std::pow loop and shrinks the D2H transfer by 3×.
+        // Fused FULL post_chain (exposure/tonemap operator/temperature/
+        // saturation/gamma/vignette) + sRGB + pack-to-uint32. Replaces the
+        // per-pixel CPU std::pow loop and shrinks the D2H transfer by 3×.
+        OidnPostParams postParams;
+        postParams.exposure         = tm.exposure;
+        postParams.cameraExposure   = tm.cameraExposure;
+        postParams.gamma            = tm.gamma;
+        postParams.saturation       = tm.saturation;
+        postParams.colorTemperature = tm.colorTemperature;
+        postParams.vignetteStrength = tm.vignetteStrength;
+        postParams.toneMapping      = tm.toneMapping;
+        postParams.vignetteEnabled  = tm.vignetteEnabled;
+        postParams.aMaskOr = tm.aMaskOr;
+        postParams.rShift  = tm.rShift;
+        postParams.gShift  = tm.gShift;
+        postParams.bShift  = tm.bShift;
+        postParams.flipY   = tm.flipY;
         if (!launchOidnTonemapKernel(static_cast<const float*>(oidnGpuOutputDevPtr),
                                      oidnGpuPackedDevPtr,
                                      width, height,
-                                     tm.exposure,
-                                     tm.aMaskOr,
-                                     tm.rShift, tm.gShift, tm.bShift,
-                                     tm.flipY,
+                                     postParams,
                                      desiredStream)) {
             cudaError_t le = cudaGetLastError();
             SCENE_LOG_ERROR(std::string("[OIDN GPU] tonemap kernel launch failed: ") + std::to_string(static_cast<int>(le)));
@@ -2322,7 +2344,10 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
             std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
 
             for (const auto& modelCtx : scene.importedModelContexts) {
-                if (!modelCtx.loader || !modelCtx.loader->getScene() || !modelCtx.loader->getScene()->mRootNode) continue;
+                // ★ Was: loader->getScene()->mRootNode. The walk now runs on the
+                // RayTrophi-owned node tree, so it works for ANY importer and no
+                // longer forces the aiScene to stay alive for the session.
+                if (modelCtx.nodeHierarchy.empty()) continue;
                 if (!modelCtx.hasAnimation) continue;
 
                 std::map<std::string, std::shared_ptr<AnimationData>> animLookup;
@@ -2334,12 +2359,8 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                 }
 
                 std::unordered_map<std::string, Matrix4x4> modelNodeTransforms;
-                modelCtx.loader->calculateAnimatedNodeTransformsRecursive(
-                    modelCtx.loader->getScene()->mRootNode,
-                    Matrix4x4::identity(),
-                    animLookup,
-                    current_time,
-                    modelNodeTransforms);
+                RayTrophi::computeAnimatedGlobalTransforms(
+                    modelCtx.nodeHierarchy, animLookup, current_time, modelNodeTransforms);
 
                 for (const auto& pair : modelNodeTransforms)
                     animatedGlobalNodeTransforms[pair.first] = pair.second;
@@ -2427,7 +2448,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
     // Iterate over ALL imported models to update their respective hierarchies
     for (const auto& modelCtx : scene.importedModelContexts) {
-        if (!modelCtx.loader || !modelCtx.loader->getScene() || !modelCtx.loader->getScene()->mRootNode) continue;
+        if (modelCtx.nodeHierarchy.empty()) continue;   // see the note at the other call site
 
         // ===========================================================================
         // CRITICAL FIX: Skip models without animation data
@@ -2448,13 +2469,8 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         // Temporary map for THIS model's node transforms
         std::unordered_map<std::string, Matrix4x4> modelNodeTransforms;
 
-        modelCtx.loader->calculateAnimatedNodeTransformsRecursive(
-            modelCtx.loader->getScene()->mRootNode,
-            Matrix4x4::identity(),
-            animationLookupMap,
-            current_time,
-            modelNodeTransforms
-        );
+        RayTrophi::computeAnimatedGlobalTransforms(
+            modelCtx.nodeHierarchy, animationLookupMap, current_time, modelNodeTransforms);
 
         // Merge into global map (for later use by non-bone animated objects)
         for (const auto& pair : modelNodeTransforms) {
@@ -4141,8 +4157,11 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         MaterialManager::getInstance().clear();
         SCENE_LOG_INFO("[MATERIAL CLEANUP] MaterialManager cleared: " + std::to_string(material_count_before) + " materials removed.");
 
-        // ---- 3. CPU Texture Cache'leri temizle ----
-        assimpLoader.clearTextureCache();
+        // ★ AssimpLoader::clearTextureCache() was called here. It emptied the
+        // LOADER's own texture cache, which no longer exists: each direct
+        // reader keeps its cache for the duration of one import and drops it
+        // with the reader. Global texture residency is still cleaned by
+        // Texture::cleanup_gpu() above, which is what actually mattered.
 
         // Reset OptiX scene-owned GPU state for the next project load without touching texture
         // ownership. Texture residency itself is cleaned by Texture::cleanup_gpu() above.
@@ -4179,24 +4198,27 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     update_progress(15, "Loading geometry & animations...");
     SCENE_LOG_INFO("Loading model geometry and animations...");
 
-    // Create a dedicated loader for this import to keep the aiScene alive
-    auto newLoader = std::make_shared<AssimpLoader>();
-    {
-        // Import-flat: skip the per-face facade soup at the source. The collapse pass below
-        // would discard it anyway; the loader emits one representative facade per non-skinned
-        // mesh instead (O(meshes) instead of O(faces) allocations on import).
-        extern bool g_dense_mesh_as_hittable;
-        newLoader->emitSingleFacadePerMesh = g_dense_mesh_as_hittable;
-    }
-    auto [loaded_triangles, loaded_animations, loaded_bone_data] = newLoader->loadModelToTriangles(model_path, nullptr, import_prefix);
+    extern bool g_dense_mesh_as_hittable;
+    auto imported = rtimport::loadSceneModel(model_path, import_prefix, g_dense_mesh_as_hittable);
+    auto loaded_triangles = std::move(imported.objects);
+    auto loaded_animations = std::move(imported.animations);
+    BoneData loaded_bone_data;
+    if (imported.bones) loaded_bone_data = std::move(*imported.bones);
+    auto loaded_hierarchy = std::move(imported.hierarchy);
+    auto loaded_import_name = std::move(imported.importName);
+    auto loaded_lights = std::move(imported.lights);
+    auto loaded_cameras = std::move(imported.cameras);
+    auto loaded_instance_groups = std::move(imported.instanceGroups);
 
     // Store the context
     SceneData::ImportedModelContext modelCtx;
-    modelCtx.loader = newLoader;
-    modelCtx.importName = newLoader->currentImportName;
+    // The node tree lives HERE, not behind an importer pointer. From Faz 0.5 on
+    // the animation runtime reads this and never an aiScene, which is what lets
+    // a non-Assimp reader produce an animated model at all.
+    modelCtx.nodeHierarchy = std::move(loaded_hierarchy);
+    modelCtx.importName = loaded_import_name;
     modelCtx.animGraphAssetKey = modelCtx.importName;
-    modelCtx.hasAnimation = !loaded_animations.empty() ||
-        (newLoader->getScene() && newLoader->getScene()->mNumAnimations > 0);
+    modelCtx.hasAnimation = !loaded_animations.empty();
     modelCtx.globalInverseTransform = loaded_bone_data.globalInverseTransform;
 
     update_progress(40, "Processing triangles...");
@@ -4219,7 +4241,6 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         // New Scene - already cleared in Step 0, but ensure boneData is fresh
         scene.boneData.boneNameToIndex.clear();
         scene.boneData.boneOffsetMatrices.clear();
-        scene.boneData.boneNameToNode.clear();
         scene.boneData.boneParents.clear();
         scene.boneData.boneDefaultTransforms.clear();
         scene.boneData.perModelInverses.clear();
@@ -4260,9 +4281,11 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         for (const auto& [name, id] : loaded_bone_data.boneNameToIndex) {
             scene.boneData.boneNameToIndex[name] = id + boneIndexOffset;
         }
-        // Merge Offset Matrices and Node Pointers
+        // Merge Offset Matrices
+        // (boneNameToNode was merged here too until Faz 0 removed it: it held
+        //  aiNode* into an aiScene that is already destroyed by this point, so
+        //  this line was copying dangling pointers between imports.)
         scene.boneData.boneOffsetMatrices.insert(loaded_bone_data.boneOffsetMatrices.begin(), loaded_bone_data.boneOffsetMatrices.end());
-        scene.boneData.boneNameToNode.insert(loaded_bone_data.boneNameToNode.begin(), loaded_bone_data.boneNameToNode.end());
         scene.boneData.perModelInverses.insert(loaded_bone_data.perModelInverses.begin(), loaded_bone_data.perModelInverses.end());
         scene.boneData.boneParents.insert(loaded_bone_data.boneParents.begin(), loaded_bone_data.boneParents.end());
         scene.boneData.boneDefaultTransforms.insert(loaded_bone_data.boneDefaultTransforms.begin(), loaded_bone_data.boneDefaultTransforms.end());
@@ -4302,6 +4325,54 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         scene.world.add(tri);
         modelCtx.members.push_back(tri);
     }
+    // ★★ EXT_mesh_gpu_instancing → InstanceManager.
+    // The writer has always EMITTED this extension for scatter groups; until now
+    // nothing read it back, so a scatter scene exported from RayTrophi reopened
+    // with the prototype mesh and an empty forest — a valid file and no error.
+    // The prototype is deliberately NOT in scene.world.objects: on the Vulkan
+    // path scatter is never expanded into world objects (see InstanceGroup.h),
+    // the backends read InstanceGroup directly.
+    for (auto& ig : loaded_instance_groups) {
+        if (ig.sourceMeshes.empty() || ig.placements.empty()) continue;
+        const int gid = InstanceManager::getInstance().createGroup(ig.name, ig.sourceNodeName, {});
+        InstanceGroup* group = InstanceManager::getInstance().getGroup(gid);
+        if (!group) continue;
+
+        // ★★★ A GROUP WITHOUT `sources` IS INVISIBLE.
+        // Every backend path starts with
+        //     if (group.instances.empty() || group.sources.empty()) continue;
+        // so filling only the legacy source_triangles produced a group that
+        // existed, logged, appeared in the manager — and rendered nothing.
+        ScatterSource source;
+        source.name = ig.sourceNodeName;
+        source.flat_meshes = ig.sourceMeshes;
+        source.weight = 1.0f;
+
+        // ★★ mesh_center STAYS ZERO. computeCenter() would set it to the
+        // prototype's bounding-box centre, and the backends then apply
+        //     sourceToScatter = translation(-mesh_center) * sourceWorld
+        // to every placement. But GltfDirectWriter ALREADY baked exactly that
+        // term into each exported placement matrix (`t * em.sourceToScatter`),
+        // so recomputing it here would apply the centring TWICE and slide every
+        // instance by the prototype's own offset. Same failure shape as the
+        // skinned-mesh node transform: a term that is already carried.
+        source.mesh_center = Vec3(0.0f, 0.0f, 0.0f);
+        source.has_local_bbox = false;
+
+        group->sources.push_back(std::move(source));
+
+        group->instances.reserve(ig.placements.size());
+        for (const auto& p : ig.placements) {
+            // fromMatrix lives beside toMatrix so the Euler convention cannot
+            // drift; see InstanceGroup.cpp.
+            group->addInstance(InstanceTransform::fromMatrix(p.transform));
+        }
+        group->markTransformsDirty();
+        SCENE_LOG_INFO("[glTF] instance group '" + ig.name + "' restored with " +
+                       std::to_string(group->instances.size()) + " placement(s) over " +
+                       std::to_string(group->sources[0].flat_meshes.size()) + " source mesh(es)");
+    }
+
     modelCtx.rebuildSkeletonRepresentation(scene.boneData);
     scene.importedModelContexts.push_back(modelCtx);
     SCENE_LOG_INFO("Added " + std::to_string(loaded_triangles.size()) + " triangles to scene member list.");
@@ -4379,9 +4450,10 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     update_progress(55, "Loading camera & lights...");
     SCENE_LOG_INFO("Loading camera and lighting data...");
 
-    // Get new cameras and lights from loaded model using NEW loader
-    auto new_lights = newLoader->getLights();
-    auto new_cameras = newLoader->getCameras();  // Get ALL cameras
+    // Cameras and lights come from whichever reader ran (see the format dispatch
+    // above), not from the Assimp loader specifically.
+    auto new_lights = loaded_lights;
+    auto new_cameras = loaded_cameras;
 
     // Handle cameras: Add all to the list
     if (append) {
@@ -4411,7 +4483,8 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
 
         // If no cameras from model, create default
         if (scene.cameras.empty()) {
-            auto new_camera = newLoader->getDefaultCamera();
+            // Preserve the reader-provided fallback without retaining its loader.
+            auto new_camera = imported.fallbackCamera;
             if (new_camera) {
                 new_camera->save_initial_state();
                 new_camera->update_camera_vectors();
@@ -4458,16 +4531,6 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
             }
         }
     }
-    // ...
-    // Note: OptiX conversion below (in original code) referenced 'assimpLoader' which was the member.
-    // We must update that block too, but replacing only up to line 1335 handles the loading/merging logic.
-    // The OptiX block is below 1335. I should include it in replacement range or do another replace.
-    // The instruction requested updating create_scene. I'll replace the block covering loading to lighting.
-
-    // BUT wait, I need to check if 'assimpLoader.convertTrianglesToOptixData' is called later.
-    // Yes, line 1364. That uses member assimpLoader. Since it's a stateless helper (except texture cache maybe?), it MIGHT be okay?
-    // BUT convertTrianglesToOptixData uses `MaterialManager` and triangle data. It seems stateless.
-    // However, it's safer to use `newLoader`.
 
     // I will replace up to line 1400.
 
@@ -9300,7 +9363,7 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
         // list (its geometry extraction is gated on nTris>0, so empty triangles are safe). Without
         // this, a flat scene reached buildFromDataTLAS with empty materials → null material buffer →
         // optixLaunch illegal memory access (CUDA 700).
-        OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
+        OptixGeometryData optix_data = buildOptixMaterialTables(triangles);
 
         // ===================================================================
         // HAIR GEOMETRY DATA (OptiX Curve Primitives)
@@ -10086,6 +10149,17 @@ void Renderer::updateBackendGasVolumes(SceneData& scene) {
     }
     WorldData wd = world.getGPUData();
     VolumetricRenderer::syncVolumetricData(scene, m_backend, &wd);
+    // The dedicated raster viewport owns a separate Vulkan device and therefore
+    // a separate NanoVDB allocation. Publishing only to the Rendered backend
+    // made the realtime SurfaceSDF show its startup field and then freeze while
+    // the simulation continued. Keep the producer single-source, but publish
+    // the same packet to both consumers.
+    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+    if (g_viewport_backend && g_viewport_backend.get() != m_backend) {
+        VolumetricRenderer::syncVolumetricData(
+            scene, g_viewport_backend.get(), &wd);
+        g_viewport_backend->resetAccumulation();
+    }
 }
 
 void Renderer::updateMeshMaterialBinding(SceneData& scene, const std::string& node_name, int old_mat_id, int new_mat_id) {

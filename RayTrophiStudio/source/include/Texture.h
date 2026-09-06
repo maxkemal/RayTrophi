@@ -22,8 +22,6 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
-#include <assimp/scene.h>      // aiTexture, aiTexel, aiScene
-#include <assimp/texture.h>    // aiTexture tanımı (bazı assimp versiyonlarında gerek)
 #include <globals.h>
 #include <atomic>
 #include <cstring>  // std::memcpy for fast pixel copy
@@ -233,50 +231,6 @@ private:
     }
 };
 
-class TextureCache {
-public:
-    struct TextureInfo {
-        int width;
-        int height;
-        bool has_alpha;
-        bool is_gray_scale;
-    };
-
-    static TextureCache& instance() {
-        static TextureCache cache;
-        return cache;
-    }
-
-    bool get(const std::string& name, TextureInfo& info) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = cache_map.find(name);
-        if (it != cache_map.end()) {
-            info = it->second;
-            return true;
-        }
-        return false;
-    }
-
-    void put(const std::string& name, const TextureInfo& info) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cache_map[name] = info;
-    }
-
-    void clear() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cache_map.clear();
-    }
-
-    size_t size() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return cache_map.size();
-    }
-
-private:
-    TextureCache() = default;
-    mutable std::mutex mutex_;
-    std::unordered_map<std::string, TextureInfo> cache_map;
-};
 class Texture {
 public:
     // Process-wide unique id. MUST come from this one function: the Vulkan
@@ -294,56 +248,13 @@ public:
 
     uint64_t m_uid;
 
-    Texture(const aiTexture* tex, TextureType type, const std::string& name = "")
-        : type(type), is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
-        m_uid = nextUid();
-
-        if (!tex) {
-            SCENE_LOG_WARN("Texture pointer null, skip");
-            return;
-        }
-        m_is_loaded = false;
-        is_gpu_uploaded = false;
-        is_hdr = false;
-        this->name = name; // Store name
-        std::string texture_name = name.empty() ? "unnamed_texture" : name;
-
-        // Cache kontrol et - SADECE embedded texture için (name boş değilse)
-        if (!name.empty() && name.find("embedded_") == 0) {
-            TextureCache::TextureInfo cached_info;
-            // Cache hit durumunda SADECE metadata'yı al, pixel decode etme!
-            if (TextureCache::instance().get(name, cached_info)) {
-                SCENE_LOG_INFO("[EMBEDDED CACHE HIT] Skipping decode, using cached metadata: " + name);
-                width = cached_info.width;
-                height = cached_info.height;
-                has_alpha = cached_info.has_alpha;
-                is_gray_scale = cached_info.is_gray_scale;
-                m_is_loaded = false;  // ← Bu texture zaten cache'de, pixel decode'a gerek yok
-                return;  // ← Constructor'dan çık, decode yapma!
-            }
-        }
-
-        // RAW embedded (RGBA)
-        if (tex->mHeight != 0) {
-            // SCENE_LOG_INFO("[DECODE] Starting RAW texture decode for: " + texture_name);
-            decode_raw(tex);
-
-            if (!name.empty()) {
-                TextureCache::instance().put(name, { width, height, has_alpha, is_gray_scale });
-                //  SCENE_LOG_INFO("[CACHE STORE] Cached metadata for: " + name);
-            }
-            return;
-        }
-
-        // Compressed embedded (PNG/JPG)
-       // SCENE_LOG_INFO("[DECODE] Starting COMPRESSED texture decode for: " + texture_name);
-        decode_compressed(tex);
-
-        if (!name.empty()) {
-            TextureCache::instance().put(name, { width, height, has_alpha, is_gray_scale });
-            // SCENE_LOG_INFO("[CACHE STORE] Cached metadata for: " + name);
-        }
-    }
+    // ★ Texture(const aiTexture*, ...) WAS HERE, together with decode_raw() and
+    // decode_compressed() below — the two decoders for images EMBEDDED inside a
+    // model file. They were removed with Assimp (Faz 3), not lost: every direct
+    // reader decodes embedded images itself and hands over a byte buffer, which
+    // the std::vector<char> constructor below already accepts. cgltf gives a
+    // buffer view, ufbx gives ufbx_texture::content, and OBJ has no embedded
+    // images at all. One decode path instead of two.
 
     // ===== Constructor Disk Yüklemesi - img_load_fast ile =====
     Texture(const std::string& filename, TextureType type)
@@ -1340,172 +1251,6 @@ public:
     std::string name; // Texture name/path
     TextureType type = TextureType::Unknown;
 private:
-    // ===== decode_raw() OPTIMIZED - SIMD + Paralel =====
-    void decode_raw(const aiTexture* tex) {
-        auto perf_start = std::chrono::high_resolution_clock::now();
-
-        width = tex->mWidth;
-        height = tex->mHeight;
-        int pixel_count = width * height;
-        pixels.resize(pixel_count);
-
-        SCENE_LOG_INFO("RAW decode start: " + std::to_string(width) + "x" +
-            std::to_string(height) + " (" + std::to_string(pixel_count) + " pixels)");
-
-        const aiTexel* data = tex->pcData;
-        int num_threads = std::thread::hardware_concurrency();
-        std::vector<std::thread> threads;
-
-        std::atomic<bool> has_alpha_atomic(false);
-        std::atomic<bool> is_gray_atomic(true);
-
-        auto process_chunk = [&](int start, int end) {
-            bool local_has_alpha = false;
-            bool local_is_gray = true;
-
-            // SIMD işlem için 4 pixel'i blok halinde işle
-            int simd_end = start + ((end - start) / 4) * 4;
-
-            for (int i = start; i < simd_end; i += 4) {
-                // 4 pixel'i aynı anda işle (data locality daha iyi)
-                for (int j = 0; j < 4; ++j) {
-                    const aiTexel& t = data[i + j];
-                    CompactVec4 px(t.r, t.g, t.b, t.a);
-                    pixels[i + j] = px;
-
-                    if (t.a != 255) local_has_alpha = true;
-                    if (!px.is_gray()) local_is_gray = false;
-                }
-            }
-
-            // Kalan pixel'ler
-            for (int i = simd_end; i < end; ++i) {
-                const aiTexel& t = data[i];
-                CompactVec4 px(t.r, t.g, t.b, t.a);
-                pixels[i] = px;
-
-                if (t.a != 255) local_has_alpha = true;
-                if (!px.is_gray()) local_is_gray = false;
-            }
-
-            if (local_has_alpha) has_alpha_atomic.store(true);
-            if (!local_is_gray) is_gray_atomic.store(false);
-            };
-
-        // Daha büyük chunks (thread startup overhead'i azalt)
-        int chunk_size = (((65536) > ((pixel_count + num_threads - 1) / num_threads)) ? (65536) : ((pixel_count + num_threads - 1) / num_threads));
-        for (int i = 0; i < pixel_count; i += chunk_size) {
-            int start = i;
-            int end = std::min(start + chunk_size, pixel_count);
-            threads.emplace_back(process_chunk, start, end);
-        }
-
-        for (auto& t : threads) t.join();
-
-        has_alpha = has_alpha_atomic.load();
-        is_gray_scale = is_gray_atomic.load();
-        m_is_loaded = true;
-
-        auto perf_end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(perf_end - perf_start);
-
-        SCENE_LOG_INFO("[SUCCESS] RAW texture decoded -> " + std::to_string(width) + "x" +
-            std::to_string(height) + (has_alpha ? " | alpha" : " | opaque") +
-            (is_gray_scale ? " | grayscale" : " | color") + " | " +
-            std::to_string(num_threads) + " threads | " +
-            std::to_string(duration.count()) + "ms");
-    }
-
-    // ===== decode_compressed() OPTIMIZED - Y-chunking + Lock tuning =====
-    void decode_compressed(const aiTexture* tex) {
-        auto perf_start = std::chrono::high_resolution_clock::now();
-
-        const unsigned char* buffer = reinterpret_cast<const unsigned char*>(tex->pcData);
-        SDL_RWops* rw = SDL_RWFromConstMem(buffer, tex->mWidth);
-        if (!rw) {
-            SCENE_LOG_ERROR("[DECODE ERROR] Failed to create SDL_RWops for compressed texture");
-            return;
-        }
-
-        SDL_Surface* surface = IMG_Load_RW(rw, 1);
-        if (!surface) {
-            SCENE_LOG_ERROR("[DECODE ERROR] Compressed texture load error: " +
-                std::string(IMG_GetError()));
-            return;
-        }
-
-        width = surface->w;
-        height = surface->h;
-        int pixel_count = width * height;
-        pixels.resize(pixel_count);
-
-        if (SDL_LockSurface(surface) != 0) {
-            SCENE_LOG_ERROR("[DECODE ERROR] Failed to lock surface");
-            SDL_FreeSurface(surface);
-            return;
-        }
-
-        SDL_Surface* converted_surface = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
-        SDL_UnlockSurface(surface);
-        SDL_FreeSurface(surface);
-
-        if (!converted_surface) {
-            SCENE_LOG_ERROR("[DECODE ERROR] Failed to convert surface");
-            return;
-        }
-
-        surface = converted_surface;
-        width = surface->w;
-        height = surface->h;
-
-        if (SDL_LockSurface(surface) != 0) {
-            SCENE_LOG_ERROR("[DECODE ERROR] Failed to lock converted surface");
-            SDL_FreeSurface(surface);
-            return;
-        }
-
-        SDL_PixelFormat* fmt = surface->format;
-        uint8_t* dataSurf = static_cast<uint8_t*>(surface->pixels);
-        if (!dataSurf) {
-            SCENE_LOG_ERROR("[DECODE ERROR] Converted surface pixels null");
-            SDL_UnlockSurface(surface);
-            SDL_FreeSurface(surface);
-            return;
-        }
-
-        int pitch = surface->pitch;
-        int bpp = fmt->BytesPerPixel;
-        has_alpha = SDL_ISPIXELFORMAT_ALPHA(fmt->format);
-
-        if (bpp != 4) {
-            SCENE_LOG_ERROR("[DECODE ERROR] Converted BPP != 4");
-            SDL_UnlockSurface(surface);
-            SDL_FreeSurface(surface);
-            return;
-        }
-
-        // Hızlı pixel kopyalama kullan (SDL_GetRGBA'dan ~5x hızlı)
-        bool alpha_detected = false;
-        bool gray_detected = true;
-        fast_copy_rgba32_pixels(dataSurf, pitch, pixels, width, height, alpha_detected, gray_detected);
-        has_alpha = alpha_detected;
-        is_gray_scale = gray_detected;
-        m_is_loaded = true;
-
-        SDL_UnlockSurface(surface);
-        SDL_FreeSurface(surface);
-
-        auto perf_end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(perf_end - perf_start);
-
-       /* SCENE_LOG_INFO("[SUCCESS] COMPRESSED texture decoded -> " + std::to_string(width) + "x" +
-            std::to_string(height) + (has_alpha ? " | alpha" : " | opaque") +
-            (is_gray_scale ? " | grayscale" : " | color") + " | " +
-            "Single-threaded safe load | " +
-            std::to_string(duration.count()) + "ms");*/
-    }
-
-
     std::vector<uint8_t> alphas;  // float yerine 1 byte kullanıyoruz
 
    

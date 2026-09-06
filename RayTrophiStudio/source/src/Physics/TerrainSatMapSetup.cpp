@@ -65,10 +65,17 @@ bool TerrainNodeGraphV2::addSatMapSetup(const std::string& preset, float x, floa
     uint32_t flowSource = 0;
     if (composer && composer->inputs.size() >= 3) flowSource = sourceForInput(composer->inputs[2].id);
     // Stable key, not slot 3: that slot published Discharge before the compact
-    // port contract and publishes Flow (sediment transport) after it. Same
+    // port contract and publishes Sediment (sediment transport) after it. Same
     // shape, same 0..1 range, different magnitude.
+    //
+    // ★★★ This colour ramp input is called Flow and its slider says "Flow
+    // Wetness"; the field it receives is sediment transport. See the longer
+    // note in TerrainSatMapPresetLibrary.cpp. Hydraulic Erosion now publishes
+    // a real "discharge" pin as well; pointing this at it changes the look of
+    // every existing SatMap preset, so it stays on sediment until that is a
+    // decision rather than a side effect.
     if (flowSource == 0)
-        flowSource = terrainPortId(hydraulic, NodeSystem::PinKind::Output, "flow");
+        flowSource = terrainPortId(hydraulic, NodeSystem::PinKind::Output, "sediment");
     if (flowSource == 0 && flowMask && !flowMask->outputs.empty()) flowSource = flowMask->outputs[0].id;
     ensureLink(flowSource, colorRamp->inputs[2].id);
 

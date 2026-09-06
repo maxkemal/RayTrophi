@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -32,18 +32,20 @@
 #include "AnimationController.h"
 #include "Matrix4x4.h"
 #include "Quaternion.h"
+#include "Animation/AnimationKeys.h"   // RayTrophi::VectorKeys / QuatKeys (was <assimp/anim.h>)
 #include <vector>
 #include <string>
 #include <functional>
 #include <unordered_set>
-#include <assimp/anim.h>  // For aiVectorKey, aiQuatKey
 #include <json.hpp>
 
 namespace AnimationGraph {
 
     // Forward declarations for animation sampling helpers
-    Vec3 sampleVectorKey(const std::vector<aiVectorKey>& keys, float time, double duration, bool wrap = true);
-    Quaternion sampleQuatKey(const std::vector<aiQuatKey>& keys, float time, double duration);
+    // Faz 0: RayTrophi's own key types, so the animation node graph no longer
+    // depends on Assimp headers at all.
+    Vec3 sampleVectorKey(const RayTrophi::VectorKeys& keys, float time, double duration, bool wrap = true);
+    Quaternion sampleQuatKey(const RayTrophi::QuatKeys& keys, float time, double duration);
 
     // ============================================================================
     // ANIMATION-SPECIFIC DATA TYPES

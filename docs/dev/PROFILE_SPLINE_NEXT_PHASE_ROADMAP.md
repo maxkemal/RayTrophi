@@ -1,6 +1,6 @@
 # Profile Spline Next Phase Roadmap
 
-> **Durum:** AKTİF — Faz 1/2 açık maddeler, Faz 3.6 yeni eklendi, Faz 4 native UI smoke doğrulaması bekliyor
+> **Durum:** AKTİF — Faz 1/2 açık maddeler, Faz 3.6 uygulamada, Faz 3.7 (ortak yüzey çizimi + River'ın tüketiciye dönüşü) yeni eklendi, Faz 4 native UI smoke doğrulaması bekliyor
 
 > Fixed-topology animation bake is implemented as the source-independent Geometry
 > Cache contract documented in `GEOMETRY_CACHE_DEFORMATION.md`. New spline modifiers
@@ -141,6 +141,11 @@ bölümündedir.
 > River sistemi bu çekirdeğin sahibi değildir ve ayrı kalır (bkz. dosya başı not);
 > bu faz River'ı taşımaz, yalnızca River'ın bugün terrain'e kilitli olan
 > surface-hit point-ekleme desenini genel çekirdeğe açar.
+>
+> Road üst katmanının kapsamı ve kabul kriterleri
+> [TERRAIN_ROAD_NETWORK_ROADMAP.md](TERRAIN_ROAD_NETWORK_ROADMAP.md) içindedir.
+> Curve geometrisinin otoritesi `SplineObject` olarak kalır; road katmanı ayrı
+> kontrol noktası, gizmo, undo veya `set_points` API'si kurmaz.
 
 - [x] `SplinePlane::Free` eklendi: point-edit gizmo'da (`ProfileSplinePointGizmo.cpp`)
       hiçbir eksen sıfırlanmaz; profile-tüketen `canonicalProfile()` artık Free'yi
@@ -159,6 +164,9 @@ bölümündedir.
       kullanarak cut-and-fill height adjust yapar. `RiverBedCarveNode`'un
       non-destructive carving deseninden ilham alır ama ondan farklı olarak arazi
       eğimini pasif takip etmez, aktif olarak sınırlar.
+      Solver Faz A'da bir kez çalışır ve graded height ile ölçüm alanlarını aynı
+      immutable/revision-tagged sonuçta tutar; Faz B publisher bu sonucu yeniden
+      çözmeden yayınlar. `analysisFields.clear()` bu snapshot'ı geçersiz kılamaz.
 - [x] Extrude, River'ın "Add" modeliyle çalışacak şekilde yeniden tasarlandı
       (`ProfileSplineOverlay.cpp`, `surfaceSnapPosition()`): tetikleme artık
       küçük endpoint ikonuna ekran-uzayı proximity ile isabet etmeyi
@@ -182,6 +190,120 @@ bölümündedir.
 - [ ] Extrude'un canlı mouse-follow + sol tık onay akışı (Faz 2'nin açık maddesi)
       Surface Snap'i her frame çağırıp önizleme göstermeli; şu an yalnızca tek
       tıklamada anlık snap oluyor, sürükleme sırasında canlı takip yok.
+
+## Faz 3.7 — Yüzey üzerine çizim ORTAK bir servis; River bir TÜKETİCİ olur
+
+> 2026-08-30 tasarım kararı. Tetikleyen gözlem: arazi üzerine Water panelinden
+> mouse ile spline nehir çiziliyor, ama o eğri genel spline sisteminde
+> **görünmüyor** — `spline.*` IPC'si yok, keyframe alamıyor, Curve Deform veya
+> `Curve to Mask` tüketemiyor. Sorun "nehir eksik" değil; **üç ayrı katman tek
+> bir struct'a kaynamış** durumda.
+
+### Bugünkü üç katman ve nerede çakışıyorlar
+
+| Katman | Ne yapar | Bugün |
+|---|---|---|
+| **Yerleştirme** | imleç altındaki yüzeyde dünya noktası bulur | İKİ kopya: `surfaceSnapPosition` (`ProfileSplineOverlay.cpp`, **anonim namespace** — dışarıdan erişilemez; mesh BVH + terrain + Y=0) ve `scene_ui_river.hpp`'deki satır içi kopya (**yalnız terrain** + Y=0, mesh'i hiç görmez) |
+| **Eğri** | yazılan kontrol noktaları | `SplineObject::spline` ve `RiverSpline::spline` — **ikisi de aynı tip: `BezierSpline`** |
+| **Tüketici** | eğrinin ne anlama geldiği | `RiverSpline`'a kaynak: hidrolik veri, su parametreleri, üretilmiş mesh, `waterSurfaceId` hepsi aynı struct'ta |
+
+İkinci satır kararı verir: nehrin eğrisi ile spline object'in eğrisi **zaten
+aynı tiptir**. Yani bu bir yeniden yazım değil, bir **ayrıştırma**.
+
+### Hedef yapı: bir kez çiz, çok kez ilişkilendir
+
+```text
+Surface Draw tool  ->  SplineObject  (tek yazarlık otoritesi)
+                            |
+        +-------------------+-------------------+
+        |                   |                   |
+   RiverAttachment    RoadAssignment      (hair guide, scatter path, ...)
+```
+
+Eğri kimin olduğunu bilmez; **tüketici eğriye bağlanır**. Aynı eğri hem yol hem
+de nehir geçişi referansı olabilir.
+
+- [x] **3.7a — `SplineSurfaceAuthoring` servisi.** YAZILDI, DERLENMEDİ. `surfaceSnapPosition` anonim
+      namespace'ten çıkar, kendi `.h/.cpp` çiftine taşınır ve sonuç bir
+      **değer** döndürür: pozisyon + normal + neyin vurulduğu
+      (`Mesh | Terrain | GroundPlane`) + vurulan nesne kimliği. Yalnız pozisyon
+      döndürmek, çağıranın "ne vurdum" bilgisini varsayıma çevirir.
+- [x] **3.7b — `SurfaceFilter` (SESSİZ DAVRANIŞ DEĞİŞİMİNİ ÖNLER).** YAZILDI, DERLENMEDİ. River'ın
+      kopyası mesh'i görmüyor; ortak servise geçince nehir çizerken bir kayanın
+      veya köprünün üstüne snap olmaya **başlar**. Bu bir hata olarak
+      görünmez — makul görünen yanlış sonuçtur. O yüzden servis
+      `TerrainOnly | MeshAndTerrain | GroundPlane` filtresi alır ve River
+      `TerrainOnly` seçer: davranış kasıtla korunur, tesadüfen değil.
+- [ ] **3.7c — River eğri sahipliğini bırakır.** `RiverSpline` içindeki
+      `BezierSpline spline` alanı kaldırılır; yerine `spline_object_id`. Kalan
+      alanlar (hidrolik dizisi, mesh ayarları, `WaterWaveParams`,
+      `waterSurfaceId`) `RiverAttachment` olur — road katmanının
+      `RoadAssignment`'ıyla **aynı şekil**. İki bağımsız tüketicinin aynı şekle
+      yakınsaması, şeklin doğru olduğunun kanıtıdır.
+- [ ] **3.7d — Nokta başına kanal ADLANDIRILIR.** `BezierControlPoint` bugün
+      `userData1/2/3 + userColor` taşıyor; River 1'i genişlik, 2'yi derinlik
+      olarak kullanıyor, Road da genişlik isteyecek. **Yeni `userDataN`
+      eklenmez** — anonim slot, tüketiciye göre anlam değiştiren alan demektir
+      ve bu deponun tekrar eden arıza sınıfıdır. Bunun yerine attachment bir
+      **kanal haritası** beyan eder (`width -> userData1`), UI slider'ı o adı
+      yazar ve `spline.set` kendini açıklar hale gelir. Dördüncü kanal ihtiyacı
+      doğarsa slot eklemek yerine adlandırılmış attribute'a geçilir.
+- [x] **3.7e — Tek çizim aracı.** YAZILDI, DERLENMEDİ. "Nehir ekle" bir mod olmaktan çıkar; viewport
+      aracı `Draw Curve on Surface` bir `SplineObject` üretir/uzatır, tüketici
+      sonradan iliştirilir. Extrude'un zaten River'ın "her tıkta zincirle"
+      modeline taşınmış olması (Faz 3.6) bu aracın hazır davranışıdır.
+- [ ] **3.7f — Göç, sessiz değil.** Proje yüklenirken her `RiverSpline`,
+      `SplineObject` + `RiverAttachment`'a çevrilir ve **serileştirme anahtarı
+      adı değişir** (`rivers` -> `river_attachments`). Kural 5: ölü yolu sök,
+      ama anlamı sessizce değiştirme — eski anahtar adı korunursa yeni kod eski
+      dosyayı yarım okur ve bunun hiçbir belirtisi olmaz. Dönüşüm loglanır.
+- [~] **3.7g — River script/IPC'ye açılır (kural ★★★1 açığı).** Eğri tarafı YAZILDI (`scene.raycast`, `spline.append_point`, `spline.create` primitive=`empty` plane=`free`); `river.*` attachment yüzeyi 3.7c/3.7f göçüne bağlı ve AÇIK. Bugün
+      `river.*` diye **hiçbir IPC metodu yok**; nehir sistemi panel-only, yani
+      test edilemez. Göçten sonra eğri tarafı `spline.*`'tan bedava gelir;
+      geriye yalnız attachment kalır: `river.attach`, `river.detach`,
+      `river.list`, `river.set_params`. Beş dokunuş + overlay satırı.
+
+### Bu partide ayrıca çıkan üç şey (2026-08-30, YAZILDI/DERLENMEDİ)
+
+- **Canlı imleç takibi.** Extrude kodda "her tıkta zincirle" modelindeydi ama
+  snap yalnızca tık anında oluyordu; ekranda hiçbir şey noktaın nereye
+  düşeceğini söylemediği için araç "otomatik bir noktaya uzatıyor" gibi
+  hissettiriyordu. Artık her frame snap çağrılıp hedef nokta ve son noktadan
+  çizgi çiziliyor. **İşaretçi rengi ne vurulduğunu söylüyor** (mavi=terrain,
+  turuncu=mesh, gri=zemin düzlemi) — kayaya düşecek bir nokta tıktan ÖNCE
+  görülüyor.
+- **★ Extrude dünya koordinatını yerel diziye yazıyordu.** Kontrol noktaları
+  eğrinin yerel uzayında tutuluyor, snap sonucu ise dünya pozisyonu. Taşınmış
+  veya döndürülmüş bir eğriyi extrude etmek noktaı ofset kadar yanlış yere
+  koyuyordu; identity transform'da görünmüyordu. `transform.inverse()` eklendi.
+- **★★ River'ın ilk mesh'i hiçbir zaman otomatik üretilemiyordu.** Kare
+  döngüsündeki kapı `river.needsRebuild && river.flatMesh` istiyordu, ama
+  `flatMesh` yalnızca `generateMesh()` içinde doğuyor — yani yeni çizilen bir
+  nehir "Rebuild Mesh" düğmesi bulunana kadar meshsiz kalıyordu.
+  `updateAllRivers` de sadece proje yüklenirken çağrılıyor. Kapı
+  `pointCount() >= 2` oldu (parametre düzenleme yollarında da aynısı).
+  **Carve elle kalmaya devam ediyor**: mesh türetilmiş ve ucuz, carve araziye
+  yıkıcı.
+
+Ölçüm: `scripts/probe_surface_curve_authoring.py`
+
+### ★★★ Açık kök: dördüncü bir carve uygulaması var
+
+`terrain.carve_river` (`RtApiTerrain.cpp:1456`) bir nehir spline'ını örnekleyip
+`TerrainManager::carveRiverBed` / `carveRiverBedNatural` ile **doğrudan
+heightmap'e yazıyor** — imperatif, yıkıcı, `TerrainSnapshot` ile geri alınıyor.
+
+Yani "spline -> yükseklik" yolu bu depoda zaten var; olmayan şey
+**non-destructive, graph'ta değerlendirilen, alan yayınlayan** yol. Bu ayrım
+önemli çünkü `Road Carve` devreye girdiğinde aynı işin iki uygulaması olacak ve
+ikisi kaçınılmaz olarak ayrışacak. Karar Faz 3.6 bitmeden verilmeli:
+
+1. `carveRiverBed*` `Road Carve`'ın bir profili haline gelir (tercih edilen), veya
+2. açıkça "yıkıcı tek seferlik authoring aracı" diye etiketlenir ve graph
+   yolundan ayrı tutulur, veya
+3. sökülür (kural 5).
+
+Karar verilmemesi üçüncü sessiz yol demektir.
 
 ## Faz 4 — Scripting, IPC ve doğrulama
 

@@ -6,6 +6,7 @@
 #include "TerrainSystem.h"
 #include "Texture.h"
 #include "Transform.h"
+#include <cmath>
 #include <random>
 #include <algorithm>
 #include <map>
@@ -137,6 +138,59 @@ Matrix4x4 InstanceTransform::toMatrix() const {
 // INSTANCE GROUP
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Inverse of toMatrix(). Read that function first: rows are scaled (row r by
+// scale.<r>, so the row LENGTHS are the scale) and the rotation basis is
+// Y * X * Z, i.e.
+//     R[1][2] = -sin(x)
+//     R[1][0] =  cos(x) sin(z)      R[1][1] = cos(x) cos(z)
+//     R[0][2] =  cos(x) sin(y)      R[2][2] = cos(x) cos(y)
+// which is what the extraction below undoes, term for term.
+InstanceTransform InstanceTransform::fromMatrix(const Matrix4x4& m) {
+    InstanceTransform out;
+    out.position = Vec3(m.m[0][3], m.m[1][3], m.m[2][3]);
+
+    float sX = std::sqrt(m.m[0][0]*m.m[0][0] + m.m[0][1]*m.m[0][1] + m.m[0][2]*m.m[0][2]);
+    float sY = std::sqrt(m.m[1][0]*m.m[1][0] + m.m[1][1]*m.m[1][1] + m.m[1][2]*m.m[1][2]);
+    float sZ = std::sqrt(m.m[2][0]*m.m[2][0] + m.m[2][1]*m.m[2][1] + m.m[2][2]*m.m[2][2]);
+    out.scale = Vec3(sX, sY, sZ);
+
+    const float eps = 1e-8f;
+    if (sX < eps) sX = eps;
+    if (sY < eps) sY = eps;
+    if (sZ < eps) sZ = eps;
+
+    // Unscaled rotation basis.
+    const float r02 = m.m[0][2] / sX;
+    const float r10 = m.m[1][0] / sY;
+    const float r11 = m.m[1][1] / sY;
+    const float r12 = m.m[1][2] / sY;
+    const float r20 = m.m[2][0] / sZ;
+    const float r22 = m.m[2][2] / sZ;
+    const float r00 = m.m[0][0] / sX;
+
+    const float rad2deg = 180.0f / 3.14159265358979f;
+    const float sinX = std::max(-1.0f, std::min(1.0f, -r12));
+    const float rx = std::asin(sinX);
+    const float cosX = std::cos(rx);
+
+    float ry, rz;
+    if (std::fabs(cosX) > 1e-5f) {
+        rz = std::atan2(r10, r11);
+        ry = std::atan2(r02, r22);
+    } else {
+        // Gimbal lock: cos(x) == 0 collapses Y and Z onto one axis. Pin Z and
+        // read Y from the terms that survive with sin(z)=0, cos(z)=1.
+        rz = 0.0f;
+        ry = std::atan2(-r20, r00);
+    }
+
+    out.rotation = Vec3(rx * rad2deg, ry * rad2deg, rz * rad2deg);
+    return out;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INSTANCE GROUP
+// ══════════════════════════════════════════════════════════════════════════════
 void InstanceGroup::addInstance(const InstanceTransform& transform) {
     instances.push_back(transform);
     initial_instances.push_back(transform); // Store Rest Pose

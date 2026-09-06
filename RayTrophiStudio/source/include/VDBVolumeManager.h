@@ -74,6 +74,20 @@ struct VDBVolumeData {
     float dense_origin[3] = {0.0f, 0.0f, 0.0f};
     float dense_voxel_size = 0.0f;
     uint64_t dense_version = 0;
+    // ★★★ HOST MIRROR of the dense grids, for a consumer that does NOT own the
+    // simulation compute device. The addresses above are raw VkDeviceAddresses
+    // and are meaningless on a second VkDevice — and reading one there yields
+    // zero density, i.e. it looks exactly like "no smoke here". This process
+    // runs two Vulkan devices (render backend + dedicated raster viewport
+    // backend), so the second consumer needs the values, not the pointer.
+    // See [[feedback_ipc_values_only_no_pointers]] — the same rule, one scope in.
+    //
+    // Filled on demand and version-stamped: a consumer that owns the device
+    // never pays for it, and a consumer that does not re-uploads only when
+    // dense_mirror_version changes.
+    std::vector<float> dense_density_mirror;
+    std::vector<float> dense_temperature_mirror;
+    uint64_t dense_mirror_version = 0;
     // Host-side render gate. Keep the live addresses/binding stable while an
     // empty dense domain is omitted from the Vulkan volume packet.
     bool dense_content_active = false;
@@ -184,6 +198,21 @@ public:
                               int block_size,
                               uint64_t emissive_list_address = 0,
                               int emissive_capacity = 0);
+
+    // ── Host mirror of the live dense grids ─────────────────────────────────
+    // Only a consumer that cannot dereference the device addresses needs this;
+    // see the field comments on VDBVolumeData. `version` is the producer's
+    // dense_version, so a consumer can gate its own re-upload on it.
+    void setLiveDenseHostMirror(int volume_id,
+                                std::vector<float>&& density,
+                                std::vector<float>&& temperature,
+                                uint64_t version);
+    // Non-owning views. Empty when no mirror was ever requested for this volume
+    // — which is the normal case on a single-device session, and must not be
+    // read as "the grid is empty".
+    const std::vector<float>* liveDenseDensityMirror(int volume_id) const;
+    const std::vector<float>* liveDenseTemperatureMirror(int volume_id) const;
+    uint64_t liveDenseMirrorVersion(int volume_id) const;
     void clearLiveDenseGpuFields(int volume_id);
     // Toggle only the content gate while preserving persistent Vulkan buffer
     // addresses and the stable TLAS/SSBO binding.

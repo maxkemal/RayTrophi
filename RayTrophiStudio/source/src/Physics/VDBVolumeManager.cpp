@@ -1025,6 +1025,41 @@ void VDBVolumeManager::setLiveDenseGpuFields(
     }
 }
 
+void VDBVolumeManager::setLiveDenseHostMirror(int volume_id,
+                                              std::vector<float>&& density,
+                                              std::vector<float>&& temperature,
+                                              uint64_t version) {
+    VDBVolumeData* volume = getVolume(volume_id);
+    if (!volume) return;
+    // Refuse to install an EMPTY density mirror over a good one. A failed
+    // readback and a genuinely empty grid produce the same vector here, and
+    // publishing the empty one would blank the volume on the mirroring
+    // consumer while the owning consumer still shows smoke — a difference
+    // between two viewports is exactly the kind of thing that gets blamed on
+    // the shader.
+    if (density.empty()) return;
+    volume->dense_density_mirror = std::move(density);
+    volume->dense_temperature_mirror = std::move(temperature);
+    volume->dense_mirror_version = version;
+}
+
+const std::vector<float>* VDBVolumeManager::liveDenseDensityMirror(int volume_id) const {
+    const VDBVolumeData* volume = getVolume(volume_id);
+    if (!volume || volume->dense_density_mirror.empty()) return nullptr;
+    return &volume->dense_density_mirror;
+}
+
+const std::vector<float>* VDBVolumeManager::liveDenseTemperatureMirror(int volume_id) const {
+    const VDBVolumeData* volume = getVolume(volume_id);
+    if (!volume || volume->dense_temperature_mirror.empty()) return nullptr;
+    return &volume->dense_temperature_mirror;
+}
+
+uint64_t VDBVolumeManager::liveDenseMirrorVersion(int volume_id) const {
+    const VDBVolumeData* volume = getVolume(volume_id);
+    return volume ? volume->dense_mirror_version : 0;
+}
+
 void VDBVolumeManager::setLiveDenseMajorant(int volume_id,
                                             uint64_t majorant_address,
                                             int dim_x, int dim_y, int dim_z,
@@ -1054,6 +1089,15 @@ void VDBVolumeManager::clearLiveDenseGpuFields(int volume_id) {
     volume->dense_temperature_address = 0;
     volume->dense_fuel_address = 0;
     volume->dense_flame_address = 0;
+    // The host mirror describes the same grid these addresses did. Leaving it
+    // behind would let a mirroring backend keep rendering a domain the producer
+    // has already withdrawn — the "'yok' != 'silinmiş'" failure, from the other
+    // direction.
+    volume->dense_density_mirror.clear();
+    volume->dense_density_mirror.shrink_to_fit();
+    volume->dense_temperature_mirror.clear();
+    volume->dense_temperature_mirror.shrink_to_fit();
+    volume->dense_mirror_version = 0;
     volume->dense_majorant_address = 0;
     volume->dense_majorant_dim[0] = 0;
     volume->dense_majorant_dim[1] = 0;

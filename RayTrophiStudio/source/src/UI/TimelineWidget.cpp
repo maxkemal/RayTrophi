@@ -1,4 +1,4 @@
-#include "TimelineWidget.h"
+﻿#include "TimelineWidget.h"
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "Triangle.h"
@@ -614,12 +614,14 @@ void TimelineWidget::draw(UIContext& ctx) {
         float frame_duration = 1.0f / ctx.render_settings.animation_fps;
 
         if (elapsed >= frame_duration) {
-            // Advance exactly as many frames as have elapsed (fixes slow-motion
-            // when render time > frame_duration, e.g. Vulkan 50ms vs 33ms@30fps)
-            int frames_to_advance = static_cast<int>(elapsed / frame_duration);
-            // Cap to 1 frame to guarantee correct per-frame animation (prevents
-            // skipping frames on a slow render, which looks like fast forwarding)
-            if (frames_to_advance > 1) frames_to_advance = 1;
+            // How many frames of WALL time have passed since the last advance.
+            const int elapsed_frames = static_cast<int>(elapsed / frame_duration);
+            // Cap to 1 frame per tick: on a slow viewport, skipping frames makes
+            // the clip look fast-forwarded and hides per-frame problems. The
+            // trade is deliberate — see the resync below for what it costs.
+            int frames_to_advance = elapsed_frames;
+            const bool clamped = frames_to_advance > 1;
+            if (clamped) frames_to_advance = 1;
 
             current_frame += frames_to_advance;
             int range = end_frame - start_frame + 1;
@@ -640,9 +642,32 @@ void TimelineWidget::draw(UIContext& ctx) {
                 }
             }
 
-            // Carry over the fractional remainder so timing stays accurate
-            last_time += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<float>(frames_to_advance * frame_duration));
+            if (clamped) {
+                // ★★★★ RESYNC, do not carry. Advancing last_time by only ONE
+                // frame_duration while (say) 2.4 frames of wall time passed banks
+                // a debt that this branch can never repay, because the cap keeps
+                // paying back one frame per tick. The debt grows every tick, so
+                // `elapsed >= frame_duration` stays true forever — and from then
+                // on the timeline advances exactly one animation frame per
+                // RENDERED frame, permanently. Playback speed becomes the render
+                // rate: slow scene = slow motion, and once the scene speeds up
+                // again it plays FASTER than real time, with no way back short of
+                // stopping playback.
+                //
+                // Reported 2026-09-05 as "raster mode plays the animation at
+                // whatever speed it computes". It is a bug, and this is it: not
+                // the cap (that is a deliberate choice) but the carry underneath it.
+                //
+                // Dropping the surplus makes the cap mean what it says: at most
+                // one frame per tick, real time whenever the viewport can keep up,
+                // and slow motion — never runaway — when it cannot.
+                last_time = now;
+            } else {
+                // Carry the fractional remainder so timing stays accurate across
+                // ticks that did keep up.
+                last_time += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<float>(frames_to_advance * frame_duration));
+            }
         }
     }
     
@@ -3005,20 +3030,20 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
             // Process Position Keys
             for (const auto& [nodeName, keys] : anim->positionKeys) {
                 for (const auto& key : keys) {
-                    int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
+                    int frame = static_cast<int>(std::round(key.time / tps * 24.0));
                     
                     // Get or create keyframe at this frame
                     auto& track = ctx.scene.timeline.tracks[nodeName];
                     Keyframe* existing = track.getKeyframeAt(frame);
                     if (existing) {
-                        existing->transform.position = Vec3(key.mValue.x, key.mValue.y, key.mValue.z);
+                        existing->transform.position = Vec3(key.value.x, key.value.y, key.value.z);
                         existing->transform.has_position = true;
                         existing->transform.has_pos_x = true; existing->transform.has_pos_y = true; existing->transform.has_pos_z = true;
                         existing->has_transform = true;
                     } else {
                         Keyframe kf(frame);
                         kf.has_transform = true;
-                        kf.transform.position = Vec3(key.mValue.x, key.mValue.y, key.mValue.z);
+                        kf.transform.position = Vec3(key.value.x, key.value.y, key.value.z);
                         kf.transform.has_position = true;
                         kf.transform.has_pos_x = true; kf.transform.has_pos_y = true; kf.transform.has_pos_z = true;
                         kf.transform.has_rotation = false;
@@ -3031,10 +3056,10 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
             // Process Rotation Keys (Quaternion -> Euler)
             for (const auto& [nodeName, keys] : anim->rotationKeys) {
                 for (const auto& key : keys) {
-                    int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
+                    int frame = static_cast<int>(std::round(key.time / tps * 24.0));
                     
                     // Convert quaternion to Euler angles (degrees)
-                    float qx = key.mValue.x, qy = key.mValue.y, qz = key.mValue.z, qw = key.mValue.w;
+                    float qx = key.value.x, qy = key.value.y, qz = key.value.z, qw = key.value.w;
                     
                     float sinr_cosp = 2.0f * (qw * qx + qy * qz);
                     float cosr_cosp = 1.0f - 2.0f * (qx * qx + qy * qy);
@@ -3073,19 +3098,19 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
             // Process Scale Keys
             for (const auto& [nodeName, keys] : anim->scalingKeys) {
                 for (const auto& key : keys) {
-                    int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
+                    int frame = static_cast<int>(std::round(key.time / tps * 24.0));
                     
                     auto& track = ctx.scene.timeline.tracks[nodeName];
                     Keyframe* existing = track.getKeyframeAt(frame);
                     if (existing) {
-                        existing->transform.scale = Vec3(key.mValue.x, key.mValue.y, key.mValue.z);
+                        existing->transform.scale = Vec3(key.value.x, key.value.y, key.value.z);
                         existing->transform.has_scale = true;
                         existing->transform.has_scl_x = true; existing->transform.has_scl_y = true; existing->transform.has_scl_z = true;
                         existing->has_transform = true;
                     } else {
                         Keyframe kf(frame);
                         kf.has_transform = true;
-                        kf.transform.scale = Vec3(key.mValue.x, key.mValue.y, key.mValue.z);
+                        kf.transform.scale = Vec3(key.value.x, key.value.y, key.value.z);
                         kf.transform.has_scale = true;
                         kf.transform.has_scl_x = true; kf.transform.has_scl_y = true; kf.transform.has_scl_z = true;
                         kf.transform.has_position = false;

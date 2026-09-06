@@ -25,7 +25,7 @@ layout(set = 0, binding = 0) readonly  buffer HeightIn  { float heightIn[]; };
 layout(set = 0, binding = 1) writeonly buffer HeightOut { float heightOut[]; };
 layout(set = 0, binding = 2) readonly  buffer Area      { float areaField[]; };
 layout(set = 0, binding = 3) readonly  buffer Mask      { float maskField[]; };
-layout(set = 0, binding = 4) readonly  buffer Filled    { float filledField[]; };
+layout(set = 0, binding = 4) readonly  buffer LakeSurf  { float lakeSurfaceField[]; };
 
 void main() {
     uint ui = gl_GlobalInvocationID.x;
@@ -38,7 +38,7 @@ void main() {
         heightOut[i] = hCur;
         return;
     }
-    if (filledField[i] - hCur > pc.lakeEps) { heightOut[i] = hCur; return; }
+    if (lakeSurfaceField[i] - hCur > pc.lakeEps) { heightOut[i] = hCur; return; }
 
     float lap = heightIn[i - 1] + heightIn[i + 1] +
                 heightIn[i - pc.width] + heightIn[i + pc.width] - 4.0 * hCur;

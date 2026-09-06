@@ -1,0 +1,93 @@
+// terrain_lem_flat_seed.comp
+// ===========================================================================
+// FLAT RESOLUTION, pass 1 of 3 (Garbrecht & Martz 1997).
+// ===========================================================================
+//
+// ★★★ WHY THIS EXISTS: in a flat or a filled depression the terrain HAS NO
+// GRADIENT. Whatever direction flow takes there is not a property of the
+// landscape, it is a property of the conditioning algorithm. The old scheme
+// raised each flood ring by a few ulp, which makes the conditioned surface an
+// 8-connected geodesic distance field from the flat's outlet -- and the level
+// sets of THAT are squares, because the fill charged the same step for a
+// cardinal and a diagonal move. Steepest descent over a square distance field
+// runs along 0 and 45 degrees. That is the whole artifact: straight, angular,
+// grid-locked channels that never merge, on exactly the low-gradient ground
+// where real rivers braid and converge.
+//
+// Dithering the ladder was tried and cannot fix it. The dither is a factor on
+// a step that is then SUMMED along the path, so its relative spread falls as
+// 1/sqrt(N): over a long flat the ramp converges right back to a linear
+// function of the geodesic distance. It perturbs the texture, not the shape.
+//
+// Garbrecht & Martz build the flat's gradient from TWO distance fields instead
+// of one:
+//
+//   dLow  -- geodesic distance to the flat's outlets (cells with a strictly
+//            lower neighbour). This is the term the old ladder had.
+//   dHigh -- geodesic distance from where HIGHER ground meets the flat. This
+//            is the term it did not have, and it is the one that makes
+//            tributaries converge: a stream entering the flat keeps heading
+//            away from the wall it came out of instead of immediately turning
+//            onto the outlet-distance rings alongside every other stream.
+//
+// This pass only classifies and seeds. terrain_lem_flat_relax propagates,
+// terrain_lem_flat_ramp combines them into the routing surface.
+//
+// ---------------------------------------------------------------------------
+// ENCODING. One uint per cell: dLow in bits 0-15, dHigh in bits 16-31.
+// Distances are FIXED POINT in twelfths of a cell, so a diagonal step can cost
+// 17/12 = 1.4167 instead of being charged the same as a cardinal one. That
+// 0.17 % error against sqrt(2) is what buys the isotropy; charging both the
+// same is what made the level sets square.
+//
+//   dLow  : 0..0xFFFC valid, >= 0xFFFD means "the outlet BFS never got here"
+//   dHigh : 0..0xFFFC valid, 0xFFFE means "flat, but no higher ground reached"
+//           and 0xFFFF means "NOT A FLAT CELL" -- the flag the ramp keys on.
+// ===========================================================================
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Filled { float filledField[]; };
+layout(set = 0, binding = 1) writeonly buffer Dist   { uint  distField[]; };
+
+const int dx8[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+    int x = i % pc.width, y = i / pc.width;
+
+    // Exact float equality is the right test and it is only safe because the
+    // fill no longer adds a ladder: with eps = 0 every cell of one filled
+    // basin settles on the SAME float, so "the flat" is a well defined set
+    // rather than a band. This is why terrain_flow_fill lost its epsilon.
+    float f = filledField[i];
+
+    bool hasEqual = false, hasLower = false, hasHigher = false;
+    for (int d = 0; d < 8; ++d) {
+        int nx = x + dx8[d], ny = y + dy8[d];
+        if (nx < 0 || ny < 0 || nx >= pc.width || ny >= pc.height) continue;
+        float nf = filledField[ny * pc.width + nx];
+        if (nf == f)      hasEqual = true;
+        else if (nf < f)  hasLower = true;
+        else              hasHigher = true;
+    }
+
+    uint lo = 0xFFFFu, hi = 0xFFFFu;
+    if (hasEqual) {
+        // The domain edge is an outlet: water leaves the map there. Without
+        // this a flat touching the border has no seed at all and the whole
+        // region stays unresolved -- which reads as a terminal sink, not as a
+        // coastline.
+        bool onBorder = (x == 0 || y == 0 || x == pc.width - 1 || y == pc.height - 1);
+        lo = (hasLower || onBorder) ? 0u : 0xFFFFu;
+        hi = hasHigher ? 0u : 0xFFFEu;
+    }
+    distField[i] = lo | (hi << 16);
+}

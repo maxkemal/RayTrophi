@@ -82,6 +82,9 @@ std::atomic<bool> rendering_paused = false;  // Pause animation render
 
 // Vulkan runtime device-loss indicator
 bool g_vulkan_device_lost = false;
+
+// Sahibi ColorProcessor; Main her karede buraya yansitir (bkz. globals.h).
+DisplayPostParams g_display_post{};
 std::string g_vulkan_device_lost_msg;
 std::atomic<bool> g_vulkan_trim_recreate_requested = false;
 

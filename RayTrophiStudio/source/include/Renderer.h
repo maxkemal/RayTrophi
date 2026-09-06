@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -52,7 +52,6 @@
 #include <ColorProcessingParams.h>
 #include <functional>
 #include "FoliageWindSystem.h"
-#include "AssimpLoader.h"
 #include "AnimationController.h"  // New animation management system
 #include "Hair/HairSystem.h"      // Hair/Fur rendering system
 #include "Stylize/StylizeModeState.h"
@@ -77,7 +76,6 @@ class Hittable;
 class HittableInstance;
 struct HitRecord;
 class ParallelBVHNode;
-class AnimatedObject;
 struct SceneData;
 struct AnimationData;
 
@@ -117,7 +115,21 @@ public:
     // already in SDL_Surface channel layout). Returns false if binding fails;
     // caller must fall back to the host path.
     struct OIDNTonemapParams {
-        float    exposure   = 1.0f;
+        // ★ Full post_chain.glsl field set (see oidn_blend_cuda.h::OidnPostParams,
+        //   which this gets forwarded into 1:1) — NOT the old exposure-only
+        //   subset. Denoise used to bypass post.* entirely and burn its own
+        //   hardcoded exposure+Reinhard+gamma2.2, so "post-process has no
+        //   effect while the denoiser is on" was structural, not a toggle bug.
+        //   Fill every field from the SAME ColorProcessingParams the non-denoised
+        //   GPU path (tonemap.comp) reads, or the two paths will disagree again.
+        float    exposure          = 1.0f;   // post.* color-grading exposure
+        float    cameraExposure    = 1.0f;   // ISO/shutter/aperture triangle
+        float    gamma             = 1.0f;
+        float    saturation        = 1.0f;
+        float    colorTemperature  = 6500.0f;
+        float    vignetteStrength  = 0.0f;
+        uint32_t toneMapping       = 4u;     // ToneMappingType; 4 = None(=Reinhard)
+        uint32_t vignetteEnabled   = 0u;
         uint32_t aMaskOr    = 0u;
         uint8_t  rShift     = 0;
         uint8_t  gShift     = 8;
@@ -270,7 +282,6 @@ private:
     std::vector<float> variance_buffer;
     static constexpr size_t CACHE_SIZE = 8;
     static constexpr size_t DIMENSION_COUNT = 2;
-    AssimpLoader assimpLoader;
 
    
     std::mutex cache_mutex;  // Header'da tanımlama

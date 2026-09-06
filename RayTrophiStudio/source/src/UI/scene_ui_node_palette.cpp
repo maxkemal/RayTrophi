@@ -23,12 +23,15 @@ void ModernTerrainNodePalette::initializeCategories() {
         {"Input", ImVec4(0.22f, 0.72f, 0.32f, 1.0f), {
             {NodeType::HeightmapInput, "Heightmap", "Imports 16-bit heightmap image", UIWidgets::IconType::Terrain},
             {NodeType::NoiseGenerator, "Noise Generator", "Procedural Perlin/Simplex noise source", UIWidgets::IconType::Noise},
-            {NodeType::HardnessInput, "Hardness Input", "Material structural resistance map", UIWidgets::IconType::ClayTool}
+            {NodeType::HardnessInput, "Hardness Input", "Material structural resistance map", UIWidgets::IconType::ClayTool},
+            {NodeType::CurveInput, "Curve Input", "Immutable scene spline snapshot", UIWidgets::IconType::Gizmo}
         }, true},
         {"Landform", ImVec4(0.62f, 0.45f, 0.32f, 1.0f), {
             {NodeType::MountainRange, "Mountain Range", "Orogeny & tectonic uplift ridges", UIWidgets::IconType::DrawTool},
             {NodeType::BasinValley, "Basin & Valley", "Depression and valley formation", UIWidgets::IconType::FlattenTool},
-            {NodeType::TerrainDetail, "Terrain Detail", "Micro-topography detail accentuation", UIWidgets::IconType::DrawSharpTool}
+            {NodeType::TerrainDetail, "Terrain Detail", "Micro-topography detail accentuation", UIWidgets::IconType::DrawSharpTool},
+            {NodeType::RoadCarve, "Road Carve", "Grade-limited road terrain and infrastructure fields", UIWidgets::IconType::Sculpt},
+            {NodeType::RoadNetwork, "Road Network", "Carves every curve with a road assignment in one solve", UIWidgets::IconType::Sculpt}
         }, true},
         {"Erosion", ImVec4(0.32f, 0.52f, 0.92f, 1.0f), {
             {NodeType::HydraulicErosion, "Hydraulic", "Water stream sediment transport erosion", UIWidgets::IconType::Water},
@@ -56,7 +59,8 @@ void ModernTerrainNodePalette::initializeCategories() {
             {NodeType::MaskImage, "Mask Image", "External mask texture file source", UIWidgets::IconType::Assets},
             {NodeType::PaintMaskCombine, "Paint Mask Combine", "Layered paint mask compositor", UIWidgets::IconType::LayerTool},
             {NodeType::GrassMask, "Grass Mask", "Vegetation growth probability map", UIWidgets::IconType::Hair},
-            {NodeType::SurfaceMasks, "Surface Masks", "Multi-channel sediment & debris mask", UIWidgets::IconType::ViewSolid}
+            {NodeType::SurfaceMasks, "Surface Masks", "Multi-channel sediment & debris mask", UIWidgets::IconType::ViewSolid},
+            {NodeType::CurveToMask, "Curve to Mask", "Metric curve stroke or closed footprint", UIWidgets::IconType::MaskTool}
         }, true},
         {"Data Maps", ImVec4(0.25f, 0.58f, 0.75f, 1.0f), {
             {NodeType::TerrainAnalysis, "Terrain Analysis", "Integrated slope/aspect/flow field", UIWidgets::IconType::Graph},
@@ -102,6 +106,8 @@ void ModernTerrainNodePalette::initializeCategories() {
             {NodeType::SatMapOutput, "SatMap Output", "Textured color composite output", UIWidgets::IconType::ViewRendered},
             {NodeType::HardnessOutput, "Hardness Output", "Structural hardness map export", UIWidgets::IconType::ShadeFlatTool},
             {NodeType::TerrainFieldsOutput, "Terrain Fields", "Multi-channel physical field export", UIWidgets::IconType::Console},
+            {NodeType::PublishField, "Publish Field", "Publish one field under your own name for mask consumers", UIWidgets::IconType::Console},
+            {NodeType::RoadFieldsOutput, "Road Fields", "Publish one validated road snapshot for materials, hydrology and foliage", UIWidgets::IconType::Console},
             {NodeType::FoliageOutput, "Foliage Output", "Scatter instance transform list", UIWidgets::IconType::HairAddTool},
             {NodeType::LakeSurfaceOutput, "Lake Output", "Water surface geometry mesh output", UIWidgets::IconType::ViewPreview},
             {NodeType::RiverSplineOutput, "River Spline", "River spline path export", UIWidgets::IconType::Gizmo}

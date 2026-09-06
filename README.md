@@ -299,6 +299,40 @@ A post-convergence layer that reads the path-traced result + AOV buffers and res
 
 ---
 
+---
+
+## 📥 Model import
+
+Every format has its **own dedicated reader**. There is no general-purpose
+importer in the middle, and no fallback between readers: if a reader fails, the
+import fails with a reason. "It loaded" and "it loaded through something else"
+must not look alike.
+
+| Format | Reader | License |
+|---|---|---|
+| `.gltf` / `.glb` | [**cgltf**](https://github.com/jkuhlmann/cgltf) 1.15 — vendored | MIT, © 2018-2021 Johannes Kuhlmann |
+| `.fbx` | [**ufbx**](https://github.com/ufbx/ufbx) 0.23.0 — vendored | MIT *or* public domain, © 2020 Samuli Raivio |
+| `.obj` / `.mtl` | RayTrophi's own parser | MIT (this project) |
+
+**What is supported:** geometry with per-corner attributes and multiple UV sets,
+PBR materials with embedded or external textures, skeletal skinning, transform
+animation, cameras and photometric punctual lights (glTF), and
+`EXT_mesh_gpu_instancing` for scatter round-trips. glTF is also the **export**
+format, written directly from the engine's flat SoA geometry.
+
+**Why dedicated readers.** A general importer builds its own full object graph
+first, then the engine converts it — the mesh is materialised twice, and the
+importer's conventions (UV origin, unit scale, node transforms) silently become
+the engine's. Reading each container directly removes that middle copy and makes
+the conventions explicit and testable. Import cost is measured per phase (parse
+/ materials+textures / geometry / animation) rather than estimated.
+
+**Attribution.** cgltf and ufbx are vendored under `RayTrophiStudio/external/`,
+unmodified, with their license texts intact — both are permissively licensed
+single-file libraries, and this project is grateful for them. OBJ is parsed
+in-house because it is a line-oriented text format where a dependency would cost
+more than it saves. See [LICENSE.txt](LICENSE.txt) for the full notices.
+
 ## Python automation & secure IPC
 
 RayTrophi includes an embedded Python 3.11 automation layer (`rt`, API version `0.5.0`) and a
@@ -361,11 +395,11 @@ The project resolves dependencies via system environment variables. Set these to
 | `OPTIX_ROOT` | OptiX SDK | `C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0` |
 | `EMBREE_ROOT` | Embree root | `E:\...\embree-4.4.0.x64.windows` |
 | `OIDN_ROOT` | Intel OIDN root | `E:\...\oidn-2.3.0.x64.windows` |
-| `ASSIMP_ROOT` | Assimp root | `E:\...\Assimp` |
 | `CUDA_PATH` | CUDA Toolkit | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x` (usually auto-set) |
 | `VULKAN_SDK` | Vulkan SDK | `C:\VulkanSDK\1.3.xxx.0` |
 
-Managed dependencies: SDL2, Embree 4.x, Assimp 5.x, ImGui, OpenMP, stb_image, TinyEXR, Intel OIDN, NanoVDB, and CUDA/OptiX (optional).
+Managed dependencies: SDL2, Embree 4.x, ImGui, OpenMP, stb_image, TinyEXR, Intel OIDN, NanoVDB, and CUDA/OptiX (optional).
+Model import needs no external SDK: cgltf and ufbx are vendored under `RayTrophiStudio/external/`.
 
 ### Build
 
@@ -388,7 +422,9 @@ cmake --build build --config Release -j 12
 CMake keeps its executable, PTX, Vulkan shaders, and runtime DLLs isolated under `build/bin/<CONFIG>` so it never overwrites the VS2022 `x64` output.
 
 ### Run
-Launch the executable; the docked UI appears. Use **File → Load Scene** to import a model (GLTF recommended; 40+ formats via Assimp).
+Launch the executable; the docked UI appears. Use **File → Load Scene** to import a model.
+Supported formats: **glTF/GLB, FBX and OBJ**, each read by a dedicated importer
+(see [Model import](#-model-import)).
 
 ---
 
@@ -513,11 +549,11 @@ Contributions are welcome — performance work, new material/FX models, format s
 
 MIT License — see [LICENSE.txt](LICENSE.txt).
 
-Third-party libraries and SDKs remain under their own licenses. See the **Third-party components** section in [LICENSE.txt](LICENSE.txt) for Jolt Physics, Assimp, Dear ImGui, ozz-animation, Intel OIDN, Embree, OptiX/CUDA, Vulkan, SDL2, JSON libraries, stb, TinyEXR, NanoVDB/OpenVDB, miniz, and related notices.
+Third-party libraries and SDKs remain under their own licenses. See the **Third-party components** section in [LICENSE.txt](LICENSE.txt) for Jolt Physics, cgltf, ufbx, Dear ImGui, ozz-animation, Intel OIDN, Embree, OptiX/CUDA, Vulkan, SDL2, JSON libraries, stb, TinyEXR, NanoVDB/OpenVDB, miniz, and related notices.
 
 ## 🙏 Acknowledgments
 
-**Embree** (Intel CPU ray tracing) · **OptiX** (NVIDIA GPU ray tracing) · **Vulkan** · **Jolt Physics** (rigid-body physics) · **Assimp** (asset import) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoising) · **NanoVDB** (sparse volumes) · **Ozz-animation** (skeletal animation) · **stb** · **TinyEXR**
+**Embree** (Intel CPU ray tracing) · **OptiX** (NVIDIA GPU ray tracing) · **Vulkan** · **Jolt Physics** (rigid-body physics) · **cgltf** (glTF import/export) · **ufbx** (FBX import) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoising) · **NanoVDB** (sparse volumes) · **Ozz-animation** (skeletal animation) · **stb** · **TinyEXR**
 
 ## 👤 Author
 

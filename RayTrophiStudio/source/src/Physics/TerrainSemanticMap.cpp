@@ -1,11 +1,11 @@
-#include "TerrainSemanticMap.h"
+﻿#include "TerrainSemanticMap.h"
 
 #include "TerrainSystem.h"
 #include "Texture.h"
 #include "globals.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
-
+#include "Texture.h"
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -27,8 +27,11 @@ bool publish(TerrainObject& terrain,
         return false;
     }
     if (!terrain.surfaceSemanticMap) {
-        terrain.surfaceSemanticMap = std::make_shared<Texture>(
-            nullptr, TextureType::Unknown, "TerrainSemanticMap");
+        // ★ Was `Texture(nullptr, ...)`: the ASSIMP constructor called with a null
+        // aiTexture just to get an empty texture. It warned on every call and
+        // returned before assigning `name`, so "TerrainSemanticMap" was discarded.
+        terrain.surfaceSemanticMap =
+            std::make_shared<Texture>("TerrainSemanticMap", width, height, TextureType::Unknown);
     }
     Texture& texture = *terrain.surfaceSemanticMap;
     texture.width = width;
@@ -158,8 +161,11 @@ bool loadPng(TerrainObject& terrain, const std::string& path, std::string& error
         return false;
     }
     if (!terrain.surfaceSemanticMap) {
-        terrain.surfaceSemanticMap = std::make_shared<Texture>(
-            nullptr, TextureType::Unknown, "TerrainSemanticMap");
+        // ★ Was `Texture(nullptr, ...)`: the ASSIMP constructor called with a null
+        // aiTexture just to get an empty texture. It warned on every call and
+        // returned before assigning `name`, so "TerrainSemanticMap" was discarded.
+        terrain.surfaceSemanticMap =
+            std::make_shared<Texture>("TerrainSemanticMap", width, height, TextureType::Unknown);
     }
     Texture& texture = *terrain.surfaceSemanticMap;
     texture.width = width;

@@ -1,4 +1,5 @@
-#include "AnimationController.h"
+﻿#include "AnimationController.h"
+#include "Animation/AnimationKeys.h"
 #include "globals.h"
 #include <cmath>
 #include <algorithm>
@@ -567,21 +568,33 @@ Matrix4x4 AnimationController::calculateNodeTransform(
     // Use sampleTime for interpolation
     double wrappedTime = sampleTime; 
     
-    Matrix4x4 translation = Matrix4x4::identity();
-    Matrix4x4 rotation = Matrix4x4::identity();
-    Matrix4x4 scale = Matrix4x4::identity();
-    
+    const auto hasKeys = [&](const auto& channels) {
+        auto it = channels.find(nodeName);
+        return it != channels.end() && !it->second.empty();
+    };
+    if (!hasKeys(anim->positionKeys) && !hasKeys(anim->rotationKeys) &&
+        !hasKeys(anim->scalingKeys)) return defaultTransform;
+
+    // Missing channels retain bind values, including unanimated armature
+    // rotation/unit scale. Only keyed components replace these defaults.
+    Vec3 bindPosition, bindScale;
+    Quaternion bindRotation;
+    RayTrophi::decomposeTRS(defaultTransform, bindPosition, bindRotation, bindScale);
+    Matrix4x4 translation = Matrix4x4::translation(bindPosition);
+    Matrix4x4 rotation = bindRotation.toMatrix();
+    Matrix4x4 scale = Matrix4x4::scaling(bindScale);
+
     // Position interpolation
     auto posIt = anim->positionKeys.find(nodeName);
     if (posIt != anim->positionKeys.end() && !posIt->second.empty()) {
         const auto& keys = posIt->second;
         
         size_t keyIndex = 0;
-        if (wrappedTime >= keys.back().mTime) {
+        if (wrappedTime >= keys.back().time) {
             keyIndex = keys.size() - 1;
         } else {
             for (size_t i = 0; i < keys.size() - 1; ++i) {
-                if (wrappedTime < keys[i + 1].mTime) {
+                if (wrappedTime < keys[i + 1].time) {
                     keyIndex = i;
                     break;
                 }
@@ -592,12 +605,12 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         float t = 0.0f;
         
         if (nextKey < keys.size()) {
-            double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
-            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+            double deltaTime = keys[nextKey].time - keys[keyIndex].time;
+            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].time) / deltaTime) : 0.0f;
         } else if (wrap) {
             nextKey = 0;
-            double deltaTime = (anim->duration - keys[keyIndex].mTime) + keys[nextKey].mTime;
-            double elapsed = wrappedTime - keys[keyIndex].mTime;
+            double deltaTime = (anim->duration - keys[keyIndex].time) + keys[nextKey].time;
+            double elapsed = wrappedTime - keys[keyIndex].time;
             t = (deltaTime > 0) ? (float)(elapsed / deltaTime) : 0.0f;
         } else {
             nextKey = keyIndex; // Clamp to end
@@ -605,8 +618,8 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         }
         
         t = std::max(0.0f, std::min(1.0f, t));
-        const auto& start = keys[keyIndex].mValue;
-        const auto& end = keys[nextKey].mValue;
+        const auto& start = keys[keyIndex].value;
+        const auto& end = keys[nextKey].value;
         Vec3 pos(
             start.x + (end.x - start.x) * t,
             start.y + (end.y - start.y) * t,
@@ -621,11 +634,11 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         const auto& keys = rotIt->second;
         
         size_t keyIndex = 0;
-        if (wrappedTime >= keys.back().mTime) {
+        if (wrappedTime >= keys.back().time) {
             keyIndex = keys.size() - 1;
         } else {
             for (size_t i = 0; i < keys.size() - 1; ++i) {
-                if (wrappedTime < keys[i + 1].mTime) {
+                if (wrappedTime < keys[i + 1].time) {
                     keyIndex = i;
                     break;
                 }
@@ -636,12 +649,12 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         float t = 0.0f;
         
         if (nextKey < keys.size()) {
-            double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
-            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+            double deltaTime = keys[nextKey].time - keys[keyIndex].time;
+            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].time) / deltaTime) : 0.0f;
         } else if (wrap) {
             nextKey = 0;
-            double deltaTime = (anim->duration - keys[keyIndex].mTime) + keys[nextKey].mTime;
-            double elapsed = wrappedTime - keys[keyIndex].mTime;
+            double deltaTime = (anim->duration - keys[keyIndex].time) + keys[nextKey].time;
+            double elapsed = wrappedTime - keys[keyIndex].time;
             t = (deltaTime > 0) ? (float)(elapsed / deltaTime) : 0.0f;
         } else {
             nextKey = keyIndex;
@@ -649,10 +662,8 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         }
         
         t = std::max(0.0f, std::min(1.0f, t));
-        Quaternion q_start(keys[keyIndex].mValue.w, keys[keyIndex].mValue.x, 
-                        keys[keyIndex].mValue.y, keys[keyIndex].mValue.z);
-        Quaternion q_end(keys[nextKey].mValue.w, keys[nextKey].mValue.x,
-                      keys[nextKey].mValue.y, keys[nextKey].mValue.z);
+        const Quaternion& q_start = keys[keyIndex].value;
+        const Quaternion& q_end = keys[nextKey].value;
         
         Quaternion result = Quaternion::slerp(q_start, q_end, t);
         rotation = result.toMatrix();
@@ -664,11 +675,11 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         const auto& keys = sclIt->second;
         
         size_t keyIndex = 0;
-        if (wrappedTime >= keys.back().mTime) {
+        if (wrappedTime >= keys.back().time) {
             keyIndex = keys.size() - 1;
         } else {
             for (size_t i = 0; i < keys.size() - 1; ++i) {
-                if (wrappedTime < keys[i + 1].mTime) {
+                if (wrappedTime < keys[i + 1].time) {
                     keyIndex = i;
                     break;
                 }
@@ -679,12 +690,12 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         float t = 0.0f;
         
         if (nextKey < keys.size()) {
-            double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
-            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+            double deltaTime = keys[nextKey].time - keys[keyIndex].time;
+            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].time) / deltaTime) : 0.0f;
         } else if (wrap) {
             nextKey = 0;
-            double deltaTime = (anim->duration - keys[keyIndex].mTime) + keys[nextKey].mTime;
-            double elapsed = wrappedTime - keys[keyIndex].mTime;
+            double deltaTime = (anim->duration - keys[keyIndex].time) + keys[nextKey].time;
+            double elapsed = wrappedTime - keys[keyIndex].time;
             t = (deltaTime > 0) ? (float)(elapsed / deltaTime) : 0.0f;
         } else {
             nextKey = keyIndex;
@@ -692,8 +703,8 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         }
         
         t = std::max(0.0f, std::min(1.0f, t));
-        const auto& start = keys[keyIndex].mValue;
-        const auto& end = keys[nextKey].mValue;
+        const auto& start = keys[keyIndex].value;
+        const auto& end = keys[nextKey].value;
         Vec3 scl(
             start.x + (end.x - start.x) * t,
             start.y + (end.y - start.y) * t,

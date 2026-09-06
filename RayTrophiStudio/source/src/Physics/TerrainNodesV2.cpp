@@ -13,6 +13,11 @@
 #include "FoliageAssetLibrary.h"
 #include "TerrainSatMapNodes.h"
 #include "TerrainSurfaceNodes.h"
+#include "TerrainCurveNodes.h"
+#include "TerrainCurveSceneSnapshot.h"
+#include "TerrainRoadCarveNode.h"
+#include "TerrainRoadNetworkNode.h"
+#include "TerrainRoadFieldsOutput.h"
 #include "TerrainPaintEvaluation.h"
 #include "TerrainSemanticMap.h"
 #include "RiverSpline.h"
@@ -1719,15 +1724,41 @@ namespace TerrainNodesV2 {
         }
         terrain->erosionMapRGBA = *erosionMap.data;
 
+        // ★★★★ DISCHARGE, published RAW.
+        //
+        // `dischargePreview` above is log-normalised because it goes into a
+        // preview texture. This is not that: FlowMask - the drainage authority
+        // - classifies channels against the field's OWN min and max, and its
+        // code says so outright ("a measured discharge in m3/s can sit
+        // anywhere"). Handing it a 0..1 field would not fail, it would just
+        // answer a different question with the same name, which is the exact
+        // trap the pin rename above documents.
+        //
+        // Until this pin existed the solver's discharge reached nothing but
+        // the RGBA preview's blue channel, so every graph without a Watershed
+        // node had its Flow mask derived from bare geometry - re-deriving
+        // drainage from the height it had just finished eroding, with a
+        // conditioning ladder that has no flat resolution in it.
+        NodeSystem::Image2DData dischargeOut = createMaskOutput(w, h);
+        dischargeOut.semantic = NodeSystem::ImageSemantic::PhysicalScalar;
+        dischargeOut.unit = NodeSystem::ImageUnit::CubicMetersPerSecond;
+        if (fields.discharge.size() == pixelCount) {
+            for (size_t i = 0; i < pixelCount; ++i)
+                (*dischargeOut.data)[i] = std::isfinite(fields.discharge[i])
+                    ? (std::max)(fields.discharge[i], 0.0f) : 0.0f;
+        }
+
         ctx.setCachedValue(id, 0, result);
         ctx.setCachedValue(id, 1, erosion);
         ctx.setCachedValue(id, 2, deposition);
         ctx.setCachedValue(id, 3, sediment);
+        ctx.setCachedValue(id, 4, dischargeOut);
 
         switch (outputIndex) {
             case 1: return NodeSystem::PinValue{erosion};
             case 2: return NodeSystem::PinValue{deposition};
             case 3: return NodeSystem::PinValue{sediment};
+            case 4: return NodeSystem::PinValue{dischargeOut};
             default: return NodeSystem::PinValue{result};
         }
     }
@@ -1936,6 +1967,18 @@ namespace TerrainNodesV2 {
             ImGui::TextDisabled("Too low leaves spurious lakes and under-counted trunk rivers,");
             ImGui::TextDisabled("both visible in Last Evaluation below.");
 
+            ImGui::SeparatorText("Flat drainage (Garbrecht & Martz)");
+            if (ImGui::DragFloat("Flat Gradient", &params.flatGradient, 1.0e-5f,
+                                 0.0f, 0.05f, "%.5f m/m")) dirty = true;
+            ImGui::TextDisabled("Slope assumed for a depression-filled flat. A flat has no");
+            ImGui::TextDisabled("gradient of its own, so this is what water steers by there.");
+            ImGui::TextDisabled("0 = off: flat channels go back to straight, grid-locked and");
+            ImGui::TextDisabled("frozen (a flat with no drop cannot incise, so it never");
+            ImGui::TextDisabled("reshapes itself). 2e-4 is a real floodplain.");
+            if (ImGui::DragInt("Flat Resolve Passes", &params.flatResolvePasses, 8, 0, 8192)) dirty = true;
+            ImGui::TextDisabled("GPU only, one cell per pass: the widest flat, in cells, that");
+            ImGui::TextDisabled("resolves. Check Unresolved Flat Cells below, not the render.");
+
             ImGui::SeparatorText("Deposition (fans, aprons, floodplains)");
             if (ImGui::DragInt("Avulsion Every", &params.avulsionInterval, 1, 0, 4096)) dirty = true;
             ImGui::TextDisabled("Transport steps between re-deriving flow direction from the");
@@ -2053,6 +2096,22 @@ namespace TerrainNodesV2 {
                 ImGui::Text("Deep lakes: %.3f%% (%d cells, deepest %.1f m)",
                             lastStats.deepLakeAreaFraction * 100.0f,
                             lastStats.deepLakeCells, lastStats.deepestLakeMeters);
+                // ★★★ An unresolved flat renders as ordinary ground while
+                // swallowing every catchment above it, so it can only be seen
+                // as a number. -1 is "not measured", which must not read the
+                // same as a measured zero.
+                if (lastStats.unresolvedFlatCells < 0) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f),
+                                       "Unresolved flats: NOT MEASURED (readback failed)");
+                } else if (lastStats.unresolvedFlatCells > 0) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                                       "Unresolved flats: %d cells (%.3f%%) - raise Flat Resolve Passes",
+                                       lastStats.unresolvedFlatCells,
+                                       lastStats.unresolvedFlatFraction * 100.0f);
+                } else {
+                    ImGui::TextColored(ImVec4(0.45f, 1.0f, 0.55f, 1.0f),
+                                       "Unresolved flats: 0");
+                }
 
                 ImGui::SeparatorText("Deposit shape");
                 ImGui::Text("Covered: %.2f%% (%d cells)",
@@ -4990,6 +5049,8 @@ namespace TerrainNodesV2 {
         const auto lakeMask = getHeightInput(3, ctx);
         const auto lakeSpillPoints = inputs.size() > 4
             ? getHeightInput(4, ctx) : NodeSystem::Image2DData{};
+        const auto channelExclusion = inputs.size() > 5
+            ? getHeightInput(5, ctx) : NodeSystem::Image2DData{};
         if (!accumulation.isValid() || !direction.isValid() ||
             accumulation.width != direction.width || accumulation.height != direction.height ||
             (catchmentArea.isValid() && (catchmentArea.width != accumulation.width ||
@@ -4998,7 +5059,10 @@ namespace TerrainNodesV2 {
                                     lakeMask.height != accumulation.height)) ||
             (lakeSpillPoints.isValid() &&
                 (lakeSpillPoints.width != accumulation.width ||
-                 lakeSpillPoints.height != accumulation.height))) {
+                 lakeSpillPoints.height != accumulation.height)) ||
+            (channelExclusion.isValid() &&
+                (channelExclusion.width != accumulation.width ||
+                 channelExclusion.height != accumulation.height))) {
             ctx.addError(id, "River Network requires matching accumulation, direction and optional lake fields");
             return NodeSystem::PinValue{};
         }
@@ -5019,6 +5083,7 @@ namespace TerrainNodesV2 {
                 catchmentArea.isValid() ? catchmentArea.data.get() : nullptr,
                 lakeMask.isValid() ? lakeMask.data.get() : nullptr,
                 lakeSpillPoints.isValid() ? lakeSpillPoints.data.get() : nullptr,
+                channelExclusion.isValid() ? channelExclusion.data.get() : nullptr,
                 params, network, &networkError)) {
             ctx.addError(id, "River Network: " + networkError);
             return NodeSystem::PinValue{};
@@ -6224,12 +6289,162 @@ namespace TerrainNodesV2 {
         return NodeSystem::PinValue{};
     }
 
+    bool PublishFieldNode::isReservedFieldName(const std::string& candidate) {
+        // Mirrors the canonical Terrain Fields and Road Fields publishers.
+        // These are measurements with a fixed meaning; an authored composition
+        // must not be able to take one over.
+        static const std::array<const char*, 42> reserved = {
+            "terrain.slope", "terrain.concavity", "terrain.convexity", "terrain.valley", "terrain.wetness",
+            "biome.forest", "biome.grass", "biome.rock", "biome.alpine",
+            "hydrology.accumulation", "hydrology.direction", "hydrology.basins",
+            "hydrology.channels", "hydrology.stream_order", "hydrology.sources", "hydrology.river_bed",
+            "hydrology.lake_mask", "hydrology.lake_depth", "hydrology.lake_level",
+            "hydrology.lake_shoreline", "hydrology.lake_spill", "hydrology.lake_id",
+            "hydrology.catchment_area", "hydrology.river_discharge", "hydrology.river_width",
+            "hydrology.river_depth", "hydrology.river_speed", "hydrology.river_level",
+            "hydrology.river_froude", "hydrology.river_foam",
+            "erosion.wear", "erosion.deposits",
+            "geology.hardness", "geology.permeability", "geology.fracture", "geology.id",
+            "infrastructure.road_core", "infrastructure.shoulder",
+            "infrastructure.cut", "infrastructure.fill",
+            "infrastructure.foliage_exclusion", "infrastructure.ditch"
+        };
+        return std::find_if(reserved.begin(), reserved.end(),
+            [&](const char* name) { return candidate == name; }) != reserved.end();
+    }
+
+    std::string PublishFieldNode::effectiveFieldName() const {
+        std::string normalized;
+        normalized.reserve(fieldName.size() + 5);
+        for (const char raw : fieldName) {
+            const unsigned char c = static_cast<unsigned char>(raw);
+            if (std::isalnum(c)) normalized += static_cast<char>(std::tolower(c));
+            else if (raw == '.' || raw == '_') normalized += raw;
+            else if (!normalized.empty() && normalized.back() != '_') normalized += '_';
+        }
+        while (!normalized.empty() && (normalized.back() == '_' || normalized.back() == '.'))
+            normalized.pop_back();
+        while (!normalized.empty() && (normalized.front() == '_' || normalized.front() == '.'))
+            normalized.erase(normalized.begin());
+        if (normalized.empty()) return {};
+        // A namespace keeps authored masks visibly separate from measured fields
+        // in every list that shows both.
+        if (normalized.find('.') == std::string::npos) normalized = "mask." + normalized;
+        return normalized;
+    }
+
+    NodeSystem::PinValue PublishFieldNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        (void)outputIndex;
+        lastPublishedName.clear();
+        lastPublishSucceeded = false;
+        lastPublishError.clear();
+
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            lastPublishError = "no terrain context";
+            ctx.addError(id, "Publish Field requires terrain context");
+            return NodeSystem::PinValue{};
+        }
+
+        const std::string target = effectiveFieldName();
+        if (target.empty()) {
+            lastPublishError = "field name is empty";
+            ctx.addError(id, "Publish Field needs a name");
+            return NodeSystem::PinValue{};
+        }
+        if (isReservedFieldName(target)) {
+            lastPublishError = "'" + target + "' is a measured field";
+            ctx.addError(id, "Publish Field cannot overwrite the measured field '" + target +
+                             "' - choose another name");
+            return NodeSystem::PinValue{};
+        }
+
+        const size_t expected = static_cast<size_t>(tctx->terrain->heightmap.width) *
+                                static_cast<size_t>(tctx->terrain->heightmap.height);
+        const auto field = getHeightInput(0, ctx);
+        if (!field.isValid() || !field.data) {
+            lastPublishError = "input not connected";
+            ctx.addError(id, "Publish Field has no input field");
+            return NodeSystem::PinValue{};
+        }
+        if (field.data->size() != expected) {
+            // Size mismatch is not a warning to swallow: the scatter shader falls
+            // back to its neutral value for a field of the wrong length, which
+            // reads as "mask off" rather than as an error.
+            lastPublishError = "input is " + std::to_string(field.data->size()) +
+                               " samples, terrain field grid is " + std::to_string(expected);
+            ctx.addError(id, "Publish Field input does not match the terrain field grid");
+            return NodeSystem::PinValue{};
+        }
+
+        tctx->terrain->analysisFields[target] = field.data;
+        lastPublishedName = target;
+        lastPublishSucceeded = true;
+        return NodeSystem::PinValue{};
+    }
+
+    void PublishFieldNode::drawContent() {
+        char nameBuffer[128] = {};
+        std::strncpy(nameBuffer, fieldName.c_str(), sizeof(nameBuffer) - 1);
+        if (ImGui::InputText("Field Name", nameBuffer, sizeof(nameBuffer))) {
+            fieldName = nameBuffer;
+            dirty = true;
+        }
+        const std::string effective = effectiveFieldName();
+        if (effective.empty()) {
+            ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f), "Name is empty");
+        } else if (effective != fieldName) {
+            ImGui::TextDisabled("Publishes as: %s", effective.c_str());
+        }
+        if (lastPublishSucceeded) {
+            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.60f, 1.0f), "Published %s",
+                               lastPublishedName.c_str());
+        } else if (!lastPublishError.empty()) {
+            ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f), "Not published: %s",
+                               lastPublishError.c_str());
+        } else {
+            ImGui::TextDisabled("Not evaluated yet");
+        }
+        ImGui::TextDisabled("Usable as a scatter density/exclusion mask");
+    }
+
+    void PublishFieldNode::serializeToJson(nlohmann::json& j) const {
+        TerrainNodeBase::serializeToJson(j);
+        j["fieldName"] = fieldName;
+    }
+
+    void PublishFieldNode::deserializeFromJson(const nlohmann::json& j) {
+        TerrainNodeBase::deserializeFromJson(j);
+        fieldName = j.value("fieldName", fieldName);
+    }
+
     NodeSystem::PinValue BiomeComposerNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
         const auto height = getHeightInput(0, ctx);
-        const auto slopeInput = getHeightInput(1, ctx);
-        const auto valleyInput = getHeightInput(2, ctx);
-        const auto wetnessInput = getHeightInput(3, ctx);
-        const auto exposureInput = getHeightInput(4, ctx);
+        // getMaskInput, not getHeightInput. All four of these pins declare
+        // acceptImageSemantic(PhysicalScalar) with the note "normalize at
+        // getMaskInput()" -- but this consumer read them raw and clamped to
+        // 0-1, so the promised normalization never ran.
+        //
+        // It matters for Wetness above all, because the standard setup wires
+        // Flow.Discharge into it: drainage area in m2, or m3/s when Hydraulic
+        // Erosion is connected. Heavy tailed by construction -- a hillslope
+        // sits near 1 while a trunk channel reaches six figures -- so clamping
+        // it put 98% of the terrain at 0.0 and every channel at a saturated
+        // 1.0. moistureSuitability is a smoothstep across forestMoisture +-
+        // transition, and a field with no midrange turns that smoothstep into
+        // a STEP at the channel edge: the forest mask broke along the river
+        // line instead of grading away from it (user report, 2026-08-30).
+        //
+        // asMaskField() already handles exactly this: it detects the heavy tail
+        // (by unit, or max/mean > 32) and normalizes logarithmically, which is
+        // what gives moisture a usable gradient out of the drainage network.
+        // For a field that is already Mask-semantic it returns the input
+        // untouched, so Slope/Valley/Exposure from Terrain Analysis are
+        // unchanged.
+        const auto slopeInput = getMaskInput(1, ctx);
+        const auto valleyInput = getMaskInput(2, ctx);
+        const auto wetnessInput = getMaskInput(3, ctx);
+        const auto exposureInput = getMaskInput(4, ctx);
         if (!height.isValid() || height.width < 2 || height.height < 2) {
             ctx.addError(id, "Biome Composer requires a valid height input");
             return NodeSystem::PinValue{};
@@ -6398,25 +6613,73 @@ namespace TerrainNodesV2 {
     }
 
     namespace {
-        const std::array<const char*, 14> kFoliageFieldNames = {
-            "", "biome.forest", "biome.grass", "biome.rock", "biome.alpine",
+        // Offered when no terrain has published anything yet, so the picker is
+        // not empty before the first graph evaluation. These are the fields a
+        // stock terrain graph tends to publish -- a suggestion, not the truth.
+        const std::array<const char*, 14> kFoliageFieldFallback = {
+            "biome.forest", "biome.grass", "biome.rock", "biome.alpine",
             "terrain.slope", "terrain.concavity", "terrain.convexity", "terrain.valley",
             "terrain.wetness", "hydrology.channels", "hydrology.lake_mask",
-            "hydrology.lake_shoreline", "hydrology.river_foam"
+            "hydrology.lake_shoreline", "hydrology.river_foam",
+            "infrastructure.foliage_exclusion"
         };
+
+        // What the live terrains ACTUALLY publish, merged across them and sorted.
+        //
+        // This used to be a fixed 13-name list, which had two failures pulling in
+        // opposite directions: it offered names the terrain does not carry (the
+        // mask then resolves to the shader's neutral fallback and silently does
+        // nothing), and it could not offer a name a Publish Field node created,
+        // so an authored mask was unselectable from the panel that needs it.
+        std::vector<std::string> availableFoliageFields() {
+            std::vector<std::string> fields;
+            for (const auto& terrain : TerrainManager::getInstance().getTerrains()) {
+                const size_t expected = static_cast<size_t>(terrain.heightmap.width) *
+                                        static_cast<size_t>(terrain.heightmap.height);
+                for (const auto& [name, data] : terrain.analysisFields) {
+                    // Wrong-sized data is what resolveField rejects at scatter
+                    // time, so offering it would name a mask that cannot work.
+                    if (name.empty() || !data || data->size() != expected) continue;
+                    fields.push_back(name);
+                }
+            }
+            std::sort(fields.begin(), fields.end());
+            fields.erase(std::unique(fields.begin(), fields.end()), fields.end());
+            if (fields.empty()) {
+                for (const char* name : kFoliageFieldFallback) fields.emplace_back(name);
+            }
+            return fields;
+        }
 
         bool drawFoliageFieldPicker(const char* label, std::string& value) {
             const char* preview = value.empty() ? "<none>" : value.c_str();
             bool changed = false;
             if (ImGui::BeginCombo(label, preview)) {
-                for (const char* field : kFoliageFieldNames) {
+                if (ImGui::Selectable("<none>", value.empty())) {
+                    value.clear();
+                    changed = true;
+                }
+                if (value.empty()) ImGui::SetItemDefaultFocus();
+
+                const auto fields = availableFoliageFields();
+                bool valueIsLive = value.empty();
+                for (const auto& field : fields) {
                     const bool selected = value == field;
-                    const char* display = field[0] == '\0' ? "<none>" : field;
-                    if (ImGui::Selectable(display, selected)) {
+                    valueIsLive = valueIsLive || selected;
+                    if (ImGui::Selectable(field.c_str(), selected)) {
                         value = field;
                         changed = true;
                     }
                     if (selected) ImGui::SetItemDefaultFocus();
+                }
+                // An authored name that no terrain publishes stays selectable so
+                // it is not silently dropped on the next edit -- but it is marked,
+                // because as it stands it masks nothing.
+                if (!valueIsLive) {
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
+                                       "%s - not published", value.c_str());
+                    ImGui::TextDisabled("Publish it from the terrain graph, or pick another");
                 }
                 ImGui::EndCombo();
             }
@@ -6508,7 +6771,19 @@ namespace TerrainNodesV2 {
             return allLoaded;
         }
 
-        void captureFoliageGroupSettings(FoliageLayerNode& layer, const InstanceGroup& group) {
+        // adoptSourceMode: the node is BINDING to this group for the first time and
+        // has no authored Source mode of its own, so infer one from what the group
+        // actually holds. Every other caller is a per-frame mirror of the live
+        // group and must leave the mode alone.
+        //
+        // It used to be inferred unconditionally, which made a measurement ("does
+        // this group hold asset sources right now?") outrank a user decision
+        // ("author this layer from the Asset Library"). Emptying a layer then
+        // flipped Source back to Scene Layer on the next frame and took the asset
+        // picker with it -- and the picker is the only way to put assets back, so
+        // the layer was stuck with scene objects as its only option.
+        void captureFoliageGroupSettings(FoliageLayerNode& layer, const InstanceGroup& group,
+                                         bool adoptSourceMode = false) {
             const auto& settings = group.brush_settings;
             layer.instanceGroupId = group.id;
             layer.instanceGroupName = group.name;
@@ -6527,11 +6802,13 @@ namespace TerrainNodesV2 {
             layer.scaleFieldInfluence = settings.scale_mask_influence;
             layer.settingsCaptured = true;
             
-            layer.useAssetLibrary = false;
-            for (const auto& src : group.sources) {
-                if (!src.asset_relative_path.empty()) {
-                    layer.useAssetLibrary = true;
-                    break;
+            if (adoptSourceMode) {
+                layer.useAssetLibrary = false;
+                for (const auto& src : group.sources) {
+                    if (!src.asset_relative_path.empty()) {
+                        layer.useAssetLibrary = true;
+                        break;
+                    }
                 }
             }
         }
@@ -6643,7 +6920,7 @@ namespace TerrainNodesV2 {
                 const std::string authoredDensityField = densityField;
                 const std::string authoredExclusionField = exclusionField;
                 const std::string authoredScaleField = scaleField;
-                captureFoliageGroupSettings(*this, *boundGroup);
+                captureFoliageGroupSettings(*this, *boundGroup, /*adoptSourceMode=*/true);
                 if (!authoredDensityField.empty()) densityField = authoredDensityField;
                 if (!authoredExclusionField.empty()) exclusionField = authoredExclusionField;
                 if (!authoredScaleField.empty()) scaleField = authoredScaleField;
@@ -6663,7 +6940,7 @@ namespace TerrainNodesV2 {
                     const bool selected = instanceGroupId == group.id ||
                         (instanceGroupId < 0 && instanceGroupName == group.name);
                     if (ImGui::Selectable(group.name.c_str(), selected)) {
-                        captureFoliageGroupSettings(*this, group);
+                        captureFoliageGroupSettings(*this, group, /*adoptSourceMode=*/true);
                         edited = true;
                     }
                     if (selected) ImGui::SetItemDefaultFocus();
@@ -10550,6 +10827,7 @@ namespace TerrainNodesV2 {
         NodeSystem::AutoRegisterNode<ExposureMaskNode>       reg_ExposureMask("TerrainV2.ExposureMask");
         NodeSystem::AutoRegisterNode<TerrainAnalysisNode>    reg_TerrainAnalysis("TerrainV2.TerrainAnalysis");
         NodeSystem::AutoRegisterNode<TerrainFieldsOutputNode> reg_TerrainFieldsOutput("TerrainV2.TerrainFieldsOutput");
+        NodeSystem::AutoRegisterNode<PublishFieldNode> reg_PublishField("TerrainV2.PublishField");
         NodeSystem::AutoRegisterNode<BiomeComposerNode>      reg_BiomeComposer("TerrainV2.BiomeComposer");
         NodeSystem::AutoRegisterNode<FoliageLayerNode>       reg_FoliageLayer("TerrainV2.FoliageLayer");
         NodeSystem::AutoRegisterNode<FoliageSetNode>         reg_FoliageSet("TerrainV2.FoliageSet");
@@ -10643,6 +10921,7 @@ namespace TerrainNodesV2 {
             case NodeType::ExposureMask: node = addNode<ExposureMaskNode>(); break;
             case NodeType::TerrainAnalysis: node = addNode<TerrainAnalysisNode>(); break;
             case NodeType::TerrainFieldsOutput: node = addNode<TerrainFieldsOutputNode>(); break;
+            case NodeType::PublishField: node = addNode<PublishFieldNode>(); break;
             case NodeType::BiomeComposer: node = addNode<BiomeComposerNode>(); break;
             case NodeType::FoliageLayer: node = addNode<FoliageLayerNode>(); break;
             case NodeType::FoliageSet: node = addNode<FoliageSetNode>(); break;
@@ -10695,6 +10974,11 @@ namespace TerrainNodesV2 {
             case NodeType::CraterCaldera: node = addNode<CraterCalderaNode>(); break;
             case NodeType::StructuralHardness: node = addNode<StructuralHardnessNode>(); break;
             case NodeType::SurfaceRelief: node = addNode<SurfaceReliefNode>(); break;
+            case NodeType::CurveInput: node = addNode<TerrainCurveInputNode>(); break;
+            case NodeType::CurveToMask: node = addNode<TerrainCurveToMaskNode>(); break;
+            case NodeType::RoadCarve: node = addNode<TerrainRoadCarveNode>(); break;
+            case NodeType::RoadNetwork: node = addNode<TerrainRoadNetworkNode>(); break;
+            case NodeType::RoadFieldsOutput: node = addNode<TerrainRoadFieldsOutputNode>(); break;
             // Disabled legacy passthrough. It is kept creatable ONLY so that
             // projects saved with one still load - which is what its own
             // comment always claimed and what the missing factory case and
@@ -10729,6 +11013,8 @@ namespace TerrainNodesV2 {
     // recomputed.
     namespace {
         void captureTerrainSceneSun(TerrainContext& terrainCtx, const SceneData& scene) {
+            terrainCtx.has_scene_sun = false;
+            captureTerrainCurveSnapshots(terrainCtx, scene);
             // SceneData::world is the renderable HittableList, not the
             // atmosphere World object. The renderer keeps Nishita synchronized
             // from the first directional light, so snapshot that same authored
@@ -10935,6 +11221,8 @@ namespace TerrainNodesV2 {
         std::vector<TerrainSatMapOutputNode*> satMapOutputNodes;
         std::vector<HardnessOutputNode*> hardnessOutputNodes;
         std::vector<TerrainFieldsOutputNode*> fieldOutputNodes;
+        std::vector<PublishFieldNode*> publishFieldNodes;
+        std::vector<TerrainRoadFieldsOutputNode*> roadFieldOutputNodes;
         std::vector<FoliageOutputNode*> foliageOutputNodes;
         std::vector<RiverSplineOutputNode*> riverOutputNodes;
         std::vector<LakeBasinNode*> lakeBasinNodes;
@@ -10957,6 +11245,14 @@ namespace TerrainNodesV2 {
             } else if (typeId == "TerrainV2.TerrainFieldsOutput") {
                 if (auto* fields = dynamic_cast<TerrainFieldsOutputNode*>(node.get())) {
                     fieldOutputNodes.push_back(fields);
+                }
+            } else if (typeId == "TerrainV2.PublishField") {
+                if (auto* publish = dynamic_cast<PublishFieldNode*>(node.get())) {
+                    publishFieldNodes.push_back(publish);
+                }
+            } else if (typeId == "TerrainV2.RoadFieldsOutput") {
+                if (auto* roadFields = dynamic_cast<TerrainRoadFieldsOutputNode*>(node.get())) {
+                    roadFieldOutputNodes.push_back(roadFields);
                 }
             } else if (typeId == "TerrainV2.FoliageOutput") {
                 if (auto* foliage = dynamic_cast<FoliageOutputNode*>(node.get())) {
@@ -11030,6 +11326,25 @@ namespace TerrainNodesV2 {
             fieldNode->compute(0, ctx);
             ctx.endNode();
             fieldNode->dirty = false;
+        }
+        // After Terrain Fields Output, so an authored mask can be built out of
+        // the measured fields it just published, and before the foliage nodes,
+        // which are the main consumers of what lands here.
+        for (auto* publishNode : publishFieldNodes) {
+            if (!publicationAllowed(publishNode)) continue;
+            ctx.beginNode(publishNode->id);
+            publishNode->compute(0, ctx);
+            ctx.endNode();
+            publishNode->dirty = false;
+        }
+        // Canonical road fields are committed as one validated snapshot. Keep
+        // this before foliage so exclusion consumers see the current revision.
+        for (auto* roadFieldNode : roadFieldOutputNodes) {
+            if (!publicationAllowed(roadFieldNode)) continue;
+            ctx.beginNode(roadFieldNode->id);
+            roadFieldNode->compute(0, ctx);
+            ctx.endNode();
+            roadFieldNode->dirty = false;
         }
         // Foliage recipes consume the named-field contract published above but
         // only update InstanceGroup authoring settings. They never own or rebuild
@@ -11120,6 +11435,8 @@ namespace TerrainNodesV2 {
                 if (type == "TerrainV2.HeightOutput" ||
                     type == "TerrainV2.HardnessOutput" ||
                     type == "TerrainV2.TerrainFieldsOutput" ||
+                    type == "TerrainV2.PublishField" ||
+                    type == "TerrainV2.RoadFieldsOutput" ||
                     type == "TerrainV2.LakeBasin" ||
                     type == "TerrainV2.LakeSurfaceOutput" ||
                     type == "TerrainV2.RiverSplineOutput") {
@@ -11153,6 +11470,7 @@ namespace TerrainNodesV2 {
         if (classifyDirtyEvaluationImpact() != DirtyEvaluationImpact::MaterialOnly) return false;
 
         if (!cachedTerrainCtx_) cachedTerrainCtx_ = std::make_unique<TerrainContext>(terrain);
+        const TerrainContext previousTerrainContext = *cachedTerrainCtx_;
         cachedTerrainCtx_->terrain = terrain;
         cachedTerrainCtx_->width = terrain->heightmap.width;
         cachedTerrainCtx_->height = terrain->heightmap.height;
@@ -11161,6 +11479,10 @@ namespace TerrainNodesV2 {
         captureTerrainSceneSun(*cachedTerrainCtx_, scene);
 
         NodeSystem::EvaluationContext& ctx = *cachedEvalContext_;
+        if (!terrainCurveSnapshotsMatch(previousTerrainContext, *cachedTerrainCtx_)) {
+            ctx.clearCache();
+            markAllDirty();
+        }
         ctx.setDomainContext(cachedTerrainCtx_.get());
         ctx.clearErrors();
         ctx.setTotalNodes(static_cast<int>(nodeCount()));
@@ -11214,6 +11536,10 @@ namespace TerrainNodesV2 {
 
         TerrainContext scratchContext(&scratchTerrain);
         scratchContext.publishTerrainState = false;
+        if (cachedTerrainCtx_) {
+            scratchContext.curveSnapshots = cachedTerrainCtx_->curveSnapshots;
+            scratchContext.terrainWorldToLocal = cachedTerrainCtx_->terrainWorldToLocal;
+        }
         NodeSystem::EvaluationContext localContext(this);
         NodeSystem::EvaluationContext* evaluation = cachedEvalContext_
             ? cachedEvalContext_.get() : &localContext;
@@ -11404,7 +11730,8 @@ namespace TerrainNodesV2 {
             cachedTerrainCtx_->width == activeTerrainCtx_->width &&
             cachedTerrainCtx_->height == activeTerrainCtx_->height &&
             std::abs(cachedTerrainCtx_->scale_xz - activeTerrainCtx_->scale_xz) < 1.0e-6f &&
-            std::abs(cachedTerrainCtx_->scale_y - activeTerrainCtx_->scale_y) < 1.0e-6f;
+            std::abs(cachedTerrainCtx_->scale_y - activeTerrainCtx_->scale_y) < 1.0e-6f &&
+            terrainCurveSnapshotsMatch(*cachedTerrainCtx_, *activeTerrainCtx_);
         if (cacheMatchesTerrain) {
             activeEvalContext = std::move(cachedEvalContext_);
         } else {
@@ -11453,11 +11780,17 @@ namespace TerrainNodesV2 {
 
         activeTerrainCtx_ = std::make_unique<TerrainContext>(terrain);
         captureTerrainSceneSun(*activeTerrainCtx_, scene);
-        if (cachedEvalContext_) {
+        const bool curveCacheMatches = cachedEvalContext_ && cachedTerrainCtx_ &&
+            terrainCurveSnapshotsMatch(*cachedTerrainCtx_, *activeTerrainCtx_);
+        if (curveCacheMatches) {
             activeEvalContext = std::move(cachedEvalContext_);
             cachedTerrainCtx_.reset();
         } else {
             activeEvalContext = std::make_shared<NodeSystem::EvaluationContext>(this);
+            activeEvalContext->clearCache();
+            markAllDirty();
+            cachedEvalContext_.reset();
+            cachedTerrainCtx_.reset();
         }
         activeEvalContext->setDomainContext(activeTerrainCtx_.get());
         activeEvalContext->clearErrors();
@@ -11704,11 +12037,58 @@ namespace TerrainNodesV2 {
          * Flow is now the authority. Measured discharge goes INTO it, and
          * every consumer reads out of it, so a graph has one answer.
          */
+        /**
+         * @brief Give the Flow mask a MEASURED discharge instead of letting it
+         *        re-derive one from the height.
+         *
+         * ★★★★ The fallback is the point, and its absence was a silent defect.
+         *
+         * This used to be reachable from exactly one setup, with the Watershed
+         * accumulation pin, and to `return` without a word when that pin was 0.
+         * Every graph WITHOUT a river network - the mountain/valley presets,
+         * anything an artist assembles by hand - therefore left
+         * FlowMask.Discharge empty, and FlowMaskNode then ran its own priority
+         * flood over the height it had just finished eroding. That fallback
+         * charges a cardinal and a diagonal ladder step the same, so its
+         * conditioned surface is a Chebyshev distance field whose level sets
+         * are squares: straight, angular, 0/45-degree channels across every
+         * flat and filled pit, and flow tips that flatten out as they enter one.
+         * The landscape underneath was fine. The mask was answering a question
+         * about geometry while the artist read it as a question about water.
+         *
+         * Nothing reported it, either: apply_preset's wiring_faults lists links
+         * the setup ASKED FOR and did not get, and this link was never asked
+         * for. wiring_fault_count = 0 was counting its own blind spot.
+         *
+         * Order of authority, highest first:
+         *   1. Whatever the artist wired (authored always wins).
+         *   2. Watershed accumulation, when a river network owns the topology.
+         *   3. Hydraulic Erosion's Discharge - the solver's own m3/s.
+         * Only if none exists does the geometric derivation stand, and in that
+         * case FlowMaskNode::lastErosionUnwired says so.
+         */
         void wireFlowAuthority(TerrainNodeGraphV2& graph, FlowMaskNode* flowMask,
                                uint32_t measuredFlowPin = 0) {
             if (!flowMask || flowMask->inputs.size() < 2) return;
-            if (measuredFlowPin && !graph.getInputSource(flowMask->inputs[1].id))
-                graph.addCheckedLink(measuredFlowPin, flowMask->inputs[1].id); // authored wins
+            if (graph.getInputSource(flowMask->inputs[1].id)) return;   // authored wins
+
+            if (!measuredFlowPin) {
+                for (const auto& node : graph.nodes) {
+                    auto* hydraulic = dynamic_cast<HydraulicErosionNode*>(node.get());
+                    // Output 4 is Discharge. A node built before that pin
+                    // existed has four outputs and output 3 is SEDIMENT, not
+                    // flow - linking it here would make the authority report
+                    // `measured` while measuring the wrong quantity, which is
+                    // worse than reporting `unwired`. So the size check is a
+                    // correctness guard, not defensive padding.
+                    if (hydraulic && hydraulic->outputs.size() >= 5) {
+                        measuredFlowPin = hydraulic->outputs[4].id;
+                        break;
+                    }
+                }
+            }
+            if (measuredFlowPin)
+                graph.addCheckedLink(measuredFlowPin, flowMask->inputs[1].id);
         }
 
         /**
@@ -12115,6 +12495,10 @@ namespace TerrainNodesV2 {
         addCheckedLink(baseHeightPin, composer->inputs[0].id);
         addCheckedLink(baseHeightPin, analysis->inputs[0].id);
         addCheckedLink(baseHeightPin, flowMask->inputs[0].id);
+        // Height alone leaves the mask re-deriving drainage from the surface
+        // the erosion sim just carved. Hand it the solver's measured
+        // discharge when one exists - see wireFlowAuthority.
+        wireFlowAuthority(*this, flowMask);
         addCheckedLink(baseHeightPin, soilDepth->inputs[0].id);
         const bool hasHydraulicFields = hydraulic && hydraulic->outputs.size() >= 3;
         // Deposition BUILDS soil, so it may only come from a real erosion
@@ -12128,7 +12512,7 @@ namespace TerrainNodesV2 {
         // banded bedrock hardness as the loudest signal, which reads as
         // contour rings.
         // Authored wins: an upstream landform setup may already feed this pin
-        // from Hydraulic's Flow, which is acyclic where Flow's channel mask is
+        // from Hydraulic's Sediment, which is acyclic where Flow's channel mask is
         // not. See addRiverNetworkSetup for the measured case.
         if (soilDepth->inputs.size() > 3 && !getInputSource(soilDepth->inputs[3].id)) {
             addCheckedLink(flowMask->outputs[0].id, soilDepth->inputs[3].id);
@@ -12289,6 +12673,10 @@ namespace TerrainNodesV2 {
                        biome->inputs[3].id);
         addCheckedLink(exposure->outputs[0].id, biome->inputs[4].id);
         addCheckedLink(baseHeightPin, flowMask->inputs[0].id);
+        // Height alone leaves the mask re-deriving drainage from the surface
+        // the erosion sim just carved. Hand it the solver's measured
+        // discharge when one exists - see wireFlowAuthority.
+        wireFlowAuthority(*this, flowMask);
         addCheckedLink(baseHeightPin, soilDepth->inputs[0].id);
         // Deposition BUILDS soil, so it may only come from a real erosion
         // sim. The old fallback handed flow accumulation to this pin, making
@@ -12301,7 +12689,7 @@ namespace TerrainNodesV2 {
         // banded bedrock hardness as the loudest signal, which reads as
         // contour rings.
         // Authored wins: an upstream landform setup may already feed this pin
-        // from Hydraulic's Flow, which is acyclic where Flow's channel mask is
+        // from Hydraulic's Sediment, which is acyclic where Flow's channel mask is
         // not. See addRiverNetworkSetup for the measured case.
         if (soilDepth->inputs.size() > 3 && !getInputSource(soilDepth->inputs[3].id)) {
             addCheckedLink(flowMask->outputs[0].id, soilDepth->inputs[3].id);
@@ -12448,7 +12836,7 @@ namespace TerrainNodesV2 {
                 foliageLayers[i]->instanceGroupName.empty()) {
                 const auto match = findExistingGroup(groupTokens[i]);
                 if (const InstanceGroup* group = InstanceManager::getInstance().getGroup(match.first)) {
-                    captureFoliageGroupSettings(*foliageLayers[i], *group);
+                    captureFoliageGroupSettings(*foliageLayers[i], *group, /*adoptSourceMode=*/true);
                 } else {
                     foliageLayers[i]->instanceGroupId = match.first;
                     foliageLayers[i]->instanceGroupName = match.second;
@@ -12456,6 +12844,9 @@ namespace TerrainNodesV2 {
                 }
             }
             foliageLayers[i]->densityField = fields[i];
+            if (foliageLayers[i]->exclusionField.empty()) {
+                foliageLayers[i]->exclusionField = "infrastructure.foliage_exclusion";
+            }
         }
         if (!foliageSet) foliageSet = dynamic_cast<FoliageSetNode*>(
             addTerrainNode(NodeType::FoliageSet, x + 330.0f, y + 260.0f));
@@ -12878,7 +13269,7 @@ namespace TerrainNodesV2 {
         // while accumulation feeds the transport/scour split on its own pin.
         //
         // Authored wins, the same rule wireFlowAuthority uses one screen up.
-        // The landform setup already feeds this pin from Hydraulic's Flow --
+        // The landform setup already feeds this pin from Hydraulic's Sediment --
         // sediment transport, 0..1, and acyclic because Hydraulic sits above
         // the whole hydrology branch. Soil Depth is upstream of hydrology here
         // (Soil -> Surface Relief -> Snow -> meltwater -> Watershed), so
@@ -13283,6 +13674,12 @@ namespace TerrainNodesV2 {
         // macro river network.
         addLink(erosion->outputs[0].id, slope->inputs[0].id);
         addLink(erosion->outputs[0].id, flow->inputs[0].id);
+        // ★★★★ The wait recorded further down is OVER: Hydraulic Erosion now
+        // publishes a real Discharge pin (m3/s), so Flow can be handed a
+        // measured quantity instead of re-deriving one from the height it was
+        // just given. wireFlowAuthority finds it by pin index 4 and refuses to
+        // settle for the four-output node whose slot 3 is sediment.
+        wireFlowAuthority(*this, flow);
         addCheckedLink(erosion->outputs[0].id, soil->inputs[0].id);
         addCheckedLink(erosion->outputs[2].id, soil->inputs[1].id);
         addCheckedLink(structural->outputs[0].id, soil->inputs[2].id);
@@ -13299,7 +13696,7 @@ namespace TerrainNodesV2 {
         // The river setup warns about exactly this two nodes away: feeding the
         // physical Discharge sibling into a mask input "is both a unit mismatch
         // and an immediate saturation of almost every real river cell".
-        // Hydraulic's Flow is log-normalised to 0..1 by construction.
+        // Hydraulic's Sediment is log-normalised to 0..1 by construction.
         //
         // Acyclicity. Flow is the hydrology authority and must sit BELOW
         // Watershed. Surface Relief sits above it: Relief feeds Snow, Snow's
@@ -13313,7 +13710,11 @@ namespace TerrainNodesV2 {
         // And it is the more honest field anyway: rills ARE erosion features,
         // so they belong to sediment transport rather than to the macro
         // drainage network the rivers are cut from.
-        addCheckedLink(terrainPortId(erosion, NodeSystem::PinKind::Output, "flow"),
+        // Key is "sediment": the pin was called Flow and always carried
+        // sediment transport, and it has now been renamed to say so. The
+        // link itself is unchanged - see the paragraph above, rills belong
+        // to sediment, not to the macro drainage network.
+        addCheckedLink(terrainPortId(erosion, NodeSystem::PinKind::Output, "sediment"),
                        relief->inputs[2].id);
         addCheckedLink(soil->outputs[0].id, relief->inputs[3].id);
         addCheckedLink(structural->outputs[0].id, relief->inputs[4].id);
@@ -13340,22 +13741,32 @@ namespace TerrainNodesV2 {
         // composer's mask inputs was a unit mismatch and could be silently
         // refused; even when coerced it saturated both Flow and Wetness.
         //
-        // ★ Flow's Discharge input is NOT wired here any more, and leaving it
-        // empty is the point. This line used to carry Hydraulic slot 3, which
-        // was Discharge in cubic metres per second. After the compact port
-        // contract slot 3 is Flow: log-normalised SEDIMENT transport, 0..1.
-        // FlowMask copies whatever arrives on that pin verbatim and publishes
-        // it as the canonical flow magnitude, and it sets discharge_measured
-        // from the pin being CONNECTED, not from what it carries -- so the
-        // wire made terrain.flow_authority report source="measured" over a
-        // field that is not discharge at all. An authority that grades a cable
-        // instead of a quantity is worse than no authority.
+        // ★★★★ HISTORY, kept because the trap is easy to walk back into.
         //
-        // With the pin empty, Flow derives the field geometrically and the
-        // authority reports "derived_erosion_unwired": this preset contains an
-        // erosion sim and no node publishing measured discharge. That is true,
-        // and it stays true until the setup migration wires River Hydraulics'
-        // Discharge (m3/s, its authoritative owner) into Flow.
+        // This link used to carry Hydraulic slot 3, which was Discharge in
+        // cubic metres per second. The compact port contract made slot 3 the
+        // pin labelled "Flow", which is log-normalised SEDIMENT transport,
+        // 0..1. FlowMask copies whatever arrives on that pin verbatim and
+        // publishes it as the canonical flow magnitude, and it sets
+        // discharge_measured from the pin being CONNECTED, not from what it
+        // carries -- so the wire made terrain.flow_authority report
+        // source="measured" over a field that is not discharge at all. An
+        // authority that grades a cable instead of a quantity is worse than no
+        // authority, so the pin was deliberately left EMPTY and the authority
+        // was left telling the truth: "derived_erosion_unwired".
+        //
+        // The cost of leaving it empty was the other half of the lie: Flow then
+        // re-derived drainage from the height with its own conditioning ladder,
+        // which charges a cardinal and a diagonal step the same and therefore
+        // draws straight, 0/45-degree channels across every flat and filled pit
+        // - on a landscape the erosion sim had just finished carving properly.
+        //
+        // Both halves are closed now. The pin formerly called Flow is called
+        // Sediment, a real Discharge pin exists next to it, and
+        // wireFlowAuthority above connects it. The remaining sharp edge is
+        // unchanged and worth remembering: discharge_measured still grades the
+        // CABLE. It is only trustworthy because the thing on the other end is
+        // now, by construction, the discharge.
         addLink(flow->outputs[0].id, composer->inputs[2].id);
         // This compact preset has no Terrain Analysis node. Reuse the graded
         // channel mask as its explicit wetness proxy rather than the physical
@@ -13621,6 +14032,16 @@ namespace TerrainNodesV2 {
                     newNode = addTerrainNode(NodeType::StructuralHardness, x, y);
                 } else if (typeId == "TerrainV2.SurfaceRelief") {
                     newNode = addTerrainNode(NodeType::SurfaceRelief, x, y);
+                } else if (typeId == "TerrainV2.CurveInput") {
+                    newNode = addTerrainNode(NodeType::CurveInput, x, y);
+                } else if (typeId == "TerrainV2.CurveToMask") {
+                    newNode = addTerrainNode(NodeType::CurveToMask, x, y);
+                } else if (typeId == "TerrainV2.RoadCarve") {
+                    newNode = addTerrainNode(NodeType::RoadCarve, x, y);
+                } else if (typeId == "TerrainV2.RoadNetwork") {
+                    newNode = addTerrainNode(NodeType::RoadNetwork, x, y);
+                } else if (typeId == "TerrainV2.RoadFieldsOutput") {
+                    newNode = addTerrainNode(NodeType::RoadFieldsOutput, x, y);
                 } else if (typeId == "TerrainV2.ErosionWizard") {
                     // Legacy passthrough: loading an old project must not
                     // silently drop the node and shift the graph around it.
@@ -13647,6 +14068,8 @@ namespace TerrainNodesV2 {
                     newNode = addTerrainNode(NodeType::TerrainAnalysis, x, y);
                 } else if (typeId == "TerrainV2.TerrainFieldsOutput") {
                     newNode = addTerrainNode(NodeType::TerrainFieldsOutput, x, y);
+                } else if (typeId == "TerrainV2.PublishField") {
+                    newNode = addTerrainNode(NodeType::PublishField, x, y);
                 } else if (typeId == "TerrainV2.BiomeComposer") {
                     newNode = addTerrainNode(NodeType::BiomeComposer, x, y);
                 } else if (typeId == "TerrainV2.FoliageLayer") {

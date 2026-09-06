@@ -721,7 +721,12 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
 
         if (ctx.scene.camera) {
 
-            Ray r = ctx.scene.camera->get_ray(u, v);
+            // Raster draws a deterministic pinhole/ortho projection. Do not
+            // let render-only lens distortion or a random aperture sample move
+            // the selection ray away from the visible pixel.
+            Ray r = interactive_selection_fallback
+                ? ctx.scene.camera->get_viewport_ray(u, v)
+                : ctx.scene.camera->get_ray(u, v);
 
             const bool edit_mode_locked =
                 mesh_overlay_settings.enabled &&

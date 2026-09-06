@@ -21,7 +21,7 @@
 #include "scene_ui.h"
 #include "AnimationNodes.h"
 #include "AnimationController.h"
-#include "AnimatedObject.h"
+#include "Animation/AnimationData.h"   // AnimationData (was reached through AnimatedObject.h)
 #include "NodeSystem/NodeEditorChrome.h"
 
 #include <cstdio>

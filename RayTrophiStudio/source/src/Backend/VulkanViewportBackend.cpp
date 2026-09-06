@@ -1,4 +1,6 @@
 #include "Backend/VulkanViewportBackend.h"
+#include "Viewport/RasterInstanceUpload.h"
+#include "Viewport/RasterViewportFrameRing.h"
 #include "PerfProfile.h"
 #include "HittableInstance.h"
 #include "HittableList.h"
@@ -25,6 +27,8 @@
 #include <unordered_set>
 
 extern RenderSettings render_settings;
+extern bool g_vulkan_device_lost;
+extern std::string g_vulkan_device_lost_msg;
 
 namespace Backend {
 namespace {
@@ -194,6 +198,27 @@ static std::vector<float> bakeEnvMap(bool outdoor) {
 
 } // namespace
 
+VulkanViewportBackend::~VulkanViewportBackend() = default;
+
+void VulkanViewportBackend::drainInteractiveViewportInFlight() {
+    // A resource drain, not a presentation stall: the two are counted apart so
+    // telemetry can say WHY the host blocked. If resource_drains climbs with
+    // frame count, some edit path is mutating a buffer every frame and the
+    // frame ring is producing no parallelism at all.
+    if (m_rasterFrameRing) m_rasterFrameRing->waitAll(true);
+}
+
+void VulkanViewportBackend::setInteractiveViewportSynchronousPresent(bool enabled) {
+    m_rasterSynchronousPresent = enabled;
+}
+
+bool VulkanViewportBackend::getInteractiveViewportFrameTelemetry(
+    RasterFrameTelemetry& out) const {
+    if (!m_rasterTelemetry.available) return false;
+    out = m_rasterTelemetry;
+    return true;
+}
+
 void VulkanViewportBackend::renderProgressive(
     void* outSurface,
     void* outWindow,
@@ -209,6 +234,7 @@ void VulkanViewportBackend::uploadTerrainLayerMaterials(const std::vector<Terrai
     // Viewport-only implementation: does NOT call the RT base class path.
     // No RT descriptor sets are touched — this backend has no RT pipeline.
     if (!m_device || !m_device->isInitialized() || layers.empty()) return;
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_device->waitIdle();
 
@@ -388,6 +414,7 @@ void VulkanViewportBackend::setInteractiveViewportMatcapPreset(int preset) {
 }
 
 void VulkanViewportBackend::setInteractiveViewportMatcapImpl(int64_t textureID) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -447,6 +474,7 @@ void VulkanViewportBackend::setInteractiveViewportMatcapImpl(int64_t textureID) 
 }
 
 void VulkanViewportBackend::setInteractiveViewportMatcapPresetImpl(int preset) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -459,6 +487,7 @@ void VulkanViewportBackend::setInteractiveViewportMatcapPresetImpl(int preset) {
 }
 
 void VulkanViewportBackend::setExternalMaterialBuffer(VkBuffer buffer, VkDeviceSize size) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_externalMaterialBuffer = buffer;
     m_externalMaterialBufferSize = size;
@@ -502,8 +531,128 @@ void VulkanViewportBackend::setExternalMaterialBuffer(VkBuffer buffer, VkDeviceS
     }
 }
 
+
+void VulkanBackendAdapter::updateMaterialPreviewSceneLightBindings() {
+    if (!m_device) return;
+    const VkDescriptorSet ds = m_interactiveViewport.materialPreviewDescSet;
+    if (ds == VK_NULL_HANDLE) return;
+    VkDevice vkDevice = m_device->getDevice();
+    if (vkDevice == VK_NULL_HANDLE) return;
+
+    // Scene globals: light counts plus canonical world/HDRI parameters.
+    if (!m_interactiveViewport.materialPreviewSceneGlobals.buffer) {
+        VulkanRT::BufferCreateInfo ci{};
+        // ★★ 144 = SceneGlobals (MaterialPreviewShadow.cpp) ile ayni. Bu sayi
+        //   UC yerde yasiyor: burada, oradaki static_assert'te ve asagidaki
+        //   memset'te. Kucuk kalirsa post alanlari buffer'in DISINA duser.
+        ci.size = 144;
+        ci.usage = VulkanRT::BufferUsage::STORAGE;
+        ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+        m_interactiveViewport.materialPreviewSceneGlobals = m_device->createBuffer(ci);
+        if (m_interactiveViewport.materialPreviewSceneGlobals.buffer) {
+            m_interactiveViewport.materialPreviewSceneGlobalsMapped =
+                m_device->mapBuffer(m_interactiveViewport.materialPreviewSceneGlobals);
+            // Ilk kare Scene modunda acilirsa sifirlanmamis bellek isik sayisi
+            // olarak okunurdu; sahne rastgele sayida hayalet isikla aydinlanir.
+            if (m_interactiveViewport.materialPreviewSceneGlobalsMapped) {
+                std::memset(m_interactiveViewport.materialPreviewSceneGlobalsMapped, 0, 144);
+            }
+        }
+    }
+    if (!m_interactiveViewport.materialPreviewSceneGlobals.buffer) return;
+
+    // ★ Binding hicbir zaman bos birakilamaz: shader ikisini de STATIK olarak
+    //   kullaniyor (Scene preset'i secili olmasa bile SPIR-V'de referans var),
+    //   yani cizim aninda ikisinin de gecerli olmasi gerekir. Isik buffer'i
+    //   yoksa materyal buffer'ina dusuyoruz -- gecerli, non-null bir SSBO;
+    //   sayiyi 0 yazdigimiz icin icerigi hicbir zaman okunmaz.
+    VkBuffer lightBuf = m_device->m_lightBuffer.buffer;
+    uint32_t lightCount = m_device->m_lightCount;
+    if (lightBuf == VK_NULL_HANDLE) {
+        lightBuf = m_device->m_materialBuffer.buffer;
+        lightCount = 0;
+    }
+    if (lightBuf == VK_NULL_HANDLE) return;
+
+    // ★ Sabit globals.h'de; burada yerel bir kopya TUTULMUYOR. Iki kopya
+    //   olsaydi panel "32 isik kullaniliyor" derken shader baskasini
+    //   kullanabilirdi.
+    const uint32_t kPreviewMaxSceneLights =
+        static_cast<uint32_t>(::kMaterialPreviewMaxSceneLights);
+    if (lightCount > kPreviewMaxSceneLights) {
+        // ★ Kirpma SESSIZ DEGIL. Onizleme piksel basina donuyor ve golge
+        //   yok, ama sinirsiz bir dongunun belirtisi "yavas" olurdu -- teshis
+        //   edilmesi en zor belirti.
+        static bool loggedLightClamp = false;
+        if (!loggedLightClamp) {
+            loggedLightClamp = true;
+            SCENE_LOG_WARN("[MaterialPreview] Sahnede " + std::to_string(lightCount) +
+                           " isik var; onizleme ilk " +
+                           std::to_string(kPreviewMaxSceneLights) +
+                           " tanesini kullanir. Rendered hepsini kullanir.");
+        }
+        lightCount = kPreviewMaxSceneLights;
+    }
+
+    const bool bufferChanged =
+        (m_interactiveViewport.boundPreviewLightBuffer != lightBuf);
+    const bool countChanged =
+        (m_interactiveViewport.lastPreviewSceneLightCount != lightCount);
+    if (!bufferChanged && !countChanged) {
+        updateMaterialPreviewShadowWorldBindings();
+        return;
+    }
+
+    // Descriptor yazmak da, mapped globals'a yazmak da ucustaki bir karenin
+    // okudugu veriyi degistirir. Degisim nadir (isik duzenlemesi), o yuzden
+    // drenaj kare basina degil DEGISIM basina odenir.
+    drainInteractiveViewportInFlight();
+
+    if (bufferChanged) {
+        VkDescriptorBufferInfo lightInfo{};
+        lightInfo.buffer = lightBuf;
+        lightInfo.offset = 0;
+        lightInfo.range = VK_WHOLE_SIZE;
+
+        VkDescriptorBufferInfo globalsInfo{};
+        globalsInfo.buffer = m_interactiveViewport.materialPreviewSceneGlobals.buffer;
+        globalsInfo.offset = 0;
+        globalsInfo.range = VK_WHOLE_SIZE;
+
+        VkWriteDescriptorSet wds[2]{};
+        wds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds[0].dstSet = ds;
+        wds[0].dstBinding = 5;
+        wds[0].descriptorCount = 1;
+        wds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        wds[0].pBufferInfo = &lightInfo;
+        wds[1] = wds[0];
+        wds[1].dstBinding = 6;
+        wds[1].pBufferInfo = &globalsInfo;
+        vkUpdateDescriptorSets(vkDevice, 2, wds, 0, nullptr);
+        m_interactiveViewport.boundPreviewLightBuffer = lightBuf;
+    }
+
+    // The shadow/world updater owns the complete 64-byte globals ABI. A
+    // partial four-uint write here would erase its flags and world mode when
+    // only the light descriptor changed while the values stayed cached.
+    m_interactiveViewport.lastPreviewSceneLightCount = lightCount;
+    updateMaterialPreviewShadowWorldBindings();
+}
+
 void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPipeline) {
     if (!m_device) return;
+    destroyMaterialPreviewTransmissionResources();
+    if (!keepPipeline) {
+        destroyMaterialPreviewSdfSurfaceResources();
+        destroyMaterialPreviewVolumeResources();
+        destroyMaterialPreviewShadowResources();
+        destroyMaterialPreviewIblResources();
+    }
+    if (m_rasterFrameRing) {
+        m_rasterFrameRing->reset();
+    }
+    m_hasRasterPresentedFrame = false;
     VkDevice vkDevice = m_device->getDevice();
 
     if (m_interactiveViewport.framebuffer != VK_NULL_HANDLE) {
@@ -558,6 +707,19 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.materialPreviewDescPool, nullptr);
         m_interactiveViewport.materialPreviewDescPool = VK_NULL_HANDLE;
         m_interactiveViewport.materialPreviewDescSet = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewSceneGlobals.buffer && !keepPipeline) {
+        if (m_interactiveViewport.materialPreviewSceneGlobalsMapped) {
+            m_device->unmapBuffer(m_interactiveViewport.materialPreviewSceneGlobals);
+            m_interactiveViewport.materialPreviewSceneGlobalsMapped = nullptr;
+        }
+        m_device->destroyBuffer(m_interactiveViewport.materialPreviewSceneGlobals);
+        m_interactiveViewport.materialPreviewSceneGlobals = {};
+        // ★ Yeniden kurulumda descriptor'lar YENIDEN yazilmali. Bu iki satir
+        //   olmazsa updateMaterialPreviewSceneLightBindings "degisiklik yok"
+        //   deyip erken doner ve set, yok edilmis bir buffer'a bakar.
+        m_interactiveViewport.boundPreviewLightBuffer = VK_NULL_HANDLE;
+        m_interactiveViewport.lastPreviewSceneLightCount = UINT32_MAX;
     }
     if (m_interactiveViewport.materialPreviewDescLayout != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.materialPreviewDescLayout, nullptr);
@@ -712,6 +874,15 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
 bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::string& shaderDir, int width, int height) {
     if (!m_device || !m_device->isInitialized() || width <= 0 || height <= 0) return false;
     if (!m_device->supportsGraphicsQueue()) return false;
+
+    // ★★★ Atmosfer LUT compute hatti. Bu backend'in KENDI VulkanDevice'i var ve
+    //   RT tembel init'i (hattin tek kurulum yeri idi) etkilesimli modda hic
+    //   calismiyor -- yani burada kurulmazsa Nishita gokyuzu her duzenlemede
+    //   CPU LUT'una duser: sahne basina ~168M exp ARTI ucustaki kareler o
+    //   goruntuleri ornekliyorken destroy/create. "Slider'i tutunca TDR"nin
+    //   kaynagi buydu. TABAN SINIFTAKI ayni cagri burada TEKRARLANMALI cunku
+    //   bu fonksiyon onu OVERRIDE ediyor, cagirmiyor.
+    ensureAtmosphereLUTPipeline(shaderDir);
 
     if (!m_device->hasSkinningPipeline() && std::filesystem::exists(shaderDir + "/skinning.spv")) {
         std::vector<uint32_t> skinningSPV = loadViewportSPV(shaderDir + "/skinning.spv");
@@ -1127,15 +1298,16 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                         vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpProps);
                         const uint32_t limit = mpProps.limits.maxPerStageDescriptorSampledImages;
                         const uint32_t want = static_cast<uint32_t>(VULKAN_TEXTURE_CAPACITY);
-                        // Reserve 2 slots for binding 2 (env maps) which shares the same stage limit.
-                        mpTextureArrayLen = (limit > 2u) ? (std::min)(want, limit - 2u) : 1u;
+                        // Reserve baked env[2], shadow/world, atmosphere LUT[3]
+                        // and HDRI IBL irradiance/prefilter/BRDF[3].
+                        mpTextureArrayLen = (limit > 12u) ? (std::min)(want, limit - 12u) : 1u;
                        /* SCENE_LOG_INFO(std::string("[MP-init] maxPerStageDescriptorSampledImages=") +
                             std::to_string(limit) +
                             " → binding1 descriptorCount=" + std::to_string(mpTextureArrayLen));*/
                     }
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
-                    VkDescriptorSetLayoutBinding mpDslBindings[5]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[21]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
@@ -1158,10 +1330,66 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpDslBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[4].descriptorCount = 1;
                     mpDslBindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // binding 5: sahne isiklari -- RT hattinin okudugu AYNI
+                    // buffer (m_lightBuffer). Ayri bir onizleme isik listesi
+                    // cikarilmadi: iki liste iki dogruluk kaynagi demektir.
+                    mpDslBindings[5].binding = 5;
+                    mpDslBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[5].descriptorCount = 1;
+                    mpDslBindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // binding 6: onizleme sahne globalleri (isik sayisi).
+                    mpDslBindings[6].binding = 6;
+                    mpDslBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[6].descriptorCount = 1;
+                    mpDslBindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[7].binding = 7;
+                    mpDslBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[7].descriptorCount = 1;
+                    mpDslBindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[8].binding = 8;
+                    mpDslBindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[8].descriptorCount = 1;
+                    mpDslBindings[8].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[9].binding = 9;
+                    mpDslBindings[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[9].descriptorCount = 1;
+                    mpDslBindings[9].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    for (uint32_t binding = 10; binding <= 12; ++binding) {
+                        mpDslBindings[binding].binding = binding;
+                        mpDslBindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        mpDslBindings[binding].descriptorCount = 1;
+                        mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    }
+                    for (uint32_t binding = 13; binding <= 15; ++binding) {
+                        mpDslBindings[binding].binding = binding;
+                        mpDslBindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        mpDslBindings[binding].descriptorCount = 1;
+                        mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    }
+                    mpDslBindings[16].binding = 16;
+                    mpDslBindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[16].descriptorCount = 1;
+                    mpDslBindings[16].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    for (uint32_t binding = 17; binding <= 18; ++binding) {
+                        mpDslBindings[binding].binding = binding;
+                        mpDslBindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        mpDslBindings[binding].descriptorCount = 1;
+                        mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    }
+                    mpDslBindings[19].binding = 19;
+                    mpDslBindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                    mpDslBindings[19].descriptorCount = 1;
+                    mpDslBindings[19].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // binding 20: the RT-owned 624-byte volume table, consumed
+                    // read-only by the focused realtime SurfaceSDF pass.
+                    mpDslBindings[20].binding = 20;
+                    mpDslBindings[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[20].descriptorCount = 1;
+                    mpDslBindings[20].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 5;
+                    mpDslci.bindingCount = 21;
                     mpDslci.pBindings = mpDslBindings;
 
                     // Binding 1 is a sparse sampler2D array: only the slots whose texture IDs
@@ -1170,16 +1398,18 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     // ICDs observed crashing in vkCmdBindDescriptorSets/first draw) dereference
                     // them unconditionally. PARTIALLY_BOUND is core in Vulkan 1.2 and only
                     // requires VK_EXT_descriptor_indexing — already gated by `hasDescIdx`.
-                    VkDescriptorBindingFlags mpBindingFlags[5] = {
+                    VkDescriptorBindingFlags mpBindingFlags[21] = {
                         0,
                         hasDescIdx ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : VkDescriptorBindingFlags{0},
+                        0,
+                        0,
                         0,
                         0,
                         0
                     };
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 5;
+                    mpBindingFlagsCI.bindingCount = 21;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     if (hasDescIdx) {
                         mpDslci.pNext = &mpBindingFlagsCI;
@@ -1188,16 +1418,21 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                                                 &m_interactiveViewport.materialPreviewDescLayout);
 
                     if (m_interactiveViewport.materialPreviewDescLayout != VK_NULL_HANDLE) {
-                    VkDescriptorPoolSize mpPoolSizes[2]{};
+                    VkDescriptorPoolSize mpPoolSizes[3]{};
                     mpPoolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    mpPoolSizes[0].descriptorCount = 3; // binding 0 (materials) + binding 3 (terrain) + binding 4 (material ext)
+                    // binding 0 (materials) + 3 (terrain) + 4 (material ext)
+                    // + 5 (sahne isiklari) + 6 (onizleme sahne globalleri)
+                    // + 7 (shadow records) + 16 (material graph program)
+                    mpPoolSizes[0].descriptorCount = 8;
                     mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     // +2 for the 2 env map slots at binding 2
-                    mpPoolSizes[1].descriptorCount = (hasDescIdx ? mpTextureArrayLen : 1u) + 2u;
+                    mpPoolSizes[1].descriptorCount = (hasDescIdx ? mpTextureArrayLen : 1u) + 12u;
+                    mpPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                    mpPoolSizes[2].descriptorCount = 1;
                     VkDescriptorPoolCreateInfo mpDpci{};
                     mpDpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
                     mpDpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-                    mpDpci.poolSizeCount = 2;
+                    mpDpci.poolSizeCount = 3;
                     mpDpci.pPoolSizes = mpPoolSizes;
                     mpDpci.maxSets = 1;
                     vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
@@ -1356,6 +1591,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                         mpDsai.descriptorSetCount = 1;
                         mpDsai.pSetLayouts = &m_interactiveViewport.materialPreviewDescLayout;
                         VkResult mpAllocRes = vkAllocateDescriptorSets(vkDevice, &mpDsai, &m_interactiveViewport.materialPreviewDescSet);
+                        updateMaterialPreviewProgramBinding();
                        /* SCENE_LOG_INFO(std::string("[MP-init] step=allocDescSet result=") +
                             std::to_string((int)mpAllocRes) +
                             " descSet=" + std::to_string((uintptr_t)m_interactiveViewport.materialPreviewDescSet));*/
@@ -2338,6 +2574,10 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
     }
 
    // SCENE_LOG_INFO("[MP-init] step=postAllPipelines");
+    if (m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE) {
+        ensureMaterialPreviewIblResources(shaderDir);
+        ensureMaterialPreviewShadowResources(shaderDir);
+    }
     // NOTE: selection-outline mask resources are intentionally NOT part of
     // this early-return: they are created in the same resize pass as the
     // main framebuffer below, and if their creation ever failed (memory
@@ -2347,7 +2587,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         m_interactiveViewport.framebuffer != VK_NULL_HANDLE &&
         m_interactiveViewport.colorImage.image != VK_NULL_HANDLE &&
         m_interactiveViewport.depthImage.image != VK_NULL_HANDLE &&
-        m_interactiveViewport.stagingBuffer.buffer != VK_NULL_HANDLE) {
+        m_interactiveViewport.stagingBuffer.buffer != VK_NULL_HANDLE &&
+        (m_interactiveViewport.materialPreviewDescSet == VK_NULL_HANDLE ||
+         m_materialPreviewTransmission != nullptr)) {
         return true;
     }
 
@@ -2445,6 +2687,12 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         }
     }
 
+    // Optional quality path. Failure leaves the combined single-pass preview
+    // intact; never bind an incomplete snapshot descriptor set.
+    ensureMaterialPreviewTransmissionResources((uint32_t)width, (uint32_t)height);
+    ensureMaterialPreviewSdfSurfaceResources(shaderDir);
+    ensureMaterialPreviewVolumeResources(shaderDir);
+
     m_interactiveViewport.width = width;
     m_interactiveViewport.height = height;
   //  SCENE_LOG_INFO("[MP-init] step=done");
@@ -2483,14 +2731,172 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                                       requestedMode == ViewportMode::Matcap ||
                                       requestedMode == ViewportMode::MaterialPreview);
     const std::string shaderDir = resolveShaderDir();
+    const bool resourcesEnsured = ensureInteractiveViewportResourcesImpl(shaderDir, width, height);
+
     if (!rasterModeRequested ||
         !m_device ||
         !m_device->supportsGraphicsQueue() ||
-        !ensureInteractiveViewportResourcesImpl(shaderDir, width, height)) {
+        !resourcesEnsured) {
         m_viewportMode = ViewportMode::Rendered;
         renderProgressive(s, nullptr, nullptr, width, height, fb, tex);
         m_viewportMode = requestedMode;
         return;
+    }
+
+    std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
+    if (!framebuffer) {
+        m_interactiveViewport.dirty = true;
+        return;
+    }
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (framebuffer->size() != pixelCount) {
+        framebuffer->resize(pixelCount);
+        m_hasRasterPresentedFrame = false;
+    }
+
+    ++m_rasterFrameSequence;
+    if (m_rasterFrameRingUnavailable &&
+        m_rasterFrameSequence >= m_rasterFrameRingRetryFrame) {
+        m_rasterFrameRingUnavailable = false;
+    }
+    auto scheduleFrameRingRetry = [&](std::uint64_t baseDelayFrames) {
+        ++m_rasterFrameRingFailureCount;
+        const std::uint32_t shift =
+            (std::min)(m_rasterFrameRingFailureCount - 1u, 5u);
+        const std::uint64_t delay =
+            (std::min)(baseDelayFrames << shift, std::uint64_t(240));
+        m_rasterFrameRingRetryFrame = m_rasterFrameSequence + delay;
+        m_rasterFrameRingUnavailable = true;
+    };
+
+    if (!m_rasterFrameRing && !m_rasterFrameRingUnavailable) {
+        m_rasterFrameRing = std::make_unique<RasterViewportFrameRing>();
+    }
+    bool frameRingReady =
+        m_rasterFrameRing &&
+        m_rasterFrameRing->ensure(*m_device, static_cast<uint32_t>(width),
+                                  static_cast<uint32_t>(height));
+    if (m_rasterFrameRing && !frameRingReady && !m_rasterFrameRingUnavailable) {
+        m_rasterFrameRing.reset();
+        scheduleFrameRingRetry(30);
+        SCENE_LOG_WARN(
+            "[Viewport] Persistent raster frame slots unavailable; falling back "
+            "temporarily to synchronous readback; async recovery is scheduled. "
+            "viewport.frame_telemetry will report async_present=false meanwhile.");
+    }
+
+    // ★★★ "Bu KAREDE hic yeni piksel tuketebildik mi" — stale sayacinin olcmesi
+    //   gereken sey budur. Bkz. asagidaki noteStalePresent cagrisi.
+    bool consumedAnyFrameThisPass = false;
+    auto consumeReadyRasterFrame = [&]() -> bool {
+        if (!frameRingReady || framebuffer->empty()) return false;
+        if (!m_rasterFrameRing->consumeNewestReady(
+                framebuffer->data(), pixelCount * sizeof(uint32_t))) {
+            return false;
+        }
+        m_hasRasterPresentedFrame = true;
+        consumedAnyFrameThisPass = true;
+        m_interactiveViewport.presentationPending = false;
+        return true;
+    };
+
+    // ★ The one number that says whether this bridge is healthy: raster work ran
+    // but no completed slot was ready, so the viewer saw pixels older than the
+    // frame that was just recorded. A small constant count is normal; a count
+    // that tracks frame count means the ring is permanently behind.
+    auto publishRasterTelemetry = [&](bool asyncPath,
+                                      double frameMs,
+                                      double cpuRecordMs,
+                                      double slotWaitMs,
+                                      double submitMs,
+                                      double imageReadbackMs,
+                                      double hostReadMs,
+                                      double presentMs) {
+        RasterFrameTelemetry t;
+        t.available = true;
+        t.async_present = asyncPath;
+        t.synchronous_present = m_rasterSynchronousPresent;
+        t.width = static_cast<uint32_t>(width);
+        t.height = static_cast<uint32_t>(height);
+        t.frame_ms = frameMs;
+        t.cpu_record_ms = cpuRecordMs;
+        t.slot_wait_ms = slotWaitMs;
+        t.submit_ms = submitMs;
+        t.image_readback_ms = imageReadbackMs;
+        t.host_read_ms = hostReadMs;
+        t.present_ms = presentMs;
+        if (m_rasterFrameRing && m_rasterFrameRing->isReady()) {
+            const auto& rs = m_rasterFrameRing->stats();
+            t.slot_count = RasterViewportFrameRing::kSlotCount;
+            t.frames_submitted = rs.framesSubmitted;
+            t.frames_consumed = rs.framesConsumed;
+            t.stale_presents = rs.stalePresents;
+            t.slot_waits = rs.slotWaits;
+            t.blocking_seeds = rs.blockingWaits;
+            t.resource_drains = rs.resourceDrains;
+            t.present_latency_frames = rs.lastPresentLatencyFrames;
+        }
+        // Geometri olcumu ayri bir uyeden gelir: bu lambda cizim dongusunden
+        // ONCE tanimlaniyor, yani oradaki yerel sayaclari yakalayamaz. Ayrica
+        // temiz-sahne erken cikisinda son OLCULEN degerlerin korunmasi gerekir.
+        const auto& gs = m_rasterGeometryStats;
+        t.global_instance_buffer  = gs.global_instance_buffer;
+        t.gpu_culling             = gs.gpu_culling;
+        t.total_instances         = gs.total_instances;
+        t.cull_mesh_count         = gs.cull_mesh_count;
+        t.draw_calls              = gs.draw_calls;
+        t.visible_triangles       = gs.visible_triangles;
+        t.full_triangles          = gs.full_triangles;
+        t.proxy_triangles         = gs.proxy_triangles;
+        t.full_instances          = gs.full_instances;
+        t.proxy_instances         = gs.proxy_instances;
+        t.scatter_triangle_target = gs.scatter_triangle_target;
+        m_rasterTelemetry = t;
+    };
+
+    // ★ Bu backend TEXTURE'A YAZMAZ, yalnizca s (original_surface) doldurur.
+    //
+    // Sahiplik siniri: raster viewport'un urunu original_surface'tir; ekrana
+    // giden SDL_Texture'in tek sahibi Main'dir. Burada bir SDL_UpdateTexture
+    // cagrisi vardi ve AYNI KARE ICINDE her zaman uzerine yaziliyordu:
+    // renderProgressive donunce cagiran kosulsuz did_render_this_frame=true
+    // yapiyor (Main.cpp), bu da needs_texture_update'i true yapiyor ve
+    // Main.cpp asil yuklemeyi surface'ten yapiyor. Yani o yazma olu bir
+    // yazmaydi -- 1080p'de kare basina 8.3 MB bedava maliyet.
+    //
+    // Geri eklemek isteyen icin: once Main'deki yuklemenin kaldirildigini
+    // dogrula. Iki yer birden yazarsa hangisinin kazandigi kare sirasina
+    // kalir ve bu ekran goruntusunde DOGRU gorunur.
+    auto presentCachedRasterFrame = [&]() {
+        if (!m_hasRasterPresentedFrame || framebuffer->empty()) return;
+        if (s) {
+            SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
+            if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
+                std::memcpy(outSurf->pixels, framebuffer->data(),
+                            pixelCount * sizeof(uint32_t));
+            }
+        }
+    };
+
+    // Pump a completed prior slot before deciding whether this frame needs new
+    // raster work. A static scene may have one last GPU submission pending even
+    // though its dirty flag is already clear.
+    //
+    // ★★★★ BU cagri gercek okumayi yapiyor (invalidate + 1680x945x4 = 6.35 MB
+    //   memcpy), ve OLCULMUYORDU. `host_read_ms` yalnizca gonderimden SONRAKI
+    //   firsatci tuketimi sarmaliyordu -- o da esasen hicbir zaman basarmadigi
+    //   icin sayi surekli 0.00 okunuyordu. Yani "readback bedava" izlenimi bir
+    //   olcum degil, olcu aletinin YANLIS YERE bakmasiydi. Bu, ayni oturumda
+    //   bulunan dorduncu ayni aile arizasi (stale_presents / slot_waits /
+    //   resource_drains). Sunum mimarisi hakkinda karar bu sayiya dayanacagi
+    //   icin once sayinin dogru yeri olcmesi gerekiyor.
+    double topOfPassConsumeMs = 0.0;
+    {
+        const auto consumeStart = std::chrono::steady_clock::now();
+        consumeReadyRasterFrame();
+        const auto consumeEnd = std::chrono::steady_clock::now();
+        topOfPassConsumeMs = std::chrono::duration<double, std::milli>(
+            consumeEnd - consumeStart).count();
     }
 
     auto hashCamera = [](const CameraParams& c) -> uint64_t {
@@ -2507,26 +2913,55 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     };
     uint64_t camHash = hashCamera(m_camera);
     {
-        // Grid settings join the change hash so slider edits invalidate the cached frame.
+        // Viewport-only render settings join the change hash so UI/API edits
+        // invalidate the cached frame even when the camera stays still.
         auto mixGrid = [&](float v) { uint32_t bits; std::memcpy(&bits, &v, 4); camHash ^= bits; camHash *= 1099511628211ull; };
         mixGrid(::render_settings.grid_fade_distance);
         mixGrid(::render_settings.grid_opacity);
+        mixGrid(static_cast<float>(::render_settings.material_preview_lighting_preset));
+
+        // ★★★★ Goruntuleme donusumu de bu hash'e GIRMEK ZORUNDA. Girmedigi
+        //   surece `post.set_exposure`, tone_mapping, ISO/enstantane/diyafram
+        //   -- hicbiri onbelleklenmis kareyi gecersiz kilmiyordu: sahne temiz
+        //   sayilip ESKI pikseller yeniden sunuluyordu.
+        //
+        //   ★★★ Panelde fark edilmiyordu cunku kullanici kadrani surerken
+        //   fare hareketi zaten her kare yeniden ciziyor. YALNIZCA script
+        //   yolunda goruluyor, ve orada da "ayar ise yaramiyor" gibi degil
+        //   "ayar bazen isliyor" gibi gorunuyor -- teshis edilmesi en zor
+        //   belirti. 2026-09-03'te bir pozlama olcumu bunun uzerine dustu:
+        //   ISO 100->1600 yapildi ve olculen ortalama BIREBIR ayni kaldi.
+        //
+        //   Bu alanlar shader'lara zaten g_display_post uzerinden gidiyor;
+        //   burada da okunmalari, "urettigin degeri TUKETICI gorecek mi"
+        //   sorusunun cevabidir.
+        mixGrid(g_display_post.exposure);
+        mixGrid(g_display_post.gamma);
+        mixGrid(g_display_post.saturation);
+        mixGrid(g_display_post.color_temperature);
+        mixGrid(g_display_post.vignette_strength);
+        mixGrid(static_cast<float>(g_display_post.tone_mapping));
+        mixGrid(static_cast<float>(g_display_post.vignette_enabled));
+        mixGrid(g_display_post.camera_exposure);
     }
     if (!m_interactiveViewport.dirty && camHash == m_lastCameraHash &&
-        m_interactiveViewport.width == width && m_interactiveViewport.height == height) {
-        std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
-        if (framebuffer && !framebuffer->empty()) {
-            if (s) {
-                SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
-                if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
-                    std::memcpy(outSurf->pixels, framebuffer->data(), framebuffer->size() * sizeof(uint32_t));
-                }
-            }
-            if (tex) {
-                SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
-            }
-            return;
-        }
+        m_interactiveViewport.width == width &&
+        m_interactiveViewport.height == height &&
+        m_hasRasterPresentedFrame) {
+        // ★ m_hasRasterPresentedFrame is part of the condition on purpose. The
+        // clean-scene path re-publishes CACHED pixels; taking it before any
+        // frame has ever landed would leave the viewport showing whatever the
+        // framebuffer vector happened to contain, with no dirty flag left to
+        // ever correct it.
+        const auto presentStart = std::chrono::steady_clock::now();
+        presentCachedRasterFrame();
+        const auto presentEnd = std::chrono::steady_clock::now();
+        publishRasterTelemetry(
+            frameRingReady,
+            std::chrono::duration<double, std::milli>(presentEnd - frameStart).count(),
+            0.0, 0.0, 0.0, 0.0, 0.0,
+            std::chrono::duration<double, std::milli>(presentEnd - presentStart).count());
+        return;
     }
     m_lastCameraHash = camHash;
     m_interactiveViewport.dirty = false;
@@ -2623,6 +3058,16 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 case ::RasterViewportQualityPreset::Quality:
                     rasterQualityScale = 1.0;
                     break;
+                case ::RasterViewportQualityPreset::Full:
+                    // ★ Hedef burada zaten ANLAMSIZ: Full modda LOD ayrimi hic
+                    //   kurulmaz (bkz. rebuildRasterCullBindings), yani hicbir
+                    //   instance proxy'ye dusmez. Yine de tavana cekiyoruz ki
+                    //   telemetride okunan hedef, uygulanan davranisla
+                    //   celismesin -- "hedef 20M ama 4 milyar ucgen cizildi"
+                    //   diye bir satir okuyan ajan hata arar.
+                    rasterQualityScale = 1.0;
+                    minBudget = maxBudget;
+                    break;
                 case ::RasterViewportQualityPreset::Auto:
                 default:
                     allowAdaptiveRasterBudget = true;
@@ -2642,6 +3087,10 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 case ::RasterViewportQualityPreset::Quality:
                     rasterQualityScale = 1.0;
                     break;
+                case ::RasterViewportQualityPreset::Full:
+                    rasterQualityScale = 1.0;
+                    minBudget = maxBudget;
+                    break;
                 case ::RasterViewportQualityPreset::Auto:
                 default:
                     rasterQualityScale = 0.72;
@@ -2653,21 +3102,78 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         const double referencePixels = 1920.0 * 1080.0;
         const double resolutionScale = std::sqrt(referencePixels / pixelCount);
         const double feedbackScale = allowAdaptiveRasterBudget
-            ? (std::clamp)(static_cast<double>(m_rasterScatterBudgetScale), 0.35, 1.0)
+            ? (std::clamp)(static_cast<double>(m_rasterScatterTargetScale), 0.35, 1.0)
             : 1.0;
         const uint64_t adaptiveBudget = static_cast<uint64_t>(
             baseBudgetMillions * 1000.0 * 1000.0 * resolutionScale * rasterQualityScale * feedbackScale);
         if (!m_rasterScatterPaintActive) {
-            m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
+            m_rasterScatterTriangleTarget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
             if (!allowAdaptiveRasterBudget) {
-                m_rasterScatterBudgetScale = 1.0f;
+                m_rasterScatterTargetScale = 1.0f;
             }
         }
     }
 
-    // ── Frustum Culling: extract planes & re-upload only visible instances ──
+    // ── Frustum culling ─────────────────────────────────────────────────────
     extractFrustumPlanes(viewProj);
-    if (!m_rasterInstances.empty()) {
+
+    // ★★★ Global instance buffer yolunda CPU culling'i ve scatter proxy'sini
+    //     uploadVisibleRasterInstances ERKEN DONEREK atliyor. Yani o yol acikken
+    //     GPU culling kurulmazsa sahne culling'siz ve proxy'siz cizilir: her
+    //     mesh'in BUTUN instance'lari, kamera nereye bakarsa baksin. Bu yuzden
+    //     asagidaki kurulum basarisiz olursa DURUM RAPORLANIR, sessizce
+    //     devam edilmez.
+    m_rasterGpuCullActive = false;
+    if (m_rasterUseGlobalInstBuffer && m_rasterGlobalInstBuf &&
+        m_rasterGlobalInstBuf->isReady() && !m_rasterInstances.empty() &&
+        m_rasterCullMeshCount > 0 && m_rasterCullDrawSlotCount > 0) {
+
+        if (!m_rasterGpuCull) m_rasterGpuCull = std::make_unique<RasterGpuCull>();
+
+        // ★ Kapasite YALNIZCA layout yeniden kuruldugunda degisir, ve o an
+        //   ensure() eski buffer'lari yok edip yenisini kurar. Ucustaki bir kare
+        //   hala eskilere bakiyor olabilir, o yuzden once bosalt. Bu kosul
+        //   sayesinde drenaj kare basina degil, YALNIZCA degisim basina odenir.
+        if (m_rasterCullBindingsDirty) {
+            drainInteractiveViewportInFlight();
+        }
+
+        const uint32_t instanceCapacity =
+            static_cast<uint32_t>(m_rasterInstanceBounds.size() / 4u);
+        if (m_rasterGpuCull->ensure(*m_device, shaderDir, instanceCapacity,
+                                    m_rasterCullOutCapacity,
+                                    m_rasterCullMeshCount, m_rasterCullDrawSlotCount)) {
+            if (m_rasterCullBindingsDirty) rebuildRasterCullBindings();
+
+            float planes[24];
+            for (int i = 0; i < 6; ++i) {
+                planes[i * 4 + 0] = m_frustumPlanes[i].normal.x;
+                planes[i * 4 + 1] = m_frustumPlanes[i].normal.y;
+                planes[i * 4 + 2] = m_frustumPlanes[i].normal.z;
+                planes[i * 4 + 3] = m_frustumPlanes[i].d;
+            }
+            const float camPos[3] = { m_camera.origin.x, m_camera.origin.y, m_camera.origin.z };
+            // Hedefi 32-bit'e sikistir: shader ucgen sayisini uint tutuyor ve
+            // pratik tavan (48M) fazlasiyla siginiyor.
+            const uint32_t target = static_cast<uint32_t>(
+                (std::min)(m_rasterScatterTriangleTarget, uint64_t(0xFFFFFFFFull)));
+            m_rasterGpuCull->setGlobals(planes, camPos, target,
+                                        kRasterLodMinDistanceSq,
+                                        kRasterLodMaxDistanceSq,
+                                        m_rasterCullMeshCount,
+                                        kRasterLodBandWidth);
+            m_rasterGpuCullActive = true;
+        } else if (!m_loggedRasterGpuCullFailure) {
+            m_loggedRasterGpuCullFailure = true;
+            SCENE_LOG_WARN(
+                "[RasterCull] GPU culling kurulamadi; global instance buffer yolu "
+                "CULLING'SIZ ve PROXY'SIZ cizecek. viewport.frame_telemetry "
+                "gpu_culling=false raporlayacak.");
+        }
+    }
+
+    if (!m_rasterGpuCullActive && !m_rasterInstances.empty()) {
+        // Eski yol: CPU tarama (global buffer kapaliyken proxy/culling burada).
         for (auto& [key, mesh] : m_rasterMeshes) {
             uploadVisibleRasterInstances(mesh);
         }
@@ -2713,14 +3219,93 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             m_interactiveViewport.selectionCompositeFramebuffer != VK_NULL_HANDLE &&
             m_interactiveViewport.selectionCompositeDescSet != VK_NULL_HANDLE;
         if (selectionOutlineReady) {
+            drainInteractiveViewportInFlight();
             resolveSelectionOutlineDraws(sop.nodeNames, selectionOutlineDraws);
         }
     }
 
-    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+    // ★★★ beginFrame'den ONCE: bu fonksiyon descriptor set'i guncelleyebilir
+    //   ve mapped bir buffer'a yazabilir. Ikisi de, ucustaki bir komut tamponu
+    //   onlari kullaniyorken yapilamaz; fonksiyon degisim varsa kendisi drain
+    //   ediyor. Kayit basladiktan sonra cagirmak, dogrulama katmani kapaliyken
+    //   sessizce bozuk kare uretirdi.
+    m_interactiveViewport.materialPreviewBoundMaterialCount =
+        m_externalMaterialBuffer ? m_externalMaterialCount
+                                 : (m_device ? m_device->m_materialCount : 0u);
+    prepareMaterialPreviewShadowFrame();
+    updateMaterialPreviewSceneLightBindings();
+    updateMaterialPreviewSdfSurfaceBinding();
+    updateMaterialPreviewVolumeBinding();
+
+    double frameRingSlotWaitMs = 0.0;
+    bool usingFrameRing = frameRingReady;
+    VkCommandBuffer cmd = usingFrameRing
+        ? m_rasterFrameRing->beginFrame(&frameRingSlotWaitMs)
+        : VK_NULL_HANDLE;
+    if (cmd == VK_NULL_HANDLE && usingFrameRing) {
+        const VkResult ringFailure = m_rasterFrameRing->lastResult();
+        if (ringFailure == VK_ERROR_DEVICE_LOST) {
+            // Never submit a compatibility command to a lost queue. The old
+            // fallback did exactly that after this warning and turned a
+            // recoverable device-lost signal into a Windows TDR/driver reset.
+            g_vulkan_device_lost = true;
+            g_vulkan_device_lost_msg =
+                "Raster frame acquisition returned VK_ERROR_DEVICE_LOST";
+            render_settings.backend_changed = true;
+            // ★★ dirty YENIDEN KURULMAZ ve log BIR KEZ basilir. Eskisi ikisini de
+            //   her karede yapiyordu: kaybedilmis bir cihaza kare istemek
+            //   basarisiz olur, dirty'yi tekrar kurar ve ayni satiri tekrar
+            //   basar -- yani ekranda gorulen "her frame de bu hata" seli
+            //   arizanin kendisi degil, arizanin YENIDEN DENEME dongusuydu.
+            //   Kurtarma g_vulkan_device_lost uzerinden Main'de yapiliyor.
+            if (!m_loggedRasterDeviceLost) {
+                m_loggedRasterDeviceLost = true;
+                SCENE_LOG_ERROR(
+                    "[Viewport] Vulkan device lost while acquiring a raster frame; "
+                    "no synchronous fallback submit will be attempted. The viewport "
+                    "backend will be rebuilt; this message is logged once.");
+            }
+            presentCachedRasterFrame();
+            publishRasterTelemetry(false, 0.0, 0.0, frameRingSlotWaitMs,
+                                   0.0, 0.0, 0.0, 0.0);
+            return;
+        }
+        // Keep the last completed image and recreate the ring after a short
+        // backoff. Starting a second, synchronous submit on a queue that just
+        // rejected frame acquisition is unsafe and was the step preceding TDR.
+        m_rasterFrameRing->reset();
+        m_rasterFrameRing.reset();
+        scheduleFrameRingRetry(2);
+        frameRingReady = false;
+        SCENE_LOG_WARN(
+            "[Viewport] Raster frame slot acquisition failed; the viewport is "
+            "keeping the last completed frame; async recovery is scheduled.");
+        m_interactiveViewport.dirty = true;
+        presentCachedRasterFrame();
+        publishRasterTelemetry(false, 0.0, 0.0, frameRingSlotWaitMs,
+                               0.0, 0.0, 0.0, 0.0);
+        return;
+    } else if (cmd == VK_NULL_HANDLE) {
+        cmd = m_device->beginSingleTimeCommands();
+    }
     if (cmd == VK_NULL_HANDLE) {
         m_interactiveViewport.dirty = true;
         return;
+    }
+    const auto cpuRecordStart = std::chrono::steady_clock::now();
+
+    // ── GPU culling + LOD ayrimi ────────────────────────────────────────────
+    // Render pass'ten ONCE kaydedilir: compute, cizimin okuyacagi sikistirilmis
+    // instance buffer'ini ve indirect komutlari uretir. record() sonundaki
+    // bariyer COMPUTE -> (DRAW_INDIRECT | VERTEX_INPUT) gecisini kurar.
+    if (m_rasterGpuCullActive && m_rasterGpuCull) {
+        m_rasterGpuCull->record(cmd,
+                                m_rasterGlobalInstBuf->vkBuffer(),
+                                m_rasterCullMeshCount);
+    }
+    recordMaterialPreviewShadowPass(cmd);
+    if (m_materialPreviewTransmission) {
+        prepareMaterialPreviewTransmissionThickness(cmd);
     }
 
     VkClearValue clearValues[2]{};
@@ -2734,19 +3319,35 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
 
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+
     renderPassInfo.renderPass = m_interactiveViewport.renderPass;
     renderPassInfo.framebuffer = m_interactiveViewport.framebuffer;
+    renderPassInfo.clearValueCount = 2;
+
     renderPassInfo.renderArea.offset = { 0, 0 };
     renderPassInfo.renderArea.extent = { (uint32_t)width, (uint32_t)height };
-    renderPassInfo.clearValueCount = 2;
     renderPassInfo.pClearValues = clearValues;
 
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    recordMaterialPreviewSkyPass(cmd, view, static_cast<uint32_t>(width),
+                                 static_cast<uint32_t>(height));
     const VkBuffer materialBuffer = m_externalMaterialBuffer
         ? m_externalMaterialBuffer
         : m_device->m_materialBuffer.buffer;
+    // ★ Do NOT require raster mesh instances here. This flag also gates the
+    // realtime volume/gas and SDF-surface overlay passes (see
+    // recordMaterialPreviewVolumePass / recordMaterialPreviewTransmissionPass
+    // below), and those draw from the volume SSBO, not m_rasterMeshes. A scene
+    // with only a gas/smoke domain and no other mesh has an empty
+    // m_rasterInstances, so the old `!m_rasterInstances.empty()` term silently
+    // skipped the entire material-preview pass — including the volume — even
+    // though the pipeline/descriptor/buffer plumbing was otherwise correct.
+    // The base-class copy of this same flag (VulkanBackend.cpp) never had this
+    // term; the two had drifted. Both the opaque-mesh loop and the transmission
+    // replay's mesh loop already iterate empty containers safely, so relaxing
+    // this costs nothing when the scene truly has neither mesh nor volume.
     const bool useMaterialPreview = (m_viewportMode == ViewportMode::MaterialPreview) &&
-        !m_rasterInstances.empty() &&
+        (!m_rasterInstances.empty() || m_device->m_volumeCount > 0u) &&
         m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE &&
         m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE &&
         materialBuffer != VK_NULL_HANDLE;
@@ -2781,34 +3382,105 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     uint64_t visibleProxyTriangleTotal = 0;
     uint64_t maxDrawTriangles = 0;
     uint32_t maxDrawInstances = 0;
+    uint32_t visibleFullInstanceTotal = 0;
+    uint32_t visibleProxyInstanceTotal = 0;
+    uint32_t rasterDrawCalls = 0;
     std::string maxDrawMeshKey;
 
     if (!m_rasterInstances.empty()) {
         for (const auto& [meshKey, rmb] : m_rasterMeshes) {
-            if (!rmb.vertexBuffer.buffer || !rmb.instanceBuffer.buffer || rmb.vertexCount == 0 || rmb.instanceCount == 0) continue;
+            // GPU culling acikken cizim, compute'un URETTIGI sikistirilmis
+            // matris buffer'indan ve indirect komuttan surulur.
+            const bool cullDriven = m_rasterGpuCullActive && m_rasterGpuCull &&
+                                    rmb.cullDrawSlot != UINT32_MAX;
+            VkBuffer instanceBuffer =
+                cullDriven
+                    ? static_cast<VkBuffer>(m_rasterGpuCull->compactedInstanceBuffer())
+                    : ((m_rasterUseGlobalInstBuffer && m_rasterGlobalInstBuf)
+                        ? static_cast<VkBuffer>(m_rasterGlobalInstBuf->vkBuffer())
+                        : rmb.instanceBuffer.buffer);
+
+            // Sikistirilmis buffer'da bu mesh'in bolgesi cullOutBase'te basliyor.
+            // Tam ve proxy AYRI bolgelerdir; proxy mesh'in kendi cullOutBase'i
+            // sahibi tarafindan atanir.
+            const VkDeviceSize instanceBindOffset =
+                cullDriven ? static_cast<VkDeviceSize>(rmb.cullOutBase) * 64ull : 0ull;
+
+            if (!rmb.vertexBuffer.buffer || !instanceBuffer || rmb.vertexCount == 0) continue;
+            // ★ GPU culling acikken instanceCount CPU'da BILINMEZ -- onu compute
+            //   yaziyor. Bu yuzden burada sifir kontrolu YAPILAMAZ; sifir
+            //   instance'li bir indirect cizim zaten gecerli bir no-op'tur.
+            //   Eski kontrolu burada birakmak proxy mesh'leri (kendi instance'i
+            //   olmayan, komutunu sahibi yazan) tamamen gizlerdi.
+            if (!cullDriven && rmb.instanceCount == 0) continue;
+
             const uint64_t trianglesPerInstance = (rmb.indexBuffer.buffer && rmb.indexCount > 0)
                 ? (static_cast<uint64_t>(rmb.indexCount) / 3ull)
                 : (static_cast<uint64_t>(rmb.vertexCount) / 3ull);
-            const uint64_t drawTriangles = trianglesPerInstance * static_cast<uint64_t>(rmb.instanceCount);
-            visibleTriangleTotal += drawTriangles;
-            if (rmb.isScatterProxy) {
-                visibleProxyTriangleTotal += drawTriangles;
+
+            if (cullDriven) {
+                // ★ Sayim GPU'dan gelir ve BIR KARE GERIDIR. Proxy mesh'in
+                //   kendi olcumu yoktur; sayisi SAHIBININ sonucunda durur, bu
+                //   yuzden proxy girdileri burada atlanir -- yoksa cift sayilir.
+                if (rmb.cullMeshIndex != UINT32_MAX) {
+                    RasterGpuCull::MeshResult mr{};
+                    if (m_rasterGpuCull->readMeshResult(rmb.cullMeshIndex, mr)) {
+                        const uint64_t fullTris = trianglesPerInstance * mr.fullInstances;
+                        visibleFullTriangleTotal += fullTris;
+                        visibleTriangleTotal     += fullTris;
+                        visibleFullInstanceTotal += mr.fullInstances;
+                        visibleProxyInstanceTotal += mr.proxyInstances;
+                        if (fullTris > maxDrawTriangles) {
+                            maxDrawTriangles = fullTris;
+                            maxDrawInstances = mr.fullInstances;
+                            maxDrawMeshKey = meshKey;
+                        }
+                        if (mr.proxyInstances > 0 && !rmb.proxyMeshKey.empty()) {
+                            auto pxIt = m_rasterMeshes.find(rmb.proxyMeshKey);
+                            if (pxIt != m_rasterMeshes.end()) {
+                                const auto& px = pxIt->second;
+                                const uint64_t pxTri = (px.indexBuffer.buffer && px.indexCount > 0)
+                                    ? (static_cast<uint64_t>(px.indexCount) / 3ull)
+                                    : (static_cast<uint64_t>(px.vertexCount) / 3ull);
+                                const uint64_t proxyTris = pxTri * mr.proxyInstances;
+                                visibleProxyTriangleTotal += proxyTris;
+                                visibleTriangleTotal      += proxyTris;
+                            }
+                        }
+                    }
+                }
             } else {
-                visibleFullTriangleTotal += drawTriangles;
-            }
-            if (drawTriangles > maxDrawTriangles) {
-                maxDrawTriangles = drawTriangles;
-                maxDrawInstances = rmb.instanceCount;
-                maxDrawMeshKey = meshKey;
+                const uint64_t drawTriangles = trianglesPerInstance * static_cast<uint64_t>(rmb.instanceCount);
+                visibleTriangleTotal += drawTriangles;
+                if (rmb.isScatterProxy) {
+                    visibleProxyTriangleTotal += drawTriangles;
+                    visibleProxyInstanceTotal += rmb.instanceCount;
+                } else {
+                    visibleFullTriangleTotal += drawTriangles;
+                    visibleFullInstanceTotal += rmb.instanceCount;
+                }
+                if (drawTriangles > maxDrawTriangles) {
+                    maxDrawTriangles = drawTriangles;
+                    maxDrawInstances = rmb.instanceCount;
+                    maxDrawMeshKey = meshKey;
+                }
             }
 
-            const bool drawMaterialPreview =
+            // ★★★ Buradaki `!rmb.isScatterProxy` 2026-09-01'de kaldirildi.
+            //   Proxy mesh'lerin UV'si ve materyal ID'si YOKTU, o yuzden bu
+            //   kosul zaten hicbir zaman gecmiyordu -- ama ayrica ACIKCA
+            //   disliyordu. Sonuc: Material Preview modunda sahnenin uzak yarisi
+            //   dokulu PBR bitkilerden DOKUSUZ MATCAP MUKAVVAYA donuyordu.
+            //   "Proxy cok kaba" sikayetinin baskin sebebi poligon sayisi degil,
+            //   proxy'nin materyal hattini hic gormemesiydi.
+            //   Artik proxy de UV + matId tasiyor (bkz. ensureScatterProxyMesh);
+            //   tasimayanlar iki buffer kontrolunde zaten eleniyor.
+            const bool drawWithGBuffer =
                 useMaterialPreview &&
-                !rmb.isScatterProxy &&
                 rmb.matIdBuffer.buffer &&
                 rmb.uvBuffer.buffer;
 
-            if (drawMaterialPreview) {
+            if (drawWithGBuffer) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.materialPreviewPipeline);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         m_interactiveViewport.materialPreviewPipelineLayout,
@@ -2837,6 +3509,10 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                     case ::RasterViewportQualityPreset::Performance: previewQuality = 1u; break;
                     case ::RasterViewportQualityPreset::Balanced: previewQuality = 2u; break;
                     case ::RasterViewportQualityPreset::Quality: previewQuality = 3u; break;
+                    // ★ Shader'in en yuksek BRDF kademesi 3. Full'un ayirt
+                    //   edici yani BRDF degil, proxy'siz geometridir; buraya
+                    //   4 yazmak shader'da tanimsiz bir dala girerdi.
+                    case ::RasterViewportQualityPreset::Full: previewQuality = 3u; break;
                     case ::RasterViewportQualityPreset::Auto:
                     default: previewQuality = 2u; break;
                 }
@@ -2844,9 +3520,11 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                     ? m_externalMaterialCount
                     : (m_device ? m_device->m_materialCount : 0u);
                 mpPush.materialMeta[0] = materialCount;
-                mpPush.materialMeta[1] = previewQuality;
+                mpPush.materialMeta[1] = previewQuality |
+                    (m_materialPreviewTransmission ? (1u << 8u) : 0u);
                 mpPush.materialMeta[2] = static_cast<uint32_t>(::render_settings.material_preview_lighting_preset);
                 mpPush.materialMeta[3] = m_interactiveViewport.materialPreviewTextureArrayLen;
+
                 vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(MaterialPreviewPushConstants), &mpPush);
@@ -2855,10 +3533,14 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                     rmb.vertexBuffer.buffer,
                     rmb.normalBuffer.buffer  ? rmb.normalBuffer.buffer  : rmb.vertexBuffer.buffer,
                     rmb.matIdBuffer.buffer ? rmb.matIdBuffer.buffer : rmb.vertexBuffer.buffer,
-                    rmb.instanceBuffer.buffer,
+                    instanceBuffer,
                     rmb.uvBuffer.buffer ? rmb.uvBuffer.buffer : rmb.vertexBuffer.buffer,
                 };
-                VkDeviceSize mpOffsets[5] = { 0, 0, 0, 0, 0 };
+                // ★ Instance binding'i mesh'in SIKISTIRILMIS cikti bolgesinin
+                //   tabanindan baglanir; indirect komuttaki firstInstance 0
+                //   kalir. Boylece drawIndirectFirstInstance cihaz ozelligine
+                //   bagimlilik yok (bkz. RasterGpuCull.h).
+                VkDeviceSize mpOffsets[5] = { 0, 0, 0, instanceBindOffset, 0 };
                 vkCmdBindVertexBuffers(cmd, 0, 5, mpVertexBuffers, mpOffsets);
             } else {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
@@ -2877,17 +3559,35 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 VkBuffer vertexBuffers[3] = {
                     rmb.vertexBuffer.buffer,
                     rmb.normalBuffer.buffer ? rmb.normalBuffer.buffer : rmb.vertexBuffer.buffer,
-                    rmb.instanceBuffer.buffer
+                    instanceBuffer
                 };
-                VkDeviceSize offsets[3] = { 0, 0, 0 };
+                VkDeviceSize offsets[3] = { 0, 0, instanceBindOffset };
                 vkCmdBindVertexBuffers(cmd, 0, 3, vertexBuffers, offsets);
             }
 
-            if (rmb.indexBuffer.buffer && rmb.indexCount > 0) {
-                vkCmdBindIndexBuffer(cmd, rmb.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(cmd, rmb.indexCount, rmb.instanceCount, 0, 0, 0);
+            ++rasterDrawCalls;
+            if (cullDriven) {
+                // instanceCount ve firstInstance komutun ICINDE; ikisini de
+                // raster_cull.comp yazdi. drawCount=1 oldugu icin stride
+                // onemsizdir ama dogru degeri gecmek ileride coklu cizime
+                // gecerken tuzagi kapatir.
+                VkBuffer cmdBuf = static_cast<VkBuffer>(m_rasterGpuCull->commandBuffer());
+                const VkDeviceSize cmdOff =
+                    static_cast<VkDeviceSize>(RasterGpuCull::commandOffset(rmb.cullDrawSlot));
+                if (rmb.indexBuffer.buffer && rmb.indexCount > 0) {
+                    vkCmdBindIndexBuffer(cmd, rmb.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+                    vkCmdDrawIndexedIndirect(cmd, cmdBuf, cmdOff, 1, RasterGpuCull::kCommandStride);
+                } else {
+                    vkCmdDrawIndirect(cmd, cmdBuf, cmdOff, 1, RasterGpuCull::kCommandStride);
+                }
             } else {
-                vkCmdDraw(cmd, rmb.vertexCount, rmb.instanceCount, 0, 0);
+                const uint32_t firstInst = m_rasterUseGlobalInstBuffer ? rmb.firstInstance : 0;
+                if (rmb.indexBuffer.buffer && rmb.indexCount > 0) {
+                    vkCmdBindIndexBuffer(cmd, rmb.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+                    vkCmdDrawIndexed(cmd, rmb.indexCount, rmb.instanceCount, 0, 0, firstInst);
+                } else {
+                    vkCmdDraw(cmd, rmb.vertexCount, rmb.instanceCount, 0, firstInst);
+                }
             }
         }
     } else if (m_rasterGeometryDirty) {
@@ -2927,6 +3627,20 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     // (standard view switched), or when the adaptive spacing bucket changed (zoom). The grid
     // lays out on the plane the camera faces so it stays a usable alignment reference, and the
     // spacing follows the zoom so it never collapses to a few lines or fuses into a mass.
+    // SurfaceSDF is submitted by the dedicated transmission replay after the
+    // opaque snapshot is captured. That ordering lets its dielectric lobe read
+    // scene colour/depth without attachment aliasing.
+    if (useMaterialPreview && !m_materialPreviewTransmission) {
+        // Optional transmission resources can fail independently (allocation,
+        // resize). Preserve the original environment-only SDF fallback.
+        recordMaterialPreviewVolumePass(
+            cmd, viewProj, view, static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height), false);
+        recordMaterialPreviewSdfSurfacePass(
+            cmd, viewProj, view, static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height), false);
+    }
+
     const int activeGridPlane = m_camera.gridPlane;
     float viewScale;
     if (m_camera.orthographic) {
@@ -3018,6 +3732,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         m_interactiveViewport.gridBuiltCenterU != fineCenterU ||
         m_interactiveViewport.gridBuiltCenterV != fineCenterV ||
         extentStale) {
+        drainInteractiveViewportInFlight();
         if (m_interactiveViewport.gridVertexBuffer.buffer) {
             m_device->destroyBuffer(m_interactiveViewport.gridVertexBuffer);
             m_interactiveViewport.gridVertexBuffer = {};
@@ -3375,6 +4090,13 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     // ── Selection outline: mask pass (selected instances only) + fullscreen
     // edge composite over the finished color image. Render-pass dependencies
     // order main-pass depth → mask test → composite sampling.
+    // The copied depth is private to refraction; selection continues to use
+    // the authoritative main depth attachment below.
+    if (useMaterialPreview && m_materialPreviewTransmission) {
+        recordMaterialPreviewTransmissionPass(
+            cmd, viewProj, view, (uint32_t)width, (uint32_t)height);
+    }
+
     if (!selectionOutlineDraws.empty()) {
         const Backend::SelectionOutlineParams& sop = m_interactiveViewport.selectionOutlineParams;
 
@@ -3415,58 +4137,185 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         vkCmdEndRenderPass(cmd);
     }
 
-    m_device->endSingleTimeCommands(cmd);
+    const auto cpuRecordEnd = std::chrono::steady_clock::now();
+    const double cpuRecordMs = std::chrono::duration<double, std::milli>(
+        cpuRecordEnd - cpuRecordStart).count();
 
-    m_device->copyImageToBuffer(m_interactiveViewport.colorImage, m_interactiveViewport.stagingBuffer);
+    double submitMs = 0.0;
+    double slotWaitMs = frameRingSlotWaitMs;
+    double imageReadbackMs = 0.0;
+    // Gecisin BASINDAKI tuketim burada baslangic degeri olarak iceride: bir
+    // karede yapilan TOPLAM host okuma maliyeti tek alanda toplanir, yoksa
+    // sayinin hangi yarisi oldugu okunamaz.
+    double hostReadMs = topOfPassConsumeMs;
+    double presentMs = 0.0;
 
-    std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
-    const size_t pixelCount = (size_t)width * (size_t)height;
-    if (framebuffer->size() != pixelCount) {
-        framebuffer->resize(pixelCount);
-    }
-    m_device->downloadBuffer(m_interactiveViewport.stagingBuffer, framebuffer->data(), pixelCount * sizeof(uint32_t));
-
-    if (s) {
-        SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
-        if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
-            std::memcpy(outSurf->pixels, framebuffer->data(), pixelCount * sizeof(uint32_t));
+    if (usingFrameRing) {
+        // The render and image-to-buffer copy share one submission. submitFrame
+        // only queues work; it never waits for the current frame.
+        const bool submitted = m_rasterFrameRing->submitFrame(
+            m_interactiveViewport.colorImage, &submitMs);
+        if (!submitted) {
+            const VkResult ringFailure = m_rasterFrameRing->lastResult();
+            if (ringFailure == VK_ERROR_DEVICE_LOST) {
+                g_vulkan_device_lost = true;
+                g_vulkan_device_lost_msg =
+                    "Raster frame submission returned VK_ERROR_DEVICE_LOST";
+                render_settings.backend_changed = true;
+                m_interactiveViewport.dirty = true;
+                SCENE_LOG_ERROR(
+                    "[Viewport] Vulkan device lost while submitting a raster frame; "
+                    "no retry will be attempted on the lost queue.");
+                presentCachedRasterFrame();
+                publishRasterTelemetry(false, 0.0, cpuRecordMs, slotWaitMs,
+                                       submitMs, 0.0, 0.0, 0.0);
+                return;
+            }
+            m_interactiveViewport.dirty = true;
+            m_rasterFrameRing->reset();
+            m_rasterFrameRing.reset();
+            scheduleFrameRingRetry(2);
+            frameRingReady = false;
+            SCENE_LOG_WARN(
+                "[Viewport] Raster frame submission failed; falling back to the "
+                "synchronous readback path temporarily; async recovery is scheduled.");
+            presentCachedRasterFrame();
+            publishRasterTelemetry(false, 0.0, cpuRecordMs, slotWaitMs, submitMs,
+                                   0.0, 0.0, 0.0);
+            return;
         }
+        m_rasterFrameRingFailureCount = 0;
+        // submitFrame is intentionally non-blocking. Keep the main-loop pump
+        // awake until consumeNewestReady publishes this exact scene revision;
+        // otherwise a one-shot selection/add/delete frame can remain hidden
+        // behind the cached image until camera motion requests another call.
+        m_interactiveViewport.presentationPending = true;
+
+        // Two reasons to block on purpose, and they are NOT the same reason:
+        //  * no frame has ever been published (mode switch / resize), and
+        //    Main.cpp treats a successful renderProgressive as having produced
+        //    valid surface pixels;
+        //  * viewport capture is on, so a probe must read the frame that was
+        //    just recorded rather than an older completed one.
+        // Steady-state interactive frames block for neither.
+        if (!m_hasRasterPresentedFrame || m_rasterSynchronousPresent) {
+            m_rasterFrameRing->waitAll(false);
+        }
+
+        const auto hostReadStart = std::chrono::steady_clock::now();
+        // ★★★ Bu ikinci tuketim FIRSATCIDIR: mikrosaniyeler once gonderilmis
+        //   karenin bitmis olmasi beklenmez. Basarisizligini "stale" saymak,
+        //   asenkron modda HER KARE artan ve "halka kalici olarak geride" diye
+        //   okunan bir sayac uretiyordu -- oysa karenin pikselleri bu gecisin
+        //   BASINDAKI tuketimde (yukarida) zaten alinmisti; bir karelik gecikme
+        //   halkanin ARIZASI degil, satin aldigi seyin ta kendisidir.
+        //   Gercek stale olayi: bu gecis boyunca HIC yeni kare tuketilemedi.
+        consumeReadyRasterFrame();
+        if (!consumedAnyFrameThisPass) m_rasterFrameRing->noteStalePresent();
+        const auto hostReadEnd = std::chrono::steady_clock::now();
+        // += : gecisin basindaki GERCEK okuma zaten iceride. Atama yapmak onu
+        // silerdi -- alanin surekli 0.00 okunmasinin sebebi tam olarak buydu.
+        hostReadMs += std::chrono::duration<double, std::milli>(
+            hostReadEnd - hostReadStart).count();
+
+        const auto presentStart = std::chrono::steady_clock::now();
+        presentCachedRasterFrame();
+        const auto presentEnd = std::chrono::steady_clock::now();
+        presentMs = std::chrono::duration<double, std::milli>(
+            presentEnd - presentStart).count();
+    } else {
+        // Deterministic compatibility path for devices that reject persistent
+        // frame resources. This retains the old synchronous behaviour.
+        const auto submitStart = std::chrono::steady_clock::now();
+        m_device->endSingleTimeCommands(cmd);
+        const auto submitEnd = std::chrono::steady_clock::now();
+        submitMs = std::chrono::duration<double, std::milli>(
+            submitEnd - submitStart).count();
+
+        const auto imageReadbackStart = std::chrono::steady_clock::now();
+        m_device->copyImageToBuffer(m_interactiveViewport.colorImage,
+                                    m_interactiveViewport.stagingBuffer);
+        const auto imageReadbackEnd = std::chrono::steady_clock::now();
+        imageReadbackMs = std::chrono::duration<double, std::milli>(
+            imageReadbackEnd - imageReadbackStart).count();
+
+        const auto hostReadStart = std::chrono::steady_clock::now();
+        m_device->downloadBuffer(m_interactiveViewport.stagingBuffer,
+                                 framebuffer->data(),
+                                 pixelCount * sizeof(uint32_t));
+        const auto hostReadEnd = std::chrono::steady_clock::now();
+        // += : halka kurulu olmasa da gecisin basindaki tuketim denenmis olur.
+        hostReadMs += std::chrono::duration<double, std::milli>(
+            hostReadEnd - hostReadStart).count();
+        m_hasRasterPresentedFrame = true;
+
+        const auto presentStart = std::chrono::steady_clock::now();
+        presentCachedRasterFrame();
+        const auto presentEnd = std::chrono::steady_clock::now();
+        presentMs = std::chrono::duration<double, std::milli>(
+            presentEnd - presentStart).count();
     }
-    if (tex) {
-        SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
-    }
+
+    // ── Geometri olcumunu yayinla ───────────────────────────────────────────
+    // Bu kare gercekten cizdi, yani olcum GECERLI. Temiz-sahne erken cikisinda
+    // buraya hic gelinmez ve son gecerli olcum korunur.
+    m_rasterGeometryStats.global_instance_buffer  = m_rasterUseGlobalInstBuffer;
+    m_rasterGeometryStats.gpu_culling             = m_rasterGpuCullActive;
+    m_rasterGeometryStats.total_instances         = static_cast<uint32_t>(m_rasterInstances.size());
+    m_rasterGeometryStats.cull_mesh_count         = m_rasterCullMeshCount;
+    m_rasterGeometryStats.draw_calls              = rasterDrawCalls;
+    m_rasterGeometryStats.visible_triangles       = visibleTriangleTotal;
+    m_rasterGeometryStats.full_triangles          = visibleFullTriangleTotal;
+    m_rasterGeometryStats.proxy_triangles         = visibleProxyTriangleTotal;
+    m_rasterGeometryStats.full_instances          = visibleFullInstanceTotal;
+    m_rasterGeometryStats.proxy_instances         = visibleProxyInstanceTotal;
+    m_rasterGeometryStats.scatter_triangle_target = m_rasterScatterTriangleTarget;
 
     static uint64_t s_prevVisibleTriangleTotal = 0;
     static auto s_lastDiagLog = std::chrono::steady_clock::time_point{};
     const auto frameEnd = std::chrono::steady_clock::now();
     const double frameMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
+    publishRasterTelemetry(usingFrameRing, frameMs, cpuRecordMs, slotWaitMs,
+                           submitMs, imageReadbackMs, hostReadMs, presentMs);
     if (!m_rasterScatterPaintActive &&
         ::render_settings.raster_viewport_quality_preset == ::RasterViewportQualityPreset::Auto) {
         if (frameMs > 120.0) {
-            m_rasterScatterBudgetScale = (std::max)(0.35f, m_rasterScatterBudgetScale * 0.55f);
+            m_rasterScatterTargetScale = (std::max)(0.35f, m_rasterScatterTargetScale * 0.55f);
         } else if (frameMs > 60.0) {
-            m_rasterScatterBudgetScale = (std::max)(0.35f, m_rasterScatterBudgetScale * 0.75f);
+            m_rasterScatterTargetScale = (std::max)(0.35f, m_rasterScatterTargetScale * 0.75f);
         } else if (frameMs > 40.0) {
-            m_rasterScatterBudgetScale = (std::max)(0.35f, m_rasterScatterBudgetScale * 0.88f);
+            m_rasterScatterTargetScale = (std::max)(0.35f, m_rasterScatterTargetScale * 0.88f);
         } else if (frameMs < 20.0) {
-            m_rasterScatterBudgetScale = (std::min)(1.0f, m_rasterScatterBudgetScale * 1.04f);
+            m_rasterScatterTargetScale = (std::min)(1.0f, m_rasterScatterTargetScale * 1.04f);
         }
     } else if (!m_rasterScatterPaintActive) {
-        m_rasterScatterBudgetScale = 1.0f;
+        m_rasterScatterTargetScale = 1.0f;
     }
     const bool visibleTriangleCliff =
         s_prevVisibleTriangleTotal > 0 &&
         visibleTriangleTotal > (s_prevVisibleTriangleTotal * 3ull) / 2ull;
-    const bool slowFrame = frameMs >= 100.0;
+    const bool slowFrame = frameMs >= 40.0;
     const bool canLog = s_lastDiagLog.time_since_epoch().count() == 0 ||
         std::chrono::duration_cast<std::chrono::milliseconds>(frameEnd - s_lastDiagLog).count() >= 750;
     if (canLog && (slowFrame || visibleTriangleCliff)) {
         SCENE_LOG_INFO(
-            "[Perf] [ViewportSolid] frame_ms=" + std::to_string(frameMs) +
+            std::string("[Perf] [") + (useMaterialPreview ? "ViewportMaterial" : "ViewportSolid") +
+            "] frame_ms=" + std::to_string(frameMs) +
+            " async=" + std::string(usingFrameRing ? "1" : "0") +
+            " cpu_record_ms=" + std::to_string(cpuRecordMs) +
+            " slot_wait_ms=" + std::to_string(slotWaitMs) +
+            " submit_ms=" + std::to_string(submitMs) +
+            " image_readback_ms=" + std::to_string(imageReadbackMs) +
+            " host_read_ms=" + std::to_string(hostReadMs) +
+            " present_ms=" + std::to_string(presentMs) +
+            " stale_presents=" + std::to_string(m_rasterTelemetry.stale_presents) +
             " visible_tris=" + std::to_string(visibleTriangleTotal) +
             " full_tris=" + std::to_string(visibleFullTriangleTotal) +
             " proxy_tris=" + std::to_string(visibleProxyTriangleTotal) +
-            " scatter_budget=" + std::to_string(m_rasterScatterTriangleBudget) +
+            " gpu_cull=" + std::string(m_rasterGpuCullActive ? "1" : "0") +
+            " draw_calls=" + std::to_string(rasterDrawCalls) +
+            " total_instances=" + std::to_string(m_rasterInstances.size()) +
+            " scatter_target=" + std::to_string(m_rasterScatterTriangleTarget) +
             " max_draw_tris=" + std::to_string(maxDrawTriangles) +
             " max_draw_instances=" + std::to_string(maxDrawInstances) +
             " max_draw_mesh='" + maxDrawMeshKey + "'");
@@ -3479,6 +4328,7 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
     const std::string& nodeName,
     const std::vector<std::shared_ptr<Triangle>>& triangles) {
     if (!m_device || !m_device->isInitialized() || triangles.empty()) return false;
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     auto findTargetKey = [&]() -> std::string {
@@ -3776,6 +4626,7 @@ bool VulkanViewportBackend::updateRasterMeshFromMeshSoA(const std::string& nodeN
     // climbs per dab, the refit is being skipped -- not merely slow.
     RTPERF_SCOPE("raster.solid.soa_refit");
     if (!m_device || !m_device->isInitialized() || !mesh || !mesh->geometry) return false;
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     auto findTargetKey = [&]() -> std::string {
@@ -3933,6 +4784,7 @@ bool VulkanViewportBackend::patchRasterMeshTriangles(
     if (!m_device || !m_device->isInitialized() || dirtyIndices.empty() || meshEntries.empty()) {
         return false;
     }
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     auto findTargetKey = [&]() -> std::string {
@@ -4135,6 +4987,7 @@ bool VulkanViewportBackend::cloneRasterObjectByNodeName(
     if (!m_device || !m_device->isInitialized() || sourceNodeName.empty() || newNodeName.empty()) {
         return false;
     }
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     std::vector<uint32_t> sourceIndices;
@@ -4189,6 +5042,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                        std::to_string(objects.size()));
         return;
     }
+    drainInteractiveViewportInFlight();
     const auto rasterBuildStart = std::chrono::steady_clock::now();
 
     // Skip rebuild if raster cache is still valid for the current scene generation.
@@ -4485,6 +5339,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         rmb.cpuPositions = std::move(positions);
         rmb.cpuNormals   = std::move(normals);
         rmb.cpuMatIds    = std::move(matIds);
+        rmb.cpuUVs       = std::move(uvs);
 
         m_rasterMeshes[meshKey] = std::move(rmb);
     };
@@ -4655,12 +5510,23 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         rmb.cpuPositions = std::move(positions);
         rmb.cpuNormals   = std::move(normals);
         rmb.cpuMatIds    = std::move(matIds);
+        rmb.cpuUVs       = std::move(uvs);
 
         m_rasterMeshes[meshKey] = std::move(rmb);
     };
 
-    auto ensureScatterProxyMesh = [&](const std::string& sourceMeshKey,
-                                     const std::vector<std::shared_ptr<Triangle>>* sourceTriangles) {
+    // ★★★ Kaynak konumlari raster mesh'in KENDI cpuPositions'indan okunur,
+    //   Triangle facade'indan degil. Eskiden imza yalnizca Triangle facade
+    //   isaretcisi aliyordu ve bu yuzden yalnizca
+    //   facade dalindan cagrilabiliyordu: FLAT SoA scatter kaynaklari
+    //   isScatterGroup = true aliyor ama PROXY MESH'I HIC URETILMIYORDU.
+    //   Proje sidecar'indan gelen her sey flat oldugu icin, yogun modern
+    //   scatter'in proxy'si yapisal olarak yoktu (CLAUDE.md'nin "facade tarayan
+    //   kod flat mesh'leri yok sayar" tuzagi).
+    //   cpuPositions ayni veriyi tasir: ensureRasterMeshForTriangles onu da
+    //   getOriginalVertexPosition'dan dolduruyor, yani facade yolu icin sonuc
+    //   BIREBIR ayni.
+    auto ensureScatterProxyMesh = [&](const std::string& sourceMeshKey) {
         const std::string proxyMeshKey = sourceMeshKey + "::proxy";
         if (m_rasterMeshes.find(proxyMeshKey) != m_rasterMeshes.end()) {
             auto sourceIt = m_rasterMeshes.find(sourceMeshKey);
@@ -4685,14 +5551,36 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         const float height = (std::max)(maxY - minY, 1e-4f);
         const float fallbackRadius = (std::max)({ maxX - minX, maxZ - minZ, 1e-3f }) * 0.5f;
 
+        // 4 duzlem x 6 dilim x cift yuzlu serit (4 ucgen) = 96 ucgen, 288 vertex.
         std::vector<float> positions;
         std::vector<float> normals;
-        positions.reserve(96 * 3);
-        normals.reserve(96 * 3);
+        positions.reserve(288 * 3);
+        normals.reserve(288 * 3);
+
+        // UV ve materyal AYRI dizilerde, ve YALNIZCA profil dalinda doldurulur.
+        // Yedek (fallback) hac proxy'sinde kaynak hakkinda hicbir sey
+        // bilinmiyor; oraya materyal 0 yazmak SESSIZ bir yalan olurdu -- 0
+        // gecerli bir materyal ID'sidir, yani proxy rastgele bir malzemeyle
+        // cizilir ve kimse bunu bug diye raporlamaz. Bos birakildiginda
+        // uv/matId buffer'lari hic olusturulmaz ve cizim eski matcap yoluna
+        // duser; bu, GORULEBILIR bir bozulmadir.
+        std::vector<float> uvs;
+        std::vector<uint32_t> matIds;
 
         auto addTri = [&](const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& n) {
             positions.insert(positions.end(), { a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z });
             normals.insert(normals.end(), { n.x, n.y, n.z, n.x, n.y, n.z, n.x, n.y, n.z });
+        };
+
+        // ★★★ Bit 31 = IMPOSTOR. material_preview_frag bunu maskeleyip opaklik
+        //   testini atlar; bkz. oradaki "Impostor OPAKTIR" notu. Bayrak burada,
+        //   TEK yerde basilir -- cagri yerlerine dagitilirsa biri unutulur ve o
+        //   proxy alfa-test'e takilip gorunmez olur.
+        constexpr uint32_t kImpostorMatBit = 0x80000000u;
+        auto addTriUV = [&](const float ua[2], const float ub[2], const float uc[2], uint32_t mat) {
+            const uint32_t tagged = (mat & 0x7FFFFFFFu) | kImpostorMatBit;
+            uvs.insert(uvs.end(), { ua[0], ua[1], ub[0], ub[1], uc[0], uc[1] });
+            matIds.insert(matIds.end(), { tagged, tagged, tagged });
         };
 
         auto buildFallbackCross = [&]() {
@@ -4715,8 +5603,28 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             addTri(z3, z1, z0, Vec3(0.0f, 0.0f, -1.0f));
         };
 
+        const std::vector<float>* srcPositions = nullptr;
+        const std::vector<float>* srcUVs = nullptr;
+        const std::vector<uint32_t>* srcMatIds = nullptr;
+        {
+            auto srcIt = m_rasterMeshes.find(sourceMeshKey);
+            if (srcIt != m_rasterMeshes.end() && !srcIt->second.cpuPositions.empty()) {
+                srcPositions = &srcIt->second.cpuPositions;
+                // Boyutlar vertex sayisiyla DOGRULANIR. Kisa bir dizi sessizce
+                // sinir disi okunur ve proxy rastgele UV/materyal alir.
+                const size_t vcount = srcPositions->size() / 3u;
+                if (srcIt->second.cpuUVs.size() >= vcount * 2u)
+                    srcUVs = &srcIt->second.cpuUVs;
+                if (srcIt->second.cpuMatIds.size() >= vcount)
+                    srcMatIds = &srcIt->second.cpuMatIds;
+            }
+        }
+        // Ikisi birden yoksa proxy materyale ULASAMAZ; bu bir tercih degil,
+        // kaynakta veri olmamasidir.
+        const bool proxyCanShade = (srcUVs != nullptr && srcMatIds != nullptr);
+
         bool builtProfileProxy = false;
-        if (sourceTriangles && !sourceTriangles->empty()) {
+        if (srcPositions) {
             static constexpr int kSliceCount = 7;
             struct ProxyPlaneProfile {
                 Vec3 axis;
@@ -4724,6 +5632,26 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                 float extents[kSliceCount]{};
                 bool touched[kSliceCount]{};
             };
+
+            // ★★★ UV ve materyal DILIM duzeyinde, duzlem duzeyinde DEGIL: bir
+            //   dilim yatay bir banttir ve dort duzlemin hepsi ayni banti
+            //   kesir, yani dordune ayri UV tutmanin bir karsiligi yok.
+            //
+            // ★★★★ UV, dilimin SILUET vertex'inden DEGIL ORTALAMASINDAN alinir.
+            //   Ilk yazimda siluet vertex'i secilmisti ("proxy'nin tam olarak
+            //   temsil ettigi nokta" diye) ve bu ALFA-TEST EDILEN YAPRAKTA
+            //   TERS TEPERDI: yaprak kartinin geometrik silueti kartin kose
+            //   noktasidir, ve atlasta o kose neredeyse her zaman SEFFAF
+            //   marjdadir. material_preview_frag opacity < 0.1 oldugunda
+            //   discard ediyor, yani proxy'nin tamami yok olurdu -- sahnenin
+            //   uzak yarisinin BOSALMASI, "kaba gorunmesi" degil.
+            //   Ortalama UV atlasin kullanilan bolgesinin ortasina duser.
+            //   Yine de garanti degildir; garantiyi shader tarafindaki
+            //   impostor bayragi verir (bkz. MaterialPreviewPushConstants).
+            double sliceUVSum[kSliceCount][2]{};
+            uint32_t sliceUVCount[kSliceCount]{};
+            struct MatTally { uint32_t id; uint32_t n; };
+            std::vector<MatTally> sliceMatTally[kSliceCount];
 
             const float invSqrt2 = 0.70710678f;
             ProxyPlaneProfile planes[] = {
@@ -4733,19 +5661,32 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                 { Vec3(invSqrt2, 0.0f, -invSqrt2), Vec3(invSqrt2, 0.0f, invSqrt2) },
             };
 
-            for (const auto& tri : *sourceTriangles) {
-                if (!tri) continue;
-                for (int v = 0; v < 3; ++v) {
-                    const Vec3 p = tri->getOriginalVertexPosition(v);
-                    const float t = std::clamp((p.y - minY) / height, 0.0f, 1.0f);
-                    const int slice = static_cast<int>(std::round(t * static_cast<float>(kSliceCount - 1)));
-                    const float dx = p.x - centerX;
-                    const float dz = p.z - centerZ;
-                    for (auto& plane : planes) {
-                        const float extent = std::abs(dx * plane.axis.x + dz * plane.axis.z);
-                        plane.extents[slice] = (std::max)(plane.extents[slice], extent);
-                        plane.touched[slice] = true;
+            const std::vector<float>& sp = *srcPositions;
+            for (size_t i = 0; i + 2 < sp.size(); i += 3) {
+                const Vec3 p(sp[i], sp[i + 1], sp[i + 2]);
+                const float t = std::clamp((p.y - minY) / height, 0.0f, 1.0f);
+                const int slice = static_cast<int>(std::round(t * static_cast<float>(kSliceCount - 1)));
+                const float dx = p.x - centerX;
+                const float dz = p.z - centerZ;
+                const size_t vi = i / 3u;
+                if (srcUVs) {
+                    sliceUVSum[slice][0] += (*srcUVs)[vi * 2u + 0u];
+                    sliceUVSum[slice][1] += (*srcUVs)[vi * 2u + 1u];
+                    ++sliceUVCount[slice];
+                }
+                if (srcMatIds) {
+                    const uint32_t mid = (*srcMatIds)[vi];
+                    auto& tally = sliceMatTally[slice];
+                    bool found = false;
+                    for (auto& t : tally) {
+                        if (t.id == mid) { ++t.n; found = true; break; }
                     }
+                    if (!found) tally.push_back({ mid, 1u });
+                }
+                for (auto& plane : planes) {
+                    const float extent = std::abs(dx * plane.axis.x + dz * plane.axis.z);
+                    plane.extents[slice] = (std::max)(plane.extents[slice], extent);
+                    plane.touched[slice] = true;
                 }
             }
 
@@ -4790,13 +5731,67 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                 }
             }
 
+            // Dilim UV/materyalini cozumle. Bos dilim (o yukseklikte hic
+            // vertex yok) SONRAKI dolu dilimden devralir; en sondaki bosluklar
+            // sondan bir onceki dolu dilimden. UV (0,0) ile birakmak, atlasin
+            // kosesinden tek texel demek olurdu -- serit yine cizilir, makul
+            // gorunur, YANLIS renktedir.
+            float sliceUV[kSliceCount][2]{};
+            uint32_t sliceMat[kSliceCount]{};
+            {
+                int lastFilled = -1;
+                for (int s = 0; s < kSliceCount; ++s) {
+                    if (sliceUVCount[s] > 0u) {
+                        sliceUV[s][0] = static_cast<float>(sliceUVSum[s][0] / sliceUVCount[s]);
+                        sliceUV[s][1] = static_cast<float>(sliceUVSum[s][1] / sliceUVCount[s]);
+                    }
+                    // Dilimin baskin materyali. Bu bir YAKLASIKLIKTIR ve
+                    // gorunur sonucu vardir: govde ile yapragin ayni banda
+                    // dustugu bir dilim yalnizca birini gosterir. Proxy zaten
+                    // siluet yaklasikligidir, ama karisimi "olctum" diye
+                    // raporlamiyoruz -- bu satir onu soyluyor.
+                    uint32_t best = 0u, bestN = 0u;
+                    for (const auto& t : sliceMatTally[s]) {
+                        if (t.n > bestN) { bestN = t.n; best = t.id; }
+                    }
+                    sliceMat[s] = best;
+                    if (sliceUVCount[s] > 0u || bestN > 0u) {
+                        for (int b = lastFilled + 1; b < s; ++b) {
+                            sliceUV[b][0] = sliceUV[s][0];
+                            sliceUV[b][1] = sliceUV[s][1];
+                            sliceMat[b] = sliceMat[s];
+                        }
+                        lastFilled = s;
+                    }
+                }
+                for (int s = lastFilled + 1; s < kSliceCount && lastFilled >= 0; ++s) {
+                    sliceUV[s][0] = sliceUV[lastFilled][0];
+                    sliceUV[s][1] = sliceUV[lastFilled][1];
+                    sliceMat[s] = sliceMat[lastFilled];
+                }
+            }
+
+            // ua = alt kenarin (a0, a1) UV'si, ub = ust kenarin (b0, b1) UV'si.
+            // UV'ler kose basina degil KENAR basina: serit dikey bir dilim
+            // oldugu icin yatay ekseninde kaynakta bir karsilik yok. Dikeyde
+            // ise dilim profili tam olarak o yuksekligin siluetidir.
             auto addDoubleSidedRibbonQuad = [&](const Vec3& a0, const Vec3& a1,
                                                 const Vec3& b0, const Vec3& b1,
-                                                const Vec3& n) {
+                                                const Vec3& n,
+                                                const float ua[2], const float ub[2],
+                                                uint32_t mat, bool withAttrs) {
                 addTri(a0, a1, b1, n);
                 addTri(a0, b1, b0, n);
                 addTri(b0, b1, a1, n * -1.0f);
                 addTri(b0, a1, a0, n * -1.0f);
+                if (!withAttrs) return;
+                // Sira addTri cagrilariyla BIREBIR ayni olmak zorunda; bir
+                // ucgen atlanirsa UV dizisi kayar ve butun proxy yanlis
+                // texel'den boyanir. Asagidaki boyut kontrolu bunu yakalar.
+                addTriUV(ua, ua, ub, mat);
+                addTriUV(ua, ub, ub, mat);
+                addTriUV(ub, ub, ua, mat);
+                addTriUV(ub, ua, ua, mat);
             };
 
             for (const auto& plane : planes) {
@@ -4810,7 +5805,9 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                     const Vec3 p1(centerX + plane.axis.x * e0, y0, centerZ + plane.axis.z * e0);
                     const Vec3 p2(centerX + plane.axis.x * e1, y1, centerZ + plane.axis.z * e1);
                     const Vec3 p3(centerX - plane.axis.x * e1, y1, centerZ - plane.axis.z * e1);
-                    addDoubleSidedRibbonQuad(p0, p1, p3, p2, plane.normal);
+                    addDoubleSidedRibbonQuad(p0, p1, p3, p2, plane.normal,
+                                             sliceUV[slice], sliceUV[slice + 1],
+                                             sliceMat[slice], proxyCanShade);
                 }
             }
 
@@ -4836,6 +5833,34 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         proxyMesh.vertexCount = static_cast<uint32_t>(positions.size() / 3);
         proxyMesh.isScatterProxy = true;
 
+        // Pozisyon/UV/matId sayilari birebir tutmali. Tutmuyorsa attribute'lari
+        // ATIYORUZ: yanlis hizalanmis bir UV dizisi, proxy'yi makul gorunen ama
+        // yanlis bir dokuyla boyar -- kimsenin bug diye raporlamayacagi tur.
+        const size_t proxyVerts = positions.size() / 3u;
+        bool proxyShaded = proxyCanShade && builtProfileProxy &&
+                           (uvs.size() == proxyVerts * 2u) &&
+                           (matIds.size() == proxyVerts);
+        if (proxyCanShade && builtProfileProxy && !proxyShaded) {
+            SCENE_LOG_WARN("[RasterProxy] '" + sourceMeshKey +
+                           "' proxy attribute sayisi tutmadi (verts=" +
+                           std::to_string(proxyVerts) + " uv=" +
+                           std::to_string(uvs.size() / 2u) + " mat=" +
+                           std::to_string(matIds.size()) +
+                           "); proxy materyalsiz cizilecek.");
+        }
+        if (!proxyCanShade) {
+            // Bir kez: kaynakta UV veya materyal yok, yani proxy matcap ile
+            // cizilecek. Bunu bilmeden "proxy cok kaba" teshisi yanlis yere
+            // (geometriye) gider.
+            static bool loggedProxyNoMaterial = false;
+            if (!loggedProxyNoMaterial) {
+                loggedProxyNoMaterial = true;
+                SCENE_LOG_WARN("[RasterProxy] Kaynak mesh'te CPU UV/materyal yok; "
+                               "scatter proxy'leri materyalsiz (matcap) cizilecek. "
+                               "Ilk gorulen: " + sourceMeshKey);
+            }
+        }
+
         VulkanRT::BufferCreateInfo vci{};
         vci.size = positions.size() * sizeof(float);
         vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST | VulkanRT::BufferUsage::STORAGE;
@@ -4853,6 +5878,25 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         }
         if (proxyMesh.normalBuffer.buffer) {
             m_device->uploadBuffer(proxyMesh.normalBuffer, normals.data(), nci.size, 0);
+        }
+
+        if (proxyShaded) {
+            VulkanRT::BufferCreateInfo uci{};
+            uci.size = uvs.size() * sizeof(float);
+            uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            proxyMesh.uvBuffer = m_device->createBuffer(uci);
+
+            VulkanRT::BufferCreateInfo mci{};
+            mci.size = matIds.size() * sizeof(uint32_t);
+            mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            proxyMesh.matIdBuffer = m_device->createBuffer(mci);
+
+            if (proxyMesh.uvBuffer.buffer)
+                m_device->uploadBuffer(proxyMesh.uvBuffer, uvs.data(), uci.size, 0);
+            if (proxyMesh.matIdBuffer.buffer)
+                m_device->uploadBuffer(proxyMesh.matIdBuffer, matIds.data(), mci.size, 0);
         }
 
         m_rasterMeshBBoxes[proxyMeshKey] = AABB(proxyMin, proxyMax);
@@ -5217,6 +6261,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         rmb.cpuPositions = std::move(grp.positions);
         rmb.cpuNormals   = std::move(grp.normals);
         rmb.cpuMatIds    = std::move(grp.matIds);
+        rmb.cpuUVs       = std::move(grp.uvs);
 
         m_rasterMeshes[grp.meshKey] = std::move(rmb);
 
@@ -5266,6 +6311,11 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                     auto rasterMeshIt = m_rasterMeshes.find(meshKey);
                     if (rasterMeshIt == m_rasterMeshes.end()) continue;
                     rasterMeshIt->second.isScatterGroup = true;
+                    // ★ Flat SoA kaynagi da proxy alir. Bu satirin yoklugu,
+                    //   yogun flat scatter'da ucgen butcesinin uygulanacagi ama
+                    //   demote edilenlerin CIZILMEYECEGI (yani kaybolacagi)
+                    //   anlamina geliyordu.
+                    ensureScatterProxyMesh(meshKey);
                     const Matrix4x4 sourceWorld = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
                     meta.entriesBySrc[si].push_back({meshKey,
                         Matrix4x4::translation(-source.mesh_center) * sourceWorld});
@@ -5291,7 +6341,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             auto rasterMeshIt = m_rasterMeshes.find(meshKey);
             if (rasterMeshIt != m_rasterMeshes.end()) {
                 rasterMeshIt->second.isScatterGroup = true;
-                ensureScatterProxyMesh(meshKey, triSource ? triSource : &source.triangles);
+                ensureScatterProxyMesh(meshKey);
             }
             meta.entriesBySrc[si].push_back({std::move(meshKey), Matrix4x4::identity()});
         }
@@ -5555,6 +6605,7 @@ void VulkanViewportBackend::syncRasterInstanceTransforms(
     changed = !dirtyMeshKeys.empty();
 
     if (changed) {
+        drainInteractiveViewportInFlight();
         for (const auto& meshKey : dirtyMeshKeys) {
             auto meshIt = m_rasterMeshes.find(meshKey);
             if (meshIt != m_rasterMeshes.end()) {
@@ -5572,6 +6623,7 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
     if (m_viewportMode != ViewportMode::Solid &&
         m_viewportMode != ViewportMode::Matcap &&
         m_viewportMode != ViewportMode::MaterialPreview) return;
+    drainInteractiveViewportInFlight();
 
     uint32_t skinnedMeshCount = 0;
     uint32_t gpuDispatchCount = 0;
@@ -5739,6 +6791,7 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
 }
 
 void VulkanBackendAdapter::uploadHairViewportLines(const std::vector<float>& vertexData, uint32_t vertexCount) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -5777,6 +6830,7 @@ void VulkanBackendAdapter::uploadHairViewportLines(const std::vector<float>& ver
 
 void VulkanBackendAdapter::uploadParticleBillboards(const std::vector<float>& addData, uint32_t addVertexCount,
                                                     const std::vector<float>& alphaData, uint32_t alphaVertexCount) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -5860,6 +6914,7 @@ void uploadEditOverlayBuffer(VulkanRT::VulkanDevice* device,
 } // namespace
 
 void VulkanBackendAdapter::uploadEditMeshOverlayGeometry(const std::vector<float>& positions, uint32_t vertexCount) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -5877,6 +6932,7 @@ void VulkanBackendAdapter::uploadEditMeshOverlayGeometry(const std::vector<float
 }
 
 void VulkanBackendAdapter::uploadEditMeshOverlayFlags(const std::vector<uint32_t>& flags) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -5888,6 +6944,7 @@ void VulkanBackendAdapter::uploadEditMeshOverlayFlags(const std::vector<uint32_t
 
 void VulkanBackendAdapter::uploadEditMeshOverlayTopology(const std::vector<uint32_t>& edgeIndices,
                                                          const std::vector<uint32_t>& faceIndices) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -5907,6 +6964,7 @@ void VulkanBackendAdapter::uploadEditMeshOverlayTopology(const std::vector<uint3
 
 void VulkanBackendAdapter::uploadEditMeshOverlaySelectionIndices(const std::vector<uint32_t>& selEdgeIndices,
                                                                  const std::vector<uint32_t>& selFaceIndices) {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -5957,6 +7015,7 @@ void VulkanBackendAdapter::setEditMeshOverlayParams(const EditMeshOverlayParams&
 }
 
 void VulkanBackendAdapter::clearEditMeshOverlay() {
+    drainInteractiveViewportInFlight();
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
 
@@ -6355,22 +7414,39 @@ bool VulkanBackendAdapter::renderSelectionOutlineMaskReadback(
             // Scatter pools skipped (see the culling loop above) — they don't
             // occlude the outline, but they also don't stall the recompute.
             if (rmb.isScatterGroup || rmb.isScatterProxy) continue;
-            if (!rmb.vertexBuffer.buffer || !rmb.instanceBuffer.buffer ||
-                rmb.vertexCount == 0 || rmb.instanceCount == 0) {
+
+            // ★★ Global instance buffer yolunda per-mesh instanceBuffer HIC
+            //    doldurulmaz ve instanceCount 0 kalir. Bu iki kosul burada
+            //    "continue" demekti, yani maske bos cikiyordu ve secim anahatti
+            //    SESSIZCE kayboluyordu. Bu gecis pass'i culling istemez (kendi
+            //    kamerasi var), o yuzden SIKISTIRILMAMIS global buffer'i
+            //    firstInstance ile okur.
+            const bool useGlobal = m_rasterUseGlobalInstBuffer &&
+                                   m_rasterGlobalInstBuf &&
+                                   m_rasterGlobalInstBuf->isReady();
+            VkBuffer instBuf = useGlobal
+                ? static_cast<VkBuffer>(m_rasterGlobalInstBuf->vkBuffer())
+                : rmb.instanceBuffer.buffer;
+            const uint32_t instCount = useGlobal ? rmb.allocatedInstanceSlots
+                                                 : rmb.instanceCount;
+            const uint32_t firstInst = useGlobal ? rmb.firstInstance : 0u;
+
+            if (!rmb.vertexBuffer.buffer || !instBuf ||
+                rmb.vertexCount == 0 || instCount == 0) {
                 continue;
             }
             VkBuffer vertexBuffers[3] = {
                 rmb.vertexBuffer.buffer,
                 rmb.normalBuffer.buffer ? rmb.normalBuffer.buffer : rmb.vertexBuffer.buffer,
-                rmb.instanceBuffer.buffer
+                instBuf
             };
             VkDeviceSize offsets[3] = { 0, 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 3, vertexBuffers, offsets);
             if (rmb.indexBuffer.buffer && rmb.indexCount > 0) {
                 vkCmdBindIndexBuffer(cmd, rmb.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(cmd, rmb.indexCount, rmb.instanceCount, 0, 0, 0);
+                vkCmdDrawIndexed(cmd, rmb.indexCount, instCount, 0, 0, firstInst);
             } else {
-                vkCmdDraw(cmd, rmb.vertexCount, rmb.instanceCount, 0, 0);
+                vkCmdDraw(cmd, rmb.vertexCount, instCount, 0, firstInst);
             }
         }
         vkCmdEndRenderPass(cmd);

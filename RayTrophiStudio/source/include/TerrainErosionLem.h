@@ -86,7 +86,31 @@ struct GpuFields {
 // post-droplet polish so the polish can reuse the converged drainage and so
 // sediment still in transit is carried across rather than silently dropped.
 struct GpuState {
+    // The depression-fill ping-pong pair. After a drainage solve, `lakeSurface`
+    // and `route` below name whichever half holds what.
     RayTrophiSim::ComputeBufferHandle filledA, filledB;
+
+    // ★★★ TWO SURFACES, and conflating them is what the flat artifact was made
+    // of. They are ALIASES of filledA/filledB, not separate allocations, so
+    // destroyGpuState must not free them.
+    //
+    //   lakeSurface -- the depression-filled surface, exactly level over a
+    //                  flat or a lake. This is the one that means "standing
+    //                  water reaches here": lakeDepth = lakeSurface - bed.
+    //   route       -- lakeSurface plus the Garbrecht-Martz flat gradient.
+    //                  This is the one flow STEERS by.
+    //
+    // They used to be one field carrying an epsilon ladder, which made it a
+    // bad lake surface (the ladder counts as standing water, which is why
+    // lakeCells could read a quarter of the map and mean nothing) and a worse
+    // routing surface (the ladder is a square distance field). Splitting them
+    // costs no memory and lets each be correct.
+    RayTrophiSim::ComputeBufferHandle lakeSurface, route;
+
+    // 16 bytes of GPU-written diagnostics, cleared at the start of every
+    // drainage solve. Slot 0 counts flat cells the outlet front never reached.
+    // A probe that is absent is not a probe that read zero.
+    RayTrophiSim::ComputeBufferHandle diag;
     // Packed MFD outflow weights, one byte per direction (8 bytes per cell).
     // Rebuilt on every drainage refresh and read by both the accumulation and
     // the sediment routing. Without it those passes recompute a neighbour's

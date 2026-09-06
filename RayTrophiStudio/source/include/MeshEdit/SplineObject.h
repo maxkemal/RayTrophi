@@ -23,7 +23,11 @@ enum class SplineEditTool : uint8_t {
     Select,
     InsertPoint,
     Subdivide,
-    Extrude
+    Extrude,
+    // Draw lays down points on whatever surface is under the cursor, starting
+    // from an empty curve. Extrude does the same thing but only once two points
+    // already exist, so it could never be the way a curve BEGINS.
+    Draw
 };
 
 // Persistent, non-destructive viewport/render display for an authoring spline.
@@ -65,6 +69,12 @@ public:
     bool edit_controls = true;
     bool edit_mode = false;
     bool point_drag_dirty = false;
+    // Where the active anchor was when the drag began, in the curve's local
+    // space. Transient authoring feedback only - never serialized. Without it
+    // the viewport can show the point's position but not HOW FAR it moved,
+    // which is the half a 3D sense of scale actually depends on.
+    Vec3 drag_origin_local;
+    bool drag_origin_valid = false;
     SplineEditTool edit_tool = SplineEditTool::Select;
     int subdivide_cuts = 1;
     Vec3 insert_preview_position;

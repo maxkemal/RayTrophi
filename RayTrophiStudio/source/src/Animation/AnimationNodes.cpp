@@ -1,4 +1,4 @@
-#include "AnimationNodes.h"
+﻿#include "AnimationNodes.h"
 #include "globals.h"
 #include <algorithm>
 #include <cmath>
@@ -384,10 +384,10 @@ namespace AnimationGraph {
     // HELPER: Sample animation keys
     // ============================================================================
     
-    Vec3 sampleVectorKey(const std::vector<aiVectorKey>& keys, float time, double duration, bool wrap) {
+    Vec3 sampleVectorKey(const RayTrophi::VectorKeys& keys, float time, double duration, bool wrap) {
         if (keys.empty()) return Vec3(0, 0, 0);
         if (keys.size() == 1) {
-            return Vec3(keys[0].mValue.x, keys[0].mValue.y, keys[0].mValue.z);
+            return keys[0].value;
         }
         
         double t = (double)time;
@@ -401,21 +401,21 @@ namespace AnimationGraph {
         // Find surrounding keyframes
         size_t keyIndex = 0;
         for (size_t i = 0; i < keys.size() - 1; ++i) {
-            if (t < keys[i + 1].mTime) {
+            if (t < keys[i + 1].time) {
                 keyIndex = i;
                 break;
             }
         }
         
         size_t nextKey = (keyIndex + 1) % keys.size();
-        double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
+        double deltaTime = keys[nextKey].time - keys[keyIndex].time;
         if (deltaTime < 0) deltaTime += duration;
         
-        float factor = (deltaTime > 0) ? (float)((t - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+        float factor = (deltaTime > 0) ? (float)((t - keys[keyIndex].time) / deltaTime) : 0.0f;
         factor = std::max(0.0f, std::min(1.0f, factor));
         
-        const auto& start = keys[keyIndex].mValue;
-        const auto& end = keys[nextKey].mValue;
+        const auto& start = keys[keyIndex].value;
+        const auto& end = keys[nextKey].value;
         
         return Vec3(
             start.x + (end.x - start.x) * factor,
@@ -424,10 +424,10 @@ namespace AnimationGraph {
         );
     }
     
-    Quaternion sampleQuatKey(const std::vector<aiQuatKey>& keys, float time, double duration) {
+    Quaternion sampleQuatKey(const RayTrophi::QuatKeys& keys, float time, double duration) {
         if (keys.empty()) return Quaternion(1, 0, 0, 0);
         if (keys.size() == 1) {
-            return Quaternion(keys[0].mValue.w, keys[0].mValue.x, keys[0].mValue.y, keys[0].mValue.z);
+            return keys[0].value;
         }
         
         double t = fmod((double)time, duration);
@@ -435,23 +435,21 @@ namespace AnimationGraph {
         
         size_t keyIndex = 0;
         for (size_t i = 0; i < keys.size() - 1; ++i) {
-            if (t < keys[i + 1].mTime) {
+            if (t < keys[i + 1].time) {
                 keyIndex = i;
                 break;
             }
         }
         
         size_t nextKey = (keyIndex + 1) % keys.size();
-        double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
+        double deltaTime = keys[nextKey].time - keys[keyIndex].time;
         if (deltaTime < 0) deltaTime += duration;
         
-        float factor = (deltaTime > 0) ? (float)((t - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+        float factor = (deltaTime > 0) ? (float)((t - keys[keyIndex].time) / deltaTime) : 0.0f;
         factor = std::max(0.0f, std::min(1.0f, factor));
         
-        Quaternion start(keys[keyIndex].mValue.w, keys[keyIndex].mValue.x, 
-                        keys[keyIndex].mValue.y, keys[keyIndex].mValue.z);
-        Quaternion end(keys[nextKey].mValue.w, keys[nextKey].mValue.x,
-                      keys[nextKey].mValue.y, keys[nextKey].mValue.z);
+        const Quaternion& start = keys[keyIndex].value;
+        const Quaternion& end = keys[nextKey].value;
         
         return Quaternion::slerp(start, end, factor);
     }

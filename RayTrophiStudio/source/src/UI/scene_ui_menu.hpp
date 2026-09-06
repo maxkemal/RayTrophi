@@ -978,6 +978,16 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  ImGui::EndMenu();
              }
 
+             if (ImGui::MenuItem("Curve: Draw on Surface")) {
+                 // The planar primitives below are for PROFILES. A route follows
+                 // the ground in three axes, so this one starts empty, in
+                 // SplinePlane::Free, with the Draw tool already armed - the next
+                 // viewport click lays its first point.
+                 MeshEdit::addSurfaceDrawSplineObject(ctx, history, "Curve");
+                 g_ProjectManager.markModified();
+                 addViewportMessage("Draw on Surface: click in the viewport to lay points");
+             }
+
              if (ImGui::BeginMenu("2D Spline")) {
                  ImGui::TextDisabled("Authoring source only — no mesh is generated");
                  ImGui::Separator();

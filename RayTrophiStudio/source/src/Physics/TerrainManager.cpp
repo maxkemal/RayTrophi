@@ -4548,7 +4548,12 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain,
             ok=backend->uploadBuffer(hMacroCurrent,macroInfinity.data(),macroMapSize)&&
                backend->uploadBuffer(hMacroNext,macroInfinity.data(),macroMapSize);
         }
+        // The macro path is the one remaining eps > 0 caller: it derives its
+        // weights straight off this surface and has no flat-resolution stage,
+        // so it still needs the ladder. The LEM passes eps = 0 and builds its
+        // flat gradient properly - see terrain_flow_fill.comp.
         struct FillPc { int mapWidth,mapHeight; float eps,noiseAmplitude; };
+        static_assert(sizeof(FillPc)==16,"must match terrain_flow_fill.comp");
         FillPc fillPc{macroWidth,macroHeight,1.0e-5f,0.0f};
         const int fillPasses=std::clamp(macroWidth*2,96,512);
         for(int pass=0;ok&&pass<fillPasses;++pass){
@@ -4988,6 +4993,13 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain,
                  backend->downloadBuffer(lemState.fluxA, lemCarried.data(), mapSize) &&
                  backend->downloadBuffer(lemState.liveArea(), areaOut.data(), mapSize) &&
                  backend->downloadBuffer(lemState.lakeDepth, lakeOut.data(), mapSize);
+            // ★★★ Flat cells the outlet front never reached. Four bytes, and
+            // they are the difference between "the flats look fine" and
+            // knowing it: an unresolved flat is a terminal sink that truncates
+            // every catchment above it while rendering as ordinary ground.
+            uint32_t lemDiag[4] = { 0u, 0u, 0u, 0u };
+            const bool diagOk = ok && lemState.diag.valid() &&
+                                backend->downloadBuffer(lemState.diag, lemDiag, sizeof(lemDiag));
             if (ok) {
                 TerrainLem::summarize(lemEroded, lemDeposited, lemExported, lemCarried,
                                       areaOut, lakeOut,
@@ -4995,6 +5007,21 @@ static bool hydraulicErosionGpuVulkan(TerrainObject* terrain,
                                       gpuOps.cellSize * gpuOps.cellSize,
                                       gpuOps.heightScale,
                                       statsOut);
+                // A failed readback must not be reported as "zero unresolved":
+                // that is the exact shape of a probe whose absence reads as a
+                // clean bill of health. -1 says "not measured".
+                statsOut.unresolvedFlatCells = diagOk ? (int)lemDiag[0] : -1;
+                statsOut.unresolvedFlatFraction =
+                    (diagOk && numPixels > 0)
+                        ? (float)lemDiag[0] / (float)numPixels : 0.0f;
+                if (diagOk && lemDiag[0] > 0u) {
+                    SCENE_LOG_WARN("[LEM] " + std::to_string(lemDiag[0]) +
+                                   " flat cells left unresolved (" +
+                                   std::to_string(100.0f * statsOut.unresolvedFlatFraction) +
+                                   " % of the map): they carry no routing gradient and are "
+                                   "terminal sinks. Raise flat_resolve_passes above the "
+                                   "widest flat, in cells.");
+                }
                 statsOut.gpuPath = true;
                 statsOut.cycleIterations = p.fluvialIterations;
                 if (fields) {

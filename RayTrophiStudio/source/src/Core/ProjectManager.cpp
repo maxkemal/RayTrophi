@@ -1,3 +1,4 @@
+#include "PostProcess/PostService.h"
 #include "ProjectManager.h"
 #include "globals.h"
 #include "Renderer.h"
@@ -5,7 +6,7 @@
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"
-#include "AssimpLoader.h"
+#include "Animation/AnimationData.h"
 #include "Triangle.h"
 #include "OptixAccelManager.h"
 #include "InstanceManager.h"
@@ -51,6 +52,7 @@
 
 #include <chrono>
 #include "TerrainManager.h"
+#include "TerrainRoadNetwork.h"
 #include "RiverSpline.h"
 
 #include "stb_image_write.h"
@@ -1080,6 +1082,10 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
     // 3. Clear Central Subsystems
     MaterialManager::getInstance().clear();
     RiverManager::getInstance().clear(&scene);  // Clear rivers BEFORE WaterManager (rivers own WaterSurfaces)
+    // Road assignments reference splines by name, so they must not survive
+    // into a different scene: a name that happens to repeat would silently
+    // turn an unrelated curve into a road.
+    TerrainNodesV2::RoadNetworkRegistry::getInstance().clear();
     WaterManager::getInstance().clear();
     TerrainManager::getInstance().removeAllTerrains(scene);
     InstanceManager::getInstance().clearAll();  // Clear foliage/scatter instances 
@@ -1394,6 +1400,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         // Post-Process / Color Grading settings (store from scene's color processor)
         const auto& pp = scene.color_processor.params;
         root["postfx"] = {
+            {"exposure_v2", rtpost::saveExposure(pp.exposure_settings)},
             {"exposure", pp.global_exposure},
             {"gamma", pp.global_gamma},
             {"saturation", pp.saturation},
@@ -1487,10 +1494,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                     json j_keys = json::array();
                     for (const auto& key : keys) {
                         j_keys.push_back({
-                            {"time", key.mTime},
-                            {"x", key.mValue.x},
-                            {"y", key.mValue.y},
-                            {"z", key.mValue.z}
+                            {"time", key.time},
+                            {"x", key.value.x},
+                            {"y", key.value.y},
+                            {"z", key.value.z}
                         });
                     }
                     j_pos_keys[nodeName] = j_keys;
@@ -1503,11 +1510,11 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                     json j_keys = json::array();
                     for (const auto& key : keys) {
                         j_keys.push_back({
-                            {"time", key.mTime},
-                            {"w", key.mValue.w},
-                            {"x", key.mValue.x},
-                            {"y", key.mValue.y},
-                            {"z", key.mValue.z}
+                            {"time", key.time},
+                            {"w", key.value.w},
+                            {"x", key.value.x},
+                            {"y", key.value.y},
+                            {"z", key.value.z}
                         });
                     }
                     j_rot_keys[nodeName] = j_keys;
@@ -1520,10 +1527,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                     json j_keys = json::array();
                     for (const auto& key : keys) {
                         j_keys.push_back({
-                            {"time", key.mTime},
-                            {"x", key.mValue.x},
-                            {"y", key.mValue.y},
-                            {"z", key.mValue.z}
+                            {"time", key.time},
+                            {"x", key.value.x},
+                            {"y", key.value.y},
+                            {"z", key.value.z}
                         });
                     }
                     j_scale_keys[nodeName] = j_keys;
@@ -1574,6 +1581,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         // River System
         if (progress_callback) progress_callback(84, "Saving river system...");
         root["rivers"] = RiverManager::getInstance().serialize();
+        root["road_assignments"] = TerrainNodesV2::RoadNetworkRegistry::getInstance().serialize();
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
         
         // Mesh Modifiers System
@@ -2159,6 +2167,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 pp.tone_mapping_type = static_cast<ToneMappingType>(pj.value("tone_mapping", static_cast<int>(pp.tone_mapping_type)));
                 pp.enable_vignette = pj.value("vignette_enabled", pp.enable_vignette);
                 pp.vignette_strength = pj.value("vignette_strength", pp.vignette_strength);
+                rtpost::loadExposure(pj, scene.color_processor);
                 // Also copy into global UI color processor so UI reflects loaded values
                 extern ColorProcessor color_processor; // defined in Main.cpp
                 color_processor.params = pp;
@@ -2199,6 +2208,15 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 if (progress_callback) progress_callback(76, "Loading river system...");
                 RiverManager::getInstance().clear(&scene);
                 RiverManager::getInstance().deserialize(sjsonToNlohmann(rivers_el), scene);
+            }
+
+            // Road assignments. Stores no curve geometry - only which spline is a
+            // road and under which profile - so it loads after the scene objects
+            // that own those curves.
+            simdjson::dom::element roads_el;
+            if (!root["road_assignments"].get(roads_el)) {
+                TerrainNodesV2::RoadNetworkRegistry::getInstance().deserialize(
+                    sjsonToNlohmann(roads_el));
             }
 
             // Foliage System
@@ -2557,45 +2575,49 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     
                     if (j_anim.contains("positionKeys")) {
                          for (auto& [nodeName, j_keys] : j_anim["positionKeys"].items()) {
-                             std::vector<aiVectorKey> keys;
+                             // ★ The .rtp key SCHEMA is unchanged (time/x/y/z):
+                             // Faz 0 swapped the in-memory type, not the file
+                             // format, so old projects load unchanged.
+                             RayTrophi::VectorKeys keys;
+                             keys.reserve(j_keys.size());
                              for (const auto& k : j_keys) {
-                                 aiVectorKey key;
-                                 key.mTime = k.value("time", 0.0);
-                                 key.mValue.x = k.value("x", 0.0f);
-                                 key.mValue.y = k.value("y", 0.0f);
-                                 key.mValue.z = k.value("z", 0.0f);
-                                 keys.push_back(key);
+                                 keys.emplace_back(k.value("time", 0.0),
+                                                   Vec3(k.value("x", 0.0f),
+                                                        k.value("y", 0.0f),
+                                                        k.value("z", 0.0f)));
                              }
-                             anim.positionKeys[nodeName] = keys;
+                             anim.positionKeys[nodeName] = std::move(keys);
                          }
                     }
                     if (j_anim.contains("rotationKeys")) {
                          for (auto& [nodeName, j_keys] : j_anim["rotationKeys"].items()) {
-                             std::vector<aiQuatKey> keys;
+                             RayTrophi::QuatKeys keys;
+                             keys.reserve(j_keys.size());
                              for (const auto& k : j_keys) {
-                                 aiQuatKey key;
-                                 key.mTime = k.value("time", 0.0);
-                                 key.mValue.w = k.value("w", 1.0f);
-                                 key.mValue.x = k.value("x", 0.0f);
-                                 key.mValue.y = k.value("y", 0.0f);
-                                 key.mValue.z = k.value("z", 0.0f);
-                                 keys.push_back(key);
+                                 // Quaternion's constructor is (w, x, y, z) - the
+                                 // same order the file stores.
+                                 keys.emplace_back(k.value("time", 0.0),
+                                                   Quaternion(k.value("w", 1.0f),
+                                                              k.value("x", 0.0f),
+                                                              k.value("y", 0.0f),
+                                                              k.value("z", 0.0f)));
                              }
-                             anim.rotationKeys[nodeName] = keys;
+                             anim.rotationKeys[nodeName] = std::move(keys);
                          }
                     }
                     if (j_anim.contains("scalingKeys")) {
                          for (auto& [nodeName, j_keys] : j_anim["scalingKeys"].items()) {
-                             std::vector<aiVectorKey> keys;
+                             RayTrophi::VectorKeys keys;
+                             keys.reserve(j_keys.size());
                              for (const auto& k : j_keys) {
-                                 aiVectorKey key;
-                                 key.mTime = k.value("time", 0.0);
-                                 key.mValue.x = k.value("x", 1.0f);
-                                 key.mValue.y = k.value("y", 1.0f);
-                                 key.mValue.z = k.value("z", 1.0f);
-                                 keys.push_back(key);
+                                 // Scale defaults to 1, not 0 - a missing component
+                                 // here must not collapse the node.
+                                 keys.emplace_back(k.value("time", 0.0),
+                                                   Vec3(k.value("x", 1.0f),
+                                                        k.value("y", 1.0f),
+                                                        k.value("z", 1.0f)));
                              }
-                             anim.scalingKeys[nodeName] = keys;
+                             anim.scalingKeys[nodeName] = std::move(keys);
                          }
                     }
                     
@@ -3949,6 +3971,7 @@ json ProjectManager::serializeCameras(const std::vector<std::shared_ptr<Camera>>
         c["fov"] = cam->vfov;
         c["aperture"] = cam->aperture;
         c["focus_dist"] = cam->focus_dist;
+
         c["is_active"] = (i == active_index);
         
         // Extended Camera Parameters
@@ -4011,6 +4034,7 @@ void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
         cam->dolly_position = c.value("dolly_pos", 0.0f);
         cam->lens_radius = c.value("lens_radius", aperture * 0.5f);
         cam->lens_radius = c.value("lens_radius", aperture * 0.5f);
+
         cam->distortion = c.value("distortion", 0.0f);
         cam->body_preset_index = c.value("body_preset_index", 1); // Default to Full Frame (index 1)
         cam->iso = c.value("iso_val", 100);
@@ -4118,10 +4142,34 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     // Load additional UI / post-process fields (safe defaults used when missing)
     settings.denoiser_blend_factor = j.value("denoiser_blend_factor", 1.0f);
     settings.quality_preset = static_cast<QualityPreset>(j.value("quality_preset", static_cast<int>(QualityPreset::Preview)));
-    settings.raster_viewport_quality_preset = static_cast<RasterViewportQualityPreset>(
-        j.value("raster_viewport_quality_preset", static_cast<int>(RasterViewportQualityPreset::Auto)));
-    settings.material_preview_lighting_preset = static_cast<MaterialPreviewLightingPreset>(
-        j.value("material_preview_lighting_preset", static_cast<int>(MaterialPreviewLightingPreset::Studio)));
+    // Aralik disi bir deger enum'a cast edilirse switch'lerin hicbir dalina
+    // girmez ve preset SESSIZCE default'a duser -- yani kullanici Full kaydeder,
+    // proje Auto acilir ve bunu soyleyen bir satir olmaz.
+    {
+        const int rq = j.value("raster_viewport_quality_preset",
+                               static_cast<int>(RasterViewportQualityPreset::Auto));
+        settings.raster_viewport_quality_preset =
+            (rq >= static_cast<int>(RasterViewportQualityPreset::Auto) &&
+             rq <= static_cast<int>(RasterViewportQualityPreset::Full))
+                ? static_cast<RasterViewportQualityPreset>(rq)
+                : RasterViewportQualityPreset::Auto;
+    }
+    // Aralik disi bir tam sayi enum'a cast edilirse hicbir switch/if daline
+    // girmez ve preset SESSIZCE varsayilan gibi davranir.
+    {
+        const int pl = j.value("material_preview_lighting_preset",
+                               static_cast<int>(MaterialPreviewLightingPreset::Scene));
+        // Values 1/2 are legacy Studio/Outdoor projects. The simplified UI has
+        // one scene-independent rig, so all three old preview rigs migrate to
+        // Three Point while Scene preserves its real-light meaning.
+        settings.material_preview_lighting_preset =
+            pl == static_cast<int>(MaterialPreviewLightingPreset::Scene)
+                ? MaterialPreviewLightingPreset::Scene
+                : (pl >= static_cast<int>(MaterialPreviewLightingPreset::Classic) &&
+                   pl <= static_cast<int>(MaterialPreviewLightingPreset::Outdoor))
+                    ? MaterialPreviewLightingPreset::Classic
+                    : MaterialPreviewLightingPreset::Scene;
+    }
     settings.grid_fade_distance = std::clamp(j.value("grid_fade_distance", 1.0f), 0.25f, 4.0f);
     settings.grid_opacity = std::clamp(j.value("grid_opacity", 1.0f), 0.0f, 1.0f);
     settings.resolution_source = static_cast<ResolutionSource>(j.value("resolution_source", static_cast<int>(ResolutionSource::Custom)));

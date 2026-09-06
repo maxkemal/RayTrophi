@@ -248,12 +248,22 @@ bool TerrainNodeGraphV2::applySatMapPresetRecipe(
     const bool hydraulicConnected = hydraulic && !hydraulic->inputs.empty() &&
         sourceForInput(hydraulic->inputs[0].id) != 0;
     // Ports are looked up by stable key, not slot. Hydraulic Erosion used to
-    // publish nine outputs and now publishes four; slot 3 was Discharge and is
-    // now Flow. Both are normalised 0..1 fields of the same shape, so a slot
+    // publish nine outputs and now publishes five; slot 3 was Discharge and is
+    // now Sediment. Both are normalised 0..1 fields of the same shape, so a slot
     // read would have kept compiling and quietly swapped water discharge for
     // sediment transport underneath every recipe that reads "flow".
+    //
+    // ★★★ AND THAT SWAP IS EXACTLY WHAT THIS LINE STILL DOES, deliberately, so
+    // the key now says it out loud. The pin was named "Flow", the recipes ask
+    // for "flow", the SatMap slider is labelled "Flow Wetness" - and the field
+    // underneath every one of those words is SEDIMENT TRANSPORT. A viewer reads
+    // the result as water and is not wrong to: sediment spreads onto valley
+    // flanks and overbank aprons, which looks precisely like a stream in flood.
+    // Hydraulic Erosion now also publishes a real "discharge" pin (m3/s);
+    // switching this to it is a deliberate LOOK change for every existing
+    // preset, so it is not done silently here.
     const uint32_t hydraulicFlowPin =
-        terrainPortId(hydraulic, NodeSystem::PinKind::Output, "flow");
+        terrainPortId(hydraulic, NodeSystem::PinKind::Output, "sediment");
     uint32_t flowSource = hydraulicConnected && hydraulicFlowPin != 0
         ? hydraulicFlowPin : (flowMask && !flowMask->outputs.empty() ? flowMask->outputs[0].id : 0);
     if (!flowSource && recipeUses(*recipe, "flow")) {

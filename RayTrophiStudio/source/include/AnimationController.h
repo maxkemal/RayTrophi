@@ -19,7 +19,7 @@
 #include "Matrix4x4.h"
 #include "Vec3.h"
 #include "Quaternion.h"
-#include "AssimpLoader.h"
+#include "Animation/AnimationData.h"
 
 // Forward declarations
 struct AnimationData;

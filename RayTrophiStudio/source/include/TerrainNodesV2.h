@@ -97,6 +97,10 @@ namespace TerrainNodesV2 {
         float scene_sun_x = 0.0f;
         float scene_sun_y = 1.0f;
         float scene_sun_z = 0.0f;
+        // Scene-authored curves are copied on the main thread before graph
+        // evaluation. Workers consume only these immutable values.
+        std::unordered_map<std::string, NodeSystem::CurveValue> curveSnapshots;
+        Matrix4x4 terrainWorldToLocal = Matrix4x4::identity();
         
         // Default resolution when terrain is not yet initialized
         static constexpr int DEFAULT_RESOLUTION = 256;
@@ -194,6 +198,7 @@ namespace TerrainNodesV2 {
         // Shared analysis/field publishing. Appended for serialized enum stability.
         TerrainAnalysis,
         TerrainFieldsOutput,
+        PublishField,
         BiomeComposer,
         // Hydrology and automatic river authoring. Appended for serialized enum stability.
         WatershedAnalysis,
@@ -233,7 +238,14 @@ namespace TerrainNodesV2 {
         // Terrain-aware detail and erosion resistance. Appended for serialized
         // enum stability; implementations live in TerrainSurfaceNodes.*.
         StructuralHardness,
-        SurfaceRelief
+        SurfaceRelief,
+        // Scene spline interoperability. Appended for serialized enum stability.
+        CurveInput,
+        CurveToMask,
+        RoadCarve,
+        RoadNetwork,
+        // Canonical infrastructure publication. Appended for enum stability.
+        RoadFieldsOutput
     };
 
     // ============================================================================
@@ -1174,8 +1186,37 @@ namespace TerrainNodesV2 {
                 "Wear", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Deposits", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            // ★★★★ THIS PIN WAS CALLED "Flow" AND IT CARRIES SEDIMENT.
+            //
+            // compute() returns `sediment` here - the suspended-load field,
+            // log-normalised to 0..1 - while the physically meaningful
+            // DISCHARGE the solver computes had no output pin at all and only
+            // reached the RGBA preview texture's blue channel.
+            //
+            // The cost of the name: FlowMask.Discharge is the drainage
+            // authority, its own comment says it "carries measured m3/s when
+            // Hydraulic Erosion is connected", and the only pin here that
+            // looked like it meant flow was this one. Wiring it makes
+            // flow_authority report `measured` while measuring sediment - a
+            // FALSE GREEN, strictly worse than the honest `unwired` state it
+            // replaces. Renamed rather than left alone, because the next
+            // person to look for "flow" on this node would make the same link.
+            //
+            // Saved graphs are safe: the loader matches by stableKey first and
+            // falls back to the pin INDEX when the key is gone and the port
+            // list has grown. An old link keyed "flow" therefore lands on index
+            // 3 - this same pin, same data, new name.
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar));
+                "Sediment", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::PhysicalScalar));
+            // The field the drainage authority actually wants. Appended, so
+            // every serialized graph keeps its existing pin indices.
+            // m3/s: catchment area times runoff, straight from the solver, NOT
+            // normalised - FlowMask classifies against the field's own min/max
+            // and a pre-normalised input would throw away the scale it needs.
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Discharge", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::PhysicalScalar,
+                1, NodeSystem::ImageUnit::CubicMetersPerSecond));
 
             metadata.displayName = "Hydraulic Erosion";
             metadata.category = "Erosion";
@@ -1256,6 +1297,8 @@ namespace TerrainNodesV2 {
                 {"drainageFillPasses", params.drainageFillPasses},
                 {"drainageAccumulatePasses", params.drainageAccumulatePasses},
                 {"drainageCoarsestSize", params.drainageCoarsestSize},
+                {"flatGradient", params.flatGradient},
+                {"flatResolvePasses", params.flatResolvePasses},
                 {"massWasting", params.massWasting},
                 {"reposeAngleDegrees", params.reposeAngleDegrees},
                 {"massWastingRate", params.massWastingRate},
@@ -1347,6 +1390,8 @@ namespace TerrainNodesV2 {
                 params.drainageFillPasses = clampValue(p.value("drainageFillPasses", params.drainageFillPasses), 8, 4096);
                 params.drainageAccumulatePasses = clampValue(p.value("drainageAccumulatePasses", params.drainageAccumulatePasses), 8, 4096);
                 params.drainageCoarsestSize = clampValue(p.value("drainageCoarsestSize", params.drainageCoarsestSize), 32, 512);
+                params.flatGradient = clampValue(p.value("flatGradient", params.flatGradient), 0.0f, 0.05f);
+                params.flatResolvePasses = clampValue(p.value("flatResolvePasses", params.flatResolvePasses), 0, 8192);
                 params.massWasting = p.value("massWasting", params.massWasting);
                 params.reposeAngleDegrees = clampValue(p.value("reposeAngleDegrees", params.reposeAngleDegrees), 1.0f, 80.0f);
                 params.massWastingRate = clampValue(p.value("massWastingRate", params.massWastingRate), 0.0f, 1.0f);
@@ -3810,6 +3855,21 @@ namespace TerrainNodesV2 {
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Lake Spill Points", NodeSystem::DataType::Image2D,
                 NodeSystem::ImageSemantic::Mask, true));
+            // Cells that must never be NAMED a channel: authored infrastructure.
+            // Wire Road Network's Road Core (and Ditch, through a Math max) here.
+            // A carved road is a linear depression, so to a threshold on
+            // accumulation it is a perfect river bed - which is exactly how one
+            // came to be painted along every road.
+            //
+            // It excludes only the classification. Routing and accumulation are
+            // untouched, so the water still reaches the same downstream cells;
+            // the road pushes it off the surface and the ditch carries it. The
+            // failure this avoids is the quiet one - a drainage network cut in
+            // half by an exclusion that also removed the flow.
+            // Appended for pin-index serialization stability.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Channel Exclusion", NodeSystem::DataType::Image2D,
+                NodeSystem::ImageSemantic::Mask, true));
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             outputs.push_back(NodeSystem::Pin::createOutput(
@@ -4289,6 +4349,74 @@ namespace TerrainNodesV2 {
         std::string getTypeId() const override { return "TerrainV2.TerrainFieldsOutput"; }
     };
 
+    // Publishes ONE authored field under a name of your choosing.
+    //
+    // Terrain Fields Output names measurements: its 36 pins are fixed because
+    // each one IS a specific quantity the solver produced. A composed mask is a
+    // different thing -- "not water and not steep" is an authoring decision, not
+    // a measurement -- so it needs a name the author picks, and there was no way
+    // to give it one. Consumers that read fields by name (scatter density and
+    // exclusion masks, the foliage layer pickers) could therefore only ever see
+    // the canonical 36.
+    //
+    // This is the node that makes combining masks worthwhile: build the
+    // combination out of Math nodes, publish it here as e.g. "mask.no_water",
+    // and point a single mask slot at it. The alternative -- N mask slots on the
+    // consumer -- would have to carry its own combine semantics (and/or/weights/
+    // per-slot thresholds), which is a small expression language hidden inside a
+    // panel, where nothing can inspect it.
+    class PublishFieldNode : public TerrainNodeBase {
+    public:
+        // Author-typed. Normalised on publish (see effectiveFieldName): trimmed,
+        // lowercased, invalid characters to '_', and given the "mask." namespace
+        // when no namespace was typed.
+        std::string fieldName = "mask.custom";
+
+        // Last evaluation's outcome, shown in the panel. A publisher that
+        // silently does nothing is the failure this node would otherwise invite:
+        // a mask slot pointed at a name nobody wrote reads as "no mask", which
+        // looks exactly like a working scatter with a permissive mask.
+        std::string lastPublishedName;
+        bool lastPublishSucceeded = false;
+        std::string lastPublishError;
+
+        PublishFieldNode() {
+            name = "Publish Field";
+            terrainNodeType = NodeType::PublishField;
+            // Generic, not Mask: this node makes NO claim about the quantity it
+            // publishes -- the author names it, and the name is the only contract.
+            // A Mask-typed input refused every non-mask field (height, slope in
+            // degrees, discharge), which are exactly the compositions worth
+            // naming. Measured live 2026-08-30: a Noise Generator output was
+            // rejected as a "type/semantic mismatch".
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Field", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Generic, true));
+            metadata.displayName = "Publish Field";
+            metadata.category = "Output";
+            metadata.description = "Publishes one field under an author-chosen name for mask consumers";
+            metadata.headerColor = IM_COL32(55, 170, 135, 255);
+            metadata.iconType = (int)UIWidgets::IconType::Console;
+            headerColor = ImVec4(0.22f, 0.67f, 0.53f, 1.0f);
+        }
+
+        // The name this node will actually write, or empty when the authored
+        // text cannot produce a legal one. Kept as a function rather than a
+        // cached member so the panel and compute() can never disagree.
+        std::string effectiveFieldName() const;
+        // Canonical measurement names owned by Terrain Fields Output. Shadowing
+        // one would make every downstream reader of that name silently receive
+        // something else, so publishing to it is refused rather than allowed to
+        // win by evaluation order.
+        static bool isReservedFieldName(const std::string& name);
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.PublishField"; }
+        float getCustomWidth() const override { return 210.0f; }
+        void serializeToJson(nlohmann::json& j) const override;
+        void deserializeFromJson(const nlohmann::json& j) override;
+    };
+
     enum class BiomeClimatePreset {
         Custom = 0,
         TemperateMixed,
@@ -4412,7 +4540,10 @@ namespace TerrainNodesV2 {
         // 0 = off. Mirrors InstanceGroup::BrushSettings::edge_margin.
         float edgeMargin = -1.0f;
         std::string densityField;
-        std::string exclusionField;
+        // New foliage layers automatically respect the canonical road keep-out
+        // field. If a terrain does not publish it, scatter's missing-field
+        // fallback preserves the previous no-exclusion behavior.
+        std::string exclusionField = "infrastructure.foliage_exclusion";
         float exclusionThreshold = 0.5f;
         std::string scaleField;
         float scaleFieldInfluence = 1.0f;

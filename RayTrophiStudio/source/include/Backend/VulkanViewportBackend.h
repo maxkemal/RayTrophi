@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "Backend/VulkanBackend.h"
+#include "Viewport/RasterViewportFrameRing.h"
 
 namespace Backend {
 
@@ -11,14 +12,31 @@ namespace Backend {
 class VulkanViewportBackend final : public VulkanBackendAdapter {
 public:
     VulkanViewportBackend() = default;
-    ~VulkanViewportBackend() override = default;
+    ~VulkanViewportBackend() override;
     const char* sceneTextureOwnerScope() const override { return "VulkanViewportBackend"; }
 
     // Set external material buffer from the render backend for MaterialPreview mode.
     // This avoids duplicating material uploads — viewport backend borrows the buffer.
     void setExternalMaterialBuffer(VkBuffer buffer, VkDeviceSize size);
 
+    void setInteractiveViewportSynchronousPresent(bool enabled) override;
+    bool getInteractiveViewportFrameTelemetry(RasterFrameTelemetry& out) const override;
+
 private:
+    std::unique_ptr<RasterViewportFrameRing> m_rasterFrameRing;
+    // A failed ring uses synchronous presentation only for a bounded recovery
+    // window. A transient queue/fence collision must not penalize the session
+    // forever; repeated failures back off to avoid create/destroy every frame.
+    bool m_rasterFrameRingUnavailable = false;
+    std::uint64_t m_rasterFrameSequence = 0;
+    std::uint64_t m_rasterFrameRingRetryFrame = 0;
+    std::uint32_t m_rasterFrameRingFailureCount = 0;
+    bool m_hasRasterPresentedFrame = false;
+    // Device-lost tek satir raporlanir; kurtarma Main'in backend_changed
+    // yolunda. Bkz. renderInteractiveViewportImpl'deki VK_ERROR_DEVICE_LOST dali.
+    bool m_loggedRasterDeviceLost = false;
+    bool m_rasterSynchronousPresent = false;
+    RasterFrameTelemetry m_rasterTelemetry;
     VkBuffer m_externalMaterialBuffer = VK_NULL_HANDLE;
     VkDeviceSize m_externalMaterialBufferSize = 0;
     uint32_t m_externalMaterialCount = 0;
@@ -57,6 +75,7 @@ protected:
     void destroyInteractiveViewportResourcesImpl(bool keepPipeline = false) override;
     void renderInteractiveViewportImpl(void* outSurface, int width, int height,
                                        void* outFramebuffer, void* outTexture) override;
+    void drainInteractiveViewportInFlight() override;
 };
 
 } // namespace Backend

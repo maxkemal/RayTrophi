@@ -1,4 +1,4 @@
-/*
+﻿/*
  * VulkanDevice compute-pipeline creation helpers.
  * Extracted from VulkanBackend.cpp without changing the public backend API.
  */
@@ -54,27 +54,50 @@ bool VulkanDevice::createSkinningPipeline(const std::vector<uint32_t>& computeSP
     // Recreate-safe: free previous skinning resources first.
     // Existing per-BLAS descriptor sets are allocated from the old pool/layout.
     // Invalidate all cached handles so dispatchSkinning reallocates safely.
+    // ★ Raster mesh sets are NOT reachable from here (they live in the viewport
+    // backend's RasterMeshBuffer), but the whole pool is destroyed below, so
+    // their handles die with it and are re-allocated lazily on the next dispatch.
     for (auto& blas : m_blasList) {
         blas.skinningDescSet = VK_NULL_HANDLE;
     }
+    m_skinningDescSetsLive = 0;
     if (m_skinningPipeline) { vkDestroyPipeline(m_device, m_skinningPipeline, nullptr); m_skinningPipeline = VK_NULL_HANDLE; }
     if (m_skinningPipelineLayout) { vkDestroyPipelineLayout(m_device, m_skinningPipelineLayout, nullptr); m_skinningPipelineLayout = VK_NULL_HANDLE; }
     if (m_skinningDescLayout) { vkDestroyDescriptorSetLayout(m_device, m_skinningDescLayout, nullptr); m_skinningDescLayout = VK_NULL_HANDLE; }
     if (m_skinningDescPool) { vkDestroyDescriptorPool(m_device, m_skinningDescPool, nullptr); m_skinningDescPool = VK_NULL_HANDLE; }
     
-    // Create descriptor pool — one persistent set per skinned BLAS, no upper bound known at
-    // pipeline-creation time so we use a generous cap.  Pool is never reset; sets are
-    // allocated once per BLAS and reused every frame (FREE_DESCRIPTOR_SET_BIT not needed).
-    // 64 skinned meshes × 7 bindings = 448 descriptors max.
-    const uint32_t kMaxSkinnedMeshes = 64;
+    // Descriptor pool — one persistent set per skinned mesh, shared by the raster
+    // viewport (RasterMeshBuffer) and the RT path (BLAS).
+    //
+    // ★★★★ FREE_DESCRIPTOR_SET_BIT is REQUIRED, and the old comment here
+    // ("Pool is never reset; sets are allocated once per BLAS and reused every
+    // frame — FREE_DESCRIPTOR_SET_BIT not needed") was the bug's charter. Sets
+    // are NOT allocated once: every scene rebuild destroys the raster meshes and
+    // the BLAS list and builds new ones, so a new set is allocated each time
+    // while the previous one is merely dropped. Without the free bit there is no
+    // way to give it back, so the pool bleeds one set per skinned mesh per
+    // rebuild.
+    //
+    // Symptom, reported 2026-09-05: GPU compute skinning works, you add ONE
+    // object to the scene, and from then on vertices are skinned on the CPU —
+    // in the raster viewport AND in Vulkan RT, because they share this pool.
+    // The failure is a `return false` inside dispatchSkinningToBuffers, whose
+    // only trace was one INFO line printed once per process.
+    //
+    // The cap is raised as well: a rigged character routinely arrives as a dozen
+    // skinned submeshes (body, hair, clothes), and 64 covered barely five of them
+    // per rebuild even without the leak.
+    const uint32_t kMaxSkinnedMeshes = 512;
     VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSkinnedMeshes * 7} };
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = poolSizes;
     poolInfo.maxSets = kMaxSkinnedMeshes;
-    poolInfo.flags = 0; // no free needed — persistent sets
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_skinningDescPool) != VK_SUCCESS) return false;
+    m_skinningDescPoolCapacity = kMaxSkinnedMeshes;
+    m_skinningDescSetsLive = 0;
 
     // Create descriptor set layout (7 storage bindings)
     std::vector<VkDescriptorSetLayoutBinding> bindings(7);
@@ -414,7 +437,12 @@ bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pc.offset = 0;
-    pc.size = 40; // w,h,view + exposure,heatScale,bounceScale,overlay + camXYZ
+    // ★★ Bu sayi tonemap.comp'taki Push blogunun boyutuyla AYNI olmak zorunda
+    //   ve o blok BURADA degil orada tanimli -- yani boyut IKI yerde yasiyor.
+    //   40 -> 68: 7 post alani eklendi (exposure/gamma/saturation/temperature/
+    //   vignetteStrength + toneMapping + vignetteEnabled). Burasi 40'ta
+    //   kalsaydi shader post alanlarini HIC okumazdi ve belirti sifir olurdu.
+    pc.size = 72; // w,h,view + exposure,heat,bounce,overlay + camXYZ + 8 post
 
     VkPipelineLayoutCreateInfo plInfo{};
     plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -818,8 +846,6 @@ bool VulkanDevice::updateAtmosphereLUTComputeDescriptors(const ImageHandle* lutI
 bool VulkanDevice::generateAtmosphereLUTGPU(const WorldData& world) {
     if (m_atmosphereLutPipeline == VK_NULL_HANDLE || m_atmosphereLutDescSet == VK_NULL_HANDLE) return false;
 
-    waitIdle();
-
     const AtmosphereLUTParamsGPU params = makeAtmosphereLUTParamsGPU(world);
     if (m_atmosphereLutParamsBuffer.size < sizeof(params)) {
         if (m_atmosphereLutParamsBuffer.buffer) destroyBuffer(m_atmosphereLutParamsBuffer);
@@ -832,20 +858,36 @@ bool VulkanDevice::generateAtmosphereLUTGPU(const WorldData& world) {
     if (!m_atmosphereLutParamsBuffer.buffer) return false;
     uploadBuffer(m_atmosphereLutParamsBuffer, &params, sizeof(params));
 
-    for (int i = 0; i < 4; ++i) {
-        if (m_lutImages[i].image) {
-            destroyImage(m_lutImages[i]);
-            m_lutImages[i] = {};
-        }
-    }
-
     constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ImageHandle lutImgs[4]{};
-    lutImgs[0] = createImage2D(TRANSMITTANCE_LUT_W, TRANSMITTANCE_LUT_H, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-    lutImgs[1] = createImage2D(SKYVIEW_LUT_W, SKYVIEW_LUT_H, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-    lutImgs[2] = createImage2D(MULTI_SCATTER_LUT_RES, MULTI_SCATTER_LUT_RES, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
+    const bool reuseImages =
+        m_lutImagesStorageCapable &&
+        m_lutImages[0].image && m_lutImages[0].view && m_lutImages[0].sampler &&
+        m_lutImages[1].image && m_lutImages[1].view && m_lutImages[1].sampler &&
+        m_lutImages[2].image && m_lutImages[2].view && m_lutImages[2].sampler &&
+        m_lutImages[0].width == TRANSMITTANCE_LUT_W &&
+        m_lutImages[0].height == TRANSMITTANCE_LUT_H &&
+        m_lutImages[1].width == SKYVIEW_LUT_W &&
+        m_lutImages[1].height == SKYVIEW_LUT_H &&
+        m_lutImages[2].width == MULTI_SCATTER_LUT_RES &&
+        m_lutImages[2].height == MULTI_SCATTER_LUT_RES;
+
+    if (reuseImages) {
+        for (int i = 0; i < 4; ++i) lutImgs[i] = m_lutImages[i];
+    } else {
+        // Allocation/descriptor identity changes are rare (first use or device
+        // recovery), so only this slow path drains. Slider edits reuse images.
+        waitIdle();
+        for (int i = 0; i < 4; ++i) {
+            if (m_lutImages[i].image) destroyImage(m_lutImages[i]);
+            m_lutImages[i] = {};
+        }
+        lutImgs[0] = createImage2D(TRANSMITTANCE_LUT_W, TRANSMITTANCE_LUT_H, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
+        lutImgs[1] = createImage2D(SKYVIEW_LUT_W, SKYVIEW_LUT_H, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
+        lutImgs[2] = createImage2D(MULTI_SCATTER_LUT_RES, MULTI_SCATTER_LUT_RES, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
+    }
     if (!lutImgs[0].image || !lutImgs[1].image || !lutImgs[2].image) {
-        for (auto& img : lutImgs) if (img.image) destroyImage(img);
+        if (!reuseImages) for (auto& img : lutImgs) if (img.image) destroyImage(img);
         return false;
     }
 
@@ -862,19 +904,39 @@ bool VulkanDevice::generateAtmosphereLUTGPU(const WorldData& world) {
         sInfo.unnormalizedCoordinates = VK_FALSE;
         vkCreateSampler(m_device, &sInfo, nullptr, &img.sampler);
     };
-    createSampler(lutImgs[0], false);
-    createSampler(lutImgs[1], true);
-    createSampler(lutImgs[2], false);
+    if (!reuseImages) {
+        createSampler(lutImgs[0], false);
+        createSampler(lutImgs[1], true);
+        createSampler(lutImgs[2], false);
+    }
 
     if (!updateAtmosphereLUTComputeDescriptors(lutImgs)) {
-        for (auto& img : lutImgs) if (img.image) destroyImage(img);
+        if (!reuseImages) for (auto& img : lutImgs) if (img.image) destroyImage(img);
         return false;
     }
 
     VkCommandBuffer cmd = beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) {
-        for (auto& img : lutImgs) if (img.image) destroyImage(img);
+        if (!reuseImages) for (auto& img : lutImgs) if (img.image) destroyImage(img);
         return false;
+    }
+
+    if (reuseImages) {
+        for (int i = 0; i < 3; ++i) {
+            VkImageMemoryBarrier writable{};
+            writable.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            writable.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            writable.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            writable.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            writable.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            writable.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            writable.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            writable.image = lutImgs[i].image;
+            writable.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                0, nullptr, 0, nullptr, 1, &writable);
+        }
     }
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_atmosphereLutPipeline);
@@ -889,6 +951,26 @@ bool VulkanDevice::generateAtmosphereLUTGPU(const WorldData& world) {
         vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1);
     };
     dispatchPhase(0, TRANSMITTANCE_LUT_W, TRANSMITTANCE_LUT_H);
+
+    // SkyView and multi-scatter consume the transmittance image produced by
+    // phase 0. Besides making the dependency valid, this removes the former
+    // nested 64 x 40 integration that could exceed the Windows GPU watchdog
+    // during interactive Physical Sky edits.
+    VkImageMemoryBarrier transmittanceReady{};
+    transmittanceReady.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    transmittanceReady.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    transmittanceReady.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    transmittanceReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    transmittanceReady.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    transmittanceReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    transmittanceReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    transmittanceReady.image = lutImgs[0].image;
+    transmittanceReady.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &transmittanceReady);
+
     dispatchPhase(1, SKYVIEW_LUT_W, SKYVIEW_LUT_H);
     dispatchPhase(2, MULTI_SCATTER_LUT_RES, MULTI_SCATTER_LUT_RES);
 
@@ -897,7 +979,12 @@ bool VulkanDevice::generateAtmosphereLUTGPU(const WorldData& world) {
     }
     endSingleTimeCommands(cmd);
 
-    updateAtmosphereLUTs(lutImgs);
+    if (!reuseImages) {
+        updateAtmosphereLUTs(lutImgs);
+        // updateAtmosphereLUTs is also the CPU-upload path's setter, so it
+        // clears the flag. Re-arm it here: THESE images carry STORAGE usage.
+        m_lutImagesStorageCapable = true;
+    }
     return true;
 }
 

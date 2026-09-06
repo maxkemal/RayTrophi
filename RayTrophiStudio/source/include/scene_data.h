@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -10,9 +10,10 @@
 */
 #pragma once
 #include <HittableList.h>
-#include <AssimpLoader.h>
+#include "Animation/AnimationData.h"
 #include "AnimationController.h"
 #include "Animation/GeometryCache.h"
+#include "Animation/NodeHierarchy.h"   // ImportedModelContext::nodeHierarchy
 #include "KeyframeSystem.h"
 #include "VDBVolume.h"
 #include "GasVolume.h"
@@ -391,7 +392,20 @@ struct SceneData {
             std::vector<int> children;
         };
 
-        std::shared_ptr<class AssimpLoader> loader; // Keep loader alive (owns aiScene)
+        // ★ `std::shared_ptr<AssimpLoader> loader` WAS here, and it pinned the
+        // whole aiScene in memory for the entire session. Its only real reader
+        // was the per-frame animation walk
+        // (loader->calculateAnimatedNodeTransformsRecursive(
+        //  loader->getScene()->mRootNode, ...)), which is also why a model
+        // loaded by any non-Assimp reader would silently not animate. Faz 0.5
+        // moved that walk onto `nodeHierarchy`; after that the field was WRITTEN
+        // once and read nowhere, so it was removed rather than left behind
+        // "just in case" (CLAUDE.md rule 5).
+        //
+        // RayTrophi-owned node tree, filled by whichever importer ran (Assimp,
+        // cgltf, later ufbx). The animation runtime reads only this, so this
+        // struct is now importer-agnostic. See Animation/NodeHierarchy.h.
+        RayTrophi::NodeHierarchy nodeHierarchy;
         std::string importName;
         bool hasAnimation = false;                  // True if this model has animation data
         Matrix4x4 globalInverseTransform;           // Matrix to correct FBX axis/scale (from Root node)
@@ -2133,6 +2147,14 @@ struct SceneData {
     uint64_t sim_render_frame_counter = 0;
     bool simulation_render_updated = false;  // a live volume's content changed this step
     bool force_simulation_render_sync_ = false;
+    // Last seen value of g_dense_gas_host_mirror_needed. The host mirror is
+    // produced by the render-volume publish, and that publish only runs when the
+    // simulation CHANGED — so on a paused timeline (the normal state while
+    // someone inspects a bake) a newly-required mirror would never be produced
+    // at all. Latching the flag lets its rise force exactly one resync; after
+    // that a paused sim legitimately keeps the mirror it has, because its grid
+    // is not moving either.
+    bool dense_gas_mirror_needed_latched_ = false;
     bool preserve_script_simulation_preview_ = false;
     // Authoring gate for Flow Source keyframes. While enabled, timeline scrub
     // moves the playhead without restoring/resimulating expensive gas state;
@@ -3166,6 +3188,32 @@ struct SceneData {
                         dense_gpu_view.majorant_block,
                         dense_gpu_view.emissive_list_address,
                         dense_gpu_view.emissive_capacity);
+                    // ★★★ HOST MIRROR for the consumer that cannot dereference
+                    // the addresses just published. They belong to the
+                    // simulation compute VkDevice; the dedicated raster viewport
+                    // backend is a DIFFERENT VkDevice and reads them as zero
+                    // density — visually identical to "there is no smoke here",
+                    // which is why this went unnoticed for so long.
+                    //
+                    // Version-gated, so a paused or unchanged domain costs
+                    // nothing, and skipped entirely when one backend serves both
+                    // roles (g_dense_gas_host_mirror_needed).
+                    if (g_dense_gas_host_mirror_needed &&
+                        mgr.liveDenseMirrorVersion(id) != dense_gpu_view.version) {
+                        std::vector<float> mirror_density;
+                        std::vector<float> mirror_temperature;
+                        if (system.runtime->downloadGasDenseFields(
+                                d, simulation_world.compute(),
+                                mirror_density, mirror_temperature)) {
+                            mgr.setLiveDenseHostMirror(
+                                id, std::move(mirror_density),
+                                std::move(mirror_temperature),
+                                dense_gpu_view.version);
+                        }
+                        // On failure the previous mirror is deliberately kept:
+                        // one stale frame is recoverable, a blanked volume on
+                        // one viewport and not the other is a bug report.
+                    }
                     simulation_render_updated = true;
                     g_gas_volumes_dirty = true;
                 } else {
@@ -6095,6 +6143,18 @@ struct SceneData {
             --timeline_range_edit_grace_;
         }
         simulation_render_updated = false;
+        // A second Vulkan consumer just appeared (or the roles changed). It
+        // cannot dereference the simulation's device addresses, so it needs the
+        // host mirror — and the publish that produces one runs only on change.
+        // Force a single resync on the rising edge; without it a paused
+        // timeline never produces the mirror, and the consumer renders that
+        // domain's BOUNDING BOX instead of its contents.
+        if (g_dense_gas_host_mirror_needed != dense_gas_mirror_needed_latched_) {
+            dense_gas_mirror_needed_latched_ = g_dense_gas_host_mirror_needed;
+            if (g_dense_gas_host_mirror_needed) {
+                force_simulation_render_sync_ = true;
+            }
+        }
         if (preserve_script_simulation_preview_) {
             preserve_script_simulation_preview_ = false;
             last_sim_config_sig_ = computeSimConfigSignature();

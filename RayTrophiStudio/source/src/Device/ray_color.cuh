@@ -1580,7 +1580,9 @@ __device__ float3 gpu_get_aerial_perspective(const WorldData& world, float3 colo
     
     float aerialDensity = fmaxf(0.0f, world.advanced.aerial_density);
     float atmosphereDensity = fmaxf(0.001f, world.nishita.air_density * 0.60f + world.nishita.dust_density * 0.40f);
-    float densityFactor = aerialDensity * atmosphereDensity * (1.0f + world.nishita.fog_density * 120.0f);
+    float enabledFogDensity = world.nishita.fog_enabled
+        ? fmaxf(world.nishita.fog_density, 0.0f) : 0.0f;
+    float densityFactor = aerialDensity * atmosphereDensity * (1.0f + enabledFogDensity * 120.0f);
     float distFactor = (1.0f - expf(-(dist / 10000.0f) * densityFactor)) * (ramp * ramp);
     
     float3 finalTrans = make_float3(powf(transmittance.x, distFactor), powf(transmittance.y, distFactor), powf(transmittance.z, distFactor));

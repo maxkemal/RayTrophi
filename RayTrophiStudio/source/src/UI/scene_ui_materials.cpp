@@ -80,6 +80,8 @@ void SceneUI::resetMaterialUI() {
 // IMPLEMENTATION: manageTextureGraveyard
 // ===============================================================================
 extern bool g_optix_rebuild_pending; // Ensure this is available
+extern bool g_materials_dirty;
+extern std::unique_ptr<Backend::IBackend> g_backend;
 
 void SceneUI::manageTextureGraveyard() {
     // Only clear invalid textures when NO rebuild is pending
@@ -918,9 +920,17 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         }
 
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.backend_ptr) {
+        if (ctx.backend_ptr && g_backend && ctx.backend_ptr != g_backend.get()) {
+            // Material Preview owns a dedicated lightweight Vulkan viewport.
+            // Updating the inactive path-tracing backend on every slider tick
+            // can block the UI behind a long in-flight RT sample (most visible
+            // on the first Transmission edit). Keep live feedback local and
+            // let the existing Rendered-mode transition perform one canonical
+            // catch-up upload when the user actually returns to RT.
+            ctx.renderer.updateBackendMaterial(ctx.scene, mat_id, ctx.backend_ptr);
+            g_materials_dirty = true;
+        } else if (ctx.backend_ptr) {
             ctx.renderer.updateBackendMaterial(ctx.scene, mat_id);
-            ctx.backend_ptr->resetAccumulation();
         }
     };
 
@@ -941,6 +951,107 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(uv_workflow_cached_uv_set));
             uv_workflow_preview_entries.push_back({ { uv0, uv1, uv2 } });
         }
+    };
+
+    // =======================================================================
+    // ★★★ WHOLE-OBJECT UV OPS GO STRAIGHT TO THE FLAT SoA.
+    //
+    // The facade path below turns one "Flip V" into one shared_ptr<Triangle>
+    // PER FACE plus a per-face read-modify-write, i.e. O(faces) heap
+    // allocations for an edit that is really a single pass over one Vec2 array.
+    // On a dense imported mesh that is millions of allocations and it reads, to
+    // the user, as "the UV button now walks the whole scene".
+    //
+    // ★ This is a consequence of the import-flat collapse: before it, the panel
+    // reused facades the loader had ALREADY built, so the cost was invisible.
+    // The facades were never the right representation for a whole-object edit,
+    // they were just lying around. Geometry is flat SoA (CLAUDE.md), so the edit
+    // addresses the attribute array directly and the facades stay a preview-only
+    // concern.
+    // =======================================================================
+
+    // The flat SoA meshes backing the selected object; empty when the object is
+    // still a genuine per-face facade group (legacy path, nothing to speed up).
+    auto collectFlatUvMeshes = [&]() {
+        std::vector<std::shared_ptr<TriangleMesh>> flatMeshes;
+        auto dmIt = direct_mesh_nodes.find(obj_n);
+        if (dmIt == direct_mesh_nodes.end() || !dmIt->second.mesh || !dmIt->second.mesh->geometry)
+            return flatMeshes;
+        // A multi-material import shares one nodeName across SEVERAL sibling
+        // TriangleMesh objects; direct_mesh_nodes only remembers the last one.
+        std::unordered_set<TriangleMesh*> seenMeshes;
+        auto mesh_it = mesh_cache.find(obj_n);
+        if (mesh_it != mesh_cache.end()) {
+            for (const auto& entry : mesh_it->second) {
+                if (entry.second && entry.second->parentMesh &&
+                    seenMeshes.insert(entry.second->parentMesh.get()).second) {
+                    flatMeshes.push_back(entry.second->parentMesh);
+                }
+            }
+        }
+        if (flatMeshes.empty()) flatMeshes.push_back(dmIt->second.mesh);
+        return flatMeshes;
+    };
+
+    // Visits every UV of `set_index` that belongs to mat_id, in place.
+    // Returns false when the object is not flat, so the caller falls back.
+    //
+    // ★ The material filter is per VERTEX here, not per face. Triangle's facade
+    // reports one material per face and reads it from the first corner, so a
+    // vertex-keyed pass matches it for any mesh whose faces do not straddle two
+    // materials — which is what the importers produce, because materialID is
+    // written per vertex in the first place.
+    auto flatUvVisit = [&](int set_index, const std::function<void(Vec2&)>& visit) -> bool {
+        auto meshes = collectFlatUvMeshes();
+        if (meshes.empty()) return false;
+
+        const std::string attrName = (set_index == 0) ? std::string("uv")
+                                                      : ("uv" + std::to_string(set_index));
+        bool touched = false;
+        for (auto& mesh : meshes) {
+            if (!mesh || !mesh->geometry) continue;
+            auto& geom = *mesh->geometry;
+            Vec2* uvs = geom.get_attribute_data_mut<Vec2>(attrName);
+            if (!uvs) continue;
+            const size_t vCount = geom.get_vertex_count();
+            const uint16_t* matIDs = geom.get_attribute_data<uint16_t>("materialID");
+
+            for (size_t v = 0; v < vCount; ++v) {
+                if (matIDs && matIDs[v] != mat_id) continue;
+                visit(uvs[v]);
+            }
+
+            // Editing a non-zero set has to be mirrored into "uv", which is the
+            // attribute every backend samples — exactly what Triangle::applyUVSet
+            // does per face. Skipping it edits a set nothing renders from.
+            if (set_index != 0) {
+                Vec2* active = geom.get_attribute_data_mut<Vec2>("uv");
+                if (active) {
+                    for (size_t v = 0; v < vCount; ++v) {
+                        if (matIDs && matIDs[v] != mat_id) continue;
+                        active[v] = uvs[v];
+                    }
+                }
+            }
+            touched = true;
+        }
+        return touched;
+    };
+
+    // Read-only bounds over the same set, without materialising anything.
+    auto flatUvBounds = [&](int set_index, double& min_u, double& min_v,
+                            double& max_u, double& max_v) -> bool {
+        min_u = min_v = std::numeric_limits<double>::max();
+        max_u = max_v = std::numeric_limits<double>::lowest();
+        bool any = false;
+        const bool isFlatObj = flatUvVisit(set_index, [&](Vec2& uv) {
+            min_u = std::min(min_u, static_cast<double>(uv.u));
+            min_v = std::min(min_v, static_cast<double>(uv.v));
+            max_u = std::max(max_u, static_cast<double>(uv.u));
+            max_v = std::max(max_v, static_cast<double>(uv.v));
+            any = true;
+        });
+        return isFlatObj && any;
     };
 
     auto ensureUvWorkflowCache = [&]() {
@@ -997,21 +1108,53 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         uv_workflow_preview_entries.clear();
 
         if (isFlat) {
-            // Materialize every face as a facade over each sibling flat mesh, filtered by material.
-            // These facades read/write the SoA "uv" attribute directly, so the UV editor
-            // (setUVSetCoordinates / applyUVSet on uv_workflow_cached_triangles) edits the flat
-            // geometry in place.
-            size_t totalTris = 0;
-            for (const auto& fm : flatMeshes) totalTris += fm->num_triangles();
-            uv_workflow_cached_triangles.reserve(totalTris);
+            // ★★ PREVIEW-ONLY, AND DECIMATED AT THE SOURCE.
+            // This used to materialise a facade for EVERY face and then let
+            // rebuildUvWorkflowPreviewEntries walk it at a stride, drawing 300 of
+            // them. So a 4M-triangle mesh paid 4M heap allocations to render 300
+            // triangles, on every cache rebuild. Editing no longer needs this list
+            // at all (flatUvVisit writes the SoA directly), so build only the
+            // sample the preview will actually draw.
+            constexpr size_t kPreviewFacades = 300;
+
+            // Pass 1: count matching faces. Reads materialID, allocates nothing.
+            auto faceMaterial = [&](const std::shared_ptr<TriangleMesh>& fm, size_t t) -> uint16_t {
+                const auto& g = *fm->geometry;
+                const uint16_t* ids = g.get_attribute_data<uint16_t>("materialID");
+                if (!ids) return mat_id;                    // no per-vertex material: everything matches
+                const size_t i = t * 3;
+                if (i >= g.indices.size()) return (uint16_t)(mat_id + 1);
+                const uint32_t v0 = g.indices[i];
+                return (v0 < g.get_vertex_count()) ? ids[v0] : (uint16_t)(mat_id + 1);
+            };
+
+            size_t matching = 0;
+            for (const auto& fm : flatMeshes) {
+                if (!fm || !fm->geometry) continue;
+                const size_t nTris = fm->num_triangles();
+                for (size_t t = 0; t < nTris; ++t)
+                    if (faceMaterial(fm, t) == mat_id) ++matching;
+            }
+
+            const size_t step = (matching > kPreviewFacades)
+                ? static_cast<size_t>(std::ceil(static_cast<double>(matching) /
+                                                static_cast<double>(kPreviewFacades)))
+                : 1;
+
+            // Pass 2: allocate only the sampled faces.
+            uv_workflow_cached_triangles.reserve(std::min(matching, kPreviewFacades));
+            size_t seen = 0;
             for (const auto& flatMesh : flatMeshes) {
+                if (!flatMesh || !flatMesh->geometry) continue;
                 const size_t nTris = flatMesh->num_triangles();
                 for (size_t t = 0; t < nTris; ++t) {
+                    if (faceMaterial(flatMesh, t) != mat_id) continue;
+                    const bool take = (seen % step) == 0;
+                    ++seen;
+                    if (!take) continue;
                     auto facade = std::make_shared<Triangle>(flatMesh, static_cast<uint32_t>(t));
-                    if (facade->getMaterialID() != mat_id) {
-                        continue;
-                    }
-                    uv_workflow_cached_max_uv_sets = std::max(uv_workflow_cached_max_uv_sets, static_cast<int>(facade->getUVSetCount()));
+                    uv_workflow_cached_max_uv_sets = std::max(uv_workflow_cached_max_uv_sets,
+                                                              static_cast<int>(facade->getUVSetCount()));
                     uv_workflow_cached_triangles.push_back(facade);
                 }
             }
@@ -1056,6 +1199,26 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
 
     auto applyUvEditToSelectedSet = [&](const std::function<void(std::array<Vec2, 3>&)>& edit_fn) {
         const int selected_uv_set = std::max(0, pbsdf->selected_uv_set);
+
+        // ★ Flat SoA object: one pass over the attribute array, no facades.
+        // edit_fn takes a triangle's three UVs because that is the legacy shape;
+        // feeding it one vertex three times is equivalent for every op the panel
+        // exposes (flip, swap, normalise, offset, rotate, scale) because each is
+        // a PER-UV function — none of them look at the other two corners. A
+        // future per-triangle op must take the facade path and say so.
+        {
+            std::array<Vec2, 3> scratch;
+            if (flatUvVisit(selected_uv_set, [&](Vec2& uv) {
+                    scratch[0] = scratch[1] = scratch[2] = uv;
+                    edit_fn(scratch);
+                    uv = scratch[0];
+                })) {
+                uv_workflow_cache_dirty = true;   // preview samples must be re-read
+                refreshGeometryAfterUvChange();
+                return;
+            }
+        }
+
         ensureUvWorkflowCache();
         for (const auto& tri : uv_workflow_cached_triangles) {
             auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(selected_uv_set));
@@ -1316,9 +1479,17 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
                 if (ImGui::Combo("UV Set", &selected_uv_set, uv_label_ptrs.data(), max_uv_sets)) {
                     pbsdf->selected_uv_set = selected_uv_set;
                     uv_workflow_cached_uv_set = selected_uv_set;
-                    for (const auto& tri : uv_workflow_cached_triangles) {
-                        tri->applyUVSet(static_cast<size_t>(selected_uv_set));
+                    // Flat: this is a copy of uvN into uv over the whole array.
+                    // The facade loop below is the legacy path and, since the flat
+                    // cache is now a decimated PREVIEW sample, it would have copied
+                    // only the sampled faces — a partly-switched UV set that looks
+                    // like a broken mesh rather than a missed step.
+                    if (!flatUvVisit(selected_uv_set, [](Vec2&) {})) {
+                        for (const auto& tri : uv_workflow_cached_triangles) {
+                            tri->applyUVSet(static_cast<size_t>(selected_uv_set));
+                        }
                     }
+                    uv_workflow_cache_dirty = true;
                     refreshGeometryAfterUvChange();
                 }
                 ImGui::TextDisabled("Textures and mesh paint use the selected UV set.");
@@ -1391,14 +1562,19 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
                 double min_v = std::numeric_limits<double>::max();
                 double max_u = std::numeric_limits<double>::lowest();
                 double max_v = std::numeric_limits<double>::lowest();
-                for (const auto& tri : uv_workflow_cached_triangles) {
-                    auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(selected_uv_set));
-                    const Vec2 uvs[3] = { uv0, uv1, uv2 };
-                    for (const Vec2& uv : uvs) {
-                        min_u = std::min(min_u, static_cast<double>(uv.u));
-                        min_v = std::min(min_v, static_cast<double>(uv.v));
-                        max_u = std::max(max_u, static_cast<double>(uv.u));
-                        max_v = std::max(max_v, static_cast<double>(uv.v));
+                // ★ Bounds must come from EVERY UV, not from the decimated preview
+                // sample — normalising against a 300-triangle subset would scale the
+                // mesh to the wrong box and look almost right.
+                if (!flatUvBounds(selected_uv_set, min_u, min_v, max_u, max_v)) {
+                    for (const auto& tri : uv_workflow_cached_triangles) {
+                        auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(selected_uv_set));
+                        const Vec2 uvs[3] = { uv0, uv1, uv2 };
+                        for (const Vec2& uv : uvs) {
+                            min_u = std::min(min_u, static_cast<double>(uv.u));
+                            min_v = std::min(min_v, static_cast<double>(uv.v));
+                            max_u = std::max(max_u, static_cast<double>(uv.u));
+                            max_v = std::max(max_v, static_cast<double>(uv.v));
+                        }
                     }
                 }
                 const double span_u = std::max(1e-8, max_u - min_u);
@@ -1464,7 +1640,9 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
 
                 ImGui::InvisibleButton("##uv_preview", ImVec2(preview_size, preview_size));
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("UV Preview\nActive Set: %d\nTriangles: %d", selected_uv_set, static_cast<int>(uv_workflow_cached_triangles.size()));
+                    // ★ The cached list is a PREVIEW SAMPLE for flat meshes; showing its size
+                    // would report "300 triangles" for a four-million-triangle object.
+                    ImGui::SetTooltip("UV Preview\nActive Set: %d\nTriangles: %d", selected_uv_set, static_cast<int>(uv_workflow_cached_object_triangle_count));
                 }
             }
             ImGui::EndChild();

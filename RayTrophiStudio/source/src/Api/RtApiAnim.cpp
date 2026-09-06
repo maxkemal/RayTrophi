@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -27,6 +27,7 @@
 #include "RtApiInternal.h"
 
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -141,6 +142,100 @@ Result listAnimClips(const std::string& character, std::vector<AnimClipInfo>& ou
         info.end_frame = clip.endFrame;
         out.push_back(std::move(info));
     }
+    return Result::success();
+}
+
+// ---------------------------------------------------------------------------
+// Raw imported clips. Deliberately NOT routed through a character: these come
+// straight off SceneData::animationDataList, which is what the loader wrote and
+// what a replacement loader has to reproduce exactly.
+// ---------------------------------------------------------------------------
+Result listAnimSourceClips(std::vector<AnimSourceClipInfo>& out) {
+    out.clear();
+    if (!g_ctx) return notBound();
+
+    for (const auto& anim : g_ctx->scene.animationDataList) {
+        if (!anim) continue;
+        AnimSourceClipInfo info;
+        info.name = anim->name;
+        info.model_name = anim->modelName;
+        info.duration_ticks = anim->duration;
+        info.ticks_per_second = anim->ticksPerSecond;
+        info.duration_seconds = (anim->ticksPerSecond > 0.0)
+            ? (anim->duration / anim->ticksPerSecond) : 0.0;
+        info.start_frame = anim->startFrame;
+        info.end_frame = anim->endFrame;
+
+        double first = 0.0, last = 0.0;
+        bool sawKey = false;
+        auto fold = [&](double t) {
+            if (!sawKey) { first = last = t; sawKey = true; return; }
+            if (t < first) first = t;
+            if (t > last)  last = t;
+        };
+
+        for (const auto& kv : anim->positionKeys) {
+            if (kv.second.empty()) continue;
+            info.position_channels++;
+            info.position_keys += kv.second.size();
+            fold(kv.second.front().time);
+            fold(kv.second.back().time);
+        }
+        for (const auto& kv : anim->rotationKeys) {
+            if (kv.second.empty()) continue;
+            info.rotation_channels++;
+            info.rotation_keys += kv.second.size();
+            fold(kv.second.front().time);
+            fold(kv.second.back().time);
+        }
+        for (const auto& kv : anim->scalingKeys) {
+            if (kv.second.empty()) continue;
+            info.scaling_channels++;
+            info.scaling_keys += kv.second.size();
+            fold(kv.second.front().time);
+            fold(kv.second.back().time);
+        }
+        // ★ front()/back() assume the keys are time-sorted, which the loader
+        // guarantees. If a future reader ever emits unsorted keys this is where
+        // it shows up as a first_key_time larger than last_key_time - a visible
+        // contradiction rather than silently wrong sampling downstream.
+        info.first_key_time = first;
+        info.last_key_time = last;
+        out.push_back(std::move(info));
+    }
+    return Result::success();
+}
+
+Result listAnimSourceChannels(const std::string& clip_name,
+                              std::vector<AnimSourceChannelInfo>& out) {
+    out.clear();
+    if (!g_ctx) return notBound();
+
+    const AnimationData* target = nullptr;
+    for (const auto& anim : g_ctx->scene.animationDataList) {
+        if (!anim) continue;
+        if (clip_name.empty() || anim->name == clip_name) { target = anim.get(); break; }
+    }
+    if (!target) {
+        return Result::fail(clip_name.empty()
+            ? "no imported animation clips in the scene"
+            : ("imported animation clip not found: " + clip_name));
+    }
+
+    std::map<std::string, AnimSourceChannelInfo> byNode;
+    auto slot = [&](const std::string& n) -> AnimSourceChannelInfo& {
+        auto it = byNode.find(n);
+        if (it != byNode.end()) return it->second;
+        AnimSourceChannelInfo fresh;
+        fresh.node_name = n;
+        return byNode.emplace(n, std::move(fresh)).first->second;
+    };
+    for (const auto& kv : target->positionKeys) slot(kv.first).position_keys = kv.second.size();
+    for (const auto& kv : target->rotationKeys) slot(kv.first).rotation_keys = kv.second.size();
+    for (const auto& kv : target->scalingKeys)  slot(kv.first).scaling_keys  = kv.second.size();
+
+    out.reserve(byNode.size());
+    for (auto& kv : byNode) out.push_back(std::move(kv.second));   // std::map = sorted by name
     return Result::success();
 }
 

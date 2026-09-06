@@ -1,4 +1,4 @@
-﻿#include "scene_ui.h"
+#include "scene_ui.h"
 #include "Api/RtApi.h"
 #include "MeshEdit/ProfileSplineEditor.h"
 #include "ui_modern.h"
@@ -27,6 +27,7 @@
 #include "Texture.h"
 #include "stb_image_write.h"
 #include "SceneCommand.h"
+#include "scene_ui_road_assignment.hpp" // Road assignment panel (panel debt closure)
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
@@ -2546,6 +2547,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
             MeshEdit::drawProfileSplineEditControls(ctx);
             UIWidgets::EndSection();
         }
+        drawRoadAssignmentPanel(ctx);
         UIWidgets::PopControlSurfaceStyle();
         return;
     }
