@@ -469,6 +469,35 @@ static const MethodDescriptor desc_anim_set_time = {
 };
 static const MethodRegistration reg_anim_set_time(desc_anim_set_time);
 
+static const MethodParam params_anim_source_channels[] = {
+    {"clip", "string", false, "Clip name; empty or omitted uses the first imported clip", "", nullptr},
+};
+static const MethodDescriptor desc_anim_source_channels = {
+    "anim.source_channels", "anim",
+    "Per-node key counts for one raw imported clip",
+    "The breakdown behind anim.source_clips, sorted by node name so two runs diff without post-processing. Kept separate because a rigged character has hundreds of nodes and the clip totals answer most questions; reach for this when the totals match but the pose does not, which means the keys landed on different NODES.",
+    "read", "Read", false, "Array of objects with node_name, position_keys, rotation_keys, scaling_keys",
+    "anim|source|channels|animation|clip|bones|import|acceptance",
+    "anim.source_clips",
+    nullptr, nullptr, nullptr, nullptr,
+    params_anim_source_channels, 1,
+    true
+};
+static const MethodRegistration reg_anim_source_channels(desc_anim_source_channels);
+
+static const MethodDescriptor desc_anim_source_clips = {
+    "anim.source_clips", "anim",
+    "List the RAW imported animation clips with channel and key counts",
+    "SceneData::animationDataList as the LOADER produced it - not a character's AnimationController state (that is anim.clips). This is the acceptance instrument for replacing the Assimp importer: the same file must yield identical channel and key counts on the old and the new path, and 'it still animates' is not a measurement. A channel is one animated node name; position_keys/rotation_keys/scaling_keys are summed over all channels. Times are in TICKS (duration_ticks, first_key_time, last_key_time); divide by ticks_per_second for seconds. first_key_time > last_key_time would mean a reader emitted unsorted keys - the sampling code assumes time-sorted keys.",
+    "read", "Read", false, "Array of objects with name, model_name, duration_ticks, ticks_per_second, duration_seconds, start_frame, end_frame, position_channels, rotation_channels, scaling_channels, position_keys, rotation_keys, scaling_keys, first_key_time, last_key_time",
+    "anim|source|clips|animation|clip|import|acceptance|assimp|gltf|channels|keys",
+    "anim.source_channels|anim.clips|scene.import_model",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_anim_source_clips(desc_anim_source_clips);
+
 static const MethodParam params_anim_status[] = {
     {"character", "string", true, "", nullptr, nullptr},
     {"layer", "int", false, "", "0", nullptr},
@@ -574,10 +603,10 @@ static const MethodRegistration reg_batch(desc_batch);
 
 static const MethodDescriptor desc_camera_get = {
     "camera.get", "camera",
-    "Return camera position, target, up vector, field of view, focus distance and aperture",
-    nullptr,
-    "read", "Read", false, "CameraState",
-    "camera|get|view",
+    "Return camera position, target, up vector, field of view, focus distance, aperture and the physical exposure state",
+    "EXPOSURE IS A RELATIVE MODEL, NOT AN ABSOLUTE PHOTOMETRIC ONE. The textbook formula 1/(1.2*2^EV100) assumes scene radiance in cd/m2; this engine's light intensities are arbitrary, so the multiplier is a ratio against a calibrated baseline (0.00003125) chosen to avoid a black viewport. Do not 'fix' it into the absolute formula - every scene would go black and the symptom would read as 'too dark', not 'wrong formula'. 'iso_value', 'shutter_seconds', 'f_number' and 'exposure_factor' are DERIVED read-only outputs, not settings: a preset INDEX is not a measurement, and exposure_factor is the number actually handed to the shaders. 'aperture' is the depth-of-field dial and does NOT affect exposure; 'fstop_preset_index' is the exposure/lens dial and does NOT affect depth of field. PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied.",
+    "read", "Read", false, "any",
+    "camera|get",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
     nullptr, 0,
@@ -600,6 +629,38 @@ static const MethodDescriptor desc_camera_set_aperture = {
     true
 };
 static const MethodRegistration reg_camera_set_aperture(desc_camera_set_aperture);
+
+static const MethodParam params_camera_set_auto_exposure[] = {
+    {"enabled", "bool", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_auto_exposure = {
+    "camera.set_auto_exposure", "camera",
+    "Turn auto exposure on; while on, only EV compensation is applied",
+    "PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied.",
+    "write", "SceneWrite", false, "any",
+    "camera|set|auto|exposure",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_auto_exposure, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_auto_exposure(desc_camera_set_auto_exposure);
+
+static const MethodParam params_camera_set_ev_compensation[] = {
+    {"ev", "float", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_ev_compensation = {
+    "camera.set_ev_compensation", "camera",
+    "Set exposure compensation in stops; this one applies in EVERY mode",
+    "Unlike the preset dials this is always read, so it is the reliable way to move exposure without first arranging auto_exposure/use_physical_exposure. Rejected outside [-10, +10].",
+    "write", "SceneWrite", false, "any",
+    "camera|set|ev|compensation",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_ev_compensation, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_ev_compensation(desc_camera_set_ev_compensation);
 
 static const MethodParam params_camera_set_focus_distance[] = {
     {"focus_distance", "float", true, "", nullptr, nullptr},
@@ -633,6 +694,38 @@ static const MethodDescriptor desc_camera_set_fov = {
 };
 static const MethodRegistration reg_camera_set_fov(desc_camera_set_fov);
 
+static const MethodParam params_camera_set_fstop_preset[] = {
+    {"index", "int", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_fstop_preset = {
+    "camera.set_fstop_preset", "camera",
+    "Select the f-stop preset by index; drives exposure and Cinema lens imperfections, NOT depth of field",
+    "Depth of field still comes from the separate 'aperture' dial. On a real camera one f-number would do both; they are separate here because unifying them would silently change the blur of every existing scene - a recorded debt. PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied.",
+    "write", "SceneWrite", false, "any",
+    "camera|set|fstop|preset",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_fstop_preset, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_fstop_preset(desc_camera_set_fstop_preset);
+
+static const MethodParam params_camera_set_iso_preset[] = {
+    {"index", "int", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_iso_preset = {
+    "camera.set_iso_preset", "camera",
+    "Select the ISO preset by index; camera.get returns the resolved iso_value",
+    "The index is not a measurement - read 'iso_value' from camera.get for the actual ISO. PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied.",
+    "write", "SceneWrite", false, "any",
+    "camera|set|iso|preset",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_iso_preset, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_iso_preset(desc_camera_set_iso_preset);
+
 static const MethodParam params_camera_set_position[] = {
     {"position", "vec3", true, "", nullptr, nullptr},
 };
@@ -649,6 +742,22 @@ static const MethodDescriptor desc_camera_set_position = {
 };
 static const MethodRegistration reg_camera_set_position(desc_camera_set_position);
 
+static const MethodParam params_camera_set_shutter_preset[] = {
+    {"index", "int", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_shutter_preset = {
+    "camera.set_shutter_preset", "camera",
+    "Select the shutter-speed preset by index; camera.get returns shutter_seconds",
+    "Index, not seconds. Read 'shutter_seconds' from camera.get for the resolved exposure time. This dial does NOT drive motion blur. PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied.",
+    "write", "SceneWrite", false, "any",
+    "camera|set|shutter|preset",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_shutter_preset, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_shutter_preset(desc_camera_set_shutter_preset);
+
 static const MethodParam params_camera_set_target[] = {
     {"target", "vec3", true, "", nullptr, nullptr},
 };
@@ -664,6 +773,22 @@ static const MethodDescriptor desc_camera_set_target = {
     true
 };
 static const MethodRegistration reg_camera_set_target(desc_camera_set_target);
+
+static const MethodParam params_camera_set_use_physical_exposure[] = {
+    {"enabled", "bool", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_use_physical_exposure = {
+    "camera.set_use_physical_exposure", "camera",
+    "Enable the ISO/shutter/f-stop preset chain (needs auto_exposure off)",
+    "PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied.",
+    "write", "SceneWrite", false, "any",
+    "camera|set|use|physical|exposure",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_use_physical_exposure, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_use_physical_exposure(desc_camera_set_use_physical_exposure);
 
 static const MethodParam params_debris_configure[] = {
     {"enabled", "bool", false, "", "true", nullptr},
@@ -2426,6 +2551,23 @@ static const MethodDescriptor desc_material_get = {
 };
 static const MethodRegistration reg_material_get(desc_material_get);
 
+static const MethodParam params_material_get_param[] = {
+    {"material_name", "string", true, "", nullptr, nullptr},
+    {"param", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_material_get_param = {
+    "material.get_param", "material",
+    "Read one material parameter directly by material name (not through an object)",
+    "material.get reads through an OBJECT and averages nothing but still names an object; this names the material ASSET, which is what you want when several materials share one flat mesh (e.g. a carafe's glass body + brass cap + rubber foot) and you need the one that actually has that name.",
+    "read", "Read", false, "any",
+    "material|get|param|shading",
+    "material.set_param|material.get|material.info",
+    nullptr, nullptr, nullptr, nullptr,
+    params_material_get_param, 2,
+    true
+};
+static const MethodRegistration reg_material_get_param(desc_material_get_param);
+
 static const MethodParam params_material_info[] = {
     {"name", "string", true, "", nullptr, nullptr},
 };
@@ -2489,6 +2631,24 @@ static const MethodDescriptor desc_material_set = {
 };
 static const MethodRegistration reg_material_set(desc_material_set);
 
+static const MethodParam params_material_set_param[] = {
+    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission and opacity are clamped to [0,1]; ior to [1,10].", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y"},
+    {"material_name", "string", true, "", nullptr, nullptr},
+    {"value", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_material_set_param = {
+    "material.set_param", "material",
+    "Set one material parameter directly by material name (base_color, roughness, metallic, emission, ior, transmission, ...)",
+    "material.set edits through an OBJECT: every Principled BSDF that object's flat meshes reference gets the same value, which is wrong the instant one object carries several DIFFERENT materials — a carafe's glass body + brass cap + rubber foot is one flat mesh, three materials, and object.set would smear transmission=1 onto the cap and foot too. This edits exactly the named material asset and nothing else that happens to share its object. Colour parameters take a 3-element array, scalars take a number; an unknown parameter name is an error, not a silent no-op. Not undoable, unlike material.set.",
+    "write", "SceneWrite", false, "any",
+    "material|set|param|shading|colour|roughness|metallic|emission",
+    "material.get_param|material.set|material.set_texture",
+    nullptr, nullptr, nullptr, nullptr,
+    params_material_set_param, 3,
+    true
+};
+static const MethodRegistration reg_material_set_param(desc_material_set_param);
+
 static const MethodParam params_material_set_texture[] = {
     {"material_name", "string", true, "", nullptr, nullptr},
     {"path", "string", true, "", nullptr, nullptr},
@@ -2512,8 +2672,8 @@ static const MethodParam params_material_textures[] = {
 };
 static const MethodDescriptor desc_material_textures = {
     "material.textures", "material",
-    "List a material's texture slots and their bound files",
-    nullptr,
+    "List a material's populated texture slots with the identity of each bound texture",
+    "Returns {slot, texture} pairs. 'texture' is the texture's identity - a file path, or an 'embedded_<import>_<slot>_<type>' cache key for a texture that lived inside the model file. Two materials reporting the SAME texture share one decoded image: intended when a map is reused, a defect when the two materials came from different source files.",
     "read", "Read", false, "any",
     "material|textures|shading|texture",
     nullptr,
@@ -3769,7 +3929,7 @@ static const MethodParam params_perf_get[] = {
 static const MethodDescriptor desc_perf_get = {
     "perf.get", "perf",
     "Read one timing section by name",
-    "Returns found:false when the section has never been recorded. It never answers with zeros: a zeroed timing reads as 'measured, and it was free', which turns a missing measurement into a false one.",
+    "Returns found:false when the section has never been recorded. It never answers with zeros: a zeroed timing reads as 'measured, and it was free', which turns a missing measurement into a false one. 'rss_measured' false means the working-set fields are absence rather than zero - per-frame sections (loop.*) skip the working-set query so the instrument does not distort the section it measures. See perf.list for the loop.* section map and for why loop.throttle_sleep must be read before any frame-rate conclusion.",
     "read", "Read", false, "PerfSection",
     "perf|get|performance|timing|profile|measure",
     "perf.list",
@@ -3782,7 +3942,7 @@ static const MethodRegistration reg_perf_get(desc_perf_get);
 static const MethodDescriptor desc_perf_list = {
     "perf.list", "perf",
     "List every recorded build/render timing section, newest write first",
-    "Sections are named by the code that performs the work: terrain.graph.evaluate/.height/.aux_outputs/.finalize_mesh, terrain.mesh_fill/.create/.update/.publish_fields, terrain.splat_resize, Renderer::rebuildBVH(...), Renderer::rebuildBackendGeometry(GPU). Each carries last/total/max ms, a call count and the process working-set delta across the scope - terrain build cost is dominated by allocation, so a timing without the memory figure next to it invites optimizing the wrong half.",
+    "Sections are named by the code that performs the work. BUILD sections: terrain.graph.evaluate/.height/.aux_outputs/.finalize_mesh, terrain.mesh_fill/.create/.update/.publish_fields, terrain.splat_resize, Renderer::rebuildBVH(...), Renderer::rebuildBackendGeometry(GPU), accel.vulkan_solid.raster_geometry. PER-FRAME sections (added 2026-09-03), all prefixed loop.: loop.frame is the whole main-loop iteration and the others are its parts - loop.events (SDL event pump), loop.ui_draw (building every ImGui panel), loop.viewport_render (the backend's renderProgressive; loop.viewport_render_cpu for the legacy CPU path), loop.display_post (original_surface to display surface), loop.imgui_render (building draw lists), loop.present (SDL_RenderClear/Copy/RenderPresent - a vsync wait, if any, lands HERE, so a large value must be read as 'work OR waiting'), loop.throttle_sleep and loop.frame_tail (deferred geometry/BLAS/TLAS rebuilds and the rest of the iteration). WHY THIS EXISTS: before it, only the backend frame and two display copies were timed. Measured on a 695k-triangle interior at 1680x945, the backend frame was 1.2 ms while the loop period was 17.8-26 ms - about 95% of the frame was in code no instrument looked at, so a 142 ms frame could not be decomposed at all. READ loop.throttle_sleep BEFORE CONCLUDING ANYTHING: the main loop deliberately sleeps 16 ms (tier1) or 48 ms (tier2) when the app is not in tier0, and tier0 requires camera_moved, which is set ONLY from mouse/keyboard. An IPC-driven session therefore never reaches tier0, so every frame rate a script measures includes that sleep and is NOT the engine's throughput. Use max_ms to catch the rare slow frame - the mean dissolves it - and call perf.reset first to open a clean window. Each section carries last/total/max ms and a call count. 'rss_measured' says whether the working-set fields mean anything: the loop.* sections set it false because a per-frame scope must not pay for two GetProcessMemoryInfo calls, and their last_rss_delta_mb/rss_after_mb are ABSENCE, not a measurement of zero.",
     "read", "Read", false, "PerfSection[]",
     "perf|list|performance|timing|profile|measure|slow|memory",
     "perf.get|perf.reset|perf.set_logging",
@@ -3795,7 +3955,7 @@ static const MethodRegistration reg_perf_list(desc_perf_list);
 static const MethodDescriptor desc_perf_reset = {
     "perf.reset", "perf",
     "Clear the timing counters before a measured run",
-    "Write ordering (seq) stays monotonic across a reset, so a section recorded after it cannot be confused with a stale one. Changes no scene, render or file state - which is why it carries the read capability.",
+    "Write ordering (seq) stays monotonic across a reset, so a section recorded after it cannot be confused with a stale one. Changes no scene, render or file state - which is why it carries the read capability. Call it before a measured run: max_ms never decays, so one scene-load frame keeps dominating the table until it is cleared.",
     "read", "Read", false, "any",
     "perf|reset|performance|timing|profile",
     "perf.list|perf.get",
@@ -4046,6 +4206,22 @@ static const MethodDescriptor desc_physics_unfracture_object = {
 };
 static const MethodRegistration reg_physics_unfracture_object(desc_physics_unfracture_object);
 
+static const MethodParam params_post_configure_exposure[] = {
+    {"settings", "object", true, "Exposure patch: mode, ev, min_ev, max_ev, low_percent, high_percent, key, speed_up, speed_down, center_weight, locked, locked_ev", nullptr, nullptr},
+};
+static const MethodDescriptor desc_post_configure_exposure = {
+    "post.configure_exposure", "post",
+    "Atomically configure manual, physical-camera or GPU-histogram exposure",
+    "UI and Python call the same service. Mode is manual|physical|auto_histogram. EV in [-24,24]; min_ev <= max_ev. 0 <= low_percent < high_percent <= 100. key in [0.001,1], speed_up/down in (0,20] per second, center_weight in [0,1]. Non-finite values and unknown fields fail without mutation. locked=true captures current applied EV unless locked_ev is supplied. Final render freezes adaptation and rejects edits. No accumulation reset.",
+    "write", "SceneWrite", false, "object",
+    "post|configure|exposure|histogram",
+    nullptr,
+    nullptr, nullptr, "post.get_exposure", "display",
+    params_post_configure_exposure, 1,
+    true
+};
+static const MethodRegistration reg_post_configure_exposure(desc_post_configure_exposure);
+
 static const MethodDescriptor desc_post_get = {
     "post.get", "post",
     "Read the post-processing settings: exposure, gamma, tone mapping, saturation, vignette and stylize",
@@ -4059,15 +4235,41 @@ static const MethodDescriptor desc_post_get = {
 };
 static const MethodRegistration reg_post_get(desc_post_get);
 
+static const MethodDescriptor desc_post_get_exposure = {
+    "post.get_exposure", "post",
+    "Read exposure settings, applied EV and HDR histogram",
+    "Relative scene-linear luminance, not photometric EV100. GPU meters use a deterministic 128x128 sample grid and 256 weighted log2 bins. Raster preview shares the last resolved EV; it does not provide an HDR meter. meter_valid and meter_source report available data.",
+    "read", "Read", false, "object",
+    "post|get|exposure|histogram",
+    "post.configure_exposure|post.reset_exposure",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_post_get_exposure(desc_post_get_exposure);
+
+static const MethodDescriptor desc_post_reset_exposure = {
+    "post.reset_exposure", "post",
+    "Reset exposure histogram and adaptation history",
+    "Invalidates in-flight measurements by generation. Does not change settings or the explicit locked EV. Rejected while a final render is active.",
+    "write", "SceneWrite", false, "object",
+    "post|reset|exposure",
+    nullptr,
+    nullptr, nullptr, "post.get_exposure", "display",
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_post_reset_exposure(desc_post_reset_exposure);
+
 static const MethodParam params_post_set_color_temperature[] = {
     {"color_temperature", "float", true, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_post_set_color_temperature = {
     "post.set_color_temperature", "post",
-    "Set post-process colour temperature",
-    nullptr,
+    "Set scene-linear Bradford white balance",
+    "Finite [4000,25000] Kelvin, daylight-locus source white adapted to D65. 6500 K is exactly neutral. Applied before the view transform. Higher Kelvin warms.",
     "write", "SceneWrite", false, "any",
-    "post|set|color|temperature|grade|white-balance",
+    "post|set|color|temperature|whitebalance",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
     params_post_set_color_temperature, 1,
@@ -4081,7 +4283,7 @@ static const MethodParam params_post_set_exposure[] = {
 static const MethodDescriptor desc_post_set_exposure = {
     "post.set_exposure", "post",
     "Set post-process exposure",
-    "Post changes must not reset sample accumulation.",
+    "Linear gain in [0,65504]. Multiplies the EV/physical/auto exposure selected by post.configure_exposure. Does not reset sample accumulation.",
     "write", "SceneWrite", false, "any",
     "post|set|exposure|brightness|grade",
     nullptr,
@@ -4156,14 +4358,14 @@ static const MethodDescriptor desc_post_set_stylize_strength = {
 static const MethodRegistration reg_post_set_stylize_strength(desc_post_set_stylize_strength);
 
 static const MethodParam params_post_set_tone_mapping[] = {
-    {"tone_mapping", "string", true, "Operator", nullptr, "agx|aces|uncharted|filmic|none"},
+    {"tone_mapping", "string", true, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_post_set_tone_mapping = {
     "post.set_tone_mapping", "post",
-    "Set the tone mapping operator",
-    nullptr,
+    "Select AgX, ACES Fitted, Uncharted, Hejl Filmic, Linear or Reinhard",
+    "Shared CPU/CUDA/GLSL scene-linear Rec.709 implementation. ACES is a fitted approximation, not a full ACES/OCIO output transform. None/linear clips without tone mapping. Old AGX/ACES looks are intentionally replaced.",
     "write", "SceneWrite", false, "any",
-    "post|set|tone|mapping|grade|filmic",
+    "post|set|tone|mapping|tonemap|color",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
     params_post_set_tone_mapping, 1,
@@ -4411,6 +4613,19 @@ static const MethodDescriptor desc_render_volume_stats = {
 };
 static const MethodRegistration reg_render_volume_stats(desc_render_volume_stats);
 
+static const MethodDescriptor desc_render_volume_tables = {
+    "render.volume_tables", "render",
+    "Report the published volume SSBO state per backend (render / raster viewport), including whether the simulation compute device is that backend's own device",
+    "The raster viewport can be a SECOND VulkanBackendAdapter with its own VkDevice and its own volume table. A 'viewport' row with instance_count 0 while 'render' is non-zero means the realtime viewport was never handed the volumes and will draw none — render.volume_stats cannot see this, because a pass that never ran counts zero exactly like a scene with no volumes. sim_device_is_this_backends false means live dense gas addresses are suppressed for that backend and it falls back to the per-adapter NanoVDB upload (a frozen grid, not a fault).",
+    "render", "Render", false, "VolumeTablesInfo",
+    "render|volume|tables|diagnostics|backend|verify",
+    "render.volume_stats|viewport.status",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_render_volume_tables(desc_render_volume_tables);
+
 static const MethodDescriptor desc_request_render = {
     "request_render", "request_render",
     "Ask the viewport to render another frame",
@@ -4568,6 +4783,35 @@ static const MethodDescriptor desc_scatter_list_groups = {
 };
 static const MethodRegistration reg_scatter_list_groups(desc_scatter_list_groups);
 
+static const MethodParam params_scatter_set_settings[] = {
+    {"group", "string", true, "Scatter group id or name", nullptr, nullptr},
+    {"target_count", "int", false, "How many instances to aim for on the next fill", nullptr, nullptr},
+    {"seed", "int", false, "Placement seed; the same seed reproduces the same layout", nullptr, nullptr},
+    {"min_distance", "float", false, "Minimum spacing between instances, in metres", nullptr, nullptr},
+    {"slope_max", "float", false, "Reject ground steeper than this, in degrees", nullptr, nullptr},
+    {"height_min", "float", false, "Lowest world height that accepts an instance, in metres", nullptr, nullptr},
+    {"height_max", "float", false, "Highest world height that accepts an instance, in metres", nullptr, nullptr},
+    {"density_mask", "string", false, "INCLUDE field name; its value is a placement PROBABILITY, so 0.3 thins rather than cuts. Empty string turns it off", nullptr, nullptr},
+    {"exclusion_mask", "string", false, "EXCLUDE field name; placement is forbidden where the field is >= exclusion_threshold. Empty string turns it off", nullptr, nullptr},
+    {"exclusion_threshold", "float", false, "Reject at or above this value; drives BOTH exclusion_mask and splat_exclude_channel", nullptr, nullptr},
+    {"scale_mask", "string", false, "Field name that scales instances. Empty string turns it off", nullptr, nullptr},
+    {"scale_mask_influence", "float", false, "0 ignores scale_mask, 1 lets it drive scale fully", nullptr, nullptr},
+    {"splat_include_channel", "int", false, "Splat map channel used as an include weight: -1 off, 0..3 = RGBA", nullptr, nullptr},
+    {"splat_exclude_channel", "int", false, "Splat map channel used as an exclusion: -1 off, 0..3 = RGBA", nullptr, nullptr},
+};
+static const MethodDescriptor desc_scatter_set_settings = {
+    "scatter.set_settings", "scatter",
+    "Patch a scatter group's placement rules and its density / exclusion / scale masks",
+    "Only the keys you pass are written; the rest are left alone. The two mask roles are NOT symmetric: density_mask INCLUDES probabilistically (its value is a placement probability, so 0.3 thins a stand), while exclusion_mask FORBIDS placement wherever the field is >= exclusion_threshold. exclusion_threshold is shared by exclusion_mask and splat_exclude_channel. Mask names are terrain analysis fields - get the ones a terrain actually has from terrain.list_fields, and build a combined mask upstream with a Publish Field node rather than expecting more mask slots here. splat channels are -1 (off) or 0..3 (RGBA); an out-of-range channel is refused, not clamped. Read the result back with scatter.list_groups.",
+    "write", "SceneWrite", false, "any",
+    "scatter|set|settings|foliage|mask|density|exclusion|placement",
+    "scatter.list_groups|terrain.list_fields|scatter.fill",
+    nullptr, nullptr, nullptr, nullptr,
+    params_scatter_set_settings, 14,
+    true
+};
+static const MethodRegistration reg_scatter_set_settings(desc_scatter_set_settings);
+
 static const MethodParam params_scene_add_primitive[] = {
     {"type", "string", true, "Primitive shape", nullptr, "cube|sphere|plane|cylinder|torus"},
     {"name", "string", false, "Requested name; a numeric suffix is added if it is taken", "", nullptr},
@@ -4617,6 +4861,57 @@ static const MethodDescriptor desc_scene_duplicate = {
     true
 };
 static const MethodRegistration reg_scene_duplicate(desc_scene_duplicate);
+
+static const MethodParam params_scene_export_estimate[] = {
+    {"geometry", "bool", false, "Count meshes", "true", nullptr},
+    {"materials", "bool", false, "Count materials and textures", "true", nullptr},
+    {"cameras", "bool", false, "Count the active camera as a glTF camera node", "false", nullptr},
+    {"lights", "bool", false, "Count scene lights", "false", nullptr},
+    {"animations", "bool", false, "Count animation clips", "true", nullptr},
+    {"skinning", "bool", false, "Count skinning data", "true", nullptr},
+    {"selected_only", "bool", false, "Estimate the current multi-selection only", "false", nullptr},
+    {"bake_terrain_materials", "bool", false, "Assume terrain layers get baked", "true", nullptr},
+    {"terrain_bake_resolution", "int", false, "Terrain bake resolution assumed by the estimate", "1024", nullptr},
+    {"gpu_instancing", "bool", false, "Assume EXT_mesh_gpu_instancing collapses scatter nodes", "true", nullptr},
+};
+static const MethodDescriptor desc_scene_export_estimate = {
+    "scene.export_estimate", "scene",
+    "Report what an export WOULD cost, without writing anything",
+    "The same pre-export estimate the Export Settings panel shows, computed by the same function - so a script can catch the panel drifting away from the writer. It already did: the writer was fixed to read scatter from InstanceManager (on Vulkan scatter is NEVER expanded into world.objects), the panel's estimate was not, and it reported instances=0 for a scene the exporter then wrote a thousand instances of. Compare `instances` here against scene.export_gltf's measured `instances`; a gap means they have drifted again. Note `triangles` counts non-instanced geometry only - add `instance_triangles` for the total. `estimated_peak_mb` covers only geometry the writer must MATERIALISE (legacy Triangle facades); flat SoA meshes stream from where they live and cost no extra heap.",
+    "read", "Read", false, "Object with objects, triangles, legacy_triangles, instances, unique_instance_sources, instance_triangles, materialised_instance_triangles, estimated_peak_mb",
+    "scene|export|estimate|gltf|cost|preflight|scatter|instances",
+    "scene.export_gltf|scatter.list_groups",
+    nullptr, nullptr, nullptr, nullptr,
+    params_scene_export_estimate, 10,
+    true
+};
+static const MethodRegistration reg_scene_export_estimate(desc_scene_export_estimate);
+
+static const MethodParam params_scene_export_gltf[] = {
+    {"path", "string", true, "Output file path; extension must be .glb or .gltf", nullptr, nullptr},
+    {"geometry", "bool", false, "Write meshes", "true", nullptr},
+    {"materials", "bool", false, "Write materials and textures", "true", nullptr},
+    {"cameras", "bool", false, "Write the active camera as a glTF camera node", "false", nullptr},
+    {"lights", "bool", false, "Write scene lights via KHR_lights_punctual", "false", nullptr},
+    {"animations", "bool", false, "Write animation clips as glTF samplers/channels", "true", nullptr},
+    {"skinning", "bool", false, "Write the skeleton, JOINTS_0/WEIGHTS_0 and inverse bind matrices", "true", nullptr},
+    {"selected_only", "bool", false, "Export only the current multi-selection; fails if nothing is selected", "false", nullptr},
+    {"bake_terrain_materials", "bool", false, "Flatten splat-blended terrain layers into export textures", "true", nullptr},
+    {"terrain_bake_resolution", "int", false, "Square resolution of each baked terrain texture", "1024", nullptr},
+    {"gpu_instancing", "bool", false, "Collapse scattered objects sharing one source mesh into EXT_mesh_gpu_instancing nodes", "true", nullptr},
+};
+static const MethodDescriptor desc_scene_export_gltf = {
+    "scene.export_gltf", "scene",
+    "Export the scene to glTF 2.0 (.glb or .gltf + sidecar .bin) and report measured cost",
+    "Written directly from the in-memory flat SoA geometry - no Assimp round trip, no per-triangle facade. Blocks the main thread until the file is closed. The reply carries what was actually written plus a per-phase time breakdown and the writer's own peak heap (peak_writer_mb, NOT process RSS), so export cost is regressable from a script. .glb is capped at 4 GB by its 32-bit chunk length; use .gltf for anything larger.",
+    "write", "FilesWrite", false, "Object with path, meshes, primitives, triangles, vertices, nodes, instances, instanced_groups, materials, images, file_bytes, peak_writer_mb and seconds_total/collect/materials/plan/write",
+    "scene|export|gltf|glb|save|interchange|asset",
+    "scene.import_model|project.save",
+    nullptr, nullptr, nullptr, nullptr,
+    params_scene_export_gltf, 11,
+    true
+};
+static const MethodRegistration reg_scene_export_gltf(desc_scene_export_gltf);
 
 static const MethodParam params_scene_get_transform[] = {
     {"name", "string", true, "", nullptr, nullptr},
@@ -4710,6 +5005,24 @@ static const MethodDescriptor desc_scene_object_info = {
     true
 };
 static const MethodRegistration reg_scene_object_info(desc_scene_object_info);
+
+static const MethodParam params_scene_raycast[] = {
+    {"origin", "vec3", false, "Ray origin in world space", nullptr, nullptr},
+    {"direction", "vec3", false, "Ray direction; normalized internally, must be non-zero", nullptr, nullptr},
+    {"filter", "string", false, "mesh_and_terrain (default) | terrain_only | ground_plane. An unknown value is REFUSED, not defaulted: silently widening a terrain_only query would report a mesh hit that looks correct", "mesh_and_terrain", nullptr},
+};
+static const MethodDescriptor desc_scene_raycast = {
+    "scene.raycast", "scene",
+    "Reports what a ray hits: scene geometry, terrain, or the Y=0 ground plane. This is the VALUE behind the viewport's draw-on-surface tools - without it that workflow is reachable only by clicking, and therefore not testable.",
+    "Returns hit, kind (mesh|terrain|ground_plane|none), object (hit mesh name; empty for terrain and the ground plane), position, normal and distance. The mesh and terrain hits are compared by distance, so a mesh behind the terrain does not win.",
+    "read", "Read", false, "any",
+    "scene|raycast",
+    "spline.append_point|terrain.sample_height|scene.list_objects",
+    nullptr, nullptr, nullptr, nullptr,
+    params_scene_raycast, 3,
+    true
+};
+static const MethodRegistration reg_scene_raycast(desc_scene_raycast);
 
 static const MethodParam params_scene_set_transform[] = {
     {"name", "string", true, "Object name", nullptr, nullptr},
@@ -5225,6 +5538,23 @@ static const MethodDescriptor desc_spline_animation_self_test = {
 };
 static const MethodRegistration reg_spline_animation_self_test(desc_spline_animation_self_test);
 
+static const MethodParam params_spline_append_point[] = {
+    {"name", "string", true, "Spline object name, as reported by spline.list", nullptr, nullptr},
+    {"position", "vec3", false, "Point position in the spline's LOCAL space", nullptr, nullptr},
+};
+static const MethodDescriptor desc_spline_append_point = {
+    "spline.append_point", "spline",
+    "Appends a control point at the tail of an open spline, valid from ZERO points. spline.extrude needs two existing points to derive a tangent, so it can extend a curve but never build one.",
+    "Returns the inserted index. Pair with scene.raycast to reproduce the viewport draw-on-surface flow from script. Keyframe topology propagation runs only once the curve has more than two points, because the first two create the curve rather than change its shape.",
+    "write", "SceneWrite", false, "any",
+    "spline|append|point",
+    "spline.create|spline.extrude|scene.raycast|spline.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_spline_append_point, 2,
+    true
+};
+static const MethodRegistration reg_spline_append_point(desc_spline_append_point);
+
 static const MethodParam params_spline_create[] = {
     {"primitive", "string", false, "Initial spline shape", "open_line", "circle|rectangle|open_line|open_arc"},
     {"name", "string", false, "Requested object name; made unique when necessary", "Spline", nullptr},
@@ -5233,7 +5563,7 @@ static const MethodParam params_spline_create[] = {
 static const MethodDescriptor desc_spline_create = {
     "spline.create", "spline",
     "Create an editable spline source through the canonical scene-object service",
-    "Returns the unique scene name. The operation is undoable and produces the same SplineObject used by the viewport UI, Python and Geometry Nodes.",
+    "Returns the unique scene name. The operation is undoable and produces the same SplineObject used by the viewport UI, Python and Geometry Nodes. primitive also accepts 'empty' (no points) and plane also accepts 'free' - the pair that starts a drawn route, since a profile is planar but a path is not.",
     "write", "SceneWrite", true, "string",
     "spline|create|curve|authoring|undo",
     "spline.list|spline.get|scene.delete|nodes.create_graph",
@@ -5772,6 +6102,8 @@ static const MethodParam params_terrain_erode[] = {
     {"drainage_fill_passes", "int", false, "GPU depression-fill budget per pyramid level. Too low leaves spurious lakes", "-1", nullptr},
     {"drainage_accumulate_passes", "int", false, "GPU area-accumulation budget. Too low under-counts long trunk rivers", "-1", nullptr},
     {"drainage_coarsest_size", "int", false, "Coarsest pyramid grid for the GPU drainage solve", "-1", nullptr},
+    {"flat_gradient", "float", false, "Slope in m/m assumed for a depression-filled FLAT. A flat has no gradient of its own, so this is what water steers by there; 0 disables it and flat channels go back to straight, grid-locked and unable to incise", "-1.0", nullptr},
+    {"flat_resolve_passes", "int", false, "GPU flat-resolution budget, one cell per pass: the widest flat in cells that resolves. Check unresolved_flat_cells in the stats, not the render", "-1", nullptr},
     {"mass_wasting", "int", false, "Enable in-loop landslides (1/0). Off means valley walls never collapse", "-1", nullptr},
     {"repose_angle_degrees", "float", false, "Angle of repose for mass wasting", "-1.0", nullptr},
     {"mass_wasting_rate", "float", false, "Fraction of the excess above repose shed per pass, 0..1", "-1.0", nullptr},
@@ -5801,7 +6133,7 @@ static const MethodDescriptor desc_terrain_erode = {
     "terrain|erode|landscape|erosion|weathering|realism|river|delta|lake|sediment",
     "terrain.erosion_stats|terrain.calculate_flow|terrain.evaluate",
     nullptr, nullptr, "terrain.erosion_stats", nullptr,
-    params_terrain_erode, 43,
+    params_terrain_erode, 45,
     true
 };
 static const MethodRegistration reg_terrain_erode(desc_terrain_erode);
@@ -5867,6 +6199,25 @@ static const MethodDescriptor desc_terrain_export_heightmap = {
     true
 };
 static const MethodRegistration reg_terrain_export_heightmap(desc_terrain_export_heightmap);
+
+static const MethodParam params_terrain_field_stats[] = {
+    {"terrain", "string", true, "Terrain name, as reported by terrain.list", nullptr, nullptr},
+    {"field", "string", true, "Live field name, as reported by terrain.list_fields", nullptr, nullptr},
+    {"histogram_bins", "int", false, "0 omits the histogram; otherwise 2..256 bins over the finite min/max range", "0", nullptr},
+    {"samples", "array", false, "Optional list of integer [x, y] field-grid coordinates", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_field_stats = {
+    "terrain.field_stats", "terrain",
+    "Measure the values and coverage of one live terrain analysis field",
+    "Reads the published field grid itself, not node settings or mesh attributes. Use this before judging a mask visually: min/max/mean and nonzero_fraction expose empty, saturated and constant fields; non_finite_count exposes poisoned data. histogram_bins is 0 to omit or 2..256. samples contains integer [x, y] field-grid coordinates and out-of-range coordinates are refused.",
+    "read", "Read", false, "any",
+    "terrain|field|stats|mask|measurement|histogram|sample|diagnostic",
+    "terrain.list_fields|terrain.get|scatter.set_settings",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_field_stats, 4,
+    true
+};
+static const MethodRegistration reg_terrain_field_stats(desc_terrain_field_stats);
 
 static const MethodParam params_terrain_flow_authority[] = {
     {"name", "string", true, "", nullptr, nullptr},
@@ -5949,6 +6300,22 @@ static const MethodDescriptor desc_terrain_list = {
 };
 static const MethodRegistration reg_terrain_list(desc_terrain_list);
 
+static const MethodParam params_terrain_list_fields[] = {
+    {"terrain", "string", true, "Terrain name, as reported by terrain.list", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_list_fields = {
+    "terrain.list_fields", "terrain",
+    "List the named analysis fields a terrain is currently publishing",
+    "Measures the LIVE terrain: a name appears only because an output node (Terrain Fields Output, or a Publish Field node) actually wrote it during this evaluation. It is not a catalogue of what the node library could produce, so an empty result means the graph has not published anything yet - not that the feature is missing. These are the valid mask names for scatter.set_settings.",
+    "read", "Read", false, "any",
+    "terrain|list|fields|field|mask|introspection",
+    "scatter.set_settings|terrain.list_layers",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_list_fields, 1,
+    true
+};
+static const MethodRegistration reg_terrain_list_fields(desc_terrain_list_fields);
+
 static const MethodParam params_terrain_list_layers[] = {
     {"name", "string", true, "", nullptr, nullptr},
 };
@@ -6028,6 +6395,226 @@ static const MethodDescriptor desc_terrain_remove = {
     true
 };
 static const MethodRegistration reg_terrain_remove(desc_terrain_remove);
+
+static const MethodParam params_terrain_road_assign_profile[] = {
+    {"spline", "string", true, "SplineObject name, as reported by spline.list", nullptr, nullptr},
+    {"profile", "string", true, "Profile id: footpath | dirt_road | main_road. An unknown id is REFUSED, never substituted - carving a main road where a footpath was asked for looks entirely plausible", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_road_assign_profile = {
+    "terrain.road.assign_profile", "terrain",
+    "Marks an existing SplineObject as a road under the named profile. Stores NO curve geometry - the curve stays owned by the spline.* surface.",
+    "A spline that does not exist is refused: an assignment pointing at a missing curve would look identical to a working one in every listing. This is also what removes the graph explosion - Road Network reads the registry, so N roads are one node.",
+    "write", "SceneWrite", false, "any",
+    "terrain|road|assign|profile",
+    "terrain.road.clear_profile|terrain.road.get_assignment|spline.list",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_assign_profile, 2,
+    true
+};
+static const MethodRegistration reg_terrain_road_assign_profile(desc_terrain_road_assign_profile);
+
+static const MethodParam params_terrain_road_build_mesh[] = {
+    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr},
+    {"object", "string", false, "Scene object to write. Empty reuses the object this assignment already owns, or creates <spline>_RoadSurface", "", nullptr},
+    {"include_shoulder", "bool", false, "Include the shoulder in the ribbon. The ditch is never meshed - a ditch is terrain", "true", nullptr},
+    {"surface_offset", "float", false, "Metres above the graded surface. At zero the continuous ribbon and the discretised heightfield interpenetrate and the road reads as torn", nullptr, nullptr},
+    {"uv_meters_per_tile", "float", false, "Metres of road per V tile", nullptr, nullptr},
+    {"skip_tunnels", "bool", false, "Split the ribbon at tunnel spans instead of drawing a deck through the mountain", "true", nullptr},
+};
+static const MethodDescriptor desc_terrain_road_build_mesh = {
+    "terrain.road.build_mesh", "terrain",
+    "Generates the optional road surface mesh from the solved route - the very samples that carved the terrain, never a second sampling of the curve.",
+    "A rebuild REPLACES the geometry of the object the assignment owns, so repeated generation cannot leave a stack of stale roads behind. Publishes flat TriangleMesh / DNA SoA geometry. The terrain-only road stays valid without it: the mesh is a view of the route, never the authority for it.",
+    "write", "SceneWrite", false, "object, vertex_count, triangle_count, span_count, length_meters, replaced_existing",
+    "terrain|road|build|mesh|geometry",
+    "terrain.road.clear_mesh|terrain.road.get_route",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_build_mesh, 6,
+    true
+};
+static const MethodRegistration reg_terrain_road_build_mesh(desc_terrain_road_build_mesh);
+
+static const MethodParam params_terrain_road_clear_carve_override[] = {
+    {"spline", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_road_clear_carve_override = {
+    "terrain.road.clear_carve_override", "terrain",
+    nullptr,
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "terrain|road|clear|carve|override",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_clear_carve_override, 1,
+    false
+};
+static const MethodRegistration reg_terrain_road_clear_carve_override(desc_terrain_road_clear_carve_override);
+
+static const MethodParam params_terrain_road_clear_mesh[] = {
+    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_road_clear_mesh = {
+    "terrain.road.clear_mesh", "terrain",
+    "Deletes the generated road surface and forgets the ownership record.",
+    "The ownership record is cleared even when the object is already gone, so the next build is not blocked by a pointer to nothing. The terrain-only road is unaffected.",
+    "write", "SceneWrite", false, "any",
+    "terrain|road|clear|mesh",
+    "terrain.road.build_mesh",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_clear_mesh, 1,
+    true
+};
+static const MethodRegistration reg_terrain_road_clear_mesh(desc_terrain_road_clear_mesh);
+
+static const MethodParam params_terrain_road_clear_profile[] = {
+    {"spline", "string", true, "SplineObject name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_road_clear_profile = {
+    "terrain.road.clear_profile", "terrain",
+    "Removes a road assignment. The SplineObject itself is untouched.",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "terrain|road|clear|profile",
+    "terrain.road.assign_profile|terrain.road.list_assignments",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_clear_profile, 1,
+    true
+};
+static const MethodRegistration reg_terrain_road_clear_profile(desc_terrain_road_clear_profile);
+
+static const MethodParam params_terrain_road_get_assignment[] = {
+    {"spline", "string", true, "SplineObject name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_road_get_assignment = {
+    "terrain.road.get_assignment", "terrain",
+    "Reads one road assignment back, including whether its curve still exists.",
+    "Returns spline_object, profile_id, crossing_mode, enabled, has_override and curve_exists. A setter with no readback cannot be tested.",
+    "read", "Read", false, "any",
+    "terrain|road|get|assignment",
+    "terrain.road.assign_profile|terrain.road.get_diagnostics",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_get_assignment, 1,
+    true
+};
+static const MethodRegistration reg_terrain_road_get_assignment(desc_terrain_road_get_assignment);
+
+static const MethodDescriptor desc_terrain_road_get_diagnostics = {
+    "terrain.road.get_diagnostics", "terrain",
+    "Reports assignment health: counts, assignments whose SplineObject is gone, and assignments naming a profile this build does not have.",
+    "Returns assignment_count, enabled_count, dangling and unknown_profiles. A road that silently stops grading because its curve was deleted is the failure nobody files, so it is surfaced here and on the Road Network node.",
+    "read", "Read", false, "any",
+    "terrain|road|get|diagnostics",
+    "terrain.road.list_assignments|terrain.field_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_terrain_road_get_diagnostics(desc_terrain_road_get_diagnostics);
+
+static const MethodParam params_terrain_road_get_route[] = {
+    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr},
+    {"max_samples", "int", false, "0 (default) returns only the counters. A positive value returns that many samples, decimated with both endpoints kept", "0", nullptr},
+};
+static const MethodDescriptor desc_terrain_road_get_route = {
+    "terrain.road.get_route", "terrain",
+    "Reads the SOLVED route of one assigned road out of the terrain graph: sample positions, road and ground height, and the crossing each sample resolved to.",
+    "This is the measurement surface for crossings: bridge_samples, ford_samples and tunnel_samples are how a script proves a declared crossing actually resolved, and crossing_diagnostic names one that could not. It fails explicitly when no Road Network node has carved this assignment yet - an empty route and an unevaluated graph must not read the same.",
+    "read", "Read", false, "spline_object, terrain, sample_count, bridge_samples, ford_samples, tunnel_samples, length_meters, peak_cut_meters, peak_fill_meters, revision, crossing_diagnostic, samples[]",
+    "terrain|road|get|route|measurement",
+    "terrain.road.build_mesh|terrain.road.set_crossing_mode|terrain.field_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_get_route, 2,
+    true
+};
+static const MethodRegistration reg_terrain_road_get_route(desc_terrain_road_get_route);
+
+static const MethodDescriptor desc_terrain_road_list_assignments = {
+    "terrain.road.list_assignments", "terrain",
+    "Lists every road assignment in the scene.",
+    "Same fields as terrain.road.get_assignment, one row per assignment.",
+    "read", "Read", false, "any",
+    "terrain|road|list|assignments",
+    "terrain.road.get_assignment|terrain.road.get_diagnostics",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_terrain_road_list_assignments(desc_terrain_road_list_assignments);
+
+static const MethodDescriptor desc_terrain_road_list_profiles = {
+    "terrain.road.list_profiles", "terrain",
+    "Lists the built-in road profiles. 'Path' and 'road' are the SAME measurement under a different profile, not two solvers - a footpath is narrow, steep-capable and barely moves earth; a main road buys a shallow grade with earthworks.",
+    "Returns id, display_name and the carve parameters each profile sets: road_width, shoulder_width, grading_falloff, foliage_margin, max_grade_percent, max_cut_meters, max_fill_meters. Ids: footpath, dirt_road, main_road.",
+    "read", "Read", false, "any",
+    "terrain|road|list|profiles",
+    "terrain.road.assign_profile|terrain.road.list_assignments",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_terrain_road_list_profiles(desc_terrain_road_list_profiles);
+
+static const MethodParam params_terrain_road_set_carve_override[] = {
+    {"spline", "string", true, "", nullptr, nullptr},
+    {"crown_meters", "float", false, "", nullptr, nullptr},
+    {"ditch_depth", "float", false, "", nullptr, nullptr},
+    {"ditch_width", "float", false, "", nullptr, nullptr},
+    {"elevation_offset", "float", false, "", nullptr, nullptr},
+    {"foliage_margin", "float", false, "", nullptr, nullptr},
+    {"grading_falloff", "float", false, "", nullptr, nullptr},
+    {"max_cut_meters", "float", false, "", nullptr, nullptr},
+    {"max_fill_meters", "float", false, "", nullptr, nullptr},
+    {"max_grade_percent", "float", false, "", nullptr, nullptr},
+    {"road_width", "float", false, "", nullptr, nullptr},
+    {"shoulder_width", "float", false, "", nullptr, nullptr},
+    {"use_point_width", "bool", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_road_set_carve_override = {
+    "terrain.road.set_carve_override", "terrain",
+    nullptr,
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "terrain|road|set|carve|override",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_set_carve_override, 13,
+    false
+};
+static const MethodRegistration reg_terrain_road_set_carve_override(desc_terrain_road_set_carve_override);
+
+static const MethodParam params_terrain_road_set_crossing_mode[] = {
+    {"spline", "string", true, "SplineObject name", nullptr, nullptr},
+    {"mode", "string", true, "auto | terrain | bridge | ford | tunnel. An unknown mode is refused. auto bridges over water when the Road Network node's Water pin is connected and otherwise behaves exactly as terrain; bridge also spans wherever the required fill exceeds max_fill_meters; tunnel bores wherever the required cut exceeds max_cut_meters; ford follows the bed and needs a Water field, reporting crossing_diagnostic when it has none", nullptr, nullptr},
+};
+static const MethodDescriptor desc_terrain_road_set_crossing_mode = {
+    "terrain.road.set_crossing_mode", "terrain",
+    "Sets how a road resolves where the ground cannot carry it. The solver applies the mode PER ROUTE SAMPLE, so only the span that needs a crossing gets one.",
+    "Bridge and tunnel spans leave the terrain untouched and are straightened between their abutments; a tunnel also publishes no surface masks at all, so a forest still grows over it. Measure the result with terrain.road.get_route.",
+    "write", "SceneWrite", false, "any",
+    "terrain|road|set|crossing|mode",
+    "terrain.road.get_route|terrain.road.get_assignment",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_set_crossing_mode, 2,
+    true
+};
+static const MethodRegistration reg_terrain_road_set_crossing_mode(desc_terrain_road_set_crossing_mode);
+
+static const MethodParam params_terrain_road_set_enabled[] = {
+    {"spline", "string", true, "SplineObject name", nullptr, nullptr},
+    {"enabled", "bool", false, "false leaves the assignment in place but stops it carving", "true", nullptr},
+};
+static const MethodDescriptor desc_terrain_road_set_enabled = {
+    "terrain.road.set_enabled", "terrain",
+    "Enables or disables one road without losing its profile assignment.",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "terrain|road|set|enabled",
+    "terrain.road.get_assignment|terrain.road.get_diagnostics",
+    nullptr, nullptr, nullptr, nullptr,
+    params_terrain_road_set_enabled, 2,
+    true
+};
+static const MethodRegistration reg_terrain_road_set_enabled(desc_terrain_road_set_enabled);
 
 static const MethodParam params_terrain_sample_height[] = {
     {"name", "string", true, "", nullptr, nullptr},
@@ -6229,6 +6816,19 @@ static const MethodDescriptor desc_viewport_capture = {
 };
 static const MethodRegistration reg_viewport_capture(desc_viewport_capture);
 
+static const MethodDescriptor desc_viewport_frame_telemetry = {
+    "viewport.frame_telemetry", "viewport",
+    "Report raster/Realtime viewport frame presentation telemetry: per-stage host timings, async frame-slot counters and stale-present count",
+    "'available' false means NO raster frame has ever been presented (Rendered mode, no Vulkan viewport backend, or nothing drawn yet) - the missing fields are ABSENCE, not zeros. GEOMETRY SUBMISSION: 'gpu_culling' false while 'global_instance_buffer' is true means the scene is drawn with NO frustum culling and NO scatter proxy - every instance of every mesh, wherever the camera looks. That combination is a FAULT that looks CORRECT on screen and only shows up as cost, so check it before trusting any raster timing. 'visible_triangles'/'full_triangles'/'proxy_triangles'/'full_instances'/'proxy_instances' are read back from the GPU when gpu_culling is on and are therefore ONE FRAME BEHIND; identical on a still camera, one frame late while it moves. 'scatter_triangle_target' is a TARGET, not a hard cap: GPU culling converges a distance threshold toward it across frames, so a fast camera move can exceed it for a frame or two. 'async_present' false means the driver refused persistent frame slots and the old synchronous readback path is live; 'image_readback_ms' is non-zero ONLY there. COUNTERS COUNT BLOCKS, NOT CALLS (corrected 2026-09-02; earlier numbers are not comparable). 'stale_presents' means NO new frame could be consumed during a whole render pass - the viewer really is seeing pixels from before this pass. It used to be incremented by the opportunistic second consume that runs right after submit, which can essentially never succeed, so it tracked frame count in healthy async operation and read as 'the ring is permanently behind'. A one-frame delivery delay is what the async ring BUYS, not a fault. 'slot_waits' likewise counts only waits that actually blocked on an unsignalled fence; read it together with 'slot_wait_ms', which is the honest number and stays 0.0 when nothing blocked. viewport.capture(enabled=true) FORCES synchronous presentation so a probe reads the frame just recorded, so timings taken with capture on are not the interactive timings. 'resource_drains' counts host blocks caused by RESOURCE MUTATION (a buffer/descriptor edit that had to wait for submitted frames), and as of 2026-09-02 it increments ONLY when the wait actually blocked on an unsignalled fence - it used to count every call, including waits on already-signalled fences, so it reported a CALL COUNT and not a cost. Read it per submitted frame: above about 1 per frame means some edit path mutates GPU-read state every frame and the two-slot ring is producing no overlap at all, which shows up as 'stale_presents' tracking 'frames_submitted'. Numbers from before that fix are not comparable. 'host_read_ms' was ALSO looking at the wrong place until 2026-09-02: it timed only the opportunistic post-submit consume (which essentially never succeeds), so it read 0.00 and made the GPU-to-CPU readback look free. It now covers the top-of-pass consume that performs the real invalidate + full-frame memcpy. Any architecture decision about removing the readback needs THIS number, measured at the target resolution - the copy scales with pixel count, so a figure taken at 1680x945 does not describe 4K. DISPLAY PATH (added 2026-09-02): every timing above ends when the backend's renderProgressive returns, and the frame is NOT finished there - the main loop still rebuilds the display surface and uploads it to the SDL texture. Those two passes are 'display_post_ms' and 'display_texture_upload_ms', with 'display_loop_period_ms' as the real main-loop period; they are published ONLY on frames that were actually presented (skipped idle/background frames would otherwise average in as free). They are reported even when 'available' is false, because Rendered mode goes down the SAME display path - check 'display_available'. 'display_post_was_noop_copy' true means color processing was a no-op and the pass degenerated to a plain full-frame copy: still a full-frame cost, but REMOVABLE work rather than needed work. MEASURED 2026-09-02 at 3840x2160, material shading, Vulkan viewport: host_read_ms 3.06 + present_ms 2.79 = 5.84 ms of a 10.57 ms frame (55%), i.e. two 31.6 MB CPU copies per frame; the copy scales with pixel count, so numbers taken at 1080p are ~1/4 of these and must not be compared across resolutions.",
+    "render", "Render", false, "any",
+    "viewport|frame|telemetry|realtime|performance|measure|latency|present",
+    "viewport.status|perf.list|render.probe",
+    nullptr, nullptr, "viewport.status", nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_viewport_frame_telemetry(desc_viewport_frame_telemetry);
+
 static const MethodDescriptor desc_viewport_get_screenshot = {
     "viewport.get_screenshot", "viewport",
     "Return the captured viewport frame as a base64 JPEG, for a vision-capable model to look at",
@@ -6241,6 +6841,32 @@ static const MethodDescriptor desc_viewport_get_screenshot = {
     true
 };
 static const MethodRegistration reg_viewport_get_screenshot(desc_viewport_get_screenshot);
+
+static const MethodDescriptor desc_viewport_preview_lighting = {
+    "viewport.preview_lighting", "viewport",
+    "Report realtime/material raster lighting mode, shadow allocation, world background and Nishita direct-sun status",
+    "Canonical modes are 'scene' and 'three_point'. The default 'scene' reads the renderer's own light buffer; 'three_point' is the fixed material-inspection rig. Scene draws canonical world color/HDRI/Nishita behind geometry and uses it for ambient/specular. HDRI uses generated diffuse irradiance, GGX roughness prefilter mips and a split-sum BRDF LUT when world_ibl_ready is true; world_ibl_fallback explicitly reports the bounded raw-environment path. Nishita contributes a direct sun with its own directional atlas tile. 'shadowed_light_count' counts scene lights only; 'world_sun_shadow' reports the reserved sun tile. A gap from 'scene_light_count' means later lights still illuminate without an atlas tile. A gap between 'scene_light_count' and 'scene_light_total' means the preview light loop itself is clamped. 'material_preview_active' false means the mode is stored but the material raster viewport is not on screen. DISPLAY TRANSFORM: Rendered and raster preview use PostProcess/ColorMath.h. display_* reports the GPU transport; post.get reports user gain, while post.get_exposure reports the resolved adaptive gain. None/linear means clipping; Reinhard is explicit. Raster preview uses the resolved EV from the Rendered HDR meter and does not meter its own display-encoded image.",
+    "render", "Render", false, "any",
+    "viewport|preview|lighting|scene|lights|measure",
+    "viewport.set_preview_lighting|viewport.set_shading|lights.list",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_viewport_preview_lighting(desc_viewport_preview_lighting);
+
+static const MethodDescriptor desc_viewport_quality = {
+    "viewport.quality", "viewport",
+    "Report the raster viewport quality preset and, as a value, whether scatter proxy substitution is active",
+    "Read values rather than matching on the preset name. 'scatter_lod_split' changes geometry submission. Scene shadows keep one fixed 4096 atlas so preset changes never destroy an image referenced by an in-flight frame; shadow_tile_resolution, shadow_tile_capacity, shadow_light_budget and shadow_pcf_samples report the live bounded contract. directional_shadow_cascades is 2 for Performance and 3 otherwise; directional lights and the Physical Sky sun consume that many atlas tiles and select the smallest camera-centred projection containing the receiver. A scene light beyond the budget still illuminates but has no atlas shadow. 'scene_pbr_shader' reports the comparison shader (GGX for Scene). The material parity strings are an explicit capability contract: opaque_core_parity is RT-aligned; material_graph_surface is bounded because pointiness/named attributes/AO/time inputs are neutral in raster; clearcoat is an iridescent lobe using the RT thin-film model; subsurface is a radius/scale profile approximation; translucency is a bounded thin-surface approximation; surface_anisotropy is unsupported because the current ABI fields are also legacy water wave controls; transparency is unsorted_alpha; transmission is screen_space_thickness with frozen opaque color/depth, bounded screen-space reflection, closed-mesh front/back thickness, RT texture/graph/IOR/Fresnel/Beer/roughness/dispersion semantics and environment fallback; overlapping or off-screen continuation/reflection remains bounded; resin_interior is a procedural bounded approximation; sdf_surface=shared_nanovdb_depth_pbr means realtime reads Vulkan RT's same field/transform/iso threshold and writes real raster depth, while lighting and environment continuation remain bounded rather than recursive. 'raster_viewport_available' false means the preset is stored but nothing on this machine reads it.",
+    "render", "Render", false, "any",
+    "viewport|quality|lod|proxy|scatter|measure",
+    "viewport.set_quality|viewport.frame_telemetry",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_viewport_quality(desc_viewport_quality);
 
 static const MethodParam params_viewport_render_frames[] = {
     {"count", "int", true, "", nullptr, nullptr},
@@ -6257,6 +6883,38 @@ static const MethodDescriptor desc_viewport_render_frames = {
     true
 };
 static const MethodRegistration reg_viewport_render_frames(desc_viewport_render_frames);
+
+static const MethodParam params_viewport_set_preview_lighting[] = {
+    {"preset", "string", true, "Canonical mode name. Realtime/real_lights aliases map to scene; legacy classic/studio/outdoor aliases map to three_point.", nullptr, "three_point|scene"},
+};
+static const MethodDescriptor desc_viewport_set_preview_lighting = {
+    "viewport.set_preview_lighting", "viewport",
+    "Set realtime/material raster lighting to the default scene path or the three-point inspection rig",
+    "'scene' uses scene lights plus the canonical world background/ambient; 'three_point' isolates material inspection from scene lighting. Directional, point, spot and area lights share a bounded shadow atlas; Nishita adds a direct world sun with one reserved directional tile. Physical Sky uses the Vulkan atmosphere LUT when available and an analytic fallback otherwise. HDRI uses generated irradiance, GGX prefilter mips and a BRDF LUT when ready, with an explicitly reported raw-environment fallback. Resets accumulation and only takes visible effect in 'material' shading mode.",
+    "render", "Render", false, "any",
+    "viewport|set|preview|lighting|scene|lights|shading",
+    "viewport.preview_lighting|viewport.set_shading|viewport.get_screenshot",
+    nullptr, nullptr, "viewport.preview_lighting", nullptr,
+    params_viewport_set_preview_lighting, 1,
+    true
+};
+static const MethodRegistration reg_viewport_set_preview_lighting(desc_viewport_set_preview_lighting);
+
+static const MethodParam params_viewport_set_quality[] = {
+    {"preset", "string", true, "Canonical preset name. 'no_proxy' and 'full (no proxy)' are accepted aliases for full because that is what the panel combo reads.", nullptr, "auto|performance|balanced|quality|full"},
+};
+static const MethodDescriptor desc_viewport_set_quality = {
+    "viewport.set_quality", "viewport",
+    "Set the raster viewport quality preset; 'full' disables scatter proxy substitution entirely",
+    "The preset controls both geometry and bounded Scene quality. Performance/Balanced/Quality select 256/512/1024 shadow tiles, 4/8/16 shadowed scene lights and 9/9/25 receiver PCF samples; Auto currently maps to Balanced. The atlas remains 4096 and is not reallocated. 'full' additionally turns scatter proxy substitution OFF so every visible instance draws its own mesh; frustum culling stays on. Rebuilds the raster scene and resets accumulation, so render frames again before probing.",
+    "render", "Render", false, "any",
+    "viewport|set|quality|lod|proxy|scatter|full|performance",
+    "viewport.quality|viewport.frame_telemetry|viewport.render_frames",
+    nullptr, nullptr, "viewport.quality|viewport.frame_telemetry", nullptr,
+    params_viewport_set_quality, 1,
+    true
+};
+static const MethodRegistration reg_viewport_set_quality(desc_viewport_set_quality);
 
 static const MethodParam params_viewport_set_shading[] = {
     {"mode", "string", true, "Canonical mode name. 'preview' is accepted as an alias for material because the panel button reads Preview.", nullptr, "solid|material|rendered|matcap"},
@@ -6314,6 +6972,19 @@ static const MethodDescriptor desc_world_get = {
 };
 static const MethodRegistration reg_world_get(desc_world_get);
 
+static const MethodDescriptor desc_world_get_atmosphere = {
+    "world.get_atmosphere", "world",
+    "Return the physical atmosphere the sky LUT is baked from",
+    "Separate from world.get on purpose: world.get is the SUN plus the two intensities, this is the MEDIUM. Every field here feeds makeAtmosphereLUTParamsGPU, so every one of them dirties the transmittance/SkyView LUT when it changes.",
+    "read", "Read", false, "WorldAtmosphereInfo",
+    "world|get|atmosphere|environment|sky|nishita",
+    "world.set_atmosphere|world.get",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_world_get_atmosphere(desc_world_get_atmosphere);
+
 static const MethodDescriptor desc_world_get_thermal = {
     "world.get_thermal", "world",
     "Return the ambient thermal condition every uncoupled substance relaxes toward",
@@ -6326,6 +6997,35 @@ static const MethodDescriptor desc_world_get_thermal = {
     true
 };
 static const MethodRegistration reg_world_get_thermal(desc_world_get_thermal);
+
+static const MethodParam params_world_set_atmosphere[] = {
+    {"air_density", "any", false, "Rayleigh scattering multiplier (Blender 'Air'). 1 = Earth. Must be >= 0.", nullptr, nullptr},
+    {"dust_density", "any", false, "Mie/aerosol scattering multiplier (Blender 'Dust'). Must be >= 0.", nullptr, nullptr},
+    {"ozone_density", "any", false, "Ozone column multiplier; drives blue-hour saturation. Must be >= 0.", nullptr, nullptr},
+    {"ozone_absorption_scale", "any", false, "Scales the ozone absorption coefficients on top of ozone_density. Must be >= 0.", nullptr, nullptr},
+    {"humidity", "any", false, "0..1, dry to hazy. Rejected outside that range.", nullptr, nullptr},
+    {"temperature", "any", false, "Air temperature in CELSIUS. Scales BOTH Rayleigh and Mie scale heights by (T+273.15)/288.15, so it moves the whole atmosphere profile, not just a tint.", nullptr, nullptr},
+    {"altitude", "any", false, "Viewer height above sea level in METRES; the SkyView LUT is baked from this camera altitude.", nullptr, nullptr},
+    {"mie_anisotropy", "any", false, "Henyey-Greenstein g for the Mie phase function; forward scattering as it approaches 1. Must be within (-1, 1).", nullptr, nullptr},
+    {"planet_radius", "any", false, "Ground sphere radius in METRES (Earth = 6360000). Must be >= 1000.", nullptr, nullptr},
+    {"atmosphere_height", "any", false, "Atmosphere shell thickness above the ground in METRES (Earth = 60000). Must be >= 1000.", nullptr, nullptr},
+    {"rayleigh_scattering", "vec3", false, "Per-channel Rayleigh scattering coefficients as [r, g, b], in 1/metre.", nullptr, nullptr},
+    {"mie_scattering", "vec3", false, "Per-channel Mie scattering coefficients as [r, g, b], in 1/metre.", nullptr, nullptr},
+    {"rayleigh_density", "any", false, "Rayleigh SCALE HEIGHT in metres (Earth = 8000). The name says density, the unit is a height. Must be >= 1.", nullptr, nullptr},
+    {"mie_density", "any", false, "Mie SCALE HEIGHT in metres (Earth = 1200). Same naming trap as rayleigh_density. Must be >= 1.", nullptr, nullptr},
+};
+static const MethodDescriptor desc_world_set_atmosphere = {
+    "world.set_atmosphere", "world",
+    "Set the physical atmosphere parameters of the Nishita sky",
+    "Every field optional: omit a key to leave it unchanged. Out-of-range values are REJECTED, not clamped, because a silently clamped planet radius or scale height reads as 'the sky looks odd' rather than as an error. Any changed field marks the atmosphere LUT dirty; the runtime rebuilds it on the GPU compute path (throttled to about 15 Hz while a value is being dragged) and falls back to a CPU bake only when that pipeline is missing. UNITS ARE ABSOLUTE: planet_radius/atmosphere_height/altitude are METRES, rayleigh_density and mie_density are SCALE HEIGHTS in metres (NOT densities, despite the field names), temperature is CELSIUS and scales both scale heights.",
+    "write", "SceneWrite", false, "any",
+    "world|set|atmosphere|environment|sky|nishita|scattering",
+    "world.get_atmosphere|world.set_atmosphere_intensity|world.set_sun_elevation",
+    nullptr, nullptr, nullptr, nullptr,
+    params_world_set_atmosphere, 14,
+    true
+};
+static const MethodRegistration reg_world_set_atmosphere(desc_world_set_atmosphere);
 
 static const MethodParam params_world_set_atmosphere_intensity[] = {
     {"atmosphere_intensity", "float", true, "", nullptr, nullptr},

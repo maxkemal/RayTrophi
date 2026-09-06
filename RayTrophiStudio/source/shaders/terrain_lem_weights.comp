@@ -60,7 +60,7 @@ layout(push_constant) uniform PC {
     int useBedMax;
 } pc;
 
-layout(set = 0, binding = 0) readonly  buffer Filled  { float filledField[]; };
+layout(set = 0, binding = 0) readonly  buffer Route   { float routeField[]; };
 layout(set = 0, binding = 1) writeonly buffer Weights { uint packedWeights[]; };
 layout(set = 0, binding = 2) readonly  buffer Bed     { float bedField[]; };
 
@@ -69,9 +69,13 @@ const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
 const float dist8[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
                                 1.0, 1.41421356, 1.0, 1.41421356);
 
-// The conditioned surface, raised wherever the bed has since aggraded past it.
+// The ROUTING surface (terrain_lem_flat_ramp: the depression-filled surface
+// plus the Garbrecht-Martz flat gradient), raised wherever the bed has since
+// aggraded past it. It is deliberately NOT the lake surface: over a flat the
+// two differ by the ramp, and using the lake surface here is what left flats
+// with an all-zero weight row.
 float routingSurface(int index) {
-    float f = filledField[index];
+    float f = routeField[index];
     return (pc.useBedMax != 0) ? max(f, bedField[index]) : f;
 }
 
@@ -95,9 +99,24 @@ void main() {
     int bytes[8];
     for (int d = 0; d < 8; ++d) bytes[d] = 0;
     if (total > 0.0) {
-        int sum = 0, maxIndex = 0;
+        // ★★ The scan STARTS at a hashed offset, and that is not cosmetic.
+        // The remainder below is folded into whichever direction wins this
+        // comparison, and with a strict `>` from a fixed d = 0 every near-tie
+        // resolved to direction 0, the up-left diagonal. On a low-gradient
+        // surface all eight powers ARE near-ties, so that was a permanent
+        // nudge of up to 4/255 of the outflow toward one fixed diagonal,
+        // reapplied on every weight rebuild. It is small per pass and the
+        // solver rebuilds these hundreds of times.
+        uint rot = uint(i);
+        rot ^= rot >> 16; rot *= 0x7feb352du;
+        rot ^= rot >> 15; rot *= 0x846ca68bu;
+        rot ^= rot >> 16;
+        int start = int(rot & 7u);
+
+        int sum = 0, maxIndex = start;
         float maxPower = -1.0;
-        for (int d = 0; d < 8; ++d) {
+        for (int k = 0; k < 8; ++k) {
+            int d = (start + k) & 7;
             bytes[d] = int(floor((power[d] / total) * 255.0 + 0.5));
             sum += bytes[d];
             if (power[d] > maxPower) { maxPower = power[d]; maxIndex = d; }

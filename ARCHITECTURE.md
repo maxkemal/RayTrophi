@@ -54,7 +54,8 @@ Built upon industry-standard frameworks and hardware-accelerated APIs:
 *   **[NVIDIA OptiX](https://developer.nvidia.com/optix):** Hardware-accelerated Ray Tracing.
 *   **[Vulkan SDK](https://www.vulkan.org/):** Modern cross-platform graphics & compute.
 *   **[Intel Embree](https://github.com/embree/embree):** High-performance CPU ray-tracing kernels.
-*   **[Assimp](https://github.com/assimp/assimp):** Robust 3D model import (40+ formats).
+*   **[cgltf](https://github.com/jkuhlmann/cgltf):** glTF 2.0 / GLB parsing, used by both the importer and the exporter.
+*   **[ufbx](https://github.com/ufbx/ufbx):** FBX import, including skinning and baked transform animation.
 *   **[NanoVDB](https://github.com/AcademySoftwareFoundation/openvdb):** GPU-friendly sparse volume representation.
 *   **[Intel OIDN](https://www.openimagedenoise.org/):** Professional-grade AI denoiser. Integrated with dual support:
     *   **CPU Mode:** High-performance denoising using Intel TBB and ISPC kernels.

@@ -162,7 +162,8 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     if (vols.empty()) {
         // No active volumes: release any stale cached VDB buffers immediately.
         if (!m_vdbBuffers.empty() || !m_vdbTempBuffers.empty() ||
-            !m_uvwBuffers.empty()) {
+            !m_uvwBuffers.empty() || !m_denseGasBuffers.empty() ||
+            !m_denseGasTempBuffers.empty()) {
             m_device->waitIdle();
         }
         for (auto& [id, buf] : m_vdbBuffers) {
@@ -183,6 +184,20 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         }
         m_uvwBuffers.clear();
         m_uvwUploadedVersions.clear();
+        // Dense-gas mirrors follow the same rule: the address published for this
+        // vdb_id last frame is still sitting in a volume slot, and freed device
+        // memory does not stop being readable.
+        for (auto& [id, buf] : m_denseGasBuffers) {
+            (void)id;
+            if (buf.buffer) m_device->destroyBuffer(buf);
+        }
+        m_denseGasBuffers.clear();
+        for (auto& [id, buf] : m_denseGasTempBuffers) {
+            (void)id;
+            if (buf.buffer) m_device->destroyBuffer(buf);
+        }
+        m_denseGasTempBuffers.clear();
+        m_denseGasUploadedVersions.clear();
         // ★INVARIANT: the SSBO length is defined by the TLAS mapping, NOT by how
         // many volumes happen to carry content this frame. m_orderedVDBInstances
         // mirrors the TLAS instance list and only updateGeometry() may rewrite it.
@@ -221,6 +236,10 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // resurrecting a previous frame's contents into the new order.
         m_publishedVolumeByKey.clear();
         m_publishedVolumeKeyOrder.clear();
+        // Publishing inactive slots is still a visible content change. Without
+        // this invalidation the raster viewport keeps presenting its previous
+        // SDF image until unrelated camera motion marks it dirty.
+        resetAccumulation();
         return;
     }
 
@@ -283,6 +302,32 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             ++it;
         }
     }
+    // Dense-gas mirrors, same rule and same reason as the three sweeps above.
+    for (auto it = m_denseGasBuffers.begin(); it != m_denseGasBuffers.end(); ) {
+        if (volByID.find(it->first) == volByID.end()) {
+            if (!destroyedAny) {
+                m_device->waitIdle();
+                destroyedAny = true;
+            }
+            if (it->second.buffer) m_device->destroyBuffer(it->second);
+            m_denseGasUploadedVersions.erase(it->first);
+            it = m_denseGasBuffers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = m_denseGasTempBuffers.begin(); it != m_denseGasTempBuffers.end(); ) {
+        if (volByID.find(it->first) == volByID.end()) {
+            if (!destroyedAny) {
+                m_device->waitIdle();
+                destroyedAny = true;
+            }
+            if (it->second.buffer) m_device->destroyBuffer(it->second);
+            it = m_denseGasTempBuffers.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
     // Identity of each TLAS volume slot, in TLAS order. Kept in lockstep with
     // orderedVols below so the published contents can later be re-laid into a
@@ -313,9 +358,36 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             auto it = volByID.find(volume_id);
             orderedVols.push_back(it != volByID.end() ? it->second : nullptr);
         }
-    } else if (!m_publishedVolumeKeyOrder.empty()) {
-        // ★★★ THE INVARIANT BELOW IS ACTUALLY VIOLATED — do not take the packet
-        // fallback here.
+    } else if (m_tlasVolumeSlotCount != 0 && !m_publishedVolumeKeyOrder.empty()) {
+        // ★★★★★ `m_tlasVolumeSlotCount != 0` IS LOAD-BEARING — MEASURED 2026-09-04.
+        //
+        // This branch means "the TLAS is mid-rebuild": m_orderedVDBInstances is
+        // empty only transiently, inside updateGeometry. That reading is correct
+        // for an adapter that BUILDS a TLAS. It is catastrophically wrong for one
+        // that never builds any — the dedicated RASTER VIEWPORT backend — where
+        // an empty m_orderedVDBInstances is the permanent, normal state.
+        //
+        // Without this guard the viewport adapter's FIRST publish took the final
+        // `else` (packet order, correct) and filled m_publishedVolumeKeyOrder,
+        // and then EVERY publish after it landed here and marked every slot
+        // INACTIVE. Symptom, exactly as reported: the SurfaceSDF appeared on one
+        // frame and vanished on the next while the camera moved, froze on
+        // whichever publish happened last when motion stopped, and never appeared
+        // at all during playback — because playback publishes continuously, so
+        // the inactive publish always won. Live gas never appeared for the same
+        // reason. Reproduced by capture: frame sizes alternating 44 KB / 33 KB
+        // on a moving camera, with nothing else changing.
+        //
+        // m_tlasVolumeSlotCount is set only where the TLAS is actually built
+        // (VulkanBackend.cpp:11168) and is 0 on any adapter that never built one,
+        // so it distinguishes "mapping temporarily unavailable" from "this
+        // consumer has no mapping and never will". With it 0, the final `else`
+        // applies and its own argument holds verbatim: nothing indexes this
+        // buffer by a baked customIndex, so packet order is not merely harmless
+        // — it is the only order that exists.
+        //
+        // ★ THE INVARIANT BELOW IS STILL VIOLATED FOR A TLAS-BUILDING ADAPTER —
+        // do not take the packet fallback there.
         //
         // updateGeometry() clears m_orderedVDBInstances at its START and only
         // re-establishes it at the END (VulkanBackend.cpp:10233). Any publish that
@@ -366,6 +438,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // slots point at, and nothing rewrites the cache on this path.
         m_publishedVolumeByKey.clear();
         m_publishedVolumeKeyOrder.clear();
+        resetAccumulation();
         return;
     }
 
@@ -428,9 +501,82 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             continue; // deleted/missing → leave inactive slot
         }
         const auto& src = *orderedVols[i];
+
+        // ── Where does this backend's dense gas grid live? ──────────────────
+        // Two answers, and the difference is invisible on screen:
+        //   1. We own the simulation compute device -> use its address directly
+        //      (zero copy, and the only path that existed before).
+        //   2. We do NOT -> the producer left a HOST mirror; copy it into our
+        //      own memory and use OUR address. Dereferencing the producer's
+        //      address here reads as zero density, which looks exactly like a
+        //      domain with no smoke in it. Measured 2026-09-04.
+        uint64_t denseDensityAddress = src.dense_density_address;
+        uint64_t denseTempAddress = src.dense_temperature_address;
+        const int denseVdbId = src.vdb_id;
+        if (denseDensityAddress == 0 && src.dense_density_host != nullptr &&
+            src.dense_resolution_x > 0 && src.dense_resolution_y > 0 &&
+            src.dense_resolution_z > 0 && denseVdbId >= 0) {
+            const uint64_t cells =
+                static_cast<uint64_t>(src.dense_resolution_x) *
+                static_cast<uint64_t>(src.dense_resolution_y) *
+                static_cast<uint64_t>(src.dense_resolution_z);
+            const uint64_t bytes = cells * sizeof(float);
+            auto ensureDenseBuffer =
+                [&](std::unordered_map<int, VulkanRT::BufferHandle>& pool)
+                -> VulkanRT::BufferHandle* {
+                auto it = pool.find(denseVdbId);
+                if (it == pool.end() || it->second.size < bytes) {
+                    if (it != pool.end()) {
+                        // The address published last frame is still sitting in a
+                        // volume slot the GPU may be reading. Retire only when
+                        // the queue is idle.
+                        m_device->waitIdle();
+                        m_device->destroyBuffer(it->second);
+                    }
+                    VulkanRT::BufferCreateInfo ci;
+                    // Over-allocate like the NanoVDB path: a gas grid can be
+                    // resized by the solver and a reallocation costs a stall.
+                    ci.size = bytes + (bytes / 2);
+                    ci.usage = (VulkanRT::BufferUsage)(
+                        (uint32_t)VulkanRT::BufferUsage::STORAGE |
+                        (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
+                        0x0100 /* VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT */);
+                    ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+                    pool[denseVdbId] = m_device->createBuffer(ci);
+                    it = pool.find(denseVdbId);
+                }
+                return (it != pool.end() && it->second.buffer) ? &it->second : nullptr;
+            };
+
+            VulkanRT::BufferHandle* densityBuf = ensureDenseBuffer(m_denseGasBuffers);
+            VulkanRT::BufferHandle* tempBuf =
+                src.dense_temperature_host ? ensureDenseBuffer(m_denseGasTempBuffers) : nullptr;
+            // Version-gated: the grid is megabytes and does not change on the
+            // frames the solver did not step. A buffer that was just (re)created
+            // holds garbage, so a fresh allocation must upload regardless of
+            // version — that is what the size check above cannot express.
+            auto verIt = m_denseGasUploadedVersions.find(denseVdbId);
+            const bool versionChanged =
+                verIt == m_denseGasUploadedVersions.end() ||
+                verIt->second != src.dense_host_version;
+            if (densityBuf) {
+                if (versionChanged || densityBuf->size < bytes) {
+                    synchronizeGridUpload();
+                    m_device->uploadBuffer(*densityBuf, src.dense_density_host, bytes);
+                    if (tempBuf && src.dense_temperature_host) {
+                        m_device->uploadBuffer(*tempBuf, src.dense_temperature_host, bytes);
+                    }
+                    m_denseGasUploadedVersions[denseVdbId] = src.dense_host_version;
+                    volumeContentChanged = true;
+                }
+                denseDensityAddress = densityBuf->deviceAddress;
+                denseTempAddress = tempBuf ? tempBuf->deviceAddress : 0;
+            }
+        }
+
         const bool liveDenseGas =
             src.dense_fields_valid != 0 &&
-            src.dense_density_address != 0 &&
+            denseDensityAddress != 0 &&
             src.dense_resolution_x > 0 &&
             src.dense_resolution_y > 0 &&
             src.dense_resolution_z > 0;
@@ -549,10 +695,10 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.shadow_stride = std::max(1, std::min(src.shadow_stride, 16));
         // Sync NanoVDB Host Buffer to Vulkan Device Buffer
         dst.volume_type = liveDenseGas ? 4 : 2;
-        dst.vdb_grid_address =
-            liveDenseGas ? src.dense_density_address : 0;
-        dst.vdb_temp_address =
-            liveDenseGas ? src.dense_temperature_address : 0;
+        // Resolved above: the simulation's own address when this backend owns
+        // that device, otherwise this backend's copy of the same grid.
+        dst.vdb_grid_address = liveDenseGas ? denseDensityAddress : 0;
+        dst.vdb_temp_address = liveDenseGas ? denseTempAddress : 0;
         // Empty-space acceleration. Only live dense gas produces one; anything
         // else marches as before. Published only as a complete set — a nonzero
         // address with a zero block size would make the shader divide the world
@@ -861,6 +1007,46 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 : ((dst.vdb_grid_address != 0) ? 2 : 1));
         dst.is_active = 1;
         dst.voxel_size = src.voxel_size;
+
+        // ★★★ A MISSING GRID MAY NEVER BECOME PROCEDURAL NOISE.
+        //
+        // volume_type 1 is procedural fbm, and it is a legitimate AUTHORED
+        // choice only for a volume that was authored that way. Reaching it from
+        // the chain above means something else: the volume wanted a grid
+        // (NanoVDB source_type 0, or live dense gas source_type 5) and no usable
+        // address was resolved. The shader then fills the volume's whole
+        // BOUNDING BOX with noise.
+        //
+        // MEASURED 2026-09-04: on the backend that does not own the simulation
+        // compute device, a live gas domain whose host mirror had not been
+        // produced yet rendered in the realtime viewport as a solid pale BOX
+        // sitting in front of the liquid — reported as "it clips half of it like
+        // a boundary". The boundary is this AABB. An absent volume is recoverable
+        // and obvious; a volume that draws a convincing box in the wrong shape is
+        // neither, and it also occludes the surfaces behind it.
+        //
+        // Publish the slot INACTIVE instead. It is the same not-ready state a
+        // mid-rebuild slot uses, the retry machinery below already covers it, and
+        // it can never be mistaken for authored content.
+        // Same family: [[feedback_default_is_not_a_measurement]].
+        // 0 = NanoVDB, 4 = fluid SurfaceSDF (its density channel IS the SDF proxy
+        // band, so it needs a grid too), 5 = live dense gas. Only source_type 3
+        // is authored procedural, and it never reaches volume_type 1.
+        const bool wantedAGrid =
+            (src.source_type == 0 || src.source_type == 4 || src.source_type == 5);
+        if (dst.volume_type == 1 && wantedAGrid) {
+            dst.is_active = 0;
+            anyMappedVolumeMissingContent = true;
+            SCENE_LOG_ON_CHANGE("volnogrid." + std::to_string(src.vdb_id),
+                (long long)src.source_type * 10ll + 1ll,
+                "[VolumeSSBO] vdb_id=" + std::to_string(src.vdb_id) +
+                " source_type=" + std::to_string(src.source_type) +
+                " resolved NO density grid on this backend; published INACTIVE "
+                "rather than falling back to procedural noise (which would draw "
+                "the bounding box as a solid block). If this is the raster "
+                "viewport and the domain is live gas, the host mirror has not "
+                "been produced yet — see g_dense_gas_host_mirror_needed.");
+        }
 
         // ── DIAGNOSTIC: the three fields the SHADER actually gates on ────────
         // volume_closesthit.rchit accepts a liquid as a SurfaceSDF candidate

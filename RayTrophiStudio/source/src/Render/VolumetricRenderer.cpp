@@ -19,6 +19,7 @@
 #include "globals.h"
 #include <cmath>
 #include <algorithm> // For std::min, std::max
+#include <cstdint>   // uintptr_t for the per-backend publish tripwire key
 #include <limits>
 #include <string>    // logIsoMaterialBinding builds its message
 #include "AtmosphereLUT.h"
@@ -407,7 +408,52 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
     // 1. Prepare VDB Volumes (Unified for VDB and Unified-Path Gas)
     std::vector<GpuVDBVolume> gpu_vdb_volumes;
     auto& mgr = VDBVolumeManager::getInstance();
-    const bool vulkanRT = dynamic_cast<Backend::VulkanBackendAdapter*>(backend) != nullptr;
+    auto* vulkanAdapter = dynamic_cast<Backend::VulkanBackendAdapter*>(backend);
+    const bool vulkanRT = vulkanAdapter != nullptr;
+
+    // ★★★ A BUFFER DEVICE ADDRESS IS ONLY MEANINGFUL ON THE DEVICE THAT MADE IT.
+    // The live dense-gas grids below are raw VkDeviceAddresses owned by the
+    // SIMULATION compute context, and that context is bound to whichever
+    // VkDevice was created LAST (VulkanDevice::createLogicalDevice publishes
+    // itself into g_vulkan_sim_compute_ctx unconditionally). This process runs
+    // TWO Vulkan devices at once — the render backend and the dedicated raster
+    // viewport backend — so "is the consumer Vulkan?" is not a sufficient test:
+    // it is true for both, and it is wrong for one of them.
+    //
+    // Handing the other device those addresses does not fail loudly. The read
+    // resolves to nothing, every density sample comes back 0, and the volume
+    // renders as an empty frame — indistinguishable from "no smoke here".
+    //
+    // With live_data suppressed the volume falls back to the NanoVDB route,
+    // whose grid IS re-uploaded per adapter into that adapter's own memory
+    // (VulkanBackendAdapter::m_vdbBuffers) — the same path that already carries
+    // baked VDB and the fluid SurfaceSDF correctly on both devices.
+    // See [[feedback_ipc_values_only_no_pointers]]: the same rule, one scope in.
+    bool simDeviceIsThisBackends = false;
+    if (vulkanAdapter) {
+        if (auto* dev = vulkanAdapter->getVulkanDevice()) {
+            simDeviceIsThisBackends =
+                (g_vulkan_sim_compute_ctx.device != nullptr) &&
+                (g_vulkan_sim_compute_ctx.device == static_cast<void*>(dev->getDevice()));
+        }
+    }
+    const bool liveDenseAddressesUsable = vulkanRT && simDeviceIsThisBackends;
+    if (vulkanRT) {
+        // One line per state transition, per backend. Says WHICH consumer this
+        // packet is for and whether live dense gas can legally ride along, so a
+        // frozen (NanoVDB-only) gas in one viewport and a live one in the other
+        // reads as a known consequence instead of a mystery.
+        SCENE_LOG_ON_CHANGE(
+            "volpublish." + std::to_string(reinterpret_cast<uintptr_t>(backend)),
+            (long long)(liveDenseAddressesUsable ? 1 : 0),
+            std::string("[VolumePublish] target=") +
+            std::to_string(reinterpret_cast<uintptr_t>(backend)) +
+            " simDeviceIsMine=" + (simDeviceIsThisBackends ? "1" : "0") +
+            (liveDenseAddressesUsable
+                 ? " -> live dense gas addresses published"
+                 : " -> live dense gas SUPPRESSED (foreign device); this target "
+                   "falls back to the per-adapter NanoVDB upload"));
+    }
 
     // 1a. Scan standard VDB objects
     for (const auto& vdb : scene.vdb_volumes) {
@@ -416,12 +462,52 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         GpuVDBVolume gv = {};
         gv.vdb_id = vdb->getVDBVolumeID();
         const VDBVolumeData* live_data =
-            vulkanRT ? mgr.getVolume(gv.vdb_id) : nullptr;
+            liveDenseAddressesUsable ? mgr.getVolume(gv.vdb_id) : nullptr;
+
+        // ── The mirroring consumer ───────────────────────────────────────────
+        // A Vulkan backend that does NOT own the simulation compute device gets
+        // the same dense grid by VALUE. Everything else about the volume is
+        // identical, so the shader path (volume_type 4 / source_type 5) is the
+        // one that already works — only the address changes owner.
+        //
+        // ★ This branch is deliberately entered ONLY for a Vulkan consumer.
+        // OptiX has its own grid route and must keep it; handing it a host
+        // pointer here would be a third representation of the same smoke.
+        const VDBVolumeData* mirror_data =
+            (vulkanRT && !liveDenseAddressesUsable) ? mgr.getVolume(gv.vdb_id) : nullptr;
+        if (mirror_data && !mirror_data->dense_density_mirror.empty() &&
+            mirror_data->dense_resolution[0] > 0 &&
+            mirror_data->dense_resolution[1] > 0 &&
+            mirror_data->dense_resolution[2] > 0) {
+            gv.dense_density_host = mirror_data->dense_density_mirror.data();
+            gv.dense_temperature_host =
+                mirror_data->dense_temperature_mirror.empty()
+                    ? nullptr
+                    : mirror_data->dense_temperature_mirror.data();
+            gv.dense_host_version = mirror_data->dense_mirror_version;
+            // The geometry metadata must come from the SAME publish as the grid
+            // itself. Deriving it from anything else stretches or shifts the
+            // field by whatever the two disagree about, which renders as smoke
+            // that swims — plausible-looking and very hard to attribute.
+            gv.dense_resolution_x = mirror_data->dense_resolution[0];
+            gv.dense_resolution_y = mirror_data->dense_resolution[1];
+            gv.dense_resolution_z = mirror_data->dense_resolution[2];
+            gv.dense_origin = make_float3(mirror_data->dense_origin[0],
+                                          mirror_data->dense_origin[1],
+                                          mirror_data->dense_origin[2]);
+            gv.dense_fields_valid = 1;
+            // No majorant and no emissive list: both are device buffers on the
+            // other device. Their absence is safe by construction — the shader
+            // must never read a missing majorant as "empty", it marches every
+            // step instead. Slower, correct.
+        }
         // These are raw Vulkan buffer device addresses owned by the simulation
-        // compute context. They are valid only for the Vulkan RT consumer;
-        // publishing them in the OptiX/CUDA volume packet gives OptiX an address
-        // from a different API/allocator and also keeps a false external
-        // lifetime dependency across Play/Pause.
+        // compute context. They are valid only for the Vulkan consumer that owns
+        // that device; publishing them in the OptiX/CUDA volume packet gives
+        // OptiX an address from a different API/allocator, and publishing them
+        // to the OTHER Vulkan device gives it an address from a different
+        // allocator too. Both also keep a false external lifetime dependency
+        // across Play/Pause.
         if (live_data) {
             // A dense volume has no NanoVDB topology for empty-space skipping.
             // Marching a completely empty AABB is perversely the worst case:
@@ -981,7 +1067,9 @@ Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const Wo
     
     float aerialDensity = (std::max)(0.0f, world_data.advanced.aerial_density);
     float atmosphereDensity = (std::max)(0.001f, world_data.nishita.air_density * 0.60f + world_data.nishita.dust_density * 0.40f);
-    float densityFactor = aerialDensity * atmosphereDensity * (1.0f + world_data.nishita.fog_density * 120.0f);
+    float enabledFogDensity = world_data.nishita.fog_enabled
+        ? (std::max)(world_data.nishita.fog_density, 0.0f) : 0.0f;
+    float densityFactor = aerialDensity * atmosphereDensity * (1.0f + enabledFogDensity * 120.0f);
     float distFactor = (1.0f - expf(-(clampedDist / 10000.0f) * densityFactor)) * (ramp * ramp);
 
     Vec3 finalTrans(

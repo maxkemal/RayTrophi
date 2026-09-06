@@ -34,9 +34,16 @@ bool drawProfileSplinePointGizmo(UIContext& ctx) {
 
     ImGuiIO& io = ImGui::GetIO();
     const Camera& camera = *ctx.scene.camera;
-    // The standalone authoring gizmo has no dependency on SceneUI's private
-    // viewport state; camera projection is the stable fallback here.
-    const bool ortho = camera.orthographic;
+    // ★ Must match drawTransformGizmo's rule, not just camera.orthographic. The
+    // Rendered viewport path-traces in PERSPECTIVE even under an orthographic
+    // camera, so claiming ortho there builds a projection that disagrees with
+    // what is on screen: the handle you grab no longer points where it looks,
+    // and a small mouse move maps to a large, arbitrary world delta. That is
+    // the "small drag sometimes jumps somewhere meaningless" report, and it
+    // only happens in Rendered + ortho - which is why it looked intermittent.
+    const bool viewportIsRendered = ctx.scene_ui_ptr &&
+        ctx.scene_ui_ptr->viewport_settings.shading_mode == 2;
+    const bool ortho = camera.orthographic && !viewportIsRendered;
     const float aspect = io.DisplaySize.x / std::max(1.0f, io.DisplaySize.y);
     const float nearPlane = 0.1f;
     const float farPlane = 10000.0f;
@@ -68,6 +75,16 @@ bool drawProfileSplinePointGizmo(UIContext& ctx) {
         projection[14] = -(2.0f * farPlane * nearPlane) / (farPlane - nearPlane);
     }
 
+    // ImGuizmo's per-frame state must be reset even when this function bails
+    // out below. It returns TRUE in those cases, so the caller does not run
+    // drawTransformGizmo either - and then nothing calls BeginFrame that frame,
+    // leaving IsOver() latched from the previous one and blocking viewport
+    // clicks. Manipulate() is what pushes the clip rect, so calling these three
+    // early keeps the original concern intact.
+    ImGuizmo::SetOrthographic(ortho);
+    ImGuizmo::BeginFrame();
+    ImGuizmo::SetRect(0.0f, 0.0f, io.DisplaySize.x, io.DisplaySize.y);
+
     const Matrix4x4 objectTransform = splineObject->transform
         ? splineObject->transform->getFinal() : Matrix4x4::identity();
     const Vec3 localPoint = splineObject->spline.points[splineObject->selected_point].position;
@@ -86,14 +103,24 @@ bool drawProfileSplinePointGizmo(UIContext& ctx) {
         pointMatrix.m[0][3], pointMatrix.m[1][3], pointMatrix.m[2][3], pointMatrix.m[3][3]
     };
 
-    ImGuizmo::SetOrthographic(ortho);
-    ImGuizmo::BeginFrame();
-    ImGuizmo::SetRect(0.0f, 0.0f, io.DisplaySize.x, io.DisplaySize.y);
     ImGuizmo::SetGizmoSizeClipSpace(0.09f);
+    // Ctrl snaps to a round metre grid. A point gizmo is small on screen, so a
+    // one-pixel wobble is a real world offset at distance; snapping is what
+    // makes "nudge it a bit" a decision rather than an estimate. Shift+Ctrl
+    // takes the finer step for close work.
+    const float snapStep = io.KeyShift ? 0.1f : 1.0f;
+    const float snapValues[3] = {snapStep, snapStep, snapStep};
     ImGuizmo::Manipulate(view, projection, ImGuizmo::TRANSLATE,
-                         ImGuizmo::WORLD, gizmo);
+                         ImGuizmo::WORLD, gizmo, nullptr,
+                         io.KeyCtrl ? snapValues : nullptr);
 
     if (ImGuizmo::IsUsing() && splineObject->transform) {
+        // Captured once per drag: point_drag_dirty is still false on the frame
+        // the drag starts, so this records the position BEFORE any delta lands.
+        if (!splineObject->point_drag_dirty) {
+            splineObject->drag_origin_local = localPoint;
+            splineObject->drag_origin_valid = true;
+        }
         const Vec3 movedWorld(gizmo[12], gizmo[13], gizmo[14]);
         const Vec3 movedLocal = objectTransform.inverse().transform_point(movedWorld);
         Vec3 delta = movedLocal - localPoint;
@@ -125,6 +152,7 @@ bool drawProfileSplinePointGizmo(UIContext& ctx) {
     } else if (splineObject->point_drag_dirty) {
         splineObject->spline.calculateAutoTangents();
         splineObject->point_drag_dirty = false;
+        splineObject->drag_origin_valid = false;
     }
     return true;
 }

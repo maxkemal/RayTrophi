@@ -323,6 +323,18 @@ struct GpuVDBVolume {
     // Emitting-block list for volume emission NEE (0 = none).
     uint64_t dense_emissive_list_address;
     int dense_emissive_capacity;
+    // ★★★ HOST MIRROR of the dense grids, for the consumer that CANNOT use the
+    // addresses above. They are raw VkDeviceAddresses owned by the simulation
+    // compute device; a second VkDevice (the dedicated raster viewport backend)
+    // reads them as zero density, which is indistinguishable from empty smoke.
+    // When set, the backend uploads these into ITS OWN buffer and publishes
+    // that address instead — the same per-adapter pattern uvw_residual_grid
+    // already uses. nullptr = this consumer owns the device and needs no copy.
+    const float* dense_density_host;
+    const float* dense_temperature_host;
+    // Producer's dense_version. The backend re-uploads only when it changes:
+    // the grid is megabytes and does not change on frames the sim did not step.
+    uint64_t dense_host_version;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -448,6 +460,16 @@ struct RayGenParams {
     int tile_width, tile_height;
     int current_pass;
     int is_final_render; // 1 = Final render, 0 = Viewport
+    // 1 = DISPLAY RESOLVE ONLY: do not trace, do not touch the accumulation or
+    // variance buffers, do not advance the sample count. Just re-encode the
+    // existing accumulation into `framebuffer` with the CURRENT display values.
+    // Exists so a post-processing edit made AFTER convergence can still reach
+    // the presented frame — the OptiX twin of the Vulkan tonemap-only refresh.
+    // ★ NO default member initializer here: RayGenParams is declared as a CUDA
+    // __constant__ variable (payload.h), and any dynamic initialization in the
+    // type makes nvcc reject it ("dynamic initialization is not supported for a
+    // __constant__ variable"). Host code sets this on every launch instead.
+    int display_resolve_only;
     int grid_enabled;    // 1 = Grid visible, 0 = Hidden
     float grid_fade_distance; // Distance where grid fades out
     float clip_near;

@@ -1135,8 +1135,45 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
 #undef IM_COL32
 #define IM_COL32(r,g,b,a) getIconColor(r,g,b,a)
 
+    auto getTonedRealColor = [&](int r, int g, int b, int a) -> ImU32 {
+        if (settings.style == IconStyle::ClayMatcap) {
+            return (((ImU32)(a)<<24) | ((ImU32)(b)<<16) | ((ImU32)(g)<<8) | ((ImU32)(r)));
+        }
+        // In Flat Minimalist / Custom / Neon Glow styles, tone the 3D RGB color to match the theme color
+        float L = (0.299f * r + 0.587f * g + 0.114f * b) / 255.0f;
+        ImVec4 base = (settings.style == IconStyle::CustomPalette) ? settings.customColor : ImGui::ColorConvertU32ToFloat4(col);
+        
+        // Shift pivot to 0.65 so that the main midtones (diffuse) match the raw tab accent color
+        float pivot = 0.65f;
+        float outR, outG, outB;
+        if (L < pivot) {
+            float f = L / pivot;
+            outR = base.x * f;
+            outG = base.y * f;
+            outB = base.z * f;
+        } else {
+            float f = (L - pivot) / (1.0f - pivot);
+            f *= 0.85f; // Soften the pure white blowout for a cleaner flat look
+            outR = base.x + (1.0f - base.x) * f;
+            outG = base.y + (1.0f - base.y) * f;
+            outB = base.z + (1.0f - base.z) * f;
+        }
+        if (settings.style == IconStyle::NeonGlow) {
+            outR = std::min(1.0f, outR * 1.3f);
+            outG = std::min(1.0f, outG * 1.3f);
+            outB = std::min(1.0f, outB * 1.3f);
+        }
+        return ImGui::ColorConvertFloat4ToU32(ImVec4(outR, outG, outB, a / 255.0f));
+    };
+
+    // Un-flattened color macro for 3D specific icons (viewport modes)
+#define REAL_COL32(r,g,b,a) getTonedRealColor(r,g,b,a)
+
     // Dynamic Clay Matcap Palette based on settings.matcapColor
     ImVec4 mc = settings.matcapColor;
+    if (settings.style != IconStyle::ClayMatcap) {
+        mc = (settings.style == IconStyle::CustomPalette) ? settings.customColor : ImGui::ColorConvertU32ToFloat4(col);
+    }
     auto makeColor = [](float r, float g, float b, float a) -> ImU32 {
         return (((ImU32)(a * 255.0f)<<24) | ((ImU32)(b * 255.0f)<<16) | ((ImU32)(g * 255.0f)<<8) | ((ImU32)(r * 255.0f)));
     };
@@ -1454,64 +1491,52 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                 ImVec2 right_face[] = { cp, V_tr, V_br, V_bottom };
 
                 // High-Contrast Steel Gray 3D Solid Cube Facets
-                dl->AddConvexPolyFilled(top_face, 4, IM_COL32(230, 235, 245, 240));
-                dl->AddConvexPolyFilled(left_face, 4, IM_COL32(130, 140, 155, 240));
-                dl->AddConvexPolyFilled(right_face, 4, IM_COL32(65, 72, 85, 240));
+                dl->AddConvexPolyFilled(top_face, 4, REAL_COL32(230, 235, 245, 240));
+                dl->AddConvexPolyFilled(left_face, 4, REAL_COL32(130, 140, 155, 240));
+                dl->AddConvexPolyFilled(right_face, 4, REAL_COL32(65, 72, 85, 240));
 
                 // 100% Opacity Crisp White Contour & Internal Facet Wireframe
                 ImVec2 hex[] = { V_top, V_tr, V_br, V_bottom, V_bl, V_tl };
-                dl->AddPolyline(hex, 6, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, thickness * 1.5f);
-                dl->AddLine(cp, V_bottom, IM_COL32(255, 255, 255, 255), thickness * 1.2f);
-                dl->AddLine(cp, V_tl, IM_COL32(255, 255, 255, 255), thickness * 1.2f);
-                dl->AddLine(cp, V_tr, IM_COL32(255, 255, 255, 255), thickness * 1.2f);
+                dl->AddPolyline(hex, 6, REAL_COL32(255, 255, 255, 255), ImDrawFlags_Closed, thickness * 1.5f);
+                dl->AddLine(cp, V_bottom, REAL_COL32(255, 255, 255, 255), thickness * 1.2f);
+                dl->AddLine(cp, V_tl, REAL_COL32(255, 255, 255, 255), thickness * 1.2f);
+                dl->AddLine(cp, V_tr, REAL_COL32(255, 255, 255, 255), thickness * 1.2f);
                 
                 // Specular highlight dot
-                dl->AddCircleFilled(ImVec2(cp.x - is * 0.12f, cp.y - is * 0.18f), is * 0.06f, IM_COL32(255, 255, 255, 255));
+                dl->AddCircleFilled(ImVec2(cp.x - is * 0.12f, cp.y - is * 0.18f), is * 0.06f, REAL_COL32(255, 255, 255, 255));
             }
             break;
         case IconType::ViewMatcap:
             {
                 float rad = is * 0.44f;
-                // Terracotta Red Clay Matcap Sphere with High Contrast
-                const ImU32 terracotta_shadow = IM_COL32(80, 25, 20, 255);
-                const ImU32 terracotta_diffuse = IM_COL32(225, 95, 75, 255);
-                const ImU32 terracotta_specular = IM_COL32(255, 235, 220, 255);
+                // Link to the active clay theme colors instead of hardcoded terracotta
+                dl->AddCircleFilled(cp, rad, clay_shadow);
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, clay_diffuse);
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.25f, clay_specular);
                 
-                // Draw shaded terracotta sphere
-                dl->AddCircleFilled(cp, rad, terracotta_shadow);
-                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, terracotta_diffuse);
-                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.25f, terracotta_specular);
-                
-                // High-Contrast White/Orange Double Contour Ring
-                dl->AddCircle(cp, rad, IM_COL32(255, 120, 50, 255), 32, thickness * 1.6f);
-                dl->AddCircle(cp, rad * 0.98f, IM_COL32(255, 255, 255, 200), 32, thickness * 0.8f);
+                // High-Contrast Double Contour Ring
+                dl->AddCircle(cp, rad, REAL_COL32(255, 120, 50, 255), 32, thickness * 1.6f);
+                dl->AddCircle(cp, rad * 0.98f, REAL_COL32(255, 255, 255, 200), 32, thickness * 0.8f);
             }
             break;
         case IconType::ViewPreview:
             {
-                // 3D High-Contrast UV Checkerboard Cylinder (Material Preview)
-                float w = is * 0.38f;
-                float h = is * 0.38f;
-                ImVec2 topC(cp.x, cp.y - h * 0.45f);
-                ImVec2 botC(cp.x, cp.y + h * 0.45f);
-
-                // Cylinder body background (Deep Cyan/Blue)
-                dl->AddRectFilled(ImVec2(cp.x - w, topC.y), ImVec2(cp.x + w, botC.y), IM_COL32(15, 120, 190, 255));
-
-                // High-Contrast Black & White Checkerboard Squares
-                dl->AddRectFilled(ImVec2(cp.x - w, topC.y), ImVec2(cp.x, cp.y), IM_COL32(255, 255, 255, 240));
-                dl->AddRectFilled(ImVec2(cp.x, cp.y), ImVec2(cp.x + w, botC.y), IM_COL32(255, 255, 255, 240));
-                dl->AddRectFilled(ImVec2(cp.x - w, cp.y), ImVec2(cp.x, botC.y), IM_COL32(20, 30, 40, 240));
-                dl->AddRectFilled(ImVec2(cp.x, topC.y), ImVec2(cp.x + w, cp.y), IM_COL32(20, 30, 40, 240));
-
-                // Top & Bottom Ellipse caps
-                dl->AddEllipseFilled(topC, ImVec2(w, h * 0.35f), IM_COL32(0, 210, 255, 255), 0.0f, 32);
-                dl->AddEllipse(topC, ImVec2(w, h * 0.35f), IM_COL32(255, 255, 255, 255), 0.0f, 32, thickness * 1.2f);
-                dl->AddEllipse(botC, ImVec2(w, h * 0.35f), IM_COL32(0, 210, 255, 240), 0.0f, 32, thickness * 1.2f);
-
-                // 100% Opacity White Contour Border Lines
-                dl->AddLine(ImVec2(cp.x - w, topC.y), ImVec2(cp.x - w, botC.y), IM_COL32(255, 255, 255, 255), thickness * 1.6f);
-                dl->AddLine(ImVec2(cp.x + w, topC.y), ImVec2(cp.x + w, botC.y), IM_COL32(255, 255, 255, 255), thickness * 1.6f);
+                // Glowing Yellow Sphere (Rayfusion)
+                float rad = is * 0.38f;
+                
+                // Outer glows for "ışılıtılı" effect
+                dl->AddCircleFilled(cp, rad * 1.4f, REAL_COL32(255, 180, 0, 40));
+                dl->AddCircleFilled(cp, rad * 1.15f, REAL_COL32(255, 200, 30, 80));
+                
+                // Base sphere
+                dl->AddCircleFilled(cp, rad, REAL_COL32(255, 160, 0, 255));
+                
+                // Core/Highlight for 3D feel
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.15f, cp.y - rad * 0.15f), rad * 0.7f, REAL_COL32(255, 210, 50, 255));
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.3f, REAL_COL32(255, 255, 200, 255));
+                
+                // High-Contrast Contour Ring for UI distinction (especially in active states)
+                dl->AddCircle(cp, rad, REAL_COL32(255, 255, 255, 220), 32, thickness * 1.2f);
             }
             break;
         case IconType::ViewRendered:
@@ -1527,20 +1552,20 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                     float a = i * (6.283185f / num_segments);
                     dl->PathLineTo(ImVec2(shadow_center.x + cosf(a) * rx, shadow_center.y + sinf(a) * ry));
                 }
-                dl->PathFillConvex(IM_COL32(0, 0, 0, 220));
+                dl->PathFillConvex(REAL_COL32(0, 0, 0, 220));
                 
                 // Base shaded PBR sphere
-                dl->AddCircleFilled(cp, rad, IM_COL32(30, 35, 50, 255));
-                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, IM_COL32(170, 160, 145, 255));
+                dl->AddCircleFilled(cp, rad, REAL_COL32(30, 35, 50, 255));
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, REAL_COL32(170, 160, 145, 255));
                 
                 // Cool cyan bounce light arc
                 dl->PathClear();
                 dl->PathArcTo(cp, rad - 1.0f, 0.0f, 1.57f, 16);
-                dl->PathStroke(IM_COL32(0, 220, 255, 220), false, thickness * 2.2f);
+                dl->PathStroke(REAL_COL32(0, 220, 255, 220), false, thickness * 2.2f);
                 
                 // High-Contrast Golden Specular Spot & Outer Contour Ring
-                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.25f, IM_COL32(255, 255, 230, 255));
-                dl->AddCircle(cp, rad, IM_COL32(255, 200, 30, 255), 32, thickness * 1.6f);
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.25f, REAL_COL32(255, 255, 230, 255));
+                dl->AddCircle(cp, rad, REAL_COL32(255, 200, 30, 255), 32, thickness * 1.6f);
                 
                 // 100% Opacity Golden 4-point raytraced star highlight at top-right
                 ImVec2 sc = ImVec2(cp.x + rad * 0.50f, cp.y - rad * 0.50f);
@@ -1555,8 +1580,8 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                     ImVec2(sc.x - sr, sc.y),
                     ImVec2(sc.x - sr * 0.22f, sc.y - sr * 0.22f)
                 };
-                dl->AddConvexPolyFilled(star_pts, 8, IM_COL32(255, 215, 0, 255));
-                dl->AddPolyline(star_pts, 8, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, 1.2f);
+                dl->AddConvexPolyFilled(star_pts, 8, REAL_COL32(255, 215, 0, 255));
+                dl->AddPolyline(star_pts, 8, REAL_COL32(255, 255, 255, 255), ImDrawFlags_Closed, 1.2f);
             }
             break;
         case IconType::CameraHud:

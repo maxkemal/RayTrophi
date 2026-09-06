@@ -1,4 +1,5 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+#include "PostProcess/PostService.h"
+// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 // NOTE: This file has been split into multiple modules for better maintainability.
@@ -25,6 +26,8 @@
 #include "json.hpp"
 #include "ProjectManager.h"
 #include "TerrainManager.h"
+#include "TerrainCurveNodes.h"
+#include "MeshEdit/SplineObject.h"
 #include "SceneSerializer.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
@@ -54,6 +57,7 @@
 #include "scene_ui_gas.hpp"     // Gas Simulation panel
 #include "scene_ui_forcefield.hpp" // Force Field panel
 #include "UI/scene_ui_volume_performance.hpp"
+#include "UI/viewport_realtime_quality_panel.hpp"
 #include "ParallelBVHNode.h"
 #include "Triangle.h"  // For object hierarchy
 #include "HittableInstance.h"
@@ -67,7 +71,9 @@
 #include "Volumetric.h"     // For volumetric material
 #include "VDBVolume.h"      // For VDB volume UI panel
 #include "VolumetricRenderer.h"
-#include "AssimpLoader.h"  // For scene rebuild after object changes
+#include "Import/ModelProbe.h"  // ModelProbe / probeModel: preview bounds, every format
+#include "Animation/AnimationData.h"
+#include "Import/ModelImport.h"  // ★ format dispatch: a .glb clip must not reach Assimp
 #include "SceneCommand.h"  // For undo/redo
 #include "Paint/MeshPaintAdapter.h"
 #include "default_scene_creator.hpp"
@@ -257,71 +263,22 @@ std::string makeUniqueAssetImportPrefix(const std::filesystem::path& asset_path)
 }
 
 bool computeAssetPreviewBounds(const std::filesystem::path& asset_path, Vec3& out_min, Vec3& out_max) {
-    Assimp::Importer importer;
-    unsigned int import_flags =
-        aiProcess_Triangulate |
-        aiProcess_JoinIdenticalVertices |
-        aiProcess_ImproveCacheLocality;
-
-    const std::string ext = AssetRegistry::toLowerCopy(asset_path.extension().string());
-    if (ext == ".fbx") {
-        import_flags |= aiProcess_GlobalScale;
-    }
-
-    std::vector<unsigned char> file_bytes;
-    const aiScene* scene = nullptr;
-    if (readBinaryFileBytes(asset_path, file_bytes)) {
-        scene = importer.ReadFileFromMemory(file_bytes.data(), file_bytes.size(), import_flags, ext.c_str());
-    }
-    if (!scene) {
-        scene = importer.ReadFile(asset_path.string(), import_flags);
-    }
-    if (!scene || !scene->mRootNode) {
+    // ★★ THIS USED TO BE A SECOND, HAND-WRITTEN SCENE-GRAPH WALK.
+    // glTF went through the direct probe; everything else built a full Assimp
+    // scene (Triangulate | JoinIdenticalVertices | ImproveCacheLocality) and
+    // recursed the aiNode tree accumulating world-space vertices — all to
+    // produce a bounding box for a PREVIEW THUMBNAIL.
+    //
+    // probeModel(applyNodeTransforms = true) is defined as exactly that box:
+    // scene-graph placed bounds. Every format answers it from its own
+    // container now, so the walk is not ported, it is deleted.
+    rtimport::ModelProbe probe;
+    if (!rtimport::probeModel(asset_path.string(), /*applyNodeTransforms=*/true, probe) ||
+        !probe.has_bounds) {
         return false;
     }
-
-    aiVector3D bb_min(1e30f, 1e30f, 1e30f);
-    aiVector3D bb_max(-1e30f, -1e30f, -1e30f);
-    bool found_vertex = false;
-
-    std::function<void(aiNode*, const aiMatrix4x4&)> walk =
-        [&](aiNode* node, const aiMatrix4x4& parent_transform) {
-            if (!node) {
-                return;
-            }
-
-            const aiMatrix4x4 world = parent_transform * node->mTransformation;
-            for (unsigned int mesh_idx = 0; mesh_idx < node->mNumMeshes; ++mesh_idx) {
-                const aiMesh* mesh = scene->mMeshes[node->mMeshes[mesh_idx]];
-                if (!mesh || !mesh->HasPositions()) {
-                    continue;
-                }
-
-                for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
-                    const aiVector3D p = world * mesh->mVertices[v];
-                    bb_min.x = (std::min)(bb_min.x, p.x);
-                    bb_min.y = (std::min)(bb_min.y, p.y);
-                    bb_min.z = (std::min)(bb_min.z, p.z);
-                    bb_max.x = (std::max)(bb_max.x, p.x);
-                    bb_max.y = (std::max)(bb_max.y, p.y);
-                    bb_max.z = (std::max)(bb_max.z, p.z);
-                    found_vertex = true;
-                }
-            }
-
-            for (unsigned int child_idx = 0; child_idx < node->mNumChildren; ++child_idx) {
-                walk(node->mChildren[child_idx], world);
-            }
-        };
-
-    walk(scene->mRootNode, aiMatrix4x4());
-
-    if (!found_vertex) {
-        return false;
-    }
-
-    out_min = Vec3(bb_min.x, bb_min.y, bb_min.z);
-    out_max = Vec3(bb_max.x, bb_max.y, bb_max.z);
+    out_min = Vec3(probe.bounds_min[0], probe.bounds_min[1], probe.bounds_min[2]);
+    out_max = Vec3(probe.bounds_max[0], probe.bounds_max[1], probe.bounds_max[2]);
     return true;
 }
 
@@ -1360,71 +1317,7 @@ void SceneUI::drawResolutionPanel(UIContext& ctx)
 }
 
 
-static void DrawRenderWindowToneMapControls(UIContext& ctx) {
-    UIWidgets::ColoredHeader("Post-Processing Controls", ImVec4(1.0f, 0.65f, 0.6f, 1.0f));
-    UIWidgets::Divider();
-
-    bool changed = false;
-
-    // -------- Main Parameters --------
-    if (UIWidgets::BeginSection("Main Post-Processing", ImVec4(0.8f, 0.6f, 0.5f, 1.0f))) {
-        if (UIWidgets::SliderWithHelp("Gamma", &ctx.color_processor.params.global_gamma, 
-                                   0.5f, 3.0f, "Controls overall image brightness curve")) changed = true;
-        if (UIWidgets::SliderWithHelp("Exposure", &ctx.color_processor.params.global_exposure, 
-                                   0.1f, 5.0f, "Adjusts overall brightness level")) changed = true;
-        if (UIWidgets::SliderWithHelp("Saturation", &ctx.color_processor.params.saturation, 
-                                   0.0f, 2.0f, "Controls color intensity")) changed = true;
-        if (UIWidgets::SliderWithHelp("Temperature (K)", &ctx.color_processor.params.color_temperature, 
-                                   1000.0f, 10000.0f, "Color temperature in Kelvin", "%.0f")) changed = true;
-        UIWidgets::EndSection();
-    }
-
-    // -------- Tonemapping Type --------
-    if (UIWidgets::BeginSection("Tonemapping Type", ImVec4(0.6f, 0.7f, 0.9f, 1.0f))) {
-        const char* tone_names[] = { "AGX", "ACES", "Uncharted", "Filmic", "None" };
-        int selected_tone = static_cast<int>(ctx.color_processor.params.tone_mapping_type);
-        if (ImGui::Combo("Tonemapping", &selected_tone, tone_names, IM_ARRAYSIZE(tone_names))) {
-            ctx.color_processor.params.tone_mapping_type = static_cast<ToneMappingType>(selected_tone);
-            changed = true;
-        }
-        UIWidgets::HelpMarker("AGX: Balanced look | ACES: Cinema standard | Filmic: Classic film");
-        UIWidgets::EndSection();
-    }
-
-    // -------- Effects --------
-    if (UIWidgets::BeginSection("Effects", ImVec4(0.7f, 0.5f, 0.8f, 1.0f))) {
-        if (ImGui::Checkbox("Vignette", &ctx.color_processor.params.enable_vignette)) changed = true;
-        if (ctx.color_processor.params.enable_vignette) {
-            if (UIWidgets::SliderWithHelp("Vignette Strength", &ctx.color_processor.params.vignette_strength, 
-                                       0.0f, 2.0f, "Darkening around image edges")) changed = true;
-        }
-        UIWidgets::EndSection();
-    }
-
-    // -------- Actions --------
-    UIWidgets::Divider();
-    
-    // Checkbox controls the persistent flag
-    ImGui::Checkbox("Enable Post-Processing", &ctx.render_settings.persistent_tonemap);
-    UIWidgets::HelpMarker("Keep post-processing active during rendering/navigation.");
-
-    // If enabled, any parameter change triggers a refresh
-    if (ctx.render_settings.persistent_tonemap && changed) {
-        ctx.apply_tonemap = true;
-    }
-
-    // Force Apply button:
-    // 1. Applies effect immediately
-    // 2. ENABLES persistence so it doesn't vanish on next frame
-    if (UIWidgets::PrimaryButton("Force Apply", ImVec2(120, 0))) {
-        ctx.apply_tonemap = true;
-        ctx.render_settings.persistent_tonemap = true;
-    }
-        
-    ImGui::SameLine();
-    if (UIWidgets::SecondaryButton("Reset", ImVec2(80, 0))) 
-        ctx.reset_tonemap = true;
-}
+static void DrawRenderWindowToneMapControls(UIContext& ctx) { rtpost::drawPanel(ctx); }
 
 void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 {
@@ -1631,7 +1524,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
         UIWidgets::Divider();
         UIWidgets::ColoredHeader("Raster Viewport Quality", ImVec4(0.96f, 0.84f, 0.58f, 1.0f));
-        const char* raster_quality_items[] = { "Auto", "Performance", "Balanced", "Quality" };
+        const char* raster_quality_items[] = { "Auto", "Performance", "Balanced", "Quality", "Full (no proxy)" };
         int raster_quality = static_cast<int>(ctx.render_settings.raster_viewport_quality_preset);
         if (!raster_quality_active) ImGui::BeginDisabled();
         if (ImGui::Combo("Raster / Preview Quality", &raster_quality, raster_quality_items, IM_ARRAYSIZE(raster_quality_items))) {
@@ -1644,6 +1537,13 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         if (!raster_quality_active) ImGui::EndDisabled();
         if (raster_quality_active) {
             ImGui::TextDisabled("Solid/Matcap: viewport proxy aggressiveness. Material Preview: specular BRDF quality.");
+            if (ctx.render_settings.raster_viewport_quality_preset ==
+                RasterViewportQualityPreset::Full) {
+                ImGui::TextColored(ImVec4(0.98f, 0.78f, 0.35f, 1.0f),
+                    "Full: every scatter instance draws its own mesh - no proxy substitution.");
+                ImGui::TextDisabled("Frustum culling stays on. Cost scales with the scene: on billion-triangle\n"
+                                    "scatter scenes this mode is deliberately slow.");
+            }
         } else {
             ImGui::TextDisabled("Active only in Solid, Material Preview, or Matcap viewport mode.");
         }
@@ -1661,20 +1561,48 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         }
 
         const bool material_preview_active = (viewport_settings.shading_mode == 1);
-        const char* preview_lighting_items[] = { "Classic 3-Point", "Studio", "Outdoor" };
-        int preview_lighting = static_cast<int>(ctx.render_settings.material_preview_lighting_preset);
+        const char* preview_lighting_items[] = {
+            "Scene (Rayfusion)",
+            "3 Point (Material Preview)"
+        };
+        int preview_lighting =
+            ctx.render_settings.material_preview_lighting_preset ==
+                    MaterialPreviewLightingPreset::Scene
+                ? 0 : 1;
         if (!material_preview_active) ImGui::BeginDisabled();
-        if (ImGui::Combo("Preview Lighting", &preview_lighting, preview_lighting_items, IM_ARRAYSIZE(preview_lighting_items))) {
-            ctx.render_settings.material_preview_lighting_preset = static_cast<MaterialPreviewLightingPreset>(preview_lighting);
+        if (ImGui::Combo("Lighting Mode", &preview_lighting,
+                         preview_lighting_items, IM_ARRAYSIZE(preview_lighting_items))) {
+            ctx.render_settings.material_preview_lighting_preset =
+                preview_lighting == 0 ? MaterialPreviewLightingPreset::Scene
+                                      : MaterialPreviewLightingPreset::Classic;
             ctx.start_render = true;
             if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
         }
         if (!material_preview_active) ImGui::EndDisabled();
         if (material_preview_active) {
-            ImGui::TextDisabled("Classic keeps the old key/fill/rim look. Studio and Outdoor use stable environment-style preview lighting.");
+            ImGui::TextDisabled("Scene is the default Rayfusion raster view. 3 Point isolates materials from scene lighting.");
+            if (ctx.render_settings.material_preview_lighting_preset ==
+                MaterialPreviewLightingPreset::Scene) {
+                ImGui::TextColored(ImVec4(0.72f, 0.92f, 0.78f, 1.0f),
+                    "Scene: the viewport reads the SAME light buffer the renderer uses.");
+                ImGui::TextDisabled("Directional, point, spot and area lights use the shared shadow atlas.\n"
+                                    "World/HDRI and LUT Physical Sky are drawn behind geometry.\n"
+                                    "HDRI uses irradiance, GGX roughness mips and a BRDF LUT.\n"
+                                    "Nishita sun adds direct light and its own atlas shadow.\n"
+                                    "Area shadows remain a bounded center-sample approximation.");
+            }
         } else {
-            ImGui::TextDisabled("Preview lighting presets are only active in Material Preview mode.");
+            ImGui::TextDisabled("Lighting Mode is only active in the Rayfusion raster viewport.");
         }
+
+        // ★ Realtime PBR kademe raporu. 2026-09-03'e kadar bu bilgi YALNIZCA
+        //   viewport'un sag ustundeki "Q" overlay'inde vardi; Render Settings
+        //   kopyasi `#if 0` blogunun icinde, yani hic derlenmiyordu. Overlay
+        //   kaldirildi, rapor buraya -- Lighting Mode'un hemen altina, kapali
+        //   acilan bir baslige -- tasindi. ★★ Bunlar AYAR degil, shader'a giden
+        //   degerlerin raporu: panelle cekirdek ayrisirsa burada gorunur.
+        UIWidgets::Divider();
+        DrawRealtimeQualitySettingsSection(ctx, viewport_settings.shading_mode);
 
         UIWidgets::EndSection();
     }
@@ -2989,6 +2917,9 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
                         UIWidgets::Divider();
                         ImGui::Checkbox("Show Scene Stats HUD", &ctx.render_settings.show_scene_stats_hud);
+                        UIWidgets::Divider();
+                        DrawRealtimeQualitySettingsSection(
+                            ctx, viewport_settings.shading_mode);
                         
                         UIWidgets::EndSection();
                     }
@@ -4901,6 +4832,15 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                         TerrainObject* terrain, const std::vector<int>& groupIds) {
                         SceneUI::syncNodeFoliageToScene(ctx, terrain, groupIds);
                     };
+                    TerrainNodesV2::g_terrainSplineListProvider = [&ctx]() {
+                        std::vector<std::string> names;
+                        for (const auto& object : ctx.scene.world.objects) {
+                            const auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object);
+                            if (spline && !spline->nodeName.empty()) names.push_back(spline->nodeName);
+                        }
+                        std::sort(names.begin(), names.end());
+                        return names;
+                    };
                     terrainNodeEditorUI.draw(ctx, *activeTerrain->nodeGraph, activeTerrain);
                 } else {
                      ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please select a terrain to edit its node graph.");
@@ -5403,6 +5343,15 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                         TerrainObject* terrain, const std::vector<int>& groupIds) {
                         SceneUI::syncNodeFoliageToScene(ctx, terrain, groupIds);
                     };
+                    TerrainNodesV2::g_terrainSplineListProvider = [&ctx]() {
+                        std::vector<std::string> names;
+                        for (const auto& object : ctx.scene.world.objects) {
+                            const auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object);
+                            if (spline && !spline->nodeName.empty()) names.push_back(spline->nodeName);
+                        }
+                        std::sort(names.begin(), names.end());
+                        return names;
+                    };
                     terrainNodeEditorUI.draw(ctx, *activeTerrain->nodeGraph, activeTerrain);
                 }
                 else {
@@ -5749,7 +5698,7 @@ bool SceneUI::raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos,
 
     const float u = std::clamp(screen_pos.x / display.x, 0.0f, 1.0f);
     const float v = std::clamp(1.0f - (screen_pos.y / display.y), 0.0f, 1.0f);
-    Ray ray = ctx.scene.camera->get_ray(u, v);
+    Ray ray = ctx.scene.camera->get_viewport_ray(u, v);
 
     const float denom = ray.direction.y;
     if (std::abs(denom) > 1e-5f) {
@@ -5782,7 +5731,7 @@ bool SceneUI::raycastViewportHit(UIContext& ctx, const ImVec2& screen_pos, HitRe
 
     const float u = std::clamp(screen_pos.x / display.x, 0.0f, 1.0f);
     const float v = std::clamp(1.0f - (screen_pos.y / display.y), 0.0f, 1.0f);
-    Ray ray = ctx.scene.camera->get_ray(u, v);
+    Ray ray = ctx.scene.camera->get_viewport_ray(u, v);
     return ctx.scene.bvh->hit(ray, 0.001f, 1e30f, hit_record);
 }
 
@@ -5889,18 +5838,29 @@ void SceneUI::drawAssetDragGhost(UIContext& ctx, const std::string& asset_name, 
 
 bool SceneUI::appendAnimationClipAssetToScene(UIContext& ctx, const AssetRecord& asset, const std::string& display_name)
 {
-    auto loader = std::make_shared<AssimpLoader>();
-    auto [loaded_triangles, loaded_animations, loaded_bone_data] =
-        loader->loadModelToTriangles(asset.entry_path.string(), nullptr, "", false);
-    (void)loaded_triangles;
-    (void)loaded_bone_data;
+    // ★ A .glb animation clip read through Assimp came back in the OLD skin
+    // space — the very thing Faz 1 fixed in the direct reader. Dispatch by format
+    // so a clip means the same thing however it enters the scene.
+    rtimport::ImportOptions clip_opts;
+    clip_opts.loadGeometry = false;
+    clip_opts.loadCameras  = false;
+    clip_opts.loadLights   = false;
 
+    rtimport::ImportedModel clip_model;
+    std::string clip_error;
+    if (!rtimport::loadModel(asset.entry_path.string(), clip_opts, clip_model, clip_error)) {
+        addViewportMessage("Could not read asset: " + display_name + " (" + clip_error + ")",
+                           3.5f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        return false;
+    }
+
+    auto loaded_animations = std::move(clip_model.animations);
     if (loaded_animations.empty()) {
         addViewportMessage("No animation clips found in asset: " + display_name, 3.5f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
         return false;
     }
 
-    const std::string source_prefix = loader->currentImportName;
+    const std::string source_prefix = clip_model.importName;
     std::string target_import_name;
     if (asset.animation_binding != "global") {
         target_import_name = findSelectedModelImportName(ctx);

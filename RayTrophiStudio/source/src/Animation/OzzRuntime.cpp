@@ -1,6 +1,7 @@
-#include "OzzRuntime.h"
+﻿#include "OzzRuntime.h"
+#include "Animation/AnimationKeys.h"
 
-#include "AssimpLoader.h"
+#include "Animation/AnimationData.h"
 #include "Matrix4x4.h"
 
 #include "ozz/animation/offline/animation_builder.h"
@@ -51,14 +52,6 @@ bool endsWithNodeName(const std::string& candidate, const std::string& nodeName)
     return candidate[offset - 1] == '_' && candidate.compare(offset, nodeName.size(), nodeName) == 0;
 }
 
-Vec3 toVec3(const aiVector3D& value) {
-    return Vec3(value.x, value.y, value.z);
-}
-
-Quaternion toQuaternion(const aiQuaternion& value) {
-    return Quaternion(value.w, value.x, value.y, value.z);
-}
-
 float toSeconds(double ticks, double ticksPerSecond) {
     if (ticksPerSecond <= 0.0) {
         return 0.0f;
@@ -66,21 +59,15 @@ float toSeconds(double ticks, double ticksPerSecond) {
     return static_cast<float>(ticks / ticksPerSecond);
 }
 
-aiMatrix4x4 toAiMatrix(const Matrix4x4& matrix) {
-    aiMatrix4x4 out;
-    out.a1 = matrix.m[0][0]; out.a2 = matrix.m[0][1]; out.a3 = matrix.m[0][2]; out.a4 = matrix.m[0][3];
-    out.b1 = matrix.m[1][0]; out.b2 = matrix.m[1][1]; out.b3 = matrix.m[1][2]; out.b4 = matrix.m[1][3];
-    out.c1 = matrix.m[2][0]; out.c2 = matrix.m[2][1]; out.c3 = matrix.m[2][2]; out.c4 = matrix.m[2][3];
-    out.d1 = matrix.m[3][0]; out.d2 = matrix.m[3][1]; out.d3 = matrix.m[3][2]; out.d4 = matrix.m[3][3];
-    return out;
-}
-
 ozz::math::Transform toOzzTransform(const Matrix4x4& matrix) {
-    aiVector3D scale;
-    aiQuaternion rotation;
-    aiVector3D position;
-    aiMatrix4x4 aiMatrix = toAiMatrix(matrix);
-    aiMatrix.Decompose(scale, rotation, position);
+    // ★ Was: copy the matrix into an aiMatrix4x4 purely to borrow its
+    // Decompose(). That round trip was Assimp's ONLY remaining role in this
+    // file (Faz 0, Assimp import replacement); decomposeTRS reproduces the same
+    // convention - scale from column lengths, rotation from the normalised
+    // columns - without it. ozz::math::Quaternion is (x, y, z, w).
+    Vec3 position, scale;
+    Quaternion rotation;
+    RayTrophi::decomposeTRS(matrix, position, rotation, scale);
 
     ozz::math::Transform result = ozz::math::Transform::identity();
     result.translation = ozz::math::Float3(position.x, position.y, position.z);
@@ -206,7 +193,8 @@ ozz::animation::offline::RawSkeleton buildRawSkeletonForImport(
 
 ozz::animation::offline::RawAnimation buildRawAnimation(
     const AnimationData& clip,
-    const std::vector<std::string>& runtimeJointNames) {
+    const std::vector<std::string>& runtimeJointNames,
+    const std::vector<Matrix4x4>& localBindTransforms) {
     ozz::animation::offline::RawAnimation rawAnimation;
     rawAnimation.name = clip.name.c_str();
     rawAnimation.duration = (clip.ticksPerSecond > 0.0)
@@ -223,8 +211,8 @@ ozz::animation::offline::RawAnimation buildRawAnimation(
         if (posIt != clip.positionKeys.end()) {
             for (const auto& key : posIt->second) {
                 ozz::animation::offline::RawAnimation::TranslationKey outKey;
-                outKey.time = toSeconds(key.mTime, clip.ticksPerSecond);
-                outKey.value = ozz::math::Float3(key.mValue.x, key.mValue.y, key.mValue.z);
+                outKey.time = toSeconds(key.time, clip.ticksPerSecond);
+                outKey.value = ozz::math::Float3(key.value.x, key.value.y, key.value.z);
                 track.translations.push_back(outKey);
             }
         }
@@ -233,8 +221,8 @@ ozz::animation::offline::RawAnimation buildRawAnimation(
         if (rotIt != clip.rotationKeys.end()) {
             for (const auto& key : rotIt->second) {
                 ozz::animation::offline::RawAnimation::RotationKey outKey;
-                outKey.time = toSeconds(key.mTime, clip.ticksPerSecond);
-                outKey.value = ozz::math::Quaternion(key.mValue.x, key.mValue.y, key.mValue.z, key.mValue.w);
+                outKey.time = toSeconds(key.time, clip.ticksPerSecond);
+                outKey.value = ozz::math::Quaternion(key.value.x, key.value.y, key.value.z, key.value.w);
                 track.rotations.push_back(outKey);
             }
         }
@@ -243,11 +231,20 @@ ozz::animation::offline::RawAnimation buildRawAnimation(
         if (scaleIt != clip.scalingKeys.end()) {
             for (const auto& key : scaleIt->second) {
                 ozz::animation::offline::RawAnimation::ScaleKey outKey;
-                outKey.time = toSeconds(key.mTime, clip.ticksPerSecond);
-                outKey.value = ozz::math::Float3(key.mValue.x, key.mValue.y, key.mValue.z);
+                outKey.time = toSeconds(key.time, clip.ticksPerSecond);
+                outKey.value = ozz::math::Float3(key.value.x, key.value.y, key.value.z);
                 track.scales.push_back(outKey);
             }
         }
+        // Ozz AnimationBuilder fills empty tracks with identity, NOT skeleton
+        // rest values. Preserve unkeyed parent TRS and missing components of
+        // partially animated glTF nodes (Assimp often supplies constant keys).
+        const auto bind = jointIndex < localBindTransforms.size()
+            ? toOzzTransform(localBindTransforms[jointIndex])
+            : ozz::math::Transform::identity();
+        if (track.translations.empty()) track.translations.push_back({0.0f, bind.translation});
+        if (track.rotations.empty()) track.rotations.push_back({0.0f, bind.rotation});
+        if (track.scales.empty()) track.scales.push_back({0.0f, bind.scale});
     }
 
     return rawAnimation;
@@ -499,7 +496,7 @@ std::shared_ptr<AnimationSet> buildStubAnimationSet(
         if (posIt != clip->positionKeys.end()) {
                 track.translations.reserve(posIt->second.size());
                 for (const auto& key : posIt->second) {
-                    track.translations.push_back({toSeconds(key.mTime, clip->ticksPerSecond), toVec3(key.mValue)});
+                    track.translations.push_back({toSeconds(key.time, clip->ticksPerSecond), key.value});
                 }
                 sortTranslationKeys(track.translations);
             }
@@ -508,7 +505,7 @@ std::shared_ptr<AnimationSet> buildStubAnimationSet(
             if (rotIt != clip->rotationKeys.end()) {
                 track.rotations.reserve(rotIt->second.size());
                 for (const auto& key : rotIt->second) {
-                    track.rotations.push_back({toSeconds(key.mTime, clip->ticksPerSecond), toQuaternion(key.mValue)});
+                    track.rotations.push_back({toSeconds(key.time, clip->ticksPerSecond), key.value});
                 }
                 sortRotationKeys(track.rotations);
             }
@@ -517,7 +514,7 @@ std::shared_ptr<AnimationSet> buildStubAnimationSet(
             if (scaleIt != clip->scalingKeys.end()) {
                 track.scales.reserve(scaleIt->second.size());
                 for (const auto& key : scaleIt->second) {
-                    track.scales.push_back({toSeconds(key.mTime, clip->ticksPerSecond), toVec3(key.mValue)});
+                    track.scales.push_back({toSeconds(key.time, clip->ticksPerSecond), key.value});
                 }
                 sortScaleKeys(track.scales);
             }
@@ -528,7 +525,7 @@ std::shared_ptr<AnimationSet> buildStubAnimationSet(
         runtime->clipRuntimes.push_back(std::move(clipRuntime));
 
         if (runtime->runtimeSkeleton) {
-            auto rawAnimation = buildRawAnimation(*clip, runtimeJointNames);
+            auto rawAnimation = buildRawAnimation(*clip, runtimeJointNames, runtime->bindPoseMatrices);
             if (rawAnimation.Validate()) {
                 ozz::animation::offline::AnimationBuilder animationBuilder;
                 animationBuilder.iframe_interval = 0.1f;

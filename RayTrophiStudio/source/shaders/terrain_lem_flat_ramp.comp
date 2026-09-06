@@ -1,0 +1,119 @@
+// terrain_lem_flat_ramp.comp
+// ===========================================================================
+// FLAT RESOLUTION, pass 3 of 3. Combines the two geodesic distance fields into
+// the ROUTING SURFACE that every downstream consumer steers by.
+// ===========================================================================
+//
+//      route = filled + flatStep * ( 2*dLow + (highRef - dHigh) )
+//
+// ★★★ THE COEFFICIENTS ARE THE PROOF, not a taste setting. Along the
+// relaxation parent link dLow falls by at least one cardinal step (1 cell)
+// while dHigh can move by at most one diagonal step (1.4167 cells), so
+//
+//      delta(route) <= -2 * 1 + 1 * 1.4167  =  -0.583  <  0
+//
+// for every resolved flat cell. A strictly lower neighbour is therefore
+// GUARANTEED TO EXIST, at any relaxation pass count. That is what stops flat
+// resolution from manufacturing the terminal sinks a perturbed-surface dither
+// creates (see the note in the CPU priorityFlood): the gradient is built from
+// DISTANCES, never by nudging the surface with noise, so a cell can never
+// accidentally end up lower than all of its neighbours.
+//
+// ★★★★ highRef IS A CAP, AND THE CAP IS WHAT MAKES THE PROOF HOLD ON A GPU.
+//
+// The `highRef - dHigh` form keeps the increment non-negative, but its real job
+// is to BOUND how far the away-from-high term reaches. Without a cap the proof
+// above is false on this path, and the failure is a silent one:
+//
+//   The high front is relaxed with the same bounded budget as the low front,
+//   and the two do NOT converge together - a long plain can be 20 cells from
+//   its outlet and 900 from the nearest wall. So some flat cells still hold the
+//   "front never arrived" sentinel while their neighbours hold a real distance.
+//   Whatever value the sentinel is mapped to, it can then sit next to a wildly
+//   different real one, the dHigh term jumps by far more than 1.4167, and a
+//   LOCAL SINK appears in the middle of a plain. Which is exactly the defect
+//   this whole pass exists to remove, reintroduced by its own diagnostic gap.
+//
+// Capping at highRef closes it by construction. After k relaxation passes every
+// flat cell within k cells of a high seed is resolved, so if highRef <= k - 2,
+// any cell still unresolved is at least highRef from high ground - i.e. inside
+// the capped region where the term is 0 anyway, and so are all its neighbours.
+// A jump can therefore only happen between two RESOLVED cells, whose dHigh
+// differ by at most one diagonal step. The host picks highRef accordingly.
+//
+// It is also the better model. Garbrecht & Martz normalise the away-from-high
+// term per flat; an uncapped distance over a thousand-cell plain would tilt the
+// whole plain away from one wall and swamp the outlet term. The term is a
+// near-boundary effect - it decides where a tributary AIMS as it leaves the
+// hillslope - and a few tens of cells is the whole of its business.
+//
+// ★★★ MAGNITUDE IS PHYSICAL, and that is the second half of the fix. The old
+// ladder was a few ulp, which had two consequences that both read as "the
+// solver ignores flats":
+//
+//   * Neighbour differences on a flat took only a handful of distinct float
+//     values, so slope^1.5 quantized to a near-binary weight row and MFD
+//     collapsed to D8 -- spreading died exactly where low gradients need it.
+//   * terrain_lem_incise clamps erosion to incisionSafety * (drop to the
+//     receiver). A few ulp of drop is zero drop, so a flat could not incise AT
+//     ALL: no channel could form, so no channel could capture area, so the
+//     A^m feedback that makes rivers merge and deepen never started. The flat
+//     stayed frozen with whatever the conditioning had drawn on it, forever.
+//     The mirror of this was already known and only half fixed -- see the
+//     maxDepositionMeters note in TerrainManager.h, which calls a flat cell a
+//     ratchet that can only GAIN height. This is the other jaw of it.
+//
+// flatStep comes from a real floodplain gradient in m/m, so the routing drop
+// across a flat is millions of ulp: incision engages at a small but finite
+// rate, the channel cuts a bed, the bed own gradient takes over, and the
+// synthetic ramp stops mattering. That handover is the point of the whole
+// pass -- the ramp is a seed for the feedback loop, not the answer.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float flatStep;     // normalized height per unit of increment
+    float highRef;      // cells; the dHigh influence RADIUS - see below
+    int countUnresolved;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Filled  { float filledField[]; };
+layout(set = 0, binding = 1) readonly  buffer Dist    { uint  distField[]; };
+layout(set = 0, binding = 2) writeonly buffer Route   { float routeField[]; };
+layout(set = 0, binding = 3)           buffer Diag    { uint  diag[]; };
+
+const float kInvScale = 1.0 / 12.0;   // fixed point -> cells
+const uint  kCeil = 0xFFFDu;
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+
+    uint c = distField[i];
+    uint lo = c & 0xFFFFu;
+    uint hi = c >> 16;
+
+    float inc = 0.0;
+    if (hi != 0xFFFFu) {                 // this is a flat cell
+        if (lo < kCeil) {
+            float dLow = float(lo) * kInvScale;
+            // Unreached (sentinel) maps to the cap, which is the same value
+            // every cell beyond the influence radius already has. That is what
+            // puts an unresolved cell and all of its neighbours in one flat
+            // region of this term instead of on a cliff of it.
+            float dHigh = (hi < kCeil) ? min(float(hi) * kInvScale, pc.highRef)
+                                       : pc.highRef;
+            inc = 2.0 * dLow + (pc.highRef - dHigh);
+        } else if (pc.countUnresolved != 0) {
+            // Flat, but the outlet front never arrived. This cell keeps no
+            // gradient and stays a sink. Counted rather than shrugged off: an
+            // unresolved flat looks completely plausible in the render and
+            // silently truncates every catchment upstream of it.
+            atomicAdd(diag[0], 1u);
+        }
+    }
+
+    routeField[i] = filledField[i] + inc * pc.flatStep;
+}

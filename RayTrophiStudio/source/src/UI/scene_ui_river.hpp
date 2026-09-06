@@ -19,6 +19,7 @@
 #include "scene_ui.h"
 #include "imgui.h"
 #include "RiverSpline.h"
+#include "MeshEdit/SplineSurfaceAuthoring.h"
 #include "TerrainManager.h"
 #include "ProjectManager.h"
 #include "WaterSystem.h"
@@ -195,7 +196,7 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
 
             if (changed) {
                 selectedRiver->needsRebuild = true;
-                if (selectedRiver->flatMesh) {
+                if (selectedRiver->spline.pointCount() >= 2) {
                     riverMgr.generateMesh(selectedRiver, ctx.scene);
                     extern bool g_bvh_rebuild_pending;
                     extern bool g_optix_rebuild_pending;
@@ -301,7 +302,7 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
 
                     if (changed) {
                         selectedRiver->needsRebuild = true;
-                        if (selectedRiver->flatMesh) {
+                        if (selectedRiver->spline.pointCount() >= 2) {
                             riverMgr.generateMesh(selectedRiver, ctx.scene);
                             extern bool g_bvh_rebuild_pending;
                             extern bool g_optix_rebuild_pending;
@@ -650,9 +651,15 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
                         }
                     }
                     
-                    // Rebuild the mesh after dragging
-
-                    if (river.needsRebuild && river.flatMesh) {
+                    // Rebuild the mesh after dragging, and on the first two
+                    // points as well. This used to require `river.flatMesh` to
+                    // already exist - but flatMesh is only born inside
+                    // generateMesh(), so a freshly drawn river could never get
+                    // its first mesh from here and the artist had to find the
+                    // Rebuild Mesh button. The mesh is derived and cheap, so it
+                    // is generated automatically; CARVING stays an explicit
+                    // action because it destroys terrain height.
+                    if (river.needsRebuild && river.spline.pointCount() >= 2) {
                         riverMgr.generateMesh(&river, ctx.scene);
                         
                         extern bool g_bvh_rebuild_pending;
@@ -675,61 +682,19 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
     
     if (editingRiver && riverMgr.isEditing && !gizmo_hit && !ImGuizmo::IsOver()) {
         if (ImGui::IsMouseClicked(0) && !ImGui::GetIO().WantCaptureMouse) {
-            // Raycast to terrain
-            float mx = io.MousePos.x;
-            float my = io.MousePos.y;
-
-            // Full window size
-            float v_width = (std::max)(1.0f, io.DisplaySize.x);
-            float v_height = (std::max)(1.0f, io.DisplaySize.y);
-
-            // Normalize mouse position relative to full window viewport
-            float u = mx / v_width;
-            float v = 1.0f - (my / v_height);
-
-            // Use Camera's own ray generation for perfect consistency
-            Ray cameraRay = cam.get_ray(u, v);
-            Vec3 rayDir = cameraRay.direction;
-            Vec3 rayOrigin = cameraRay.origin;
-            
-            // Perform accurate terrain raycast
-            if (TerrainManager::getInstance().hasActiveTerrain()) {
-                float closest_t = 1e20f;
-                Vec3 hitPoint;
-                bool found_terrain = false;
-                
-                auto& terrains = TerrainManager::getInstance().getTerrains();
-                for (auto& terrain : terrains) {
-                    float t_out;
-                    Vec3 n_out;
-                    if (TerrainManager::getInstance().intersectRay(&terrain, cameraRay, t_out, n_out)) {
-                        if (t_out < closest_t) {
-                            closest_t = t_out;
-                            hitPoint = cameraRay.origin + cameraRay.direction * t_out;
-                            found_terrain = true;
-                        }
-                    }
-                }
-                
-                if (found_terrain) {
-                    // Add control point
-                    editingRiver->addControlPoint(hitPoint, riverMgr.defaultWidth, riverMgr.defaultDepth);
-                    riverMgr.selectedControlPoint = (int)editingRiver->controlPointCount() - 1;
-                    ProjectManager::getInstance().markModified();
-                    gizmo_hit = true;
-                }
-            } else {
-                // No terrain - intersect with Y=0 plane
-                if (fabsf(rayDir.y) > 0.01f) {
-                    float t = -rayOrigin.y / rayDir.y;
-                    if (t > 0) {
-                        Vec3 hitPoint = rayOrigin + rayDir * t;
-                        editingRiver->addControlPoint(hitPoint, riverMgr.defaultWidth, riverMgr.defaultDepth);
-                        riverMgr.selectedControlPoint = (int)editingRiver->controlPointCount() - 1;
-                        ProjectManager::getInstance().markModified();
-                        gizmo_hit = true;
-                    }
-                }
+            // Placement goes through the shared authoring service. River keeps
+            // TerrainOnly deliberately: the general policy also snaps to scene
+            // meshes, so adopting it wholesale would silently start dropping
+            // river points onto rocks and bridges - a plausible-looking result
+            // that nobody would file as a bug.
+            MeshEdit::SurfaceSnapResult snap;
+            if (MeshEdit::snapToSurface(ctx, io.MousePos,
+                                        MeshEdit::SurfaceFilter::TerrainOnly, snap)) {
+                editingRiver->addControlPoint(snap.position, riverMgr.defaultWidth,
+                                              riverMgr.defaultDepth);
+                riverMgr.selectedControlPoint = (int)editingRiver->controlPointCount() - 1;
+                ProjectManager::getInstance().markModified();
+                gizmo_hit = true;
             }
         }
     }

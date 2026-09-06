@@ -10,6 +10,10 @@ enum class SplinePrimitiveType : uint8_t {
     Rectangle,
     OpenLine,
     OpenArc,
+    // No points at all: the starting state for surface drawing. The other
+    // primitives are planar because a PROFILE is planar; a route is not, which
+    // is why an empty curve is created with SplinePlane::Free.
+    Empty,
 };
 
 struct SplinePrimitiveSettings {

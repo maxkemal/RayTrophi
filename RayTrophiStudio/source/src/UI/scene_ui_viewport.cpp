@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <algorithm>
 #include "ProjectManager.h"
+#include "Api/RtApi.h"
 
 extern bool g_hasVulkan;
 extern bool g_vulkan_rebuild_pending;
@@ -52,7 +53,6 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     const float pad_x = 6.0f;
 
     const float right_margin = 18.0f + getPaintBrushDockWidth();
-    const float top_margin = menu_height + 10.0f;
 
     // Calculate dynamic toolbar width for right alignment inside main menu bar
     const bool can_edit_object_pivot =
@@ -244,13 +244,13 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
             const ShadingBtn btns[] = {
                 { 0, "##shade_solid",   "Solid",   hasRasterViewport ? "Fast raster preview for layout work." : "Requires Vulkan — not available on this machine.",              ImVec4(0.90f, 0.92f, 0.98f, 1.0f), hasRasterViewport  },
                 { 3, "##shade_matcap",  "Matcap",  hasRasterViewport ? "Studio-style shaded preview with matcap lighting.\nRight-click to select preset." : "Requires Vulkan — not available on this machine.", ImVec4(0.90f, 0.92f, 0.98f, 1.0f), hasRasterViewport  },
-                { 1, "##shade_preview", "Preview", hasRasterViewport ? "PBR material preview with stable studio/environment lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.90f, 0.92f, 0.98f, 1.0f), hasRasterViewport },
+                { 1, "##shade_preview", "Rayfusion", hasRasterViewport ? "Rayfusion PBR raster viewport. Use Lighting Mode to switch between Scene and the 3 Point material rig." : "Requires Vulkan — not available on this machine.", ImVec4(0.90f, 0.92f, 0.98f, 1.0f), hasRasterViewport },
                 { 2, "##shade_render",  "Render",  "Full rendered viewport using the selected device.",  ImVec4(0.90f, 0.92f, 0.98f, 1.0f), true  },
             };
             const float shade_btn_w = 54.0f;
 
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 0.0f));
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < IM_ARRAYSIZE(btns); ++i) {
                 if (i > 0) ImGui::SameLine();
                 const bool is_active = (viewport_settings.shading_mode == btns[i].mode);
                 const ImVec4 accent = btns[i].accent;
@@ -574,6 +574,10 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     }
 
     ImGui::PopStyleVar(); // ItemSpacing
+    // ★ "Q" Realtime Quality overlay'i kaldirildi (2026-09-03). Icerigi ayar
+    //   degil RAPOR'du ve viewport'un ustunde surekli yer kapliyordu; ayni
+    //   rapor artik Render Inspector > Sampling & Quality > Lighting Mode'un
+    //   altinda (DrawRealtimeQualitySettingsSection).
     // overlay handled by raster grid (depth-tested) in the Vulkan backend
 
     // ── ViewCube: standard-view navigator (top-right, below the toolbar) ──
@@ -1834,7 +1838,11 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 // Solid/Matcap/MaterialPreview: show viewport mode name
                 switch (viewport_settings.shading_mode) {
                     case 0: status_text = "Solid Mode"; break;
-                    case 1: status_text = "Material Preview"; break;
+                    case 1:
+                        status_text = ctx.render_settings.material_preview_lighting_preset ==
+                                MaterialPreviewLightingPreset::Scene
+                            ? "Rayfusion" : "Material Preview (3 Point)";
+                        break;
                     case 3: status_text = "Matcap Mode"; break;
                     default: status_text = "Viewport Mode"; break;
                 }
@@ -1892,6 +1900,46 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 if (instance_count > 0) {
                     drawHudLine("Instances: " + formatCompactCount(instance_count), IM_COL32(190, 192, 195, 200));
                     drawHudLine("Instance tris: " + formatCompactCount(instance_triangle_count), IM_COL32(190, 192, 195, 200));
+                }
+
+                // Realtime roadmap Faz 0.5a: raster presentation bridge.
+                // The panel READS the same values rt.viewport.frame_telemetry
+                // returns - it is not a second source of truth. Shown here
+                // because a serial stall is felt at the mouse long before it is
+                // measured, and this is where a human is looking when it is.
+                // ★ Only shown in raster modes (Solid/Matcap/MaterialPreview).
+                // In RT (Rendered) mode the raster ring is not the active path
+                // and these numbers are stale/meaningless.
+                const rtapi::ViewportFrameTelemetryInfo vt =
+                    !in_rendered_mode ? rtapi::viewportFrameTelemetry()
+                                      : rtapi::ViewportFrameTelemetryInfo{};
+                if (vt.available && !in_rendered_mode) {
+                    char frameLine[192];
+                    std::snprintf(frameLine, sizeof(frameLine),
+                                  "Present: %s%s  %.1f ms  (record %.1f / wait %.1f / read %.1f)",
+                                  vt.async_present ? "async" : "SYNC FALLBACK",
+                                  vt.synchronous_present ? " +capture-lock" : "",
+                                  vt.frame_ms, vt.cpu_record_ms,
+                                  vt.slot_wait_ms, vt.host_read_ms);
+                    drawHudLine(frameLine,
+                                vt.async_present ? IM_COL32(150, 200, 235, 210)
+                                                 : IM_COL32(245, 170, 70, 220));
+                    // ★ stale_presents is the number that tells the truth about
+                    // this bridge: raster work ran but no completed slot was
+                    // ready, so the viewer saw older pixels. Amber it when it
+                    // has overtaken the frames actually consumed.
+                    std::snprintf(frameLine, sizeof(frameLine),
+                                  "  slots %d  submitted %llu  consumed %llu  stale %llu  drains %llu  lat %d",
+                                  vt.slot_count,
+                                  (unsigned long long)vt.frames_submitted,
+                                  (unsigned long long)vt.frames_consumed,
+                                  (unsigned long long)vt.stale_presents,
+                                  (unsigned long long)vt.resource_drains,
+                                  vt.present_latency_frames);
+                    drawHudLine(frameLine,
+                                (vt.stale_presents > vt.frames_consumed)
+                                    ? IM_COL32(245, 170, 70, 220)
+                                    : IM_COL32(155, 205, 225, 205));
                 }
             }
 

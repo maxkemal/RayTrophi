@@ -278,9 +278,8 @@
     "tags": "selection"
   },
   "camera.get": {
-    "summary": "Return camera position, target, up vector, field of view, focus distance and aperture",
-    "returns": "CameraState",
-    "tags": "view"
+    "summary": "Return camera position, target, up vector, field of view, focus distance, aperture and the physical exposure state",
+    "notes": "EXPOSURE IS A RELATIVE MODEL, NOT AN ABSOLUTE PHOTOMETRIC ONE. The textbook formula 1/(1.2*2^EV100) assumes scene radiance in cd/m2; this engine's light intensities are arbitrary, so the multiplier is a ratio against a calibrated baseline (0.00003125) chosen to avoid a black viewport. Do not 'fix' it into the absolute formula - every scene would go black and the symptom would read as 'too dark', not 'wrong formula'. 'iso_value', 'shutter_seconds', 'f_number' and 'exposure_factor' are DERIVED read-only outputs, not settings: a preset INDEX is not a measurement, and exposure_factor is the number actually handed to the shaders. 'aperture' is the depth-of-field dial and does NOT affect exposure; 'fstop_preset_index' is the exposure/lens dial and does NOT affect depth of field. PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied."
   },
   "camera.set_position": {
     "summary": "Move the camera to a world position",
@@ -510,6 +509,13 @@
     "summary": "Enable or disable volume instrumentation counters",
     "tags": "diagnostics|performance|volume"
   },
+  "render.volume_tables": {
+    "summary": "Report the published volume SSBO state per backend (render / raster viewport), including whether the simulation compute device is that backend's own device",
+    "returns": "VolumeTablesInfo",
+    "tags": "diagnostics|volume|backend|verify",
+    "notes": "The raster viewport can be a SECOND VulkanBackendAdapter with its own VkDevice and its own volume table. A 'viewport' row with instance_count 0 while 'render' is non-zero means the realtime viewport was never handed the volumes and will draw none — render.volume_stats cannot see this, because a pass that never ran counts zero exactly like a scene with no volumes. sim_device_is_this_backends false means live dense gas addresses are suppressed for that backend and it falls back to the per-adapter NanoVDB upload (a frozen grid, not a fault).",
+    "related": "render.volume_stats|viewport.status"
+  },
   "viewport.status": {
     "summary": "Report viewport backend, shading mode, resolution, sample count, capture state and whether a frame is available",
     "returns": "ViewportStatusInfo",
@@ -521,6 +527,58 @@
     "notes": "interactive_available false means this build has no raster viewport (no Vulkan), so 'rendered' is the only selectable mode - a rejected viewport.set_shading there is the machine, not a bad request.",
     "tags": "viewport|shading|display|measure",
     "related": "viewport.set_shading|viewport.status"
+  },
+  "viewport.preview_lighting": {
+    "summary": "Report realtime/material raster lighting mode, shadow allocation, world background and Nishita direct-sun status",
+    "notes": "Canonical modes are 'scene' and 'three_point'. The default 'scene' reads the renderer's own light buffer; 'three_point' is the fixed material-inspection rig. Scene draws canonical world color/HDRI/Nishita behind geometry and uses it for ambient/specular. HDRI uses generated diffuse irradiance, GGX roughness prefilter mips and a split-sum BRDF LUT when world_ibl_ready is true; world_ibl_fallback explicitly reports the bounded raw-environment path. Nishita contributes a direct sun with its own directional atlas tile. 'shadowed_light_count' counts scene lights only; 'world_sun_shadow' reports the reserved sun tile. A gap from 'scene_light_count' means later lights still illuminate without an atlas tile. A gap between 'scene_light_count' and 'scene_light_total' means the preview light loop itself is clamped. 'material_preview_active' false means the mode is stored but the material raster viewport is not on screen. DISPLAY TRANSFORM: Rendered and raster preview use PostProcess/ColorMath.h. display_* reports the GPU transport; post.get reports user gain, while post.get_exposure reports the resolved adaptive gain. None/linear means clipping; Reinhard is explicit. Raster preview uses the resolved EV from the Rendered HDR meter and does not meter its own display-encoded image.",
+    "tags": "viewport|preview|lighting|scene|lights|measure",
+    "related": "viewport.set_preview_lighting|viewport.set_shading|lights.list"
+  },
+  "viewport.set_preview_lighting": {
+    "summary": "Set realtime/material raster lighting to the default scene path or the three-point inspection rig",
+    "notes": "'scene' uses scene lights plus the canonical world background/ambient; 'three_point' isolates material inspection from scene lighting. Directional, point, spot and area lights share a bounded shadow atlas; Nishita adds a direct world sun with one reserved directional tile. Physical Sky uses the Vulkan atmosphere LUT when available and an analytic fallback otherwise. HDRI uses generated irradiance, GGX prefilter mips and a BRDF LUT when ready, with an explicitly reported raw-environment fallback. Resets accumulation and only takes visible effect in 'material' shading mode.",
+    "tags": "viewport|preview|lighting|scene|lights|shading",
+    "related": "viewport.preview_lighting|viewport.set_shading|viewport.get_screenshot",
+    "params": {
+      "preset": {
+        "enum": "three_point|scene",
+        "description": "Canonical mode name. Realtime/real_lights aliases map to scene; legacy classic/studio/outdoor aliases map to three_point."
+      }
+    },
+    "verify_with": [
+      "viewport.preview_lighting"
+    ]
+  },
+  "viewport.quality": {
+    "summary": "Report the raster viewport quality preset and, as a value, whether scatter proxy substitution is active",
+    "notes": "Read values rather than matching on the preset name. 'scatter_lod_split' changes geometry submission. Scene shadows keep one fixed 4096 atlas so preset changes never destroy an image referenced by an in-flight frame; shadow_tile_resolution, shadow_tile_capacity, shadow_light_budget and shadow_pcf_samples report the live bounded contract. directional_shadow_cascades is 2 for Performance and 3 otherwise; directional lights and the Physical Sky sun consume that many atlas tiles and select the smallest camera-centred projection containing the receiver. A scene light beyond the budget still illuminates but has no atlas shadow. 'scene_pbr_shader' reports the comparison shader (GGX for Scene). The material parity strings are an explicit capability contract: opaque_core_parity is RT-aligned; material_graph_surface is bounded because pointiness/named attributes/AO/time inputs are neutral in raster; clearcoat is an iridescent lobe using the RT thin-film model; subsurface is a radius/scale profile approximation; translucency is a bounded thin-surface approximation; surface_anisotropy is unsupported because the current ABI fields are also legacy water wave controls; transparency is unsorted_alpha; transmission is screen_space_thickness with frozen opaque color/depth, bounded screen-space reflection, closed-mesh front/back thickness, RT texture/graph/IOR/Fresnel/Beer/roughness/dispersion semantics and environment fallback; overlapping or off-screen continuation/reflection remains bounded; resin_interior is a procedural bounded approximation; sdf_surface=shared_nanovdb_depth_pbr means realtime reads Vulkan RT's same field/transform/iso threshold and writes real raster depth, while lighting and environment continuation remain bounded rather than recursive. 'raster_viewport_available' false means the preset is stored but nothing on this machine reads it.",
+    "tags": "viewport|quality|lod|proxy|scatter|measure",
+    "related": "viewport.set_quality|viewport.frame_telemetry"
+  },
+  "viewport.set_quality": {
+    "summary": "Set the raster viewport quality preset; 'full' disables scatter proxy substitution entirely",
+    "notes": "The preset controls both geometry and bounded Scene quality. Performance/Balanced/Quality select 256/512/1024 shadow tiles, 4/8/16 shadowed scene lights and 9/9/25 receiver PCF samples; Auto currently maps to Balanced. The atlas remains 4096 and is not reallocated. 'full' additionally turns scatter proxy substitution OFF so every visible instance draws its own mesh; frustum culling stays on. Rebuilds the raster scene and resets accumulation, so render frames again before probing.",
+    "tags": "viewport|quality|lod|proxy|scatter|full|performance",
+    "related": "viewport.quality|viewport.frame_telemetry|viewport.render_frames",
+    "params": {
+      "preset": {
+        "enum": "auto|performance|balanced|quality|full",
+        "description": "Canonical preset name. 'no_proxy' and 'full (no proxy)' are accepted aliases for full because that is what the panel combo reads."
+      }
+    },
+    "verify_with": [
+      "viewport.quality",
+      "viewport.frame_telemetry"
+    ]
+  },
+  "viewport.frame_telemetry": {
+    "summary": "Report raster/Realtime viewport frame presentation telemetry: per-stage host timings, async frame-slot counters and stale-present count",
+    "notes": "'available' false means NO raster frame has ever been presented (Rendered mode, no Vulkan viewport backend, or nothing drawn yet) - the missing fields are ABSENCE, not zeros. GEOMETRY SUBMISSION: 'gpu_culling' false while 'global_instance_buffer' is true means the scene is drawn with NO frustum culling and NO scatter proxy - every instance of every mesh, wherever the camera looks. That combination is a FAULT that looks CORRECT on screen and only shows up as cost, so check it before trusting any raster timing. 'visible_triangles'/'full_triangles'/'proxy_triangles'/'full_instances'/'proxy_instances' are read back from the GPU when gpu_culling is on and are therefore ONE FRAME BEHIND; identical on a still camera, one frame late while it moves. 'scatter_triangle_target' is a TARGET, not a hard cap: GPU culling converges a distance threshold toward it across frames, so a fast camera move can exceed it for a frame or two. 'async_present' false means the driver refused persistent frame slots and the old synchronous readback path is live; 'image_readback_ms' is non-zero ONLY there. COUNTERS COUNT BLOCKS, NOT CALLS (corrected 2026-09-02; earlier numbers are not comparable). 'stale_presents' means NO new frame could be consumed during a whole render pass - the viewer really is seeing pixels from before this pass. It used to be incremented by the opportunistic second consume that runs right after submit, which can essentially never succeed, so it tracked frame count in healthy async operation and read as 'the ring is permanently behind'. A one-frame delivery delay is what the async ring BUYS, not a fault. 'slot_waits' likewise counts only waits that actually blocked on an unsignalled fence; read it together with 'slot_wait_ms', which is the honest number and stays 0.0 when nothing blocked. viewport.capture(enabled=true) FORCES synchronous presentation so a probe reads the frame just recorded, so timings taken with capture on are not the interactive timings. 'resource_drains' counts host blocks caused by RESOURCE MUTATION (a buffer/descriptor edit that had to wait for submitted frames), and as of 2026-09-02 it increments ONLY when the wait actually blocked on an unsignalled fence - it used to count every call, including waits on already-signalled fences, so it reported a CALL COUNT and not a cost. Read it per submitted frame: above about 1 per frame means some edit path mutates GPU-read state every frame and the two-slot ring is producing no overlap at all, which shows up as 'stale_presents' tracking 'frames_submitted'. Numbers from before that fix are not comparable. 'host_read_ms' was ALSO looking at the wrong place until 2026-09-02: it timed only the opportunistic post-submit consume (which essentially never succeeds), so it read 0.00 and made the GPU-to-CPU readback look free. It now covers the top-of-pass consume that performs the real invalidate + full-frame memcpy. Any architecture decision about removing the readback needs THIS number, measured at the target resolution - the copy scales with pixel count, so a figure taken at 1680x945 does not describe 4K. DISPLAY PATH (added 2026-09-02): every timing above ends when the backend's renderProgressive returns, and the frame is NOT finished there - the main loop still rebuilds the display surface and uploads it to the SDL texture. Those two passes are 'display_post_ms' and 'display_texture_upload_ms', with 'display_loop_period_ms' as the real main-loop period; they are published ONLY on frames that were actually presented (skipped idle/background frames would otherwise average in as free). They are reported even when 'available' is false, because Rendered mode goes down the SAME display path - check 'display_available'. 'display_post_was_noop_copy' true means color processing was a no-op and the pass degenerated to a plain full-frame copy: still a full-frame cost, but REMOVABLE work rather than needed work. MEASURED 2026-09-02 at 3840x2160, material shading, Vulkan viewport: host_read_ms 3.06 + present_ms 2.79 = 5.84 ms of a 10.57 ms frame (55%), i.e. two 31.6 MB CPU copies per frame; the copy scales with pixel count, so numbers taken at 1080p are ~1/4 of these and must not be compared across resolutions.",
+    "tags": "viewport|realtime|telemetry|performance|measure|frame|latency|present",
+    "related": "viewport.status|perf.list|render.probe",
+    "verify_with": [
+      "viewport.status"
+    ]
   },
   "viewport.get_screenshot": {
     "summary": "Return the captured viewport frame as a base64 JPEG, for a vision-capable model to look at",
@@ -606,6 +664,24 @@
       }
     }
   },
+  "material.get_param": {
+    "summary": "Read one material parameter directly by material name (not through an object)",
+    "notes": "material.get reads through an OBJECT and averages nothing but still names an object; this names the material ASSET, which is what you want when several materials share one flat mesh (e.g. a carafe's glass body + brass cap + rubber foot) and you need the one that actually has that name.",
+    "tags": "shading",
+    "related": "material.set_param|material.get|material.info"
+  },
+  "material.set_param": {
+    "summary": "Set one material parameter directly by material name (base_color, roughness, metallic, emission, ior, transmission, ...)",
+    "notes": "material.set edits through an OBJECT: every Principled BSDF that object's flat meshes reference gets the same value, which is wrong the instant one object carries several DIFFERENT materials — a carafe's glass body + brass cap + rubber foot is one flat mesh, three materials, and object.set would smear transmission=1 onto the cap and foot too. This edits exactly the named material asset and nothing else that happens to share its object. Colour parameters take a 3-element array, scalars take a number; an unknown parameter name is an error, not a silent no-op. Not undoable, unlike material.set.",
+    "tags": "shading|colour|roughness|metallic|emission",
+    "related": "material.get_param|material.set|material.set_texture",
+    "params": {
+      "param": {
+        "enum": "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y",
+        "description": "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission and opacity are clamped to [0,1]; ior to [1,10]."
+      }
+    }
+  },
   "material.set_texture": {
     "summary": "Bind an image file to a material texture slot",
     "tags": "shading|texture|image"
@@ -615,7 +691,8 @@
     "tags": "shading|texture"
   },
   "material.textures": {
-    "summary": "List a material's texture slots and their bound files",
+    "summary": "List a material's populated texture slots with the identity of each bound texture",
+    "notes": "Returns {slot, texture} pairs. 'texture' is the texture's identity - a file path, or an 'embedded_<import>_<slot>_<type>' cache key for a texture that lived inside the model file. Two materials reporting the SAME texture share one decoded image: intended when a map is reused, a defect when the two materials came from different source files.",
     "tags": "shading|texture"
   },
   "fluid.create_domain": {
@@ -1274,6 +1351,12 @@
       "drainage_coarsest_size": {
         "description": "Coarsest pyramid grid for the GPU drainage solve"
       },
+      "flat_gradient": {
+        "description": "Slope in m/m assumed for a depression-filled FLAT. A flat has no gradient of its own, so this is what water steers by there; 0 disables it and flat channels go back to straight, grid-locked and unable to incise"
+      },
+      "flat_resolve_passes": {
+        "description": "GPU flat-resolution budget, one cell per pass: the widest flat in cells that resolves. Check unresolved_flat_cells in the stats, not the render"
+      },
       "mass_wasting": {
         "description": "Enable in-loop landslides (1/0). Off means valley walls never collapse"
       },
@@ -1774,6 +1857,27 @@
     "summary": "List a character's animation clips with frame ranges and loop flags",
     "tags": "animation|clip"
   },
+  "anim.source_clips": {
+    "summary": "List the RAW imported animation clips with channel and key counts",
+    "notes": "SceneData::animationDataList as the LOADER produced it - not a character's AnimationController state (that is anim.clips). This is the acceptance instrument for replacing the Assimp importer: the same file must yield identical channel and key counts on the old and the new path, and 'it still animates' is not a measurement. A channel is one animated node name; position_keys/rotation_keys/scaling_keys are summed over all channels. Times are in TICKS (duration_ticks, first_key_time, last_key_time); divide by ticks_per_second for seconds. first_key_time > last_key_time would mean a reader emitted unsorted keys - the sampling code assumes time-sorted keys.",
+    "tags": "animation|clip|import|acceptance|assimp|gltf|channels|keys",
+    "related": "anim.source_channels|anim.clips|scene.import_model",
+    "returns": "Array of objects with name, model_name, duration_ticks, ticks_per_second, duration_seconds, start_frame, end_frame, position_channels, rotation_channels, scaling_channels, position_keys, rotation_keys, scaling_keys, first_key_time, last_key_time",
+    "undoable": false
+  },
+  "anim.source_channels": {
+    "summary": "Per-node key counts for one raw imported clip",
+    "notes": "The breakdown behind anim.source_clips, sorted by node name so two runs diff without post-processing. Kept separate because a rigged character has hundreds of nodes and the clip totals answer most questions; reach for this when the totals match but the pose does not, which means the keys landed on different NODES.",
+    "tags": "animation|clip|channels|bones|import|acceptance",
+    "related": "anim.source_clips",
+    "returns": "Array of objects with node_name, position_keys, rotation_keys, scaling_keys",
+    "undoable": false,
+    "params": {
+      "clip": {
+        "description": "Clip name; empty or omitted uses the first imported clip"
+      }
+    }
+  },
   "anim.play": {
     "summary": "Play an animation clip on a character layer with a blend time",
     "tags": "animation|play|clip"
@@ -1838,7 +1942,7 @@
   },
   "post.set_exposure": {
     "summary": "Set post-process exposure",
-    "notes": "Post changes must not reset sample accumulation.",
+    "notes": "Linear gain in [0,65504]. Multiplies the EV/physical/auto exposure selected by post.configure_exposure. Does not reset sample accumulation.",
     "tags": "post|brightness|grade"
   },
   "post.set_gamma": {
@@ -1846,12 +1950,12 @@
     "tags": "post|grade"
   },
   "post.set_tone_mapping": {
-    "summary": "Set the tone mapping operator",
-    "tags": "post|grade|filmic",
+    "summary": "Select AgX, ACES Fitted, Uncharted, Hejl Filmic, Linear or Reinhard",
+    "notes": "Shared CPU/CUDA/GLSL scene-linear Rec.709 implementation. ACES is a fitted approximation, not a full ACES/OCIO output transform. None/linear clips without tone mapping. Old AGX/ACES looks are intentionally replaced.",
+    "tags": "post|tonemap|color",
     "params": {
-      "tone_mapping": {
-        "description": "Operator",
-        "enum": "agx|aces|uncharted|filmic|none"
+      "type": {
+        "enum": "agx|aces_fitted|uncharted|filmic|linear|reinhard"
       }
     }
   },
@@ -1860,8 +1964,9 @@
     "tags": "post|grade|colour"
   },
   "post.set_color_temperature": {
-    "summary": "Set post-process colour temperature",
-    "tags": "post|grade|white-balance"
+    "summary": "Set scene-linear Bradford white balance",
+    "notes": "Finite [4000,25000] Kelvin, daylight-locus source white adapted to D65. 6500 K is exactly neutral. Applied before the view transform. Higher Kelvin warms.",
+    "tags": "post|whitebalance|color"
   },
   "post.set_vignette_enabled": {
     "summary": "Enable or disable the vignette",
@@ -2034,21 +2139,21 @@
   },
   "perf.list": {
     "summary": "List every recorded build/render timing section, newest write first",
-    "notes": "Sections are named by the code that performs the work: terrain.graph.evaluate/.height/.aux_outputs/.finalize_mesh, terrain.mesh_fill/.create/.update/.publish_fields, terrain.splat_resize, Renderer::rebuildBVH(...), Renderer::rebuildBackendGeometry(GPU). Each carries last/total/max ms, a call count and the process working-set delta across the scope - terrain build cost is dominated by allocation, so a timing without the memory figure next to it invites optimizing the wrong half.",
+    "notes": "Sections are named by the code that performs the work. BUILD sections: terrain.graph.evaluate/.height/.aux_outputs/.finalize_mesh, terrain.mesh_fill/.create/.update/.publish_fields, terrain.splat_resize, Renderer::rebuildBVH(...), Renderer::rebuildBackendGeometry(GPU), accel.vulkan_solid.raster_geometry. PER-FRAME sections (added 2026-09-03), all prefixed loop.: loop.frame is the whole main-loop iteration and the others are its parts - loop.events (SDL event pump), loop.ui_draw (building every ImGui panel), loop.viewport_render (the backend's renderProgressive; loop.viewport_render_cpu for the legacy CPU path), loop.display_post (original_surface to display surface), loop.imgui_render (building draw lists), loop.present (SDL_RenderClear/Copy/RenderPresent - a vsync wait, if any, lands HERE, so a large value must be read as 'work OR waiting'), loop.throttle_sleep and loop.frame_tail (deferred geometry/BLAS/TLAS rebuilds and the rest of the iteration). WHY THIS EXISTS: before it, only the backend frame and two display copies were timed. Measured on a 695k-triangle interior at 1680x945, the backend frame was 1.2 ms while the loop period was 17.8-26 ms - about 95% of the frame was in code no instrument looked at, so a 142 ms frame could not be decomposed at all. READ loop.throttle_sleep BEFORE CONCLUDING ANYTHING: the main loop deliberately sleeps 16 ms (tier1) or 48 ms (tier2) when the app is not in tier0, and tier0 requires camera_moved, which is set ONLY from mouse/keyboard. An IPC-driven session therefore never reaches tier0, so every frame rate a script measures includes that sleep and is NOT the engine's throughput. Use max_ms to catch the rare slow frame - the mean dissolves it - and call perf.reset first to open a clean window. Each section carries last/total/max ms and a call count. 'rss_measured' says whether the working-set fields mean anything: the loop.* sections set it false because a per-frame scope must not pay for two GetProcessMemoryInfo calls, and their last_rss_delta_mb/rss_after_mb are ABSENCE, not a measurement of zero.",
     "tags": "performance|timing|profile|measure|slow|memory",
     "related": "perf.get|perf.reset|perf.set_logging",
     "returns": "PerfSection[]"
   },
   "perf.get": {
     "summary": "Read one timing section by name",
-    "notes": "Returns found:false when the section has never been recorded. It never answers with zeros: a zeroed timing reads as 'measured, and it was free', which turns a missing measurement into a false one.",
+    "notes": "Returns found:false when the section has never been recorded. It never answers with zeros: a zeroed timing reads as 'measured, and it was free', which turns a missing measurement into a false one. 'rss_measured' false means the working-set fields are absence rather than zero - per-frame sections (loop.*) skip the working-set query so the instrument does not distort the section it measures. See perf.list for the loop.* section map and for why loop.throttle_sleep must be read before any frame-rate conclusion.",
     "tags": "performance|timing|profile|measure",
     "related": "perf.list",
     "returns": "PerfSection"
   },
   "perf.reset": {
     "summary": "Clear the timing counters before a measured run",
-    "notes": "Write ordering (seq) stays monotonic across a reset, so a section recorded after it cannot be confused with a stale one. Changes no scene, render or file state - which is why it carries the read capability.",
+    "notes": "Write ordering (seq) stays monotonic across a reset, so a section recorded after it cannot be confused with a stale one. Changes no scene, render or file state - which is why it carries the read capability. Call it before a measured run: max_ms never decays, so one scene-load frame keeps dominating the table until it is cleared.",
     "tags": "performance|timing|profile|reset",
     "related": "perf.list|perf.get"
   },
@@ -2086,7 +2191,7 @@
   },
   "spline.create": {
     "summary": "Create an editable spline source through the canonical scene-object service",
-    "notes": "Returns the unique scene name. The operation is undoable and produces the same SplineObject used by the viewport UI, Python and Geometry Nodes.",
+    "notes": "Returns the unique scene name. The operation is undoable and produces the same SplineObject used by the viewport UI, Python and Geometry Nodes. primitive also accepts 'empty' (no points) and plane also accepts 'free' - the pair that starts a drawn route, since a profile is planar but a path is not.",
     "tags": "spline|curve|create|authoring|undo",
     "related": "spline.list|spline.get|scene.delete|nodes.create_graph",
     "returns": "string",
@@ -2701,5 +2806,474 @@
         "default": "0.0166667"
       }
     }
+  },
+  "scatter.set_settings": {
+    "summary": "Patch a scatter group's placement rules and its density / exclusion / scale masks",
+    "notes": "Only the keys you pass are written; the rest are left alone. The two mask roles are NOT symmetric: density_mask INCLUDES probabilistically (its value is a placement probability, so 0.3 thins a stand), while exclusion_mask FORBIDS placement wherever the field is >= exclusion_threshold. exclusion_threshold is shared by exclusion_mask and splat_exclude_channel. Mask names are terrain analysis fields - get the ones a terrain actually has from terrain.list_fields, and build a combined mask upstream with a Publish Field node rather than expecting more mask slots here. splat channels are -1 (off) or 0..3 (RGBA); an out-of-range channel is refused, not clamped. Read the result back with scatter.list_groups.",
+    "tags": "scatter|foliage|mask|density|exclusion|placement",
+    "related": "scatter.list_groups|terrain.list_fields|scatter.fill",
+    "params": {
+      "group": {
+        "type": "string",
+        "description": "Scatter group id or name"
+      },
+      "target_count": {
+        "type": "int",
+        "description": "How many instances to aim for on the next fill"
+      },
+      "seed": {
+        "type": "int",
+        "description": "Placement seed; the same seed reproduces the same layout"
+      },
+      "min_distance": {
+        "type": "float",
+        "description": "Minimum spacing between instances, in metres"
+      },
+      "slope_max": {
+        "type": "float",
+        "description": "Reject ground steeper than this, in degrees"
+      },
+      "height_min": {
+        "type": "float",
+        "description": "Lowest world height that accepts an instance, in metres"
+      },
+      "height_max": {
+        "type": "float",
+        "description": "Highest world height that accepts an instance, in metres"
+      },
+      "density_mask": {
+        "type": "string",
+        "description": "INCLUDE field name; its value is a placement PROBABILITY, so 0.3 thins rather than cuts. Empty string turns it off"
+      },
+      "exclusion_mask": {
+        "type": "string",
+        "description": "EXCLUDE field name; placement is forbidden where the field is >= exclusion_threshold. Empty string turns it off"
+      },
+      "exclusion_threshold": {
+        "type": "float",
+        "description": "Reject at or above this value; drives BOTH exclusion_mask and splat_exclude_channel"
+      },
+      "scale_mask": {
+        "type": "string",
+        "description": "Field name that scales instances. Empty string turns it off"
+      },
+      "scale_mask_influence": {
+        "type": "float",
+        "description": "0 ignores scale_mask, 1 lets it drive scale fully"
+      },
+      "splat_include_channel": {
+        "type": "int",
+        "description": "Splat map channel used as an include weight: -1 off, 0..3 = RGBA"
+      },
+      "splat_exclude_channel": {
+        "type": "int",
+        "description": "Splat map channel used as an exclusion: -1 off, 0..3 = RGBA"
+      }
+    }
+  },
+  "terrain.list_fields": {
+    "summary": "List the named analysis fields a terrain is currently publishing",
+    "notes": "Measures the LIVE terrain: a name appears only because an output node (Terrain Fields Output, or a Publish Field node) actually wrote it during this evaluation. It is not a catalogue of what the node library could produce, so an empty result means the graph has not published anything yet - not that the feature is missing. These are the valid mask names for scatter.set_settings.",
+    "tags": "terrain|field|mask|introspection",
+    "related": "scatter.set_settings|terrain.list_layers",
+    "params": {
+      "terrain": {
+        "type": "string",
+        "description": "Terrain name, as reported by terrain.list"
+      }
+    }
+  },
+  "terrain.field_stats": {
+    "summary": "Measure the values and coverage of one live terrain analysis field",
+    "notes": "Reads the published field grid itself, not node settings or mesh attributes. Use this before judging a mask visually: min/max/mean and nonzero_fraction expose empty, saturated and constant fields; non_finite_count exposes poisoned data. histogram_bins is 0 to omit or 2..256. samples contains integer [x, y] field-grid coordinates and out-of-range coordinates are refused.",
+    "tags": "terrain|field|mask|measurement|histogram|sample|diagnostic",
+    "related": "terrain.list_fields|terrain.get|scatter.set_settings",
+    "params": {
+      "terrain": {
+        "type": "string",
+        "description": "Terrain name, as reported by terrain.list"
+      },
+      "field": {
+        "type": "string",
+        "description": "Live field name, as reported by terrain.list_fields"
+      },
+      "histogram_bins": {
+        "type": "int",
+        "description": "0 omits the histogram; otherwise 2..256 bins over the finite min/max range"
+      },
+      "samples": {
+        "type": "array",
+        "description": "Optional list of integer [x, y] field-grid coordinates"
+      }
+    }
+  },
+  "scene.raycast": {
+    "summary": "Reports what a ray hits: scene geometry, terrain, or the Y=0 ground plane. This is the VALUE behind the viewport's draw-on-surface tools - without it that workflow is reachable only by clicking, and therefore not testable.",
+    "params": {
+      "origin": {
+        "type": "vec3",
+        "description": "Ray origin in world space"
+      },
+      "direction": {
+        "type": "vec3",
+        "description": "Ray direction; normalized internally, must be non-zero"
+      },
+      "filter": {
+        "type": "string",
+        "description": "mesh_and_terrain (default) | terrain_only | ground_plane. An unknown value is REFUSED, not defaulted: silently widening a terrain_only query would report a mesh hit that looks correct"
+      }
+    },
+    "notes": "Returns hit, kind (mesh|terrain|ground_plane|none), object (hit mesh name; empty for terrain and the ground plane), position, normal and distance. The mesh and terrain hits are compared by distance, so a mesh behind the terrain does not win.",
+    "related": "spline.append_point|terrain.sample_height|scene.list_objects"
+  },
+  "spline.append_point": {
+    "summary": "Appends a control point at the tail of an open spline, valid from ZERO points. spline.extrude needs two existing points to derive a tangent, so it can extend a curve but never build one.",
+    "params": {
+      "name": {
+        "type": "string",
+        "description": "Spline object name, as reported by spline.list"
+      },
+      "position": {
+        "type": "vec3",
+        "description": "Point position in the spline's LOCAL space"
+      }
+    },
+    "notes": "Returns the inserted index. Pair with scene.raycast to reproduce the viewport draw-on-surface flow from script. Keyframe topology propagation runs only once the curve has more than two points, because the first two create the curve rather than change its shape.",
+    "related": "spline.create|spline.extrude|scene.raycast|spline.get"
+  },
+  "terrain.road.list_profiles": {
+    "summary": "Lists the built-in road profiles. 'Path' and 'road' are the SAME measurement under a different profile, not two solvers - a footpath is narrow, steep-capable and barely moves earth; a main road buys a shallow grade with earthworks.",
+    "notes": "Returns id, display_name and the carve parameters each profile sets: road_width, shoulder_width, grading_falloff, foliage_margin, max_grade_percent, max_cut_meters, max_fill_meters. Ids: footpath, dirt_road, main_road.",
+    "related": "terrain.road.assign_profile|terrain.road.list_assignments"
+  },
+  "terrain.road.assign_profile": {
+    "summary": "Marks an existing SplineObject as a road under the named profile. Stores NO curve geometry - the curve stays owned by the spline.* surface.",
+    "params": {
+      "spline": {
+        "type": "string",
+        "description": "SplineObject name, as reported by spline.list"
+      },
+      "profile": {
+        "type": "string",
+        "description": "Profile id: footpath | dirt_road | main_road. An unknown id is REFUSED, never substituted - carving a main road where a footpath was asked for looks entirely plausible"
+      }
+    },
+    "notes": "A spline that does not exist is refused: an assignment pointing at a missing curve would look identical to a working one in every listing. This is also what removes the graph explosion - Road Network reads the registry, so N roads are one node.",
+    "related": "terrain.road.clear_profile|terrain.road.get_assignment|spline.list"
+  },
+  "terrain.road.clear_profile": {
+    "summary": "Removes a road assignment. The SplineObject itself is untouched.",
+    "params": {
+      "spline": {
+        "type": "string",
+        "description": "SplineObject name"
+      }
+    },
+    "related": "terrain.road.assign_profile|terrain.road.list_assignments"
+  },
+  "terrain.road.get_assignment": {
+    "summary": "Reads one road assignment back, including whether its curve still exists.",
+    "params": {
+      "spline": {
+        "type": "string",
+        "description": "SplineObject name"
+      }
+    },
+    "notes": "Returns spline_object, profile_id, crossing_mode, enabled, has_override and curve_exists. A setter with no readback cannot be tested.",
+    "related": "terrain.road.assign_profile|terrain.road.get_diagnostics"
+  },
+  "terrain.road.list_assignments": {
+    "summary": "Lists every road assignment in the scene.",
+    "notes": "Same fields as terrain.road.get_assignment, one row per assignment.",
+    "related": "terrain.road.get_assignment|terrain.road.get_diagnostics"
+  },
+  "terrain.road.set_crossing_mode": {
+    "summary": "Sets how a road resolves where the ground cannot carry it. The solver applies the mode PER ROUTE SAMPLE, so only the span that needs a crossing gets one.",
+    "params": {
+      "spline": {
+        "type": "string",
+        "description": "SplineObject name"
+      },
+      "mode": {
+        "type": "string",
+        "description": "auto | terrain | bridge | ford | tunnel. An unknown mode is refused. auto bridges over water when the Road Network node's Water pin is connected and otherwise behaves exactly as terrain; bridge also spans wherever the required fill exceeds max_fill_meters; tunnel bores wherever the required cut exceeds max_cut_meters; ford follows the bed and needs a Water field, reporting crossing_diagnostic when it has none"
+      }
+    },
+    "related": "terrain.road.get_route|terrain.road.get_assignment",
+    "notes": "Bridge and tunnel spans leave the terrain untouched and are straightened between their abutments; a tunnel also publishes no surface masks at all, so a forest still grows over it. Measure the result with terrain.road.get_route."
+  },
+  "terrain.road.set_enabled": {
+    "summary": "Enables or disables one road without losing its profile assignment.",
+    "params": {
+      "spline": {
+        "type": "string",
+        "description": "SplineObject name"
+      },
+      "enabled": {
+        "type": "bool",
+        "description": "false leaves the assignment in place but stops it carving"
+      }
+    },
+    "related": "terrain.road.get_assignment|terrain.road.get_diagnostics"
+  },
+  "terrain.road.get_diagnostics": {
+    "summary": "Reports assignment health: counts, assignments whose SplineObject is gone, and assignments naming a profile this build does not have.",
+    "notes": "Returns assignment_count, enabled_count, dangling and unknown_profiles. A road that silently stops grading because its curve was deleted is the failure nobody files, so it is surfaced here and on the Road Network node.",
+    "related": "terrain.road.list_assignments|terrain.field_stats"
+  },
+  "terrain.road.get_route": {
+    "summary": "Reads the SOLVED route of one assigned road out of the terrain graph: sample positions, road and ground height, and the crossing each sample resolved to.",
+    "params": {
+      "spline": {
+        "type": "string",
+        "description": "SplineObject name of an assigned road"
+      },
+      "max_samples": {
+        "type": "int",
+        "description": "0 (default) returns only the counters. A positive value returns that many samples, decimated with both endpoints kept"
+      }
+    },
+    "notes": "This is the measurement surface for crossings: bridge_samples, ford_samples and tunnel_samples are how a script proves a declared crossing actually resolved, and crossing_diagnostic names one that could not. It fails explicitly when no Road Network node has carved this assignment yet - an empty route and an unevaluated graph must not read the same.",
+    "returns": "spline_object, terrain, sample_count, bridge_samples, ford_samples, tunnel_samples, length_meters, peak_cut_meters, peak_fill_meters, revision, crossing_diagnostic, samples[]",
+    "tags": "terrain|road|measurement",
+    "related": "terrain.road.build_mesh|terrain.road.set_crossing_mode|terrain.field_stats"
+  },
+  "terrain.road.build_mesh": {
+    "summary": "Generates the optional road surface mesh from the solved route - the very samples that carved the terrain, never a second sampling of the curve.",
+    "params": {
+      "spline": {
+        "type": "string",
+        "description": "SplineObject name of an assigned road"
+      },
+      "object": {
+        "type": "string",
+        "description": "Scene object to write. Empty reuses the object this assignment already owns, or creates <spline>_RoadSurface"
+      },
+      "include_shoulder": {
+        "type": "bool",
+        "description": "Include the shoulder in the ribbon. The ditch is never meshed - a ditch is terrain"
+      },
+      "surface_offset": {
+        "type": "float",
+        "description": "Metres above the graded surface. At zero the continuous ribbon and the discretised heightfield interpenetrate and the road reads as torn"
+      },
+      "uv_meters_per_tile": {
+        "type": "float",
+        "description": "Metres of road per V tile"
+      },
+      "skip_tunnels": {
+        "type": "bool",
+        "description": "Split the ribbon at tunnel spans instead of drawing a deck through the mountain"
+      }
+    },
+    "notes": "A rebuild REPLACES the geometry of the object the assignment owns, so repeated generation cannot leave a stack of stale roads behind. Publishes flat TriangleMesh / DNA SoA geometry. The terrain-only road stays valid without it: the mesh is a view of the route, never the authority for it.",
+    "returns": "object, vertex_count, triangle_count, span_count, length_meters, replaced_existing",
+    "tags": "terrain|road|geometry",
+    "related": "terrain.road.clear_mesh|terrain.road.get_route"
+  },
+  "terrain.road.clear_mesh": {
+    "summary": "Deletes the generated road surface and forgets the ownership record.",
+    "params": {
+      "spline": {
+        "type": "string",
+        "description": "SplineObject name of an assigned road"
+      }
+    },
+    "notes": "The ownership record is cleared even when the object is already gone, so the next build is not blocked by a pointer to nothing. The terrain-only road is unaffected.",
+    "related": "terrain.road.build_mesh"
+  },
+  "world.get_atmosphere": {
+    "summary": "Return the physical atmosphere the sky LUT is baked from",
+    "notes": "Separate from world.get on purpose: world.get is the SUN plus the two intensities, this is the MEDIUM. Every field here feeds makeAtmosphereLUTParamsGPU, so every one of them dirties the transmittance/SkyView LUT when it changes.",
+    "returns": "WorldAtmosphereInfo",
+    "tags": "environment|sky|atmosphere|nishita",
+    "related": "world.set_atmosphere|world.get"
+  },
+  "world.set_atmosphere": {
+    "summary": "Set the physical atmosphere parameters of the Nishita sky",
+    "notes": "Every field optional: omit a key to leave it unchanged. Out-of-range values are REJECTED, not clamped, because a silently clamped planet radius or scale height reads as 'the sky looks odd' rather than as an error. Any changed field marks the atmosphere LUT dirty; the runtime rebuilds it on the GPU compute path (throttled to about 15 Hz while a value is being dragged) and falls back to a CPU bake only when that pipeline is missing. UNITS ARE ABSOLUTE: planet_radius/atmosphere_height/altitude are METRES, rayleigh_density and mie_density are SCALE HEIGHTS in metres (NOT densities, despite the field names), temperature is CELSIUS and scales both scale heights.",
+    "tags": "environment|sky|atmosphere|nishita|scattering",
+    "related": "world.get_atmosphere|world.set_atmosphere_intensity|world.set_sun_elevation",
+    "params": {
+      "air_density": {
+        "description": "Rayleigh scattering multiplier (Blender 'Air'). 1 = Earth. Must be >= 0."
+      },
+      "dust_density": {
+        "description": "Mie/aerosol scattering multiplier (Blender 'Dust'). Must be >= 0."
+      },
+      "ozone_density": {
+        "description": "Ozone column multiplier; drives blue-hour saturation. Must be >= 0."
+      },
+      "ozone_absorption_scale": {
+        "description": "Scales the ozone absorption coefficients on top of ozone_density. Must be >= 0."
+      },
+      "humidity": {
+        "description": "0..1, dry to hazy. Rejected outside that range."
+      },
+      "temperature": {
+        "description": "Air temperature in CELSIUS. Scales BOTH Rayleigh and Mie scale heights by (T+273.15)/288.15, so it moves the whole atmosphere profile, not just a tint."
+      },
+      "altitude": {
+        "description": "Viewer height above sea level in METRES; the SkyView LUT is baked from this camera altitude."
+      },
+      "mie_anisotropy": {
+        "description": "Henyey-Greenstein g for the Mie phase function; forward scattering as it approaches 1. Must be within (-1, 1)."
+      },
+      "planet_radius": {
+        "description": "Ground sphere radius in METRES (Earth = 6360000). Must be >= 1000."
+      },
+      "atmosphere_height": {
+        "description": "Atmosphere shell thickness above the ground in METRES (Earth = 60000). Must be >= 1000."
+      },
+      "rayleigh_scattering": {
+        "description": "Per-channel Rayleigh scattering coefficients as [r, g, b], in 1/metre."
+      },
+      "mie_scattering": {
+        "description": "Per-channel Mie scattering coefficients as [r, g, b], in 1/metre."
+      },
+      "rayleigh_density": {
+        "description": "Rayleigh SCALE HEIGHT in metres (Earth = 8000). The name says density, the unit is a height. Must be >= 1."
+      },
+      "mie_density": {
+        "description": "Mie SCALE HEIGHT in metres (Earth = 1200). Same naming trap as rayleigh_density. Must be >= 1."
+      }
+    }
+  },
+  "camera.set_auto_exposure": {
+    "summary": "Turn auto exposure on; while on, only EV compensation is applied",
+    "notes": "PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied."
+  },
+  "camera.set_use_physical_exposure": {
+    "summary": "Enable the ISO/shutter/f-stop preset chain (needs auto_exposure off)",
+    "notes": "PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied."
+  },
+  "camera.set_iso_preset": {
+    "summary": "Select the ISO preset by index; camera.get returns the resolved iso_value",
+    "notes": "The index is not a measurement - read 'iso_value' from camera.get for the actual ISO. PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied."
+  },
+  "camera.set_shutter_preset": {
+    "summary": "Select the shutter-speed preset by index; camera.get returns shutter_seconds",
+    "notes": "Index, not seconds. Read 'shutter_seconds' from camera.get for the resolved exposure time. This dial does NOT drive motion blur. PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied."
+  },
+  "camera.set_fstop_preset": {
+    "summary": "Select the f-stop preset by index; drives exposure and Cinema lens imperfections, NOT depth of field",
+    "notes": "Depth of field still comes from the separate 'aperture' dial. On a real camera one f-number would do both; they are separate here because unifying them would silently change the blur of every existing scene - a recorded debt. PRIORITY ORDER, and it is the most common reason these dials look dead: if auto_exposure is ON only ev_compensation is applied and ISO/shutter/f-stop are NOT read; if auto_exposure is OFF but use_physical_exposure is OFF too, again only ev_compensation applies. The call still SUCCEEDS because it really did write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor to see the multiplier actually applied."
+  },
+  "camera.set_ev_compensation": {
+    "summary": "Set exposure compensation in stops; this one applies in EVERY mode",
+    "notes": "Unlike the preset dials this is always read, so it is the reliable way to move exposure without first arranging auto_exposure/use_physical_exposure. Rejected outside [-10, +10]."
+  },
+  "scene.export_gltf": {
+    "summary": "Export the scene to glTF 2.0 (.glb or .gltf + sidecar .bin) and report measured cost",
+    "notes": "Written directly from the in-memory flat SoA geometry - no Assimp round trip, no per-triangle facade. Blocks the main thread until the file is closed. The reply carries what was actually written plus a per-phase time breakdown and the writer's own peak heap (peak_writer_mb, NOT process RSS), so export cost is regressable from a script. .glb is capped at 4 GB by its 32-bit chunk length; use .gltf for anything larger.",
+    "tags": "export|gltf|glb|save|interchange|asset",
+    "related": "scene.import_model|project.save",
+    "returns": "Object with path, meshes, primitives, triangles, vertices, nodes, instances, instanced_groups, materials, images, file_bytes, peak_writer_mb and seconds_total/collect/materials/plan/write",
+    "undoable": false,
+    "params": {
+      "path": {
+        "description": "Output file path; extension must be .glb or .gltf"
+      },
+      "geometry": {
+        "description": "Write meshes"
+      },
+      "materials": {
+        "description": "Write materials and textures"
+      },
+      "cameras": {
+        "description": "Write the active camera as a glTF camera node"
+      },
+      "lights": {
+        "description": "Write scene lights via KHR_lights_punctual"
+      },
+      "animations": {
+        "description": "Write animation clips as glTF samplers/channels"
+      },
+      "skinning": {
+        "description": "Write the skeleton, JOINTS_0/WEIGHTS_0 and inverse bind matrices"
+      },
+      "selected_only": {
+        "description": "Export only the current multi-selection; fails if nothing is selected"
+      },
+      "bake_terrain_materials": {
+        "description": "Flatten splat-blended terrain layers into export textures"
+      },
+      "terrain_bake_resolution": {
+        "description": "Square resolution of each baked terrain texture"
+      },
+      "gpu_instancing": {
+        "description": "Collapse scattered objects sharing one source mesh into EXT_mesh_gpu_instancing nodes"
+      }
+    }
+  },
+  "scene.export_estimate": {
+    "summary": "Report what an export WOULD cost, without writing anything",
+    "notes": "The same pre-export estimate the Export Settings panel shows, computed by the same function - so a script can catch the panel drifting away from the writer. It already did: the writer was fixed to read scatter from InstanceManager (on Vulkan scatter is NEVER expanded into world.objects), the panel's estimate was not, and it reported instances=0 for a scene the exporter then wrote a thousand instances of. Compare `instances` here against scene.export_gltf's measured `instances`; a gap means they have drifted again. Note `triangles` counts non-instanced geometry only - add `instance_triangles` for the total. `estimated_peak_mb` covers only geometry the writer must MATERIALISE (legacy Triangle facades); flat SoA meshes stream from where they live and cost no extra heap.",
+    "tags": "export|gltf|estimate|cost|preflight|scatter|instances",
+    "related": "scene.export_gltf|scatter.list_groups",
+    "returns": "Object with objects, triangles, legacy_triangles, instances, unique_instance_sources, instance_triangles, materialised_instance_triangles, estimated_peak_mb",
+    "undoable": false,
+    "params": {
+      "geometry": {
+        "description": "Count meshes"
+      },
+      "materials": {
+        "description": "Count materials and textures"
+      },
+      "cameras": {
+        "description": "Count the active camera as a glTF camera node"
+      },
+      "lights": {
+        "description": "Count scene lights"
+      },
+      "animations": {
+        "description": "Count animation clips"
+      },
+      "skinning": {
+        "description": "Count skinning data"
+      },
+      "selected_only": {
+        "description": "Estimate the current multi-selection only"
+      },
+      "bake_terrain_materials": {
+        "description": "Assume terrain layers get baked"
+      },
+      "terrain_bake_resolution": {
+        "description": "Terrain bake resolution assumed by the estimate"
+      },
+      "gpu_instancing": {
+        "description": "Assume EXT_mesh_gpu_instancing collapses scatter nodes"
+      }
+    }
+  },
+  "post.get_exposure": {
+    "summary": "Read exposure settings, applied EV and HDR histogram",
+    "notes": "Relative scene-linear luminance, not photometric EV100. GPU meters use a deterministic 128x128 sample grid and 256 weighted log2 bins. Raster preview shares the last resolved EV; it does not provide an HDR meter. meter_valid and meter_source report available data.",
+    "returns": "object",
+    "tags": "post|exposure|histogram",
+    "related": "post.configure_exposure|post.reset_exposure"
+  },
+  "post.configure_exposure": {
+    "summary": "Atomically configure manual, physical-camera or GPU-histogram exposure",
+    "notes": "UI and Python call the same service. Mode is manual|physical|auto_histogram. EV in [-24,24]; min_ev <= max_ev. 0 <= low_percent < high_percent <= 100. key in [0.001,1], speed_up/down in (0,20] per second, center_weight in [0,1]. Non-finite values and unknown fields fail without mutation. locked=true captures current applied EV unless locked_ev is supplied. Final render freezes adaptation and rejects edits. No accumulation reset.",
+    "params": {
+      "settings": {
+        "type": "object",
+        "required": true,
+        "description": "Exposure patch: mode, ev, min_ev, max_ev, low_percent, high_percent, key, speed_up, speed_down, center_weight, locked, locked_ev"
+      }
+    },
+    "tags": "post|exposure|histogram",
+    "verify_with": "post.get_exposure",
+    "invalidates": "display",
+    "returns": "object"
+  },
+  "post.reset_exposure": {
+    "summary": "Reset exposure histogram and adaptation history",
+    "notes": "Invalidates in-flight measurements by generation. Does not change settings or the explicit locked EV. Rejected while a final render is active.",
+    "returns": "object",
+    "tags": "post|exposure|reset",
+    "verify_with": "post.get_exposure",
+    "invalidates": "display"
   }
 }

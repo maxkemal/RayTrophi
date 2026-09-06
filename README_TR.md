@@ -299,6 +299,41 @@ Yakınsama sonrası, path-traced sonucu + AOV tamponlarını okuyup; sahne geome
 
 ---
 
+---
+
+## 📥 Model içe aktarma
+
+Her formatın **kendi özel okuyucusu** var. Ortada genel amaçlı bir içe aktarıcı
+yok, ve okuyucular arası fallback de yok: bir okuyucu başarısız olursa içe
+aktarma **sebebiyle** başarısız olur. "Yüklendi" ile "başka bir şey üzerinden
+yüklendi" aynı görünmemeli.
+
+| Format | Okuyucu | Lisans |
+|---|---|---|
+| `.gltf` / `.glb` | [**cgltf**](https://github.com/jkuhlmann/cgltf) 1.15 — gömülü | MIT, © 2018-2021 Johannes Kuhlmann |
+| `.fbx` | [**ufbx**](https://github.com/ufbx/ufbx) 0.23.0 — gömülü | MIT *veya* kamu malı, © 2020 Samuli Raivio |
+| `.obj` / `.mtl` | RayTrophi'nin kendi ayrıştırıcısı | MIT (bu proje) |
+
+**Desteklenenler:** köşe bazında öznitelikler ve çoklu UV setleriyle geometri,
+gömülü veya harici dokularla PBR materyaller, iskelet skinning'i, transform
+animasyonu, kameralar ve fotometrik ışıklar (glTF), ve scatter turları için
+`EXT_mesh_gpu_instancing`. glTF aynı zamanda **dışa aktarma** formatıdır; motorun
+flat SoA geometrisinden doğrudan yazılır.
+
+**Neden özel okuyucular.** Genel bir içe aktarıcı önce kendi tam nesne grafiğini
+kurar, sonra motor onu dönüştürür — mesh **iki kez** oluşturulur, ve içe
+aktarıcının konvansiyonları (UV orijini, birim ölçeği, düğüm transformları)
+sessizce motorun konvansiyonu haline gelir. Her konteyneri doğrudan okumak o
+aradaki kopyayı kaldırır ve konvansiyonları açık, test edilebilir yapar. İçe
+aktarma maliyeti tahmin edilmez, **faz faz ölçülür** (ayrıştırma /
+materyal+doku / geometri / animasyon).
+
+**Teşekkür.** cgltf ve ufbx `RayTrophiStudio/external/` altında, değiştirilmeden
+ve lisans metinleri korunarak gömülüdür — ikisi de izin verici lisanslı tek
+dosyalık kütüphaneler, ve bu proje onlara minnettar. OBJ satır tabanlı bir metin
+formatı olduğu, yani bir bağımlılık kazandırdığından fazlasını götüreceği için
+kendi içimizde ayrıştırılır. Tam notlar için: [LICENSE.txt](LICENSE.txt).
+
 ## Python otomasyonu & güvenli IPC
 
 RayTrophi, gömülü Python 3.11 otomasyon katmanı (`rt`, API sürümü `0.5.0`) ve transporttan
@@ -360,11 +395,11 @@ Proje bağımlılıkları sistem ortam değişkenleriyle çözer. Derlemeden ön
 | `OPTIX_ROOT` | OptiX SDK | `C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0` |
 | `EMBREE_ROOT` | Embree kökü | `E:\...\embree-4.4.0.x64.windows` |
 | `OIDN_ROOT` | Intel OIDN kökü | `E:\...\oidn-2.3.0.x64.windows` |
-| `ASSIMP_ROOT` | Assimp kökü | `E:\...\Assimp` |
 | `CUDA_PATH` | CUDA Toolkit | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x` (genelde otomatik) |
 | `VULKAN_SDK` | Vulkan SDK | `C:\VulkanSDK\1.3.xxx.0` |
 
-Yönetilen bağımlılıklar: SDL2, Embree 4.x, Assimp 5.x, ImGui, OpenMP, stb_image, TinyEXR, Intel OIDN, NanoVDB ve CUDA/OptiX (opsiyonel).
+Yönetilen bağımlılıklar: SDL2, Embree 4.x, ImGui, OpenMP, stb_image, TinyEXR, Intel OIDN, NanoVDB ve CUDA/OptiX (opsiyonel).
+Model içe aktarma harici bir SDK istemez: cgltf ve ufbx `RayTrophiStudio/external/` altında gömülüdür.
 
 ### Derleme
 
@@ -387,7 +422,9 @@ cmake --build build --config Release -j 12
 CMake; çalıştırılabilir, PTX, Vulkan shader ve runtime DLL'lerini `build/bin/<CONFIG>` altında izole tutar, VS2022 `x64` çıktısının üzerine asla yazmaz.
 
 ### Çalıştırma
-Çalıştırılabiliri başlat; dock'lu UI açılır. **File → Load Scene** ile model içe aktar (GLTF önerilir; Assimp ile 40+ format).
+Çalıştırılabiliri başlat; dock'lu UI açılır. **File → Load Scene** ile model içe aktar.
+Desteklenen formatlar: **glTF/GLB, FBX ve OBJ**; her biri kendi okuyucusuyla
+(bkz. [Model içe aktarma](#-model-içe-aktarma)).
 
 ---
 
@@ -512,11 +549,11 @@ Katkılar memnuniyetle karşılanır — performans çalışmaları, yeni matery
 
 MIT Lisansı — bkz. [LICENSE.txt](LICENSE.txt).
 
-Üçüncü taraf kütüphane ve SDK'lar kendi lisansları altında kalır. Jolt Physics, Assimp, Dear ImGui, ozz-animation, Intel OIDN, Embree, OptiX/CUDA, Vulkan, SDL2, JSON kütüphaneleri, stb, TinyEXR, NanoVDB/OpenVDB, miniz ve ilgili notlar için [LICENSE.txt](LICENSE.txt) içindeki **Third-party components** bölümüne bakın.
+Üçüncü taraf kütüphane ve SDK'lar kendi lisansları altında kalır. Jolt Physics, cgltf, ufbx, Dear ImGui, ozz-animation, Intel OIDN, Embree, OptiX/CUDA, Vulkan, SDL2, JSON kütüphaneleri, stb, TinyEXR, NanoVDB/OpenVDB, miniz ve ilgili notlar için [LICENSE.txt](LICENSE.txt) içindeki **Third-party components** bölümüne bakın.
 
 ## 🙏 Teşekkürler
 
-**Embree** (Intel CPU ışın izleme) · **OptiX** (NVIDIA GPU ışın izleme) · **Vulkan** · **Jolt Physics** (rigid-body fizik) · **Assimp** (asset içe aktarma) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoise) · **NanoVDB** (seyrek hacimler) · **Ozz-animation** (iskelet animasyonu) · **stb** · **TinyEXR**
+**Embree** (Intel CPU ışın izleme) · **OptiX** (NVIDIA GPU ışın izleme) · **Vulkan** · **Jolt Physics** (rigid-body fizik) · **cgltf** (glTF içe/dışa aktarma) · **ufbx** (FBX içe aktarma) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoise) · **NanoVDB** (seyrek hacimler) · **Ozz-animation** (iskelet animasyonu) · **stb** · **TinyEXR**
 
 ## 👤 Yazar
 

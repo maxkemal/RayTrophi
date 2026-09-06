@@ -993,12 +993,15 @@ void SceneData::syncFluidParticleRenderInstances(bool enable_rt_geometry) {
             destroyFluidParticleRenderGroup(obj);
             continue;
         }
-        // Particles render_mode OR Solid/Matcap viewport (splat-sphere proxy, since
-        // the raster viewport can't draw the SurfaceSDF volume).
+        // Solid/Matcap still need a compatibility splat-sphere proxy. Material
+        // Preview owns a native SurfaceSDF pass, so drawing that proxy there as
+        // well makes two depth representations race during camera movement.
+        const bool needs_raster_sdf_proxy =
+            g_solid_viewport_active && !g_material_preview_viewport_active;
         const bool lifecycle_alive = obj.visible && obj.enabled;
         const bool wants = lifecycle_alive &&
             (obj.render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
-             g_solid_viewport_active);
+             needs_raster_sdf_proxy);
         if (!lifecycle_alive) {
             destroyFluidParticleRenderGroup(obj);
             continue;
@@ -1204,11 +1207,13 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             const auto& state  = states[d];
             const bool is_fluid = state.type == RayTrophiSim::SimulationDomainType::Fluid;
 
-            // Render the splat-sphere proxy when the fluid's render_mode is Particles,
-            // OR whenever the active viewport is Solid/Matcap — the raster viewport
-            // can't draw the SurfaceSDF NanoVDB volume, so spheres are the live proxy
-            // there. In Rendered mode + SurfaceSDF this stays false (the volume renders
-            // instead) and the gate below tears the sphere group down.
+            // Material Preview renders SurfaceSDF directly. Solid/Matcap retain
+            // the compatibility particle proxy until they share that pass.
+            const bool needs_raster_sdf_proxy =
+                g_solid_viewport_active && !g_material_preview_viewport_active;
+
+            // Explicit particle/Splat authoring always wins. The compatibility
+            // proxy only fills SurfaceSDF in raster modes without a native pass.
             const bool lifecycle_alive =
                 system.visible && system.enabled && state.valid && is_fluid &&
                 d < domains.size();
@@ -1220,7 +1225,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             }
             const bool render_eligible = enable_rt_geometry && lifecycle_alive &&
                 (domains[d].fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
-                 has_splat_override || g_solid_viewport_active);
+                 has_splat_override || needs_raster_sdf_proxy);
 
             int& group_id = system.domain_particle_render_group_ids[d];
 
@@ -1420,7 +1425,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     }
                     break;
                 }
-                if ((splat || g_solid_viewport_active) && accepted_particles < budget) {
+                if ((splat || needs_raster_sdf_proxy) && accepted_particles < budget) {
                     source_particles[source_index].push_back(pi);
                     ++accepted_particles;
                 }

@@ -1,3 +1,5 @@
+#include "PostProcess/PostSurface.h"
+#include "PostProcess/PostService.h"
 #include <SDL_main.h> 
 #include <fstream>
 #include <locale>
@@ -20,6 +22,8 @@
 #include <string_view>
 #include <SDL_image.h>
 #include "Renderer.h"
+#include "VolumetricRenderer.h"
+#include "PerfProfile.h"
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 #include "Backend/VulkanBackend.h"
@@ -562,11 +566,12 @@ int         g_seq_save_end = 0;
 std::string g_seq_save_dir;
 bool        g_seq_save_denoise = false;
 
-// True while the active viewport is an interactive shading mode (Solid/Matcap),
-// i.e. NOT Rendered. The fluid particle bridge reads this to render a cheap splat-
-// sphere proxy in Solid mode even when the fluid's render_mode is SurfaceSDF (the
-// raster viewport cannot draw the NanoVDB surface). Updated once per frame.
+// True while the active viewport is an interactive raster shading mode, i.e.
+// NOT Rendered. Material Preview is distinguished because it has a native
+// NanoVDB SurfaceSDF pass; Solid/Matcap still use the compatibility sphere proxy.
 bool g_solid_viewport_active = false;
+bool g_material_preview_viewport_active = false;
+bool g_dense_gas_host_mirror_needed = false;
 bool g_sim_timeline_mode = true;  // true = timeline-driven (bake/scrub, idle when stopped); false = live free-run preview
 bool g_sim_use_gpu_solver = false; // GPU simulation compute (Vulkan, or CUDA where present): grid solver + APIC fluid + NanoVDB bridge
 bool g_gpu_subdivide_enabled = true; // GPU linear mesh subdivision (CPU fallback when unavailable / small mesh)
@@ -613,29 +618,13 @@ std::future<void> g_optix_future;
 bool g_optix_rebuilding = false;
 
 
-Vec3 applyVignette(const Vec3& color, int x, int y, int width, int height, float strength = 1.0f) {
-    float u = (x / (float)width - 0.5f) * 2.0f;
-    float v = (y / (float)height - 0.5f) * 2.0f;
-    float dist = u * u + v * v;
-    float falloff = std::clamp(1.0f - strength * dist, 0.0f, 1.0f);
-    return color * falloff;
-}
 
-bool hasNoOpColorProcessing(const ColorProcessor& processor) {
-    const auto nearlyEqual = [](float a, float b, float eps = 1e-5f) {
-        return std::fabs(a - b) <= eps;
-    };
 
-    const auto& params = processor.params;
-    const bool vignette_noop = !params.enable_vignette || nearlyEqual(params.vignette_strength, 0.0f);
-    return nearlyEqual(params.global_exposure, 1.0f) &&
-           nearlyEqual(params.global_gamma, 1.0f) &&
-           nearlyEqual(params.saturation, 1.0f) &&
-           nearlyEqual(params.color_temperature, 6500.0f) &&
-           params.tone_mapping_type == ToneMappingType::None &&
-           vignette_noop;
-}
-
+// ★ `hasNoOpColorProcessing` SILINDI. Tek kullanicisi, "post varsayilan mi"
+//   diye sorup GPU'nun urettigi kareyi oldugu gibi gecirme karariydi. Artik GPU
+//   post'u HER ZAMAN uyguladigi icin o soru anlamsiz: cevabi ne olursa olsun
+//   CPU gecisi kosmamali. Iki kod yolunu "her ihtimale karsi" yasatmak bu
+//   depoda tekrar tekrar sessiz ariza uretti.
 void copySurfacePixelsOrBlit(SDL_Surface* dst, SDL_Surface* src) {
     if (!dst || !src || !dst->pixels || !src->pixels) return;
 
@@ -1074,444 +1063,6 @@ UIContext ui_ctx{
    reset_tonemap,
    mouse_control_enabled
 };
-void applyToneMappingToSurfaceWithCamera(SDL_Surface* surface, SDL_Surface* original, ColorProcessor& processor, Renderer* renderer, const Camera* camera) {
-    if (!surface || !surface->pixels) return;
-    Uint32* pixels = (Uint32*)surface->pixels;
-    int width = surface->w;
-    int height = surface->h;
-    SDL_PixelFormat* fmt = surface->format;
-
-    const bool use_float_buffer = (renderer != nullptr) &&
-                                  renderer->cpu_accumulation_valid &&
-                                  (renderer->cpu_accumulation_buffer.size() == (size_t)(width * height));
-
-    Uint32* src = (original && original->pixels) ? (Uint32*)original->pixels : nullptr;
-    if (!use_float_buffer && !src) return;
-
-    // Capture format masks/shifts once — avoid SDL_MapRGB/SDL_GetRGB per-pixel dispatch.
-    const Uint32 rMask = fmt->Rmask, gMask = fmt->Gmask, bMask = fmt->Bmask, aMask = fmt->Amask;
-    const Uint8  rShift = fmt->Rshift, gShift = fmt->Gshift, bShift = fmt->Bshift;
-    const float  inv255 = 1.0f / 255.0f;
-
-    // Precompute linear→sRGB→uint8 LUT so the per-pixel hot path avoids 3× std::pow.
-    // Only needed for use_float_buffer branch; non-float branch consumes pre-sRGB pixels.
-    constexpr int LUT_SIZE = 4096;
-    constexpr float LUT_MAX = float(LUT_SIZE - 1);
-    alignas(64) uint8_t srgbLut[LUT_SIZE];
-    if (use_float_buffer) {
-        for (int i = 0; i < LUT_SIZE; ++i) {
-            float x = float(i) / LUT_MAX;
-            float s = (x <= 0.0031308f) ? 12.92f * x
-                                        : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f;
-            if (s < 0.0f) s = 0.0f;
-            if (s > 1.0f) s = 1.0f;
-            srgbLut[i] = static_cast<uint8_t>(s * 255.0f + 0.5f);
-        }
-    }
-
-    const bool reinhard_none = (processor.params.tone_mapping_type == ToneMappingType::None);
-    const bool use_denoised  = use_float_buffer && renderer->hasCPUDenoisedBuffer();
-    const bool vignette_on   = processor.params.enable_vignette;
-    const float vignette_strength = processor.params.vignette_strength;
-    const Stylize::StylizeModeState* stylize_state = renderer ? &renderer->stylizeMode : nullptr;
-    const int stylize_frame = renderer ? renderer->world.getGPUData().frame_count : 0;
-    const WorldData stylize_world = renderer ? renderer->world.getGPUData() : WorldData{};
-    const bool use_cpu_stylize_aov =
-        stylize_state &&
-        stylize_state->enabled &&
-        use_float_buffer &&
-        renderer->cpu_albedo_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
-        renderer->cpu_normal_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
-        renderer->cpu_world_position_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
-        renderer->cpu_depth_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
-        renderer->cpu_material_id_buffer.size() == static_cast<size_t>(width * height);
-
-    auto makeStylizeAOV = [=](int sx, int sy) -> Stylize::StylizeAOVSample {
-        Stylize::StylizeAOVSample aov;
-        if (!use_cpu_stylize_aov ||
-            sx < 0 || sy < 0 || sx >= width || sy >= height) {
-            return aov;
-        }
-        aov.valid = true;
-        aov.screen_u = (static_cast<float>(sx) + 0.5f) / std::max(1.0f, static_cast<float>(width));
-        aov.screen_v = (static_cast<float>(sy) + 0.5f) / std::max(1.0f, static_cast<float>(height));
-        aov.sun_dir = Vec3(stylize_world.nishita.sun_direction.x, stylize_world.nishita.sun_direction.y, stylize_world.nishita.sun_direction.z);
-        if (aov.sun_dir.length_squared() <= 1e-8f) {
-            aov.sun_dir = Vec3(0.32f, 0.82f, 0.46f);
-        } else {
-            aov.sun_dir = aov.sun_dir.normalize();
-        }
-        aov.sun_size_degrees = std::max(0.01f, stylize_world.nishita.sun_size);
-        aov.sun_elevation_degrees = stylize_world.nishita.sun_elevation;
-        aov.nishita_clouds_enabled = stylize_world.nishita.clouds_enabled != 0;
-        aov.nishita_cloud_coverage = std::clamp(stylize_world.nishita.cloud_coverage, 0.0f, 1.0f);
-        aov.nishita_cloud_density = std::max(0.0f, stylize_world.nishita.cloud_density);
-        aov.nishita_cloud_scale = std::max(0.05f, stylize_world.nishita.cloud_scale);
-        aov.nishita_cloud_offset_x = stylize_world.nishita.cloud_offset_x;
-        aov.nishita_cloud_offset_z = stylize_world.nishita.cloud_offset_z;
-        aov.nishita_cloud_seed = stylize_world.nishita.cloud_seed;
-        float stylize_view_len = 0.0f;
-        if (camera) {
-            Vec3 view_dir = camera->lower_left_corner
-                + aov.screen_u * camera->horizontal
-                + aov.screen_v * camera->vertical
-                - camera->origin;
-            stylize_view_len = view_dir.length();
-            aov.view_dir = view_dir.length_squared() > 1e-8f ? view_dir.normalize() : Vec3(0.0f, 0.0f, -1.0f);
-        }
-        const size_t idx = static_cast<size_t>(sy) * static_cast<size_t>(width) + static_cast<size_t>(sx);
-        const Renderer::Vec4& albedo = renderer->cpu_albedo_accumulation_buffer[idx];
-        const Renderer::Vec4& normal = renderer->cpu_normal_accumulation_buffer[idx];
-        const Renderer::Vec4& world_position = renderer->cpu_world_position_accumulation_buffer[idx];
-        aov.hit = albedo.w > 0.0f && renderer->cpu_depth_accumulation_buffer[idx] > 0.0f;
-        aov.albedo = Vec3(albedo.x, albedo.y, albedo.z);
-        aov.normal = Vec3(normal.x, normal.y, normal.z);
-        aov.world_position = Vec3(world_position.x, world_position.y, world_position.z);
-        aov.depth = renderer->cpu_depth_accumulation_buffer[idx];
-        aov.material_id = renderer->cpu_material_id_buffer[idx];
-        if (aov.hit && stylize_view_len > 1e-6f) {
-            // world units per pixel at the hit — drives screen-constant brush daub sizing
-            aov.pixel_scale = aov.depth * camera->vertical.length()
-                            / (std::max(1.0f, static_cast<float>(height)) * stylize_view_len);
-        }
-        return aov;
-    };
-
-    auto makeStylizeAOVWithEdges = [=](int sx, int sy) -> Stylize::StylizeAOVSample {
-        Stylize::StylizeAOVSample aov = makeStylizeAOV(sx, sy);
-        if (!aov.hit) {
-            return aov;
-        }
-        const Stylize::StylizeAOVSample right = makeStylizeAOV(sx + 1, sy);
-        const Stylize::StylizeAOVSample down = makeStylizeAOV(sx, sy + 1);
-        float edge = 0.0f;
-        auto accumulateEdge = [&](const Stylize::StylizeAOVSample& n) {
-            if (!n.hit) {
-                edge += 1.0f;
-                return;
-            }
-            const float depth_scale = std::max(0.025f, aov.depth * 0.015f);
-            edge += std::min(1.0f, std::abs(aov.depth - n.depth) / depth_scale);
-            edge += std::min(1.0f, (aov.normal - n.normal).length() * 0.75f);
-            if (aov.material_id != n.material_id) {
-                edge += 0.45f;
-            }
-        };
-        accumulateEdge(right);
-        accumulateEdge(down);
-        aov.edge = std::clamp(edge * 0.55f, 0.0f, 1.0f);
-        return aov;
-    };
-
-    const float* denoised_ptr = use_denoised ? renderer->cpu_denoised_buffer.data() : nullptr;
-    const Renderer::Vec4* accum_ptr = (use_float_buffer && !use_denoised)
-                                      ? renderer->cpu_accumulation_buffer.data() : nullptr;
-
-    // std::for_each_n over row indices → inner loop vectorizable; avoids std::async thread spawn per call.
-    std::vector<int> rowIndices(height);
-    std::iota(rowIndices.begin(), rowIndices.end(), 0);
-
-    std::for_each_n(std::execution::par_unseq, rowIndices.data(), (size_t)height,
-        [=, &processor](int j) {
-            const int buffer_y = height - 1 - j;
-            Uint32* __restrict rowDst = pixels + (size_t)j * (size_t)width;
-            const Uint32* __restrict rowSrc = src ? (src + (size_t)j * (size_t)width) : nullptr;
-
-            for (int i = 0; i < width; ++i) {
-                Vec3 raw_color;
-
-                if (use_float_buffer) {
-                    if (use_denoised) {
-                        const size_t idx = ((size_t)j * (size_t)width + (size_t)i) * 3;
-                        raw_color = Vec3(denoised_ptr[idx], denoised_ptr[idx + 1], denoised_ptr[idx + 2]);
-                    } else {
-                        const Renderer::Vec4& p = accum_ptr[(size_t)buffer_y * (size_t)width + (size_t)i];
-                        raw_color = Vec3(p.x, p.y, p.z);
-                    }
-                    if (reinhard_none) {
-                        raw_color.x = raw_color.x / (raw_color.x + 1.0f);
-                        raw_color.y = raw_color.y / (raw_color.y + 1.0f);
-                        raw_color.z = raw_color.z / (raw_color.z + 1.0f);
-                    }
-                } else {
-                    Uint32 px = rowSrc[i];
-                    float r = float((px & rMask) >> rShift) * inv255;
-                    float g = float((px & gMask) >> gShift) * inv255;
-                    float b = float((px & bMask) >> bShift) * inv255;
-                    raw_color = Vec3(r, g, b);
-                }
-
-                Vec3 final_color = processor.processColor(raw_color, i, j);
-
-                if (vignette_on)
-                    final_color = applyVignette(final_color, i, j, width, height, vignette_strength);
-
-                if (stylize_state && stylize_state->enabled) {
-                    if (use_cpu_stylize_aov) {
-                        final_color = Stylize::applyPostProcess(
-                            final_color,
-                            makeStylizeAOVWithEdges(i, buffer_y),
-                            i, j, stylize_frame, *stylize_state);
-                    } else {
-                        final_color = Stylize::applyPostProcess(final_color, i, j, stylize_frame, *stylize_state);
-                    }
-                }
-
-                Uint8 ri, gi, bi;
-                if (use_float_buffer) {
-                    float fx = final_color.x; if (fx < 0.0f) fx = 0.0f; else if (fx > 1.0f) fx = 1.0f;
-                    float fy = final_color.y; if (fy < 0.0f) fy = 0.0f; else if (fy > 1.0f) fy = 1.0f;
-                    float fz = final_color.z; if (fz < 0.0f) fz = 0.0f; else if (fz > 1.0f) fz = 1.0f;
-                    ri = srgbLut[int(fx * LUT_MAX)];
-                    gi = srgbLut[int(fy * LUT_MAX)];
-                    bi = srgbLut[int(fz * LUT_MAX)];
-                } else {
-                    float fx = final_color.x; if (fx < 0.0f) fx = 0.0f; else if (fx > 1.0f) fx = 1.0f;
-                    float fy = final_color.y; if (fy < 0.0f) fy = 0.0f; else if (fy > 1.0f) fy = 1.0f;
-                    float fz = final_color.z; if (fz < 0.0f) fz = 0.0f; else if (fz > 1.0f) fz = 1.0f;
-                    ri = uint8_t(fx * 255.0f);
-                    gi = uint8_t(fy * 255.0f);
-                    bi = uint8_t(fz * 255.0f);
-                }
-
-                Uint32 alpha = rowSrc ? (rowSrc[i] & aMask) : aMask;
-                rowDst[i] = alpha
-                          | ((Uint32)ri << rShift)
-                          | ((Uint32)gi << gShift)
-                          | ((Uint32)bi << bShift);
-            }
-        });
-}
-
-void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, ColorProcessor& processor, Renderer* renderer) {
-    applyToneMappingToSurfaceWithCamera(surface, original, processor, renderer, nullptr);
-}
-
-void applyStylizeToSurfaceWithCamera(SDL_Surface* surface, Renderer& renderer, bool use_cpu_aov, const Camera* camera) {
-    if (!surface || !surface->pixels || !renderer.stylizeMode.enabled) return;
-
-    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
-    SDL_PixelFormat* fmt = surface->format;
-    const int width = surface->w;
-    const int height = surface->h;
-
-    const Uint32 rMask = fmt->Rmask, gMask = fmt->Gmask, bMask = fmt->Bmask, aMask = fmt->Amask;
-    const Uint8 rShift = fmt->Rshift, gShift = fmt->Gshift, bShift = fmt->Bshift;
-    const float inv255 = 1.0f / 255.0f;
-    const int stylize_frame = renderer.world.getGPUData().frame_count;
-    const WorldData stylize_world = renderer.world.getGPUData();
-    const bool use_cpu_stylize_aov =
-        use_cpu_aov &&
-        renderer.cpu_albedo_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
-        renderer.cpu_normal_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
-        renderer.cpu_world_position_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
-        renderer.cpu_depth_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
-        renderer.cpu_material_id_buffer.size() == static_cast<size_t>(width * height);
-
-    auto makeStylizeAOV = [&](int sx, int sy) -> Stylize::StylizeAOVSample {
-        Stylize::StylizeAOVSample aov;
-        if (!use_cpu_stylize_aov ||
-            sx < 0 || sy < 0 || sx >= width || sy >= height) {
-            return aov;
-        }
-        aov.valid = true;
-        aov.screen_u = (static_cast<float>(sx) + 0.5f) / std::max(1.0f, static_cast<float>(width));
-        aov.screen_v = (static_cast<float>(sy) + 0.5f) / std::max(1.0f, static_cast<float>(height));
-        aov.sun_dir = Vec3(stylize_world.nishita.sun_direction.x, stylize_world.nishita.sun_direction.y, stylize_world.nishita.sun_direction.z);
-        if (aov.sun_dir.length_squared() <= 1e-8f) {
-            aov.sun_dir = Vec3(0.32f, 0.82f, 0.46f);
-        } else {
-            aov.sun_dir = aov.sun_dir.normalize();
-        }
-        aov.sun_size_degrees = std::max(0.01f, stylize_world.nishita.sun_size);
-        aov.sun_elevation_degrees = stylize_world.nishita.sun_elevation;
-        aov.nishita_clouds_enabled = stylize_world.nishita.clouds_enabled != 0;
-        aov.nishita_cloud_coverage = std::clamp(stylize_world.nishita.cloud_coverage, 0.0f, 1.0f);
-        aov.nishita_cloud_density = std::max(0.0f, stylize_world.nishita.cloud_density);
-        aov.nishita_cloud_scale = std::max(0.05f, stylize_world.nishita.cloud_scale);
-        aov.nishita_cloud_offset_x = stylize_world.nishita.cloud_offset_x;
-        aov.nishita_cloud_offset_z = stylize_world.nishita.cloud_offset_z;
-        aov.nishita_cloud_seed = stylize_world.nishita.cloud_seed;
-        float stylize_view_len = 0.0f;
-        if (camera) {
-            Vec3 view_dir = camera->lower_left_corner
-                + aov.screen_u * camera->horizontal
-                + aov.screen_v * camera->vertical
-                - camera->origin;
-            stylize_view_len = view_dir.length();
-            aov.view_dir = view_dir.length_squared() > 1e-8f ? view_dir.normalize() : Vec3(0.0f, 0.0f, -1.0f);
-        }
-        const size_t idx = static_cast<size_t>(sy) * static_cast<size_t>(width) + static_cast<size_t>(sx);
-        const Renderer::Vec4& albedo = renderer.cpu_albedo_accumulation_buffer[idx];
-        const Renderer::Vec4& normal = renderer.cpu_normal_accumulation_buffer[idx];
-        const Renderer::Vec4& world_position = renderer.cpu_world_position_accumulation_buffer[idx];
-        aov.hit = albedo.w > 0.0f && renderer.cpu_depth_accumulation_buffer[idx] > 0.0f;
-        aov.albedo = Vec3(albedo.x, albedo.y, albedo.z);
-        aov.normal = Vec3(normal.x, normal.y, normal.z);
-        aov.world_position = Vec3(world_position.x, world_position.y, world_position.z);
-        aov.depth = renderer.cpu_depth_accumulation_buffer[idx];
-        aov.material_id = renderer.cpu_material_id_buffer[idx];
-        if (aov.hit && stylize_view_len > 1e-6f) {
-            // world units per pixel at the hit — drives screen-constant brush daub sizing
-            aov.pixel_scale = aov.depth * camera->vertical.length()
-                            / (std::max(1.0f, static_cast<float>(height)) * stylize_view_len);
-        }
-        return aov;
-    };
-
-    auto makeStylizeAOVWithEdges = [&](int sx, int sy) -> Stylize::StylizeAOVSample {
-        Stylize::StylizeAOVSample aov = makeStylizeAOV(sx, sy);
-        if (!aov.hit) return aov;
-        const Stylize::StylizeAOVSample right = makeStylizeAOV(sx + 1, sy);
-        const Stylize::StylizeAOVSample down = makeStylizeAOV(sx, sy + 1);
-        float edge = 0.0f;
-        auto accumulateEdge = [&](const Stylize::StylizeAOVSample& n) {
-            if (!n.hit) {
-                edge += 1.0f;
-                return;
-            }
-            const float depth_scale = std::max(0.025f, aov.depth * 0.015f);
-            edge += std::min(1.0f, std::abs(aov.depth - n.depth) / depth_scale);
-            edge += std::min(1.0f, (aov.normal - n.normal).length() * 0.75f);
-            if (aov.material_id != n.material_id) edge += 0.45f;
-        };
-        accumulateEdge(right);
-        accumulateEdge(down);
-        aov.edge = std::clamp(edge * 0.55f, 0.0f, 1.0f);
-        return aov;
-    };
-
-    std::vector<int> rowIndices(height);
-    std::iota(rowIndices.begin(), rowIndices.end(), 0);
-
-    std::for_each_n(std::execution::par_unseq, rowIndices.data(), static_cast<size_t>(height),
-        [=, &renderer](int y) {
-            Uint32* row = pixels + static_cast<size_t>(y) * static_cast<size_t>(width);
-            for (int x = 0; x < width; ++x) {
-                const Uint32 px = row[x];
-                Vec3 color(
-                    static_cast<float>((px & rMask) >> rShift) * inv255,
-                    static_cast<float>((px & gMask) >> gShift) * inv255,
-                    static_cast<float>((px & bMask) >> bShift) * inv255
-                );
-                if (use_cpu_stylize_aov) {
-                    const int buffer_y = height - 1 - y;
-                    color = Stylize::applyPostProcess(
-                        color,
-                        makeStylizeAOVWithEdges(x, buffer_y),
-                        x, y, stylize_frame, renderer.stylizeMode);
-                } else {
-                    color = Stylize::applyPostProcess(color, x, y, stylize_frame, renderer.stylizeMode);
-                }
-
-                const Uint8 ri = static_cast<Uint8>(std::clamp(color.x, 0.0f, 1.0f) * 255.0f);
-                const Uint8 gi = static_cast<Uint8>(std::clamp(color.y, 0.0f, 1.0f) * 255.0f);
-                const Uint8 bi = static_cast<Uint8>(std::clamp(color.z, 0.0f, 1.0f) * 255.0f);
-                row[x] = (px & aMask)
-                       | (static_cast<Uint32>(ri) << rShift)
-                       | (static_cast<Uint32>(gi) << gShift)
-                       | (static_cast<Uint32>(bi) << bShift);
-            }
-        });
-}
-
-void applyStylizeToSurface(SDL_Surface* surface, Renderer& renderer, bool use_cpu_aov) {
-    applyStylizeToSurfaceWithCamera(surface, renderer, use_cpu_aov, nullptr);
-}
-
-void applyCPUDenoisedPreviewToSurface(SDL_Surface* surface, Renderer& renderer, const Camera* camera) {
-    if (!surface || !surface->pixels || !renderer.hasCPUDenoisedBuffer()) return;
-
-    Uint32* pixels = (Uint32*)surface->pixels;
-    SDL_PixelFormat* fmt = surface->format;
-    const int width = surface->w;
-    const int height = surface->h;
-
-    const Uint32 rMask = fmt->Rmask, gMask = fmt->Gmask, bMask = fmt->Bmask, aMask = fmt->Amask;
-    const Uint8  rShift = fmt->Rshift, gShift = fmt->Gshift, bShift = fmt->Bshift;
-
-    float exposure_factor = 1.0f;
-    if (camera) {
-        if (camera->auto_exposure) {
-            exposure_factor = std::pow(2.0f, camera->ev_compensation);
-        } else if (camera->use_physical_exposure) {
-            float iso_mult = (camera->iso_preset_index >= 0 && camera->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) ?
-                CameraPresets::ISO_PRESETS[camera->iso_preset_index].exposure_multiplier : 1.0f;
-            float shutter_time = (camera->shutter_preset_index >= 0 && camera->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) ?
-                CameraPresets::SHUTTER_SPEED_PRESETS[camera->shutter_preset_index].speed_seconds : 0.004f;
-
-            float f_number = 16.0f;
-            if (camera->fstop_preset_index > 0 && camera->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
-                f_number = CameraPresets::FSTOP_PRESETS[camera->fstop_preset_index].f_number;
-            } else if (camera->aperture > 0.001f) {
-                f_number = 0.8f / camera->aperture;
-            }
-
-            float aperture_sq = f_number * f_number;
-            float ev_comp = std::pow(2.0f, camera->ev_compensation);
-            float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
-            float baseline_val = 0.00003125f;
-            exposure_factor = (current_val / baseline_val) * ev_comp * 2.0f;
-        } else {
-            exposure_factor = std::pow(2.0f, camera->ev_compensation);
-        }
-    }
-
-    // LUT: Reinhard + linear→sRGB + *255 → uint8, indexed on clamp01(raw*exposure).
-    // Eliminates 3× std::pow per pixel.
-    constexpr int LUT_SIZE = 4096;
-    constexpr float LUT_MAX = float(LUT_SIZE - 1);
-    alignas(64) uint8_t outLut[LUT_SIZE];
-    for (int i = 0; i < LUT_SIZE; ++i) {
-        float x = float(i) / LUT_MAX;          // x = raw * exposure in [0,1] after clamp
-        float r = x / (1.0f + x);              // Reinhard
-        float s = (r <= 0.0031308f) ? 12.92f * r
-                                    : 1.055f * std::pow(r, 1.0f / 2.4f) - 0.055f;
-        if (s < 0.0f) s = 0.0f;
-        if (s > 1.0f) s = 1.0f;
-        outLut[i] = static_cast<uint8_t>(s * 255.0f + 0.5f);
-    }
-
-    const float* denoised = renderer.cpu_denoised_buffer.data();
-    const float expF = exposure_factor;
-
-    std::vector<int> rowIndices(height);
-    std::iota(rowIndices.begin(), rowIndices.end(), 0);
-
-    std::for_each_n(std::execution::par_unseq, rowIndices.data(), (size_t)height,
-        [=](int j) {
-            Uint32* __restrict rowDst = pixels + (size_t)j * (size_t)width;
-            for (int i = 0; i < width; ++i) {
-                const size_t idx = ((size_t)j * (size_t)width + (size_t)i) * 3;
-                float r = denoised[idx]     * expF; if (r < 0.0f) r = 0.0f;
-                float g = denoised[idx + 1] * expF; if (g < 0.0f) g = 0.0f;
-                float b = denoised[idx + 2] * expF; if (b < 0.0f) b = 0.0f;
-
-                // Clamp raw*exposure to [0,1] for LUT indexing.
-                // Reinhard handles >1 natively, but LUT represents the post-Reinhard
-                // compressed range; raw*exposure >1 just saturates to LUT_MAX.
-                float xr = r / (1.0f + r);
-                float xg = g / (1.0f + g);
-                float xb = b / (1.0f + b);
-                // xr/xg/xb already in [0,1) — but LUT keyed on pre-Reinhard x.
-                // Cheaper: key LUT on clamp01(raw*exposure) directly; rebuild LUT.
-                (void)xr; (void)xg; (void)xb;
-
-                if (r > 1.0f) r = 1.0f;
-                if (g > 1.0f) g = 1.0f;
-                if (b > 1.0f) b = 1.0f;
-
-                const uint8_t ri = outLut[int(r * LUT_MAX)];
-                const uint8_t gi = outLut[int(g * LUT_MAX)];
-                const uint8_t bi = outLut[int(b * LUT_MAX)];
-
-                rowDst[i] = aMask
-                          | ((Uint32)ri << rShift)
-                          | ((Uint32)gi << gShift)
-                          | ((Uint32)bi << bShift);
-            }
-        });
-}
 void reset_render_resolution(int w, int h)
 {
     // ------------------------------------------------------------------
@@ -2359,14 +1910,14 @@ int main(int argc, char* argv[]) try {
             return;
         }
 
-        if (wd.mode == WORLD_MODE_NISHITA) {
+        if (wd.mode == WORLD_MODE_NISHITA && ray_renderer.world.needsLUTUpdate()) {
             if (vulkanBackend->generateAtmosphereLUTGPU(&wd)) {
                 ray_renderer.world.clearLUTDirty();
                 wd = ray_renderer.world.getGPUData();
                 return;
             }
 
-            if (ray_renderer.world.needsLUTUpdate() && ray_renderer.world.flushLUT()) {
+            if (ray_renderer.world.flushLUT()) {
                 wd = ray_renderer.world.getGPUData();
             }
             if (auto* al = ray_renderer.world.getLUT()) {
@@ -2693,7 +2244,7 @@ int main(int argc, char* argv[]) try {
             cli_argument_error = true;
             app_exit_code = 2;
         }
-        ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
+        ui.viewport_settings.shading_mode = g_hasVulkan ? 1 : 2;
     } else {
         if (splashOk) { splash.setStatus("Creating General Scene template..."); splash.render(); }
         const auto template_result = raytrophi::templates::TemplateSession::instance().open(
@@ -2701,7 +2252,7 @@ int main(int argc, char* argv[]) try {
         if (!template_result.opened) {
             SCENE_LOG_ERROR("General Scene startup template failed: " + template_result.code);
         }
-        ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
+        ui.viewport_settings.shading_mode = g_hasVulkan ? 1 : 2;
     }
     resolveRequestedRenderBackend(true, false);
     ui_ctx.render_settings.use_optix = render_settings.use_optix;
@@ -2972,6 +2523,22 @@ int main(int argc, char* argv[]) try {
 
     SDL_Event e;
     while (!quit) {
+        // ★★★ ANA DONGU OLCUMU (2026-09-03).
+        // Buraya kadar yalnizca backend'in `renderProgressive`'i ve ekran
+        // yolunun iki kopyasi olculuyordu. Olcum sunu gosterdi: surekli kamera
+        // hareketinde backend karesi ~1.2 ms iken dongu ~26 ms -- yani karenin
+        // %95'i HICBIR ALETIN BAKMADIGI yerdeydi. "142 ms" gibi bir sayiyi
+        // bilesenlere ayirmak bu yuzden imkansizdi.
+        //
+        // ★★ Bolumler `loop.*` adiyla rt.perf kaydina yazilir: perf.reset ile
+        // pencere acilir, perf.list ile okunur. `max_ms` NADIR yavas kareyi
+        // yakalar -- ortalama onu eritir, ve aranan sey zaten nadir olandir.
+        //
+        // ★ Kapsamlar RTPERF_FRAME_SCOPE: calisma seti OLCULMEZ. Kare basina
+        // iki GetProcessMemoryInfo cagrisi, 0.5 ms'lik bir bolumde olctugu seyi
+        // bozardi. rss alanlari bu yuzden `rss_measured=false` ile YOKLUK
+        // olarak raporlanir, sifir olarak degil.
+        RTPERF_FRAME_SCOPE("loop.frame");
         // One dynamics tick token per viewport frame. updateAllTransforms runs more than once
         // per frame (animation update + UI draw); this lets rigid-dynamic hair integrate its
         // Verlet at most once per frame while still settling after the object stops.
@@ -3209,6 +2776,17 @@ int main(int argc, char* argv[]) try {
                     SCENE_LOG_ERROR(std::string("Vulkan device lost detected: ") + g_vulkan_device_lost_msg);
                 } catch (...) {}
                 ui.addViewportMessage("Vulkan device lost — switched to CPU rendering.", 8.0f, ImVec4(1.0f, 0.4f, 0.2f, 1.0f));
+                // ★★★ Kaybedilen cihaz DEDIKE VIEWPORT backend'ine ait olabilir:
+                //   Solid/Matcap/MaterialPreview kendi VulkanBackendAdapter'i ve
+                //   KENDI VkDevice'i uzerinde kosuyor. Yalnizca render backend'ini
+                //   yikmak, viewport backend'ini olu bir cihazla ayakta birakiyordu
+                //   -- her karede kare edinimi basarisiz oluyor, hicbir kurtarma
+                //   onu hedeflemiyordu. waitForCompletion CAGRILMAZ: olu bir cihazda
+                //   idle beklemenin anlami yok.
+                if (g_viewport_backend) {
+                    try { g_viewport_backend->shutdown(); } catch (...) {}
+                    g_viewport_backend.reset();
+                }
                 render_settings.use_vulkan = false;
                 ui_ctx.render_settings.use_vulkan = false;
                 success = false;
@@ -3361,6 +2939,7 @@ int main(int argc, char* argv[]) try {
             }
         }
 
+        rtpost::tick(ui_ctx);
         bool did_render_this_frame = false;
         bool post_processing_happened = false;
         // =========================================================================
@@ -3395,6 +2974,8 @@ int main(int argc, char* argv[]) try {
             rendering_in_progress.load() && ui_ctx.is_animation_mode && !g_seq_save_active;
 
         bool window_focus_gained_event = false;
+        {
+        RTPERF_FRAME_SCOPE("loop.events");
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
             if (e.type == SDL_QUIT) ui.tryExit();
@@ -3834,6 +3415,7 @@ int main(int argc, char* argv[]) try {
                 }
             }
         }
+        }  // loop.events
 
         static bool window_was_focused =
             (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0;
@@ -4467,10 +4049,41 @@ int main(int argc, char* argv[]) try {
                 s_lastViewportModeSyncedBackend = ui_ctx.backend_ptr;
             }
         }
-        // Solid/Matcap (not Rendered=2): fluid bridge renders a splat-sphere proxy
-        // even for SurfaceSDF fluids, since the raster viewport can't draw the volume.
+        // All non-Rendered modes use the interactive raster backend. Material
+        // Preview has a native SurfaceSDF pass, while Solid/Matcap currently
+        // retain the compatibility sphere proxy.
         g_solid_viewport_active = isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
-        ui.draw(ui_ctx);
+        g_material_preview_viewport_active = ui.viewport_settings.shading_mode == 1;
+        // ★ A dedicated raster viewport backend is a SECOND VkDevice, and the
+        // live dense-gas addresses belong to whichever device owns the sim
+        // compute context. Ask the producer for a host mirror only when such a
+        // second consumer actually exists — a single-backend session must not
+        // pay for a per-step grid readback it will never read.
+        g_dense_gas_host_mirror_needed =
+            (g_viewport_backend != nullptr) &&
+            (static_cast<Backend::IBackend*>(g_viewport_backend.get()) != g_backend.get());
+        {
+            // Butun ImGui panellerinin INSA maliyeti (cizim degil -- cizim
+            // loop.imgui_render'da). 60 nesneli sahne hiyerarsisi, node
+            // editorleri ve inspector'lar burada toplanir.
+            RTPERF_FRAME_SCOPE("loop.ui_draw");
+            ui.draw(ui_ctx);
+        }
+
+        // Raster invalidation is event-driven and must wake presentation even
+        // when progressive rendering is paused. The older wake-up lived only
+        // inside the auto-accumulation gate (`!is_paused`), so selection,
+        // add/delete and material edits correctly set backend dirty but no new
+        // frame was requested until camera motion independently set
+        // start_render. Consume the backend contract immediately after UI
+        // mutations, before the render block for this frame.
+        if (g_solid_viewport_active) {
+            Backend::IBackend* rasterWakeBackend =
+                getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
+            if (rasterWakeBackend && rasterWakeBackend->needsViewportRender()) {
+                start_render = true;
+            }
+        }
 
         // Vulkan consumes native InstanceGroup data. CPU/OptiX retain the
         // compatibility batch until the native OptiX topology path is proven
@@ -4971,6 +4584,31 @@ int main(int argc, char* argv[]) try {
             }
 
            
+            // ★★★★ A post-processing edit must reach a CONVERGED frame too.
+            //
+            // The post panel deliberately raises ONLY apply_tonemap and never a
+            // render request — post must not reset accumulation (that rule is
+            // right and stays). But the whole GPU render block below is gated on
+            // start_render, so once accumulation converged nothing re-entered it,
+            // and the backend's tonemap-only refresh path was never reached. The
+            // display block further down then takes the `gpu_already_posted`
+            // branch (a GPU backend is assumed to have baked post in already) and
+            // just re-copies the STALE original_surface. Net effect: the edit
+            // lands in the core, and the screen never moves.
+            //
+            // MEASURED 2026-09-04 over IPC, Vulkan RT, 128 samples, converged:
+            //   exposure 0.82 -> 4.00, no render request : mean luma 121.433, and
+            //                                              the JPEG was BYTE-IDENTICAL
+            //   same edit + one render request           : mean luma 246.094
+            //
+            // This does NOT reset accumulation and does NOT add a sample: the
+            // converged branch of renderProgressiveImpl services it as a
+            // tonemap-only refresh (m_tonemapRefreshPending), which re-runs the
+            // tonemap dispatch over the EXISTING accumulation and re-presents.
+            if (apply_tonemap && isActiveRenderBackendGpu()) {
+                start_render = true;
+            }
+
             // 2. Handle Interactive Render (One Frame / Progressive)
             // ONLY if no background rendering is happening
             if (start_render) {
@@ -5189,7 +4827,17 @@ int main(int argc, char* argv[]) try {
                         }
 
                         if (g_gas_volumes_dirty) {
-                            if (activeViewportBackend && activeViewportBackend == g_backend.get()) {
+                            // Rendered consumes volumes through g_backend. Material
+                            // Preview owns a separate Vulkan device but now also
+                            // consumes the NanoVDB table through its native SDF
+                            // pass. Solid/Matcap still use particle proxies, so do
+                            // not pay a volume upload there.
+                            const bool nativeSdfRasterActive =
+                                activeViewportBackend &&
+                                ui.viewport_settings.shading_mode == 1;
+                            if (activeViewportBackend &&
+                                (activeViewportBackend == g_backend.get() ||
+                                 nativeSdfRasterActive)) {
                                 // A particle pool/source can change TLAS topology in
                                 // the same tick that a gas flow source publishes its
                                 // first volume. Do not build the Vulkan volume SSBO
@@ -5211,6 +4859,19 @@ int main(int argc, char* argv[]) try {
                                     // Vulkan RT then reused the previous active volume
                                     // SSBO slot and rendered the domain as a black box.
                                     g_gas_volumes_dirty = false;
+                                } else if (nativeSdfRasterActive) {
+                                    // The dormant Rendered backend cannot accept a
+                                    // volume table until its pending TLAS rebuild
+                                    // establishes the final customIndex order. The
+                                    // separate raster device has no such dependency:
+                                    // publish the live SDF frame there now. The
+                                    // pending Vulkan rebuild remains the Rendered
+                                    // backend's durable synchronization obligation.
+                                    WorldData wd = ray_renderer.world.getGPUData();
+                                    VolumetricRenderer::syncVolumetricData(
+                                        scene, activeViewportBackend, &wd);
+                                    activeViewportBackend->resetAccumulation();
+                                    g_gas_volumes_dirty = false;
                                 }
                             }
                         }
@@ -5231,15 +4892,47 @@ int main(int argc, char* argv[]) try {
                             ray_renderer.world.needsLUTUpdate() &&
                             dynamic_cast<Backend::VulkanBackendAdapter*>(activeViewportBackend) != nullptr;
 
+                        // Interactive raster shares the graphics/compute queue
+                        // with its asynchronous presentation ring. Rebuilding a
+                        // SkyView LUT for every mouse event starves those slots
+                        // and can force a synchronous presentation fallback.
+                        // Keep lightweight world-buffer edits immediate, but
+                        // bound expensive LUT generation to about 15 Hz.
+                        static uint32_t last_interactive_lut_update_ms = 0;
+                        const uint32_t world_sync_now_ms = SDL_GetTicks();
+                        const bool interactiveRasterLutPending =
+                            vulkanRasterActive &&
+                            nishitaWorldActive &&
+                            !timeline_playing &&
+                            ray_renderer.world.needsLUTUpdate();
+                        const bool interactiveRasterLutDue =
+                            !interactiveRasterLutPending ||
+                            last_interactive_lut_update_ms == 0 ||
+                            world_sync_now_ms - last_interactive_lut_update_ms >= 66u;
+
                         if (g_world_dirty ||
                             (nishitaWorldActive && !timeline_playing && ray_renderer.world.needsLUTUpdate()) ||
                             allowTimelineLUTUpdate ||
                             allowImmediateVulkanLUTUpdate) {
                             if (activeViewportBackend) {
                                 const bool hadPendingLUT = ray_renderer.world.needsLUTUpdate();
-                                syncWorldDataToBackend(activeViewportBackend);
+                                if (interactiveRasterLutPending && !interactiveRasterLutDue) {
+                                    // setWorldData uploads current sun/fog/etc.
+                                    // without regenerating an already-ready LUT;
+                                    // World keeps lut_dirty armed for the due tick.
+                                    if (g_world_dirty) {
+                                        WorldData wd = ray_renderer.world.getGPUData();
+                                        activeViewportBackend->setWorldData(&wd);
+                                    }
+                                } else {
+                                    syncWorldDataToBackend(activeViewportBackend);
+                                }
                                 if (hadPendingLUT && !ray_renderer.world.needsLUTUpdate() && timeline_playing) {
                                     last_timeline_lut_update_frame = ui.timeline.getCurrentFrame();
+                                }
+                                if (hadPendingLUT && !ray_renderer.world.needsLUTUpdate() &&
+                                    interactiveRasterLutPending) {
+                                    last_interactive_lut_update_ms = world_sync_now_ms;
                                 }
                             }
                             g_world_dirty = false;
@@ -5381,7 +5074,26 @@ int main(int argc, char* argv[]) try {
                                 static uint64_t s_lastRenderedGeometryGen = 0;
                                 const uint64_t currentGen = g_scene_geometry_generation.load(std::memory_order_acquire);
                                 const bool geometryChangedSinceSolid = (currentGen != s_lastRenderedGeometryGen)
-                                    || g_geometry_dirty || g_materials_dirty || g_texture_pool_dirty;
+                                    || g_geometry_dirty;
+                                // ★★★ A pending rebuild REQUEST is not the same thing as a
+                                // detected geometry change, and this block used to clear the
+                                // request (below) while deciding what to do from the detection
+                                // alone — so any request raised while a raster viewport owned
+                                // the screen was silently discarded at the mode switch.
+                                // Measured: dropping a VDB asset raises g_vulkan_rebuild_pending
+                                // but bumps neither g_scene_geometry_generation nor
+                                // g_geometry_dirty (volumes carry no raster geometry). The
+                                // deferred rebuild at the bottom of the frame loop is gated on
+                                // !interactive_viewport_active, so it never ran either. Result:
+                                // "SWITCHING to Vulkan RT (Rendered), geometryChanged=0", no
+                                // updateGeometry, no TLAS slot for the new volume, and the VDB
+                                // never rendered in Vulkan RT — with a gas domain already
+                                // present the stale mapping even looked healthy.
+                                // Captured BEFORE the clear below; a consumer must not drop a
+                                // request it does not service.
+                                const bool vulkanRebuildRequested = g_vulkan_rebuild_pending;
+                                const bool materialsChangedSinceSolid =
+                                    g_materials_dirty || g_texture_pool_dirty;
 
                                 auto* vkRenderBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
                                 if (vkRenderBackend != nullptr) {
@@ -5401,7 +5113,8 @@ int main(int argc, char* argv[]) try {
                                     static int s_switchCount = 0;
                                     SCENE_LOG_ON_CHANGE("viewport.toRendered", ++s_switchCount,
                                         "[VolumeGate ==] SWITCHING to Vulkan RT (Rendered), "
-                                        "geometryChanged=" + std::string(geometryChangedSinceSolid ? "1" : "0"));
+                                        "geometryChanged=" + std::string(geometryChangedSinceSolid ? "1" : "0") +
+                                        " rebuildRequested=" + std::string(vulkanRebuildRequested ? "1" : "0"));
                                     // ★ CONSUME BEFORE SERVICING — this is the
                                     // transition the SDF bug is reported on
                                     // ("switching to Vulkan RT"). updateGeometry
@@ -5411,7 +5124,7 @@ int main(int argc, char* argv[]) try {
                                     // the block cancelled that retry at exactly
                                     // the moment it was needed.
                                     g_vulkan_rebuild_pending = false;
-                                    if (geometryChangedSinceSolid) {
+                                    if (geometryChangedSinceSolid || vulkanRebuildRequested) {
                                         // Geometry changed while in Solid mode — full sync needed
                                         vkRenderBackend->rebuildAccelerationStructure();
                                         vkRenderBackend->updateGeometry(scene.world.objects);
@@ -5423,13 +5136,24 @@ int main(int argc, char* argv[]) try {
                                         g_gas_volumes_dirty = false;
                                         g_texture_pool_dirty = false;
                                         g_render_backend_refit_pending = false;
-                                    } else if (g_render_backend_refit_pending) {
-                                        // Solid mode already updated the raster
-                                        // transforms, but its consumption of the
-                                        // shared refit request must not leave the
-                                        // inactive Vulkan TLAS at its old poses.
-                                        vkRenderBackend->updateInstanceTransforms(scene.world.objects);
-                                        g_render_backend_refit_pending = false;
+                                    } else {
+                                        if (g_render_backend_refit_pending) {
+                                            // Solid mode already updated the raster
+                                            // transforms, but its consumption of the
+                                            // shared refit request must not leave the
+                                            // inactive Vulkan TLAS at its old poses.
+                                            vkRenderBackend->updateInstanceTransforms(scene.world.objects);
+                                            g_render_backend_refit_pending = false;
+                                        }
+                                        if (materialsChangedSinceSolid) {
+                                            // Scalar/texture edits in Material Preview
+                                            // do not invalidate geometry. Catch up the
+                                            // inactive RT table without rebuilding BLAS.
+                                            ray_renderer.updateBackendMaterials(scene);
+                                            syncMaterialBufferToViewportBackend(scene, ray_renderer);
+                                            g_materials_dirty = false;
+                                            g_texture_pool_dirty = false;
+                                        }
                                     }
                                     // Cached/dense volume bindings can change while
                                     // Solid owns the viewport without changing mesh
@@ -5461,6 +5185,11 @@ int main(int argc, char* argv[]) try {
                                     } else if (g_render_backend_refit_pending) {
                                         g_backend->updateInstanceTransforms(scene.world.objects);
                                         g_render_backend_refit_pending = false;
+                                    } else if (materialsChangedSinceSolid) {
+                                        ray_renderer.updateBackendMaterials(scene);
+                                        syncMaterialBufferToViewportBackend(scene, ray_renderer);
+                                        g_materials_dirty = false;
+                                        g_texture_pool_dirty = false;
                                     } else if (g_needs_optix_sync.load(std::memory_order_acquire)) {
                                         (void)syncActiveRenderBackendScene();
                                     } else {
@@ -5518,14 +5247,31 @@ int main(int argc, char* argv[]) try {
                                  
                                  // Render using the backend's generic progressive interface
                                  if (activeViewportBackend) {
-                                     if (activeViewportBackend->isAccumulationComplete()) break;
-                                     activeViewportBackend->renderProgressive(
-                                         original_surface, nullptr, renderer,
-                                         image_width, image_height, &framebuffer, raytrace_texture);
+                                     // [FIX] Do NOT skip the call just because accumulation is
+                                     // done. renderProgressive's own "converged" branch is
+                                     // already built to handle that cheaply (idle-deduped
+                                     // re-present, or a tonemap-only refresh when a post-
+                                     // processing/debug-view change is pending) — breaking
+                                     // BEFORE calling it, as this used to, skipped that logic
+                                     // entirely. The visible bug: post-processing edits (and
+                                     // the debug-view toggle) took effect only while accumulation
+                                     // was still running, and did nothing once it converged.
+                                     const bool wasAccumulationComplete =
+                                         activeViewportBackend->isAccumulationComplete();
+                                     {
+                                         RTPERF_FRAME_SCOPE("loop.viewport_render");
+                                         activeViewportBackend->renderProgressive(
+                                             original_surface, nullptr, renderer,
+                                             image_width, image_height, &framebuffer, raytrace_texture);
+                                     }
                                      // Backend always writes valid pixels to original_surface
                                      // (RT trace, background fallback, or cached re-present).
                                      // Flag as rendered so display pipeline blits to screen.
                                      did_render_this_frame = true;
+                                     // Already converged: one call is enough to service any
+                                     // pending refresh — looping loop_count times would just
+                                     // repeat the same cheap no-op.
+                                     if (wasAccumulationComplete) break;
                                  }
                             }
                         } else {
@@ -5544,14 +5290,20 @@ int main(int argc, char* argv[]) try {
                                     // Done — but surface still has valid data from last render
                                     did_render_this_frame = true;
                                 } else {
-                                    activeViewportBackend->renderProgressive(
-                                        original_surface, nullptr, renderer,
-                                        image_width, image_height, &framebuffer, raytrace_texture);
+                                    {
+                                        RTPERF_FRAME_SCOPE("loop.viewport_render");
+                                        activeViewportBackend->renderProgressive(
+                                            original_surface, nullptr, renderer,
+                                            image_width, image_height, &framebuffer, raytrace_texture);
+                                    }
                                     did_render_this_frame = true;
                                 }
                             } else {
                                 // Default legacy CPU Path
-                                ray_renderer.render_progressive_pass(original_surface, window, scene, 1);
+                                {
+                                    RTPERF_FRAME_SCOPE("loop.viewport_render_cpu");
+                                    ray_renderer.render_progressive_pass(original_surface, window, scene, 1);
+                                }
                                 did_render_this_frame = true;
                             }
                         }
@@ -5609,40 +5361,13 @@ int main(int argc, char* argv[]) try {
 
                             // Exposure factor — hoisted so both the fused-GPU tonemap kernel
                             // and the CPU fallback loop share the same value.
-                            float exposure_factor = 1.0f;
-                            if (scene.camera) {
-                                if (scene.camera->auto_exposure) {
-                                    exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
-                                } else if (scene.camera->use_physical_exposure) {
-                                    float iso_mult = 1.0f;
-                                    if (scene.camera->iso_preset_index >= 0 &&
-                                        scene.camera->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) {
-                                        iso_mult = CameraPresets::ISO_PRESETS[scene.camera->iso_preset_index].exposure_multiplier;
-                                    }
-
-                                    float shutter_time = 0.004f;
-                                    if (scene.camera->shutter_preset_index >= 0 &&
-                                        scene.camera->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) {
-                                        shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[scene.camera->shutter_preset_index].speed_seconds;
-                                    }
-
-                                    float f_number = 16.0f;
-                                    if (scene.camera->fstop_preset_index > 0 &&
-                                        scene.camera->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
-                                        f_number = CameraPresets::FSTOP_PRESETS[scene.camera->fstop_preset_index].f_number;
-                                    } else if (scene.camera->aperture > 0.001f) {
-                                        f_number = 0.8f / scene.camera->aperture;
-                                    }
-
-                                    float aperture_sq = f_number * f_number;
-                                    float ev_comp = std::pow(2.0f, scene.camera->ev_compensation);
-                                    float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
-                                    float baseline_val = 0.00003125f;
-                                    exposure_factor = (current_val / baseline_val) * ev_comp * 2.0f;
-                                } else {
-                                    exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
-                                }
-                            }
+                            // ★★★★ Ikinci kopya da SILINDI; tek tanim
+                            //   Camera::exposureFactor(). Yorumda "hoisted so
+                            //   both the fused-GPU tonemap kernel and the CPU
+                            //   fallback share the same value" yaziyordu -- ama
+                            //   ayni deger DORT ayri yerde yeniden hesaplaniyordu.
+                            const float exposure_factor =
+                                scene.camera ? scene.camera->exposureFactor() : 1.0f;
 
                             SDL_PixelFormat* fmt = original_surface ? original_surface->format : nullptr;
                             const Uint32 aMask = fmt ? fmt->Amask : 0u;
@@ -5656,8 +5381,26 @@ int main(int argc, char* argv[]) try {
                                 std::vector<uint32_t> packedDenoised;
                                 if (g_backend->getDenoiserFrameGPU(gpuFrame, use_denoiser_aux)) {
                                     anyFrameProvided = true;
+                                    // ★★★ Full post_chain.glsl field set, read from the SAME
+                                    //   ColorProcessingParams the non-denoised GPU path
+                                    //   (tonemap.comp, see g_display_post fill at the display
+                                    //   step below) uses — otherwise "post-process has no
+                                    //   effect while the denoiser is on" comes right back.
+                                    //   `exposure_factor` above is the CAMERA (ISO/shutter/
+                                    //   aperture) term; `cp.global_exposure` is the SEPARATE
+                                    //   post.* color-grading term. The old code fed only the
+                                    //   camera term into the single "exposure" field and
+                                    //   dropped every other post.* setting on the floor.
+                                    const auto& cp = color_processor.params;
                                     Renderer::OIDNTonemapParams tm;
-                                    tm.exposure = exposure_factor;
+                                    tm.exposure         = g_display_post.exposure;
+                                    tm.cameraExposure   = g_display_post.camera_exposure;
+                                    tm.gamma            = cp.global_gamma;
+                                    tm.saturation       = cp.saturation;
+                                    tm.colorTemperature = cp.color_temperature;
+                                    tm.vignetteStrength = cp.vignette_strength;
+                                    tm.toneMapping       = static_cast<uint32_t>(cp.tone_mapping_type);
+                                    tm.vignetteEnabled   = cp.enable_vignette ? 1u : 0u;
                                     tm.aMaskOr  = aMask;
                                     tm.rShift   = rShift;
                                     tm.gShift   = gShift;
@@ -5704,8 +5447,16 @@ int main(int argc, char* argv[]) try {
                             }
 
                             // CPU fallback — only if the GPU path didn't land (binding failed,
-                            // shared memory not available, etc.). Keeps the original per-pixel
-                            // tonemap loop for parity.
+                            // shared memory not available, etc.). This is the ONLY denoise path
+                            // AMD/Intel ever take: OIDN's own device cascade (Renderer::initOIDN,
+                            // CUDA->HIP->SYCL->CPU) only governs ITS host-buffer path, and
+                            // applyOIDNDenoisingGPU above hardcodes oidn::newCUDADevice — there is
+                            // no HIP/SYCL zero-copy kernel, so non-NVIDIA GPUs fall through to here
+                            // unconditionally. It used to carry the SAME bug the CUDA kernel just
+                            // got fixed for (hardcoded exposure*Reinhard*gamma2.2, no post.*) — now
+                            // reuses the canonical CPU chain (ColorProcessor::processColor +
+                            // applyVignette, the same two calls the non-denoised CPU tonemap path
+                            // uses) instead of a third hand-written copy of the math.
                             if (!gpuPathSucceeded) {
                                 std::vector<float> denoised;
                                 Backend::DenoiserFrameData denoiserFrame;
@@ -5740,9 +5491,13 @@ int main(int argc, char* argv[]) try {
                                             const size_t pixelCount = (size_t)denoisedW * (size_t)denoisedH;
                                             Uint32* __restrict pxBase = pixels;
                                             const float* __restrict denoisedBase = denoised.data();
+                                            const bool cpu_vignette_on = color_processor.params.enable_vignette;
+                                            const float cpu_vignette_strength = color_processor.params.vignette_strength;
                                             std::for_each_n(std::execution::par_unseq,
                                                 pxBase, pixelCount,
                                                 [=](Uint32& px) {
+                                                    // color_processor is the file-scope global (line
+                                                    // ~714); a global needs no capture.
                                                     const size_t i = static_cast<size_t>(&px - pxBase);
                                                     const size_t idx = i * 3;
                                                     const int x = static_cast<int>(i % (size_t)denoisedW);
@@ -5750,21 +5505,21 @@ int main(int argc, char* argv[]) try {
                                                     const int screen_y = denoisedH - 1 - y;
                                                     const size_t screen_index = (size_t)screen_y * (size_t)row_stride + (size_t)x;
 
-                                                    float r = std::max(denoisedBase[idx] * exposure_factor, 0.0f);
-                                                    float g = std::max(denoisedBase[idx + 1] * exposure_factor, 0.0f);
-                                                    float b = std::max(denoisedBase[idx + 2] * exposure_factor, 0.0f);
+                                                    Vec3 exposed(std::max(denoisedBase[idx], 0.0f),
+                                                                 std::max(denoisedBase[idx + 1], 0.0f),
+                                                                 std::max(denoisedBase[idx + 2], 0.0f));
+                                                    Vec3 graded = color_processor.processColor(exposed, x, y);
+                                                    if (cpu_vignette_on)
+                                                        graded = applyVignette(graded, x, y, denoisedW, denoisedH, cpu_vignette_strength);
 
-                                                    r = r / (1.0f + r);
-                                                    g = g / (1.0f + g);
-                                                    b = b / (1.0f + b);
-
-                                                    r = std::pow(r, 1.0f / 2.2f);
-                                                    g = std::pow(g, 1.0f / 2.2f);
-                                                    b = std::pow(b, 1.0f / 2.2f);
-
-                                                    const Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
-                                                    const Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
-                                                    const Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
+                                                    auto linearToSRGB = [](float c) -> float {
+                                                        c = std::clamp(c, 0.0f, 1.0f);
+                                                        return (c <= 0.0031308f) ? (12.92f * c)
+                                                                                 : (1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f);
+                                                    };
+                                                    const Uint8 ri = static_cast<Uint8>(linearToSRGB(graded.x) * 255.0f + 0.5f);
+                                                    const Uint8 gi = static_cast<Uint8>(linearToSRGB(graded.y) * 255.0f + 0.5f);
+                                                    const Uint8 bi = static_cast<Uint8>(linearToSRGB(graded.z) * 255.0f + 0.5f);
                                                     const Uint32 alpha = pxBase[screen_index] & aMask;
                                                     pxBase[screen_index] = alpha
                                                         | ((Uint32)ri << rShift)
@@ -5932,7 +5687,10 @@ int main(int argc, char* argv[]) try {
                                 
                                 // Render to original_surface (Raw LDR) instead of surface (Display/Tonemapped)
                                 // This prevents "Accumulating Tonemap" corruption.
-                                ray_renderer.render_progressive_pass(original_surface, window, scene, 1);
+                                {
+                                    RTPERF_FRAME_SCOPE("loop.viewport_render_cpu");
+                                    ray_renderer.render_progressive_pass(original_surface, window, scene, 1);
+                                }
                                 /*
                                 if (ui_ctx.render_settings.use_vectorized_renderer) {
                                     ray_renderer.render_progressive_pass_packet(surface, window, scene, 1);
@@ -6051,16 +5809,37 @@ int main(int argc, char* argv[]) try {
         // on/off setting (don't force tonemap), then the stylize block re-applies on top.
         const bool needs_redisplay = did_render_this_frame || stylize_redisplay;
 
+        // ★★★ post.* ayarlarini GPU'nun gorebilecegi aynaya yansit. Sahibi
+        //   hala color_processor; burasi tek yonlu kopya (bkz. globals.h).
+        //   Bu satir olmadan shader'lar varsayilan degerleri kullanir ve
+        //   panel ile goruntu SESSIZCE ayrisir.
+        rtpost::syncDisplay(color_processor, scene.camera.get(), ui_ctx.render_settings.is_final_render_mode);
+
+        // ★★★ Ekran yolunun maliyeti burada olculur. Backend telemetrisi
+        // `renderProgressive` donunce biter; asagidaki iki gecis (display
+        // surface'i yeniden kurmak + dokuyu yuklemek) onun DISINDA kalir ve
+        // 4K'da her biri 31.6 MB'lik ayri bir tam-kare gecistir. Olculmeyen is,
+        // olmayan is sanilir -- bu deponun tekrar eden hatasi.
+        double display_post_ms = 0.0;
+        bool   display_post_noop_copy = false;
+        const auto display_post_start = std::chrono::steady_clock::now();
+
         // 3. Handle Tonemap Apply OR Display Update
         if (apply_tonemap || (ui_ctx.render_settings.persistent_tonemap && needs_redisplay)) {
             if (original_surface && surface) {
-                const bool gpu_noop_post =
+                // ★★★ Eskiden bu kosul `hasNoOpColorProcessing` istiyordu:
+                //   yani post ayarlari VARSAYILAN degilse tam-kare CPU gecisi
+                //   kosuyordu -- ve o gecis exposure'i zaten sRGB'ye kodlanmis
+                //   8-bit degerlere uyguluyordu (cift kodlama, olculdu).
+                //   Artik GPU zinciri (post_chain.glsl) butun post'u uyguluyor,
+                //   yani CPU gecisine gerek yok VE dogru olan GPU'daki.
+                //   Stylize hala CPU AOV'lerine muhtac, o yuzden disarida.
+                const bool gpu_already_posted =
                     isActiveRenderBackendGpu() &&
-                    ui_ctx.render_settings.persistent_tonemap &&
-                    hasNoOpColorProcessing(color_processor) &&
                     !stylize_post_active;
 
-                if (gpu_noop_post) {
+                if (gpu_already_posted) {
+                    display_post_noop_copy = true;
                     copySurfacePixelsOrBlit(surface, original_surface);
                 } else {
                     // Pass renderer to use float buffer if available (prevents quantization artifacts)
@@ -6073,7 +5852,7 @@ int main(int argc, char* argv[]) try {
             }
             if (apply_tonemap) {
                 apply_tonemap = false;
-                SCENE_LOG_INFO("Tonemap applied.");
+                //SCENE_LOG_INFO("Tonemap applied.");
             }
             post_processing_happened = true;
             surface_rebuilt = true;
@@ -6091,6 +5870,12 @@ int main(int argc, char* argv[]) try {
             }
             surface_rebuilt = true;
         }
+
+        display_post_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - display_post_start).count();
+        // Ayni sayi rt.perf'te de dursun ki `loop.*` tablosu kendi icinde
+        // toplansin; viewport.frame_telemetry'ye bakmak zorunda kalinmasin.
+        ::rtperf::recordFast("loop.display_post", display_post_ms);
 
         if (surface_rebuilt &&
             stylize_post_active &&
@@ -6643,6 +6428,7 @@ int main(int argc, char* argv[]) try {
                        ((idle_frame_count > 3) && !autonomous_anim_graph_playing);
 
         // --- Present / skip ---
+        double display_texture_upload_ms = 0.0;
         if (!skip_present) {
             if (needs_texture_update) {
                 static std::vector<Uint32> transparency_preview;
@@ -6651,16 +6437,47 @@ int main(int argc, char* argv[]) try {
                     transparency_preview);
                 const int display_pitch = ui_ctx.render_settings.transparent_background
                     ? surface->w * 4 : surface->pitch;
+                const auto tex_upload_start = std::chrono::steady_clock::now();
                 SDL_UpdateTexture(raytrace_texture, nullptr, display_pixels, display_pitch);
+                display_texture_upload_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - tex_upload_start).count();
                 last_texture_updated = !accumulation_done_for_display;
             }
 
-            ImGui::Render();
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-            SDL_RenderClear(renderer);
-            SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
-            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-            SDL_RenderPresent(renderer);
+            {
+                // Draw listelerinin uretilmesi (CPU tarafi).
+                RTPERF_FRAME_SCOPE("loop.imgui_render");
+                ImGui::Render();
+            }
+            {
+                // ★ SDL_Renderer (Windows'ta D3D11) uzerinden sunum. vsync
+                //   aciksa BEKLEME de burada gorunur; yani bu bolum buyukse
+                //   once "is mi, bekleme mi" diye sorulmali.
+                RTPERF_FRAME_SCOPE("loop.present");
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+                SDL_RenderClear(renderer);
+                SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+                ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+                SDL_RenderPresent(renderer);
+            }
+
+            // ★★ YALNIZCA gercekten sunulan karelerde yayinla. Atlanan karede
+            // (arka plan / gorunmez pencere / idle) yayinlamak, sifirlari
+            // "ekran yolu bedava" diye okunacak bir ortalamaya karistirirdi.
+            {
+                static auto s_lastDisplayPublish = std::chrono::steady_clock::time_point{};
+                const auto nowTp = std::chrono::steady_clock::now();
+                rtapi::DisplayPathTiming dpt;
+                dpt.post_ms = display_post_ms;
+                dpt.texture_upload_ms = display_texture_upload_ms;
+                dpt.post_was_noop_copy = display_post_noop_copy;
+                if (s_lastDisplayPublish.time_since_epoch().count() != 0) {
+                    dpt.loop_period_ms = std::chrono::duration<double, std::milli>(
+                        nowTp - s_lastDisplayPublish).count();
+                }
+                s_lastDisplayPublish = nowTp;
+                rtapi::noteDisplayPathTiming(dpt);
+            }
         } else {
             // Idle — consume ImGui draw data without GPU work.
             ImGui::Render();
@@ -6679,6 +6496,14 @@ int main(int argc, char* argv[]) try {
 
         // --- Throttle based on tier ---
         if (!skip_present) {
+            // ★★★ Bilerek AYRI olculur. Bu uyku `loop.frame`'in icinde
+            //   erirse kare "17.8 ms" gorunur ve o sure IS sanilir; oysa
+            //   16 ms'i uykudur. Bir kadranin degeri ile bir olcum ayni
+            //   kutuya konamaz.
+            // ★★ Ve script'ten surulen bir oturum tier0'a HIC giremez
+            //   (camera_moved yalnizca fare/klavyeden set edilir), yani
+            //   IPC uzerinden olculen her kare hizi bu uykuyu icerir.
+            RTPERF_FRAME_SCOPE("loop.throttle_sleep");
             if (tier2_light) {
                 // Foreground idle → ~20 FPS
                 std::this_thread::sleep_for(std::chrono::milliseconds(48));
@@ -6692,6 +6517,13 @@ int main(int argc, char* argv[]) try {
         // ===========================================================================
         // DEFERRED REBUILD PROCESSING - Batched at frame end for faster UI response
         // ===========================================================================
+        // ★ Kare sonunda toplanan yeniden-kurulum isi ve iterasyonun geri
+        //   kalani. 40 ms'i asan kareler cogunlukla BURADA yasar
+        //   (geometri/BLAS/TLAS), cizimde degil -- `max_ms` onu ayirir.
+        // ★★ Ad bilerek "deferred_rebuild" DEGIL: kapsam bu noktadan
+        //   iterasyonun sonuna kadar surer, yani yalnizca yeniden kurulumu
+        //   olcmez. Dar bir ad, sonradan bakan birine yanlis yer gosterirdi.
+        RTPERF_FRAME_SCOPE("loop.frame_tail");
         auto* rasterViewportBackend = getRasterViewportBackend();
         const bool interactive_viewport_active =
             isVulkanInteractiveViewportActive(

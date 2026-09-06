@@ -54,7 +54,8 @@ Endüstri standardı çerçeveler ve donanım hızlandırmalı API'ler üzerine 
 *   **[NVIDIA OptiX](https://developer.nvidia.com/optix):** Donanım hızlandırmalı Ray Tracing.
 *   **[Vulkan SDK](https://www.vulkan.org/):** Modern platformlar arası grafik ve hesaplama.
 *   **[Intel Embree](https://github.com/embree/embree):** Yüksek performanslı CPU ışın izleme çekirdekleri.
-*   **[Assimp](https://github.com/assimp/assimp):** Güçlü 3D model içe aktarma (40+ format).
+*   **[cgltf](https://github.com/jkuhlmann/cgltf):** glTF 2.0 / GLB ayrıştırma; hem içe hem dışa aktarmada kullanılır.
+*   **[ufbx](https://github.com/ufbx/ufbx):** FBX içe aktarma; skinning ve baked transform animasyonu dahil.
 *   **[NanoVDB](https://github.com/AcademySoftwareFoundation/openvdb):** GPU dostu seyreltik hacim gösterimi.
 *   **[Intel OIDN](https://www.openimagedenoise.org/):** Profesyonel düzeyde yapay zeka tabanlı "denoising" (gürültü giderme). Çift mod desteği ile entegre edilmiştir:
     *   **CPU Modu:** Intel TBB ve ISPC kernellerini kullanarak yüksek başarımlı gürültü giderme.

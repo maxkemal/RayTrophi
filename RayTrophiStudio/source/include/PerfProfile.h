@@ -42,12 +42,25 @@ struct Section {
     // figure next to it invites optimizing the wrong half.
     double   last_rss_delta_mb = 0.0;
     double   rss_after_mb = 0.0;
+    // ★ false ise rss alanlari YOKLUKTUR, sifir olcumu degil (bkz. recordFast).
+    bool     rss_measured = true;
     // Monotonic write order, so a caller can tell which sections belong to the
     // most recent operation without clearing the registry first.
     uint64_t seq = 0;
 };
 
 void record(const std::string& name, double ms, double rss_delta_mb, double rss_after_mb);
+
+// ★★★ Calisma seti OLCULMEDEN kaydeder, ve bunu SOYLER (`rss_measured=false`).
+// Neden ayri bir giris noktasi: `Scope` her kapsamda iki kez
+// K32GetProcessMemoryInfo cagiriyor. Bir yapim adimi icin bu bedava; KARE
+// BASINA kosan bir kapsam icin degil -- olculen bolum 0.5 ms iken aletin kendi
+// maliyeti olcunun anlamli bir yuzdesi olur ve alet olctugu seyi bozar.
+//
+// ★★ Ve sifir yazip susmak bu deponun bilinen hata sinifi olurdu: okuyan taraf
+// "0 MB" gorup "hic ayirma olmadi" diye okur. YOKLUK ile SIFIR OLCUM ayri
+// raporlanir.
+void recordFast(const std::string& name, double ms);
 
 // Newest write first.
 std::vector<Section> snapshot();
@@ -87,8 +100,28 @@ struct Scope {
     Scope& operator=(const Scope&) = delete;
 };
 
+// Kare basina kosan bolumler icin: yalnizca duvar saati, calisma seti YOK.
+// ★ Ad `const char*` olarak tutulur; kisa etiketler (loop.ui_draw) SSO'ya
+// sigar, yani kayit yolunda kare basina ayirma olmaz.
+struct FrameScope {
+    const char* tag;
+    std::chrono::high_resolution_clock::time_point t0;
+
+    explicit FrameScope(const char* t)
+        : tag(t), t0(std::chrono::high_resolution_clock::now()) {}
+
+    ~FrameScope() {
+        recordFast(tag, std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count());
+    }
+
+    FrameScope(const FrameScope&) = delete;
+    FrameScope& operator=(const FrameScope&) = delete;
+};
+
 } // namespace rtperf
 
 #define RTPERF_CONCAT2(a, b) a##b
 #define RTPERF_CONCAT(a, b) RTPERF_CONCAT2(a, b)
 #define RTPERF_SCOPE(tag) ::rtperf::Scope RTPERF_CONCAT(rtperf_scope_, __LINE__)(tag)
+#define RTPERF_FRAME_SCOPE(tag) ::rtperf::FrameScope RTPERF_CONCAT(rtperf_fscope_, __LINE__)(tag)

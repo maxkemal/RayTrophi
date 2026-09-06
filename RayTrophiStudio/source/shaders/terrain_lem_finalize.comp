@@ -26,7 +26,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 layout(set = 0, binding = 0) readonly  buffer Height       { float heightField[]; };
-layout(set = 0, binding = 1) readonly  buffer Filled       { float filledField[]; };
+layout(set = 0, binding = 1) readonly  buffer LakeSurf     { float lakeSurfaceField[]; };
 layout(set = 0, binding = 2) readonly  buffer Area         { float areaField[]; };
 layout(set = 0, binding = 3) writeonly buffer Discharge    { float dischargeField[]; };
 layout(set = 0, binding = 4) writeonly buffer ChannelWidth { float channelWidth[]; };
@@ -35,6 +35,9 @@ layout(set = 0, binding = 6) writeonly buffer WaterLevel   { float waterLevel[];
 layout(set = 0, binding = 7) writeonly buffer DirectionX   { float directionX[]; };
 layout(set = 0, binding = 8) writeonly buffer DirectionY   { float directionY[]; };
 layout(set = 0, binding = 9) writeonly buffer LakeDepth    { float lakeDepth[]; };
+// The flow DIRECTION comes off the routing surface, not the lake surface: over
+// a flat the lake surface is bitwise level and yields no direction at all.
+layout(set = 0, binding = 10) readonly buffer Route        { float routeField[]; };
 
 void main() {
     uint ui = gl_GlobalInvocationID.x;
@@ -43,7 +46,7 @@ void main() {
     int x = i % pc.width, y = i / pc.width;
 
     float hCur = heightField[i];
-    float lake = max(filledField[i] - hCur, 0.0);
+    float lake = max(lakeSurfaceField[i] - hCur, 0.0);
     float areaM2 = max(areaField[i], 0.0);
     float areaKm2 = areaM2 * 1.0e-6;
 
@@ -64,7 +67,7 @@ void main() {
     if (lake > pc.lakeEps) {
         channelWidth[i] = max(width, pc.cellSize);
         waterDepth[i] = lake * max(pc.heightScale, 1.0e-3);
-        waterLevel[i] = filledField[i];
+        waterLevel[i] = lakeSurfaceField[i];
     } else {
         channelWidth[i] = width;
         waterDepth[i] = depth;
@@ -79,11 +82,11 @@ void main() {
         const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
         const float dist[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
                                        1.0, 1.41421356, 1.0, 1.41421356);
-        float fCur = filledField[i];
+        float fCur = routeField[i];
         float best = 0.0;
         for (int d = 0; d < 8; ++d) {
             int ni = (y + dy[d]) * pc.width + (x + dx[d]);
-            float grade = (fCur - filledField[ni]) / dist[d];
+            float grade = (fCur - routeField[ni]) / dist[d];
             if (grade > best) { best = grade; dir = vec2(dx[d], dy[d]) / dist[d]; }
         }
     }

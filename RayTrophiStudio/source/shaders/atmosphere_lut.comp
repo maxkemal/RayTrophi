@@ -2,7 +2,9 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(binding = 0, rgba32f) uniform writeonly image2D transmittanceLUT;
+// Phase 0 writes this image; the later phases reuse it instead of nesting a
+// second 40-step atmosphere integration inside every sky/multi-scatter step.
+layout(binding = 0, rgba32f) uniform image2D transmittanceLUT;
 layout(binding = 1, rgba32f) uniform writeonly image2D skyviewLUT;
 layout(binding = 2, rgba32f) uniform writeonly image2D multiScatterLUT;
 
@@ -81,6 +83,25 @@ vec3 computeTransmittanceInternal(vec3 pos, vec3 dir) {
     return exp(-tau);
 }
 
+vec3 sampleComputedTransmittance(vec3 pos, vec3 dir) {
+    float Rg = max(params.physical.x, 1000.0);
+    float atmosphereHeight = max(params.physical.y, 1000.0);
+    vec3 up = normalize(pos);
+    float cosTheta = clamp(dot(up, normalize(dir)), -0.2, 1.0);
+    vec2 uv = vec2((cosTheta + 0.2) / 1.2,
+                   clamp((length(pos) - Rg) / atmosphereHeight, 0.0, 1.0));
+    ivec2 size = imageSize(transmittanceLUT);
+    vec2 texel = uv * vec2(size - ivec2(1));
+    ivec2 p0 = ivec2(floor(texel));
+    ivec2 p1 = min(p0 + ivec2(1), size - ivec2(1));
+    vec2 f = fract(texel);
+    vec3 a = mix(imageLoad(transmittanceLUT, ivec2(p0.x, p0.y)).rgb,
+                 imageLoad(transmittanceLUT, ivec2(p1.x, p0.y)).rgb, f.x);
+    vec3 b = mix(imageLoad(transmittanceLUT, ivec2(p0.x, p1.y)).rgb,
+                 imageLoad(transmittanceLUT, ivec2(p1.x, p1.y)).rgb, f.x);
+    return mix(a, b, f.y);
+}
+
 vec3 skyRadiance(vec3 dir) {
     float Rg = max(params.physical.x, 1000.0);
     float Rt = Rg + max(params.physical.y, 1000.0);
@@ -95,13 +116,16 @@ vec3 skyRadiance(vec3 dir) {
 
     vec3 radiance = vec3(0.0);
     vec3 opticalDepth = vec3(0.0);
-    float stepSize = dist / 64.0;
-    for (int i = 0; i < 64; ++i) {
+    // Transmittance is already pre-integrated. 24 view-ray samples are enough
+    // for the smooth 256x128 preview LUT and keep interactive sky edits bounded.
+    const int SKY_VIEW_STEPS = 24;
+    float stepSize = dist / float(SKY_VIEW_STEPS);
+    for (int i = 0; i < SKY_VIEW_STEPS; ++i) {
         vec3 p = camPos + dir * (stepSize * (float(i) + 0.5));
         float h = max(length(p) - Rg, 0.0);
         float hr = exp(-h / rH);
         float hm = exp(-h / mH);
-        vec3 transSun = computeTransmittanceInternal(p, sunDir);
+        vec3 transSun = sampleComputedTransmittance(p, sunDir);
         vec3 scatR = max(params.rayleigh.xyz, vec3(0.0)) * max(params.density_intensity.x, 0.0) * hr;
         vec3 scatM = max(params.mie.xyz, vec3(0.0)) * max(params.density_intensity.y, 0.0) * hm;
         float mu = dot(dir, sunDir);
@@ -141,7 +165,7 @@ void writeMultiScatter(ivec2 p, vec2 uv) {
     for (int i = 0; i < 8; ++i) {
         float cosTheta = float(i) / 7.0;
         vec3 dir = normalize(vec3(sqrt(max(0.0, 1.0 - cosTheta * cosTheta)), cosTheta, 0.0));
-        vec3 t = computeTransmittanceInternal(pos, dir);
+        vec3 t = sampleComputedTransmittance(pos, dir);
         avgTrans += (t.x + t.y + t.z) * 0.3333333;
     }
     avgTrans /= 8.0;

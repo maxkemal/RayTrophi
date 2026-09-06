@@ -272,8 +272,8 @@ Result clearMaterialTexture(const std::string& material_name, const std::string&
     return Result::success();
 }
 
-std::vector<std::string> materialTextureSlots(const std::string& material_name) {
-    std::vector<std::string> out;
+std::vector<MaterialTextureBinding> materialTextureSlots(const std::string& material_name) {
+    std::vector<MaterialTextureBinding> out;
     uint16_t id = 0;
     Material* material = nullptr;
     if (!resolveMaterial(material_name, id, material)) return out;
@@ -285,9 +285,77 @@ std::vector<std::string> materialTextureSlots(const std::string& material_name) 
     for (const char* slot : kSlots) {
         TextureSlot target;
         if (!resolveTextureSlot(*pbsdf, slot, target)) continue;
-        if (target.property->texture) out.emplace_back(slot);
+        const auto& texture = target.property->texture;
+        if (!texture) continue;
+        out.push_back(MaterialTextureBinding{ slot, texture->name });
     }
     return out;
+}
+
+Result getMaterialParamByName(const std::string& material_name, const std::string& param,
+                              MaterialParamValue& out) {
+    uint16_t id = 0;
+    Material* material = nullptr;
+    if (Result r = resolveMaterial(material_name, id, material); !r) return r;
+    auto* pbsdf = dynamic_cast<PrincipledBSDF*>(material);
+    if (!pbsdf) return Result::fail("material parameters require a Principled BSDF material: " + material_name);
+
+    MaterialParamKind kind;
+    bool is_color = false;
+    if (!parseMaterialParam(param, kind, is_color))
+        return Result::fail("unknown material parameter: " + param);
+
+    const MaterialValue value = readMaterialValue(*pbsdf, kind);
+    out = {};
+    out.is_color = is_color;
+    out.scalar = value.scalar;
+    out.color = value.color;
+    return Result::success();
+}
+
+namespace {
+
+Result setMaterialParamByNameValue(const std::string& material_name, const std::string& param,
+                                   const MaterialValue& requested, bool supplied_color) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+
+    uint16_t id = 0;
+    Material* material = nullptr;
+    if (Result r = resolveMaterial(material_name, id, material); !r) return r;
+    auto* pbsdf = dynamic_cast<PrincipledBSDF*>(material);
+    if (!pbsdf) return Result::fail("material parameters require a Principled BSDF material: " + material_name);
+
+    MaterialParamKind kind;
+    bool expects_color = false;
+    if (!parseMaterialParam(param, kind, expects_color))
+        return Result::fail("unknown material parameter: " + param);
+    if (expects_color != supplied_color)
+        return Result::fail(param + (expects_color ? " expects an RGB value" : " expects a scalar value"));
+
+    if (Result r = validateMaterialParamValue(kind, supplied_color, requested); !r)
+        return Result::fail(param + " " + r.error);
+
+    // Direct write, no undo record: matches setMaterialTexture/assignMaterial
+    // in this file — a script building a look treats these as bulk authoring,
+    // same as the other material asset calls here.
+    writeMaterialValue(*pbsdf, kind, requested);
+    resyncMaterial(id);
+    return Result::success();
+}
+
+} // namespace
+
+Result setMaterialParamByName(const std::string& material_name, const std::string& param, float value) {
+    MaterialValue requested;
+    requested.scalar = value;
+    return setMaterialParamByNameValue(material_name, param, requested, false);
+}
+
+Result setMaterialParamByName(const std::string& material_name, const std::string& param, const Vec3& value) {
+    MaterialValue requested;
+    requested.color = value;
+    return setMaterialParamByNameValue(material_name, param, requested, true);
 }
 
 } // namespace rtapi

@@ -180,4 +180,18 @@ bool SplineEditService::extrudeEndpoint(BezierSpline& spline, int endpointIndex,
     return true;
 }
 
+bool SplineEditService::appendPointAtEnd(BezierSpline& spline, const Vec3& position,
+                                         int* insertedIndex) {
+    if (spline.isClosed) return false;
+    if (spline.points.size() >= 2) {
+        return extrudeEndpoint(spline, static_cast<int>(spline.points.size()) - 1,
+                               position, insertedIndex);
+    }
+    // BezierSpline::addPoint already clears the B-spline knot vector and runs
+    // calculateAutoTangents once a second point exists.
+    spline.addPoint(position);
+    if (insertedIndex) *insertedIndex = static_cast<int>(spline.points.size()) - 1;
+    return true;
+}
+
 } // namespace MeshEdit

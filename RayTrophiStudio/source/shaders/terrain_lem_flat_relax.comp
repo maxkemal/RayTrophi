@@ -1,0 +1,86 @@
+// terrain_lem_flat_relax.comp
+// ===========================================================================
+// FLAT RESOLUTION, pass 2 of 3. One Jacobi relaxation of both geodesic
+// distance fields seeded by terrain_lem_flat_seed. See that file for the
+// encoding and for why two fields are needed rather than one.
+// ===========================================================================
+//
+// Propagation is confined to cells of EQUAL filled elevation, so a distance
+// cannot leak across a flat boundary into the next basin.
+//
+// ★★★ THE DESCENT INVARIANT, and why the pass budget cannot silently ruin the
+// result. The update is min-plus:  d(i) = min(d(i), min_n(d(n) + step)).  d
+// only ever decreases, so if a non-seed cell holds a finite d(i) at ANY pass,
+// that value was written from some neighbour n at some earlier pass, and that
+// neighbour value has only fallen since:
+//
+//      finite d(i)  =>  there exists n with d(n) <= d(i) - step
+//
+// The invariant therefore holds after one pass exactly as it holds after a
+// thousand. That is what lets terrain_lem_flat_ramp guarantee that every
+// resolved flat cell has a strictly lower neighbour on the routing surface --
+// no convergence assumption, no "it looked fine at 96 passes".
+//
+// What an under-converged run costs is not correctness but COVERAGE: cells the
+// front has not reached yet stay at the sentinel. Those are not quietly
+// treated as zero -- the ramp pass counts them and the host publishes the
+// count as unresolved_flat_cells. A flat that never resolves is a terminal
+// sink for drainage, which is a real defect and now says so.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+} pc;
+
+layout(set = 0, binding = 0) readonly  buffer Filled  { float filledField[]; };
+layout(set = 0, binding = 1) readonly  buffer DistIn  { uint  distIn[]; };
+layout(set = 0, binding = 2) writeonly buffer DistOut { uint  distOut[]; };
+
+const int dx8[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+// Twelfths of a cell. 17/12 = 1.41667 against sqrt(2) = 1.41421. Charging a
+// diagonal the SAME as a cardinal is what made the old distance field square,
+// and a square distance field is what put every channel on a 45 degree line.
+const uint step8[8] = uint[8](17u, 12u, 17u, 12u, 12u, 17u, 12u, 17u);
+
+// Saturating ceiling. A value that reaches it is reported as unresolved rather
+// than pinned: two neighbours both pinned at the ceiling have no gradient
+// between them, and a silent plateau is precisely the failure this whole pass
+// exists to remove.
+const uint kCeil = 0xFFFDu;
+
+void main() {
+    uint ui = gl_GlobalInvocationID.x;
+    if (ui >= uint(pc.width * pc.height)) return;
+    int i = int(ui);
+
+    uint cur = distIn[i];
+    // Bits 16-31 == 0xFFFF marks a non-flat cell. It has a real gradient of
+    // its own and must be left exactly as it is.
+    if ((cur >> 16) == 0xFFFFu) { distOut[i] = cur; return; }
+
+    int x = i % pc.width, y = i / pc.width;
+    float f = filledField[i];
+
+    uint lo = cur & 0xFFFFu;
+    uint hi = cur >> 16;
+
+    for (int d = 0; d < 8; ++d) {
+        int nx = x + dx8[d], ny = y + dy8[d];
+        if (nx < 0 || ny < 0 || nx >= pc.width || ny >= pc.height) continue;
+        int ni = ny * pc.width + nx;
+        if (filledField[ni] != f) continue;      // stay inside this flat
+
+        uint c = distIn[ni];
+        uint s = step8[d];
+
+        uint vlo = c & 0xFFFFu;
+        if (vlo < kCeil) lo = min(lo, min(vlo + s, kCeil));
+
+        uint vhi = c >> 16;
+        if (vhi < kCeil) hi = min(hi, min(vhi + s, kCeil));
+    }
+
+    distOut[i] = lo | (hi << 16);
+}

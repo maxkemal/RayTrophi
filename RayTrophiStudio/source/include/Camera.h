@@ -12,11 +12,13 @@
 #define CAMERA_H
 
 #include <vector>
+#include <cmath>   // exposureFactor(): std::pow
 #include "Vec3.h"
 #include "Matrix4x4.h"
 #include "Ray.h"
 #include "AABB.h"
 #include "ThreadLocalRNG.h"
+#include "CameraPresets.h"   // exposureFactor(): ISO/shutter/f-stop tablolari
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CAMERA MODE - Controls feature availability and physical simulation level
@@ -85,6 +87,9 @@ public:
     Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, float aperture, float focus_dist, int blade_count);
     Camera();
     Ray get_ray(float s, float t) const;
+    // Deterministic viewport/picking ray. Raster projection is pinhole/ortho:
+    // it does not apply render-lens distortion or stochastic aperture offsets.
+    Ray get_viewport_ray(float s, float t) const;
 
     int random_int(int min, int max) const;
 
@@ -123,6 +128,54 @@ public:
     bool auto_exposure = true;         // Default to manual to use above settings
     float ev_compensation = 0.0f;      // EV compensation (-2 to +2)
     float calculated_ev = 0.0f;        // Calculated exposure value (output)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // POZLAMA CARPANI -- TEK TANIM
+    // ═══════════════════════════════════════════════════════════════════════
+    // ★★★★ Bu formul 2026-09-03'e kadar DORT yerde kopyalanmisti:
+    //   Main.cpp'de iki kez (CPU denoised preview + render dongusu),
+    //   VulkanBackend::setCamera ve OptixBackend. Dordu de ayni sabitleri
+    //   (baseline 0.00003125, `* 2.0f`) elle tasiyordu; birini kalibre edip
+    //   otekini birakmak, ayni sahnenin iki yolda farkli parlakligi demekti
+    //   ve belirtisi "biraz farkli gorunuyor" olurdu.
+    //
+    // ★★★ Model GORELIDIR ve oyle kalmali: carpan `current_val / baseline_val`
+    //   oranidir, mutlak fotometrik formul DEGIL. Ders kitabi formulu
+    //   (1 / (1.2 * 2^EV100)) sahne radyansinin cd/m2 olmasini varsayar; bu
+    //   motorda isik siddeti keyfi birimde ve mutlak formul her sahneyi
+    //   karartir. Buradaki baseline zaten "siyah viewport'u onlemek icin"
+    //   kalibre edilmis (asagidaki yorum orijinaldir).
+    float exposureFactor() const {
+        const float ev_comp = std::pow(2.0f, ev_compensation);
+        if (auto_exposure) return ev_comp;
+        if (!use_physical_exposure) return ev_comp;
+
+        float iso_mult = 1.0f;
+        if (iso_preset_index >= 0 &&
+            iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) {
+            iso_mult = CameraPresets::ISO_PRESETS[iso_preset_index].exposure_multiplier;
+        }
+        float shutter_time = 0.004f;
+        if (shutter_preset_index >= 0 &&
+            shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) {
+            shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[shutter_preset_index].speed_seconds;
+        }
+        float f_num = 16.0f;
+        if (fstop_preset_index > 0 &&
+            fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
+            f_num = CameraPresets::FSTOP_PRESETS[fstop_preset_index].f_number;
+        } else if (aperture > 0.001f) {
+            // Main.cpp'deki CPU yolunun yaptigi geri dusus; burada da var ki
+            // iki yol ayni sayiyi uretsin.
+            f_num = 0.8f / aperture;
+        }
+
+        const float aperture_sq = f_num * f_num;
+        const float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
+        // Calibration: boosted baseline to avoid a black viewport.
+        const float baseline_val = 0.00003125f;
+        return (current_val / baseline_val) * ev_comp * 2.0f;
+    }
     
     // Aspect Ratio for Output (syncs with final render)
     int output_aspect_index = 2;       // Default: 16:9 (index into CameraPresets::ASPECT_RATIOS)

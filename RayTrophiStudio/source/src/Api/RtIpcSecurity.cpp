@@ -1,4 +1,4 @@
-#include "RtIpcSecurity.h"
+﻿#include "RtIpcSecurity.h"
 
 #include "json.hpp"
 #include <openssl/evp.h>
@@ -224,8 +224,12 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "project.open" || method == "scene.import_model" ||
         method == "terrain.import_heightmap" || method == "paint.import_channel")
         return FilesRead | SceneWrite;
+    // ★ scene.export_gltf lives in the `scene.` namespace but does NOT write the
+    // scene - it reads it and writes a file. Without this line the namespace
+    // table below would demand SceneWrite, so a read+files-write agent could not
+    // export, and a scene-write agent could export without a file capability.
     if (method == "project.save" || method == "terrain.export_heightmap" ||
-        method == "paint.export_channel") return FilesWrite;
+        method == "paint.export_channel" || method == "scene.export_gltf") return FilesWrite;
     if (method.rfind("render.", 0) == 0) {
         if (method == "render.start" || method == "render.start_sequence")
             return Render | FilesWrite;
@@ -276,6 +280,15 @@ uint32_t requiredCapabilities(const std::string& method) {
     // method table is a reading trap, not a naming preference.
     if (method == "perf.reset" || method == "perf.set_logging") return Read;
     if (method == "spline.animation.self_test") return Read;
+    // scene.raycast measures what is under a ray and mutates nothing. Without
+    // this line the "scene." namespace below would classify it as SceneWrite and
+    // a read-capability agent could not use the one method that tells it where a
+    // surface actually is.
+    if (method == "scene.raycast") return Read;
+    // scene.export_estimate writes NOTHING - not the scene, not a file. It only
+    // reports what an export WOULD cost, so it must not demand FilesWrite the
+    // way scene.export_gltf does, and must not fall through to SceneWrite.
+    if (method == "scene.export_estimate") return Read;
     if (method == "geometry_cache.self_test") return Read;
     if (method == "request_render" || method == "reset_accumulation") return Render;
     // Profile sweep preview/self-test only allocate transient flat geometry; they
@@ -310,10 +323,16 @@ uint32_t requiredCapabilities(const std::string& method) {
         // substring heuristics, so without this line it falls through to
         // the terrain. namespace and is graded SceneWrite.
         method == "terrain.landform_stats" ||
+        // Live analysis-field measurement; reads published scalar arrays and
+        // changes neither graph nor terrain state.
+        method == "terrain.field_stats" ||
         method == "forcefield.evaluate" || method == "particle.stats" ||
         method == "particle.emitters" || method == "anim.characters" ||
         method == "anim.character" || method == "anim.clips" ||
         method == "anim.graph_status" ||
+        // Raw imported-clip counters. Read-only, and neither name matches the
+        // .get/.list/.status substring heuristics below.
+        method == "anim.source_clips" || method == "anim.source_channels" ||
         // Substance library enumeration: read-only, and its name matches none
         // of the ".get"/".list" substring heuristics below.
         method == "msf.substances" || method == "msf.fields" ||

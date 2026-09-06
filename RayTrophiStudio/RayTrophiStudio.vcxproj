@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -118,7 +118,7 @@
     <TargetName>RayTrophiStudio</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(ProjectDir)..\vcpkg\installed\x64-windows\include\python$(RayTrophiPythonVersion);$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
+    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(ProjectDir)..\vcpkg\installed\x64-windows\include\python$(RayTrophiPythonVersion);$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
     <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
@@ -126,7 +126,7 @@
     <LibraryPath>$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(ProjectDir)..\vcpkg\installed\x64-windows\include\python$(RayTrophiPythonVersion);$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
+    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(ProjectDir)..\vcpkg\installed\x64-windows\include\python$(RayTrophiPythonVersion);$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
     <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
     <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -185,12 +185,12 @@
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
@@ -239,7 +239,7 @@
       <WholeProgramOptimization>true</WholeProgramOptimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <OpenMPSupport>true</OpenMPSupport>
-      <AdditionalIncludeDirectories>$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
     </ClCompile>
@@ -248,7 +248,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
@@ -282,6 +282,13 @@
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="source\include\PostProcess\ColorMath.h" />
+    <ClInclude Include="source\include\PostProcess\Exposure.h" />
+    <ClInclude Include="source\include\PostProcess\PostService.h" />
+    <ClInclude Include="source\include\PostProcess\PostSurface.h" />
+    <ClInclude Include="source\include\PostProcess\VulkanExposure.h" />
+    <ClInclude Include="source\src\Device\post_exposure.cuh" />
+    <ClInclude Include="source\src\Api\RtPostBindings.h" />
     <ClInclude Include="source\src\Api\RtIpcAgentDiscovery.h" />
     <ClInclude Include="source\src\Api\RtAgentLifecycleManager.h" />
     <ClInclude Include="source\src\Api\RtPythonAgent.h" />
@@ -337,6 +344,11 @@
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
     <ClInclude Include="source\src\UI\scene_ui_agent_chat.hpp" />
+    <ClInclude Include="source\include\Viewport\RasterFrameTelemetry.h" />
+    <ClInclude Include="source\include\Viewport\RasterGpuCull.h" />
+    <ClInclude Include="source\include\Viewport\RasterInstanceUpload.h" />
+    <ClInclude Include="source\include\Viewport\RasterViewportFrameRing.h" />
+    <ClInclude Include="source\include\Viewport\RealtimeRenderSettings.h" />
     <ClInclude Include="source\include\Viewport\ViewportSceneSync.h" />
     <ClInclude Include="source\include\stb_image_write.h" />
     <ClInclude Include="source\include\ui_modern.h" />
@@ -349,6 +361,7 @@
     <ClInclude Include="external\xatlas\source\xatlas\xatlas.h" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_node_palette.hpp" />
+    <ClCompile Include="source\src\PostProcess\PostSurface.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_node_palette.cpp" />
     <ClInclude Include="source\src\UI\scene_ui_river.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp" />
@@ -362,11 +375,9 @@
     <None Include="source\src\Device\trace_ray.cuh" />
     <None Include="source\src\Device\gpucamera.cuh" />
     <ClInclude Include="source\include\AABB.h" />
-    <ClInclude Include="source\include\AnimatedObject.h" />
     <ClInclude Include="source\include\AreaLight.h" />
     <ClInclude Include="source\include\AssetRegistry.h" />
     <ClInclude Include="source\include\FoliageAssetLibrary.h" />
-    <ClInclude Include="source\include\AssimpLoader.h" />
     <ClInclude Include="source\include\Camera.h" />
     <ClInclude Include="source\include\Dielectric.h" />
     <ClInclude Include="source\include\DiffuseLight.h" />
@@ -441,6 +452,17 @@
     <ClInclude Include="source\include\MeshEdit\CurveNodeData.h" />
     <ClInclude Include="source\include\MeshEdit\GeometryCurveNodes.h" />
     <ClInclude Include="source\include\MeshEdit\SplineAnimation.h" />
+    <ClInclude Include="source\include\Animation\AnimationKeys.h" />
+    <ClInclude Include="source\include\Animation\NodeHierarchy.h" />
+    <ClInclude Include="source\include\Import\ImportedModel.h" />
+    <ClInclude Include="source\include\Import\GltfDirectReader.h" />
+    <ClInclude Include="source\include\Import\ModelImport.h" />
+    <ClInclude Include="source\include\Import\UfbxReader.h" />
+    <ClInclude Include="source\include\Import\ObjReader.h" />
+    <ClInclude Include="source\include\Import\ModelProbe.h" />
+    <ClInclude Include="source\include\OptixMaterialTables.h" />
+    <ClInclude Include="source\include\Animation\AnimationData.h" />
+    <ClInclude Include="source\src\Import\UfbxMaterials.h" />
     <ClInclude Include="source\include\Animation\GeometryCache.h" />
     <ClInclude Include="source\include\MeshEdit\SplinePrimitive.h" />
     <ClInclude Include="source\include\MeshEdit\SplineObject.h" />
@@ -486,6 +508,13 @@
     <ClInclude Include="source\include\TerrainErosionLem.h" />
     <ClInclude Include="source\include\TerrainRiverNetworkCore.h" />
     <ClInclude Include="source\include\TerrainSurfaceNodes.h" />
+    <ClInclude Include="source\include\TerrainCurveMask.h" />
+    <ClInclude Include="source\include\TerrainCurveNodes.h" />
+    <ClInclude Include="source\include\TerrainCurveSceneSnapshot.h" />
+    <ClInclude Include="source\include\TerrainRoadCarve.h" />
+    <ClInclude Include="source\include\TerrainRoadMesh.h" />
+    <ClInclude Include="source\include\TerrainRoadCarveNode.h" />
+    <ClInclude Include="source\include\TerrainRoadFieldsOutput.h" />
     <ClInclude Include="source\include\TerrainNodePortPanel.h" />
     <ClInclude Include="source\include\TerrainNodePortPresentation.h" />
     <ClInclude Include="source\include\unified_types.h" />
@@ -502,6 +531,7 @@
     <ClInclude Include="source\include\Backend\VulkanVolumeInstrumentation.h" />
     <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h" />
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp" />
+    <ClInclude Include="source\include\UI\viewport_realtime_quality_panel.hpp" />
     <ClInclude Include="source\include\UI\HierarchyLiveObjectView.h" />
     <ClInclude Include="source\include\UI\TemplateHubUI.h" />
     <ClInclude Include="source\include\Template\StartupPreferences.h" />
@@ -1380,8 +1410,16 @@
     <ClCompile Include="source\src\Scene\FoliageAssetLibrary.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_mesh_overlay.cpp" />
     <ClCompile Include="source\src\Utils\TriangleProxyConverter.cpp" />
+    <ClCompile Include="source\src\Viewport\RasterGpuCull.cpp" />
+    <ClCompile Include="source\src\Viewport\MaterialPreviewShadow.cpp" />
+    <ClCompile Include="source\src\Viewport\MaterialPreviewIbl.cpp" />
+    <ClCompile Include="source\src\Viewport\MaterialPreviewTransmission.cpp" />
+    <ClCompile Include="source\src\Viewport\MaterialPreviewSdfSurface.cpp" />
+    <ClCompile Include="source\src\Viewport\MaterialPreviewVolume.cpp" />
+    <ClCompile Include="source\src\Viewport\RasterInstanceUpload.cpp" />
+    <ClCompile Include="source\src\Viewport\RasterViewportFrameRing.cpp" />
+    <ClCompile Include="source\src\Viewport\RealtimeRenderSettings.cpp" />
     <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp" />
-    <ClCompile Include="source\src\Utils\AssimpLoader.cpp" />
     <ClCompile Include="source\src\Render\AtmosphereLUT.cpp" />
     <ClCompile Include="source\src\Render\Camera.cpp" />
     <ClCompile Include="source\src\Physics\CurlNoise.cpp" />
@@ -1426,8 +1464,15 @@
     <ClCompile Include="source\src\Utils\SceneCommand.cpp" />
     <ClCompile Include="source\src\Utils\PerfProfile.cpp" />
     <ClCompile Include="source\src\Utils\MeshModifiers.cpp" />
+    <ClCompile Include="source\src\Utils\GltfDirectWriter.cpp" />
     <ClCompile Include="source\src\Utils\SceneExporter.cpp" />
     <ClCompile Include="source\src\Api\RtApi.cpp" />
+    <ClCompile Include="source\src\PostProcess\Exposure.cpp" />
+    <ClCompile Include="source\src\PostProcess\PostService.cpp" />
+    <ClCompile Include="source\src\PostProcess\PostPanel.cpp" />
+    <ClCompile Include="source\src\PostProcess\VulkanExposure.cpp" />
+    <ClCompile Include="source\src\Api\RtApiPost.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcPostExposure.cpp" />
     <ClCompile Include="source\src\Api\RtApiModifiers.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluid.cpp" />
     <ClCompile Include="source\src\Api\RtApiFracture.cpp" />
@@ -1538,6 +1583,15 @@
     <ClCompile Include="source\src\MeshEdit\ProfileSweep.cpp" />
     <ClCompile Include="source\src\MeshEdit\GeometryCurveNodes.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineAnimation.cpp" />
+    <ClCompile Include="source\src\Animation\NodeHierarchy.cpp" />
+    <ClCompile Include="source\src\Import\GltfDirectReader.cpp" />
+    <ClCompile Include="source\src\Import\ModelImport.cpp"><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Import\ModelImportScene.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Import\UfbxVendor.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Import\UfbxReader.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Import\UfbxMaterials.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Import\ObjReader.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Render\OptixMaterialTables.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\Animation\GeometryCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplinePrimitive.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineObject.cpp" />
@@ -1545,6 +1599,7 @@
     <ClCompile Include="source\src\MeshEdit\SplineEvaluationService.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineSerialization.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineObjectService.cpp" />
+    <ClCompile Include="source\src\MeshEdit\SplineSurfaceAuthoring.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineObjectLifecycle.cpp" />
     <ClCompile Include="source\src\MeshEdit\ProfileSweepService.cpp" />
     <ClCompile Include="source\src\MeshEdit\ProfileRevolve.cpp" />
@@ -1560,6 +1615,7 @@
     <ClCompile Include="source\src\Api\RtIpcMeshToolDescriptors.cpp" />
     <ClCompile Include="source\src\Api\RtApiMeshEdit.cpp" />
     <ClCompile Include="source\src\Api\RtApiSpline.cpp" />
+    <ClCompile Include="source\src\Api\RtApiRoadMesh.cpp" />
     <ClCompile Include="source\src\Api\RtApiSplineSkin.cpp" />
     <ClCompile Include="source\src\Api\RtApiGeometryCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshValidator.cpp" />
@@ -1601,6 +1657,16 @@
     <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp" />
     <ClCompile Include="source\src\Physics\TerrainRiverNetworkCore.cpp" />
     <ClCompile Include="source\src\Physics\TerrainSurfaceNodes.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainCurveMask.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainCurveNodes.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainCurveSceneSnapshot.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainRoadCarve.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainRoadCarveNode.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainRoadProfile.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainRoadNetwork.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainRoadNetworkNode.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainRoadFieldsOutput.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainRoadMesh.cpp" />
     <ClCompile Include="source\src\Physics\TerrainNodePortPresentation.cpp" />
     <ClCompile Include="source\src\Physics\TerrainPaintEvaluation.cpp" />
     <ClCompile Include="source\src\Physics\TerrainSemanticMap.cpp" />

@@ -13,6 +13,7 @@
 
 #include "Backend/VulkanBackend.h"
 #include "Backend/vulkan_world_data.h"
+#include "Viewport/RasterInstanceUpload.h"
 #include "VulkanBackend_Internal.h"
 #include "globals.h"
 #include "HittableInstance.h"
@@ -49,6 +50,14 @@ void VulkanBackendAdapter::destroyRasterMesh(RasterMeshBuffer& mesh) {
     if (mesh.boneIndexBuffer.buffer) m_device->destroyBuffer(mesh.boneIndexBuffer);
     if (mesh.boneWeightBuffer.buffer) m_device->destroyBuffer(mesh.boneWeightBuffer);
     if (mesh.persistentBoneMatsBuffer.buffer) m_device->destroyBuffer(mesh.persistentBoneMatsBuffer);
+    // ★★★★ Return the skinning descriptor set BEFORE the struct is zeroed.
+    // Every buffer above was destroyed and this handle was simply dropped, so
+    // each scene rebuild (adding any object rebuilds the raster meshes) burned
+    // one pool slot per skinned mesh. Once the pool ran dry, GPU compute
+    // skinning failed to allocate and silently fell back to the CPU - and
+    // because the RT BLAS path shares this pool, Vulkan RT lost GPU skinning
+    // too. Reported as "GPU skinning works until I add an object" (2026-09-05).
+    m_device->freeSkinningDescriptorSet(mesh.skinningDescSet);
     mesh = RasterMeshBuffer{};
 }
 
@@ -58,6 +67,26 @@ void VulkanBackendAdapter::destroyAllRasterMeshes() {
     }
     m_rasterMeshes.clear();
     m_rasterInstances.clear();
+    
+    if (m_rasterGlobalInstBuf) {
+        m_rasterGlobalInstBuf->destroy();
+        m_rasterGlobalInstBuf.reset();
+    }
+    m_rasterUseGlobalInstBuffer = false;
+
+    // ★ GPU culling kaynaklarini AYNI yerde birak. Ayri bir omurde birakmak,
+    //   cihaz gittikten sonra calisan bir yikici demekti: unique_ptr'in kendi
+    //   yikicisi destroy()'u cagirir ve o da cihazi kullanir.
+    if (m_rasterGpuCull) {
+        m_rasterGpuCull->destroy();
+        m_rasterGpuCull.reset();
+    }
+    m_rasterGpuCullActive = false;
+    m_rasterCullDrawSlotCount = 0;
+    m_rasterCullMeshCount = 0;
+    m_rasterCullBindingsDirty = true;
+    m_rasterCullOutCapacity = 0;
+    m_rasterInstanceBounds.clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -292,7 +321,7 @@ void VulkanBackendAdapter::setRasterVisibleInstances(RasterMeshBuffer& mesh,
         mesh.visibleInstanceIndicesCache.clear();
         mesh.visibleInstancesDirty = false;
         mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
-        mesh.lastScatterTriangleBudget = m_rasterScatterTriangleBudget;
+        mesh.lastScatterTriangleTarget = m_rasterScatterTriangleTarget;
         return;
     }
 
@@ -339,9 +368,10 @@ void VulkanBackendAdapter::setRasterVisibleInstances(RasterMeshBuffer& mesh,
     mesh.visibleInstanceIndicesCache = visibleInstanceIndices;
     mesh.visibleInstancesDirty = false;
     mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
-    mesh.lastScatterTriangleBudget = m_rasterScatterTriangleBudget;
+    mesh.lastScatterTriangleTarget = m_rasterScatterTriangleTarget;
 
     const VkDeviceSize requiredSize = gpuInstances.size() * sizeof(RasterInstanceGPU);
+    drainInteractiveViewportInFlight();
     if (mesh.instanceBuffer.buffer && mesh.instanceBuffer.size >= requiredSize) {
         m_device->uploadBuffer(mesh.instanceBuffer, gpuInstances.data(), requiredSize, 0);
         return;
@@ -357,7 +387,10 @@ void VulkanBackendAdapter::setRasterVisibleInstances(RasterMeshBuffer& mesh,
     VulkanRT::BufferCreateInfo ici{};
     ici.size = std::max(requiredSize, allocCapacity);
     ici.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
-    ici.location = VulkanRT::MemoryLocation::GPU_ONLY;
+    // Instance matrices are small and frequently edited. Host-visible memory
+    // avoids allocating a staging buffer and submitting a blocking transfer for
+    // every transform update; frame-ring draining above protects GPU readers.
+    ici.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
     ici.initialData = nullptr;
     mesh.instanceBuffer = m_device->createBuffer(ici);
     if (mesh.instanceBuffer.buffer) {
@@ -369,11 +402,22 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
     if (!m_device) return;
     if (mesh.isScatterProxy) return;
 
+    // ── Production instancing path ──
+    if (m_rasterUseGlobalInstBuffer) {
+        // CPU frustum culling is disabled. The global buffer already contains
+        // all instances (updated directly by layout builder or transform sync).
+        // Just mark clean and return. No drain, no staging.
+        mesh.visibleInstancesDirty = false;
+        mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+        return;
+    }
+    // ────────────────────────────────
+
     const bool proxySplitStale =
         mesh.isScatterGroup &&
         !mesh.proxyMeshKey.empty() &&
         (mesh.lastVisibleFrustumRevision != m_rasterFrustumRevision ||
-         mesh.lastScatterTriangleBudget != m_rasterScatterTriangleBudget);
+         mesh.lastScatterTriangleTarget != m_rasterScatterTriangleTarget);
 
     if (!mesh.visibleInstancesDirty &&
         !proxySplitStale &&
@@ -437,11 +481,11 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
             }
         }
         visibleInstanceIndices = std::move(fullInstances);
-    } else if (mesh.isScatterGroup) {
+    } else if (mesh.isScatterGroup && rasterScatterLodSplitEnabled()) {
         const uint64_t trianglesPerInstance = (mesh.indexBuffer.buffer && mesh.indexCount > 0)
             ? (static_cast<uint64_t>(mesh.indexCount) / 3ull)
             : (static_cast<uint64_t>(mesh.vertexCount) / 3ull);
-        const uint64_t scatterTriangleBudget = std::max<uint64_t>(1ull, m_rasterScatterTriangleBudget);
+        const uint64_t scatterTriangleBudget = std::max<uint64_t>(1ull, m_rasterScatterTriangleTarget);
         if (trianglesPerInstance > 0) {
             const uint64_t visibleTriangles = trianglesPerInstance * static_cast<uint64_t>(visibleInstanceIndices.size());
             if (visibleTriangles > scatterTriangleBudget) {
@@ -514,6 +558,59 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
 void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
     if (!m_device) return;
 
+    // ── Production instancing path ──
+    if (m_rasterUseGlobalInstBuffer && m_rasterGlobalInstBuf && m_rasterGlobalInstBuf->isReady()) {
+        struct RasterInstanceGPU { float model[16]; };
+        auto matrixToGL = [](const Matrix4x4& mat, float out[16]) {
+            Matrix4x4 t = mat.transpose();
+            int k = 0;
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c)
+                    out[k++] = t.m[r][c];
+        };
+
+        const uint32_t count = static_cast<uint32_t>(mesh.instanceIndices.size());
+        if (count > 0 && mesh.firstInstance + count <= m_rasterGlobalInstBuf->capacity()) {
+            std::vector<RasterInstanceGPU> gpuInstances(count);
+            for (size_t i = 0; i < count; ++i) {
+                const uint32_t instIdx = mesh.instanceIndices[i];
+                if (instIdx >= m_rasterInstances.size()) {
+                    std::memset(gpuInstances[i].model, 0, sizeof(float) * 16);
+                    continue;
+                }
+                const auto& ri = m_rasterInstances[instIdx];
+                writeRasterInstanceBound(mesh.firstInstance + static_cast<uint32_t>(i),
+                                         ri, mesh.hasSkinning);
+                if (ri.mask == 0) {
+                    std::memset(gpuInstances[i].model, 0, sizeof(float) * 16);
+                } else {
+                    matrixToGL(ri.transform, gpuInstances[i].model);
+                }
+            }
+            // GPU culling sinirlarini YALNIZ bu mesh'in araligi icin gonder.
+            // Tamamini gondermek tek bir nesne kipirdadiginda butun diziyi
+            // (500K instance'ta ~8 MB) kopyalamak olurdu.
+            if (m_rasterGpuCull && mesh.firstInstance * 4u + count * 4u <= m_rasterInstanceBounds.size()) {
+                m_rasterGpuCull->setBounds(
+                    mesh.firstInstance,
+                    m_rasterInstanceBounds.data() + static_cast<size_t>(mesh.firstInstance) * 4u,
+                    count);
+            }
+            // Direct write to mapped buffer — NO DRAIN, NO STAGING.
+            m_rasterGlobalInstBuf->write(
+                mesh.firstInstance,
+                reinterpret_cast<const float*>(gpuInstances.data()),
+                count);
+        }
+        mesh.instanceCount = count;
+        mesh.visibleInstancesDirty = false;
+        mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+        return;
+    }
+    // ────────────────────────────────
+
+    drainInteractiveViewportInFlight();
+
     mesh.visibleInstancesDirty = true;
     mesh.lastVisibleFrustumRevision = 0;
     if (kRasterFrustumCullingEnabled) {
@@ -525,11 +622,6 @@ void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
     struct RasterInstanceGPU {
         float model[16];
     };
-
-    if (mesh.instanceBuffer.buffer) {
-        m_device->destroyBuffer(mesh.instanceBuffer);
-        mesh.instanceBuffer = VulkanRT::BufferHandle{};
-    }
 
     bool allInstancesVisible = true;
     for (uint32_t instanceIndex : mesh.instanceIndices) {
@@ -594,23 +686,33 @@ void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
         for (auto& f : futures) f.get();
     }
 
-    VulkanRT::BufferCreateInfo ici{};
-    ici.size = gpuInstances.size() * sizeof(RasterInstanceGPU);
-    ici.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
-    ici.location = VulkanRT::MemoryLocation::GPU_ONLY;
-    ici.initialData = nullptr;
-    mesh.instanceBuffer = m_device->createBuffer(ici);
+    const VkDeviceSize requiredSize =
+        gpuInstances.size() * sizeof(RasterInstanceGPU);
+    if (!mesh.instanceBuffer.buffer || mesh.instanceBuffer.size < requiredSize) {
+        if (mesh.instanceBuffer.buffer) {
+            m_device->destroyBuffer(mesh.instanceBuffer);
+            mesh.instanceBuffer = VulkanRT::BufferHandle{};
+        }
+        const VkDeviceSize growCapacity = requiredSize + requiredSize / 2u;
+        VulkanRT::BufferCreateInfo ici{};
+        ici.size = (std::max)(requiredSize, growCapacity);
+        ici.usage = VulkanRT::BufferUsage::VERTEX |
+                    VulkanRT::BufferUsage::TRANSFER_DST;
+        ici.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+        ici.initialData = nullptr;
+        mesh.instanceBuffer = m_device->createBuffer(ici);
+    }
     if (mesh.instanceBuffer.buffer) {
         m_device->uploadBuffer(mesh.instanceBuffer,
                                gpuInstances.data(),
-                               gpuInstances.size() * sizeof(RasterInstanceGPU),
+                               requiredSize,
                                0);
     }
 
     mesh.visibleInstanceIndicesCache = std::move(visibleInstanceIndices);
     mesh.visibleInstancesDirty = false;
     mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
-    mesh.lastScatterTriangleBudget = m_rasterScatterTriangleBudget;
+    mesh.lastScatterTriangleTarget = m_rasterScatterTriangleTarget;
 }
 
 void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared_ptr<Hittable>>& objects) {
@@ -1134,8 +1236,14 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         if (meshIt == m_rasterMeshes.end()) continue;
         meshIt->second.instanceIndices.push_back(i);
     }
-    for (auto& [key, mesh] : m_rasterMeshes) {
-        uploadRasterInstanceBuffer(mesh);
+    // ── Production instancing: try global buffer first, per-mesh fallback ──
+    rebuildRasterInstanceLayout();
+    if (m_rasterUseGlobalInstBuffer) {
+        writeRasterInstanceTransformsToGlobal();
+    } else {
+        for (auto& [key, mesh] : m_rasterMeshes) {
+            uploadRasterInstanceBuffer(mesh);
+        }
     }
 
     m_rasterGeometryDirty = false;
@@ -1732,3 +1840,266 @@ bool VulkanBackendAdapter::cloneRasterObjectByNodeName(
     return !dirtyMeshKeys.empty();
 }
 } // namespace Backend
+
+// ============================================================================
+// Production instancing: global instance buffer layout & upload
+// ============================================================================
+
+namespace Backend {
+
+void VulkanBackendAdapter::rebuildRasterInstanceLayout() {
+    if (!m_device || !m_device->isInitialized()) {
+        m_rasterUseGlobalInstBuffer = false;
+        return;
+    }
+
+    // Lazily create the global buffer object.
+    if (!m_rasterGlobalInstBuf) {
+        m_rasterGlobalInstBuf = std::make_unique<RasterGlobalInstanceBuffer>();
+    }
+
+    // ── Compact layout: assign contiguous firstInstance offsets ──
+    //
+    // ★ Ayni dongude GPU culling yuvalari da atanir. Ayri bir dongude atamak,
+    //   iki gecisin unordered_map'i ayni sirada gezdigi VARSAYIMINA dayanirdi;
+    //   o varsayim sessizce bozulursa bir mesh baska bir mesh'in komutunu
+    //   yazar ve bu ekranda "yanlis nesne kayboldu" diye gorunur.
+    uint32_t offset = 0;
+    uint32_t outOffset = 0;
+    uint32_t cullMeshIdx = 0;
+    uint32_t cullDrawSlot = 0;
+    for (auto& [key, mesh] : m_rasterMeshes) {
+        const uint32_t slots = static_cast<uint32_t>(mesh.instanceIndices.size());
+        mesh.firstInstance = offset;
+        mesh.allocatedInstanceSlots = slots;
+        offset += slots;
+
+        // Her mesh cizilebilir, yani her mesh bir indirect komut yuvasi alir.
+        // Proxy mesh'in komutunu SAHIBI (scatter grubu) yazar.
+        mesh.cullDrawSlot = cullDrawSlot++;
+        // Yalnizca kendi instance'i olan mesh'ler dispatch edilir.
+        mesh.cullMeshIndex = (slots > 0) ? cullMeshIdx++ : UINT32_MAX;
+
+        // TAM cizimin cikti bolgesi. Proxy bolgesi asagida ayri ayrilir.
+        mesh.cullOutBase = outOffset;
+        outOffset += slots;
+    }
+
+    // ★ Proxy bolgeleri: LOD ayrimi olan her scatter grubu icin, PROXY mesh'e
+    //   kendi cikti bolgesi verilir. Tam ve proxy ayri bolgelerde ve ikisi de
+    //   onden doldurulur -- boylece iki tabanin ikisi de CPU'da bilinir ve
+    //   indirect komutta firstInstance 0 kalabilir (drawIndirectFirstInstance
+    //   cihaz ozelligi bu projede etkin DEGIL).
+    for (const auto& entry : m_rasterMeshes) {
+        const RasterMeshBuffer& owner = entry.second;
+        if (!owner.isScatterGroup || owner.proxyMeshKey.empty()) continue;
+        if (owner.allocatedInstanceSlots == 0) continue;
+        auto proxyIt = m_rasterMeshes.find(owner.proxyMeshKey);
+        if (proxyIt == m_rasterMeshes.end()) continue;
+        proxyIt->second.cullOutBase = outOffset;
+        outOffset += owner.allocatedInstanceSlots;
+    }
+
+    m_rasterCullDrawSlotCount = cullDrawSlot;
+    m_rasterCullMeshCount = cullMeshIdx;
+    m_rasterCullOutCapacity = outOffset;
+    m_rasterCullBindingsDirty = true;
+    m_rasterInstanceBounds.assign(static_cast<size_t>(offset) * 4u, 0.0f);
+
+    const uint32_t totalInstances = offset;
+    if (totalInstances == 0) {
+        m_rasterUseGlobalInstBuffer = false;
+        return;
+    }
+
+    // Ensure global buffer capacity (geometric growth inside).
+    // ★ This is the ONLY place that may allocate/grow. If it fails, we fall
+    // back to the old per-mesh path for this build.
+    drainInteractiveViewportInFlight();
+    if (!m_rasterGlobalInstBuf->ensure(*m_device, totalInstances)) {
+        SCENE_LOG_WARN("[Vulkan] Global raster instance buffer allocation "
+                       "failed for " + std::to_string(totalInstances) +
+                       " instances. Falling back to per-mesh buffers.");
+        m_rasterUseGlobalInstBuffer = false;
+        m_rasterGlobalInstLayoutDirty = true;
+        return;
+    }
+
+    m_rasterUseGlobalInstBuffer = true;
+    m_rasterGlobalInstLayoutDirty = false;
+
+    SCENE_LOG_INFO("[Vulkan] Global instance buffer layout: " +
+                   std::to_string(m_rasterMeshes.size()) + " meshes, " +
+                   std::to_string(totalInstances) + " instance slots, " +
+                   std::to_string(m_rasterGlobalInstBuf->capacity()) +
+                   " capacity");
+}
+
+void VulkanBackendAdapter::writeRasterInstanceBound(uint32_t globalSlot,
+                                                    const RasterInstance& ri,
+                                                    bool neverCull) {
+    const size_t base = static_cast<size_t>(globalSlot) * 4u;
+    if (base + 4u > m_rasterInstanceBounds.size()) return;
+    float* b = m_rasterInstanceBounds.data() + base;
+
+    if (ri.mask == 0) {
+        // radius < 0 => raster_cull.comp bu instance'i HIC gondermez. Eskiden
+        // gizli instance sifir matrisle dejenere ucgen olarak yine vertex
+        // shader'dan geciyordu; artik gecmiyor.
+        b[0] = 0.0f; b[1] = 0.0f; b[2] = 0.0f; b[3] = -1.0f;
+        return;
+    }
+
+    if (!neverCull && ri.worldBBox.is_valid()) {
+        const Vec3 center = (ri.worldBBox.min + ri.worldBBox.max) * 0.5f;
+        const Vec3 half   = (ri.worldBBox.max - ri.worldBBox.min) * 0.5f;
+        b[0] = center.x; b[1] = center.y; b[2] = center.z;
+        b[3] = half.length();
+        return;
+    }
+
+    // CPU yolu da tam boyle davraniyordu: gecersiz bbox ve SKINNED mesh
+    // frustum testine HIC sokulmuyordu (deforme olan bbox bayattir). Devasa
+    // yaricap = her zaman gorunur. Bunlari "gizli" saymak, deforme olan bir
+    // karakterin kamera donunce kaybolmasi demek olurdu.
+    const Vec3 origin = ri.transform.transform_point(Vec3(0.0f, 0.0f, 0.0f));
+    b[0] = origin.x; b[1] = origin.y; b[2] = origin.z;
+    b[3] = 1.0e18f;
+}
+
+bool VulkanBackendAdapter::rasterScatterLodSplitEnabled() {
+    return ::render_settings.raster_viewport_quality_preset !=
+           ::RasterViewportQualityPreset::Full;
+}
+
+void VulkanBackendAdapter::rebuildRasterCullBindings() {
+    if (!m_rasterGpuCull) return;
+
+    std::vector<RasterGpuCull::MeshBinding> bindings(m_rasterCullMeshCount);
+    for (const auto& entry : m_rasterMeshes) {
+        const RasterMeshBuffer& mesh = entry.second;
+        if (mesh.cullMeshIndex == UINT32_MAX ||
+            mesh.cullMeshIndex >= bindings.size()) continue;
+
+        const bool indexed = (mesh.indexBuffer.buffer && mesh.indexCount > 0);
+        RasterGpuCull::MeshBinding& b = bindings[mesh.cullMeshIndex];
+        b.firstInstance = mesh.firstInstance;
+        b.instanceCount = mesh.allocatedInstanceSlots;
+        // Cikti duzeni kaynakla AYNI: her mesh kendi offsetine sikistirir.
+        // full + proxy <= instanceCount oldugu icin mesh bolgeleri cakismaz.
+        b.outBase       = mesh.firstInstance;
+        b.outCapacity   = mesh.allocatedInstanceSlots;
+        b.drawSlot      = mesh.cullDrawSlot;
+        b.elementCount  = indexed ? mesh.indexCount : mesh.vertexCount;
+        b.flags         = indexed ? RasterGpuCull::kFlagIndexed : 0u;
+        b.trianglesPerInstance = (indexed ? mesh.indexCount : mesh.vertexCount) / 3u;
+
+        // ★★★ Butce HER scatter grubuna uygulanir -- proxy mesh'i olsun ya da
+        //   olmasin. Eski CPU yolu da boyleydi: kirpma kosulsuzdu, yalnizca
+        //   proxy YUKLEMESI kosulluydu. Bunu proxy varligina baglamak, flat SoA
+        //   kaynakli scatter gruplarinda (ki proxy'leri uretilmiyor) butceyi
+        //   tamamen etkisiz birakiyordu.
+        if (mesh.isScatterGroup && b.trianglesPerInstance > 0 &&
+            rasterScatterLodSplitEnabled()) {
+            b.flags |= RasterGpuCull::kFlagLodSplit;
+
+            if (!mesh.proxyMeshKey.empty()) {
+                auto proxyIt = m_rasterMeshes.find(mesh.proxyMeshKey);
+                if (proxyIt != m_rasterMeshes.end() &&
+                    proxyIt->second.cullDrawSlot != UINT32_MAX &&
+                    proxyIt->second.vertexBuffer.buffer) {
+                    const RasterMeshBuffer& px = proxyIt->second;
+                    const bool pxIndexed = (px.indexBuffer.buffer && px.indexCount > 0);
+                    b.flags |= RasterGpuCull::kFlagHasProxy;
+                    b.proxyDrawSlot     = px.cullDrawSlot;
+                    b.proxyElementCount = pxIndexed ? px.indexCount : px.vertexCount;
+                    b.proxyFlags        = pxIndexed ? RasterGpuCull::kFlagIndexed : 0u;
+                    b.proxyOutBase      = px.cullOutBase;
+                }
+            }
+        }
+    }
+
+    m_rasterGpuCull->setMeshBindings(bindings);
+    m_rasterGpuCull->setBounds(0, m_rasterInstanceBounds.data(),
+                               static_cast<uint32_t>(m_rasterInstanceBounds.size() / 4u));
+    m_rasterCullBindingsDirty = false;
+}
+
+void VulkanBackendAdapter::writeRasterInstanceTransformsToGlobal() {
+    if (!m_rasterGlobalInstBuf || !m_rasterGlobalInstBuf->isReady()) return;
+
+    // Per-instance GPU layout: float model[16] (column-major, 64 bytes)
+    struct RasterInstanceGPU { float model[16]; };
+
+    auto matrixToGL = [](const Matrix4x4& mat, float out[16]) {
+        Matrix4x4 t = mat.transpose();
+        int k = 0;
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                out[k++] = t.m[r][c];
+    };
+
+    // Parallel matrix conversion threshold
+    constexpr size_t kParallelThreshold = 4096;
+    unsigned numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 4;
+
+    for (auto& [key, mesh] : m_rasterMeshes) {
+        const uint32_t count = static_cast<uint32_t>(mesh.instanceIndices.size());
+        if (count == 0) continue;
+
+        // Build contiguous GPU matrix array for this mesh
+        std::vector<RasterInstanceGPU> gpuInstances(count);
+
+        auto fillRange = [&](size_t start, size_t end) {
+            for (size_t i = start; i < end; ++i) {
+                const uint32_t instIdx = mesh.instanceIndices[i];
+                if (instIdx >= m_rasterInstances.size()) {
+                    std::memset(gpuInstances[i].model, 0, sizeof(float) * 16);
+                    continue;
+                }
+                const auto& ri = m_rasterInstances[instIdx];
+                // GPU culling sinirlarini ayni gecisde yaz: zaten burada okunan
+                // verinin turevi, ikinci bir tarama gerekmesin.
+                writeRasterInstanceBound(mesh.firstInstance + static_cast<uint32_t>(i),
+                                         ri, mesh.hasSkinning);
+                if (ri.mask == 0) {
+                    // Hidden instance: zero-scale matrix → degenerate triangles
+                    std::memset(gpuInstances[i].model, 0, sizeof(float) * 16);
+                } else {
+                    matrixToGL(ri.transform, gpuInstances[i].model);
+                }
+            }
+        };
+
+        if (count < kParallelThreshold || numThreads < 2) {
+            fillRange(0, count);
+        } else {
+            const size_t chunk = (count + numThreads - 1) / numThreads;
+            std::vector<std::future<void>> futures;
+            futures.reserve(numThreads);
+            for (unsigned t = 0; t < numThreads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = std::min<size_t>(s + chunk, count);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, fillRange, s, e));
+            }
+            for (auto& f : futures) f.get();
+        }
+
+        // Write contiguously at this mesh's firstInstance offset
+        m_rasterGlobalInstBuf->write(
+            mesh.firstInstance,
+            reinterpret_cast<const float*>(gpuInstances.data()),
+            count);
+
+        // Set instanceCount = total (all instances drawn, no CPU frustum cull)
+        mesh.instanceCount = count;
+        mesh.visibleInstancesDirty = false;
+        mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+    }
+}
+
+} // namespace Backend
+

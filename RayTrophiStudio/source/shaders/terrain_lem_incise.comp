@@ -13,6 +13,9 @@
 //  * A cell is NEVER cut below its own receiver (`incisionSafety`). Cutting past
 //    the receiver is how an incision scheme manufactures new closed depressions,
 //    which then read as lakes, which the next drainage solve has to fill again.
+//    The drop this is measured against is bed relief PLUS the conditioning
+//    gradient, so the clamp stays a limit instead of turning into an absolute
+//    veto on flat ground - see the long note at the computation itself.
 //  * `maxStep` bounds a single step in absolute height units, so one pathological
 //    slope cannot punch a spike-deep hole.
 //  * Slope is clamped into [minSlope, maxSlope] before pow(): S^n with an
@@ -40,13 +43,14 @@ layout(push_constant) uniform PC {
 // frozen surface also makes the pass deterministic.
 layout(set = 0, binding = 0) readonly  buffer HeightIn  { float heightIn[]; };
 layout(set = 0, binding = 1) writeonly buffer HeightOut { float heightOut[]; };
-layout(set = 0, binding = 2) readonly buffer Filled { float filledField[]; };
+layout(set = 0, binding = 2) readonly buffer LakeSurface { float lakeSurfaceField[]; };
 layout(set = 0, binding = 3) readonly buffer Area   { float areaField[]; };
 layout(set = 0, binding = 4) readonly buffer Hard   { float hardnessField[]; };
 layout(set = 0, binding = 5) readonly buffer Mask   { float maskField[]; };
 layout(set = 0, binding = 6) readonly buffer FluxIn { float fluxIn[]; };
 layout(set = 0, binding = 7) writeonly buffer FluxOut { float fluxOut[]; };
 layout(set = 0, binding = 8) buffer Erosion         { float erosionField[]; };
+layout(set = 0, binding = 9) readonly buffer Route  { float routeField[]; };
 
 void main() {
     uint ui = gl_GlobalInvocationID.x;
@@ -62,27 +66,53 @@ void main() {
         return;
     }
 
-    float lakeDepth = max(filledField[i] - hCur, 0.0);
+    float lakeDepth = max(lakeSurfaceField[i] - hCur, 0.0);
     if (lakeDepth > pc.lakeEps) { heightOut[i] = hCur; fluxOut[i] = carried; return; }
 
-    // Receiver: steepest descent on the FILLED surface (guaranteed to exist and
-    // to point out of any conditioned depression).
+    // Receiver: steepest descent on the ROUTING surface (guaranteed to exist
+    // and to point out of any conditioned depression -- over a flat that
+    // guarantee comes from the Garbrecht-Martz ramp, see
+    // terrain_lem_flat_ramp.comp).
     const int dx[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
     const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
     const float dist[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
                                    1.0, 1.41421356, 1.0, 1.41421356);
-    float fCur = filledField[i];
+    float rCur = routeField[i];
     int receiver = -1;
     float bestGrade = 0.0, receiverDist = 1.0;
     for (int d = 0; d < 8; ++d) {
         int ni = (y + dy[d]) * pc.width + (x + dx[d]);
-        float grade = (fCur - filledField[ni]) / dist[d];
+        float grade = (rCur - routeField[ni]) / dist[d];
         if (grade > bestGrade) { bestGrade = grade; receiver = ni; receiverDist = dist[d]; }
     }
     if (receiver < 0) { heightOut[i] = hCur; fluxOut[i] = carried; return; }
 
     float run = max(receiverDist * pc.cellSize, 1.0e-3);
-    float dropNorm = max(hCur - heightIn[receiver], 0.0);
+
+    // ★★★★ TWO drops, and only the first of them used to be here.
+    //
+    // `bedDrop` is the real relief between this cell and its receiver.
+    // `routeDrop` is the conditioning gradient - zero wherever the terrain has
+    // relief of its own, and equal to the flat gradient over a flat, which is
+    // precisely where bedDrop is zero.
+    //
+    // With bedDrop alone a flat cell got slope = 0 AND clamp = 0, so the flat
+    // could not incise by any amount, for any parameter setting. That is the
+    // reason low-gradient ground never developed a channel: the A^m feedback
+    // that separates a river out of a plain needs a first cut to amplify, and
+    // there was none. The routing pattern drawn on the flat by the first
+    // drainage solve was therefore the FINAL pattern, which is why it kept the
+    // shape of the conditioning algorithm rather than of a river.
+    //
+    // The anti-pit guarantee survives: the routing surface descends strictly
+    // toward the receiver, every cell cuts at most `incisionSafety` of its own
+    // routing drop, so a channel cutting into a floodplain stays monotone
+    // downstream. Where it does invert by a fraction of a millimetre the next
+    // fill reads it as what it physically is - a channel holding water - and
+    // lakeEps (1 cm by default) keeps that below the lake threshold.
+    float bedDrop = max(hCur - heightIn[receiver], 0.0);
+    float routeDrop = max(rCur - routeField[receiver], 0.0);
+    float dropNorm = bedDrop + routeDrop;
     float slope = clamp(dropNorm * max(pc.heightScale, 1.0e-3) / run, pc.minSlope, pc.maxSlope);
 
     float areaKm2 = max(areaField[i], 0.0) * 1.0e-6;

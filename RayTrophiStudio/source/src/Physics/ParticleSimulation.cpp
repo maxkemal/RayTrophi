@@ -7050,6 +7050,54 @@ SimulationGasGpuFieldView ParticleSimulationSystem::gasGpuFieldView(
     return view;
 }
 
+bool ParticleSimulationSystem::downloadGasDenseFields(
+    std::size_t domain_index,
+    const SimulationComputeContext& compute,
+    std::vector<float>& density_out,
+    std::vector<float>& temperature_out) const {
+    if (domain_index >= grid_domain_states_.size() ||
+        domain_index >= grid_domain_compute_buffers_.size()) {
+        return false;
+    }
+    const auto& state = grid_domain_states_[domain_index];
+    const auto& buffers = grid_domain_compute_buffers_[domain_index];
+    // Exactly the same admission test as gasGpuFieldView. Keeping them
+    // identical is the point: the mirror must describe the SAME grid the live
+    // addresses describe, or the two consumers disagree about where the smoke
+    // is and only one of them looks wrong.
+    if (!state.valid || state.type != SimulationDomainType::Gas ||
+        buffers.backend != ComputeBackendType::VulkanCompute ||
+        !buffers.gpu_resident_fields_valid) {
+        return false;
+    }
+    const std::size_t cells =
+        static_cast<std::size_t>(state.resolution_x) *
+        static_cast<std::size_t>(state.resolution_y) *
+        static_cast<std::size_t>(state.resolution_z);
+    if (cells == 0) return false;
+    const std::size_t bytes = cells * sizeof(float);
+
+    std::vector<float> density(cells, 0.0f);
+    if (!compute.downloadBuffer(buffers.density, density.data(), bytes)) {
+        // A failed read is NOT an empty grid. Report it as a failure so the
+        // caller keeps the previous mirror instead of publishing a black one.
+        return false;
+    }
+    // Temperature is optional: a domain with no temperature channel is valid
+    // and simply has no blackbody emission. Only an outright read FAILURE on a
+    // channel that exists should be treated as missing.
+    std::vector<float> temperature;
+    if (buffers.temperature.valid()) {
+        temperature.assign(cells, 0.0f);
+        if (!compute.downloadBuffer(buffers.temperature, temperature.data(), bytes)) {
+            temperature.clear();
+        }
+    }
+    density_out.swap(density);
+    temperature_out.swap(temperature);
+    return true;
+}
+
 const SimulationGpuFoamRenderBuffer* ParticleSimulationSystem::gridDomainFoamRenderBuffer(
     std::size_t domain_index) const {
     if (domain_index >= grid_domain_compute_buffers_.size()) {

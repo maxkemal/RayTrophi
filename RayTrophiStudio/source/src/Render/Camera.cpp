@@ -76,6 +76,23 @@ Ray Camera::get_ray(float s, float t) const {
     return Ray(origin + offset, direction);
 }
 
+Ray Camera::get_viewport_ray(float s, float t) const {
+    if (orthographic) {
+        const float half_h = ortho_height * 0.5f;
+        const float half_w = half_h * aspect_ratio;
+        Vec3 ro = origin + (s - 0.5f) * (2.0f * half_w) * u
+                         + (t - 0.5f) * (2.0f * half_h) * v;
+        return Ray(ro, -w);
+    }
+
+    Vec3 direction = lower_left_corner + s * horizontal + t * vertical - origin;
+    const float lenSq = direction.length_squared();
+    direction = lenSq > 1e-12f
+        ? direction / std::sqrt(lenSq)
+        : Vec3(0.0f, 0.0f, -1.0f);
+    return Ray(origin, direction);
+}
+
 int Camera::random_int(int min, int max) const {
     static std::random_device rd;
     static std::mt19937 gen(rd());  // Mersenne Twister RNG

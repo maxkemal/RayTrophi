@@ -395,7 +395,11 @@ private:
     // their handles so backend teardown can release them with the pipeline.
     OptixModule curve_is_module = nullptr;
     OptixModule sphere_is_module = nullptr;
-    RayGenParams params;
+    // Value-initialized on the HOST so newly added fields start at 0 without
+    // giving RayGenParams a default member initializer — the type is also
+    // declared as a CUDA __constant__, and nvcc rejects any dynamic
+    // initialization in such a type.
+    RayGenParams params{};
     OptixProgramGroup raygen_pg = nullptr;
     OptixProgramGroup miss_pg = nullptr;
     OptixProgramGroup miss_shadow_pg = nullptr;
@@ -460,6 +464,19 @@ private:
     
     // Cycles-style accumulative rendering state
     uint64_t last_camera_hash = 0;           // Camera state hash for change detection
+    // Signature of the display/post values last baked into the presented frame.
+    // A change while accumulation is already converged triggers a resolve-only
+    // launch (params.display_resolve_only) instead of nothing at all — see
+    // renderFrame's converged early-return.
+    uint64_t last_display_post_signature = 0;
+    // Hash of every value that changes how the accumulation is turned into
+    // pixels. NOTE: OptiX currently honours only camera exposure and vignette
+    // here — make_color() in vec3_utils.cuh still hardcodes Reinhard + gamma 2.2
+    // and never reads g_display_post, so tone-map type / gamma / saturation /
+    // colour temperature do not reach the OptiX image at all. Those fields are
+    // mixed in anyway so this signature does not have to change when that is
+    // fixed (see docs/dev — "single display transform").
+    uint64_t computeDisplayPostSignature() const;
     int accumulated_samples = 0;              // Total samples accumulated so far
     bool accumulation_valid = false;          // Is current accumulation buffer valid?
     float4* d_accumulation_float4 = nullptr;  // High precision accumulation buffer (float4)

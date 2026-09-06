@@ -463,6 +463,10 @@ void MaterialManager::clear() {
     std::lock_guard<std::mutex> lock(mutex);
     materials.clear();
     nameToID.clear();
+    // Every ID handed out so far is now meaningless. Holders that cached one
+    // cannot detect that from the ID itself -- it still indexes a live table --
+    // so they compare generations instead. See generation().
+    ++registry_generation;
 }
 
 std::string MaterialManager::getMaterialName(uint16_t id) const {

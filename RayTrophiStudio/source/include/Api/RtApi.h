@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <optional>
 #include <vector>
 #include "Matrix4x4.h"
 #include "Vec3.h"
@@ -148,6 +149,158 @@ Result subdivideSpline(const std::string& name, const std::vector<int>& segments
                        int cuts, int& out_last_index);
 Result extrudeSplineEndpoint(const std::string& name, int endpoint, const Vec3& position,
                              int& out_index);
+// Append at the tail, valid from ZERO points. extrudeSplineEndpoint needs two
+// points to derive a tangent, so a curve could not be BUILT from script - only
+// extended after a primitive had been placed somewhere first.
+Result appendSplinePoint(const std::string& name, const Vec3& position, int& out_index);
+
+// ---------------------------------------------------------------------------
+// Scene raycast. This is the VALUE behind the viewport's "place a point where
+// the cursor aims" tools: without it the drawing workflow is reachable only by
+// clicking, i.e. not testable from script. filter is mesh_and_terrain (default),
+// terrain_only or ground_plane.
+// ---------------------------------------------------------------------------
+struct RaycastHit {
+    bool hit = false;
+    std::string kind;         // "mesh" | "terrain" | "ground_plane" | "none"
+    std::string object;       // hit mesh name; empty for terrain/ground plane
+    Vec3 position;
+    Vec3 normal;
+    float distance = 0.0f;
+};
+Result raycastScene(const Vec3& origin, const Vec3& direction,
+                    const std::string& filter, RaycastHit& out);
+
+// ---------------------------------------------------------------------------
+// Road assignments. The registry stores NO curve geometry: an assignment is a
+// SplineObject name plus the road semantics on top. Curve editing stays on the
+// `spline.*` surface, so there is one authority for the geometry of a curve and
+// no `set_points` duplicate here.
+// ---------------------------------------------------------------------------
+// The cross-section a road actually solves with. ONE shape shared by the shipped
+// profiles, the per-assignment override and the readback, so a caller can never
+// be shown one set of numbers while the solver uses another.
+struct RoadCarveValues {
+    float road_width = 4.0f;
+    float shoulder_width = 1.5f;
+    float grading_falloff = 3.0f;
+    float foliage_margin = 2.0f;
+    float max_grade_percent = 12.0f;
+    float elevation_offset = 0.0f;
+    // How far the road may deviate from the ground. Without these the grade
+    // limiter is unbounded and a road crossing a mountain becomes a canyon plus
+    // a mountain-high embankment.
+    float max_cut_meters = 8.0f;
+    float max_fill_meters = 6.0f;
+    // Crown and ditch are not cosmetic. A ditchless, crownless road is a flat
+    // linear trench, and a flat linear trench is a perfect channel to any flow
+    // solver reading the carved height afterwards - which is how carved roads
+    // came to be classified as river beds. A crowned surface sheds sideways and
+    // the ditch carries the water away: the road pushes, the ditch moves.
+    float crown_meters = 0.12f;
+    float ditch_width = 1.2f;
+    float ditch_depth = 0.5f;
+    bool use_point_width = true;
+};
+struct RoadProfileInfo {
+    std::string id;
+    std::string display_name;
+    RoadCarveValues carve;
+};
+struct RoadAssignmentInfo {
+    std::string spline_object;
+    std::string profile_id;
+    std::string crossing_mode;
+    bool enabled = true;
+    bool has_override = false;
+    // False when the named SplineObject is not in the scene. A segment that
+    // stops grading because its curve was deleted must be visible, not silent.
+    bool curve_exists = true;
+    // What this assignment will ACTUALLY be solved with - the override when one
+    // is set, the profile otherwise. Without it "the road came out wrong" and
+    // "the override never landed" are the same observation.
+    RoadCarveValues effective;
+};
+Result listRoadProfiles(std::vector<RoadProfileInfo>& out);
+Result assignRoadProfile(const std::string& spline_object, const std::string& profile_id);
+Result clearRoadProfile(const std::string& spline_object);
+Result getRoadAssignment(const std::string& spline_object, RoadAssignmentInfo& out);
+Result listRoadAssignments(std::vector<RoadAssignmentInfo>& out);
+Result setRoadCrossingMode(const std::string& spline_object, const std::string& mode);
+Result setRoadEnabled(const std::string& spline_object, bool enabled);
+// Per-assignment cross-section override, so one segment can be widened without
+// cloning a whole profile. Validated against the SAME bounds the solver uses;
+// an out-of-range value is refused, never clamped, because a clamped write reads
+// back as a successful one that simply did something else.
+Result setRoadCarveOverride(const std::string& spline_object, const RoadCarveValues& values);
+Result clearRoadCarveOverride(const std::string& spline_object);
+struct RoadDiagnostics {
+    int assignment_count = 0;
+    int enabled_count = 0;
+    std::vector<std::string> dangling;
+    std::vector<std::string> unknown_profiles;
+};
+Result getRoadDiagnostics(RoadDiagnostics& out);
+
+// ---------------------------------------------------------------------------
+// Road route measurement and the optional surface mesh.
+//
+// Both read the SOLVED route out of the terrain graph's Road Network node - the
+// very samples that carved the terrain. Re-sampling the curve here would produce
+// a second answer to the same question, and the two would disagree first on the
+// bends where it is most visible.
+// ---------------------------------------------------------------------------
+struct RoadRouteSampleInfo {
+    float x = 0.0f;                 // terrain-local metres
+    float z = 0.0f;
+    float height_meters = 0.0f;     // solved road surface
+    float ground_meters = 0.0f;     // terrain before the road
+    float distance_meters = 0.0f;   // along the route
+    std::string crossing;           // terrain | bridge | ford | tunnel
+};
+struct RoadRouteInfo {
+    std::string spline_object;
+    std::string terrain;
+    int sample_count = 0;
+    int bridge_samples = 0;
+    int ford_samples = 0;
+    int tunnel_samples = 0;
+    float length_meters = 0.0f;
+    float peak_cut_meters = 0.0f;
+    float peak_fill_meters = 0.0f;
+    unsigned long long revision = 0;
+    // Empty unless a crossing was declared and could not be resolved (a Ford
+    // with no Water field, for instance). Reported rather than downgraded.
+    std::string crossing_diagnostic;
+    // Decimated to at most the requested count, endpoints always included.
+    std::vector<RoadRouteSampleInfo> samples;
+};
+// max_samples <= 0 returns the counters with no sample list.
+Result getRoadRoute(const std::string& spline_object, int max_samples, RoadRouteInfo& out);
+
+struct RoadMeshOptions {
+    // Empty asks for "<spline>_RoadSurface". An assignment remembers the object
+    // it generated, so a rebuild replaces that geometry instead of stacking a
+    // second road on the first.
+    std::string object;
+    bool include_shoulder = true;
+    float surface_offset = 0.05f;
+    float uv_meters_per_tile = 4.0f;
+    bool skip_tunnels = true;
+};
+struct RoadMeshInfo {
+    std::string object_name;
+    size_t vertex_count = 0;
+    size_t triangle_count = 0;
+    int span_count = 0;
+    float length_meters = 0.0f;
+    bool replaced_existing = false;
+};
+Result buildRoadMesh(const std::string& spline_object, const RoadMeshOptions& options,
+                     RoadMeshInfo& out);
+// Deletes the generated surface and forgets the ownership. The terrain-only road
+// stays valid: the mesh is a view of the route, never the authority for it.
+Result clearRoadMesh(const std::string& spline_object);
 struct SplineKeyInfo {
     int frame = 0;
     bool has_object_transform = false;
@@ -276,6 +429,81 @@ Result importModel(const std::string& filepath);
 Result addPrimitive(const std::string& type, const std::string& name, float size, std::string& out_new_name);
 
 // ---------------------------------------------------------------------------
+// Scene export (glTF 2.0: .glb or .gltf + sidecar .bin).
+//
+// The export ran for years with NO script surface, which is why a crowded-scene
+// regression could only be found by exporting by hand and watching Task Manager.
+// exportSceneGltf returns MEASURED cost - per-phase seconds plus the writer's
+// own peak heap - so export performance is regressable from a script.
+//
+// Runs synchronously on the calling thread and blocks until the file is closed.
+// ---------------------------------------------------------------------------
+struct SceneExportOptions {
+    bool geometry = true;
+    bool materials = true;
+    bool cameras = false;
+    bool lights = false;
+    bool animations = true;
+    bool skinning = true;
+    bool selected_only = false;          // uses the current multi-selection
+    bool bake_terrain_materials = true;
+    int  terrain_bake_resolution = 1024;
+    bool gpu_instancing = true;          // EXT_mesh_gpu_instancing for scatter
+};
+
+struct SceneExportStats {
+    uint64_t meshes = 0;
+    uint64_t primitives = 0;
+    uint64_t triangles = 0;
+    uint64_t vertices = 0;
+    uint64_t nodes = 0;
+    uint64_t instances = 0;
+    uint64_t instanced_groups = 0;
+    uint64_t materials = 0;
+    uint64_t images = 0;
+    uint64_t file_bytes = 0;
+    double   peak_writer_mb = 0.0;   // heap the writer asked for, not process RSS
+    double   seconds_total = 0.0;
+    double   seconds_collect = 0.0;
+    double   seconds_materials = 0.0;
+    double   seconds_plan = 0.0;
+    double   seconds_write = 0.0;
+};
+
+Result exportSceneGltf(const std::string& filepath,
+                       const SceneExportOptions& options,
+                       SceneExportStats& out_stats);
+
+// ---------------------------------------------------------------------------
+// PRE-EXPORT ESTIMATE — the numbers the Export Settings panel shows BEFORE the
+// user commits to a write.
+//
+// ★★★ This exists because the panel lied. The exporter was fixed on 2026-09-04
+// to read scatter from InstanceManager (on Vulkan, scatter is never expanded
+// into world.objects), but the panel's estimate kept walking world.objects
+// only — so it reported "0 instances" for a scene the writer then happily wrote
+// a thousand of. No error, no warning, a perfectly plausible number.
+//
+// An agent that can only read exportSceneGltf's MEASURED stats is structurally
+// blind to that: measured and estimated must be comparable from a script, or
+// the next divergence is invisible again. Compare estimated.instances against
+// SceneExportStats::instances after a real export.
+// ---------------------------------------------------------------------------
+struct SceneExportEstimate {
+    uint64_t objects = 0;
+    uint64_t triangles = 0;               // non-instanced triangles
+    uint64_t legacy_triangles = 0;        // of those, Triangle-facade objects
+    uint64_t instances = 0;               // scatter/foliage placements
+    uint64_t unique_instance_sources = 0; // distinct source meshes
+    uint64_t instance_triangles = 0;      // counted ONCE per unique source
+    uint64_t materialised_instance_triangles = 0; // legacy-facade part of the above
+    double   estimated_peak_mb = 0.0;
+};
+
+Result sceneExportEstimate(const SceneExportOptions& options,
+                           SceneExportEstimate& out_estimate);
+
+// ---------------------------------------------------------------------------
 // Material parameters (undoable). An object may use more than one material;
 // setters update every distinct Principled BSDF material assigned to that
 // flat mesh. Shared materials retain their normal shared-material semantics.
@@ -342,7 +570,36 @@ Result assignMaterial(const std::string& object_name, const std::string& materia
 Result setMaterialTexture(const std::string& material_name, const std::string& slot,
                           const std::string& filepath);
 Result clearMaterialTexture(const std::string& material_name, const std::string& slot);
-std::vector<std::string> materialTextureSlots(const std::string& material_name);
+// One populated texture slot and the IDENTITY of the texture bound to it.
+// The identity matters on its own: two materials that report the same texture
+// name ARE sharing one decoded image. That is legitimate for a reused map and a
+// defect when the two materials came from different source files -- which is how
+// an import-time cache-key collision presents, and it is invisible if the readback
+// only says "this slot has something in it".
+struct MaterialTextureBinding {
+    std::string slot;     // base_color | roughness | ... (see materialTextureSlots)
+    std::string texture;  // Texture::name — a file path, or an "embedded_..." cache key
+};
+std::vector<MaterialTextureBinding> materialTextureSlots(const std::string& material_name);
+
+// getMaterialParam/setMaterialParam above edit through an OBJECT: every
+// Principled BSDF the object's flat meshes reference gets the same value,
+// which is wrong the moment one object carries several DIFFERENT materials
+// (a menu carafe's glass body + brass cap + rubber foot are one flat mesh,
+// three materials — object.set would smear "transmission=1" onto the cap and
+// foot too). These two edit exactly one material asset, by name, the same way
+// setMaterialTexture already does, and touch nothing else that happens to
+// share the object. Not undoable, matching the other asset calls in this file.
+// Same param vocabulary as object-scoped get/set (see the comment above
+// MaterialParamValue).
+// Named ...ByName (not an overload of the object-scoped pair above): the
+// object-scoped setMaterialParam(object_name, param, float) already claims
+// that exact signature, and C++ cannot overload on a parameter's NAME, only
+// its type — object_name and material_name are both std::string.
+Result getMaterialParamByName(const std::string& material_name, const std::string& param,
+                              MaterialParamValue& out);
+Result setMaterialParamByName(const std::string& material_name, const std::string& param, float value);
+Result setMaterialParamByName(const std::string& material_name, const std::string& param, const Vec3& value);
 
 // ---------------------------------------------------------------------------
 // Selection (Faz 5.5a). Most editor operations are selection-driven, so this is
@@ -491,7 +748,34 @@ struct CameraState {
     Vec3 up;
     float fov = 45.0f;
     float focus_distance = 10.0f;
+    // ★★ DoF diyaframi. Pozlamayi ETKILEMEZ -- fiziksel bir kamerada ederdi,
+    //   burada etmiyor cunku bu alan yillardir yalnizca lens yaricapini
+    //   suruyor ve anlamini degistirmek her mevcut sahnenin gorunumunu
+    //   sessizce degistirirdi. Pozlamanin f-sayisi ayri: exposure_f_number.
     float aperture = 0.0f;
+
+    // ── Fiziksel pozlama (MEVCUT model, preset tabanli) ────────────────────
+    // ★★★ Bu alanlar yeni bir model DEGIL: motorun yillardir kullandigi
+    //   ISO/enstantane/f-stop preset zincirini disari acar. Carpan GORELIDIR
+    //   (`current_val / baseline_val`), mutlak fotometrik formul degil -- bu
+    //   motorda isik siddeti keyfi birimde ve mutlak formul her sahneyi
+    //   karartirdi. Tek tanim: Camera::exposureFactor().
+    //
+    // ★★ Oncelik sirasi tam olarak sudur: auto_exposure ACIKSA yalnizca EV
+    //   compensation uygulanir ve ISO/enstantane/diyafram OKUNMAZ. Kadranlarin
+    //   "olu" gorunmesinin en sik sebebi budur, ariza degil.
+    bool  auto_exposure = true;
+    bool  use_physical_exposure = false;
+    int   iso_preset_index = 1;
+    int   shutter_preset_index = 1;
+    int   fstop_preset_index = 4;
+    float ev_compensation = 0.0f;
+    // Cozulmus preset degerleri + uygulanan carpan. ★ AYAR DEGIL SONUCTUR:
+    // bir ajanin kadranin gercekten ise yaradigini gorebilmesi icin doner.
+    float iso_value = 100.0f;
+    float shutter_seconds = 0.004f;
+    float f_number = 2.8f;
+    float exposure_factor = 1.0f;
 };
 
 Result getCamera(CameraState& out);
@@ -500,6 +784,18 @@ Result setCameraTarget(const Vec3& target);
 Result setCameraFov(float fov);
 Result setCameraFocusDistance(float focus_distance);
 Result setCameraAperture(float aperture);
+
+// Fiziksel pozlama. ★★ `auto_exposure` acikken diger uc kadran OKUNMAZ;
+// setCameraAutoExposure(false) + setCameraUsePhysicalExposure(true) yapilmadan
+// ISO/enstantane/diyafram degistirmek goruntuye DOKUNMAZ. Bu bir ariza degil,
+// modelin oncelik sirasi -- ve tam bu yuzden `camera.get` cozulmus degerleri ve
+// uygulanan carpani da dondurur.
+Result setCameraAutoExposure(bool enabled);
+Result setCameraUsePhysicalExposure(bool enabled);
+Result setCameraIsoPreset(int index);
+Result setCameraShutterPreset(int index);
+Result setCameraFStopPreset(int index);
+Result setCameraEvCompensation(float ev);
 
 // ---------------------------------------------------------------------------
 // World / environment (Faz 5.1c). Narrow surface: background color plus the
@@ -527,6 +823,57 @@ Result setWorldSunAzimuth(float degrees);
 Result setWorldSunIntensity(float intensity);
 Result setWorldAtmosphereIntensity(float intensity);
 Result setWorldSunSize(float degrees);
+
+// ---------------------------------------------------------------------------
+// Physical atmosphere (Nishita) — the parameters the SkyView/transmittance LUT
+// is BAKED FROM. Until now only sun angle + the two intensities were
+// scriptable, so the whole "Physical Sky" block (air/dust/ozone, humidity,
+// temperature, scale heights, planet geometry) could be exercised ONLY by
+// dragging a slider. That is exactly the class of surface this repo treats as
+// untestable — and it is where the interactive LUT rebuild cost lives, so a
+// regression there had no automatable probe.
+//
+// ★ Every field optional (partial update, same shape as updateFluidDomain):
+//   a nullptr leaves the value untouched. Any field that differs from the
+//   current value dirties the atmosphere LUT — that is the cost this surface
+//   exists to measure.
+// ---------------------------------------------------------------------------
+struct WorldAtmosphereInfo {
+    float air_density = 1.0f;             // Rayleigh multiplier
+    float dust_density = 1.0f;            // Mie/aerosol multiplier
+    float ozone_density = 1.0f;
+    float ozone_absorption_scale = 1.0f;  // "blue hour" strength
+    float humidity = 0.1f;                // 0..1
+    float temperature = 15.0f;            // Celsius; scales BOTH scale heights
+    float altitude = 0.0f;                // camera height, metres
+    float mie_anisotropy = 0.8f;          // g
+    float planet_radius = 6360000.0f;     // metres
+    float atmosphere_height = 60000.0f;   // metres
+    Vec3  rayleigh_scattering;            // per-channel coefficients
+    Vec3  mie_scattering;
+    float rayleigh_density = 8000.0f;     // Rayleigh SCALE HEIGHT, metres
+    float mie_density = 1200.0f;          // Mie SCALE HEIGHT, metres
+};
+
+struct WorldAtmosphereUpdate {
+    const float* air_density = nullptr;
+    const float* dust_density = nullptr;
+    const float* ozone_density = nullptr;
+    const float* ozone_absorption_scale = nullptr;
+    const float* humidity = nullptr;
+    const float* temperature = nullptr;
+    const float* altitude = nullptr;
+    const float* mie_anisotropy = nullptr;
+    const float* planet_radius = nullptr;
+    const float* atmosphere_height = nullptr;
+    const Vec3*  rayleigh_scattering = nullptr;
+    const Vec3*  mie_scattering = nullptr;
+    const float* rayleigh_density = nullptr;
+    const float* mie_density = nullptr;
+};
+
+Result getWorldAtmosphere(WorldAtmosphereInfo& out);
+Result updateWorldAtmosphere(const WorldAtmosphereUpdate& update);
 
 // ---------------------------------------------------------------------------
 // World thermal ambient (docs/dev/SIMULATION_NODE_OBJECT_MODEL.md section 7
@@ -692,6 +1039,49 @@ VolumeInstrumentationInfo volumeStats();
 Result setVolumeInstrumentation(bool enabled);  // also zeroes the counters
 
 // ---------------------------------------------------------------------------
+// Per-backend volume TABLE state (render.volume_tables).
+//
+// ★★★★★ This exists because of a bug that had no symptom other than absence.
+// The process runs up to TWO Vulkan devices — the render backend and the
+// dedicated raster viewport backend (g_viewport_backend) — and the volume SSBO
+// is per DEVICE. The volume packet was published to the render backend only, so
+// the viewport adapter's table stayed empty forever: every realtime volume
+// consumer (gas march, SurfaceSDF, the material-preview branch) gates on
+// `m_volumeCount > 0` and refused silently, on every scene, with no warning.
+//
+// `volumeStats()` above could not see this: it reports what the SHADER counted,
+// and a pass that was never recorded counts nothing — the same zero a scene with
+// no volumes produces. This reports what was PUBLISHED, per consumer, which is
+// the value that separates the two.
+//
+// ★ `sim_device_is_this_backends` matters for the same reason: live dense-gas
+// grids are raw buffer device addresses owned by the simulation compute context,
+// and an address is only meaningful on the device that made it. A backend with
+// instance_count > 0 and sim_device_is_this_backends == false renders baked VDB
+// and SurfaceSDF correctly but shows live gas frozen at its last host NanoVDB
+// grid — a known consequence, not a fault.
+struct VolumeTableInfo {
+    std::string role;                        // "render" | "viewport"
+    bool        is_vulkan = false;           // false: nothing below is meaningful
+    uint32_t    instance_count = 0;          // VulkanDevice::m_volumeCount
+    bool        buffer_allocated = false;    // the binding-9/20 SSBO exists
+    bool        sim_device_is_this_backends = false;
+    // How many live dense-gas grids this backend copied into its OWN device
+    // memory because it cannot dereference the simulation's addresses. Expected
+    // 0 on the backend that owns the sim device, and >= 1 on the other one when
+    // a live gas domain is present. A backend with
+    // sim_device_is_this_backends == false, a gas domain in the scene, and 0
+    // here will draw NO gas — that combination is the whole failure, stated as
+    // three numbers instead of as an empty screen.
+    uint32_t    dense_gas_mirror_buffers = 0;
+};
+struct VolumeTablesInfo {
+    bool available = false;                  // false = no Vulkan backend at all
+    std::vector<VolumeTableInfo> backends;
+};
+VolumeTablesInfo volumeTables();
+
+// ---------------------------------------------------------------------------
 // Viewport measurement.
 //
 // ★★★ An agent that can only SAVE a render is guessing; one that can read the
@@ -745,12 +1135,224 @@ struct ViewportShadingInfo {
 };
 ViewportShadingInfo viewportShading();
 
+// ---------------------------------------------------------------------------
+// Raster/Realtime viewport frame presentation telemetry.
+//
+// ★★★ Realtime yol haritasi Faz 0.5a (docs/dev/REALTIME_RENDERER_ROADMAP.md)
+// viewport sunumunu seri `submit -> fence -> readback -> fence -> memcpy`
+// zincirinden iki slotlu asenkron bir halkaya tasidi. Bu degisimin BASARISI
+// GORUNMEZ: goruntu ayni cikar, yalnizca stall kalkar. Yani "koprü calisiyor
+// mu" sorusunun tek dogru cevabi olcumdur, bakmak degil — ve bir panele bakip
+// karar vermek CLAUDE.md kural 1'in yasakladigi seyin ta kendisi.
+//
+// ★ `available == false` bu backend'de raster frame ring HIC KURULMADI demek
+// (Rendered modu, Vulkan yok, ya da henuz tek kare cizilmedi). Asagidaki butun
+// sayilar o durumda YOKLUKtur, sifir olcumu degil.
+struct ViewportFrameTelemetryInfo {
+    bool available = false;
+    // false = surucu kalici frame kaynaklarini reddetti; eski senkron yol
+    // calisiyor. Kural 6: sessizce yanlis gorunme, raporla.
+    bool async_present = false;
+    // Capture acikken sunum bilerek senkronlanir ki bir probe AZ ONCE cizilen
+    // kareyi okusun. setViewportCapture bunu kendisi acar/kapatir.
+    bool synchronous_present = false;
+    int  slot_count = 0;
+    int  width = 0;
+    int  height = 0;
+
+    // Son kare, milisaniye.
+    double frame_ms = 0.0;
+    double cpu_record_ms = 0.0;
+    double slot_wait_ms = 0.0;
+    double submit_ms = 0.0;
+    double image_readback_ms = 0.0;   // YALNIZ eski senkron yolda > 0
+    double host_read_ms = 0.0;
+    double present_ms = 0.0;
+
+    // Ring kurulusundan beri sayaclar.
+    uint64_t frames_submitted = 0;
+    uint64_t frames_consumed = 0;
+    // ★★ En onemli sayac: raster is yapildi ama sunulacak tamamlanmis slot
+    // yoktu, ekrana eski pikseller gitti. Kucuk ve SABIT olmasi beklenir;
+    // kare sayisiyla birlikte buyumesi halkanin kalici olarak geride
+    // kaldigini soyler.
+    uint64_t stale_presents = 0;
+    uint64_t slot_waits = 0;      // slot yeniden kullanilmadan once beklenen kare
+    uint64_t blocking_seeds = 0;  // bilerek bloke edilen kare (tohum / capture)
+    uint64_t resource_drains = 0; // buffer mutasyonu icin ucustaki kareyi bosaltma
+    int present_latency_frames = 0; // 0 = bu kare, 1 = bir onceki
+
+    // ── Geometri gonderimi ──────────────────────────────────────────────────
+    // ★★★ Sunum telemetrisinin cevaplayamadigi soruyu olcer: "raster mi yavas,
+    // yoksa CPU instance taramasi mi?"
+    //
+    // ★★ gpu_culling false + global_instance_buffer true = sahne CULLING'SIZ ve
+    // PROXY'SIZ ciziliyor: her mesh'in butun instance'lari, kamera nereye
+    // bakarsa baksin. Bu kombinasyon bir ARIZADIR ve ekranda DOGRU gorunur --
+    // yalnizca yavastir. Tam bu yuzden olculuyor.
+    bool global_instance_buffer = false;
+    bool gpu_culling = false;
+    uint64_t total_instances = 0;
+    uint64_t cull_mesh_count = 0;
+    uint64_t draw_calls = 0;
+    // ★ gpu_culling acikken bu sayilar GPU'dan okunur ve BIR KARE GERIDIR.
+    uint64_t visible_triangles = 0;
+    uint64_t full_triangles = 0;
+    uint64_t proxy_triangles = 0;
+    uint64_t full_instances = 0;
+    uint64_t proxy_instances = 0;
+    // ★ Adi bilerek "target": GPU culling'de sert tavan degil, kareler arasi
+    // yakinsayan bir mesafe esiginin hedefidir.
+    uint64_t scatter_triangle_target = 0;
+
+    // ── Ekran yolu (ana dongu) ─────────────────────────────────────
+    // ★★★ Yukaridaki alanlar backend'in `renderProgressive` cagrisini olcer ve
+    // orada BITER. Ama kare orada bitmiyor: ana dongu original_surface'i
+    // display surface'e (post veya duz kopya) ve sonra SDL_Texture'a tasir.
+    // 4K'da bunlarin her biri 31.6 MB'lik AYRI bir tam-kare gecistir. Backend
+    // telemetrisine bakip "kare 10 ms" demek bu iki gecisi saymamaktir.
+    //
+    // ★★ Bu alanlar raster viewport OLMASA DA gecerlidir (Rendered modu da ayni
+    // ekran yolundan geciyor), o yuzden `available` false iken de yayinlanir.
+    bool     display_available = false;
+    double   display_post_ms = 0.0;             // original_surface -> surface
+    double   display_texture_upload_ms = 0.0;   // surface -> SDL_Texture
+    double   display_loop_period_ms = 0.0;      // ana dongunun tam periyodu
+    // ★ Post gercekten calisti mi, yoksa no-op tespit edilip duz kopya mi
+    // yapildi? Ikisi de tam-kare maliyet, ama biri KALDIRILABILIR is.
+    bool     display_post_was_noop_copy = false;
+    uint64_t display_frames = 0;
+};
+
+// ★★★ Ana dongu bu olcumu her karede buraya birakir. Backend'den GELMEZ --
+// backend'in gorus alani `renderProgressive` ile sinirli, ve tam olarak bu
+// yuzden ekran yolunun maliyeti yillarca olculmedi.
+struct DisplayPathTiming {
+    double post_ms = 0.0;
+    double texture_upload_ms = 0.0;
+    double loop_period_ms = 0.0;
+    bool   post_was_noop_copy = false;
+};
+void noteDisplayPathTiming(const DisplayPathTiming& t);
+ViewportFrameTelemetryInfo viewportFrameTelemetry();
+
 // `mode`: solid | material | rendered | matcap. "preview" is accepted as an
 // alias for material because the panel button reads Preview.
 // `matcap_preset`: 0..9, or -1 to leave it alone.
 // Resets accumulation exactly like the panel buttons do — otherwise the next
 // probe would measure the frame from the mode you just left.
 Result setViewportShading(const std::string& mode, int matcap_preset = -1);
+
+// ---------------------------------------------------------------------------
+// Raster viewport quality preset.
+//
+// ★★★ Panel-only until 2026-09-01, and that made the scatter LOD path
+// UNTESTABLE from a script: an agent could read full_triangles/proxy_triangles
+// from viewport.frame_telemetry but had no way to turn the proxy substitution
+// OFF, so it could never establish the reference the numbers are compared
+// against. Measuring a LOD system without being able to disable it is measuring
+// a ratio with no denominator.
+//
+// Names cross the boundary, never the panel's integer: auto, performance,
+// balanced, quality, full.
+struct ViewportQualityInfo {
+    std::string preset;                  // current preset, as a name
+    // ★ Full's distinguishing behaviour, reported as a VALUE rather than left
+    // for the caller to infer from the name. A caller that special-cases the
+    // string breaks the day a preset is added; this flag does not.
+    bool scatter_lod_split = true;       // false only in 'full'
+    // ★ false = this machine has no raster viewport, so the preset is stored
+    // but nothing reads it. Without this a probe reads a preset that has no
+    // effect and calls it a measurement.
+    bool raster_viewport_available = false;
+    // Scene-lighting quality values consumed by both the panel and backend.
+    // Atlas allocation is intentionally fixed; tile size changes do not
+    // destroy an image that an in-flight frame may still sample.
+    int shadow_atlas_resolution = 4096;
+    int shadow_tile_resolution = 512;
+    int shadow_tile_capacity = 64;
+    int shadow_light_budget = 8;
+    int shadow_pcf_samples = 9;
+    int directional_shadow_cascades = 3;
+    std::string scene_pbr_shader = "ggx";
+    // Explicit RT-parity contract. These values prevent UI/scripts from
+    // mistaking a bounded raster approximation for traversal-based RT.
+    std::string opaque_core_parity = "rt_aligned";
+    std::string material_graph_surface = "bounded";
+    std::string clearcoat = "iridescent_lobe";
+    std::string subsurface = "radius_profile_approx";
+    std::string translucency = "thin_surface_approx";
+    std::string surface_anisotropy = "unsupported_abi_conflict";
+    std::string transparency = "unsorted_alpha";
+    std::string transmission = "screen_space_thickness";
+    std::string resin_interior = "procedural_interior_approx";
+    // Same NanoVDB field/transform/iso threshold as Vulkan RT, with bounded
+    // raster lighting and environment continuation (not recursive traversal).
+    std::string sdf_surface = "shared_nanovdb_depth_pbr";
+    // Same sparse/dense fields and optical controls as Vulkan RT; realtime is
+    // bounded single scattering rather than recursive volume transport.
+    std::string volumes = "shared_vdb_dense_single_scatter";
+};
+ViewportQualityInfo viewportQuality();
+
+// Applying a preset rebuilds the raster scene (proxy split changes which draw
+// commands exist) and resets accumulation, exactly like the panel combo.
+Result setViewportQuality(const std::string& preset);
+
+// ---------------------------------------------------------------------------
+// Material preview lighting preset.
+//
+// ★★★ 'scene' is the default realtime raster view; 'three_point' deliberately
+// lights the frame with a fixed inspection rig that exists nowhere in the scene.
+// 'scene' reads the SAME light buffer the renderer reads. So "does the preview
+// agree with Rendered" is a question you can only ask in 'scene'.
+//
+// Shadow ownership is reported as a value, not inferred from the preset:
+// Scene uses the bounded shared atlas; the three-point rig remains shadow-free.
+struct ViewportPreviewLightingInfo {
+    std::string preset;                 // three_point | scene
+    bool uses_scene_lights = false;     // true only in 'scene'
+    // Lights the preview would actually evaluate, after the clamp. Compare with
+    // scene_light_total: a gap means the preview is showing fewer lights than
+    // the renderer, which looks like a lighting difference and is not one.
+    int  scene_light_count = 0;
+    int  scene_light_total = 0;         // visible lights in the scene
+    bool shadows = false;               // true for Scene's shared shadow atlas
+    int  shadowed_light_count = 0;      // deterministic atlas allocation result
+    bool world_ambient = false;          // canonical color/HDRI/Nishita contribution
+    bool world_background = false;       // Scene draws the canonical world behind geometry
+    bool world_sun_direct = false;       // Nishita sun participates as a direct light
+    bool world_sun_shadow = false;       // Nishita sun owns a directional atlas tile
+    bool world_ibl_supported = false;    // Vulkan HDRI convolution pipeline exists
+    bool world_ibl_ready = false;        // current HDRI owns irradiance/prefilter/BRDF maps
+    bool world_ibl_fallback = false;     // HDRI is using bounded raw-environment fallback
+    // ★ false = Material Preview is not the mode on screen, so this preset is
+    // stored but nothing draws with it.
+    bool material_preview_active = false;
+
+    // ── Uygulanan goruntuleme donusumu ─────────────────────────────────────
+    // ★★★ Bunlar bir AYAR degil, GPU'ya GERCEKTEN gonderilen degerlerdir
+    //   (globals.h icindeki g_display_post aynasi). `post.get` ayarin ne
+    //   oldugunu soyler; burasi onizlemenin onu gorup gormedigini soyler.
+    //   Ikisinin ayrisabilecegi tek yer bu ayna, ve o ayrisma ekranda
+    //   "renk biraz farkli" diye gorunur -- kimsenin bug diye raporlamadigi
+    //   belirti. Rendered yolu (tonemap.comp) AYNI degerleri okuyor, yani bu
+    //   alanlar iki modun ayni operator zincirini paylastiginin kanitidir.
+    float display_exposure = 1.0f;
+    float display_gamma = 1.0f;
+    float display_saturation = 1.0f;
+    float display_color_temperature = 6500.0f;
+    float display_vignette_strength = 0.0f;
+    bool  display_vignette_enabled = false;
+    // AGX | ACES | Uncharted | Filmic | None
+    // ★ 'None' bu projede "hicbir sey yapma" DEGIL, "varsayilan operator
+    //   (Reinhard)" anlamina geliyor -- bir adlandirma borcu, bkz.
+    //   post_chain.glsl.
+    std::string display_tone_mapping;
+};
+ViewportPreviewLightingInfo viewportPreviewLighting();
+
+Result setViewportPreviewLighting(const std::string& preset);
 
 // Per-frame capture of the displayed frame costs a copy, so it is opt-in and
 // off by default. Enabling it does not change what is rendered.
@@ -996,6 +1598,10 @@ struct PerfSection {
     uint64_t count = 0;
     double   last_rss_delta_mb = 0.0;   // working-set delta across the scope
     double   rss_after_mb = 0.0;
+    // ★ false ise iki rss alani da YOKLUKTUR, "0 MB olctum" DEGIL. Kare basina
+    //   kosan bolumler (loop.*) calisma setini bilerek olcmez: olcumun kendi
+    //   maliyeti olculen bolumun anlamli bir yuzdesi olurdu.
+    bool     rss_measured = true;
     uint64_t seq = 0;                   // monotonic write order, newest highest
 };
 // Newest write first.
@@ -1290,6 +1896,57 @@ struct AnimClipInfo {
     int end_frame = 0;
 };
 
+// ---------------------------------------------------------------------------
+// RAW IMPORTED CLIPS — SceneData::animationDataList, before any controller.
+//
+// ★★★ This is the acceptance instrument for replacing the Assimp importer.
+// AnimClipInfo above describes what a CHARACTER's AnimationController plays;
+// this describes what the LOADER actually produced, which is the thing that has
+// to stay identical when the loader is swapped. The brief's acceptance rule is
+// "the same .glb must give the same vertex/triangle/joint/CHANNEL counts on the
+// old and new path" - without a script-readable channel/key count there is no
+// way to state that as a number, and "looks like it still animates" is not a
+// measurement.
+//
+// It is also what makes Faz 0 (the animation KEY TYPE migration) checkable:
+// that phase must change nothing, so every count here must be byte-identical
+// before and after it.
+// ---------------------------------------------------------------------------
+struct AnimSourceClipInfo {
+    std::string name;
+    std::string model_name;         // import prefix this clip came in with
+    double   duration_ticks = 0.0;  // AnimationData::duration, in TICKS
+    double   ticks_per_second = 0.0;
+    double   duration_seconds = 0.0;// derived; 0 when ticks_per_second is 0
+    int      start_frame = 0;
+    int      end_frame = 0;
+    // Channel = one animated node name present in that key map.
+    uint64_t position_channels = 0;
+    uint64_t rotation_channels = 0;
+    uint64_t scaling_channels = 0;
+    uint64_t position_keys = 0;     // summed over all channels
+    uint64_t rotation_keys = 0;
+    uint64_t scaling_keys = 0;
+    double   first_key_time = 0.0;  // min key time in ticks across all channels
+    double   last_key_time = 0.0;   // max key time in ticks
+};
+
+// Per-node breakdown, only filled when the caller asks for it: a rigged
+// character has hundreds of nodes and the totals above answer most questions.
+struct AnimSourceChannelInfo {
+    std::string node_name;
+    uint64_t position_keys = 0;
+    uint64_t rotation_keys = 0;
+    uint64_t scaling_keys = 0;
+};
+
+Result listAnimSourceClips(std::vector<AnimSourceClipInfo>& out);
+
+// `clip_name` empty = the first clip. Returns channels sorted by node name so
+// two runs are diffable without post-processing.
+Result listAnimSourceChannels(const std::string& clip_name,
+                              std::vector<AnimSourceChannelInfo>& out);
+
 struct AnimPlaybackInfo {
     std::string clip;
     bool playing = false;
@@ -1507,6 +2164,44 @@ struct ScatterGroupInfo {
     size_t instance_count = 0;
     size_t triangle_count = 0;
     std::vector<ScatterSourceInfo> sources;
+
+    // Placement masks, reported so a caller can VERIFY what it set. A setter
+    // with no readback cannot be tested: the call returns success whether or
+    // not the name it wrote resolves to a field that exists.
+    //
+    // The two roles are deliberately asymmetric and must not be collapsed:
+    //   density_mask   INCLUDE, probabilistic — the value is a placement
+    //                  probability, so 0.3 thins a stand rather than cutting it.
+    //   exclusion_mask EXCLUDE, hard threshold — value >= exclusion_threshold
+    //                  forbids placement outright (water, roads, rock faces).
+    // Empty name = that mask is off. Names are terrain analysis fields; see
+    // listTerrainAnalysisFields() for what a given terrain actually carries.
+    std::string density_mask;
+    std::string exclusion_mask;
+    float exclusion_threshold = 0.5f;   // shared by exclusion_mask AND splat_exclude_channel
+    std::string scale_mask;
+    float scale_mask_influence = 1.0f;  // 0 = scale mask ignored, 1 = scale follows it fully
+    int splat_include_channel = -1;     // -1 = off, 0..3 = splat map RGBA
+    int splat_exclude_channel = -1;
+};
+
+// Every field optional: absent leaves the authored value alone. Replaces a
+// positional pointer list that had grown to nine arguments and still could not
+// reach the exclusion mask at all.
+struct ScatterGroupSettingsPatch {
+    std::optional<int> target_count;
+    std::optional<int> seed;
+    std::optional<float> min_distance;
+    std::optional<float> slope_max;
+    std::optional<float> height_min;
+    std::optional<float> height_max;
+    std::optional<std::string> density_mask;
+    std::optional<std::string> exclusion_mask;
+    std::optional<float> exclusion_threshold;
+    std::optional<std::string> scale_mask;
+    std::optional<float> scale_mask_influence;
+    std::optional<int> splat_include_channel;
+    std::optional<int> splat_exclude_channel;
 };
 
 struct FoliageAssetInfo {
@@ -1528,10 +2223,7 @@ Result addScatterSource(const std::string& group_id_or_name, const std::string& 
                         float rotation_y = 360.0f, bool align_to_normal = true);
 Result removeScatterSource(const std::string& group_id_or_name, int source_index = 0);
 Result setScatterGroupSettings(const std::string& group_id_or_name,
-                                const int* target_count, const int* seed,
-                                const float* min_distance, const float* slope_max,
-                                const float* height_min, const float* height_max,
-                                const std::string* density_mask, const std::string* scale_mask);
+                               const ScatterGroupSettingsPatch& patch);
 Result fillScatterGroup(const std::string& group_id_or_name, int& out_spawned);
 Result addScatterInstance(const std::string& group_id_or_name, Vec3 pos, Vec3 rot, Vec3 scale, int source_index = 0);
 
@@ -2669,6 +3361,58 @@ Result setTerrainPaintResolution(const std::string& terrain_name, int paint_reso
 Result listTerrains(std::vector<TerrainInfo>& out_terrains);
 Result getTerrain(const std::string& terrain_name, TerrainInfo& out_info);
 
+// The named analysis fields a terrain is CURRENTLY publishing, in sorted order.
+// This is a measurement of the live terrain, not a catalogue of what the node
+// library could publish: a name is here only because some output node ran and
+// wrote it this evaluation. Anything that consumes a field by name (scatter
+// masks, the foliage layer picker) should offer these rather than a hardcoded
+// list, or it will offer names the terrain does not have and hide the ones a
+// Publish Field node just created.
+Result listTerrainAnalysisFields(const std::string& terrain_name,
+                                 std::vector<std::string>& out_fields);
+
+struct TerrainFieldCoordinate {
+    int x = 0;
+    int y = 0;
+};
+
+struct TerrainFieldSample {
+    int x = 0;
+    int y = 0;
+    float value = 0.0f;
+};
+
+// Numeric measurement of one LIVE scalar analysis field. Histogram generation
+// is optional (0 bins = omit); requested coordinates are returned in order.
+// Non-finite values are counted and excluded from finite statistics so a
+// poisoned field cannot masquerade as an ordinary constant/empty mask.
+struct TerrainFieldStats {
+    std::string terrain;
+    std::string field;
+    int width = 0;
+    int height = 0;
+    int channels = 1;
+    size_t value_count = 0;
+    size_t finite_count = 0;
+    size_t non_finite_count = 0;
+    size_t nonzero_count = 0;
+    double nonzero_fraction = 0.0;
+    double minimum = 0.0;
+    double maximum = 0.0;
+    double mean = 0.0;
+    bool constant = false;
+    double histogram_min = 0.0;
+    double histogram_max = 0.0;
+    std::vector<size_t> histogram;
+    std::vector<TerrainFieldSample> samples;
+};
+
+Result getTerrainFieldStats(const std::string& terrain_name,
+                            const std::string& field_name,
+                            int histogram_bins,
+                            const std::vector<TerrainFieldCoordinate>& coordinates,
+                            TerrainFieldStats& out_stats);
+
 // ============================================================================
 // TERRAIN LAYER SLOTS
 // ============================================================================
@@ -2823,6 +3567,31 @@ struct TerrainErosionSettings {
     int drainage_fill_passes = -1;
     int drainage_accumulate_passes = -1;
     int drainage_coarsest_size = -1;
+    /// ★★★★ Slope in m/m assumed for a depression-filled FLAT, and the single
+    /// dial behind "rivers on low-gradient ground look straight and angular".
+    ///
+    /// A flat has no gradient, so flow direction there is decided by the
+    /// conditioning algorithm. The old scheme lifted each flood ring by a few
+    /// ulp, which is a geodesic distance field whose level sets are squares -
+    /// hence descent along 0 and 45 degrees, channels that never merge. It was
+    /// also numerically zero drop, and incision is clamped to a fraction of the
+    /// drop to the receiver, so a flat could not cut a channel AT ALL and the
+    /// first drainage solve's pattern was frozen for the whole run.
+    ///
+    /// Now the flat gradient is built from two geodesic distance fields
+    /// (Garbrecht & Martz 1997: distance to the outlet AND distance from higher
+    /// ground) and given this physical magnitude, so incision engages, a bed
+    /// forms, and the bed's own relief takes over.
+    ///
+    /// 2e-4 is a real floodplain. Larger = more decisive, more incised flat
+    /// drainage. 0 disables the ramp and restores the frozen behaviour, which
+    /// makes this a usable A/B control.
+    float flat_gradient = -1.0f;
+    /// GPU only. The geodesic fronts advance ONE CELL PER PASS, so this is
+    /// literally "the widest flat, in cells, that resolves". Read
+    /// unresolved_flat_cells back: anything above zero means this is too low
+    /// and those cells are terminal sinks truncating the catchments above them.
+    int flat_resolve_passes = -1;
     int mass_wasting = -1;               // <0 default, 0 off, 1 on
     float repose_angle_degrees = -1.0f;
     float mass_wasting_rate = -1.0f;
@@ -2870,6 +3639,13 @@ struct TerrainErosionStats {
     float deepest_deposit_meters = 0.0f;
     float mean_deposit_meters = 0.0f;
     float drainage_density = 0.0f;
+    /// ★★★ Flat cells the outlet front never reached, so they carry no routing
+    /// gradient and swallow every catchment above them. They render as
+    /// perfectly ordinary ground, which is why this is a number and not a
+    /// look-at-it check. -1 means the readback failed, i.e. NOT MEASURED -
+    /// deliberately distinguishable from a measured zero. GPU path only.
+    int unresolved_flat_cells = 0;
+    float unresolved_flat_fraction = 0.0f;
     int cycle_iterations = 0;
     bool gpu_path = false;
 };

@@ -18,6 +18,7 @@
 #include <functional>
 #include "Hittable.h" // For Hittable definition
 #include "light.h"
+#include "Viewport/RasterFrameTelemetry.h"
 class Camera;  // Forward declaration for syncCamera
 struct GpuVDBVolume;
 struct GpuGasVolume;
@@ -58,6 +59,11 @@ struct BackendInfo {
     std::string driverVersion;
     bool hasHardwareRT;
     uint64_t vramBytes;
+};
+
+struct MaterialPreviewIblStatus {
+    bool supported = false;
+    bool ready = false;
 };
 
 struct GpuMemoryStats {
@@ -635,6 +641,33 @@ public:
      */
     virtual void setInteractiveViewportMatcapPreset(int preset) { (void)preset; }
     /* custom matcap support removed */
+
+    /**
+     * @brief Force the raster/Realtime viewport to publish the frame it just
+     *        rendered instead of the newest already-completed one.
+     *
+     * ★★★ The asynchronous frame ring (Realtime roadmap Faz 0.5a) presents an
+     * older completed slot so the host never blocks. That is right for a human
+     * dragging the camera and WRONG for an automated probe: the pixels a script
+     * reads would belong to a frame recorded before its last scene edit, and
+     * nothing in the image would say so. rtapi turns this on whenever viewport
+     * capture is enabled, trading latency for a defensible measurement.
+     */
+    virtual void setInteractiveViewportSynchronousPresent(bool enabled) { (void)enabled; }
+
+    /**
+     * @brief Read the last raster viewport frame's presentation telemetry.
+     * @return false when this backend has no raster frame ring at all. The out
+     *         parameter is then absence, NOT a measurement of zero.
+     */
+    virtual bool getInteractiveViewportFrameTelemetry(RasterFrameTelemetry& out) const {
+        (void)out;
+        return false;
+    }
+    virtual bool getMaterialPreviewIblStatus(MaterialPreviewIblStatus& out) const {
+        out = {};
+        return false;
+    }
     
     /**
      * @brief Resolve a CPU texture pointer to a GPU bindless texture array index.

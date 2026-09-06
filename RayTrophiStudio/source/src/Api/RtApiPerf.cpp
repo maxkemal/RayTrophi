@@ -31,6 +31,7 @@ std::vector<PerfSection> perfSections() {
         entry.count = s.count;
         entry.last_rss_delta_mb = s.last_rss_delta_mb;
         entry.rss_after_mb = s.rss_after_mb;
+        entry.rss_measured = s.rss_measured;
         entry.seq = s.seq;
         out.push_back(std::move(entry));
     }
@@ -47,6 +48,7 @@ bool perfSection(const std::string& name, PerfSection& out) {
     out.count = s.count;
     out.last_rss_delta_mb = s.last_rss_delta_mb;
     out.rss_after_mb = s.rss_after_mb;
+    out.rss_measured = s.rss_measured;
     out.seq = s.seq;
     return true;
 }

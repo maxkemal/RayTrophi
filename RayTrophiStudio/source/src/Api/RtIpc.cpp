@@ -1,4 +1,5 @@
-﻿/*
+#include "RtPostBindings.h"
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          Api/RtIpc.cpp
@@ -246,6 +247,21 @@ json matrixToJson(const Matrix4x4& m) {
         rows.push_back(std::move(row));
     }
     return rows;
+}
+
+json roadCarveValuesToJson(const rtapi::RoadCarveValues& c) {
+    return json{{"road_width", c.road_width},
+                {"shoulder_width", c.shoulder_width},
+                {"grading_falloff", c.grading_falloff},
+                {"foliage_margin", c.foliage_margin},
+                {"max_grade_percent", c.max_grade_percent},
+                {"elevation_offset", c.elevation_offset},
+                {"max_cut_meters", c.max_cut_meters},
+                {"max_fill_meters", c.max_fill_meters},
+                {"crown_meters", c.crown_meters},
+                {"ditch_width", c.ditch_width},
+                {"ditch_depth", c.ditch_depth},
+                {"use_point_width", c.use_point_width}};
 }
 
 json vec3ToJson(const Vec3& v) {
@@ -597,6 +613,8 @@ json dispatchMethod(const std::string& method, const json& params) {
     json mesh_tool_result;
     if (dispatchMeshToolMethod(method, params, mesh_tool_result)) return mesh_tool_result;
 
+    json post_result;
+    if (dispatchPostExposureIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, post_result)) return post_result;
     json template_result;
     if (dispatchTemplateIpc(
             method, params,
@@ -820,6 +838,239 @@ json dispatchMethod(const std::string& method, const json& params) {
             int index = -1;
             const auto r = rtapi::extrudeSplineEndpoint(name, endpoint, position, index);
             return r.ok ? json{{"index", index}} : json{{"__error", r.error}};
+        });
+    }
+    if (method == "spline.append_point") {
+        const std::string name = requireString(params, "name");
+        if (!params.contains("position") || !params["position"].is_array() || params["position"].size() != 3)
+            return json{{"__error", "position must be a three-component array"}};
+        const Vec3 position(params["position"][0].get<float>(), params["position"][1].get<float>(),
+                            params["position"][2].get<float>());
+        return enqueueQuery([name, position](UIContext&) {
+            int index = -1;
+            const auto r = rtapi::appendSplinePoint(name, position, index);
+            return r.ok ? json{{"index", index}} : json{{"__error", r.error}};
+        });
+    }
+    if (method == "scene.raycast") {
+        if (!params.contains("origin") || !params["origin"].is_array() || params["origin"].size() != 3)
+            return json{{"__error", "origin must be a three-component array"}};
+        if (!params.contains("direction") || !params["direction"].is_array() || params["direction"].size() != 3)
+            return json{{"__error", "direction must be a three-component array"}};
+        const Vec3 origin(params["origin"][0].get<float>(), params["origin"][1].get<float>(),
+                          params["origin"][2].get<float>());
+        const Vec3 direction(params["direction"][0].get<float>(), params["direction"][1].get<float>(),
+                             params["direction"][2].get<float>());
+        const std::string filter = params.value("filter", std::string("mesh_and_terrain"));
+        return enqueueQuery([origin, direction, filter](UIContext&) {
+            rtapi::RaycastHit hit;
+            const auto r = rtapi::raycastScene(origin, direction, filter, hit);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{
+                {"hit", hit.hit},
+                {"kind", hit.kind},
+                {"object", hit.object},
+                {"position", {hit.position.x, hit.position.y, hit.position.z}},
+                {"normal", {hit.normal.x, hit.normal.y, hit.normal.z}},
+                {"distance", hit.distance}
+            };
+        });
+    }
+    if (method == "terrain.road.list_profiles") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::RoadProfileInfo> profiles;
+            const auto r = rtapi::listRoadProfiles(profiles);
+            if (!r.ok) return json{{"__error", r.error}};
+            json rows = json::array();
+            for (const auto& p : profiles) {
+                json row = roadCarveValuesToJson(p.carve);
+                row["id"] = p.id;
+                row["display_name"] = p.display_name;
+                rows.push_back(std::move(row));
+            }
+            return rows;
+        });
+    }
+    if (method == "terrain.road.assign_profile") {
+        const std::string spline = requireString(params, "spline");
+        const std::string profile = requireString(params, "profile");
+        return enqueueResult([spline, profile](UIContext&) {
+            return rtapi::assignRoadProfile(spline, profile);
+        });
+    }
+    if (method == "terrain.road.clear_profile") {
+        const std::string spline = requireString(params, "spline");
+        return enqueueResult([spline](UIContext&) { return rtapi::clearRoadProfile(spline); });
+    }
+    if (method == "terrain.road.get_assignment") {
+        const std::string spline = requireString(params, "spline");
+        return enqueueQuery([spline](UIContext&) {
+            rtapi::RoadAssignmentInfo info;
+            const auto r = rtapi::getRoadAssignment(spline, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"spline_object", info.spline_object},
+                        {"profile_id", info.profile_id},
+                        {"crossing_mode", info.crossing_mode},
+                        {"enabled", info.enabled},
+                        {"has_override", info.has_override},
+                        {"curve_exists", info.curve_exists},
+                        {"effective", roadCarveValuesToJson(info.effective)}};
+        });
+    }
+    if (method == "terrain.road.list_assignments") {
+        return enqueueQuery([](UIContext&) {
+            std::vector<rtapi::RoadAssignmentInfo> rows;
+            const auto r = rtapi::listRoadAssignments(rows);
+            if (!r.ok) return json{{"__error", r.error}};
+            json out = json::array();
+            for (const auto& info : rows) {
+                out.push_back({{"spline_object", info.spline_object},
+                               {"profile_id", info.profile_id},
+                               {"crossing_mode", info.crossing_mode},
+                               {"enabled", info.enabled},
+                               {"has_override", info.has_override},
+                               {"curve_exists", info.curve_exists},
+                               {"effective", roadCarveValuesToJson(info.effective)}});
+            }
+            return out;
+        });
+    }
+    if (method == "terrain.road.set_crossing_mode") {
+        const std::string spline = requireString(params, "spline");
+        const std::string mode = requireString(params, "mode");
+        return enqueueResult([spline, mode](UIContext&) {
+            return rtapi::setRoadCrossingMode(spline, mode);
+        });
+    }
+    if (method == "terrain.road.set_enabled") {
+        const std::string spline = requireString(params, "spline");
+        const bool enabled = params.value("enabled", true);
+        return enqueueResult([spline, enabled](UIContext&) {
+            return rtapi::setRoadEnabled(spline, enabled);
+        });
+    }
+    if (method == "terrain.road.set_carve_override") {
+        const std::string spline = requireString(params, "spline");
+        // Partial by design: the base is what the assignment solves with TODAY,
+        // so "widen this one segment" is one call. An empty call is REFUSED - a
+        // mistyped key would otherwise pin the current values and report success,
+        // which reads back as a write that landed and did nothing.
+        static const char* const kFields[] = {
+            "road_width", "shoulder_width", "grading_falloff", "foliage_margin",
+            "max_grade_percent", "elevation_offset", "max_cut_meters",
+            "max_fill_meters", "crown_meters", "ditch_width", "ditch_depth",
+            "use_point_width"};
+        bool anyField = false;
+        for (const char* field : kFields) {
+            if (params.contains(field)) { anyField = true; break; }
+        }
+        if (!anyField) {
+            return json{{"__error", "set_carve_override needs at least one of: "
+                                    "road_width, shoulder_width, grading_falloff, "
+                                    "foliage_margin, max_grade_percent, elevation_offset, "
+                                    "max_cut_meters, max_fill_meters, crown_meters, "
+                                    "ditch_width, ditch_depth, use_point_width"}};
+        }
+        const json fields = params;
+        return enqueueQuery([spline, fields](UIContext&) -> json {
+            rtapi::RoadAssignmentInfo info;
+            const auto read = rtapi::getRoadAssignment(spline, info);
+            if (!read.ok) return json{{"__error", read.error}};
+            rtapi::RoadCarveValues values = info.effective;
+            values.road_width = optionalFloat(fields, "road_width", values.road_width);
+            values.shoulder_width = optionalFloat(fields, "shoulder_width", values.shoulder_width);
+            values.grading_falloff =
+                optionalFloat(fields, "grading_falloff", values.grading_falloff);
+            values.foliage_margin = optionalFloat(fields, "foliage_margin", values.foliage_margin);
+            values.max_grade_percent =
+                optionalFloat(fields, "max_grade_percent", values.max_grade_percent);
+            values.elevation_offset =
+                optionalFloat(fields, "elevation_offset", values.elevation_offset);
+            values.max_cut_meters = optionalFloat(fields, "max_cut_meters", values.max_cut_meters);
+            values.max_fill_meters =
+                optionalFloat(fields, "max_fill_meters", values.max_fill_meters);
+            values.crown_meters = optionalFloat(fields, "crown_meters", values.crown_meters);
+            values.ditch_width = optionalFloat(fields, "ditch_width", values.ditch_width);
+            values.ditch_depth = optionalFloat(fields, "ditch_depth", values.ditch_depth);
+            values.use_point_width =
+                optionalBool(fields, "use_point_width", values.use_point_width);
+            const auto write = rtapi::setRoadCarveOverride(spline, values);
+            if (!write.ok) return json{{"__error", write.error}};
+            // Echo what was stored: the caller sees the merged result rather than
+            // assuming the fields it did not send kept the value it imagined.
+            return roadCarveValuesToJson(values);
+        });
+    }
+    if (method == "terrain.road.clear_carve_override") {
+        const std::string spline = requireString(params, "spline");
+        return enqueueResult([spline](UIContext&) {
+            return rtapi::clearRoadCarveOverride(spline);
+        });
+    }
+    if (method == "terrain.road.get_route") {
+        const std::string spline = requireString(params, "spline");
+        const int maxSamples = params.value("max_samples", 0);
+        return enqueueQuery([spline, maxSamples](UIContext&) {
+            rtapi::RoadRouteInfo info;
+            const auto r = rtapi::getRoadRoute(spline, maxSamples, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            json samples = json::array();
+            for (const auto& sample : info.samples) {
+                samples.push_back({{"x", sample.x},
+                                   {"z", sample.z},
+                                   {"height_meters", sample.height_meters},
+                                   {"ground_meters", sample.ground_meters},
+                                   {"distance_meters", sample.distance_meters},
+                                   {"crossing", sample.crossing}});
+            }
+            return json{{"spline_object", info.spline_object},
+                        {"terrain", info.terrain},
+                        {"sample_count", info.sample_count},
+                        {"bridge_samples", info.bridge_samples},
+                        {"ford_samples", info.ford_samples},
+                        {"tunnel_samples", info.tunnel_samples},
+                        {"length_meters", info.length_meters},
+                        {"peak_cut_meters", info.peak_cut_meters},
+                        {"peak_fill_meters", info.peak_fill_meters},
+                        {"revision", info.revision},
+                        {"crossing_diagnostic", info.crossing_diagnostic},
+                        {"samples", std::move(samples)}};
+        });
+    }
+    if (method == "terrain.road.build_mesh") {
+        const std::string spline = requireString(params, "spline");
+        rtapi::RoadMeshOptions options;
+        options.object = params.value("object", std::string());
+        options.include_shoulder = params.value("include_shoulder", true);
+        options.surface_offset = optionalFloat(params, "surface_offset", options.surface_offset);
+        options.uv_meters_per_tile =
+            optionalFloat(params, "uv_meters_per_tile", options.uv_meters_per_tile);
+        options.skip_tunnels = params.value("skip_tunnels", true);
+        return enqueueQuery([spline, options](UIContext&) {
+            rtapi::RoadMeshInfo info;
+            const auto r = rtapi::buildRoadMesh(spline, options, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"object", info.object_name},
+                        {"vertex_count", info.vertex_count},
+                        {"triangle_count", info.triangle_count},
+                        {"span_count", info.span_count},
+                        {"length_meters", info.length_meters},
+                        {"replaced_existing", info.replaced_existing}};
+        });
+    }
+    if (method == "terrain.road.clear_mesh") {
+        const std::string spline = requireString(params, "spline");
+        return enqueueResult([spline](UIContext&) { return rtapi::clearRoadMesh(spline); });
+    }
+    if (method == "terrain.road.get_diagnostics") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::RoadDiagnostics diagnostics;
+            const auto r = rtapi::getRoadDiagnostics(diagnostics);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"assignment_count", diagnostics.assignment_count},
+                        {"enabled_count", diagnostics.enabled_count},
+                        {"dangling", diagnostics.dangling},
+                        {"unknown_profiles", diagnostics.unknown_profiles}};
         });
     }
     if (method == "spline.keyframe.insert") {
@@ -1094,6 +1345,79 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::importModel(path);
         });
     }
+    if (method == "scene.export_gltf") {
+        // Export had no script surface at all until now, which is why a crowded
+        // scene taking minutes on one core could only be found by hand. The reply
+        // carries MEASURED cost so an agent can regress it.
+        std::string path = requireString(params, "path");
+        rtapi::SceneExportOptions opt;
+        opt.geometry = params.value("geometry", true);
+        opt.materials = params.value("materials", true);
+        opt.cameras = params.value("cameras", false);
+        opt.lights = params.value("lights", false);
+        opt.animations = params.value("animations", true);
+        opt.skinning = params.value("skinning", true);
+        opt.selected_only = params.value("selected_only", false);
+        opt.bake_terrain_materials = params.value("bake_terrain_materials", true);
+        opt.terrain_bake_resolution = params.value("terrain_bake_resolution", 1024);
+        opt.gpu_instancing = params.value("gpu_instancing", true);
+        return enqueueQuery([path, opt](UIContext&) -> json {
+            rtapi::SceneExportStats st;
+            const rtapi::Result r = rtapi::exportSceneGltf(path, opt, st);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{
+                {"path", path},
+                {"meshes", st.meshes},
+                {"primitives", st.primitives},
+                {"triangles", st.triangles},
+                {"vertices", st.vertices},
+                {"nodes", st.nodes},
+                {"instances", st.instances},
+                {"instanced_groups", st.instanced_groups},
+                {"materials", st.materials},
+                {"images", st.images},
+                {"file_bytes", st.file_bytes},
+                {"peak_writer_mb", st.peak_writer_mb},
+                {"seconds_total", st.seconds_total},
+                {"seconds_collect", st.seconds_collect},
+                {"seconds_materials", st.seconds_materials},
+                {"seconds_plan", st.seconds_plan},
+                {"seconds_write", st.seconds_write}
+            };
+        });
+    }
+    if (method == "scene.export_estimate") {
+        // The PRE-export numbers the Export Settings panel shows. Same options
+        // as scene.export_gltf so the two replies are directly comparable —
+        // that comparison is the only thing that catches the panel drifting
+        // away from the writer again (it already did once, on scatter).
+        rtapi::SceneExportOptions opt;
+        opt.geometry = params.value("geometry", true);
+        opt.materials = params.value("materials", true);
+        opt.cameras = params.value("cameras", false);
+        opt.lights = params.value("lights", false);
+        opt.animations = params.value("animations", true);
+        opt.skinning = params.value("skinning", true);
+        opt.selected_only = params.value("selected_only", false);
+        opt.bake_terrain_materials = params.value("bake_terrain_materials", true);
+        opt.terrain_bake_resolution = params.value("terrain_bake_resolution", 1024);
+        opt.gpu_instancing = params.value("gpu_instancing", true);
+        return enqueueQuery([opt](UIContext&) -> json {
+            rtapi::SceneExportEstimate est;
+            const rtapi::Result r = rtapi::sceneExportEstimate(opt, est);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{
+                {"objects", est.objects},
+                {"triangles", est.triangles},
+                {"legacy_triangles", est.legacy_triangles},
+                {"instances", est.instances},
+                {"unique_instance_sources", est.unique_instance_sources},
+                {"instance_triangles", est.instance_triangles},
+                {"materialised_instance_triangles", est.materialised_instance_triangles},
+                {"estimated_peak_mb", est.estimated_peak_mb}
+            };
+        });
+    }
     if (method == "scene.add_primitive") {
         std::string type = requireString(params, "type");
         std::string name = params.value("name", "");
@@ -1200,8 +1524,50 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "material.textures") {
         std::string mat = requireString(params, "material_name");
         return enqueueQuery([mat](UIContext&) {
-            return json(rtapi::materialTextureSlots(mat));
+            json result = json::array();
+            for (const auto& binding : rtapi::materialTextureSlots(mat)) {
+                result.push_back({{"slot", binding.slot}, {"texture", binding.texture}});
+            }
+            return result;
         });
+    }
+    // material.get/material.set (above) edit through an OBJECT: every material
+    // that object's flat meshes reference gets the same value. These two edit
+    // exactly one material ASSET, by name, so a multi-material object (a menu
+    // carafe's glass body + brass cap + rubber foot on one flat mesh) does not
+    // get a sibling material's param bled onto it by a script that only meant
+    // to touch the glass.
+    if (method == "material.get_param") {
+        std::string mat = requireString(params, "material_name");
+        std::string param = requireString(params, "param");
+        return enqueueQuery([mat, param](UIContext&) {
+            rtapi::MaterialParamValue val;
+            rtapi::Result r = rtapi::getMaterialParamByName(mat, param, val);
+            if (!r.ok) return json{{"__error", r.error}};
+            if (val.is_color) return vec3ToJson(val.color);
+            return json(val.scalar);
+        });
+    }
+    if (method == "material.set_param") {
+        std::string mat = requireString(params, "material_name");
+        std::string param = requireString(params, "param");
+        if (!params.contains("value"))
+            throw std::runtime_error("missing param: value");
+        if (params["value"].is_number()) {
+            float value = params["value"].get<float>();
+            return enqueueResult([mat, param, value](UIContext&) {
+                return rtapi::setMaterialParamByName(mat, param, value);
+            });
+        } else if (params["value"].is_array() && params["value"].size() == 3) {
+            Vec3 color(params["value"][0].get<float>(),
+                       params["value"][1].get<float>(),
+                       params["value"][2].get<float>());
+            return enqueueResult([mat, param, color](UIContext&) {
+                return rtapi::setMaterialParamByName(mat, param, color);
+            });
+        } else {
+            throw std::runtime_error("value must be a number or [r,g,b] array");
+        }
     }
 
     // ── Selection (Faz 5.5a) ────────────────────────────────────────────
@@ -1352,8 +1718,43 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (!r.ok) return json{{"__error", r.error}};
             return json{{"position", vec3ToJson(s.position)}, {"target", vec3ToJson(s.target)},
                         {"up", vec3ToJson(s.up)}, {"fov", s.fov},
-                        {"focus_distance", s.focus_distance}, {"aperture", s.aperture}};
+                        {"focus_distance", s.focus_distance}, {"aperture", s.aperture},
+                        {"auto_exposure", s.auto_exposure},
+                        {"use_physical_exposure", s.use_physical_exposure},
+                        {"iso_preset_index", s.iso_preset_index},
+                        {"shutter_preset_index", s.shutter_preset_index},
+                        {"fstop_preset_index", s.fstop_preset_index},
+                        {"ev_compensation", s.ev_compensation},
+                        // Cozulmus degerler + uygulanan carpan: AYAR DEGIL SONUC.
+                        {"iso_value", s.iso_value},
+                        {"shutter_seconds", s.shutter_seconds},
+                        {"f_number", s.f_number},
+                        {"exposure_factor", s.exposure_factor}};
         });
+    }
+    if (method == "camera.set_auto_exposure") {
+        bool v = requireBool(params, "enabled");
+        return enqueueResult([v](UIContext&) { return rtapi::setCameraAutoExposure(v); });
+    }
+    if (method == "camera.set_use_physical_exposure") {
+        bool v = requireBool(params, "enabled");
+        return enqueueResult([v](UIContext&) { return rtapi::setCameraUsePhysicalExposure(v); });
+    }
+    if (method == "camera.set_iso_preset") {
+        int v = requireInt(params, "index");
+        return enqueueResult([v](UIContext&) { return rtapi::setCameraIsoPreset(v); });
+    }
+    if (method == "camera.set_shutter_preset") {
+        int v = requireInt(params, "index");
+        return enqueueResult([v](UIContext&) { return rtapi::setCameraShutterPreset(v); });
+    }
+    if (method == "camera.set_fstop_preset") {
+        int v = requireInt(params, "index");
+        return enqueueResult([v](UIContext&) { return rtapi::setCameraFStopPreset(v); });
+    }
+    if (method == "camera.set_ev_compensation") {
+        float v = requireFloat(params, "ev");
+        return enqueueResult([v](UIContext&) { return rtapi::setCameraEvCompensation(v); });
     }
     if (method == "camera.set_position") {
         Vec3 p = requireVec3(params, "position");
@@ -1417,6 +1818,75 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "world.set_sun_size") {
         float d = requireFloat(params, "sun_size");
         return enqueueResult([d](UIContext&) { return rtapi::setWorldSunSize(d); });
+    }
+    if (method == "world.get_atmosphere") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::WorldAtmosphereInfo a;
+            rtapi::Result r = rtapi::getWorldAtmosphere(a);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"air_density", a.air_density},
+                        {"dust_density", a.dust_density},
+                        {"ozone_density", a.ozone_density},
+                        {"ozone_absorption_scale", a.ozone_absorption_scale},
+                        {"humidity", a.humidity},
+                        {"temperature", a.temperature},
+                        {"altitude", a.altitude},
+                        {"mie_anisotropy", a.mie_anisotropy},
+                        {"planet_radius", a.planet_radius},
+                        {"atmosphere_height", a.atmosphere_height},
+                        {"rayleigh_scattering", vec3ToJson(a.rayleigh_scattering)},
+                        {"mie_scattering", vec3ToJson(a.mie_scattering)},
+                        {"rayleigh_density", a.rayleigh_density},
+                        {"mie_density", a.mie_density}};
+        });
+    }
+    if (method == "world.set_atmosphere") {
+        // ★ Ayristirma LAMBDA'NIN DISINDA: bicimsiz bir vec3 burada firlatir ve
+        //   dispatcher onu bir hata mesajina cevirir. Ana thread'de firlatmak
+        //   uygulamayi indirirdi.
+        struct AtmoOpt { bool has = false; float value = 0.0f; };
+        auto optNumber = [&](const char* key) {
+            AtmoOpt o;
+            if (params.contains(key) && params.at(key).is_number()) {
+                o.has = true;
+                o.value = params.at(key).get<float>();
+            }
+            return o;
+        };
+        const AtmoOpt air      = optNumber("air_density");
+        const AtmoOpt dust     = optNumber("dust_density");
+        const AtmoOpt ozone    = optNumber("ozone_density");
+        const AtmoOpt ozoneAbs = optNumber("ozone_absorption_scale");
+        const AtmoOpt humidity = optNumber("humidity");
+        const AtmoOpt temper   = optNumber("temperature");
+        const AtmoOpt altitude = optNumber("altitude");
+        const AtmoOpt mieG     = optNumber("mie_anisotropy");
+        const AtmoOpt planetR  = optNumber("planet_radius");
+        const AtmoOpt atmoH    = optNumber("atmosphere_height");
+        const AtmoOpt rayH     = optNumber("rayleigh_density");
+        const AtmoOpt mieH     = optNumber("mie_density");
+        const bool hasRayS = params.contains("rayleigh_scattering");
+        const bool hasMieS = params.contains("mie_scattering");
+        const Vec3 rayS = hasRayS ? requireVec3(params, "rayleigh_scattering") : Vec3();
+        const Vec3 mieS = hasMieS ? requireVec3(params, "mie_scattering") : Vec3();
+        return enqueueResult([=](UIContext&) {
+            rtapi::WorldAtmosphereUpdate u;
+            if (air.has)      u.air_density = &air.value;
+            if (dust.has)     u.dust_density = &dust.value;
+            if (ozone.has)    u.ozone_density = &ozone.value;
+            if (ozoneAbs.has) u.ozone_absorption_scale = &ozoneAbs.value;
+            if (humidity.has) u.humidity = &humidity.value;
+            if (temper.has)   u.temperature = &temper.value;
+            if (altitude.has) u.altitude = &altitude.value;
+            if (mieG.has)     u.mie_anisotropy = &mieG.value;
+            if (planetR.has)  u.planet_radius = &planetR.value;
+            if (atmoH.has)    u.atmosphere_height = &atmoH.value;
+            if (rayH.has)     u.rayleigh_density = &rayH.value;
+            if (mieH.has)     u.mie_density = &mieH.value;
+            if (hasRayS)      u.rayleigh_scattering = &rayS;
+            if (hasMieS)      u.mie_scattering = &mieS;
+            return rtapi::updateWorldAtmosphere(u);
+        });
     }
     if (method == "world.get_thermal") {
         return enqueueQuery([](UIContext&) {
@@ -1583,7 +2053,14 @@ json dispatchMethod(const std::string& method, const json& params) {
                 }
                 arr.push_back({{"id", g.id}, {"name", g.name}, {"target_type", g.target_type},
                                {"target_node_name", g.target_node_name}, {"instance_count", g.instance_count},
-                               {"triangle_count", g.triangle_count}, {"sources", sources}});
+                               {"triangle_count", g.triangle_count}, {"sources", sources},
+                               {"density_mask", g.density_mask},
+                               {"exclusion_mask", g.exclusion_mask},
+                               {"exclusion_threshold", g.exclusion_threshold},
+                               {"scale_mask", g.scale_mask},
+                               {"scale_mask_influence", g.scale_mask_influence},
+                               {"splat_include_channel", g.splat_include_channel},
+                               {"splat_exclude_channel", g.splat_exclude_channel}});
             }
             return arr;
         });
@@ -1638,6 +2115,28 @@ json dispatchMethod(const std::string& method, const json& params) {
         std::string relative_path = requireString(params, "relative_path");
         return enqueueResult([group, relative_path](UIContext&) {
             return rtapi::addLibraryScatterSource(group, relative_path);
+        });
+    }
+    if (method == "scatter.set_settings") {
+        std::string group = requireString(params, "group");
+        rtapi::ScatterGroupSettingsPatch patch;
+        // Absent means "leave alone". Writing a default for an unmentioned key
+        // would make every partial call silently reset the rest of the group.
+        if (params.contains("target_count"))        patch.target_count = params["target_count"].get<int>();
+        if (params.contains("seed"))                patch.seed = params["seed"].get<int>();
+        if (params.contains("min_distance"))        patch.min_distance = params["min_distance"].get<float>();
+        if (params.contains("slope_max"))           patch.slope_max = params["slope_max"].get<float>();
+        if (params.contains("height_min"))          patch.height_min = params["height_min"].get<float>();
+        if (params.contains("height_max"))          patch.height_max = params["height_max"].get<float>();
+        if (params.contains("density_mask"))        patch.density_mask = params["density_mask"].get<std::string>();
+        if (params.contains("exclusion_mask"))      patch.exclusion_mask = params["exclusion_mask"].get<std::string>();
+        if (params.contains("exclusion_threshold")) patch.exclusion_threshold = params["exclusion_threshold"].get<float>();
+        if (params.contains("scale_mask"))          patch.scale_mask = params["scale_mask"].get<std::string>();
+        if (params.contains("scale_mask_influence")) patch.scale_mask_influence = params["scale_mask_influence"].get<float>();
+        if (params.contains("splat_include_channel")) patch.splat_include_channel = params["splat_include_channel"].get<int>();
+        if (params.contains("splat_exclude_channel")) patch.splat_exclude_channel = params["splat_exclude_channel"].get<int>();
+        return enqueueResult([group, patch](UIContext&) {
+            return rtapi::setScatterGroupSettings(group, patch);
         });
     }
     if (method == "scatter.fill") {
@@ -2474,6 +2973,8 @@ json dispatchMethod(const std::string& method, const json& params) {
         settings.drainage_fill_passes = optionalInt(params, "drainage_fill_passes", -1);
         settings.drainage_accumulate_passes = optionalInt(params, "drainage_accumulate_passes", -1);
         settings.drainage_coarsest_size = optionalInt(params, "drainage_coarsest_size", -1);
+        settings.flat_gradient = optionalFloat(params, "flat_gradient", -1.0f);
+        settings.flat_resolve_passes = optionalInt(params, "flat_resolve_passes", -1);
         settings.mass_wasting = optionalInt(params, "mass_wasting", -1);
         settings.repose_angle_degrees = optionalFloat(params, "repose_angle_degrees", -1.0f);
         settings.alluvium_slope_degrees = optionalFloat(params, "alluvium_slope_degrees", -1.0f);
@@ -2513,6 +3014,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"deepest_deposit_meters", stats.deepest_deposit_meters},
                 {"mean_deposit_meters", stats.mean_deposit_meters},
                 {"drainage_density", stats.drainage_density},
+                {"unresolved_flat_cells", stats.unresolved_flat_cells},
+                {"unresolved_flat_fraction", stats.unresolved_flat_fraction},
                 {"cycle_iterations", stats.cycle_iterations},
                 {"gpu_path", stats.gpu_path}};
         });
@@ -2532,6 +3035,58 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"applied", true},
                         {"wiring_faults", faults},
                         {"wiring_fault_count", static_cast<int>(faults.size())}};
+        });
+    }
+    if (method == "terrain.list_fields") {
+        std::string name = requireString(params, "terrain");
+        return enqueueQuery([name](UIContext&) {
+            std::vector<std::string> fields;
+            rtapi::Result r = rtapi::listTerrainAnalysisFields(name, fields);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json(fields);
+        });
+    }
+    if (method == "terrain.field_stats") {
+        std::string terrainName = requireString(params, "terrain");
+        std::string fieldName = requireString(params, "field");
+        int histogramBins = optionalInt(params, "histogram_bins", 0);
+        std::vector<rtapi::TerrainFieldCoordinate> coordinates;
+        if (params.contains("samples")) {
+            if (!params["samples"].is_array())
+                throw std::runtime_error("invalid array param: samples");
+            coordinates.reserve(params["samples"].size());
+            for (const auto& coordinate : params["samples"]) {
+                if (!coordinate.is_array() || coordinate.size() != 2 ||
+                    !coordinate[0].is_number_integer() ||
+                    !coordinate[1].is_number_integer()) {
+                    throw std::runtime_error("each samples entry must be [x, y] integers");
+                }
+                coordinates.push_back({coordinate[0].get<int>(), coordinate[1].get<int>()});
+            }
+        }
+        return enqueueQuery([terrainName, fieldName, histogramBins,
+                             coordinates = std::move(coordinates)](UIContext&) {
+            rtapi::TerrainFieldStats stats;
+            const auto result = rtapi::getTerrainFieldStats(
+                terrainName, fieldName, histogramBins, coordinates, stats);
+            if (!result.ok) return json{{"__error", result.error}};
+            json samples = json::array();
+            for (const auto& sample : stats.samples) {
+                samples.push_back({{"x", sample.x}, {"y", sample.y}, {"value", sample.value}});
+            }
+            return json{
+                {"terrain", stats.terrain}, {"field", stats.field},
+                {"width", stats.width}, {"height", stats.height},
+                {"channels", stats.channels}, {"value_count", stats.value_count},
+                {"finite_count", stats.finite_count},
+                {"non_finite_count", stats.non_finite_count},
+                {"nonzero_count", stats.nonzero_count},
+                {"nonzero_fraction", stats.nonzero_fraction},
+                {"min", stats.minimum}, {"max", stats.maximum}, {"mean", stats.mean},
+                {"constant", stats.constant},
+                {"histogram_min", stats.histogram_min},
+                {"histogram_max", stats.histogram_max},
+                {"histogram", stats.histogram}, {"samples", samples}};
         });
     }
     if (method == "terrain.list_layers") {
@@ -3005,6 +3560,26 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"arbiter_no_crossing", s.arbiter_no_crossing}};
         });
     }
+    if (method == "render.volume_tables") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::VolumeTablesInfo t = rtapi::volumeTables();
+            json backends = json::array();
+            for (const auto& b : t.backends) {
+                backends.push_back(json{
+                    {"role", b.role},
+                    {"is_vulkan", b.is_vulkan},
+                    {"instance_count", b.instance_count},
+                    {"buffer_allocated", b.buffer_allocated},
+                    {"sim_device_is_this_backends", b.sim_device_is_this_backends},
+                    {"dense_gas_mirror_buffers", b.dense_gas_mirror_buffers}});
+            }
+            // Two rows means two Vulkan devices in this session. A "viewport"
+            // row with instance_count == 0 while "render" is non-zero is the
+            // realtime volume failure by itself: the raster viewport cannot draw
+            // a volume it was never given, and nothing else reports that.
+            return json{{"available", t.available}, {"backends", backends}};
+        });
+    }
     // -- sim_graph.* : every method names the scope it means -----------------
     //
     // *** `scope` is REQUIRED and there is no active-domain fallback. Making it
@@ -3289,6 +3864,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                            {"count", s.count},
                            {"last_rss_delta_mb", s.last_rss_delta_mb},
                            {"rss_after_mb", s.rss_after_mb},
+                           {"rss_measured", s.rss_measured},
                            {"seq", s.seq}});
         }
         return arr;
@@ -3308,6 +3884,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"count", s.count},
                     {"last_rss_delta_mb", s.last_rss_delta_mb},
                     {"rss_after_mb", s.rss_after_mb},
+                    {"rss_measured", s.rss_measured},
                     {"seq", s.seq}};
     }
     if (method == "perf.reset") {
@@ -3397,6 +3974,142 @@ json dispatchMethod(const std::string& method, const json& params) {
         int matcap_preset = optionalInt(params, "matcap_preset", -1);
         return enqueueResult([mode, matcap_preset](UIContext&) {
             return rtapi::setViewportShading(mode, matcap_preset);
+        });
+    }
+    if (method == "viewport.quality") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportQualityInfo q = rtapi::viewportQuality();
+            return json{
+                {"preset", q.preset},
+                {"scatter_lod_split", q.scatter_lod_split},
+                {"raster_viewport_available", q.raster_viewport_available},
+                {"shadow_atlas_resolution", q.shadow_atlas_resolution},
+                {"shadow_tile_resolution", q.shadow_tile_resolution},
+                {"shadow_tile_capacity", q.shadow_tile_capacity},
+                {"shadow_light_budget", q.shadow_light_budget},
+                {"shadow_pcf_samples", q.shadow_pcf_samples},
+                {"directional_shadow_cascades", q.directional_shadow_cascades},
+                {"scene_pbr_shader", q.scene_pbr_shader},
+                {"opaque_core_parity", q.opaque_core_parity},
+                {"material_graph_surface", q.material_graph_surface},
+                {"clearcoat", q.clearcoat},
+                {"subsurface", q.subsurface},
+                {"translucency", q.translucency},
+                {"surface_anisotropy", q.surface_anisotropy},
+                {"transparency", q.transparency},
+                {"transmission", q.transmission},
+                {"resin_interior", q.resin_interior},
+                {"sdf_surface", q.sdf_surface},
+                {"volumes", q.volumes}};
+        });
+    }
+    if (method == "viewport.set_quality") {
+        std::string preset = requireString(params, "preset");
+        return enqueueResult([preset](UIContext&) {
+            return rtapi::setViewportQuality(preset);
+        });
+    }
+    if (method == "viewport.preview_lighting") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportPreviewLightingInfo p = rtapi::viewportPreviewLighting();
+            return json{
+                {"preset", p.preset},
+                {"uses_scene_lights", p.uses_scene_lights},
+                {"scene_light_count", p.scene_light_count},
+                {"scene_light_total", p.scene_light_total},
+                {"shadows", p.shadows},
+                {"shadowed_light_count", p.shadowed_light_count},
+                {"world_ambient", p.world_ambient},
+                {"world_background", p.world_background},
+                {"world_sun_direct", p.world_sun_direct},
+                {"world_sun_shadow", p.world_sun_shadow},
+                {"world_ibl_supported", p.world_ibl_supported},
+                {"world_ibl_ready", p.world_ibl_ready},
+                {"world_ibl_fallback", p.world_ibl_fallback},
+                {"material_preview_active", p.material_preview_active},
+                // Uygulanan goruntuleme donusumu: post.get AYARI verir, bunlar
+                // shader'a GIDEN degerlerdir. Ikisi ayrisirsa onizleme yalan
+                // soyluyor demektir.
+                {"display_tone_mapping", p.display_tone_mapping},
+                {"display_exposure", p.display_exposure},
+                {"display_gamma", p.display_gamma},
+                {"display_saturation", p.display_saturation},
+                {"display_color_temperature", p.display_color_temperature},
+                {"display_vignette_enabled", p.display_vignette_enabled},
+                {"display_vignette_strength", p.display_vignette_strength}};
+        });
+    }
+    if (method == "viewport.set_preview_lighting") {
+        std::string preset = requireString(params, "preset");
+        return enqueueResult([preset](UIContext&) {
+            return rtapi::setViewportPreviewLighting(preset);
+        });
+    }
+    if (method == "viewport.frame_telemetry") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportFrameTelemetryInfo t = rtapi::viewportFrameTelemetry();
+            // ★ `available` false ise butun sayilar YOKLUK. Onu okumadan
+            // stale_presents=0 gormek "koprü saglikli" DEGIL, "raster viewport
+            // hic kosmadi" demektir.
+            // ★★ Ekran yolu olcumu raster telemetrisinden BAGIMSIZ yayinlanir:
+            // Rendered modunda raster viewport yoktur ama ana dongu pikselleri
+            // yine CPU'da tasir. Onu `available` erken donusunun arkasina
+            // koymak, olcumu tam gerekli oldugu modda gizlerdi.
+            json display = json::object();
+            if (t.display_available) {
+                display = json{
+                    {"display_available", true},
+                    {"display_post_ms", t.display_post_ms},
+                    {"display_texture_upload_ms", t.display_texture_upload_ms},
+                    {"display_loop_period_ms", t.display_loop_period_ms},
+                    {"display_post_was_noop_copy", t.display_post_was_noop_copy},
+                    {"display_frames", t.display_frames}};
+            } else {
+                display = json{{"display_available", false}};
+            }
+            if (!t.available) {
+                json miss{
+                    {"available", false},
+                    {"reason", "No raster viewport frame has been presented yet "
+                               "(Rendered mode, no Vulkan viewport backend, or "
+                               "no frame drawn since startup)."}};
+                miss.update(display);
+                return miss;
+            }
+            json out{
+                {"available", true},
+                {"async_present", t.async_present},
+                {"synchronous_present", t.synchronous_present},
+                {"slot_count", t.slot_count},
+                {"width", t.width},
+                {"height", t.height},
+                {"frame_ms", t.frame_ms},
+                {"cpu_record_ms", t.cpu_record_ms},
+                {"slot_wait_ms", t.slot_wait_ms},
+                {"submit_ms", t.submit_ms},
+                {"image_readback_ms", t.image_readback_ms},
+                {"host_read_ms", t.host_read_ms},
+                {"present_ms", t.present_ms},
+                {"frames_submitted", t.frames_submitted},
+                {"frames_consumed", t.frames_consumed},
+                {"stale_presents", t.stale_presents},
+                {"slot_waits", t.slot_waits},
+                {"blocking_seeds", t.blocking_seeds},
+                {"resource_drains", t.resource_drains},
+                {"present_latency_frames", t.present_latency_frames},
+                {"global_instance_buffer", t.global_instance_buffer},
+                {"gpu_culling", t.gpu_culling},
+                {"total_instances", t.total_instances},
+                {"cull_mesh_count", t.cull_mesh_count},
+                {"draw_calls", t.draw_calls},
+                {"visible_triangles", t.visible_triangles},
+                {"full_triangles", t.full_triangles},
+                {"proxy_triangles", t.proxy_triangles},
+                {"full_instances", t.full_instances},
+                {"proxy_instances", t.proxy_instances},
+                {"scatter_triangle_target", t.scatter_triangle_target}};
+            out.update(display);
+            return out;
         });
     }
     if (method == "viewport.get_screenshot") {
@@ -3567,6 +4280,51 @@ json dispatchMethod(const std::string& method, const json& params) {
                                       {"loop", clip.loop},
                                       {"start_frame", clip.start_frame},
                                       {"end_frame", clip.end_frame}});
+            }
+            return result;
+        });
+    }
+    if (method == "anim.source_clips") {
+        // The RAW loader output, not a character's controller state. This is the
+        // acceptance instrument for swapping the importer: same file in, same
+        // channel/key numbers out.
+        return enqueueQuery([](UIContext&) -> json {
+            std::vector<rtapi::AnimSourceClipInfo> clips;
+            rtapi::Result r = rtapi::listAnimSourceClips(clips);
+            if (!r.ok) return json{{"__error", r.error}};
+            json result = json::array();
+            for (const rtapi::AnimSourceClipInfo& c : clips) {
+                result.push_back(json{{"name", c.name},
+                                      {"model_name", c.model_name},
+                                      {"duration_ticks", c.duration_ticks},
+                                      {"ticks_per_second", c.ticks_per_second},
+                                      {"duration_seconds", c.duration_seconds},
+                                      {"start_frame", c.start_frame},
+                                      {"end_frame", c.end_frame},
+                                      {"position_channels", c.position_channels},
+                                      {"rotation_channels", c.rotation_channels},
+                                      {"scaling_channels", c.scaling_channels},
+                                      {"position_keys", c.position_keys},
+                                      {"rotation_keys", c.rotation_keys},
+                                      {"scaling_keys", c.scaling_keys},
+                                      {"first_key_time", c.first_key_time},
+                                      {"last_key_time", c.last_key_time}});
+            }
+            return result;
+        });
+    }
+    if (method == "anim.source_channels") {
+        std::string clip = params.value("clip", "");
+        return enqueueQuery([clip](UIContext&) -> json {
+            std::vector<rtapi::AnimSourceChannelInfo> channels;
+            rtapi::Result r = rtapi::listAnimSourceChannels(clip, channels);
+            if (!r.ok) return json{{"__error", r.error}};
+            json result = json::array();
+            for (const rtapi::AnimSourceChannelInfo& c : channels) {
+                result.push_back(json{{"node_name", c.node_name},
+                                      {"position_keys", c.position_keys},
+                                      {"rotation_keys", c.rotation_keys},
+                                      {"scaling_keys", c.scaling_keys}});
             }
             return result;
         });

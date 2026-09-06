@@ -1698,6 +1698,30 @@ public:
     SimulationGasGpuFieldView gasGpuFieldView(
         std::size_t domain_index,
         const SimulationComputeContext& compute) const;
+
+    /// Read a GPU-resident gas domain's density and temperature grids back to
+    /// the host.
+    ///
+    /// ★★★ WHY THIS EXISTS: the addresses `gasGpuFieldView` publishes are raw
+    /// VkDeviceAddresses, valid ONLY on the device that allocated them. This
+    /// process runs two Vulkan devices — the render backend and the dedicated
+    /// raster viewport backend — and the second one cannot dereference them.
+    /// Measured 2026-09-04: live gas rendered correctly in Rendered and drew
+    /// NOTHING in the realtime viewport, with no warning, because a foreign
+    /// address simply reads as zero density.
+    ///
+    /// A host mirror is the crossing point. It is deliberately NOT the OpenVDB →
+    /// NanoVDB route: that conversion is what `use_live_dense_gpu` was gated to
+    /// avoid, and it is unnecessary here — the consumer samples a plain dense
+    /// float grid either way, so a memcpy-shaped readback is the whole job.
+    ///
+    /// Returns false and leaves the vectors untouched when the domain is not a
+    /// GPU-resident gas domain, so a failed read can never be mistaken for an
+    /// empty grid. Sized to nx*ny*nz on success.
+    bool downloadGasDenseFields(std::size_t domain_index,
+                                const SimulationComputeContext& compute,
+                                std::vector<float>& density_out,
+                                std::vector<float>& temperature_out) const;
     const SimulationGpuFoamRenderBuffer* gridDomainFoamRenderBuffer(std::size_t domain_index) const;
     void setGridDomainStates(const std::vector<SimulationGridDomainState>& states); // timeline cache restore
     SimulationGridDomainDesc& addGridDomain(const SimulationGridDomainDesc& desc);

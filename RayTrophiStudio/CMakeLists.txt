@@ -103,16 +103,12 @@ if(NOT EXISTS "${OPTIX_ROOT}/include/optix.h" AND EXISTS "C:/ProgramData/NVIDIA 
 endif()
 set(EMBREE_ROOT "$ENV{EMBREE_ROOT}" CACHE PATH "Path to Embree root")
 set(OIDN_ROOT "$ENV{OIDN_ROOT}" CACHE PATH "Path to OIDN root")
-set(ASSIMP_ROOT "$ENV{ASSIMP_ROOT}" CACHE PATH "Path to Assimp root")
 set(VULKAN_SDK "$ENV{VULKAN_SDK}" CACHE PATH "Path to Vulkan SDK")
 if(NOT EXISTS "${EMBREE_ROOT}/include/embree4/rtcore.h")
     raytrophi_set_path_if_valid(EMBREE_ROOT "${RAYTROPHI_EXTERNAL_DEPS}/embree-4.4.0.x64.windows")
 endif()
 if(NOT EXISTS "${OIDN_ROOT}/include/OpenImageDenoise/oidn.hpp")
     raytrophi_set_path_if_valid(OIDN_ROOT "${RAYTROPHI_EXTERNAL_DEPS}/oidn-2.3.0.x64.windows")
-endif()
-if(NOT EXISTS "${ASSIMP_ROOT}/include/assimp/Importer.hpp")
-    raytrophi_set_path_if_valid(ASSIMP_ROOT "${RAYTROPHI_EXTERNAL_DEPS}/Assimp")
 endif()
 
 # --- SOURCE FILES (Refactored Structure) ---
@@ -131,9 +127,11 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/Backend/*.cpp"
     "source/src/Paint/*.cpp"
     "source/src/Stylize/*.cpp"
+    "source/src/PostProcess/*.cpp"
     "source/src/Viewport/*.cpp"
     "source/src/MeshEdit/*.cpp"
     "source/src/Api/*.cpp"
+    "source/src/Import/*.cpp"
 )
 list(APPEND SOURCES_CPP ${SOURCES_CPP_ROOT})
 list(APPEND SOURCES_CPP "source/src/Render/FoliageWindSystem.cpp")
@@ -315,6 +313,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/external"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/cgltf"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/ozz-animation/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/ozz-animation/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs"
@@ -324,7 +323,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${SDL2_IMAGE_ROOT}/include"
     "${EMBREE_ROOT}/include"
     "${OIDN_ROOT}/include"
-    "${ASSIMP_ROOT}/include"
     "${VULKAN_SDK}/Include"
 )
 
@@ -349,9 +347,6 @@ set(LIB_TBB "${EMBREE_ROOT}/lib/tbb12.lib")
 set(LIB_OIDN "${OIDN_ROOT}/lib/OpenImageDenoise.lib")
 set(LIB_OIDN_CORE "${OIDN_ROOT}/lib/OpenImageDenoise_core.lib")
 
-# Assimp
-set(LIB_ASSIMP "${ASSIMP_ROOT}/lib/x64/assimp-vc143-mt.lib")
-
 # VCPKG Libraries
 file(GLOB VCPKG_LIBS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/lib/*.lib")
 set(ADDITIONAL_LIBS
@@ -367,7 +362,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${LIB_TBB}
     ${LIB_OIDN}
     ${LIB_OIDN_CORE}
-    ${LIB_ASSIMP}
     CUDA::cudart
     CUDA::cuda_driver
     CUDA::cufft           # cuFFT for FFT-based pressure solver
@@ -454,7 +448,6 @@ raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise_core.dll")
 raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise_device_cpu.dll")
 raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise_device_cuda.dll")
 raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise_device_hip.dll")
-raytrophi_copy_runtime_dll("${ASSIMP_ROOT}/bin/x64/assimp-vc143-mt.dll")
 
 file(GLOB RAYTROPHI_VCPKG_RUNTIME_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/bin/*.dll")
 foreach(RUNTIME_DLL IN LISTS RAYTROPHI_VCPKG_RUNTIME_DLLS)

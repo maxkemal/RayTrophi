@@ -122,7 +122,7 @@ World::World() {
     // ATMOSPHERIC FOG DEFAULTS
     // ═══════════════════════════════════════════════════════════
     data.nishita.fog_enabled = 0;                // Disabled by default
-    data.nishita.fog_density = 0.1f;            // Light fog
+    data.nishita.fog_density = 0.0001f;         // Light fog, extinction per metre
     data.nishita.fog_height = 500.0f;            // Fog concentrated below 500m
     data.nishita.fog_falloff = 0.003f;           // Gradual falloff
     data.nishita.fog_distance = 10000.0f;        // 10km max distance
@@ -962,7 +962,14 @@ void World::deserialize(const nlohmann::json& j) {
         data.nishita.altitude = n.value("altitude", 0.0f);
         
         data.nishita.fog_enabled = n.value("fog_enabled", 0);
-        data.nishita.fog_density = n.value("fog_density", 0.01f);
+        data.nishita.fog_density = n.value("fog_density", 0.0001f);
+        // Older projects serialized 0.1 as the disabled default. In metre-based
+        // extinction that becomes practically opaque on first enable; migrate
+        // only the untouched disabled default and preserve authored dense fog.
+        if (!data.nishita.fog_enabled &&
+            std::fabs(data.nishita.fog_density - 0.1f) < 1e-6f) {
+            data.nishita.fog_density = 0.0001f;
+        }
         data.nishita.fog_height = n.value("fog_height", 500.0f);
         data.nishita.fog_falloff = n.value("fog_falloff", 0.003f);
         data.nishita.fog_distance = n.value("fog_distance", 10000.0f);

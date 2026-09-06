@@ -51,14 +51,17 @@ Vendored or source-included components:
   See RayTrophiStudio/source/include/tinyexr.h.
 - miniz — MIT License.
   See RayTrophiStudio/external/miniz.h and related miniz source files.
+- cgltf — MIT License. Copyright (c) 2018-2021 Johannes Kuhlmann.
+  Single-header glTF 2.0 parser; the full notice is at the end of the header.
+  See RayTrophiStudio/external/cgltf/cgltf.h (version 1.15).
+- ufbx — dual licensed: MIT License or public domain (Unlicense), at your
+  option. Copyright (c) 2020 Samuli Raivio.
+  See RayTrophiStudio/external/ufbx/LICENSE (version 0.23.0).
 - tinygltf and its bundled nlohmann/json copy under ozz-animation — MIT License.
   See RayTrophiStudio/external/ozz-animation/src/animation/offline/gltf/extern/.
 
 External SDK and runtime dependencies:
 
-- Assimp — BSD 3-Clause License. The build uses the Assimp package selected by
-  ASSIMP_ROOT; keep Assimp's own license/notice files with redistributed
-  binaries.
 - Intel Embree — Apache License 2.0. The build uses the Embree package selected
   by EMBREE_ROOT.
 - Intel Open Image Denoise (OIDN) — Apache License 2.0. The build uses the OIDN

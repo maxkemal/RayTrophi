@@ -5,8 +5,13 @@
 #include "MeshEdit/SplineObject.h"
 #include "MeshEdit/SplineObjectService.h"
 #include "MeshEdit/SplineAnimation.h"
+#include "MeshEdit/SplineSurfaceAuthoring.h"
+#include "TerrainRoadNetwork.h"
+#include "Ray.h"
 #include "ProjectManager.h"
 #include "json.hpp"
+#include "TerrainManager.h"
+#include "NodeSystem/Graph.h"
 
 #include <algorithm>
 #include <optional>
@@ -129,14 +134,17 @@ Result createSpline(const std::string& primitive, const std::string& name,
         type = MeshEdit::SplinePrimitiveType::OpenLine;
     else if (primitive == "arc" || primitive == "open_arc")
         type = MeshEdit::SplinePrimitiveType::OpenArc;
+    else if (primitive == "empty") type = MeshEdit::SplinePrimitiveType::Empty;
     else return Result::fail("unknown spline primitive '" + primitive +
-                             "' (expected circle|rectangle|open_line|open_arc)");
+                             "' (expected circle|rectangle|open_line|open_arc|empty)");
 
     MeshEdit::SplinePlane targetPlane;
     if (plane == "xy") targetPlane = MeshEdit::SplinePlane::XY;
     else if (plane == "xz") targetPlane = MeshEdit::SplinePlane::XZ;
     else if (plane == "yz") targetPlane = MeshEdit::SplinePlane::YZ;
-    else return Result::fail("unknown spline plane '" + plane + "' (expected xy|xz|yz)");
+    // Free is the plane a drawn route needs: a profile is planar, a path is not.
+    else if (plane == "free") targetPlane = MeshEdit::SplinePlane::Free;
+    else return Result::fail("unknown spline plane '" + plane + "' (expected xy|xz|yz|free)");
 
     auto object = MeshEdit::addSplinePrimitiveObject(
         *g_ctx, *g_history, type, name, targetPlane);
@@ -256,6 +264,72 @@ Result extrudeSplineEndpoint(const std::string& name, int endpoint, const Vec3& 
     return Result::success();
 }
 
+Result raycastScene(const Vec3& origin, const Vec3& direction,
+                    const std::string& filter, RaycastHit& out) {
+    if (!g_ctx) return notBound();
+    out = RaycastHit{};
+
+    const float length = direction.length();
+    if (!(length > 1e-6f)) return Result::fail("direction must be a non-zero vector");
+
+    MeshEdit::SurfaceFilter surfaceFilter;
+    if (filter.empty() || filter == "mesh_and_terrain")
+        surfaceFilter = MeshEdit::SurfaceFilter::MeshAndTerrain;
+    else if (filter == "terrain_only") surfaceFilter = MeshEdit::SurfaceFilter::TerrainOnly;
+    else if (filter == "ground_plane") surfaceFilter = MeshEdit::SurfaceFilter::GroundPlaneOnly;
+    // Refused rather than defaulted: a typo silently falling back to the full
+    // policy would report a mesh hit to a caller that asked for terrain only,
+    // and nothing about the answer would look wrong.
+    else return Result::fail("unknown raycast filter '" + filter +
+                             "' (expected mesh_and_terrain|terrain_only|ground_plane)");
+
+    const Ray ray(origin, direction / length);
+    MeshEdit::SurfaceSnapResult snap;
+    if (!MeshEdit::raycastSurface(g_ctx->scene, ray, surfaceFilter, snap)) {
+        out.kind = "none";
+        return Result::success();
+    }
+    out.hit = true;
+    switch (snap.kind) {
+    case MeshEdit::SurfaceHitKind::Mesh: out.kind = "mesh"; break;
+    case MeshEdit::SurfaceHitKind::Terrain: out.kind = "terrain"; break;
+    case MeshEdit::SurfaceHitKind::GroundPlane: out.kind = "ground_plane"; break;
+    default: out.kind = "none"; break;
+    }
+    out.object = snap.object_name;
+    out.position = snap.position;
+    out.normal = snap.normal;
+    out.distance = snap.distance;
+    return Result::success();
+}
+
+Result appendSplinePoint(const std::string& name, const Vec3& position, int& out_index) {
+    std::shared_ptr<MeshEdit::SplineObject> spline;
+    const Result guard = writableSpline(name, spline);
+    if (!guard.ok) return guard;
+    const nlohmann::json before = MeshEdit::serializeSpline(*spline);
+    const auto beforeTrack = captureSplineTrack(name);
+    const BezierSpline beforeSpline = spline->spline;
+    const int previousEndpoint = beforeSpline.points.empty()
+        ? -1 : static_cast<int>(beforeSpline.points.size()) - 1;
+    if (!MeshEdit::SplineEditService::appendPointAtEnd(spline->spline, position, &out_index))
+        return Result::fail("append requires an open spline");
+    // Keyframe propagation is a topology edit and only applies once the append
+    // was an extrude, i.e. the curve already had two points. The first two
+    // points create the curve rather than change its shape.
+    if (previousEndpoint >= 0 && spline->spline.points.size() > 2) {
+        std::string topologyError;
+        if (!MeshEdit::propagateSplineExtrudeToKeys(
+                g_ctx->scene.timeline, name, beforeSpline, previousEndpoint, position,
+                &topologyError)) {
+            restoreSplineTransaction(spline, before, beforeTrack);
+            return Result::fail(topologyError);
+        }
+    }
+    recordSplineEdit(spline, before, "Append spline point " + name, beforeTrack);
+    return Result::success();
+}
+
 Result insertSplineKeyframe(const std::string& name, int frame,
                             bool include_object_transform, bool include_points) {
     if (!g_ctx) return notBound();
@@ -300,6 +374,211 @@ Result listSplineKeyframes(const std::string& name, std::vector<SplineKeyInfo>& 
 Result splineAnimationSelfTest(std::string& out_details) {
     return MeshEdit::runSplineAnimationSelfTest(&out_details)
         ? Result::success() : Result::fail(out_details);
+}
+
+
+// ---------------------------------------------------------------------------
+// Road assignments
+// ---------------------------------------------------------------------------
+namespace {
+
+bool splineObjectExists(const std::string& name) {
+    return static_cast<bool>(findSpline(name));
+}
+
+RoadCarveValues toCarveValues(const TerrainNodesV2::RoadCarveSettings& settings) {
+    RoadCarveValues values;
+    values.road_width = settings.roadWidthMeters;
+    values.shoulder_width = settings.shoulderWidthMeters;
+    values.grading_falloff = settings.gradingFalloffMeters;
+    values.foliage_margin = settings.foliageExclusionMarginMeters;
+    values.max_grade_percent = settings.maxGradePercent;
+    values.elevation_offset = settings.elevationOffsetMeters;
+    values.max_cut_meters = settings.maxCutMeters;
+    values.max_fill_meters = settings.maxFillMeters;
+    values.crown_meters = settings.crownMeters;
+    values.ditch_width = settings.ditchWidthMeters;
+    values.ditch_depth = settings.ditchDepthMeters;
+    values.use_point_width = settings.usePointWidth;
+    return values;
+}
+
+TerrainNodesV2::RoadCarveSettings fromCarveValues(const RoadCarveValues& values) {
+    TerrainNodesV2::RoadCarveSettings settings;
+    settings.roadWidthMeters = values.road_width;
+    settings.shoulderWidthMeters = values.shoulder_width;
+    settings.gradingFalloffMeters = values.grading_falloff;
+    settings.foliageExclusionMarginMeters = values.foliage_margin;
+    settings.maxGradePercent = values.max_grade_percent;
+    settings.elevationOffsetMeters = values.elevation_offset;
+    settings.maxCutMeters = values.max_cut_meters;
+    settings.maxFillMeters = values.max_fill_meters;
+    settings.crownMeters = values.crown_meters;
+    settings.ditchWidthMeters = values.ditch_width;
+    settings.ditchDepthMeters = values.ditch_depth;
+    settings.usePointWidth = values.use_point_width;
+    return settings;
+}
+
+RoadAssignmentInfo toAssignmentInfo(const TerrainNodesV2::RoadAssignment& assignment) {
+    RoadAssignmentInfo info;
+    info.spline_object = assignment.splineObject;
+    info.profile_id = assignment.profileId;
+    info.crossing_mode = TerrainNodesV2::roadCrossingModeName(assignment.crossingMode);
+    info.enabled = assignment.enabled;
+    info.has_override = assignment.hasOverride;
+    info.curve_exists = splineObjectExists(assignment.splineObject);
+    // effectiveCarve() is the solver's own accessor, not a reimplementation of
+    // its rules here - the readback and the solve cannot disagree.
+    info.effective = toCarveValues(assignment.effectiveCarve());
+    return info;
+}
+
+void invalidateTerrainGraphs() {
+    for (auto& terrain : TerrainManager::getInstance().getTerrains()) {
+        if (terrain.nodeGraph) {
+            terrain.nodeGraph->markAllDirty();
+        }
+    }
+}
+
+} // namespace
+
+Result listRoadProfiles(std::vector<RoadProfileInfo>& out) {
+    out.clear();
+    for (const auto& profile : TerrainNodesV2::builtinRoadProfiles()) {
+        RoadProfileInfo info;
+        info.id = profile.id;
+        info.display_name = profile.displayName;
+        info.carve = toCarveValues(profile.carve);
+        out.push_back(std::move(info));
+    }
+    return Result::success();
+}
+
+Result assignRoadProfile(const std::string& spline_object, const std::string& profile_id) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    // Refused rather than accepted-and-flagged: an assignment pointing at a curve
+    // that does not exist would look identical to a working one in every listing.
+    if (!splineObjectExists(spline_object))
+        return Result::fail("spline not found: " + spline_object);
+    std::string error;
+    if (!TerrainNodesV2::RoadNetworkRegistry::getInstance().assignProfile(
+            spline_object, profile_id, &error)) {
+        return Result::fail(error);
+    }
+    ProjectManager::getInstance().markModified();
+    invalidateTerrainGraphs();
+    return Result::success();
+}
+
+Result clearRoadProfile(const std::string& spline_object) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (!TerrainNodesV2::RoadNetworkRegistry::getInstance().clearProfile(spline_object))
+        return Result::fail("no road assignment for '" + spline_object + "'");
+    ProjectManager::getInstance().markModified();
+    invalidateTerrainGraphs();
+    return Result::success();
+}
+
+Result getRoadAssignment(const std::string& spline_object, RoadAssignmentInfo& out) {
+    if (!g_ctx) return notBound();
+    const auto* assignment =
+        TerrainNodesV2::RoadNetworkRegistry::getInstance().find(spline_object);
+    if (!assignment) return Result::fail("no road assignment for '" + spline_object + "'");
+    out = toAssignmentInfo(*assignment);
+    return Result::success();
+}
+
+Result listRoadAssignments(std::vector<RoadAssignmentInfo>& out) {
+    if (!g_ctx) return notBound();
+    out.clear();
+    for (const auto& assignment :
+         TerrainNodesV2::RoadNetworkRegistry::getInstance().assignments()) {
+        out.push_back(toAssignmentInfo(assignment));
+    }
+    return Result::success();
+}
+
+Result setRoadCrossingMode(const std::string& spline_object, const std::string& mode) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    TerrainNodesV2::RoadCrossingMode parsed;
+    if (!TerrainNodesV2::parseRoadCrossingMode(mode, parsed))
+        return Result::fail("unknown crossing mode '" + mode +
+                            "' (expected auto|terrain|bridge|ford|tunnel)");
+    std::string error;
+    if (!TerrainNodesV2::RoadNetworkRegistry::getInstance().setCrossingMode(
+            spline_object, parsed, &error)) {
+        return Result::fail(error);
+    }
+    ProjectManager::getInstance().markModified();
+    invalidateTerrainGraphs();
+    return Result::success();
+}
+
+Result setRoadEnabled(const std::string& spline_object, bool enabled) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    std::string error;
+    if (!TerrainNodesV2::RoadNetworkRegistry::getInstance().setEnabled(
+            spline_object, enabled, &error)) {
+        return Result::fail(error);
+    }
+    ProjectManager::getInstance().markModified();
+    invalidateTerrainGraphs();
+    return Result::success();
+}
+
+Result setRoadCarveOverride(const std::string& spline_object, const RoadCarveValues& values) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    const TerrainNodesV2::RoadCarveSettings settings = fromCarveValues(values);
+    std::string error;
+    // The SAME validator the solver runs. A second copy of these bounds here
+    // would eventually accept what the solve refuses, and the road would simply
+    // stop carving with nothing reported anywhere.
+    if (!TerrainNodesV2::validateRoadCarveSettings(settings, spline_object, &error))
+        return Result::fail(error);
+    if (!TerrainNodesV2::RoadNetworkRegistry::getInstance().setCarveOverride(
+            spline_object, settings, &error)) {
+        return Result::fail(error);
+    }
+    ProjectManager::getInstance().markModified();
+    invalidateTerrainGraphs();
+    return Result::success();
+}
+
+Result clearRoadCarveOverride(const std::string& spline_object) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    std::string error;
+    if (!TerrainNodesV2::RoadNetworkRegistry::getInstance().clearCarveOverride(
+            spline_object, &error)) {
+        return Result::fail(error);
+    }
+    ProjectManager::getInstance().markModified();
+    invalidateTerrainGraphs();
+    return Result::success();
+}
+
+Result getRoadDiagnostics(RoadDiagnostics& out) {
+    if (!g_ctx) return notBound();
+    out = RoadDiagnostics{};
+    const auto& registry = TerrainNodesV2::RoadNetworkRegistry::getInstance();
+    for (const auto& assignment : registry.assignments()) {
+        ++out.assignment_count;
+        if (assignment.enabled) ++out.enabled_count;
+        TerrainNodesV2::RoadProfile profile;
+        if (!assignment.hasOverride &&
+            !TerrainNodesV2::findRoadProfile(assignment.profileId, profile)) {
+            out.unknown_profiles.push_back(assignment.splineObject);
+        }
+    }
+    out.dangling = registry.danglingAssignments(&splineObjectExists);
+    return Result::success();
 }
 
 } // namespace rtapi

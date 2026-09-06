@@ -54,9 +54,39 @@ void SceneUI::syncVDBVolumesToGPU(UIContext& ctx) {
     // Sync to GPU for both OptiX and Vulkan backends.
     // Previously guarded by !g_hasOptix which caused animated VDB frames
     // to never be re-uploaded in Vulkan mode.
+    //
+    // ★★★★★ MEASURED 2026-09-04: this published to the RENDER backend ONLY, and
+    // the raster viewport is a SEPARATE VulkanBackendAdapter with its OWN
+    // VkDevice (g_viewport_backend, created unconditionally whenever Vulkan is
+    // available — Main.cpp initializeViewportBackendIfAvailable). The volume
+    // SSBO is per-device (VulkanDevice::m_volumeBuffer), so that adapter's table
+    // stayed EMPTY for the whole session: m_volumeCount == 0, binding 20 never
+    // bound. Every realtime volume consumer gates on exactly those two values,
+    // so the gas pass, the SurfaceSDF pass and the material-preview branch all
+    // refused silently — an empty frame with no warning, on any scene.
+    //
+    // ★ That is what the [MPVolume] tripwire had already reported
+    // (`volumeCount=0 bound=0 -> SKIPPED`); it was misread as "this scene has no
+    // gas". It reads 0 for EVERY scene on that adapter. Materials, lights, world
+    // and camera were each mirrored to the viewport backend individually
+    // (Main.cpp ~860 / ~2689 / ~3252); volumes were the one packet nobody
+    // mirrored, and the omission had no symptom other than absence.
+    //
+    // Publish to every distinct backend that can display volumes. The packet
+    // builder is stateless with respect to the backend, so a second call with a
+    // second target is safe — and it must be a second CALL rather than a shared
+    // buffer, because the live dense-gas device addresses inside the packet are
+    // resolved per target device (see VolumetricRenderer::syncVolumetricData).
+    WorldData wd = ctx.renderer.world.getGPUData();
+    Backend::IBackend* published = nullptr;
     if (Backend::IBackend* renderBackend = getVdbRenderBackend(ctx)) {
-        WorldData wd = ctx.renderer.world.getGPUData();
         VolumetricRenderer::syncVolumetricData(ctx.scene, renderBackend, &wd);
+        published = renderBackend;
+    }
+    if (Backend::IBackend* viewportBackend = g_viewport_backend.get()) {
+        if (viewportBackend != published) {
+            VolumetricRenderer::syncVolumetricData(ctx.scene, viewportBackend, &wd);
+        }
     }
 }
 

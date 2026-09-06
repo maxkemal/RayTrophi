@@ -76,6 +76,11 @@ BezierSpline makeSplinePrimitive(SplinePrimitiveType type,
         }
         break;
     }
+    case SplinePrimitiveType::Empty:
+        // Intentionally no points: the Draw tool supplies them from surface
+        // hits. isClosed stays false so the first append is legal.
+        spline.isClosed = false;
+        break;
     }
     return spline;
 }

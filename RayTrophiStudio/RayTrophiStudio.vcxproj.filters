@@ -72,6 +72,13 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="source\include\PostProcess\ColorMath.h" />
+    <ClInclude Include="source\include\PostProcess\Exposure.h" />
+    <ClInclude Include="source\include\PostProcess\PostService.h" />
+    <ClInclude Include="source\include\PostProcess\PostSurface.h" />
+    <ClInclude Include="source\include\PostProcess\VulkanExposure.h" />
+    <ClInclude Include="source\src\Device\post_exposure.cuh" />
+    <ClInclude Include="source\src\Api\RtPostBindings.h" />
     <ClInclude Include="source\src\Api\RtIpcAgentDiscovery.h">
       <Filter>Header Files\Api</Filter>
     </ClInclude>
@@ -333,9 +340,6 @@
     <ClInclude Include="source\include\CPUInfo.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\include\AnimatedObject.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
     <ClInclude Include="source\include\ColorProcessingParams.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -540,6 +544,27 @@
     <ClInclude Include="source\include\TerrainSurfaceNodes.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\TerrainCurveMask.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainCurveNodes.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainCurveSceneSnapshot.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainRoadCarve.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainRoadMesh.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainRoadCarveNode.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainRoadFieldsOutput.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\TerrainNodePortPanel.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -555,6 +580,13 @@
     <ClInclude Include="source\src\UI\scene_ui_node_palette.hpp">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClCompile Include="source\src\PostProcess\PostSurface.cpp" />
+    <ClCompile Include="source\src\PostProcess\Exposure.cpp" />
+    <ClCompile Include="source\src\PostProcess\PostService.cpp" />
+    <ClCompile Include="source\src\PostProcess\PostPanel.cpp" />
+    <ClCompile Include="source\src\PostProcess\VulkanExposure.cpp" />
+    <ClCompile Include="source\src\Api\RtApiPost.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcPostExposure.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_node_palette.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -593,6 +625,9 @@
     </ClInclude>
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp">
       <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\viewport_realtime_quality_panel.hpp">
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\UI\HierarchyLiveObjectView.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
@@ -802,6 +837,36 @@
     <ClCompile Include="source\src\Physics\TerrainSurfaceNodes.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainCurveMask.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainCurveNodes.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainCurveSceneSnapshot.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadCarve.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadCarveNode.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadProfile.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadNetwork.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadNetworkNode.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadFieldsOutput.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadMesh.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\TerrainNodePortPresentation.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
@@ -898,6 +963,9 @@
     <ClCompile Include="source\src\MeshEdit\SplineObjectService.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineSurfaceAuthoring.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\MeshEdit\SplineObjectLifecycle.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
@@ -941,6 +1009,9 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiSpline.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRoadMesh.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiSplineSkin.cpp">
@@ -1031,6 +1102,9 @@
       <Filter>Kaynak Dosyalar\Stylize</Filter>
     </CudaCompile>
     <ClCompile Include="source\src\Utils\MeshModifiers.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\GltfDirectWriter.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Utils\SceneExporter.cpp">
@@ -1546,6 +1620,33 @@
     <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Viewport\RealtimeRenderSettings.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterGpuCull.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewShadow.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewIbl.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewTransmission.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewSdfSurface.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewVolume.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterInstanceUpload.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterViewportFrameRing.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\AABBTree\AABBTreeBuilder.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -1974,6 +2075,21 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="source\include\Viewport\RasterFrameTelemetry.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Viewport\RasterGpuCull.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Viewport\RasterInstanceUpload.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Viewport\RasterViewportFrameRing.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Viewport\RealtimeRenderSettings.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Viewport\ViewportSceneSync.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>

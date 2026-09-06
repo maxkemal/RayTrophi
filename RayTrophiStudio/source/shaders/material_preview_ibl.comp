@@ -1,0 +1,151 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D sourceEnvironment;
+layout(binding = 1, rgba32f) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform IblPushConstants {
+    uint phase;       // 0=irradiance, 1=GGX prefilter, 2=BRDF integration
+    uint width;
+    uint height;
+    uint sampleCount;
+    float roughness;
+    float sourceMaxLod;
+    float pad0;
+    float pad1;
+} pc;
+
+const float PI = 3.14159265358979323846;
+
+float radicalInverseVdC(uint bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+
+vec2 hammersley(uint i, uint count) {
+    return vec2(float(i) / float(max(count, 1u)), radicalInverseVdC(i));
+}
+
+vec2 directionToUv(vec3 d) {
+    d = normalize(d);
+    return vec2(fract(atan(d.z, d.x) / (2.0 * PI) + 0.5),
+                acos(clamp(d.y, -1.0, 1.0)) / PI);
+}
+
+vec3 uvToDirection(vec2 uv) {
+    float phi = (uv.x - 0.5) * 2.0 * PI;
+    float theta = uv.y * PI;
+    float s = sin(theta);
+    return normalize(vec3(cos(phi) * s, cos(theta), sin(phi) * s));
+}
+
+void basisFromNormal(vec3 n, out vec3 tangent, out vec3 bitangent) {
+    vec3 up = abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+    tangent = normalize(cross(up, n));
+    bitangent = cross(n, tangent);
+}
+
+vec3 importanceSampleGGX(vec2 xi, vec3 n, float roughness) {
+    float a = max(roughness * roughness, 0.001);
+    float a2 = a * a;
+    float phi = 2.0 * PI * xi.x;
+    float cosTheta = sqrt((1.0 - xi.y) / max(1.0 + (a2 - 1.0) * xi.y, 1e-6));
+    float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+    vec3 hLocal = vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+    vec3 tangent, bitangent;
+    basisFromNormal(n, tangent, bitangent);
+    return normalize(tangent * hLocal.x + bitangent * hLocal.y + n * hLocal.z);
+}
+
+float geometrySchlickGGX(float ndotv, float roughness) {
+    float a = roughness;
+    float k = (a * a) * 0.5;
+    return ndotv / max(ndotv * (1.0 - k) + k, 1e-6);
+}
+
+float geometrySmith(float ndotv, float ndotl, float roughness) {
+    return geometrySchlickGGX(ndotv, roughness) *
+           geometrySchlickGGX(ndotl, roughness);
+}
+
+vec3 integrateIrradiance(vec3 n) {
+    vec3 tangent, bitangent;
+    basisFromNormal(n, tangent, bitangent);
+    vec3 sum = vec3(0.0);
+    uint count = max(pc.sampleCount, 1u);
+    for (uint i = 0u; i < count; ++i) {
+        vec2 xi = hammersley(i, count);
+        float r = sqrt(xi.x);
+        float phi = 2.0 * PI * xi.y;
+        vec3 local = vec3(r * cos(phi), r * sin(phi), sqrt(max(1.0 - xi.x, 0.0)));
+        vec3 l = normalize(tangent * local.x + bitangent * local.y + n * local.z);
+        sum += textureLod(sourceEnvironment, directionToUv(l), 0.0).rgb;
+    }
+    // Cosine-weighted expectation already contains the Lambert 1/PI factor;
+    // store diffuse incident radiance so the surface shader multiplies albedo once.
+    return sum / float(count);
+}
+
+vec3 prefilterEnvironment(vec3 r, float roughness) {
+    vec3 n = r;
+    vec3 v = r;
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    uint count = max(pc.sampleCount, 1u);
+    for (uint i = 0u; i < count; ++i) {
+        vec3 h = importanceSampleGGX(hammersley(i, count), n, roughness);
+        vec3 l = normalize(2.0 * dot(v, h) * h - v);
+        float ndotl = max(dot(n, l), 0.0);
+        if (ndotl > 0.0) {
+            sum += textureLod(sourceEnvironment, directionToUv(l), pc.sourceMaxLod).rgb * ndotl;
+            weight += ndotl;
+        }
+    }
+    return sum / max(weight, 1e-5);
+}
+
+vec2 integrateBrdf(float ndotv, float roughness) {
+    vec3 v = vec3(sqrt(max(1.0 - ndotv * ndotv, 0.0)), 0.0, ndotv);
+    vec3 n = vec3(0.0, 0.0, 1.0);
+    float a = 0.0;
+    float b = 0.0;
+    uint count = max(pc.sampleCount, 1u);
+    for (uint i = 0u; i < count; ++i) {
+        vec3 h = importanceSampleGGX(hammersley(i, count), n, roughness);
+        vec3 l = normalize(2.0 * dot(v, h) * h - v);
+        float ndotl = max(l.z, 0.0);
+        float ndoth = max(h.z, 0.0);
+        float vdoth = max(dot(v, h), 0.0);
+        if (ndotl > 0.0) {
+            float g = geometrySmith(max(ndotv, 1e-4), ndotl, roughness);
+            float visibility = g * vdoth / max(ndoth * max(ndotv, 1e-4), 1e-5);
+            float fc = pow(1.0 - vdoth, 5.0);
+            a += (1.0 - fc) * visibility;
+            b += fc * visibility;
+        }
+    }
+    return vec2(a, b) / float(count);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+
+    if (pc.phase == 2u) {
+        vec2 integrated = integrateBrdf(clamp(uv.x, 0.001, 0.999), clamp(uv.y, 0.0, 1.0));
+        imageStore(outputImage, pixel, vec4(integrated, 0.0, 1.0));
+        return;
+    }
+
+    vec3 direction = uvToDirection(uv);
+    vec3 result = pc.phase == 0u
+        ? integrateIrradiance(direction)
+        : prefilterEnvironment(direction, pc.roughness);
+    imageStore(outputImage, pixel, vec4(max(result, vec3(0.0)), 1.0));
+}

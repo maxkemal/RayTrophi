@@ -13,6 +13,7 @@
 #include "CameraPresets.h"
 #include "scene_data.h"
 #include "ProjectManager.h"
+#include <algorithm>   // std::clamp (pozlama kadranlari)
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 
@@ -711,6 +712,104 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
                 insertCameraPropertyKey("Focus", false, false, false, true, false);
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Insert Focus Keyframe");
+
+            // ── Pozlama (MEVCUT preset modeli) ─────────────────────────────
+            // ★★★ Bu panel bir DEGER TUTMAZ: her kadran dogrudan Camera'ya
+            //   yazar ve ayni degerleri `camera.get` IPC'si doner.
+            // ★★★★ Ve yeni bir model KURMUYOR: ISO/enstantane/f-stop preset
+            //   zinciri motorda zaten vardi ve Rendered yolunda uygulaniyordu;
+            //   eksik olan tek sey onun realtime onizlemeye ULASMAMASIYDI.
+            ImGui::Separator();
+            {
+                Camera* cam = ctx.scene.camera.get();
+                bool exposure_dirty = false;
+
+                // ★★ Oncelik sirasi burada GORUNUR olmali: auto acikken diger
+                //   kadranlar OKUNMAZ. Gorunmezse kullanici "kadran bozuk" der.
+                bool ae = cam->auto_exposure;
+                if (ImGui::Checkbox("Auto Exposure (EV only)", &ae)) {
+                    cam->auto_exposure = ae; exposure_dirty = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "ON  = only EV compensation is applied.
+"
+                        "OFF = ISO / shutter / f-stop are read (needs Physical below).");
+
+                bool phys = cam->use_physical_exposure;
+                if (ae) ImGui::BeginDisabled();
+                if (ImGui::Checkbox("Physical Exposure", &phys)) {
+                    cam->use_physical_exposure = phys; exposure_dirty = true;
+                }
+                if (ae) ImGui::EndDisabled();
+
+                const bool dialsLive = !ae && phys;
+                if (!dialsLive) ImGui::BeginDisabled();
+
+                int isoIdx = cam->iso_preset_index;
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("ISO");
+                ImGui::SameLine(80); ImGui::PushItemWidth(-1);
+                if (ImGui::SliderInt("##CamISO", &isoIdx, 0,
+                                     (int)CameraPresets::ISO_PRESET_COUNT - 1,
+                                     CameraPresets::ISO_PRESETS[
+                                         std::clamp(isoIdx, 0, (int)CameraPresets::ISO_PRESET_COUNT - 1)].name)) {
+                    cam->iso_preset_index = std::clamp(isoIdx, 0, (int)CameraPresets::ISO_PRESET_COUNT - 1);
+                    exposure_dirty = true;
+                }
+                ImGui::PopItemWidth();
+
+                int shIdx = cam->shutter_preset_index;
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Shutter");
+                ImGui::SameLine(80); ImGui::PushItemWidth(-1);
+                if (ImGui::SliderInt("##CamShutter", &shIdx, 0,
+                                     (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT - 1,
+                                     CameraPresets::SHUTTER_SPEED_PRESETS[
+                                         std::clamp(shIdx, 0, (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT - 1)].name)) {
+                    cam->shutter_preset_index = std::clamp(shIdx, 0, (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT - 1);
+                    exposure_dirty = true;
+                }
+                ImGui::PopItemWidth();
+
+                int fsIdx = cam->fstop_preset_index;
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("f-stop");
+                ImGui::SameLine(80); ImGui::PushItemWidth(-1);
+                if (ImGui::SliderInt("##CamFStop", &fsIdx, 0,
+                                     (int)CameraPresets::FSTOP_PRESET_COUNT - 1,
+                                     CameraPresets::FSTOP_PRESETS[
+                                         std::clamp(fsIdx, 0, (int)CameraPresets::FSTOP_PRESET_COUNT - 1)].name)) {
+                    cam->fstop_preset_index = std::clamp(fsIdx, 0, (int)CameraPresets::FSTOP_PRESET_COUNT - 1);
+                    exposure_dirty = true;
+                }
+                ImGui::PopItemWidth();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Drives EXPOSURE and Cinema lens imperfections.
+"
+                        "Depth of field still comes from the Aperture slider above.");
+
+                if (!dialsLive) ImGui::EndDisabled();
+
+                float evc = cam->ev_compensation;
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("EV");
+                ImGui::SameLine(80); ImGui::PushItemWidth(-1);
+                if (ImGui::SliderFloat("##CamEV", &evc, -5.0f, 5.0f, "%+.2f")) {
+                    cam->ev_compensation = evc; exposure_dirty = true;
+                }
+                ImGui::PopItemWidth();
+
+                // ★ SONUC gosterilir: kadranin gercekten is yaptigini gormek
+                //   icin. Ayni sayi camera.get'in exposure_factor alaninda.
+                ImGui::TextDisabled("exposure factor  x%.4f", cam->exposureFactor());
+
+                if (exposure_dirty) {
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.syncCameraToBackend(*cam);
+                        ctx.backend_ptr->resetAccumulation();
+                    }
+                    ctx.renderer.resetCPUAccumulation();
+                }
+            }
+            ImGui::Separator();
 
             // Focus buttons in row
             bool has_selection = ctx.selection.hasSelection();

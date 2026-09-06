@@ -1,10 +1,17 @@
 #version 460
 #extension GL_EXT_shader_image_load_formatted : require
 
-// GPU tonemap: HDR storage image -> 8-bit sRGB packed storage image.
-// Mirrors the CPU path in VulkanBackendAdapter::renderFrame: sanitize NaN/Inf,
-// clamp negatives, Reinhard c/(c+1), linear -> sRGB (analytic, gamma 2.4).
-// Eliminates per-frame full-resolution CPU tonemap loop.
+// GPU post: HDR storage image -> 8-bit sRGB packed storage image.
+//
+// ★★★ Operator artik BURADA TANIMLI DEGIL. Eskiden burada sabit bir Reinhard
+//   vardi ve projenin `post.*` ayarlari (exposure/gamma/saturation/tonemap)
+//   bu gecise HIC ulasmiyordu: CPU tarafi onlari SONRADAN, zaten sRGB'ye
+//   kodlanmis 8-bit degerlere uyguluyordu. Artik zincir post_chain.glsl'de ve
+//   Realtime onizleme AYNI dosyayi kullaniyor.
+// ★★ Varsayilan ayarlarda (exposure 1, gamma 1, sat 1, 6500K, vignette 0,
+//   tone_mapping=none) cikti eskisiyle BIREBIR ayni kalir -- None dali
+//   Reinhard'dir. Bu bilerek: bu partide Rendered'in gorunumu degismemeli.
+#include "post_chain.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -28,7 +35,34 @@ layout(push_constant) uniform Push {
     float camX;        // camera origin (world) for the Depth ramp
     float camY;
     float camZ;
+    // ★★ Beauty yolunun post ayarlari. `exposure` yukarida DEBUG kazancidir ve
+    //   ayni sey DEGILDIR -- ayni ada sahip iki farkli buyukluk oldugu icin
+    //   burada ayri tutuldu.
+    float postExposure;
+    float postGamma;
+    float postSaturation;
+    float postColorTemperature;
+    float postVignetteStrength;
+    uint  postToneMapping;      // ToneMappingType
+    uint  postVignetteEnabled;
+    float postCameraExposure;   // Camera pozlama ucgeni (ISO/enstantane/diyafram)
 } pc;
+
+// ★ Push-constant boyutu IKI yerde yasiyor: burada ve VulkanBackend.cpp
+//   icindeki TonemapPush struct'i (iki cagri yeri) ile pipeline layout'un
+//   kayitli boyutu. Birini buyutup otekini birakirsan alan sessizce okunmaz.
+RtPostParams beautyPostParams() {
+    RtPostParams p;
+    p.exposure         = pc.postExposure;
+    p.gamma            = pc.postGamma;
+    p.saturation       = pc.postSaturation;
+    p.colorTemperature = pc.postColorTemperature;
+    p.vignetteStrength = pc.postVignetteStrength;
+    p.toneMapping      = pc.postToneMapping;
+    p.vignetteEnabled  = pc.postVignetteEnabled;
+    p.cameraExposure   = pc.postCameraExposure;
+    return p;
+}
 
 // Stable hash colour per material id (PCG avalanche).
 vec3 dvHashColor(uint id) {
@@ -55,16 +89,8 @@ vec3 dvViridis(float t) {
     return clamp(c0 + t*(c1 + t*(c2 + t*(c3 + t*(c4 + t*(c5 + t*c6))))), 0.0, 1.0);
 }
 
-float sanitize(float v) {
-    if (isnan(v)) return 0.0;
-    if (isinf(v)) return v > 0.0 ? 65504.0 : 0.0;
-    return max(v, 0.0);
-}
-
-float linToSrgb(float c) {
-    c = clamp(c, 0.0, 1.0);
-    return (c <= 0.0031308) ? (12.92 * c) : (1.055 * pow(c, 1.0 / 2.4) - 0.055);
-}
+// ★ `sanitize` ve `linToSrgb` post_chain.glsl'e tasindi (rtSanitize /
+//   rtLinearToSRGB); ayni sayilar, tek tanim.
 
 void main() {
     uvec2 px = gl_GlobalInvocationID.xy;
@@ -72,12 +98,17 @@ void main() {
 
     vec4 hdr = imageLoad(inHDR, ivec2(px));
 
-    float r = sanitize(hdr.r);
-    float g = sanitize(hdr.g);
-    float b = sanitize(hdr.b);
+    // Beauty: tam post zinciri (exposure -> operator -> grade -> gama ->
+    // vignette -> sRGB). sRGB kodlamasi dahil oldugu icin debug dallari
+    // ASAGIDA ayrica kodlanir; ikisi ayni yerde toplanamaz.
+    vec2 uv01 = (vec2(px) + vec2(0.5)) / vec2(max(pc.width, 1u), max(pc.height, 1u));
+    vec3 beautySrgb = rtApplyPost(hdr.rgb, beautyPostParams(), uv01);
 
-    // Reinhard
-    vec3 beauty = vec3(r / (r + 1.0), g / (g + 1.0), b / (b + 1.0));
+    // Debug karisimlari icin lineer-benzeri (0-1) beauty: operator uygulanmis
+    // ama sRGB kodlanmamis hali gerekiyor, cunku alttaki `mix` debug rengiyle
+    // ayni uzayda yapilmali.
+    vec3 beauty = rtToneMap(rtSanitize(hdr.rgb) * pc.postExposure * pc.postCameraExposure,
+                            pc.postToneMapping);
 
     // ── DEBUG VISUALIZER — display-time views ────────────────────────────────
     // These read persistent AOVs (or the accumulation alpha) that raygen keeps
@@ -87,7 +118,7 @@ void main() {
         vec3 dbg = vec3(0.0);
         if (pc.debugView == 14u) {
             // SAMPLE HEATMAP — per-pixel accumulated sample count (hdr alpha).
-            dbg = dvViridis(sanitize(hdr.a) * pc.heatScale);
+            dbg = dvViridis(rtSanitize(hdr.a) * pc.heatScale);
         } else if (pc.debugView == 6u) {
             // BOUNCE COUNT — average substantive path depth.
             dbg = dvViridis(clamp(imageLoad(aovStats, ivec2(px)).a * pc.bounceScale, 0.0, 1.0));
@@ -123,13 +154,10 @@ void main() {
         }
         vec3 outc = mix(dbg, beauty, clamp(pc.overlay, 0.0, 1.0));
         float coverage = imageLoad(aovPosition, ivec2(px)).a > 0.5 ? 1.0 : 0.0;
-        imageStore(outLDR, ivec2(px), vec4(linToSrgb(outc.r), linToSrgb(outc.g), linToSrgb(outc.b), coverage));
+        imageStore(outLDR, ivec2(px), vec4(rtLinearToSRGB(outc), coverage));
         return;
     }
 
-    // Linear -> sRGB (matches CPU LUT analytic form, no quantization)
     float coverage = imageLoad(aovPosition, ivec2(px)).a > 0.5 ? 1.0 : 0.0;
-    vec4 ldr = vec4(linToSrgb(beauty.r), linToSrgb(beauty.g), linToSrgb(beauty.b), coverage);
-
-    imageStore(outLDR, ivec2(px), ldr);
+    imageStore(outLDR, ivec2(px), vec4(beautySrgb, coverage));
 }

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <cmath>
 #include <deque>
 #include <limits>
@@ -36,11 +37,57 @@ constexpr int kNeighborY[8] = { -1, -1, -1, 0, 0, 1, 1, 1 };
 const float kNeighborDist[8] = { 1.41421356f, 1.0f, 1.41421356f, 1.0f,
                                  1.0f, 1.41421356f, 1.0f, 1.41421356f };
 
-// Depression-fill increment, in normalized height. It has to be small enough
-// that a long flat run does not accumulate into a fake lake (a 4000-cell run
-// accumulates 4000 * eps) and large enough to stay above float resolution near
-// h = 0.5, where one ulp is about 6e-8. Three ulp is the compromise.
-constexpr float kFillEpsilon = 2.0e-7f;
+// ★★★ THERE IS NO FILL EPSILON ANY MORE, and that is the change this file is
+// mostly about. See terrain_flow_fill.comp and terrain_lem_flat_seed.comp: the
+// depression fill now produces an exactly level surface over a flat, and the
+// routing gradient over that flat is built afterwards from two geodesic
+// distance fields (Garbrecht & Martz 1997) instead of being a by-product of
+// the flood order. The old epsilon ladder was a Chebyshev distance field whose
+// level sets are squares, which is why every channel on flat ground came out
+// straight and at 0 or 45 degrees, and it was numerically zero, which is why
+// flats could never incise and so never reshaped themselves.
+constexpr float kFillEpsilon = 0.0f;
+
+// Flat-resolution geodesic step costs, in twelfths of a cell. A diagonal must
+// cost sqrt(2); charging it the same as a cardinal step is exactly what made
+// the old distance field square. 17/12 = 1.41667 against sqrt(2) = 1.41421.
+constexpr int kFlatStepCardinal = 12;
+constexpr int kFlatStepDiagonal = 17;
+constexpr int kFlatDistCeiling  = 0xFFFD;   // at or above: unresolved
+constexpr int kFlatNotFlat      = 0xFFFF;   // dHigh sentinel for a non-flat cell
+const float kFlatStepPerCell = 1.0f / (float)kFlatStepCardinal;
+
+// ★★★★ How far the away-from-higher-ground term reaches, in cells. It is a CAP,
+// not a normalisation constant, and it is load bearing twice over:
+//
+//  * On the GPU it is what keeps the descent proof true under a bounded
+//    relaxation budget. The two fronts do not converge together (a plain can
+//    be 20 cells from its outlet and 900 from the nearest wall), so some cells
+//    still hold the "never arrived" sentinel while their neighbours hold a real
+//    distance. Capping puts every unresolved cell AND its neighbours inside one
+//    flat region of this term, so the only place the term can jump is between
+//    two resolved cells - which differ by at most one diagonal step. Without
+//    the cap a local sink appears mid-plain: the exact defect this pass exists
+//    to remove, reintroduced through its own diagnostic gap. The host keeps
+//    highRef <= flatResolvePasses - 2 for this reason.
+//  * It is also the better model. Garbrecht & Martz normalise this term per
+//    flat; an uncapped distance across a thousand-cell plain would tilt the
+//    whole plain away from one wall and swamp the outlet term. Deciding where a
+//    tributary AIMS as it leaves the hillslope is a near-boundary job.
+constexpr int kFlatHighInfluenceCells = 64;
+const int kFlatStepFor[8] = { kFlatStepDiagonal, kFlatStepCardinal, kFlatStepDiagonal,
+                              kFlatStepCardinal, kFlatStepCardinal,
+                              kFlatStepDiagonal, kFlatStepCardinal, kFlatStepDiagonal };
+
+// Normalized height added per unit of flat-ramp increment. The increment rises
+// by 2 per cell along the drainage direction (see terrain_lem_flat_ramp.comp
+// for why the coefficient is 2 and why that guarantees a strictly lower
+// neighbour), so the resulting surface slope is exactly `flatGradient`.
+float flatStepFor(const HydraulicErosionParams& p, float cellSize, float heightScale) {
+    const float grade = (std::max)(p.flatGradient, 0.0f);
+    if (grade <= 0.0f) return 0.0f;
+    return grade * cellSize / (2.0f * (std::max)(heightScale, 1.0e-3f));
+}
 
 struct Derived {
     float dt = 1.0f;
@@ -125,6 +172,14 @@ static_assert(sizeof(AccumulatePc) == 8, "must match terrain_lem_accumulate.comp
 
 struct FillPc { int mapWidth, mapHeight; float eps, noiseAmplitude; };
 static_assert(sizeof(FillPc) == 16, "must match terrain_flow_fill.comp");
+
+// Flat resolution (Garbrecht & Martz). See terrain_lem_flat_seed.comp.
+struct FlatSeedPc { int width, height; };
+static_assert(sizeof(FlatSeedPc) == 8, "must match terrain_lem_flat_seed.comp");
+struct FlatRelaxPc { int width, height; };
+static_assert(sizeof(FlatRelaxPc) == 8, "must match terrain_lem_flat_relax.comp");
+struct FlatRampPc { int width, height; float flatStep, highRef; int countUnresolved; };
+static_assert(sizeof(FlatRampPc) == 20, "must match terrain_lem_flat_ramp.comp");
 
 struct IncisePc {
     int width, height;
@@ -236,28 +291,34 @@ size_t weightBytes(int cells) { return (size_t)cells * 2u * sizeof(uint32_t); }
 // this answer; here it is computed outright, which is why the CPU path is the
 // reference for lake extent.
 //
-// ★★★ The ladder is DITHERED, and that is not cosmetic.
+// ★★★★ THE LADDER IS GONE, AND ITS ABSENCE IS THE FIX.
 //
-// A bare flood fills a flat with `parent + eps` and the queue breaks ties by
-// linear index, so the front sweeps a flat in row-major order and the epsilon
-// ramp comes out an almost perfect inclined PLANE. Steepest descent over a
-// plane sends every cell the same way: dense parallel straight channels that
-// never merge - the "power line" artifact, which reads as a printed circuit
-// board over the valley floors while the sloping ground either side looks
-// perfect (real gradient, no ramp, no artifact).
+// This flood used to raise every cell it visited to `level + eps`, dithered,
+// so that a filled flat would still have somewhere downhill for a router to
+// find. Three things were wrong with that and only the first was ever noticed:
 //
-// The dither is applied to the ladder's MAGNITUDE, never to the surface.
-// Perturbing the surface is the obvious move and it is wrong: it creates
-// dither pits mid-flat, cells with no strictly lower neighbour, which
-// buildWeights then writes as an all-zero row - a terminal sink that cuts the
-// river in the middle of the plain. Scaling the step keeps every cell at least
-// one full ladder above its parent, so a strictly lower neighbour always
-// exists, while the varying step breaks the plane and lets paths merge.
+//  1. A bare (undithered) ladder sweeps a flat in queue order and comes out an
+//     inclined PLANE, so steepest descent sends every cell the same way:
+//     parallel straight channels that never merge, the "power line" artifact.
+//     This is the one the dither was added for.
+//  2. The dither DOES NOT FIX IT. The per-cell factor multiplies a step that is
+//     then SUMMED along the path, so the relative spread of the accumulated
+//     ramp falls as 1/sqrt(N). Over a long flat the surface converges straight
+//     back to a linear function of the geodesic distance from the outlet; the
+//     dither perturbs the texture and leaves the SHAPE untouched. And the
+//     shape is the problem: with the same step charged for a cardinal and a
+//     diagonal move, that geodesic distance is the Chebyshev metric, whose
+//     level sets are squares. Descent over squares runs along 0 and 45
+//     degrees, which is exactly what the artifact looked like.
+//  3. A few ulp is numerically ZERO DROP, so a flat could not incise (see the
+//     clamp note in the incision loop) and therefore could never reshape the
+//     pattern the conditioning had drawn on it.
 //
-// The sibling WatershedAnalysisNode carries the same term, and its comment
-// records that a raw LCG product kept a constant difference between adjacent
-// indices and laid sawtooth ramps that steered drainage into repeating
-// diagonal sweeps. Hence an avalanche mix, not a multiply.
+// So the flood no longer touches the surface at all: `filled[ni] = max(height,
+// level)` leaves every cell of one basin on exactly the same float. That
+// well-defined equality is what resolveFlats classifies on, and the routing
+// gradient is built properly there. This function is now purely "where does
+// standing water reach", which is all its consumers ever wanted from it.
 void priorityFlood(const std::vector<float>& height, int w, int h,
                    std::vector<float>& filled) {
     filled = height;
@@ -279,25 +340,132 @@ void priorityFlood(const std::vector<float>& height, int w, int h,
             const int ni = ny * w + nx;
             if (visited[ni]) continue;
             visited[ni] = 1u;
-            // The ladder has to stay above float resolution AT THE WORKING
-            // HEIGHT. kFillEpsilon is about three ulp near h = 0.5 but only
-            // 1.7 near h = 1, and over a wide basin `level + eps == level`
-            // ends the ladder entirely: every cell of the basin lands on one
-            // value, buildWeights finds no strictly lower neighbour, leaves an
-            // all-zero row, and the basin becomes a terminal sink for drainage
-            // area. Flow then dies at the rim - on the CPU reference too,
-            // which is why both paths cut flow at the same kind of boundary.
-            const float ladder = (std::max)(kFillEpsilon,
-                                            std::fabs(level) * 4.0f * 1.1920929e-7f);
-            uint32_t tie = (uint32_t)ni;
-            tie ^= tie >> 16; tie *= 0x7feb352du;
-            tie ^= tie >> 15; tie *= 0x846ca68bu;
-            tie ^= tie >> 16;
-            const float jitter = 1.0f + 0.5f * ((float)(tie & 0xffffu) / 65535.0f);
-            filled[ni] = (std::max)(height[ni], level + ladder * jitter);
+            filled[ni] = (std::max)(height[ni], level + kFillEpsilon);
             open.push({ filled[ni], ni });
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// FLAT RESOLUTION (Garbrecht & Martz 1997) - CPU reference.
+// ---------------------------------------------------------------------------
+// The two geodesic distance fields the routing ramp is built from. See
+// terrain_lem_flat_seed.comp for the full argument; in short, one distance
+// field (to the outlet) can only ever reproduce the artifact, because its
+// level sets are the metric's balls. The SECOND field - distance from where
+// higher ground meets the flat - is what makes a tributary keep heading away
+// from the wall it emerged from, so streams entering a plain converge instead
+// of turning onto the outlet rings side by side.
+//
+// Distances are in twelfths of a cell (see kFlatStep*) so a diagonal can cost
+// sqrt(2). Both fronts propagate ONLY between cells of exactly equal filled
+// elevation, so nothing leaks into the next basin.
+//
+// Dijkstra with a binary heap rather than Dial's buckets: this is the
+// reference path, and matching the priorityFlood above in shape is worth more
+// here than the constant factor.
+void resolveFlats(const std::vector<float>& filled, int w, int h,
+                  std::vector<uint16_t>& distLow, std::vector<uint16_t>& distHigh,
+                  std::vector<uint8_t>& isFlat) {
+    const int n = w * h;
+    const uint16_t kInf = 0xFFFFu;
+    distLow.assign((size_t)n, kInf);
+    distHigh.assign((size_t)n, kInf);
+    isFlat.assign((size_t)n, 0u);
+
+    using Node = std::pair<int, int>;   // distance, cell
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> lowQ, highQ;
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const int i = y * w + x;
+            const float f = filled[(size_t)i];
+            bool hasEqual = false, hasLower = false, hasHigher = false;
+            for (int d = 0; d < 8; ++d) {
+                const int nx = x + kNeighborX[d], ny = y + kNeighborY[d];
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                const float nf = filled[(size_t)(ny * w + nx)];
+                if (nf == f)      hasEqual = true;
+                else if (nf < f)  hasLower = true;
+                else              hasHigher = true;
+            }
+            if (!hasEqual) continue;
+            isFlat[(size_t)i] = 1u;
+            // The domain edge drains out of the map, so it is an outlet. A
+            // flat touching the border with no other spill point would
+            // otherwise have no seed at all and read as a terminal sink -
+            // i.e. a coastline would truncate every catchment behind it.
+            const bool onBorder = (x == 0 || y == 0 || x == w - 1 || y == h - 1);
+            if (hasLower || onBorder) { distLow[(size_t)i] = 0u; lowQ.push({ 0, i }); }
+            if (hasHigher)            { distHigh[(size_t)i] = 0u; highQ.push({ 0, i }); }
+        }
+    }
+
+    auto sweep = [&](std::priority_queue<Node, std::vector<Node>, std::greater<Node>>& q,
+                     std::vector<uint16_t>& dist) {
+        while (!q.empty()) {
+            const auto [dv, i] = q.top(); q.pop();
+            if (dv != (int)dist[(size_t)i]) continue;         // stale heap entry
+            const int x = i % w, y = i / w;
+            const float f = filled[(size_t)i];
+            for (int d = 0; d < 8; ++d) {
+                const int nx = x + kNeighborX[d], ny = y + kNeighborY[d];
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                const int ni = ny * w + nx;
+                if (filled[(size_t)ni] != f) continue;        // stay inside this flat
+                const int cand = dv + kFlatStepFor[d];
+                if (cand >= kFlatDistCeiling) continue;
+                if (cand < (int)dist[(size_t)ni]) {
+                    dist[(size_t)ni] = (uint16_t)cand;
+                    q.push({ cand, ni });
+                }
+            }
+        }
+    };
+    sweep(lowQ, distLow);
+    sweep(highQ, distHigh);
+}
+
+// filled + the flat gradient. Everything that decides WHERE WATER GOES reads
+// this; everything that decides WHERE WATER STANDS reads `filled`. Keeping
+// them apart is the reason the ramp can be given a physical magnitude at all -
+// baked into one field it would have registered as up to half a metre of fake
+// lake across every plain, and lakes are excluded from incision.
+void buildRouteSurface(const std::vector<float>& filled,
+                       const std::vector<uint16_t>& distLow,
+                       const std::vector<uint16_t>& distHigh,
+                       const std::vector<uint8_t>& isFlat,
+                       int w, int h, float flatStep, float highRef,
+                       std::vector<float>& route, int* unresolvedFlatCells = nullptr) {
+    const int n = w * h;
+    route.assign((size_t)n, 0.0f);
+    int unresolved = 0;
+#pragma omp parallel for reduction(+:unresolved)
+    for (int i = 0; i < n; ++i) {
+        float inc = 0.0f;
+        if (isFlat[(size_t)i]) {
+            const int lo = (int)distLow[(size_t)i];
+            if (lo < kFlatDistCeiling) {
+                const int hi = (int)distHigh[(size_t)i];
+                const float dLow = (float)lo * kFlatStepPerCell;
+                // Sentinel maps to the cap - the same value every cell beyond
+                // the influence radius already carries. See kFlatHighInfluence-
+                // Cells; the CPU sweep is exact, but the two paths have to
+                // agree on the SHAPE, not just on the convergence.
+                const float dHigh = (hi < kFlatDistCeiling)
+                    ? (std::min)((float)hi * kFlatStepPerCell, highRef) : highRef;
+                inc = 2.0f * dLow + (highRef - dHigh);
+            } else {
+                // Cannot happen on this path - the CPU sweep runs to
+                // completion - unless a single flat is wider than the fixed
+                // point ceiling (about 5460 cells). Counted anyway, because
+                // the number means the same thing on both paths.
+                ++unresolved;
+            }
+        }
+        route[(size_t)i] = filled[(size_t)i] + inc * flatStep;
+    }
+    if (unresolvedFlatCells) *unresolvedFlatCells = unresolved;
 }
 
 // Normalized MFD outflow weights, slope^1.5, on the conditioned surface. The
@@ -415,12 +583,23 @@ void accumulateExact(const std::vector<float>& filled, const std::vector<float>&
 // this sequence and a flat-routing pass added to only some of them would be
 // invisible: the odd one out would keep the radial fan and nothing would say so.
 void conditionAndAccumulate(const std::vector<float>& height, int w, int h,
-                            float cellSize, const std::vector<float>& rainArea,
-                            std::vector<float>& filled, std::vector<float>& weights,
+                            float cellSize, float flatStep,
+                            const std::vector<float>& rainArea,
+                            std::vector<float>& filled, std::vector<float>& route,
+                            std::vector<float>& weights,
                             std::vector<int>& order, std::vector<float>& area) {
     priorityFlood(height, w, h, filled);
-    buildWeights(filled, w, h, cellSize, weights);
-    accumulateExact(filled, weights, rainArea, w, h, order, area);
+    if (flatStep > 0.0f) {
+        std::vector<uint16_t> distLow, distHigh;
+        std::vector<uint8_t> isFlat;
+        resolveFlats(filled, w, h, distLow, distHigh, isFlat);
+        buildRouteSurface(filled, distLow, distHigh, isFlat, w, h, flatStep,
+                          (float)kFlatHighInfluenceCells, route);
+    } else {
+        route = filled;
+    }
+    buildWeights(route, w, h, cellSize, weights);
+    accumulateExact(route, weights, rainArea, w, h, order, area);
 }
 
 }  // namespace
@@ -452,6 +631,9 @@ bool createGpuState(ISimulationComputeBackend* backend, int width, int height,
     state.lakeDepth = backend->createBuffer(d);
     state.erosionLedger = backend->createBuffer(d);
     state.depositionLedger = backend->createBuffer(d);
+    ComputeBufferDesc dd;
+    dd.size_bytes = 4u * sizeof(uint32_t);
+    state.diag = backend->createBuffer(dd);
     state.width = width;
     state.height = height;
     state.valid = state.filledA.valid() && state.filledB.valid() &&
@@ -459,7 +641,8 @@ bool createGpuState(ISimulationComputeBackend* backend, int width, int height,
                   state.areaA.valid() && state.areaB.valid() && state.fluxA.valid() &&
                   state.fluxB.valid() && state.alluviumA.valid() && state.alluviumB.valid() &&
                   state.exported.valid() && state.lakeDepth.valid() &&
-                  state.erosionLedger.valid() && state.depositionLedger.valid();
+                  state.erosionLedger.valid() && state.depositionLedger.valid() &&
+                  state.diag.valid();
 
     if (state.valid) {
         const std::vector<float> zeros((size_t)cells, 0.0f);
@@ -474,6 +657,9 @@ bool createGpuState(ISimulationComputeBackend* backend, int width, int height,
                       backend->uploadBuffer(state.lakeDepth, zeros.data(), bytes) &&
                       backend->uploadBuffer(state.erosionLedger, zeros.data(), bytes) &&
                       backend->uploadBuffer(state.depositionLedger, zeros.data(), bytes);
+        const uint32_t diagZero[4] = { 0u, 0u, 0u, 0u };
+        state.valid = state.valid &&
+                      backend->uploadBuffer(state.diag, diagZero, sizeof(diagZero));
     }
     if (!state.valid) destroyGpuState(backend, state);
     return state.valid;
@@ -488,6 +674,10 @@ void destroyGpuState(ISimulationComputeBackend* backend, GpuState& state) {
     kill(state.alluviumA); kill(state.alluviumB);
     kill(state.exported); kill(state.lakeDepth);
     kill(state.erosionLedger); kill(state.depositionLedger);
+    kill(state.diag);
+    // lakeSurface and route ALIAS filledA/filledB; freeing them would be a
+    // double free. Just drop the names.
+    state.lakeSurface = {}; state.route = {};
     state.valid = false;
 }
 
@@ -502,6 +692,20 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
     const int cells = width * height;
     const uint32_t fullGroups = groupsFor(cells);
     const Derived d = derive(p, cellSize, heightScale, iterations);
+    // Flat resolution. flatStep == 0 disables the ramp and makes the routing
+    // surface identical to the lake surface, i.e. the old behaviour.
+    const float flatStep = flatStepFor(p, cellSize, heightScale);
+    // One pass advances each geodesic front by one cell, so this IS "the
+    // widest flat, in cells, that resolves". Cells beyond it are counted into
+    // state.diag[0] rather than quietly treated as drained.
+    const int flatPasses = std::clamp(p.flatResolvePasses, 0, 8192);
+    // ★★★ NEVER above flatPasses - 2. That inequality is what makes the flat
+    // ramp's descent guarantee survive a bounded relaxation: see the note on
+    // kFlatHighInfluenceCells. A budget too small to reach the cap simply
+    // shrinks the away-from-high term toward zero, degrading to outlet-distance
+    // routing rather than to a plain full of sinks.
+    const float flatHighRef =
+        (float)std::clamp((std::min)(kFlatHighInfluenceCells, flatPasses - 2), 0, 8192);
 
     Batch batch;
     batch.backend = backend;
@@ -585,6 +789,11 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
         infinity.assign((size_t)levels[deepest].cells(), 1.0e18f);
         if (!backend->uploadBuffer(levels[deepest].filledA, infinity.data(),
                                    infinity.size() * sizeof(float))) return false;
+        // Per-solve, not per-run: solveDrainage is called on every refresh and
+        // again at publish, and a counter that accumulated across them would
+        // report several times the number of cells the map actually has.
+        const uint32_t diagZero[4] = { 0u, 0u, 0u, 0u };
+        if (!backend->uploadBuffer(state.diag, diagZero, sizeof(diagZero))) return false;
         // Submit the staged transfer before any kernel reads it: the per-
         // dispatch barrier this backend emits is COMPUTE -> COMPUTE and does
         // not cover a pending TRANSFER write.
@@ -609,16 +818,85 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
                 // to correct fine-scale detail -- and it costs four times as
                 // much per pass. A flat budget spent most of the solve on the
                 // level that needed it least.
-                passes = std::clamp(p.drainageFillPasses >> (deepest - 1 - l),
-                                    12, (std::max)(p.drainageFillPasses, 12));
+                //
+                // ★★★ LEVEL 0 IS EXEMPT, and the old schedule had it exactly
+                // backwards. Planchon-Darboux moves information one cell per
+                // pass, so the budget has to cover the widest flat IN CELLS -
+                // and the shift made the budget SHRINK as the map grew: at
+                // 2K and above `drainageFillPasses >> (deepest - 1)` bottomed
+                // out on the floor of 12, i.e. any flat wider than twelve
+                // cells kept the nearest-neighbour prolongation of a coarse
+                // level verbatim. That is a piecewise-constant surface, so
+                // whole blocks of it were bitwise equal, the weight rows came
+                // out all-zero inside each block, and drainage could only
+                // step at block edges. Terraced, rectangular staircases, at
+                // every resolution, on every terrain - because the artifact
+                // was in the SCHEDULE, not in the landscape.
+                passes = (l == 0)
+                    ? (std::max)(p.drainageFillPasses, 12)
+                    : std::clamp(p.drainageFillPasses >> (deepest - 1 - l),
+                                 24, (std::max)(p.drainageFillPasses, 24));
             }
-            FillPc fPc{ lv.w, lv.h, kFillEpsilon, 0.0f };
+            // eps = 0: no ladder, so a flat comes out bitwise level and the
+            // flat-resolution stage below can classify it by exact equality.
+            // noise = 0: perturbing the surface is what creates dither pits,
+            // and the ramp perturbs distances instead.
+            FillPc fPc{ lv.w, lv.h, 0.0f, 0.0f };
             for (int pass = 0; pass < passes; ++pass) {
                 const ComputeBufferHandle fb[3] = { lv.height, lv.filledA, lv.filledB };
                 if (!batch.run("terrain_flow_fill", g, fb, 3, &fPc, sizeof(fPc), (uint64_t)lv.cells())) return false;
                 std::swap(lv.filledA, lv.filledB);
             }
-            // The conditioned surface is final for this level, so tabulate its
+
+            // ---- Flat resolution ---------------------------------------
+            // filledA now holds the LAKE surface: exactly level over every
+            // flat, because the fill no longer adds a ladder. That level-ness
+            // is what makes "the flat" a well defined set, and it is also why
+            // a router cannot use this surface directly - it has no gradient
+            // there at all. Build the routing surface into filledB.
+            //
+            // Scratch: areaA/areaB are free until the accumulation stage
+            // below, so the two geodesic distance fields cost no memory. They
+            // are packed two-per-uint (dLow low half, dHigh high half).
+            if (flatStep > 0.0f) {
+                FlatSeedPc sPc{ lv.w, lv.h };
+                const ComputeBufferHandle sb[2] = { lv.filledA, lv.areaA };
+                if (!batch.run("terrain_lem_flat_seed", g, sb, 2, &sPc, sizeof(sPc), (uint64_t)lv.cells()))
+                    return false;
+
+                FlatRelaxPc rPc2{ lv.w, lv.h };
+                for (int pass = 0; pass < flatPasses; ++pass) {
+                    const ComputeBufferHandle rb2[3] = { lv.filledA, lv.areaA, lv.areaB };
+                    if (!batch.run("terrain_lem_flat_relax", g, rb2, 3, &rPc2, sizeof(rPc2), (uint64_t)lv.cells()))
+                        return false;
+                    std::swap(lv.areaA, lv.areaB);
+                }
+
+                // countUnresolved only at level 0: the coarse levels exist to
+                // seed the fine one, and counting them would inflate a figure
+                // whose whole job is to say "this map has flats wider than
+                // flatResolvePasses".
+                FlatRampPc mPc{ lv.w, lv.h, flatStep, flatHighRef,
+                                (l == 0) ? 1 : 0 };
+                const ComputeBufferHandle mb[4] = { lv.filledA, lv.areaA, lv.filledB, state.diag };
+                if (!batch.run("terrain_lem_flat_ramp", g, mb, 4, &mPc, sizeof(mPc), (uint64_t)lv.cells()))
+                    return false;
+            } else {
+                // flatGradient == 0: routing surface IS the lake surface. This
+                // restores the pre-flat-resolution behaviour exactly, which is
+                // what makes the parameter a usable A/B control rather than a
+                // one-way door.
+                FlatRampPc mPc{ lv.w, lv.h, 0.0f, 0.0f, 0 };
+                const ComputeBufferHandle mb[4] = { lv.filledA, lv.areaA, lv.filledB, state.diag };
+                FlatSeedPc sPc{ lv.w, lv.h };
+                const ComputeBufferHandle sb[2] = { lv.filledA, lv.areaA };
+                if (!batch.run("terrain_lem_flat_seed", g, sb, 2, &sPc, sizeof(sPc), (uint64_t)lv.cells()))
+                    return false;
+                if (!batch.run("terrain_lem_flat_ramp", g, mb, 4, &mPc, sizeof(mPc), (uint64_t)lv.cells()))
+                    return false;
+            }
+
+            // The routing surface is final for this level, so tabulate its
             // outflow weights once instead of re-deriving them inside every
             // accumulation and routing pass.
             // useBedMax = 0: the drainage solve must see the CONDITIONED
@@ -626,7 +904,7 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
             // feeding it in here would let a bar in one basin re-route the
             // accumulation of the whole pyramid.
             WeightsPc wPc{ lv.w, lv.h, cellSize, 0 };
-            const ComputeBufferHandle wb[3] = { lv.filledA, lv.weights, lv.height };
+            const ComputeBufferHandle wb[3] = { lv.filledB, lv.weights, lv.height };
             if (!batch.run("terrain_lem_weights", g, wb, 3, &wPc, sizeof(wPc), (uint64_t)lv.cells())) return false;
         }
 
@@ -664,6 +942,11 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
         }
         // Level 0 borrows the state's buffers; publish whichever half won.
         state.filledA = levels[0].filledA; state.filledB = levels[0].filledB;
+        // Name which half is which. filledA came out of the fill (exactly
+        // level over flats = where water STANDS); filledB came out of the
+        // ramp (where water GOES). Consumers must never take the other one.
+        state.lakeSurface = levels[0].filledA;
+        state.route = levels[0].filledB;
         state.weights = levels[0].weights;
         state.areaA = levels[0].areaA;     state.areaB = levels[0].areaB;
         return true;
@@ -702,11 +985,12 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
         }
 
         {
-            const ComputeBufferHandle bufs[9] = { fields.height, fields.heightAlt,
-                                                  state.filledA, state.areaA,
-                                                  fields.hardness, fields.mask,
-                                                  state.fluxA, state.fluxB, fields.erosion };
-            ok = batch.run("terrain_lem_incise", fullGroups, bufs, 9, &incisePc, sizeof(incisePc), (uint64_t)cells);
+            const ComputeBufferHandle bufs[10] = { fields.height, fields.heightAlt,
+                                                   state.lakeSurface, state.areaA,
+                                                   fields.hardness, fields.mask,
+                                                   state.fluxA, state.fluxB, fields.erosion,
+                                                   state.route };
+            ok = batch.run("terrain_lem_incise", fullGroups, bufs, 10, &incisePc, sizeof(incisePc), (uint64_t)cells);
             std::swap(state.fluxA, state.fluxB);
             std::swap(fields.height, fields.heightAlt);
         }
@@ -722,13 +1006,13 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
             // is, and re-solving accumulation here would cost the whole
             // multigrid pass per route step.
             if (avulsion > 0 && (s % avulsion) == 0) {
-                const ComputeBufferHandle ab[3] = { state.filledA, state.weights, fields.height };
+                const ComputeBufferHandle ab[3] = { state.route, state.weights, fields.height };
                 ok = batch.run("terrain_lem_weights", fullGroups, ab, 3,
                                &avulsionPc, sizeof(avulsionPc), (uint64_t)cells);
                 if (!ok) break;
             }
 
-            const ComputeBufferHandle bufs[10] = { state.weights, state.filledA, state.areaA,
+            const ComputeBufferHandle bufs[10] = { state.weights, state.lakeSurface, state.areaA,
                                                    state.fluxA, state.fluxB,
                                                    fields.height, fields.heightAlt,
                                                    fields.deposition, state.exported,
@@ -762,7 +1046,7 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
 
         for (int s = 0; ok && s < d.diffuseSteps; ++s) {
             const ComputeBufferHandle bufs[5] = { fields.height, fields.heightAlt,
-                                                  state.areaA, fields.mask, state.filledA };
+                                                  state.areaA, fields.mask, state.lakeSurface };
             ok = batch.run("terrain_lem_diffuse", fullGroups, bufs, 5, &diffusePc, sizeof(diffusePc), (uint64_t)cells);
             std::swap(fields.height, fields.heightAlt);
         }
@@ -782,12 +1066,12 @@ bool runGpu(ISimulationComputeBackend* backend, const HydraulicErosionParams& p,
                               (std::max)(p.fluvialDepthScale, 0.0f),
                               (std::max)(p.fluvialHeadwaterAreaKm2, 1.0e-6f),
                               d.lakeEps, 1.0f };
-            const ComputeBufferHandle bufs[10] = { fields.height, state.filledA, state.areaA,
+            const ComputeBufferHandle bufs[11] = { fields.height, state.lakeSurface, state.areaA,
                                                    fields.discharge, fields.channelWidth,
                                                    fields.waterDepth, fields.waterLevel,
                                                    fields.directionX, fields.directionY,
-                                                   state.lakeDepth };
-            ok = batch.run("terrain_lem_finalize", fullGroups, bufs, 10, &finPc, sizeof(finPc), (uint64_t)cells);
+                                                   state.lakeDepth, state.route };
+            ok = batch.run("terrain_lem_finalize", fullGroups, bufs, 11, &finPc, sizeof(finPc), (uint64_t)cells);
         }
     }
 
@@ -824,7 +1108,12 @@ void runCpu(TerrainObject* terrain, const HydraulicErosionParams& p,
     auto hardnessAt = [&](int i) { return hasHardness ? std::clamp(terrain->hardnessMap[i], 0.0f, 1.0f) : 0.0f; };
     auto maskAt = [&](int i) { return hasMask ? std::clamp(mask[i], 0.0f, 1.0f) : 1.0f; };
 
-    std::vector<float> filled, weights, area, rainArea((size_t)n, d.cellArea);
+    // `filled` is the LAKE surface (where standing water reaches); `route` is
+    // filled plus the Garbrecht-Martz flat gradient (where water goes). They
+    // differ only over flats, which is precisely where the old single field
+    // had to lie about one of the two.
+    std::vector<float> filled, route, weights, area, rainArea((size_t)n, d.cellArea);
+    const float flatStep = flatStepFor(p, cellSize, heightScale);
     std::vector<float> flux((size_t)n, 0.0f), fluxNext((size_t)n, 0.0f);
     std::vector<float> exported((size_t)n, 0.0f), scratch((size_t)n, 0.0f);
     std::vector<int> order;
@@ -875,7 +1164,8 @@ void runCpu(TerrainObject* terrain, const HydraulicErosionParams& p,
         if (progressCallback) progressCallback((float)it / (float)iterations);
         if (it % refresh == 0) {
             computeRain();
-            conditionAndAccumulate(data, w, h, cellSize, rainArea, filled, weights, order, area);
+            conditionAndAccumulate(data, w, h, cellSize, flatStep, rainArea,
+                                   filled, route, weights, order, area);
         }
 
         // --- Incision -----------------------------------------------------
@@ -896,13 +1186,29 @@ void runCpu(TerrainObject* terrain, const HydraulicErosionParams& p,
                 float bestGrade = 0.0f, receiverDist = 1.0f;
                 for (int k = 0; k < 8; ++k) {
                     const int ni = (y + kNeighborY[k]) * w + (x + kNeighborX[k]);
-                    const float grade = (filled[i] - filled[ni]) / kNeighborDist[k];
+                    const float grade = (route[i] - route[ni]) / kNeighborDist[k];
                     if (grade > bestGrade) { bestGrade = grade; receiver = ni; receiverDist = kNeighborDist[k]; }
                 }
                 if (receiver < 0) { fluxNext[i] = carried; continue; }
 
                 const float run = (std::max)(receiverDist * cellSize, 1.0e-3f);
-                const float dropNorm = (std::max)(hCur - data[receiver], 0.0f);
+                // ★★★★ TWO drops. `bedDrop` is real relief; `routeDrop` is the
+                // conditioning gradient, which is zero wherever the terrain has
+                // relief of its own and equal to the flat gradient over a flat -
+                // exactly where bedDrop is zero.
+                //
+                // With bedDrop alone a flat cell got slope = 0 AND clamp = 0, so
+                // it could not incise by any amount, for any parameter setting.
+                // No first cut means the A^m feedback that separates a river out
+                // of a plain never starts, so the pattern the first drainage
+                // solve drew on the flat was the FINAL pattern - which is why it
+                // kept the shape of the conditioning algorithm instead of a
+                // river's. The mirror of this was already documented on
+                // maxDepositionMeters ("a flat cell can only ever GAIN height, a
+                // ratchet"); this is the other jaw of that same trap.
+                const float bedDrop = (std::max)(hCur - data[receiver], 0.0f);
+                const float routeDrop = (std::max)(route[i] - route[receiver], 0.0f);
+                const float dropNorm = bedDrop + routeDrop;
                 const float slope = std::clamp(dropNorm * heightScale / run, slopeMin, slopeMax);
                 const float areaKm2 = (std::max)(area[i], 0.0f) * 1.0e-6f;
                 const float shape = std::pow((std::max)(areaKm2, 1.0e-9f), exponentM) *
@@ -937,7 +1243,7 @@ void runCpu(TerrainObject* terrain, const HydraulicErosionParams& p,
             // drainage area is deliberately NOT re-accumulated here: aggradation
             // moves the flow path, not the size of the catchment feeding it.
             if (avulsion > 0 && (s % avulsion) == 0)
-                buildWeights(filled, w, h, cellSize, weights, &data);
+                buildWeights(route, w, h, cellSize, weights, &data);
 #pragma omp parallel for
             for (int y = 0; y < h; ++y) {
                 for (int x = 0; x < w; ++x) {
@@ -1134,7 +1440,8 @@ void runCpu(TerrainObject* terrain, const HydraulicErosionParams& p,
     // priority-flood plus a topological sweep there was pure waste.
     if (publishFields) {
         computeRain();
-        conditionAndAccumulate(data, w, h, cellSize, rainArea, filled, weights, order, area);
+        conditionAndAccumulate(data, w, h, cellSize, flatStep, rainArea,
+                               filled, route, weights, order, area);
     }
 
     if (fields) {
@@ -1178,12 +1485,14 @@ void runCpu(TerrainObject* terrain, const HydraulicErosionParams& p,
                     fields->waterLevel[i] = hCur + channelD / heightScale;
                 }
 
+                // Direction comes off the ROUTING surface: over a flat the lake
+                // surface is bitwise level and yields no direction at all.
                 float dirX = 0.0f, dirY = 0.0f;
                 if (x > 0 && y > 0 && x < w - 1 && y < h - 1) {
                     float best = 0.0f;
                     for (int k = 0; k < 8; ++k) {
                         const int ni = (y + kNeighborY[k]) * w + (x + kNeighborX[k]);
-                        const float grade = (filled[i] - filled[ni]) / kNeighborDist[k];
+                        const float grade = (route[i] - route[ni]) / kNeighborDist[k];
                         if (grade > best) {
                             best = grade;
                             dirX = kNeighborX[k] / kNeighborDist[k];
@@ -1205,6 +1514,12 @@ void runCpu(TerrainObject* terrain, const HydraulicErosionParams& p,
                   heightScale, stats);
         stats.gpuPath = false;
         stats.cycleIterations = iterations;
+        // The CPU sweep runs both geodesic fronts to completion, so there is
+        // nothing left unresolved. Stated rather than left at whatever the
+        // struct happened to hold, so the two paths report the same field with
+        // the same meaning.
+        stats.unresolvedFlatCells = 0;
+        stats.unresolvedFlatFraction = 0.0f;
     }
     if (fields) fields->stats = stats;
 }
@@ -1366,18 +1681,21 @@ void applyFluvialQuality(HydraulicErosionParams& p, FluvialQuality quality) {
             p.drainageFillPasses = 48; p.drainageAccumulatePasses = 96;
             p.sedimentRouteSteps = 48; p.drainageCoarsestSize = 96;
             p.avulsionInterval = 12; p.alluviumSteps = 2;
+            p.flatResolvePasses = 128;
             break;
         case FluvialQuality::Balanced:
             p.fluvialIterations = 16; p.drainageRefreshInterval = 6;
             p.drainageFillPasses = 96; p.drainageAccumulatePasses = 192;
             p.sedimentRouteSteps = 96; p.drainageCoarsestSize = 128;
             p.avulsionInterval = 8; p.alluviumSteps = 4;
+            p.flatResolvePasses = 256;
             break;
         case FluvialQuality::High:
             p.fluvialIterations = 28; p.drainageRefreshInterval = 4;
             p.drainageFillPasses = 160; p.drainageAccumulatePasses = 320;
             p.sedimentRouteSteps = 160; p.drainageCoarsestSize = 192;
             p.avulsionInterval = 5; p.alluviumSteps = 6;
+            p.flatResolvePasses = 512;
             break;
         case FluvialQuality::Custom:
             break;
@@ -1395,7 +1713,8 @@ FluvialQuality detectFluvialQuality(const HydraulicErosionParams& p) {
             probe.sedimentRouteSteps == p.sedimentRouteSteps &&
             probe.drainageCoarsestSize == p.drainageCoarsestSize &&
             probe.avulsionInterval == p.avulsionInterval &&
-            probe.alluviumSteps == p.alluviumSteps)
+            probe.alluviumSteps == p.alluviumSteps &&
+            probe.flatResolvePasses == p.flatResolvePasses)
             return static_cast<FluvialQuality>(i);
     }
     return FluvialQuality::Custom;

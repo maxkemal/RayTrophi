@@ -163,8 +163,40 @@ void registerSceneBindings(py::module_& module) {
     }, py::arg("material_name"), py::arg("slot"));
 
     materials.def("textures", [](const std::string& material_name) {
-        return rtapi::materialTextureSlots(material_name);
-    }, py::arg("material_name"), "Slot names that currently hold a texture.");
+        py::list result;
+        for (const auto& binding : rtapi::materialTextureSlots(material_name)) {
+            py::dict entry;
+            entry["slot"] = binding.slot;
+            entry["texture"] = binding.texture;
+            result.append(std::move(entry));
+        }
+        return result;
+    }, py::arg("material_name"),
+       "Populated texture slots as {slot, texture}. 'texture' is the texture's "
+       "identity (file path, or an 'embedded_...' cache key) — two materials "
+       "reporting the same one are sharing a single decoded image.");
+
+    // get/set above edit through an OBJECT (every material that object's flat
+    // meshes reference gets the same value). get_param/set_param edit exactly
+    // one material ASSET, by name — the primitive a script needs when an
+    // object carries several different materials (a carafe's glass body +
+    // brass cap + rubber foot on one flat mesh) and only one of them should
+    // change. Same param vocabulary as get/set.
+    materials.def("get_param", [](const std::string& material_name, const std::string& param) -> py::object {
+        rtapi::MaterialParamValue value;
+        requireResult(rtapi::getMaterialParamByName(material_name, param, value));
+        if (value.is_color) return vec3ToPython(value.color);
+        return py::float_(value.scalar);
+    }, py::arg("material_name"), py::arg("param"));
+
+    materials.def("set_param", [](const std::string& material_name, const std::string& param,
+                                  const py::handle& value) {
+        if (PyFloat_Check(value.ptr()) || PyLong_Check(value.ptr())) {
+            requireResult(rtapi::setMaterialParamByName(material_name, param, py::cast<float>(value)));
+        } else {
+            requireResult(rtapi::setMaterialParamByName(material_name, param, vec3FromPython(value)));
+        }
+    }, py::arg("material_name"), py::arg("param"), py::arg("value"));
 
     // -----------------------------------------------------------------------
     // rt.lights — indexed into scene.lights; undoable.

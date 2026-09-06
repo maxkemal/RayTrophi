@@ -123,7 +123,7 @@ struct NishitaSkyParams {
     // ATMOSPHERIC FOG (Height-based + Distance-based)
     // ═══════════════════════════════════════════════════════════════
     int fog_enabled;               // 1 = show fog
-    float fog_density;             // Base fog density (0.0 - 0.1)
+    float fog_density;             // Extinction per metre (typical 0.00001 - 0.001)
     float fog_height;              // Fog falloff height (meters, 0 = ground level)
     float fog_falloff;             // Exponential falloff rate (0.001 - 0.01)
     float fog_distance;            // Max fog distance (meters)

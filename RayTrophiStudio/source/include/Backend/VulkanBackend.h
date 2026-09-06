@@ -1,4 +1,5 @@
-﻿/*
+#include "PostProcess/VulkanExposure.h"
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          VulkanBackend.h
@@ -46,6 +47,9 @@
 
 // Facade-mesh SoA database (DNA::GeometryDetail) — used by the indexed-BLAS upload path.
 class TriangleMesh;
+
+#include "Viewport/RasterInstanceUpload.h"
+#include "Viewport/RasterGpuCull.h"
 
 namespace VulkanRT {
 
@@ -125,7 +129,8 @@ enum class BufferUsage : uint32_t {
     TRANSFER_SRC    = 0x0010,
     TRANSFER_DST    = 0x0020,
     ACCELERATION    = 0x0040,   // For RT acceleration structures
-    SHADER_BINDING  = 0x0080    // For shader binding table
+    SHADER_BINDING  = 0x0080,   // For shader binding table
+    INDIRECT        = 0x0100    // vkCmdDraw*Indirect / vkCmdDispatchIndirect kaynagi
 };
 
 inline BufferUsage operator|(BufferUsage a, BufferUsage b) {
@@ -483,6 +488,7 @@ class VulkanDevice {
 public:
     VulkanDevice();
     ~VulkanDevice();
+    bool initializeExposureMeter(const std::vector<uint32_t>& code) { return m_exposureMeter.initialize(m_device, m_physicalDevice, code); }
     
     // Non-copyable
     VulkanDevice(const VulkanDevice&) = delete;
@@ -925,6 +931,21 @@ public:
     VkQueue getComputeQueue() const { return m_computeQueue; }
     uint32_t getComputeQueueFamily() const { return m_computeQueueFamily; }
     bool supportsGraphicsQueue() const { return m_queueSupportsGraphics; }
+
+    // ★★★ THE SIMULATION COMPUTE CONTEXT IS A SINGLE GLOBAL, AND THIS PROCESS
+    // RUNS TWO DEVICES. `createLogicalDevice` publishes every new device into
+    // g_vulkan_sim_compute_ctx, and `cleanup` CLEARS it when the dying device
+    // owned it. Nothing re-published the survivor, so one Rendered -> Material
+    // round trip left the simulation with NO Vulkan compute context at all —
+    // measured 2026-09-04 as `render.volume_tables` reporting
+    // sim_device_is_this_backends == false on BOTH rows, which is not a
+    // reachable state for a single-owner global.
+    //
+    // These two make the ownership handover explicit instead of accidental:
+    // publish claims the context for this device, and adoptSimComputeContext-
+    // IfOrphaned is what a surviving device calls when the owner dies.
+    void publishAsSimComputeContext();
+    static void adoptSimComputeContextIfOrphaned();
     // SSBO Update helpers
     // Uploads the SPLIT material arrays: core -> binding 2, ext -> binding 24.
     // Sizes are in bytes; count is the material count (same for both arrays).
@@ -960,7 +981,14 @@ public:
     // Atmosphere LUT Textures (for raygen/miss shaders)
     // [0] = transmittance_lut, [1] = skyview_lut, [2] = multi_scatter_lut, [3] = aerial_perspective_lut
     ImageHandle m_lutImages[4];
-    
+    // ★★★ Yeniden kullanim kosulu: compute LUT yolu bu goruntulere STORAGE
+    //   olarak yaziyor, CPU yolu ise onlari yalnizca TRANSFER_DST|SAMPLED ile
+    //   kuruyor. Boyut/handle esitligine bakip yeniden kullanmak, storage
+    //   olmayan bir goruntuyu imageStore hedefi yapardi -- gecerli gorunen,
+    //   surucude tanimsiz bir durum. Bayrak, "bu goruntuleri KIM kurdu"
+    //   sorusunun tek cevabi.
+    bool m_lutImagesStorageCapable = false;
+
     uint32_t m_materialCount = 0;
     uint32_t m_lightCount = 0;
     std::vector<AccelStructHandle> m_blasList;
@@ -1003,8 +1031,21 @@ public:
     // Skinning Compute Pipeline
     bool createSkinningPipeline(const std::vector<uint32_t>& computeSPV);
     bool hasSkinningPipeline() const;
-    void dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix4x4>& boneMatrices); // legacy shim
-    void dispatchSkinningAll(const std::vector<Matrix4x4>& boneMatrices); // batch: 1 submit for all BLASes
+    // Skins ONE BLAS and refits its acceleration structure, in one command
+    // buffer, submitted and fence-waited on the spot. So the RT cost per frame
+    // is (skin + AS refit + submit + wait) x skinned-BLAS-count, on top of the
+    // TLAS update — which is why Vulkan RT is slower than the raster viewport
+    // on the same character even though BOTH run the same skinning.spv over the
+    // same descriptor pool. The difference is acceleration-structure work, not
+    // the skinning maths.
+    //
+    // ★ There WAS a `dispatchSkinningAll(...)` declared here, commented
+    // "batch: 1 submit for all BLASes". It was never defined and never called —
+    // a declaration advertising an optimisation that does not exist, which is
+    // worse than no declaration: it answers "why is RT slow?" with a lie.
+    // Removed (CLAUDE.md rule 5). Batching the per-BLAS submits into one command
+    // buffer is still the real win available here; it is a separate piece of work.
+    void dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix4x4>& boneMatrices);
     bool dispatchSkinningToBuffers(BufferHandle& baseVertexBuffer,
                                    BufferHandle& baseNormalBuffer,
                                    BufferHandle& boneIndexBuffer,
@@ -1016,11 +1057,29 @@ public:
                                    const BufferHandle& outNormalBuffer,
                                    uint32_t vertexCount,
                                    const std::vector<Matrix4x4>& boneMatrices);
-    
+
+    // ★★★★ MUST be called for every skinning descriptor set that goes out of
+    // scope - when a RasterMeshBuffer or a BLAS is destroyed. The pool is a
+    // FIXED number of sets shared by the raster viewport AND the RT BLAS path;
+    // dropping the handle instead of freeing it consumes one permanently.
+    //
+    // That is exactly how GPU skinning died: destroyRasterMesh() destroyed every
+    // buffer and then zeroed the struct, dropping skinningDescSet on the floor.
+    // Each scene rebuild (adding ANY object rebuilds the raster meshes) leaked
+    // one set per skinned mesh, and after the pool ran dry vkAllocateDescriptorSets
+    // failed forever - so skinning silently fell back to the CPU, in BOTH the
+    // raster viewport and Vulkan RT, and the only trace was one INFO line.
+    void freeSkinningDescriptorSet(VkDescriptorSet& set);
+
     VkPipeline m_skinningPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_skinningPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_skinningDescLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_skinningDescPool = VK_NULL_HANDLE;
+    // Capacity of m_skinningDescPool and how many sets are currently out. Kept
+    // so exhaustion can be REPORTED as a number instead of being inferred from
+    // "skinning looks slow" - see freeSkinningDescriptorSet's comment.
+    uint32_t m_skinningDescPoolCapacity = 0;
+    uint32_t m_skinningDescSetsLive = 0;
 
     // Sculpt Compute Pipeline (simple GPU sculpt pass)
     bool createSculptPipeline(const std::vector<uint32_t>& computeSPV);
@@ -1127,6 +1186,7 @@ public:
         VkFence fence = VK_NULL_HANDLE;
         bool everSubmitted = false;
     };
+    rtpost::VulkanExposure m_exposureMeter;
     FrameSlot m_frameSlots[kFrameSlotCount];
     VkCommandPool m_frameSlotCommandPool = VK_NULL_HANDLE; // RESET_COMMAND_BUFFER_BIT capable
     bool ensureFrameSlotsCreated();
@@ -1154,6 +1214,13 @@ private:
     VkQueue m_computeQueue = VK_NULL_HANDLE;
     uint32_t m_computeQueueFamily = 0;
     bool m_queueSupportsGraphics = false;
+    // Latched at device creation so the context can be re-published later, when
+    // this device has to adopt an orphaned simulation context. These say what
+    // was actually ENABLED, not merely supported — the fallback device path
+    // enables neither, and the sim compute backend must keep fluid P2G on the
+    // CPU there rather than invoking undefined float-atomic behaviour.
+    bool m_simAtomicFloatEnabled = false;
+    bool m_simFloat64Enabled = false;
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     
@@ -1328,6 +1395,12 @@ namespace {
 #define VK_WARN() VulkanLogHelper(LogLevel::Warning)
 
 namespace Backend {
+
+class MaterialPreviewShadowResources;
+class MaterialPreviewTransmissionResources;
+class MaterialPreviewIblResources;
+class MaterialPreviewSdfSurfaceResources;
+class MaterialPreviewVolumeResources;
 
 // Maximum number of texture descriptor slots available to shaders.
 // Both the RT (binding 6) and raster-preview (binding 1) descriptor arrays
@@ -1733,7 +1806,8 @@ public:
     bool isAccumulationComplete() const override;
     bool needsViewportRender() const override {
         if (shouldUseInteractiveViewport()) {
-            return m_interactiveViewport.dirty;
+            return m_interactiveViewport.dirty ||
+                   m_interactiveViewport.presentationPending;
         }
         return m_currentSamples < m_targetSamples;
     }
@@ -1765,6 +1839,9 @@ public:
     // Vulkan-specific access
     // ========================================================================
     VulkanRT::VulkanDevice* getVulkanDevice() { return m_device.get(); }
+    // Live dense-gas grids this backend holds its OWN copy of, because it does
+    // not own the simulation compute device. See m_denseGasBuffers.
+    std::size_t denseGasMirrorBufferCount() const { return m_denseGasBuffers.size(); }
 
     /**
      * @brief Upload Atmosphere LUT host arrays into Vulkan images and bind to descriptor slot 8
@@ -1796,6 +1873,71 @@ protected:
     virtual bool ensureInteractiveViewportResourcesImpl(const std::string& shaderDir, int width, int height);
     virtual void destroyInteractiveViewportResourcesImpl(bool keepPipeline = false);
     virtual void renderInteractiveViewportImpl(void* outSurface, int width, int height, void* outFramebuffer, void* outTexture);
+    // Dedicated viewport backends with asynchronous frame slots override this
+    // before mutating single-copy raster buffers/descriptors.
+    virtual void drainInteractiveViewportInFlight() {}
+
+    // ★★★ Atmosfer LUT compute hatti HER IKI yolun da ihtiyaci.
+    //   Eskiden yalnizca renderProgressiveImpl'in RT tembel init blogunda
+    //   kuruluyordu; o blok Solid/Matcap/MaterialPreview'da ERKEN DONULDUGU
+    //   icin hic calismiyordu. Viewport backend'i AYRI bir adapter ve AYRI bir
+    //   VulkanDevice tutuyor, yani etkilesimli modda hat hicbir zaman var
+    //   olmadi ve her Physical Sky duzenlemesi CPU LUT'una dusuyordu.
+    bool ensureAtmosphereLUTPipeline(const std::string& shaderDir);
+    // Bir kez denenir: dosya yoksa ya da derleme basarisizsa her karede tekrar
+    // denemek log'u doldurur ve dosya sistemine bakar.
+    bool m_atmosphereLutPipelineAttempted = false;
+
+    // Material preview binding 5 (sahne isiklari) + binding 6 (onizleme sahne
+    // globalleri).
+    //
+    // ★★★ KAYIT BASLAMADAN once cagrilmali: bir descriptor set'i, ucusta olan
+    //   bir komut tamponu onu kullaniyorken guncellemek gecersizdir. Fonksiyon
+    //   degisim varsa kendisi drain ediyor.
+    //
+    // ★★★ TABAN SINIFTA, bilerek: material preview hattinin IKI kurulumu var
+    //   (VulkanBackendAdapter ve VulkanViewportBackend kendi descriptor
+    //   set'ini kuruyor). Bu fonksiyonu yalnizca birine koymak, otekinde
+    //   binding 5/6'nin HIC yazilmadigi -- yani shader'in yazilmamis bir
+    //   descriptor'u statik olarak kullandigi -- bir set birakirdi.
+    void updateMaterialPreviewSceneLightBindings();
+    void updateMaterialPreviewProgramBinding();
+    bool ensureMaterialPreviewShadowResources(const std::string& shaderDir);
+    void destroyMaterialPreviewShadowResources();
+    bool ensureMaterialPreviewIblResources(const std::string& shaderDir);
+    void refreshMaterialPreviewIbl();
+    void destroyMaterialPreviewIblResources();
+    bool bindMaterialPreviewIblDescriptors(VkDescriptorSet set,
+                                           const VulkanRT::ImageHandle& fallback);
+    bool getMaterialPreviewIblStatus(MaterialPreviewIblStatus& out) const override;
+    void prepareMaterialPreviewShadowFrame();
+    void updateMaterialPreviewShadowWorldBindings();
+    void recordMaterialPreviewShadowPass(VkCommandBuffer cmd);
+    void recordMaterialPreviewSkyPass(VkCommandBuffer cmd, const Matrix4x4& view,
+                                      uint32_t width, uint32_t height);
+    bool ensureMaterialPreviewTransmissionResources(uint32_t width, uint32_t height);
+    void destroyMaterialPreviewTransmissionResources();
+    void prepareMaterialPreviewTransmissionThickness(VkCommandBuffer cmd);
+    void recordMaterialPreviewTransmissionPass(VkCommandBuffer cmd,
+                                               const Matrix4x4& viewProj,
+                                               const Matrix4x4& view,
+                                               uint32_t width, uint32_t height);
+    bool ensureMaterialPreviewSdfSurfaceResources(const std::string& shaderDir);
+    void destroyMaterialPreviewSdfSurfaceResources();
+    void updateMaterialPreviewSdfSurfaceBinding();
+    void recordMaterialPreviewSdfSurfacePass(VkCommandBuffer cmd,
+                                             const Matrix4x4& viewProj,
+                                             const Matrix4x4& view,
+                                             uint32_t width, uint32_t height,
+                                              bool opaqueSnapshotReady = false);
+    bool ensureMaterialPreviewVolumeResources(const std::string& shaderDir);
+    void destroyMaterialPreviewVolumeResources();
+    void updateMaterialPreviewVolumeBinding();
+    void recordMaterialPreviewVolumePass(VkCommandBuffer cmd,
+                                         const Matrix4x4& viewProj,
+                                         const Matrix4x4& view,
+                                         uint32_t width, uint32_t height,
+                                         bool opaqueSnapshotReady = false);
     void renderProgressiveImpl(void* outSurface, void* outWindow, void* outRenderer,
                                int width, int height, void* outFramebuffer, void* outTexture);
     virtual void setInteractiveViewportMatcapImpl(int64_t textureID);
@@ -1840,6 +1982,9 @@ protected:
     struct InteractiveViewportState {
         bool initialized = false;
         bool dirty = true;          // needs re-render (cleared after draw, set on scene change)
+        // Async frame submitted but not copied into the host presentation
+        // buffer yet. This wakes a cheap pump call without requiring camera motion.
+        bool presentationPending = false;
         int width = 0;
         int height = 0;
         VulkanRT::ImageHandle colorImage;
@@ -1856,6 +2001,20 @@ protected:
         VkDescriptorPool materialPreviewDescPool = VK_NULL_HANDLE;
         VkDescriptorSet materialPreviewDescSet = VK_NULL_HANDLE;
         uint32_t materialPreviewTextureArrayLen = 0;
+        // Binding 0 can be owned by the derived viewport backend. Keep its
+        // material count beside the shared descriptor state so focused base
+        // modules never reach into derived-only members.
+        uint32_t materialPreviewBoundMaterialCount = 0;
+        // Binding 6: scene light count plus shadow/world globals.
+        VulkanRT::BufferHandle materialPreviewSceneGlobals;
+        void* materialPreviewSceneGlobalsMapped = nullptr;
+        uint32_t lastPreviewSceneLightCount = UINT32_MAX;
+        // ★★ Isik buffer'i BUYUDUGUNDE yok edilip yeniden yaratilir
+        //   (VulkanDevice::updateLightBuffer). Descriptor'i bir kez yazip
+        //   birakmak, silinmis bir VkBuffer'a bakan bir set birakirdi. Bagli
+        //   handle'i takip edip degistiginde yeniden yaziyoruz.
+        VkBuffer boundPreviewLightBuffer = VK_NULL_HANDLE;
+
         // Baked environment maps for specular reflection (binding 2): [0]=studio, [1]=outdoor
         int64_t envMapStudioID  = 0;
         int64_t envMapOutdoorID = 0;
@@ -1983,6 +2142,13 @@ protected:
     // renderProgressive call re-runs ONLY tonemap + readback (no trace, no
     // sample added) so the toggle shows up without waiting for camera motion.
     bool  m_tonemapRefreshPending = false;
+    // Signature of the post-processing values (exposure/gamma/saturation/...)
+    // last baked into the presented frame. Compared against g_display_post
+    // each renderProgressive call so a post-panel edit made AFTER accumulation
+    // has already converged still triggers the tonemap-only refresh above —
+    // otherwise the panel would only take effect while a new sample was still
+    // being traced. See renderProgressiveImpl.
+    uint64_t m_lastDisplayPostSignature = 0;
     // Views resolved at tonemap time from persistent AOVs — instant, reset-free.
     static bool isTonemapSideView(int v) {
         return v == 6 || v == 7 || v == 8 || (v >= 10 && v <= 14);
@@ -2208,11 +2374,32 @@ protected:
         std::vector<uint32_t> visibleInstanceIndicesCache;
         bool visibleInstancesDirty = true;
         uint64_t lastVisibleFrustumRevision = 0;
-        uint64_t lastScatterTriangleBudget = 0;
+        uint64_t lastScatterTriangleTarget = 0;
+        // Global instance buffer offset for production instancing.
+        // vkCmdDraw*(... firstInstance) uses this to index into the single
+        // shared buffer instead of binding a per-mesh instance buffer.
+        uint32_t firstInstance = 0;
+        uint32_t allocatedInstanceSlots = 0; // slots reserved in global buffer
+        // GPU culling yuvalari (bkz. Viewport/RasterGpuCull.h).
+        // cullMeshIndex: yalnizca kendi instance'i olan mesh'lerde gecerli --
+        //   proxy mesh'lerin instance'i YOKTUR, onlarin komutunu SAHIBI yazar.
+        // cullDrawSlot: her cizilebilir mesh'in indirect komut yuvasi.
+        uint32_t cullMeshIndex = UINT32_MAX;
+        uint32_t cullDrawSlot  = UINT32_MAX;
+        // Bu mesh'in SIKISTIRILMIS cikti bolgesinin tabani (instance cinsinden).
+        // Cizim, instance vertex buffer'ini bu tabandan bayt ofsetiyle baglar;
+        // indirect komuttaki firstInstance 0 kalir.
+        uint32_t cullOutBase   = 0;
         // CPU shadow copy for dirty-range detection during sculpt
         std::vector<float> cpuPositions;
         std::vector<float> cpuNormals;
         std::vector<uint32_t> cpuMatIds;
+        // ★★ Scatter proxy'si icin gerekli: impostor seridinin her dilimi,
+        //   o dilimin SILUETINI belirleyen kaynak vertex'inin UV'sini ve
+        //   materyalini devralir. Bunlar CPU'da tutulmadan proxy'nin
+        //   materyale ulasmasi mumkun degil -- ve materyalsiz proxy, uzaktaki
+        //   yarim sahnenin dokusuz matcap mukavvaya donmesi demekti.
+        std::vector<float> cpuUVs;
     };
     struct SelectionOutlineDrawItem {
         const RasterMeshBuffer* mesh = nullptr;
@@ -2242,6 +2429,21 @@ protected:
     size_t m_rasterNodeIndexInstanceCount = 0;
     size_t m_rtNodeIndexInstanceCount = 0;
     bool m_rasterGeometryDirty = true;  // force initial build
+    // Focused owner for the shared shadow atlas, per-light matrices and the
+    // alpha-cutout depth pipeline. Both Vulkan viewport implementations call
+    // the same core; the giant backend files only contain integration wiring.
+    std::shared_ptr<MaterialPreviewShadowResources> m_materialPreviewShadows;
+    std::shared_ptr<MaterialPreviewIblResources> m_materialPreviewIbl;
+    std::shared_ptr<MaterialPreviewTransmissionResources> m_materialPreviewTransmission;
+    std::shared_ptr<MaterialPreviewSdfSurfaceResources> m_materialPreviewSdfSurface;
+    std::shared_ptr<MaterialPreviewVolumeResources> m_materialPreviewVolume;
+
+    // ── Production instancing: single global instance buffer ────────────
+    std::unique_ptr<Backend::RasterGlobalInstanceBuffer> m_rasterGlobalInstBuf;
+    bool m_rasterGlobalInstLayoutDirty = true;   // mesh→firstInstance stale
+    bool m_rasterUseGlobalInstBuffer   = false;  // false = CPU fallback
+    void rebuildRasterInstanceLayout();           // compact pack all meshes
+    void writeRasterInstanceTransformsToGlobal(); // batch write all transforms
 
     // Generation counter: last g_scene_geometry_generation value seen when
     // raster geometry was built.  Allows skipping redundant rebuilds on
@@ -2325,6 +2527,17 @@ private:
     // is reachable only through a stale address, which reads as valid memory.
     std::unordered_map<int, VulkanRT::BufferHandle> m_uvwBuffers;
     std::unordered_map<int, uint32_t> m_uvwUploadedVersions;
+    // ★★★ Live dense-gas grids copied into THIS adapter's own device memory,
+    // for the backend that does not own the simulation compute device. The
+    // addresses the simulation publishes are raw VkDeviceAddresses and mean
+    // nothing on a second VkDevice — they read as zero density, i.e. exactly
+    // like empty smoke, which is why the realtime viewport drew no gas at all.
+    // Same lifecycle and same stale-sweep rule as m_vdbBuffers above: a device
+    // buffer that outlives its vdb_id is reachable only through a stale address,
+    // and freed device memory does not stop being readable.
+    std::unordered_map<int, VulkanRT::BufferHandle> m_denseGasBuffers;
+    std::unordered_map<int, VulkanRT::BufferHandle> m_denseGasTempBuffers;
+    std::unordered_map<int, uint64_t> m_denseGasUploadedVersions;
     // VDB volumes in the ORDER they were added to the TLAS (customIndex 0,1,2...)
     // Guarantees SSBO layout matches gl_InstanceCustomIndexEXT lookups in the shader.
     // ★CONTRACT: only updateGeometry()/rebuildAccelerationStructure() — the two
@@ -2466,8 +2679,12 @@ private:
     Vec3 m_rasterCullCameraPosition;
     float m_rasterCullFocalLengthPixels = 0.0f;
     float m_rasterMinChunkScreenRadiusPixels = 2.0f;
-    uint64_t m_rasterScatterTriangleBudget = 96ull * 1000ull * 1000ull;
-    float m_rasterScatterBudgetScale = 1.0f;
+    // ★ ADI BILEREK "target": GPU culling'e gecisle birlikte bu sayi artik sert
+    //   bir tavan degil, kareler arasi yakinsayan bir LOD mesafe esiginin
+    //   hedefidir. Hizli kamera hareketinde bir-iki kare asilabilir.
+    //   Gerekce: shaders/raster_cull.comp basindaki yorum.
+    uint64_t m_rasterScatterTriangleTarget = 96ull * 1000ull * 1000ull;
+    float m_rasterScatterTargetScale = 1.0f;
     bool m_rasterScatterPaintActive = false;
     void extractFrustumPlanes(const Matrix4x4& viewProj);
     bool isAABBInFrustum(const AABB& box) const;
@@ -2477,6 +2694,69 @@ private:
     void rebuildRasterMeshCullingChunks(RasterMeshBuffer& mesh);
     void setRasterVisibleInstances(RasterMeshBuffer& mesh, const std::vector<uint32_t>& visibleInstanceIndices);
     void uploadVisibleRasterInstances(RasterMeshBuffer& mesh);
+
+    // ── GPU culling (global instance buffer yolu) ───────────────────────────
+    // Bu yol acikken CPU tarama yapilmaz; frustum testi ve scatter LOD ayrimi
+    // raster_cull.comp icinde olur. Kapali kalirsa (pipeline/buffer kurulamadi)
+    // m_rasterGpuCullActive false olur ve durum RAPORLANIR -- sessizce
+    // culling'siz cizmek bu modulun duzeltmeye calistigi arizanin kendisidir.
+    std::unique_ptr<RasterGpuCull> m_rasterGpuCull;
+    bool m_rasterGpuCullActive = false;
+    uint32_t m_rasterCullDrawSlotCount = 0;
+    // ★ Cikti kapasitesi KAYNAKTAN BUYUK olabilir: LOD ayrimi olan her mesh
+    //   icin ayri bir proxy bolgesi ayrilir.
+    uint32_t m_rasterCullOutCapacity = 0;
+    uint32_t m_rasterCullMeshCount = 0;
+    bool m_rasterCullBindingsDirty = true;
+    bool m_loggedRasterGpuCullFailure = false;
+
+    // Son cizim gecisinin geometri olcumu.
+    // ★ Temiz-sahne erken cikisinda BU DEGISMEDEN KALIR: o karede yeni bir
+    //   olcum yapilmadi, ve sifirlamak "olctum, sifirdi" demek olurdu.
+    //   Ekranda duran kare hala son olculen karedir.
+    struct RasterGeometryStats {
+        bool          global_instance_buffer = false;
+        bool          gpu_culling = false;
+        std::uint32_t total_instances = 0;
+        std::uint32_t cull_mesh_count = 0;
+        std::uint32_t draw_calls = 0;
+        std::uint64_t visible_triangles = 0;
+        std::uint64_t full_triangles = 0;
+        std::uint64_t proxy_triangles = 0;
+        std::uint32_t full_instances = 0;
+        std::uint32_t proxy_instances = 0;
+        std::uint64_t scatter_triangle_target = 0;
+    };
+    RasterGeometryStats m_rasterGeometryStats;
+    // LOD mesafe esiginin sinirlari (dunya birimi kare).
+    // ★ Alt sinir yalnizca SON CARE bir kapidir: kontrolcunun esigi tam sifira
+    //   surukleyip her seyi proxy yapmasini engeller.
+    //
+    // ★★ Bilerek KUCUK (1 m). Once 25 m^2 (5 m) idi ve bu, bir arizanin
+    //   kaynagiydi: instance'larin tamami kameradan 5 m icinde yogunlasmis bir
+    //   sahnede esik bu tabana dayaniyor, hicbir sey demote edilemiyor ve
+    //   ucgen hedefi UYGULANAMIYORDU -- tam olarak "alan kucuk gorunuyor ama
+    //   butce asilmis" belirtisi. Asil koruma zaten kontrolcudedir: izin
+    //   verilen instance sayisi en az 1'dir.
+    static constexpr float kRasterLodMinDistanceSq = 1.0f;
+    static constexpr float kRasterLodMaxDistanceSq = 1.0e18f;
+    // ★★ LOD gecis bandinin yari genisligi, esigin carpani olarak. Mesafe
+    //   KARESI uzerinde uygulanir, yani 0.35 dogrusal mesafede kabaca
+    //   [-19%, +16%]'lik bir cozunme bandi demektir.
+    //   0 yaparsan eski sert anahtar geri gelir: gecis sahnede suprulen
+    //   gorunur bir cizgi olur ve tekduze yogun kumede sayim salinir.
+    static constexpr float kRasterLodBandWidth = 0.35f;
+    // ★★★ Full preset'inin TEK karar noktasi. GPU yolu (rebuildRasterCullBindings)
+    //   ve CPU yolu (uploadVisibleRasterInstances) bunu AYNI fonksiyondan
+    //   okur. Iki ayri kosul yazmak, birinin unutuldugu ve modun yalnizca
+    //   yarim caistigi -- yani GPU culling acikken tam kalite, kapaliyken
+    //   proxy'li -- sessiz arizasini uretirdi.
+    static bool rasterScatterLodSplitEnabled();
+    // Instance basina dunya kuresi (cx, cy, cz, r); r < 0 => gizli.
+    // Global instance buffer ile AYNI indekslemeyi kullanir.
+    std::vector<float> m_rasterInstanceBounds;
+    void writeRasterInstanceBound(uint32_t globalSlot, const RasterInstance& ri, bool neverCull);
+    void rebuildRasterCullBindings();
 
     // Selection outline internals shared by the raster-mode composite path
     // and the Rendered-mode mask readback. Caller must hold m_mutex.

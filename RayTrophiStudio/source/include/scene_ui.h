@@ -649,7 +649,7 @@ public:
      
      // Viewport Display Settings (Blender-style overlay)
      struct ViewportDisplaySettings {
-         int shading_mode = 0;  // 0=Solid, 1=Material, 2=Rendered, 3=Matcap
+         int shading_mode = 1;  // 0=Solid, 1=Material/Realtime raster, 2=Rendered, 3=Matcap
             int matcap_preset = 0; // 0..9 allowed: 0=Solid clay, 1=User texture, 2..9=procedural presets
          bool show_gizmos = true;
          // Per-object silhouette outline drawn around the selected mesh. The

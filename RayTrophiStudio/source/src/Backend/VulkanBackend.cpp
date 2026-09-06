@@ -1,3 +1,4 @@
+#include "PostProcess/Exposure.h"
 /*
  * =========================================================================
  * Project:       RayTrophi Studio
@@ -26,6 +27,8 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include <mutex>   // live Vulkan device registry (simulation compute context owner)
+#include <vector>
 #include <cstdio>
 // Material State Field render-bridge telemetry (materialStateFieldBridgeStats).
 #include "MaterialStateField.h"
@@ -69,6 +72,48 @@
 #include "oidn_blend_cuda.h"
 
 namespace {
+
+// ★★★ LIVE Vulkan DEVICE REGISTRY — exists only so the simulation compute
+// context has an owner at all times.
+//
+// g_vulkan_sim_compute_ctx is a single global naming one VkDevice, but this
+// process runs two: the render backend and the dedicated raster viewport
+// backend. Every device creation overwrote the global, and every device
+// teardown cleared it if it happened to be the owner — with no handover. One
+// Rendered -> Material round trip therefore left the context EMPTY for the rest
+// of the session, and the only visible consequence was that GPU simulation
+// silently stopped having a device.
+//
+// Insertion order is meaningful: the most recently created survivor is the best
+// adopter, because it is the one whose device the rest of the session is
+// actually rendering with.
+std::mutex& liveVulkanDeviceMutex() {
+    static std::mutex m;
+    return m;
+}
+std::vector<VulkanRT::VulkanDevice*>& liveVulkanDevices() {
+    static std::vector<VulkanRT::VulkanDevice*> devices;
+    return devices;
+}
+void registerLiveVulkanDevice(VulkanRT::VulkanDevice* device) {
+    if (!device) return;
+    std::lock_guard<std::mutex> lock(liveVulkanDeviceMutex());
+    auto& list = liveVulkanDevices();
+    if (std::find(list.begin(), list.end(), device) == list.end()) {
+        list.push_back(device);
+    }
+}
+void unregisterLiveVulkanDevice(VulkanRT::VulkanDevice* device) {
+    std::lock_guard<std::mutex> lock(liveVulkanDeviceMutex());
+    auto& list = liveVulkanDevices();
+    list.erase(std::remove(list.begin(), list.end(), device), list.end());
+}
+VulkanRT::VulkanDevice* newestLiveVulkanDevice() {
+    std::lock_guard<std::mutex> lock(liveVulkanDeviceMutex());
+    auto& list = liveVulkanDevices();
+    return list.empty() ? nullptr : list.back();
+}
+
 bool isUsableTLASInstanceTransform(const Matrix4x4& m) {
     // Vulkan RT instance transforms must be finite and invertible. In particular,
     // a zero-scale "hidden" scatter slot is not a valid VkTransformMatrixKHR.
@@ -762,7 +807,9 @@ void VulkanDevice::shutdown() {
             if (m_lutImages[i].image || m_lutImages[i].view || m_lutImages[i].memory || m_lutImages[i].sampler) {
                 destroyImage(m_lutImages[i]);
             }
+            m_lutImages[i] = {};
         }
+        m_lutImagesStorageCapable = false;
 
         // Destroy skinning compute resources (persistent across frames).
         if (m_skinningPipeline) {
@@ -789,6 +836,7 @@ void VulkanDevice::shutdown() {
                 vkWaitForFences(m_device, 1, &m_frameSlots[i].fence, VK_TRUE, UINT64_MAX);
             }
         }
+        m_exposureMeter.shutdown();
         destroyFrameSlots();
         destroyDenoiserCopySlot();
 
@@ -863,6 +911,11 @@ void VulkanDevice::shutdown() {
             safeDestroy(blas.boneIndexBuffer);
             safeDestroy(blas.boneWeightBuffer);
             safeDestroy(blas.skinScratchBuffer);
+            safeDestroy(blas.persistentBoneMatsBuffer);
+            blas.persistentBoneMatsBufSize = 0;
+            // ★ Give the descriptor set back. Dropping it here leaked one pool
+            // slot per skinned BLAS per rebuild until GPU skinning died.
+            freeSkinningDescriptorSet(blas.skinningDescSet);
         }
         m_blasList.clear();
 
@@ -934,8 +987,18 @@ void VulkanDevice::shutdown() {
         // pointing at this freed device and crash in createBuffer on the next mesh op
         // (OptiX -> Vulkan -> bake access violation).
         RayTrophiSim::releaseSharedMeshComputeBackend();
+        // ★★★ Unregister FIRST, then clear, then let a survivor adopt. Doing it
+        // in this order is the whole point: adoptSimComputeContextIfOrphaned
+        // must not be able to hand the context back to the device that is being
+        // destroyed three lines below.
+        unregisterLiveVulkanDevice(this);
         if (g_vulkan_sim_compute_ctx.device == static_cast<void*>(m_device)) {
             g_vulkan_sim_compute_ctx = RayTrophiSim::SimulationComputeVulkanContext{};
+            // A second Vulkan device usually outlives this one (render backend
+            // torn down, raster viewport backend still running). Before this
+            // call the context simply stayed empty and the simulation lost its
+            // GPU compute path silently for the rest of the session.
+            adoptSimComputeContextIfOrphaned();
         }
 
         vkDestroyDevice(m_device, nullptr);
@@ -1441,16 +1504,16 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
 
     vkGetDeviceQueue(m_device, m_computeQueueFamily, 0, &m_computeQueue);
 
-    // Expose device handles for the Vulkan simulation compute backend.
-    g_vulkan_sim_compute_ctx.device           = static_cast<void*>(m_device);
-    g_vulkan_sim_compute_ctx.physical_device  = static_cast<void*>(m_physicalDevice);
-    g_vulkan_sim_compute_ctx.compute_queue    = static_cast<void*>(m_computeQueue);
-    g_vulkan_sim_compute_ctx.queue_family_index = m_computeQueueFamily;
     // Latch whether float SSBO atomics were actually enabled (not just supported)
     // so the sim compute backend can safely run fluid P2G scatter / density splat
     // on the GPU. False on the fallback path → those kernels stay on CPU.
-    g_vulkan_sim_compute_ctx.shader_atomic_float_enabled = enabledAtomicFloat;
-    g_vulkan_sim_compute_ctx.shader_float64_enabled = enabledShaderFloat64;
+    // Stored as members, not just published: this device may have to re-publish
+    // the context later if it outlives the device that owns it.
+    m_simAtomicFloatEnabled = enabledAtomicFloat;
+    m_simFloat64Enabled = enabledShaderFloat64;
+    // Expose device handles for the Vulkan simulation compute backend.
+    registerLiveVulkanDevice(this);
+    publishAsSimComputeContext();
     if (enabledAtomicFloat) {
         VK_INFO() << "[VulkanDevice] VK_EXT_shader_atomic_float enabled; fluid P2G/density can run on Vulkan GPU." << std::endl;
     }
@@ -1668,6 +1731,7 @@ VkBufferUsageFlags VulkanDevice::translateBufferUsage(BufferUsage usage) {
     if ((uint32_t)usage & (uint32_t)BufferUsage::TRANSFER_DST) flags |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if ((uint32_t)usage & (uint32_t)BufferUsage::ACCELERATION) flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     if ((uint32_t)usage & (uint32_t)BufferUsage::SHADER_BINDING) flags |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
+    if ((uint32_t)usage & (uint32_t)BufferUsage::INDIRECT) flags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     return flags;
 }
 
@@ -2419,11 +2483,15 @@ bool VulkanDevice::dispatchSkinningToBuffers(BufferHandle& baseVertexBuffer,
         if (!persistentBoneMatsBuffer.buffer || !persistentBoneMatsBuffer.memory) {
             persistentBoneMatsBuffer = {};
             persistentBoneMatsBufSize = 0;
-            skinningDescSet = VK_NULL_HANDLE;
+            // ★ free, don't drop: nulling the handle here leaked a pool slot too.
+            freeSkinningDescriptorSet(skinningDescSet);
             return false;
         }
         persistentBoneMatsBufSize = boneMatSize;
-        skinningDescSet = VK_NULL_HANDLE;
+        // The bone buffer moved, so the cached set points at a dead buffer.
+        // (The rewrite below would fix the binding anyway, but the set is
+        //  released rather than abandoned so the pool stays accounted for.)
+        freeSkinningDescriptorSet(skinningDescSet);
     }
 
     void* mapped = nullptr;
@@ -2441,8 +2509,22 @@ bool VulkanDevice::dispatchSkinningToBuffers(BufferHandle& baseVertexBuffer,
         allocInfo.pSetLayouts = &m_skinningDescLayout;
         if (vkAllocateDescriptorSets(m_device, &allocInfo, &skinningDescSet) != VK_SUCCESS ||
             skinningDescSet == VK_NULL_HANDLE) {
+            // ★ Say WHY. This returns false, the caller silently skins on the
+            // CPU, and the user sees "animation got slow after I added an
+            // object" with nothing in the log tying the two together. A leak
+            // shows up here as live == capacity.
+            static bool logged = false;
+            if (!logged) {
+                SCENE_LOG_WARN("[Vulkan] GPU skinning disabled: descriptor pool exhausted ("
+                    + std::to_string(m_skinningDescSetsLive) + "/"
+                    + std::to_string(m_skinningDescPoolCapacity)
+                    + " sets live). Skinning falls back to the CPU from here.");
+                logged = true;
+            }
+            skinningDescSet = VK_NULL_HANDLE;
             return false;
         }
+        ++m_skinningDescSetsLive;
     }
 
     const uint64_t outNormalByteOffset =
@@ -5717,11 +5799,16 @@ void VulkanDevice::updateHairMaterialBuffer(const std::vector<VulkanRT::HairGpuM
 
 void VulkanDevice::updateAtmosphereLUTs(const ImageHandle* lutImages) {
     if (!lutImages) return;
-    
+
     // Store the LUT image handles
     for (int i = 0; i < 4; i++) {
         m_lutImages[i] = lutImages[i];
     }
+    // Default to "not storage": the CPU upload path creates TRANSFER_DST|SAMPLED
+    // images and reaches this function too. generateAtmosphereLUTGPU re-arms the
+    // flag for the images IT created, so the compute path can never reuse a
+    // sampled-only image as an imageStore target.
+    m_lutImagesStorageCapable = false;
     // Stored LUT handles updated
     
     // If RT descriptor set already exists, update binding 8 with LUT samplers
@@ -6474,16 +6561,32 @@ bool VulkanDevice::traceRaysTonemapAndReadback(uint32_t w, uint32_t h,
         0, 0, nullptr, 0, nullptr, 1, &hdrBarrier);
 
     // ── 3. Dispatch tonemap compute ──────────────────────────────────────────
+    waitFrameSlot(0);
+    m_exposureMeter.record(cmd, hdrImage.view, 0);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_tonemapPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_tonemapPipelineLayout, 0, 1, &tmDescSet, 0, nullptr);
+    // ★ Duzen tonemap.comp'taki Push blogunun AYNISI; boyut
+    //   VulkanDevicePipelines.cpp'de kayitli (68).
     struct TonemapPush {
         uint32_t width, height, debugView;
         float exposure, heatScale, bounceScale, overlay;
         float camX, camY, camZ;
+        float postExposure, postGamma, postSaturation, postColorTemperature;
+        float postVignetteStrength;
+        uint32_t postToneMapping, postVignetteEnabled;
+        float postCameraExposure;
     } tmPush{ w, h, m_tmDebugView,
               m_tmExposure, m_tmHeatScale, m_tmBounceScale, m_tmOverlay,
-              m_tmCam[0], m_tmCam[1], m_tmCam[2] };
+              m_tmCam[0], m_tmCam[1], m_tmCam[2],
+              g_display_post.exposure, g_display_post.gamma,
+              g_display_post.saturation, g_display_post.color_temperature,
+              g_display_post.vignette_strength,
+              static_cast<uint32_t>(g_display_post.tone_mapping),
+              static_cast<uint32_t>(g_display_post.vignette_enabled),
+              g_display_post.camera_exposure };
+    static_assert(sizeof(TonemapPush) == 72u,
+                  "tonemap push ABI changed; update pc.size in createTonemapPipeline");
     vkCmdPushConstants(cmd, m_tonemapPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
         0, sizeof(TonemapPush), &tmPush);
     const uint32_t gx = (w + 7) / 8;
@@ -6525,7 +6628,8 @@ bool VulkanDevice::traceRaysTonemapAndReadback(uint32_t w, uint32_t h,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         0, 0, nullptr, 0, nullptr, 1, &ldrBarrier);
 
-    endSingleTimeCommands(cmd); // single vkQueueWaitIdle; stage 2 will replace with fences
+    endSingleTimeCommands(cmd);
+    m_exposureMeter.consume(0); // single vkQueueWaitIdle; stage 2 will replace with fences
     return true;
 }
 
@@ -6731,6 +6835,49 @@ void VulkanDevice::bindStorageImage(uint32_t pipelineIndex, uint32_t bindingInde
     m_activeDescriptorSets = { descriptorSet };
 }
 
+void VulkanDevice::publishAsSimComputeContext() {
+    if (!m_device || !m_computeQueue) return;
+    g_vulkan_sim_compute_ctx.device             = static_cast<void*>(m_device);
+    g_vulkan_sim_compute_ctx.physical_device    = static_cast<void*>(m_physicalDevice);
+    g_vulkan_sim_compute_ctx.compute_queue      = static_cast<void*>(m_computeQueue);
+    g_vulkan_sim_compute_ctx.queue_family_index = m_computeQueueFamily;
+    g_vulkan_sim_compute_ctx.shader_atomic_float_enabled = m_simAtomicFloatEnabled;
+    g_vulkan_sim_compute_ctx.shader_float64_enabled      = m_simFloat64Enabled;
+}
+
+void VulkanDevice::adoptSimComputeContextIfOrphaned() {
+    // Only ever fills a VACANT context. Stealing a live one would migrate the
+    // simulation off a device that still owns its buffers, which is the failure
+    // this whole mechanism exists to avoid.
+    if (g_vulkan_sim_compute_ctx.device != nullptr) return;
+    VulkanDevice* survivor = newestLiveVulkanDevice();
+    if (!survivor) {
+        // Legitimate at shutdown, and worth one line: any GPU simulation from
+        // here on runs on the CPU fallback, which looks like "the solver got
+        // slow" rather than like a missing device.
+        SCENE_LOG_ON_CHANGE("simctx.owner", 0ll,
+            "[SimComputeCtx] owner device destroyed and no Vulkan device "
+            "survives — GPU simulation compute is unavailable until a backend "
+            "is created again.");
+        return;
+    }
+    survivor->publishAsSimComputeContext();
+    // ★ The shared mesh compute backend caches which device it was built on and
+    // rebuilds when the global changes, but it does that lazily on the next
+    // acquire. Release here, while the survivor's device is valid, so the next
+    // mesh op builds against the device we just published instead of holding a
+    // handle into the one about to be destroyed.
+    RayTrophiSim::releaseSharedMeshComputeBackend();
+    SCENE_LOG_ON_CHANGE("simctx.owner",
+        (long long)reinterpret_cast<uintptr_t>(survivor->getDevice()),
+        std::string("[SimComputeCtx] owner device destroyed; surviving device ") +
+        std::to_string(reinterpret_cast<uintptr_t>(survivor->getDevice())) +
+        " adopted the simulation compute context (atomicFloat=" +
+        (g_vulkan_sim_compute_ctx.shader_atomic_float_enabled ? "1" : "0") +
+        " float64=" +
+        (g_vulkan_sim_compute_ctx.shader_float64_enabled ? "1" : "0") + ").");
+}
+
 void VulkanDevice::waitIdle() { if (m_device) vkDeviceWaitIdle(m_device); }
 void VulkanDevice::submitAndWait() { if (m_computeQueue) vkQueueWaitIdle(m_computeQueue); }
 
@@ -6812,6 +6959,7 @@ bool VulkanDevice::waitFrameSlot(uint32_t slot, uint64_t timeoutNs) {
     if (m_frameSlots[slot].fence == VK_NULL_HANDLE) return false;
     if (!m_frameSlots[slot].everSubmitted) return true; // nothing in flight
     VkResult res = vkWaitForFences(m_device, 1, &m_frameSlots[slot].fence, VK_TRUE, timeoutNs);
+    if (res == VK_SUCCESS) m_exposureMeter.consume(slot);
     return res == VK_SUCCESS;
 }
 
@@ -6999,6 +7147,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
         VkResult wr = vkWaitForFences(m_device, 1, &fs.fence, VK_TRUE, UINT64_MAX);
         if (wr != VK_SUCCESS) return false;
     }
+    m_exposureMeter.consume(slot);
     vkResetFences(m_device, 1, &fs.fence);
 
     if (vkResetCommandBuffer(fs.cmd, 0) != VK_SUCCESS) return false;
@@ -7061,16 +7210,31 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
         0, 1, &aovBarrier, 0, nullptr, 1, &hdrBarrier);
 
     // ── 3. Tonemap compute ───────────────────────────────────────────────────
+    m_exposureMeter.record(cmd, hdrImage.view, slot);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_tonemapPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_tonemapPipelineLayout, 0, 1, &m_tonemapDescSet, 0, nullptr);
+    // ★ Duzen tonemap.comp'taki Push blogunun AYNISI; boyut
+    //   VulkanDevicePipelines.cpp'de kayitli (68).
     struct TonemapPush {
         uint32_t width, height, debugView;
         float exposure, heatScale, bounceScale, overlay;
         float camX, camY, camZ;
+        float postExposure, postGamma, postSaturation, postColorTemperature;
+        float postVignetteStrength;
+        uint32_t postToneMapping, postVignetteEnabled;
+        float postCameraExposure;
     } tmPush{ w, h, m_tmDebugView,
               m_tmExposure, m_tmHeatScale, m_tmBounceScale, m_tmOverlay,
-              m_tmCam[0], m_tmCam[1], m_tmCam[2] };
+              m_tmCam[0], m_tmCam[1], m_tmCam[2],
+              g_display_post.exposure, g_display_post.gamma,
+              g_display_post.saturation, g_display_post.color_temperature,
+              g_display_post.vignette_strength,
+              static_cast<uint32_t>(g_display_post.tone_mapping),
+              static_cast<uint32_t>(g_display_post.vignette_enabled),
+              g_display_post.camera_exposure };
+    static_assert(sizeof(TonemapPush) == 72u,
+                  "tonemap push ABI changed; update pc.size in createTonemapPipeline");
     vkCmdPushConstants(cmd, m_tonemapPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
         0, sizeof(TonemapPush), &tmPush);
     const uint32_t gx = (w + 7) / 8;
@@ -7131,6 +7295,22 @@ bool VulkanDevice::hasSkinningPipeline() const {
            m_skinningPipelineLayout != VK_NULL_HANDLE &&
            m_skinningDescLayout != VK_NULL_HANDLE &&
            m_skinningDescPool != VK_NULL_HANDLE;
+}
+
+// Give a skinning descriptor set back to the shared pool. Safe to call with a
+// null handle or after the pool is gone.
+//
+// ★ Callers must have finished the GPU work that uses the set. Both current
+// callers qualify: dispatchSkinningToBuffers / dispatchSkinning submit through
+// endSingleTimeCommands, which waits on a fence before returning, and the BLAS
+// teardown path runs after vkDeviceWaitIdle.
+void VulkanDevice::freeSkinningDescriptorSet(VkDescriptorSet& set) {
+    if (set == VK_NULL_HANDLE) return;
+    if (m_device && m_skinningDescPool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(m_device, m_skinningDescPool, 1, &set);
+        if (m_skinningDescSetsLive > 0) --m_skinningDescSetsLive;
+    }
+    set = VK_NULL_HANDLE;
 }
 
 void VulkanDevice::dispatchSculpt(const BufferHandle& positions, const BufferHandle& normals, const BufferHandle& weights,
@@ -7216,9 +7396,12 @@ void VulkanDevice::dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix
         if (!blas.persistentBoneMatsBuffer.buffer || !blas.persistentBoneMatsBuffer.memory) {
             blas.persistentBoneMatsBuffer = {};
             blas.persistentBoneMatsBufSize = 0;
+            freeSkinningDescriptorSet(blas.skinningDescSet);
             return;
         }
         blas.persistentBoneMatsBufSize = boneMatSize;
+        // Buffer moved; release the cached set rather than abandoning it.
+        freeSkinningDescriptorSet(blas.skinningDescSet);
     }
     {
         void* m = nullptr;
@@ -7238,8 +7421,18 @@ void VulkanDevice::dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix
         allocInfo.pSetLayouts = &m_skinningDescLayout;
         if (vkAllocateDescriptorSets(m_device, &allocInfo, &blas.skinningDescSet) != VK_SUCCESS ||
             blas.skinningDescSet == VK_NULL_HANDLE) {
+            static bool logged = false;
+            if (!logged) {
+                SCENE_LOG_WARN("[Vulkan] RT GPU skinning disabled: descriptor pool exhausted ("
+                    + std::to_string(m_skinningDescSetsLive) + "/"
+                    + std::to_string(m_skinningDescPoolCapacity)
+                    + " sets live). The raster viewport shares this pool.");
+                logged = true;
+            }
+            blas.skinningDescSet = VK_NULL_HANDLE;
             return;
         }
+        ++m_skinningDescSetsLive;
     }
 
     // normalBuffer is an aliased view of the same VkBuffer as vertexBuffer but at byte
@@ -7601,7 +7794,8 @@ bool VulkanBackendAdapter::initialize() {
     if (ok && !m_cachedLights.empty()) {
         VK_INFO() << "[VulkanBackendAdapter] Uploading cached lights after device init (" << m_cachedLights.size() << ")" << std::endl;
         setLights(m_cachedLights);
-        m_cachedLights.clear();
+        // Keep the canonical CPU snapshot: Material Preview shadow view
+        // generation uses the same visible-light ordering as setLights().
     }
 
     if (ok) {
@@ -9825,6 +10019,10 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
             // batch scratch this allocation is owned by the handle and must die
             // with the acceleration structure.
             destroyOwnedBlasBuffer(blas.skinScratchBuffer);
+            destroyOwnedBlasBuffer(blas.persistentBoneMatsBuffer);
+            blas.persistentBoneMatsBufSize = 0;
+            // ★ Same leak as the other teardown path — see freeSkinningDescriptorSet.
+            m_device->freeSkinningDescriptorSet(blas.skinningDescSet);
         }
         m_device->m_blasList.clear();
 
@@ -12858,13 +13056,16 @@ void VulkanBackendAdapter::uploadMaterialPrograms(const std::vector<uint32_t>& w
     // uploadMaterials() releasing the lock and this call could still be reading
     // the buffer that updateMatProgramBuffer destroys on growth.
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    drainInteractiveViewportInFlight();
     // Empty stream still needs a valid buffer (materialCount=0 => all lookups NONE).
     if (words.empty()) {
         const uint32_t emptyProg = 0u;
         m_device->updateMatProgramBuffer(&emptyProg, sizeof(uint32_t));
-        return;
+    } else {
+        m_device->updateMatProgramBuffer(words.data(), words.size() * sizeof(uint32_t));
     }
-    m_device->updateMatProgramBuffer(words.data(), words.size() * sizeof(uint32_t));
+    updateMaterialPreviewProgramBinding();
+    m_interactiveViewport.dirty = true;
 }
 
 void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialData>& materials) {
@@ -14095,6 +14296,17 @@ void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& 
         // Upload packed lights to GPU
         m_device->updateLightBuffer(gpuLights.data(), gpuLights.size() * sizeof(::VulkanRT::VkGpuLight), (uint32_t)gpuLights.size());
         resetAccumulation();
+    } else {
+        // ★★★ Burasi eskiden BOSTU. Sahnedeki butun isiklar silindiginde (ya da
+        //   hepsi gizlendiginde) m_lightCount ESKI degerinde kaliyordu ve
+        //   sahne SILINMIS isiklarla aydinlatilmaya devam ediyordu. Kimse bunu
+        //   bug diye raporlamaz: "isigi sildim ama sahne hala aydinlik" bir
+        //   aydinlatma tercihi gibi okunur.
+        //   ★ Buffer'in kendisi bosaltilmiyor -- binding'in gecerli kalmasi
+        //   gerekiyor; sayiyi 0 yapmak icerigin okunmamasini garanti eder.
+        ::VulkanRT::VkGpuLight none{};
+        m_device->updateLightBuffer(&none, sizeof(none), 0);
+        resetAccumulation();
     }
 }
 void VulkanBackendAdapter::setRenderParams(const RenderParams& p) { 
@@ -14235,6 +14447,17 @@ void VulkanBackendAdapter::syncCamera(const Camera& cam) {
     cp.ev_compensation = cam.ev_compensation;
     cp.autoAE = cam.auto_exposure;
     cp.usePhysicalExposure = cam.use_physical_exposure;
+    // ★★★ Bu cagri 0.0 dondurebilir ve 0.0 bir DEGER DEGIL SINYALDIR:
+    //   "use_physical_exposure acik, carpani sen hesapla" demek. setCamera
+    //   asagida tam olarak bunu yapiyor. Formulun bu depoda DORT kopyasi
+    //   olmasinin sebebi bu sentinel: her backend kendi kopyasini tasiyor.
+    //   2026-09-03'te Camera::exposureFactor() gercek degeri donduren TEK
+    //   tanim olarak eklendi ve CPU tarafindaki iki kopya ona indirildi;
+    //   backend'lerin kopyalari BILEREK dokunulmadan birakildi -- sentinel
+    //   sozlesmesini ayni partide degistirmek OptiX yolunu da riske atardi.
+    //   ★★ Iki formul BIREBIR ayni sabitlerle yazildi (baseline 0.00003125,
+    //   * 2.0f); birini kalibre eden otekini de kalibre etmeli, yoksa realtime
+    //   ile Rendered ayni sahnede farkli parlaklik verir.
     cp.exposureFactor = cam.getPhysicalExposureMultiplier();
 
     // Pro camera features
@@ -15381,6 +15604,13 @@ bool VulkanBackendAdapter::shouldUseInteractiveViewportImpl() const {
 
 void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipeline) {
     if (!m_device) return;
+    destroyMaterialPreviewTransmissionResources();
+    if (!keepPipeline) {
+        destroyMaterialPreviewSdfSurfaceResources();
+        destroyMaterialPreviewVolumeResources();
+        destroyMaterialPreviewShadowResources();
+        destroyMaterialPreviewIblResources();
+    }
     VkDevice vkDevice = m_device->getDevice();
 
     if (m_interactiveViewport.framebuffer != VK_NULL_HANDLE) {
@@ -15412,6 +15642,19 @@ void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipe
         vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.materialPreviewDescPool, nullptr);
         m_interactiveViewport.materialPreviewDescPool = VK_NULL_HANDLE;
         m_interactiveViewport.materialPreviewDescSet = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewSceneGlobals.buffer && !keepPipeline) {
+        if (m_interactiveViewport.materialPreviewSceneGlobalsMapped) {
+            m_device->unmapBuffer(m_interactiveViewport.materialPreviewSceneGlobals);
+            m_interactiveViewport.materialPreviewSceneGlobalsMapped = nullptr;
+        }
+        m_device->destroyBuffer(m_interactiveViewport.materialPreviewSceneGlobals);
+        m_interactiveViewport.materialPreviewSceneGlobals = {};
+        // Yeniden kurulumda descriptor'lar YENIDEN yazilmali; bu iki satir
+        // olmazsa guncelleyici "degisiklik yok" deyip erken doner ve set yok
+        // edilmis bir buffer'a bakar.
+        m_interactiveViewport.boundPreviewLightBuffer = VK_NULL_HANDLE;
+        m_interactiveViewport.lastPreviewSceneLightCount = UINT32_MAX;
     }
     if (m_interactiveViewport.materialPreviewDescLayout != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.materialPreviewDescLayout, nullptr);
@@ -15458,9 +15701,47 @@ void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipe
     }
 }
 
+// ★★★ Atmosfer LUT compute hattini kur (bir kez denenir).
+//
+// Bu fonksiyon var cunku hat eskiden YALNIZCA renderProgressiveImpl'in RT
+// tembel init blogunda kuruluyordu ve o blok etkilesimli viewport modlarinda
+// (Solid/Matcap/MaterialPreview) ERKEN DONULDUGU icin hic calismiyordu.
+// Viewport backend'i kendi VulkanDevice'ini tutan AYRI bir adapter oldugundan
+// sonuc suydu: etkilesimli modda hasAtmosphereLUTPipeline() DAIMA false,
+// generateAtmosphereLUTGPU() daima false, ve her Physical Sky duzenlemesi
+// sessizce CPU LUT'una dusuyordu -- 256x128 SkyView x 128 adim x her adimda
+// ic ice 40 adimlik transmittance integrali (~168M exp) ARTI ucustaki kareler
+// LUT goruntulerini ornekliyorken destroy/create. Birincisi "her parametre
+// asiri maliyetli", ikincisi VK_ERROR_DEVICE_LOST demekti.
+bool VulkanBackendAdapter::ensureAtmosphereLUTPipeline(const std::string& shaderDir) {
+    if (!m_device || !m_device->isInitialized()) return false;
+    if (m_device->hasAtmosphereLUTPipeline()) return true;
+    if (m_atmosphereLutPipelineAttempted) return false;
+    m_atmosphereLutPipelineAttempted = true;
+
+    const std::string spvPath = shaderDir + "/atmosphere_lut.spv";
+    if (!std::filesystem::exists(spvPath)) {
+        SCENE_LOG_INFO("[Vulkan] atmosphere_lut.spv not found — using CPU LUT upload fallback.");
+        return false;
+    }
+    std::vector<std::uint32_t> atmosphereSPV = loadSPV(spvPath);
+    if (atmosphereSPV.empty() || !m_device->createAtmosphereLUTPipeline(atmosphereSPV)) {
+        SCENE_LOG_ERROR("[Vulkan] Failed to create Atmosphere LUT compute pipeline; falling back to CPU LUT upload.");
+        return false;
+    }
+    SCENE_LOG_INFO("[Vulkan] Atmosphere LUT compute pipeline ready (" +
+                   std::string(sceneTextureOwnerScope()) + ").");
+    return true;
+}
+
 bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::string& shaderDir, int width, int height) {
     if (!m_device || !m_device->isInitialized() || width <= 0 || height <= 0) return false;
     if (!m_device->supportsGraphicsQueue()) return false;
+
+    // Nishita gokyuzu etkilesimli modda da LUT'tan okunuyor (binding 8 /
+    // material preview LUT slotlari). RT hatti burada kurulmadigi icin LUT
+    // compute hatti da kurulmali; yoksa her sky duzenlemesi CPU yoluna duser.
+    ensureAtmosphereLUTPipeline(shaderDir);
 
     VkDevice vkDevice = m_device->getDevice();
 
@@ -15830,13 +16111,13 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                 if (mpVertModule && mpFragModule) {
                     VkPhysicalDeviceProperties mpDevProps{};
                     vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpDevProps);
-                    const uint32_t mpTextureArrayLen = (mpDevProps.limits.maxPerStageDescriptorSampledImages > 2u)
+                    const uint32_t mpTextureArrayLen = (mpDevProps.limits.maxPerStageDescriptorSampledImages > 12u)
                         ? (std::min)(static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY),
-                                     mpDevProps.limits.maxPerStageDescriptorSampledImages - 2u)
+                                     mpDevProps.limits.maxPerStageDescriptorSampledImages - 12u)
                         : 1u;
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
-                    VkDescriptorSetLayoutBinding mpDslBindings[5]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[21]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
@@ -15858,6 +16139,62 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpDslBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[4].descriptorCount = 1;
                     mpDslBindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // ★★★ binding 5 (sahne isiklari) + 6 (onizleme sahne
+                    //   globalleri). Bu kurulum VulkanViewportBackend'dekinin
+                    //   IKIZI: material preview hattinin iki ayri descriptor
+                    //   set kurulumu var. Yalnizca birini buyutmek, otekinde
+                    //   shader'in STATIK olarak kullandigi iki binding'in
+                    //   layout'ta hic bulunmadigi bir pipeline uretirdi.
+                    mpDslBindings[5].binding = 5;
+                    mpDslBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[5].descriptorCount = 1;
+                    mpDslBindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[6].binding = 6;
+                    mpDslBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[6].descriptorCount = 1;
+                    mpDslBindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[7].binding = 7;
+                    mpDslBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[7].descriptorCount = 1;
+                    mpDslBindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[8].binding = 8;
+                    mpDslBindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[8].descriptorCount = 1;
+                    mpDslBindings[8].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[9].binding = 9;
+                    mpDslBindings[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[9].descriptorCount = 1;
+                    mpDslBindings[9].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    for (uint32_t binding = 10; binding <= 12; ++binding) {
+                        mpDslBindings[binding].binding = binding;
+                        mpDslBindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        mpDslBindings[binding].descriptorCount = 1;
+                        mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    }
+                    for (uint32_t binding = 13; binding <= 15; ++binding) {
+                        mpDslBindings[binding].binding = binding;
+                        mpDslBindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        mpDslBindings[binding].descriptorCount = 1;
+                        mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    }
+                    mpDslBindings[16].binding = 16;
+                    mpDslBindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[16].descriptorCount = 1;
+                    mpDslBindings[16].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    for (uint32_t binding = 17; binding <= 18; ++binding) {
+                        mpDslBindings[binding].binding = binding;
+                        mpDslBindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        mpDslBindings[binding].descriptorCount = 1;
+                        mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    }
+                    mpDslBindings[19].binding = 19;
+                    mpDslBindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                    mpDslBindings[19].descriptorCount = 1;
+                    mpDslBindings[19].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[20].binding = 20;
+                    mpDslBindings[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[20].descriptorCount = 1;
+                    mpDslBindings[20].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
                     // Guard: check device push-constant limit before touching descriptor/pipeline layout.
                     // Some older drivers crash inside vkCreateDescriptorSetLayout or vkCreatePipelineLayout
@@ -15873,9 +16210,9 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 5;
+                    mpDslci.bindingCount = 21;
                     mpDslci.pBindings = mpDslBindings;
-                    VkDescriptorBindingFlags mpBindingFlags[5] = {
+                    VkDescriptorBindingFlags mpBindingFlags[21] = {
                         0,
                         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
                         0,
@@ -15884,7 +16221,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     };
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 5;
+                    mpBindingFlagsCI.bindingCount = 21;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     mpDslci.pNext = &mpBindingFlagsCI;
                     if (mpPushOk) {
@@ -15893,14 +16230,19 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     }
 
                     // Descriptor pool
-                    VkDescriptorPoolSize mpPoolSizes[2]{};
+                    VkDescriptorPoolSize mpPoolSizes[3]{};
                     mpPoolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    mpPoolSizes[0].descriptorCount = 3;
+                    // 0 (materials) + 3 (terrain) + 4 (material ext)
+                    // + 5 (sahne isiklari) + 6 (onizleme sahne globalleri)
+                    // + 7 (shadow records) + 16 (material graph program)
+                    mpPoolSizes[0].descriptorCount = 8;
                     mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 2u;
+                    mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 12u;
+                    mpPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                    mpPoolSizes[2].descriptorCount = 1;
                     VkDescriptorPoolCreateInfo mpDpci{};
                     mpDpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-                    mpDpci.poolSizeCount = 2;
+                    mpDpci.poolSizeCount = 3;
                     mpDpci.pPoolSizes = mpPoolSizes;
                     mpDpci.maxSets = 1;
                     vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
@@ -16039,6 +16381,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                         mpDsai.descriptorSetCount = 1;
                         mpDsai.pSetLayouts = &m_interactiveViewport.materialPreviewDescLayout;
                         vkAllocateDescriptorSets(vkDevice, &mpDsai, &m_interactiveViewport.materialPreviewDescSet);
+                        updateMaterialPreviewProgramBinding();
 
                         if (m_device->m_materialBuffer.buffer && m_interactiveViewport.materialPreviewDescSet) {
                             VkDescriptorBufferInfo matBufInfo{};
@@ -16160,12 +16503,19 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
         }
     }
 
+    if (m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE) {
+        ensureMaterialPreviewIblResources(shaderDir);
+        ensureMaterialPreviewShadowResources(shaderDir);
+    }
+
     if (m_interactiveViewport.width == width &&
         m_interactiveViewport.height == height &&
         m_interactiveViewport.framebuffer != VK_NULL_HANDLE &&
         m_interactiveViewport.colorImage.image != VK_NULL_HANDLE &&
         m_interactiveViewport.depthImage.image != VK_NULL_HANDLE &&
-        m_interactiveViewport.stagingBuffer.buffer != VK_NULL_HANDLE) {
+        m_interactiveViewport.stagingBuffer.buffer != VK_NULL_HANDLE &&
+        (m_interactiveViewport.materialPreviewDescSet == VK_NULL_HANDLE ||
+         m_materialPreviewTransmission != nullptr)) {
         return true;
     }
 
@@ -16209,6 +16559,10 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
         destroyInteractiveViewportResources(true);
         return false;
     }
+
+    ensureMaterialPreviewTransmissionResources((uint32_t)width, (uint32_t)height);
+    ensureMaterialPreviewSdfSurfaceResources(shaderDir);
+    ensureMaterialPreviewVolumeResources(shaderDir);
 
     m_interactiveViewport.width = width;
     m_interactiveViewport.height = height;
@@ -16274,10 +16628,12 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
     };
     uint64_t camHash = hashCamera(m_camera);
     {
-        // Grid settings join the change hash so slider edits invalidate the cached frame.
+        // Viewport-only render settings join the change hash so UI/API edits
+        // invalidate the cached frame even when the camera stays still.
         auto mixGrid = [&](float v) { uint32_t bits; std::memcpy(&bits, &v, 4); camHash ^= bits; camHash *= 1099511628211ull; };
         mixGrid(::render_settings.grid_fade_distance);
         mixGrid(::render_settings.grid_opacity);
+        mixGrid(static_cast<float>(::render_settings.material_preview_lighting_preset));
     }
     if (!m_interactiveViewport.dirty && camHash == m_lastCameraHash &&
         m_interactiveViewport.width == width && m_interactiveViewport.height == height) {
@@ -16381,6 +16737,9 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 case ::RasterViewportQualityPreset::Performance: rasterQualityScale = 0.58; break;
                 case ::RasterViewportQualityPreset::Balanced: rasterQualityScale = 0.78; break;
                 case ::RasterViewportQualityPreset::Quality: rasterQualityScale = 1.0; break;
+                // ★ Full modda LOD ayrimi hic kurulmaz; hedefi tavana cekmek
+                //   telemetrinin uygulanan davranisla celismemesi icin.
+                case ::RasterViewportQualityPreset::Full: rasterQualityScale = 1.0; minBudget = maxBudget; break;
                 case ::RasterViewportQualityPreset::Auto:
                 default: allowAdaptiveRasterBudget = true; break;
             }
@@ -16392,6 +16751,7 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 case ::RasterViewportQualityPreset::Performance: rasterQualityScale = 0.45; break;
                 case ::RasterViewportQualityPreset::Balanced: rasterQualityScale = 0.65; break;
                 case ::RasterViewportQualityPreset::Quality: rasterQualityScale = 1.0; break;
+                case ::RasterViewportQualityPreset::Full: rasterQualityScale = 1.0; minBudget = maxBudget; break;
                 case ::RasterViewportQualityPreset::Auto:
                 default:
                     rasterQualityScale = 0.72;
@@ -16403,14 +16763,14 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         const double referencePixels = 1920.0 * 1080.0;
         const double resolutionScale = std::sqrt(referencePixels / pixelCount);
         const double feedbackScale = allowAdaptiveRasterBudget
-            ? (std::clamp)(static_cast<double>(m_rasterScatterBudgetScale), 0.35, 1.0)
+            ? (std::clamp)(static_cast<double>(m_rasterScatterTargetScale), 0.35, 1.0)
             : 1.0;
         const uint64_t adaptiveBudget = static_cast<uint64_t>(
             baseBudgetMillions * 1000.0 * 1000.0 * resolutionScale * rasterQualityScale * feedbackScale);
         if (!m_rasterScatterPaintActive) {
-            m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
+            m_rasterScatterTriangleTarget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
             if (!allowAdaptiveRasterBudget) {
-                m_rasterScatterBudgetScale = 1.0f;
+                m_rasterScatterTargetScale = 1.0f;
             }
         }
     }
@@ -16434,11 +16794,21 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         }
     }
 
+    // ★★★ Komut tamponu BASLAMADAN once: descriptor guncellemesi ve mapped
+    //   yazma, ucustaki bir kare onlari kullaniyorken yapilamaz.
+    m_interactiveViewport.materialPreviewBoundMaterialCount =
+        m_device ? m_device->m_materialCount : 0u;
+    prepareMaterialPreviewShadowFrame();
+    updateMaterialPreviewSceneLightBindings();
+    updateMaterialPreviewSdfSurfaceBinding();
+    updateMaterialPreviewVolumeBinding();
+
     VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) {
         m_interactiveViewport.dirty = true;
         return;
     }
+    recordMaterialPreviewShadowPass(cmd);
 
     VkClearValue clearValues[2]{};
     // Use World's solid background color for the raster viewport clear
@@ -16460,6 +16830,8 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
     renderPassInfo.pClearValues = clearValues;
 
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    recordMaterialPreviewSkyPass(cmd, view, static_cast<uint32_t>(width),
+                                 static_cast<uint32_t>(height));
 
     // Decide which pipeline to use based on viewport mode
     const bool useMaterialPreview = (m_viewportMode == ViewportMode::MaterialPreview) &&
@@ -16536,6 +16908,7 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                     case ::RasterViewportQualityPreset::Performance: previewQuality = 1u; break;
                     case ::RasterViewportQualityPreset::Balanced: previewQuality = 2u; break;
                     case ::RasterViewportQualityPreset::Quality: previewQuality = 3u; break;
+                    case ::RasterViewportQualityPreset::Full: previewQuality = 3u; break;
                     case ::RasterViewportQualityPreset::Auto:
                     default: previewQuality = 2u; break;
                 }
@@ -16634,6 +17007,15 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 vkCmdDraw(cmd, blas.vertexCount, 1, 0, 0);
             }
         }
+    }
+
+    if (useMaterialPreview) {
+        recordMaterialPreviewVolumePass(
+            cmd, viewProj, view, static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height));
+        recordMaterialPreviewSdfSurfacePass(
+            cmd, viewProj, view, static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height));
     }
 
     // ── Reference Grid (auto-orients to the active plane, adaptive spacing) ──
@@ -17013,7 +17395,31 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         rePresentCachedFrame();
         return;
     }
-    
+
+    // A post-processing panel edit (exposure/gamma/saturation/tone mapping/
+    // vignette/camera exposure) made AFTER accumulation has already converged
+    // must still reach the presented frame. While actively accumulating this
+    // is moot (every new sample's tonemap dispatch already reads the current
+    // g_display_post — see submitTraceTonemapAsync's TonemapPush), but once
+    // m_currentSamples >= m_targetSamples nothing re-triggers that dispatch on
+    // its own. Piggyback on the existing tonemap-only refresh path (below)
+    // instead of adding a second mechanism: any change here just sets the same
+    // m_tonemapRefreshPending flag the debug-view toggle already uses.
+    {
+        const auto& dp = g_display_post;
+        uint64_t sig = 0;
+        auto mix = [&sig](uint32_t bits) { sig = sig * 1099511628211ull + bits; };
+        auto mixFloat = [&](float v) { uint32_t bits; std::memcpy(&bits, &v, sizeof(bits)); mix(bits); };
+        mixFloat(dp.exposure); mixFloat(dp.gamma); mixFloat(dp.saturation);
+        mixFloat(dp.color_temperature); mixFloat(dp.vignette_strength);
+        mix((uint32_t)dp.tone_mapping); mix((uint32_t)dp.vignette_enabled);
+        mixFloat(dp.camera_exposure);
+        if (rtpost::meterEnabled() || sig != m_lastDisplayPostSignature) {
+            m_lastDisplayPostSignature = sig;
+            m_tonemapRefreshPending = true;
+        }
+    }
+
     if (this->m_currentSamples >= this->m_targetSamples) {
         bool tonemapRefreshed = false;
         // ── TONEMAP-ONLY PRESENTATION REFRESH ────────────────────────────────
@@ -17517,6 +17923,8 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             }
         }
 
+        if (std::filesystem::exists(shaderDir + "/exposure_histogram.spv"))
+            m_device->initializeExposureMeter(loadSPV(shaderDir + "/exposure_histogram.spv"));
         // Load Tonemap Compute Shader (optional — when present, render path skips the
         // per-frame CPU Reinhard+sRGB loop and reads back 1/4 the bytes).
         if (std::filesystem::exists(shaderDir + "/tonemap.spv")) {
@@ -17550,16 +17958,10 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             SCENE_LOG_INFO("[Vulkan] stylize.spv not found — using CPU stylize fallback.");
         }
 
-        // Load Atmosphere LUT Compute Shader (optional; CPU LUT path remains fallback).
-        if (std::filesystem::exists(shaderDir + "/atmosphere_lut.spv")) {
-            std::vector<std::uint32_t> atmosphereSPV = loadSPV(shaderDir + "/atmosphere_lut.spv");
-            if (m_device->createAtmosphereLUTPipeline(atmosphereSPV)) {
-            } else {
-                SCENE_LOG_ERROR("[Vulkan] Failed to create Atmosphere LUT compute pipeline; falling back to CPU LUT upload.");
-            }
-        } else {
-            SCENE_LOG_INFO("[Vulkan] atmosphere_lut.spv not found — using CPU LUT upload fallback.");
-        }
+        // Atmosphere LUT compute shader (optional; CPU LUT path remains fallback).
+        // ★ Ayni yardimciyi etkilesimli viewport init'i de cagiriyor — iki ayri
+        //   kurulum kopyasi, birinin sessizce eksik kalmasi demekti.
+        ensureAtmosphereLUTPipeline(shaderDir);
 
         // Only create the heavy RT pipeline when the viewport mode requires it.
         if (m_viewportMode == ViewportMode::Rendered) {
@@ -17725,7 +18127,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     pushConst.lightCount = (uint32_t)m_cachedLights.size();
     pushConst.varianceThreshold = m_useAdaptiveSampling ? m_varianceThreshold : 0.0f;
     pushConst.maxSamples = m_targetSamples;
-    pushConst.exposureFactor = this->m_camera.exposureFactor;
+    pushConst.exposureFactor = 1.0f; // scene-linear accumulation; exposure belongs exclusively to display post
 
     // Population of extended features
     pushConst.aperture = this->m_camera.aperture;
@@ -18937,6 +19339,7 @@ bool VulkanBackendAdapter::isAccumulationComplete() const {
 
 // Environment stubs
 void VulkanBackendAdapter::setEnvironmentMap(int64_t h) {
+    if (m_envTexID == h) return;
     if (!m_device || !m_device->isInitialized()) {
         VK_INFO() << "[VulkanBackendAdapter] Device not ready — caching env texture id" << std::endl;
         m_envTexID = h;
@@ -18946,6 +19349,7 @@ void VulkanBackendAdapter::setEnvironmentMap(int64_t h) {
     // The uploadTexture2D already registered the ImageHandle and updated binding 6.
     // We just record the env tex id and update the world buffer so shaders can read the slot.
     m_envTexID = h;
+    refreshMaterialPreviewIbl();
 
     // Update the full GPU-world struct with complete atmosphere parameters
     setWorldData(&m_cachedWorld);
@@ -18954,6 +19358,16 @@ void VulkanBackendAdapter::setSkyParams() {}
 
 void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
     if (!m_device || !m_device->isInitialized()) return;
+
+    // ★★★ Ucustaki bir raster karesi bu goruntuleri hala ornekliyor olabilir ve
+    //   descriptor'lari (binding 8 / material preview LUT slotlari) hala onlara
+    //   isaret ediyor. Once yok edip sonra yenisini kurmak, GPU'nun altindan
+    //   goruntuyu cekmekti: bu, "device lost while acquiring a raster frame"
+    //   olarak geri donen yoldu. waitIdle burada dogru arac -- bu yol NADIR
+    //   (yalnizca compute LUT hatti yoksa) ve tam garanti istiyor.
+    drainInteractiveViewportInFlight();
+    m_device->waitIdle();
+
     // Destroy previous LUT images held by device
     for (int i = 0; i < 4; ++i) {
         if (m_device->m_lutImages[i].image) {
@@ -19063,6 +19477,14 @@ bool VulkanBackendAdapter::generateAtmosphereLUTGPU(const WorldData* worldData) 
     if (!m_device || !m_device->isInitialized() || !worldData) return false;
     if (!m_device->hasAtmosphereLUTPipeline()) return false;
 
+    // ★★★ Compute gecisi, raster viewport'un binding 8'den ORNEKLEDIGI ayni LUT
+    //   goruntulerini SHADER_READ_ONLY -> GENERAL'e cevirip uzerine yaziyor.
+    //   Kuyruga verilmis bir kare o goruntuleri hala okuyor olabilir; layout
+    //   gecisini ucustaki bir okumayla yarisa sokmak tanimsiz davranistir.
+    //   Drenaj KARE BASINA degil, LUT YENIDEN URETIMI BASINA odenir (slider
+    //   surerken ~15 Hz), yani maliyet sinirli.
+    drainInteractiveViewportInFlight();
+
     if (!m_device->generateAtmosphereLUTGPU(*worldData)) {
         m_atmosphereLutReady = false;
         return false;
@@ -19076,10 +19498,8 @@ bool VulkanBackendAdapter::generateAtmosphereLUTGPU(const WorldData* worldData) 
 
 void VulkanBackendAdapter::setWorldData(const void* w) {
     if (!w) return;
-    
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    m_device->waitIdle();
 
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     const WorldData* wd = static_cast<const WorldData*>(w);
     m_cachedWorld = *wd; // Always update cache
 
@@ -19087,6 +19507,10 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
         VK_INFO() << "[VulkanBackendAdapter] Device not ready — cached WorldData for later upload" << std::endl;
         return;
     }
+
+    // updateWorldBuffer uses an ordered transfer submission and waits only for
+    // that fence. A device-wide idle here made every Physical Sky slider tick
+    // wait for unrelated viewport/RT work before the small world upload.
 
     // Safety net for backend/viewport transitions: if a plain setWorldData()
     // reaches Vulkan before the Nishita LUT has been generated, build it here so

@@ -1,131 +1,206 @@
-# Siradaki build kontrolleri — TERRAIN FIRCA + SECIM KIMLIGI
+# Bir sonraki build — Faz 3 BİTTİ: Assimp söküldü
 
-> **Durum:** REFERANS — 2026-08-29, dokuzuncu parti. **Hepsi canli dogrulandi**,
-> asagisi bundan sonraki degisiklikler icin REGRESYON listesidir.
->
-> Sekizinci parti: terrain sculpt clamp'i (dogrulandi). Dokuzuncu parti:
-> (1) terrain splat paint fircasi cikmiyordu — iki kok, **dogrulandi**,
-> (2) sag firca dock'u sol panelin kopyasiydi — kaldirildi, **dogrulandi**,
-> (3) "kup secili ama terrain tasiniyor" — iki yapisal kok, **dogrulandi**
-> (dogru obje ekleniyor/seciliyor, terrain tasinmiyor).
+> **Durum:** CANLI — **derlendi ve import yolları doğrulandı** (kullanıcı,
+> 2026-09-06): “import yapılarını test ettim, herhangi bir eksiklik tespit
+> etmedim”. Yani **§0, §1, §2 geçti.** ★ Aşağıdakiler import yolu DİŞINDA
+> kaldığı için ayrıca bakılmadı — kapandı saymayın: **§3** varlık tarayıcısı,
+> **§4** OptiX render, **§5** gömülü dokulu dosya, **§6** dll gerçekten düştü mü,
+> **§7** arazi macro color + semantic map.
 
-Bu partide degisen dosyalar:
+**Önceki parti doğrulandı.** Kullanıcı derledi ve **FBX, GLB, OBJ** üçünü de yeni
+okuyucularla açtı: sorunsuz. Bu, Faz 3'ün üç artışını da kapattı, ve bu parti
+son adımı yapıyor: **Assimp projeden tamamen çıkarıldı.**
 
-- `UI/scene_ui.cpp` — ★★★ Terrain Graph paneli **acik olmasi** degil **odakta
-  olmasi** fircayi kapatiyor (iki yerde); `allow_paint_bridge` eski haline dondu
-- `UI/scene_ui_modifiers.cpp` — terrain paint dock'u kaldirildi;
-  `syncPaintBrushToTerrain` artik **radius kopyalamiyor**; terrain paint paneli
-  `terrain_brush.radius`'u (metre) duzenliyor
-- `Physics/TerrainManager.cpp` — ★★★ `registerTerrainMeshOnce` zaten kayitliysa
-  **yerinden oynatmiyor**; her world.objects mutasyonunda `g_mesh_cache_dirty`
-- `UI/SceneSelection.cpp` — ★★★ `object_index` esitligi artik tek basina KIMLIK
-  degil; spline oğeleri icin null==null tuzagi kapatildi
-- `scripts/terrain_scene_selection_check.py` (+ `x64/Release/scripts/`) — yeni
+Önceki glTF kontrolleri [arşivde](IMPORT_GLTF_CHECKS_ARCHIVE.md).
+Devir notu ve tuzak listesi: [FAZ3_DEVIR_NOTU.md](FAZ3_DEVIR_NOTU.md).
 
-Yeni `.cpp` yok, `.vcxproj` degismedi. IPC yuzeyi degismedi
-(`python scripts/gen_ipc_descriptors.py --check` yine `up to date` demeli).
+## Ne yapıldı
+
+| İş | Sonuç |
+|---|---|
+| `AssimpLoader.h` (3400 satır) + `AssimpLoader.cpp` | **silindi** |
+| `assimp-vc143-mt.lib` / dll kopyası | vcxproj **ve** CMakeLists'ten söküldü |
+| `Texture(const aiTexture*)` + `decode_raw` + `decode_compressed` | silindi — her okuyucu gömülü görüntüyü kendi çözüp byte buffer veriyor, o kurucu zaten var |
+| `AssimpLoader::convertTrianglesToOptixData` (334 satır) | **taşındı** → `buildOptixMaterialTables()`, `OptixMaterialTables.h/.cpp`. İçinde tek satır Assimp yoktu |
+| `AssetRegistry` FBX/OBJ metadata | Assimp yerine `probeModel()` |
+| `GltfProbe` | → `ModelProbe` (kural 5: anlamı genişledi, adı değişti); `probeFbx` (ufbx) ve `probeObj` eklendi |
+| `set_fbx_reader` / `set_obj_reader` + File menüsü | **kaldırıldı** — format başına tek okuyucu kaldı, seçenek ölü |
+| `RtApiImport` / `RtIpcImport` / `RtPythonImport` / `ImportSettings*` | silindi, IPC 416 → **412 metot**, audit yeşil |
+
+Manuel test; yeni test scripti yok.
 
 ---
 
-## 0. Derleme
+## §0 — ★★★ Derleme: bu partinin EN OLASI hata sınıfı
 
-**Ne gormen gerek:** temiz build.
-**Bozuksa ne demek:** `TerrainManager.cpp`'de `g_mesh_cache_dirty` icin
-"declared but not defined" (C7631) cikarsa `extern` yine `namespace {}` icine
-kaymis demektir — dosya kapsaminda durmali (kod icinde not var).
+★★★ **Beklenen hata türü tek bir şey: eksik include.** `AssimpLoader.h` yalnızca
+bir yükleyici değildi; `Triangle.h`, `Camera.h`, `Material.h`, `MaterialManager.h`,
+`Texture.h`, `Light.h`, `globals.h`, `EmbreeBVH.h`, `sbt_data.h` gibi başlıkları
+da **onu include eden herkese geçişli olarak** taşıyordu. Include edenlerin
+listesi 13'tü. Şimdi o başlık yok.
 
-## 1. ★★★ Terrain splat paint fircasi (asil sikayet)
+Include'unu değiştirdiğim dosyalar: `Renderer.h`, `scene_data.h`,
+`AnimationController.h`, `ProjectManager.cpp`, `scene_ui.cpp`,
+`scene_ui_animgraph.hpp`, `NodeHierarchy.cpp`, `OzzRuntime.cpp`,
+`GltfDirectReader.cpp`, `UfbxReader.cpp`.
 
-Terrain sec → **Paint** sekmesi → panel `Target: <terrain>` demeli.
+**Bozuksa ne demek:** `undefined identifier` / `incomplete type` alırsan bu odur.
+**Çaresi:** o dosyaya eksik başlığı **doğrudan** ekle. Geri alma, ve "eskisi gibi
+her şeyi taşıyan bir başlık" kurma — gizli bağımlılığı görünür yapmak bu işin
+amacıydı.
 
-**Ne gormen gerek:** viewport'ta **sari** firca cemberi; sol tik surukleyince
-splat degisiyor. **Sag tarafta ek bir firca paneli CIKMAMALI.**
+★★ **Bu partide tarama iki kez dar kaldı, ikisi de kullanıcı build'inde veya
+son kontrolde yakalandı — kayda geçiyor:**
 
-**Bozuksa ne demek — sirayla:**
-1. Cember hic yoksa: `terrain_brush.enabled` yine her kare kapaniyordur.
-   ★ Kok buydu: `Terrain Graph` panelini **acik** birakmak yetiyordu; o blok
-   `handleTerrainBrush`'tan SONRA calisip bayragi siliyordu. Sculpt etkilenmiyordu
-   cunku o `terrain_sculpt_proxy_active` uzerinden geciyor — "sculpt calisiyor,
-   paint calismiyor" asimetrisinin tek sebebi buydu.
-2. Cember **cok kucuk / nokta gibi**yse: yaricap birimi yine mesh fircasindan
-   kopyalaniyordur. `Paint::BrushSettings::radius` obje birimidir (presetler
-   0.09–0.30), `terrain_brush.radius` **metredir**; 1 km'lik arazide 0.25 m
-   fircadir ve "firca cikmiyor" diye gorunur.
-3. Panelde `Paint target: none` yaziyorsa secim terrain'i baglamiyordur
-   (`terrain_brush.active_terrain_id == -1`).
+1. `scene_ui_animgraph.hpp` silinmiş başlığı include ediyordu; ilk taramam
+   yalnızca `*.h`/`*.cpp` bakıyordu, `.hpp` uzantısı kaçmıştı.
+2. **`scene_ui.cpp` içinde İKİNCİ bir Assimp yolu vardı**
+   (`computeAssetPreviewBounds`): önizleme sınır kutusu için elle yazılmış bir
+   `aiNode` ağacı yürüyüşü. Kullanıcının derlemesinde `aiProcess_*`,
+   `aiMatrix4x4`, `aiNode` hataları olarak çıktı. Kalibrasyon hatası bendeydi:
+   `aiScene|aiMesh|aiMaterial|aiTexture` diye **isim listesi** taramıştım,
+   `ai[A-Z]` **deseni** yerine — `aiProcess_*`, `aiNode` ve `aiMatrix4x4` o
+   listede yoktu.
 
-★ **En sinsi hali:** cember var, boyuyor gibi ama splat degismiyor — o zaman
-`radius` degil `strength`/kanal bakilir. Ölçum:
+**Ders:** bir bağımlılığı sökerken **isim listesiyle değil desenle** tara
+(`\bai[A-Z][A-Za-z0-9_]*\b`), ve uzantı listesine `.hpp/.inl/.cu/.cuh` ekle.
+Son tarama ikisiyle de tekrarlandı ve temiz.
 
-```powershell
-Invoke-RtIpc terrain.paint_splat @{ name='Terrain_1'; dabs=@(@(0,0),@(20,0)); channel=1; radius=50 }
-```
-`coverage_delta > 0` olmali.
+★ O ikinci yol **portlanmadı, silindi**: `probeModel(applyNodeTransforms=true)`
+zaten tam olarak o kutuyu (sahne grafiğine yerleştirilmiş sınırlar) tanımlıyor.
+Yani önizleme çerçeveleme artık FBX/OBJ'de **ilk kez** bu yoldan geçiyor — §3'ü
+atlama.
 
-## 2. Regresyon: mesh boyama ve mesh firca dock'u
+## §1 — En hızlı bağımsız kontrol: menü ve script
 
-Bir kup sec → Paint → boya.
+**Yap:** File menüsüne bak. Sonra script'ten `scene.get_fbx_reader()` çağır.
 
-**Ne gormen gerek:** sag firca dock'u ESKISI GIBI aciliyor (mesh paint), aletler
-ve katmanlar calisiyor.
-**Bozuksa ne demek:** dock kapisi (`shouldShowPaintBrushDock`) fazla daraltilmis.
+**Ne görmen gerek:** **FBX Reader / OBJ Reader menüleri YOK.** Script metodu
+`unknown method` diyor. `agent.discover` 412 metot raporluyor.
 
-★ Ayrica: mesh boyadiktan sonra terrain'e gec, sonra tekrar mesh'e don.
-**Ne gormen gerek:** her iki fircanin yaricapi kendi olceginde kaliyor
-(mesh ~0.25, terrain ~5–50 m). Birbirine bulasiyorsa radius yine paylasiliyor.
+**Bozuksa ne demek:** menüler duruyorsa eski exe çalışıyordur — zaman damgasına bak.
 
-## 3. ★★★ "Kup secili, terrain tasiniyor" — once OLC
+## §2 — ★★ Üç formatın da hâlâ açılması
 
-```powershell
-python scripts/terrain_scene_selection_check.py
-```
+**Yap:** geçen partide açtığın **aynı** FBX, GLB ve OBJ dosyalarını tekrar aç.
 
-**Ne gormen gerek:** hepsi PASS. Ozellikle `the TERRAIN did NOT move`.
-**Bozuksa ne demek:** ariza **kimlik hattinda** (isim/indeks/transform handle) —
-UI'de degil. O zaman `select.list` ciktisi hangi nesnenin gercekten secili
-oldugunu soyler.
-**Hepsi PASS ise:** deger katmani temiz; kalan ariza **hiyerarsi tiklamasi →
-secim → gizmo** zincirindedir (scene_ui_hierarchy.cpp / scene_ui_gizmos.cpp).
+**Ne görmen gerek:** geçen seferkiyle **birebir aynı** sonuç — obje sayısı,
+konum, ölçek, dokular, skinli FBX'te animasyon.
 
-Sonra UI'da tekrarla: terrain-only sahne → `Add > Mesh > Cube` → hiyerarside
-kupe tikla → tasi.
+★ Bu parti hiçbir okuma davranışını değiştirmedi; yalnızca **artık çağrılmayan**
+kodu sildi. Bir fark görürsen o silme yanlış bir şeye dokunmuş demektir, ve en
+olası aday `Texture.h`'den çıkan gömülü görüntü çözücüleridir — o durumda belirti
+**gömülü dokulu bir dosyada doku gelmemesi** olur (harici dokular etkilenmez).
 
-**Ne gormen gerek:** kup tasiniyor, terrain duruyor; hiyerarside YALNIZ kup
-satiri secili gorunuyor.
-**Bozuksa ne demek:**
-- Iki satir birden secili gorunuyorsa `object_index` esitligi hala kimlik
-  sayiliyordur (`SceneSelection::isSelected`).
-- Kup satiri secili ama terrain tasiniyorsa gizmo'nun tuttugu
-  `sel.selected.object->getTransformHandle()` yanlis nesnenin handle'idir —
-  o zaman kupun flat mesh'inin `transform`'una bak (`scene.get_transform`).
+## §3 — Varlık tarayıcısı (metadata artık Assimp'siz)
 
-★ Terrain'in mesh cozunurlugunu degistirip (Terrain > Resolution > Apply)
-tekrar dene: eski kod bu anda `world.objects`'i yeniden siraliyordu ve
-UI'nin cache'ledigi her slot indeksi kayiyordu.
+**Yap:** varlık tarayıcısında **FBX ve OBJ** klasörlerine gir. Üçgen/mesh
+sayılarına ve önizleme çerçevelemesine bak.
 
-## 4. Terrain mesh yeniden kaydi hala tek kopya
+**Ne görmen gerek:** sayılar dolu ve makul; önizleme objeyi çerçeveliyor.
+★ Tarama **belirgin biçimde hızlanmış** olmalı: eski yol her dosyanın bütün
+buffer'larını çözüp `aiProcess_ImproveCacheLocality` (Tipsify yeniden sıralama)
+çalıştırıp **bir sayı ve bir kutu** üretiyordu. Yeni yol ufbx'te gömülü
+görüntüleri atlıyor, OBJ'de düz metin tarıyor.
 
-Terrain graph'i birkac kez Evaluate et, sonra:
+**Bozuksa ne demek — belirtiden sebebe:**
 
-```powershell
-Invoke-RtIpc scene.list_objects | Select-String Chunk
-```
+| Belirti | Sebep |
+|---|---|
+| Bütün sayılar **0**, boyut yok | `probeModel` false döndü. Log'da `model probe failed` satırı olmalı — ★ probe **sessizce başka bir yola düşmüyor**, çünkü probe'un okuyamadığı dosyayı **importer da okuyamaz**; açılamayacak bir dosya için makul sayı göstermek tam da "panel yalan söylüyor" hatası |
+| FBX sayıları doğru ama **tarama yavaş** | `opts.ignore_embedded` düşmüş; probe gömülü görüntüleri çözüyor demektir |
+| OBJ üçgen sayısı **import'takinden farklı** | Probe da okuyucu da n-gon'u fan ile bölüyor (köşe−2). İkisi ayrılırsa tarayıcı ile sahne farklı sayı gösterir |
+| Önizleme çerçevesi FBX/OBJ'de **bozuk** | `probeModel(..., applyNodeTransforms=true)`. Artık glTF dışı formatlarda da çalışıyor — eskiden yalnızca glTF'ti, bu yeni bir yetenek, yani ilk kez burada test ediliyor |
 
-**Ne gormen gerek:** `<terrain>_Chunk` **bir kez** listeleniyor.
-**Bozuksa ne demek:** `registerTerrainMeshOnce`'in "zaten kayitli => dokunma"
-kisayolu cift kayit birakiyor demektir (eski kod her seferinde sil+ekle yapip
-bunu maskeliyordu).
+## §4 — OptiX yolu (taşınan 334 satır)
 
-## 5. Sculpt regresyonu (gecen parti)
+**Yap:** OptiX/CUDA backend'i ile bir sahne render et. Mümkünse **flat SoA**
+(proje dosyasından açılmış) bir sahne.
 
-```powershell
-python scripts/terrain_brush_check.py
-```
-**Ne gormen gerek:** hepsi PASS (`raise RAISES the ground it touches`).
+**Ne görmen gerek:** normal render.
 
-## 6. ✔ Kapandi: "terrain-only sahnede Add gorunmuyor"
+★★ **Bozuksa ne demek:** `buildOptixMaterialTables` yanlış taşınmış olabilir.
+Fonksiyonun kritik özelliği adında değil: **üçgen listesi boş olsa bile
+çağrılmak zorunda.** Tablolar `MaterialManager`'dan geliyor; geometri çıkarımı
+`nTris>0` ile kapılı. Flat bir sahne buraya **boş** liste ile gelir ve tabloları
+yine de ister — çağrılmazsa materyal buffer'ı null olur ve `optixLaunch`
+**CUDA 700 illegal memory access** ile ölür. Yeni başlıkta bu yazılı; "boş liste
+için atlayalım" diye optimize etme.
 
-Ayri bir cizim arizasi degildi. Nesne sahnedeydi; **kimligi** yanlis nesneye
-aitti (bkz. §3). Bir parti raster hattinda bosa arandi — ders: "gorunmuyor"
-raporunda once nesnenin KIMLIGINI dogrula (outliner + secim + transform),
-sonra render hattina in.
+## §5 — Gömülü dokulu dosya (silinen çözücüler)
+
+**Yap:** dokuları **içine gömülü** bir GLB ve mümkünse bir FBX aç.
+
+**Ne görmen gerek:** dokular geliyor.
+
+**Bozuksa ne demek:** `Texture.h`'den `decode_raw`/`decode_compressed` silindi.
+Bunlar Assimp'in `aiTexture`'ından çözüyordu. Okuyucular gömülü içeriği kendileri
+alıp `Texture(std::vector<char>, ...)` kurucusuna veriyor — cgltf buffer view,
+ufbx `content`, OBJ'de gömülü görüntü yok. Doku gelmiyorsa o yol kopmuştur.
+★ Harici dosya dokuları bu maddeden **etkilenmez**, o yüzden §2'de doku görmen
+bu maddeyi geçtiğin anlamına gelmez.
+
+## §6 — Bağımlılığın gerçekten düştüğü
+
+**Yap:** çıktı klasöründe `assimp-vc143-mt.dll` var mı bak. Temiz bir klasöre
+build alıp çalıştır.
+
+**Ne görmen gerek:** dll **kopyalanmıyor** ve uygulama onsuz açılıyor.
+
+**Bozuksa ne demek:** hâlâ bir yerde linkleniyor. vcxproj'da iki configuration
+ve CMakeLists'te dört satır temizlendi; başka bir yer kalmış olabilir.
+
+## §7 — Arazi doku haritaları (silinen kurucunun son kullanıcıları)
+
+**Yap:** iki şeyi de çalıştır:
+1. arazi SatMap / macro color düğümü (arazi renklendirmesi) → `MacroColorMap`
+2. arazi **semantic map** üretimi ve PNG'den yüklenmesi → `TerrainSemanticMap`
+
+**Ne görmen gerek:** ikisi de eskisi gibi çalışıyor, ve log'da artık
+**`Texture pointer null, skip` uyarısı YOK.**
+
+★ **Neden burada:** iki çağıran boş bir doku elde etmek için
+`Texture(nullptr, TextureType::Albedo, "MacroColorMap")` çağırıyordu — yani
+**Assimp kurucusunu null bir `aiTexture` ile**. Kurucu silinince derleme
+`std::construct_at` / `C2665` ile patladı (hata `xutility`'de görünür, çünkü
+`make_shared` oradan kurar; gerçek yer çağıran dosyadır).
+
+Zaten var olan `Texture(name, w, h, type)` kurucusuna çevrildi. **İki gözle
+görülür fark:**
+
+1. Her arazi boyamasında düşen `Texture pointer null, skip` uyarısı kalktı.
+2. ★ Doku artık gerçekten **`"MacroColorMap"` adını taşıyor**. Eski kurucu
+   null kontrolünden `name` atamasından **ÖNCE** dönüyordu, yani o ad sessizce
+   çöpe gidiyordu. Ad'a göre arayan bir şey varsa ilk kez bulacak.
+
+★★ **Tarama dersi, üçüncü kez:** bu maddedeki dört çağırandan ikisi
+(`TerrainSemanticMap.cpp`) ilk taramamda **kaçtı**, çünkü `nullptr` çağrının
+**bir sonraki satırındaydı** ve satır bazlı grep çok satırlı çağrıyı görmez.
+Bu partide tarama üç kez zayıf kaldı: (1) uzantı listesi `.hpp` içermiyordu,
+(2) desen yerine isim listesi kullandım, (3) satır bazlı aradım.
+Son araç (`scratchpad/scan_removed.py`) üçünü de karşılıyor: yorumları söküp
+**dosyanın tamamında desenle** arıyor. ★ Bir tarama aracı kendi
+dokümantasyonunu bulgu diye raporluyorsa, o araç bozuktur.
+
+★ Ayrıca not: `TerrainSatMapNodes.cpp` **iki yerde** var (`src/Physics/` 1802
+satır, `src/Scene/` 178 satır) ve vcxproj'da yalnızca Physics olanı kayıtlı —
+ama CMake recursive glob kullandığı için diğerini de derler. İkisini de
+düzelttim; hangisinin ölü olduğuna bakmak ayrı bir iş (kural 5).
+
+---
+
+---
+
+## Bu partide KAPANMAYAN
+
+- **Rule 1 borcu:** `scene.import_model` hâlâ bir şey döndürmüyor. Okuyucular
+  `ImportStats`'ı ölçüyor (parse / materyal / geometri / animasyon ayrı ayrı),
+  ama script tarafına açılmadı. ★ Import IPC dosyaları bu partide silindi;
+  bu iş yeni bir `RtIpcImport` ile geri gelecek, ve doğal yeri orası.
+- glTF açık maddeleri: `KHR_texture_transform` okunmuyor; 7 paylaşılan mesh için
+  gerçek instancing (~4.39M kopya üçgen); LOD0-only import seçeneği.
+- Yazıcının non-conformant skin sözleşmesi (okuyucu `generator` sniff'i ile
+  telafi ediyor) — kendi export'umuz Blender'da yanlış açılıyor.
+- UV düzenlemesi Vulkan RT'de tam rebuild tetikliyor.
+- `vcpkg/ports/assimp` duruyor: o vcpkg'nin **kendi port kayıt ağacı**, bizim
+  manifestimiz değil. Bize ait bir bağımlılık değil, dokunulmadı.

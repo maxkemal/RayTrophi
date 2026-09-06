@@ -927,10 +927,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::Indent();
                 bool fogKeyed = isWorldKeyed(WorldProp::FogParams);
                 
-                if (SceneUI::DrawSmartFloat("fogd", "Fog Density", &params.fog_density, 0.001f, 1.0f, "%.4f", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
+                if (SceneUI::DrawSmartFloat("fogd", "Fog Density", &params.fog_density, 0.00001f, 0.01f, "%.5f", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
                     changed = true;
                 }
-                UIWidgets::HelpMarker("Base fog density (lower = lighter fog)");
+                UIWidgets::HelpMarker("Extinction per metre. 0.0001 is light atmospheric fog; 0.001 becomes dense over kilometre-scale views.");
                 
                 if (SceneUI::DrawSmartFloat("fogh", "Fog Height", &params.fog_height, 10.0f, 2000.0f, "%.0f m", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
                     changed = true;
@@ -1098,18 +1098,26 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 for (auto& light : ctx.scene.lights) {
                     if (light && light->type() == LightType::Directional) {
                         // Light direction is opposite of sun direction (sun to ground)
-                        light->direction = Vec3(
+                        const Vec3 newDirection(
                             -params.sun_direction.x,
                             -params.sun_direction.y,
                             -params.sun_direction.z
                         );
-                        
-                        // Keep light intensity in sync with the Nishita params when user edits the sun
-                        light->intensity = params.sun_intensity;
-                        
-                        // CRITICAL: Mark lights dirty so GPU gets updated light direction
-                        extern bool g_lights_dirty;
-                        g_lights_dirty = true;
+                        const bool lightChanged =
+                            fabsf(light->direction.x - newDirection.x) > 1e-5f ||
+                            fabsf(light->direction.y - newDirection.y) > 1e-5f ||
+                            fabsf(light->direction.z - newDirection.z) > 1e-5f ||
+                            fabsf(light->intensity - params.sun_intensity) > 1e-5f;
+
+                        // Air/dust/fog/overlay edits must not rebuild the light
+                        // buffer and the complete realtime shadow atlas. Only an
+                        // actual sun direction/intensity change owns that cost.
+                        if (lightChanged) {
+                            light->direction = newDirection;
+                            light->intensity = params.sun_intensity;
+                            extern bool g_lights_dirty;
+                            g_lights_dirty = true;
+                        }
                         break;
                     }
                 }
@@ -1675,9 +1683,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         // Let Main loop handle it once per frame after flushLUT() to avoid
         // double GPU transfer and ensure LUT is fresh before upload.
         extern bool g_world_dirty;
-        extern bool g_gas_volumes_dirty;
         g_world_dirty = true;
-        g_gas_volumes_dirty = true;
+        // World/atmosphere parameters live in the world buffer. Re-uploading
+        // all VDB/gas volume payloads here made every sky slider scale with the
+        // scene's volume data and could disturb the active volume descriptor.
         
         // Reset GPU accumulation so change is visible on next render pass
         if (ctx.backend_ptr) {

@@ -1,3 +1,4 @@
+#include "PostProcess/PostService.h"
 /*
 * =========================================================================
 * Project:       RayTrophi Studio
@@ -28,6 +29,7 @@
 #include "Backend/IBackend.h"  // backend resetAccumulation
 #include "Backend/IViewportBackend.h"  // g_viewport_backend (volume counters)
 #include "Backend/VulkanBackend.h"     // VulkanBackendAdapter volume instrumentation
+#include "globals.h"                   // g_vulkan_sim_compute_ctx (volume table ownership)
 #include <memory>
 #include "TriangleMesh.h"
 #include "MeshEdit/SplineObject.h"
@@ -42,6 +44,7 @@
 #include "NodeSystem/NodeRegistry.h"  // typeId -> factory (Faz 3d)
 #include "KeyframeSystem.h"    // TimelineManager / Keyframe / TransformKeyframe (Faz 3c)
 #include "ProjectManager.h"
+#include "SceneExporter.h"          // scene.export_gltf (rtapi::exportSceneGltf)
 #include "Api/RtPython.h"
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
@@ -87,6 +90,9 @@ extern bool        g_viewport_raster_rebuild_pending;
 // rtapi — declaring it inside would silently create a second, never-defined
 // symbol and fail at link time rather than at the point of the mistake.
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+// The RENDER backend, by role. Deliberately not read through UIContext: in an
+// interactive shading mode that pointer is the viewport backend.
+extern std::unique_ptr<Backend::IBackend> g_backend;
 
 namespace rtapi {
 
@@ -118,62 +124,14 @@ TriangleMesh* findFlatMesh(UIContext& ctx, const std::string& name) {
     return nullptr;
 }
 
-enum class MaterialParamKind {
-    BaseColor,
-    Roughness,
-    Metallic,
-    Specular,
-    Emission,
-    EmissionStrength,
-    Transmission,
-    Ior,
-    Opacity,
-    // Thin-shell film + resin coat. These reach the fluid ISOSURFACE too (see
-    // volume_closesthit.rchit), so they must be scriptable or the isosurface
-    // branches that read them cannot be driven from a test at all.
-    // Names are the ones the .rtp serializer already uses (MaterialNodesV2.h)
-    // — one vocabulary for save files and scripts, so neither can drift.
-    IsBubble,
-    BubbleIor,
-    BubbleFilm,
-    ResinDensity,
-    ResinColor,
-    ResinRoughness,
-    ResinInclusion,
-    ResinDirt,
-    ResinDirtColor,
-    ResinInclusionScale,
-    ResinShard,
-    ResinShardHue,
-    ResinObjectSpace,
-    DustStyle,
-    DustColorA,
-    DustColorB,
-    ShardShape,
-    // Texture tiling. Scriptable because on a fluid ISOSURFACE these are the
-    // ONLY tiling control there is: the surface has no UVs, so the tri-planar
-    // projection reuses uv_scale/uv_offset as world units per tile. Leaving
-    // them panel-only would have made the isosurface's texture mapping
-    // untestable from a script — which in this project is the same as untested.
-    // Exposed per AXIS rather than as a 2-vector: this channel carries a scalar
-    // or an RGB triple, and squeezing a 2-vector through the RGB path means an
-    // ignored third component that silently accepts nonsense.
-    UvScaleX,
-    UvScaleY,
-    UvOffsetX,
-    UvOffsetY
-};
+} // namespace
 
-struct MaterialValue {
-    float scalar = 0.0f;
-    Vec3 color;
-};
-
-struct MaterialEdit {
-    uint16_t material_id = MaterialManager::INVALID_MATERIAL_ID;
-    MaterialValue before;
-    MaterialValue after;
-};
+// MaterialParamKind / MaterialValue / parseMaterialParam / readMaterialValue /
+// writeMaterialValue / validateMaterialParamValue live at rtapi:: scope
+// (declared in RtApiInternal.h) rather than in the anonymous namespace above —
+// RtApiMaterial.cpp's material-scoped material.set_param reuses them so the
+// two setters (object-scoped and material-scoped) cannot drift apart on field
+// mapping or validation range.
 
 bool parseMaterialParam(const std::string& name, MaterialParamKind& out, bool& is_color) {
     is_color = false;
@@ -292,7 +250,32 @@ void writeMaterialValue(PrincipledBSDF& material, MaterialParamKind kind, const 
     applyPBRMaterialSnapshotToGpuMaterial(capturePBRMaterialSnapshot(material), *material.gpuMaterial);
 }
 
-} // namespace
+Result validateMaterialParamValue(MaterialParamKind kind, bool is_color, const MaterialValue& value) {
+    if (is_color) {
+        if (!std::isfinite(value.color.x) || !std::isfinite(value.color.y) ||
+            !std::isfinite(value.color.z) || value.color.x < 0.0f ||
+            value.color.y < 0.0f || value.color.z < 0.0f) {
+            return Result::fail("color components must be finite and non-negative");
+        }
+        return Result::success();
+    }
+    if (!std::isfinite(value.scalar)) return Result::fail("value must be finite");
+    const bool unit_range = kind == MaterialParamKind::Roughness ||
+                            kind == MaterialParamKind::Metallic ||
+                            kind == MaterialParamKind::Specular ||
+                            kind == MaterialParamKind::Transmission ||
+                            kind == MaterialParamKind::Opacity;
+    if (unit_range && (value.scalar < 0.0f || value.scalar > 1.0f)) {
+        return Result::fail("value must be in the range [0, 1]");
+    }
+    if (kind == MaterialParamKind::EmissionStrength && value.scalar < 0.0f) {
+        return Result::fail("emission_strength must be non-negative");
+    }
+    if (kind == MaterialParamKind::Ior && (value.scalar < 1.0f || value.scalar > 10.0f)) {
+        return Result::fail("ior must be in the range [1, 10]");
+    }
+    return Result::success();
+}
 
 // Declared in RtApiInternal.h — RtApiMaterial.cpp needs it, so it cannot live in
 // this file's anonymous namespace.
@@ -317,6 +300,12 @@ std::vector<uint16_t> objectMaterialIds(UIContext& ctx, const std::string& objec
 }
 
 namespace {
+
+struct MaterialEdit {
+    uint16_t material_id = MaterialManager::INVALID_MATERIAL_ID;
+    MaterialValue before;
+    MaterialValue after;
+};
 
 class MaterialParamCommand final : public SceneCommand {
 public:
@@ -787,6 +776,106 @@ Result importModel(const std::string& filepath) {
     return Result::success();
 }
 
+Result exportSceneGltf(const std::string& filepath,
+                       const SceneExportOptions& options,
+                       SceneExportStats& out_stats) {
+    out_stats = SceneExportStats{};
+    if (!g_ctx) return notBound();
+    if (filepath.empty()) return Result::fail("filepath is empty");
+
+    std::string ext = std::filesystem::path(filepath).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext != ".glb" && ext != ".gltf") {
+        return Result::fail("filepath must end in .glb or .gltf (got '" + ext + "')");
+    }
+
+    ExportSettings settings;
+    settings.export_geometry = options.geometry;
+    settings.export_materials = options.materials;
+    settings.export_cameras = options.cameras;
+    settings.export_lights = options.lights;
+    settings.export_animations = options.animations;
+    settings.export_skinning = options.skinning;
+    settings.export_selected_only = options.selected_only;
+    settings.bake_terrain_materials = options.bake_terrain_materials;
+    settings.terrain_bake_resolution = options.terrain_bake_resolution;
+    settings.use_gpu_instancing_extension = options.gpu_instancing;
+    settings.binary_mode = (ext == ".glb");
+
+    std::vector<std::shared_ptr<Hittable>> selected;
+    if (options.selected_only) {
+        for (const SelectableItem& item : g_ctx->selection.multi_selection) {
+            if (item.type != SelectableType::Object) continue;
+            if (item.mesh_object)  selected.push_back(item.mesh_object);
+            else if (item.object)  selected.push_back(item.object);
+        }
+        if (selected.empty()) return Result::fail("selected_only requested but nothing is selected");
+    }
+
+    SceneExporter& exporter = SceneExporter::getInstance();
+    const bool ok = exporter.exportScene(filepath, g_ctx->scene, settings, selected);
+
+    const rtgltf::WriteStats& s = exporter.last_stats;
+    out_stats.meshes = s.mesh_count;
+    out_stats.primitives = s.primitive_count;
+    out_stats.triangles = s.triangle_count;
+    out_stats.vertices = s.vertex_count;
+    out_stats.nodes = s.node_count;
+    out_stats.instances = s.instance_count;
+    out_stats.instanced_groups = s.instanced_group_count;
+    out_stats.materials = s.material_count;
+    out_stats.images = s.image_count;
+    out_stats.file_bytes = s.file_bytes;
+    out_stats.peak_writer_mb = s.peak_writer_mb;
+    out_stats.seconds_total = s.seconds_total;
+    out_stats.seconds_collect = s.seconds_collect;
+    out_stats.seconds_materials = s.seconds_materials;
+    out_stats.seconds_plan = s.seconds_plan;
+    out_stats.seconds_write = s.seconds_write;
+
+    if (!ok) {
+        return Result::fail(exporter.last_error.empty()
+            ? ("export failed: " + filepath)
+            : ("export failed: " + exporter.last_error));
+    }
+    return Result::success();
+}
+
+Result sceneExportEstimate(const SceneExportOptions& options,
+                           SceneExportEstimate& out_estimate) {
+    out_estimate = SceneExportEstimate{};
+    if (!g_ctx) return notBound();
+
+    ExportSettings settings;
+    settings.export_geometry = options.geometry;
+    settings.export_materials = options.materials;
+    settings.export_cameras = options.cameras;
+    settings.export_lights = options.lights;
+    settings.export_animations = options.animations;
+    settings.export_skinning = options.skinning;
+    settings.export_selected_only = options.selected_only;
+    settings.bake_terrain_materials = options.bake_terrain_materials;
+    settings.terrain_bake_resolution = options.terrain_bake_resolution;
+    settings.use_gpu_instancing_extension = options.gpu_instancing;
+
+    // ★ The SAME call the panel makes, not a re-implementation. A second copy
+    // of the counting rules is exactly how the panel drifted away from the
+    // writer in the first place.
+    const SceneExporter::ExportEstimate est =
+        SceneExporter::getInstance().computeExportEstimate(g_ctx->scene, settings);
+
+    out_estimate.objects = est.object_count;
+    out_estimate.triangles = est.triangle_count;
+    out_estimate.legacy_triangles = est.legacy_triangle_count;
+    out_estimate.instances = est.instance_count;
+    out_estimate.unique_instance_sources = est.unique_instance_sources;
+    out_estimate.instance_triangles = est.instance_triangle_count;
+    out_estimate.materialised_instance_triangles = est.materialised_instance_triangles;
+    out_estimate.estimated_peak_mb = est.estimated_peak_mb;
+    return Result::success();
+}
+
 namespace {
 
 std::shared_ptr<TriangleMesh> createPrimitiveMesh(const std::string& type_in, float size, const std::string& name) {
@@ -1126,29 +1215,8 @@ Result setMaterialParamValue(const std::string& object_name, const std::string& 
         return Result::fail(param + (expects_color ? " expects an RGB value" : " expects a scalar value"));
     }
 
-    if (supplied_color) {
-        if (!std::isfinite(requested.color.x) || !std::isfinite(requested.color.y) ||
-            !std::isfinite(requested.color.z) || requested.color.x < 0.0f ||
-            requested.color.y < 0.0f || requested.color.z < 0.0f) {
-            return Result::fail(param + " components must be finite and non-negative");
-        }
-    } else {
-        const float value = requested.scalar;
-        if (!std::isfinite(value)) return Result::fail(param + " must be finite");
-        const bool unit_range = kind == MaterialParamKind::Roughness ||
-                                kind == MaterialParamKind::Metallic ||
-                                kind == MaterialParamKind::Specular ||
-                                kind == MaterialParamKind::Transmission ||
-                                kind == MaterialParamKind::Opacity;
-        if (unit_range && (value < 0.0f || value > 1.0f)) {
-            return Result::fail(param + " must be in the range [0, 1]");
-        }
-        if (kind == MaterialParamKind::EmissionStrength && value < 0.0f) {
-            return Result::fail("emission_strength must be non-negative");
-        }
-        if (kind == MaterialParamKind::Ior && (value < 1.0f || value > 10.0f)) {
-            return Result::fail("ior must be in the range [1, 10]");
-        }
+    if (Result r = validateMaterialParamValue(kind, supplied_color, requested); !r) {
+        return Result::fail(param + " " + r.error);
     }
 
     std::vector<MaterialEdit> edits;
@@ -1370,6 +1438,42 @@ Result setVolumeInstrumentation(bool enabled) {
         return Result::fail("no active Vulkan backend (volume counters are Vulkan-only)");
     backend->resetVolumePerformanceStats(enabled);
     return Result::success();
+}
+
+VolumeTablesInfo volumeTables() {
+    VolumeTablesInfo out;
+    auto describe = [&](const char* role, Backend::IBackend* backend) {
+        if (!backend) return;
+        VolumeTableInfo info;
+        info.role = role;
+        auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(backend);
+        if (!vk) { out.backends.push_back(info); return; }
+        info.is_vulkan = true;
+        out.available = true;
+        info.dense_gas_mirror_buffers =
+            static_cast<uint32_t>(vk->denseGasMirrorBufferCount());
+        if (auto* dev = vk->getVulkanDevice()) {
+            info.instance_count = dev->m_volumeCount;
+            info.buffer_allocated = dev->m_volumeBuffer.buffer != VK_NULL_HANDLE;
+            info.sim_device_is_this_backends =
+                (g_vulkan_sim_compute_ctx.device != nullptr) &&
+                (g_vulkan_sim_compute_ctx.device == static_cast<void*>(dev->getDevice()));
+        }
+        out.backends.push_back(info);
+    };
+    // ★ MUST be g_backend, not g_ctx->backend_ptr. In an interactive shading
+    // mode backend_ptr can already be the VIEWPORT backend, so this row silently
+    // became a duplicate of the row below — two identical rows read as "neither
+    // backend owns the simulation device", which is not a reachable state and
+    // sent one diagnosis down the wrong path entirely. The instrument must name
+    // the two ROLES, not whatever pointer the UI happens to be holding.
+    describe("render", ::g_backend.get());
+    // Reported separately even when it is the SAME object as the render backend:
+    // "one row" vs "two rows" is itself the answer to "does this session have a
+    // second Vulkan device?", and collapsing them would hide the case this
+    // method exists to expose.
+    describe("viewport", ::g_viewport_backend.get());
+    return out;
 }
 
 void completeRenderOutput(bool ok, const std::string& error) {
@@ -1696,6 +1800,24 @@ Result getCamera(CameraState& out) {
     out.fov = cam->vfov;                 // UI treats vfov as the authoritative field
     out.focus_distance = cam->focus_dist;
     out.aperture = cam->aperture;
+    out.auto_exposure = cam->auto_exposure;
+    out.use_physical_exposure = cam->use_physical_exposure;
+    out.iso_preset_index = cam->iso_preset_index;
+    out.shutter_preset_index = cam->shutter_preset_index;
+    out.fstop_preset_index = cam->fstop_preset_index;
+    out.ev_compensation = cam->ev_compensation;
+    // ★ Cozulmus degerler: preset INDEKSI bir olcum degildir, ajanin "hangi
+    //   ISO" sorusuna cevabi burasi.
+    if (cam->iso_preset_index >= 0 &&
+        cam->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT)
+        out.iso_value = static_cast<float>(CameraPresets::ISO_PRESETS[cam->iso_preset_index].iso_value);
+    if (cam->shutter_preset_index >= 0 &&
+        cam->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT)
+        out.shutter_seconds = CameraPresets::SHUTTER_SPEED_PRESETS[cam->shutter_preset_index].speed_seconds;
+    if (cam->fstop_preset_index >= 0 &&
+        cam->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT)
+        out.f_number = CameraPresets::FSTOP_PRESETS[cam->fstop_preset_index].f_number;
+    out.exposure_factor = cam->exposureFactor();
     return Result::success();
 }
 
@@ -1749,6 +1871,87 @@ Result setCameraAperture(float aperture) {
     Camera* cam = activeCamera();
     if (!cam) return Result::fail("no active camera in the scene");
     cam->aperture = aperture;
+    cameraChanged(*cam);
+    return Result::success();
+}
+
+// ── Fiziksel pozlama (MEVCUT preset modeli) ────────────────────────────────
+// ★★★ Degerler KIRPILMAZ, REDDEDILIR: sessizce kirpilan bir kadran, ajanin
+//   "ayarladim" deyip baska bir degeri olcmesi demektir.
+// ★★ Ve `auto_exposure` acikken ISO/enstantane/diyafram OKUNMAZ. Bu setter'lar
+//   yine de basarili doner cunku ayari GERCEKTEN yaziyorlar; goruntunun
+//   degismemesi modelin oncelik sirasidir. Ajan bunu `camera.get`'in
+//   `exposure_factor` alanindan gorur -- kadran "olu" degil, kapali.
+
+Result setCameraAutoExposure(bool enabled) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    Camera* cam = activeCamera();
+    if (!cam) return Result::fail("no active camera in the scene");
+    cam->auto_exposure = enabled;
+    cameraChanged(*cam);
+    return Result::success();
+}
+
+Result setCameraUsePhysicalExposure(bool enabled) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    Camera* cam = activeCamera();
+    if (!cam) return Result::fail("no active camera in the scene");
+    cam->use_physical_exposure = enabled;
+    cameraChanged(*cam);
+    return Result::success();
+}
+
+Result setCameraIsoPreset(int index) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (index < 0 || index >= (int)CameraPresets::ISO_PRESET_COUNT)
+        return Result::fail("iso_preset_index out of range [0, " +
+                            std::to_string((int)CameraPresets::ISO_PRESET_COUNT - 1) + "]");
+    Camera* cam = activeCamera();
+    if (!cam) return Result::fail("no active camera in the scene");
+    cam->iso_preset_index = index;
+    cameraChanged(*cam);
+    return Result::success();
+}
+
+Result setCameraShutterPreset(int index) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (index < 0 || index >= (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT)
+        return Result::fail("shutter_preset_index out of range [0, " +
+                            std::to_string((int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT - 1) + "]");
+    Camera* cam = activeCamera();
+    if (!cam) return Result::fail("no active camera in the scene");
+    cam->shutter_preset_index = index;
+    cameraChanged(*cam);
+    return Result::success();
+}
+
+Result setCameraFStopPreset(int index) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (index < 0 || index >= (int)CameraPresets::FSTOP_PRESET_COUNT)
+        return Result::fail("fstop_preset_index out of range [0, " +
+                            std::to_string((int)CameraPresets::FSTOP_PRESET_COUNT - 1) + "]");
+    Camera* cam = activeCamera();
+    if (!cam) return Result::fail("no active camera in the scene");
+    // ★★ Bu preset pozlamayi VE Cinema modu lens kusurlarini surer, ama DoF'u
+    //   surmez -- DoF hala `aperture` kadranindan gelir. Kayitli borc.
+    cam->fstop_preset_index = index;
+    cameraChanged(*cam);
+    return Result::success();
+}
+
+Result setCameraEvCompensation(float ev) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (!(ev >= -10.0f && ev <= 10.0f))
+        return Result::fail("ev_compensation must be in [-10, +10] stops");
+    Camera* cam = activeCamera();
+    if (!cam) return Result::fail("no active camera in the scene");
+    cam->ev_compensation = ev;
     cameraChanged(*cam);
     return Result::success();
 }
@@ -1918,6 +2121,84 @@ Result setWorldSunSize(float degrees) {
     return Result::success();
 }
 
+Result getWorldAtmosphere(WorldAtmosphereInfo& out) {
+    if (!g_ctx) return notBound();
+    const NishitaSkyParams p = g_ctx->renderer.world.getNishitaParams();
+    out.air_density = p.air_density;
+    out.dust_density = p.dust_density;
+    out.ozone_density = p.ozone_density;
+    out.ozone_absorption_scale = p.ozone_absorption_scale;
+    out.humidity = p.humidity;
+    out.temperature = p.temperature;
+    out.altitude = p.altitude;
+    out.mie_anisotropy = p.mie_anisotropy;
+    out.planet_radius = p.planet_radius;
+    out.atmosphere_height = p.atmosphere_height;
+    out.rayleigh_scattering = Vec3(p.rayleigh_scattering.x, p.rayleigh_scattering.y, p.rayleigh_scattering.z);
+    out.mie_scattering = Vec3(p.mie_scattering.x, p.mie_scattering.y, p.mie_scattering.z);
+    out.rayleigh_density = p.rayleigh_density;
+    out.mie_density = p.mie_density;
+    return Result::success();
+}
+
+Result updateWorldAtmosphere(const WorldAtmosphereUpdate& update) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+
+    NishitaSkyParams p = g_ctx->renderer.world.getNishitaParams();
+
+    // ★ Sinirlar SESSIZ DEGIL: kirpmak yerine reddediyoruz. Bir gezegen
+    //   yaricapini 0 yapmak LUT integralini bozar ve belirtisi "gokyuzu tuhaf"
+    //   olur -- panelin yalan soyledigi sinifin tam ornegi.
+    auto reject = [](const char* what) { return Result::fail(std::string(what)); };
+    if (update.air_density && *update.air_density < 0.0f) return reject("air_density must be >= 0");
+    if (update.dust_density && *update.dust_density < 0.0f) return reject("dust_density must be >= 0");
+    if (update.ozone_density && *update.ozone_density < 0.0f) return reject("ozone_density must be >= 0");
+    if (update.ozone_absorption_scale && *update.ozone_absorption_scale < 0.0f)
+        return reject("ozone_absorption_scale must be >= 0");
+    if (update.humidity && (*update.humidity < 0.0f || *update.humidity > 1.0f))
+        return reject("humidity must be within 0..1");
+    if (update.temperature && (*update.temperature < -273.15f))
+        return reject("temperature is in CELSIUS and must be above absolute zero");
+    if (update.mie_anisotropy && (*update.mie_anisotropy <= -1.0f || *update.mie_anisotropy >= 1.0f))
+        return reject("mie_anisotropy (g) must be within (-1, 1)");
+    if (update.planet_radius && *update.planet_radius < 1000.0f)
+        return reject("planet_radius is in METRES and must be >= 1000");
+    if (update.atmosphere_height && *update.atmosphere_height < 1000.0f)
+        return reject("atmosphere_height is in METRES and must be >= 1000");
+    if (update.rayleigh_density && *update.rayleigh_density < 1.0f)
+        return reject("rayleigh_density is a SCALE HEIGHT in metres and must be >= 1");
+    if (update.mie_density && *update.mie_density < 1.0f)
+        return reject("mie_density is a SCALE HEIGHT in metres and must be >= 1");
+
+    if (update.air_density)             p.air_density = *update.air_density;
+    if (update.dust_density)            p.dust_density = *update.dust_density;
+    if (update.ozone_density)           p.ozone_density = *update.ozone_density;
+    if (update.ozone_absorption_scale)  p.ozone_absorption_scale = *update.ozone_absorption_scale;
+    if (update.humidity)                p.humidity = *update.humidity;
+    if (update.temperature)             p.temperature = *update.temperature;
+    if (update.altitude)                p.altitude = *update.altitude;
+    if (update.mie_anisotropy)          p.mie_anisotropy = *update.mie_anisotropy;
+    if (update.planet_radius)           p.planet_radius = *update.planet_radius;
+    if (update.atmosphere_height)       p.atmosphere_height = *update.atmosphere_height;
+    if (update.rayleigh_scattering)
+        p.rayleigh_scattering = make_float3(update.rayleigh_scattering->x,
+                                            update.rayleigh_scattering->y,
+                                            update.rayleigh_scattering->z);
+    if (update.mie_scattering)
+        p.mie_scattering = make_float3(update.mie_scattering->x,
+                                       update.mie_scattering->y,
+                                       update.mie_scattering->z);
+    if (update.rayleigh_density)        p.rayleigh_density = *update.rayleigh_density;
+    if (update.mie_density)             p.mie_density = *update.mie_density;
+
+    // setNishitaParams'in kendi karsilastirmasi LUT'u kirletiyor; burada ayrica
+    // isaretlemiyoruz ki "hangi alan LUT'a giriyor" sorusunun TEK bir cevabi olsun.
+    g_ctx->renderer.world.setNishitaParams(p);
+    worldChanged();
+    return Result::success();
+}
+
 Result getWorldThermal(WorldThermalInfo& out) {
     if (!g_ctx) return notBound();
     // ★ worldThermal() lives on ParticleSimulationSystem, not SceneData
@@ -1962,141 +2243,7 @@ Result setWorldThermal(const float* ambient_kelvin, const float* kelvin_per_unit
 // Post-processing helpers (Faz 5.1d).
 // CRITICAL RULE: Post-processing changes MUST NEVER call resetAccumulation.
 // ---------------------------------------------------------------------------
-namespace {
-
-std::string toneMapTypeName(ToneMappingType type) {
-    switch (type) {
-        case ToneMappingType::AGX: return "agx";
-        case ToneMappingType::ACES: return "aces";
-        case ToneMappingType::Uncharted: return "uncharted";
-        case ToneMappingType::Filmic: return "filmic";
-        case ToneMappingType::None: return "none";
-    }
-    return "none";
-}
-
-bool parseToneMapType(const std::string& name, ToneMappingType& out) {
-    std::string s = name;
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (s == "agx") { out = ToneMappingType::AGX; return true; }
-    if (s == "aces") { out = ToneMappingType::ACES; return true; }
-    if (s == "uncharted") { out = ToneMappingType::Uncharted; return true; }
-    if (s == "filmic") { out = ToneMappingType::Filmic; return true; }
-    if (s == "none") { out = ToneMappingType::None; return true; }
-    return false;
-}
-
-void postChanged() {
-    if (g_ctx) {
-        g_ctx->apply_tonemap = true;
-        g_ctx->render_settings.persistent_tonemap = true;
-    }
-}
-
-void stylizeChanged() {
-    if (g_ctx) {
-        g_ctx->render_settings.stylize_enabled = g_ctx->renderer.stylizeMode.enabled;
-        stylize_redisplay = true;
-    }
-}
-
-} // namespace
-
-Result getPost(PostState& out) {
-    if (!g_ctx) return notBound();
-    const auto& params = g_ctx->color_processor.params;
-    out.exposure = params.global_exposure;
-    out.gamma = params.global_gamma;
-    out.saturation = params.saturation;
-    out.color_temperature = params.color_temperature;
-    out.tone_mapping = toneMapTypeName(params.tone_mapping_type);
-    out.vignette_enabled = params.enable_vignette;
-    out.vignette_strength = params.vignette_strength;
-    out.stylize_enabled = g_ctx->renderer.stylizeMode.enabled;
-    out.stylize_strength = g_ctx->renderer.stylizeMode.profile.global_strength;
-    return Result::success();
-}
-
-Result setPostExposure(float exposure) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    if (exposure < 0.0f) return Result::fail("exposure must be non-negative");
-    g_ctx->color_processor.params.global_exposure = exposure;
-    postChanged();
-    return Result::success();
-}
-
-Result setPostGamma(float gamma) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    if (gamma <= 0.0f) return Result::fail("gamma must be positive");
-    g_ctx->color_processor.params.global_gamma = gamma;
-    postChanged();
-    return Result::success();
-}
-
-Result setPostSaturation(float saturation) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    if (saturation < 0.0f) return Result::fail("saturation must be non-negative");
-    g_ctx->color_processor.params.saturation = saturation;
-    postChanged();
-    return Result::success();
-}
-
-Result setPostColorTemperature(float temp_k) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    if (temp_k <= 0.0f) return Result::fail("color temperature must be positive");
-    g_ctx->color_processor.params.color_temperature = temp_k;
-    postChanged();
-    return Result::success();
-}
-
-Result setPostToneMapping(const std::string& type) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    ToneMappingType t;
-    if (!parseToneMapType(type, t))
-        return Result::fail("unknown tone mapping type '" + type + "' (expected agx|aces|uncharted|filmic|none)");
-    g_ctx->color_processor.params.tone_mapping_type = t;
-    postChanged();
-    return Result::success();
-}
-
-Result setPostVignetteEnabled(bool enabled) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    g_ctx->color_processor.params.enable_vignette = enabled;
-    postChanged();
-    return Result::success();
-}
-
-Result setPostVignetteStrength(float strength) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    if (strength < 0.0f) return Result::fail("vignette strength must be non-negative");
-    g_ctx->color_processor.params.vignette_strength = strength;
-    postChanged();
-    return Result::success();
-}
-
-Result setPostStylizeEnabled(bool enabled) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    g_ctx->renderer.stylizeMode.enabled = enabled;
-    stylizeChanged();
-    return Result::success();
-}
-
-Result setPostStylizeStrength(float strength) {
-    if (!g_ctx) return notBound();
-    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
-    if (strength < 0.0f) return Result::fail("stylize strength must be non-negative");
-    g_ctx->renderer.stylizeMode.profile.global_strength = strength;
-    stylizeChanged();
-    return Result::success();
-}
+// Post operations are implemented in RtApiPost.cpp.
 
 // ---------------------------------------------------------------------------
 // Mesh Modifiers (Faz 5.2b) — Implemented in RtApiModifiers.cpp
@@ -2140,6 +2287,13 @@ Result listScatterGroups(std::vector<rtapi::ScatterGroupInfo>& out_groups) {
         info.target_node_name = g.target_node_name;
         info.instance_count = g.getInstanceCount();
         info.triangle_count = g.getTriangleCount();
+        info.density_mask = g.brush_settings.density_mask_attribute;
+        info.exclusion_mask = g.brush_settings.exclusion_mask_attribute;
+        info.exclusion_threshold = g.brush_settings.exclusion_threshold;
+        info.scale_mask = g.brush_settings.scale_mask_attribute;
+        info.scale_mask_influence = g.brush_settings.scale_mask_influence;
+        info.splat_include_channel = g.brush_settings.splat_map_channel;
+        info.splat_exclude_channel = g.brush_settings.exclusion_channel;
 
         for (const auto& src : g.sources) {
             rtapi::ScatterSourceInfo sinfo;
@@ -2273,7 +2427,11 @@ Result addLibraryScatterSource(const std::string& group_id_or_name, const std::s
 
     ScatterSource source;
     std::string error;
-    if (!FoliageAssets::loadScatterSource(relative_path, "API_Library_Asset", 1.0f, source, &error)) {
+    // Empty display name => loadScatterSource names the source after the asset
+    // file, as the panel does. The old fixed "API_Library_Asset" made every
+    // script-added source report the same name, so scatter.list_groups could not
+    // tell two sources apart — the readback existed but carried no information.
+    if (!FoliageAssets::loadScatterSource(relative_path, std::string{}, 1.0f, source, &error)) {
         return Result::fail("failed to load asset from library: " + error);
     }
     
@@ -2309,26 +2467,43 @@ Result removeScatterSource(const std::string& group_id_or_name, int source_index
 }
 
 Result setScatterGroupSettings(const std::string& group_id_or_name,
-                                const int* target_count, const int* seed,
-                                const float* min_distance, const float* slope_max,
-                                const float* height_min, const float* height_max,
-                                const std::string* density_mask, const std::string* scale_mask) {
+                               const ScatterGroupSettingsPatch& patch) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
 
     InstanceGroup* group = findScatterGroupHelper(group_id_or_name);
     if (!group) return Result::fail("scatter group not found: " + group_id_or_name);
 
-    auto& bs = group->brush_settings;
-    if (target_count) bs.target_count = std::clamp(*target_count, 0, 5000000);
-    if (seed) bs.seed = *seed;
-    if (min_distance) bs.min_distance = std::max(0.0f, *min_distance);
-    if (slope_max) bs.slope_max = std::clamp(*slope_max, 0.0f, 90.0f);
-    if (height_min) bs.height_min = *height_min;
-    if (height_max) bs.height_max = *height_max;
-    if (density_mask) bs.density_mask_attribute = *density_mask;
-    if (scale_mask) bs.scale_mask_attribute = *scale_mask;
+    // A splat channel is an index into RGBA, and -1 means "off". Clamping an
+    // out-of-range channel to 3 would silently mask against the alpha channel
+    // instead of reporting the typo, so refuse it.
+    const auto checkChannel = [](const std::optional<int>& channel, const char* what) -> Result {
+        if (channel && (*channel < -1 || *channel > 3))
+            return Result::fail(std::string(what) + " must be -1 (off) or 0..3 (splat RGBA), got " +
+                                std::to_string(*channel));
+        return Result::success();
+    };
+    if (Result r = checkChannel(patch.splat_include_channel, "splat_include_channel"); !r) return r;
+    if (Result r = checkChannel(patch.splat_exclude_channel, "splat_exclude_channel"); !r) return r;
 
+    auto& bs = group->brush_settings;
+    if (patch.target_count) bs.target_count = std::clamp(*patch.target_count, 0, 5000000);
+    if (patch.seed) bs.seed = *patch.seed;
+    if (patch.min_distance) bs.min_distance = std::max(0.0f, *patch.min_distance);
+    if (patch.slope_max) bs.slope_max = std::clamp(*patch.slope_max, 0.0f, 90.0f);
+    if (patch.height_min) bs.height_min = *patch.height_min;
+    if (patch.height_max) bs.height_max = *patch.height_max;
+    if (patch.density_mask) bs.density_mask_attribute = *patch.density_mask;
+    if (patch.exclusion_mask) bs.exclusion_mask_attribute = *patch.exclusion_mask;
+    if (patch.exclusion_threshold) bs.exclusion_threshold = std::clamp(*patch.exclusion_threshold, 0.0f, 1.0f);
+    if (patch.scale_mask) bs.scale_mask_attribute = *patch.scale_mask;
+    if (patch.scale_mask_influence) bs.scale_mask_influence = std::clamp(*patch.scale_mask_influence, 0.0f, 1.0f);
+    if (patch.splat_include_channel) bs.splat_map_channel = *patch.splat_include_channel;
+    if (patch.splat_exclude_channel) bs.exclusion_channel = *patch.splat_exclude_channel;
+
+    // The panel drives placement off these too; without this the node UI keeps
+    // showing the previous values until something else marks the group dirty.
+    group->gpu_dirty = true;
     return Result::success();
 }
 

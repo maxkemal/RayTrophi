@@ -1030,12 +1030,16 @@ private:
             { "terrain_lem_rain",                    "terrain_lem_rain.spv",                 2, 32 },
             { "terrain_lem_weights",                 "terrain_lem_weights.spv",              3, 16 },
             { "terrain_lem_accumulate",              "terrain_lem_accumulate.spv",           4, 8  },
-            { "terrain_lem_incise",                  "terrain_lem_incise.spv",               9, 60 },
+            { "terrain_lem_incise",                  "terrain_lem_incise.spv",              10, 60 },
             { "terrain_lem_route",                   "terrain_lem_route.spv",               10, 44 },
             { "terrain_lem_talus",                   "terrain_lem_talus.spv",                6, 32 },
             { "terrain_lem_alluvium",                "terrain_lem_alluvium.spv",             6, 32 },
             { "terrain_lem_diffuse",                 "terrain_lem_diffuse.spv",              5, 20 },
-            { "terrain_lem_finalize",                "terrain_lem_finalize.spv",            10, 40 },
+            { "terrain_lem_finalize",                "terrain_lem_finalize.spv",            11, 40 },
+            // Flat resolution (Garbrecht & Martz). See terrain_lem_flat_seed.comp.
+            { "terrain_lem_flat_seed",               "terrain_lem_flat_seed.spv",            2,  8 },
+            { "terrain_lem_flat_relax",              "terrain_lem_flat_relax.spv",           3,  8 },
+            { "terrain_lem_flat_ramp",               "terrain_lem_flat_ramp.spv",            4, 20 },
             // Phase 1 GPU foliage parity kernel. Surface producers (terrain/mesh)
             // share these include/exclude semantics and deterministic candidate RNG.
             { "foliage_scatter_parity",              "foliage_scatter_parity.spv",           2, 48 },

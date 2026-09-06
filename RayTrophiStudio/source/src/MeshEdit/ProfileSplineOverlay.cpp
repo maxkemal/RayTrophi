@@ -1,6 +1,7 @@
 #include "MeshEdit/ProfileSplineOverlay.h"
 
 #include "MeshEdit/SplineObject.h"
+#include "MeshEdit/SplineSurfaceAuthoring.h"
 #include "MeshEdit/SplineEditService.h"
 #include "MeshEdit/SplineEvaluationService.h"
 #include "MeshEdit/SplineAnimation.h"
@@ -10,7 +11,6 @@
 #include "scene_ui.h"
 #include "globals.h"
 #include "Camera.h"
-#include "TerrainManager.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
 
@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace MeshEdit {
 namespace {
@@ -40,78 +41,15 @@ bool project(const Camera& camera, const Vec3& point, float width, float height,
     return true;
 }
 
-// Surface Snap: reuses the same scene BVH (+ linear fallback) the viewport
-// selection tool queries, the terrain raycast River already uses, and
-// River's own Y=0 ground fallback when neither is under the cursor - so a
-// new spline point always lands where the cursor is actually aiming, the
-// same River-style "click to place the next point" model. Only returns
-// false in the genuinely degenerate case (ray nearly parallel to Y=0,
-// looking at the horizon with nothing behind it).
+// Surface Snap now lives in MeshEdit/SplineSurfaceAuthoring so the River tool
+// and the scene.raycast IPC method share one placement policy. Profile spline
+// authoring wants the full policy: a point may be laid on other geometry, on
+// the terrain, or on the ground plane past the edge of the world.
 bool surfaceSnapPosition(UIContext& ctx, const ImVec2& mousePos, Vec3& outPosition) {
-    if (!ctx.scene.camera) return false;
-    ImGuiIO& io = ImGui::GetIO();
-    const float viewportWidth = std::max(1.0f, io.DisplaySize.x);
-    const float viewportHeight = std::max(1.0f, io.DisplaySize.y);
-    const float u = mousePos.x / viewportWidth;
-    const float v = 1.0f - (mousePos.y / viewportHeight);
-    const Ray ray = ctx.scene.camera->get_ray(u, v);
-
-    float closestT = 1e9f;
-    bool hitMesh = false;
-    HitRecord hitRecord;
-    if (ctx.scene.bvh) {
-        HitRecord temp;
-        if (ctx.scene.bvh->hit(ray, 0.001f, closestT, temp)) {
-            hitMesh = true;
-            closestT = temp.t;
-            hitRecord = temp;
-        }
-    }
-    if (!hitMesh) {
-        for (const auto& object : ctx.scene.world.objects) {
-            if (!object) continue;
-            HitRecord temp;
-            if (object->hit(ray, 0.001f, closestT, temp)) {
-                hitMesh = true;
-                closestT = temp.t;
-                hitRecord = temp;
-            }
-        }
-    }
-    if (hitMesh) {
-        outPosition = ray.origin + ray.direction * hitRecord.t;
-        return true;
-    }
-
-    if (TerrainManager::getInstance().hasActiveTerrain()) {
-        float closestTerrainT = 1e20f;
-        bool hitTerrain = false;
-        for (auto& terrain : TerrainManager::getInstance().getTerrains()) {
-            float terrainT = 0.0f;
-            Vec3 terrainNormal;
-            if (TerrainManager::getInstance().intersectRay(&terrain, ray, terrainT, terrainNormal) &&
-                terrainT < closestTerrainT) {
-                closestTerrainT = terrainT;
-                hitTerrain = true;
-            }
-        }
-        if (hitTerrain) {
-            outPosition = ray.origin + ray.direction * closestTerrainT;
-            return true;
-        }
-    }
-
-    // No mesh/terrain under the cursor: fall back to the same Y=0 ground
-    // plane the River tool uses when no terrain is active, so clicking past
-    // the edge of the world still places a point where the cursor is aiming.
-    if (std::fabs(ray.direction.y) > 0.01f) {
-        const float t = -ray.origin.y / ray.direction.y;
-        if (t > 0.0f) {
-            outPosition = ray.origin + ray.direction * t;
-            return true;
-        }
-    }
-    return false;
+    SurfaceSnapResult snap;
+    if (!snapToSurface(ctx, mousePos, SurfaceFilter::MeshAndTerrain, snap)) return false;
+    outPosition = snap.position;
+    return true;
 }
 
 void addSmoothTriangle(ImDrawList* draw, const ImVec2& a, const ImVec2& b,
@@ -136,7 +74,13 @@ void drawProfileSplineOverlay(UIContext& ctx) {
     for (size_t objectIndex = 0; objectIndex < ctx.scene.world.objects.size(); ++objectIndex) {
         const auto& object = ctx.scene.world.objects[objectIndex];
         auto splineObject = std::dynamic_pointer_cast<SplineObject>(object);
-        if (!splineObject || !splineObject->visible || splineObject->spline.points.empty()) continue;
+        if (!splineObject || !splineObject->visible) continue;
+        // An empty curve normally has nothing to draw, but a Draw-armed one has
+        // to stay in this loop or it can never receive the click that lays its
+        // first point - which is exactly why drawing a curve from nothing was
+        // impossible before.
+        if (splineObject->spline.points.empty() &&
+            splineObject->edit_tool != SplineEditTool::Draw) continue;
         // The overlay also owns the viewport control-point edit path, so this
         // reference must remain mutable when a point is dragged.
         auto& spline = splineObject->spline;
@@ -386,6 +330,130 @@ void drawProfileSplineOverlay(UIContext& ctx) {
             }
         }
 
+        // Drag feedback. The gizmo manipulates; this reports. An overlay drawn in
+        // screen space with no depth test cannot convey where a point sits in 3D
+        // on its own, so the numbers carry what the picture cannot: how far the
+        // point has moved, and where it is relative to the object it belongs to.
+        if (selected && pointEditing && splineObject->point_drag_dirty &&
+            splineObject->drag_origin_valid &&
+            splineObject->selected_point >= 0 &&
+            splineObject->selected_point < static_cast<int>(spline.points.size())) {
+            const size_t activeIndex = static_cast<size_t>(splineObject->selected_point);
+            const Vec3 localNow = spline.points[activeIndex].position;
+            const Vec3 delta = localNow - splineObject->drag_origin_local;
+            const Vec3 worldNow = transform.transform_point(localNow);
+
+            ImVec2 anchorScreen;
+            if (projectLocal(localNow, anchorScreen)) {
+                // A ghost of where the drag started, plus the travel line. This
+                // is the part that answers "how much did it move" at a glance,
+                // before anyone reads a number.
+                ImVec2 originScreen;
+                if (projectLocal(splineObject->drag_origin_local, originScreen)) {
+                    draw->AddCircle(originScreen, 5.0f, IM_COL32(255, 255, 255, 90), 12, 1.5f);
+                    draw->AddLine(originScreen, anchorScreen, IM_COL32(255, 210, 90, 200), 1.5f);
+                }
+
+                // Neighbour segments with their lengths: a curve point's real
+                // context is the points it connects to, not the world origin.
+                const auto drawNeighbour = [&](int neighbourIndex) {
+                    if (neighbourIndex < 0 ||
+                        neighbourIndex >= static_cast<int>(spline.points.size())) return;
+                    const Vec3 neighbourLocal =
+                        spline.points[static_cast<size_t>(neighbourIndex)].position;
+                    ImVec2 neighbourScreen;
+                    if (!projectLocal(neighbourLocal, neighbourScreen)) return;
+                    draw->AddLine(anchorScreen, neighbourScreen, IM_COL32(120, 200, 255, 130), 1.0f);
+                    const Vec3 span = transform.transform_point(neighbourLocal) - worldNow;
+                    char label[32];
+                    std::snprintf(label, sizeof(label), "%.2f", span.length());
+                    const ImVec2 mid((anchorScreen.x + neighbourScreen.x) * 0.5f,
+                                     (anchorScreen.y + neighbourScreen.y) * 0.5f);
+                    draw->AddText(mid, IM_COL32(160, 215, 255, 200), label);
+                };
+                drawNeighbour(splineObject->selected_point - 1);
+                drawNeighbour(splineObject->selected_point + 1);
+
+                // Distance to the object's own pivot, so the point can be read
+                // against the object rather than against the world.
+                ImVec2 pivotScreen;
+                const Vec3 pivotLocal(0.0f, 0.0f, 0.0f);
+                if (projectLocal(pivotLocal, pivotScreen)) {
+                    draw->AddLine(anchorScreen, pivotScreen, IM_COL32(200, 200, 200, 70), 1.0f);
+                }
+
+                char readout[192];
+                std::snprintf(readout, sizeof(readout),
+                              "d %+.3f %+.3f %+.3f  (%.3f)\n"
+                              "local %.3f %.3f %.3f\n"
+                              "world %.3f %.3f %.3f",
+                              delta.x, delta.y, delta.z, delta.length(),
+                              localNow.x, localNow.y, localNow.z,
+                              worldNow.x, worldNow.y, worldNow.z);
+                const ImVec2 textSize = ImGui::CalcTextSize(readout);
+                const ImVec2 boxMin(anchorScreen.x + 14.0f, anchorScreen.y + 14.0f);
+                const ImVec2 boxMax(boxMin.x + textSize.x + 10.0f, boxMin.y + textSize.y + 8.0f);
+                draw->AddRectFilled(boxMin, boxMax, IM_COL32(18, 18, 20, 205), 4.0f);
+                draw->AddRect(boxMin, boxMax, IM_COL32(255, 210, 90, 140), 4.0f);
+                draw->AddText(ImVec2(boxMin.x + 5.0f, boxMin.y + 4.0f),
+                              IM_COL32(240, 240, 240, 255), readout);
+                if (io.KeyCtrl) {
+                    draw->AddText(ImVec2(boxMin.x + 5.0f, boxMax.y + 2.0f),
+                                  IM_COL32(255, 210, 90, 220),
+                                  io.KeyShift ? "snap 0.1" : "snap 1.0");
+                }
+            }
+        }
+
+        // Live cursor follow for Draw and Extrude. Without this the tool still
+        // worked but felt like it was extending to some automatic point: the
+        // snap only happened at the instant of the click, so nothing on screen
+        // told the artist where the next point was going to land. This is the
+        // half that makes it feel like the River tool.
+        const bool appendToolActive = selected && pointEditing && !spline.isClosed &&
+            (splineObject->edit_tool == SplineEditTool::Draw ||
+             splineObject->edit_tool == SplineEditTool::Extrude);
+        // The picker now claims every click while an append tool is active, so
+        // there has to be a way OUT that is not "find the combo again". Escape
+        // returns to Select, which is also what makes the claim safe: without an
+        // exit the tool would trap the viewport.
+        if (appendToolActive && !io.WantTextInput &&
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            splineObject->edit_tool = SplineEditTool::Select;
+        }
+        if (appendToolActive && !io.WantTextInput && !ImGuizmo::IsOver() && !io.WantCaptureMouse) {
+            SurfaceSnapResult snap;
+            if (snapToSurface(ctx, io.MousePos, SurfaceFilter::MeshAndTerrain, snap)) {
+                ImVec2 cursorScreen;
+                if (project(*ctx.scene.camera, snap.position,
+                            io.DisplaySize.x, io.DisplaySize.y, cursorScreen)) {
+                    // The marker colour reports WHAT was hit, so a point that is
+                    // about to land on a rock instead of the terrain is visible
+                    // before the click rather than after it.
+                    ImU32 markerColor = IM_COL32(120, 200, 255, 255);   // terrain
+                    if (snap.kind == SurfaceHitKind::Mesh)
+                        markerColor = IM_COL32(255, 200, 90, 255);
+                    else if (snap.kind == SurfaceHitKind::GroundPlane)
+                        markerColor = IM_COL32(150, 150, 150, 255);
+                    draw->AddCircle(cursorScreen, 7.0f, markerColor, 16, 2.0f);
+                    draw->AddCircleFilled(cursorScreen, 2.5f, markerColor);
+
+                    const int tailIndex = splineObject->edit_tool == SplineEditTool::Extrude
+                        ? splineObject->selected_point
+                        : (spline.points.empty()
+                               ? -1 : static_cast<int>(spline.points.size()) - 1);
+                    if (tailIndex >= 0 && tailIndex < static_cast<int>(spline.points.size())) {
+                        ImVec2 tailScreen;
+                        if (projectLocal(spline.points[static_cast<size_t>(tailIndex)].position,
+                                         tailScreen)) {
+                            draw->AddLine(tailScreen, cursorScreen,
+                                          IM_COL32(255, 255, 255, 110), 1.5f);
+                        }
+                    }
+                }
+            }
+        }
+
         // Viewport picking: unlike renderable mesh objects, authoring splines
         // intentionally do not ray-hit. Their screen-space source overlay is
         // the canonical picker and keeps the authoring object mesh-free.
@@ -432,6 +500,37 @@ void drawProfileSplineOverlay(UIContext& ctx) {
                 }
                 return;
             }
+            // Draw: the same "click lays the next point" model as Extrude, but
+            // valid from ZERO points, so this is how a curve BEGINS. Placement
+            // uses the full surface policy (mesh, terrain, then ground plane).
+            if (pointEditing && splineObject->edit_tool == SplineEditTool::Draw &&
+                !spline.isClosed) {
+                if (ImGui::IsMouseClicked(0) && !io.WantCaptureMouse) {
+                    SurfaceSnapResult snap;
+                    if (snapToSurface(ctx, io.MousePos, SurfaceFilter::MeshAndTerrain, snap)) {
+                        // The curve carries a transform, so the click has to be
+                        // taken back into local space or every point after a
+                        // moved/rotated curve lands somewhere else.
+                        const Vec3 localPosition = transform.inverse().transform_point(snap.position);
+                        const BezierSpline beforeSpline = spline;
+                        const int previousEndpoint =
+                            spline.points.empty()
+                                ? -1 : static_cast<int>(spline.points.size()) - 1;
+                        int inserted = -1;
+                        if (SplineEditService::appendPointAtEnd(spline, localPosition, &inserted)) {
+                            if (previousEndpoint >= 0 && spline.points.size() > 2) {
+                                propagateSplineExtrudeToKeys(
+                                    ctx.scene.timeline, splineObject->nodeName, beforeSpline,
+                                    previousEndpoint, localPosition);
+                            }
+                            splineObject->selected_point = inserted;
+                            splineObject->selected_points = {inserted};
+                            ProjectManager::getInstance().markModified();
+                        }
+                    }
+                    return;
+                }
+            }
             // Extrude follows River's "Add" model: once the tool is active on a
             // valid open-spline endpoint, every click lays down the next point
             // wherever the cursor is aiming (surface/terrain/ground snap) and
@@ -446,7 +545,13 @@ void drawProfileSplineOverlay(UIContext& ctx) {
                  extrudeEndpoint == static_cast<int>(spline.points.size()) - 1);
             if (ImGui::IsMouseClicked(0) && extrudeToolActive) {
                 Vec3 targetPosition;
-                if (!surfaceSnapPosition(ctx, io.MousePos, targetPosition)) {
+                if (surfaceSnapPosition(ctx, io.MousePos, targetPosition)) {
+                    // Control points are stored in the curve's local space. The
+                    // snap result is a world position, so it has to come back
+                    // through the inverse transform - without this, extruding a
+                    // moved or rotated curve laid the point at the offset twice.
+                    targetPosition = transform.inverse().transform_point(targetPosition);
+                } else {
                     targetPosition = spline.points[static_cast<size_t>(extrudeEndpoint)].position;
                 }
                 const BezierSpline beforeSpline = spline;
@@ -493,7 +598,9 @@ bool pickProfileSpline(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
     for (size_t objectIndex = 0; objectIndex < ctx.scene.world.objects.size(); ++objectIndex) {
         auto splineObject = std::dynamic_pointer_cast<SplineObject>(ctx.scene.world.objects[objectIndex]);
-        if (!splineObject || !splineObject->visible || splineObject->spline.points.empty()) continue;
+        if (!splineObject || !splineObject->visible) continue;
+        if (splineObject->spline.points.empty() &&
+            splineObject->edit_tool != SplineEditTool::Draw) continue;
         const Matrix4x4 transform = splineObject->transform
             ? splineObject->transform->getFinal() : Matrix4x4::identity();
         auto projectLocal = [&](const Vec3& local, ImVec2& screen) {
@@ -524,11 +631,20 @@ bool pickProfileSpline(UIContext& ctx) {
         }
         const bool pointEditing = ctx.selection.selected.spline_object == splineObject &&
                                   splineObject->edit_mode;
-        // Insert/Subdivide/Extrude are consumed by the authoring overlay on
-        // the next draw pass. The generic object picker must not swallow the
-        // click first.
+        // An active authoring tool CLAIMS the click: the overlay consumes it on
+        // this frame's draw pass, so the generic object picker must not run.
+        //
+        // This returned false, which is the opposite - false means "not a spline
+        // click" and lets scene_ui_selection.cpp run the whole picker. Over
+        // ordinary geometry that was survivable, because clicking empty space
+        // selects nothing and the spline stays selected. Over a TERRAIN there is
+        // no empty space: every click hit the terrain, selected it, dropped the
+        // spline selection, and the next click had nothing to draw on. The
+        // symptom was "I have to reselect the curve after every click" - the
+        // tool looked broken only where a terrain existed, which is exactly the
+        // surface the tool was built for.
         if (pointEditing && splineObject->edit_tool != SplineEditTool::Select)
-            return false;
+            return true;
         if (pointHit >= 0 || best < 10.0f) {
             ctx.selection.selectObject(splineObject, static_cast<int>(objectIndex), splineObject->nodeName);
             if (pointEditing && pointHit >= 0) {

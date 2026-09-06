@@ -1,21 +1,57 @@
 // terrain_flow_fill.comp
-// GPU port of the CPU priority-flood depression-filling step in fluvialErosionGPU's
-// updateFlowCPU (TerrainManager.cpp) — used to compute a depression-free "filled"
-// surface that flow direction is derived from. A true parallel priority-flood
-// (Barnes et al.) is a much bigger undertaking; this instead uses the classic
-// Planchon-Darboux (2001) relaxation formulation, which converges to the same
-// depression-free surface via repeated Jacobi-style passes (ping-pong buffers):
-// each interior cell's filled value can only decrease each pass, starting from
-// +infinity, until it settles at max(ownHeight, min-over-neighbors(neighborFilled)+eps).
-// Border cells are pinned to their own (noised) height — same role as the CPU
-// version's boundary-seeded priority queue. Includes the same coherent low-frequency
-// noise the CPU path now applies (see project_terrain_erosion_gpu_migration memory) so
-// flat-ground flow doesn't follow a deterministic rectilinear artifact.
+// GPU depression filling: Planchon-Darboux (2001) relaxation toward the same
+// depression-free surface an exact priority flood (Barnes et al.) produces.
+// Each interior cell may only DECREASE each pass, starting from +infinity,
+// until it settles at max(ownHeight, min-over-neighbours(neighbourFilled) +
+// eps). Border cells are pinned to their own height, which is the role the CPU
+// version's boundary-seeded priority queue plays.
 //
-// Convergence needs roughly as many passes as the largest connected flat/depression
-// region (in cells) — the noise keeps this bounded in practice but very large flat
-// areas may need more passes than the host currently budgets; tune fillPasses if flat
-// areas still look artifact-y.
+// ---------------------------------------------------------------------------
+// ★★★ eps == 0 IS THE LEM PATH, AND IT IS NOT AN OPTIMISATION.
+// ---------------------------------------------------------------------------
+// This pass used to always raise each flood ring by a few ulp so that a filled
+// flat would still have "somewhere downhill" for a router to find. That ladder
+// was the single largest source of artificial drainage geometry in the solver:
+//
+//   * A ladder with the SAME step for cardinal and diagonal moves is a
+//     Chebyshev distance field from the outlet, and the level sets of that are
+//     SQUARES. Steepest descent over it runs along 0 and 45 degrees, which is
+//     exactly the straight, angular, never-merging channel pattern that showed
+//     up on flats and around filled pits while the real slopes either side
+//     looked perfect.
+//   * A few ulp of drop is numerically zero drop. terrain_lem_incise clamps
+//     erosion to incisionSafety * (drop to the receiver), so a flat could not
+//     incise at all and the drainage pattern drawn there on the first refresh
+//     was frozen for the rest of the run.
+//   * Dithering the step was tried (a 1.0-1.5x factor per destination cell)
+//     and cannot work: the factors are SUMMED along the path, so the relative
+//     spread falls as 1/sqrt(N) and a long flat converges straight back to a
+//     linear ramp in geodesic distance. It changed the texture, not the shape.
+//
+// The LEM now passes eps = 0, which makes every cell of one filled basin
+// settle on exactly the SAME float. That is what turns "the flat" into a well
+// defined set that terrain_lem_flat_seed can classify by exact equality, and
+// the routing gradient over it is built properly (Garbrecht & Martz, two
+// geodesic distance fields) in terrain_lem_flat_*.comp instead of being a
+// side effect of the flood order.
+//
+// eps > 0 remains for the two OTHER callers - the coarse hydraulic macro grid
+// and the flow-mask/watershed solve, both in TerrainManager - which derive
+// their weights straight from this surface and have no flat-resolution stage of
+// their own. Only they should pass a non-zero eps.
+//
+// `noiseAmplitude` perturbs the SURFACE and is likewise only for those callers
+// (the watershed path passes 0.03). It is the move the LEM deliberately does
+// not make: perturbing the surface creates dither pits mid-flat - cells with no
+// strictly lower neighbour - which the weight pass writes as an all-zero row,
+// i.e. a terminal sink that cuts a river in the middle of a plain. The flat
+// ramp perturbs DISTANCES instead, which cannot do that. Left alone here rather
+// than changed underneath a subsystem this batch did not otherwise touch.
+//
+// Convergence needs roughly as many passes as the largest connected
+// flat/depression region, in cells. Under-convergence shows up as basins that
+// are still over-filled, i.e. spurious lakes -- reported in the erosion stats,
+// not silent.
 #version 450
 layout(local_size_x = 256) in;
 
@@ -27,6 +63,14 @@ layout(push_constant) uniform PC {
 layout(set = 0, binding = 0) readonly buffer OrigHeight { float origHeight[]; };
 layout(set = 0, binding = 1) readonly buffer FilledIn   { float filledIn[]; };
 layout(set = 0, binding = 2) buffer FilledOut           { float filledOut[]; };
+
+const int dx8[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+const int dy8[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+// A diagonal ladder step costs sqrt(2), like the ground it covers. Charging it
+// the same as a cardinal step is what makes the ladder square; this only
+// matters on the eps > 0 path, and there it matters a lot.
+const float dist8[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                1.0, 1.41421356, 1.0, 1.41421356);
 
 float hash2(int xi, int yi) {
     uint hh = uint(xi) * 374761393u + uint(yi) * 668265263u;
@@ -62,43 +106,34 @@ void main() {
     int x = id % pc.mapWidth;
     int y = id / pc.mapWidth;
 
-    float noisedH = origHeight[id] + coherentNoise(x, y) * pc.noiseAmplitude;
-
-    // A constant epsilon makes a wide filled flat an almost perfect plane.
-    // Steepest descent over that plane produces parallel, grid-aligned rivers
-    // instead of tributaries that merge. Vary the LADDER STEP per destination
-    // cell (never the authored surface) just like the CPU priority flood. The
-    // factor stays >= 1, so every filled cell remains strictly above its
-    // parent and cannot turn into a dither-created sink.
-    uint tie = uint(id);
-    tie ^= tie >> 16u; tie *= 0x7feb352du;
-    tie ^= tie >> 15u; tie *= 0x846ca68bu;
-    tie ^= tie >> 16u;
-    float ladderJitter = 1.0 + 0.5 * (float(tie & 0xffffu) / 65535.0);
+    float h = origHeight[id];
+    if (pc.noiseAmplitude != 0.0) h += coherentNoise(x, y) * pc.noiseAmplitude;
 
     if (x == 0 || x == pc.mapWidth - 1 || y == 0 || y == pc.mapHeight - 1) {
-        filledOut[id] = noisedH;
+        filledOut[id] = h;
         return;
     }
 
-    const int dx[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
-    const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
-
     float best = 1e18;
     for (int d = 0; d < 8; d++) {
-        int nIdx = (y + dy[d]) * pc.mapWidth + (x + dx[d]);
+        int nIdx = (y + dy8[d]) * pc.mapWidth + (x + dx8[d]);
         float nf = filledIn[nIdx];
-        // The ladder has to stay above float resolution at the height it is
-        // actually walking, not at the one the constant was calibrated for.
-        // The host passes ~2e-7, which is about three ulp near h = 0.5 but
-        // only 1.7 near h = 1 - so on a tall terrain a long flat run stops
-        // stepping at all, the filled surface goes bitwise flat, and every
-        // cell of it becomes a terminal sink for drainage. Skipped while the
-        // relaxation is still seeded at +infinity, where it would be nonsense.
-        float stepEps = pc.eps;
-        if (nf < 1.0e6) stepEps = max(pc.eps, abs(nf) * 4.0 * 1.1920929e-7);
-        stepEps *= ladderJitter;
-        float candidate = max(noisedH, nf + stepEps);
+
+        float stepEps = 0.0;
+        if (pc.eps > 0.0) {
+            // The ladder has to stay above float resolution at the height it
+            // is actually walking, not at the one the constant was calibrated
+            // for: a fixed 2e-7 is about three ulp near h = 0.5 but only 1.7
+            // near h = 1, so on a tall terrain a long flat run stops stepping,
+            // the surface goes bitwise flat, and every cell of it becomes a
+            // terminal sink. Skipped while the relaxation is still seeded at
+            // +infinity, where it would be nonsense.
+            stepEps = pc.eps;
+            if (nf < 1.0e6) stepEps = max(pc.eps, abs(nf) * 4.0 * 1.1920929e-7);
+            stepEps *= dist8[d];
+        }
+
+        float candidate = max(h, nf + stepEps);
         best = min(best, candidate);
     }
     filledOut[id] = min(filledIn[id], best);

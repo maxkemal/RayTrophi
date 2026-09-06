@@ -76,6 +76,7 @@ namespace TerrainHydrology {
                            const std::vector<float>* catchmentArea,
                            const std::vector<float>* lakeMask,
                            const std::vector<float>* lakeSpillPoints,
+                           const std::vector<float>* channelExclusion,
                            const RiverNetworkParams& params,
                            RiverNetworkResult& result,
                            std::string* error) {
@@ -91,6 +92,8 @@ namespace TerrainHydrology {
             return fail(error, "invalid lake-mask field layout");
         if (lakeSpillPoints && lakeSpillPoints->size() != pixelCount)
             return fail(error, "invalid lake-spill field layout");
+        if (channelExclusion && channelExclusion->size() != pixelCount)
+            return fail(error, "invalid channel-exclusion field layout");
 
         result = {};
         std::vector<int> directParent(pixelCount, -1);
@@ -116,8 +119,15 @@ namespace TerrainHydrology {
                     ? accumulated >= minimumArea
                     : accumulated >= params.legacyAccumulationThreshold;
             const bool insideLake = lakeMask && (*lakeMask)[index] >= 0.5f;
+            // Infrastructure is not landscape. A road surface carries no river,
+            // and neither does the ditch beside it: a ditch DRAINS, and calling
+            // it a river would paint one along every carved road. Routing above
+            // is deliberately left alone - the water still goes where it went.
+            const bool excludedByAuthor =
+                channelExclusion && (*channelExclusion)[index] >= 0.5f;
             lakeBlocked[index] = insideLake ? 1u : 0u;
-            result.active[index] = channelActive && !insideLake ? 1u : 0u;
+            result.active[index] =
+                channelActive && !insideLake && !excludedByAuthor ? 1u : 0u;
         }
 
         // A lake is a hydrological super-node, not a hole in the drainage

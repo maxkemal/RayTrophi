@@ -35,7 +35,7 @@ void drawSessions() {
     if (ImGui::Button("Disconnect all")) rtipc::disconnectAllSessions();
     ImGui::SameLine(); ImGui::TextDisabled("%zu retained session(s)", sessions.size());
     if (ImGui::BeginTable("ipc_sessions", 8,
-            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY)) {
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable)) {
         for (const char* heading : {"State", "Transport", "Peer", "TLS", "Token", "Requests", "Errors", "Action"})
             ImGui::TableSetupColumn(heading);
         ImGui::TableHeadersRow();
@@ -140,7 +140,7 @@ void drawAudit() {
     const auto events = rtipc::recentAuditEvents(512);
     ImGui::SameLine(); ImGui::TextDisabled("%zu event(s)", events.size());
     if (ImGui::BeginTable("ipc_audit", 7,
-            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY)) {
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable)) {
         for (const char* heading : {"Seq", "Peer", "Token", "Method", "Decision", "Outcome", "us"})
             ImGui::TableSetupColumn(heading);
         ImGui::TableHeadersRow();

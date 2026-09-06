@@ -295,9 +295,9 @@ void drawProfileSplineEditControls(UIContext& ctx) {
     if (splineObject->edit_mode) {
         ImGui::Separator();
         ImGui::Text("Viewport Tool");
-        const char* toolNames[] = {"Select", "Insert Point", "Subdivide", "Extrude"};
+        const char* toolNames[] = {"Select", "Insert Point", "Subdivide", "Extrude", "Draw on Surface"};
         int tool = static_cast<int>(splineObject->edit_tool);
-        if (ImGui::Combo("Tool", &tool, toolNames, 4)) {
+        if (ImGui::Combo("Tool", &tool, toolNames, IM_ARRAYSIZE(toolNames))) {
             splineObject->edit_tool = static_cast<SplineEditTool>(tool);
         }
         if (splineObject->edit_tool == SplineEditTool::InsertPoint) {
@@ -308,7 +308,21 @@ void drawProfileSplineEditControls(UIContext& ctx) {
             ImGui::SliderInt("Cuts", &splineObject->subdivide_cuts, 1, 32);
             ImGui::TextDisabled("Selected point starts the segment.");
         } else if (splineObject->edit_tool == SplineEditTool::Extrude) {
-            ImGui::TextDisabled("Select an open endpoint, then click the button.");
+            ImGui::TextDisabled("Select an open endpoint, then click in the viewport.");
+            ImGui::TextDisabled("Esc returns to Select.");
+        } else if (splineObject->edit_tool == SplineEditTool::Draw) {
+            ImGui::TextDisabled("Click in the viewport to lay points on the surface.");
+            ImGui::TextDisabled("Marker colour: blue = terrain, orange = mesh, grey = ground plane.");
+            ImGui::TextDisabled("Esc returns to Select.");
+            if (splineObject->plane != SplinePlane::Free) {
+                // Drawing itself writes full 3D positions, but the point gizmo
+                // zeroes an axis for a planar lock - so a drawn route would
+                // survive until the first time someone nudged a point, and then
+                // collapse onto the plane. Warned rather than silently changed:
+                // the lock is the author's setting, not this tool's to override.
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
+                                   "Plane lock is not Free: dragging a drawn point will flatten it.");
+            }
         }
     }
 

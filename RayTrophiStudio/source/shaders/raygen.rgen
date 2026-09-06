@@ -1239,7 +1239,9 @@ void main() {
             
             float aerialDensity = max(worldData.w.aerialDensity, 0.0);
             float atmosphereDensity = max(worldData.w.airDensity * 0.60 + worldData.w.dustDensity * 0.40, 0.001);
-            float densityFactor = aerialDensity * atmosphereDensity * (1.0 + worldData.w.fogDensity * 120.0);
+            float enabledFogDensity = worldData.w.fogEnabled != 0
+                ? max(worldData.w.fogDensity, 0.0) : 0.0;
+            float densityFactor = aerialDensity * atmosphereDensity * (1.0 + enabledFogDensity * 120.0);
             float distFactor = (1.0 - exp(-(hitDist / 10000.0) * densityFactor)) * (ramp * ramp);
 
             vec3 finalTrans = pow(transmittance, vec3(distFactor));

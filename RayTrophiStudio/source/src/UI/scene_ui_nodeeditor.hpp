@@ -110,13 +110,16 @@ public:
             {"Input", ImVec4(0.2f, 0.7f, 0.3f, 1.0f), {
                 {NodeType::HeightmapInput, "Heightmap"},
                 {NodeType::NoiseGenerator, "Noise Generator"},
-                {NodeType::HardnessInput, "Hardness Input"}
+                {NodeType::HardnessInput, "Hardness Input"},
+                {NodeType::CurveInput, "Curve Input"}
             }},
             {"Landform", ImVec4(0.58f, 0.42f, 0.30f, 1.0f), {
                 {NodeType::MountainRange, "Mountain Range / Orogeny"},
                 {NodeType::BasinValley, "Basin & Valley"},
                 {NodeType::TerrainDetail, "Terrain Detail"},
-                {NodeType::SurfaceRelief, "Surface Relief"}
+                {NodeType::SurfaceRelief, "Surface Relief"},
+                {NodeType::RoadCarve, "Road Carve"},
+                {NodeType::RoadNetwork, "Road Network"}
             }},
             {"Erosion", ImVec4(0.3f, 0.5f, 0.9f, 1.0f), {
                 {NodeType::HydraulicErosion, "Hydraulic"},
@@ -144,7 +147,8 @@ public:
                 {NodeType::MaskImage, "Mask Image"},
                 {NodeType::PaintMaskCombine, "Paint Mask Combine"},
                 {NodeType::GrassMask, "Grass Mask"},
-                {NodeType::SurfaceMasks, "Surface Detail Masks"}
+                {NodeType::SurfaceMasks, "Surface Detail Masks"},
+                {NodeType::CurveToMask, "Curve to Mask"}
             }},
             {"Data Maps", ImVec4(0.25f, 0.55f, 0.72f, 1.0f), {
                 {NodeType::TerrainAnalysis, "Terrain Analysis"},
@@ -189,6 +193,8 @@ public:
                 {NodeType::SatMapOutput, "SatMap Output"},
                 {NodeType::HardnessOutput, "Hardness Output"},
                 {NodeType::TerrainFieldsOutput, "Terrain Fields Output"},
+                {NodeType::PublishField, "Publish Field"},
+                {NodeType::RoadFieldsOutput, "Road Fields Output"},
                 {NodeType::FoliageOutput, "Foliage Output"},
                 {NodeType::LakeSurfaceOutput, "Lake Surface Output"},
                 {NodeType::RiverSplineOutput, "River Spline Output"}
@@ -1018,6 +1024,8 @@ private:
                type == "Terrain.SatMapOutput" ||
                type == "TerrainV2.HardnessOutput" ||
                type == "TerrainV2.TerrainFieldsOutput" ||
+               type == "TerrainV2.PublishField" ||
+               type == "TerrainV2.RoadFieldsOutput" ||
                type == "TerrainV2.FoliageOutput" ||
                type == "TerrainV2.LakeBasin" ||
                type == "TerrainV2.LakeSurfaceOutput" ||

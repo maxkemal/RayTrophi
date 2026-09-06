@@ -64,4 +64,18 @@ std::shared_ptr<SplineObject> addSplinePrimitiveObject(
     return object;
 }
 
+std::shared_ptr<SplineObject> addSurfaceDrawSplineObject(
+    UIContext& ctx, SceneHistory& history, const std::string& requested_name) {
+    auto object = addSplinePrimitiveObject(ctx, history, SplinePrimitiveType::Empty,
+                                           requested_name.empty() ? "Curve" : requested_name,
+                                           SplinePlane::Free);
+    if (!object) return object;
+    object->edit_mode = true;
+    object->edit_controls = true;
+    object->edit_tool = SplineEditTool::Draw;
+    object->selected_point = -1;
+    object->selected_points.clear();
+    return object;
+}
+
 } // namespace MeshEdit
