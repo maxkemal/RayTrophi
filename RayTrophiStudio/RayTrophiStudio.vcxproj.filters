@@ -1146,6 +1146,9 @@
     <ClCompile Include="source\src\Api\RtApiPerf.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGpuMemory.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiSimNodes.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
@@ -2093,5 +2096,78 @@
     <ClInclude Include="source\include\Viewport\ViewportSceneSync.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigPoseAuthoringState.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigPoseAuthoringMath.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigPoseAuthoring.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigPoseAuthoring.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\RigPoseAuthoringUI.h"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Animation\RigPoseAuthoringMath.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseAuthoring.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigPoseAuthoring.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigPoseAuthoringUI.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigJointRules.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigJointProfile.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\RigJointProfileUI.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\Animation\RigJointRules.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigJointProfile.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigJointProfileUI.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigIK.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigIK.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\RigIKUI.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\src\Api\RtRigIKBindings.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\Animation\RigIK.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigIK.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRigIK.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonRigIK.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigIKUI.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigIKViewportUI.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigJointLimits.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigJointLimits.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\RigJointLimitsUI.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\Animation\RigJointLimits.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigJointLimits.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigJointLimitsUI.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigIKChannels.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigIKTimeline.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\Animation\RigIKChannels.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigIKTimeline.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigIKTimelineUI.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigChainIK.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigAimIK.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigWalkRecipe.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigEnvelopeWeights.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\Animation\RigChainIK.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigAimIK.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigWalkRecipe.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigEnvelopeWeights.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="source\include\Api\RtApiRigMotion.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigEnvelopeWeights.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\Api\RtApiRigMotion.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigEnvelopeWeights.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="source\include\UI\RigMotionRecipeUI.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\RigEnvelopeOverlay.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\RigEnvelopeEditorUI.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\UI\RigMotionRecipeUI.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigEnvelopeOverlay.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigEnvelopeEditorUI.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigSplineIK.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\Animation\RigSplineIK.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigSplineIKUI.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
 </Project>

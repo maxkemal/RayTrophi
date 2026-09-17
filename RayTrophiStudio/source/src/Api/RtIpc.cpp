@@ -1,4 +1,10 @@
 #include "RtPostBindings.h"
+#include "RtViewportCutoutBindings.h"
+#include "RtRasterDiagnosticsBindings.h"
+#include "RtScreenGiBindings.h"
+#include "RtReflectionBindings.h"
+#include "RtRigBindings.h"
+#include "RtClipBindingBindings.h"
 /*
  * =========================================================================
  * Project:       RayTrophi Studio
@@ -29,6 +35,7 @@
 #include "RtIpcFracture.h"
 #include "RtIpcSecurity.h"
 #include "RtIpcTemplates.h"
+#include "RtIpcRayFusion.h"
 #include "RtIpcAgentDiscovery.h"
 #include "RtIpcMeshTools.h"
 #include "scene_ui.h"
@@ -609,11 +616,40 @@ rtapi::NodeParamValue nodeParamFromJson(const json& value) {
 // ---------------------------------------------------------------------------
 // Method dispatch. Every rtapi function that is not mesh-binary gets a handler.
 // ---------------------------------------------------------------------------
+// ★★ Hata durumunda bile TAM DURUMU dondurur: "neden yazmadi" sorusunun cevabi
+//   tam olarak bu alanlarda, ve yalnizca bir hata dizesi dondurmek olcu aletini
+//   kapatmak olurdu.
+static json autosaveStatusJson(const rtapi::AutosaveStatus& st, const rtapi::Result& r) {
+    json j{{"enabled", st.enabled},
+           {"interval_sec", st.interval_sec},
+           {"path", st.path},
+           {"file_exists", st.file_exists},
+           {"file_bytes", st.file_bytes},
+           {"seconds_since_last_write", st.seconds_since_last_write},
+           {"seconds_until_next", st.seconds_until_next},
+           {"last_write_ms", st.last_write_ms},
+           {"last_reason", st.last_reason},
+           {"last_ok", st.last_ok},
+           {"last_error", st.last_error},
+           {"write_count", st.write_count},
+           {"skipped_unmodified", st.skipped_unmodified},
+           {"scene_is_modified", st.scene_is_modified}};
+    if (!r.ok) j["__error"] = r.error;
+    return j;
+}
+
 json dispatchMethod(const std::string& method, const json& params) {
+    json clip_binding_result;
+    if (dispatchClipBindingIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, clip_binding_result)) return clip_binding_result;
+    json rig_result;
+    if (dispatchRigIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, rig_result)) return rig_result;
+    json rayfusion_result;
+    if (dispatchRayFusionIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, rayfusion_result)) return rayfusion_result;
     json mesh_tool_result;
     if (dispatchMeshToolMethod(method, params, mesh_tool_result)) return mesh_tool_result;
 
     json post_result;
+    if (dispatchViewportCutoutIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, post_result)) return post_result;
     if (dispatchPostExposureIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, post_result)) return post_result;
     json template_result;
     if (dispatchTemplateIpc(
@@ -1227,7 +1263,66 @@ json dispatchMethod(const std::string& method, const json& params) {
         });
     }
 
+
     // ── Scene queries ───────────────────────────────────────────────────
+    if (method == "scene.pick_gpu") {
+        const float u = requireFloat(params, "u");
+        const float v = requireFloat(params, "v");
+        return enqueueQuery([u, v](UIContext&) {
+            rtapi::GpuPickResult g;
+            rtapi::Result r = rtapi::pickObjectGpu(u, v, g);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"ok", g.ok},
+                        {"hit", g.hit},
+                        {"object", g.object},
+                        {"instance_index", g.instance_index},
+                        {"mesh_key", g.mesh_key},
+                        {"reason", g.reason},
+                        {"gpu_ms", g.gpu_ms}};
+        });
+    }
+    if (method == "scene.pick_ray") {
+        // u,v NORMALIZE ekran koordinati [0,1], v YUKARI dogru -- piksel degil.
+        // Piksel gondermek cagirani viewport'un o anki cozunurlugunu bilmeye
+        // zorlardi ve yanlis cozunurlukle gonderilen bir piksel tam olarak
+        // teshis etmeye calistigimiz belirtiyi (yanlis obje) uretirdi.
+        const float u = requireFloat(params, "u");
+        const float v = requireFloat(params, "v");
+        return enqueueQuery([u, v](UIContext&) {
+            rtapi::PickDiagnostics d;
+            rtapi::Result r = rtapi::pickRayDiagnostics(u, v, d);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{
+                {"viewport_ray_dir", {d.viewport_ray_dir[0], d.viewport_ray_dir[1], d.viewport_ray_dir[2]}},
+                {"render_ray_dir", {d.render_ray_dir[0], d.render_ray_dir[1], d.render_ray_dir[2]}},
+                {"ray_divergence_deg", d.ray_divergence_deg},
+                {"depth_of_field", d.depth_of_field},
+                {"bvh_present", d.bvh_present},
+                {"bvh_hit", d.bvh_hit},
+                {"bvh_object", d.bvh_object},
+                {"bvh_t", d.bvh_t},
+                {"linear_hit", d.linear_hit},
+                {"linear_object", d.linear_object},
+                {"linear_t", d.linear_t},
+                {"paths_agree", d.paths_agree},
+                {"world_objects", d.world_objects},
+                {"shading_mode", d.shading_mode},
+                {"interactive_fallback_ray", d.interactive_fallback_ray},
+                {"gate_rig_edit_mode", d.gate_rig_edit_mode},
+                {"gate_hud_captured", d.gate_hud_captured},
+                {"gate_dragging", d.gate_dragging},
+                {"gate_blocks_selection", d.gate_blocks_selection},
+                {"linear_has_facade", d.linear_has_facade},
+                {"linear_has_flat", d.linear_has_flat},
+                {"linear_facade_object", d.linear_facade_object},
+                {"linear_flat_object", d.linear_flat_object},
+                {"linear_handles_agree", d.linear_handles_agree},
+                {"linear_hit_index", d.linear_hit_index},
+                {"linear_identity_index", d.linear_identity_index},
+                {"linear_hit_entry_kind", d.linear_hit_entry_kind},
+                {"linear_hit_point", {d.linear_hit_point[0], d.linear_hit_point[1], d.linear_hit_point[2]}}};
+        });
+    }
     if (method == "scene.list_objects") {
         return enqueueQuery([](UIContext&) {
             return json(rtapi::listObjects());
@@ -1719,6 +1814,8 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"position", vec3ToJson(s.position)}, {"target", vec3ToJson(s.target)},
                         {"up", vec3ToJson(s.up)}, {"fov", s.fov},
                         {"focus_distance", s.focus_distance}, {"aperture", s.aperture},
+                        {"depth_of_field", s.depth_of_field},
+                        {"effective_lens_radius", s.effective_lens_radius},
                         {"auto_exposure", s.auto_exposure},
                         {"use_physical_exposure", s.use_physical_exposure},
                         {"iso_preset_index", s.iso_preset_index},
@@ -1775,6 +1872,10 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "camera.set_aperture") {
         float f = requireFloat(params, "aperture");
         return enqueueResult([f](UIContext&) { return rtapi::setCameraAperture(f); });
+    }
+    if (method == "camera.set_depth_of_field") {
+        bool v = requireBool(params, "enabled");
+        return enqueueResult([v](UIContext&) { return rtapi::setCameraDepthOfField(v); });
     }
 
     // ── World / environment (Faz 5.1c) ──────────────────────────────────
@@ -3896,6 +3997,47 @@ json dispatchMethod(const std::string& method, const json& params) {
         rtapi::perfSetLogging(enabled);
         return json{{"ok", true}, {"logging", rtapi::perfLogging()}};
     }
+    // Unlike the timing reads above this one walks the live backends, so it
+    // IS enqueued: a backend torn down mid-read would be a use-after-free.
+    if (method == "perf.get_gpu_memory") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::GpuMemoryReport r = rtapi::gpuMemoryReport();
+            json devices = json::array();
+            for (const auto& d : r.devices) {
+                json cats = json::object();
+                for (const auto& c : d.categories) {
+                    cats[c.name] = json{{"device_local_bytes", c.device_local_bytes},
+                                        {"host_bytes", c.host_bytes},
+                                        {"allocations", c.allocations}};
+                }
+                devices.push_back(json{
+                    {"role", d.role}, {"backend", d.backend}, {"tracked", d.tracked},
+                    {"device_local_bytes", d.device_local_bytes},
+                    {"host_bytes", d.host_bytes}, {"allocations", d.allocations},
+                    {"categories", cats},
+                    {"compaction", json{
+                        {"supported", d.compaction_supported},
+                        {"compacted", d.compacted},
+                        {"skipped_skinned", d.compaction_skipped_skinned},
+                        {"failures", d.compaction_failures},
+                        {"bytes_before", d.compaction_bytes_before},
+                        {"bytes_after", d.compaction_bytes_after}}}});
+            }
+            return json{{"vram_measured", r.vram_measured},
+                        {"vram_usage_bytes", r.vram_usage_bytes},
+                        {"vram_budget_bytes", r.vram_budget_bytes},
+                        {"tracked_device_local_bytes", r.tracked_device_local_bytes},
+                        {"untracked_bytes", r.untracked_bytes},
+                        {"blas_compaction_enabled", r.blas_compaction_enabled},
+                        {"devices", devices}};
+        });
+    }
+    if (method == "perf.set_blas_compaction") {
+        const bool enabled = requireBool(params, "enabled");
+        return enqueueResult([enabled](UIContext&) {
+            return rtapi::setBlasCompaction(enabled);
+        });
+    }
     if (method == "editor.set_bottom_editor") {
         std::string name = requireString(params, "name");
         return enqueueResult([name](UIContext&) { return rtapi::setBottomEditor(name); });
@@ -3976,6 +4118,105 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::setViewportShading(mode, matcap_preset);
         });
     }
+    if (method == "viewport.scene_load_guard") {
+        return enqueueQuery([](UIContext&) {
+            return json{{"enabled", rtapi::sceneLoadGuard()}};
+        });
+    }
+    if (method == "viewport.set_rt_shadow") {
+        const bool enabled = requireBool(params, "enabled");
+        return enqueueResult([enabled](UIContext&) {
+            return rtapi::setRtShadow(enabled);
+        });
+    }
+    if (method == "viewport.rt_shadow") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::RtShadowInfo s = rtapi::rtShadow();
+            return json{
+                {"supported", s.supported},
+                {"enabled", s.enabled},
+                {"ready", s.ready},
+                {"rays", s.rays},
+                {"cascades_replaced", s.cascades_replaced},
+                {"reason", s.reason}};
+        });
+    }
+    if (method == "viewport.frame_timings") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::RasterTimingInfo t = rtapi::rasterTimings();
+            json stages = json::array();
+            for (const auto& s : t.stages) {
+                stages.push_back({{"name", s.name},
+                                  {"cpu_mean_ms", s.cpu_mean_ms},
+                                  {"cpu_p95_ms", s.cpu_p95_ms},
+                                  {"gpu_mean_ms", s.gpu_mean_ms},
+                                  {"gpu_p95_ms", s.gpu_p95_ms},
+                                  {"frames_ran", s.frames_ran}});
+            }
+            return json{
+                {"available", t.available},
+                {"gpu_supported", t.gpu_supported},
+                {"gpu_unsupported_reason", t.gpu_unsupported_reason},
+                {"frames", t.frames},
+                {"frames_with_gpu", t.frames_with_gpu},
+                {"frame_cpu_mean_ms", t.frame_cpu_mean_ms},
+                {"frame_cpu_p95_ms", t.frame_cpu_p95_ms},
+                {"frame_gpu_mean_ms", t.frame_gpu_mean_ms},
+                {"frame_gpu_p95_ms", t.frame_gpu_p95_ms},
+                {"window_wall_ms", t.window_wall_ms},
+                {"stages", stages},
+                {"applied", json{
+                    {"screen_gi", screenGiDictionary<json>(t.screen_gi)},
+                    {"reflection", reflectionDictionary<json>(t.reflection)},
+                    {"shading", t.shading},
+                    {"quality_preset", t.quality_preset},
+                    {"lighting_preset", t.lighting_preset},
+                    {"width", t.width},
+                    {"height", t.height},
+                    {"depth_prepass", t.depth_prepass},
+                    {"gpu_culling", t.gpu_culling},
+                    {"global_instance_buffer", t.global_instance_buffer},
+                    {"rt_shadow_requested", t.rt_shadow_requested},
+                    {"rt_shadow_ready", t.rt_shadow_ready},
+                    {"rt_cascades_replaced", t.rt_cascades_replaced},
+                    {"directional_cascades", t.directional_cascades},
+                    {"shadowed_lights", t.shadowed_lights},
+                    {"scene_lights", t.scene_lights},
+                    {"volume_count", t.volume_count},
+                    {"visible_triangles", t.visible_triangles},
+                    {"total_instances", t.total_instances},
+                    {"draw_calls", t.draw_calls}}},
+                {"warnings", t.warnings}};
+        });
+    }
+    if (method == "viewport.reset_frame_timings") {
+        return enqueueResult([](UIContext&) {
+            return rtapi::resetRasterTimings();
+        });
+    }
+    if (method == "viewport.set_raster_depth_prepass") {
+        const bool enabled = requireBool(params, "enabled");
+        return enqueueResult([enabled](UIContext&) {
+            return rtapi::setRasterDepthPrepass(enabled);
+        });
+    }
+    if (method == "viewport.raster_depth_prepass") {
+        return enqueueQuery([](UIContext&) {
+            return rasterDepthPrepassDictionary<json>();
+        });
+    }
+    if (method == "viewport.set_raster_gpu_instancing") {
+        const bool enabled = requireBool(params, "enabled");
+        return enqueueResult([enabled](UIContext&) {
+            return rtapi::setRasterGpuInstancing(enabled);
+        });
+    }
+    if (method == "viewport.set_scene_load_guard") {
+        const bool enabled = requireBool(params, "enabled");
+        return enqueueResult([enabled](UIContext&) {
+            return rtapi::setSceneLoadGuard(enabled);
+        });
+    }
     if (method == "viewport.quality") {
         return enqueueQuery([](UIContext&) {
             const rtapi::ViewportQualityInfo q = rtapi::viewportQuality();
@@ -3985,6 +4226,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"raster_viewport_available", q.raster_viewport_available},
                 {"shadow_atlas_resolution", q.shadow_atlas_resolution},
                 {"shadow_tile_resolution", q.shadow_tile_resolution},
+                {"volume_shadow_tile_resolution", q.volume_shadow_tile_resolution},
+                {"volume_shadow_depth_layers", q.volume_shadow_depth_layers},
+                {"volume_shadow_steps", q.volume_shadow_steps},
                 {"shadow_tile_capacity", q.shadow_tile_capacity},
                 {"shadow_light_budget", q.shadow_light_budget},
                 {"shadow_pcf_samples", q.shadow_pcf_samples},
@@ -4009,6 +4253,70 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::setViewportQuality(preset);
         });
     }
+    if (method == "viewport.set_depth_of_field") {
+        const bool enabled = params.value("enabled", true);
+        const float maxCoC = params.value("max_coc_pixels", 24.0f);
+        const int maxTaps = params.value("max_taps", 32);
+        return enqueueResult([enabled, maxCoC, maxTaps](UIContext&) {
+            return rtapi::setViewportDepthOfField(enabled, maxCoC, maxTaps);
+        });
+    }
+    if (method == "viewport.set_taa") {
+        const bool enabled = params.value("enabled", true);
+        const int samples = params.value("samples", 16);
+        return enqueueResult([enabled, samples](UIContext&) {
+            return rtapi::setViewportTaa(enabled, samples);
+        });
+    }
+    if (method == "viewport.taa") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportTaaInfo t = rtapi::viewportTaa();
+            return json{
+                {"enabled", t.enabled},
+                {"target_samples", t.target_samples},
+                {"accumulated_samples", t.accumulated_samples},
+                {"converged", t.converged},
+                {"supported", t.supported},
+                {"last_ms", t.last_ms},
+                {"inactive_reason", t.inactive_reason}};
+        });
+    }
+    if (method == "viewport.set_af") {
+        const bool enabled = requireBool(params, "enabled");
+        const int area = requireInt(params, "area_mode");
+        const int focus = requireInt(params, "focus_mode");
+        const int point = requireInt(params, "selected_point");
+        return enqueueResult([enabled, area, focus, point](UIContext&) {
+            return rtapi::setViewportAf(enabled, area, focus, point);
+        });
+    }
+    if (method == "viewport.get_af") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportAfInfo a = rtapi::viewportAf();
+            return json{
+                {"enabled", a.enabled},
+                {"area_mode", a.area_mode},
+                {"focus_mode", a.focus_mode},
+                {"selected_point", a.selected_point},
+                {"point_count", a.point_count},
+                {"active", a.active},
+                {"inactive_reason", a.inactive_reason}};
+        });
+    }
+    if (method == "viewport.get_depth_of_field") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::ViewportDepthOfFieldInfo d = rtapi::viewportDepthOfField();
+            return json{
+                {"enabled", d.enabled},
+                {"max_coc_pixels", d.max_coc_pixels},
+                {"max_taps", d.max_taps},
+                {"camera_aperture", d.camera_aperture},
+                {"camera_depth_of_field", d.camera_depth_of_field},
+                {"camera_focus_distance", d.camera_focus_distance},
+                {"active", d.active},
+                {"inactive_reason", d.inactive_reason}};
+        });
+    }
     if (method == "viewport.preview_lighting") {
         return enqueueQuery([](UIContext&) {
             const rtapi::ViewportPreviewLightingInfo p = rtapi::viewportPreviewLighting();
@@ -4026,6 +4334,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"world_ibl_supported", p.world_ibl_supported},
                 {"world_ibl_ready", p.world_ibl_ready},
                 {"world_ibl_fallback", p.world_ibl_fallback},
+                {"world_ibl_source", p.world_ibl_source},
+                {"world_sky_capture_supported", p.world_sky_capture_supported},
+                {"world_background_source", p.world_background_source},
                 {"material_preview_active", p.material_preview_active},
                 // Uygulanan goruntuleme donusumu: post.get AYARI verir, bunlar
                 // shader'a GIDEN degerlerdir. Ikisi ayrisirsa onizleme yalan
@@ -4067,6 +4378,13 @@ json dispatchMethod(const std::string& method, const json& params) {
             } else {
                 display = json{{"display_available", false}};
             }
+            // ★★★★ Teshis alanlari `available` erken donusunun ONUNDE uretilir.
+            // Surucu kaybi ring'i olduren seyin ta kendisidir: onlari
+            // `available` kapisinin arkasina koymak, tam da okunmalari gereken
+            // anda gizlerdi -- ve bir ajan "olcum yok"u "sorun yok" diye okurdu.
+            const json diag{
+                {"stale_descset_rebuilds", t.stale_descset_rebuilds},
+                {"device_lost", t.device_lost}};
             if (!t.available) {
                 json miss{
                     {"available", false},
@@ -4074,6 +4392,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                                "(Rendered mode, no Vulkan viewport backend, or "
                                "no frame drawn since startup)."}};
                 miss.update(display);
+                miss.update(diag);
                 return miss;
             }
             json out{
@@ -4097,8 +4416,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"blocking_seeds", t.blocking_seeds},
                 {"resource_drains", t.resource_drains},
                 {"present_latency_frames", t.present_latency_frames},
+                {"stale_descset_rebuilds", t.stale_descset_rebuilds},
+                {"device_lost", t.device_lost},
                 {"global_instance_buffer", t.global_instance_buffer},
                 {"gpu_culling", t.gpu_culling},
+                {"depth_prepass", t.depth_prepass},
                 {"total_instances", t.total_instances},
                 {"cull_mesh_count", t.cull_mesh_count},
                 {"draw_calls", t.draw_calls},
@@ -4202,6 +4524,77 @@ json dispatchMethod(const std::string& method, const json& params) {
             path = params["path"].get<std::string>();
         return enqueueResult([path](UIContext&) {
             return rtapi::saveProject(path);
+        });
+    }
+    if (method == "viewport.retry_device_recovery") {
+        return enqueueResult([](UIContext&) {
+            return rtapi::viewportRetryDeviceRecovery();
+        });
+    }
+    if (method == "viewport.device_recovery_status") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::ViewportRecoveryStatus st;
+            rtapi::Result r = rtapi::viewportRecoveryStatus(st);
+            json j{{"viewport_alive", st.viewport_alive},
+                   {"rebuild_pending", st.rebuild_pending},
+                   {"device_lost_count", st.device_lost_count},
+                   {"rebuild_attempts", st.rebuild_attempts},
+                   {"gate_remaining_ms", st.gate_remaining_ms},
+                   {"consecutive_losses", st.consecutive_losses},
+                   {"given_up", st.given_up},
+                   {"max_streak", st.max_streak}};
+            if (!r.ok) j["__error"] = r.error;
+            return j;
+        });
+    }
+    if (method == "render.optix_accum_status") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::OptixAccumStatus st;
+            rtapi::Result r = rtapi::optixAccumStatus(st);
+            json j{{"available", st.available},
+                   {"accumulated_samples", st.accumulated_samples},
+                   {"wipe_count", st.wipe_count},
+                   {"wipe_resolution", st.wipe_resolution},
+                   {"wipe_camera", st.wipe_camera},
+                   {"buffer_w_read", st.buffer_w_read},
+                   {"buffer_w_mean", st.buffer_w_mean},
+                   {"buffer_w_max", st.buffer_w_max},
+                   {"buffer_w_center", st.buffer_w_center},
+                   {"adaptive_sampling", st.adaptive_sampling},
+                   {"min_samples", st.min_samples},
+                   {"variance_threshold", st.variance_threshold},
+                   {"samples_per_pixel", st.samples_per_pixel},
+                   {"prev_zero_pixels", st.prev_zero_pixels},
+                   {"read_w", st.read_w},
+                   {"read_h", st.read_h},
+                   {"image_w", st.image_w},
+                   {"image_h", st.image_h},
+                   {"reset_buffers_calls", st.reset_buffers_calls},
+                   {"set_render_params_calls", st.set_render_params_calls},
+                   {"set_render_params_reason", st.set_render_params_reason},
+                   {"first_cuda_error", st.first_cuda_error},
+                   {"first_cuda_error_site", st.first_cuda_error_site},
+                   {"last_wipe_from", json::array({st.last_wipe_from[0], st.last_wipe_from[1]})},
+                   {"last_wipe_to", json::array({st.last_wipe_to[0], st.last_wipe_to[1]})}};
+            if (!r.ok) j["__error"] = r.error;
+            return j;
+        });
+    }
+    if (method == "project.autosave_now") {
+        std::string reason;
+        if (params.contains("reason") && params["reason"].is_string())
+            reason = params["reason"].get<std::string>();
+        return enqueueQuery([reason](UIContext&) {
+            rtapi::AutosaveStatus st;
+            rtapi::Result r = rtapi::autosaveNow(reason, st);
+            return autosaveStatusJson(st, r);
+        });
+    }
+    if (method == "project.autosave_status") {
+        return enqueueQuery([](UIContext&) {
+            rtapi::AutosaveStatus st;
+            rtapi::Result r = rtapi::autosaveStatus(st);
+            return autosaveStatusJson(st, r);
         });
     }
     if (method == "project.open") {
@@ -4416,6 +4809,53 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::Result r = rtapi::getAnimGraphPlayback(character, info);
             if (!r.ok) return json{{"__error", r.error}};
             return animPlaybackToJson(info);
+        });
+    }
+    if (method == "anim.state_machines") {
+        std::string character = requireString(params, "character");
+        return enqueueQuery([character](UIContext&) {
+            std::vector<rtapi::AnimStateMachineInfo> machines;
+            rtapi::Result r = rtapi::listAnimStateMachines(character, machines);
+            if (!r.ok) return json{{"__error", r.error}};
+            json result = json::array();
+            for (const auto& m : machines) {
+                json states = json::array();
+                for (const auto& s : m.states) {
+                    states.push_back(json{
+                        {"name", s.name}, {"is_default", s.is_default},
+                        {"is_current", s.is_current}, {"pose_node_id", s.pose_node_id},
+                        {"pose_connected", s.pose_connected}
+                    });
+                }
+                json transitions = json::array();
+                for (const auto& t : m.transitions) {
+                    transitions.push_back(json{
+                        {"from", t.from}, {"to", t.to}, {"condition", t.condition},
+                        {"parameter", t.parameter}, {"compare_value", t.compare_value},
+                        {"has_exit_time", t.has_exit_time}, {"exit_time", t.exit_time},
+                        {"blend_time", t.blend_time}
+                    });
+                }
+                result.push_back(json{
+                    {"node_id", m.node_id},
+                    {"current_state", m.current_state},
+                    {"target_state", m.target_state},
+                    {"transitioning", m.transitioning},
+                    {"transition_progress", m.transition_progress},
+                    {"states", states},
+                    {"transitions", transitions},
+                    {"recent_events", m.recent_events}
+                });
+            }
+            return result;
+        });
+    }
+    if (method == "anim.force_state") {
+        std::string character = requireString(params, "character");
+        std::string state = requireString(params, "state");
+        unsigned int node_id = static_cast<unsigned int>(optionalInt(params, "node_id", 0));
+        return enqueueResult([character, state, node_id](UIContext&) {
+            return rtapi::forceAnimState(character, state, node_id);
         });
     }
 

@@ -10,6 +10,10 @@
 #define I_BACKEND_H
 
 #include "Vec3.h"
+#include "RayFusion/ProbeBounce.h"
+#include "RayFusion/ProbeField.h"
+#include "RayFusion/ScreenGi.h"
+#include "RayFusion/Reflection.h"
 #include "Vec2.h"
 #include "Matrix4x4.h"
 #include <vector>
@@ -19,6 +23,7 @@
 #include "Hittable.h" // For Hittable definition
 #include "light.h"
 #include "Viewport/RasterFrameTelemetry.h"
+#include "Viewport/RasterStageTimings.h"
 class Camera;  // Forward declaration for syncCamera
 struct GpuVDBVolume;
 struct GpuGasVolume;
@@ -64,6 +69,165 @@ struct BackendInfo {
 struct MaterialPreviewIblStatus {
     bool supported = false;
     bool ready = false;
+    // Which producer filled the irradiance/prefilter slots: "none", "hdri" or
+    // "sky". A reader that only sees ready=true cannot tell whether Physical
+    // Sky took the prefiltered path or fell back to the per-fragment cone.
+    std::string source = "none";
+    bool sky_capture_supported = false;
+    // ★★★★ ARKA PLANIN GERCEKTE CIZDIGI SEY -- `ready` degil. Sky shader'inin
+    //   kapisi ile AYNI girdilerden hesaplanir (`m_envTexID` + yuklu goruntu,
+    //   atmosfer LUT view/sampler'lari), yani "HDRI secili" ile "HDRI cizildi"
+    //   ayrisirsa BU alan soyler. Degerler:
+    //     "color"                 — dunya modu duz renk (istenen sonuc)
+    //     "hdri"                  — HDRI dokusu bagli ve ciziliyor
+    //     "sky"                   — Physical Sky LUT'lari bagli ve ciziliyor
+    //     "solid_fallback"        — mod HDRI ama doku YOK -> duz renk ciziliyor
+    //     "sky_analytic_fallback" — mod Physical Sky ama LUT YOK -> kaba gradyan
+    //   Son ikisi arizanin adidir; "ready=false" onlari ayirt edemiyordu.
+    // ★ Adapter GIRDILERE gore raporlar. Preset kapisi (three_point) bu
+    //   gecisi tamamen kapatabilir; onu API katmani "not_drawn" olarak
+    //   soyler, cunku preset bu adapter'in bilgisi degil.
+    std::string background_source = "color";
+};
+
+// RayFusion probe field, as the GPU consumer sees it. Reported so the swap
+// from "one global sky texture" to "a probe field" is measurable rather than
+// believed: the render looks the same either way, on purpose.
+struct RayFusionProbeStatus {
+    bool overlay_requested = false, overlay_ready = false, follow_camera = false;
+    uint32_t overlay_markers = 0;
+    std::string overlay_reason;
+    RayFusion::BounceStatus bounce;
+    bool supported = false;   // GPU buffers exist
+    bool configured = false;  // the CPU field has a grid and a revision
+    bool uploaded = false;    // at least one slot has reached the GPU
+    bool bound = false;       // the preview descriptor set points at them
+    // What actually RAN, never what was requested -- an instrument that echoes
+    // the request cannot show the request being refused. "sky_bake" (step 1a),
+    // "traced" (step 1b), or "none".
+    std::string producer = "none";
+    bool producer_traced_requested = false;
+    std::string producer_reason;       // why a traced request was not honoured
+    std::string budget_preset;         // which quality budget is scheduling
+    uint64_t producer_signature = 0;
+    // Traced-producer measurements. hit_fraction is the share of probe rays
+    // that hit anything: if it stays 0 while geometry is clearly in range, the
+    // rays are not seeing the scene at all -- and the result then looks exactly
+    // like the sky-only producer, which is the failure nobody reports.
+    float hit_fraction = 0.0f;
+    uint32_t rejected_inside = 0;      // probes born inside geometry
+    // ★★★★ "Katinin icinde" kararini ARKA YUZ ORANI tek basina veremez.
+    //   Olculdu 2026-09-15: bu odanin arka yuz orani %84,5 -- yani esik %35
+    //   iken odanin TAM ORTASINDAKI probe da "katinin icinde" sayilip
+    //   atiliyordu, ve belirti "problar kirmizi" oluyordu. Duvara gomulu bir
+    //   probe ile oda ortasindaki probe arka yuz oraniyla AYNI gorunur;
+    //   ayiran sey MESAFE: gomulunun etrafindaki geometri santimetrelerde,
+    //   odadakinin metrelerde.
+    // ★★★ backface_enclosed duzeltmenin KANITIDIR: "kirmizi probe kalmadi"
+    //   hem "kapi calisti" hem "hic probe yayinlanmadi" demek olabilirdi.
+    //   Bu sayac ikisini ayirir -- yuksekse kapi gercekten ates ediyor.
+    uint32_t backface_enclosed = 0;    // cok arka yuz AMA uzak: ic mekan, kati degil
+    float mean_hit_distance = 0.0f;    // dunya birimi; esigi olcuyle karsilastir
+    double trace_ms = 0.0;
+    uint64_t traced_publishes = 0;
+    uint32_t total = 0, valid = 0, pending = 0, in_flight = 0;
+    uint64_t accepted = 0, rejected = 0;
+    // The APPLIED window, read back from the field itself rather than from the
+    // request that asked for it. counts/minimum are cells, spacing world units.
+    uint32_t counts[3]{};
+    int32_t minimum[3]{};
+    float spacing = 0.0f;
+    uint32_t max_slots = 0;   // ceiling on counts.x*y*z, fixed by the GPU buffer
+    // ★★★★ Izgara artik SAHNEYE otomatik oturuyor. `auto_fit_mode` HANGI
+    //   REJIMIN kostugunu soyler ("scene" | "camera_local" | "off") ve bu bir
+    //   ayrinti degil: ayni kaba izgara iki farkli sebepten dogabilir, ve
+    //   ikisinin duzeltmesi farklidir. Sebep metni de tasinir, cunku moda
+    //   bakip "neden" diye tahmin etmek tam olarak kacindigimiz sey.
+    bool auto_fit = false;
+    std::string auto_fit_mode = "off";
+    std::string auto_fit_reason;
+};
+
+// The acceleration structure the raster viewport keeps resident. This is the
+// bill RayFusion pays whether or not a ray is traced this frame, so it is
+// reported as bytes and milliseconds rather than as a boolean.
+struct RayFusionSceneASStatus {
+    bool hardware_rt = false;
+    bool ready = false;
+    uint32_t blas_count = 0;
+    uint32_t instance_count = 0;
+    uint32_t instances_skipped = 0;
+    uint32_t meshes_skipped = 0;
+    uint64_t as_bytes = 0;
+    double last_build_ms = 0.0;
+    uint64_t builds = 0;
+    uint64_t built_geometry_generation = 0;
+    // What the gate actually watches. The global generation is reported too,
+    // but it is NOT the gate: scene.delete leaves it unchanged.
+    uint64_t geometry_signature = 0;
+    uint64_t instance_signature = 0;
+    double signature_ms = 0.0;
+    uint64_t tlas_only_refreshes = 0;
+    // ★★★★★ TRACE EDILEN sahnenin dunya kutusu -- cizilen sahnenin degil.
+    //   Ayni donguden, ayni `continue`'lardan SONRA toplanir: gizli (mask==0)
+    //   ve cap ile elenen instance'lar TLAS'ta yoksa bu kutuda da yoktur.
+    //   Ayri bir dongu yazmak, probe izgarasini ISINLARIN GORMEDIGI bir
+    //   hacme oturtur ve belirti "izgara dogru yerde ama problar bos" olurdu.
+    // ★★★ Gecerlilik AYRI bir alan: (0,0,0)-(0,0,0) mesru bir kutudur (tek
+    //   nokta), yani "olculmedi"yi deger kumesine kodlamak olurdu.
+    bool world_bounds_valid = false;
+    float world_min[3]{};
+    float world_max[3]{};
+    // Instances the raster draw hides (mask 0) and the AS therefore excludes.
+    // scene.delete produces these: it hides, it does not erase.
+    uint32_t instances_hidden = 0;
+    // ★★★★ Of blas_count, how many were built from a WELDED (indexed) raster
+    //   mesh. This exists because the failure it guards is invisible: building
+    //   a welded mesh without its index buffer produces a full, "ready" AS
+    //   whose triangles are fabricated from storage order. Every counter stayed
+    //   green while the traced world was wrong. A scene whose large static
+    //   meshes are welded (terrain, imported props) MUST report a non-zero
+    //   number here; 0 in such a scene means the triangulation was dropped
+    //   again. blas_flat is its complement -- genuine flat SoA, one vertex per
+    //   corner -- so the two must sum to blas_count.
+    uint32_t blas_indexed = 0;
+    uint32_t blas_flat = 0;
+    // ★★★★ Of blas_count, how many were built from a GPU-SKINNED raster mesh
+    //   and are therefore re-fit as the character deforms. This exists because
+    //   the failure it guards is invisible in exactly the same way blas_indexed
+    //   guards its own: GPU skinning rewrites the CONTENTS of the borrowed
+    //   vertex buffer while its handle, address and vertex count all stay put,
+    //   so a "ready" AS with every counter green can be describing the pose of
+    //   the frame it was built in. A scene with an animated character MUST
+    //   report a non-zero number here; 0 in such a scene means the deforming
+    //   mesh is casting a frozen shadow again.
+    //
+    //   skin_refits is the number that shows it is actually HAPPENING, not just
+    //   possible: it has to climb while the timeline plays and stay put while
+    //   it is paused. Frozen at 0 with blas_skinned > 0 means the generation
+    //   never reached the gate. IPC WRITE-THEN-MEASURE applies -- put a frame
+    //   between stepping the timeline and reading this.
+    uint32_t blas_skinned = 0;
+    uint64_t skin_refits = 0;
+    uint64_t skin_refit_failures = 0;
+    // The total, and the three parts it is made of. Read the PARTS: the total
+    // cannot be acted on because each part has a different fix -- the drain is
+    // the GPU still owing us a frame, the BLAS figure is one submit plus a
+    // fence wait around the refits, and the TLAS figure is a full top-level
+    // rebuild that drains a second time.
+    double last_skin_refit_ms = 0.0;
+    double last_skin_drain_ms = 0.0;
+    double last_skin_blas_ms = 0.0;
+    double last_skin_tlas_ms = 0.0;
+    // Released because the viewport shows Rendered (see yieldRayFusionSceneAS).
+    bool yielded = false;
+    uint64_t yields = 0;
+    // Driver-reported device-local VRAM for the whole PROCESS (all devices).
+    // vram_measured=false means the zeros are not a reading.
+    bool vram_measured = false;
+    uint64_t vram_usage_bytes = 0;
+    uint64_t vram_budget_bytes = 0;
+    std::string inactive_reason;
 };
 
 struct GpuMemoryStats {
@@ -107,6 +271,21 @@ struct RenderParams {
     int   debugView = 0;
     float debugExposure = 1.0f;
     float debugOverlay = 0.0f;         // 0 = pure debug … 1 = pure beauty
+    // ★★★ Realtime (raster) depth of field. The STRENGTH is not here: the blur
+    //   radius comes from the camera's own aperture and focus distance, exactly
+    //   as the path tracer's lens does, so Rendered and Realtime cannot drift.
+    //   These three are the COST knobs plus the master switch.
+    //   ★ With aperture 0 (the default camera) the pass early-outs to a plain
+    //   tone map, so leaving this enabled costs nothing until a lens is dialled.
+    bool  realtimeDepthOfField = true;
+    float realtimeDofMaxCoC = 24.0f;   // pixels; caps both blur size and cost
+    int   realtimeDofMaxTaps = 32;     // gather samples at the maximum radius
+    // ★★★★ Realtime raster TAA. `Samples` is a STOPPING CONDITION, not a
+    //   quality dial: the viewport keeps asking for frames until it has that
+    //   many jittered samples, then stops. That is also the honest place to
+    //   read its cost -- a still scene converges and then goes idle.
+    bool  realtimeTaa = true;
+    int   realtimeTaaSamples = 16;
 };
 
 struct DenoiserFrameData {
@@ -354,20 +533,6 @@ public:
      * @brief Hide all instances matching a node name  
      */
     virtual void hideInstancesByNodeName(const std::string& nodeName) { setVisibilityByNodeName(nodeName, false); }
-
-    /**
-     * @brief GPU object picking: get object ID at screen position
-     */
-    virtual int getPickedObjectId(int x, int y, int viewport_width = 0, int viewport_height = 0) {
-        (void)x; (void)y; (void)viewport_width; (void)viewport_height; return -1;
-    }
-    
-    /**
-     * @brief GPU object picking: get object name at screen position
-     */
-    virtual std::string getPickedObjectName(int x, int y, int viewport_width = 0, int viewport_height = 0) {
-        (void)x; (void)y; (void)viewport_width; (void)viewport_height; return "";
-    }
 
     /**
      * @brief Update geometry for the entire scene (optimized path)
@@ -664,8 +829,114 @@ public:
         (void)out;
         return false;
     }
+    virtual bool getRayFusionSceneASStatus(RayFusionSceneASStatus& out) const {
+        (void)out;
+        return false;
+    }
+    virtual bool getRayFusionProbeStatus(RayFusionProbeStatus& out) const {
+        (void)out;
+        return false;
+    }
+    /**
+     * @brief Choose the probe producer: traced (step 1b) or the sky bake (1a).
+     * This exists so the two can be compared on the SAME scene. A producer that
+     * cannot be switched off cannot be measured against the one it replaced,
+     * and "it looks different" is not a measurement.
+     */
+    virtual void setRayFusionProbeProducer(bool traced) { (void)traced; }
+    virtual bool setRayFusionProbeBounce(bool enabled) { (void)enabled; return false; }
+    virtual RayFusion::ScreenGiStatus screenGiStatus() const { return {}; }
+    virtual bool setScreenGi(const RayFusion::ScreenGiSettings&, std::string& error) { error = "no screen GI backend"; return false; }
+    // ★★★ Piksel basina spekuler yansima. `metallic` ile SINIRLI DEGIL: kapi
+    //   split-sum agirligina (F0*brdf.x + brdf.y) kurulu, o da bir Fresnel
+    //   terimi -- verniklenmis ahsap, boyali zemin, seramik ve plastik ayni
+    //   yoldan gecer.
+    virtual RayFusion::ReflectionStatus reflectionStatus() const { return {}; }
+    virtual bool setReflection(const RayFusion::ReflectionSettings&, std::string& error) { error = "no reflection backend"; return false; }
+    virtual bool setRayFusionProbeOverlay(bool enabled) { (void)enabled; return false; }
+    virtual bool setRayFusionProbeFollowCamera(bool enabled) { (void)enabled; return false; }
+    /**
+     * @brief A/B lever for the global instance buffer + GPU culling path.
+     * False forces the per-mesh fallback: no GPU culling, no scatter LOD
+     * proxies, and a full frame-ring drain on every visible-set change. That
+     * fallback is what the realtime viewport ran unconditionally until
+     * 2026-09-08, so it has to stay selectable or the fix cannot be measured
+     * against the thing it replaced. Read the outcome from
+     * viewport.frame_telemetry: gpu_culling, visible_triangles, resource_drains.
+     */
+    virtual bool setRasterGpuInstancing(bool enabled) { (void)enabled; return false; }
+    virtual bool rasterGpuInstancingAllowed() const { return false; }
+    // Alfa-test'li derinlik on gecisi. Iki isi birden yapar: overdraw
+    // golgelendirmesini erken-Z ile eler, ve RT golge isininin cikis noktasi
+    // olan piksel basina derinligi uretir.
+    // ★ Kapatilabilir birakildi: kapatilamayan bir duzeltme, kendisini
+    //   yargilayacak olcumu de oldurur.
+    virtual bool setRasterDepthPrepass(bool enabled) { (void)enabled; return false; }
+    virtual bool rasterDepthPrepassAllowed() const { return false; }
+    // Same-frame directional RT shadows with alpha cutouts and cascade fallback.
+    virtual bool setRtShadow(bool enabled) { (void)enabled; return false; }
+    virtual bool rtShadowAllowed() const { return false; }
+    // `cascadesReplaced` is how many cascade shadow VIEWS the ray pass took
+    // over this frame -- the only number that can show the cost actually moved.
+    // Rays rising while this stays 0 means both paths are running, which is what
+    // "the cost did not drop" looked like before the handoff existed.
+    virtual bool getRtShadowStatus(bool& supported, bool& ready, uint32_t& rays,
+                                   uint32_t& cascadesReplaced,
+                                   std::string& reason) const {
+        supported = false; ready = false; rays = 0; cascadesReplaced = 0;
+        reason = "backend has no RT shadow pass";
+        return false;
+    }
+    // ── Per-pass raster frame timing ────────────────────────────────────────
+    // ★★★ The window is a MEASUREMENT, so it is reset and read explicitly
+    //   rather than accumulating for the life of the session: a lifetime mean
+    //   silently averages every configuration the session passed through, and
+    //   this app's settings change what a frame does, not just how fast it is.
+    //   Drive the camera between the reset and the read -- the viewport renders
+    //   only when it is marked dirty, so a still camera measures nothing and
+    //   says so.
+    virtual bool getRasterStageTimings(RasterStageTimings& out) const {
+        (void)out; return false;
+    }
+    virtual bool resetRasterStageTimings() { return false; }
+
+    /**
+     * @brief Move or reshape the probe window at RUNTIME.
+     * Coverage is the one input every RayFusion image question so far has been
+     * confounded by (a field nailed to the world origin, half of it outdoors),
+     * and a parameter that needs a rebuild to change cannot be A/B'd at all.
+     * Partial: unsent fields keep their current value. Fail-closed -- on a
+     * rejected request nothing changes and @p error says which field was wrong.
+     */
+    virtual bool setRayFusionProbeGrid(const RayFusion::GridRequest& request,
+                                       std::string& error) {
+        (void)request;
+        error = "no viewport backend owns a probe field";
+        return false;
+    }
     virtual bool getMaterialPreviewIblStatus(MaterialPreviewIblStatus& out) const {
         out = {};
+        return false;
+    }
+
+    // ★★★★★ TAA, ayarindan degil BIRIKEN ORNEK sayisindan olculur.
+    //   "enabled" yalnizca istegi soyler; goruntunun gercekten yumusayip
+    //   yumusamadigini soyleyen tek sayi `accumulated`. Ikisi ayrildi cunku
+    //   hat dort ayri yerde sessizce kapanabiliyor: shader yok, pipeline
+    //   kurulamadi, gecmis tahsisi basarisiz, ya da mod raster degil --
+    //   dordu de "enabled = true" ile birlikte yasayabilir.
+    struct RasterTaaStatus {
+        bool supported = false;     // pipeline + gecmis goruntuleri var
+        bool enabled = false;       // istenen
+        uint32_t target_samples = 0;
+        uint32_t accumulated_samples = 0; // OLCUM: su ana kadar biriken
+        bool converged = false;
+        double last_ms = 0.0;       // gecen karedeki dispatch + kopya
+        std::string inactive_reason;
+    };
+    virtual bool getRasterTaaStatus(RasterTaaStatus& out) const {
+        out = {};
+        out.inactive_reason = "this backend has no raster viewport";
         return false;
     }
     

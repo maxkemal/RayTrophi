@@ -17,6 +17,7 @@
 #include <limits>
 #include <cmath>
 #include <vector>
+#include <string>
 #include <memory>
 #include "Vec3.h"
 #include "Backend/RenderCapabilities.h"
@@ -88,6 +89,54 @@ inline constexpr int rasterShadowPcfSamples(RasterViewportQualityPreset preset) 
     return preset == RasterViewportQualityPreset::Quality ||
            preset == RasterViewportQualityPreset::Full ? 25 : 9;
 }
+// ★★★★★ RayFusion yansima butcesi AYNI preset'ten turer -- golge karosu, PCF
+//   tap sayisi ve isik butcesi gibi. Bunu ayri kadranlara birakmak iki sorun
+//   uretiyordu: panel kalabaligi, ve bir TUTARSIZLIK (baska her raster kalite
+//   dugmesi preset'ten turerken yansima ciplak sayilarla ayarlaniyordu).
+//
+// ★★ Kapi roughness'a VE split-sum agirligina kurulu, `metallic`e DEGIL: agirlik
+//   bir Fresnel terimi oldugu icin verniklenmis ahsap, boyali zemin ve seramik
+//   ayni yoldan geciyor. Preset'in degistirdigi sey hangi yuzeylerin GIRDIGI
+//   (roughness kapisi) ve her birine kac isin atildigi.
+//
+// ★ Performance'ta kapi kasitli olarak COK sikidir (0,08): orada yalnizca
+//   ayna-benzeri yuzeyler izlenir, geri kalani env lookup'inda kalir -- yani
+//   maliyet sahneyle degil, sahnedeki AYNA sayisiyla buyur.
+inline constexpr unsigned int rasterReflectionSamples(
+    RasterViewportQualityPreset preset) {
+    switch (preset) {
+        case RasterViewportQualityPreset::Quality: return 2u;
+        case RasterViewportQualityPreset::Full:    return 4u;
+        case RasterViewportQualityPreset::Performance:
+        case RasterViewportQualityPreset::Auto:
+        case RasterViewportQualityPreset::Balanced:
+        default: return 1u;
+    }
+}
+inline constexpr float rasterReflectionRoughnessGate(
+    RasterViewportQualityPreset preset) {
+    switch (preset) {
+        case RasterViewportQualityPreset::Performance: return 0.08f;
+        case RasterViewportQualityPreset::Quality:     return 0.25f;
+        case RasterViewportQualityPreset::Full:        return 0.40f;
+        case RasterViewportQualityPreset::Auto:
+        case RasterViewportQualityPreset::Balanced:
+        default: return 0.15f;
+    }
+}
+inline constexpr float rasterReflectionWeightGate(
+    RasterViewportQualityPreset preset) {
+    // Dusuk preset zayif katkilari daha erken eler; Full sonuk olanlari da tutar.
+    switch (preset) {
+        case RasterViewportQualityPreset::Performance: return 0.030f;
+        case RasterViewportQualityPreset::Quality:     return 0.008f;
+        case RasterViewportQualityPreset::Full:        return 0.004f;
+        case RasterViewportQualityPreset::Auto:
+        case RasterViewportQualityPreset::Balanced:
+        default: return 0.010f;
+    }
+}
+
 inline constexpr int rasterDirectionalShadowCascades(
     RasterViewportQualityPreset preset) {
     return preset == RasterViewportQualityPreset::Performance ? 2 : 3;
@@ -139,7 +188,10 @@ struct DisplayPostParams {
     int   tone_mapping = 0;
     int   vignette_enabled = 1;
 
-    // ★★ Bu alanin sahibi ColorProcessor DEGIL, Camera'dir (pozlama ucgeni).
+    // ★★ Bu alanin degeri Camera'dan gelir (pozlama ucgeni) ama KAPISI post
+    //   modudur: `rtpost::syncDisplay` yalnizca mode==Physical Camera iken
+    //   kadranlari okur, diger modlarda buraya 1.0 yazar. "Kadrani cevirdim,
+    //   goruntu kimildamadi" sorusunun cevabi bu kapidir.
     //   Ayni transport yapisinda tasiniyor cunku ayni shader zincirine, ayni
     //   noktada giriyor -- ama AYRI bir buyukluk: bu kamera, yukaridaki
     //   `exposure` renk derecelendirmesi. Ikisini tek alanda toplamak, bu
@@ -206,6 +258,7 @@ struct RenderSettings {
     // Quality Preset
     QualityPreset quality_preset = QualityPreset::Preview;
     RasterViewportQualityPreset raster_viewport_quality_preset = RasterViewportQualityPreset::Auto;
+    bool viewport_automatic_cutout = true;
     // Vulkan acilista Material/Realtime raster yoluna girdigi icin varsayilan
     // gercek sahne isigidir. Three Point yalniz materyal inceleme secenegidir.
     MaterialPreviewLightingPreset material_preview_lighting_preset = MaterialPreviewLightingPreset::Scene;
@@ -250,6 +303,26 @@ struct RenderSettings {
     // raygen tarafındadır (veri üretimini değiştirir) → geçişte reset gerekir.
     int debug_view = 0;
     bool volume_metrics_overlay = false;
+
+    // ── Realtime (raster) alan derinligi ────────────────────────────────────
+    // ★★★ SIDDET BURADA DEGIL: bulaniklik yaricapi kameranin kendi diyaframi
+    //   ve odak mesafesinden gelir -- path tracer'in lensiyle AYNI formul.
+    //   Ayri bir "realtime blur" kadrani koymak, Rendered ile Realtime'i
+    //   ayirmanin en kolay yoludur; bu yuzden koyulmadi. Buradakiler MALIYET
+    //   kadranlari ve ana anahtar.
+    // ★ Varsayilan kamerada aperture 0'dir, yani DoF acik olsa bile gecis
+    //   duz bir tonemap'e erken cikar: acik birakmanin bedeli yok.
+    bool realtime_depth_of_field = true;
+    float realtime_dof_max_coc = 24.0f;   // piksel tavani (hem boyut hem maliyet)
+    int realtime_dof_max_taps = 64;       // en buyuk yaricapta orneklem sayisi
+    // ★★★★★ Realtime raster TAA. Raster viewport'un anti-aliasing'i YOKTU ve
+    //   ekran-uzayi GI/yansimalarin gecmis karesi de yoktu; ikisi de AYNI
+    //   eksigin iki yuzu (zamanda ornek biriktirmemek). `samples` bir kalite
+    //   kadrani DEGIL, bir DURMA KOSULU: viewport o sayiya ulasana kadar kare
+    //   ister, sonra birakir. Buyutmek daha temiz bir duruk goruntu verir ve
+    //   kamera durduktan sonra GPU'nun daha uzun calismasi demektir.
+    bool realtime_taa = true;
+    int realtime_taa_samples = 16;
     float debug_exposure = 1.0f;        // false-color / enerji kazancı
     float debug_overlay = 0.0f;         // 0 = salt debug … 1 = salt beauty (karışım)
 
@@ -549,7 +622,17 @@ extern std::atomic<bool> rendering_paused;  // Pause animation render (P key or 
 // ===========================================================================
 extern bool g_camera_dirty;
 extern bool g_lights_dirty;
-extern bool g_world_dirty;
+// ★★★★ DUNYA (gokyuzu/ortam) KIRLILIGI IKI BAYRAK, cunku IKI TUKETICI VAR ve
+//   ikisi AYRI VkDevice: `g_backend` (RT/render) ve `g_viewport_backend`
+//   (realtime raster / RayFusion). Tek bayrak vardi ve HANGISI ONCE KOSARSA
+//   onu TEMIZLIYORDU -- yani proje acilisinda RT sync'i bayragi yutunca raster
+//   viewport HDRI dokusunu HIC almiyor, sky shader'i `worldMode==1 &&
+//   (flags&2)` kapisindan dusup DUZ RENGE (solid) iniyordu. Belirti: "ayni
+//   projede Vulkan RT butun modlari dogru acıyor, RayFusion solid'de kaliyor".
+//   Uretici hicbir zaman tek bayrak set ETMEZ: `markWorldDirty()` cagirir.
+extern bool g_world_dirty;           // g_backend'in dunya verisi bayat
+extern bool g_viewport_world_dirty;  // g_viewport_backend'in dunya verisi bayat
+void markWorldDirty();               // ikisini birden kurar (tek dogru uretici)
 
 // Granular scene-sync dirty flags (for syncActiveRenderBackendScene optimization)
 // Each flag tracks whether a specific subsystem needs re-uploading to the GPU.
@@ -669,10 +752,72 @@ extern bool g_viewport_hovered;         // True when mouse is over the main Rend
 
 // Vulkan runtime device-loss indicator (set by Vulkan backend when fatal errors occur)
 extern bool g_vulkan_device_lost;
+// TDR RECOVERY GATE (2026-09-16).
+//   The device-lost path tore the viewport backend down and then fell through,
+//   in the SAME loop iteration, to the rebuild call -- opening a new VkDevice
+//   while the driver was still resetting. That creation can return "success"
+//   and store a poisoned backend; from then on
+//   initializeViewportBackendIfAvailable() SHORT-CIRCUITS on
+//   `if (g_viewport_backend) return true` and no manual mode switch ever
+//   rebuilds it. Symptom: "after a TDR it never comes back, not even if I
+//   switch to raster or RT by hand". So the rebuild sits behind a TIME gate and
+//   the main loop retries on its own.
+extern std::atomic<long long> g_viewport_rebuild_not_before_ms;  // steady_clock ms
+extern std::atomic<int>       g_viewport_device_lost_count;
+extern std::atomic<int>       g_viewport_rebuild_attempts;
+extern std::atomic<bool>      g_viewport_rebuild_pending_after_loss;
+// TDR LOOP BUDGET.
+//   The time gate above is not enough on its own: if the raster work is what
+//   trips the TDR, rebuilding reproduces it, and the gate only slows that down
+//   rather than stopping it. So CONSECUTIVE losses are counted and automatic
+//   recovery is GIVEN UP once a budget is exceeded.
+//   The distinction matters: "the rebuild failed" and "it rebuilt, then was
+//   lost again" are different faults. The second one is the dangerous one, and
+//   it is the one being counted.
+extern std::atomic<int>       g_viewport_recovery_consecutive_losses;
+extern std::atomic<bool>      g_viewport_recovery_given_up;
+extern std::atomic<long long> g_viewport_recovered_at_ms;
+// setRenderParams GATE diagnostic (2026-09-17).
+//   OptixWrapper::resetBuffers() zeroes the accumulation buffer
+//   UNCONDITIONALLY (the memset sits OUTSIDE the resize guard) but does not
+//   reset `accumulated_samples` (that line is INSIDE the guard). So if this
+//   gate opens every frame: the pixels are zeroed while the counter keeps
+//   counting -- "the counter says 35, the image carries one sample".
+//   Which FIELD opens the gate cannot be guessed, so it is printed.
+extern std::atomic<unsigned long long> g_set_render_params_calls;
+extern std::string g_set_render_params_reason;   // yalnizca teshis; main thread yazar
 extern std::string g_vulkan_device_lost_msg;
 // Vulkan memory-pressure indicator (set by Vulkan backend on OOM/alloc pressure).
 // Main loop performs a safe backend recreate at the next synchronization point.
 extern std::atomic<bool> g_vulkan_trim_recreate_requested;
+
+// ── In-place mesh edits (sculpt) vs. the global geometry generation ─────────
+// A sculpt stroke bumps g_scene_geometry_generation (many consumers key on it)
+// but changes no topology, and the GPU copies are refit per object. Without a
+// record of that, every generation consumer treated the stroke as "the scene
+// changed": measured on a 36M-triangle scene, releasing a stroke on a 32-tri
+// plane cost a 5.8 s Vulkan RT geometry rebuild, a 5.0 s raster rebuild and a
+// 3.1 s Embree build, with no rebuild message anywhere.
+//
+// g_render_backend_synced_geometry_generation: the generation the Vulkan RT
+// render backend's geometry reflects. UINT64_MAX = unknown (forces a full sync).
+extern std::atomic<uint64_t> g_render_backend_synced_geometry_generation;
+// Objects edited in place while the render backend was NOT refit (Solid mode).
+// Valid only as a CHAIN: applying `objects` to a backend at fromGeneration
+// brings it to toGeneration. Any unrelated bump in between breaks the chain
+// and the consumer falls back to a full sync.
+struct InPlaceMeshEditLedger {
+    bool active = false;
+    uint64_t fromGeneration = 0;
+    uint64_t toGeneration = 0;
+    std::vector<std::string> objects;
+};
+extern InPlaceMeshEditLedger g_render_mesh_edit_ledger;
+// The render backend was refit for an edit that moved the generation
+// from -> to: adopt it if the backend was exactly at `from`.
+void adoptRenderMeshEditGeneration(uint64_t fromGeneration, uint64_t toGeneration);
+// The render backend was NOT refit for this edit: remember the object.
+void deferRenderMeshEdit(const std::string& objectName, uint64_t fromGeneration, uint64_t toGeneration);
 
 #endif // GLOBALS_H
 

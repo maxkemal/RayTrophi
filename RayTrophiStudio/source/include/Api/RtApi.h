@@ -21,6 +21,15 @@
 *  - Keep this header light: forward declarations only, no heavy includes.
 */
 #pragma once
+#include "Api/RtApiRayFusion.h"
+#include "Api/RtApiRasterDiagnostics.h"
+#include "Api/RtApiScreenGi.h"
+#include "Api/RtApiReflection.h"
+#include "Api/RtApiRig.h"
+#include "Api/RtApiRigMotion.h"
+#include "Api/RtApiRigEnvelopeWeights.h"
+#include "Api/RtApiRigEditing.h"
+#include "Api/RtApiClipBinding.h"
 
 #include <cstdint>
 #include <functional>
@@ -123,6 +132,122 @@ struct ObjectInfo {
     size_t triangle_count = 0;
     size_t vertex_count = 0;
 };
+
+// ★★★★★ SECIM TESHISI. Bu depoda secim IPC'de HIC YOKTU, ve kuralin kendi
+//   ifadesiyle bu, secimin TEST EDILEMEZ olmasi demekti -- "kucuk objeler
+//   secilemiyor / yanlis obje seciliyor" tam da bu yuzden yillarca
+//   olculmeden yasayabilecek bir arizadir.
+//
+// ★★★★ Bu yapi secim POLITIKASINI KOPYALAMAZ. Kopyalasaydi enstruman
+//   olctugu seyden bagimsiz evrilirdi ve bir gun ikisi ayrilirdi -- "testte
+//   dogru, uygulamada yanlis"in klasik uretim yolu. Bunun yerine AYNI isini
+//   iki ayri yola sorar ve IKISININ CEVABINI YAN YANA koyar: anlasmazligin
+//   kendisi olcumdur.
+//
+// ★★★ Isin de iki varyanti raporlanir. `get_ray` render isinidir (mercek
+//   bozulmasi + rastgele diyafram ornegi), `get_viewport_ray` raster'in
+//   cizdigi deterministik pinhole isindir. Ikisi ayrisiyorsa kucuk objeler
+//   kacar ve komsusu secilir -- ve bu, BVH bayatligiyla BIREBIR AYNI
+//   belirtiyi verir. Ayirt edebilmek icin ikisi de olculur.
+struct PickDiagnostics {
+    bool ok = false;
+    std::string error;
+    // Hangi isin kullanildi ve digeri nereye giderdi.
+    float viewport_ray_dir[3]{};   // deterministik (raster'in cizdigi)
+    float render_ray_dir[3]{};     // mercek + diyafram ornekli
+    float ray_divergence_deg = 0.0f;
+    bool  depth_of_field = false;  // diyafram ornegi devrede mi
+    // BVH yolunun cevabi.
+    bool bvh_present = false;
+    bool bvh_hit = false;
+    std::string bvh_object;
+    float bvh_t = 0.0f;
+    // Dogrusal tarama yolunun cevabi (BVH'yi hic kullanmaz).
+    bool linear_hit = false;
+    std::string linear_object;
+    float linear_t = 0.0f;
+    // Iki yol ayni objede anlasti mi. FALSE ise BVH bayat demektir: AABB
+    // budamasi kucuk objeyi eliyor, buyuk komsu isabet ediyor, ve etkilesimli
+    // yol BVH'ye ONCE sordugu icin dogrusal taramayi HIC calistirmiyor.
+    bool paths_agree = false;
+    // Aranan havuzun boyu. Kucuk/sifir ise sorun secimde degil, objelerin
+    // world.objects'e hic ulasmamasinda (flat SoA / scatter genislememesi).
+    size_t world_objects = 0;
+    int shading_mode = 0;
+    bool interactive_fallback_ray = false;  // secim hangi isini SECERDI
+    // ★★★★★ GIRDI KAPISI. 2026-09-16'da secim bir oturumda TAMAMEN olmustu ve
+    //   `scene.pick_ray` isin/BVH/nesne listesinin KUSURSUZ oldugunu gosterdi
+    //   (paths_agree true, divergence 0, dogru objede isabet). Yani tik hic
+    //   islenmiyordu: ariza isinda degil, ONUNDEKI KAPIDAYDI. Kullanici
+    //   uygulamayi yeniden acmak zorunda kaldi, cunku kapiya SORULAMIYORDU.
+    //
+    // ★★★★ Bu alanlar YAPISKAN olanlar: bir kez true kalirsa secim kalici
+    //   olarak oluyor ve yalnizca sahne/proje yeniden yuklenince temizleniyor
+    //   -- "tekrar acinca duzeldi"nin tam olarak aciklamasi.
+    //
+    // ★★★ Kare-anlik olanlar (WantCaptureMouse, ImGuizmo::IsOver) BILEREK
+    //   YAYINLANMIYOR: tik disinda orneklendiklerinde anlamsizlar ve kapiymis
+    //   gibi raporlamak, olcmedigi bir seyi olcuyormus gibi gosteren bir
+    //   enstruman olurdu.
+    bool gate_rig_edit_mode = false;   // acikken handleMouseSelection ANINDA doner
+    bool gate_hud_captured = false;    // HUD tiki yuttu; yalnizca bir sonraki tikta sifirlanir
+    bool gate_dragging = false;        // gizmo manipulasyonu surdugu varsayiliyor
+    bool gate_blocks_selection = false; // yukaridakilerden HERHANGI biri
+    // ★★★★★ ISABETI HANGI TUTAMAK TASIDI. Etkilesimli secim once `rec.triangle`
+    //   (facade) dalini, sonra `rec.tri_mesh` (flat SoA) dalini deniyor. Bu
+    //   depoda geometri HER ZAMAN flat SoA'dir ve facade eski yoldur; ikisi
+    //   birden doluysa secim FACADE dalini alir ve `tri_to_index` uzerinden
+    //   bir INDEKSE cozer. O indeks flat mesh'in kendisini degil temsilci bir
+    //   ucgeni gosteriyorsa, isabet DOGRU olmasina ragmen YANLIS OBJE secilir.
+    // ★★★★ Bu yuzden iki ad AYRI AYRI raporlanir: tek bir "object" alani,
+    //   ikisinin ayristigi durumu yapisal olarak gizlerdi -- ve ayrisma tam
+    //   olarak aradigimiz ariza.
+    bool linear_has_facade = false;      // rec.triangle dolu mu
+    bool linear_has_flat = false;        // rec.tri_mesh dolu mu
+    std::string linear_facade_object;    // facade'in verdigi ad
+    std::string linear_flat_object;      // flat SoA'nin verdigi ad
+    bool linear_handles_agree = false;   // ikisi ayni objeyi mi gosteriyor
+    // ★★★★★ ISABETI URETEN `world.objects` GIRDISI ile `rec.tri_mesh`in
+    //   KIMLIGI ayni mi. Secim, tiklanan objeyi `world_mesh.get() ==
+    //   rec.tri_mesh` pointer karsilastirmasiyla buluyor. Bir instance
+    //   (`HittableInstance`) icin `rec.tri_mesh` PAYLASILAN KAYNAK mesh'i
+    //   gosterir, tikladigin kopyayi degil -- yani tarama kaynagin indeksini
+    //   bulur ve gizmo KAYNAGIN konumuna gider.
+    // ★★★★ Bildirilen belirti tam bu: "isaret edilen obje ile secilen obje
+    //   KONUMLARI farkli, cok nadir tutarli" -- nadir tutarli, tikladigin
+    //   seyin zaten kaynagin kendisi oldugu durumdur.
+    // ★★★ `hit_index` ile `identity_index` AYRI raporlanir. Tek bir indeks
+    //   alani bu ikisinin ayristigi durumu yapisal olarak gizlerdi, ve
+    //   ayrisma aradigimiz arizanin TA KENDISI.
+    int linear_hit_index = -1;        // isabeti ureten world.objects girdisi
+    int linear_identity_index = -1;   // secimin pointer ile buldugu girdi (direct_index)
+    std::string linear_hit_entry_kind; // TriangleMesh | HittableInstance | Triangle | other
+    float linear_hit_point[3]{};      // dunya uzayinda carpma noktasi
+};
+Result pickRayDiagnostics(float u, float v, PickDiagnostics& out);
+
+// ★★★★★ GPU SECIMI. CPU isini degil, GPU'nun CIZDIGI goruntuyu sorar: raster
+//   geciste kullanilan AYNI vertex/instance tamponlari ve AYNI (jittersiz)
+//   viewProj ile bir obje-ID hedefi cizilir ve tek piksel geri okunur.
+//   Boylece CPU geometri kopyasinin uzayina dair butun hata sinifina
+//   (bkz. POSTMORTEM_CPU_PICK_P_VS_PORIG.md) yapisal olarak bagisiktir.
+// ★★★★ Sonuc ADLA degil KIMLIKLE cozulur: (mesh yuvasi, instance yuvasi)
+//   dogrudan raster instance indeksine cevrilir. Eski OptiX GPU secimi tam da
+//   ID->ad->secim onbellegi yolundan cozdugu icin kapatilmisti.
+// ★★★ `hit` false ise bu bir ARIZA DEGIL: o pikselde geometri yok. `ok`
+//   cagrinin yurudugunu, `reason` ise yurumediyse NEDENINI soyler -- ucunu
+//   tek bayraga katlamak "bos piksel" ile "secim calismiyor"u ayirt
+//   edilemez yapardi.
+struct GpuPickResult {
+    bool ok = false;
+    bool hit = false;
+    std::string object;
+    int instance_index = -1;
+    std::string mesh_key;
+    std::string reason;
+    double gpu_ms = 0.0;
+};
+Result pickObjectGpu(float u, float v, GpuPickResult& out);
 
 std::vector<std::string> listObjects();
 bool objectExists(const std::string& name);
@@ -754,6 +879,17 @@ struct CameraState {
     //   sessizce degistirirdi. Pozlamanin f-sayisi ayri: exposure_f_number.
     float aperture = 0.0f;
 
+    // ★★★★ AYRI BIR OLGU: lens diski ORNEKLENIYOR mu (2026-09-06 II).
+    //   `aperture == 0` yillarca hem "aciklik" hem "kapali" demekti; f-stop
+    //   kadrani aciklaga baglaninca o sentinel'e geri donmenin yolu kalmadi.
+    //   Artik `aperture` her zaman fiziksel aciklik, `depth_of_field` ise
+    //   anahtar. ★★ Bulanikligin gercek olcusu `effective_lens_radius`:
+    //   anahtar kapaliysa 0 doner, aciklik degeri KORUNUR. Bir ajanin
+    //   "bulaniklik olacak mi" sorusuna cevap veren alan budur, `aperture`
+    //   degil.
+    bool  depth_of_field = false;
+    float effective_lens_radius = 0.0f;
+
     // ── Fiziksel pozlama (MEVCUT model, preset tabanli) ────────────────────
     // ★★★ Bu alanlar yeni bir model DEGIL: motorun yillardir kullandigi
     //   ISO/enstantane/f-stop preset zincirini disari acar. Carpan GORELIDIR
@@ -761,9 +897,15 @@ struct CameraState {
     //   motorda isik siddeti keyfi birimde ve mutlak formul her sahneyi
     //   karartirdi. Tek tanim: Camera::exposureFactor().
     //
-    // ★★ Oncelik sirasi tam olarak sudur: auto_exposure ACIKSA yalnizca EV
-    //   compensation uygulanir ve ISO/enstantane/diyafram OKUNMAZ. Kadranlarin
-    //   "olu" gorunmesinin en sik sebebi budur, ariza degil.
+    // ★★★★ ONCELIK SIRASININ SAHIBI ARTIK POST ZINCIRIDIR (2026-09-06).
+    //   Kadranlarin okunup okunmadigina `post.get_exposure`in `mode` alani
+    //   karar verir: "physical" ise ISO/enstantane/f-stop OKUNUR, "manual" ve
+    //   "auto_histogram" modlarinda HIC okunmaz ve kamera terimi 1.0'dir.
+    //   ★★ Asagidaki iki bayrak MIRASTIR: `rtpost::syncDisplay` physical modda
+    //   ikisini de zorlar, yani realtime/Rendered goruntusunu DEGISTIRMEZLER.
+    //   Hala CPU render dongusu ve OptiX yolu tarafindan okunuyorlar -- onlari
+    //   ayni kapiya baglamak ayri bir parti (bkz. docs/dev/NEXT_BUILD_CHECKS).
+    //   Kadran cevirmeden once modu ayarla: post.configure_exposure {mode}.
     bool  auto_exposure = true;
     bool  use_physical_exposure = false;
     int   iso_preset_index = 1;
@@ -772,6 +914,9 @@ struct CameraState {
     float ev_compensation = 0.0f;
     // Cozulmus preset degerleri + uygulanan carpan. ★ AYAR DEGIL SONUCTUR:
     // bir ajanin kadranin gercekten ise yaradigini gorebilmesi icin doner.
+    // ★★★ `exposure_factor` UYGULANAN degerdir (`g_display_post.camera_exposure`),
+    // kameranin kendi hesabi degil: mod physical degilse 1.0 doner. "Ayarladim
+    // ama sayi kimildamadi" cevabi budur, ve dogru cevaptir.
     float iso_value = 100.0f;
     float shutter_seconds = 0.004f;
     float f_number = 2.8f;
@@ -784,6 +929,8 @@ Result setCameraTarget(const Vec3& target);
 Result setCameraFov(float fov);
 Result setCameraFocusDistance(float focus_distance);
 Result setCameraAperture(float aperture);
+// ★ Anahtar aciklaga DOKUNMAZ: kapatip acmak eski bulanikligi geri getirir.
+Result setCameraDepthOfField(bool enabled);
 
 // Fiziksel pozlama. ★★ `auto_exposure` acikken diger uc kadran OKUNMAZ;
 // setCameraAutoExposure(false) + setCameraUsePhysicalExposure(true) yapilmadan
@@ -1192,6 +1339,8 @@ struct ViewportFrameTelemetryInfo {
     // yalnizca yavastir. Tam bu yuzden olculuyor.
     bool global_instance_buffer = false;
     bool gpu_culling = false;
+    // ★ Derinlik on gecisi bu karede KOSTU mu (istenen degil, UYGULANAN).
+    bool depth_prepass = false;
     uint64_t total_instances = 0;
     uint64_t cull_mesh_count = 0;
     uint64_t draw_calls = 0;
@@ -1222,6 +1371,18 @@ struct ViewportFrameTelemetryInfo {
     // yapildi? Ikisi de tam-kare maliyet, ama biri KALDIRILABILIR is.
     bool     display_post_was_noop_copy = false;
     uint64_t display_frames = 0;
+
+    // ── Teshis: device-lost avi ─────────────────────────────────────────────
+    // ★★★★ Material-preview descriptor set'i, altindaki VkImage'lari yok eden
+    // bir doku purge'unden SONRA bayat yakalandi ve cizimden once yeniden
+    // kuruldu. > 0 = proje acilisindaki device-lost'un kok neden sinifi
+    // GORULDU. Bkz. docs/dev/BUG_VIEWPORT_DEVICE_LOST_ON_PROJECT_OPEN.md
+    //
+    // ★ Bu alanlar `available` false iken de anlamlidir: surucu kaybi zaten
+    // ring'i olduren seydir, yani "olcum yok" dedigi an tam da okunmasi
+    // gereken andir.
+    uint64_t stale_descset_rebuilds = 0;
+    bool     device_lost = false;
 };
 
 // ★★★ Ana dongu bu olcumu her karede buraya birakir. Backend'den GELMEZ --
@@ -1242,6 +1403,89 @@ ViewportFrameTelemetryInfo viewportFrameTelemetry();
 // Resets accumulation exactly like the panel buttons do — otherwise the next
 // probe would measure the frame from the mode you just left.
 Result setViewportShading(const std::string& mode, int matcap_preset = -1);
+
+// ---------------------------------------------------------------------------
+// Sahne yukleme kalkani (scene_ui.h'deki kural) — ACIK/KAPALI.
+//
+// ★★★★ Bu, bir tercih degil bir HATA AYIKLAMA anahtaridir ve varlik sebebi
+// olcum: kural, device-lost'a giden tek yolu kapatti; kok nedeni arayan
+// tripwire de bu yuzden asla tetiklenemez hale geldi. Kalkani kapatmadan
+// "tripwire sustu, o sinif elendi" demek OLCUM YAPMADAN sonuc bildirmektir.
+//
+// Kapaliyken her sahne acilisi Scene Log'a bir UYARI yazar. Panele bilerek
+// konmadi: arizali yolu menuden secilebilir birakmak kurali tercihe cevirirdi.
+Result setSceneLoadGuard(bool enabled);
+bool   sceneLoadGuard();
+
+// ---------------------------------------------------------------------------
+// Raster GPU instancing: global instance buffer + GPU culling + scatter LOD
+// proxies. Measured 2026-09-08: the realtime viewport never turned this on, so
+// a foliage scene submitted 45.9M triangles per frame with proxies carrying
+// 30k of them, and every frame paid a full frame-ring drain because the
+// drain-free direct write lives behind the same flag. Kept switchable so the
+// fix can be measured against the path it replaced, not merely asserted.
+// Read the outcome from viewport.frame_telemetry.
+Result setRasterGpuInstancing(bool enabled);
+// Alfa-test'li derinlik on gecisi: overdraw golgelendirmesini erken-Z ile eler
+// ve RT golge isininin cikis noktasi olan derinligi uretir.
+Result setRasterDepthPrepass(bool enabled);
+bool rasterDepthPrepass();
+
+// Same-frame directional RT hard shadows with alpha cutouts; cascades are the fallback.
+struct RtShadowInfo {
+    bool supported = false;   // cihaz ray query destekliyor mu
+    bool enabled = false;     // kol (ISTEK)
+    bool ready = false;       // enabled, valid resources + last dispatch recorded; not GPU completion
+    uint32_t rays = 0;        // ray upper bound (mask pixels); sky pixels do not trace
+    // ★★★ Devralinan cascade VIEW sayisi: maliyetin gercekten TASINDIGINI
+    //   soyleyebilen tek sayi. `rays` artarken bunun 0 kalmasi, iki yolun da
+    //   her kare kostugu anlamina gelir -- "maliyet hic dusmedi" tam olarak bu
+    //   gorunuyordu. 0 ve ready=true birlikteyse sebep genellikle sahnede HACIM
+    //   olmasidir: SDF yuzeyi, hacim shader'i ve derin golge atlasi ekran
+    //   maskesini hic okumaz, o yuzden cascade'ler onlar icin ayakta kalir.
+    uint32_t cascades_replaced = 0;
+    std::string reason;       // hazir degilse NEDEN
+};
+Result setRtShadow(bool enabled);
+RtShadowInfo rtShadow();
+
+// ── Per-pass raster frame timing ────────────────────────────────────────────
+// ★★★ Reset, drive the camera, read. The viewport renders only when it is
+//   marked dirty, so a still camera measures nothing -- and says so in
+//   `warnings` rather than returning a confident zero. `applied` carries the
+//   configuration the measured frames ACTUALLY ran under, so a number can never
+//   be attributed to the wrong settings.
+struct RasterStageInfo {
+    std::string name;
+    double cpu_mean_ms = 0.0, cpu_p95_ms = 0.0;
+    double gpu_mean_ms = 0.0, gpu_p95_ms = 0.0;
+    uint32_t frames_ran = 0;
+};
+struct RasterTimingInfo {
+    RayFusion::ScreenGiStatus screen_gi;
+    RayFusion::ReflectionStatus reflection;
+    bool available = false;
+    bool gpu_supported = false;
+    std::string gpu_unsupported_reason;
+    uint32_t frames = 0, frames_with_gpu = 0;
+    double frame_cpu_mean_ms = 0.0, frame_cpu_p95_ms = 0.0;
+    double frame_gpu_mean_ms = 0.0, frame_gpu_p95_ms = 0.0;
+    double window_wall_ms = 0.0;
+    std::vector<RasterStageInfo> stages;
+    // What the frames actually did, not what a panel asked for.
+    std::string shading, quality_preset, lighting_preset;
+    uint32_t width = 0, height = 0;
+    bool depth_prepass = false, gpu_culling = false, global_instance_buffer = false;
+    bool rt_shadow_requested = false, rt_shadow_ready = false;
+    uint32_t rt_cascades_replaced = 0, directional_cascades = 0;
+    uint32_t shadowed_lights = 0, scene_lights = 0, volume_count = 0;
+    uint64_t visible_triangles = 0;
+    uint32_t total_instances = 0, draw_calls = 0;
+    std::vector<std::string> warnings;
+};
+RasterTimingInfo rasterTimings();
+Result resetRasterTimings();
+bool   rasterGpuInstancing();
 
 // ---------------------------------------------------------------------------
 // Raster viewport quality preset.
@@ -1274,6 +1518,10 @@ struct ViewportQualityInfo {
     int shadow_light_budget = 8;
     int shadow_pcf_samples = 9;
     int directional_shadow_cascades = 3;
+    // Preset budgets, not GPU availability or measured timing.
+    int volume_shadow_tile_resolution = 0;
+    int volume_shadow_depth_layers = 0;
+    int volume_shadow_steps = 0;
     std::string scene_pbr_shader = "ggx";
     // Explicit RT-parity contract. These values prevent UI/scripts from
     // mistaking a bounded raster approximation for traversal-based RT.
@@ -1298,6 +1546,77 @@ ViewportQualityInfo viewportQuality();
 // Applying a preset rebuilds the raster scene (proxy split changes which draw
 // commands exist) and resets accumulation, exactly like the panel combo.
 Result setViewportQuality(const std::string& preset);
+
+// Realtime (raster) alan derinligi. ★★★ SIDDET BURADA DEGIL: bulaniklik
+// yaricapi kameranin `aperture` ve `focus_distance` alanlarindan gelir --
+// path tracer'in lensiyle AYNI formul, boylece Rendered ile Realtime ayni
+// sahnede ayni bulanikligi verir. Buradaki iki sayi MALIYET tavanlaridir.
+// ★★★ Kamera kendi DoF anahtarina sahiptir (`camera.set_depth_of_field`) ve o
+// KAPALIYKEN aciklik dolu olabilir -- bu yuzden `camera_aperture` burada ETKIN
+// degeri raporlar, fiziksel degeri degil. Yoksa "aciklik 0.2 ama ekran keskin"
+// gibi kendi icinde celisen bir rapor uretirdi.
+// ★★ Varsayilan kamerada aperture 0'dir; DoF acik olsa bile gecis duz bir
+// tonemap'e erken cikar. "Actim ama hicbir sey olmadi"nin cevabi genellikle
+// budur: once camera.set_aperture ile bir lens ac.
+// ★ Yalnizca Material shading modunda ve perspektif kamerada kosar.
+struct ViewportDepthOfFieldInfo {
+    bool  enabled = true;
+    float max_coc_pixels = 24.0f;
+    int   max_taps = 32;
+    // Asagidakiler AYAR DEGIL SONUCTUR: kadranin gercekten is yapip
+    // yapmadigini disaridan gormenin tek yolu.
+    float camera_aperture = 0.0f;          // ETKIN aciklik (anahtar kapaliysa 0)
+    bool  camera_depth_of_field = false;   // kameranin kendi anahtari
+    float camera_focus_distance = 0.0f;
+    bool  active = false;          // bu karede gercekten bulanistiriyor mu
+    std::string inactive_reason;   // aktif degilse NEDEN
+};
+Result setViewportDepthOfField(bool enabled, float max_coc_pixels, int max_taps);
+
+// ── Realtime raster TAA ─────────────────────────────────────────────────────
+// ★★★★★ `samples` bir KALITE kadrani degil bir DURMA KOSULU: viewport o kadar
+//   jitterli ornek biriktirene kadar kare ister, sonra birakir. Yani buyutmek
+//   "daha iyi" degil, "duruktan sonra daha uzun GPU" demektir ve bu takas
+//   olculebilir olmali -- `accumulated_samples` ve `last_ms` tam olarak bunun
+//   icin var.
+// ★★★ `enabled` ISTEKTIR, `accumulated_samples` OLCUMDUR. Hat dort ayri yerde
+//   sessizce kapanabilir (shader yok / pipeline kurulamadi / gecmis tahsisi
+//   basarisiz / mod raster degil) ve dordu de `enabled = true` ile yasar.
+struct ViewportTaaInfo {
+    bool enabled = true;
+    int  target_samples = 16;
+    // OLCUM: su ana kadar biriken ornek. 0 = bu kare taze basladi (kamera
+    // oynadi ya da sahne degisti); target'a esit = yakinsadi, viewport artik
+    // yeni kare ISTEMIYOR.
+    int  accumulated_samples = 0;
+    bool converged = false;
+    bool supported = false;
+    float last_ms = 0.0f;   // gecen karedeki TAA dispatch + kopya
+    std::string inactive_reason;
+};
+Result setViewportTaa(bool enabled, int samples);
+ViewportTaaInfo viewportTaa();
+
+// ── Vizor AF noktalari ──────────────────────────────────────────────────────
+// ★★★★ Bu bir IZLEME overlay'i DEGILDIR: AF-C modunda her karede kameranin
+//   `focus_distance`ini YAZAR, ve secili nokta hangi nesneye odaklanildigini
+//   belirler. Yani kamera durumunu degistiren bir arac -- 2026-09-06'ya kadar
+//   yalnizca bir viewport popup'inda yasiyordu ve script'ten HIC erisilemiyordu
+//   (kural 1 ihlali: panelden erisilen ama test edilemeyen yetenek).
+// ★★ `active` yalnizca ayara bakmaz: Camera HUD kapaliysa, sahnede BVH yoksa
+//   veya sekans render'i suruyorsa cizim hic yapilmaz. Sebep ADIYLA doner.
+struct ViewportAfInfo {
+    bool enabled = false;
+    int  area_mode = 0;        // 0=Single, 1=Zone9, 2=Zone21, 3=Wide, 4=CenterWeighted
+    int  focus_mode = 1;       // 0=MF, 1=AF-S, 2=AF-C
+    int  selected_point = 4;
+    int  point_count = 9;      // secili alan modunun urettigi nokta sayisi
+    bool active = false;
+    std::string inactive_reason;
+};
+Result setViewportAf(bool enabled, int area_mode, int focus_mode, int selected_point);
+ViewportAfInfo viewportAf();
+ViewportDepthOfFieldInfo viewportDepthOfField();
 
 // ---------------------------------------------------------------------------
 // Material preview lighting preset.
@@ -1324,8 +1643,25 @@ struct ViewportPreviewLightingInfo {
     bool world_sun_direct = false;       // Nishita sun participates as a direct light
     bool world_sun_shadow = false;       // Nishita sun owns a directional atlas tile
     bool world_ibl_supported = false;    // Vulkan HDRI convolution pipeline exists
-    bool world_ibl_ready = false;        // current HDRI owns irradiance/prefilter/BRDF maps
-    bool world_ibl_fallback = false;     // HDRI is using bounded raw-environment fallback
+    bool world_ibl_ready = false;        // the current world owns irradiance/prefilter/BRDF maps
+    bool world_ibl_fallback = false;     // world is using the bounded per-fragment fallback
+    // Which producer filled those maps: "none", "hdri" (uploaded environment
+    // texture) or "sky" (Physical Sky baked into an equirect). ready alone
+    // cannot answer that, and the two paths have very different frame costs.
+    std::string world_ibl_source = "none";
+    bool world_sky_capture_supported = false;
+    // ★★★★ Arka planin GERCEKTEN cizdigi kaynak, RASTER VIEWPORT'u suren
+    //   adapter'dan okunur (varsa `g_viewport_backend`, yoksa render backend).
+    //   Diger world_ibl_* alanlari backend'ler uzerinde OR'lanir; bu alan
+    //   OR'lanMAZ, cunku arizanin tamami "RT adapter dogru, viewport adapter
+    //   degil" ayrismasidir ve OR onu gizler.
+    //   "color" | "hdri" | "sky" | "solid_fallback" | "sky_analytic_fallback"
+    // ★★★★ VARSAYILAN "not_drawn", "color" DEGIL. `three_point` preset'inde
+    //   gokyuzu gecisi HIC kosmaz (`recordMaterialPreviewSkyPass` erken doner),
+    //   yani olculecek bir arka plan yoktur. Varsayilani "color" birakmak, tam
+    //   da bu alanin yakalamak icin var oldugu hatayi yapardi: "olcemedim"
+    //   sessizce "duz renk olctum"e donusurdu ve rapor makul gorunurdu.
+    std::string world_background_source = "not_drawn";
     // ★ false = Material Preview is not the mode on screen, so this preset is
     // stored but nothing draws with it.
     bool material_preview_active = false;
@@ -1612,6 +1948,49 @@ Result perfReset();
 Result perfSetLogging(bool enabled);
 bool perfLogging();
 
+// -- GPU memory: who holds the VRAM ------------------------------------------
+//
+// *** The driver's number (vram_usage_bytes) is process-wide: with a dedicated
+// viewport VkDevice and a render VkDevice on one card it cannot say which of
+// them is full. These are the app's own allocation records per device and per
+// purpose. untracked_bytes = usage - tracked: CUDA/OptiX, simulation compute,
+// the exposure meter and driver overhead live there. It is only a reading when
+// vram_measured is true.
+struct GpuMemoryCategory {
+    std::string name;             // geometry, accel_struct, scratch, texture, render_target, other
+    uint64_t device_local_bytes = 0;
+    uint64_t host_bytes = 0;      // host-visible heaps (staging, readback)
+    uint32_t allocations = 0;
+};
+struct GpuMemoryDevice {
+    std::string role;             // "render" or "viewport"
+    std::string backend;          // "vulkan", or the backend name when not Vulkan
+    bool tracked = false;         // false: no VulkanDevice, categories are absent
+    uint64_t device_local_bytes = 0;
+    uint64_t host_bytes = 0;
+    uint32_t allocations = 0;
+    std::vector<GpuMemoryCategory> categories;
+    bool compaction_supported = false;
+    uint64_t compacted = 0;
+    uint64_t compaction_skipped_skinned = 0;   // skinned BLAS rebuild in place; left at build size
+    uint64_t compaction_failures = 0;
+    uint64_t compaction_bytes_before = 0;   // of the compacted BLAS only
+    uint64_t compaction_bytes_after = 0;
+};
+struct GpuMemoryReport {
+    bool vram_measured = false;
+    uint64_t vram_usage_bytes = 0;
+    uint64_t vram_budget_bytes = 0;
+    uint64_t tracked_device_local_bytes = 0;
+    int64_t untracked_bytes = 0;
+    bool blas_compaction_enabled = true;
+    std::vector<GpuMemoryDevice> devices;
+};
+// Touches the backends: call on the frame-loop thread.
+GpuMemoryReport gpuMemoryReport();
+// Process-wide; applies to BLAS built from now on (rebuild to see the effect).
+Result setBlasCompaction(bool enabled);
+
 void initSimulationNodes();   // register types + install the attribute resolver
 
 // ── Scoped simulation graphs ────────────────────────────────────────────────
@@ -1835,6 +2214,90 @@ Result simClearCache();
 // ---------------------------------------------------------------------------
 std::string currentProjectPath();
 Result saveProject(const std::string& filepath = {});
+
+// Autosave. Ayar, geri yukleme yolu ve Hub dugmesi vardi; dosyayi YAZAN
+// kimse yoktu (2026-09-16). Status yalnizca ayari degil SONUCU raporlar:
+// write_count 0 iken skipped_unmodified buyuyorsa arizali olan autosave
+// degil, `is_modified` bayragidir.
+struct AutosaveStatus {
+    bool enabled = false;
+    int interval_sec = 0;
+    std::string path;
+    bool file_exists = false;
+    uint64_t file_bytes = 0;
+    double seconds_since_last_write = -1.0;
+    double seconds_until_next = -1.0;
+    double last_write_ms = 0.0;
+    std::string last_reason;
+    bool last_ok = false;
+    std::string last_error;
+    uint64_t write_count = 0;
+    uint64_t skipped_unmodified = 0;
+    bool scene_is_modified = false;
+};
+Result autosaveNow(const std::string& reason, AutosaveStatus& out);
+Result autosaveStatus(AutosaveStatus& out);
+
+// OptiX birikim aleti. "Sayac ilerliyor ama goruntu birikmiyor" sorusunu
+// cevaplar: wipe_count, accumulated_samples'tan BAGIMSIZ sayilir, cunku
+// cozunurluk dalinda tampon sifirlanirken sayac sifirlanmaz -- yani ikisi
+// birbirini yalanlar ve hangisinin dogru oldugu ancak silinmeyi sayarak bilinir.
+struct OptixAccumStatus {
+    bool available = false;         // OptiX backend etkin degilse false
+    int accumulated_samples = 0;
+    uint64_t wipe_count = 0;        // tampon kac kez sifirlandi
+    uint64_t wipe_resolution = 0;   // bunlarin kaci cozunurluk degisimi yuzunden
+    uint64_t wipe_camera = 0;       // kamera degisimi dali (AYRI mekanizma: memset)
+    int last_wipe_from[2]{0, 0};
+    int last_wipe_to[2]{0, 0};
+    // Birikim tamponunun KENDISINDEN okunan ornek sayisi (.w). Host sayaci
+    // ile bunun ayrismasi arizanin ta kendisidir: sayac 35 derken buffer_w 1
+    // ise birikim yazilmiyor demektir.
+    bool  buffer_w_read = false;
+    float buffer_w_mean = -1.0f;
+    float buffer_w_max = -1.0f;
+    float buffer_w_center = -1.0f;
+    bool  adaptive_sampling = false;
+    int   min_samples = 0;
+    float variance_threshold = 0.0f;
+    int   samples_per_pixel = 0;
+    // Cekirdegin son launch'ta "gecmis ornek yok" gordugu piksel sayisi.
+    // Host tarafindaki her okuma, olcmeye calistigi bellegin aynisini kullanir;
+    // bu alan o kor noktayi kapatir.
+    unsigned int prev_zero_pixels = 0;
+    // Aletin KENDISINI dogrulamak icin: okunan bolge ile cizilen bolge.
+    // Ayrisiyorlarsa buffer_w_* degerleri yanlis yeri olcuyordur.
+    int read_w = 0, read_h = 0, image_w = 0, image_h = 0;
+    // resetBuffers() cagri sayisi ve setRenderParams kapisini ACAN alan.
+    // Ikisi birlikte okunur: kapi her kare aciliyorsa neden buradadir.
+    uint64_t reset_buffers_calls = 0;
+    uint64_t set_render_params_calls = 0;
+    std::string set_render_params_reason;
+    // ★ 719 YAPISKANDIR: baglam bozulunca her cagri onu dondurur, yani hatanin
+    //   raporlandigi satir kokeni GOSTERMEZ. Bu iki alan ilk gorulen hatayi ve
+    //   nerede gorunduğunu tutar.
+    int first_cuda_error = 0;
+    std::string first_cuda_error_site;
+};
+Result optixAccumStatus(OptixAccumStatus& out);
+
+// TDR / cihaz kaybi kurtarma aleti. `viewport_alive` bir POINTER kontrolu
+// degildir tek basina yeterli degildir -- rebuild_pending ile birlikte okunur.
+struct ViewportRecoveryStatus {
+    bool viewport_alive = false;      // g_viewport_backend != nullptr
+    bool rebuild_pending = false;     // cihaz kaybindan sonra yeniden kurulmayi bekliyor
+    int  device_lost_count = 0;       // oturum boyunca kac kez cihaz kaybedildi
+    int  rebuild_attempts = 0;        // kac kez yeniden kurmayi denedik
+    double gate_remaining_ms = 0.0;   // >0 ise surucunun sifirlanmasini bekliyoruz
+    int  consecutive_losses = 0;      // ART ARDA kayip -- dongu gostergesi
+    bool given_up = false;            // butce doldu, otomatik kurtarma durdu
+    int  max_streak = 0;              // butce degeri
+};
+Result viewportRecoveryStatus(ViewportRecoveryStatus& out);
+// "Biraktim" durumunu temizler ve bir deneme daha planlar. TDR'yi ureten is
+// sahnede duruyorsa bu yeni bir surucu sifirlamasi demektir -- o yuzden
+// otomatik degil, ISTEK uzerine.
+Result viewportRetryDeviceRecovery();
 Result openProject(const std::string& filepath);
 int currentFrame();
 Result setFrame(int frame);
@@ -1983,6 +2446,57 @@ Result setAnimGraphFloat(const std::string& character, const std::string& name, 
 Result setAnimGraphBool(const std::string& character, const std::string& name, bool value);
 Result triggerAnimGraphParam(const std::string& character, const std::string& name);
 Result getAnimGraphPlayback(const std::string& character, AnimPlaybackInfo& out);
+
+// ★A state machine's LIVE state used to be visible ONLY in the AnimGraph panel,
+// which makes the whole node class untestable: a machine pinned to its default
+// state, a machine with no transitions authored, and a machine whose state
+// inputs are disconnected all look identical from outside (the character just
+// keeps playing one clip, or stops). These read the RUNTIME graph — the clone
+// the renderer actually evaluates — so a script can assert on what ran, not on
+// what the editor asset says should run.
+struct AnimStateMachineTransitionInfo {
+    std::string from;
+    std::string to;
+    std::string condition;        // "none" | "bool" | "float_greater" | "float_less" | "trigger"
+    std::string parameter;
+    float compare_value = 0.0f;
+    bool has_exit_time = true;
+    float exit_time = 0.9f;
+    float blend_time = 0.3f;
+};
+
+struct AnimStateMachineStateInfo {
+    std::string name;
+    bool is_default = false;
+    bool is_current = false;
+    // A state's pose comes from the node it names, or — for graphs authored before
+    // states carried a node id — from the input pin at the state's own index.
+    // pose_connected == false means the state evaluates to an EMPTY pose: the
+    // character freezes at its last pose and nothing is logged. That is the single
+    // most useful bit here, so it is measured rather than assumed.
+    unsigned int pose_node_id = 0;
+    bool pose_connected = false;
+};
+
+struct AnimStateMachineInfo {
+    unsigned int node_id = 0;
+    std::string current_state;
+    std::string target_state;     // empty unless transitioning
+    bool transitioning = false;
+    float transition_progress = 0.0f;   // 0..1 across the transition's blend time
+    std::vector<AnimStateMachineStateInfo> states;
+    std::vector<AnimStateMachineTransitionInfo> transitions;
+    std::vector<std::string> recent_events;   // newest last; from the graph debug trace
+};
+
+Result listAnimStateMachines(const std::string& character,
+                             std::vector<AnimStateMachineInfo>& out);
+
+// Jump a state machine straight to `state`, cancelling any running transition —
+// the scripted twin of clicking a state in the State Machine panel. node_id 0
+// means the character's first state machine.
+Result forceAnimState(const std::string& character, const std::string& state,
+                      unsigned int node_id = 0);
 
 // ---------------------------------------------------------------------------
 // Node graphs (Faz 3d). Builds material / geometry node graphs through the

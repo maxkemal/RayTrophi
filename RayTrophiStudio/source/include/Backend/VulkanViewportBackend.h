@@ -23,6 +23,8 @@ public:
     bool getInteractiveViewportFrameTelemetry(RasterFrameTelemetry& out) const override;
 
 private:
+    std::shared_ptr<RayFusion::ProbeOverlay> m_probeOverlay;
+    void recordRayFusionProbeOverlay(VkCommandBuffer cmd, const Matrix4x4& viewProj);
     std::unique_ptr<RasterViewportFrameRing> m_rasterFrameRing;
     // A failed ring uses synchronous presentation only for a bounded recovery
     // window. A transient queue/fence collision must not penalize the session
@@ -35,6 +37,13 @@ private:
     // Device-lost tek satir raporlanir; kurtarma Main'in backend_changed
     // yolunda. Bkz. renderInteractiveViewportImpl'deki VK_ERROR_DEVICE_LOST dali.
     bool m_loggedRasterDeviceLost = false;
+    // ★ Doku kusagi tripwire'i oturumda BIR KEZ raporlanir; her karede basmak
+    //   arizayi degil yeniden deneme dongusunu gosterirdi (ayni hatayi
+    //   device-lost yolunda bir kez yedik).
+    bool m_loggedStaleMaterialPreviewDescSet = false;
+    // Log bir kez yazilir ama SAYAC her olayda artar: tekrar eden bir purge ile
+    // tek seferlik bir yarisi ancak bu sayi ayirt eder.
+    std::uint64_t m_staleMaterialPreviewDescSetEvents = 0;
     bool m_rasterSynchronousPresent = false;
     RasterFrameTelemetry m_rasterTelemetry;
     VkBuffer m_externalMaterialBuffer = VK_NULL_HANDLE;
@@ -76,6 +85,23 @@ protected:
     void renderInteractiveViewportImpl(void* outSurface, int width, int height,
                                        void* outFramebuffer, void* outTexture) override;
     void drainInteractiveViewportInFlight() override;
+
+    // ── Realtime post (alan derinligi + goruntuleme donusumu) ───────────────
+    // ★★★ Bu iki fonksiyon TEK bir seyin iki yarisidir: kaynak (descriptor) ve
+    //   kayit (dispatch). Ayri tutuluyorlar cunku descriptor'lar YENIDEN
+    //   BOYUTLANDIRMADA, dispatch ise HER KAREDE kosar.
+    bool updateRasterPostDescriptors();
+    void recordRasterPostPass(VkCommandBuffer cmd, uint32_t width, uint32_t height);
+
+    // ── TAA (raster_taa.comp) ───────────────────────────────────────────────
+    // Ayni ikilik: kaynak kurulumu yeniden boyutlandirmada, kayit her karede.
+    // `ensure` pipeline'i bir kez kurar; basarisizlik OLUMCUL DEGIL -- TAA
+    // kapanir ve viewport eskisi gibi (jittersiz, gecmissiz) cizer.
+    bool ensureRasterTaaResources(uint32_t width, uint32_t height);
+    void destroyRasterTaaResources(bool keepPipeline);
+    // `blend` ve gecerlilik cagiranda hesaplanir; bu fonksiyon yalnizca kaydeder.
+    void recordRasterTaaPass(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                             const Matrix4x4& invViewProjUnjittered);
 };
 
 } // namespace Backend

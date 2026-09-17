@@ -390,7 +390,51 @@ public:
      void discardMeshEditLayer(UIContext& ctx);
      void tryRestoreSerializedMeshEditLayer(UIContext& ctx);
      void queueMeshEditGpuSync(const std::string& objectName);
+     // Adopts a flat (SoA) geometry edit made OUTSIDE the sculpt loop -- undo/redo
+     // writes the mesh SoA directly. Re-seeds this UI's editable cache + PBVH
+     // bounds and routes the GPU copies through the incremental sculpt sync.
+     // Returns false if it cannot service the object, so the caller keeps the
+     // whole-scene rebuild path rather than leaving something unsynced.
+     bool adoptExternalFlatSoaEdit(UIContext& ctx, const std::string& objectName);
+     // Post undo/redo cache handling. `commandSyncedUiCaches` comes from
+     // SceneCommand::handlesUiCacheSync(); when true the caches are already
+     // correct and the expensive blanket invalidation is skipped.
+     void invalidateUiCachesAfterHistoryStep(UIContext& ctx, bool commandSyncedUiCaches);
+
+     // *** Per-dab scratch for the flat-SoA normal recompute, stamp-indexed so a
+     //   dab costs O(touched) with NO allocation. It replaces an
+     //   unordered_set + unordered_map that were built FROM SCRATCH every dab:
+     //   roughly one set node per moved vertex plus one map node per incident
+     //   face, i.e. ~7x the moved-vertex count in allocations. That is why the
+     //   cost JUMPED as the brush radius grew instead of growing smoothly --
+     //   measured at 5,5 ms/dab average with an 81 ms peak, the largest sculpt
+     //   phase left after the GPU refit was fixed.
+     //   A stamp of 0 means "never touched"; the counter is reset on wrap so a
+     //   stale stamp can never read as current.
+     struct FlatSoaNormalScratch {
+         std::vector<uint32_t> vertex_stamp;  // per editable vertex
+         std::vector<uint32_t> face_stamp;    // per editable face
+         std::vector<Vec3> face_normal;       // valid where face_stamp == stamp
+         std::vector<uint32_t> affected;      // this dab's vertex ids
+         uint32_t stamp = 0;
+     };
+     FlatSoaNormalScratch flat_soa_normal_scratch;
+
+     // Stamp array behind EditableVertexMembership: "is this vertex in the set
+     // the brush just solved". Replaces a binary search that ran per triangle
+     // corner inside the per-vertex anti-flip guard.
+     std::vector<uint32_t> sculpt_touched_membership_stamps;
+     uint32_t sculpt_touched_membership_stamp = 0;
+
+     // Measured cost of one full sculpt dab, smoothed. The per-frame dab cap is
+     // derived from THIS rather than from a vertex-count proxy -- see the note
+     // at the cap. Only full dabs update it; early-returning ones are cheap and
+     // would drag the estimate down, which would raise the cap.
+     float sculpt_dab_cost_ms_ema = 0.0f;
      void processPendingMeshEditGpuSync(UIContext& ctx);
+     // Refit the render backend for objects sculpted while it was inactive.
+     // false = at least one could not be refit; the caller must full-sync.
+     bool catchUpRenderMeshEdits(UIContext& ctx, const std::vector<std::string>& objectNames);
      bool mergeSelectedVerticesToCenter(UIContext& ctx);
      bool weldSelectedVerticesByDistance(UIContext& ctx, float distance);
      bool addFaceFromSelectedVertices(UIContext& ctx);
@@ -993,6 +1037,11 @@ public:
      std::string modifier_panel_exit_object; // Object for which user manually exited edit mode
      bool mesh_edit_gpu_sync_pending = false;
      std::string mesh_edit_gpu_sync_object_name;
+     // Set by a sculpt stroke end: the generation bump it made, so the sync can
+     // tell each GPU copy that it is current instead of stale.
+     bool mesh_edit_stroke_end_pending = false;
+     uint64_t mesh_edit_stroke_from_generation = 0;
+     uint64_t mesh_edit_stroke_to_generation = 0;
      ImVec2 mesh_overlay_view_min = ImVec2(0.0f, 0.0f);
      ImVec2 mesh_overlay_view_max = ImVec2(0.0f, 0.0f);
      bool mesh_overlay_view_valid = false;
@@ -1212,7 +1261,18 @@ public:
         // each touched SoA vertex's local rest pos+normal the FIRST time it is written this stroke
         // (in syncFlatSculptVerticesToSoA). At stroke end this seeds a FlatSculptEditCommand.
         // Key = SoA vertex id; value = {P_orig, N_orig} BEFORE the stroke's first touch of it.
-        std::unordered_map<uint32_t, std::pair<Vec3, Vec3>> flat_before_soa;
+        // *** Flat (SoA) sculpt undo snapshots: the pre-stroke position+normal of
+        //   every SoA vertex the stroke wrote, captured the FIRST time each is
+        //   written. This was an unordered_map, which cost a hash lookup (plus
+        //   an insert on first touch) for EVERY SoA write -- and a dab writes
+        //   about seven slots per moved vertex (position, then the normal of the
+        //   vertex and its one-ring). Measured 13,4 ms per dab in
+        //   sculpt.dab.11_flat_soa_sync on a 10.891-vertex footprint.
+        //   Now: append-only parallel arrays plus a 1-bit-per-vertex presence
+        //   mask (1,1 MB for a 9M-vertex mesh, allocated once per stroke).
+        std::vector<uint32_t> flat_before_ids;
+        std::vector<std::pair<Vec3, Vec3>> flat_before_vals;
+        std::vector<uint64_t> flat_before_captured;
     };
     SculptStrokeState sculpt_stroke_state;
 
@@ -1447,6 +1507,7 @@ private:
     // --- Overlays & Gizmos ---
     bool drawOverlays(UIContext& ctx);
     void drawLightGizmos(UIContext& ctx, bool& gizmo_hit);
+    void drawSkeletonOverlay(UIContext& ctx, bool& gizmo_hit);
     void drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit);
     void drawParticleDebugOverlay(UIContext& ctx);
     // Build camera-facing billboards from all visible particle systems and upload
@@ -1464,7 +1525,6 @@ private:
     void drawFocusPeakingOverlay(UIContext& ctx);  // Sharp edge highlighting
     void drawZebraOverlay(UIContext& ctx);         // Overexposure warning
     void drawAFPointsOverlay(UIContext& ctx);      // Multi-point autofocus grid
-    void drawProCameraPanel(UIContext& ctx);       // Settings panel for pro features
      void drawLensInfoHUD(UIContext& ctx);  // Lens info top-left
     
 
@@ -1727,3 +1787,41 @@ public:
 };
 
 float getMainMenuReservedHeight();
+
+// ★★★ KURAL: hiçbir sahne-açma yolu viewport'u AĞIR bir modda bırakamaz.
+//
+// Bir proje/template açmak, mevcut GPU durumunu söküp yeniden kurar. Bu sökme
+// Material (realtime raster) veya Rendered (RT) bağlıyken yapıldığında raster
+// gönderiminde VK_ERROR_DEVICE_LOST üretiyor — ve arıza yalnızca ORTADA
+// SÖKÜLECEK DOLU bir sahne varken görülüyor (boş uygulamaya aynı sahneyi
+// yüklemek sorunsuz). Bkz. docs/dev/BUG_VIEWPORT_DEVICE_LOST_ON_PROJECT_OPEN.md
+//
+// Kural iki parçalı ve ikisi de burada uygulanır:
+//   1. Hiçbir açılış yolu Material/Rendered'ı ZORLAYAMAZ.
+//   2. Uygulama o an Material/Rendered'daysa, açılış Solid'e düşürür.
+// Solid ve Matcap hafif raster modlarıdır; onlara dokunulmaz.
+//
+// ★ Vulkan yoksa raster viewport da yoktur; o yapıda tek geçerli mod Rendered,
+//   ve orada düşürecek daha hafif bir yer olmadığı için mod korunur.
+void enterSolidViewportForSceneLoad(SceneUI& ui, const char* reason);
+
+// ★★★★ KURALIN KAPATMA ANAHTARI — ve neden VAR OLMAK ZORUNDA olduğu:
+//
+// Yukarıdaki kural, device-lost'a giden yolu artık hiç kullandırmıyor. Bu iyi
+// bir düzeltme ama BERBAT bir ölçüm durumu: kök nedeni arayan tripwire, tam da
+// tetiklendiği yol kapatıldığı için sonsuza kadar susar — ve suskunluğu
+// "o sınıf elendi" diye okunur. CLAUDE.md: *"Tripwire'ın susması yokluğu
+// kanıtlamaz. Enstrümanın anahtarı, ölçtüğü şeyle çakışmamalı."* Burada anahtar
+// ile ölçülen şey tam olarak çakışıyordu.
+//
+// Bu bayrak çakışmayı ayırır: false iken açılış yolları eski (arızalı)
+// davranışa döner, yani hata TEKRAR ÜRETİLEBİLİR olur.
+//
+// ★ Varsayılan true. Kapatmak bir HATA AYIKLAMA eylemidir, tercih değil:
+//   kapalıyken her açılış Scene Log'a bir UYARI yazar, böylece "neden çöktü"
+//   sorusunun cevabı yanlışlıkla açık kalmış bir anahtar olduğunda görülür.
+//
+// ★★ Yalnız IPC'den sürülür (`viewport.set_scene_load_guard`) — bilerek panele
+//   konmadı: arızalı yolu bir menüden açılabilir bırakmak, kuralı bir tercihe
+//   çevirirdi.
+extern bool g_scene_load_solid_guard;

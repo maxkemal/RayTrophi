@@ -82,11 +82,52 @@ std::atomic<bool> rendering_paused = false;  // Pause animation render
 
 // Vulkan runtime device-loss indicator
 bool g_vulkan_device_lost = false;
+std::atomic<long long> g_viewport_rebuild_not_before_ms{0};
+std::atomic<int>       g_viewport_device_lost_count{0};
+std::atomic<int>       g_viewport_rebuild_attempts{0};
+std::atomic<bool>      g_viewport_rebuild_pending_after_loss{false};
+std::atomic<int>       g_viewport_recovery_consecutive_losses{0};
+std::atomic<bool>      g_viewport_recovery_given_up{false};
+std::atomic<long long> g_viewport_recovered_at_ms{0};
+std::atomic<unsigned long long> g_set_render_params_calls{0};
+std::string g_set_render_params_reason;
 
 // Sahibi ColorProcessor; Main her karede buraya yansitir (bkz. globals.h).
 DisplayPostParams g_display_post{};
 std::string g_vulkan_device_lost_msg;
 std::atomic<bool> g_vulkan_trim_recreate_requested = false;
+
+std::atomic<uint64_t> g_render_backend_synced_geometry_generation{ UINT64_MAX };
+InPlaceMeshEditLedger g_render_mesh_edit_ledger;
+
+void adoptRenderMeshEditGeneration(uint64_t fromGeneration, uint64_t toGeneration) {
+    uint64_t expected = fromGeneration;
+    g_render_backend_synced_geometry_generation.compare_exchange_strong(
+        expected, toGeneration, std::memory_order_acq_rel);
+}
+
+void deferRenderMeshEdit(const std::string& objectName, uint64_t fromGeneration, uint64_t toGeneration) {
+    InPlaceMeshEditLedger& ledger = g_render_mesh_edit_ledger;
+    if (!ledger.active) {
+        ledger.active = true;
+        ledger.fromGeneration = fromGeneration;
+        ledger.toGeneration = toGeneration;
+        ledger.objects.assign(1, objectName);
+        return;
+    }
+    if (ledger.toGeneration != fromGeneration) {
+        // Something else bumped the generation in between: the chain no longer
+        // describes the whole difference. The consumer will see !active and a
+        // generation mismatch, i.e. a full sync.
+        ledger = InPlaceMeshEditLedger{};
+        return;
+    }
+    ledger.toGeneration = toGeneration;
+    for (const std::string& existing : ledger.objects) {
+        if (existing == objectName) return;
+    }
+    ledger.objects.push_back(objectName);
+}
 
 // Macros are defined in globals.h
 

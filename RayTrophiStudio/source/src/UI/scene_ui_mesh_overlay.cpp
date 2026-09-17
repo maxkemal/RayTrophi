@@ -1,4 +1,5 @@
-﻿#include "scene_ui.h"
+#include "scene_ui.h"
+#include "UI/ScalarFieldOverlay.h"
 
 #include "Vec3SIMD.h"
 #include <omp.h>
@@ -2679,7 +2680,14 @@ void beginSculptStroke(
 
     strokeState.before_triangle_states.reserve(512);
     strokeState.touched_triangles.reserve(512);
-    strokeState.flat_before_soa.reserve(512); // flat (SoA) sculpt undo snapshots
+    // Flat (SoA) sculpt undo snapshots. The presence mask is sized on first
+    // capture (it needs the mesh's SoA vertex count); clearing it here is what
+    // scopes the whole snapshot set to THIS stroke.
+    strokeState.flat_before_ids.clear();
+    strokeState.flat_before_vals.clear();
+    strokeState.flat_before_captured.clear();
+    strokeState.flat_before_ids.reserve(512);
+    strokeState.flat_before_vals.reserve(512);
 
     if (activeTool == SceneUI::SculptBrushTool::Layer) {
         strokeState.layer_accum.assign(editableVertexCount, 0.0f);
@@ -4035,6 +4043,34 @@ bool applyNonGrabSculptCandidate(
         // Eğer sample.weight sıfıra yakınsa clamp de sıfıra yaklaşır, bunu önlemek için ufak bir epsilon:
         maxLocalStep = (std::max)(maxLocalStep, localRadius * 1e-5f);
     }
+    // ***** UNIT MISMATCH, and it defeated the very clamp above. maxLocalStep is
+    //   an ANTI-FLIP limit, so its natural unit is the MESH's edge length --
+    //   that is what isEditableVertexTopologySafe judges. But the floors added
+    //   next to it (localRadius * 0.05 for Draw/Clay, and the plain
+    //   localRadius * 1e-4) are in BRUSH units, and `max` takes the LARGER.
+    //   On a dense mesh with a wide brush the brush-unit term wins by a wide
+    //   margin (radius 1.0 with a 0.003 edge => 0.05, i.e. ~16 edge lengths),
+    //   so the clamp stopped clamping, the guard rejected the oversized move,
+    //   and the vertex was FROZEN while its lower-weight neighbours -- whose
+    //   steps were small enough to pass -- travelled. That is exactly the
+    //   reported artifact: most vertices under a wide brush on a 9M-triangle
+    //   plane are not caught, and the ones that are look over-driven. It scales
+    //   with radius (the term grows) and with density (the edge shrinks), and
+    //   it does not appear at 2M because the ratio stays inside the guard's
+    //   tolerance there.
+    //
+    //   The ceiling is therefore re-imposed in mesh units, AFTER the falloff
+    //   multiplication so the brush's weight profile is untouched. Grab-family
+    //   tools are excluded because they never reach this guard (the commit loop
+    //   trusts their coherent field), and SnakeHook/Nudge keep the large step
+    //   the block above deliberately grants them.
+    //   Note: avg_edge_length is a GLOBAL average, so on a mesh with uneven
+    //   density this is an approximation; sculpt.guard.frozen says whether it
+    //   is good enough in practice.
+    if (activeTool != SceneUI::SculptBrushTool::SnakeHook &&
+        activeTool != SceneUI::SculptBrushTool::Nudge) {
+        maxLocalStep = (std::min)(maxLocalStep, meshAvgEdgeLocal * 0.75f);
+    }
     const float localDeltaLen = std::sqrt(localDeltaLenSq);
     if (std::isfinite(localDeltaLen) && localDeltaLen > maxLocalStep) {
         localDelta *= (maxLocalStep / localDeltaLen);
@@ -4759,10 +4795,28 @@ void expandTouchedTrianglesFromAffectedVertices(
     }
 }
 
+// *** O(1) membership for "did the brush just solve this vertex". The set is
+//   sorted and unique, so std::binary_search was CORRECT -- only ruinously
+//   placed: it ran three times per incident face, inside a guard evaluated up
+//   to nine times per vertex. On the measured 10.891-vertex footprint that is
+//   ~250 comparisons per vertex, and commit_and_polish cost 14,0 ms per dab
+//   (1,3 us per vertex, ~4000 cycles to move one vertex).
+//   Same stamp trick as FlatSoaNormalScratch: the array is sized once per mesh
+//   and a counter bump invalidates the whole previous set.
+struct EditableVertexMembership {
+    const std::vector<uint32_t>* stamps = nullptr;
+    uint32_t stamp = 0;
+    bool contains(int vertexIdInt) const {
+        if (!stamps || vertexIdInt < 0) return false;
+        const size_t v = static_cast<size_t>(vertexIdInt);
+        return v < stamps->size() && (*stamps)[v] == stamp;
+    }
+};
+
 Vec3 resolveEditableProposedLocalPosition(
     const SceneUI::EditableMeshCache& editableMeshCache,
     const std::vector<Vec3>& proposedPositions,
-    const std::vector<int>& updatedVertexIdsSorted,
+    const EditableVertexMembership& updatedVertices,
     int vertexIdInt) {
     if (vertexIdInt < 0) {
         return Vec3(0.0f, 0.0f, 0.0f);
@@ -4771,18 +4825,48 @@ Vec3 resolveEditableProposedLocalPosition(
     if (vertexId >= editableMeshCache.vertices.size()) {
         return Vec3(0.0f, 0.0f, 0.0f);
     }
-    if (std::binary_search(updatedVertexIdsSorted.begin(), updatedVertexIdsSorted.end(), vertexIdInt) &&
-        vertexId < proposedPositions.size()) {
+    if (updatedVertices.contains(vertexIdInt) && vertexId < proposedPositions.size()) {
         return proposedPositions[vertexId];
     }
     return editableMeshCache.vertices[vertexId].local_position;
 }
 
+// *** Which test rejected a move. The guard's own comment (below) says a
+//   rejection FREEZES the vertex while its neighbours travel, producing thin
+//   spikes from the brush centre -- the exact artifact reported on a 9M-triangle
+//   plane with a wide brush. Three independent tests can reject, and the fix for
+//   each is different, so the reason has to be measured rather than guessed.
+enum class EditableTopologyReject {
+    None = 0,
+    NonFinite,
+    Edge,    // an edge shrank below 5% of its original length
+    Area,    // triangle area fell below 10% of the original
+    Orient,  // normal turned too far -- NOTE this test compares an area-scaled
+             // dot against the OLD area, so it also fires when the new triangle
+             // is merely much smaller than the old one
+};
+
+struct EditableTopologyGuardStats {
+    uint32_t frozen = 0;      // rejected after all 8 back-offs: vertex does NOT move
+    uint32_t backedOff = 0;   // moved, but less than the brush asked for
+    uint32_t accepted = 0;
+    uint32_t rejectEdge = 0;
+    uint32_t rejectArea = 0;
+    uint32_t rejectOrient = 0;
+    uint32_t rejectNonFinite = 0;
+};
+
 bool isEditableVertexTopologySafe(
     const SceneUI::EditableMeshCache& editableMeshCache,
     int vertexIdInt,
     const std::vector<Vec3>& proposedPositions,
-    const std::vector<int>& updatedVertexIdsSorted) {
+    const EditableVertexMembership& updatedVertices,
+    EditableTopologyReject* outReason = nullptr) {
+    auto reject = [&](EditableTopologyReject r) {
+        if (outReason) *outReason = r;
+        return false;
+    };
+    if (outReason) *outReason = EditableTopologyReject::None;
     if (vertexIdInt < 0) {
         return false;
     }
@@ -4804,9 +4888,9 @@ bool isEditableVertexTopologySafe(
         const Vec3 oldP0 = editableMeshCache.vertices[static_cast<size_t>(triVertexIds[0])].local_position;
         const Vec3 oldP1 = editableMeshCache.vertices[static_cast<size_t>(triVertexIds[1])].local_position;
         const Vec3 oldP2 = editableMeshCache.vertices[static_cast<size_t>(triVertexIds[2])].local_position;
-        const Vec3 newP0 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertexIdsSorted, triVertexIds[0]);
-        const Vec3 newP1 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertexIdsSorted, triVertexIds[1]);
-        const Vec3 newP2 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertexIdsSorted, triVertexIds[2]);
+        const Vec3 newP0 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertices, triVertexIds[0]);
+        const Vec3 newP1 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertices, triVertexIds[1]);
+        const Vec3 newP2 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertices, triVertexIds[2]);
 
         const Vec3 oldNormal = Vec3::cross(oldP1 - oldP0, oldP2 - oldP0);
         const Vec3 newNormal = Vec3::cross(newP1 - newP0, newP2 - newP0);
@@ -4827,22 +4911,28 @@ bool isEditableVertexTopologySafe(
         // ORIGINAL edge/area) already detect a genuine collapse/flip at any density; the
         // absolute term only needs to reject literal zero, so push it far below float noise.
         if (!std::isfinite(newEdge01LenSq) || !std::isfinite(newEdge12LenSq) || !std::isfinite(newEdge20LenSq)) {
-            return false;
+            return reject(EditableTopologyReject::NonFinite);
         }
         if (newEdge01LenSq <= (std::max)(1e-24f, oldEdge01LenSq * 0.0025f) ||
             newEdge12LenSq <= (std::max)(1e-24f, oldEdge12LenSq * 0.0025f) ||
             newEdge20LenSq <= (std::max)(1e-24f, oldEdge20LenSq * 0.0025f)) {
-            return false;
+            return reject(EditableTopologyReject::Edge);
         }
 
-        if (!std::isfinite(newLenSq) || newLenSq <= (std::max)(1e-24f, oldLenSq * 0.01f)) {
-            return false;
+        if (!std::isfinite(newLenSq)) {
+            return reject(EditableTopologyReject::NonFinite);
+        }
+        if (newLenSq <= (std::max)(1e-24f, oldLenSq * 0.01f)) {
+            return reject(EditableTopologyReject::Area);
         }
 
         if (oldLenSq > 1e-24f) {
             const float orientDot = oldNormal.dot(newNormal);
-            if (!std::isfinite(orientDot) || orientDot <= oldLenSq * 0.04f) {
-                return false;
+            if (!std::isfinite(orientDot)) {
+                return reject(EditableTopologyReject::NonFinite);
+            }
+            if (orientDot <= oldLenSq * 0.04f) {
+                return reject(EditableTopologyReject::Orient);
             }
         }
     }
@@ -4854,8 +4944,9 @@ bool resolveEditableTopologySafePosition(
     const SceneUI::EditableMeshCache& editableMeshCache,
     int vertexIdInt,
     std::vector<Vec3>& proposedPositions,
-    const std::vector<int>& updatedVertexIdsSorted,
-    Vec3& outLocalPosition) {
+    const EditableVertexMembership& updatedVertices,
+    Vec3& outLocalPosition,
+    EditableTopologyGuardStats* stats = nullptr) {
     if (vertexIdInt < 0) {
         return false;
     }
@@ -4875,13 +4966,28 @@ bool resolveEditableTopologySafePosition(
         return false;
     }
 
+    EditableTopologyReject reason = EditableTopologyReject::None;
     if (isEditableVertexTopologySafe(
             editableMeshCache,
             vertexIdInt,
             proposedPositions,
-            updatedVertexIdsSorted)) {
+            updatedVertices,
+            &reason)) {
         outLocalPosition = targetLocalPosition;
+        if (stats) ++stats->accepted;
         return true;
+    }
+    // The reason recorded is the FIRST rejection, at full brush delta: that is
+    // the test that actually gates this vertex. Later back-offs can trip a
+    // different test and would misattribute the cause.
+    if (stats) {
+        switch (reason) {
+            case EditableTopologyReject::Edge:      ++stats->rejectEdge; break;
+            case EditableTopologyReject::Area:      ++stats->rejectArea; break;
+            case EditableTopologyReject::Orient:    ++stats->rejectOrient; break;
+            case EditableTopologyReject::NonFinite: ++stats->rejectNonFinite; break;
+            default: break;
+        }
     }
 
     float blend = 0.5f;
@@ -4894,8 +5000,9 @@ bool resolveEditableTopologySafePosition(
                 editableMeshCache,
                 vertexIdInt,
                 proposedPositions,
-                updatedVertexIdsSorted)) {
+                updatedVertices)) {
             outLocalPosition = backedOffPosition;
+            if (stats) ++stats->backedOff;
             return true;
         }
         blend *= 0.5f;
@@ -4903,6 +5010,9 @@ bool resolveEditableTopologySafePosition(
 
     proposedPositions[vertexId] = originalLocalPosition;
     outLocalPosition = originalLocalPosition;
+    // Frozen: the brush asked this vertex to move and it did not. Its neighbours
+    // did, which is what a spike IS.
+    if (stats) ++stats->frozen;
     return false;
 }
 
@@ -6554,12 +6664,25 @@ bool SceneUI::syncFlatSculptVerticesToSoA(const std::vector<size_t>& movedVertex
     // these BEFORE snapshots + the final SoA into a FlatSculptEditCommand. Skipped for the non-stroke
     // callers (gizmo move/transform have their own undo); they don't set sculpt_stroke_state.active.
     const bool captureUndo = sculpt_stroke_state.active;
+    if (captureUndo) {
+        const size_t words = (soaVCount + 63u) / 64u;
+        if (sculpt_stroke_state.flat_before_captured.size() < words) {
+            // Grows only: a stroke never shrinks its mesh, and clearing happens
+            // at stroke begin.
+            sculpt_stroke_state.flat_before_captured.resize(words, 0ull);
+        }
+    }
     auto captureBefore = [&](uint32_t s) {
         if (!captureUndo) return;
-        if (sculpt_stroke_state.flat_before_soa.count(s)) return;
+        const size_t word = static_cast<size_t>(s) >> 6;
+        if (word >= sculpt_stroke_state.flat_before_captured.size()) return;
+        const uint64_t bit = 1ull << (s & 63u);
+        if (sculpt_stroke_state.flat_before_captured[word] & bit) return;
+        sculpt_stroke_state.flat_before_captured[word] |= bit;
         const Vec3 bp = Porig ? Porig[s] : (P ? P[s] : Vec3());
         const Vec3 bn = Norig ? Norig[s] : Vec3(0.0f, 1.0f, 0.0f);
-        sculpt_stroke_state.flat_before_soa.emplace(s, std::make_pair(bp, bn));
+        sculpt_stroke_state.flat_before_ids.push_back(s);
+        sculpt_stroke_state.flat_before_vals.emplace_back(bp, bn);
     };
 
     // 1) Positions — P_orig is the authoritative local rest position; P is the world mirror.
@@ -6584,41 +6707,71 @@ bool SceneUI::syncFlatSculptVerticesToSoA(const std::vector<size_t>& movedVertex
     // vertex to every one of that vertex's SoA slots, so a Flat-shaded object's sculpted area
     // always ended up smooth-shaded regardless of the object's setting.
     if (Norig) {
-        std::unordered_set<size_t> affected;
-        affected.reserve(movedVertexIds.size() * 7 + 1);
+        // *** Stamp-indexed scratch, reused across dabs. The unordered_set +
+        //   unordered_map this replaced were rebuilt every dab, costing roughly
+        //   one node allocation per moved vertex plus one per incident face --
+        //   which is exactly why a WIDER brush made the cost jump instead of
+        //   scaling with the work. See FlatSoaNormalScratch in scene_ui.h.
+        FlatSoaNormalScratch& scratch = flat_soa_normal_scratch;
+        if (scratch.vertex_stamp.size() != cache.vertices.size()) {
+            scratch.vertex_stamp.assign(cache.vertices.size(), 0u);
+            scratch.stamp = 0;
+        }
+        if (scratch.face_stamp.size() != cache.faces.size()) {
+            scratch.face_stamp.assign(cache.faces.size(), 0u);
+            scratch.face_normal.resize(cache.faces.size());
+            scratch.stamp = 0;
+        }
+        if (++scratch.stamp == 0u) {
+            // Wrapped: every stale stamp would otherwise read as current.
+            std::fill(scratch.vertex_stamp.begin(), scratch.vertex_stamp.end(), 0u);
+            std::fill(scratch.face_stamp.begin(), scratch.face_stamp.end(), 0u);
+            scratch.stamp = 1u;
+        }
+        const uint32_t stamp = scratch.stamp;
+        scratch.affected.clear();
+
+        auto touch = [&](size_t v) {
+            if (v >= scratch.vertex_stamp.size()) return;
+            if (scratch.vertex_stamp[v] == stamp) return;
+            scratch.vertex_stamp[v] = stamp;
+            scratch.affected.push_back(static_cast<uint32_t>(v));
+        };
         for (const size_t v : movedVertexIds) {
             if (v >= cache.vertices.size()) continue;
-            affected.insert(v);
+            touch(v);
             if (v < cache.vertex_neighbors.size()) {
                 for (const int nb : cache.vertex_neighbors[v]) {
-                    if (nb >= 0) affected.insert(static_cast<size_t>(nb));
+                    if (nb >= 0) touch(static_cast<size_t>(nb));
                 }
             }
         }
 
         // Per-face normal cache (used by both branches — flat writes it directly per corner,
         // smooth accumulates it into the vertex average).
-        std::unordered_map<int, Vec3> faceNormalCache;
         auto faceNormal = [&](int fi) -> Vec3 {
-            auto it = faceNormalCache.find(fi);
-            if (it != faceNormalCache.end()) return it->second;
-            Vec3 n(0.0f, 1.0f, 0.0f);
-            if (fi >= 0 && fi < static_cast<int>(cache.faces.size())) {
-                const EditableFace& f = cache.faces[static_cast<size_t>(fi)];
-                if (f.v0 >= 0 && f.v1 >= 0 && f.v2 >= 0) {
-                    const Vec3& p0 = cache.vertices[static_cast<size_t>(f.v0)].local_position;
-                    const Vec3& p1 = cache.vertices[static_cast<size_t>(f.v1)].local_position;
-                    const Vec3& p2 = cache.vertices[static_cast<size_t>(f.v2)].local_position;
-                    const Vec3 cr = Vec3::cross(p1 - p0, p2 - p0);
-                    const float l = cr.length();
-                    if (l > 1e-12f) n = cr / l;
-                }
+            if (fi < 0 || fi >= static_cast<int>(scratch.face_stamp.size())) {
+                return Vec3(0.0f, 1.0f, 0.0f);
             }
-            faceNormalCache[fi] = n;
+            const size_t fu = static_cast<size_t>(fi);
+            if (scratch.face_stamp[fu] == stamp) return scratch.face_normal[fu];
+            Vec3 n(0.0f, 1.0f, 0.0f);
+            const EditableFace& f = cache.faces[fu];
+            if (f.v0 >= 0 && f.v1 >= 0 && f.v2 >= 0) {
+                const Vec3& p0 = cache.vertices[static_cast<size_t>(f.v0)].local_position;
+                const Vec3& p1 = cache.vertices[static_cast<size_t>(f.v1)].local_position;
+                const Vec3& p2 = cache.vertices[static_cast<size_t>(f.v2)].local_position;
+                const Vec3 cr = Vec3::cross(p1 - p0, p2 - p0);
+                const float l = cr.length();
+                if (l > 1e-12f) n = cr / l;
+            }
+            scratch.face_stamp[fu] = stamp;
+            scratch.face_normal[fu] = n;
             return n;
         };
 
-        for (const size_t w : affected) {
+        for (const uint32_t affectedId : scratch.affected) {
+            const size_t w = static_cast<size_t>(affectedId);
             if (w >= cache.vertices.size()) continue;
 
             if (cache.shade_flat) {
@@ -6689,6 +6842,14 @@ bool SceneUI::syncFlatSculptVerticesToSoA(const std::vector<size_t>& movedVertex
 }
 
 bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectName) {
+    // *** Entering the sculpt panel on a dense mesh stalls for a long time and
+    //   nothing measured it. These three builds are the candidates, and they get
+    //   separate sections because they have separate costs: the editable cache
+    //   (welded vertices, per-vertex refs, one-ring neighbours), the control
+    //   graph, and the PBVH. A count of 1 with a large total is the entry stall;
+    //   a climbing count means something rebuilds them per frame, which would be
+    //   a different bug entirely.
+    RTPERF_SCOPE("sculpt.enter.editable_cache");
     if (objectName.empty()) {
         editable_mesh_cache = EditableMeshCache{};
         invalidateSculptControlGraph();
@@ -6697,7 +6858,26 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     }
 
     if (!mesh_cache_valid) {
+        // *** rebuildMeshCache() wipes editable_mesh_cache (it preserves only the
+        //   ACTIVE edit object, see its own note). Measured: the editable cache
+        //   was rebuilt 4 times at ~1,07 s each, and reason_object +
+        //   reason_tricount + reason_transform ALL fired together every time --
+        //   the signature of a WIPED cache, not a changed one. So the question is
+        //   no longer "which property changed" but "who wiped it", and this is
+        //   the only path that wipes without the caller asking.
+        const bool hadBuiltCache = (editable_mesh_cache.object_name == objectName) &&
+                                   !editable_mesh_cache.vertices.empty();
         rebuildMeshCache(ctx.scene.world.objects);
+        const bool keptIt = (editable_mesh_cache.object_name == objectName) &&
+                            !editable_mesh_cache.vertices.empty();
+        rtperf::recordFast("sculpt.cache_wipe.rebuildMeshCache_ran", 1.0);
+        rtperf::recordFast("sculpt.cache_wipe.lost_built_cache",
+                           (hadBuiltCache && !keptIt) ? 1.0 : 0.0);
+        if (hadBuiltCache && !keptIt) {
+            SCENE_LOG_WARN("[ensureEditableMeshCache] rebuildMeshCache WIPED a built editable cache for '" +
+                           objectName + "'; active_mesh_edit_object_name='" +
+                           active_mesh_edit_object_name + "'");
+        }
     }
 
     const auto modifierIt = ctx.scene.mesh_modifiers.find(objectName);
@@ -6810,6 +6990,39 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
         editable_mesh_cache.auto_smooth = shading.auto_smooth;
         editable_mesh_cache.auto_smooth_angle_degrees = shading.auto_smooth_angle_degrees;
         return true;
+    }
+
+    // ***** This build measured 1,07 s on a 2M-triangle mesh and ran TEN times in
+    //   one session (10,7 s -- the largest single item in the whole profile). It
+    //   is the real cost behind both "Ctrl+Z still takes ~2 s" and "dab cost
+    //   rises after a CPU -> Solid round trip": the undo/adopt path itself
+    //   measures ~100 ms, so the rest is this rebuild happening again.
+    //   Four independent conditions can force it and the fix differs for each,
+    //   so the REASON is recorded rather than guessed. Counters (total = count):
+    //     .reason_object   - a different object took the cache over
+    //     .reason_tricount - the source triangle count changed
+    //     .reason_transform- the object transform compared unequal
+    //     .reason_topology - built minimal for sculpt, now Edit topology wanted
+    //   A rebuild with NONE of these set is impossible; if one fires on plain
+    //   undo, that condition is the bug.
+    {
+        const bool reasonObject = (editable_mesh_cache.object_name != objectName);
+        const bool reasonTriCount = (editable_mesh_cache.source_triangle_count != triangleCount);
+        const bool reasonTransform =
+            !(editable_mesh_cache.source_object_transform == currentObjectTransform);
+        const bool reasonTopology =
+            (editable_mesh_cache.built_minimal_for_sculpt && !buildForSculpt);
+        rtperf::recordFast("sculpt.cache_rebuild.reason_object", reasonObject ? 1.0 : 0.0);
+        rtperf::recordFast("sculpt.cache_rebuild.reason_tricount", reasonTriCount ? 1.0 : 0.0);
+        rtperf::recordFast("sculpt.cache_rebuild.reason_transform", reasonTransform ? 1.0 : 0.0);
+        rtperf::recordFast("sculpt.cache_rebuild.reason_topology", reasonTopology ? 1.0 : 0.0);
+        SCENE_LOG_INFO(std::string("[ensureEditableMeshCache] rebuild reason:") +
+            (reasonObject ? " object('" + editable_mesh_cache.object_name + "'->'" + objectName + "')" : "") +
+            (reasonTriCount ? " tricount(" +
+                std::to_string(editable_mesh_cache.source_triangle_count) + "->" +
+                std::to_string(triangleCount) + ")" : "") +
+            (reasonTransform ? " transform" : "") +
+            (reasonTopology ? " topology(sculpt->edit)" : ""));
     }
 
     RTPERF_SCOPE(std::string("ensureEditableMeshCache.build[") +
@@ -7635,6 +7848,7 @@ void SceneUI::invalidateSculptPBVH(const std::string& objectName) {
 }
 
 bool SceneUI::ensureSculptControlGraph(UIContext& ctx, const std::string& objectName) {
+    RTPERF_SCOPE("sculpt.enter.control_graph");
     if (!ensureEditableMeshCache(ctx, objectName)) {
         invalidateSculptControlGraph(objectName);
         return false;
@@ -7673,6 +7887,7 @@ bool SceneUI::ensureSculptControlGraph(UIContext& ctx, const std::string& object
 }
 
 bool SceneUI::ensureSculptPBVH(UIContext& ctx, const std::string& objectName) {
+    RTPERF_SCOPE("sculpt.enter.pbvh");
     if (!ensureEditableMeshCache(ctx, objectName)) {
         invalidateSculptPBVH(objectName);
         return false;
@@ -10881,6 +11096,22 @@ void SceneUI::queueMeshEditGpuSync(const std::string& objectName) {
     gpu_edit_overlay_sync.geometry_dirty = true;
 }
 
+namespace {
+// Per-dab phase timing for rt.perf. Each mark() records the time since the
+// previous mark under its own name, so phases can be read without wrapping the
+// (long, early-returning) dab body in blocks. A dab that returns early simply
+// records fewer phases. Sub-step dabs recurse, so `sculpt.dab.total` of the
+// outer call INCLUDES its sub-steps; the phase names do not double count.
+struct SculptPhaseClock {
+    std::chrono::high_resolution_clock::time_point t = std::chrono::high_resolution_clock::now();
+    void mark(const char* tag) {
+        const auto now = std::chrono::high_resolution_clock::now();
+        rtperf::recordFast(tag, std::chrono::duration<double, std::milli>(now - t).count());
+        t = now;
+    }
+};
+} // namespace
+
 void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     if (terrain_sculpt_proxy_active) {
         return;
@@ -11014,16 +11245,29 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             // stroke in syncFlatSculptVerticesToSoA) + the final SoA values (AFTER). This is the
             // flat-mesh equivalent of the MeshEditCommand above — without it, sculpting an
             // imported/opened/added flat mesh (now the default) was un-undoable.
-            if (!sculpt_stroke_state.flat_before_soa.empty() &&
+            if (!sculpt_stroke_state.flat_before_ids.empty() &&
                 editable_mesh_cache.flat_source_mesh &&
                 editable_mesh_cache.flat_source_mesh->geometry) {
                 DNA::GeometryDetail* geom = editable_mesh_cache.flat_source_mesh->geometry.get();
                 const size_t vCount = geom->get_vertex_count();
                 const Vec3* Porig = geom->get_attribute_data<Vec3>("P_orig");
                 const Vec3* Norig = geom->get_attribute_data<Vec3>("N_orig");
+                // *** Undo is reported as correct but costly, and the cost could
+                //   be on EITHER side: building this snapshot when the stroke is
+                //   released, or replaying it on Ctrl+Z. They are measured
+                //   separately because the fixes are different -- one is the
+                //   snapshot's size, the other is what the replay schedules.
+                //   record_verts' total is the running vertex COUNT (not ms);
+                //   each vertex costs 52 bytes here, so a million-vertex stroke
+                //   is ~52 MB of history.
+                RTPERF_SCOPE("sculpt.undo.record");
+                rtperf::recordFast("sculpt.undo.record_verts",
+                                   (double)sculpt_stroke_state.flat_before_ids.size());
                 std::vector<FlatSculptVertexState> flatStates;
-                flatStates.reserve(sculpt_stroke_state.flat_before_soa.size());
-                for (const auto& [soaId, before] : sculpt_stroke_state.flat_before_soa) {
+                flatStates.reserve(sculpt_stroke_state.flat_before_ids.size());
+                for (size_t i = 0; i < sculpt_stroke_state.flat_before_ids.size(); ++i) {
+                    const uint32_t soaId = sculpt_stroke_state.flat_before_ids[i];
+                    const std::pair<Vec3, Vec3>& before = sculpt_stroke_state.flat_before_vals[i];
                     if (soaId >= vCount) continue;
                     FlatSculptVertexState st;
                     st.soa_id = soaId;
@@ -11043,10 +11287,24 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             // handled the live viewport update. The Rendered/Vulkan RT transition
             // checks these flags/generation to decide whether a full RT geometry
             // sync is needed after leaving Solid mode.
+            //
+            // ★★★★ The bump stays (many consumers key on it), but g_geometry_dirty
+            //   is no longer set here: in Rendered it forced a FULL render-backend
+            //   geometry sync right after the incremental refit had already
+            //   succeeded (5.8 s on a 36M-triangle scene). The sync below decides
+            //   per GPU copy: refit -> adopt the new generation; skipped (Solid) ->
+            //   record the object for the next transition; failed -> dirty.
             extern bool g_geometry_dirty;
             extern std::atomic<uint64_t> g_scene_geometry_generation;
-            g_geometry_dirty = true;
-            g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+            const uint64_t strokeFromGeneration =
+                g_scene_geometry_generation.fetch_add(1, std::memory_order_acq_rel);
+            mesh_edit_stroke_end_pending = true;
+            mesh_edit_stroke_from_generation = strokeFromGeneration;
+            mesh_edit_stroke_to_generation = strokeFromGeneration + 1;
+            if (!ctx.backend_ptr && !g_backend && !g_viewport_backend) {
+                g_geometry_dirty = true;   // CPU path: no GPU copy to account for
+                mesh_edit_stroke_end_pending = false;
+            }
 
             // Expand the cached bbox by the stroke's touched verts (O(touched)) rather than
             // rescanning the whole mesh — updateBBoxCache is O(N) and was the other half of
@@ -11174,6 +11432,9 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         return;
     }
 
+    RTPERF_FRAME_SCOPE("sculpt.dab.total");
+    SculptPhaseClock phase;
+    const auto dabStartTime = std::chrono::high_resolution_clock::now();
     auto meshEntryIt = mesh_cache.find(objectName);
     const bool objectHadPendingCpuSync = objects_needing_cpu_sync.count(objectName) > 0;
     if (!sculpt_stroke_state.active &&
@@ -11213,6 +11474,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     }
 
     ensureCPUSyncForPicking(ctx);
+    phase.mark("sculpt.dab.1_cpu_pick_sync");
     const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
     const float u = io.MousePos.x / (std::max)(1.0f, displaySize.x);
     const float v = 1.0f - (io.MousePos.y / (std::max)(1.0f, displaySize.y));
@@ -11239,6 +11501,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         !meshEntryIt->second.empty()) {
         rawDidHit = raycastEditableObjectTriangles(meshEntryIt->second, ray, hit);
     }
+    phase.mark("sculpt.dab.2_scene_raycast");
     bool didHit = rawDidHit;
     if (didHit) {
         hit.normal = computeStableSculptHitNormal(hit, hit.normal);
@@ -11252,6 +11515,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     if (!overrideHitPoint) {
         didHit = refineSculptHitWithPBVH(ray, objectName, hit, didHit);
     }
+    phase.mark("sculpt.dab.3_pbvh_refine");
 
     // Sub-step dab: override the brush center with the interpolated segment point.
     // The mouse-picked normal is a good-enough surface normal over the short span.
@@ -11476,10 +11740,22 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             // barely changes coverage. telemetry_candidate_vertices is the previous dab's
             // measured footprint (0 on the stroke's first frame → full 24 dabs, then it
             // self-corrects). Typical brushes (small footprint) keep all 24 dabs untouched.
-            const size_t lastFootprint = (std::max)(telemetry_candidate_vertices, size_t{1});
-            constexpr size_t kSculptPerFrameDabVertexBudget = 5000000;
-            const int budgetDabs = static_cast<int>(std::clamp<size_t>(
-                kSculptPerFrameDabVertexBudget / lastFootprint, size_t{1}, size_t{100}));
+            // ***** The budget is now in MILLISECONDS, because that is what the
+            //   cap exists to protect. It used to be a vertex count
+            //   (5.000.000 "vertex-ops" per frame), which is a PROXY -- and the
+            //   proxy's conversion factor drifted by more than an order of
+            //   magnitude: at the measured 10.891-vertex footprint it permitted
+            //   459 dabs, clamped to 100, while one dab actually cost ~33 ms.
+            //   That is the 2,7 s single-frame sculpt spike (and the 10 s
+            //   loop.frame peak) seen in perf.list -- the cap was "protecting" a
+            //   3,3 s frame. Budgeting the measured dab cost cannot drift: if a
+            //   dab gets cheaper the cap rises on its own.
+            //   Same lesson as the anti-flip step clamp: express a limit in the
+            //   unit of the thing it is limiting.
+            constexpr float kSculptPerFrameDabBudgetMs = 16.0f;
+            const float dabCostMs = (std::max)(sculpt_dab_cost_ms_ema, 0.05f);
+            const int budgetDabs = std::clamp(
+                static_cast<int>(kSculptPerFrameDabBudgetMs / dabCostMs), 1, 100);
             const int idealDabs = static_cast<int>(std::floor(segDist / spacing));
             const int dabCount = std::clamp(idealDabs, 1, budgetDabs);
             if (dabCount >= idealDabs) {
@@ -11497,18 +11773,42 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                     hitNormalWorld
                 );
             } else {
-                // Budget-capped: SPAN the allowed dabs across the whole travelled segment
-                // rather than clustering them at the start and dropping the tail — keeps
-                // the stroke continuous (just lighter) so the brush doesn't visibly lag a
-                // fast cursor. The large footprint that triggered the cap overlaps enough
-                // to cover the wider gaps; the whole segment is consumed this frame.
-                const float step = segDist / static_cast<float>(dabCount);
+                // ***** Budget-capped. The previous version SPREAD the allowed dabs
+                //   across the whole travelled segment so the brush would not lag
+                //   the cursor -- which means it WIDENED the spacing, and dab
+                //   spacing is the one thing that makes a stroke read as
+                //   continuous. Measured consequence, reported as soon as dabs
+                //   got cheap enough for the cap to bind on ordinary strokes:
+                //   a fast stroke came out "blocky / broken" instead of smooth.
+                //   The overlap argument in the old comment only holds while the
+                //   gaps stay under a fraction of the radius; at dabCount well
+                //   below idealDabs they do not.
+                //
+                //   So: emit the affordable dabs at the CORRECT spacing and let
+                //   the brush lag, carrying the untouched tail of the segment
+                //   into the next frame. Spacing is preserved, so the stroke is
+                //   smooth; the cost is a little tracking lag instead of visible
+                //   blocks.
                 for (int i = 1; i <= dabCount; ++i) {
-                    const Vec3 sub = lastDab + dir * (step * static_cast<float>(i));
+                    const Vec3 sub = lastDab + dir * (spacing * static_cast<float>(i));
                     handleMeshSculpt(ctx, &sub);
                 }
-                sculpt_stroke_state.last_dab_world = curHit;
-                sculpt_stroke_state.last_dab_normal = hitNormalWorld;
+                Vec3 newLastDab = lastDab + dir * (spacing * static_cast<float>(dabCount));
+                // The lag has to be BOUNDED, or a sustained fast stroke leaves the
+                // brush trailing further behind every frame and the deposit keeps
+                // arriving after the cursor has gone. Past this backlog, give the
+                // tail up and resync: one gap beats an ever-growing delay.
+                const float maxBacklog = radiusWorld * 3.0f;
+                const float backlog = (curHit - newLastDab).length();
+                if (backlog > maxBacklog) {
+                    newLastDab = curHit - dir * maxBacklog;
+                }
+                sculpt_stroke_state.last_dab_world = newLastDab;
+                const float tFinal = std::clamp(
+                    (newLastDab - lastDab).length() / segDist, 0.0f, 1.0f);
+                sculpt_stroke_state.last_dab_normal = safeNormalizeVec3(
+                    lastDabNormal * (1.0f - tFinal) + hitNormalWorld * tFinal,
+                    hitNormalWorld);
             }
             sculpt_stroke_state.has_last_dab = true;
             return;
@@ -11785,6 +12085,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         ((activeTool == SculptBrushTool::Grab || activeTool == SculptBrushTool::ElasticDeform) &&
          !sculpt_stroke_state.grab_weights_by_vertex.empty()) ||
         (anchoredActive && sculpt_stroke_state.anchored_primed);
+    phase.mark("sculpt.dab.4_prepare");
     if (!absoluteGrabPrimed) {
         sculptCandidateVertexIdsStorage = collectSculptCandidateVerticesWithPBVHFallback(
             sculpt_pbvh,
@@ -11792,6 +12093,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             candidateCenterLocal,
             candidateCollectionRadius);
     }
+    phase.mark("sculpt.dab.5_gather_candidates");
     if (activeTool == SculptBrushTool::Draw || activeTool == SculptBrushTool::Inflate ||
         activeTool == SculptBrushTool::Stamp) {
         const float largeBrushFactor = computeLargeBrushProjectionBlend(radiusWorld);
@@ -12238,6 +12540,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     // resolveEditableSnapshotLocalPosition fall back to the cache — bit-identical to
     // the old per-frame snapshot copy, zero allocation. (Direct reads below read the
     // cache for the same reason.)
+    phase.mark("sculpt.dab.6_weights_and_mirrors");
     static const std::vector<Vec3> kEmptySnapshot;
     const size_t sculptVertexCount = editable_mesh_cache.vertex_positions.size();
     if (sculpt_updated_local_positions.size() != sculptVertexCount) {
@@ -13377,6 +13680,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         }
     }
 
+    phase.mark("sculpt.dab.7_brush_solve");
     if (!changed) {
         sculpt_stroke_state.last_world_hit = (isGrabFamilyTool(activeTool)) ? planeHit
             : ((activeTool == SculptBrushTool::Nudge) ? snakePlaneHit : hit.point);
@@ -13387,6 +13691,29 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     strokeTouchedVertexIds.erase(
         std::unique(strokeTouchedVertexIds.begin(), strokeTouchedVertexIds.end()),
         strokeTouchedVertexIds.end());
+    // Stamp the finalised set so the topology guard's membership test is O(1)
+    // instead of a binary search per triangle corner. The sort/unique above is
+    // still needed: other passes below iterate the set in order.
+    EditableVertexMembership touchedMembership;
+    {
+        if (sculpt_touched_membership_stamps.size() != editable_mesh_cache.vertices.size()) {
+            sculpt_touched_membership_stamps.assign(editable_mesh_cache.vertices.size(), 0u);
+            sculpt_touched_membership_stamp = 0u;
+        }
+        if (++sculpt_touched_membership_stamp == 0u) {
+            std::fill(sculpt_touched_membership_stamps.begin(),
+                      sculpt_touched_membership_stamps.end(), 0u);
+            sculpt_touched_membership_stamp = 1u;
+        }
+        for (const int vid : strokeTouchedVertexIds) {
+            if (vid >= 0 && static_cast<size_t>(vid) < sculpt_touched_membership_stamps.size()) {
+                sculpt_touched_membership_stamps[static_cast<size_t>(vid)] =
+                    sculpt_touched_membership_stamp;
+            }
+        }
+        touchedMembership.stamps = &sculpt_touched_membership_stamps;
+        touchedMembership.stamp = sculpt_touched_membership_stamp;
+    }
     const std::vector<int> touchedPBVHLeafIds =
         collectTouchedSculptPBVHLeafIds(sculpt_pbvh, strokeTouchedVertexIds);
     sculpt_control_graph.last_touched_leaf_count = touchedPBVHLeafIds.size();
@@ -13397,6 +13724,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             touchedPBVHLeafIds);
     const std::vector<int> expandedStrokeVertexIds =
         convertAffectedVertexIdsToIntList(pbvhExpandedAffectedVertexIds);
+    phase.mark("sculpt.dab.8_pbvh_leaf_expand");
 
     // The PBVH-leaf affected set (expandedStrokeVertexIds) can reach FAR outside the
     // brush on SPARSE meshes — a leaf's spatial bounds are large when verts are few,
@@ -13571,6 +13899,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         wetDepositAnchors.reserve(strokeTouchedVertexIds.size());
     }
 
+    EditableTopologyGuardStats guardStats;
     for (const int vertexIdInt : strokeTouchedVertexIds) {
         if (vertexIdInt < 0) {
             continue;
@@ -13605,8 +13934,9 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                 editable_mesh_cache,
                 vertexIdInt,
                 sculpt_updated_local_positions,
-                strokeTouchedVertexIds,
-                safeLocalPosition)) {
+                touchedMembership,
+                safeLocalPosition,
+                &guardStats)) {
             continue;
         }
         // Protection mask — single choke point. Pull this frame's motion back
@@ -13673,6 +14003,21 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                 editable_mesh_cache.vertex_positions[static_cast<size_t>(vid)];
         }
     }
+    // *** Per-dab guard outcome. Read with perf.list: `total_ms` is the running
+    //   COUNT (these record integers, not milliseconds) and `max_ms` the worst
+    //   single dab. frozen/solved is the fraction of the footprint the brush
+    //   asked to move and failed to move -- the number behind "most vertices in
+    //   the brush circle are not caught". The three reject_* sections say WHICH
+    //   test froze them, and each one implies a different fix.
+    rtperf::recordFast("sculpt.guard.solve_verts",
+                       (double)(guardStats.accepted + guardStats.backedOff + guardStats.frozen));
+    rtperf::recordFast("sculpt.guard.frozen", (double)guardStats.frozen);
+    rtperf::recordFast("sculpt.guard.backed_off", (double)guardStats.backedOff);
+    rtperf::recordFast("sculpt.guard.reject_edge", (double)guardStats.rejectEdge);
+    rtperf::recordFast("sculpt.guard.reject_area", (double)guardStats.rejectArea);
+    rtperf::recordFast("sculpt.guard.reject_orient", (double)guardStats.rejectOrient);
+    rtperf::recordFast("sculpt.guard.reject_nonfinite", (double)guardStats.rejectNonFinite);
+
     std::vector<size_t> affectedVertexIds = pbvhExpandedAffectedVertexIds;
     if (affectedVertexIds.empty()) {
         affectedVertexIds = collectAffectedEditableVertexIds(editable_mesh_cache, touchedTriangles);
@@ -13690,13 +14035,17 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         affectedVertexIds,
         touchedTriangles);
 
+    phase.mark("sculpt.dab.9_commit_and_polish");
     recomputeEditableSmoothNormals(editable_mesh_cache, affectedVertexIds);
+    phase.mark("sculpt.dab.10_normals");
     // Flat mesh: scatter the stroke's edited positions/normals into the SoA (no-op for facades).
     syncFlatSculptVerticesToSoA(affectedVertexIds);
+    phase.mark("sculpt.dab.11_flat_soa_sync");
     refreshSculptPBVHLeavesAndAncestors(
         sculpt_pbvh,
         editable_mesh_cache,
         touchedPBVHLeafIds);
+    phase.mark("sculpt.dab.12_pbvh_refresh");
 
     // Batch-apply transform to all touched triangles using precomputed matrices
     // instead of per-triangle getTransformMatrix() + inverse().transpose().
@@ -13738,6 +14087,15 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         }
     }
 
+    phase.mark("sculpt.dab.13_facades_and_dirty_set");
+    // Full dab completed: feed the per-frame dab cap (see kSculptPerFrameDabBudgetMs).
+    {
+        const float dabMs = std::chrono::duration<float, std::milli>(
+            std::chrono::high_resolution_clock::now() - dabStartTime).count();
+        sculpt_dab_cost_ms_ema = (sculpt_dab_cost_ms_ema <= 0.0f)
+            ? dabMs
+            : (sculpt_dab_cost_ms_ema * 0.8f + dabMs * 0.2f);
+    }
     // Don't invalidate overlay cache during sculpt — triangle data is updated in-place
     // so the overlay will read correct positions from the same Triangle pointers.
     objects_needing_cpu_sync.erase(objectName);
@@ -13784,10 +14142,31 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
     if (!mesh_edit_gpu_sync_pending || (!ctx.backend_ptr && !g_backend && !g_viewport_backend)) {
         return;
     }
+    RTPERF_FRAME_SCOPE("sculpt.gpu_sync");
 
     const std::string objectName = mesh_edit_gpu_sync_object_name;
     mesh_edit_gpu_sync_pending = false;
     mesh_edit_gpu_sync_object_name.clear();
+
+    // Stroke-end bookkeeping (see finishStroke). Consumed here exactly once.
+    const bool strokeEnd = mesh_edit_stroke_end_pending;
+    const uint64_t strokeFrom = mesh_edit_stroke_from_generation;
+    const uint64_t strokeTo = mesh_edit_stroke_to_generation;
+    mesh_edit_stroke_end_pending = false;
+    extern bool g_geometry_dirty;
+    auto renderCopySynced = [&]() {
+        if (strokeEnd) adoptRenderMeshEditGeneration(strokeFrom, strokeTo);
+    };
+    auto renderCopyDeferred = [&](bool renderIsVulkan) {
+        if (!strokeEnd) return;
+        // Only the Vulkan RT transition reads the ledger; every other render
+        // backend keeps the old "geometry dirty" catch-up.
+        if (renderIsVulkan) deferRenderMeshEdit(objectName, strokeFrom, strokeTo);
+        else g_geometry_dirty = true;
+    };
+    auto renderCopyFailed = [&]() {
+        if (strokeEnd) g_geometry_dirty = true;
+    };
 
     // The dirty set is accumulated across this frame's dabs (see the sculpt commit), so it
     // may hold duplicates from triangles touched by several sub-step dabs — collapse them
@@ -13806,7 +14185,15 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
     extern bool g_cpu_bvh_refit_pending;
 
     auto* renderVkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(getMeshOverlayRenderBackend(ctx));
+    // ★ In Rendered, ctx.backend_ptr is the RENDER backend, which also
+    //   implements IViewportBackend. Treating it as the raster viewport made a
+    //   stroke release rebuild the whole scene as raster geometry on the RT
+    //   device (out of device memory on a 36M-triangle scene).
     auto* activeViewportRasterBackend = dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
+    if (activeViewportRasterBackend && ctx.backend_ptr &&
+        ctx.backend_ptr->getViewportMode() == Backend::ViewportMode::Rendered) {
+        activeViewportRasterBackend = nullptr;
+    }
     auto* viewportVkBackend = getMeshOverlayViewportBackend(ctx);
     const bool renderBackendIsVulkan = (renderVkBackend != nullptr);
     const bool activeViewportIsRaster = (activeViewportRasterBackend != nullptr);
@@ -13818,6 +14205,7 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
         if (!vkBackend) {
             return false;
         }
+        const bool updated = [&]() -> bool {
 
         // Flat (direct) SoA mesh: mesh_cache holds only ONE representative facade for it, so the
         // facade-triangle raster updates below would replace the whole raster mesh with a single
@@ -13877,6 +14265,16 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
         }
 
         return false;
+        }();
+        // A refit (not a rebuild) leaves the cache one generation behind the
+        // stroke's bump; adopting it is what keeps the next consumer from
+        // rebuilding all raster geometry (5.0 s measured).
+        if (updated && strokeEnd) {
+            if (auto* adapter = dynamic_cast<Backend::VulkanBackendAdapter*>(vkBackend)) {
+                adapter->adoptRasterGeometryGeneration(strokeFrom, strokeTo);
+            }
+        }
+        return updated;
     };
 
     bool rasterViewportUpdated = false;
@@ -13930,6 +14328,7 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
         sculpt_dirty_mesh_cache_indices.clear();
         ctx.renderer.resetCPUAccumulation();
         ctx.start_render = true;
+        renderCopyDeferred(renderBackendIsVulkan);
         return;
     }
 
@@ -13949,6 +14348,7 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
                 sculpt_dirty_mesh_cache_indices.clear();
                 ctx.renderer.resetCPUAccumulation();
                 ctx.start_render = true;
+                renderCopySynced();
                 return;
             }
         }
@@ -13973,6 +14373,7 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
                 sculpt_dirty_mesh_cache_indices.clear();
                 ctx.renderer.resetCPUAccumulation();
                 ctx.start_render = true;
+                renderCopySynced();
                 return;
             }
         }
@@ -13989,6 +14390,7 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
             sculpt_dirty_mesh_cache_indices.clear();
             ctx.renderer.resetCPUAccumulation();
             ctx.start_render = true;
+            renderCopySynced();
             return;
         }
 
@@ -13999,10 +14401,12 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
                 sculpt_dirty_mesh_cache_indices.clear();
                 ctx.renderer.resetCPUAccumulation();
                 ctx.start_render = true;
+                renderCopySynced();
                 return;
             }
         }
         g_vulkan_rebuild_pending = true;
+        renderCopyFailed();
     }
     else if (dynamic_cast<Backend::OptixBackend*>(getMeshOverlayRenderBackend(ctx)) != nullptr) {
         bool handled = false;
@@ -14033,6 +14437,7 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
         if (!handled) {
             g_optix_rebuild_pending = true;
         }
+        renderCopyDeferred(false);  // OptiX keeps the old dirty-flag catch-up
     } else {
         Backend::IBackend* renderBackend = getMeshOverlayRenderBackend(ctx);
         if (renderBackend) {
@@ -14044,6 +14449,142 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
     sculpt_dirty_mesh_cache_indices.clear();
     ctx.renderer.resetCPUAccumulation();
     ctx.start_render = true;
+}
+
+bool SceneUI::adoptExternalFlatSoaEdit(UIContext& ctx, const std::string& objectName) {
+    // ***** Undo/redo of a flat sculpt edit writes the mesh SoA directly. That is
+    //   a POSITION-ONLY change to ONE object -- the same shape of change a sculpt
+    //   dab makes -- so it belongs on the dab's incremental sync.
+    //   It used to call scheduleSceneMutationRebuilds(ctx, true), which bumps the
+    //   geometry generation and requests a CPU BVH REBUILD plus a full raster
+    //   rebuild plus a full Vulkan RT rebuild. That is the same heavy path the
+    //   sculpt stroke END was taken off earlier (~14 s on a 36M-triangle scene),
+    //   and it is the reported "Ctrl+Z stalls for seconds".
+    //   No generation bump here, deliberately: a position-only edit is a refit,
+    //   not a structural rebuild -- the same reasoning as the note at the end of
+    //   syncFlatSculptVerticesToSoA.
+    RTPERF_SCOPE("sculpt.undo.adopt");
+    if (objectName.empty()) return false;
+
+    extern bool g_cpu_bvh_refit_pending;
+
+    EditableMeshCache& cache = editable_mesh_cache;
+    const bool cacheOwnsObject = (cache.object_name == objectName) &&
+                                 cache.flat_source_mesh &&
+                                 cache.flat_source_mesh->geometry;
+    if (!cacheOwnsObject) {
+        // No editable cache to correct. The GPU copies still need the refit, and
+        // the pending-sync consumer finds a flat mesh through direct_mesh_nodes,
+        // so this path is complete on its own.
+        queueMeshEditGpuSync(objectName);
+        g_cpu_bvh_refit_pending = true;
+        return true;
+    }
+
+    DNA::GeometryDetail* geom = cache.flat_source_mesh->geometry.get();
+    const size_t soaVCount = geom->get_vertex_count();
+    const Vec3* Porig = geom->get_attribute_data<Vec3>("P_orig");
+    if (!Porig) Porig = geom->get_attribute_data<Vec3>("P");
+    const size_t vertexCount = cache.vertices.size();
+    if (!Porig || vertexCount == 0 || cache.vertex_positions.size() != vertexCount) {
+        return false;  // caller keeps the rebuild path
+    }
+
+    // Re-seed the editable cache from the SoA the command just rewrote. Without
+    // this the cache still holds the SCULPTED positions, and the next dab would
+    // scatter them straight back into the SoA -- the undo would silently come
+    // apart on the next brush touch rather than failing visibly.
+    // The scan is O(N) either way, so it also reports WHICH vertices moved --
+    // that turns the PBVH refresh below from O(mesh) into O(touched). Per-chunk
+    // output vectors keep it allocation-light and give a deterministic order.
+    std::vector<int> changedVertexIds;
+    {
+        RTPERF_SCOPE("sculpt.undo.adopt.reseed_cache");
+        const std::vector<int>& off = cache.flat_soa_offsets;
+        const std::vector<uint32_t>& soa = cache.flat_soa_data;
+        const bool haveMap = (off.size() == vertexCount + 1) && !soa.empty();
+        constexpr int kChunks = 256;
+        std::vector<std::vector<int>> chunkChanged(kChunks);
+        #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+        for (int c = 0; c < kChunks; ++c) {
+            const size_t begin = vertexCount * static_cast<size_t>(c) / kChunks;
+            const size_t end = vertexCount * static_cast<size_t>(c + 1) / kChunks;
+            std::vector<int>& out = chunkChanged[static_cast<size_t>(c)];
+            for (size_t ev = begin; ev < end; ++ev) {
+                uint32_t s = static_cast<uint32_t>(ev);
+                if (haveMap) {
+                    if (off[ev] >= off[ev + 1]) continue;
+                    s = soa[static_cast<size_t>(off[ev])];
+                }
+                if (s >= soaVCount) continue;
+                const Vec3 p = Porig[s];
+                // EXACT comparison on purpose. Vec3::operator== is epsilon-based
+                // (1e-5), which on a mesh with ~0,003 edges is 0,3% of an edge --
+                // it would call the falloff tail's small motions "unchanged" and
+                // leave those rim vertices holding SCULPTED positions in the
+                // cache, which the next dab would write straight back into the
+                // SoA. The undo would come apart quietly at its own edge.
+                const Vec3& cur = cache.vertex_positions[ev];
+                if (cur.x == p.x && cur.y == p.y && cur.z == p.z) continue;
+                cache.vertices[ev].local_position = p;
+                cache.vertex_positions[ev] = p;
+                out.push_back(static_cast<int>(ev));
+            }
+        }
+        size_t changedCount = 0;
+        for (const auto& v : chunkChanged) changedCount += v.size();
+        changedVertexIds.reserve(changedCount);
+        for (const auto& v : chunkChanged) {
+            changedVertexIds.insert(changedVertexIds.end(), v.begin(), v.end());
+        }
+    }
+
+    // The persistent brush buffer mirrors the cache; a size mismatch is the
+    // documented way to force its full re-sync on the next dab.
+    sculpt_updated_local_positions.clear();
+
+    // Topology did not change, so the PBVH tree stands and only its bounds
+    // moved. Refreshing every leaf is O(N); DROPPING the tree would force a full
+    // rebuild on the next dab, which is the cost being removed here.
+    if (sculpt_pbvh.object_name == objectName && !sculpt_pbvh.nodes.empty() &&
+        !changedVertexIds.empty()) {
+        // *** Refreshing EVERY leaf measured 38,9 ms per Ctrl+Z -- it is O(mesh)
+        //   while an undo moves only the stroke's footprint. The scan above
+        //   already knows which vertices moved, so ask for exactly the leaves
+        //   that own them. The tree itself still stands (topology is unchanged);
+        //   dropping it would force a full rebuild on the next dab.
+        RTPERF_SCOPE("sculpt.undo.adopt.pbvh_bounds");
+        const std::vector<int> touchedLeafIds =
+            collectTouchedSculptPBVHLeafIds(sculpt_pbvh, changedVertexIds);
+        if (!touchedLeafIds.empty()) {
+            refreshSculptPBVHLeavesAndAncestors(sculpt_pbvh, cache, touchedLeafIds);
+        }
+    }
+
+    // queueMeshEditGpuSync is the single choke point that also invalidates the
+    // GPU edit-overlay positions, so the overlay follows the undo too.
+    queueMeshEditGpuSync(objectName);
+    g_cpu_bvh_refit_pending = true;
+    ctx.renderer.resetCPUAccumulation();
+    return true;
+}
+
+bool SceneUI::catchUpRenderMeshEdits(UIContext& ctx, const std::vector<std::string>& objectNames) {
+    auto* renderVkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(getMeshOverlayRenderBackend(ctx));
+    if (!renderVkBackend) return false;
+    for (const std::string& objectName : objectNames) {
+        // Whole-object refit: the stroke's dirty set is long gone. A flat mesh
+        // refits from its SoA (the facade list only has to be non-empty); a
+        // facade mesh needs its full triangle list, which is what this returns.
+        const auto triangles = Viewport::collectMeshTrianglesForObject(mesh_cache, objectName);
+        if (triangles.empty() || !renderVkBackend->updateMeshBLASPartial(objectName, triangles)) {
+            SCENE_LOG_WARN("[MeshEdit] render catch-up failed for '" + objectName +
+                           "'; falling back to a full geometry sync.");
+            return false;
+        }
+    }
+    renderVkBackend->resetAccumulation();
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15529,16 +16070,9 @@ void SceneUI::drawSculptMaskViewportOverlay(UIContext& ctx) {
     // background list paints over the 3D viewport but stays BEHIND the panels
     // (the mask tint lives on the surface, it must not bleed over the UI).
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
-    const ImVec2 uvWhite = ImGui::GetFontTexUvWhitePixel();
     const std::vector<EditableFace>& faces = editable_mesh_cache.faces;
     constexpr int kMaxTris = 120000;
     int drawnTris = 0;
-    auto maskColor = [](float m) -> ImU32 {
-        const float c = std::clamp(m, 0.0f, 1.0f);
-        // Transparent where unmasked → soft gradient edge; opaque blue at full mask.
-        const int a = static_cast<int>(c * c * 165.0f);
-        return IM_COL32(70, 150, 240, a);
-    };
     for (const EditableFace& f : faces) {
         const int i0 = f.v0, i1 = f.v1, i2 = f.v2;
         if (i0 < 0 || i1 < 0 || i2 < 0 ||
@@ -15569,10 +16103,7 @@ void SceneUI::drawSculptMaskViewportOverlay(UIContext& ctx) {
             !vertexScreen(static_cast<size_t>(i2), p2)) {
             continue;
         }
-        dl->PrimReserve(3, 3);
-        dl->PrimVtx(p0, uvWhite, maskColor(m0));
-        dl->PrimVtx(p1, uvWhite, maskColor(m1));
-        dl->PrimVtx(p2, uvWhite, maskColor(m2));
+        ScalarFieldOverlay::triangle(dl,p0,p1,p2,m0,m1,m2);
         if (++drawnTris >= kMaxTris) {
             break;
         }

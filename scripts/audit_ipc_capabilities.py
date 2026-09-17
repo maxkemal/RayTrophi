@@ -72,7 +72,7 @@ def required(method, namespaces):
     # scene.export_gltf sits in the "scene." namespace but reads the scene and
     # writes a FILE, so it must be named here or the namespace table below would
     # mirror it as SceneWrite and disagree with RtIpcSecurity.cpp.
-    if method in ("project.save", "terrain.export_heightmap",
+    if method in ("project.save", "project.autosave_now", "terrain.export_heightmap",
                   "paint.export_channel", "scene.export_gltf"):
         return "FilesWrite"
     if method.startswith("render."):
@@ -89,11 +89,21 @@ def required(method, namespaces):
     # a Scene Log mirror), so the C++ classifies them Read explicitly.
     if method in ("perf.reset", "perf.set_logging"):
         return "Read"
+    if method == "perf.set_blas_compaction":
+        return "Render"
     if method == "spline.animation.self_test":
         return "Read"
     # Measures what is under a ray, mutates nothing. Without this the "scene."
     # namespace below would call it SceneWrite.
     if method == "scene.raycast":
+        return "Read"
+    # Secim teshisi: kamera isinini kurar, iki secim yolunu ayri ayri sorar ve
+    # cevaplarini raporlar. Secimi DEGISTIRMEZ, o yuzden "scene." varsayilani
+    # olan SceneWrite yanlis olurdu.
+    if method == "scene.pick_ray":
+        return "Read"
+    # GPU secimi: obje-ID hedefi cizip tek piksel okur, secimi degistirmez.
+    if method == "scene.pick_gpu":
         return "Read"
     # Reports what an export WOULD cost. Writes neither the scene nor a file, so
     # it is neither SceneWrite (the "scene." namespace default) nor FilesWrite
@@ -102,6 +112,17 @@ def required(method, namespaces):
         return "Read"
     if method == "geometry_cache.self_test":
         return "Read"
+    if method in ("rayfusion.core_status", "rayfusion.validate_core",
+                  "rayfusion.probe_field", "rayfusion.scene_as", "rayfusion.screen_gi",
+                  "rayfusion.reflections"):
+        return "Read"
+    # Selecting the probe producer changes what the viewport renders.
+    # ... and so does moving the window that decides WHERE it is measured.
+    if method in ("rayfusion.set_probe_producer", "rayfusion.set_probe_bounce",
+                  "rayfusion.set_probe_overlay", "rayfusion.set_probe_follow_camera",
+                  "rayfusion.set_probe_grid", "rayfusion.set_screen_gi",
+                  "rayfusion.set_reflections"):
+        return "Render"
     if method in ("mesh.profile.sweep.preview", "mesh.profile.sweep.self_test",
                   "mesh.profile.revolve.preview", "mesh.profile.revolve.self_test",
                   "mesh.profile.loft.preview", "mesh.profile.loft.self_test"):
@@ -141,7 +162,11 @@ def required(method, namespaces):
                   "terrain.field_stats",
                   "forcefield.evaluate", "particle.stats",
                   "particle.emitters", "anim.characters", "anim.character",
-                  "anim.clips", "anim.graph_status",
+                  "anim.clips", "anim.graph_status", "anim.state_machines",
+                  "anim.preview_clip_binding", "anim.sample_clip_binding",
+                  "rig.preview_bind", "rig.preview_fit", "rig.preflight",
+                  "rig.weight_stats", "rig.suggest_joint_profile",
+                  "rig.preview_envelope_weights",
                   "anim.source_clips", "anim.source_channels", "msf.substances",
                   "msf.fields", "templates.refresh", "templates.validate",
                   "templates.prepare"):

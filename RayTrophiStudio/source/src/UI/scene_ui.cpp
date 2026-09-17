@@ -1,4 +1,4 @@
-#include "PostProcess/PostService.h"
+﻿#include "PostProcess/PostService.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -53,6 +53,11 @@
 #include "scene_ui_river.hpp"   // River spline editor
 #include "WaterSystem.h"        // Water Manager for update loop
 #include "scene_ui_terrain.hpp" // Terrain panel implementation
+#include "UI/RigMappingUI.h"
+#include "UI/RigEditingUI.h"
+#include "UI/RigFittingUI.h"
+#include "UI/RigEnvelopeEditorUI.h"
+#include "UI/RigViewportUI.h"
 #include "scene_ui_animgraph.hpp" // Animation Graph Editor
 #include "scene_ui_gas.hpp"     // Gas Simulation panel
 #include "scene_ui_forcefield.hpp" // Force Field panel
@@ -116,6 +121,46 @@ float g_main_menu_reserved_height = 30.0f;
 
 float getMainMenuReservedHeight() {
     return (std::max)(28.0f, g_main_menu_reserved_height);
+}
+
+// ★★★ Sözleşme scene_ui.h'de yazılı. Tek gövde: bu kuralı uygulayan başka bir
+//   yer OLMAMALI — beş ayrı açılış yolu beş farklı karar veriyordu ve bu
+//   dosyanın kendi Open Project yolu tek doğru olanıydı.
+//
+// ★★★★ Bayrağın KAPATILABİLİR olmasının gerekçesi de scene_ui.h'de: kural,
+//   device-lost'a giden tek yolu kapattığı için onu arayan tripwire'ı da
+//   susturdu. Kapatma anahtarı olmadan tripwire'ın sessizliği ölçüm sayılırdı.
+bool g_scene_load_solid_guard = true;
+
+void enterSolidViewportForSceneLoad(SceneUI& ui, const char* reason) {
+    extern bool g_hasVulkan;
+    extern bool g_solid_viewport_active;
+    extern bool g_material_preview_viewport_active;
+    // Vulkan yoksa Solid diye bir şey yok; Rendered tek seçenek ve zaten öyle.
+    if (!g_hasVulkan) return;
+
+    const int previous = ui.viewport_settings.shading_mode;
+    // 0=Solid, 3=Matcap zaten hafif raster modları — dokunma.
+    if (previous != 1 && previous != 2) return;
+
+    // ★★★★ Kapalıyken SESSİZ olmaz. Kapalı bir kalkanın tek kabul edilebilir
+    //   hali gürültülü olmasıdır: yoksa aylar sonra gelen bir device-lost
+    //   raporunun altında unutulmuş bu anahtar yatar ve kimse bakmaz.
+    if (!g_scene_load_solid_guard) {
+        SCENE_LOG_WARN(std::string("[Viewport] Sahne yükleme kalkanı KAPALI — shading_mode=") +
+                       std::to_string(previous) + " ile yükleniyor (sebep=" +
+                       (reason ? reason : "?") +
+                       "). Bu bilerek arıza üretmek içindir; device-lost beklenen sonuçtur. "
+                       "Ölçüm bittiğinde viewport.set_scene_load_guard { enabled = true }.");
+        return;
+    }
+
+    ui.viewport_settings.shading_mode = 0;
+    g_solid_viewport_active = true;
+    g_material_preview_viewport_active = false;
+    SCENE_LOG_INFO(std::string("[Viewport] Sahne yüklemesi Solid'e düşürdü (önceki shading_mode=") +
+                   std::to_string(previous) + ", sebep=" + (reason ? reason : "?") +
+                   "). Kural: açılış yolları ağır modu zorlayamaz.");
 }
 
 namespace {
@@ -1549,6 +1594,88 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         }
 
         UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Realtime Depth of Field", ImVec4(0.86f, 0.80f, 0.98f, 1.0f));
+        {
+            // *** SIDDET KADRANI BURADA YOK, ve bu bilincli: bulaniklik yaricapi
+            //   kameranin diyaframindan ve odak mesafesinden gelir -- path
+            //   tracer'in lensiyle AYNI formul. Ayri bir "realtime blur" kadrani
+            //   koymak, Rendered ile Realtime'in ayrisabilecegi ilk yer olurdu.
+            //   Buradakiler MALIYET tavanlari. (Ayni ayarlar
+            //   `viewport.set_depth_of_field` IPC'sinde.)
+            const bool material_mode = (viewport_settings.shading_mode == 1);
+
+            // ★★★★★ TAA. Raster viewport'ta hicbir anti-aliasing yoktu ve
+            //   ekran-uzayi GI/yansimalarin gecmis karesi de yoktu -- ikisi de
+            //   AYNI eksik. `Samples` bir kalite kadrani DEGIL bir DURMA
+            //   KOSULU: viewport o kadar ornek biriktirene kadar kare ister,
+            //   sonra birakir. Buyutmek "daha iyi" degil, kamera durduktan
+            //   sonra daha uzun GPU demektir -- ve olculen sayi yaninda
+            //   yaziyor ki bu takas gorunur olsun.
+            //   (Ayni ayarlar `viewport.set_taa` / `viewport.taa` IPC'sinde.)
+            if (ImGui::Checkbox("Temporal Anti-Aliasing", &ctx.render_settings.realtime_taa))
+                ctx.start_render = true;
+            if (ImGui::SliderInt("TAA Samples", &ctx.render_settings.realtime_taa_samples, 1, 64))
+                ctx.start_render = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Stopping condition: the viewport renders frames until it accumulates this many jittered samples,\n "
+                                  "then goes idle. Increasing this value yields a cleaner still image\n "
+                                  "and longer GPU work after the camera stops.");
+            {
+                // ** OLCUM, ayar degil: ayar ile ekranda olan ayrisabilir.
+                const rtapi::ViewportTaaInfo taa = rtapi::viewportTaa();
+                if (!taa.supported)
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "TAA inactive: %s",
+                                       taa.inactive_reason.c_str());
+                else
+                    ImGui::TextDisabled("accumulated %d / %d%s   (%.2f ms)",
+                                        taa.accumulated_samples, taa.target_samples,
+                                        taa.converged ? " - converged" : " - converging",
+                                        taa.last_ms);
+            }
+            ImGui::Separator();
+
+            if (!material_mode) ImGui::BeginDisabled();
+            if (ImGui::Checkbox("Enable Depth of Field", &ctx.render_settings.realtime_depth_of_field))
+                ctx.start_render = true;
+            if (ImGui::SliderFloat("Max Blur (px)", &ctx.render_settings.realtime_dof_max_coc,
+                                   1.0f, 128.0f, "%.0f px"))
+                ctx.start_render = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Ceiling for the circle of confusion. Caps both the blur size\n"
+                                  "and the cost; it does NOT set the blur strength.");
+            if (ImGui::SliderInt("Quality (taps)", &ctx.render_settings.realtime_dof_max_taps, 8, 256))
+                ctx.start_render = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Sample ceiling. Keep this lower if you do not notice artifacts with a large blur radius.\n"
+                                  "Recommendation: at least 64 for maxCoC 24; at least 96 for maxCoC 32.\n"
+                                  "(Formula: taps = min(searchR^2 * 0.35, maxTaps))");
+            if (!material_mode) ImGui::EndDisabled();
+
+            // ** OLCUM, ayar degil: kapali kapiyi SOYLE. "Actim, hicbir sey
+            //   olmadi" sorusunun cevabi neredeyse her zaman aperture 0'dir.
+            const Camera* dofCam = ctx.scene.camera.get();
+            const float dofAperture = dofCam ? dofCam->effectiveAperture() : 0.0f;
+            if (!material_mode) {
+                ImGui::TextDisabled("Runs in Material viewport mode only (Rendered has its own lens DoF).");
+            } else if (!ctx.render_settings.realtime_depth_of_field) {
+                ImGui::TextDisabled("Disabled.");
+            } else if (dofCam && dofCam->orthographic) {
+                ImGui::TextDisabled("Orthographic camera has no lens.");
+            } else if (dofCam && !dofCam->depth_of_field) {
+                // ★★★ Kamera anahtari ayri bir kapi: burada "aperture 0" demek
+                //   yanlis teshis olurdu -- aciklik dolu olabilir.
+                ImGui::TextColored(ImVec4(0.98f, 0.78f, 0.35f, 1.0f),
+                                   "Camera lens is off - tick Depth of Field in the Camera panel.");
+            } else if (dofAperture <= 1e-5f) {
+                ImGui::TextColored(ImVec4(0.98f, 0.78f, 0.35f, 1.0f),
+                                   "Aperture is 0 - no blur. Open the lens in Camera > F-Stop.");
+            } else {
+                ImGui::TextDisabled("Active: aperture %.3f, focus %.2f m (Camera panel owns both).",
+                                    dofAperture, dofCam ? (float)dofCam->focus_dist : 0.0f);
+            }
+        }
+
+        UIWidgets::Divider();
         UIWidgets::ColoredHeader("Viewport Grid", ImVec4(0.72f, 0.84f, 0.97f, 1.0f));
         if (!raster_quality_active) ImGui::BeginDisabled();
         ImGui::SliderFloat("Grid Fade Distance", &ctx.render_settings.grid_fade_distance, 0.25f, 3.0f, "%.2fx");
@@ -2487,6 +2614,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
             if (ImGui::InvisibleButton("##tab", ImVec2(size, size))) {
                 if (hold_timers[index] < 2.0f) {
+                    if((ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && (index==7 || index==13 || index==10))rtapi::setRigMode("scene");
                     active_properties_tab = index;
                     focus_properties_panel_next_frame = true;
                 }
@@ -2649,6 +2777,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         
         // 2. Geometry Creation & Modeling / Sculpting / Hair
         drawTabButton(7, UIWidgets::IconType::Mesh, "Modeling");
+        drawTabButton(14, UIWidgets::IconType::Bone, "Edit Bone");
         drawTabButton(13, UIWidgets::IconType::Sculpt, "Sculpting");
         if (show_paint_tab)      drawTabButton(10, UIWidgets::IconType::PaintTool,  "Paint Mode");
         if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Hair,       "Hair & Fur");
@@ -3229,6 +3358,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             case 6: if (show_world_tab) drawWorldContent(ctx); break;
             case 12: if (show_stylize_tab) drawStylizePanel(ctx); break;
             case 7: drawModifiersPanel(ctx); break;
+            case 14: RigUI::drawRigEditing(ctx); break;
             case 13: drawSculptPanel(ctx); break;
             case 11: if (show_scatter_tab) drawScatterBrushPanel(ctx); break;
             case 9: drawThemeSelector(); drawResolutionPanel(ctx); break;
@@ -3609,10 +3739,13 @@ void SceneUI::draw(UIContext& ctx)
 
     // Texture Safety Cleanup
     manageTextureGraveyard();
-    syncMeshEditState(ctx);
+    {
+        RTPERF_FRAME_SCOPE("ui.sync_mesh_edit_state");
+        syncMeshEditState(ctx);
+    }
     publishEditPinSelection(ctx);
     tryRestoreSerializedMeshEditLayer(ctx);
-    processPendingMeshEditGpuSync(ctx);
+    processPendingMeshEditGpuSync(ctx);  // times itself as sculpt.gpu_sync
 
     // Export Popup Logic
     if (SceneExporter::getInstance().drawExportPopup(ctx.scene)) {
@@ -3734,6 +3867,31 @@ void SceneUI::draw(UIContext& ctx)
     float screen_y = io.DisplaySize.y;
 
     drawMainMenuBar(ctx);
+
+    // ★★★★★ YÜKLEYİCİ İPLİĞİ BU KARENİN ORTASINDA BAŞLAR — KARE BİTMEK ZORUNDA.
+    //
+    // `drawMainMenuBar` File menüsünü VE Template Hub'ı çizer (scene_ui_menu.hpp:1304).
+    // Hub'daki bir "recent project" tıklaması performOpenProject'e gider, o da
+    // `std::thread loader_thread(...)` başlatıp DERHAL geri döner. Main.cpp'deki
+    // "EARLY SCENE LOADING GUARD" (~3674) yalnızca döngünün BİR SONRAKİ turunda
+    // bakar; yani ipliğin ilk işi olan `newProject()` -> `InstanceManager::clearAll()`
+    // ile bu karenin geri kalanı (drawPanels, overlays, render bloğu) YARIŞIR.
+    //
+    // Belirti: `DrawVolumePerformancePanel` her karede her scatter kaynağının
+    // üçgen vektörünü gezer; ağır bir foliage sahnesinden ağır bir projeye
+    // geçerken `groups.clear()` o vektörleri yok eder ve panel serbest bırakılmış
+    // belleği yineler -> erişim ihlali (scene_ui_volume_performance.cpp:193).
+    // Sıraya bağlı olması yarışın kendisidir, projelerin içeriğinin değil:
+    // panelin taraması yeterince UZUN, yeni projenin ayrıştırması yeterince
+    // KISA olmalı ki iki pencere çakışsın.
+    //
+    // Kapı burada, menü çiziminden hemen SONRA duruyor: yükleme başladıysa bu
+    // kare sahneye bir daha DOKUNMAZ. Main.cpp aynı bayrağa bakıp render/present
+    // bloğunu da atlar.
+    if (scene_loading.load() || g_scene_loading_in_progress.load()) {
+        return;
+    }
+
     rtpython::drawConsole(&show_python_console);
     rtipc_panel::draw(&show_remote_ipc_panel);
     rtui::drawAddonPanels();  // Faz 4b: addon-registered floating rt.ui panels
@@ -3779,8 +3937,8 @@ void SceneUI::draw(UIContext& ctx)
     }
 
     drawSelectionGizmos(ctx);
-    drawCameraGizmos(ctx);  // Draw camera frustum icons
-    drawRiverGizmos(ctx, gizmo_hit);  // Draw river spline control points
+    if(!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active)) drawCameraGizmos(ctx);  // Draw camera frustum icons
+    if(!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active)) drawRiverGizmos(ctx, gizmo_hit);  // Draw river spline control points
 
 
     // [SEQUENCE-RENDER OWNERSHIP] While a sequence render is active the worker
@@ -3970,14 +4128,23 @@ void SceneUI::draw(UIContext& ctx)
             (scatter_brush.enabled || foliage_brush.enabled);
         vkViewport->setRasterScatterPaintActive(foliageStrokeActive);
     }
-    handleMeshSculpt(ctx);
-    stepWetClayField(ctx);   // dynamic wet-clay: settle + dry the active wet region each frame
+    {
+        RTPERF_FRAME_SCOPE("ui.handle_mesh_sculpt");
+        handleMeshSculpt(ctx);
+    }
+    {
+        RTPERF_FRAME_SCOPE("ui.step_wet_clay");
+        stepWetClayField(ctx);   // dynamic wet-clay: settle + dry the active wet region each frame
+    }
     handleMeshPaint(ctx);
     
     // Hair Brush System
     handleHairBrush(ctx);      // Hair paint brush input + preview
 
-    handleSceneInteraction(ctx, gizmo_hit);
+    {
+        RTPERF_FRAME_SCOPE("ui.scene_interaction");
+        handleSceneInteraction(ctx, gizmo_hit);
+    }
     processDeferredSceneUpdates(ctx);
     
     
@@ -4027,7 +4194,7 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
         SCENE_LOG_INFO(showSidePanel ? "Properties panel shown (N)" : "Properties panel hidden (N)");
     }
 
-    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Tab) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+    if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && !io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Tab) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
         const bool hasSelectedObject =
             ctx.selection.selected.type == SelectableType::Object &&
             ctx.selection.selected.object != nullptr;
@@ -4042,7 +4209,7 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     }
 
     // Selection Shortcuts (A=All, Alt+A=None, Ctrl+I=Invert)
-    if (!io.WantTextInput) {
+    if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && !io.WantTextInput) {
         const bool edit_mode_active = mesh_overlay_settings.enabled &&
                                       mesh_overlay_settings.edit_mode &&
                                       ctx.selection.mesh_element_mode != MeshElementSelectMode::Object;
@@ -4081,24 +4248,18 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     // Undo / Redo
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && !io.KeyShift) {
         if (!block_history_actions && history.canUndo()) {
-            history.undo(ctx);
-            rebuildMeshCache(ctx.scene.world.objects);
-            mesh_overlay_cache = MeshOverlayCache{};
-            editable_mesh_cache = EditableMeshCache{};
-            ctx.selection.updatePositionFromSelection();
-            ctx.selection.selected.has_cached_aabb = false;
+            bool commandSyncedUiCaches = false;
+            history.undo(ctx, &commandSyncedUiCaches);
+            invalidateUiCachesAfterHistoryStep(ctx, commandSyncedUiCaches);
         }
     }
 
     if ((ImGui::IsKeyPressed(ImGuiKey_Y) && io.KeyCtrl) ||
         (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && io.KeyShift)) {
         if (!block_history_actions && history.canRedo()) {
-            history.redo(ctx);
-            rebuildMeshCache(ctx.scene.world.objects);
-            mesh_overlay_cache = MeshOverlayCache{};
-            editable_mesh_cache = EditableMeshCache{};
-            ctx.selection.updatePositionFromSelection();
-            ctx.selection.selected.has_cached_aabb = false;
+            bool commandSyncedUiCaches = false;
+            history.redo(ctx, &commandSyncedUiCaches);
+            invalidateUiCachesAfterHistoryStep(ctx, commandSyncedUiCaches);
         }
     }
 }
@@ -5235,7 +5396,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                     ImGui::SetWindowFocus();
                 }
                 anim_graph_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
-                drawAnimationGraphPanel(ctx);
+                RigUI::drawAnimationWorkspace(ctx, [&]() { drawAnimationGraphPanel(ctx); });
             }
             ImGui::End();
             ImGui::PopStyleVar();
@@ -5359,7 +5520,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 }
             }
             else if (show_anim_graph) {
-                drawAnimationGraphPanel(ctx);
+                RigUI::drawAnimationWorkspace(ctx, [&]() { drawAnimationGraphPanel(ctx); });
             }
             else if (show_asset_browser) {
                 drawAssetBrowser(ctx, true);
@@ -5472,12 +5633,19 @@ bool SceneUI::drawOverlays(UIContext& ctx)
         } catch (...) {}
     }
 
+    RigUI::drawRigAlignmentWindow(ctx);
+    RigUI::drawRigEnvelopeEditor(ctx);
+
     bool gizmo_hit = false;
+
+    RigUI::drawRigRestGizmo(ctx,viewport_settings.shading_mode,viewport_settings.show_gizmos && ctx.selection.show_gizmo &&
+        !mesh_overlay_settings.edit_mode && !sculpt_mode_state.enabled && !paint_mode_state.enabled,gizmo_hit);
+    drawSkeletonOverlay(ctx, gizmo_hit);
 
     // Draw Viewport HUDs
     // Render status is now integrated into drawViewportMessages
 
-    if (ctx.scene.camera && ctx.selection.show_gizmo) {
+    if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && ctx.scene.camera && ctx.selection.show_gizmo) {
         drawLightGizmos(ctx, gizmo_hit);
         drawForceFieldGizmos(ctx, gizmo_hit);
     }
@@ -5630,6 +5798,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
 
 void SceneUI::handleSceneInteraction(UIContext& ctx, bool gizmo_hit)
 {
+    if((ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active))return;
     if (rtpython::wantsInputCapture() || rtapi::renderOutputPending()) return;
     bool mesh_paint_locked = false;
     if (paint_mode_state.enabled && paint_mode_state.hasValidTarget()) {
@@ -7455,6 +7624,17 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
         editable_mesh_cache.object_name == active_mesh_edit_object_name &&
         !editable_mesh_cache.vertices.empty();
     EditableMeshCache preservedEditable;
+    // *** Two ways this preservation misses, and they need different fixes: the
+    //   predicate not selecting the cache at all (the active-edit name empty or
+    //   mismatched), or the restore below refusing because the object has no
+    //   mesh_cache entry -- which a FLAT mesh can plausibly hit, since it only
+    //   ever gets one representative facade there. Recorded separately.
+    rtperf::recordFast("sculpt.cache_wipe.preserve_selected", preserveEditable ? 1.0 : 0.0);
+    if (!preserveEditable && !editable_mesh_cache.vertices.empty()) {
+        SCENE_LOG_WARN(std::string("[rebuildMeshCache] NOT preserving a built editable cache: cache_object='") +
+                       editable_mesh_cache.object_name + "' active_edit='" +
+                       active_mesh_edit_object_name + "'");
+    }
     if (preserveEditable) {
         preservedEditable = std::move(editable_mesh_cache);
     }
@@ -7700,8 +7880,16 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     // Restore the active edit object's editable cache (see preserve note above). Only if the
     // object still exists in the rebuilt cache — otherwise it was genuinely removed and the
     // empty cache is correct.
-    if (preserveEditable && mesh_cache.find(active_mesh_edit_object_name) != mesh_cache.end()) {
-        editable_mesh_cache = std::move(preservedEditable);
+    if (preserveEditable) {
+        const bool haveEntry =
+            mesh_cache.find(active_mesh_edit_object_name) != mesh_cache.end();
+        rtperf::recordFast("sculpt.cache_wipe.restore_refused", haveEntry ? 0.0 : 1.0);
+        if (haveEntry) {
+            editable_mesh_cache = std::move(preservedEditable);
+        } else {
+            SCENE_LOG_WARN("[rebuildMeshCache] restore REFUSED: no mesh_cache entry for active edit object '" +
+                           active_mesh_edit_object_name + "' -- the editable cache will be rebuilt from scratch.");
+        }
     }
 
    /* SCENE_LOG_INFO("Selection cache built: " + std::to_string(mesh_cache.size()) +
@@ -7718,6 +7906,7 @@ void SceneUI::syncAllTransformedVertices(struct SceneData& scene) {
     // Iterate through all mesh groups in mesh_cache
     for (auto& [name, tris] : mesh_cache) {
         if (tris.empty()) continue;
+        if (tris[0].second->parentMesh && tris[0].second->parentMesh->hasSkinWeights()) continue;
 
         // Sync instance's transform first if it is a HittableInstance
         const int object_index = tris[0].first;
@@ -7806,6 +7995,28 @@ void SceneUI::rebuildTriToIndex(const std::vector<std::shared_ptr<Hittable>>& ob
         }
     }
     SCENE_LOG_INFO("rebuildTriToIndex: indexed " + std::to_string(tri_to_index.size()) + " triangles");
+}
+
+void SceneUI::invalidateUiCachesAfterHistoryStep(UIContext& ctx, bool commandSyncedUiCaches) {
+    if (!commandSyncedUiCaches) {
+        // ***** Blanket invalidation after a history step. It is the right
+        //   default -- most commands change topology or membership and SceneUI
+        //   cannot know what moved -- but it is NOT free: wiping
+        //   editable_mesh_cache costs 1,07 s to rebuild on a 2M-triangle mesh,
+        //   which was the entirety of the reported "Ctrl+Z takes ~2 s" after the
+        //   command itself had been brought down to ~14 ms. Note the wipe below
+        //   also undoes rebuildMeshCache's own careful preserve/restore of that
+        //   cache, which is why the preservation measured as working while the
+        //   rebuild still happened.
+        //   A command opts out only by overriding handlesUiCacheSync() AND
+        //   actually re-seeding what it changed (see
+        //   FlatSculptEditCommand + adoptExternalFlatSoaEdit).
+        rebuildMeshCache(ctx.scene.world.objects);
+        mesh_overlay_cache = MeshOverlayCache{};
+        editable_mesh_cache = EditableMeshCache{};
+    }
+    ctx.selection.updatePositionFromSelection();
+    ctx.selection.selected.has_cached_aabb = false;
 }
 
 void SceneUI::invalidateCache() {
@@ -8429,6 +8640,10 @@ void SceneUI::performNewProject(UIContext& ctx) {
          ctx.backend_ptr->waitForCompletion();
      }
      
+     // ★★★ New Project de bir sahne yüklemesidir: dolu bir sahneyi ağır
+     //   viewport modu bağlıyken sökmek sürücüyü kaybettiriyor.
+     enterSolidViewportForSceneLoad(*this, "ui:new_project");
+
      // 1. Reset Global Project System
      g_ProjectManager.newProject(ctx.scene, ctx.renderer);
      
@@ -8498,7 +8713,7 @@ void SceneUI::performNewProject(UIContext& ctx) {
 
      extern bool g_camera_dirty;
      extern bool g_lights_dirty;
-     extern bool g_world_dirty;
+     extern void markWorldDirty();
      extern bool g_geometry_dirty;
      extern bool g_materials_dirty;
      extern bool g_gas_volumes_dirty;
@@ -8506,7 +8721,7 @@ void SceneUI::performNewProject(UIContext& ctx) {
      extern std::atomic<bool> g_needs_optix_sync;
      g_camera_dirty = true;
      g_lights_dirty = true;
-     g_world_dirty = true;
+     markWorldDirty();
      g_geometry_dirty = true;
      g_materials_dirty = true;
      g_gas_volumes_dirty = true;

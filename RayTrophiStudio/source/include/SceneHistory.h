@@ -30,10 +30,13 @@ public:
     void record(std::unique_ptr<SceneCommand> command);
     
     // Undo last command
-    bool undo(UIContext& ctx);
+    // outHandledUiCacheSync (optional) receives the applied command's
+    // handlesUiCacheSync(): true means the command already synced the SceneUI
+    // caches and the caller must NOT invalidate them.
+    bool undo(UIContext& ctx, bool* outHandledUiCacheSync = nullptr);
     
     // Redo last undone command
-    bool redo(UIContext& ctx);
+    bool redo(UIContext& ctx, bool* outHandledUiCacheSync = nullptr);
     
     // Check if undo/redo available
     bool canUndo() const { return !undo_stack_.empty(); }
