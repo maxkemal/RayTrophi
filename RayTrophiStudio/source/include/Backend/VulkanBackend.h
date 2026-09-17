@@ -41,6 +41,10 @@
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/SceneTextureManager.h"
+// ProbeTexel is part of the probe producer signature below; the header is
+// std-only, so including it costs nothing beyond the ABI it defines.
+#include "RayFusion/ProbeField.h"
+#include "RayFusion/ProbeOverlay.h"
 #include "Backend/VulkanVolumeInstrumentation.h"
 #include "Backend/VulkanVolumeTemporal.h"
 #include "AtmosphereLUT.h"
@@ -50,6 +54,11 @@ class TriangleMesh;
 
 #include "Viewport/RasterInstanceUpload.h"
 #include "Viewport/RasterGpuCull.h"
+#include "Viewport/RasterGpuTimers.h"
+#include "Viewport/RasterStageTimings.h"
+#include "Viewport/RasterMaterialVisibility.h"
+#include <array>
+#include <chrono>
 
 namespace VulkanRT {
 
@@ -105,6 +114,9 @@ struct GPUCapabilities {
     bool supportsInt64Atomics = false;
     bool supportsBufferDeviceAddress = false;
     bool supportsDescriptorIndexing = false;
+    // VK_EXT_memory_budget: the only live VRAM reading we have. Without it the
+    // app can only report what it THINKS it allocated.
+    bool supportsMemoryBudget = false;
     bool supportsSamplerAnisotropy = false;
     float maxSamplerAnisotropy = 1.0f;
     bool supportsBC4 = false;
@@ -148,11 +160,24 @@ enum class MemoryLocation : uint8_t {
     CPU_ONLY        // Host only (debugging)
 };
 
+// What an allocation is FOR, for per-device VRAM accounting (see VulkanDevice).
+enum class VramCategory : uint8_t {
+    Other = 0,      // untagged buffers: uniforms, SSBO tables, staging
+    Geometry,       // vertex/index/attribute data (RT combined buffers, raster meshes)
+    AccelStruct,    // BLAS/TLAS storage
+    Scratch,        // AS build/update scratch
+    Texture,        // scene textures and 3D volume textures
+    RenderTarget,   // framebuffers, accumulation, denoiser staging
+    Count
+};
+
 struct BufferCreateInfo {
     uint64_t size = 0;
     BufferUsage usage = BufferUsage::STORAGE;
     MemoryLocation location = MemoryLocation::GPU_ONLY;
     const void* initialData = nullptr;    // Optional
+    // Other = take the thread's VramCategoryScope tag.
+    VramCategory category = VramCategory::Other;
 };
 
 struct BufferHandle {
@@ -445,6 +470,10 @@ struct AccelStructHandle {
     // MODE_UPDATE must reproduce the geometry flags from the original BLAS build
     // exactly (notably VK_GEOMETRY_OPAQUE_BIT_KHR).
     VkGeometryFlagsKHR geometryFlags = 0;
+    // ...and the BUILD flags too. A compacted BLAS was built with
+    // ALLOW_COMPACTION; an update that omits it is invalid usage. 0 = not
+    // recorded (paths that never compact), callers then use their defaults.
+    VkBuildAccelerationStructureFlagsKHR buildFlags = 0;
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
     // AABB BLAS only: how many AABBs this AS was built/sized for. A refit is legal only
@@ -481,6 +510,60 @@ struct ImageHandle {
 };
 
 // ============================================================================
+// VRAM accounting
+// ============================================================================
+// What the app itself holds, per VkDevice and per purpose. The driver's
+// VK_EXT_memory_budget number is process-wide and says nothing about WHO holds
+// the bytes; with two devices on one card that is exactly the question.
+// Allocations made outside VulkanDevice (sim compute, exposure meter) are not
+// tracked -- a consumer sees them as usage minus the sum of these reports.
+// (VramCategory is declared above BufferCreateInfo, which carries it.)
+const char* vramCategoryName(VramCategory category);
+
+// Tags every allocation made on this thread while in scope. Nesting restores
+// the outer tag. Untagged buffers are Other; untagged mip-chain images are
+// Texture and plain 2D images RenderTarget (see createImage2D*).
+class VramCategoryScope {
+public:
+    explicit VramCategoryScope(VramCategory category);
+    ~VramCategoryScope();
+    VramCategoryScope(const VramCategoryScope&) = delete;
+    VramCategoryScope& operator=(const VramCategoryScope&) = delete;
+    static VramCategory current();
+private:
+    VramCategory m_previous;
+};
+
+struct VramCategoryUsage {
+    uint64_t deviceLocalBytes = 0;
+    uint64_t hostBytes = 0;
+    uint32_t allocations = 0;
+};
+
+struct VramAllocationReport {
+    VramCategoryUsage categories[static_cast<size_t>(VramCategory::Count)];
+    uint64_t deviceLocalBytes = 0;
+    uint64_t hostBytes = 0;
+    uint32_t allocations = 0;
+};
+
+// Compaction copies a finished BLAS into an allocation sized to what the
+// build actually used. PREFER_FAST_TRACE builds are allocated for the worst
+// case; the difference is pure residency.
+struct BlasCompactionStats {
+    bool enabled = true;
+    bool supported = false;
+    uint64_t compacted = 0;
+    // Skinned BLAS are periodically rebuilt IN PLACE (MODE_BUILD), which needs
+    // the build-size allocation, so they are not compacted. Refit-only
+    // (ALLOW_UPDATE) BLAS are: an update never grows the structure.
+    uint64_t skippedSkinned = 0;
+    uint64_t failures = 0;          // compaction failed; the original stays in use
+    uint64_t bytesBefore = 0;       // of the compacted ones only
+    uint64_t bytesAfter = 0;
+};
+
+// ============================================================================
 // Main Low-Level Vulkan Device
 // ============================================================================
 
@@ -488,6 +571,25 @@ class VulkanDevice {
 public:
     VulkanDevice();
     ~VulkanDevice();
+
+    // ── VRAM accounting (see VramCategory) ──
+    VramAllocationReport vramAllocationReport() const;
+    // Call right after a successful vkAllocateMemory on this device.
+    void noteMemoryAllocated(VkDeviceMemory memory, uint64_t bytes, uint32_t memoryTypeIndex,
+                             VramCategory category);
+    // The ONLY way this device frees memory: untracks, then vkFreeMemory.
+    void freeTrackedMemory(VkDeviceMemory memory);
+
+    // ── BLAS compaction ──
+    // Process-wide: a device recreated after a TDR or memory pressure keeps
+    // the choice. Takes effect for BLAS built from now on.
+    static void setBlasCompactionEnabled(bool enabled);
+    static bool blasCompactionEnabled();
+    BlasCompactionStats blasCompactionStats() const;
+    // Bytes the BLAS storage occupies NOW (after any compaction).
+    uint64_t blasResidentBytes(uint32_t index) const {
+        return index < m_blasList.size() ? m_blasList[index].buffer.size : 0;
+    }
     bool initializeExposureMeter(const std::vector<uint32_t>& code) { return m_exposureMeter.initialize(m_device, m_physicalDevice, code); }
     
     // Non-copyable
@@ -531,11 +633,45 @@ public:
 
     bool isRTReady() const { return m_rtPipelineReady; }
     bool hasTLAS() const { return m_tlas.accel != VK_NULL_HANDLE; }
+    // Needed by ray-query consumers that bind the TLAS into their own descriptor
+    // set. Returned as a VALUE that the caller must re-check every dispatch: a
+    // rebuild produces a NEW handle, and a descriptor still pointing at the old
+    // one does not fail -- it traces a destroyed structure.
+    VkAccelerationStructureKHR getTLASHandle() const { return m_tlas.accel; }
     
     // ========================================================================
     // Buffer Operations
     // ========================================================================
     
+    // Triangle BLAS over buffers that already live on this device. Borrowing
+    // the raster allocation instead of re-uploading is what keeps the AS bill
+    // honest. `indices` is OPTIONAL and must be passed whenever the raster mesh
+    // carries one: the welded upload path stores unique vertices, so building
+    // from `vertices` alone traces vertices 0-1-2, 3-4-5 ... in storage order --
+    // geometry that does not exist. Pass an empty handle / indexCount 0 only
+    // for genuinely de-indexed flat SoA (one vertex per triangle corner).
+    // `allowUpdate` is for geometry whose POSITIONS are rewritten in place on
+    // the device (GPU skinning writes into the very buffer this BLAS borrows).
+    // Without it the AS is frozen at the pose of the frame it was built in and
+    // nothing says so -- the mesh animates in the raster image while its BLAS
+    // keeps casting the first frame's silhouette. It costs a slightly slower
+    // BVH, so it is opt-in per mesh rather than a blanket flag.
+    uint32_t createTriangleBLAS_Device(const BufferHandle& vertices, uint32_t vertexCount,
+                                       uint32_t vertexStride, const BufferHandle& indices,
+                                       uint32_t indexCount, uint64_t* outAsBytes,
+                                       bool allowUpdate = false);
+    // Records a refit of a BLAS created with allowUpdate over vertex data the
+    // DEVICE has already rewritten -- no CPU upload, unlike updateBLAS(), which
+    // takes CPU pointers and would push a base pose over the skinned result.
+    //
+    // RECORDS into the caller's command buffer rather than submitting its own:
+    // a skinned scene refits every frame, and one submit-plus-fence per BLAS is
+    // a CPU stall per mesh per frame. dispatchSkinning() on the RT render path
+    // has always folded its refit into the skinning command buffer for exactly
+    // this reason. Returns false if the BLAS was not built updatable, which is
+    // a programming error, not a transient condition.
+    bool recordTriangleBLASRefit(VkCommandBuffer cmd, uint32_t blasIndex);
+    void destroyOwnedBLASRange(uint32_t first, uint32_t count);
     BufferHandle createBuffer(const BufferCreateInfo& info);
     void destroyBuffer(BufferHandle& buffer);
 
@@ -635,6 +771,8 @@ public:
         return 1u + (m_hasVolumeShaders ? 1u : 0u) + (m_hasHairShaders ? 1u : 0u);
     }
     
+    const BufferHandle& getHairMaterialBuffer() const { return m_hairMaterialBuffer; }
+
     /**
      * @brief Build top-level acceleration structure (instances)
      */
@@ -716,6 +854,18 @@ public:
      * @brief Update existing BLAS (for animation)
      */
     bool updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals = nullptr);
+
+    // Uploads ONE vertex range into a BLAS's geometry buffers without refitting.
+    // `positions` / `normals` address the FULL vertex arrays; [firstVertex,
+    // firstVertex + vertexCount) is what travels. Split out of updateBLAS so an
+    // interactive refit can carry only the vertices that moved and then refit
+    // once via updateBLAS(idx, nullptr, nullptr) -- a full-buffer upload per
+    // sculpt dab was 2 x 24 MB of blocking staging traffic on a 2M-vertex mesh.
+    bool uploadBLASVertexRange(uint32_t blasIndex,
+                               const float* positions,
+                               const float* normals,
+                               uint32_t firstVertex,
+                               uint32_t vertexCount);
     
     /**
      * @brief Rebuild TLAS with new transforms
@@ -927,6 +1077,12 @@ public:
     
     VkDevice getDevice() const { return m_device; }
     VkPhysicalDevice getPhysicalDevice() const { return m_physicalDevice; }
+    // Device-local heap usage and budget as the DRIVER sees it. heapUsage is
+    // per PROCESS, not per VkDevice: with a dedicated viewport device and a
+    // render device on the same GPU both report the same total. Returns false
+    // (and zeros) when VK_EXT_memory_budget is not enabled -- a zero here is
+    // "not measured", never "nothing allocated".
+    bool queryDeviceLocalMemory(uint64_t& usageBytes, uint64_t& budgetBytes) const;
     VkInstance getInstance() const { return m_instance; }
     VkQueue getComputeQueue() const { return m_computeQueue; }
     uint32_t getComputeQueueFamily() const { return m_computeQueueFamily; }
@@ -1006,7 +1162,33 @@ public:
     PFN_vkCreateRayTracingPipelinesKHR fpCreateRayTracingPipelinesKHR = nullptr;
     PFN_vkGetRayTracingShaderGroupHandlesKHR fpGetRayTracingShaderGroupHandlesKHR = nullptr;
     PFN_vkGetBufferDeviceAddressKHR fpGetBufferDeviceAddressKHR = nullptr;
+    PFN_vkCmdCopyAccelerationStructureKHR fpCmdCopyAccelerationStructureKHR = nullptr;
+    PFN_vkCmdWriteAccelerationStructuresPropertiesKHR fpCmdWriteAccelerationStructuresPropertiesKHR = nullptr;
     VkDevice m_device = VK_NULL_HANDLE;
+    // VRAM accounting state.
+    struct TrackedAllocation {
+        uint64_t bytes = 0;
+        VramCategory category = VramCategory::Other;
+        bool deviceLocal = false;
+    };
+    mutable std::mutex m_vramTrackMutex;
+    std::unordered_map<VkDeviceMemory, TrackedAllocation> m_vramTracked;
+    // BLAS compaction. A build that asks for compaction records a
+    // COMPACTED_SIZE query into the SAME command buffer; the copy happens once
+    // that submission has completed (finishPendingBlasCompactions).
+    static constexpr uint32_t kCompactionQueryCapacity = 16;
+    VkQueryPool m_compactionQueryPool = VK_NULL_HANDLE;
+    struct PendingCompaction {
+        VkAccelerationStructureKHR accel = VK_NULL_HANDLE;
+        uint32_t query = 0;
+    };
+    std::vector<PendingCompaction> m_pendingCompactions;
+    BlasCompactionStats m_compactionStats;
+    bool ensureCompactionQueryPool();
+    // True when a query was recorded; the caller then owes a
+    // finishPendingBlasCompactions() after the command buffer completed.
+    bool recordBlasCompactionQuery(VkCommandBuffer cmd, VkAccelerationStructureKHR accel);
+    void finishPendingBlasCompactions();
     VkDescriptorSet m_rtDescriptorSet = VK_NULL_HANDLE;
     // Acceleration structures
     AccelStructHandle m_tlas;
@@ -1399,6 +1581,13 @@ namespace Backend {
 class MaterialPreviewShadowResources;
 class MaterialPreviewTransmissionResources;
 class MaterialPreviewIblResources;
+class MaterialPreviewProbeResources;
+class RayFusionSceneASResources;
+class RayFusionProbeTraceResources;
+class MaterialPreviewRtShadowResources;
+class ScreenGiResources;
+class ReflectionResources;
+class RayFusionBounceResources;
 class MaterialPreviewSdfSurfaceResources;
 class MaterialPreviewVolumeResources;
 
@@ -1787,6 +1976,15 @@ public:
     void syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects);
     void syncRasterSkinnedVertices(const std::vector<std::shared_ptr<Hittable>>& objects,
                                    const std::vector<Matrix4x4>& boneMatrices);
+    // The raster copy was refit in place for an edit that moved the scene
+    // generation from -> to. Adopt `to` only if the cache was exactly at `from`
+    // -- any other bump in between still needs the full build.
+    bool adoptRasterGeometryGeneration(uint64_t fromGeneration, uint64_t toGeneration) {
+        if (m_rasterMeshes.empty() || m_rasterBuiltGeometryGeneration != fromGeneration) return false;
+        m_rasterBuiltGeometryGeneration = toGeneration;
+        m_rasterBuiltGenSource = "in_place_mesh_edit";
+        return true;
+    }
     bool hasValidRasterCache(uint64_t sceneGeometryGeneration) const override {
         return !m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == sceneGeometryGeneration;
     }
@@ -1806,7 +2004,7 @@ public:
     bool isAccumulationComplete() const override;
     bool needsViewportRender() const override {
         if (shouldUseInteractiveViewport()) {
-            return m_interactiveViewport.dirty ||
+            return m_interactiveViewport.dirty || rayFusionProbeUpdatesPending() ||
                    m_interactiveViewport.presentationPending;
         }
         return m_currentSamples < m_targetSamples;
@@ -1849,6 +2047,24 @@ public:
      */
     void uploadAtmosphereLUT(const AtmosphereLUT* lut);
     bool generateAtmosphereLUTGPU(const WorldData* worldData);
+    // ★★★★ "Bu adapter'in LUT'u BU dunyadan mi uretildi?" `World::needsLUTUpdate()`
+    //   tek ve paylasilan bir bayrak; iki adapter (RT + raster viewport) ayri
+    //   VkDevice'ta oldugu icin ilk uretip bayragi temizleyen otekini bayat
+    //   birakiyordu. Cagiran, kisitlama (throttle) kararini verdikten SONRA sorar.
+    bool atmosphereLutStale(const WorldData& wd) const;
+    // ★★★★★ Transmittance LUT'unun YALNIZCA 0. SATIRI. Shader
+    //   (`canonicalWorldSunRadiance`) tam olarak `texture(lut, vec2(u, 0.0))`
+    //   okuyor, yani gunes tonu icin gereken tek sey bu satir.
+    // ★★★ Neden isaretci degil KOPYA: LUT'un sahibi `World`, ve backend'in
+    //   omru onunkiyle bagli degil. Bir isaretci saklamak, sahne degisiminde
+    //   sarkan bir okumaya donusurdu -- ve belirtisi cokme degil, YANLIS RENKLI
+    //   dolayli gunes olurdu.
+    std::vector<float> m_atmosphereTransmittanceRow0;  // RGB uclusu, 256 girdi
+    // Dolayli (bounce) gunes icin radyans. Dogrudan aydinlatmanin kullandigi
+    // `canonicalWorldSunRadiance` ile AYNI formul: aksi halde bir yuzeyin
+    // aldigi dogrudan gunes ile ondan sicrayan gunes farkli renkte olurdu.
+    bool worldSunBounceRadiance(float outRgb[3], bool& tintFromLut) const;
+    static uint64_t atmosphereLutSignature(const WorldData& wd);
     void setInteractiveViewportMatcap(int64_t textureID);
     void setInteractiveViewportMatcapPreset(int preset);
 
@@ -1859,6 +2075,37 @@ public:
     // any VulkanBackendAdapter; the next frame will recreate interactive
     // viewport resources and backfill textures from the fresh project.
     void resetForProjectReload();
+    struct RtShadowCoverage {
+        uint32_t primaryLight = 0;    // maskenin meta.w'si; raporlama icin
+        uint32_t sceneLightMask = 0;  // bit i = i. GORUNUR sahne isigi kapsandi
+        bool worldSun = false;        // Nishita gunesi (slot kMaxLights) kapsandi
+        Vec3 toLight{ 0.0f, 1.0f, 0.0f };
+    };
+
+    // The viewport device keeps its scene AS (GBs on a large scene) resident on
+    // the SAME GPU the render backend is about to fill. While the viewport shows
+    // Rendered nothing traces it, so it is released and ensureRayFusionSceneAS
+    // refuses to rebuild it until reclaimed. Owned by the frame loop's mode
+    // transition, not by setViewportMode: in Rendered the dedicated viewport
+    // backend is never told the mode changed.
+    void yieldRayFusionSceneAS();
+    void reclaimRayFusionSceneAS();
+    bool isRayFusionSceneASYielded() const { return m_rayFusionSceneASYielded; }
+
+    // RayFusion step 2: acceleration structure residency in the raster viewport.
+    // The device was already created with preferHardwareRT; what was missing is
+    // that nothing on this side ever built a BLAS.
+    bool ensureRayFusionSceneAS();
+    // Re-fits the skinned BLASes of the RayFusion scene AS over the vertices
+    // the skinning compute wrote this frame. Called from inside
+    // ensureRayFusionSceneAS; separate so the gate it implements is readable.
+    void refreshRayFusionSkinnedBLAS();
+    // The ONE place m_rasterSkinGeneration moves. Every skinning path calls
+    // this with the bone matrices it just applied; the generation advances only
+    // when that pose differs from the last one, so a held pose costs a hash of
+    // a few KB instead of a BLAS refit plus a TLAS rebuild plus a drain.
+    void noteSkinnedPose(const std::vector<Matrix4x4>& boneMatrices);
+
 protected:
     bool updateRasterMeshFromTrianglesImpl(const std::string& nodeName,
                                            const std::vector<std::shared_ptr<Triangle>>& triangles);
@@ -1905,11 +2152,75 @@ protected:
     bool ensureMaterialPreviewShadowResources(const std::string& shaderDir);
     void destroyMaterialPreviewShadowResources();
     bool ensureMaterialPreviewIblResources(const std::string& shaderDir);
+    // Physical Sky has no source image, so one is baked from the canonical
+    // world before the IBL builder runs. Signature-gated: an unchanged sky
+    // costs a comparison, not a dispatch.
+    bool packPreviewWorldUniforms(float* worldColor, float* worldParams,
+                                 float* worldSun, float* atmosphereA,
+                                 float* atmosphereB) const;
+    bool ensureIrradianceStaging();
+    bool ensureWorldSkyCaptureResources(const std::string& shaderDir);
+    bool refreshWorldSkyCapture(uint64_t& signature);
     void refreshMaterialPreviewIbl();
     void destroyMaterialPreviewIblResources();
     bool bindMaterialPreviewIblDescriptors(VkDescriptorSet set,
                                            const VulkanRT::ImageHandle& fallback);
     bool getMaterialPreviewIblStatus(MaterialPreviewIblStatus& out) const override;
+    bool getRasterTaaStatus(RasterTaaStatus& out) const override;
+    // RayFusion probe field, step 1a. The producer is still the sky bake; only
+    // the pipe the ambient value travels through has changed.
+    bool ensureMaterialPreviewProbeResources();
+    void setMaterialPreviewProbeSource(const float* equirectRgba, uint32_t width,
+                                       uint32_t height, uint64_t signature);
+    void serviceMaterialPreviewProbeField();
+    void applyMaterialPreviewProbeAutoFit(const RayFusionSceneASStatus& asStatus);
+    bool bindMaterialPreviewProbeDescriptors(VkDescriptorSet set);
+    bool getRayFusionProbeStatus(RayFusionProbeStatus& out) const override;
+    void setRayFusionProbeProducer(bool traced) override;
+    bool setRayFusionProbeBounce(bool enabled) override;
+    bool setRayFusionProbeOverlay(bool enabled) override;
+    bool setRayFusionProbeFollowCamera(bool enabled) override;
+    bool setRayFusionProbeGrid(const RayFusion::GridRequest& request,
+                               std::string& error) override;
+    bool rayFusionProbeUpdatesPending() const;
+    bool rayFusionProbeOverlayRequested() const;
+    std::vector<RayFusion::ProbeMarker> rayFusionProbeMarkers() const;
+    void setRayFusionProbeOverlayResult(bool ready, uint32_t count, const std::string& reason);
+    uint64_t prepareRayFusionBounce();
+    RayFusion::BounceStatus rayFusionBounceStatus() const;
+    RayFusion::BounceCounters rayFusionBounceCounters() const;
+    bool rayFusionBounceBuffers(VulkanRT::BufferHandle (&buffers)[4]) const;
+    bool getRayFusionHitInstances(std::vector<RayFusion::HitInstance>& out) const;
+    // ★★★ Emissive geometriyi orneklenebilir bir isik listesine cevirir, ve
+    //   TLAS'a giren instance kumesinin TAM AYNISINDAN kurar: gizli ya da cap
+    //   ile elenmis bir instance'i isik saymak, golge isininin bulamadigi --
+    //   yani hicbir seyin engelleyemedigi -- bir isik uretirdi.
+    // `materialInNee`: malzeme ID'si basina tek sayim bayragi. 1 ise o
+    // malzemenin emission'i listede TAM temsil ediliyor ve yarim kure isini onu
+    // EKLEMEMELI -- bu bayrak olmadan ayni isik iki kez sayilirdi.
+    bool getRayFusionEmissiveTriangles(std::vector<RayFusion::EmissiveTriangle>& out,
+                                       std::vector<uint8_t>& materialInNee,
+                                       RayFusion::BounceStatus& status) const;
+    void destroyRayFusionBounce();
+    void destroyMaterialPreviewProbeResources();
+
+    bool rebuildRayFusionTLAS();
+    // RayFusion step 1b-alpha: the probe PRODUCER now traces. The consumer
+    // (probe_field.glsl) is deliberately untouched -- that is what makes any
+    // visible difference attributable to the producer and nothing else.
+    bool ensureRayFusionProbeTraceResources(uint32_t capacity);
+    bool traceRayFusionProbes(const float* origins, uint32_t probeCount,
+                              std::vector<RayFusion::ProbeTexel>& out);
+    bool getRayFusionProbeTraceStatus(bool& supported, double& lastMs,
+                                      uint64_t& dispatches, uint64_t& probesTraced,
+                                      std::string& reason) const;
+    void destroyRayFusionProbeTraceResources();
+    // Raw environment radiance (prefiltered mip 0), for producers that do their
+    // own cosine integral. Exposed as a view+sampler so the IBL resource type
+    // stays private to its own translation unit.
+    bool getMaterialPreviewEnvRadiance(VkImageView& view, VkSampler& sampler) const;
+    bool getRayFusionSceneASStatus(RayFusionSceneASStatus& out) const override;
+    void destroyRayFusionSceneAS();
     void prepareMaterialPreviewShadowFrame();
     void updateMaterialPreviewShadowWorldBindings();
     void recordMaterialPreviewShadowPass(VkCommandBuffer cmd);
@@ -1918,6 +2229,23 @@ protected:
     bool ensureMaterialPreviewTransmissionResources(uint32_t width, uint32_t height);
     void destroyMaterialPreviewTransmissionResources();
     void prepareMaterialPreviewTransmissionThickness(VkCommandBuffer cmd);
+    // ★★★★★ Replay gecisinin ISI VAR MI. Kapisi bugune kadar yalnizca
+    //   "kaynak kuruldu mu" idi, yani gecis HER material sahnesinde kosuyordu:
+    //   butun sahne, tam materyal pipeline'indan IKINCI kez. Olculdu 2026-09-09,
+    //   camsiz bir bitki sahnesi: 160,9 ms, karenin %40'i, ekranda SIFIR fark.
+    //   Is ancak (a) bagli materyallerden biri gecirgense ya da (b) sahnede
+    //   hacim varsa vardir -- SDF yuzeyi ve hacim gecisleri bu replay'in ICINDE
+    //   kaydediliyor ve ikisi de m_volumeCount>0 kapisina bakiyor.
+    //   ★ ONBELLEKLENMIYOR, her kare materyal tablosu taraniyor: birkac yuz
+    //   kayit, mikrosaniyeler. Bir bayrak tutmak bu depoda tanidik bir sessiz
+    //   ariza uretirdi -- bayat `false` = CAM KAYBOLUR, ve kimse bunu bug diye
+    //   raporlamaz. Bkz. feedback_cached_material_id_needs_a_generation.
+    bool materialPreviewTransmissionHasWork() const;
+    // Replay atlandiginda BIR KEZ kosar: tuketici 17/18 numarali baglantilari
+    // kosulsuz orneklendiriyor ve bu goruntulere bugune kadar YALNIZCA replay
+    // yaziyordu. Hic yazilmamis bir goruntuyu ornekleyip transmission=0 ile
+    // carpmak guvenli DEGILDIR (0 * NaN = NaN).
+    void initMaterialPreviewTransmissionSnapshot(VkCommandBuffer cmd);
     void recordMaterialPreviewTransmissionPass(VkCommandBuffer cmd,
                                                const Matrix4x4& viewProj,
                                                const Matrix4x4& view,
@@ -1992,19 +2320,107 @@ protected:
         VulkanRT::BufferHandle stagingBuffer;
         VkRenderPass renderPass = VK_NULL_HANDLE;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
+
+        // ── Realtime HDR yolu (alan derinligi + tek goruntuleme donusumu) ───
+        // ★★★★ Raster viewport ARTIK IKI GECIS: once sahne scene-linear
+        //   RGBA16F'e cizilir (gokyuzu, material preview mesh'leri, hacim,
+        //   SDF yuzeyi, transmission), sonra `raster_post.comp` DoF + post
+        //   zincirini uygulayip 8-bit `colorImage`a yazar, en sonunda
+        //   DISPLAY-REFERRED cizimler (izgara, gizmo, solid/matcap, sac,
+        //   partikul, edit overlay) LDR gecisinde ustune cizilir.
+        //
+        //   Neden: DoF, parlak noktanin DAIRE olarak acilmasidir ve bu ancak
+        //   tonemap'ten ONCE yapilabilir. Eskiden goruntuleme donusumu her
+        //   shader'in icindeydi; bulanistirilacak HDR bir ara hedef YOKTU.
+        //
+        // ★★ Solid/Matcap modunda HDR gecisi ve compute HIC kosmaz: o modun
+        //   icerigi zaten display-referred'dir. Bu yuzden LDR gecisinin iki
+        //   varyanti var (CLEAR / LOAD) -- load/store op'lari render-pass
+        //   UYUMLULUGUNU etkilemez, yani ikisi ayni pipeline'lari paylasir.
+        VulkanRT::ImageHandle hdrColorImage;
+        // ★★★ Reflection G-buffer, IKI eklenti. HDR gecisinin 2. ve 3. renk
+        //   eklentileri olarak yazilir; `reflection_trace.comp` okur.
+        //     normal   : R16G16_SFLOAT        -- oct kodlu SHADING normal
+        //     specular : R16G16B16A16_SFLOAT  -- .rgb F0*brdf.x + brdf.y,
+        //                                        .a reflectionRoughness
+        //   Normali DEPTH'ten geri kurmamanin tek sebebi su: yansimada yon
+        //   hatasi normal hatasinin 2 KATI ve roughness 0,05'te lob ~3 derece
+        //   -- geometrik normal o lobun icine sigmaz. Agirligin RENK olmasinin
+        //   sebebi de tek: altinin yansimasi altin rengindedir.
+        VulkanRT::ImageHandle reflectionNormalImage;
+        VulkanRT::ImageHandle reflectionSpecularImage;
+        VkRenderPass hdrRenderPassLoad = VK_NULL_HANDLE; // HDR continuation after RT compute
+        VkRenderPass hdrRenderPass = VK_NULL_HANDLE;   // RGBA16F + depth + 2 gbuffer (CLEAR)
+        VkFramebuffer hdrFramebuffer = VK_NULL_HANDLE;
+        VkRenderPass renderPassLoad = VK_NULL_HANDLE;  // LDR, post'tan sonra (LOAD)
+        // ★ Ayni kaynak kodla iki kez yaratilir: solid_frag hem HDR gecisinde
+        //   (material modunda materyalsiz mesh'lerin geri dususu) hem LDR
+        //   gecisinde (solid mod, izgara, gizmo) kullaniliyor ve bir pipeline
+        //   yalnizca UYUMLU bir render pass'te baglanabilir.
+        VkPipeline solidPipelineHdr = VK_NULL_HANDLE;
+        VkPipeline postPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout postPipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout postDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool postDescPool = VK_NULL_HANDLE;
+        VkDescriptorSet postDescSet = VK_NULL_HANDLE;
+        // ── TAA (raster_taa.comp) ───────────────────────────────────────────
+        // ★★★★★ Iki gecmis goruntusu, ping-pong. Tek bir goruntuye hem okuyup
+        //   hem yazmak, komsuluk kutusunu okurken baska bir is parcaciginin
+        //   uzerine yazdigi bir texel'i okumak demekti -- yaris, ve belirtisi
+        //   "bazen hafif titriyor" olurdu.
+        //   Cozulmus sonuc post'un okudugu `hdrColorImage`a KOPYALANIR. Post'un
+        //   descriptor'ini TAA ciktisina cevirmek bir kopyayi kurtarirdi ama
+        //   TAA kapaliyken/ilk karede iki ayri descriptor durumu demek olurdu;
+        //   kopyanin maliyeti olculebilir ve tek yerde.
+        VulkanRT::ImageHandle taaHistoryImage[2];
+        VkPipeline taaPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout taaPipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout taaDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool taaDescPool = VK_NULL_HANDLE;
+        // [i] = bu karenin ciktisi history[i], girdisi history[1-i].
+        VkDescriptorSet taaDescSet[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+        // ★★★★★ AYRI bir LINEAR ornekleyici, `postSampler` DEGIL. Post'unki
+        //   bilerek NEAREST (derinligi de o ornekliyor ve D32'nin lineer
+        //   filtrelenmesi opsiyoneldir). Gecmisi NEAREST ornekleseydik yeniden
+        //   izdusum texel merkezlerine YUVARLANIRDI: TAA kosar, sayaclar artar,
+        //   goruntu "calisiyor" gibi durur ve alt-piksel kenar YUMUSAMAZ --
+        //   yani dogru gorunen bir hiclik.
+        VkSampler taaHistorySampler = VK_NULL_HANDLE;
+        VkSampler postSampler = VK_NULL_HANDLE;
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
         VkPipeline solidPipeline = VK_NULL_HANDLE;
         // Material Preview pipeline (PBR shading with material data)
         VkPipeline materialPreviewPipeline = VK_NULL_HANDLE;
+        // ★★★ Derinlik on gecisi. AYNI layout, AYNI vertex girdi durumu, AYNI
+        //   descriptor set -- yalnizca fragment shader'i alfa testi disinda
+        //   hicbir sey yapmiyor ve renk yazimi kapali. Shader'lari golge
+        //   atlasindan devralir (material_preview_shadow{,_frag}.spv): o ikisi
+        //   zaten bu pipeline'in vertex attribute konumlariyla birebir ayni ve
+        //   pc.viewProj okuyor, yani kamera gecisinde de dogru calisirlar.
+        VkPipeline materialPreviewDepthPrepassPipeline = VK_NULL_HANDLE;
         VkPipelineLayout materialPreviewPipelineLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout materialPreviewDescLayout = VK_NULL_HANDLE;
         VkDescriptorPool materialPreviewDescPool = VK_NULL_HANDLE;
         VkDescriptorSet materialPreviewDescSet = VK_NULL_HANDLE;
         uint32_t materialPreviewTextureArrayLen = 0;
+        // ★★★ TRIPWIRE: binding 1 bu descriptor set'e YAZILDIGI andaki doku
+        //   kusagi. `purgeUploadedTextureCacheLocked` her cagrildiginda
+        //   m_uploadedImages'teki BUTUN VkImage'lari yok ediyor ve
+        //   m_textureCacheGeneration'i artiriyor. O purge yollarindan bazilari
+        //   (uploadMaterials 12065/12073, terrain 13146) bu descriptor set'i
+        //   SOKMUYOR -- yani set olu VkImageView'lara bakmaya devam edebilir ve
+        //   sonraki material karesi use-after-free ile cihazi kaybettirir.
+        //
+        //   Damga ile cizim anindaki kusak esitse o sinif ELENMIS olur; esit
+        //   degilse arizanin adi konmus olur. 0 = "henuz yazilmadi".
+        //   Bkz. docs/dev/BUG_VIEWPORT_DEVICE_LOST_ON_PROJECT_OPEN.md
+        uint64_t materialPreviewDescSetTextureGeneration = 0;
         // Binding 0 can be owned by the derived viewport backend. Keep its
         // material count beside the shared descriptor state so focused base
         // modules never reach into derived-only members.
         uint32_t materialPreviewBoundMaterialCount = 0;
+        VkPipeline materialPreviewCoveredPipeline = VK_NULL_HANDLE;
+        bool materialPreviewUsesExternalMaterials = false;
         // Binding 6: scene light count plus shadow/world globals.
         VulkanRT::BufferHandle materialPreviewSceneGlobals;
         void* materialPreviewSceneGlobalsMapped = nullptr;
@@ -2041,7 +2457,11 @@ protected:
         float gridBuiltFineHalf = 0.0f; // minor-lattice half-extent (drives the minor fade band)
 
         // Hair polyline overlay (Solid/Matcap viewport)
+        VkPipelineLayout hairLinePipelineLayout = VK_NULL_HANDLE;
         VkPipeline hairLinePipeline = VK_NULL_HANDLE;
+        VkDescriptorSetLayout hairDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool hairDescPool = VK_NULL_HANDLE;
+        VkDescriptorSet hairDescSet = VK_NULL_HANDLE;
         VulkanRT::BufferHandle hairLineVertexBuffer;
         uint32_t hairLineVertexCount = 0;
 
@@ -2097,6 +2517,7 @@ protected:
         VkFramebuffer selectionMaskFramebuffer = VK_NULL_HANDLE;
         VkFramebuffer selectionCompositeFramebuffer = VK_NULL_HANDLE;
         VulkanRT::BufferHandle selectionInstanceBuffer;
+        std::vector<float> selectionUploadedMatrices;
         SelectionOutlineParams selectionOutlineParams;
     };
 
@@ -2138,6 +2559,82 @@ protected:
     int   m_debugView = 0;
     float m_debugExposure = 1.0f;
     float m_debugOverlay = 0.0f;
+    // ── TAA durumu ──────────────────────────────────────────────────────────
+    // ★★★★★ ORNEK BIRIKTIRMEK ICIN KARE GEREK, ve raster viewport yalnizca
+    //   DIRTY oldugunda ciziyor. Yani "kamera durunca yakinsasin" kendiliginden
+    //   olmaz: yakinsayana kadar bir sonraki kareyi BIZ istemeliyiz. Hedefe
+    //   ulasinca istemeyi birakir, yani hareketsiz bir sahnede GPU bosa yanmaz.
+    //   Bu, TAA'yi "bedava" sanmanin bedelini gorunur kilan yer: yakinsama
+    //   suresince viewport her kare cizer.
+    bool m_taaEnabled = true;
+    uint32_t m_taaTargetSamples = 16;
+    uint32_t m_taaFrameIndex = 0;      // 0 = gecmis yok, bu kare TAM agirlikli
+    // ── TAA double-precision kamera durumu ──────────────────────────────────
+    // ★★★★★ NEDEN DOUBLE: generic float32 Matrix4x4::inverse() perspektif
+    //   matrisine uygulandiginda zFar/zNear koşul sayisi (~1e8) float32'nin
+    //   goreli hassasiyetiyle (~1e-7) carpilir → ~10 NDC hata → her karede
+    //   10+ piksel hayalet. Matrisler analitik formule ve double hassasiyetiyle
+    //   yeniden üretilir; bu sekilde cancellation ve koşul sayisi sorunu
+    //   birlikte ortadan kalkar.
+    double m_taaCurViewD[4][4]{};   // bu karenin view matrisi (jitter oncesi)
+    double m_taaCurProjD[4][4]{};   // bu karenin proj matrisi (jitter oncesi)
+    double m_taaPrevViewD[4][4]{};  // bir onceki karenin view matrisi
+    double m_taaPrevProjD[4][4]{};  // bir onceki karenin proj matrisi
+    bool   m_taaPrevDValid = false; // ilk kare geçene kadar false
+
+    // ★★★★★ SERBEST AKAN kare sayaci, ve `m_taaFrameIndex`ten AYRI olmasi
+    //   sart: o bir YAKINSAMA sayaci, bu bir ZAMAN sayaci. Ikisi ayni seye
+    //   benziyor ve ayni degil -- yakinsama sayaci hedefe varinca DOYAR
+    //   (`if (m_taaFrameIndex < m_taaTargetSamples) ++...`), zaman sayaci
+    //   ise cizilen her karede artar.
+    //
+    // ★★★★ Ikisini karistirmanin belirtisi 2026-09-15'te bildirildi: "taa
+    //   once devreye giriyor, en son gurultulu sahne basiliyor". Mekanizma:
+    //   ekran GI tohumu `m_taaFrameIndex`e bagliydi, TAA yakinsayinca tohum
+    //   DONUYORDU, ve tam o sirada probe alani hala pompaladigi icin kareler
+    //   cizilmeye devam ediyordu. Her kare BIT AYNI gurultu deseniyle
+    //   uretiliyor ve TAA onu 1/(n+1) ile kendi gecmisine tekrar tekrar
+    //   katiyordu -- yani gurultuyu ortalamak yerine KALICILASTIRIYORDU.
+    //
+    // ★★★ Eski gerekce ("ortalanacak bir sey yokken donmus gurultu dogrudur")
+    //   viewport BOSTAYKEN dogruydu. Kaciran kosul, viewport'un bosta
+    //   olmadigi ama TAA'nin doymus oldugu ARA DURUMDU.
+    uint64_t m_rasterFrameCounter = 0;
+    // GPU secim gecisi, cizilen karenin JITTERSIZ matrisini kullanir.
+    Matrix4x4 m_rasterPickViewProj{};
+    bool m_rasterPickHasViewProj = false;
+    std::shared_ptr<class ObjectPickResources> m_objectPick;
+public:
+    // ★★★ Sonuc ADLA degil KIMLIKLE cozulur: mesh yuvasi ve instance yuvasi
+    //   `m_rasterInstances` indeksine cevrilir. Eski OptiX GPU secimi tam da
+    //   ID->ad->secim onbellegi cozumlemesi yuzunden kapatilmisti
+    //   (`if (false && ...)`), ve o onbellek bayatti.
+    struct ObjectPickResult {
+        bool ok = false;
+        bool hit = false;
+        std::string object;        // nodeName, kimlikle cozuldu
+        int  instance_index = -1;  // m_rasterInstances indeksi
+        std::string mesh_key;
+        std::string reason;        // neden calismadi
+        double gpu_ms = 0.0;
+    };
+    // ★★★ NORMALIZE koordinat alir, piksel DEGIL: cagirani viewport'un o anki
+    //   cozunurlugunu bilmeye zorlamak, yanlis cozunurlukle gonderilen bir
+    //   pikselin tam olarak teshis etmeye calistigimiz belirtiyi (yanlis obje)
+    //   uretmesi demekti. v YUKARI dogrudur.
+    bool pickObjectAtNormalized(float u, float v, ObjectPickResult& out);
+    bool pickObjectAtPixel(int x, int y, ObjectPickResult& out);
+    void destroyObjectPick();
+protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapanmali
+    uint32_t m_taaHistoryParity = 0;   // bu karenin yazdigi history slotu
+    Matrix4x4 m_taaPrevViewProj;       // JITTERSIZ, yeniden izdusum icin
+    bool m_taaHasPrevViewProj = false;
+    double m_taaLastMs = 0.0;
+    // Realtime raster depth of field (raster_post.comp). Radius comes from the
+    // camera lens; these are the cost knobs. See recordRasterPostPass.
+    bool     m_rasterDepthOfField = true;
+    float    m_rasterDofMaxCoCPixels = 24.0f;
+    uint32_t m_rasterDofMaxTaps = 64u;
     // Tonemap-side debug state changed while accumulation is complete: the next
     // renderProgressive call re-runs ONLY tonemap + readback (no trace, no
     // sample added) so the toggle shows up without waiting for camera motion.
@@ -2394,6 +2891,17 @@ protected:
         std::vector<float> cpuPositions;
         std::vector<float> cpuNormals;
         std::vector<uint32_t> cpuMatIds;
+        RasterMaterialUsage materialUsage;
+        // ★★★★ RayFusion'in publication imzasi bu akisin ICERIGINE bakar
+        //   (materyal yeniden atamasi GPU tamponunu YERINDE gunceller, adres
+        //   degismez). O hash her kare yeniden hesaplaniyordu ve maliyeti
+        //   TLAS instance sayisiyla CARPILIYORDU: 97,6M instance ucgenlik bir
+        //   sahnede kare basina ~1 GB'lik seri bayt hash'i, tek cekirdekte.
+        //   Belirti "CPU %6" idi -- yani 16 mantiksal cekirdegin BIRI %100.
+        //   Hash artik degistiginde hesaplanir; gecerlilik bayragini dusurmek
+        //   cpuMatIds'e yazan HER yerin isi (bkz. audit_rayfusion_probe_grid).
+        mutable uint64_t matIdsHash = 0;
+        mutable bool matIdsHashValid = false;
         // ★★ Scatter proxy'si icin gerekli: impostor seridinin her dilimi,
         //   o dilimin SILUETINI belirleyen kaynak vertex'inin UV'sini ve
         //   materyalini devralir. Bunlar CPU'da tutulmadan proxy'nin
@@ -2424,6 +2932,14 @@ protected:
     std::unordered_map<std::string, RasterMeshBuffer> m_rasterMeshes;
     std::vector<RasterInstance> m_rasterInstances;
     std::vector<VulkanRT::VkGpuMaterial> m_cachedGpuMaterials;
+    // CPU-side cache of hair materials for RayFusion bounce table builder.
+    // Populated by uploadHairMaterials(); consumed by prepareRayFusionBounce().
+    std::vector<VulkanRT::HairGpuMaterial> m_cachedHairGpuMaterials;
+    RasterMaterialPrograms m_rasterMaterialPrograms;
+    bool materialPreviewMeshNeedsTransmission(const RasterMeshBuffer& mesh) const;
+    VkPipeline materialPreviewShadingPipeline(const RasterMeshBuffer& mesh, bool depthPrepassActive) const;
+    void createMaterialPreviewCoveredPipeline(const VkGraphicsPipelineCreateInfo& base, const std::string& shaderDir);
+    void destroyMaterialPreviewCoveredPipeline();
     std::unordered_map<std::string, std::vector<uint32_t>> m_rasterNodeIndex;
     std::unordered_map<std::string, std::vector<uint32_t>> m_rtNodeIndex;
     size_t m_rasterNodeIndexInstanceCount = 0;
@@ -2434,25 +2950,216 @@ protected:
     // the same core; the giant backend files only contain integration wiring.
     std::shared_ptr<MaterialPreviewShadowResources> m_materialPreviewShadows;
     std::shared_ptr<MaterialPreviewIblResources> m_materialPreviewIbl;
+    std::shared_ptr<MaterialPreviewProbeResources> m_materialPreviewProbes;
+    std::shared_ptr<RayFusionSceneASResources> m_rayFusionSceneAS;
+    bool m_rayFusionSceneASYielded = false;
+    uint64_t m_rayFusionSceneASYields = 0;
+    std::shared_ptr<RayFusionProbeTraceResources> m_rayFusionProbeTrace;
+
+    // Same-frame directional RT shadows; off by default, cascade fallback.
+    std::shared_ptr<MaterialPreviewRtShadowResources> m_rtShadow;
+    std::shared_ptr<ScreenGiResources> m_screenGi;
+    RayFusion::ScreenGiSettings m_screenGiSettings;
+    RayFusion::ScreenGiStatus screenGiStatus() const override;
+    bool setScreenGi(const RayFusion::ScreenGiSettings&, std::string& error) override;
+    void resetScreenGiFrame(VkCommandBuffer cmd, uint32_t width, uint32_t height);
+    void prepareScreenGiFrame();
+    void recordScreenGi(VkCommandBuffer cmd, const Matrix4x4& viewProj);
+    void destroyScreenGi();
+
+    // ★★★★★ Piksel basina spekuler yansima. Bu gecis env lookup'ini DEGISTIRIR,
+    //   metalik bir terim EKLEMEZ: fragment shader agirligi G-buffer'a yazar,
+    //   gecis `agirlik * (izlenen - env(R))` ekler. Iskalayan isin goruntuyu HIC
+    //   degistirmez (dikis yapisal olarak olusamaz) ve gecis hic kosmazsa
+    //   goruntu bugunkunun aynisi kalir.
+    // ★ SIRALAMA: `record` ana HDR gecisi KAPANDIKTAN sonra, transmission
+    //   replay'den ONCE kosar -- cam boylece yansima duzeltilmis bir goruntuyu
+    //   kirar. Screen GI'in yerinde kosamaz: orada G-buffer'i yazan hicbir sey
+    //   henuz kosmamistir.
+    std::shared_ptr<ReflectionResources> m_reflection;
+    // ★ POD bayrak: kare dongusu TU'su `ReflectionResources`i EKSIK tip olarak
+    //   goruyor, yani oradan `m_reflection->recorded` okunamaz. Ayni desen
+    //   `m_rtShadowCoveredLastFrame`de de bu yuzden var.
+    bool m_reflectionRecordedLastFrame = false;
+    RayFusion::ReflectionSettings m_reflectionSettings;
+    RayFusion::ReflectionStatus reflectionStatus() const override;
+    bool setReflection(const RayFusion::ReflectionSettings&, std::string& error) override;
+    void resetReflectionFrame(uint32_t width, uint32_t height);
+    void prepareReflectionFrame();
+    void recordReflectionPass(VkCommandBuffer cmd, const Matrix4x4& viewProj,
+                              const Matrix4x4& view, uint32_t width, uint32_t height);
+    void destroyReflection();
+    bool m_rtShadowAllowed = true;
+    bool m_rtShadowHasMaterialPrograms = false;
+    void updateRtShadowMaterialPrograms(const std::vector<uint32_t>& words);
+    bool ensureRtShadowResources(uint32_t width, uint32_t height);
+    bool prepareRtShadowFrame(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool eligible);
+    void resumeRtShadowShading(VkCommandBuffer cmd, const Matrix4x4& viewProj,
+                               const VkRenderPassBeginInfo& original);
+    void destroyRtShadowResources();
+    void recordRtShadowPass(VkCommandBuffer cmd, const Matrix4x4& viewProj,
+                            uint32_t width, uint32_t height);
+    bool setRtShadow(bool enabled) override;
+    bool rtShadowAllowed() const override { return m_rtShadowAllowed; }
+    bool getRtShadowStatus(bool& supported, bool& ready, uint32_t& rays,
+                           uint32_t& cascadesReplaced,
+                           std::string& reason) const override;
+    // ★★★ THE single answer to "will the ray pass own this light this frame".
+    //   prepareRtShadowFrame picks its light with this, and the cascade builder
+    //   decides to stand down with this. Two predicates would drift, and the
+    //   drift is silent in BOTH directions: one way the light is shadowed twice
+    //   (cost), the other way not at all (a hole).
+    //   CPU state only -- it has to be answerable before the frame's command
+    //   buffer opens, which is where the cascade views are already built.
+    // ★★★★ Bir ISIK degil bir ISIK KUMESI. Dunya gunesi ile bir Directional
+    //   sahne isigi bu uygulamada birbirine SENKRONLANIR (sun_elevation/azimuth
+    //   degisince ilk directional isik ayni yone yazilir; bkz.
+    //   syncDirectionalLightToWorldSun ve scene_ui_world.cpp). Yani raster tek
+    //   bir fiziksel gunes icin IKI cascade kumesi cizerken, tek bir ekran
+    //   maskesi ikisini de karsilar -- ayni yon, ayni gorunurluk.
+    //   ★ Kapsama, senkron ANAHTARINA degil OLCULEN YONE bakar: bir isik ancak
+    //   yonu birincil yonle ayni ise (dot >= kAlignDot) devralinir. UI anahtari
+    //   kapali ama yonler denk ise yine devralinir; anahtar acik ama biri elle
+    //   cevrilmisse devralinmaz. Bayrak bir niyet, yon bir olcumdur.
+   
+    bool rtShadowCoveredLight(RtShadowCoverage& coverage, std::string& reason) const;
+    // Last frame's ACTUAL outcome, not this frame's intent. The scene AS is
+    // built one call AFTER the cascade views (it hangs off the world bindings,
+    // which must run after the shadow prepare because that prepare can reseat
+    // their buffer), so readiness cannot be read in time. Standing down on the
+    // previous frame's measured success makes the miss self-correcting: the
+    // frame RT fails, this goes false and the cascade is back the next frame.
+    bool m_rtShadowCoveredLastFrame = false;
+    uint32_t m_rtShadowCascadesReplaced = 0;
+
+    // ── Per-pass frame timing ───────────────────────────────────────────────
+    // ★★★★★ Added 2026-09-09. Before this, a 467 ms foliage frame had NO
+    //   breakdown at all: the 92 ms the RT shadow handoff saved had to be
+    //   inferred from an A/B on the display loop period, one frame per IPC
+    //   round trip. That answers "did this switch help" and nothing else.
+    RasterGpuTimers m_rasterGpuTimers;
+    RasterStageAccumulator m_rasterStageAccum;
+    // Host time recorded per stage this frame, same order as RasterStage.
+    std::array<double, RasterStageAccumulator::kStageCount> m_rasterCpuStageMs{};
+    std::chrono::steady_clock::time_point m_rasterStageClock{};
+    // ★★★★ What the LAST frame actually did, not what the arm asks for. The RT
+    //   shadow pass forces a depth prepass on whether or not the user's arm is
+    //   set, so reading the arm made the instrument contradict ITSELF: measured
+    //   2026-09-09, applied.depth_prepass said false in the same window where
+    //   the depth_prepass stage reported 19.5 ms with frames_ran = every frame.
+    bool m_rasterDepthPrepassRan = false;
+    // Closes the host clock on `stage` and opens the next one. Paired with the
+    // GPU mark at the same call site so the two halves cannot describe
+    // different boundaries.
+    void markRasterStage(VkCommandBuffer cmd, RasterStage stage, bool ran);
+    // MaterialPreviewShadowResources is opaque outside its own translation
+    // unit, so the two facts the instrument needs about the atlas come through
+    // here rather than by reaching into an incomplete type.
+    void materialPreviewShadowAtlasState(bool& active, uint32_t& shadowedLights) const;
+    void beginRasterStageTimings(VkCommandBuffer cmd);
+    void publishRasterStageTimings(VkCommandBuffer cmd, double frameCpuMs,
+                                   uint64_t visibleTriangles, uint32_t drawCalls);
+    RasterAppliedState sampleRasterAppliedState() const;
+    // ★ Deliberately left in this `protected:` section, like getRtShadowStatus
+    //   above it. These override PUBLIC virtuals on IBackend, and callers reach
+    //   them through that base -- so narrowing the access here costs nothing and
+    //   inserting a `public:`/`private:` pair would silently re-section every
+    //   member below, which the derived viewport backend reads.
+    bool getRasterStageTimings(RasterStageTimings& out) const override;
+    bool resetRasterStageTimings() override;
+
+    // ── Per-pass frame timing ───────────────────────────────────────────────
+    // ★★★★★ Added 2026-09-09. Before this, a 467 ms foliage frame had NO
+    //   breakdown at all: the 92 ms the RT shadow handoff saved had to be
+    //   inferred from an A/B on the display loop period, one frame per IPC
+    //   round trip. That answers "did this switch help" and nothing else.
+ 
+   
+    // Host time recorded per stage this frame, same order as RasterStage.
+    
+  
+    // Closes the host clock on `stage` and opens the next one. Paired with the
+    // GPU mark at the same call site so the two halves cannot describe
+    // different boundaries.
+   
+ 
+    void publishRasterStageTimings(double frameCpuMs);
+   
+public:
+   
+   
+    bool m_rasterUseGlobalInstBuffer = false;  // false = CPU fallback
+    void refreshRasterInstanceLayout();
+    uint64_t m_rasterBuiltGeometryGeneration = 0;
+    // ★★★★ Bumped when the skinned raster vertex buffers are rewritten in
+    //   place WITH A DIFFERENT POSE. The RayFusion AS gate hashes buffer
+    //   HANDLES and counts, and GPU skinning changes neither -- so without a
+    //   counter the gate is structurally unable to see a deforming mesh, and
+    //   the traced shadow stays at the pose of the frame the AS was built in.
+    //
+    //   ★★★★★ MEASURED 2026-09-13, and it is why the pose hash exists: bumping
+    //   this whenever the skinning DISPATCH ran cost 2.18 ms of refit every
+    //   frame on a timeline PARKED at frame 0 -- roughly twice the entire
+    //   1.20 ms render frame, spent reproducing a tree that was already
+    //   correct. The compute dispatch runs unconditionally; "a dispatch
+    //   happened" is therefore not evidence that anything MOVED. Only
+    //   noteSkinnedPose() may touch this.
+    uint64_t m_rasterSkinGeneration = 0;
+    uint64_t m_rasterSkinPoseHash = 0;
+    const char* m_rasterBuiltGenSource = "init";
+    std::string m_rayFusionShaderDir;
     std::shared_ptr<MaterialPreviewTransmissionResources> m_materialPreviewTransmission;
     std::shared_ptr<MaterialPreviewSdfSurfaceResources> m_materialPreviewSdfSurface;
     std::shared_ptr<MaterialPreviewVolumeResources> m_materialPreviewVolume;
-
-    // ── Production instancing: single global instance buffer ────────────
+    bool m_rasterDepthPrepassAllowed = false;
     std::unique_ptr<Backend::RasterGlobalInstanceBuffer> m_rasterGlobalInstBuf;
     bool m_rasterGlobalInstLayoutDirty = true;   // mesh→firstInstance stale
-    bool m_rasterUseGlobalInstBuffer   = false;  // false = CPU fallback
+private:
+    std::shared_ptr<RayFusionBounceResources> m_rayFusionBounce;
+    // Where the compiled SPV lives. Cached when the IBL resources are created,
+    // because the per-frame probe service has no shader-dir argument and adding
+    // one to every caller would spread a path through the frame loop.
+   
+
+    // ── Production instancing: single global instance buffer ────────────
+  
+   
     void rebuildRasterInstanceLayout();           // compact pack all meshes
+    // Layout + upload in ONE body. Every geometry build must end here; the
+    // realtime viewport's override once carried its own copy of this tail and
+    // silently dropped the layout call, which left GPU culling permanently off.
+  
+    // A/B lever for the whole global-instance-buffer + GPU-culling path. False
+    // forces the per-mesh fallback, which is what shipped before 2026-09-08.
+    bool setRasterGpuInstancing(bool enabled) override;
+    bool rasterGpuInstancingAllowed() const override { return m_rasterGpuInstancingAllowed; }
+    bool m_rasterGpuInstancingAllowed = true;
+    bool setRasterDepthPrepass(bool enabled) override;
+    bool rasterDepthPrepassAllowed() const override { return m_rasterDepthPrepassAllowed; }
+    // ★★★★ VARSAYILAN KAPALI, ve bu bir OLCUM sonucudur (2026-09-08).
+    //   Orman sahnesinde dort turda: KAPALI 323,5/323,7/324,4/324,1 ms,
+    //   ACIK 339,0/366,8/337,4/340,9 -- yani on gecis ~22 ms (%7) EKLIYOR ve
+    //   olculebilir hicbir sey kazandirmiyor.
+    //   Anlami: bu sahnedeki maliyet OKLUZYON overdraw'i degil, mikro-ucgen
+    //   QUAD KUANTALAMASI. Derinlik testi yalnizca GIZLI fragment'i eler;
+    //   piksel-altindaki her ucgen kendi 2x2 quad'ini yine de calistirir ve o
+    //   fragment'ler GORUNURDUR -- elenecek bir sey yok.
+    //   ⚠ Ayrilamayan ikinci ihtimal: ana fragment shader'da `discard` var ve
+    //   `early_fragment_tests` beyani YOK, yani surucu erken-Z REDDINI tamamen
+    //   kapatmis olabilir. Ikisi de ayni olcumu uretir.
+    //   Kol ve pipeline KORUNDU: RT golge maskesi icin piksel basina derinlik
+    //   gerekiyor ve orada 113 ms'lik golge terimine karsi 22 ms iyi bir takas.
+   
     void writeRasterInstanceTransformsToGlobal(); // batch write all transforms
 
     // Generation counter: last g_scene_geometry_generation value seen when
     // raster geometry was built.  Allows skipping redundant rebuilds on
     // Rendered→Solid transitions when scene geometry hasn't changed.
-    uint64_t m_rasterBuiltGeometryGeneration = 0;
+   
     // Attribution for the token above: which code path last wrote it. Only a FULL
     // raster build may write it; this string is logged by the early-out so a cache
     // that wrongly claims to be current names its writer instead of hiding.
-    const char* m_rasterBuiltGenSource = "init";
+    
 private:
     // Solo-mesh BLAS build-order triangle pointers (blasIndex -> ordered tris).
     // Captured during full geometry build so the interactive sculpt/edit refit
@@ -2473,6 +3180,27 @@ private:
     std::unordered_map<uint32_t, SoloIndexedMeshInfo> m_soloBlasIndexedMesh;
     // Re-reads a solo indexed BLAS's mesh SoA and MODE_UPDATE-refits it (no 3N gather).
     bool refitIndexedSoloBLAS(uint32_t blasIndex);
+    // *** CPU mirror for that refit. It REPLACES the two full-size temporaries
+    //   the refit used to allocate and free on EVERY sculpt dab, and it is what
+    //   lets the refit upload only the vertex range that actually moved.
+    //   ONE slot on purpose: only one object is edited at a time, so a second
+    //   index simply takes the slot over (its buffers are reused, not
+    //   reallocated). Animation that rotates through several meshes therefore
+    //   never accumulates mirrors -- it just keeps paying the full upload it
+    //   already paid before this existed.
+    struct BlasRefitMirror {
+        std::vector<float> positions;
+        std::vector<float> normals;
+        // A mesh whose whole shape changes per refit (keyframed/skinned) gains
+        // nothing from the diff, so after a refit that dirtied most of the mesh
+        // the diff is skipped -- but re-probed periodically, otherwise sculpting
+        // a mesh that was animated earlier would be stuck on the slow path.
+        bool diffWorthwhile = true;
+        uint32_t refitsSinceProbe = 0;
+    };
+    static constexpr uint32_t kBlasRefitDiffProbeInterval = 16;
+    uint32_t m_blasRefitMirrorIndex = UINT32_MAX;
+    BlasRefitMirror m_blasRefitMirror;
     struct InstanceTransformCache { int instance_id; std::shared_ptr<Hittable> representative_hittable; };
     std::vector<InstanceTransformCache> m_instance_sync_cache;
     // Last scatter transform generation consumed by the Vulkan TLAS. Static
@@ -2486,6 +3214,8 @@ private:
     bool queueGpuScatterInstanceUpdate(const std::unordered_set<int>& dirtyGroups);
     void recordGpuInstancePrepass(VkCommandBuffer cmd, uint32_t frameSlot);
     bool m_topology_dirty = false; // set when instances/BLAS list changes
+    std::vector<Matrix4x4> m_currentSkinMatrices;
+    void restoreCurrentSkinning(const std::vector<std::shared_ptr<Hittable>>& objects, bool rasterOnly);
     // Lifetime sentinel shared with destroyFn lambdas stored in SceneTextureManager.
     // Set to false before container teardown so lambdas that outlive this backend
     // skip the container-erase step and only destroy GPU handles.
@@ -2616,6 +3346,13 @@ private:
     // Set to true after uploadAtmosphereLUT() succeeds — used to set _pad5 (nishitaLutReady) in world buffer
     bool m_atmosphereLutReady = false;
     bool m_atmosphereLutGenerationInProgress = false;
+    // ★★★★ LUT'un HANGI atmosferden uretildigi. `World::needsLUTUpdate()` TEK
+    //   ve PAYLASILAN bir bayrak; iki adapter (RT + raster viewport) ayri
+    //   VkDevice'ta yasadigi icin ilk uretip `clearLUTDirty()` cagiran otekini
+    //   BAYAT LUT ile birakiyordu -- ve `m_atmosphereLutReady` hala true
+    //   oldugundan emniyet agi da devreye girmiyordu. "Hazir mi" bir olcum
+    //   degil; "NEYE gore hazir" olcumdur.
+    uint64_t m_atmosphereLutSignature = 0;
     uint64_t m_lastCameraHash = 0;
     Vec3 m_prevViewDir;
     bool  m_hasPrevView = false;
@@ -2717,6 +3454,10 @@ private:
     struct RasterGeometryStats {
         bool          global_instance_buffer = false;
         bool          gpu_culling = false;
+        // ★ Derinlik on gecisi bu karede KOSTU mu -- ISTENEN degil UYGULANAN.
+        //   Kol acik olsa da pipeline kurulamamis olabilir; o zaman sessizce
+        //   eski tek gecisli yola dusulur ve ekranda hicbir farki olmaz.
+        bool          depth_prepass = false;
         std::uint32_t total_instances = 0;
         std::uint32_t cull_mesh_count = 0;
         std::uint32_t draw_calls = 0;
@@ -2762,10 +3503,11 @@ private:
     // and the Rendered-mode mask readback. Caller must hold m_mutex.
    
     // Resolves node names against m_rasterInstances and uploads one matrix
-    // per matched instance into selectionInstanceBuffer (must run before
-    // command recording starts — the upload submits its own transfer).
+    // per matched instance into selectionInstanceBuffer. The shared uploader
+    // drains before changed host writes; call before command recording starts.
     void resolveSelectionOutlineDraws(const std::vector<std::string>& nodeNames,
                                       std::vector<SelectionOutlineDrawItem>& outDraws);
+    bool uploadSelectionOutlineMatrices(const std::vector<float>& matrices);
     // Records the R8G8 mask render pass (G = depth-test-off silhouette,
     // R = visible vs the depth already in depthImage) into cmd.
     void recordSelectionOutlineMaskPass(VkCommandBuffer cmd,

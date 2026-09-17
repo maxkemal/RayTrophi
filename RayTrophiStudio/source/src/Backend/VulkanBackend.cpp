@@ -1,4 +1,5 @@
 #include "PostProcess/Exposure.h"
+#include "Viewport/AutomaticCutout.h"
 /*
  * =========================================================================
  * Project:       RayTrophi Studio
@@ -8,6 +9,7 @@
  * =========================================================================
  */
 #include "Backend/VulkanBackend.h"
+#include <atomic>
 #include "PerfProfile.h"
 #include "TerrainSemanticMap.h"
 #include "Backend/vulkan_world_data.h"
@@ -867,6 +869,7 @@ void VulkanDevice::shutdown() {
             vkFreeCommandBuffers(m_device, m_commandPool, 1, &m_batchBLASCmd);
             m_batchBLASCmd = VK_NULL_HANDLE;
         }
+        m_pendingCompactions.clear();
         if (m_batchScratchBuffer.buffer) {
             destroyBuffer(m_batchScratchBuffer);
         }
@@ -889,7 +892,7 @@ void VulkanDevice::shutdown() {
             auto safeDestroy = [&](VulkanRT::BufferHandle& bh) {
                 if (bh.buffer && destroyedBuffers.find(bh.buffer) == destroyedBuffers.end()) {
                     vkDestroyBuffer(m_device, bh.buffer, nullptr);
-                    if (bh.memory) vkFreeMemory(m_device, bh.memory, nullptr);
+                    if (bh.memory) freeTrackedMemory(bh.memory);
                     destroyedBuffers.insert(bh.buffer);
                 }
                 bh = {};
@@ -925,7 +928,7 @@ void VulkanDevice::shutdown() {
         }
         if (m_tlas.buffer.buffer) {
             vkDestroyBuffer(m_device, m_tlas.buffer.buffer, nullptr);
-            vkFreeMemory(m_device, m_tlas.buffer.memory, nullptr);
+            freeTrackedMemory(m_tlas.buffer.memory);
         }
         if (m_tlasInstanceBuffer.buffer) {
             destroyBuffer(m_tlasInstanceBuffer);
@@ -1001,8 +1004,16 @@ void VulkanDevice::shutdown() {
             adoptSimComputeContextIfOrphaned();
         }
 
+        if (m_compactionQueryPool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(m_device, m_compactionQueryPool, nullptr);
+            m_compactionQueryPool = VK_NULL_HANDLE;
+        }
+        m_pendingCompactions.clear();
         vkDestroyDevice(m_device, nullptr);
         m_device = VK_NULL_HANDLE;
+        // Whatever was still tracked went with the device.
+        std::lock_guard<std::mutex> lock(m_vramTrackMutex);
+        m_vramTracked.clear();
     }
 
     if (m_debugMessenger && m_instance) {
@@ -1258,6 +1269,13 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // Deferred host operations (required by accel struct)
     bool hasDeferredOps = hasExtension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
     if (hasDeferredOps) deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+
+    // Memory budget: read-only query, no feature bit. Lets an OOM be reported
+    // against a measured total instead of guessed at.
+    if (hasExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
+        deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        m_capabilities.supportsMemoryBudget = true;
+    }
 
     // Ray tracing extensions
     bool hasAccelStruct = hasExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
@@ -1582,7 +1600,11 @@ void VulkanDevice::loadRayTracingFunctions() {
     LOAD_VK_FUNC(CreateRayTracingPipelinesKHR);
     LOAD_VK_FUNC(GetRayTracingShaderGroupHandlesKHR);
     LOAD_VK_FUNC(GetBufferDeviceAddressKHR);
+    LOAD_VK_FUNC(CmdCopyAccelerationStructureKHR);
+    LOAD_VK_FUNC(CmdWriteAccelerationStructuresPropertiesKHR);
     #undef LOAD_VK_FUNC
+    m_compactionStats.supported =
+        fpCmdCopyAccelerationStructureKHR && fpCmdWriteAccelerationStructuresPropertiesKHR;
 
     VK_INFO() << "[VulkanDevice] RT functions loaded" << std::endl;
 }
@@ -1711,6 +1733,233 @@ void VulkanDevice::setupDebugMessenger() {
 // Buffer Operations
 // ========================================================================
 
+// ========================================================================
+// VRAM accounting
+// ========================================================================
+
+namespace {
+thread_local VramCategory t_vramCategory = VramCategory::Other;
+}
+
+const char* vramCategoryName(VramCategory category) {
+    switch (category) {
+    case VramCategory::Other:        return "other";
+    case VramCategory::Geometry:     return "geometry";
+    case VramCategory::AccelStruct:  return "accel_struct";
+    case VramCategory::Scratch:      return "scratch";
+    case VramCategory::Texture:      return "texture";
+    case VramCategory::RenderTarget: return "render_target";
+    default:                         return "unknown";
+    }
+}
+
+VramCategoryScope::VramCategoryScope(VramCategory category) : m_previous(t_vramCategory) {
+    t_vramCategory = category;
+}
+VramCategoryScope::~VramCategoryScope() { t_vramCategory = m_previous; }
+VramCategory VramCategoryScope::current() { return t_vramCategory; }
+
+void VulkanDevice::noteMemoryAllocated(VkDeviceMemory memory, uint64_t bytes,
+                                       uint32_t memoryTypeIndex, VramCategory category) {
+    if (memory == VK_NULL_HANDLE) return;
+    bool deviceLocal = false;
+    if (m_physicalDevice != VK_NULL_HANDLE) {
+        VkPhysicalDeviceMemoryProperties props;
+        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &props);
+        if (memoryTypeIndex < props.memoryTypeCount) {
+            const uint32_t heap = props.memoryTypes[memoryTypeIndex].heapIndex;
+            deviceLocal = heap < props.memoryHeapCount &&
+                (props.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+        }
+    }
+    std::lock_guard<std::mutex> lock(m_vramTrackMutex);
+    m_vramTracked[memory] = TrackedAllocation{ bytes, category, deviceLocal };
+}
+
+void VulkanDevice::freeTrackedMemory(VkDeviceMemory memory) {
+    if (memory == VK_NULL_HANDLE) return;
+    {
+        std::lock_guard<std::mutex> lock(m_vramTrackMutex);
+        m_vramTracked.erase(memory);
+    }
+    if (m_device != VK_NULL_HANDLE) vkFreeMemory(m_device, memory, nullptr);
+}
+
+VramAllocationReport VulkanDevice::vramAllocationReport() const {
+    VramAllocationReport report;
+    std::lock_guard<std::mutex> lock(m_vramTrackMutex);
+    for (const auto& kv : m_vramTracked) {
+        const TrackedAllocation& a = kv.second;
+        size_t c = static_cast<size_t>(a.category);
+        if (c >= static_cast<size_t>(VramCategory::Count)) c = 0;
+        VramCategoryUsage& u = report.categories[c];
+        (a.deviceLocal ? u.deviceLocalBytes : u.hostBytes) += a.bytes;
+        (a.deviceLocal ? report.deviceLocalBytes : report.hostBytes) += a.bytes;
+        ++u.allocations;
+        ++report.allocations;
+    }
+    return report;
+}
+
+// ========================================================================
+// BLAS compaction
+// ========================================================================
+
+namespace {
+std::atomic<bool> g_blasCompactionEnabled{ true };
+}
+
+void VulkanDevice::setBlasCompactionEnabled(bool enabled) {
+    g_blasCompactionEnabled.store(enabled, std::memory_order_release);
+}
+
+bool VulkanDevice::blasCompactionEnabled() {
+    return g_blasCompactionEnabled.load(std::memory_order_acquire);
+}
+
+BlasCompactionStats VulkanDevice::blasCompactionStats() const {
+    BlasCompactionStats out = m_compactionStats;
+    out.enabled = blasCompactionEnabled();
+    return out;
+}
+
+bool VulkanDevice::ensureCompactionQueryPool() {
+    if (m_compactionQueryPool != VK_NULL_HANDLE) return true;
+    if (m_device == VK_NULL_HANDLE) return false;
+    VkQueryPoolCreateInfo qpci{};
+    qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qpci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+    qpci.queryCount = kCompactionQueryCapacity;
+    if (vkCreateQueryPool(m_device, &qpci, nullptr, &m_compactionQueryPool) != VK_SUCCESS) {
+        m_compactionQueryPool = VK_NULL_HANDLE;
+        m_compactionStats.supported = false;
+        return false;
+    }
+    return true;
+}
+
+bool VulkanDevice::recordBlasCompactionQuery(VkCommandBuffer cmd, VkAccelerationStructureKHR accel) {
+    if (cmd == VK_NULL_HANDLE || accel == VK_NULL_HANDLE) return false;
+    if (!blasCompactionEnabled() || !m_compactionStats.supported) return false;
+    // Full: this BLAS simply stays uncompacted. Callers flush at most every
+    // four builds, so this is a guard, not a path.
+    if (m_pendingCompactions.size() >= kCompactionQueryCapacity) return false;
+    if (!ensureCompactionQueryPool()) return false;
+    const uint32_t query = static_cast<uint32_t>(m_pendingCompactions.size());
+    vkCmdResetQueryPool(cmd, m_compactionQueryPool, query, 1);
+    // Recorded AFTER the build command in the same buffer: the size is written
+    // when the build has executed, and read back once the submit completed.
+    fpCmdWriteAccelerationStructuresPropertiesKHR(
+        cmd, 1, &accel, VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+        m_compactionQueryPool, query);
+    m_pendingCompactions.push_back(PendingCompaction{ accel, query });
+    return true;
+}
+
+void VulkanDevice::finishPendingBlasCompactions() {
+    if (m_pendingCompactions.empty()) return;
+    const std::vector<PendingCompaction> pending = std::move(m_pendingCompactions);
+    m_pendingCompactions.clear();
+
+    std::vector<VkDeviceSize> sizes(pending.size(), 0);
+    if (vkGetQueryPoolResults(m_device, m_compactionQueryPool, 0,
+                              static_cast<uint32_t>(pending.size()),
+                              sizes.size() * sizeof(VkDeviceSize), sizes.data(),
+                              sizeof(VkDeviceSize), 0) != VK_SUCCESS) {
+        // No WAIT bit on purpose: the submit was already fenced, and a query
+        // whose command buffer never executed (device lost, discarded batch)
+        // would block forever. VK_NOT_READY is a failure, not a retry.
+        m_compactionStats.failures += pending.size();
+        return;
+    }
+
+    struct Job {
+        size_t blasIndex = 0;
+        AccelStructHandle compact;
+        uint64_t before = 0;
+    };
+    std::vector<Job> jobs;
+    jobs.reserve(pending.size());
+    for (size_t i = 0; i < pending.size(); ++i) {
+        // Addressed by handle, not index: the list is only appended to while
+        // builds are pending, but a handle cannot point at the wrong BLAS.
+        size_t blasIndex = m_blasList.size();
+        for (size_t k = m_blasList.size(); k-- > 0;) {
+            if (m_blasList[k].accel == pending[i].accel) { blasIndex = k; break; }
+        }
+        if (blasIndex == m_blasList.size()) continue;  // destroyed meanwhile
+        const AccelStructHandle& original = m_blasList[blasIndex];
+        const uint64_t before = original.buffer.size;
+        const VkDeviceSize compactSize = sizes[i];
+        // Nothing to gain (or a zero from a driver that ignored the query):
+        // keep the original rather than pay for a copy.
+        if (compactSize == 0 || compactSize >= before) continue;
+
+        Job job;
+        job.blasIndex = blasIndex;
+        job.before = before;
+        {
+            VramCategoryScope tag(VramCategory::AccelStruct);
+            BufferCreateInfo bi;
+            bi.size = compactSize;
+            bi.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
+            bi.location = MemoryLocation::GPU_ONLY;
+            job.compact.buffer = createBuffer(bi);
+        }
+        if (!job.compact.buffer.buffer) { ++m_compactionStats.failures; continue; }
+        VkAccelerationStructureCreateInfoKHR ci{};
+        ci.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+        ci.buffer = job.compact.buffer.buffer;
+        ci.size = compactSize;
+        ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        if (fpCreateAccelerationStructureKHR(m_device, &ci, nullptr, &job.compact.accel) != VK_SUCCESS ||
+            job.compact.accel == VK_NULL_HANDLE) {
+            destroyBuffer(job.compact.buffer);
+            ++m_compactionStats.failures;
+            continue;
+        }
+        jobs.push_back(std::move(job));
+    }
+    if (jobs.empty()) return;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) {
+        for (Job& job : jobs) {
+            fpDestroyAccelerationStructureKHR(m_device, job.compact.accel, nullptr);
+            destroyBuffer(job.compact.buffer);
+        }
+        m_compactionStats.failures += jobs.size();
+        return;
+    }
+    for (const Job& job : jobs) {
+        VkCopyAccelerationStructureInfoKHR copy{};
+        copy.sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR;
+        copy.src = m_blasList[job.blasIndex].accel;
+        copy.dst = job.compact.accel;
+        copy.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+        fpCmdCopyAccelerationStructureKHR(cmd, &copy);
+    }
+    endSingleTimeCommands(cmd);  // waits; the originals are unused from here
+
+    for (Job& job : jobs) {
+        AccelStructHandle& blas = m_blasList[job.blasIndex];
+        fpDestroyAccelerationStructureKHR(m_device, blas.accel, nullptr);
+        destroyBuffer(blas.buffer);
+        blas.accel = job.compact.accel;
+        blas.buffer = job.compact.buffer;
+        VkAccelerationStructureDeviceAddressInfoKHR addr{};
+        addr.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+        addr.accelerationStructure = blas.accel;
+        // ★ The TLAS references BLAS by this address. It is re-read from
+        //   m_blasList when instances are written, so the swap is complete here
+        //   -- as long as no TLAS is built from a stale copy before this runs.
+        blas.deviceAddress = fpGetAccelerationStructureDeviceAddressKHR(m_device, &addr);
+        ++m_compactionStats.compacted;
+        m_compactionStats.bytesBefore += job.before;
+        m_compactionStats.bytesAfter += blas.buffer.size;
+    }
+}
+
 uint32_t VulkanDevice::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProps);
@@ -1748,6 +1997,28 @@ VkMemoryPropertyFlags VulkanDevice::translateMemoryLocation(MemoryLocation locat
         case MemoryLocation::CPU_ONLY:  return VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         default: return VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     }
+}
+
+bool VulkanDevice::queryDeviceLocalMemory(uint64_t& usageBytes, uint64_t& budgetBytes) const {
+    usageBytes = 0;
+    budgetBytes = 0;
+    if (m_physicalDevice == VK_NULL_HANDLE || m_device == VK_NULL_HANDLE ||
+        !m_capabilities.supportsMemoryBudget) {
+        return false;
+    }
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+    budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+    VkPhysicalDeviceMemoryProperties2 props{};
+    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+    props.pNext = &budget;
+    vkGetPhysicalDeviceMemoryProperties2(m_physicalDevice, &props);
+    for (uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; ++i) {
+        if (props.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            usageBytes += budget.heapUsage[i];
+            budgetBytes += budget.heapBudget[i];
+        }
+    }
+    return true;
 }
 
 BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
@@ -1807,6 +2078,9 @@ BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
         handle = {};
         return handle;
     }
+    noteMemoryAllocated(handle.memory, memReq.size, allocInfo.memoryTypeIndex,
+                        info.category != VramCategory::Other ? info.category
+                                                             : VramCategoryScope::current());
     vkBindBufferMemory(m_device, handle.buffer, handle.memory, 0);
 
     // Get device address
@@ -1834,7 +2108,7 @@ void VulkanDevice::destroyBuffer(BufferHandle& buffer) {
         return;
     }
     if (buffer.buffer) vkDestroyBuffer(m_device, buffer.buffer, nullptr);
-    if (buffer.memory) vkFreeMemory(m_device, buffer.memory, nullptr);
+    if (buffer.memory) freeTrackedMemory(buffer.memory);
     buffer = {};
 }
 
@@ -1914,13 +2188,16 @@ BufferHandle VulkanDevice::createExportableBuffer(const BufferCreateInfo& info,
         handle = {};
         return handle;
     }
+    noteMemoryAllocated(handle.memory, memReq.size, memType,
+                        VramCategoryScope::current() == VramCategory::Other
+                            ? VramCategory::RenderTarget : VramCategoryScope::current());
     vkBindBufferMemory(m_device, handle.buffer, handle.memory, 0);
 
     // Resolve vkGetMemoryWin32HandleKHR (device extension entry point).
     auto fpGetMemHandle = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
         vkGetDeviceProcAddr(m_device, "vkGetMemoryWin32HandleKHR"));
     if (!fpGetMemHandle) {
-        vkFreeMemory(m_device, handle.memory, nullptr);
+        freeTrackedMemory(handle.memory);
         vkDestroyBuffer(m_device, handle.buffer, nullptr);
         handle = {};
         return handle;
@@ -1933,7 +2210,7 @@ BufferHandle VulkanDevice::createExportableBuffer(const BufferCreateInfo& info,
 
     HANDLE rawHandle = nullptr;
     if (fpGetMemHandle(m_device, &getHandleInfo, &rawHandle) != VK_SUCCESS || !rawHandle) {
-        vkFreeMemory(m_device, handle.memory, nullptr);
+        freeTrackedMemory(handle.memory);
         vkDestroyBuffer(m_device, handle.buffer, nullptr);
         handle = {};
         return handle;
@@ -2191,6 +2468,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         geomBufInfo.location = MemoryLocation::GPU_ONLY;
         geomBufInfo.initialData = nullptr;
 
+        VramCategoryScope tag(VramCategory::Geometry);
         geometryBuffer = createBuffer(geomBufInfo);
         if (!geometryBuffer.buffer) {
             VK_ERROR() << "[VulkanDevice] Failed to allocate combined geometry buffer for BLAS" << std::endl;
@@ -2213,6 +2491,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     // Build skinning separate buffers if required
     BufferHandle baseVertBuf, baseNormBuf, boneIdxBuf, boneWtBuf;
     if (info.hasSkinning && info.boneIndicesData && info.boneWeightsData) {
+        VramCategoryScope tag(VramCategory::Geometry);
         BufferCreateInfo sInfo;
         sInfo.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
         sInfo.location = MemoryLocation::GPU_ONLY;
@@ -2259,6 +2538,15 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
     if (info.allowUpdate) buildInfo.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    // ★ Refit-able BLAS ARE compacted: every indexed scene mesh is built
+    //   ALLOW_UPDATE (sculpt/deform refit), so excluding them measured as
+    //   compacted=0 of 1108 on a 36M-triangle scene. MODE_UPDATE never grows
+    //   the structure; only the skinned path rebuilds in place (MODE_BUILD),
+    //   and that needs the build-size allocation.
+    const bool wantCompaction = !info.hasSkinning &&
+                                blasCompactionEnabled() && m_compactionStats.supported;
+    if (wantCompaction) buildInfo.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+    else if (info.hasSkinning) ++m_compactionStats.skippedSkinned;
     buildInfo.geometryCount = 1;
     buildInfo.pGeometries = &geometry;
 
@@ -2278,7 +2566,10 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     asBufInfo.size = sizeInfo.accelerationStructureSize;
     asBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
     asBufInfo.location = MemoryLocation::GPU_ONLY;
-    blasHandle.buffer = createBuffer(asBufInfo);
+    {
+        VramCategoryScope tag(VramCategory::AccelStruct);
+        blasHandle.buffer = createBuffer(asBufInfo);
+    }
     if (!blasHandle.buffer.buffer) {
         destroyBuffer(geometryBuffer);
         destroyBuffer(baseVertBuf);
@@ -2316,6 +2607,9 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
     rangeInfo.primitiveCount = primitiveCount;
     const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfo = &rangeInfo;
+    // Non-batched builds compact as soon as the BLAS is in the list; batched
+    // ones at the next fragment flush.
+    bool compactAfterPush = false;
 
     if (m_inBatchedBLASBuild && m_batchBLASCmd) {
         // ── Batched mode: reuse single shared scratch buffer, record into batch cmd ──
@@ -2328,6 +2622,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         constexpr uint32_t kMaxBLASBuildsPerSubmission = 4u;
         if (m_batchBLASInCurrentCmd >= kMaxBLASBuildsPerSubmission) {
             endSingleTimeCommands(m_batchBLASCmd);
+            finishPendingBlasCompactions();
             m_batchBLASCmd = beginSingleTimeCommands();
             if (m_batchBLASCmd == VK_NULL_HANDLE) {
                 if (m_batchScratchBuffer.buffer) destroyBuffer(m_batchScratchBuffer);
@@ -2339,6 +2634,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
             // Scratch buffer too small — flush pending builds, then resize
             if (m_batchScratchBuffer.buffer && m_batchBLASInCurrentCmd > 0) {
                 endSingleTimeCommands(m_batchBLASCmd);
+                finishPendingBlasCompactions();
                 m_batchBLASCmd = beginSingleTimeCommands();
                 if (m_batchBLASCmd == VK_NULL_HANDLE) {
                     if (m_batchScratchBuffer.buffer) destroyBuffer(m_batchScratchBuffer);
@@ -2351,7 +2647,10 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
             scrBuf.size = alignedScratchSize;
             scrBuf.usage = BufferUsage::STORAGE;
             scrBuf.location = MemoryLocation::GPU_ONLY;
-            m_batchScratchBuffer = createBuffer(scrBuf);
+            {
+                VramCategoryScope tag(VramCategory::Scratch);
+                m_batchScratchBuffer = createBuffer(scrBuf);
+            }
             if (!m_batchScratchBuffer.buffer) {
                 return UINT32_MAX;
             }
@@ -2368,6 +2667,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         }
         buildInfo.scratchData.deviceAddress = m_batchScratchBuffer.deviceAddress;
         fpCmdBuildAccelerationStructuresKHR(m_batchBLASCmd, 1, &buildInfo, &pRangeInfo);
+        if (wantCompaction) recordBlasCompactionQuery(m_batchBLASCmd, blasHandle.accel);
         m_batchBLASCount++;
         m_batchBLASInCurrentCmd++;
     } else {
@@ -2376,7 +2676,11 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         scratchBufInfo.size = alignedScratchSize;
         scratchBufInfo.usage = BufferUsage::STORAGE;
         scratchBufInfo.location = MemoryLocation::GPU_ONLY;
-        auto scratchBuffer = createBuffer(scratchBufInfo);
+        BufferHandle scratchBuffer;
+        {
+            VramCategoryScope tag(VramCategory::Scratch);
+            scratchBuffer = createBuffer(scratchBufInfo);
+        }
         if (!scratchBuffer.buffer) return UINT32_MAX;
         buildInfo.scratchData.deviceAddress = scratchBuffer.deviceAddress;
 
@@ -2386,6 +2690,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
             return UINT32_MAX;
         }
         fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
+        compactAfterPush = wantCompaction && recordBlasCompactionQuery(cmd, blasHandle.accel);
         endSingleTimeCommands(cmd);
         destroyBuffer(scratchBuffer);
     }
@@ -2436,6 +2741,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     blasHandle.hasSkinning = info.hasSkinning;
     blasHandle.allowUpdate = info.allowUpdate;
     blasHandle.geometryFlags = geometry.flags;
+    blasHandle.buildFlags = buildInfo.flags;
     blasHandle.vertexCount = info.vertexCount;
     blasHandle.indexCount = info.indexCount;
     if (info.hasSkinning) {
@@ -2447,6 +2753,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
 
     uint32_t idx = (uint32_t)m_blasList.size();
     m_blasList.push_back(blasHandle);
+    if (compactAfterPush) finishPendingBlasCompactions();
 
     if (!m_inBatchedBLASBuild) {
         VK_INFO() << "[VulkanDevice] BLAS created (index=" << idx
@@ -2576,6 +2883,44 @@ bool VulkanDevice::dispatchSkinningToBuffers(BufferHandle& baseVertexBuffer,
     return true;
 }
 
+bool VulkanDevice::uploadBLASVertexRange(uint32_t blasIndex,
+                                         const float* positions,
+                                         const float* normals,
+                                         uint32_t firstVertex,
+                                         uint32_t vertexCount) {
+    if (blasIndex >= m_blasList.size() || vertexCount == 0) return false;
+    AccelStructHandle& blasHandle = m_blasList[blasIndex];
+    if (blasHandle.vertexCount == 0) return false;
+    if (firstVertex >= blasHandle.vertexCount) return false;
+    if (vertexCount > blasHandle.vertexCount - firstVertex) {
+        vertexCount = blasHandle.vertexCount - firstVertex;
+    }
+
+    const uint64_t rangeBytes = (uint64_t)vertexCount * 12;
+    const uint64_t rangeOffset = (uint64_t)firstVertex * 12;
+
+    if (positions) {
+        uploadBuffer(blasHandle.vertexBuffer, positions + (size_t)firstVertex * 3,
+                     rangeBytes, rangeOffset);
+    }
+    if (normals && blasHandle.normalBuffer.buffer) {
+        // The normal block can live INSIDE the vertex buffer (one allocation,
+        // two device addresses); its base offset is the address delta.
+        const bool normalSharesGeometryBuffer =
+            blasHandle.normalBuffer.buffer == blasHandle.vertexBuffer.buffer &&
+            blasHandle.normalBuffer.deviceAddress >= blasHandle.vertexBuffer.deviceAddress;
+        const uint64_t normalBase = normalSharesGeometryBuffer
+            ? (uint64_t)(blasHandle.normalBuffer.deviceAddress - blasHandle.vertexBuffer.deviceAddress)
+            : 0ull;
+        uploadBuffer(
+            normalSharesGeometryBuffer ? blasHandle.vertexBuffer : blasHandle.normalBuffer,
+            normals + (size_t)firstVertex * 3,
+            rangeBytes,
+            normalBase + rangeOffset);
+    }
+    return true;
+}
+
 bool VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals) {
     if (!hasHardwareRT() || !fpCmdBuildAccelerationStructuresKHR) return false;
     if (blasIndex >= m_blasList.size()) return false;
@@ -2583,22 +2928,8 @@ bool VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
     AccelStructHandle& blasHandle = m_blasList[blasIndex];
     if (blasHandle.accel == VK_NULL_HANDLE || !blasHandle.allowUpdate || blasHandle.vertexCount == 0) return false;
 
-    if (newVertices) {
-        uploadBuffer(blasHandle.vertexBuffer, newVertices, (uint64_t)blasHandle.vertexCount * 12);
-    }
-    if (newNormals && blasHandle.normalBuffer.buffer) {
-        const uint64_t normalByteSize = (uint64_t)blasHandle.vertexCount * 12;
-        const bool normalSharesGeometryBuffer =
-            blasHandle.normalBuffer.buffer == blasHandle.vertexBuffer.buffer &&
-            blasHandle.normalBuffer.deviceAddress >= blasHandle.vertexBuffer.deviceAddress;
-        const uint64_t normalByteOffset = normalSharesGeometryBuffer
-            ? (uint64_t)(blasHandle.normalBuffer.deviceAddress - blasHandle.vertexBuffer.deviceAddress)
-            : 0ull;
-        uploadBuffer(
-            normalSharesGeometryBuffer ? blasHandle.vertexBuffer : blasHandle.normalBuffer,
-            newNormals,
-            normalByteSize,
-            normalByteOffset);
+    if (newVertices || newNormals) {
+        uploadBLASVertexRange(blasIndex, newVertices, newNormals, 0, blasHandle.vertexCount);
     }
 
     VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
@@ -2632,7 +2963,12 @@ bool VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    // MODE_UPDATE flags must equal the original build's -- including
+    // ALLOW_COMPACTION when the BLAS was compacted.
+    buildInfo.flags = blasHandle.buildFlags != 0
+        ? blasHandle.buildFlags
+        : (VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+           VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR);
     buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
     buildInfo.srcAccelerationStructure = blasHandle.accel;
     buildInfo.dstAccelerationStructure = blasHandle.accel;
@@ -2656,6 +2992,7 @@ bool VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
     scratchBufInfo.size = alignedScratchSize;
     scratchBufInfo.usage = BufferUsage::STORAGE;
     scratchBufInfo.location = MemoryLocation::GPU_ONLY;
+    scratchBufInfo.category = VramCategory::Scratch;
     auto scratchBuffer = createBuffer(scratchBufInfo);
     if (!scratchBuffer.buffer) return false;
 
@@ -2696,10 +3033,12 @@ void VulkanDevice::endBatchedBLASBuild() {
 
     if (m_batchBLASInCurrentCmd > 0) {
         endSingleTimeCommands(m_batchBLASCmd);
+        finishPendingBlasCompactions();
     } else {
         // No builds recorded in current cmd — discard
         vkEndCommandBuffer(m_batchBLASCmd);
         vkFreeCommandBuffers(m_device, m_commandPool, 1, &m_batchBLASCmd);
+        m_pendingCompactions.clear();
     }
 
     // Cleanup shared scratch buffer
@@ -2773,7 +3112,10 @@ uint32_t VulkanDevice::createAABB_BLAS(const float aabbMin[3], const float aabbM
     asBufInfo.size = sizeInfo.accelerationStructureSize;
     asBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
     asBufInfo.location = MemoryLocation::GPU_ONLY;
-    blasHandle.buffer = createBuffer(asBufInfo);
+    {
+        VramCategoryScope tag(VramCategory::AccelStruct);
+        blasHandle.buffer = createBuffer(asBufInfo);
+    }
 
     // Create acceleration structure
     VkAccelerationStructureCreateInfoKHR asCreateInfo{};
@@ -2790,6 +3132,7 @@ uint32_t VulkanDevice::createAABB_BLAS(const float aabbMin[3], const float aabbM
     scratchBufInfo.size = alignedScratchSize;
     scratchBufInfo.usage = BufferUsage::STORAGE;
     scratchBufInfo.location = MemoryLocation::GPU_ONLY;
+    scratchBufInfo.category = VramCategory::Scratch;
     auto scratchBuffer = createBuffer(scratchBufInfo);
     if (!scratchBuffer.buffer) {
         if (fpDestroyAccelerationStructureKHR && blasHandle.accel) {
@@ -2928,6 +3271,7 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         instBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
         instBufInfo.location = MemoryLocation::CPU_TO_GPU;
         instBufInfo.initialData = vkInstances.data();
+        instBufInfo.category = VramCategory::AccelStruct;
         m_tlasInstanceBuffer = createBuffer(instBufInfo);
         if (!m_tlasInstanceBuffer.buffer) return;
     }
@@ -2974,6 +3318,7 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         asBufInfo.size = sizeInfo.accelerationStructureSize;
         asBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
         asBufInfo.location = MemoryLocation::GPU_ONLY;
+        asBufInfo.category = VramCategory::AccelStruct;
         m_tlas.buffer = createBuffer(asBufInfo);
 
         VkAccelerationStructureCreateInfoKHR asCreateInfo{};
@@ -3003,6 +3348,7 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         scratchBufInfo.size = alignedScratchSize;
         scratchBufInfo.usage = BufferUsage::STORAGE;
         scratchBufInfo.location = MemoryLocation::GPU_ONLY;
+        scratchBufInfo.category = VramCategory::Scratch;
         m_tlasScratchBuffer = createBuffer(scratchBufInfo);
         if (!m_tlasScratchBuffer.buffer) {
             return;
@@ -3138,7 +3484,7 @@ bool VulkanDevice::createGpuTLAS(const std::vector<GpuTLASInstanceSource>& sourc
     fpGetAccelerationStructureBuildSizesKHR(m_device,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&build,&count,&sizes);
     if(m_tlas.accel){fpDestroyAccelerationStructureKHR(m_device,m_tlas.accel,nullptr);destroyBuffer(m_tlas.buffer);m_tlas={};}
     BufferCreateInfo aci{};aci.size=sizes.accelerationStructureSize;aci.usage=BufferUsage::ACCELERATION|BufferUsage::STORAGE;aci.location=MemoryLocation::GPU_ONLY;
-    m_tlas.buffer=createBuffer(aci); if(!m_tlas.buffer.buffer)return false;
+    aci.category=VramCategory::AccelStruct;m_tlas.buffer=createBuffer(aci); if(!m_tlas.buffer.buffer)return false;
     VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};ci.buffer=m_tlas.buffer.buffer;ci.size=sizes.accelerationStructureSize;ci.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     if (fpCreateAccelerationStructureKHR(m_device, &ci, nullptr, &m_tlas.accel) != VK_SUCCESS) {
         destroyBuffer(m_tlas.buffer);
@@ -3149,7 +3495,7 @@ bool VulkanDevice::createGpuTLAS(const std::vector<GpuTLASInstanceSource>& sourc
     const uint64_t align=m_capabilities.minScratchAlignment?m_capabilities.minScratchAlignment:128;
     const uint64_t needed=(std::max)(sizes.buildScratchSize,sizes.updateScratchSize);
     const uint64_t aligned=(needed+align-1)&~(align-1);
-    if(!m_tlasScratchBuffer.buffer||m_tlasScratchBuffer.size<aligned){if(m_tlasScratchBuffer.buffer)destroyBuffer(m_tlasScratchBuffer);BufferCreateInfo sci{};sci.size=aligned;sci.usage=BufferUsage::STORAGE;sci.location=MemoryLocation::GPU_ONLY;m_tlasScratchBuffer=createBuffer(sci);}
+    if(!m_tlasScratchBuffer.buffer||m_tlasScratchBuffer.size<aligned){if(m_tlasScratchBuffer.buffer)destroyBuffer(m_tlasScratchBuffer);BufferCreateInfo sci{};sci.size=aligned;sci.usage=BufferUsage::STORAGE;sci.location=MemoryLocation::GPU_ONLY;sci.category=VramCategory::Scratch;m_tlasScratchBuffer=createBuffer(sci);}
     if (!m_tlasScratchBuffer.buffer) return false;
     m_tlasInstanceCount = count;
     m_tlasSupportsUpdate = true;
@@ -5033,6 +5379,7 @@ uint32_t VulkanDevice::createHairAABB_BLAS(const std::vector<VkAabbPositionsKHR>
     scratchCI.size     = alignedScratchSize;
     scratchCI.usage    = BufferUsage::STORAGE;
     scratchCI.location = MemoryLocation::GPU_ONLY;
+    scratchCI.category = VramCategory::Scratch;
     auto scratchBuffer = createBuffer(scratchCI);
     if (!scratchBuffer.buffer) {
         if (fpDestroyAccelerationStructureKHR) fpDestroyAccelerationStructureKHR(m_device, blasHandle.accel, nullptr);
@@ -5136,6 +5483,7 @@ uint32_t VulkanDevice::createHairAABB_BLAS_Device(const BufferHandle& aabbBuffer
     scratchCI.usage = BufferUsage::STORAGE;
     scratchCI.location = MemoryLocation::GPU_ONLY;
     // Keep the build scratch as the persistent per-BLAS refit scratch (reused every frame).
+    scratchCI.category = VramCategory::Scratch;
     blasHandle.skinScratchBuffer = createBuffer(scratchCI);
     if (!blasHandle.skinScratchBuffer.buffer) {
         if (fpDestroyAccelerationStructureKHR) fpDestroyAccelerationStructureKHR(m_device, blasHandle.accel, nullptr);
@@ -5449,6 +5797,7 @@ bool VulkanDevice::refitHairAABB_BLAS(uint32_t blasIndex, const std::vector<VkAa
         scratchCI.size     = alignedScratch;
         scratchCI.usage    = BufferUsage::STORAGE;
         scratchCI.location = MemoryLocation::GPU_ONLY;
+        scratchCI.category = VramCategory::Scratch;
         blas.skinScratchBuffer = createBuffer(scratchCI);
         if (!blas.skinScratchBuffer.buffer) return false;
     }
@@ -5548,6 +5897,7 @@ uint32_t VulkanDevice::createFoamSphereBLAS(const std::vector<VkAabbPositionsKHR
     scratchCI.size = alignedScratchSize;
     scratchCI.usage = BufferUsage::STORAGE;
     scratchCI.location = MemoryLocation::GPU_ONLY;
+    scratchCI.category = VramCategory::Scratch;
     auto scratchBuffer = createBuffer(scratchCI);
     if (!scratchBuffer.buffer) {
         if (fpDestroyAccelerationStructureKHR) fpDestroyAccelerationStructureKHR(m_device, blasHandle.accel, nullptr);
@@ -5635,6 +5985,7 @@ bool VulkanDevice::updateFoamSphereBLAS(uint32_t blasIndex, const std::vector<Vk
     scratchCI.size = bldScratch;
     scratchCI.usage = BufferUsage::STORAGE;
     scratchCI.location = MemoryLocation::GPU_ONLY;
+    scratchCI.category = VramCategory::Scratch;
     auto scratchBuffer = createBuffer(scratchCI);
     if (!scratchBuffer.buffer) return false;
     buildInfo.scratchData.deviceAddress = scratchBuffer.deviceAddress;
@@ -6115,11 +6466,14 @@ ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkForma
         vkDestroyImage(m_device, handle.image, nullptr);
         return {};
     }
+    noteMemoryAllocated(handle.memory, memReq.size, allocInfo.memoryTypeIndex,
+                        VramCategoryScope::current() == VramCategory::Other
+                            ? VramCategory::RenderTarget : VramCategoryScope::current());
 
     VkResult bindRes = vkBindImageMemory(m_device, handle.image, handle.memory, 0);
     if (bindRes != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] Failed to bind image memory (result=" << bindRes << ")" << std::endl;
-        vkFreeMemory(m_device, handle.memory, nullptr);
+        freeTrackedMemory(handle.memory);
         vkDestroyImage(m_device, handle.image, nullptr);
         return {};
     }
@@ -6140,7 +6494,7 @@ ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkForma
     if (viewRes != VK_SUCCESS || !handle.view) {
         VK_ERROR() << "[VulkanDevice] Failed to create image view (result=" << viewRes << ")" << std::endl;
         vkDestroyImage(m_device, handle.image, nullptr);
-        vkFreeMemory(m_device, handle.memory, nullptr);
+        freeTrackedMemory(handle.memory);
         return {};
     }
 
@@ -6204,9 +6558,12 @@ ImageHandle VulkanDevice::createImage2DWithMips(uint32_t width, uint32_t height,
         vkDestroyImage(m_device, handle.image, nullptr);
         return {};
     }
+    noteMemoryAllocated(handle.memory, memReq.size, allocInfo.memoryTypeIndex,
+                        VramCategoryScope::current() == VramCategory::Other
+                            ? VramCategory::Texture : VramCategoryScope::current());
 
     if (vkBindImageMemory(m_device, handle.image, handle.memory, 0) != VK_SUCCESS) {
-        vkFreeMemory(m_device, handle.memory, nullptr);
+        freeTrackedMemory(handle.memory);
         vkDestroyImage(m_device, handle.image, nullptr);
         return {};
     }
@@ -6224,7 +6581,7 @@ ImageHandle VulkanDevice::createImage2DWithMips(uint32_t width, uint32_t height,
     viewInfo.subresourceRange.layerCount = 1;
 
     if (vkCreateImageView(m_device, &viewInfo, nullptr, &handle.view) != VK_SUCCESS) {
-        vkFreeMemory(m_device, handle.memory, nullptr);
+        freeTrackedMemory(handle.memory);
         vkDestroyImage(m_device, handle.image, nullptr);
         return {};
     }
@@ -6345,7 +6702,7 @@ void VulkanDevice::destroyImage(ImageHandle& image) {
     if (image.sampler) vkDestroySampler(m_device, image.sampler, nullptr);
     if (image.view) vkDestroyImageView(m_device, image.view, nullptr);
     if (image.image) vkDestroyImage(m_device, image.image, nullptr);
-    if (image.memory) vkFreeMemory(m_device, image.memory, nullptr);
+    if (image.memory) freeTrackedMemory(image.memory);
     image = {};
 }
 
@@ -7282,8 +7639,22 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
-    if (vkQueueSubmit(m_computeQueue, 1, &submit, fs.fence) != VK_SUCCESS) {
-        SCENE_LOG_WARN("[Vulkan] submitTraceTonemapAsync: vkQueueSubmit failed.");
+    const VkResult submitResult = vkQueueSubmit(m_computeQueue, 1, &submit, fs.fence);
+    if (submitResult != VK_SUCCESS) {
+        // Measured as a per-frame flood after a memory-pressure recreate, with
+        // no result code -- the one thing needed to tell OOM from device loss.
+        static uint64_t s_failures = 0;
+        if ((++s_failures & (s_failures - 1)) == 0) {  // 1, 2, 4, 8, ...
+            SCENE_LOG_WARN("[Vulkan] submitTraceTonemapAsync: vkQueueSubmit failed (result=" +
+                           std::to_string(static_cast<int>(submitResult)) +
+                           ", failures=" + std::to_string(s_failures) + ").");
+        }
+        if (submitResult == VK_ERROR_DEVICE_LOST) {
+            g_vulkan_device_lost = true;
+            g_vulkan_device_lost_msg = "submitTraceTonemapAsync: vkQueueSubmit returned VK_ERROR_DEVICE_LOST";
+        } else {
+            signalVulkanMemoryPressure(submitResult, "submitTraceTonemapAsync/vkQueueSubmit");
+        }
         return false;
     }
     fs.everSubmitted = true;
@@ -7544,6 +7915,7 @@ void VulkanDevice::dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix
         scratchBufInfo.size = alignedScratchSize;
         scratchBufInfo.usage = BufferUsage::STORAGE;
         scratchBufInfo.location = MemoryLocation::GPU_ONLY;
+        scratchBufInfo.category = VramCategory::Scratch;
         auto scratchBuffer = createBuffer(scratchBufInfo);
         if (!scratchBuffer.buffer) {
             endSingleTimeCommands(cmd);
@@ -7812,6 +8184,19 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
     if (!m_device) return;
     m_device->waitIdle();
     m_device->clearPendingRTTextureDescriptors();
+    // ★★★★ RT binding'lerini temizlemek YETMEZ: material preview descriptor
+    //   set'inin binding 1'i de asagida yok edilen goruntulerin VkImageView'ini
+    //   tutuyor. Burada SOKMUYORUZ, cunku set yalnizca keepPipeline=false ile
+    //   yikilabiliyor ve o butun viewport pipeline'larini da goturur -- Solid
+    //   modda tamamen bosuna odenecek bir maliyet.
+    //
+    //   Bunun yerine set'e DOKU KUSAGI damgasi vuruldu
+    //   (`materialPreviewDescSetTextureGeneration`, VulkanBackend.h) ve
+    //   VulkanViewportBackend::renderInteractiveViewportImpl cizimden ONCE
+    //   damgayi m_textureCacheGeneration ile karsilastirip bayat set'i tek
+    //   seferde yeniden kuruyor. Tembel, yalnizca Material modda odeniyor, ve
+    //   tetiklendiginde KENDINI RAPORLUYOR.
+    //   Bkz. docs/dev/BUG_VIEWPORT_DEVICE_LOST_ON_PROJECT_OPEN.md
     // Let manager call destroyFns for all manager-tracked textures (device still alive here).
     // The callbacks erase their entries from m_uploadedImages and call destroyImage, so the
     // loop below only has to clean up non-manager-tracked (legacy) entries.
@@ -7833,6 +8218,24 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
     m_cacheKeyOwner.clear();
     m_nextTextureID = 1;
     ++m_textureCacheGeneration;
+
+    // ★★★★★ DUNYA ORTAM DOKUSU DA BU HAVUZDA YASIYOR. Purge onu yok eder ama
+    //   `m_envTexID` geride kalirsa okuma sessizce basarisiz olur:
+    //   `hasWorldEnv = m_envTexID > 0 && m_uploadedImages.count(...)` -> false,
+    //   sceneGlobals bit 2 bos, `material_preview_sky.frag` HDRI dalini atlar
+    //   ve arka plan DUZ RENGE duser. Hatasiz, logsuz.
+    //   Eskiden id yalnizca `rebuildAccelerationStructure()` icinde sifirlaniyordu
+    //   -- purge'un ALTI cagiranindan biri. "Bazen RayFusion solid'de kaliyor"
+    //   raporunun kaynagi tam olarak oteki bes yoldu (ozellikle
+    //   `releaseInactiveViewportTextureCache`: Material Preview'dan cikis).
+    //   Purge, dokuyu OLDUREN yer oldugu icin bayragi da BURASI dusurmeli;
+    //   cagiranlara birakmak alti kez hatirlanmasi gereken bir kural demekti.
+    if (m_envTexID != 0) {
+        m_envTexID = 0;
+        // Yeniden yukleme CPU tarafindaki Texture'i ister; bu adapter onu
+        // tutmuyor. Tek dogru hareket: dunya senkronunu YENIDEN SILAHLANDIR.
+        markWorldDirty();
+    }
 }
 
 void VulkanBackendAdapter::releaseInactiveViewportTextureCache() {
@@ -8613,6 +9016,10 @@ uint32_t VulkanBackendAdapter::uploadWeldedTriangles(const std::vector<TriangleD
 // and topology-stable. Phase 2 will add a dirty-region partial path; for now any edit re-pushes
 // the whole vertex array (still a refit, not a full rebuild).
 bool VulkanBackendAdapter::refitIndexedSoloBLAS(uint32_t blasIndex) {
+    // *** Measured only AFTER the Solid-mode refit was fixed and RT stayed slow:
+    //   this is the RT half of the same path and it had NO section at all, so
+    //   "RT is still slow" could not be attributed to anything.
+    RTPERF_SCOPE("accel.vulkan_rt.mesh_refit");
     auto idxIt = m_soloBlasIndexedMesh.find(blasIndex);
     if (idxIt == m_soloBlasIndexedMesh.end()) {
         SCENE_LOG_WARN("[refitIndexedSoloBLAS] Not found in m_soloBlasIndexedMesh");
@@ -8655,29 +9062,141 @@ bool VulkanBackendAdapter::refitIndexedSoloBLAS(uint32_t blasIndex) {
     SCENE_LOG_ON_CHANGE("blasrefit." + std::to_string(blasIndex), (long long)vCount,
         "[refitIndexedSoloBLAS] Uploading " + std::to_string(vCount) +
         " vertices for BLAS " + std::to_string(blasIndex));
-    std::vector<float> positions(vCount * 3);
-    std::vector<float> normals(vCount * 3);
-    for (size_t v = 0; v < vCount; ++v) {
-        positions[v * 3 + 0] = srcP[v].x;
-        positions[v * 3 + 1] = srcP[v].y;
-        positions[v * 3 + 2] = srcP[v].z;
-        if (srcN) {
-            normals[v * 3 + 0] = srcN[v].x;
-            normals[v * 3 + 1] = srcN[v].y;
-            normals[v * 3 + 2] = srcN[v].z;
-        } else {
-            normals[v * 3 + 0] = 0.0f; normals[v * 3 + 1] = 1.0f; normals[v * 3 + 2] = 0.0f;
+    // *** This gather used to allocate two full-size float arrays, fill them
+    //   SERIALLY over every vertex, and hand them to updateBLAS, which uploaded
+    //   BOTH IN FULL -- 2 x 24 MB of blocking staging traffic on a 2M-vertex
+    //   mesh, per sculpt dab, no matter how few vertices the brush moved. The
+    //   raster (Solid) half of this path had the same disease and measured
+    //   158,8 ms/refit; curing it took Solid to ~27 ms while RT stayed slow,
+    //   which is how this one was found.
+    //
+    //   Now: gather straight into a persistent mirror, compare against what the
+    //   mirror says the GPU already holds, and upload only the ranges that
+    //   differ. The mirror is not extra memory -- it is the temporaries, kept.
+    const size_t floatCount = vCount * 3;
+    BlasRefitMirror& mir = m_blasRefitMirror;
+    const bool mirrorUsable = (m_blasRefitMirrorIndex == blasIndex &&
+                               mir.positions.size() == floatCount &&
+                               mir.normals.size() == floatCount);
+    if (!mirrorUsable) {
+        // A different BLAS (or a resized mesh) takes the slot over. The buffers
+        // are reused; only their contents are unknown, so everything is dirty.
+        m_blasRefitMirrorIndex = blasIndex;
+        mir.positions.assign(floatCount, 0.0f);
+        mir.normals.assign(floatCount, 0.0f);
+        mir.diffWorthwhile = true;
+        mir.refitsSinceProbe = 0;
+    }
+    bool doDiff = false;
+    if (mirrorUsable) {
+        if (mir.diffWorthwhile) {
+            doDiff = true;
+        } else if (++mir.refitsSinceProbe >= kBlasRefitDiffProbeInterval) {
+            doDiff = true;  // re-probe: the mesh may have stopped animating
         }
+        if (doDiff) mir.refitsSinceProbe = 0;
+    }
+
+    struct SlotRun { size_t begin; size_t end; };  // [begin, end) in vertices
+    std::vector<SlotRun> runs;
+
+    if (!doDiff) {
+        RTPERF_SCOPE("accel.vulkan_rt.mesh_refit.gather_full");
+        #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+        for (int v = 0; v < (int)vCount; ++v) {  // MSVC OpenMP 2.0 wants a signed int index
+            const size_t i = (size_t)v * 3;
+            mir.positions[i + 0] = srcP[v].x;
+            mir.positions[i + 1] = srcP[v].y;
+            mir.positions[i + 2] = srcP[v].z;
+            if (srcN) {
+                mir.normals[i + 0] = srcN[v].x;
+                mir.normals[i + 1] = srcN[v].y;
+                mir.normals[i + 2] = srcN[v].z;
+            } else {
+                mir.normals[i + 0] = 0.0f; mir.normals[i + 1] = 1.0f; mir.normals[i + 2] = 0.0f;
+            }
+        }
+        if (vCount > 0) runs.push_back(SlotRun{0, vCount});
+    } else {
+        // Chunk boundaries double as upload run boundaries, so a local edit
+        // collapses into a few contiguous uploads instead of one min..max span
+        // covering the whole mesh whenever two moved vertices sit far apart in
+        // SoA order.
+        constexpr int kChunks = 256;
+        std::vector<uint32_t> lo(kChunks, UINT32_MAX), hi(kChunks, 0);
+        {
+            RTPERF_SCOPE("accel.vulkan_rt.mesh_refit.diff");
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+            for (int c = 0; c < kChunks; ++c) {
+                const size_t begin = vCount * (size_t)c / kChunks;
+                const size_t end = vCount * (size_t)(c + 1) / kChunks;
+                uint32_t vLo = UINT32_MAX, vHi = 0;
+                for (size_t v = begin; v < end; ++v) {
+                    const size_t i = v * 3;
+                    const Vec3 p = srcP[v];
+                    const Vec3 n = srcN ? srcN[v] : Vec3(0.0f, 1.0f, 0.0f);
+                    float* dp = &mir.positions[i];
+                    float* dn = &mir.normals[i];
+                    if (dp[0] != p.x || dp[1] != p.y || dp[2] != p.z ||
+                        dn[0] != n.x || dn[1] != n.y || dn[2] != n.z) {
+                        dp[0] = p.x; dp[1] = p.y; dp[2] = p.z;
+                        dn[0] = n.x; dn[1] = n.y; dn[2] = n.z;
+                        const uint32_t s = (uint32_t)v;
+                        if (s < vLo) vLo = s;
+                        if (s > vHi) vHi = s;
+                    }
+                }
+                lo[c] = vLo; hi[c] = vHi;
+            }
+        }
+        constexpr size_t kGapVerts = 4096;
+        constexpr size_t kMaxRuns = 4;
+        for (int c = 0; c < kChunks; ++c) {
+            if (lo[c] == UINT32_MAX) continue;
+            const size_t b = lo[c];
+            const size_t e = (size_t)hi[c] + 1;
+            if (!runs.empty() && b <= runs.back().end + kGapVerts) runs.back().end = e;
+            else runs.push_back(SlotRun{b, e});
+        }
+        if (runs.size() > kMaxRuns) {
+            const SlotRun span{runs.front().begin, runs.back().end};
+            runs.assign(1, span);
+        }
+        size_t dirtyVerts = 0;
+        for (const SlotRun& r : runs) dirtyVerts += r.end - r.begin;
+        // Hysteresis on the NEXT refit only: a mesh whose whole shape moves
+        // (keyframed/skinned) pays nothing for a diff it cannot benefit from.
+        mir.diffWorthwhile = (vCount == 0) || (dirtyVerts * 2 <= vCount);
     }
 
     // Positions + normals only. The pointiness block in the combined buffer keeps its
     // pre-edit values through a refit — recomputing it means a full weld + 1-ring pass over
     // the mesh, which is far too expensive per sculpt dab. It refreshes on the next full
     // geometry rebuild, which is also when the CPU caches (rebuildBVH) refresh.
-    if (!m_device->updateBLAS(blasIndex, positions.data(), normals.data())) {
-        SCENE_LOG_WARN("[refitIndexedSoloBLAS] Vulkan BLAS update failed");
-        return false;
+    if (!runs.empty()) {
+        {
+            RTPERF_SCOPE("accel.vulkan_rt.mesh_refit.upload");
+            for (const SlotRun& r : runs) {
+                // Always carries normals, as the full-buffer upload did: when
+                // the mesh has no normal attribute the mirror holds the (0,1,0)
+                // default, and skipping it here would leave the BLAS normal
+                // block on whatever the last build wrote.
+                m_device->uploadBLASVertexRange(blasIndex,
+                                                mir.positions.data(),
+                                                mir.normals.data(),
+                                                (uint32_t)r.begin,
+                                                (uint32_t)(r.end - r.begin));
+            }
+        }
+        RTPERF_SCOPE("accel.vulkan_rt.mesh_refit.blas");
+        if (!m_device->updateBLAS(blasIndex, nullptr, nullptr)) {
+            SCENE_LOG_WARN("[refitIndexedSoloBLAS] Vulkan BLAS update failed");
+            return false;
+        }
     }
+    // runs empty => the mesh SoA already matches the BLAS, so neither the
+    // upload nor the MODE_UPDATE refit has anything to do. The TLAS refresh
+    // below still runs: a transform can have changed without a vertex moving.
 
     // Refresh the TLAS instance transform from the live handle (mirrors the non-indexed refit),
     // so a scale/rotate since the last full rebuild renders at the correct world-space pose.
@@ -8692,9 +9211,16 @@ bool VulkanBackendAdapter::refitIndexedSoloBLAS(uint32_t blasIndex) {
         }
     }
 
-    auto merged = m_vkInstances;
-    for (const auto& h : m_hairVkInstances) merged.push_back(h);
-    if (!merged.empty()) m_device->updateTLAS(merged);
+    {
+        // Measured separately: a BLAS refit obliges a TLAS refit (the instance
+        // AABBs are derived from the BLAS), so this is NOT removable -- but it
+        // is sized by the whole scene's instance count, not by the edit, and
+        // that distinction only shows up if it has its own section.
+        RTPERF_SCOPE("accel.vulkan_rt.mesh_refit.tlas");
+        auto merged = m_vkInstances;
+        for (const auto& h : m_hairVkInstances) merged.push_back(h);
+        if (!merged.empty()) m_device->updateTLAS(merged);
+    }
 
     resetAccumulation();
     return true;
@@ -9959,8 +10485,11 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
     m_rasterBuiltGenSource = "invalidated";
     m_geometryBuiltWithPointiness = false; // BLAS pointiness blocks die with the BLAS list below
     m_geometryBuiltWithAttributes = false; // ...and so do the named-attribute blocks
-    m_envTexID = 0;
+    // ★ `m_envTexID` BURADA sifirlanmaz: asagidaki purgeUploadedTextureCacheLocked()
+    //   onu dokuyu OLDURDUGU yerde dusuruyor ve dunya senkronunu yeniden
+    //   silahlandiriyor. Burada onden sifirlamak o kolu susturuyordu.
     m_atmosphereLutReady = false;
+    m_atmosphereLutSignature = 0;
     
     if (m_device) {
         m_device->waitIdle();
@@ -9975,7 +10504,7 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
                 vkDestroyBuffer(m_device->m_device, buffer.buffer, nullptr);
             }
             if (buffer.memory && freedBlasMemories.insert(buffer.memory).second) {
-                vkFreeMemory(m_device->m_device, buffer.memory, nullptr);
+                m_device->freeTrackedMemory(buffer.memory);
             }
             buffer = {};
         };
@@ -10025,6 +10554,9 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
             m_device->freeSkinningDescriptorSet(blas.skinningDescSet);
         }
         m_device->m_blasList.clear();
+        // A pending compaction names a handle that no longer exists, and
+        // Vulkan may hand that handle value to the next BLAS.
+        m_device->m_pendingCompactions.clear();
 
         // Phase 3d: every BLAS is now destroyed and the GPU is idle (waitIdle above), so
         // it is finally safe to free device-resident CC buffers queued for release — the
@@ -10108,6 +10640,7 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
     if (!m_device || !m_device->isInitialized()) return;
 
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_currentSkinMatrices = b;
 
     // ── Fast path: skinned BLAS refit + lightweight TLAS update ──────────────────
     // Only run the full updateGeometry (scene rebuild + waitIdle) on the very first
@@ -10143,6 +10676,23 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
             }
         }
 
+        // Sync Vulkan RT TLAS instance transforms from live object handles so that
+        // Root Motion, transform animations, gizmos, and physics update the TLAS instance transforms.
+        for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+            if (!m_instanceSources[i]) continue;
+            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+                m_vkInstances[i].transform = inst->transform;
+            } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+                if (tri->getTransformPtr()) {
+                    m_vkInstances[i].transform = tri->getTransformPtr()->getFinal();
+                }
+            } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+                if (tm->transform) {
+                    m_vkInstances[i].transform = tm->transform->getFinal();
+                }
+            }
+        }
+
         // 2. TLAS. When the GPU hair prepass will rebuild the TLAS this frame — it does so
         // from m_vkInstances + m_hairVkInstances INSIDE the async trace command buffer,
         // guarded by the ping-pong fence — refitting it again here is a redundant full
@@ -10170,16 +10720,11 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
     }
 
     // ── Slow path: first frame or topology changed — full scene rebuild ───────────
-    // Dispatch skinning first so refitted BLASes are ready for the new TLAS
-    if (!b.empty()) {
-        for (uint32_t i = 0; i < (uint32_t)m_device->m_blasList.size(); ++i) {
-            if (m_device->m_blasList[i].hasSkinning) {
-                m_device->dispatchSkinning(i, b);
-            }
-        }
-    }
     updateGeometry(o);
     m_topology_dirty = false;
+    // Rebuilt BLAS buffers contain bind vertices. Apply the requested pose to
+    // the NEW buffers, not the buffers updateGeometry just replaced.
+    if (!b.empty() && !m_vkInstances.empty()) return;
 
     // Sync raster viewport instances so Solid/Matcap mode reflects animation
     if (!m_rasterInstances.empty() && shouldUseInteractiveViewport()) {
@@ -10222,6 +10767,13 @@ void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& node
 
         if (!meshChanged) continue;
 
+        // ★ This is the ONE site that rewrites the ID stream IN PLACE: the GPU
+        //   buffer keeps its address, so nothing downstream can notice from the
+        //   handle alone. RayFusion's bounce signature reads the stream's
+        //   content hash, and that cache has to fall here or a reassigned
+        //   material would keep lighting the scene with the old albedo.
+        mesh.materialUsage.invalidate();
+        mesh.matIdsHashValid = false;
         m_device->uploadBuffer(mesh.matIdBuffer,
                                mesh.cpuMatIds.data(),
                                mesh.cpuMatIds.size() * sizeof(uint32_t),
@@ -11363,6 +11915,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         destroyAllRasterMeshes();
         m_interactiveViewport.dirty = true;
     }
+    restoreCurrentSkinning(objects, false);
 }
 
 bool VulkanBackendAdapter::tryAppendGeometryIncremental(const std::vector<std::shared_ptr<Hittable>>& objects) {
@@ -12580,6 +13133,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         }
         gm.height_tex = getTexID(m.heightTexture, TextureType::Unknown, true);
 
+        applyAutomaticViewportCutout(gm, ::render_settings.viewport_automatic_cutout);
         gpuMats.push_back(gm);
     }
 
@@ -13035,6 +13589,7 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     }
 
     // Patch BOTH halves of the split record at their own strides.
+    applyAutomaticViewportCutout(gm, ::render_settings.viewport_automatic_cutout);
     VulkanRT::VkGpuMaterialCore gmCore{};
     VulkanRT::VkGpuMaterialExt  gmExt{};
     VulkanRT::splitGpuMaterial(gm, gmCore, gmExt);
@@ -13056,6 +13611,8 @@ void VulkanBackendAdapter::uploadMaterialPrograms(const std::vector<uint32_t>& w
     // uploadMaterials() releasing the lock and this call could still be reading
     // the buffer that updateMatProgramBuffer destroys on growth.
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    updateRtShadowMaterialPrograms(words);
+    m_rasterMaterialPrograms.update(words);
     drainInteractiveViewportInFlight();
     // Empty stream still needs a valid buffer (materialCount=0 => all lookups NONE).
     if (words.empty()) {
@@ -13126,6 +13683,8 @@ void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialDat
     }
 
     m_device->updateHairMaterialBuffer(gpuMats);
+    // Cache on CPU for RayFusion bounce table builder.
+    m_cachedHairGpuMaterials = gpuMats;
     if (!gpuMats.empty()) {
        // SCENE_LOG_INFO("[Vulkan] Hair materials uploaded: " + std::to_string(gpuMats.size()));
     }
@@ -13355,6 +13914,8 @@ void VulkanBackendAdapter::endBatchedTextureUpload() {
 
 int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool srgb, bool isFloat) {
     if (!m_device || !m_device->isInitialized() || !data) return 0;
+    // Staging included: in a batched upload it lives until the batch ends.
+    VulkanRT::VramCategoryScope vramTag(VulkanRT::VramCategory::Texture);
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     
     // Call VRAM check and eviction before allocating staging/image resources
@@ -13650,6 +14211,7 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
     uint32_t height,
     VkFormat format)
 {
+    VulkanRT::VramCategoryScope vramTag(VulkanRT::VramCategory::Texture);
     if (!m_device || !m_device->isInitialized() || !data || dataSize == 0) return 0;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     
@@ -13827,6 +14389,8 @@ int64_t VulkanBackendAdapter::uploadTexture3D(const void* data, uint32_t width, 
         m_device->destroyBuffer(staging);
         return 0;
     }
+    m_device->noteMemoryAllocated(img.memory, memReq.size, mai.memoryTypeIndex,
+                                  VulkanRT::VramCategory::Texture);
     VkResult imgBindRes = vkBindImageMemory(dev, img.image, img.memory, 0);
     if (imgBindRes != VK_SUCCESS) {
         m_device->destroyImage(img);
@@ -14382,40 +14946,35 @@ void VulkanBackendAdapter::setRenderParams(const RenderParams& p) {
     m_debugView = p.debugView;
     m_debugExposure = p.debugExposure;
     m_debugOverlay = p.debugOverlay;
+    m_rasterDepthOfField = p.realtimeDepthOfField;
+    // ★ Kirpma BURADA, cunku sifir/negatif bir yaricap ile dispatch etmek
+    //   sessizce "DoF yok"a donusur ve ayar "calismiyor" diye raporlanir.
+    m_rasterDofMaxCoCPixels = std::max(0.0f, std::min(p.realtimeDofMaxCoC, 128.0f));
+    m_rasterDofMaxTaps = static_cast<uint32_t>(std::max(8, std::min(p.realtimeDofMaxTaps, 256)));
+    // ★ Hedef degisirse birikimi SIFIRLA: 4 orneklik bir gecmisin uzerine
+    //   "artik 32 istiyorum" demek, ilk karelerde eski ortalamaya yanlis
+    //   agirlik vermek olurdu.
+    {
+        const uint32_t nextTaaSamples =
+            static_cast<uint32_t>(std::max(1, std::min(p.realtimeTaaSamples, 256)));
+        if (!p.realtimeTaa || nextTaaSamples != m_taaTargetSamples) m_taaFrameIndex = 0;
+        m_taaEnabled = p.realtimeTaa;
+        m_taaTargetSamples = nextTaaSamples;
+    }
 }
 
-void VulkanBackendAdapter::setCamera(const CameraParams& c) { 
+void VulkanBackendAdapter::setCamera(const CameraParams& c) {
     m_camera = c;
-
-    // Calculate Physical Exposure for Vulkan
-    float factor = 1.0f;
-    float ev_comp = std::pow(2.0f, c.ev_compensation);
-
-    if (c.exposureFactor > 0.0f) {
-        factor = c.exposureFactor;
-    } else if (c.autoAE) {
-        factor = ev_comp; 
-    } else if (c.usePhysicalExposure) {
-        float iso_mult = (c.isoPresetIndex >= 0 && c.isoPresetIndex < (int)CameraPresets::ISO_PRESET_COUNT) ? 
-                         CameraPresets::ISO_PRESETS[c.isoPresetIndex].exposure_multiplier : 1.0f;
-        float shutter_time = (c.shutterPresetIndex >= 0 && c.shutterPresetIndex < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) ? 
-                             CameraPresets::SHUTTER_SPEED_PRESETS[c.shutterPresetIndex].speed_seconds : 0.004f;
-        
-        float f_number = 16.0f;
-        if (c.fstopPresetIndex > 0 && c.fstopPresetIndex < (int)CameraPresets::FSTOP_PRESET_COUNT) {
-             f_number = CameraPresets::FSTOP_PRESETS[c.fstopPresetIndex].f_number;
-        }
-        
-        float aperture_sq = f_number * f_number;
-        float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
-        
-        // Calibration: Boosted baseline to avoid black viewport
-        float baseline_val = 0.00003125f; 
-        factor = (current_val / baseline_val) * ev_comp * 2.0f;
-    }
-    
-    m_camera.exposureFactor = factor;
-    resetAccumulation(); 
+    // ★★★★ Burada pozlama formulunun DORDUNCU kopyasi vardi ve 2026-09-06'da
+    //   SOKULDU: sonucu (`m_camera.exposureFactor`) hicbir yerde okunmuyordu.
+    //   Traversal push-constant'i yillardir sabit 1.0 gonderiyor ("scene-linear
+    //   accumulation; exposure belongs exclusively to display post"), yani
+    //   Vulkan yolunda kamera terimi post zincirinden geliyor
+    //   (`g_display_post.camera_exposure`, bkz. `rtpost::syncDisplay`).
+    //   ★★ Olu ama CANLI GORUNEN bir formul, kalibrasyon turunda "iki formulden
+    //   hangisi?" diye saatler yakar; birini kalibre edip otekini unutmak bu
+    //   depoda adi konmus hata sinifi.
+    resetAccumulation();
 }
 
 void VulkanBackendAdapter::syncCamera(const Camera& cam) {
@@ -14426,7 +14985,12 @@ void VulkanBackendAdapter::syncCamera(const Camera& cam) {
     cp.lookAt = cam.lookat;
     cp.up = cam.vup;
     cp.fov = cam.vfov;
-    cp.aperture = cam.aperture;
+    // ★★★★ TASIMA KATMANINDA `aperture` = ETKIN aciklik (kapali lens = 0).
+    //   Kapiyi burada, TEK yerde uygularsak: Vulkan RT'nin lens ornekleyicisi,
+    //   odak kaymasi (focus drift), ve raster post'un DoF gecisi -- ucu de
+    //   ayni cevabi gorur. Ucune ayri ayri "&& depth_of_field" yazmak, o
+    //   ucunden birinin unutuldugu gunu garanti ederdi.
+    cp.aperture = cam.effectiveAperture();
     cp.focusDistance = cam.focus_dist;
     cp.aspectRatio = cam.aspect;
 
@@ -14448,16 +15012,12 @@ void VulkanBackendAdapter::syncCamera(const Camera& cam) {
     cp.autoAE = cam.auto_exposure;
     cp.usePhysicalExposure = cam.use_physical_exposure;
     // ★★★ Bu cagri 0.0 dondurebilir ve 0.0 bir DEGER DEGIL SINYALDIR:
-    //   "use_physical_exposure acik, carpani sen hesapla" demek. setCamera
-    //   asagida tam olarak bunu yapiyor. Formulun bu depoda DORT kopyasi
-    //   olmasinin sebebi bu sentinel: her backend kendi kopyasini tasiyor.
-    //   2026-09-03'te Camera::exposureFactor() gercek degeri donduren TEK
-    //   tanim olarak eklendi ve CPU tarafindaki iki kopya ona indirildi;
-    //   backend'lerin kopyalari BILEREK dokunulmadan birakildi -- sentinel
-    //   sozlesmesini ayni partide degistirmek OptiX yolunu da riske atardi.
-    //   ★★ Iki formul BIREBIR ayni sabitlerle yazildi (baseline 0.00003125,
-    //   * 2.0f); birini kalibre eden otekini de kalibre etmeli, yoksa realtime
-    //   ile Rendered ayni sahnede farkli parlaklik verir.
+    //   "use_physical_exposure acik, carpani sen hesapla" demek. Sentinel'i
+    //   tuketen Vulkan kopyasi 2026-09-06'da sokuldu (bkz. setCamera): bu
+    //   yolda pozlama artik POST ZINCIRINDEN geliyor. Alan doldurulmaya devam
+    //   ediyor cunku sentinel `CameraParams` sozlesmesinin parcasi ve OptiX
+    //   adaptoru (OptixBackend::syncCamera -> setCameraParams override'i) onu
+    //   HALA tuketiyor -- OptiX'i ayni kapiya baglamak ayri bir parti.
     cp.exposureFactor = cam.getPhysicalExposureMultiplier();
 
     // Pro camera features
@@ -15112,7 +15672,27 @@ void VulkanBackendAdapter::renderPass(bool accumulate) { (void)accumulate; /* TO
 
 void VulkanBackendAdapter::buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
     RTPERF_SCOPE("accel.vulkan_rt.raster_geometry");
+    // ★★★★ Refused while this backend is NOT drawing the interactive viewport.
+    //   Callers find "the raster backend" through ctx.backend_ptr, and in
+    //   Rendered that pointer IS the render backend (it implements
+    //   IViewportBackend too). Measured: releasing a sculpt stroke in Vulkan RT
+    //   uploaded all 1108 meshes (36M triangles, flat) as raster geometry onto
+    //   the RT device, then the UI warmers built a RayFusion AS on top -- ~1200
+    //   VK_ERROR_OUT_OF_DEVICE_MEMORY lines. updateGeometry() already refused
+    //   the same duplicate for the same reason; this is the entry every other
+    //   caller goes through. setViewportMode() marks the raster dirty on the
+    //   way back, so nothing is lost by refusing here.
+    if (!shouldUseInteractiveViewport()) {
+        static uint64_t s_refused = 0;
+        if ((++s_refused & (s_refused - 1)) == 0) {  // 1, 2, 4, 8, ...
+            SCENE_LOG_WARN("[Vulkan] buildRasterGeometry refused: render backend is in Rendered mode "
+                           "(the dedicated viewport backend owns raster geometry). refusals=" +
+                           std::to_string(s_refused));
+        }
+        return;
+    }
     buildRasterGeometryImpl(objects);
+    restoreCurrentSkinning(objects, true);
 }
 
 void VulkanBackendAdapter::setRasterScatterPaintActive(bool active) {
@@ -15383,6 +15963,7 @@ void VulkanBackendAdapter::syncRasterInstanceTransforms(const std::vector<std::s
 void VulkanBackendAdapter::syncRasterSkinnedVertices(
     const std::vector<std::shared_ptr<Hittable>>& objects,
     const std::vector<Matrix4x4>& boneMatrices) {
+    m_currentSkinMatrices = boneMatrices;
     syncRasterSkinnedVerticesImpl(objects, boneMatrices);
 }
 
@@ -15630,6 +16211,7 @@ void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipe
         m_interactiveViewport.pipelineLayout = VK_NULL_HANDLE;
     }
     // Material Preview pipeline cleanup
+    if (!keepPipeline) destroyMaterialPreviewCoveredPipeline();
     if (m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipeline(vkDevice, m_interactiveViewport.materialPreviewPipeline, nullptr);
         m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
@@ -16117,7 +16699,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                         : 1u;
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
-                    VkDescriptorSetLayoutBinding mpDslBindings[21]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[25]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
@@ -16195,6 +16777,16 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpDslBindings[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[20].descriptorCount = 1;
                     mpDslBindings[20].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // bindings 21/22: RayFusion probe alani (texel paketleri) ve
+                    // izgara parametreleri. Ikisi de STORAGE_BUFFER -- ayri bir
+                    // UNIFORM_BUFFER havuz turu eklemek, ayni listeyi tutan IKI
+                    // dosyada da guncellenmesi gereken bir sey daha olurdu.
+                    for (uint32_t binding = 21; binding <= 24; ++binding) {
+                        mpDslBindings[binding].binding = binding;
+                        mpDslBindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                        mpDslBindings[binding].descriptorCount = 1;
+                        mpDslBindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    }
 
                     // Guard: check device push-constant limit before touching descriptor/pipeline layout.
                     // Some older drivers crash inside vkCreateDescriptorSetLayout or vkCreatePipelineLayout
@@ -16210,9 +16802,9 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 21;
+                    mpDslci.bindingCount = 25;
                     mpDslci.pBindings = mpDslBindings;
-                    VkDescriptorBindingFlags mpBindingFlags[21] = {
+                    VkDescriptorBindingFlags mpBindingFlags[25] = {
                         0,
                         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
                         0,
@@ -16221,7 +16813,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     };
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 21;
+                    mpBindingFlagsCI.bindingCount = 25;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     mpDslci.pNext = &mpBindingFlagsCI;
                     if (mpPushOk) {
@@ -16235,7 +16827,8 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     // 0 (materials) + 3 (terrain) + 4 (material ext)
                     // + 5 (sahne isiklari) + 6 (onizleme sahne globalleri)
                     // + 7 (shadow records) + 16 (material graph program)
-                    mpPoolSizes[0].descriptorCount = 8;
+                    // + 20 (volume table) + 21/22 (RayFusion probe alani + izgara)
+                    mpPoolSizes[0].descriptorCount = 12;
                     mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 12u;
                     mpPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -16829,15 +17422,33 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
     renderPassInfo.clearValueCount = 2;
     renderPassInfo.pClearValues = clearValues;
 
-    vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    recordMaterialPreviewSkyPass(cmd, view, static_cast<uint32_t>(width),
-                                 static_cast<uint32_t>(height));
+    // ★★★★ BU, TEMEL SINIFIN KENDI VIEWPORT KOPYASIDIR (raster viewport'un
+    //   asil sahibi VulkanViewportBackend). 2026-09-06'da realtime raster
+    //   HDR + post (DoF) yoluna gecti ve o yol YALNIZCA turetilmis sinifta
+    //   kuruldu: material preview shader'lari artik SCENE-LINEAR yaziyor ve
+    //   goruntuleme donusumunu `raster_post.comp` uyguluyor.
+    // ★★★ Bu yuzden burada material preview KAPALIDIR. Acik birakmak,
+    //   tonemap'ten gecmemis scene-linear degerleri 8-bit hedefe yazmak olurdu
+    //   ve belirti "viewport asiri parlak / yikanmis" olarak gorunurdu --
+    //   sebebi goruntude yazmayan bir ariza. Bu yol Solid/Matcap cizer.
+    //   ★ Kapiyi `postPipeline`e bagliyoruz cunku o, HDR yolunun VAR OLDUGUNUN
+    //   isaretidir; temel sinif onu hic kurmaz. Sart yaziliyor ki bu dosya
+    //   ileride HDR yoluna tasinirsa kapi kendiliginden acilsin.
+    const bool hdrPathAvailable = m_interactiveViewport.postPipeline != VK_NULL_HANDLE &&
+                                  m_interactiveViewport.hdrFramebuffer != VK_NULL_HANDLE;
 
     // Decide which pipeline to use based on viewport mode
-    const bool useMaterialPreview = (m_viewportMode == ViewportMode::MaterialPreview) &&
+    const bool useMaterialPreview = hdrPathAvailable &&
+                                     (m_viewportMode == ViewportMode::MaterialPreview) &&
                                      m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE &&
                                      m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE &&
                                      m_device->m_materialBuffer.buffer != VK_NULL_HANDLE;
+
+    // Gokyuzu de scene-linear yazar: ayni kapi.
+    if (useMaterialPreview) {
+        recordMaterialPreviewSkyPass(cmd, view, static_cast<uint32_t>(width),
+                                     static_cast<uint32_t>(height));
+    }
 
     if (useMaterialPreview) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.materialPreviewPipeline);
@@ -17886,9 +18497,10 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         }
 
         // Load Skinning Compute Shader
-        if (std::filesystem::exists(shaderDir + "/skinning.spv")) {
+        if (!m_device->hasSkinningPipeline() && std::filesystem::exists(shaderDir + "/skinning.spv")) {
             std::vector<std::uint32_t> skinningSPV = loadSPV(shaderDir + "/skinning.spv");
             if (m_device->createSkinningPipeline(skinningSPV)) {
+                restoreCurrentSkinning(m_lastObjects, false);
             } else {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create Skinning compute pipeline.");
             }
@@ -19358,6 +19970,18 @@ void VulkanBackendAdapter::setSkyParams() {}
 
 void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
     if (!m_device || !m_device->isInitialized()) return;
+    // Gunes tonu icin gereken tek satiri KOPYALA (bkz. VulkanBackend.h).
+    if (lut) {
+        const auto& host = lut->getHostTransmittance();
+        if (host.size() >= static_cast<size_t>(TRANSMITTANCE_LUT_W)) {
+            m_atmosphereTransmittanceRow0.resize(static_cast<size_t>(TRANSMITTANCE_LUT_W) * 3u);
+            for (int i = 0; i < TRANSMITTANCE_LUT_W; ++i) {
+                m_atmosphereTransmittanceRow0[i * 3 + 0] = host[i].x;
+                m_atmosphereTransmittanceRow0[i * 3 + 1] = host[i].y;
+                m_atmosphereTransmittanceRow0[i * 3 + 2] = host[i].z;
+            }
+        }
+    }
 
     // ★★★ Ucustaki bir raster karesi bu goruntuleri hala ornekliyor olabilir ve
     //   descriptor'lari (binding 8 / material preview LUT slotlari) hala onlara
@@ -19380,6 +20004,7 @@ void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
         VulkanRT::ImageHandle empty[4] = {};
         m_device->updateAtmosphereLUTs(empty);
         m_atmosphereLutReady = false;
+        m_atmosphereLutSignature = 0;
         setWorldData(&m_cachedWorld);
         return;
     }
@@ -19469,6 +20094,9 @@ void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
 
     // Mark LUT as ready only when the GLSL samplers used by sky/aerial paths are valid.
     m_atmosphereLutReady = (lutImgs[0].view != VK_NULL_HANDLE && lutImgs[1].view != VK_NULL_HANDLE);
+    // CPU yolu da bir URETIMDIR: imzasi yazilmazsa adapter kendini sonsuza
+    // kadar bayat sanar ve her senkronda yeniden uretmeye calisir.
+    m_atmosphereLutSignature = m_atmosphereLutReady ? atmosphereLutSignature(m_cachedWorld) : 0;
     // Push updated world buffer immediately so GPU sees _pad5 = 1 without waiting for next frame
     setWorldData(&m_cachedWorld);
 }
@@ -19487,13 +20115,41 @@ bool VulkanBackendAdapter::generateAtmosphereLUTGPU(const WorldData* worldData) 
 
     if (!m_device->generateAtmosphereLUTGPU(*worldData)) {
         m_atmosphereLutReady = false;
+        m_atmosphereLutSignature = 0;
         return false;
     }
 
     m_atmosphereLutReady = true;
+    m_atmosphereLutSignature = atmosphereLutSignature(*worldData);
     m_cachedWorld = *worldData;
     setWorldData(&m_cachedWorld);
     return true;
+}
+
+// ★★★★ LUT'un uretildigi GIRDININ imzasi. Aynen `generateAtmosphereLUTGPU`'nun
+//   cihaza yolladigi struct uzerinden hesaplanir -- yani "ayni bayt, ayni LUT".
+//   Baska bir alan secmek (ornegin yalniz gunes yonu) imzayi bir OLCUMDEN bir
+//   TAHMINE cevirirdi.
+// Bu adapter'in elindeki LUT, verilen dunyadan uretilmis MI? "Hazir mi" degil,
+// "NEYE gore hazir" -- iki adapter ayri VkDevice ve `World::needsLUTUpdate()`
+// tek/paylasilan bayrak oldugu icin, ilk uretip bayragi temizleyen otekini
+// bayat bir SkyView ile birakiyordu. Belirti sessiz: gokyuzu cizilir, sadece
+// yanlis gunese gore.
+bool VulkanBackendAdapter::atmosphereLutStale(const WorldData& wd) const {
+    if (wd.mode != WORLD_MODE_NISHITA) return false;
+    if (!m_atmosphereLutReady) return true;
+    return m_atmosphereLutSignature != atmosphereLutSignature(wd);
+}
+
+uint64_t VulkanBackendAdapter::atmosphereLutSignature(const WorldData& wd) {
+    const AtmosphereLUTParamsGPU params = makeAtmosphereLUTParamsGPU(wd);
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&params);
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < sizeof(params); ++i) {
+        h ^= bytes[i];
+        h *= 1099511628211ull;
+    }
+    return h ? h : 1ull; // 0 = "hic uretilmedi"
 }
 
 void VulkanBackendAdapter::setWorldData(const void* w) {
@@ -19516,6 +20172,11 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     // reaches Vulkan before the Nishita LUT has been generated, build it here so
     // the first frame does not render through the analytic/fallback atmosphere
     // until a UI slider dirties the world again.
+    //
+    // ★ Kapi bilerek "HIC uretilmedi"; "bayat mi" sorusu buraya KONULAMAZ, cunku
+    //   bu govde her dunya yazmasinda kosar ve Physical Sky slider'inin ~15 Hz
+    //   kisitini (Main.cpp) yok ederdi. Bayatlik olcusu `atmosphereLutStale()`
+    //   ile disaridan, kisitin ICINDEN sorulur.
     if (wd->mode == WORLD_MODE_NISHITA &&
         !m_atmosphereLutReady &&
         !m_atmosphereLutGenerationInProgress &&

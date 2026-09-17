@@ -199,7 +199,11 @@ public:
     // the triangle topology changed (the Embree refit self-detects that and raises
     // g_bvh_rebuild_pending). Much cheaper for per-frame dynamic updates (sculpt,
     // rigid/soft/fluid sim body motion, transform drags).
-    void refitBVH(SceneData& scene, bool use_embree);
+    // Returns false when no in-place refit was possible (no Embree BVH), having
+    // done NOTHING -- the caller decides whether a full rebuild is worth it. It
+    // used to rebuild silently, which turned a per-sculpt-dab refit request into
+    // a per-dab full CPU BVH rebuild.
+    bool refitBVH(SceneData& scene, bool use_embree);
     void updateBVH(SceneData& scene, bool use_embree);
    
     void create_scene(SceneData& scene, Backend::IBackend* backend, const std::string& model_path,
@@ -396,7 +400,7 @@ private:
         std::vector<std::shared_ptr<class HittableInstance>> instances;
     };
     std::vector<AnimatableGroup> animation_groups;
-    bool animation_groups_dirty = true;
+   
 
     // Per-frame collection of (nodeName, worldMatrix) pairs for nodes that
     // had a keyframe applied. Populated in updateAnimationState; consumed
@@ -408,6 +412,9 @@ private:
     std::vector<std::shared_ptr<HittableInstance>> m_dynamic_instances;   // [NEW] Tüm instanced nesneler önbelleği
 
 public:
+    bool animation_groups_dirty = true;
+    void invalidateAnimationGeometry() { animation_groups_dirty = true; }
+
     SDL_Window* window;
     // ============ CYCLES-STYLE ACCUMULATIVE RENDERING (CPU) ============
     struct Vec4 { float x, y, z, w; };  // For accumulation buffer (RGB + sample count)

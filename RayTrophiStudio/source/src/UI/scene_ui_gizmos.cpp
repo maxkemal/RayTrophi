@@ -1,10 +1,12 @@
-﻿// ===============================================================================
+// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
 // ===============================================================================
 
+#include "PerfProfile.h"
 #include "scene_ui.h"
+#include "UI/RigWeightMapUI.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -4987,6 +4989,7 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
     // in both Solid and Rendered viewport modes (the GPU edit overlay is Edit +
     // Solid only). Self-guards on sculpt mode / mask presence.
     drawSculptMaskViewportOverlay(ctx);
+    RigUI::drawRigWeightMapOverlay(ctx);
     MeshEdit::drawProfileSplineOverlay(ctx);
     // While a sculpt session owns the selected object, suppress the selection bbox /
     // outline / transform gizmo: the brush draws its own cursor + mask overlay, and the
@@ -4997,10 +5000,11 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
         mesh_workspace_mode == MeshWorkspaceMode::Sculpt &&
         mesh_overlay_settings.edit_mode &&
         !sculpt_mode_state.active_target_name.empty();
-    if (!sculpt_session_active &&
+    if (!ctx.scene.rigView.edit_mode && !sculpt_session_active &&
         ctx.selection.hasSelection() && ctx.selection.show_gizmo && ctx.scene.camera && viewport_settings.show_gizmos) {
         drawSelectionBoundingBox(ctx);
         if (mesh_overlay_settings.enabled && mesh_workspace_mode == MeshWorkspaceMode::Edit) {
+            RTPERF_FRAME_SCOPE("ui.editable_mesh_overlay");
             drawEditableMeshOverlay(ctx);
         }
         // The point gizmo normally owns spline edit mode, so let P switch

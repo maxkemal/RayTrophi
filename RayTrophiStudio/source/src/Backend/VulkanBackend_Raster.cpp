@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // VulkanBackend_Raster.cpp
 //
 // Rasterized viewport path of VulkanBackendAdapter: raster mesh lifetime,
@@ -838,9 +838,15 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         rmb.vertexCount = (uint32_t)(positions.size() / 3);
         VulkanRT::BufferCreateInfo vci{};
         vci.size = positions.size() * sizeof(float);
-        vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        // ACCELERATION: the same positions are the build input for the RayFusion
+        // BLAS. A usage flag costs no memory; without it the buffer cannot be
+        // read by an acceleration structure build at all, and the only symptom
+        // would be a validation error at build time.
+        vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST |
+                    VulkanRT::BufferUsage::ACCELERATION;
         vci.location = VulkanRT::MemoryLocation::GPU_ONLY;
         vci.initialData = nullptr;
+        vci.category = VulkanRT::VramCategory::Geometry;
         rmb.vertexBuffer = m_device->createBuffer(vci);
 
         VulkanRT::BufferCreateInfo nci{};
@@ -848,6 +854,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         nci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
         nci.location = VulkanRT::MemoryLocation::GPU_ONLY;
         nci.initialData = nullptr;
+        nci.category = VulkanRT::VramCategory::Geometry;
         rmb.normalBuffer = m_device->createBuffer(nci);
 
         // UV buffer for MaterialPreview
@@ -856,6 +863,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             uci.size = uvs.size() * sizeof(float);
             uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
             uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            uci.category = VulkanRT::VramCategory::Geometry;
             rmb.uvBuffer = m_device->createBuffer(uci);
             if (rmb.uvBuffer.buffer) {
                 m_device->uploadBuffer(rmb.uvBuffer, uvs.data(), uvs.size() * sizeof(float), 0);
@@ -868,11 +876,14 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             mci.size = matIds.size() * sizeof(uint32_t);
             mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
             mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            mci.category = VulkanRT::VramCategory::Geometry;
             rmb.matIdBuffer = m_device->createBuffer(mci);
             if (rmb.matIdBuffer.buffer) {
                 m_device->uploadBuffer(rmb.matIdBuffer, matIds.data(), matIds.size() * sizeof(uint32_t), 0);
             }
             rmb.cpuMatIds = std::move(matIds);
+            rmb.materialUsage.invalidate();
+            rmb.matIdsHashValid = false;  // RayFusion bounce signature cache
         }
 
         if (rmb.vertexBuffer.buffer) {
@@ -1043,6 +1054,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
         vci.location = VulkanRT::MemoryLocation::GPU_ONLY;
         vci.initialData = nullptr;
+        vci.category = VulkanRT::VramCategory::Geometry;
         rmb.vertexBuffer = m_device->createBuffer(vci);
 
         VulkanRT::BufferCreateInfo nci{};
@@ -1050,6 +1062,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         nci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
         nci.location = VulkanRT::MemoryLocation::GPU_ONLY;
         nci.initialData = nullptr;
+        nci.category = VulkanRT::VramCategory::Geometry;
         rmb.normalBuffer = m_device->createBuffer(nci);
 
         if (rmb.vertexBuffer.buffer) {
@@ -1065,6 +1078,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             uci.size = grp.uvs.size() * sizeof(float);
             uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
             uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            uci.category = VulkanRT::VramCategory::Geometry;
             rmb.uvBuffer = m_device->createBuffer(uci);
             if (rmb.uvBuffer.buffer) {
                 m_device->uploadBuffer(rmb.uvBuffer, grp.uvs.data(), grp.uvs.size() * sizeof(float), 0);
@@ -1076,11 +1090,14 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             mci.size = grp.matIds.size() * sizeof(uint32_t);
             mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
             mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            mci.category = VulkanRT::VramCategory::Geometry;
             rmb.matIdBuffer = m_device->createBuffer(mci);
             if (rmb.matIdBuffer.buffer) {
                 m_device->uploadBuffer(rmb.matIdBuffer, grp.matIds.data(), grp.matIds.size() * sizeof(uint32_t), 0);
             }
             rmb.cpuMatIds = grp.matIds;
+            rmb.materialUsage.invalidate();
+            rmb.matIdsHashValid = false;  // RayFusion bounce signature cache
         }
 
         m_rasterMeshes[grp.meshKey] = rmb;
@@ -1237,14 +1254,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         meshIt->second.instanceIndices.push_back(i);
     }
     // ── Production instancing: try global buffer first, per-mesh fallback ──
-    rebuildRasterInstanceLayout();
-    if (m_rasterUseGlobalInstBuffer) {
-        writeRasterInstanceTransformsToGlobal();
-    } else {
-        for (auto& [key, mesh] : m_rasterMeshes) {
-            uploadRasterInstanceBuffer(mesh);
-        }
-    }
+    refreshRasterInstanceLayout();
 
     m_rasterGeometryDirty = false;
     m_interactiveViewport.dirty = true;
@@ -1525,6 +1535,16 @@ void VulkanBackendAdapter::syncRasterSkinnedVerticesImpl(
             rmb.cpuNormals   = std::move(newNormals);
         }
     }
+    // ★★★★ The skinned vertex buffers were just rewritten IN PLACE: same
+    //   allocation, same device address, same vertex count. Every gate that
+    //   watches handles and counts -- including the RayFusion scene-AS
+    //   signature -- is structurally blind to that, so the deformation has to
+    //   announce itself, or the BLAS built over these very buffers keeps
+    //   describing the pose it was built in and the character animates in the
+    //   raster image while casting a frozen shadow.
+    //   noteSkinnedPose decides whether anything actually MOVED: this dispatch
+    //   runs every frame regardless, and a parked timeline must not pay for it.
+    noteSkinnedPose(boneMatrices);
 
     m_interactiveViewport.dirty = true;
 }
@@ -1646,6 +1666,7 @@ bool VulkanBackendAdapter::updateRasterMeshFromTrianglesImpl(const std::string& 
         vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
         vci.location = VulkanRT::MemoryLocation::GPU_ONLY;
         vci.initialData = nullptr;
+        vci.category = VulkanRT::VramCategory::Geometry;
         rmb.vertexBuffer = m_device->createBuffer(vci);
 
         VulkanRT::BufferCreateInfo nci{};
@@ -1653,6 +1674,7 @@ bool VulkanBackendAdapter::updateRasterMeshFromTrianglesImpl(const std::string& 
         nci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
         nci.location = VulkanRT::MemoryLocation::GPU_ONLY;
         nci.initialData = nullptr;
+        nci.category = VulkanRT::VramCategory::Geometry;
         rmb.normalBuffer = m_device->createBuffer(nci);
 
         // Upload data into device-local buffers via staging path
@@ -1847,8 +1869,52 @@ bool VulkanBackendAdapter::cloneRasterObjectByNodeName(
 
 namespace Backend {
 
+void VulkanBackendAdapter::refreshRasterInstanceLayout() {
+    // ★★★★ ONE body, called from BOTH buildRasterGeometryImpl and the realtime
+    //   viewport's override. It exists because the override drifted: it had a
+    //   copy of this tail WITHOUT the layout call, so the global instance buffer
+    //   and GPU culling could never turn on in the realtime viewport -- measured
+    //   2026-09-08 as gpu_culling=false, cull_mesh_count=0, 45.9M triangles
+    //   submitted per frame and a FULL frame-ring drain on every frame, because
+    //   the drain-free direct write lives behind that same flag.
+    //   Two copies of a tail is how that happened; there is now one.
+    rebuildRasterInstanceLayout();
+    if (m_rasterUseGlobalInstBuffer) {
+        writeRasterInstanceTransformsToGlobal();
+    } else {
+        for (auto& [key, mesh] : m_rasterMeshes) {
+            uploadRasterInstanceBuffer(mesh);
+        }
+    }
+}
+
+bool VulkanBackendAdapter::setRasterDepthPrepass(bool enabled) {
+    if (m_rasterDepthPrepassAllowed == enabled) return true;
+    m_rasterDepthPrepassAllowed = enabled;
+    // ★★★ Kol, pipeline'i YENIDEN KURMAZ -- yalnizca gecisin kosup kosmadigini
+    //   secer. Boylece A/B iki yonde de bedava ve ayni karede yapilabilir.
+    //   Uygulananin kendisi telemetride: depth_prepass.
+    m_interactiveViewport.dirty = true;
+    return true;
+}
+
+bool VulkanBackendAdapter::setRasterGpuInstancing(bool enabled) {
+    if (m_rasterGpuInstancingAllowed == enabled) return true;
+    m_rasterGpuInstancingAllowed = enabled;
+    // ★★★★ The shield must be switchable. This path had never once run in the
+    //   realtime viewport, so turning it on is a real change to the hot path --
+    //   and a fix that cannot be switched off destroys the measurement that
+    //   would have judged it. Read viewport.frame_telemetry gpu_culling,
+    //   visible_triangles and resource_drains on both sides.
+    if (m_device && m_device->isInitialized() && !m_rasterMeshes.empty()) {
+        refreshRasterInstanceLayout();
+    }
+    m_interactiveViewport.dirty = true;
+    return true;
+}
+
 void VulkanBackendAdapter::rebuildRasterInstanceLayout() {
-    if (!m_device || !m_device->isInitialized()) {
+    if (!m_device || !m_device->isInitialized() || !m_rasterGpuInstancingAllowed) {
         m_rasterUseGlobalInstBuffer = false;
         return;
     }
@@ -2018,6 +2084,45 @@ void VulkanBackendAdapter::rebuildRasterCullBindings() {
                 }
             }
         }
+    }
+
+    // ★★★★ Ucgen hedefini LOD ayrimi acik mesh'ler arasinda TALEBE ORANTILI
+    //   paylastir. Bu satirlar olmadan shader her mesh icin hedefin TAMAMINI
+    //   kullaniyordu (finalize() mesh basina kosuyor), yani efektif tavan mesh
+    //   sayisi KADAR katlaniyordu -- olculen sahnede 35 kat. Sonuc: her mesh
+    //   kendi payinin cok altinda kalir, geri besleme orani her kare 1,5'e
+    //   yapisir, mesafe esigi lodMaxDistSq'e kacar ve HICBIR SEY proxy'ye
+    //   dusmez. Telemetri hedefi dogru raporluyordu; uygulanani degil.
+    //   bkz. docs/dev/RASTER_MICROTRIANGLE_WALL.md
+    //
+    //   Talep = instanceCount * trianglesPerInstance. Bu, frustum culling'den
+    //   ONCEKI talep -- yani bir mesh'in ekranda kac instance'i kaldigina degil,
+    //   sahnedeki agirligina gore paylastiriyoruz. Kare kare degisen bir paya
+    //   gore cozmek esikleri kamera dondukce salindirirdi; pay layout ile
+    //   birlikte, yani seyrek degisiyor.
+    long double totalDemand = 0.0L;
+    for (const auto& b : bindings) {
+        if ((b.flags & RasterGpuCull::kFlagLodSplit) == 0u) continue;
+        totalDemand += static_cast<long double>(b.instanceCount) *
+                       static_cast<long double>(b.trianglesPerInstance);
+    }
+    for (auto& b : bindings) {
+        if ((b.flags & RasterGpuCull::kFlagLodSplit) == 0u) {
+            b.targetShare = 0u;
+            continue;
+        }
+        if (totalDemand <= 0.0L) {
+            // Talep olcelemiyorsa butceyi uygulamak yerine ESKI davranisa don
+            // (hedefin tamami). ★ Pay'i 0 birakmak sessizce her seyi proxy'ye
+            // dusururdu: shader'da allowed = max(1u, 0) = 1.
+            b.targetShare = 65536u;
+            continue;
+        }
+        const long double demand = static_cast<long double>(b.instanceCount) *
+                                   static_cast<long double>(b.trianglesPerInstance);
+        const long double share  = (demand / totalDemand) * 65536.0L;
+        b.targetShare = static_cast<uint32_t>(
+            std::max<long double>(1.0L, std::min<long double>(65536.0L, share + 0.5L)));
     }
 
     m_rasterGpuCull->setMeshBindings(bindings);

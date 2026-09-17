@@ -1,4 +1,10 @@
 #include "RtPostBindings.h"
+#include "RtViewportCutoutBindings.h"
+#include "RtRasterDiagnosticsBindings.h"
+#include "RtScreenGiBindings.h"
+#include "RtReflectionBindings.h"
+#include "RtRigBindings.h"
+#include "RtClipBindingBindings.h"
 /*
 * =========================================================================
 * Project:       RayTrophi Studio
@@ -35,6 +41,7 @@
 #include "RtPythonDebris.h"
 #include "RtPythonMassTransfer.h"
 #include "RtPythonTemplates.h"
+#include "RtPythonRayFusion.h"
 #include "RtPythonAgent.h"
 #include "RtPythonMeshEdit.h"
 
@@ -177,10 +184,32 @@ rtapi::NodeParamValue nodeParamFromPython(const py::handle& value) {
 
 } // namespace
 
+// Dosya kapsaminda: pybind lambda'lari yakalamasiz, yani kapsayan fonksiyonun
+// yerel bir lambda'sina basvuramazlar (E1735).
+static py::dict autosaveStatusToDict(const rtapi::AutosaveStatus& st) {
+    py::dict d;
+    d["enabled"] = st.enabled;
+    d["interval_sec"] = st.interval_sec;
+    d["path"] = st.path;
+    d["file_exists"] = st.file_exists;
+    d["file_bytes"] = st.file_bytes;
+    d["seconds_since_last_write"] = st.seconds_since_last_write;
+    d["seconds_until_next"] = st.seconds_until_next;
+    d["last_write_ms"] = st.last_write_ms;
+    d["last_reason"] = st.last_reason;
+    d["last_ok"] = st.last_ok;
+    d["last_error"] = st.last_error;
+    d["write_count"] = st.write_count;
+    d["skipped_unmodified"] = st.skipped_unmodified;
+    d["scene_is_modified"] = st.scene_is_modified;
+    return d;
+}
+
 PYBIND11_EMBEDDED_MODULE(rt, module) {
     module.doc() = "RayTrophi Studio embedded scripting API";
 
     rtpy::registerTemplateBindings(module);
+    rtpy::registerRayFusionBindings(module);
     rtpy::registerAgentBindings(module);
 
     module.def("version", [] {
@@ -227,6 +256,53 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         out["distance"] = hit.distance;
         return out;
     }, py::arg("origin"), py::arg("direction"), py::arg("filter") = "mesh_and_terrain");
+    scene.def("pick_gpu", [](float u, float v) -> py::dict {
+        rtapi::GpuPickResult g;
+        requireResult(rtapi::pickObjectGpu(u, v, g));
+        py::dict out;
+        out["ok"] = g.ok;
+        out["hit"] = g.hit;
+        out["object"] = g.object;
+        out["instance_index"] = g.instance_index;
+        out["mesh_key"] = g.mesh_key;
+        out["reason"] = g.reason;
+        out["gpu_ms"] = g.gpu_ms;
+        return out;
+    }, py::arg("u"), py::arg("v"));
+    scene.def("pick_ray", [](float u, float v) -> py::dict {
+        rtapi::PickDiagnostics d;
+        requireResult(rtapi::pickRayDiagnostics(u, v, d));
+        py::dict out;
+        out["viewport_ray_dir"] = py::make_tuple(d.viewport_ray_dir[0], d.viewport_ray_dir[1], d.viewport_ray_dir[2]);
+        out["render_ray_dir"] = py::make_tuple(d.render_ray_dir[0], d.render_ray_dir[1], d.render_ray_dir[2]);
+        out["ray_divergence_deg"] = d.ray_divergence_deg;
+        out["depth_of_field"] = d.depth_of_field;
+        out["bvh_present"] = d.bvh_present;
+        out["bvh_hit"] = d.bvh_hit;
+        out["bvh_object"] = d.bvh_object;
+        out["bvh_t"] = d.bvh_t;
+        out["linear_hit"] = d.linear_hit;
+        out["linear_object"] = d.linear_object;
+        out["linear_t"] = d.linear_t;
+        out["paths_agree"] = d.paths_agree;
+        out["world_objects"] = d.world_objects;
+        out["shading_mode"] = d.shading_mode;
+        out["interactive_fallback_ray"] = d.interactive_fallback_ray;
+        out["gate_rig_edit_mode"] = d.gate_rig_edit_mode;
+        out["gate_hud_captured"] = d.gate_hud_captured;
+        out["gate_dragging"] = d.gate_dragging;
+        out["gate_blocks_selection"] = d.gate_blocks_selection;
+        out["linear_has_facade"] = d.linear_has_facade;
+        out["linear_has_flat"] = d.linear_has_flat;
+        out["linear_facade_object"] = d.linear_facade_object;
+        out["linear_flat_object"] = d.linear_flat_object;
+        out["linear_handles_agree"] = d.linear_handles_agree;
+        out["linear_hit_index"] = d.linear_hit_index;
+        out["linear_identity_index"] = d.linear_identity_index;
+        out["linear_hit_entry_kind"] = d.linear_hit_entry_kind;
+        out["linear_hit_point"] = py::make_tuple(d.linear_hit_point[0], d.linear_hit_point[1], d.linear_hit_point[2]);
+        return out;
+    }, py::arg("u"), py::arg("v"));
     scene.def("exists", &rtapi::objectExists, py::arg("name"));
     scene.def("delete", [](const std::string& name) { requireResult(rtapi::deleteObject(name)); });
     scene.def("duplicate", [](const std::string& name) {
@@ -3410,6 +3486,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     rtpy::registerSceneBindings(module);
 
     py::module_ anim = module.def_submodule("anim", "Keyframe animation (transform tracks)");
+    registerClipBindingPython(anim);
     anim.def("insert_key", [](const std::string& object_name, const std::string& channel,
                               int frame, const py::handle& value) {
         requireResult(rtapi::insertKeyframe(object_name, channel, frame, vec3FromPython(value)));
@@ -3557,6 +3634,56 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::getAnimGraphPlayback(character, info));
         return playbackToDict(info);
     }, py::arg("character"));
+    anim.def("state_machines", [](const std::string& character) {
+        std::vector<rtapi::AnimStateMachineInfo> machines;
+        requireResult(rtapi::listAnimStateMachines(character, machines));
+        py::list out;
+        for (const auto& m : machines) {
+            py::list states;
+            for (const auto& s : m.states) {
+                py::dict d;
+                d["name"] = s.name;
+                d["is_default"] = s.is_default;
+                d["is_current"] = s.is_current;
+                d["pose_node_id"] = s.pose_node_id;
+                d["pose_connected"] = s.pose_connected;
+                states.append(d);
+            }
+            py::list transitions;
+            for (const auto& t : m.transitions) {
+                py::dict d;
+                d["from"] = t.from;
+                d["to"] = t.to;
+                d["condition"] = t.condition;
+                d["parameter"] = t.parameter;
+                d["compare_value"] = t.compare_value;
+                d["has_exit_time"] = t.has_exit_time;
+                d["exit_time"] = t.exit_time;
+                d["blend_time"] = t.blend_time;
+                transitions.append(d);
+            }
+            py::dict entry;
+            entry["node_id"] = m.node_id;
+            entry["current_state"] = m.current_state;
+            entry["target_state"] = m.target_state;
+            entry["transitioning"] = m.transitioning;
+            entry["transition_progress"] = m.transition_progress;
+            entry["states"] = states;
+            entry["transitions"] = transitions;
+            entry["recent_events"] = m.recent_events;
+            out.append(entry);
+        }
+        return out;
+    }, py::arg("character"),
+       "Live state machines of the character's RUNTIME graph: current state, "
+       "transition progress, and whether each state's pose input resolves. "
+       "pose_connected False means that state evaluates to an empty pose.");
+    anim.def("force_state", [](const std::string& character, const std::string& state,
+                               unsigned int node_id) {
+        requireResult(rtapi::forceAnimState(character, state, node_id));
+    }, py::arg("character"), py::arg("state"), py::arg("node_id") = 0u,
+       "Jump straight to a state, cancelling any running transition. "
+       "node_id 0 targets the character's first state machine.");
 
     py::module_ nodes = module.def_submodule("nodes",
         "Node graph construction (material / geometry / terrain graphs via NodeRegistry)");
@@ -3787,6 +3914,24 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             requireResult(rtapi::setCameraFocusDistance(py::cast<float>(kwargs["focus_distance"])));
         if (kwargs.contains("aperture"))
             requireResult(rtapi::setCameraAperture(py::cast<float>(kwargs["aperture"])));
+        // ★ AF: kamera odagini YAZAN bir arac oldugu icin kamera setter'lariyla
+        //   ayni yerde duruyor; kapilarini `viewport.get_af` raporlar.
+        if (kwargs.contains("af_area_mode") || kwargs.contains("af_focus_mode") ||
+            kwargs.contains("af_selected_point") || kwargs.contains("af_points")) {
+            const rtapi::ViewportAfInfo cur = rtapi::viewportAf();
+            const bool en = kwargs.contains("af_points")
+                          ? py::cast<bool>(kwargs["af_points"]) : cur.enabled;
+            const int area = kwargs.contains("af_area_mode")
+                           ? py::cast<int>(kwargs["af_area_mode"]) : cur.area_mode;
+            const int fm = kwargs.contains("af_focus_mode")
+                         ? py::cast<int>(kwargs["af_focus_mode"]) : cur.focus_mode;
+            const int pt = kwargs.contains("af_selected_point")
+                         ? py::cast<int>(kwargs["af_selected_point"]) : cur.selected_point;
+            requireResult(rtapi::setViewportAf(en, area, fm, pt));
+        }
+        // ★ Anahtar aciklaktan AYRI: aciklagi yazmak DoF'u acmaz.
+        if (kwargs.contains("depth_of_field"))
+            requireResult(rtapi::setCameraDepthOfField(py::cast<bool>(kwargs["depth_of_field"])));
         // ★★ auto_exposure ACIKKEN preset'ler okunmaz; ikisini birlikte
         //   gecmek isteyenler icin auto_exposure ONCE uygulanir.
         if (kwargs.contains("auto_exposure"))
@@ -3913,6 +4058,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if (kwargs.contains("ambient_kelvin")) { ambient_val = py::cast<float>(kwargs["ambient_kelvin"]); p_ambient = &ambient_val; }
         if (kwargs.contains("kelvin_per_unit")) { kelvin_val = py::cast<float>(kwargs["kelvin_per_unit"]); p_kelvin = &kelvin_val; }
         if (kwargs.contains("convection_coefficient")) { convection_val = py::cast<float>(kwargs["convection_coefficient"]); p_convection = &convection_val; }
+
         if (kwargs.contains("oxygen_availability")) { oxygen_val = py::cast<float>(kwargs["oxygen_availability"]); p_oxygen = &oxygen_val; }
         requireResult(rtapi::setWorldThermal(p_ambient, p_kelvin, p_convection, p_oxygen));
     });
@@ -3955,11 +4101,22 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             requireResult(rtapi::setPostStylizeStrength(py::cast<float>(kwargs["stylize_strength"])));
     });
 
+    registerRigPython(module);
     py::module_ project = module.def_submodule("project", "Project file operations");
     project.def("path", &rtapi::currentProjectPath);
     project.def("save", [](const std::string& path) {
         requireResult(rtapi::saveProject(path));
     }, py::arg("path") = std::string());
+    project.def("autosave_now", [](const std::string& reason) -> py::dict {
+        rtapi::AutosaveStatus st;
+        requireResult(rtapi::autosaveNow(reason, st));
+        return autosaveStatusToDict(st);
+    }, py::arg("reason") = std::string("manual"));
+    project.def("autosave_status", []() -> py::dict {
+        rtapi::AutosaveStatus st;
+        requireResult(rtapi::autosaveStatus(st));
+        return autosaveStatusToDict(st);
+    });
     project.def("open", [](const std::string& path) {
         requireResult(rtapi::openProject(path));
     }, py::arg("path"));
@@ -3969,6 +4126,37 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     timeline.def("set_frame", [](int frame) { requireResult(rtapi::setFrame(frame)); }, py::arg("frame"));
 
     py::module_ render = module.def_submodule("render", "Asynchronous final-render jobs");
+    render.def("optix_accum_status", []() -> py::dict {
+        rtapi::OptixAccumStatus st;
+        requireResult(rtapi::optixAccumStatus(st));
+        py::dict d;
+        d["available"] = st.available;
+        d["accumulated_samples"] = st.accumulated_samples;
+        d["wipe_count"] = st.wipe_count;
+        d["wipe_resolution"] = st.wipe_resolution;
+        d["wipe_camera"] = st.wipe_camera;
+        d["buffer_w_read"] = st.buffer_w_read;
+        d["buffer_w_mean"] = st.buffer_w_mean;
+        d["buffer_w_max"] = st.buffer_w_max;
+        d["buffer_w_center"] = st.buffer_w_center;
+        d["adaptive_sampling"] = st.adaptive_sampling;
+        d["min_samples"] = st.min_samples;
+        d["variance_threshold"] = st.variance_threshold;
+        d["samples_per_pixel"] = st.samples_per_pixel;
+        d["prev_zero_pixels"] = st.prev_zero_pixels;
+        d["read_w"] = st.read_w;
+        d["read_h"] = st.read_h;
+        d["image_w"] = st.image_w;
+        d["image_h"] = st.image_h;
+        d["reset_buffers_calls"] = st.reset_buffers_calls;
+        d["set_render_params_calls"] = st.set_render_params_calls;
+        d["set_render_params_reason"] = st.set_render_params_reason;
+        d["first_cuda_error"] = st.first_cuda_error;
+        d["first_cuda_error_site"] = st.first_cuda_error_site;
+        d["last_wipe_from"] = py::make_tuple(st.last_wipe_from[0], st.last_wipe_from[1]);
+        d["last_wipe_to"] = py::make_tuple(st.last_wipe_to[0], st.last_wipe_to[1]);
+        return d;
+    });
     render.def("start", [](const std::string& output_path, int spp) {
         requireResult(rtapi::renderFrame(output_path, spp));
     }, py::arg("output_path"), py::arg("spp"));
@@ -4137,6 +4325,51 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "Also mirror completed sections into the Scene Log. Off by default.");
     perf.def("logging", [] { return rtapi::perfLogging(); },
        "Whether Scene Log mirroring is on.");
+    perf.def("get_gpu_memory", [] {
+        const rtapi::GpuMemoryReport r = rtapi::gpuMemoryReport();
+        py::list devices;
+        for (const auto& d : r.devices) {
+            py::dict cats;
+            for (const auto& c : d.categories) {
+                py::dict cd;
+                cd["device_local_bytes"] = c.device_local_bytes;
+                cd["host_bytes"] = c.host_bytes;
+                cd["allocations"] = c.allocations;
+                cats[py::str(c.name)] = cd;
+            }
+            py::dict comp;
+            comp["supported"] = d.compaction_supported;
+            comp["compacted"] = d.compacted;
+            comp["skipped_skinned"] = d.compaction_skipped_skinned;
+            comp["failures"] = d.compaction_failures;
+            comp["bytes_before"] = d.compaction_bytes_before;
+            comp["bytes_after"] = d.compaction_bytes_after;
+            py::dict dd;
+            dd["role"] = d.role;
+            dd["backend"] = d.backend;
+            dd["tracked"] = d.tracked;
+            dd["device_local_bytes"] = d.device_local_bytes;
+            dd["host_bytes"] = d.host_bytes;
+            dd["allocations"] = d.allocations;
+            dd["categories"] = cats;
+            dd["compaction"] = comp;
+            devices.append(dd);
+        }
+        py::dict out;
+        out["vram_measured"] = r.vram_measured;
+        out["vram_usage_bytes"] = r.vram_usage_bytes;
+        out["vram_budget_bytes"] = r.vram_budget_bytes;
+        out["tracked_device_local_bytes"] = r.tracked_device_local_bytes;
+        out["untracked_bytes"] = r.untracked_bytes;
+        out["blas_compaction_enabled"] = r.blas_compaction_enabled;
+        out["devices"] = devices;
+        return out;
+    }, "VRAM by device (render/viewport) and purpose, plus the driver's "
+       "process-wide usage and the untracked remainder.");
+    perf.def("set_blas_compaction", [](bool enabled) {
+        requireResult(rtapi::setBlasCompaction(enabled));
+    }, py::arg("enabled"),
+       "Process-wide BLAS compaction switch; affects BLAS built afterwards.");
 
     // ── rt.editor: the application's own editor view state ──────────────────
     //
@@ -4453,6 +4686,24 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     py::module_ viewport = module.def_submodule("viewport",
         "Viewport state and per-frame capture for render.probe().");
+    viewport.def("device_recovery_status", []() -> py::dict {
+        rtapi::ViewportRecoveryStatus st;
+        requireResult(rtapi::viewportRecoveryStatus(st));
+        py::dict d;
+        d["viewport_alive"] = st.viewport_alive;
+        d["rebuild_pending"] = st.rebuild_pending;
+        d["device_lost_count"] = st.device_lost_count;
+        d["rebuild_attempts"] = st.rebuild_attempts;
+        d["gate_remaining_ms"] = st.gate_remaining_ms;
+        d["consecutive_losses"] = st.consecutive_losses;
+        d["given_up"] = st.given_up;
+        d["max_streak"] = st.max_streak;
+        return d;
+    });
+    viewport.def("retry_device_recovery", []() {
+        requireResult(rtapi::viewportRetryDeviceRecovery());
+    });
+    registerViewportCutoutPython(viewport);
     viewport.def("capture", [](bool enabled) {
         requireResult(rtapi::setViewportCapture(enabled));
     }, py::arg("enabled"),
@@ -4540,6 +4791,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["display_post_was_noop_copy"] = t.display_post_was_noop_copy;
             d["display_frames"] = t.display_frames;
         }
+        // Teshis alanlari `available` kapisinin ONUNDE: surucu kaybi ring'i
+        // olduren seyin ta kendisi, yani "olcum yok" dedigi an tam da
+        // okunmasi gereken andir.
+        d["stale_descset_rebuilds"] = t.stale_descset_rebuilds;
+        d["device_lost"] = t.device_lost;
         if (!t.available) return d;
         d["async_present"] = t.async_present;
         d["synchronous_present"] = t.synchronous_present;
@@ -4562,6 +4818,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["present_latency_frames"] = t.present_latency_frames;
         d["global_instance_buffer"] = t.global_instance_buffer;
         d["gpu_culling"] = t.gpu_culling;
+        d["depth_prepass"] = t.depth_prepass;
         d["total_instances"] = t.total_instances;
         d["cull_mesh_count"] = t.cull_mesh_count;
         d["draw_calls"] = t.draw_calls;
@@ -4582,7 +4839,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "the viewer saw older pixels - small and constant is normal, growing "
        "with frame count is not. Note that rt.viewport.capture(True) forces "
        "synchronous presentation so a probe reads the frame just recorded; "
-       "timings taken with capture on are NOT the interactive timings.");
+       "timings taken with capture on are NOT the interactive timings. "
+       "'stale_descset_rebuilds' and 'device_lost' are published even when "
+       "'available' is false, because a lost device is what kills the ring: "
+       "gating them behind availability would hide them exactly when they "
+       "matter. stale_descset_rebuilds > 0 means a texture purge orphaned the "
+       "material-preview descriptor set and the viewport rebuilt it before "
+       "drawing - the suspected project-open device-lost root cause.");
 
     // Panel-only until 2026-09-01. Without it the scatter LOD numbers in
     // frame_telemetry had no reference point: a script could read
@@ -4596,6 +4859,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["raster_viewport_available"] = q.raster_viewport_available;
         d["shadow_atlas_resolution"] = q.shadow_atlas_resolution;
         d["shadow_tile_resolution"] = q.shadow_tile_resolution;
+        d["volume_shadow_tile_resolution"] = q.volume_shadow_tile_resolution;
+        d["volume_shadow_depth_layers"] = q.volume_shadow_depth_layers;
+        d["volume_shadow_steps"] = q.volume_shadow_steps;
         d["shadow_tile_capacity"] = q.shadow_tile_capacity;
         d["shadow_light_budget"] = q.shadow_light_budget;
         d["shadow_pcf_samples"] = q.shadow_pcf_samples;
@@ -4621,6 +4887,47 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "'raster_viewport_available' false means the preset is stored but "
        "nothing reads it on this machine.");
 
+    viewport.def("set_taa",
+        [](bool enabled, int samples) {
+            requireResult(rtapi::setViewportTaa(enabled, samples));
+        },
+        py::arg("enabled") = true, py::arg("samples") = 16,
+        "Realtime raster temporal anti-aliasing. 'samples' is a STOPPING "
+        "CONDITION, not a quality dial: the viewport keeps drawing frames until "
+        "it has accumulated that many jittered samples, then goes idle.");
+    viewport.def("taa", []() {
+        const rtapi::ViewportTaaInfo t = rtapi::viewportTaa();
+        py::dict out;
+        out["enabled"] = t.enabled;
+        out["target_samples"] = t.target_samples;
+        out["accumulated_samples"] = t.accumulated_samples;
+        out["converged"] = t.converged;
+        out["supported"] = t.supported;
+        out["last_ms"] = t.last_ms;
+        out["inactive_reason"] = t.inactive_reason;
+        return out;
+    }, "'enabled' is the request; 'accumulated_samples' is the measurement. "
+       "Reading it right after a camera move gives 0 or 1 -- that is correct, "
+       "not a failure: accumulation restarts whenever the image changes.");
+
+    viewport.def("set_depth_of_field",
+        [](bool enabled, float max_coc_pixels, int max_taps) {
+            requireResult(rtapi::setViewportDepthOfField(enabled, max_coc_pixels, max_taps));
+        },
+        py::arg("enabled") = true, py::arg("max_coc_pixels") = 24.0f,
+        py::arg("max_taps") = 32);
+    viewport.def("get_depth_of_field", []() {
+        const rtapi::ViewportDepthOfFieldInfo d = rtapi::viewportDepthOfField();
+        py::dict out;
+        out["enabled"] = d.enabled;
+        out["max_coc_pixels"] = d.max_coc_pixels;
+        out["max_taps"] = d.max_taps;
+        out["camera_aperture"] = d.camera_aperture;
+        out["camera_focus_distance"] = d.camera_focus_distance;
+        out["active"] = d.active;
+        out["inactive_reason"] = d.inactive_reason;
+        return out;
+    });
     viewport.def("set_quality", [](const std::string& preset) {
         requireResult(rtapi::setViewportQuality(preset));
     }, py::arg("preset"),
@@ -4646,6 +4953,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["world_ibl_supported"] = p.world_ibl_supported;
         d["world_ibl_ready"] = p.world_ibl_ready;
         d["world_ibl_fallback"] = p.world_ibl_fallback;
+        d["world_ibl_source"] = p.world_ibl_source;
+        d["world_sky_capture_supported"] = p.world_sky_capture_supported;
+        d["world_background_source"] = p.world_background_source;
         d["material_preview_active"] = p.material_preview_active;
         // post.get AYARI verir; bunlar shader'a GIDEN degerler.
         d["display_tone_mapping"] = p.display_tone_mapping;
@@ -4684,6 +4994,145 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "accepted for material). Resets accumulation, so probe again after "
        "switching rather than reading the frame from the mode you left. Raises "
        "when the mode is unavailable instead of silently falling back.");
+
+    viewport.def("set_rt_shadow", [](bool enabled) {
+        requireResult(rtapi::setRtShadow(enabled));
+    }, py::arg("enabled"),
+       "Enable same-frame alpha-tested hard shadows for the first visible directional "
+       "light, or the world sun if none. Off by default. Other lights and surfaces "
+       "use cascades. Automatically requires a depth prepass. Read rt_shadow() for "
+       "enabled/ready/reason and the ray upper bound. No accumulation or soft shadows.");
+
+    viewport.def("rt_shadow", []() {
+        const rtapi::RtShadowInfo s = rtapi::rtShadow();
+        py::dict d;
+        d["supported"] = s.supported;
+        d["enabled"] = s.enabled;
+        d["ready"] = s.ready;
+        d["rays"] = s.rays;
+        d["cascades_replaced"] = s.cascades_replaced;
+        d["reason"] = s.reason;
+        return d;
+    }, "RT shadow mask state. 'enabled' is the REQUEST, 'ready' is what actually "
+       "built, and they differ whenever ray query is unsupported, the shader is "
+       "missing or the scene acceleration structure has not been built yet - "
+       "'reason' says which.");
+
+    viewport.def("frame_timings", []() {
+        const rtapi::RasterTimingInfo t = rtapi::rasterTimings();
+        py::list stages;
+        for (const auto& s : t.stages) {
+            py::dict d;
+            d["name"] = s.name;
+            d["cpu_mean_ms"] = s.cpu_mean_ms;
+            d["cpu_p95_ms"] = s.cpu_p95_ms;
+            d["gpu_mean_ms"] = s.gpu_mean_ms;
+            d["gpu_p95_ms"] = s.gpu_p95_ms;
+            d["frames_ran"] = s.frames_ran;
+            stages.append(d);
+        }
+        py::dict applied;
+        applied["shading"] = t.shading;
+        applied["quality_preset"] = t.quality_preset;
+        applied["lighting_preset"] = t.lighting_preset;
+        applied["width"] = t.width;
+        applied["height"] = t.height;
+        applied["depth_prepass"] = t.depth_prepass;
+        applied["gpu_culling"] = t.gpu_culling;
+        applied["global_instance_buffer"] = t.global_instance_buffer;
+        applied["rt_shadow_requested"] = t.rt_shadow_requested;
+        applied["rt_shadow_ready"] = t.rt_shadow_ready;
+        applied["rt_cascades_replaced"] = t.rt_cascades_replaced;
+        applied["directional_cascades"] = t.directional_cascades;
+        applied["shadowed_lights"] = t.shadowed_lights;
+        applied["scene_lights"] = t.scene_lights;
+        applied["volume_count"] = t.volume_count;
+        applied["visible_triangles"] = t.visible_triangles;
+        applied["total_instances"] = t.total_instances;
+        applied["draw_calls"] = t.draw_calls;
+        applied["screen_gi"] = screenGiDictionary<py::dict>(t.screen_gi);
+        applied["reflection"] = reflectionDictionary<py::dict>(t.reflection);
+        py::dict d;
+        d["available"] = t.available;
+        d["gpu_supported"] = t.gpu_supported;
+        d["gpu_unsupported_reason"] = t.gpu_unsupported_reason;
+        d["frames"] = t.frames;
+        d["frames_with_gpu"] = t.frames_with_gpu;
+        d["frame_cpu_mean_ms"] = t.frame_cpu_mean_ms;
+        d["frame_cpu_p95_ms"] = t.frame_cpu_p95_ms;
+        d["frame_gpu_mean_ms"] = t.frame_gpu_mean_ms;
+        d["frame_gpu_p95_ms"] = t.frame_gpu_p95_ms;
+        d["window_wall_ms"] = t.window_wall_ms;
+        d["stages"] = stages;
+        d["applied"] = applied;
+        d["warnings"] = t.warnings;
+        return d;
+    }, "Per-pass CPU and GPU cost of the raster viewport frame, over the window "
+       "since the last reset_frame_timings(). Reset, drive the camera, read: the "
+       "viewport renders only when marked dirty, so a still camera measures "
+       "nothing and says so in 'warnings'. 'applied' is what the measured frames "
+       "ACTUALLY did, not what a panel requested.");
+
+    viewport.def("reset_frame_timings", []() {
+        requireResult(rtapi::resetRasterTimings());
+    }, "Clear the per-pass timing window before a measured run.");
+
+    viewport.def("set_raster_depth_prepass", [](bool enabled) {
+        requireResult(rtapi::setRasterDepthPrepass(enabled));
+    }, py::arg("enabled"),
+       "Enable/disable the alpha-tested depth prepass in the raster viewport. ON "
+       "is the default. It does two jobs: early-Z then rejects hidden fragments "
+       "before the scene shader runs, and it produces the per-pixel depth a "
+       "ray-traced shadow pass needs to know where to start its ray. Measured "
+       "motivation: in a forest scene the fusion path spent 427.6 ms per frame "
+       "against 17.5 ms for solid at 2.6x MORE triangles, so about 98 percent of "
+       "the frame was fragment shading multiplied by 18.4 triangles per pixel. "
+       "Kept switchable because a fix that cannot be turned off also destroys "
+       "the measurement that would judge it.");
+
+    viewport.def("raster_depth_prepass", []() {
+        return rasterDepthPrepassDictionary<py::dict>();
+    }, "Current request and last recorded frame: effective, forced_by_rt_shadow, observed.");
+
+    viewport.def("set_raster_gpu_instancing", [](bool enabled) {
+        requireResult(rtapi::setRasterGpuInstancing(enabled));
+    }, py::arg("enabled"),
+       "Enable/disable the global instance buffer, GPU culling and scatter LOD "
+       "proxies in the raster viewport. ON is the default. OFF forces the "
+       "per-mesh fallback, which is what the realtime viewport ran "
+       "unconditionally until 2026-09-08 because its buildRasterGeometry "
+       "override never called the layout builder: measured on a 1000-instance "
+       "foliage scene that meant 45.9M triangles submitted per frame with LOD "
+       "proxies carrying 30k of them, plus 0.98 full frame-ring drains per "
+       "frame. It is kept switchable because a fix that cannot be turned off "
+       "destroys the measurement that would judge it. The scene looks CORRECT "
+       "either way -- only the numbers differ, so read them from "
+       "viewport.frame_telemetry: gpu_culling, global_instance_buffer, "
+       "cull_mesh_count, visible_triangles, proxy_triangles and resource_drains.");
+    viewport.def("raster_gpu_instancing", [] {
+        py::dict result;
+        result["enabled"] = rtapi::rasterGpuInstancing();
+        return result;
+    }, "Is raster GPU instancing allowed? See set_raster_gpu_instancing. This is "
+       "the REQUEST; viewport.frame_telemetry gpu_culling reports what actually "
+       "engaged, and the two differ whenever the cull resources failed to build.");
+
+    viewport.def("set_scene_load_guard", [](bool enabled) {
+        requireResult(rtapi::setSceneLoadGuard(enabled));
+    }, py::arg("enabled"),
+       "Enable/disable the scene-load Solid guard. ON (default) means opening a "
+       "project or template drops Material/Rendered to Solid first, because "
+       "tearing a loaded scene down under a heavy viewport mode loses the Vulkan "
+       "device. Turn it OFF only to REPRODUCE that fault on purpose: with the "
+       "guard on, the descriptor-set tripwire can never fire, so its silence "
+       "proves nothing. Every load logs a warning while it is off. Read the "
+       "outcome from viewport.frame_telemetry: stale_descset_rebuilds and "
+       "device_lost.");
+    viewport.def("scene_load_guard", [] {
+        py::dict result;
+        result["enabled"] = rtapi::sceneLoadGuard();
+        return result;
+    }, "Is the scene-load Solid guard active? See set_scene_load_guard.");
 
     // Multi-frame sequence render (maps to the g_seq_save_active state machine).
     render.def("start_sequence", [](const std::string& output_dir, int spp,

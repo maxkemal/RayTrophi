@@ -60,6 +60,18 @@ public:
 
     // Check if the command contains heavy mesh geometry vectors
     virtual bool isHeavyGeometry() const { return false; }
+
+    // ***** True when this command has ALREADY brought the SceneUI caches in
+    //   line with its edit, so the undo/redo handler must not invalidate them.
+    //   Default false keeps the old blanket invalidation for every command that
+    //   has not been audited -- a command that lies here leaves SceneUI reading
+    //   stale geometry, so it is opt-in per command, never assumed.
+    //   Why it exists: the Ctrl+Z handler unconditionally wiped
+    //   editable_mesh_cache, which measured 1,07 s to rebuild on a 2M-triangle
+    //   mesh (the whole of "Ctrl+Z takes ~2 s"). rebuildMeshCache even
+    //   preserves and restores that cache carefully -- and the next line threw
+    //   it away regardless.
+    virtual bool handlesUiCacheSync() const { return false; }
     virtual size_t getTriangleCount() const { return 0; }
 };
 
@@ -495,10 +507,16 @@ public:
     void undo(UIContext& ctx) override;     // → before
     Type getType() const override { return Type::Transform; }
     std::string getDescription() const override { return "Sculpt " + object_name_; }
+    // Set by apply(): true only when SceneUI actually adopted the edit
+    // incrementally. On the rebuild fallback it stays false, so the caller
+    // still invalidates -- otherwise the editable cache would keep the SCULPTED
+    // positions and the next dab would write them straight back.
+    bool handlesUiCacheSync() const override { return ui_caches_synced_; }
 
 private:
     std::string object_name_;
     std::vector<FlatSculptVertexState> states_;
+    bool ui_caches_synced_ = false;
     void apply(UIContext& ctx, bool use_after);
 };
 

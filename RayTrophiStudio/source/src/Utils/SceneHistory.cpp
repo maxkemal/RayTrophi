@@ -73,7 +73,8 @@ void SceneHistory::record(std::unique_ptr<SceneCommand> command) {
     }
 }
 
-bool SceneHistory::undo(UIContext& ctx) {
+bool SceneHistory::undo(UIContext& ctx, bool* outHandledUiCacheSync) {
+    if (outHandledUiCacheSync) *outHandledUiCacheSync = false;
     if (undo_stack_.empty()) {
         return false;
     }
@@ -85,6 +86,7 @@ bool SceneHistory::undo(UIContext& ctx) {
     // Execute undo
     SCENE_LOG_INFO("History: Undo - " + command->getDescription());
     command->undo(ctx);
+    if (outHandledUiCacheSync) *outHandledUiCacheSync = command->handlesUiCacheSync();
     
     // Push to redo stack
     redo_stack_.push_back(std::move(command));
@@ -92,7 +94,8 @@ bool SceneHistory::undo(UIContext& ctx) {
     return true;
 }
 
-bool SceneHistory::redo(UIContext& ctx) {
+bool SceneHistory::redo(UIContext& ctx, bool* outHandledUiCacheSync) {
+    if (outHandledUiCacheSync) *outHandledUiCacheSync = false;
     if (redo_stack_.empty()) {
         return false;
     }
@@ -104,6 +107,7 @@ bool SceneHistory::redo(UIContext& ctx) {
     // Execute command again
     SCENE_LOG_INFO("History: Redo - " + command->getDescription());
     command->execute(ctx);
+    if (outHandledUiCacheSync) *outHandledUiCacheSync = command->handlesUiCacheSync();
     
     // Push back to undo stack
     undo_stack_.push_back(std::move(command));

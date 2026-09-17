@@ -1,4 +1,5 @@
 #include "SceneCommand.h"
+#include "PerfProfile.h"
 #include "scene_ui.h"
 #include "Renderer.h"
 #include "ProjectManager.h"
@@ -1146,6 +1147,8 @@ void MeshEditCommand::undo(UIContext& ctx) {
 }
 
 void FlatSculptEditCommand::apply(UIContext& ctx, bool use_after) {
+    RTPERF_SCOPE("sculpt.undo.apply");
+    rtperf::recordFast("sculpt.undo.apply_verts", (double)states_.size());
     // Locate the flat TriangleMesh-as-Hittable by node name (resolved at apply time so it survives
     // mesh-cache rebuilds between the stroke and the undo).
     TriangleMesh* mesh = nullptr;
@@ -1167,21 +1170,47 @@ void FlatSculptEditCommand::apply(UIContext& ctx, bool use_after) {
     // as SceneUI::syncFlatSculptVerticesToSoA, so every consumer reads a consistent result).
     const Matrix4x4 world = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
     const Matrix4x4 normalMatrix = world.inverse().transpose();
-    for (const auto& s : states_) {
-        if (s.soa_id >= vCount) continue;
-        const Vec3 lp = use_after ? s.after_pos : s.before_pos;
-        const Vec3 ln = use_after ? s.after_nrm : s.before_nrm;
-        if (Porig) Porig[s.soa_id] = lp;
-        if (P)     P[s.soa_id]     = world.transform_point(lp);
-        if (Norig) Norig[s.soa_id] = ln;
-        if (N) {
-            const Vec3 wn = normalMatrix.transform_vector(ln);
-            const float wl = wn.length();
-            N[s.soa_id] = (wl > 1e-12f) ? (wn / wl) : ln;
+    // *** Measured 52,3 ms per Ctrl+Z on 247.528 vertices -- 211 ns each, for
+    //   two matrix transforms and a normalize. It is a scatter (soa_id is
+    //   arbitrary), so cache misses dominate and threads help almost linearly.
+    //   Safe to parallelise: the stroke's presence bitmask guarantees ONE state
+    //   per soa_id, so no two iterations write the same slot.
+    {
+        RTPERF_SCOPE("sculpt.undo.apply.soa_write");
+        const int stateCount = static_cast<int>(states_.size());
+        #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+        for (int i = 0; i < stateCount; ++i) {
+            const FlatSculptVertexState& s = states_[static_cast<size_t>(i)];
+            if (s.soa_id >= vCount) continue;
+            const Vec3 lp = use_after ? s.after_pos : s.before_pos;
+            const Vec3 ln = use_after ? s.after_nrm : s.before_nrm;
+            if (Porig) Porig[s.soa_id] = lp;
+            if (P)     P[s.soa_id]     = world.transform_point(lp);
+            if (Norig) Norig[s.soa_id] = ln;
+            if (N) {
+                const Vec3 wn = normalMatrix.transform_vector(ln);
+                const float wl = wn.length();
+                N[s.soa_id] = (wl > 1e-12f) ? (wn / wl) : ln;
+            }
         }
     }
 
-    scheduleSceneMutationRebuilds(ctx, true);
+    // ***** A position-only refit of ONE object takes the sculpt dab's
+    //   incremental sync. scheduleSceneMutationRebuilds asks for a
+    //   geometry-generation bump, a CPU BVH REBUILD, a full raster rebuild and a
+    //   full Vulkan RT rebuild -- the heavy path the sculpt stroke end was taken
+    //   off earlier, and the reported "Ctrl+Z stalls for seconds" on a
+    //   9M-triangle scene. Kept as the fallback: the UI refuses when it cannot
+    //   service the object, and then nothing is left unsynced.
+    bool handledIncrementally = false;
+    if (ctx.scene_ui_ptr) {
+        handledIncrementally = ctx.scene_ui_ptr->adoptExternalFlatSoaEdit(ctx, object_name_);
+    }
+    ui_caches_synced_ = handledIncrementally;
+    if (!handledIncrementally) {
+        RTPERF_SCOPE("sculpt.undo.apply.schedule_rebuilds");
+        scheduleSceneMutationRebuilds(ctx, true);
+    }
     ctx.renderer.resetCPUAccumulation();
     ProjectManager::getInstance().markModified();
     ctx.start_render = true;

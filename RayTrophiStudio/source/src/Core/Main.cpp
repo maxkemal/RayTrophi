@@ -22,6 +22,7 @@
 #include <string_view>
 #include <SDL_image.h>
 #include "Renderer.h"
+#include "Autosave.h"
 #include "VolumetricRenderer.h"
 #include "PerfProfile.h"
 #include "Backend/IBackend.h"
@@ -37,6 +38,7 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"  // De�i�tirildi: sdlrenderer2
 #include <scene_ui.h>
+#include "Animation/RigPoseView.h"
 #include "Api/RtApi.h"
 #include "Api/RtPython.h"
 #include "Api/RtIpc.h"
@@ -89,6 +91,18 @@
 #include "tinyexr.h"
 #include <InstanceManager.h>
 #include "DllLoadPolicy.h"
+
+// ★★★ Ilk CUDA hatasi mandali (OptixWrapper.cpp). Cokme kaydina DURUM olarak
+//   basilir: "std::terminate" ile "CUDA 719"dan hangisinin once oldugunu
+//   iki ayri satiri saat saat karsilastirarak degil, TEK satirda okuyabilmek
+//   icin. Cokme sirasinda hangisinin SEBEP oldugu tam olarak bu siraya bagli.
+#ifdef _WIN32
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")   // vcxproj'a dokunmadan baglanir
+#endif
+
+int rtOptixFirstCudaError();
+std::string rtOptixFirstCudaErrorSite();
 
 namespace {
 bool g_startupDiagVerbose = false;
@@ -402,6 +416,66 @@ LONG CALLBACK vectoredExceptionHandler(PEXCEPTION_POINTERS exceptionInfo) {
         } else {
             emergencyStartupLog("[FATAL] std::terminate called without active exception");
         }
+        // ★★★★★ YIGIN IZI. "join/detach edilmeden yok edilen std::thread"
+        //   teshisi dogru ama ADRESSIZ: bu kod tabaninda onlarca iplik var.
+        //   Sembollu iz, hangi ipligin sahibinin yikildigini ADIYLA soyler --
+        //   tahmin turlarini tamamen ortadan kaldirir.
+        //   `_Exit` cagrilmadan ONCE yazilmali; sonrasi yok.
+#ifdef _WIN32
+        try {
+            void* frames[48] = {};
+            const USHORT n = CaptureStackBackTrace(0, 48, frames, nullptr);
+            HANDLE proc = GetCurrentProcess();
+            static bool symReady = false;
+            if (!symReady) {
+                SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+                symReady = (SymInitialize(proc, nullptr, TRUE) != FALSE);
+            }
+            emergencyStartupLog("[STACK] terminate backtrace (" + std::to_string(n) + " frames):");
+            alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 512] = {};
+            auto* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+            sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+            sym->MaxNameLen = 511;
+            for (USHORT i = 0; i < n; ++i) {
+                std::string line = "  #" + std::to_string(i) + " ";
+                DWORD64 disp = 0;
+                if (symReady && SymFromAddr(proc, (DWORD64)frames[i], &disp, sym)) {
+                    line += sym->Name;
+                    IMAGEHLP_LINE64 li{}; li.SizeOfStruct = sizeof(li);
+                    DWORD lineDisp = 0;
+                    if (SymGetLineFromAddr64(proc, (DWORD64)frames[i], &lineDisp, &li) && li.FileName) {
+                        line += std::string(" (") + li.FileName + ":" + std::to_string(li.LineNumber) + ")";
+                    }
+                } else {
+                    char addr[32] = {};
+                    std::snprintf(addr, sizeof(addr), "0x%p", frames[i]);
+                    line += addr;
+                }
+                emergencyStartupLog(line);
+            }
+        } catch (...) {
+            emergencyStartupLog("[STACK] backtrace unavailable");
+        }
+#endif
+
+        // ★★★★ SIRAYI BURADA CEVAPLA. Bu dosya temizlenemeden cokuldugu icin
+        //   kayit kaliyor, ama iki olayin sirasini saatten okumak zor. Mandal
+        //   durumu terminate ANINDA basilirsa soru ortadan kalkar:
+        //   "none" ise CUDA hatasi terminate'ten SONRA olmus ya da hic olmamis;
+        //   bir deger varsa CUDA hatasi ONCE olmus ve muhtemelen SEBEP odur.
+        {
+            const int firstErr = rtOptixFirstCudaError();
+            if (firstErr != 0) {
+                emergencyStartupLog("[STATE] a CUDA error was ALREADY latched at terminate: code=" +
+                                    std::to_string(firstErr) + " site='" + rtOptixFirstCudaErrorSite() +
+                                    "' -> the CUDA error came FIRST; terminate is most likely a CONSEQUENCE.");
+            } else {
+                emergencyStartupLog("[STATE] no CUDA error latched at terminate. This does NOT prove the "
+                                    "fault is CUDA-independent: a silent tripwire proves nothing. Read the "
+                                    "[STACK] frames above and find what called std::terminate -- a joinable "
+                                    "std::thread destroyed without join/detach is only one of the candidates.");
+            }
+        }
     } catch (...) {
         emergencyStartupLog("[FATAL] std::terminate logging failed");
     }
@@ -410,8 +484,26 @@ LONG CALLBACK vectoredExceptionHandler(PEXCEPTION_POINTERS exceptionInfo) {
 
 void signalHandler(int sig) {
     emergencyStartupLog("[FATAL] Signal received: " + std::to_string(sig));
+    const int firstErr = rtOptixFirstCudaError();
+    if (firstErr != 0) {
+        emergencyStartupLog("[STATE] CUDA error latched at signal: code=" + std::to_string(firstErr) +
+                            " site='" + rtOptixFirstCudaErrorSite() + "'");
+    }
     std::_Exit(EXIT_FAILURE);
 }
+
+// ★★★ Cekirdek disi modullerin (OptixWrapper) AYNI zaman damgali cokme
+//   dosyasina yazabilmesi icin kopru. `emergencyStartupLog` anonim
+//   namespace'te, yani ic baglantili; disaridan cagrilamaz.
+//   Gerekcesi: iki olayin sirasini okumak, iki AYRI dosyayi saat saat
+//   karsilastirmaktan cok daha guvenilir olmali.
+} // namespace
+
+void rtEmergencyLog(const std::string& message) {
+    emergencyStartupLog(message);
+}
+
+namespace {
 
 void installEarlyCrashHandlers() {
     AddVectoredExceptionHandler(1, vectoredExceptionHandler);
@@ -521,7 +613,16 @@ bool rayhit = false;
 // ===========================================================================
 bool g_camera_dirty = true;
 bool g_lights_dirty = true;
+// ★★★★ Iki tuketici, iki bayrak. Gerekcesi globals.h'te yazili: tek bayragi
+//   once kosan tuketici yutuyordu ve oteki adapter (ayri VkDevice) dunyayi HIC
+//   almiyordu. Ureticiler `markWorldDirty()` cagirir; bayraklari TEK TEK set
+//   eden yeni kod eklersen o tuketici yine ac kalir.
 bool g_world_dirty = true;
+bool g_viewport_world_dirty = true;
+void markWorldDirty() {
+    g_world_dirty = true;
+    g_viewport_world_dirty = true;
+}
 bool g_original_surface_needs_sync = true;
 
 // Granular scene-sync dirty flags
@@ -897,6 +998,50 @@ static void releaseCudaSceneResidencyForBackendSwitch() {
     }
 }
 
+// The dedicated raster viewport backend, when it runs on its OWN VkDevice.
+// Null when there is none or when the render backend doubles as the viewport.
+static Backend::VulkanBackendAdapter* dedicatedVulkanViewportBackend() {
+    if (!g_viewport_backend ||
+        static_cast<Backend::IBackend*>(g_viewport_backend.get()) == g_backend.get()) {
+        return nullptr;
+    }
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get());
+}
+
+// Process-wide device-local VRAM as the driver reports it, for log lines at
+// the points where GBs change hands. "unmeasured" is not zero.
+static std::string vramReadingForLog() {
+    auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+    if (!vk) vk = dedicatedVulkanViewportBackend();
+    uint64_t usage = 0, budget = 0;
+    if (!vk || !vk->getVulkanDevice() ||
+        !vk->getVulkanDevice()->queryDeviceLocalMemory(usage, budget)) {
+        return "vram=unmeasured";
+    }
+    return "vram=" + std::to_string(usage / (1024ull * 1024ull)) + "/" +
+           std::to_string(budget / (1024ull * 1024ull)) + " MB";
+}
+
+// Frees what the viewport device holds but cannot use while the viewport
+// shows Rendered. Both GPU backends live on the same card; without this the
+// render backend's upload hits VK_ERROR_OUT_OF_DEVICE_MEMORY next to a
+// multi-GB AS nobody traces.
+static void yieldViewportVramToRenderBackend(const char* reason) {
+    auto* vp = dedicatedVulkanViewportBackend();
+    if (!vp || vp->isRayFusionSceneASYielded()) return;
+    const std::string before = vramReadingForLog();
+    vp->waitForCompletion();
+    vp->yieldRayFusionSceneAS();
+    SCENE_LOG_INFO(std::string("[Viewport] VRAM yielded to render backend (") + reason +
+                   "): " + before + " -> " + vramReadingForLog());
+}
+
+// Set by the memory-pressure handler: the next backend switch must really tear
+// down and recreate even though the requested backend is the active one.
+// Cleared only once the teardown has happened -- a switch deferred by an
+// active render must not lose it.
+static bool g_vulkan_pressure_recreate_forced = false;
+
 static void shutdownAndResetBackendSafe(const char* reason) {
     if (!g_backend) return;
     try {
@@ -980,6 +1125,24 @@ static void shutdownAndResetBackendSafe(const char* reason) {
         SCENE_LOG_WARN("[Backend] SetProcessWorkingSetSize trim request failed.");
     }
 #endif
+}
+
+// Art arda kac cihaz kaybindan sonra otomatik kurtarma birakilir.
+// 3: ilki kaza olabilir, ikincisi tesaduf olabilir, ucuncusu bir DESENDIR.
+static constexpr int  kViewportRecoveryMaxStreak = 3;
+// Yeniden kurulan viewport bu kadar sure ayakta kalirsa seri SIFIRLANIR.
+// Yoksa saatler sonraki ilgisiz bir TDR, bir onceki seriye eklenip kurtarmayi
+// haksiz yere birakirdi.
+static constexpr long long kViewportRecoverySettleMs = 30000;
+
+// TDR kurtarma kapisi: cihaz kaybindan sonra surucunun sifirlanmasi icin
+// gecmesi gereken sure dolmadan yeni bir VkDevice acmayiz.
+static bool viewportRebuildGateOpen() {
+    const long long notBefore = g_viewport_rebuild_not_before_ms.load(std::memory_order_acquire);
+    if (notBefore == 0) return true;
+    const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return nowMs >= notBefore;
 }
 
 static bool initializeViewportBackendIfAvailable() {
@@ -1138,6 +1301,11 @@ void reset_render_resolution(int w, int h)
         rp.causticsVolDirect = render_settings.caustics_vol_direct;
         rp.causticsVolNoise = render_settings.caustics_vol_noise;
         rp.debugView = render_settings.debug_view;
+        rp.realtimeDepthOfField = render_settings.realtime_depth_of_field;
+        rp.realtimeTaa = render_settings.realtime_taa;
+        rp.realtimeTaaSamples = render_settings.realtime_taa_samples;
+        rp.realtimeDofMaxCoC = render_settings.realtime_dof_max_coc;
+        rp.realtimeDofMaxTaps = render_settings.realtime_dof_max_taps;
         rp.debugExposure = render_settings.debug_exposure;
         rp.debugOverlay = render_settings.debug_overlay;
         g_backend->setRenderParams(rp);
@@ -1905,12 +2073,126 @@ int main(int argc, char* argv[]) try {
     // Only re-uploads subsystems whose dirty flag is set. Falls back to full
     // sync when forceFullSync is true (e.g. first sync after backend create).
     // -----------------------------------------------------------------------
-    auto syncVulkanWorldWithAtmosphere = [&](Backend::VulkanBackendAdapter* vulkanBackend, WorldData& wd) {
+    // ★★★★★ TEK Vulkan dunya-senkron govdesi. ESKIDEN ortam dokusu yuklemesi
+    //   (`setEnvironmentMap`) YALNIZCA `syncWorldDataToBackend` icindeydi, ama
+    //   acilis / backend-degisimi / Solid->Rendered yollarinin HEPSI dogrudan
+    //   bu lambdayi cagiriyordu. Sonuc: raster viewport adapter'i dunya
+    //   verisini aliyor ama HDRI dokusunu ALMIYORDU -> `m_envTexID == 0` ->
+    //   sceneGlobals.flags bit 2 bos -> `material_preview_sky.frag` HDRI dalini
+    //   atlayip DUZ RENGE dusuyordu. Ayni projede Vulkan RT dogru aciyordu
+    //   cunku env yuklemesini alan tek yol oydu.
+    //   Kural: bir adapter'a dunya verisi yaziliyorsa ortam dokusu de AYNI
+    //   govdede yazilir; ikisini ayirmak "panelin yalan soylemesi" sinifidir.
+    // allowLutRegen=false: ortam dokusu + dunya buffer'i yazilir, ama pahali
+    // SkyView/transmittance yeniden uretimi ATLANIR. Physical Sky slider'i
+    // surulurken ~15 Hz'e sinirlanan tek sey odur; dokuyu de birlikte atlamak
+    // HDRI'yi hicbir zaman yuklememek demekti.
+    auto syncVulkanWorldToBackend = [&](Backend::VulkanBackendAdapter* vulkanBackend, WorldData& wd,
+                                        bool allowLutRegen = true) {
         if (!vulkanBackend) {
             return;
         }
 
-        if (wd.mode == WORLD_MODE_NISHITA && ray_renderer.world.needsLUTUpdate()) {
+        Backend::IBackend* envCacheKey = static_cast<Backend::IBackend*>(vulkanBackend);
+        struct VulkanEnvCache {
+            const Texture* texture = nullptr;
+            int64_t handle = 0;
+            uint64_t textureCacheGeneration = 0;
+        };
+        // Adapter basina onbellek: iki adapter AYRI VkDevice, yani ayni CPU
+        // Texture'i her ikisine de ayri ayri yuklenir ve handle'lari karismaz.
+        static std::unordered_map<Backend::IBackend*, VulkanEnvCache> s_vulkanEnvCache;
+
+        auto uploadVulkanEnvironmentTexture = [&](const Texture* texture) -> int64_t {
+            if (!texture || !texture->is_loaded() || texture->width <= 0 || texture->height <= 0) {
+                s_vulkanEnvCache.erase(envCacheKey);
+                return 0;
+            }
+
+            auto& cache = s_vulkanEnvCache[envCacheKey];
+            VulkanRT::ImageHandle existingEnvImage{};
+            const VkFormat expectedFormat = (texture->is_hdr && !texture->float_pixels.empty())
+                ? VK_FORMAT_R32G32B32A32_SFLOAT
+                : VK_FORMAT_R8G8B8A8_UNORM;
+            const bool cacheValid =
+                cache.texture == texture &&
+                cache.handle != 0 &&
+                cache.textureCacheGeneration == vulkanBackend->textureCacheGeneration() &&
+                vulkanBackend->tryGetUploadedImageHandle(cache.handle, existingEnvImage) &&
+                existingEnvImage.width == static_cast<uint32_t>(texture->width) &&
+                existingEnvImage.height == static_cast<uint32_t>(texture->height) &&
+                existingEnvImage.format == expectedFormat;
+            if (cacheValid) {
+                return cache.handle;
+            }
+
+            int64_t envHandle = 0;
+            if (texture->is_hdr && !texture->float_pixels.empty()) {
+                envHandle = vulkanBackend->uploadTexture2D(
+                    texture->float_pixels.data(),
+                    static_cast<uint32_t>(texture->width),
+                    static_cast<uint32_t>(texture->height),
+                    4,
+                    false,
+                    true);
+            } else if (!texture->pixels.empty()) {
+                envHandle = vulkanBackend->uploadTexture2D(
+                    texture->pixels.data(),
+                    static_cast<uint32_t>(texture->width),
+                    static_cast<uint32_t>(texture->height),
+                    4,
+                    false,
+                    false);
+            }
+            cache.texture = texture;
+            cache.handle = envHandle;
+            cache.textureCacheGeneration = vulkanBackend->textureCacheGeneration();
+            return envHandle;
+        };
+
+        if (wd.mode == WORLD_MODE_HDRI) {
+            // ★ HDRI tembel yuklenir (`World::setMode`). Proje acilisinda mod
+            //   HDRI olarak deserialize edilip doku henuz yuklenmemis olabilir;
+            //   burada bir kez zorlamak, "dosya var ama arka plan duz renk"
+            //   halini sessiz birakmamak icin.
+            // ★ Bir kez DENENIR, path basina. Dosya yoksa `setHDRI` sessizce
+            //   basarisiz olur; kapisiz birakmak her senkronda bir disk
+            //   erisimi demekti (kare basina, HDRI modunda).
+            if (!ray_renderer.world.hasHDRI() && !ray_renderer.world.getHDRIPath().empty()) {
+                static std::unordered_set<std::string> s_attemptedHdriPaths;
+                if (s_attemptedHdriPaths.insert(ray_renderer.world.getHDRIPath()).second) {
+                    ray_renderer.world.setMode(WORLD_MODE_HDRI);
+                    wd = ray_renderer.world.getGPUData();
+                }
+            }
+            int64_t envHandle = uploadVulkanEnvironmentTexture(ray_renderer.world.getHDRITexture());
+            vulkanBackend->setEnvironmentMap(envHandle != 0 ? envHandle : 0);
+            if (envHandle == 0) {
+                static std::unordered_set<Backend::IBackend*> s_warnedMissingEnv;
+                if (s_warnedMissingEnv.insert(envCacheKey).second) {
+                    SCENE_LOG_WARN("[World] HDRI mode is active but no environment texture "
+                                   "reached this backend; its background falls back to the "
+                                   "world solid colour. Path: '" +
+                                   ray_renderer.world.getHDRIPath() + "'");
+                }
+            }
+        } else if (wd.mode == WORLD_MODE_NISHITA && wd.advanced.env_overlay_enabled != 0) {
+            int64_t envHandle = uploadVulkanEnvironmentTexture(
+                ray_renderer.world.getNishitaEnvOverlayTexture());
+            vulkanBackend->setEnvironmentMap(envHandle != 0 ? envHandle : 0);
+        } else {
+            s_vulkanEnvCache.erase(envCacheKey);
+            vulkanBackend->setEnvironmentMap(0);
+        }
+
+        // ★★★★ Iki olcu, TEK kapi: paylasilan `needsLUTUpdate()` (dunya degisti)
+        //   VEYA bu adapter'in KENDI imzasi tutmuyor (oteki adapter uretip
+        //   paylasilan bayragi yuttu). Ikisi de kisitin ICINDE, yani slider
+        //   surerken maliyet artmaz.
+        const bool lutStaleHere =
+            wd.mode == WORLD_MODE_NISHITA &&
+            (ray_renderer.world.needsLUTUpdate() || vulkanBackend->atmosphereLutStale(wd));
+        if (allowLutRegen && lutStaleHere) {
             if (vulkanBackend->generateAtmosphereLUTGPU(&wd)) {
                 ray_renderer.world.clearLUTDirty();
                 wd = ray_renderer.world.getGPUData();
@@ -1931,7 +2213,7 @@ int main(int argc, char* argv[]) try {
         vulkanBackend->setWorldData(&wd);
     };
 
-    auto syncWorldDataToBackend = [&](Backend::IBackend* backend) {
+    auto syncWorldDataToBackend = [&](Backend::IBackend* backend, bool allowLutRegen = true) {
         if (!backend) {
             return;
         }
@@ -1943,86 +2225,16 @@ int main(int argc, char* argv[]) try {
 
         WorldData wd = ray_renderer.world.getGPUData();
         if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(backend)) {
-            struct VulkanEnvCache {
-                const Texture* texture = nullptr;
-                int64_t handle = 0;
-                uint64_t textureCacheGeneration = 0;
-            };
-            static std::unordered_map<Backend::IBackend*, VulkanEnvCache> s_vulkanEnvCache;
-
-            auto uploadVulkanEnvironmentTexture = [&](const Texture* texture) -> int64_t {
-                if (!texture || !texture->is_loaded() || texture->width <= 0 || texture->height <= 0) {
-                    s_vulkanEnvCache.erase(backend);
-                    return 0;
-                }
-
-                auto& cache = s_vulkanEnvCache[backend];
-                VulkanRT::ImageHandle existingEnvImage{};
-                const VkFormat expectedFormat = (texture->is_hdr && !texture->float_pixels.empty())
-                    ? VK_FORMAT_R32G32B32A32_SFLOAT
-                    : VK_FORMAT_R8G8B8A8_UNORM;
-                const bool cacheValid =
-                    cache.texture == texture &&
-                    cache.handle != 0 &&
-                    cache.textureCacheGeneration == vulkanBackend->textureCacheGeneration() &&
-                    vulkanBackend->tryGetUploadedImageHandle(cache.handle, existingEnvImage) &&
-                    existingEnvImage.width == static_cast<uint32_t>(texture->width) &&
-                    existingEnvImage.height == static_cast<uint32_t>(texture->height) &&
-                    existingEnvImage.format == expectedFormat;
-                if (cacheValid) {
-                    return cache.handle;
-                }
-
-                int64_t envHandle = 0;
-                if (texture->is_hdr && !texture->float_pixels.empty()) {
-                    envHandle = vulkanBackend->uploadTexture2D(
-                        texture->float_pixels.data(),
-                        static_cast<uint32_t>(texture->width),
-                        static_cast<uint32_t>(texture->height),
-                        4,
-                        false,
-                        true);
-                } else if (!texture->pixels.empty()) {
-                    envHandle = vulkanBackend->uploadTexture2D(
-                        texture->pixels.data(),
-                        static_cast<uint32_t>(texture->width),
-                        static_cast<uint32_t>(texture->height),
-                        4,
-                        false,
-                        false);
-                }
-                cache.texture = texture;
-                cache.handle = envHandle;
-                cache.textureCacheGeneration = vulkanBackend->textureCacheGeneration();
-                return envHandle;
-            };
-
-            if (wd.mode == WORLD_MODE_HDRI) {
-                int64_t envHandle = uploadVulkanEnvironmentTexture(ray_renderer.world.getHDRITexture());
-                if (envHandle != 0) {
-                    vulkanBackend->setEnvironmentMap(envHandle);
-                } else {
-                    vulkanBackend->setEnvironmentMap(0);
-                }
-            } else if (wd.mode == WORLD_MODE_NISHITA && wd.advanced.env_overlay_enabled != 0) {
-                int64_t envHandle = uploadVulkanEnvironmentTexture(ray_renderer.world.getNishitaEnvOverlayTexture());
-                if (envHandle != 0) {
-                    vulkanBackend->setEnvironmentMap(envHandle);
-                } else {
-                    vulkanBackend->setEnvironmentMap(0);
-                }
-            } else {
-                s_vulkanEnvCache.erase(backend);
-                vulkanBackend->setEnvironmentMap(0);
-            }
-            syncVulkanWorldWithAtmosphere(vulkanBackend, wd);
+            // Ortam dokusu + atmosfer + dunya buffer'i TEK govdede -- bkz.
+            // syncVulkanWorldToBackend basindaki not.
+            syncVulkanWorldToBackend(vulkanBackend, wd, allowLutRegen);
         } else {
             // Mirror the Vulkan branch's lazy LUT flush for OptiX/CPU backends: World::reset()
             // and World::deserialize() no longer bake the atmosphere LUT synchronously — they
             // only mark it dirty. Without this flush, an OptiX viewport in Nishita mode would
             // re-enter the world-sync gate every frame (needsLUTUpdate() never clears) and
             // render from a stale LUT.
-            if (wd.mode == WORLD_MODE_NISHITA && ray_renderer.world.needsLUTUpdate() &&
+            if (allowLutRegen && wd.mode == WORLD_MODE_NISHITA && ray_renderer.world.needsLUTUpdate() &&
                 ray_renderer.world.flushLUT()) {
                 wd = ray_renderer.world.getGPUData();
             }
@@ -2038,9 +2250,15 @@ int main(int argc, char* argv[]) try {
         bool did_geometry = false;
         if (forceFullSync || g_geometry_dirty) {
             ray_renderer.rebuildBackendGeometry(scene);
+            if (!render_settings.use_vulkan && !ray_renderer.finalBoneMatrices.empty())
+                g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
             applyPendingDeleteVisibilityToBackend(scene, g_backend.get());
             g_geometry_dirty = false;
             did_geometry = true;
+            g_render_backend_synced_geometry_generation.store(
+                g_scene_geometry_generation.load(std::memory_order_acquire),
+                std::memory_order_release);
+            g_render_mesh_edit_ledger = InPlaceMeshEditLedger{};
         }
 
         if (forceFullSync || g_materials_dirty || g_texture_pool_dirty || did_geometry) {
@@ -2244,7 +2462,10 @@ int main(int argc, char* argv[]) try {
             cli_argument_error = true;
             app_exit_code = 2;
         }
-        ui.viewport_settings.shading_mode = g_hasVulkan ? 1 : 2;
+        // ★★★ ESKIDEN: `= g_hasVulkan ? 1 : 2;` — yani her acilis Material'i
+        //   ZORLUYORDU. Kural artik bunu yasakliyor (bkz. scene_ui.h).
+        //   Vulkan varsa Solid, yoksa Rendered zaten tek secenek.
+        ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
     } else {
         if (splashOk) { splash.setStatus("Creating General Scene template..."); splash.render(); }
         const auto template_result = raytrophi::templates::TemplateSession::instance().open(
@@ -2252,7 +2473,10 @@ int main(int argc, char* argv[]) try {
         if (!template_result.opened) {
             SCENE_LOG_ERROR("General Scene startup template failed: " + template_result.code);
         }
-        ui.viewport_settings.shading_mode = g_hasVulkan ? 1 : 2;
+        // ★★★ Ayni kural: acilis template'i de Material'i zorlayamaz.
+        //   TemplateUiStateAdapter zaten agir modu Solid'e kisitliyor; buradaki
+        //   satir onu EZIYORDU, o yuzden burada da duzeltilmesi sart.
+        ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
     }
     resolveRequestedRenderBackend(true, false);
     ui_ctx.render_settings.use_optix = render_settings.use_optix;
@@ -2268,7 +2492,7 @@ int main(int argc, char* argv[]) try {
     if (g_viewport_backend) {
         WorldData wd = ray_renderer.world.getGPUData();
         if (auto* vkViewport = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
-            syncVulkanWorldWithAtmosphere(vkViewport, wd);
+            syncVulkanWorldToBackend(vkViewport, wd);
         } else {
             g_viewport_backend->setWorldData(&wd);
         }
@@ -2544,20 +2768,123 @@ int main(int argc, char* argv[]) try {
         // Verlet at most once per frame while still settling after the object stops.
         ray_renderer.getHairSystem().beginDynamicsFrame();
 
+        // Aralikli autosave. `busy` iken hicbir sey yapmaz: sahne yuklenirken
+        // yazmak yarim bir sahneyi kurtarma dosyasi diye kaydetmek olurdu.
+        raytrophi::autosave::tick(
+            scene, render_settings, ray_renderer,
+            ui.scene_loading.load() || g_scene_loading_in_progress.load() ||
+                rendering_in_progress.load());
+
+        // ★★★★★ TDR'den AYNI OTURUMDA donus. `backend_changed` blogu yalnizca
+        //   kullanici mod degistirince kosar; cihaz kaybindan sonra onu
+        //   bekleyemeyiz, cunku o blok da ayni kapiya takilir ve kullanici
+        //   "raster'a da RT'ye de donsem ayaga kalkmiyor" durumunda kalir.
+        //   Kapi acilinca dongu KENDISI bir kez daha dener.
+        // ★★★ "Biraktim" durumundan CIKIS YOLU. Otomatik kurtarma butcesi
+        //   dolunca kendiliginden tekrar denemeyiz -- ama kullanicinin viewport
+        //   modunu elle degistirmesi acik bir "tekrar dene" niyetidir, ve tek
+        //   cikis yolu IPC olsaydi panel basindaki kullanici uygulamayi yeniden
+        //   baslatmak zorunda kalirdi.
+        {
+            static int s_prevShadingMode = -1;
+            const int mode = ui.viewport_settings.shading_mode;
+            if (s_prevShadingMode != -1 && mode != s_prevShadingMode &&
+                g_viewport_recovery_given_up.load(std::memory_order_acquire)) {
+                g_viewport_recovery_given_up.store(false, std::memory_order_release);
+                g_viewport_recovery_consecutive_losses.store(0, std::memory_order_release);
+                g_viewport_rebuild_pending_after_loss.store(true, std::memory_order_release);
+                g_viewport_rebuild_not_before_ms.store(0, std::memory_order_release);
+                SCENE_LOG_INFO("[Viewport] Recovery re-armed by a manual viewport mode change.");
+            }
+            s_prevShadingMode = mode;
+        }
+
+        // Yeniden kurulan viewport yeterince uzun ayakta kaldiysa seriyi sifirla.
+        if (g_viewport_backend &&
+            g_viewport_recovery_consecutive_losses.load(std::memory_order_acquire) > 0) {
+            const long long recoveredAt = g_viewport_recovered_at_ms.load(std::memory_order_acquire);
+            if (recoveredAt != 0) {
+                const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (nowMs - recoveredAt >= kViewportRecoverySettleMs) {
+                    g_viewport_recovery_consecutive_losses.store(0, std::memory_order_release);
+                    g_viewport_recovered_at_ms.store(0, std::memory_order_release);
+                }
+            }
+        }
+
+        if (g_viewport_rebuild_pending_after_loss.load(std::memory_order_acquire) &&
+            !g_viewport_recovery_given_up.load(std::memory_order_acquire) &&
+            !g_viewport_backend && g_hasVulkan && viewportRebuildGateOpen() &&
+            !ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
+            g_viewport_rebuild_attempts.fetch_add(1, std::memory_order_acq_rel);
+            if (initializeViewportBackendIfAvailable()) {
+                g_viewport_rebuild_pending_after_loss.store(false, std::memory_order_release);
+                g_viewport_rebuild_not_before_ms.store(0, std::memory_order_release);
+                // ★★ Seri BURADA sifirlanmaz. "Kuruldu" hayatta kaldigi anlamina
+                //   gelmez -- tam da olculmek istenen sey, kurulan seyin bir
+                //   sonraki karede yine olup olmadigi. Sifirlama, viewport
+                //   kViewportRecoverySettleMs kadar ayakta kalirsa yapilir.
+                g_viewport_recovered_at_ms.store(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count(),
+                    std::memory_order_release);
+                g_viewport_raster_rebuild_pending = true;
+                render_settings.backend_changed = true;   // sahne/isik/kamera yeniden baglansin
+                ui.addViewportMessage("Vulkan viewport recovered after device loss.", 5.0f,
+                                      ImVec4(0.4f, 1.0f, 0.5f, 1.0f));
+                SCENE_LOG_INFO("[Viewport] Rebuilt after device loss (attempt " +
+                               std::to_string(g_viewport_rebuild_attempts.load()) + ").");
+            } else {
+                // Basarisizsa kapiyi ileri at; her karede yeniden denemek
+                // surucuyu daha da dovmekten baska bir sey yapmaz.
+                const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                g_viewport_rebuild_not_before_ms.store(nowMs + 2500, std::memory_order_release);
+            }
+        }
+
         if (!ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
             rtapi::drainMainThreadQueue();
         }
         // If Vulkan reported memory pressure (typically OOM/shared-memory exhaustion),
         // schedule a safe backend recreate using the already hardened switch path.
+        // ★★★ This used to be a NO-OP that looked like a recovery: it only set
+        //   backend_changed, the switch block saw "Vulkan requested, Vulkan
+        //   active" and skipped the teardown, then re-synced the dirty scene into
+        //   the same full GPU -- which raised pressure again, every frame. With a
+        //   36M-triangle scene each lap is seconds of upload into an
+        //   oversubscribed card: the app reads as hung. Now: free what the
+        //   viewport device holds, recreate FOR REAL, and at most once per
+        //   minute -- a second OOM right after a clean recreate means the scene
+        //   does not fit, and retrying cannot change that.
         if (isActiveRenderBackendVulkan() &&
             g_vulkan_trim_recreate_requested.exchange(false, std::memory_order_acq_rel)) {
             if (!ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
-                SCENE_LOG_WARN("Vulkan memory pressure detected. Scheduling safe Vulkan backend recreate.");
-                ui.addViewportMessage("Vulkan memory pressure detected. Scheduling safe Vulkan backend recreate.", 5.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
-                render_settings.backend_changed = true;
-                ui_ctx.render_settings.backend_changed = true;
-                // Force a fresh accumulation after device recreate.
-                start_render = true;
+                static int s_pressureRecreates = 0;
+                static long long s_lastPressureRecreateMs = 0;
+                const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (nowMs - s_lastPressureRecreateMs > 60000) s_pressureRecreates = 0;
+                yieldViewportVramToRenderBackend("memory_pressure");
+                if (s_pressureRecreates >= 1) {
+                    SCENE_LOG_ERROR("[Vulkan] Memory pressure persists after a clean backend recreate (" +
+                                    vramReadingForLog() + "). Not recreating again: the scene does not fit "
+                                    "in VRAM. Switch to OptiX or reduce the scene.");
+                    ui.addViewportMessage("Vulkan RT: scene does not fit in VRAM. Switch to OptiX or reduce the scene.",
+                                          10.0f, ImVec4(1.0f, 0.4f, 0.2f, 1.0f));
+                } else {
+                    ++s_pressureRecreates;
+                    s_lastPressureRecreateMs = nowMs;
+                    SCENE_LOG_WARN("Vulkan memory pressure detected (" + vramReadingForLog() +
+                                   "). Recreating the Vulkan render backend.");
+                    ui.addViewportMessage("Vulkan memory pressure detected. Recreating the Vulkan backend.", 5.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+                    g_vulkan_pressure_recreate_forced = true;
+                    render_settings.backend_changed = true;
+                    ui_ctx.render_settings.backend_changed = true;
+                    // Force a fresh accumulation after device recreate.
+                    start_render = true;
+                }
             } else {
                 // Loader is active; defer to next safe loop iteration.
                 g_vulkan_trim_recreate_requested.store(true, std::memory_order_release);
@@ -2608,10 +2935,10 @@ int main(int argc, char* argv[]) try {
             const bool currentIsOptix  = (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
             const bool requestedVulkan = render_settings.use_vulkan;
             const bool requestedOptix  = render_settings.use_optix;
-            const bool sameBackendRequested =
+            const bool sameBackendRequested = !g_vulkan_pressure_recreate_forced && (
                 (requestedVulkan && currentIsVulkan) ||
                 (requestedOptix && currentIsOptix) ||
-                ((!requestedVulkan && !requestedOptix) && !g_backend);
+                ((!requestedVulkan && !requestedOptix) && !g_backend));
 
             if (sameBackendRequested) {
                 if (g_backend) {
@@ -2735,7 +3062,9 @@ int main(int argc, char* argv[]) try {
             }
 
             // Now safe to destroy existing backend
-            shutdownAndResetBackendSafe("backend_switch");
+            shutdownAndResetBackendSafe(g_vulkan_pressure_recreate_forced
+                                            ? "memory_pressure_recreate" : "backend_switch");
+            g_vulkan_pressure_recreate_forced = false;
 
             if (render_settings.use_vulkan) {
                 if (g_hasCUDA) {
@@ -2775,7 +3104,19 @@ int main(int argc, char* argv[]) try {
                 try {
                     SCENE_LOG_ERROR(std::string("Vulkan device lost detected: ") + g_vulkan_device_lost_msg);
                 } catch (...) {}
-                ui.addViewportMessage("Vulkan device lost — switched to CPU rendering.", 8.0f, ImVec4(1.0f, 0.4f, 0.2f, 1.0f));
+                // ★★★★★ ONCE KAYDET, SONRA YIK. Cihaz kaybi kullanicinin isini
+                //   kaybettigi an degil, kaybedebilecegi andir: sahne verisi
+                //   CPU'da saglam duruyor ve `saveProject` GPU'ya HIC dokunmuyor
+                //   (dogrulandi). Yikimdan sonraya birakmak, yikim sirasinda bir
+                //   cokme olursa isi tamamen kaybetmek demekti.
+                const bool autosaved = raytrophi::autosave::writeNow(
+                    scene, render_settings, ray_renderer, "vulkan_device_lost");
+                ui.addViewportMessage(
+                    autosaved
+                        ? "Vulkan device lost — session autosaved, switched to CPU rendering."
+                        : "Vulkan device lost — AUTOSAVE FAILED, switched to CPU rendering.",
+                    8.0f,
+                    autosaved ? ImVec4(1.0f, 0.4f, 0.2f, 1.0f) : ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
                 // ★★★ Kaybedilen cihaz DEDIKE VIEWPORT backend'ine ait olabilir:
                 //   Solid/Matcap/MaterialPreview kendi VulkanBackendAdapter'i ve
                 //   KENDI VkDevice'i uzerinde kosuyor. Yalnizca render backend'ini
@@ -2786,6 +3127,52 @@ int main(int argc, char* argv[]) try {
                 if (g_viewport_backend) {
                     try { g_viewport_backend->shutdown(); } catch (...) {}
                     g_viewport_backend.reset();
+                }
+                // ★★★★ RENDER backend'i de kaybedilmis olabilir. Eskiden yalnizca
+                //   viewport yikiliyordu; Vulkan RT ayni surucu sifirlamasindan
+                //   gecmis bir VkDevice uzerinde AYAKTA kaliyor ve kullanici
+                //   "RT'ye donunce de calismiyor" diyordu -- cunku donulen sey
+                //   olu backend'in ta kendisiydi.
+                if (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
+                    shutdownAndResetBackendSafe("vulkan_device_lost");
+                }
+                // ★★★★★ AYNI ITERASYONDA YENIDEN KURMA. Bu blogun asagisinda
+                //   kosulsuz bir initializeViewportBackendIfAvailable() var ve
+                //   arada continue/return YOK: surucu daha sifirlanirken yeni
+                //   bir VkDevice aciliyordu. Kurulum "basarili" donup zehirli
+                //   bir backend saklarsa, o fonksiyon bundan sonra
+                //   `if (g_viewport_backend) return true` ile kisa devre yapar
+                //   ve hicbir manuel mod gecisi onu bir daha kurmaz.
+                {
+                    const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    g_viewport_device_lost_count.fetch_add(1, std::memory_order_acq_rel);
+                    const int streak =
+                        g_viewport_recovery_consecutive_losses.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+                    // ★★★★★ TDR'yi raster'in KENDISI uretiyorsa, yeniden kurmak
+                    //   onu yeniden uretir. Zaman kapisi bunu yavaslatir ama
+                    //   durdurmaz, yani sonsuz bir TDR dongusu olur -- ve her
+                    //   tur surucuyu bir kez daha sifirlar. Bu yuzden butce var.
+                    if (streak >= kViewportRecoveryMaxStreak) {
+                        g_viewport_recovery_given_up.store(true, std::memory_order_release);
+                        g_viewport_rebuild_pending_after_loss.store(false, std::memory_order_release);
+                        g_viewport_rebuild_not_before_ms.store(0, std::memory_order_release);
+                        ui.addViewportMessage(
+                            "Vulkan viewport lost repeatedly - automatic recovery stopped. "
+                            "Switch viewport mode manually to try again.",
+                            12.0f, ImVec4(1.0f, 0.35f, 0.25f, 1.0f));
+                        SCENE_LOG_ERROR(
+                            "[Viewport] Device lost " + std::to_string(streak) +
+                            " times in a row; automatic recovery GIVEN UP. Rebuilding would "
+                            "most likely reset the driver again. Re-arm with a manual viewport "
+                            "mode switch or viewport.retry_device_recovery.");
+                    } else {
+                        // Ustel geri cekilme: 2.5s, 5s, 10s.
+                        const long long backoff = 2500LL * (1LL << (streak - 1));
+                        g_viewport_rebuild_not_before_ms.store(nowMs + backoff, std::memory_order_release);
+                        g_viewport_rebuild_pending_after_loss.store(true, std::memory_order_release);
+                    }
                 }
                 render_settings.use_vulkan = false;
                 ui_ctx.render_settings.use_vulkan = false;
@@ -2825,13 +3212,13 @@ int main(int argc, char* argv[]) try {
                 (void)syncActiveRenderBackendScene(true); // New backend — full sync required
             }
 
-            if (g_hasVulkan) {
+            if (g_hasVulkan && viewportRebuildGateOpen()) {
                 (void)initializeViewportBackendIfAvailable();
             }
             if (g_viewport_backend) {
                 auto wdViewport = ray_renderer.world.getGPUData();
                 if (auto* vkViewport = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
-                    syncVulkanWorldWithAtmosphere(vkViewport, wdViewport);
+                    syncVulkanWorldToBackend(vkViewport, wdViewport);
                 } else {
                     g_viewport_backend->setWorldData(&wdViewport);
                 }
@@ -3575,7 +3962,7 @@ int main(int argc, char* argv[]) try {
         bool autonomous_anim_graph_playing = false;
         for (const auto& modelCtx : scene.importedModelContexts) {
             auto activeGraph = modelCtx.runtimeGraph ? modelCtx.runtimeGraph : modelCtx.graph;
-            if (!modelCtx.useAnimGraph || !activeGraph || modelCtx.animGraphFollowTimeline) {
+            if (RigAuthoring::isRestPoseView(scene,modelCtx.importName) || !modelCtx.useAnimGraph || !activeGraph || modelCtx.animGraphFollowTimeline) {
                 continue;
             }
             const auto playback = activeGraph->getPlaybackStatus();
@@ -4009,7 +4396,7 @@ int main(int argc, char* argv[]) try {
             // Mark all buffers dirty for fresh scene
             g_camera_dirty = true;
             g_lights_dirty = true;
-            g_world_dirty = true;
+            markWorldDirty();
             g_geometry_dirty = true;
             g_materials_dirty = true;
             g_gas_volumes_dirty = true;
@@ -4068,6 +4455,23 @@ int main(int argc, char* argv[]) try {
             // editorleri ve inspector'lar burada toplanir.
             RTPERF_FRAME_SCOPE("loop.ui_draw");
             ui.draw(ui_ctx);
+        }
+
+        // ★★★★★ YUKLEME BU KARENIN ICINDE BASLADIYSA KARE BURADA BITER.
+        //
+        // Yukaridaki "EARLY SCENE LOADING GUARD" bir tur GEC kalir: yukleyici
+        // ipligi ui.draw'in ICINDE (File menusu / Template Hub) dogar, ve o an
+        // bu turun geri kalani -- render blogu, viewport submit, present --
+        // yukleyicinin soktugu sahneye karsi calismaya devam eder. ui.draw kendi
+        // tarafini menu cizimden hemen sonra kesiyor; kalan yari burasi.
+        //
+        // ★ Ozellikle GPU tarafi: `newProject` -> `resetForProjectReload`
+        // viewport kaynaklarini yukleyici ipliginde yikarken bu kare hala raster
+        // is kaydediyor olabilir. Frame'i ImGui acisindan duzgun kapat (bir
+        // sonraki tur NewFrame cagiracak), submit etme, present etme.
+        if (ui.scene_loading.load() || g_scene_loading_in_progress.load()) {
+            ImGui::EndFrame();
+            continue;
         }
 
         // Raster invalidation is event-driven and must wake presentation even
@@ -4743,7 +5147,7 @@ int main(int argc, char* argv[]) try {
                         else {
 
                         bool geometry_updated = false;
-                        const bool has_file_animations = !scene.animationDataList.empty();
+                        const bool has_file_animations = RigAuthoring::needsFileAnimationEvaluation(scene);
                         bool force_bind_pose = (ui.show_hair_tab && ui.active_properties_tab == 8);
                         const bool should_update_animation = has_file_animations ||
                             autonomous_anim_graph_playing ||
@@ -4794,7 +5198,7 @@ int main(int argc, char* argv[]) try {
                             // Geometry change implies all buffers need refresh
                             g_camera_dirty = true;
                             g_lights_dirty = true;
-                            g_world_dirty = true;
+                            markWorldDirty();
                         }
 
                         // OPTIMIZATION: Only update GPU buffers when data has changed
@@ -4910,7 +5314,19 @@ int main(int argc, char* argv[]) try {
                             last_interactive_lut_update_ms == 0 ||
                             world_sync_now_ms - last_interactive_lut_update_ms >= 66u;
 
-                        if (g_world_dirty ||
+                        // ★★★★ Bu kapi VIEWPORT backend'ini besler. Hedef
+                        //   `g_backend`'in KENDISI ise (Rendered modu) tuketilen
+                        //   bayrak render bayragidir; ayri bir raster adapter'i
+                        //   ise viewport bayragi. Eskiden ikisi de `g_world_dirty`
+                        //   idi ve `syncActiveRenderBackendScene` bayragi ONCE
+                        //   yutunca raster viewport dunyayi HIC almiyordu --
+                        //   HDRI'da arka plan duz renge dusuyordu.
+                        const bool viewportTargetIsRenderBackend =
+                            (activeViewportBackend == g_backend.get());
+                        bool& viewportWorldDirty = viewportTargetIsRenderBackend
+                            ? g_world_dirty : g_viewport_world_dirty;
+
+                        if (viewportWorldDirty ||
                             (nishitaWorldActive && !timeline_playing && ray_renderer.world.needsLUTUpdate()) ||
                             allowTimelineLUTUpdate ||
                             allowImmediateVulkanLUTUpdate) {
@@ -4920,9 +5336,12 @@ int main(int argc, char* argv[]) try {
                                     // setWorldData uploads current sun/fog/etc.
                                     // without regenerating an already-ready LUT;
                                     // World keeps lut_dirty armed for the due tick.
-                                    if (g_world_dirty) {
-                                        WorldData wd = ray_renderer.world.getGPUData();
-                                        activeViewportBackend->setWorldData(&wd);
+                                    // ★ Ama ortam dokusu bir LUT DEGIL: bayrak
+                                    //   kirliyse tam govdeyi kosturmak sart,
+                                    //   yoksa HDRI dokusu bu ucuz dala takilip
+                                    //   hicbir zaman yuklenmez.
+                                    if (viewportWorldDirty) {
+                                        syncWorldDataToBackend(activeViewportBackend, false);
                                     }
                                 } else {
                                     syncWorldDataToBackend(activeViewportBackend);
@@ -4935,7 +5354,7 @@ int main(int argc, char* argv[]) try {
                                     last_interactive_lut_update_ms = world_sync_now_ms;
                                 }
                             }
-                            g_world_dirty = false;
+                            viewportWorldDirty = false;
                         }
 
 
@@ -4961,6 +5380,17 @@ int main(int argc, char* argv[]) try {
                             static int last_debug_view = -1;
                             static float last_debug_exposure = -1.0f;
                             static float last_debug_overlay = -1.0f;
+                            // ★★★★★ 2026-09-14: `realtime_taa`/`realtime_dof_*` UNUTULMUSTU. Checkbox
+                            //   kapatinca `render_settings.realtime_taa` degisiyordu ama bu deger asagidaki
+                            //   karsilastirmada YOKTU, yani baska hicbir sey degismedikce setRenderParams
+                            //   bir daha cagrilmiyordu ve backend'deki m_taaEnabled eski degerinde donuyordu.
+                            //   Belirti: "kapatsam da aktif kalir gibi" -- cunku ONE KEZ acildiktan sonra
+                            //   kapatmak, o gorunmez listede olmadigi icin hic iletilmiyordu.
+                            static bool last_taa = true;
+                            static int last_taa_samples = -1;
+                            static bool last_dof = true;
+                            static float last_dof_max_coc = -1.0f;
+                            static int last_dof_max_taps = -1;
                             int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
 
                             if (activeViewportBackend != last_backend ||
@@ -4984,7 +5414,12 @@ int main(int argc, char* argv[]) try {
                                 std::abs(render_settings.caustics_vol_noise - last_caustics_vol_noise) > 1e-5f ||
                                 render_settings.debug_view != last_debug_view ||
                                 std::abs(render_settings.debug_exposure - last_debug_exposure) > 1e-5f ||
-                                std::abs(render_settings.debug_overlay - last_debug_overlay) > 1e-5f)
+                                std::abs(render_settings.debug_overlay - last_debug_overlay) > 1e-5f ||
+                                render_settings.realtime_taa != last_taa ||
+                                render_settings.realtime_taa_samples != last_taa_samples ||
+                                render_settings.realtime_depth_of_field != last_dof ||
+                                std::abs(render_settings.realtime_dof_max_coc - last_dof_max_coc) > 1e-5f ||
+                                render_settings.realtime_dof_max_taps != last_dof_max_taps)
                             {
                                 Backend::RenderParams rp = {};
                                 rp.imageWidth = image_width;
@@ -5007,8 +5442,40 @@ int main(int argc, char* argv[]) try {
         rp.causticsVolDirect = render_settings.caustics_vol_direct;
         rp.causticsVolNoise = render_settings.caustics_vol_noise;
         rp.debugView = render_settings.debug_view;
+        rp.realtimeDepthOfField = render_settings.realtime_depth_of_field;
+        rp.realtimeTaa = render_settings.realtime_taa;
+        rp.realtimeTaaSamples = render_settings.realtime_taa_samples;
+        rp.realtimeDofMaxCoC = render_settings.realtime_dof_max_coc;
+        rp.realtimeDofMaxTaps = render_settings.realtime_dof_max_taps;
         rp.debugExposure = render_settings.debug_exposure;
         rp.debugOverlay = render_settings.debug_overlay;
+                                // ★★ NEDENI `last_*` guncellenmeden ONCE topla, yoksa
+                                //    hepsi esitlenmis olur ve alet bos doner.
+                                {
+                                    std::string why;
+                                    auto add = [&why](const char* n){ if(!why.empty()) why += ","; why += n; };
+                                    if (activeViewportBackend != last_backend) add("backend");
+                                    if (image_width != last_w || image_height != last_h) add("size");
+                                    if (current_max != last_max) add("max_samples");
+                                    if (render_settings.min_samples != last_min) add("min_samples");
+                                    if (render_settings.max_bounces != last_bounces) add("max_bounces");
+                                    if (render_settings.diffuse_bounces != last_diffuse_bounces) add("diffuse_bounces");
+                                    if (render_settings.transmission_bounces != last_transmission_bounces) add("transmission_bounces");
+                                    if (render_settings.use_adaptive_sampling != last_adaptive) add("adaptive");
+                                    if (std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f) add("variance_threshold");
+                                    if (render_settings.caustics_enabled != last_caustics) add("caustics");
+                                    if (render_settings.debug_view != last_debug_view) add("debug_view");
+                                    if (std::abs(render_settings.debug_exposure - last_debug_exposure) > 1e-5f) add("debug_exposure");
+                                    if (std::abs(render_settings.debug_overlay - last_debug_overlay) > 1e-5f) add("debug_overlay");
+                                    if (render_settings.realtime_taa != last_taa) add("realtime_taa");
+                                    if (render_settings.realtime_taa_samples != last_taa_samples) add("realtime_taa_samples");
+                                    if (render_settings.realtime_depth_of_field != last_dof) add("realtime_dof");
+                                    if (std::abs(render_settings.realtime_dof_max_coc - last_dof_max_coc) > 1e-5f) add("realtime_dof_max_coc");
+                                    if (render_settings.realtime_dof_max_taps != last_dof_max_taps) add("realtime_dof_max_taps");
+                                    if (why.empty()) why = "(karsilastirma disi bir alan)";
+                                    g_set_render_params_reason = why;
+                                    g_set_render_params_calls.fetch_add(1, std::memory_order_acq_rel);
+                                }
                                 activeViewportBackend->setRenderParams(rp);
 
                                 last_backend = activeViewportBackend;
@@ -5034,6 +5501,25 @@ int main(int argc, char* argv[]) try {
                                 last_debug_view = render_settings.debug_view;
                                 last_debug_exposure = render_settings.debug_exposure;
                                 last_debug_overlay = render_settings.debug_overlay;
+                                // ★★★★★ 2026-09-17: BU BES SATIR EKSIKTI, ve eksikligi
+                                //   2026-09-14'te bu alanlar karsilastirmaya EKLENIRKEN
+                                //   dogdu. `last_taa_samples`/`last_dof_max_coc`/
+                                //   `last_dof_max_taps` -1 baslatilip bir daha hic
+                                //   yazilmadigi icin karsilastirma HER KARE "degisti"
+                                //   diyordu -> setRenderParams her kare -> OptiX'te
+                                //   resetBuffers() her kare -> birikim tamponu her kare
+                                //   sifirlaniyordu. Belirti OptiX'te goruldu ama kapi
+                                //   backend'den BAGIMSIZ: her kare bosuna is yapiliyordu.
+                                //
+                                //   ★★★ Ders: bir degisim karsilastirmasina alan eklemek
+                                //   IKI yer degistirir. Yalnizca birini yapmak hata
+                                //   vermez -- kapi ya hic acilmaz (eski hata) ya da hic
+                                //   kapanmaz (bu hata). Ikisi de sessizdir.
+                                last_taa = render_settings.realtime_taa;
+                                last_taa_samples = render_settings.realtime_taa_samples;
+                                last_dof = render_settings.realtime_depth_of_field;
+                                last_dof_max_coc = render_settings.realtime_dof_max_coc;
+                                last_dof_max_taps = render_settings.realtime_dof_max_taps;
                             }
                         }
                         // Enter GPU render block when selected engine is GPU OR when
@@ -5069,12 +5555,39 @@ int main(int argc, char* argv[]) try {
                                 if (original_surface && original_surface->pixels) {
                                     SDL_FillRect(original_surface, nullptr, 0);
                                 }
+                                // ★★★★ The dedicated viewport device is NOT told about this
+                                //   transition (activeViewportBackend is now the render
+                                //   backend), so its scene AS stayed resident -- 2.5 GB on a
+                                //   36M-triangle scene -- on the card the render backend is
+                                //   about to fill. Measured: Vulkan RT upload then failed
+                                //   with VK_ERROR_OUT_OF_DEVICE_MEMORY on a project that
+                                //   opened fine before RayFusion existed.
+                                yieldViewportVramToRenderBackend("enter_rendered");
                                 // Track whether scene geometry actually changed while in Solid mode.
                                 // If unchanged, skip the expensive full rebuild — just sync lightweight state.
-                                static uint64_t s_lastRenderedGeometryGen = 0;
                                 const uint64_t currentGen = g_scene_geometry_generation.load(std::memory_order_acquire);
-                                const bool geometryChangedSinceSolid = (currentGen != s_lastRenderedGeometryGen)
+                                const uint64_t renderSyncedGen =
+                                    g_render_backend_synced_geometry_generation.load(std::memory_order_acquire);
+                                bool geometryChangedSinceSolid = (currentGen != renderSyncedGen)
                                     || g_geometry_dirty;
+                                // ★★★ Behind ONLY by in-place mesh edits (sculpt in Solid):
+                                //   refit those objects instead of rebuilding the scene.
+                                //   Measured cost of the full path for a 32-triangle edit on a
+                                //   36M-triangle scene: 5.8 s RT + 3.1 s Embree.
+                                const InPlaceMeshEditLedger meshEditLedger = g_render_mesh_edit_ledger;
+                                g_render_mesh_edit_ledger = InPlaceMeshEditLedger{};
+                                if (geometryChangedSinceSolid && !g_geometry_dirty &&
+                                    !g_vulkan_rebuild_pending &&
+                                    meshEditLedger.active &&
+                                    meshEditLedger.fromGeneration == renderSyncedGen &&
+                                    meshEditLedger.toGeneration == currentGen &&
+                                    dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr &&
+                                    ui.catchUpRenderMeshEdits(ui_ctx, meshEditLedger.objects)) {
+                                    SCENE_LOG_INFO("[MeshEdit] Vulkan RT caught up on " +
+                                                   std::to_string(meshEditLedger.objects.size()) +
+                                                   " in-place edited object(s); no scene rebuild.");
+                                    geometryChangedSinceSolid = false;
+                                }
                                 // ★★★ A pending rebuild REQUEST is not the same thing as a
                                 // detected geometry change, and this block used to clear the
                                 // request (below) while deciding what to do from the detection
@@ -5128,6 +5641,8 @@ int main(int argc, char* argv[]) try {
                                         // Geometry changed while in Solid mode — full sync needed
                                         vkRenderBackend->rebuildAccelerationStructure();
                                         vkRenderBackend->updateGeometry(scene.world.objects);
+                                        if (!ray_renderer.finalBoneMatrices.empty())
+                                            vkRenderBackend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
                                         ray_renderer.uploadHairToGPU();
                                         ray_renderer.updateBackendMaterials(scene);
                                         syncMaterialBufferToViewportBackend(scene, ray_renderer);
@@ -5169,11 +5684,11 @@ int main(int argc, char* argv[]) try {
                                     }
                                     vkRenderBackend->setLights(scene.lights);
                                     auto wd = ray_renderer.world.getGPUData();
-                                    syncVulkanWorldWithAtmosphere(vkRenderBackend, wd);
+                                    syncVulkanWorldToBackend(vkRenderBackend, wd);
                                     vkRenderBackend->resetAccumulation();
                                     g_camera_dirty = true;
                                     g_lights_dirty = true;
-                                    g_world_dirty = true;
+                                    markWorldDirty();
                                 } else if (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr) {
                                     if (geometryChangedSinceSolid) {
                                         g_optix_rebuild_pending = true;
@@ -5197,7 +5712,7 @@ int main(int argc, char* argv[]) try {
                                         g_backend->resetAccumulation();
                                         g_camera_dirty = true;
                                         g_lights_dirty = true;
-                                        g_world_dirty = true;
+                                        markWorldDirty();
                                     }
                                 } else {
                                     // CPU mode (no GPU render backend): synchronous vertex sync
@@ -5209,20 +5724,54 @@ int main(int argc, char* argv[]) try {
                                 if (geometryChangedSinceSolid) {
                                     g_bvh_rebuild_pending = true;
                                 }
-                                s_lastRenderedGeometryGen = currentGen;
+                                g_render_backend_synced_geometry_generation.store(
+                                    currentGen, std::memory_order_release);
                             }
                             // Switching rendered → solid/matcap: only rebuild raster geometry
                             // if it doesn't exist yet or scene geometry has changed since last build.
                             if (s_prevGlobalViewportMode == Backend::ViewportMode::Rendered &&
                                 viewportMode != Backend::ViewportMode::Rendered) {
                                 auto* rasterBk = getRasterViewportBackend();
+                                // The AS rebuilds lazily from the resident raster geometry.
+                                if (auto* vp = dedicatedVulkanViewportBackend()) {
+                                    vp->reclaimRayFusionSceneAS();
+                                }
                                 const uint64_t curGen = g_scene_geometry_generation.load(std::memory_order_acquire);
                                 const bool rasterCacheValid = rasterBk && rasterBk->hasValidRasterCache(curGen);
                                 if (!rasterCacheValid) {
                                     g_viewport_raster_rebuild_pending = true;
                                 }
+                                // [FIX] Rendered moddan raster moda geçilince eski renderer
+                                // istatistikleri başlıkta ve HUD'da kalmamalı. Sıfırla ve
+                                // başlığı raster mod adıyla güncelle.
+                                render_settings.avg_total_frame_time_ms = 0.0f;
+                                render_settings.avg_total_frame_fps    = 0.0f;
+                                if (window) {
+                                    std::string pn = active_model_path;
+                                    if (pn.empty() || pn == "Untitled") {
+                                        pn = "Untitled Project";
+                                    } else {
+                                        size_t sl = pn.find_last_of("\\/");
+                                        if (sl != std::string::npos) pn = pn.substr(sl + 1);
+                                        size_t dt = pn.find_last_of(".");
+                                        if (dt != std::string::npos) pn = pn.substr(0, dt);
+                                    }
+                                    const char* modeName =
+                                        (viewportMode == Backend::ViewportMode::Solid)   ? "Solid" :
+                                        (viewportMode == Backend::ViewportMode::Matcap)  ? "Matcap" :
+                                        "RayFusion";
+                                    std::string t = "RayTrophi Studio [" + pn + "] - " + modeName;
+                                    SDL_SetWindowTitle(window, t.c_str());
+                                }
                             }
                             s_prevGlobalViewportMode = viewportMode;
+                            // Held for as long as Rendered is shown, not only at the
+                            // edge: a viewport backend recreated here (TDR recovery)
+                            // starts un-yielded, and the UI warmers would rebuild its
+                            // AS on the next frame. No-op once yielded.
+                            if (viewportMode == Backend::ViewportMode::Rendered) {
+                                yieldViewportVramToRenderBackend("rendered");
+                            }
                             // Ensure we have a valid Raw Buffer (original_surface) for Backend output
                             EnsureOriginalSurface(surface);
                             
@@ -5310,7 +5859,19 @@ int main(int argc, char* argv[]) try {
                         
                         auto sample_end = std::chrono::high_resolution_clock::now();
                         float sample_time_ms = std::chrono::duration<float, std::milli>(sample_end - sample_start).count();
-                        
+
+                        // [FIX v2] Raster (Solid/Matcap/RayFusion) için istatistikler
+                        // GPU render süresinden (sample_time_ms) ölçülmez; VSync,
+                        // ImGui build ve SDL present bu pencerededir. Sadece ham
+                        // render süresini kısmi bir referans olarak sakla; gerçek
+                        // frame-to-frame süresini SDL_RenderPresent sonrasında
+                        // s_lastDisplayPublish delta'şıyla güncelliyoruz (aşağıda).
+                        if (vulkanRasterActive && sample_time_ms > 0.0f) {
+                            // Sadece ham GPU render süresini kısmi referans olarak sar
+                            render_settings.avg_sample_time_ms =
+                                render_settings.avg_sample_time_ms * 0.85f + sample_time_ms * 0.15f;
+                        }
+
                         // Update progress for UI
                         const bool active_gpu_backend_for_stats = backendIsOptix || backendIsVulkan;
                         int prev_samples = render_settings.render_current_samples;
@@ -5619,6 +6180,8 @@ int main(int argc, char* argv[]) try {
                                 }
                             }
 
+                            RigAuthoring::synchronizeCpuSkinning(scene, ray_renderer.finalBoneMatrices);
+
                             // Trigger CPU BVH rebuild (SYNCHRONOUS for safety)
                             // Async rebuild causes crashes if objects were deleted in GPU mode.
                             // skip_sync=true: we already did the per-object sync above,
@@ -5636,7 +6199,7 @@ int main(int argc, char* argv[]) try {
                         // OPTIMIZATION: Only update animation state when timeline frame changed
                         // AND when we have file-based animations (not manual keyframes)
                         static int last_cpu_anim_frame = -1;
-                        bool has_file_animations = !scene.animationDataList.empty();
+                        bool has_file_animations = RigAuthoring::needsFileAnimationEvaluation(scene);
                         if (has_file_animations) {
                              // CPU mode: apply CPU vertex skinning for ray-triangle intersection
                              bool force_bind_pose = (ui.show_hair_tab && ui.active_properties_tab == 8);
@@ -5993,7 +6556,7 @@ int main(int argc, char* argv[]) try {
                 // PERFORMANCE OPTIMIZATION: 
                 // Check if ANY animation data exists (file-based OR manual keyframes)
                 // If no animation at all, SKIP all expensive updates - nothing to animate!
-                bool has_file_animations = !scene.animationDataList.empty();
+                bool has_file_animations = RigAuthoring::needsFileAnimationEvaluation(scene);
                 bool has_timeline_tracks = !scene.timeline.tracks.empty();
                 
                 // Count actual keyframes (not just tracks) - CACHE THIS to avoid repeated iteration
@@ -6039,13 +6602,17 @@ int main(int argc, char* argv[]) try {
                     
                     if (has_file_animations || timeline_has_camera_keyframes) g_camera_dirty = true;
                     if (has_file_animations || timeline_has_light_keyframes) g_lights_dirty = true;
-                    if (has_file_animations) g_world_dirty = true;
+                    if (has_file_animations) markWorldDirty();
                     
                     // Update Backend if needed
                         if (has_active_render_gpu_backend) {
                         // PERFORMANCE: Only update geometry if file-based animations modified it
                         if (has_file_animations) {
-                            if (g_backend) g_backend->updateGeometry(scene.world.objects);
+                            if (g_backend) {
+                                g_backend->updateGeometry(scene.world.objects);
+                                if (!ray_renderer.finalBoneMatrices.empty())
+                                    g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
+                            }
                         } else if (wind_active) {
                             if (g_backend) g_backend->updateInstanceTransforms(scene.world.objects);
                         } else if (has_manual_keyframes) {
@@ -6267,7 +6834,8 @@ int main(int argc, char* argv[]) try {
                 rendering_in_progress = false;
                 ui_ctx.is_animation_mode = false;
                 ui_ctx.render_settings.animation_render_locked = false;
-                g_camera_dirty = g_lights_dirty = g_world_dirty = true;
+                g_camera_dirty = g_lights_dirty = true;
+                markWorldDirty();
                 SCENE_LOG_INFO("[SeqSave] Cancelled at frame " + std::to_string(g_seq_save_frame));
                 if (cli_seq_mode) {
                     // Cancelled by user / error in headless mode — exit cleanly.
@@ -6304,7 +6872,8 @@ int main(int argc, char* argv[]) try {
                         rendering_in_progress = false;
                         ui_ctx.is_animation_mode = false;
                         ui_ctx.render_settings.animation_render_locked = false;
-                        g_camera_dirty = g_lights_dirty = g_world_dirty = true;
+                        g_camera_dirty = g_lights_dirty = true;
+                        markWorldDirty();
                         SCENE_LOG_INFO("[SeqSave] Sequence complete (last frame " +
                                        std::to_string(g_seq_save_frame) + ").");
                         if (cli_seq_mode) {
@@ -6474,6 +7043,50 @@ int main(int argc, char* argv[]) try {
                 if (s_lastDisplayPublish.time_since_epoch().count() != 0) {
                     dpt.loop_period_ms = std::chrono::duration<double, std::milli>(
                         nowTp - s_lastDisplayPublish).count();
+
+                    // [FIX v2] Raster modu için gerçek duvar saati kare süresini
+                    // (VSync + ImGui + SDL present dahil) başlığa yaz.
+                    // sample_time_ms yalnızca GPU render kernel'ini ölçer;
+                    // buradaki delta tam "kullanıcının algıladığı" fps'tir.
+                    if (g_solid_viewport_active && dpt.loop_period_ms > 0.5 && window) {
+                        const float wall_ms  = static_cast<float>(dpt.loop_period_ms);
+                        const float wall_fps = 1000.0f / wall_ms;
+
+                        // Eüzsel ortalama: 0.9/0.1 — hızlı değişimler görünsün ama titrşemesin
+                        render_settings.avg_total_frame_time_ms =
+                            render_settings.avg_total_frame_time_ms * 0.9f + wall_ms  * 0.1f;
+                        render_settings.avg_total_frame_fps =
+                            render_settings.avg_total_frame_fps   * 0.9f + wall_fps * 0.1f;
+
+                        // Başlığı ~10 Hz'de güncelle (her kare string alloc + syscall engellemek için)
+                        static uint32_t s_lastRasterTitleMs = 0;
+                        const uint32_t nowMs = SDL_GetTicks();
+                        if (nowMs - s_lastRasterTitleMs >= 100u) {
+                            s_lastRasterTitleMs = nowMs;
+                            std::string pn = active_model_path;
+                            if (pn.empty() || pn == "Untitled") {
+                                pn = "Untitled Project";
+                            } else {
+                                size_t sl = pn.find_last_of("\\/");
+                                if (sl != std::string::npos) pn = pn.substr(sl + 1);
+                                size_t dt = pn.find_last_of(".");
+                                if (dt != std::string::npos) pn = pn.substr(0, dt);
+                            }
+                            const Backend::ViewportMode rasterMode =
+                                viewportModeFromShadingMode(ui.viewport_settings.shading_mode);
+                            const char* modeName =
+                                (rasterMode == Backend::ViewportMode::Solid)  ? "Solid" :
+                                (rasterMode == Backend::ViewportMode::Matcap) ? "Matcap" :
+                                "RayFusion";
+                            char titleBuf[256];
+                            snprintf(titleBuf, sizeof(titleBuf),
+                                "RayTrophi Studio [%s] - %s - %.0f ms/frame - %.1f fps",
+                                pn.c_str(), modeName,
+                                render_settings.avg_total_frame_time_ms,
+                                render_settings.avg_total_frame_fps);
+                            SDL_SetWindowTitle(window, titleBuf);
+                        }
+                    }
                 }
                 s_lastDisplayPublish = nowTp;
                 rtapi::noteDisplayPathTiming(dpt);
@@ -6649,8 +7262,19 @@ int main(int argc, char* argv[]) try {
         // triangle topology actually changed.
         if (g_cpu_bvh_refit_pending && !g_bvh_rebuild_pending) {
             bool use_embree = ui_ctx.render_settings.UI_use_embree;
-            ray_renderer.refitBVH(scene, use_embree);
-            ray_renderer.resetCPUAccumulation();
+            if (ray_renderer.refitBVH(scene, use_embree)) {
+                ray_renderer.resetCPUAccumulation();
+            } else {
+                // ***** No in-place refit available (non-Embree BVH). Do NOT rebuild
+                //   synchronously here: a sculpt stroke sets this flag on EVERY dab,
+                //   and refitBVH used to answer it with a full CPU BVH rebuild --
+                //   ~200 ms per dab on a 2M-triangle scene, which is the reported
+                //   "dab cost rises after a CPU -> Solid round trip". Hand it to the
+                //   deferred rebuild below, which is asynchronous and coalesces a
+                //   stream of requests into one build. CPU rays are not being traced
+                //   while a GPU viewport is drawing, so the lag is invisible.
+                g_bvh_rebuild_pending = true;
+            }
             g_cpu_bvh_refit_pending = false;
         }
 
@@ -6834,7 +7458,7 @@ int main(int argc, char* argv[]) try {
                     // CRITICAL FIX: Mark all scene data dirty after rebuild to force re-sync
                     g_camera_dirty = true;
                     g_lights_dirty = true;
-                    g_world_dirty = true;
+                    markWorldDirty();
                     g_needs_optix_sync.store(true, std::memory_order_release);
                     // The snapshot rebuild just consumed the topology dirty
                     // state. Leaving this set lets the central scene-sync path
@@ -6878,6 +7502,7 @@ int main(int argc, char* argv[]) try {
             if (auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(rasterViewportBackend)) {
                 ui.addViewportMessage("Updating Solid View...", 1.0f);
                 vkBackend->buildRasterGeometry(scene.world.objects);
+                vkBackend->syncRasterSkinnedVertices(scene.world.objects, ray_renderer.finalBoneMatrices);
                 applyPendingDeleteVisibilityToBackend(scene, vkBackend);
                 syncMaterialBufferToViewportBackend(scene, ray_renderer);
                 // Hair viewport lines must be refreshed here: Renderer::uploadHairToGPU
@@ -7031,6 +7656,8 @@ int main(int argc, char* argv[]) try {
                 g_backend->rebuildAccelerationStructure();
 
                 g_backend->updateGeometry(scene.world.objects);
+                if (!ray_renderer.finalBoneMatrices.empty())
+                    g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
                 // Re-sync VDB SSBO after TLAS rebuild so SSBO order matches TLAS customIndex.
                 ui.syncVDBVolumesToGPU(ui_ctx);
                 g_gas_volumes_dirty = false;

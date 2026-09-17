@@ -1,4 +1,5 @@
-﻿#include "renderer.h"
+#include "renderer.h"
+#include "Animation/RigPoseView.h"
 #include <SDL_image.h>
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
@@ -1618,6 +1619,7 @@ static int directional_pick_count = 0;
 // ============================================================================
 
 void Renderer::initializeAnimationSystem(SceneData& scene) {
+    RigAuthoring::initializeRestPoseDefaults(scene);
     animation_groups_dirty = true;
 
     // Initialize per-model animators
@@ -1711,7 +1713,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
     // totalBones increases. assign() would destroy Model A's existing bone matrices,
     // causing its skinned mesh to collapse to origin on the next GPU skinning pass
     // (before Model A's animator re-computes). resize() preserves existing entries.
-    size_t totalBones = scene.boneData.boneNameToIndex.size();
+    size_t totalBones = scene.boneData.getBoneIndexCapacity();
     if (this->finalBoneMatrices.size() < totalBones) {
         this->finalBoneMatrices.resize(totalBones, Matrix4x4::identity());
     }
@@ -1724,6 +1726,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
         std::vector<Matrix4x4> modelBoneMatrices;
         bool modelChanged = false;
         auto applyModelRestPose = [&]() {
+            RigAuthoring::captureGlobals(scene, ctx.importName, {}, "bind");
             bool applied = false;
             for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
                 if (boneName.find(ctx.importName + "_") != 0) {
@@ -1740,6 +1743,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             return applied;
         };
 
+        if(RigAuthoring::applyRestPoseView(scene,ctx,this->finalBoneMatrices,apply_cpu_skinning,modelChanged)){anyChanged=anyChanged || modelChanged;continue;}
         auto activeGraph = ctx.runtimeGraph ? ctx.runtimeGraph : ctx.graph;
         if (ctx.useAnimGraph && activeGraph) {
             float graphDeltaTime = deltaTime;
@@ -1756,7 +1760,6 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             }
 
             // Timeline-driven anim graph overrides for cinematic shots.
-            activeGraph->evalContext.triggerParams.clear();
             auto trackIt = scene.timeline.tracks.find(ctx.importName);
             if (trackIt != scene.timeline.tracks.end()) {
                 Keyframe animKf = trackIt->second.evaluate(scene.timeline.current_frame);
@@ -1825,6 +1828,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             activeGraph->evalContext.rootMotion = RootMotionDelta(); // reset
 
             AnimationGraph::PoseData pose = activeGraph->evaluate(graphDeltaTime, scene.boneData);
+            RigAuthoring::captureGlobals(scene, ctx.importName, pose.jointGlobalTransforms, "graph");
 
             if (pose.isValid()) {
                 if (pose.wasUpdated) {
@@ -1967,6 +1971,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
 
                 if (supportsOzzBlendPath && !ozzBlendLayers.empty()) {
                     if (OzzRuntime::sampleBlendedAnimationToModelMatrices(*ctx.ozzAnimationSet, ozzBlendLayers, &modelBoneMatrices)) {
+                        RigAuthoring::captureRuntimeGlobals(scene, ctx.importName, modelBoneMatrices, ctx.ozzAnimationSet->sceneBoneToRuntimeJoint);
                         usedOzzRuntime = true;
                         if (!ctx.loggedOzzRuntimeUsage) {
                             SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Ozz");
@@ -2002,6 +2007,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                     if (foundClip) {
                         const float sampleTime = ctx.animator->getCurrentTime();
                         if (OzzRuntime::sampleAnimationToModelMatrices(*ctx.ozzAnimationSet, ozzClipIndex, sampleTime, &modelBoneMatrices)) {
+                            RigAuthoring::captureRuntimeGlobals(scene, ctx.importName, modelBoneMatrices, ctx.ozzAnimationSet->sceneBoneToRuntimeJoint);
                             usedOzzRuntime = true;
                             if (!ctx.loggedOzzRuntimeUsage) {
                                 SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Ozz");
@@ -2036,6 +2042,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                 }
                 // Get this model's bone matrices (current state)
                 modelBoneMatrices = ctx.animator->getFinalBoneMatrices();
+                RigAuthoring::captureGlobals(scene, ctx.importName, ctx.animator->getJointGlobalTransforms(), "controller");
 
                 // ===========================================================================
                 // CRITICAL FIX: Map Animator Local Indices to Global Indices
@@ -2117,6 +2124,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             }
         }
         
+        anyChanged=RigAuthoring::applyPoseViewResume(scene,ctx,this->finalBoneMatrices,apply_cpu_skinning) || anyChanged;
         if (modelChanged) {
             anyChanged = true;
             
@@ -2200,6 +2208,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
     static bool was_in_bind_pose = false;
     if (force_bind_pose) {
+        RigAuthoring::clearPoseSnapshots(scene);
         if (!was_in_bind_pose) {
             was_in_bind_pose = true;
             // [HAIR PANEL FIX] Do NOT mark geometry_changed=true for the GPU path
@@ -2211,7 +2220,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
             geometry_changed = apply_cpu_skinning;
             
             if (!scene.boneData.boneNameToIndex.empty()) {
-                this->finalBoneMatrices.assign(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
+                this->finalBoneMatrices.assign(scene.boneData.getBoneIndexCapacity(), Matrix4x4::identity());
             }
 
             // Ensure animation groups are built
@@ -2347,6 +2356,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                 // ★ Was: loader->getScene()->mRootNode. The walk now runs on the
                 // RayTrophi-owned node tree, so it works for ANY importer and no
                 // longer forces the aiScene to stay alive for the session.
+                if (RigAuthoring::isRestPoseView(scene,modelCtx.importName)) continue;
                 if (modelCtx.nodeHierarchy.empty()) continue;
                 if (!modelCtx.hasAnimation) continue;
 
@@ -2441,8 +2451,8 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
     // Ensure bone matrices buffer is large enough for all bones in the scene
     if (!scene.boneData.boneNameToIndex.empty()) {
-        if (this->finalBoneMatrices.size() < scene.boneData.boneNameToIndex.size()) {
-            this->finalBoneMatrices.resize(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
+        if (this->finalBoneMatrices.size() < scene.boneData.getBoneIndexCapacity()) {
+            this->finalBoneMatrices.resize(scene.boneData.getBoneIndexCapacity(), Matrix4x4::identity());
         }
     }
 
@@ -2500,8 +2510,8 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
 
     // Ensure finalBoneMatrices is sized correctly for any remaining bones
-    if (finalBoneMatrices.size() < scene.boneData.boneNameToIndex.size()) {
-        finalBoneMatrices.resize(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
+    if (finalBoneMatrices.size() < scene.boneData.getBoneIndexCapacity()) {
+        finalBoneMatrices.resize(scene.boneData.getBoneIndexCapacity(), Matrix4x4::identity());
     }
 
     // --- 0. Ad�m: Performans �nbelle�i Haz�rl��� ---
@@ -3596,6 +3606,11 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rp.causticsVolDirect = render_settings.caustics_vol_direct;
         rp.causticsVolNoise = render_settings.caustics_vol_noise;
         rp.debugView = render_settings.debug_view;
+        rp.realtimeDepthOfField = render_settings.realtime_depth_of_field;
+        rp.realtimeTaa = render_settings.realtime_taa;
+        rp.realtimeTaaSamples = render_settings.realtime_taa_samples;
+        rp.realtimeDofMaxCoC = render_settings.realtime_dof_max_coc;
+        rp.realtimeDofMaxTaps = render_settings.realtime_dof_max_taps;
         rp.debugExposure = render_settings.debug_exposure;
         rp.debugOverlay = render_settings.debug_overlay;
                     m_backend->setRenderParams(rp);
@@ -3808,6 +3823,11 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rp.causticsVolDirect = render_settings.caustics_vol_direct;
         rp.causticsVolNoise = render_settings.caustics_vol_noise;
         rp.debugView = render_settings.debug_view;
+        rp.realtimeDepthOfField = render_settings.realtime_depth_of_field;
+        rp.realtimeTaa = render_settings.realtime_taa;
+        rp.realtimeTaaSamples = render_settings.realtime_taa_samples;
+        rp.realtimeDofMaxCoC = render_settings.realtime_dof_max_coc;
+        rp.realtimeDofMaxTaps = render_settings.realtime_dof_max_taps;
         rp.debugExposure = render_settings.debug_exposure;
         rp.debugOverlay = render_settings.debug_overlay;
         m_backend->setRenderParams(rp);
@@ -4005,18 +4025,26 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
     scene.rebuildParticleBVH(use_embree);
 }
 
-void Renderer::refitBVH(SceneData& scene, bool use_embree) {
+bool Renderer::refitBVH(SceneData& scene, bool use_embree) {
+    RTPERF_SCOPE("accel.cpu.bvh_refit");
     if (!scene.initialized) {
-        return;
+        return true;  // nothing to keep up to date
     }
 
     // True in-place BVH refit is only available on the Embree path. If we don't have
     // an Embree BVH (ParallelBVH fallback, or none built yet), there is nothing to
-    // refit — do a full rebuild instead.
+    // refit.
+    //
+    // ***** This used to call rebuildBVH() here. A sculpt dab requests a CPU BVH
+    //   refit on EVERY dab, so whenever the scene held a non-Embree BVH that
+    //   request silently became a FULL CPU BVH REBUILD per dab -- measured as
+    //   "dab cost rises after a CPU -> Solid round trip", because the CPU path
+    //   leaves a non-Embree BVH behind and every later dab paid for it. Report
+    //   the refusal instead and let the caller decide; the deferred rebuild path
+    //   is asynchronous and coalesces, which is what a stream of dabs needs.
     auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
     if (!use_embree || !embree_ptr) {
-        rebuildBVH(scene, use_embree);
-        return;
+        return false;
     }
 
     // 1. Adım: Hangi transformların gerçekten değiştiğini (dirty) tespit et ve matrislerini güncelle (Pre-pass)
@@ -4096,6 +4124,7 @@ void Renderer::refitBVH(SceneData& scene, bool use_embree) {
 
     // Keep the separate particle-only BVH coherent, matching rebuildBVH.
     scene.rebuildParticleBVH(use_embree);
+    return true;
 }
 
 void Renderer::updateBVH(SceneData& scene, bool use_embree) {
@@ -4140,6 +4169,7 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
             }
             ctx.members.clear();
         }
+        RigAuthoring::clearSelection(scene); scene.rigView.edit_mode=false; scene.rigView.edit_character.clear(); scene.rigView.pose_views.clear(); scene.rigView.pose_view_dirty.clear();
         scene.importedModelContexts.clear();
 
         // ---- 1c. Clear renderer's cached bone matrices ----
@@ -4224,8 +4254,7 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     update_progress(40, "Processing triangles...");
 
     if (loaded_triangles.empty()) {
-        SCENE_LOG_ERROR("No triangle data, scene loading failed: " + model_path);
-        SCENE_LOG_ERROR("Please provide a valid model file.");
+        SCENE_LOG_INFO("[Import] No mesh geometry; processing non-mesh scene content: " + model_path);
     }
 
     // --- MERGE ANIMATION DATA & BONES ---
@@ -4235,7 +4264,7 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     // Calculate Offset for Bone Indices (Append Mode)
     unsigned int boneIndexOffset = 0;
     if (append) {
-        boneIndexOffset = static_cast<unsigned int>(scene.boneData.boneNameToIndex.size());
+        boneIndexOffset = static_cast<unsigned int>(scene.boneData.getBoneIndexCapacity());
     }
     else {
         // New Scene - already cleared in Step 0, but ensure boneData is fresh
@@ -4309,7 +4338,7 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
 
     SCENE_LOG_INFO("Successfully loaded triangles: " + std::to_string(loaded_triangles.size()));
     SCENE_LOG_INFO("Loaded animations: " + std::to_string(loaded_animations.size()));
-    SCENE_LOG_INFO("Total Bones (Merged): " + std::to_string(scene.boneData.boneNameToIndex.size()));
+    SCENE_LOG_INFO("Total Bones (Merged): " + std::to_string(scene.boneData.getBoneCount()));
 
     update_progress(45, "Adding triangles to scene...");
     SCENE_LOG_INFO("Adding triangles to scene world...");
@@ -7794,10 +7823,34 @@ void Renderer::uploadHairToGPU() {
                 const Hair::HairGroom* groom = hairSystem.getGroom(gName);
                 if (!groom || !groom->isVisible || groom->guides.empty()) continue;
                 const Matrix4x4& xf = groom->transform;
-                // Mirror the ray-tracing upload: procedural children (no materialized
-                // interpolated), so the viewport wireframe matches what the RT render shows.
                 const uint32_t vpChildren = hideInterpolatedHair ? 0u : groom->params.interpolatedPerGuide;
                 const uint32_t vpBaseSeed = 54321u + static_cast<uint32_t>(gName.length());
+
+                // Compute display color from the groom's material
+                const auto& mat = groom->material;
+                float cr, cg, cb;
+                if (mat.colorMode == Hair::HairMaterialParams::ColorMode::MELANIN) {
+                    float eu = mat.melanin * (1.0f - mat.melaninRedness);
+                    float ph = mat.melanin * mat.melaninRedness;
+                    cr = std::exp(-(eu * 0.506f + ph * 0.343f) * 0.5f);
+                    cg = std::exp(-(eu * 0.841f + ph * 0.733f) * 0.5f);
+                    cb = std::exp(-(eu * 1.653f + ph * 1.924f) * 0.5f);
+                } else if (mat.colorMode == Hair::HairMaterialParams::ColorMode::ABSORPTION) {
+                    cr = std::exp(-mat.absorptionCoefficient.x * 0.5f);
+                    cg = std::exp(-mat.absorptionCoefficient.y * 0.5f);
+                    cb = std::exp(-mat.absorptionCoefficient.z * 0.5f);
+                } else {
+                    cr = mat.color.x;
+                    cg = mat.color.y;
+                    cb = mat.color.z;
+                }
+                // Apply tint
+                if (mat.tint > 0.0f) {
+                    float t = std::min(mat.tint, 1.0f);
+                    cr = cr * (1.0f - t) + mat.tintColor.x * t;
+                    cg = cg * (1.0f - t) + mat.tintColor.y * t;
+                    cb = cb * (1.0f - t) + mat.tintColor.z * t;
+                }
 
                 auto emitLines = [&](const std::vector<Hair::HairPoint>& pts) {
                     const size_t n = pts.size();
@@ -7806,9 +7859,10 @@ void Renderer::uploadHairToGPU() {
                     for (size_t i = 0; i + 1 < n; ++i) {
                         Vec3 p0 = xf.transform_point(pts[i].position);
                         Vec3 p1 = xf.transform_point(pts[i + 1].position);
+                        // 8 floats per vertex: pos(3) + vcoord(1) + thickness(1) + color(3)
                         lineVerts.insert(lineVerts.end(),
-                            { p0.x, p0.y, p0.z, float(i)     * invN,
-                              p1.x, p1.y, p1.z, float(i + 1) * invN });
+                            { p0.x, p0.y, p0.z, float(i)     * invN, groom->params.rootRadius * 2.0f, cr, cg, cb,
+                              p1.x, p1.y, p1.z, float(i + 1) * invN, groom->params.rootRadius * 2.0f, cr, cg, cb });
                     }
                 };
 
@@ -7827,7 +7881,7 @@ void Renderer::uploadHairToGPU() {
                     for (const auto& strand : groom->guides) emitLines(strand.points);
                 }
             }
-            vpb->uploadHairViewportLines(lineVerts, uint32_t(lineVerts.size() / 4));
+            vpb->uploadHairViewportLines(lineVerts, uint32_t(lineVerts.size() / 8));
         }
     }
 
@@ -8900,8 +8954,12 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                         return (c <= 0.0031308f) ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
                         };
 
-                    float exp_factor = scene.camera ? (scene.camera->auto_exposure ?
-                        std::pow(2.0f, scene.camera->ev_compensation) : 1.0f) : 1.0f;
+                    // ★★★ Yakinsamis piksel ile yeni izlenen piksel AYNI
+                    //   pozlamayi kullanmali. Buradaki eski satir kameranin
+                    //   `auto_exposure` bayragindan dallaniyordu ve asagidaki
+                    //   ana yolla ayrisiyordu -- fiziksel modda ekran yama yama
+                    //   olurdu ve kimse buna "bug" demezdi, "gurultu" derdi.
+                    const float exp_factor = g_display_post.camera_exposure;
                     Vec3 exposed = cached_color * exp_factor;
                     exposed.x = exposed.x / (exposed.x + 1.0f);
                     exposed.y = exposed.y / (exposed.y + 1.0f);
@@ -9094,45 +9152,18 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                     return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
                 };
 
-            // Calculate Exposure Factor (MUST match GPU path - OptixWrapper for consistency)
-            float exposure_factor = 1.0f;
-            if (scene.camera) {
-                if (scene.camera->auto_exposure) {
-                    // Auto Exposure: use EV compensation only
-                    exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
-                }
-                else if (scene.camera->use_physical_exposure) {
-                    // Physical Manual Mode: calculate from ISO/Shutter/F-stop (matches GPU)
-                    float iso_mult = (scene.camera->iso_preset_index >= 0 && scene.camera->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) ?
-                                     CameraPresets::ISO_PRESETS[scene.camera->iso_preset_index].exposure_multiplier : 1.0f;
-                    float shutter_time = (scene.camera->shutter_preset_index >= 0 && scene.camera->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) ?
-                                         CameraPresets::SHUTTER_SPEED_PRESETS[scene.camera->shutter_preset_index].speed_seconds : 0.004f;
-
-                    // Use F-Stop Number
-                    float f_number = 16.0f;
-                    if (scene.camera->fstop_preset_index > 0 && scene.camera->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
-                        f_number = CameraPresets::FSTOP_PRESETS[scene.camera->fstop_preset_index].f_number;
-                    }
-                    else {
-                        // Custom Mode: Estimate f-number from aperture (diameter/radius)
-                        if (scene.camera->aperture > 0.001f)
-                            f_number = 0.8f / scene.camera->aperture;
-                        else
-                            f_number = 16.0f;
-                    }
-                    float aperture_sq = f_number * f_number + 1e-6f;
-                    float ev_comp = std::pow(2.0f, scene.camera->ev_compensation);
-                    float current_val = (iso_mult * shutter_time) / (aperture_sq + 0.001f);
-                    float baseline_val = 0.00003125f; // Sunny 16 baseline
-                    exposure_factor = (current_val / baseline_val) * ev_comp;
-                }
-                else {
-                    // Manual Mode (non-physical): use EV compensation only
-                    exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
-                }
-
-            }
-
+            // ★★★★ POZLAMA MODUNUN KAPISI POST ZINCIRINDEDIR.
+            //   Burada 2026-09-06'ya kadar formulun bir KOPYASI daha vardi
+            //   (kameranin `auto_exposure` / `use_physical_exposure`
+            //   bayraklarindan dallanan) -- yani ayni sahne, ayni kadranlar,
+            //   Vulkan'da post modunun kapisindan geciyor, burada gecmiyordu.
+            //   `g_display_post.camera_exposure` zaten uygulanacak degerdir:
+            //   mod Physical Camera degilse 1.0, oyleyse
+            //   `Camera::physicalExposureFactor()`. Tek tanim, tek kapi.
+            //   ★ Bu satir renk derecelendirmesinin `exposure`ini (post.*)
+            //   UYGULAMAZ; asagidaki Reinhard'la birlikte bu yolun kendi
+            //   goruntuleme donusumudur (bkz. OIDN yolu, tam post_chain).
+            const float exposure_factor = g_display_post.camera_exposure;
 
             // Apply Reinhard Tone Mapping (CPU Parity with GPU)
             // GPU uses: color / (color + 1.0f) in make_color
@@ -10187,7 +10218,11 @@ void Renderer::syncCameraToBackend(const Camera& cam) {
     cp.lookAt = cam.lookat;
     cp.up = cam.vup;
     cp.fov = cam.vfov;
-    cp.aperture = cam.aperture;
+    // ★★★★ IKINCI uretici. `VulkanBackendAdapter::syncCamera` ile AYNI
+    //   kapiyi uygulamak ZORUNDA: biri etkin digeri fiziksel aciklik
+    //   gonderirse, DoF anahtari hangi yolun kamerayi son yazdigina gore
+    //   calisir gorunurdu -- "bazen kapaniyor" sinifi bir ariza.
+    cp.aperture = cam.effectiveAperture();
     cp.focusDistance = cam.focus_dist;
     cp.aspectRatio = cam.aspect_ratio;
     cp.orthographic = cam.orthographic;

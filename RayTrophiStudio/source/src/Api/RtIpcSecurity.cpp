@@ -1,4 +1,4 @@
-﻿#include "RtIpcSecurity.h"
+#include "RtIpcSecurity.h"
 
 #include "json.hpp"
 #include <openssl/evp.h>
@@ -228,7 +228,8 @@ uint32_t requiredCapabilities(const std::string& method) {
     // scene - it reads it and writes a file. Without this line the namespace
     // table below would demand SceneWrite, so a read+files-write agent could not
     // export, and a scene-write agent could export without a file capability.
-    if (method == "project.save" || method == "terrain.export_heightmap" ||
+    if (method == "project.save" || method == "project.autosave_now" ||
+        method == "terrain.export_heightmap" ||
         method == "paint.export_channel" || method == "scene.export_gltf") return FilesWrite;
     if (method.rfind("render.", 0) == 0) {
         if (method == "render.start" || method == "render.start_sequence")
@@ -245,6 +246,24 @@ uint32_t requiredCapabilities(const std::string& method) {
     // know whether its own measurement was invalidated - gating it any higher
     // would make the honest path the privileged one.
     if (method == "sim.control_state") return Read;
+    if (method == "rayfusion.core_status" || method == "rayfusion.validate_core" ||
+        method == "rayfusion.probe_field" || method == "rayfusion.scene_as") return Read;
+    // Choosing the probe producer changes what the viewport renders, so it is
+    // Render and not Read -- it is a measurement lever, but the measurement is
+    // taken on the live image.
+    if (method == "rayfusion.set_probe_producer") return Render;
+    if (method == "rayfusion.screen_gi") return Read;
+    if (method == "rayfusion.set_screen_gi") return Render;
+    // ★ authorize() FAIL-CLOSED: bu iki satir olmadan metotlar sessizce
+    //   reddedilir -- hata yok, ipucu yok.
+    if (method == "rayfusion.reflections") return Read;
+    if (method == "rayfusion.set_reflections") return Render;
+    if (method == "rayfusion.set_probe_bounce") return Render;
+    if (method == "rayfusion.set_probe_overlay" || method == "rayfusion.set_probe_follow_camera") return Render;
+    // The probe window decides WHERE indirect light is measured, so moving it
+    // changes the image. Render, not Read: this is a measurement lever, but the
+    // measurement is taken on the live viewport.
+    if (method == "rayfusion.set_probe_grid") return Render;
     // sim_graph.* builds and inspects the simulation graph. Reads are harmless,
     // but building/connecting alters what the graph will drive, so the whole
     // namespace takes SceneWrite. Queries are still gated by Read below via the
@@ -279,12 +298,22 @@ uint32_t requiredCapabilities(const std::string& method) {
     // and means a profile CURVE. Two unrelated meanings of one word in one
     // method table is a reading trap, not a naming preference.
     if (method == "perf.reset" || method == "perf.set_logging") return Read;
+    // Changes how the NEXT acceleration structures are allocated: a render
+    // setting, not a diagnostic toggle. (perf.get_gpu_memory is Read via .get.)
+    if (method == "perf.set_blas_compaction") return Render;
     if (method == "spline.animation.self_test") return Read;
     // scene.raycast measures what is under a ray and mutates nothing. Without
     // this line the "scene." namespace below would classify it as SceneWrite and
     // a read-capability agent could not use the one method that tells it where a
     // surface actually is.
     if (method == "scene.raycast") return Read;
+    // Teshis, yalnizca OKUR: kamera isinini kurar, iki secim yolunu ayri ayri
+    // sorar ve cevaplarini raporlar. Hicbir secimi DEGISTIRMEZ -- degistirseydi
+    // olctugu durumu bozan bir enstruman olurdu.
+    if (method == "scene.pick_ray") return Read;
+    // GPU secimi de yalnizca OKUR: bir obje-ID hedefi cizip tek piksel geri
+    // okur, secimi DEGISTIRMEZ.
+    if (method == "scene.pick_gpu") return Read;
     // scene.export_estimate writes NOTHING - not the scene, not a file. It only
     // reports what an export WOULD cost, so it must not demand FilesWrite the
     // way scene.export_gltf does, and must not fall through to SceneWrite.
@@ -305,8 +334,14 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "mesh.asset.validate" || method == "mesh.operation.plan" ||
         method == "mesh.operation.self_test" || method == "mesh.tools.describe") return Read;
     if (method == "mesh.operation.commit_positions") return SceneWrite;
+    if (method == "rig.preview_bind" || method == "rig.preview_fit" ||
+        method == "rig.preflight" || method == "rig.weight_stats" ||
+        method == "rig.suggest_joint_profile" ||
+        method == "rig.preview_envelope_weights")
+        return Read;
     // Read-only methods whose names miss the substring heuristics below.
     if (method == "material.info" || method == "material.of_object" ||
+        method == "anim.preview_clip_binding" || method == "anim.sample_clip_binding" ||
         method == "material.textures" || method == "nodes.graphs" ||
         // Attribute measurement (rt.attr.stats): "stats" does not match the
         // ".status" substring heuristic below, so it needs an explicit entry
@@ -330,6 +365,13 @@ uint32_t requiredCapabilities(const std::string& method) {
         method == "particle.emitters" || method == "anim.characters" ||
         method == "anim.character" || method == "anim.clips" ||
         method == "anim.graph_status" ||
+        // Live state machine snapshot: current state, transition progress and
+        // whether each state's pose input actually resolves. Read-only, and
+        // "state_machines" matches none of the substring heuristics below, so
+        // without this line it falls through to the anim. namespace and is
+        // graded SceneWrite -- a measurement that needs write authority is a
+        // measurement scripts stop taking.
+        method == "anim.state_machines" ||
         // Raw imported-clip counters. Read-only, and neither name matches the
         // .get/.list/.status substring heuristics below.
         method == "anim.source_clips" || method == "anim.source_channels" ||
@@ -355,7 +397,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     // the two files so the pair cannot drift apart again.
     static const char* namespaces[] = {
         "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "geometry_cache.", "mesh.profile.",
-        "world.", "post.", "anim.", "nodes.", "modifiers.",
+        "world.", "post.", "anim.", "rig.", "nodes.", "modifiers.",
         "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.",
         // Emitters. `flow_source.list`/`.get` fall through to Read above via the
         // substring heuristics; create/update/remove land here as SceneWrite.
