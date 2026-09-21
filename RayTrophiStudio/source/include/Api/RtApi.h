@@ -3207,6 +3207,14 @@ struct GasStepStats {
     std::size_t active_density_cells = 0;
     std::size_t grid_memory_bytes = 0;
 
+    // Occupancy at BLOCK granularity (the majorant grid's 8^3 blocks), which is
+    // the number that decides what sparse dispatch can actually save. It is
+    // always LESS flattering than active_density_cells: one live cell keeps its
+    // whole block alive. Compare the two before converting any kernel.
+    // -1 = not measured (no GPU path). 0 means the grid really is empty.
+    int active_blocks = -1;
+    int total_blocks = 0;
+
     float total_ms = 0.0f;
     float voxelize_ms = 0.0f;
     float analysis_ms = 0.0f;
@@ -3224,6 +3232,7 @@ struct GasStepStats {
     float gpu_pressure_ms = 0.0f;
     float gpu_publish_ms = 0.0f;
     float gpu_majorant_ms = 0.0f;
+    float gpu_host_sync_ms = 0.0f;
 
     // Host operator chain that still had to run.
     float cpu_total_ms = 0.0f;

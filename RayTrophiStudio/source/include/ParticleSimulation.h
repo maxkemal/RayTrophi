@@ -837,6 +837,26 @@ struct SimulationGasStats {
     float gpu_publish_ms = 0.0f;           // final scalar publication for the RT bridge
     float gpu_majorant_ms = 0.0f;          // per-block density max for the RT empty-space skip
 
+    // ***** THE ONE STRUCTURAL READBACK, AND IT USED TO BE INVISIBLE.
+    //
+    // gasSyncGridToHost brings every device-only field home before the HOST
+    // solver (boundaries + solids) runs in the middle of the device chain. It
+    // sat between two marks and was billed to neither: cpu_total_ms did not
+    // grow, total_ms silently carried it.
+    //
+    // ** THIS ROW EXISTS BECAUSE OF WHAT COMES NEXT. Moving boundaries+solids
+    // to the GPU is worth exactly this number, so without it that work would be
+    // done and then measured with the instrument blind to its own prize.
+    float gpu_host_sync_ms = 0.0f;         // readback before GridFluid::step
+
+    // Block-granularity occupancy, from the majorant kernel's compacted list.
+    // -1 = not measured (no GPU path, or the readback failed); 0 really means
+    // an empty grid. Blocks are kGasMajorantBlock^3, so this is the number the
+    // sparse-dispatch work is worth judging by - NOT the active CELL count,
+    // which is always the more flattering of the two.
+    int active_blocks = -1;
+    int total_blocks = 0;
+
     // Host operator chain that still had to run (stages the device covered are
     // switched off inside it, so its rows are the true CPU residual).
     GridFluid::GasSolverStats cpu;
@@ -1037,7 +1057,37 @@ struct SimulationGridDomainComputeBuffers {
         VelX = 0, VelY, VelZ, Density, Temperature, Fuel, Interaction,
         Pressure, Divergence, Count
     };
+
+    // ***** THREE STATES, NOT TWO - AND THE THIRD IS THE WHOLE POINT.
+    //
+    // The first version of this ledger held one bit meaning "device == host".
+    // That is enough to skip a redundant UPLOAD, and no more: it cannot express
+    // "the device holds the only copy", so every stage still had to read its
+    // result back before the next one could use it. MEASURED 2026-09-21: those
+    // readbacks are what cap the gas step at 4.7-7.3 GB/s while a kernel that
+    // never leaves the device (sim_gas_majorant) runs at 125 GB/s on the same
+    // GPU in the same step.
+    //
+    // Two bits per field:
+    //
+    //   device_current | host_current | meaning
+    //   ---------------+--------------+------------------------------------
+    //        1         |      1       | copies agree - either side may read
+    //        1         |      0       | DEVICE ONLY - host must download first
+    //        0         |      1       | host only - device must upload first
+    //        0         |      0       | neither is known good (fresh buffers)
+    //
+    // ** THE DEFAULT MUST BE (0,0) FOR device AND 1 FOR host. A cleared device
+    // bit means "upload before use", which is merely slow. The opposite default
+    // would claim a freshly allocated buffer already held the field and the
+    // solver would advect uninitialised memory - fast, silent and wrong.
+    //
+    // ** AND THE HOST BIT HAS THE MIRROR TRAP. Clearing it wrongly makes the
+    // host download something it did not need (slow). LEAVING IT SET wrongly
+    // makes a host stage read a field the device has already moved on from -
+    // which is not a crash, it is a field that is one step behind everywhere.
     uint32_t device_current = 0;
+    uint32_t host_current = ~0u;
 
     static uint32_t gridFieldBit(GridField f) {
         return 1u << static_cast<uint32_t>(f);
@@ -1045,13 +1095,41 @@ struct SimulationGridDomainComputeBuffers {
     bool deviceHasCurrent(GridField f) const {
         return (device_current & gridFieldBit(f)) != 0u;
     }
-    void markDeviceCurrent(GridField f) { device_current |= gridFieldBit(f); }
+    bool hostHasCurrent(GridField f) const {
+        return (host_current & gridFieldBit(f)) != 0u;
+    }
+    // Both copies agree: after an upload, or after a readback.
+    void markSynced(GridField f) {
+        device_current |= gridFieldBit(f);
+        host_current |= gridFieldBit(f);
+    }
+    // Kept as the old name so the readback sites read naturally.
+    void markDeviceCurrent(GridField f) { markSynced(f); }
     // The host wrote this field, so the device copy is stale.
-    void markHostWrote(GridField f) { device_current &= ~gridFieldBit(f); }
+    void markHostWrote(GridField f) {
+        host_current |= gridFieldBit(f);
+        device_current &= ~gridFieldBit(f);
+    }
+    // ** A KERNEL WROTE THIS FIELD AND NOBODY READ IT BACK. This is the state
+    // the one-bit ledger could not hold, and the reason the GPU sub-chain can
+    // now run without a readback between its stages.
+    void markDeviceWrote(GridField f) {
+        device_current |= gridFieldBit(f);
+        host_current &= ~gridFieldBit(f);
+    }
     // Any host stage that touches the grid, plus reset/resize/cache scrub.
-    // Deliberately blunt: five call sites instead of dozens of write points,
-    // and over-invalidating costs a transfer while under-invalidating is wrong.
-    void invalidateDeviceCopies() { device_current = 0; }
+    // Deliberately blunt: a handful of call sites instead of dozens of write
+    // points, and over-invalidating costs a transfer while under-invalidating
+    // is wrong. The host becomes authoritative for everything.
+    void invalidateDeviceCopies() {
+        device_current = 0;
+        host_current = ~0u;
+    }
+    // True when some field only exists on the device, i.e. a host stage may not
+    // run until it has been brought back.
+    bool anyDeviceOnly() const {
+        return (device_current & ~host_current) != 0u;
+    }
 
     // Per-block density maximum consumed by the RT volume march. Sized from the
     // block resolution, which is tracked separately from the cell resolution so
@@ -1066,6 +1144,11 @@ struct SimulationGridDomainComputeBuffers {
     // never reads it, so producing it costs no sync.
     ComputeBufferHandle gas_emissive_list;
     bool gas_emissive_valid = false;
+    // Blocks the solver must step. Built by the same kernel as the majorant,
+    // read back as a single count. -1 = not measured this step, which is NOT
+    // the same as 0 and must not be reported as "the grid is empty".
+    ComputeBufferHandle gas_active_blocks;
+    int gas_active_block_count = -1;
     ComputeBufferHandle scratch_vel_x;
     ComputeBufferHandle scratch_vel_y;
     ComputeBufferHandle scratch_vel_z;

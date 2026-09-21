@@ -5489,6 +5489,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                 j["gpu_pressure_ms"] = s.gpu_pressure_ms;
                 j["gpu_publish_ms"] = s.gpu_publish_ms;
                 j["gpu_majorant_ms"] = s.gpu_majorant_ms;
+                j["gpu_host_sync_ms"] = s.gpu_host_sync_ms;
                 j["cpu_total_ms"] = s.cpu_total_ms;
                 j["cpu_advect_velocity_ms"] = s.cpu_advect_velocity_ms;
                 j["cpu_advect_scalar_ms"] = s.cpu_advect_scalar_ms;
@@ -5507,6 +5508,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                 j["cfl"] = s.cfl;
                 j["cell_count"] = s.cell_count;
                 j["active_density_cells"] = s.active_density_cells;
+                j["active_blocks"] = s.active_blocks;
+                j["total_blocks"] = s.total_blocks;
                 j["grid_memory_bytes"] = s.grid_memory_bytes;
                 j["burning_cells"] = s.burning_cells;
                 j["solid_cells"] = s.solid_cells;

@@ -4288,6 +4288,91 @@ void gasNoteDownloaded(SimulationGridDomainComputeBuffers& buffers,
     buffers.markDeviceCurrent(field);
 }
 
+// ***** THE OTHER DIRECTION, AND THE ONE THAT MAKES THE CHAIN SAFE.
+//
+// Download only when the device holds something the host has not seen. This is
+// the counterpart of gasEnsureOnDevice, and every host stage that reads the
+// grid must go through it or through gasSyncGridToHost below.
+//
+// ** The failure mode this exists to prevent is not a crash. A host stage that
+// reads a field the device has already moved past produces a plausible result
+// that is one step behind - everywhere, every step, with no warning.
+bool gasEnsureOnHost(SimulationComputeContext* compute,
+                     SimulationGridDomainComputeBuffers& buffers,
+                     GasGridField field,
+                     ComputeBufferHandle handle,
+                     void* host_data,
+                     std::size_t size_bytes) {
+    if (buffers.hostHasCurrent(field)) {
+        return true;
+    }
+    if (!compute || !handle.valid() || host_data == nullptr || size_bytes == 0) {
+        // Nothing can be brought back, so the host copy cannot be trusted and
+        // saying so is the only safe answer.
+        return false;
+    }
+    if (!compute->downloadBuffer(handle, host_data, size_bytes)) {
+        return false;
+    }
+    buffers.markSynced(field);
+    return true;
+}
+
+// Bring every device-only field back before a HOST stage touches the grid.
+//
+// ***** THIS IS THE ONE STRUCTURAL READBACK. GridFluid::step runs on the host
+// in the middle of the device chain (boundaries + solids), so one download
+// around it is not waste - it is the price of that stage still being on the
+// CPU. What the ledger removes is the repetition BETWEEN device stages; this
+// call is what makes removing them safe, because it is the single place the
+// host is guaranteed to be caught up.
+//
+// Returns false if anything could not be brought back. A caller that ignores
+// that and runs the host stage anyway is reading stale memory.
+bool gasSyncGridToHost(SimulationComputeContext* compute,
+                       SimulationGridDomainComputeBuffers& buffers,
+                       FluidSim::FluidGrid& grid) {
+    if (!buffers.anyDeviceOnly()) {
+        return true;
+    }
+    struct Entry {
+        GasGridField field;
+        ComputeBufferHandle handle;
+        std::vector<float>* data;
+    };
+    const Entry entries[] = {
+        { GasGridField::VelX,        buffers.vel_x,       &grid.vel_x },
+        { GasGridField::VelY,        buffers.vel_y,       &grid.vel_y },
+        { GasGridField::VelZ,        buffers.vel_z,       &grid.vel_z },
+        { GasGridField::Density,     buffers.density,     &grid.density },
+        { GasGridField::Temperature, buffers.temperature, &grid.temperature },
+        { GasGridField::Fuel,        buffers.fuel,        &grid.fuel },
+        { GasGridField::Interaction, buffers.interaction, &grid.interaction },
+        { GasGridField::Pressure,    buffers.pressure,    &grid.pressure },
+        { GasGridField::Divergence,  buffers.divergence,  &grid.divergence },
+    };
+    bool ok = true;
+    if (compute) compute->beginTransferBatch();
+    for (const Entry& e : entries) {
+        if (buffers.hostHasCurrent(e.field)) continue;
+        if (e.data->empty()) {
+            // A channel that is switched off has no host storage. Nothing to
+            // bring back, and claiming otherwise would fail the whole sync.
+            buffers.markSynced(e.field);
+            continue;
+        }
+        ok = gasEnsureOnHost(compute, buffers, e.field, e.handle, e.data->data(),
+                             e.data->size() * sizeof(float)) && ok;
+    }
+    if (compute && !compute->endTransferBatch()) ok = false;
+    if (!ok) {
+        // Half a sync is worse than none: force every later stage to upload
+        // from the host copy rather than trust a partial readback.
+        buffers.invalidateDeviceCopies();
+    }
+    return ok;
+}
+
 bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
                               const GridFluid::SolverParams& params,
                               float dt,
@@ -4435,7 +4520,39 @@ bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
     // on persistent device buffers. Do not advertise residency after a readback:
     // later stages must upload the freshly projected CPU values.
     gpu_buffers.gpu_resident_fields_valid = false;
-    gpu_buffers.invalidateDeviceCopies();
+    // ***** A READBACK IS THE ONE MOMENT THE TWO COPIES AGREE.
+    //
+    // These two flags were being set together and they do not mean the same
+    // thing:
+    //
+    //   gpu_resident_fields_valid = "the DEVICE copy is authoritative"
+    //   the ledger bit            = "the device copy EQUALS the host copy"
+    //
+    // After a download the first is false - the host is authoritative again -
+    // but the second is TRUE, and that is exactly what the ledger exists to
+    // record. Clearing it here made every stage re-upload fields the previous
+    // stage had just handed back, which is why converting velocity advection to
+    // the ledger measured as no gain at all: NINE of the fifteen invalidate
+    // sites sat directly after a readback and wiped the ledger before the next
+    // stage could read it.
+    //
+    // MEASURED 2026-09-21: a kernel that never leaves the device
+    // (sim_gas_majorant) moves 25.8 MB in 0.202 ms = 125 GB/s. The
+    // round-tripping stages manage 4.7-7.3 GB/s on the same GPU in the same
+    // step. That gap is this line.
+    //
+    // * The ok/else guard is repeated at every site rather than hoisted: a
+    // failed batch leaves the host copy half written, so neither side may be
+    // claimed, and that rule has to be visible where the readback is.
+    if (ok) {
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
+        gasNoteDownloaded(gpu_buffers, GasGridField::Pressure);
+        gasNoteDownloaded(gpu_buffers, GasGridField::Divergence);
+    } else {
+        gpu_buffers.invalidateDeviceCopies();
+    }
     return ok;
 }
 
@@ -4597,12 +4714,24 @@ bool runGpuGasInjection(FluidSim::FluidGrid& grid,
 
     compute->beginTransferBatch();
     bool ok =
-        compute->uploadBuffer(buffers[0], grid.density.data(), grid.density.size() * sizeof(float)) &&
-        compute->uploadBuffer(buffers[1], grid.temperature.data(), grid.temperature.size() * sizeof(float)) &&
-        compute->uploadBuffer(buffers[2], grid.fuel.data(), grid.fuel.size() * sizeof(float)) &&
-        compute->uploadBuffer(buffers[3], grid.pressure.data(), grid.pressure.size() * sizeof(float)) &&
-        compute->uploadBuffer(buffers[4], grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-        compute->uploadBuffer(buffers[5], grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Density,
+                          buffers[0], grid.density.data(),
+                          grid.density.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Temperature,
+                          buffers[1], grid.temperature.data(),
+                          grid.temperature.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Fuel,
+                          buffers[2], grid.fuel.data(),
+                          grid.fuel.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Pressure,
+                          buffers[3], grid.pressure.data(),
+                          grid.pressure.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelX,
+                          buffers[4], grid.vel_x.data(),
+                          grid.vel_x.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelY,
+                          buffers[5], grid.vel_y.data(),
+                          grid.vel_y.size() * sizeof(float)) &&
         compute->uploadBuffer(buffers[6], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
     if (!ok) return false;
@@ -4667,7 +4796,19 @@ bool runGpuGasInjection(FluidSim::FluidGrid& grid,
         compute->downloadBuffer(buffers[6], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
     gpu_buffers.gpu_resident_fields_valid = false;
-    gpu_buffers.invalidateDeviceCopies();
+    // A readback leaves both copies equal - see the note in
+    // runGpuPressureProjection. On failure neither side may be claimed.
+    if (ok) {
+        gasNoteDownloaded(gpu_buffers, GasGridField::Density);
+        gasNoteDownloaded(gpu_buffers, GasGridField::Temperature);
+        gasNoteDownloaded(gpu_buffers, GasGridField::Fuel);
+        gasNoteDownloaded(gpu_buffers, GasGridField::Pressure);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
+    } else {
+        gpu_buffers.invalidateDeviceCopies();
+    }
     return ok;
 }
 
@@ -4697,9 +4838,13 @@ struct GasMajorantGpuConstants {
     int bx; int by; int bz;
     int emissive_capacity = 0;
     float emissive_threshold = 0.0f;
+    int active_capacity = 0;
+    float active_threshold = 0.0f;
 };
-static_assert(sizeof(GasMajorantGpuConstants) == 32,
-              "sim_gas_majorant push constant range is registered as 32 bytes");
+static_assert(sizeof(GasMajorantGpuConstants) == 40,
+              "sim_gas_majorant push constant range is registered as 40 bytes "
+              "in SimulationComputeVulkan.cpp and declared in "
+              "sim_gas_majorant.comp - all THREE must change together");
 
 // Reduce the device-resident density field to one maximum per
 // kGasMajorantBlock^3 block, so the RT volume march can skip empty blocks.
@@ -4747,33 +4892,58 @@ bool runGpuGasMajorant(const FluidSim::FluidGrid& grid,
     // still excluded while every visibly glowing one is kept.
     constants.emissive_threshold = 0.05f;
 
+    // Active-block list. Capacity is every block, so this list can never
+    // overflow and the count it reports is exact - which matters because the
+    // whole point of PHASE A is to measure how much of the grid is really
+    // empty at BLOCK granularity. Blocks are 8^3, so a cloud with 49% of cells
+    // active can still occupy far more than 49% of blocks, and converting seven
+    // kernels before knowing that number would be paying the cost without
+    // knowing the prize.
+    const bool active_ok = gpu_buffers.gas_active_blocks.valid();
+    constants.active_capacity = active_ok ? (bx * by * bz) : 0;
+    // Anything at all. This is an emptiness test, not a visibility test - the
+    // renderer's density cutoff is a much larger number and must not be reused.
+    constants.active_threshold = 0.0f;
+
     // The kernel appends with an atomic on slot 0, so the count must start at 0
     // every step. Four bytes, batched with nothing else — cheaper than a
     // dedicated clear dispatch and it cannot race the append, which follows it
     // in the same queue.
-    if (emissive_ok) {
+    if (emissive_ok || constants.active_capacity > 0) {
         const uint32_t zero = 0u;
         compute->beginTransferBatch();
-        const bool cleared = compute->uploadBuffer(
-            gpu_buffers.gas_emissive_list, &zero, sizeof(uint32_t));
-        if (!compute->endTransferBatch() || !cleared) {
+        const bool emissive_cleared =
+            !emissive_ok ||
+            compute->uploadBuffer(gpu_buffers.gas_emissive_list, &zero,
+                                  sizeof(uint32_t));
+        const bool active_cleared =
+            constants.active_capacity <= 0 ||
+            compute->uploadBuffer(gpu_buffers.gas_active_blocks, &zero,
+                                  sizeof(uint32_t));
+        const bool batch_ok = compute->endTransferBatch();
+        if (!batch_ok || !emissive_cleared) {
             // A stale count would make the consumer read last step's emitters,
             // which is worse than no emitter sampling at all.
             constants.emissive_capacity = 0;
         }
+        if (!batch_ok || !active_cleared) {
+            constants.active_capacity = 0;
+        }
     }
 
-    ComputeBufferHandle buffers[4] = {
+    ComputeBufferHandle buffers[5] = {
         gpu_buffers.density,
         gpu_buffers.gas_majorant,
         gpu_buffers.temperature,
         gpu_buffers.gas_emissive_list.valid() ? gpu_buffers.gas_emissive_list
+                                              : gpu_buffers.gas_majorant,
+        gpu_buffers.gas_active_blocks.valid() ? gpu_buffers.gas_active_blocks
                                               : gpu_buffers.gas_majorant
     };
     ComputeDispatch cmd;
     cmd.kernel = "sim_gas_majorant";
     cmd.buffers = buffers;
-    cmd.buffer_count = 4;
+    cmd.buffer_count = 5;
     cmd.constants = &constants;
     cmd.constants_size = sizeof(constants);
     const uint32_t block_count =
@@ -4783,6 +4953,17 @@ bool runGpuGasMajorant(const FluidSim::FluidGrid& grid,
     if (!compute->dispatch(cmd)) return false;
     gpu_buffers.gas_majorant_valid = true;
     gpu_buffers.gas_emissive_valid = (constants.emissive_capacity > 0);
+
+    // Four bytes back, at the one point in the step where a sync costs nothing:
+    // this kernel is the last thing that runs, so nothing is waiting on it.
+    gpu_buffers.gas_active_block_count = -1;
+    if (constants.active_capacity > 0) {
+        uint32_t count = 0u;
+        if (compute->downloadBuffer(gpu_buffers.gas_active_blocks, &count,
+                                    sizeof(uint32_t))) {
+            gpu_buffers.gas_active_block_count = static_cast<int>(count);
+        }
+    }
     return true;
 }
 
@@ -4812,12 +4993,21 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
             gpu_buffers.density,
             gpu_buffers.interaction
         };
+        // ***** THE LEDGER'S READ SIDE. Fixing the readback sites only stops
+        // the ledger being wiped; these four lines are where the saving is
+        // actually taken. The previous stage downloaded these same fields, so
+        // in the steady state all four uploads are skipped and this stage moves
+        // 4 x 12.89 MB less per step.
         compute->beginTransferBatch();
         bool ok =
-            compute->uploadBuffer(buffers[0], grid.fuel.data(), n * sizeof(float)) &&
-            compute->uploadBuffer(buffers[1], grid.temperature.data(), n * sizeof(float)) &&
-            compute->uploadBuffer(buffers[2], grid.density.data(), n * sizeof(float)) &&
-            compute->uploadBuffer(buffers[3], grid.interaction.data(), n * sizeof(float));
+            gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Fuel,
+                              buffers[0], grid.fuel.data(), n * sizeof(float)) &&
+            gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Temperature,
+                              buffers[1], grid.temperature.data(), n * sizeof(float)) &&
+            gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Density,
+                              buffers[2], grid.density.data(), n * sizeof(float)) &&
+            gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Interaction,
+                              buffers[3], grid.interaction.data(), n * sizeof(float));
         ok = compute->endTransferBatch() && ok;
         if (ok) {
             GasCombustionGpuConstants constants;
@@ -4843,17 +5033,21 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
             compute->synchronize();
         }
         if (ok) {
-            compute->beginTransferBatch();
-            ok =
-                compute->downloadBuffer(buffers[0], grid.fuel.data(), n * sizeof(float)) &&
-                compute->downloadBuffer(buffers[1], grid.temperature.data(), n * sizeof(float)) &&
-                compute->downloadBuffer(buffers[2], grid.density.data(), n * sizeof(float)) &&
-                compute->downloadBuffer(buffers[3], grid.interaction.data(), n * sizeof(float));
-            ok = compute->endTransferBatch() && ok;
-        }
-        if (ok) {
+            // ***** THE READBACK THAT NO LONGER HAPPENS.
+            // Four fields stay on the device. Every consumer between here and
+            // the host solver now asks the ledger first - buoyancy, TURBULENCE
+            // (which takes these three only as a mask, and was missed for
+            // exactly that reason) and the RT publication - and
+            // gasSyncGridToHost brings them back once, just before
+            // GridFluid::step. 4 x 12.89 MB of download plus the same again in
+            // re-upload, removed from every step.
+            //
+            // MEASURED 2026-09-21: gpu_combustion_ms 14.09 -> 6.79.
+            gpu_buffers.markDeviceWrote(GasGridField::Fuel);
+            gpu_buffers.markDeviceWrote(GasGridField::Temperature);
+            gpu_buffers.markDeviceWrote(GasGridField::Density);
+            gpu_buffers.markDeviceWrote(GasGridField::Interaction);
             gpu_buffers.gpu_resident_fields_valid = false;
-            gpu_buffers.invalidateDeviceCopies();
             return true;
         }
     }
@@ -4923,10 +5117,20 @@ bool runGpuBuoyancy(FluidSim::FluidGrid& grid,
             gpu_buffers.temperature,
             gpu_buffers.vel_y
         };
+        // ***** EVERY CONSUMER GOES THROUGH THE LEDGER BEFORE ANY PRODUCER IS
+        // ALLOWED TO SKIP ITS READBACK. This was the exact line that broke the
+        // first attempt at device residency: combustion stopped downloading, and
+        // this stage then uploaded the STALE host density and temperature back
+        // over the fresh device values. It does not crash and it does not warn -
+        // it is a plume that advances on last step's smoke.
         compute->beginTransferBatch();
         bool ok =
-            compute->uploadBuffer(buffers[0], grid.density.data(), grid.density.size() * sizeof(float)) &&
-            compute->uploadBuffer(buffers[1], grid.temperature.data(), grid.temperature.size() * sizeof(float));
+            gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Density,
+                              buffers[0], grid.density.data(),
+                              grid.density.size() * sizeof(float)) &&
+            gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Temperature,
+                              buffers[1], grid.temperature.data(),
+                              grid.temperature.size() * sizeof(float));
         if (!velocity_is_resident) {
             ok = ok &&
                 compute->uploadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
@@ -4971,7 +5175,13 @@ bool runGpuBuoyancy(FluidSim::FluidGrid& grid,
         }
         if (ok) {
             gpu_buffers.gpu_resident_fields_valid = false;
-            gpu_buffers.invalidateDeviceCopies();
+            // A readback leaves both copies equal - see the note in
+            // runGpuPressureProjection. On failure neither side may be claimed.
+            if (ok) {
+                gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
+            } else {
+                gpu_buffers.invalidateDeviceCopies();
+            }
             return true;
         }
     }
@@ -5153,7 +5363,15 @@ bool runGpuGasForceFields(
     ok = compute->endTransferBatch() && ok;
     if (ok) {
         gpu_buffers.gpu_resident_fields_valid = false;
-        gpu_buffers.invalidateDeviceCopies();
+        // A readback leaves both copies equal - see the note in
+        // runGpuPressureProjection. On failure neither side may be claimed.
+        if (ok) {
+            gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
+            gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
+            gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
+        } else {
+            gpu_buffers.invalidateDeviceCopies();
+        }
     }
     return ok;
 }
@@ -5232,7 +5450,15 @@ bool runGpuVorticity(FluidSim::FluidGrid& grid,
         compute->downloadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
     if (ok) gpu_buffers.gpu_resident_fields_valid = false;
- gpu_buffers.invalidateDeviceCopies();
+ // A readback leaves both copies equal - see the note in
+ // runGpuPressureProjection. On failure neither side may be claimed.
+ if (ok) {
+     gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
+     gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
+     gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
+ } else {
+     gpu_buffers.invalidateDeviceCopies();
+ }
     return ok;
 }
 
@@ -5264,11 +5490,35 @@ bool runGpuTurbulence(FluidSim::FluidGrid& grid,
     for (const auto& h : cell_buffers) if (!h.valid()) return false;
     for (const auto& h : gather_buffers) if (!h.valid()) return false;
 
+    // ***** THE STAGE THAT ERASED COMBUSTION, AND WHY IT WAS MISSED.
+    //
+    // These three fields are not what this stage is ABOUT - turbulence produces
+    // velocity. Density, temperature and interaction come in only as the mask
+    // that decides where the noise is allowed to act, so when the consumers
+    // were converted to the ledger this one did not read as a consumer of them
+    // at all. It is, and it runs AFTER combustion: with the device-resident
+    // chain on, an unconditional upload here pushes the STALE host copy over
+    // the only copy of the combustion result, which gasSyncGridToHost then
+    // faithfully reads back. Every step's burn was discarded.
+    //
+    // MEASURED 2026-09-21, f120: 96 826 active cells with residency on versus
+    // 959 364 with it off, mean heat 0.25 versus 1.30. No crash, no warning -
+    // a plume that is simply smaller and colder than it should be.
+    //
+    // ** THE RULE THIS BREAKS IS ALREADY WRITTEN DOWN: a field a stage merely
+    // READS is still a consumer of it. Look for the fields a stage takes as
+    // context, not the field it is named after.
     compute->beginTransferBatch();
     bool ok =
-        compute->uploadBuffer(cell_buffers[0], grid.density.data(), grid.density.size()*sizeof(float)) &&
-        compute->uploadBuffer(cell_buffers[1], grid.temperature.data(), grid.temperature.size()*sizeof(float)) &&
-        compute->uploadBuffer(cell_buffers[2], grid.interaction.data(), grid.interaction.size()*sizeof(float));
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Density,
+                          cell_buffers[0], grid.density.data(),
+                          grid.density.size()*sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Temperature,
+                          cell_buffers[1], grid.temperature.data(),
+                          grid.temperature.size()*sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Interaction,
+                          cell_buffers[2], grid.interaction.data(),
+                          grid.interaction.size()*sizeof(float));
     if (!velocity_is_resident) {
         ok = ok &&
             compute->uploadBuffer(gather_buffers[0], grid.vel_x.data(), grid.vel_x.size()*sizeof(float)) &&
@@ -5313,7 +5563,15 @@ bool runGpuTurbulence(FluidSim::FluidGrid& grid,
        compute->downloadBuffer(gather_buffers[2],grid.vel_z.data(),grid.vel_z.size()*sizeof(float));
     ok=compute->endTransferBatch() && ok;
     if(ok) gpu_buffers.gpu_resident_fields_valid = false;
- gpu_buffers.invalidateDeviceCopies();
+ // A readback leaves both copies equal - see the note in
+ // runGpuPressureProjection. On failure neither side may be claimed.
+ if (ok) {
+     gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
+     gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
+     gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
+ } else {
+     gpu_buffers.invalidateDeviceCopies();
+ }
     return ok;
 }
 
@@ -5561,7 +5819,16 @@ bool runGpuColliderGasSource(FluidSim::FluidGrid& grid,
        compute->downloadBuffer(bufs[3],grid.interaction.data(),grid.interaction.size()*sizeof(float));
     ok=compute->endTransferBatch()&&ok;
     if(ok)b.gpu_resident_fields_valid = false;
-b.invalidateDeviceCopies();
+// A readback leaves both copies equal - see the note in
+// runGpuPressureProjection. On failure neither side may be claimed.
+if (ok) {
+    gasNoteDownloaded(b, GasGridField::Density);
+    gasNoteDownloaded(b, GasGridField::Temperature);
+    gasNoteDownloaded(b, GasGridField::Fuel);
+    gasNoteDownloaded(b, GasGridField::Interaction);
+} else {
+    b.invalidateDeviceCopies();
+}
     return ok;
 }
 
@@ -5626,7 +5893,15 @@ bool runGpuVelocityDissipationClamp(FluidSim::FluidGrid& grid,
          compute->downloadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
     gpu_buffers.gpu_resident_fields_valid = false;
-    gpu_buffers.invalidateDeviceCopies();
+    // A readback leaves both copies equal - see the note in
+    // runGpuPressureProjection. On failure neither side may be claimed.
+    if (ok) {
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
+    } else {
+        gpu_buffers.invalidateDeviceCopies();
+    }
     return ok;
 }
 
@@ -5634,8 +5909,13 @@ bool runGpuScalarAdvection(FluidSim::FluidGrid& grid,
                            const GridFluid::SolverParams& params,
                            float dt,
                            SimulationComputeContext* compute,
-                           SimulationGridDomainComputeBuffers& gpu_buffers,
-                           bool scalar_inputs_resident=false) {
+                           SimulationGridDomainComputeBuffers& gpu_buffers) {
+    // ***** THE RESIDENCY ARGUMENT IS GONE, AND IT WAS WORSE THAN DEAD.
+    // The parameter was called `scalar_inputs_resident` and the one caller fed
+    // it `fluid_combustion_deposit_pre_run` - a flag about whether a DIFFERENT
+    // stage had run. One boolean also had to answer for three separate fields.
+    // The upload ledger answers the real question, per field, at the point of
+    // use: see gasEnsureOnDevice in advectField below.
     if (!compute || !compute->supportsDispatch() || grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || dt <= 0.0f) {
         return false;
     }
@@ -5695,6 +5975,7 @@ bool runGpuScalarAdvection(FluidSim::FluidGrid& grid,
     auto advectField = [&](const std::vector<float>& field,
                            std::vector<float>& output,
                            ComputeBufferHandle source_buffer,
+                           GasGridField field_id,
                            float background) {
         if (field.empty() || field.size() != grid.getCellCount()) {
             return false;
@@ -5712,9 +5993,10 @@ bool runGpuScalarAdvection(FluidSim::FluidGrid& grid,
         buffers[6] = gpu_buffers.gas_solid_mask;
 
         bool field_ok = buffers[3].valid() && buffers[4].valid();
-        if(field_ok && !scalar_inputs_resident) {
-            field_ok=compute->uploadBuffer(
-                buffers[3],field.data(),field.size()*sizeof(float));
+        if (field_ok) {
+            field_ok = gasEnsureOnDevice(compute, gpu_buffers, field_id,
+                                         buffers[3], field.data(),
+                                         field.size() * sizeof(float));
         }
         // Index of the buffer holding the final result.
         int result = 4;
@@ -5750,25 +6032,38 @@ bool runGpuScalarAdvection(FluidSim::FluidGrid& grid,
     std::vector<float> next_temperature;
     std::vector<float> next_fuel;
     if (ok && params.channel_density) {
-        ok = advectField(grid.density, next_density, gpu_buffers.density, 0.0f);
+        ok = advectField(grid.density, next_density, gpu_buffers.density,
+                         GasGridField::Density, 0.0f);
     }
     if (ok && params.channel_temperature) {
         ok = advectField(grid.temperature, next_temperature, gpu_buffers.temperature,
-                         params.ambient_temperature);
+                         GasGridField::Temperature, params.ambient_temperature);
     }
     if (ok && params.channel_fuel) {
-        ok = advectField(grid.fuel, next_fuel, gpu_buffers.fuel, 0.0f);
+        ok = advectField(grid.fuel, next_fuel, gpu_buffers.fuel,
+                         GasGridField::Fuel, 0.0f);
     }
 
     if (ok) {
+        // ***** THE SWAP IS A HOST WRITE AND THE LEDGER MUST HEAR ABOUT IT.
+        // The advected result was read back into `next_*` and is swapped into
+        // the grid here, so the host now holds the NEW field while the device
+        // buffer still holds the one from before advection. Leaving the bit set
+        // would be the ledger lying in the only direction that is not merely
+        // slow: the next stage would skip its upload and advance the previous
+        // step's smoke. No crash, no warning - just a field that is one step
+        // behind, everywhere, forever.
         if (params.channel_density) {
             grid.density.swap(next_density);
+            gpu_buffers.markHostWrote(GasGridField::Density);
         }
         if (params.channel_temperature) {
             grid.temperature.swap(next_temperature);
+            gpu_buffers.markHostWrote(GasGridField::Temperature);
         }
         if (params.channel_fuel) {
             grid.fuel.swap(next_fuel);
+            gpu_buffers.markHostWrote(GasGridField::Fuel);
         }
     }
 
@@ -10432,6 +10727,32 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 }
             }
         }
+        // ***** THE HOST ALREADY WROTE THIS GRID THIS STEP, AND IT DID NOT TELL
+        // THE LEDGER.
+        //
+        // Before this loop runs, injectFlowSourcesIntoGridDomains and the
+        // particle -> gas deposit write grid.density / temperature / fuel and
+        // the velocity faces directly, element by element, from dozens of
+        // places. Marking each of those sites would be a second copy of the
+        // deposit logic, drifting from the first - so the ledger is reset once,
+        // here, at the single point where the host is finished and the device
+        // chain begins.
+        //
+        // ** WHAT THIS ACTUALLY SAVES IS THE VELOCITY FACES, and finding that
+        // out took a measurement. The block further down that says it uploads
+        // "(fuel, temp, density, vel)" uploads the three scalars and NO
+        // velocity - the comment is older than the code. So the scalar deposits
+        // were covered by accident, while the velocity a particle deposits into
+        // the MAC faces was not: the step-end publication leaves VelX/VelY
+        // marked synced, and velocity advection would then skip its upload and
+        // advect without the deposit.
+        //
+        // * It costs exactly the uploads that existed before device residency,
+        // and it costs them ONCE. Everything the ledger saves happens further
+        // down the chain, between device stages, and is untouched by this.
+        if (gpu_buffers) {
+            gpu_buffers->invalidateDeviceCopies();
+        }
         const bool gpu_grid_ready = gpu_buffers != nullptr;
         bool gpu_velocity_advection_pre_run = false;
         bool gpu_scalar_advection_ok = false;
@@ -10579,8 +10900,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         }
         if (gpu_velocity_advection_pre_run && (params.channel_density || params.channel_temperature || params.channel_fuel)) {
             gpu_scalar_advection_ok = runGpuScalarAdvection(
-                state.grid,params,dt,context.compute,*gpu_buffers,
-                fluid_combustion_deposit_pre_run);
+                state.grid,params,dt,context.compute,*gpu_buffers);
             gas_gpu_mark(state.gas_stats.gpu_scalar_advect_ms);
             if (!gpu_scalar_advection_ok) {
                 static bool logged_gpu_advection_fallback = false;
@@ -10656,6 +10976,27 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         const bool is_sparse_vdb = (i < grid_domains_.size()) &&
                                    (grid_domains_[i].backend == SimulationDomainBackend::CPU_SparseVDB) &&
                                    !domain_has_solid;
+
+        // ***** THE ONE STRUCTURAL READBACK, AND THE SAFETY NET FOR ALL THE
+        // OTHERS. GridFluid::step reads and writes the HOST grid, so anything a
+        // device stage produced and did not hand back has to come home first.
+        //
+        // This is a no-op until some producer starts marking a field
+        // device-only, which is exactly why it lands BEFORE any of them do: the
+        // net goes up before anyone walks the wire. The first attempt at device
+        // residency did it the other way round and the tree broke silently.
+        if (gpu_buffers && !gasSyncGridToHost(context.compute, *gpu_buffers, state.grid)) {
+            // Could not bring a field back. The host copy is not trustworthy,
+            // so say so once rather than let the solver read it.
+            static bool logged_sync_fail = false;
+            if (!logged_sync_fail) {
+                SCENE_LOG_WARN("[SimCompute] gas grid readback before the host "
+                               "solver failed; device residency disabled for "
+                               "this domain until the next reset.");
+                logged_sync_fail = true;
+            }
+        }
+        gas_gpu_mark(state.gas_stats.gpu_host_sync_ms);
         if (is_sparse_vdb) {
             GridFluid::stepSparseVDB(state.grid, params, dt, context.force_snapshot,
                                      context.time_seconds, &state.gas_stats.cpu);
@@ -10759,6 +11100,14 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             if (fields_published) {
                 runGpuGasMajorant(state.grid, context.compute, *gpu_buffers);
                 gas_gpu_mark(state.gas_stats.gpu_majorant_ms);
+                // Block occupancy for the sparse-dispatch work. -1 stays -1:
+                // "not measured" must never be reported as "grid empty".
+                state.gas_stats.active_blocks =
+                    gpu_buffers->gas_active_block_count;
+                state.gas_stats.total_blocks =
+                    gpu_buffers->gas_majorant_dim[0] *
+                    gpu_buffers->gas_majorant_dim[1] *
+                    gpu_buffers->gas_majorant_dim[2];
             } else {
                 gpu_buffers->gas_majorant_valid = false;
                 gpu_buffers->gas_emissive_valid = false;
@@ -11984,6 +12333,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     buffers.foam_bin_ready_this_step = false;
     destroy(buffers.gas_majorant);
     destroy(buffers.gas_emissive_list);
+    destroy(buffers.gas_active_blocks);
     buffers.gas_emissive_valid = false;
     buffers.gas_majorant_dim[0] = 0;
     buffers.gas_majorant_dim[1] = 0;
@@ -12122,6 +12472,15 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         ensureComputeBuffer(compute, buffers.gas_emissive_list,
                             "GridDomainGasEmissiveList",
                             static_cast<std::size_t>(kGasEmissiveListCapacity + 1) *
+                                sizeof(uint32_t),
+                            render_field_usage);
+        // Capacity is every block plus the count, so the list cannot overflow
+        // and its count is exact rather than saturating.
+        ensureComputeBuffer(compute, buffers.gas_active_blocks,
+                            "GridDomainGasActiveBlocks",
+                            (static_cast<std::size_t>(std::max(1, bx)) *
+                             static_cast<std::size_t>(std::max(1, by)) *
+                             static_cast<std::size_t>(std::max(1, bz)) + 1u) *
                                 sizeof(uint32_t),
                             render_field_usage);
         if (buffers.gas_majorant_dim[0] != bx ||
