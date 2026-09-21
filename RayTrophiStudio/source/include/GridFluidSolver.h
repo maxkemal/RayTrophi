@@ -123,6 +123,7 @@ struct SolverParams {
     bool skip_force_fields = false;          // lets an external GPU path apply shared fields first
     bool skip_vorticity = false;            // lets an external GPU path add confinement first
     bool skip_turbulence = false;           // lets an external GPU path add curl noise first
+    bool skip_scalar_dissipation = false;   // lets an external GPU path decay density/temperature/fuel
     bool skip_velocity_dissipation_clamp = false; // lets an external GPU path run velocity loss/limit
     bool skip_pressure_projection = false; // lets an external GPU path run projection
 

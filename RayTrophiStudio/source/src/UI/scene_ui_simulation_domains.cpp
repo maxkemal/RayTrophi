@@ -3748,7 +3748,8 @@ void drawSimulationDomainControls(
                         gs.gpu_scalar_advect_ms + gs.gpu_combustion_ms +
                         gs.gpu_body_forces_ms + gs.gpu_dissipation_ms +
                         gs.gpu_pressure_ms + gs.gpu_publish_ms + gs.gpu_majorant_ms +
-                        gs.gpu_host_sync_ms;
+                        gs.gpu_host_sync_ms + gs.gpu_surface_dust_ms +
+                        gs.gpu_scalar_dissipate_ms;
                     const float phase_sum =
                         gs.voxelize_ms + gs.analysis_ms + gpu_sum + cpu.total_ms;
                     const float step_total = std::max(gs.total_ms, phase_sum);
@@ -3825,6 +3826,10 @@ void drawSimulationDomainControls(
                                  gs.pressure_on_gpu ? "GPU" : "CPU", 1);
                         blk.Time("field publication (RT bridge)", gs.gpu_publish_ms, "GPU", 1);
                         blk.Time("majorant (RT empty-space skip)", gs.gpu_majorant_ms, "GPU", 1);
+                        blk.Time("surface dust (wind loft)", gs.gpu_surface_dust_ms,
+                                 "GPU", 1);
+                        blk.Time("scalar dissipation", gs.gpu_scalar_dissipate_ms,
+                                 "GPU", 1);
                         blk.Time("grid readback (for host solver)", gs.gpu_host_sync_ms,
                                  "GPU->CPU", 1);
                     }

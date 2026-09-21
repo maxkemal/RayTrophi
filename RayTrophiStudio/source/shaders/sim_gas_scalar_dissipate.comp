@@ -1,0 +1,36 @@
+// sim_gas_scalar_dissipate.comp - per-cell exponential decay of the gas scalars.
+//
+// The host equivalent is the "4) Dissipation." block in GridFluid::step: three
+// std::vector passes over the whole grid, ~2.9 ms per step at 3.4M cells. The
+// factors are computed host-side (exp(-rate * dt)) because they are per-field
+// constants, not per-cell work.
+//
+// ** A factor of exactly 1.0 means "this channel does not dissipate", not "skip
+// the multiply": keeping the write unconditional costs nothing and keeps the
+// three channels on the same code path, which is what the CPU version does.
+// The has_* flags are about a channel that has no STORAGE, which is different.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float density_factor;
+    float temperature_factor;
+    float fuel_factor;
+    int has_density;
+    int has_temperature;
+    int has_fuel;
+} pc;
+
+layout(set = 0, binding = 0) buffer Density     { float density[]; };
+layout(set = 0, binding = 1) buffer Temperature { float temperature[]; };
+layout(set = 0, binding = 2) buffer Fuel        { float fuel[]; };
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.nx) * uint(pc.ny) * uint(pc.nz)) return;
+
+    if (pc.has_density != 0)     density[id]     *= pc.density_factor;
+    if (pc.has_temperature != 0) temperature[id] *= pc.temperature_factor;
+    if (pc.has_fuel != 0)        fuel[id]        *= pc.fuel_factor;
+}

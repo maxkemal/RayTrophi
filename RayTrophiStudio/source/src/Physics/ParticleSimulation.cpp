@@ -1479,6 +1479,35 @@ struct GasCombustionGpuConstants {
     float flame_decay = 1.0f;
     float max_temperature = 0.0f;
 };
+struct GasScalarDissipationGpuConstants {
+    int nx; int ny; int nz;
+    float density_factor;
+    float temperature_factor;
+    float fuel_factor;
+    int has_density;
+    int has_temperature;
+    int has_fuel;
+};
+static_assert(sizeof(GasScalarDissipationGpuConstants) == 36,
+              "sim_gas_scalar_dissipate push constant range is registered as 36 "
+              "bytes in SimulationComputeVulkan.cpp and declared in "
+              "sim_gas_scalar_dissipate.comp - all THREE must change together");
+
+struct GasSurfaceDustGpuConstants {
+    int nx; int ny; int nz;
+    int has_temperature;
+    float threshold;
+    float emission;
+    float ceiling;
+    float supply;
+    float dust_temperature;
+    float dt;
+};
+static_assert(sizeof(GasSurfaceDustGpuConstants) == 40,
+              "sim_gas_surface_dust push constant range is registered as 40 "
+              "bytes in SimulationComputeVulkan.cpp and declared in "
+              "sim_gas_surface_dust.comp - all THREE must change together");
+
 static_assert(sizeof(GasCombustionGpuConstants) == 40,
               "sim_gas_combustion push-constant ABI changed");
 
@@ -5122,6 +5151,202 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
         }
         compute->endTransferBatch();
     }
+    return true;
+}
+
+// Decay density / temperature / fuel on the device.
+//
+// This is the "4) Dissipation." block of GridFluid::step, which was three full
+// host passes over the grid. The exponential factors are per-field constants,
+// so they are computed here rather than per cell.
+bool runGpuGasScalarDissipation(FluidSim::FluidGrid& grid,
+                                const GridFluid::SolverParams& params,
+                                float dt,
+                                SimulationComputeContext* compute,
+                                SimulationGridDomainComputeBuffers& gpu_buffers) {
+    if (!compute || !compute->supportsDispatch() || dt <= 0.0f) return false;
+    const std::size_t cells = grid.getCellCount();
+    if (cells == 0) return false;
+
+    const bool has_d = params.channel_density && grid.density.size() == cells &&
+                       gpu_buffers.density.valid();
+    const bool has_t = params.channel_temperature &&
+                       grid.temperature.size() == cells &&
+                       gpu_buffers.temperature.valid();
+    const bool has_f = params.channel_fuel && grid.fuel.size() == cells &&
+                       gpu_buffers.fuel.valid();
+    // ** All three handles must be bindable even when a channel is off: the
+    // shader declares three bindings and a null one is not a descriptor. The
+    // has_* flags are what actually switch a channel off.
+    if (!gpu_buffers.density.valid() || !gpu_buffers.temperature.valid() ||
+        !gpu_buffers.fuel.valid()) {
+        return false;
+    }
+    if (!has_d && !has_t && !has_f) return false;
+
+    auto decay = [dt](float rate) {
+        return rate > 0.0f ? std::exp(-rate * dt) : 1.0f;
+    };
+
+    compute->beginTransferBatch();
+    bool ok = true;
+    if (has_d) {
+        ok = gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Density,
+                               gpu_buffers.density, grid.density.data(),
+                               cells * sizeof(float)) && ok;
+    }
+    if (has_t) {
+        ok = gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Temperature,
+                               gpu_buffers.temperature, grid.temperature.data(),
+                               cells * sizeof(float)) && ok;
+    }
+    if (has_f) {
+        ok = gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Fuel,
+                               gpu_buffers.fuel, grid.fuel.data(),
+                               cells * sizeof(float)) && ok;
+    }
+    ok = compute->endTransferBatch() && ok;
+    if (!ok) return false;
+
+    GasScalarDissipationGpuConstants constants;
+    constants.nx = grid.nx;
+    constants.ny = grid.ny;
+    constants.nz = grid.nz;
+    constants.density_factor = decay(params.density_dissipation);
+    constants.temperature_factor = decay(params.temperature_dissipation);
+    constants.fuel_factor = decay(params.fuel_dissipation);
+    constants.has_density = has_d ? 1 : 0;
+    constants.has_temperature = has_t ? 1 : 0;
+    constants.has_fuel = has_f ? 1 : 0;
+
+    ComputeBufferHandle buffers[3] = {
+        gpu_buffers.density, gpu_buffers.temperature, gpu_buffers.fuel
+    };
+    ComputeDispatch cmd;
+    cmd.kernel = "sim_gas_scalar_dissipate";
+    cmd.buffers = buffers;
+    cmd.buffer_count = 3;
+    cmd.constants = &constants;
+    cmd.constants_size = sizeof(constants);
+    cmd.groups.groups_x = (static_cast<uint32_t>(cells) + 255u) / 256u;
+    if (!compute->dispatch(cmd)) return false;
+
+    if (has_d) gpu_buffers.markDeviceWrote(GasGridField::Density);
+    if (has_t) gpu_buffers.markDeviceWrote(GasGridField::Temperature);
+    if (has_f) gpu_buffers.markDeviceWrote(GasGridField::Fuel);
+    gpu_buffers.gpu_resident_fields_valid = false;
+    return true;
+}
+
+// Wind lofting dust off the domain floor, on the device.
+//
+// ***** RETURNS FALSE FOR A DOMAIN WITH COLLIDERS, ON PURPOSE. The host version
+// also walks the tops of solids; this kernel does the floor layer only, so a
+// domain with any solid keeps the host path rather than getting a silently
+// partial source. The caller uses the return value as skip_surface_dust, so
+// false means "the host still owes this stage" - which is exactly true.
+bool runGpuGasSurfaceDust(FluidSim::FluidGrid& grid,
+                          const GridFluid::SolverParams& params,
+                          float dt,
+                          SimulationComputeContext* compute,
+                          SimulationGridDomainComputeBuffers& gpu_buffers) {
+    if (!compute || !compute->supportsDispatch() || dt <= 0.0f) return false;
+    if (!params.surface_dust_enabled || !params.channel_density) return false;
+    const std::size_t cells = grid.getCellCount();
+    if (cells == 0 || grid.density.size() != cells) return false;
+    if (std::max(0.0f, params.surface_dust_emission) <= 0.0f) return false;
+    // Any solid at all -> host path (see the note above).
+    const bool any_solid = grid.solid.size() == cells &&
+                           !(grid.solid_cells_valid && grid.solid_cells.empty());
+    if (any_solid) return false;
+    if (!gpu_buffers.density.valid() || !gpu_buffers.temperature.valid() ||
+        !gpu_buffers.vel_x.valid() || !gpu_buffers.vel_z.valid() ||
+        !gpu_buffers.gas_surface_dust_supply.valid()) {
+        return false;
+    }
+
+    const std::size_t columns =
+        static_cast<std::size_t>(grid.nx) * static_cast<std::size_t>(grid.nz);
+    const float supply = std::max(0.0f, params.surface_dust_supply);
+    if (supply > 0.0f && grid.surface_dust_supply.size() != columns) {
+        grid.surface_dust_supply.assign(columns, 1.0f);
+    }
+    if (grid.surface_dust_supply.size() != columns) {
+        // supply == 0 means the unlimited reservoir; the shader still binds the
+        // buffer, so give it storage rather than a null descriptor.
+        grid.surface_dust_supply.assign(columns, 1.0f);
+    }
+
+    const bool has_temp = params.channel_temperature &&
+                          grid.temperature.size() == cells;
+
+    // ** The reservoir is ROUND-TRIPPED EVERY STEP and that is deliberate. It
+    // is 68 KB at this resolution - five ten-thousandths of one field - and
+    // keeping the host copy authoritative means the CPU fallback, the bake and
+    // a domain that later acquires a collider all read a value that is current,
+    // with no residency state to get wrong. The fields are the thing worth
+    // being clever about; this is not.
+    compute->beginTransferBatch();
+    bool ok =
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Density,
+                          gpu_buffers.density, grid.density.data(),
+                          cells * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelX,
+                          gpu_buffers.vel_x, grid.vel_x.data(),
+                          grid.vel_x.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelZ,
+                          gpu_buffers.vel_z, grid.vel_z.data(),
+                          grid.vel_z.size() * sizeof(float)) &&
+        compute->uploadBuffer(gpu_buffers.gas_surface_dust_supply,
+                              grid.surface_dust_supply.data(),
+                              columns * sizeof(float));
+    if (has_temp) {
+        ok = gasEnsureOnDevice(compute, gpu_buffers, GasGridField::Temperature,
+                               gpu_buffers.temperature, grid.temperature.data(),
+                               cells * sizeof(float)) && ok;
+    }
+    ok = compute->endTransferBatch() && ok;
+    if (!ok) return false;
+
+    GasSurfaceDustGpuConstants constants;
+    constants.nx = grid.nx;
+    constants.ny = grid.ny;
+    constants.nz = grid.nz;
+    constants.has_temperature = has_temp ? 1 : 0;
+    constants.threshold = std::max(0.0f, params.surface_dust_threshold);
+    constants.emission = std::max(0.0f, params.surface_dust_emission);
+    constants.ceiling = std::max(0.0f, params.surface_dust_max_density);
+    constants.supply = supply;
+    constants.dust_temperature = params.surface_dust_temperature;
+    constants.dt = dt;
+
+    ComputeBufferHandle buffers[5] = {
+        gpu_buffers.density, gpu_buffers.temperature,
+        gpu_buffers.vel_x, gpu_buffers.vel_z,
+        gpu_buffers.gas_surface_dust_supply
+    };
+    ComputeDispatch cmd;
+    cmd.kernel = "sim_gas_surface_dust";
+    cmd.buffers = buffers;
+    cmd.buffer_count = 5;
+    cmd.constants = &constants;
+    cmd.constants_size = sizeof(constants);
+    cmd.groups.groups_x = (static_cast<uint32_t>(columns) + 255u) / 256u;
+    if (!compute->dispatch(cmd)) return false;
+    compute->synchronize();
+
+    if (!compute->downloadBuffer(gpu_buffers.gas_surface_dust_supply,
+                                 grid.surface_dust_supply.data(),
+                                 columns * sizeof(float))) {
+        // The reservoir is the only state this stage carries between steps. If
+        // it did not come back, the host copy is wrong for the next step, so
+        // say the stage did not run and let the CPU redo it from a known value.
+        return false;
+    }
+
+    gpu_buffers.markDeviceWrote(GasGridField::Density);
+    if (has_temp) gpu_buffers.markDeviceWrote(GasGridField::Temperature);
+    gpu_buffers.gpu_resident_fields_valid = false;
     return true;
 }
 
@@ -10795,6 +11020,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         bool gas_turbulence_pre_run = false;
         bool gas_velocity_chain_resident = false;
         bool gas_collider_source_pre_run = false;
+        bool gas_surface_dust_pre_run = false;
+        bool gas_scalar_dissipation_pre_run = false;
         bool fluid_combustion_deposit_pre_run = false;
         bool gpu_velocity_post_ok = false;
         bool gpu_projection_ok = false;
@@ -11000,6 +11227,15 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // emitters and advances heat on the wrong frame.
         if (gpu_grid_ready) {
             gas_gpu_cursor = SimulationClock::now();
+            // Surface dust is a SOURCE and it runs before combustion and
+            // buoyancy, exactly where GridFluid::step puts it: the dust this
+            // step's wind lifted has to be part of what this step's buoyancy
+            // sorts out. Moving it after would make the skirt lag the cap by a
+            // frame - visible as the ground layer trailing the cloud.
+            gas_surface_dust_pre_run =
+                runGpuGasSurfaceDust(state.grid, params, dt, context.compute,
+                                     *gpu_buffers);
+            gas_gpu_mark(state.gas_stats.gpu_surface_dust_ms);
             gas_combustion_pre_run =
                 runGpuCombustion(state.grid, params, dt, context.compute, *gpu_buffers);
             gas_gpu_mark(state.gas_stats.gpu_combustion_ms);
@@ -11046,8 +11282,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 gas_turbulence_pre_run = false;
             }
         }
+        // Dissipation is step 4 of the host solver: after the body forces,
+        // before projection. Same place here.
+        if (gpu_grid_ready) {
+            gas_scalar_dissipation_pre_run =
+                runGpuGasScalarDissipation(state.grid, params, dt,
+                                           context.compute, *gpu_buffers);
+            gas_gpu_mark(state.gas_stats.gpu_scalar_dissipate_ms);
+        }
         params.skip_velocity_advection = gpu_velocity_advection_pre_run;
         params.skip_scalar_advection = gpu_scalar_advection_ok;
+        params.skip_surface_dust = gas_surface_dust_pre_run;
+        params.skip_scalar_dissipation = gas_scalar_dissipation_pre_run;
         params.skip_combustion = gas_combustion_pre_run;
         params.skip_buoyancy = gas_buoyancy_pre_run;
         params.skip_force_fields = gas_force_fields_pre_run;
@@ -12427,6 +12673,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.gas_majorant);
     destroy(buffers.gas_emissive_list);
     destroy(buffers.gas_active_blocks);
+    destroy(buffers.gas_surface_dust_supply);
     buffers.gas_emissive_valid = false;
     buffers.gas_majorant_dim[0] = 0;
     buffers.gas_majorant_dim[1] = 0;
@@ -12569,6 +12816,12 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
                             render_field_usage);
         // Capacity is every block plus the count, so the list cannot overflow
         // and its count is exact rather than saturating.
+        ensureComputeBuffer(compute, buffers.gas_surface_dust_supply,
+                            "GridDomainGasSurfaceDustSupply",
+                            static_cast<std::size_t>(std::max(1, grid.nx)) *
+                                static_cast<std::size_t>(std::max(1, grid.nz)) *
+                                sizeof(float),
+                            render_field_usage);
         ensureComputeBuffer(compute, buffers.gas_active_blocks,
                             "GridDomainGasActiveBlocks",
                             (static_cast<std::size_t>(std::max(1, bx)) *

@@ -928,6 +928,8 @@ private:
             { "sim_gas_force_gather",               "sim_gas_force_gather.spv",             6, 48 },
             { "sim_particle_force_integrate",        "sim_particle_force_integrate.spv",      7, 40 },
             { "sim_gas_combustion",                 "sim_gas_combustion.spv",               4, 40 },
+            { "sim_gas_scalar_dissipate",           "sim_gas_scalar_dissipate.spv",         3, 36 },
+            { "sim_gas_surface_dust",               "sim_gas_surface_dust.spv",             5, 40 },
             { "sim_gas_vorticity_curl",             "sim_gas_vorticity_curl.spv",           8, 28 },
             { "sim_gas_vorticity_force",            "sim_gas_vorticity_force.spv",         11, 28 },
             { "sim_gas_turbulence_cell",            "sim_gas_turbulence_cell.spv",          7, 96 },

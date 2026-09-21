@@ -660,6 +660,8 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     out.gpu_publish_ms = gs.gpu_publish_ms;
     out.gpu_majorant_ms = gs.gpu_majorant_ms;
     out.gpu_host_sync_ms = gs.gpu_host_sync_ms;
+    out.gpu_surface_dust_ms = gs.gpu_surface_dust_ms;
+    out.gpu_scalar_dissipate_ms = gs.gpu_scalar_dissipate_ms;
 
     out.cpu_total_ms = gs.cpu.total_ms;
     out.cpu_advect_velocity_ms = gs.cpu.advect_velocity_ms;

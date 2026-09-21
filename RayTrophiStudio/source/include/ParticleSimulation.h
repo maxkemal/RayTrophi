@@ -836,6 +836,8 @@ struct SimulationGasStats {
     float gpu_pressure_ms = 0.0f;          // projection
     float gpu_publish_ms = 0.0f;           // final scalar publication for the RT bridge
     float gpu_majorant_ms = 0.0f;          // per-block density max for the RT empty-space skip
+    float gpu_surface_dust_ms = 0.0f;      // wind lofting dust off the floor
+    float gpu_scalar_dissipate_ms = 0.0f;  // density/temperature/fuel decay
 
     // ***** THE ONE STRUCTURAL READBACK, AND IT USED TO BE INVISIBLE.
     //
@@ -1148,6 +1150,10 @@ struct SimulationGridDomainComputeBuffers {
     // read back as a single count. -1 = not measured this step, which is NOT
     // the same as 0 and must not be reported as "the grid is empty".
     ComputeBufferHandle gas_active_blocks;
+    // One float per ground column (nx * nz): the dust reservoir the surface
+    // source draws down. Tiny next to a field - 68 KB at this resolution -
+    // which is why it is round-tripped every step instead of tracked.
+    ComputeBufferHandle gas_surface_dust_supply;
     int gas_active_block_count = -1;
     ComputeBufferHandle scratch_vel_x;
     ComputeBufferHandle scratch_vel_y;

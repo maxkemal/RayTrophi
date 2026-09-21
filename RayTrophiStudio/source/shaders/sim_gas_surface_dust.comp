@@ -1,0 +1,81 @@
+// sim_gas_surface_dust.comp - wind lofting dust off the domain FLOOR.
+//
+// Mirrors addSurfaceDust in GridFluidSolver.cpp, floor layer only: one thread
+// per ground column (nx * nz), not per cell. The host version also walks the
+// tops of solids, and this kernel deliberately does NOT - the caller only
+// dispatches it for a domain with no colliders and runs the host path
+// otherwise. Splitting it that way keeps the collider case on the one
+// implementation that has always been correct for it, rather than growing a
+// second solid-topology traversal on the GPU for a case that is rare.
+//
+// ** DUST IS COLD, AND THAT IS THE POINT. The lofted ground is what makes the
+// skirt read as separate from the cap; blend it toward surface_dust_temperature
+// rather than leaving it at the cell's heat, or it rises with the fireball and
+// the two merge into one shapeless cloud.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    int has_temperature;
+    float threshold;
+    float emission;
+    float ceiling;
+    float supply;
+    float dust_temperature;
+    float dt;
+} pc;
+
+layout(set = 0, binding = 0) buffer Density       { float density[]; };
+layout(set = 0, binding = 1) buffer Temperature   { float temperature[]; };
+layout(set = 0, binding = 2) readonly buffer VelX { float vel_x[]; };
+layout(set = 0, binding = 3) readonly buffer VelZ { float vel_z[]; };
+// One entry per ground column. 1.0 = untouched, 0.0 = stripped.
+layout(set = 0, binding = 4) buffer DustSupply    { float dust_supply[]; };
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.nx) * uint(pc.nz)) return;
+
+    int i = int(id % uint(pc.nx));
+    int k = int(id / uint(pc.nx));
+    const int j = 0;                       // floor layer
+
+    // Cell-centred horizontal speed from the two MAC face pairs.
+    uint xs = uint(pc.nx + 1);
+    uint xbase = uint(j) * xs + uint(k) * xs * uint(pc.ny);
+    float ux = 0.5 * (vel_x[uint(i) + xbase] + vel_x[uint(i + 1) + xbase]);
+
+    uint zs = uint(pc.nx) * uint(pc.ny);
+    uint zbase = uint(i) + uint(j) * uint(pc.nx);
+    float uz = 0.5 * (vel_z[zbase + uint(k) * zs] + vel_z[zbase + uint(k + 1) * zs]);
+
+    float speed = sqrt(ux * ux + uz * uz);
+    if (speed <= pc.threshold) return;
+
+    float added = pc.emission * (speed - pc.threshold) * pc.dt;
+    if (added <= 0.0) return;
+
+    if (pc.supply > 0.0) {
+        // ** TAKE WHAT IS LEFT, NOT WHAT THE WIND ASKED FOR. A strong enough
+        // gust strips the column in one step and that column is finished;
+        // clamping the RATE instead would leave every column producing forever
+        // at a lower level, which is the carpet again in slow motion.
+        //
+        // * No atomic is needed: one thread owns one column, and the floor
+        // layer is the only writer of that column in this dispatch.
+        float remaining = dust_supply[id];
+        float available = remaining * pc.supply;
+        if (available <= 0.0) return;
+        added = min(added, available);
+        dust_supply[id] = max(0.0, remaining - added / pc.supply);
+    }
+
+    uint c = uint(i) + uint(j) * uint(pc.nx) + uint(k) * uint(pc.nx) * uint(pc.ny);
+    float d = density[c] + added;
+    density[c] = (pc.ceiling > 0.0) ? min(d, pc.ceiling) : d;
+
+    if (pc.has_temperature != 0) {
+        temperature[c] += (pc.dust_temperature - temperature[c]) * min(1.0, added);
+    }
+}
