@@ -1,4 +1,5 @@
 ﻿#include "AnimationNodes.h"
+#include "Animation/GraphRestDefaults.h"
 #include "globals.h"
 #include <algorithm>
 #include <cmath>
@@ -206,19 +207,21 @@ namespace AnimationGraph {
         }
         
         // 3. Sample Animation to TRS (Industry Standard)
-        size_t boneCount = ctx.boneData->boneNameToIndex.size();
+        size_t boneCount = ctx.boneData->getBoneIndexCapacity();
         result.trsTransforms.resize(boneCount);
         result.boneTransforms.resize(boneCount);
+        // Downstream stages (LayeredBlendNode's bone mask, BlendNode) address bones by
+        // name. No producer used to fill this, so every one of those lookups missed and
+        // the mask silently degraded to "layer affects nothing".
+        result.boneNames.assign(boneCount, std::string{});
         result.wasUpdated = isPlaying && (ctx.deltaTime > 0.0f);
         
         float timeInTicks = currentTime * clip->ticksPerSecond;
         auto anim = clip->sourceData;
         
         for (const auto& [boneName, boneIndex] : ctx.boneData->boneNameToIndex) {
-            BoneTransform trs;
-            // Match AnimationController: when a clip is active, we build from tracks directly.
-            // Omitted tracks remain Identity. Do not fallback to Bind Pose values, as 
-            // the legacy controller ignores defaultTransform if the clip exists.
+            BoneTransform trs = graphRestLocalTRS(*ctx.boneData, boneName);
+            // Keyed components replace local rest; omitted components retain it.
 
             // Override with Animation Keys if they exist
             auto posIt = anim->positionKeys.find(boneName);
@@ -240,6 +243,7 @@ namespace AnimationGraph {
             
             result.trsTransforms[boneIndex] = trs;
             result.boneTransforms[boneIndex] = trs.toMatrix();
+            if (boneIndex < result.boneNames.size()) result.boneNames[boneIndex] = boneName;
         }
         
         // Include animated nodes that aren't in boneNameToIndex (e.g. Armature, RootNode that lack skin weights)
@@ -251,8 +255,8 @@ namespace AnimationGraph {
         for (const std::string& nodeName : extraNodes) {
              if (ctx.boneData->boneNameToIndex.count(nodeName) > 0) continue;
              
-             BoneTransform trs;
-             // Match AnimationController: tracks only.
+             BoneTransform trs = graphRestLocalTRS(*ctx.boneData, nodeName);
+             // Missing channels retain canonical local rest components.
              
              auto posIt = anim->positionKeys.find(nodeName);
              if (posIt != anim->positionKeys.end() && !posIt->second.empty())
@@ -540,6 +544,12 @@ namespace AnimationGraph {
         result.boneTransforms.resize(count);
         result.boneNames.resize(count);
         result.blendWeight = 1.0f;
+
+        // The renderer only writes bone matrices when pose.wasUpdated is true
+        // (Renderer::updateAnimationWithGraph). A blend that drops the flag makes the
+        // character hold its last pose for the whole blend, which reads as "the
+        // animation stopped" exactly while a state machine transition is running.
+        result.wasUpdated = a.wasUpdated || b.wasUpdated;
         
         // Forward normalized time from the dominant pose
         result.normalizedTime = (t > 0.5f) ? b.normalizedTime : a.normalizedTime;
@@ -571,14 +581,10 @@ namespace AnimationGraph {
             else if (i < b.boneNames.size()) boneName = b.boneNames[i];
             result.boneNames[i] = boneName;
             
-            // Generate matrix and apply offset
-            Matrix4x4 localMat = result.trsTransforms[i].toMatrix();
-            auto offsetIt = ctx.boneData->boneOffsetMatrices.find(boneName);
-            if (offsetIt != ctx.boneData->boneOffsetMatrices.end()) {
-                result.boneTransforms[i] = localMat * offsetIt->second;
-            } else {
-                result.boneTransforms[i] = localMat;
-            }
+            // A blend result is a LOCAL pose, same contract as AnimClipNode's output:
+            // FinalPoseNode walks the hierarchy and applies the bind-pose offset there.
+            // Multiplying the offset in here too would apply it twice.
+            result.boneTransforms[i] = result.trsTransforms[i].toMatrix();
             
         }
         
@@ -637,6 +643,7 @@ namespace AnimationGraph {
         if (!additive.isValid()) return base;
         
         PoseData result = base;
+        result.wasUpdated = base.wasUpdated || additive.wasUpdated;
         size_t count = std::min(base.boneCount(), additive.boneCount());
         
         for (size_t i = 0; i < count; ++i) {
@@ -710,6 +717,7 @@ namespace AnimationGraph {
         if (!layerPose.isValid()) return basePose;
         
         PoseData result = basePose;  // Start with base
+        result.wasUpdated = basePose.wasUpdated || layerPose.wasUpdated;
         
         // Layered Blend Root Motion (assuming root bone is in the mask, interpolate it)
         float rootWeight = 0.0f;
@@ -760,14 +768,8 @@ namespace AnimationGraph {
                 result.trsTransforms[i].scale = Vec3::lerp(trsBase.scale, trsLayer.scale, weight);
                 result.trsTransforms[i].rotation = Quaternion::slerp(trsBase.rotation, trsLayer.rotation, weight);
                 
-                // Update matrix and apply offset
-                Matrix4x4 localMat = result.trsTransforms[i].toMatrix();
-                auto offsetIt = ctx.boneData->boneOffsetMatrices.find(boneName);
-                if (offsetIt != ctx.boneData->boneOffsetMatrices.end()) {
-                    result.boneTransforms[i] = localMat * offsetIt->second;
-                } else {
-                    result.boneTransforms[i] = localMat;
-                }
+                // Local space, like every other pose stage (see BlendNode::blendPoses).
+                result.boneTransforms[i] = result.trsTransforms[i].toMatrix();
             } else {
                 result.trsTransforms[i] = trsBase;
                 result.boneTransforms[i] = (i < basePose.boneTransforms.size()) ? basePose.boneTransforms[i] : Matrix4x4::identity();
@@ -816,7 +818,13 @@ namespace AnimationGraph {
     // ============================================================================
     
     bool StateMachineNode::Transition::evaluate(AnimationEvalContext& ctx) const {
+        if (conditionType == ConditionType::None || parameterName.empty()) {
+            return true;
+        }
         switch (conditionType) {
+            case ConditionType::None:
+                return true;
+                
             case ConditionType::Bool:
                 return ctx.getBoolParam(parameterName, false);
                 
@@ -830,7 +838,7 @@ namespace AnimationGraph {
                 return ctx.consumeTrigger(parameterName);
                 
             default:
-                return false;
+                return true;
         }
     }
     
@@ -914,11 +922,18 @@ namespace AnimationGraph {
                     if (trans.toState.empty() || trans.toState == currentStateName || !hasState(trans.toState)) {
                         continue;
                     }
-                    bool conditionMet = trans.evaluate(ctx);
-                    float exitTime = std::clamp(trans.exitTime, 0.0f, 1.0f);
-                    bool exitTimeMet = !trans.hasExitTime || (currentPose.normalizedTime >= exitTime);
-                    
-                    if (conditionMet && exitTimeMet) {
+                    // Exit time is checked FIRST on purpose. Transition::evaluate()
+                    // CONSUMES a Trigger parameter, so asking the condition on a frame
+                    // where the transition could not be taken anyway eats the trigger
+                    // and nothing happens. The symptom is not "triggers are broken" but
+                    // "the trigger works sometimes" - it depends on where the clip
+                    // happened to be when it was fired. Pending triggers now survive
+                    // until a frame that can actually act on them.
+                    const float exitTime = std::clamp(trans.exitTime, 0.0f, 1.0f);
+                    const bool exitTimeMet = !trans.hasExitTime || (currentPose.normalizedTime >= exitTime);
+                    if (!exitTimeMet) continue;
+
+                    if (trans.evaluate(ctx)) {
                         targetStateName = trans.toState;
                         transitionProgress = 0.0f;
                         isTransitioning = true;
@@ -1447,6 +1462,7 @@ namespace AnimationGraph {
             finalPose.boneTransforms[boneIndex] = finalMat;
         }
         
+        finalPose.jointGlobalTransforms = std::move(globalCache);
         ctx.outputPose = finalPose; // Final result for the renderer
         return finalPose;
     }
@@ -1472,9 +1488,7 @@ namespace AnimationGraph {
             if (extraIt != localPose.extraTransforms.end()) {
                  localMat = extraIt->second.toMatrix();
             } else {
-                 // Match AnimationController: if animation is playing, missing tracks yield Identity,
-                 // NOT Bind Pose, because bone offset and existing tracks already contain the space transforms.
-                 localMat = Matrix4x4::identity();
+                 localMat = graphRestLocalMatrix(*boneData, boneName);
             }
         }
         

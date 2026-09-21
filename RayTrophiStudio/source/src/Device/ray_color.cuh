@@ -1797,7 +1797,7 @@ __device__ float resolve_surface_opacity(const GpuMaterial& mat, const OptixHitR
         float mask = payload.opacity_has_alpha ? tex.w : tex.x;
         opacity *= fminf(fmaxf(mask, 0.0f), 1.0f);
     }
-    return fminf(fmaxf(opacity, 0.0f), 1.0f);
+    return SurfaceCoverage::materialCoverageOpacity(fminf(fmaxf(opacity, 0.0f), 1.0f), (mat.flags & MATERIAL_FLAG_ALPHA_CUTOUT) != 0);
 }
 
 __device__ float resolve_surface_transmission(const GpuMaterial& mat, const OptixHitResult& payload) {
@@ -1809,7 +1809,7 @@ __device__ float resolve_surface_transmission(const GpuMaterial& mat, const Opti
     }
 
     float opacity = resolve_surface_opacity(mat, payload);
-    if (opacity < 0.99f && mat.metallic < 0.1f && transmission < 0.01f) {
+    if ((mat.flags & MATERIAL_FLAG_ALPHA_CUTOUT) == 0 && opacity < 0.99f && mat.metallic < 0.1f && transmission < 0.01f) {
         transmission = 1.0f - opacity;
     }
     return fminf(fmaxf(transmission, 0.0f), 1.0f);
@@ -2773,11 +2773,6 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             // If it's a primary ray, we still need this for fog/picking
             if (bounce == 0) {
                 first_hit_t = payload.t;
-                if (optixLaunchParams.pick_buffer != nullptr && optixLaunchParams.frame_number == 0) {
-                    const uint3 launch_idx = optixGetLaunchIndex();
-                    int pixel_idx = launch_idx.y * optixLaunchParams.image_width + launch_idx.x;
-                    optixLaunchParams.pick_buffer[pixel_idx] = payload.object_id;
-                }
             }
             break; // Stop path at hair
         }
@@ -2785,38 +2780,12 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         if (bounce == 0 && payload.hit) {
             first_hit_t = payload.t;
             
-            // ═══════════════════════════════════════════════════════════
-            // GPU PICKING - Write object ID to pick buffer on primary hit
-            // This enables O(1) viewport object selection from GPU render
-            // ═══════════════════════════════════════════════════════════
-            if (optixLaunchParams.pick_buffer != nullptr) {
-                const uint3 launch_idx = optixGetLaunchIndex();
-                int pixel_idx = launch_idx.y * optixLaunchParams.image_width + launch_idx.x;
-                
-                // Only update on first sample (frame_number == 0 or sample pass 0)
-                // This avoids race conditions and ensures stable pick results
-                if (optixLaunchParams.frame_number == 0) {
-                    optixLaunchParams.pick_buffer[pixel_idx] = payload.object_id;
-                    if (optixLaunchParams.pick_depth_buffer != nullptr) {
-                        optixLaunchParams.pick_depth_buffer[pixel_idx] = payload.t;
-                    }
-                }
-            }
         } else if (bounce == 0 && !payload.hit) {
             if (primary_albedo_out) *primary_albedo_out = make_float3(0.0f);
             if (primary_normal_out) *primary_normal_out = make_float3(0.0f);
             if (primary_hit_out) *primary_hit_out = 0;
             if (primary_world_pos_out) *primary_world_pos_out = make_float3(0.0f);
             if (primary_material_id_out) *primary_material_id_out = -1;
-            // Miss on primary ray - write -1 to pick buffer (no object)
-            if (optixLaunchParams.pick_buffer != nullptr && optixLaunchParams.frame_number == 0) {
-                const uint3 launch_idx = optixGetLaunchIndex();
-                int pixel_idx = launch_idx.y * optixLaunchParams.image_width + launch_idx.x;
-                optixLaunchParams.pick_buffer[pixel_idx] = -1;
-                if (optixLaunchParams.pick_depth_buffer != nullptr) {
-                    optixLaunchParams.pick_depth_buffer[pixel_idx] = -1.0f;
-                }
-            }
         }
 
         if (optixLaunchParams.vdb_volumes && optixLaunchParams.vdb_volume_count > 0) {

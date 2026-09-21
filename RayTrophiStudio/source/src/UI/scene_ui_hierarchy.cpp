@@ -5,10 +5,13 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "UI/RigViewUI.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
+#include "PostProcess/PostService.h"   // pozlama MODUNUN sahibi (rtpost)
 #include "SceneSelection.h"
+#include "CameraPresets.h"
 #include "imgui.h"
 #include "scene_data.h"
 #include "Triangle.h"
@@ -68,38 +71,7 @@ void setHierarchyObjectVisibility(UIContext& ctx, const std::string& nodeName, b
 }
 }
 
-static void drawSkeletonHierarchyTree(const SceneData::ImportedModelContext& modelCtx, int nodeIndex) {
-    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(modelCtx.skeletonNodes.size())) {
-        return;
-    }
 
-    const auto& node = modelCtx.skeletonNodes[nodeIndex];
-    const bool hasChildren = !node.children.empty();
-
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth;
-    if (!hasChildren) {
-        flags |= ImGuiTreeNodeFlags_Leaf;
-    }
-
-    std::string label = node.name;
-    if (node.weightedBone) {
-        label += " [skinned]";
-    } else if (node.boneIndex >= 0) {
-        label += " [anim]";
-    }
-
-    bool open = ImGui::TreeNodeEx(label.c_str(), flags);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Bone Index: %d", node.boneIndex);
-    }
-
-    if (open) {
-        for (int childIndex : node.children) {
-            drawSkeletonHierarchyTree(modelCtx, childIndex);
-        }
-        ImGui::TreePop();
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE HIERARCHY PANEL (Outliner)
@@ -500,6 +472,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Object pivot follows the character's root animation (walking, etc.)");
 
                     if (mctx.hasSkeletonRepresentation) {
+                        RigUI::drawModelControls(ctx, mctx);
                         ImGui::TextDisabled("Skeleton: %zu nodes, %zu weighted bones%s",
                             mctx.skeletonNodes.size(),
                             mctx.weightedBoneCount,
@@ -507,7 +480,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                         if (ImGui::TreeNodeEx("Skeleton", ImGuiTreeNodeFlags_SpanAvailWidth)) {
                             for (int rootIndex : mctx.skeletonRootNodes) {
-                                drawSkeletonHierarchyTree(mctx, rootIndex);
+                                RigUI::drawBoneTree(ctx, mctx, rootIndex);
                             }
                             ImGui::TreePop();
                         }
@@ -1282,7 +1255,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 if (!all_visible) textColor.w = 0.5f;
 
                 ImVec2 pos = ImGui::GetCursorScreenPos();
-                UIWidgets::DrawIcon(has_skinning ? UIWidgets::IconType::Physics : UIWidgets::IconType::Mesh, 
+                UIWidgets::DrawIcon(has_skinning ? UIWidgets::IconType::Bone : UIWidgets::IconType::Mesh, 
                     pos, 16, ImGui::ColorConvertFloat4ToU32(textColor));
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
 
@@ -2280,7 +2253,46 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::Separator();
 
                 // ═══════════════════════════════════════════════════════════════════════════
+                // ALAN DERINLIGI ANAHTARI
+                // ★★★★ Bu onay kutusu 2026-09-06'da geri geldi. Eskiden tek
+                //   kapali-anahtar "aciklik = 0" idi ve o bir DEGER degil
+                //   SENTINEL'di: f-stop kadrani fiziksel bir buyukluk uretir,
+                //   hicbir f-sayisi sifir aciklik vermez. Kadrani aciklaga
+                //   baglamak, geri donusun tek yolunu yok etti.
+                //   ★★ Anahtar aciklaga DOKUNMAZ: kapatip acmak eski
+                //   bulanikligi aynen geri getirir.
+                // ═══════════════════════════════════════════════════════════════════════════
+                if (ImGui::Checkbox("Depth of Field", &cam.depth_of_field)) {
+                    // ★ Acilirken aciklik hic yazilmamissa f-sayisindan turet;
+                    //   yoksa "actim ama hicbir sey olmadi" sinifi bir kutu
+                    //   olurdu (varsayilan kamerada aciklik 0'dir).
+                    if (cam.depth_of_field && cam.aperture <= 1e-5f) {
+                        cam.setFNumber(cam.fNumber());
+                    }
+                    cam.markDirty();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.syncCameraToBackend(cam);
+                        ctx.backend_ptr->resetAccumulation();
+                    }
+                    ctx.renderer.resetCPUAccumulation();
+                    ProjectManager::getInstance().markModified();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Off = pinhole lens (everything sharp).\n"
+                                      "The f-stop below keeps driving exposure either way.");
+                ImGui::SameLine();
+                if (cam.depth_of_field) {
+                    ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+                                       "lens r %.4f", cam.effectiveLensRadius());
+                } else {
+                    ImGui::TextDisabled("pinhole");
+                }
+
+                // ═══════════════════════════════════════════════════════════════════════════
                 // F-STOP PRESETS - Photographer-friendly aperture selection
+                // ★★ f-sayisi HER ZAMAN aciklagi da yazar (ikisi ayni fiziksel
+                //   buyukluk); goruntude bulaniklik olup olmadigina yukaridaki
+                //   anahtar karar verir.
                 // ═══════════════════════════════════════════════════════════════════════════
                 bool fstop_changed = false;
 
@@ -2307,11 +2319,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         if (ImGui::Selectable(CameraPresets::FSTOP_PRESETS[i].name, is_selected)) {
                             cam.fstop_preset_index = (int)i;
 
-                            // Apply Preset
+                            // Apply Preset -- ★ tek yazar: aciklik + indeks
+                            //   birlikte yazilir, yoksa panelin gosterdigi
+                            //   f-sayisi ile pozlamanin okudugu ayrisir.
                             if (cam.fstop_preset_index > 0) {
-                                float f_mm = (cam.focal_length_mm > 1.0f) ? cam.focal_length_mm : 50.0f;
-                                cam.aperture = CameraPresets::FSTOP_PRESETS[i].aperture_value;
-                                cam.lens_radius = cam.aperture * 0.5f;
+                                cam.setFNumber(CameraPresets::FSTOP_PRESETS[i].f_number);
+                                cam.fstop_preset_index = (int)i;
                             }
                             cam.update_camera_vectors();
                             cam.markDirty();
@@ -2324,20 +2337,27 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 }
 
                 // Manual F-Stop Slider
+                // ★★ Burada IKI elmas vardi: bir `KeyframeButton("##CAp")` ve
+                //   `DrawSmartFloat`in kendi cizdigi elmas. Ikisi de AYNI isi
+                //   yapiyordu (`insertCamKey("Aperture", ...)`) ama farkli
+                //   tooltip gosteriyordu, yani ayni eylem iki isimle duruyordu.
+                //   Diger satirlar (FOV, Focus Dist) zaten tek elmas kullaniyor;
+                //   fazlalik olan sokuldu.
                 bool apKeyed = isCamKeyed(false, false, false, false, true);
-                if (KeyframeButton("##CAp", apKeyed)) { insertCamKey("Aperture", false, false, false, false, true); }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip(apKeyed ? "REMOVE Aperture key" : "ADD Aperture key");
-                ImGui::SameLine();
                 
-                float calc_f_mm = (cam.focal_length_mm > 1.0f) ? cam.focal_length_mm : 50.0f;
-                float current_f = (cam.aperture > 0.001f) ? (calc_f_mm / cam.aperture) : limit_max_f;
+                // ★★★★ Eskiden burada `focal_mm / aperture` vardi: yazma
+                //   formulunun (`focal_mm / f * 0.01`) TERSI DEGILDI, yani
+                //   combo'dan f/2.8 secince panel f/128'e (ust sinira)
+                //   yapisiyordu. Tek okuyucu `fNumber()`.
+                float current_f = cam.fNumber();
                 current_f = std::max(limit_min_f, std::min(current_f, limit_max_f));
 
                 if (SceneUI::DrawSmartFloat("fstop", "F-Stop", &current_f, limit_min_f, limit_max_f, "f/%.2f", apKeyed,
                     [&](){ insertCamKey("Aperture", false, false, false, false, true); }, 16)) {
-                    cam.fstop_preset_index = 0; // Reset to Custom
-                    cam.aperture = (calc_f_mm / current_f) * 0.01f; 
-                    cam.lens_radius = cam.aperture * 0.5f;
+                    // ★ `setFNumber` presete oturuyorsa indeksi de oturtur;
+                    //   oturmuyorsa Custom (0) yazar. Elle yazilan iki satirlik
+                    //   formul boylece ortadan kalkti.
+                    cam.setFNumber(current_f);
                     cam.markDirty();
                     fstop_changed = true;
                 }
@@ -2350,6 +2370,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
+                    // ★★ HUD ucgeninin yaptigi gibi: pozlama carpani post
+                    //   zincirinden ekrana ulasir. Bu iki satir olmadan
+                    //   durgun (converge olmus) bir viewport'ta panel kadrani
+                    //   OLU gorunur -- batch A'da HUD icin duzeltilmisti,
+                    //   panel ayni yoldan gecmiyordu.
+                    rtpost::syncDisplay(ctx.color_processor, ctx.scene.camera.get(), false);
+                    ctx.apply_tonemap = true;
                 }
 
                 // Lens & Aperture Shape Settings
@@ -2452,6 +2479,43 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::SetTooltip("Click on an object in viewport to set focus distance (ignores selection)");
                 }
 
+                // ═══════════════════════════════════════════════════════════════════════════
+                // AF NOKTALARI - viewport overlay popup'indan BURAYA tasindi
+                // ★★★★ Tasima sebebi "yer acmak" degil: AF bir IZLEME overlay'i
+                //   degildir, ODAK MESAFESINI YAZAR. AF-C modunda her karede
+                //   `cam.focus_dist` degisir ve backend yeniden senkronlanir --
+                //   yani bu, kamera durumunu degistiren bir aractir ve kamera
+                //   panelinde, Focus Distance'in yaninda yasamalidir.
+                //   ★★ Histogram/zebra/peaking ise gercekten izleme araci ve
+                //   overlay popup'inda kaldi (orada da CPU render karesini
+                //   okuduklari icin kaynak yokken kapali gosteriliyorlar).
+                // ═══════════════════════════════════════════════════════════════════════════
+                ImGui::Spacing();
+                if (ImGui::Checkbox("AF Points", &viewport_settings.show_af_points))
+                    ProjectManager::getInstance().markModified();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Viewfinder AF grid. Points that are IN FOCUS light up green;\n"
+                                      "click one to focus on it. Needs the Camera HUD to be on.");
+                if (viewport_settings.show_af_points) {
+                    ImGui::Indent();
+                    if (!viewport_settings.show_camera_hud) {
+                        // ★ Kapiyi SOYLE: HUD kapaliyken overlay hic cizilmez ve
+                        //   kutu isaretli gorunurdu -- "actim, hicbir sey olmadi".
+                        ImGui::TextColored(ImVec4(0.98f, 0.78f, 0.35f, 1.0f),
+                                           "Camera HUD is off - AF grid is not drawn.");
+                    }
+                    if (ImGui::Combo("AF Area", &viewport_settings.af_mode,
+                                     "Single\0Zone 9\0Zone 21\0Wide\0Center Weighted\0"))
+                        ProjectManager::getInstance().markModified();
+                    if (ImGui::Combo("Focus Mode", &viewport_settings.focus_mode,
+                                     "MF (Manual)\0AF-S (Single)\0AF-C (Continuous)\0"))
+                        ProjectManager::getInstance().markModified();
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("AF-C keeps writing Focus Distance every frame,\n"
+                                          "so the slider above will move on its own.");
+                    ImGui::Unindent();
+                }
+
                 // Camera navigation controls: angular look is intentionally
                 // independent from world-space pan/zoom/fly scaling.
                 ImGui::Spacing();
@@ -2473,11 +2537,43 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 if (ImGui::CollapsingHeader("Exposure", ImGuiTreeNodeFlags_DefaultOpen)) {
                     bool exposure_changed = false;
 
-                    // Auto Exposure Toggle
-                    if (ImGui::Checkbox("Auto Exposure", &cam.auto_exposure)) {
-                        exposure_changed = true;
+                    // ═══════════════════════════════════════════════════════════
+                    // ★★★★ POZLAMA MODUNUN SAHIBI POST ZINCIRIDIR, KAMERA DEGIL.
+                    //   Burada eskiden bir "Auto Exposure" checkbox'i vardi ve
+                    //   `cam.auto_exposure`i yaziyordu. Yeni post yapisinda
+                    //   (`rtpost::ExposureSettings`) mod uc degerden biridir ve
+                    //   `rtpost::syncDisplay` mode==Physical iken kameranin
+                    //   `auto_exposure` / `use_physical_exposure` bayraklarini
+                    //   ZORLAR, diger modlarda kadranlari HIC okumaz -- yani o
+                    //   checkbox ayari yaziyor ama goruntude karsiligi yoktu.
+                    //   Ayni tek ayar: Render Settings > "Exposure & Color
+                    //   Management" paneli, viewport'taki pozlama ucgeni ve
+                    //   `post.configure_exposure` IPC'si. Ayrilmalari imkansiz.
+                    // ═══════════════════════════════════════════════════════════
+                    const auto& exposure_settings =
+                        ctx.color_processor.params.exposure_settings;
+                    int exp_mode = exposure_settings.mode;
+                    const char* exp_mode_names[] = {"Manual EV", "Physical Camera", "Auto Histogram"};
+                    const char* exp_mode_keys[]  = {"manual", "physical", "auto_histogram"};
+                    ImGui::PushItemWidth(180);
+                    if (ImGui::Combo("Mode", &exp_mode, exp_mode_names, 3)) {
+                        exp_mode = std::max(0, std::min(exp_mode, 2));
+                        const auto result = rtpost::configure(
+                            ctx, nlohmann::json{{"mode", exp_mode_keys[exp_mode]}});
+                        if (result.contains("__error"))
+                            SCENE_LOG_INFO("Exposure mode rejected: " + result["__error"].get<std::string>());
                     }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Automatically adjust exposure based on scene brightness");
+                    ImGui::PopItemWidth();
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "Manual EV       = only the post chain's own EV is applied.\n"
+                            "Physical Camera = the ISO / shutter / f-stop dials below are read.\n"
+                            "Auto Histogram  = metered from the HDR frame.");
+
+                    // ★ Kadranlar okunmuyorsa KAPALI cizilir. Cevirilebilir ama
+                    //   etkisiz bir kadran, bu deponun en pahali hata sinifidir.
+                    const bool dials_live = (exposure_settings.mode == 1);
+                    if (!dials_live) ImGui::BeginDisabled();
 
                     ImGui::Spacing();
 
@@ -2539,38 +2635,73 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
                     ImGui::PopItemWidth();
 
-                    // EV Compensation
+                    // f-stop preset — ★ Bu panelde EKSIKTI: pozlama ucgeninin
+                    //   ucuncu kadrani buradan duzenlenemiyordu, yani script ve
+                    //   HUD'dan degistirilebilen bir alan panelde yoktu.
+                    //   ★★ Alan derinligi HALA `aperture` kadranindan gelir;
+                    //   bu preset pozlamayi ve Cinema lens kusurlarini surer.
+                    ImGui::PushItemWidth(180);
+                    {
+                        int fs_idx = std::max(0, std::min(cam.fstop_preset_index,
+                                                          (int)CameraPresets::FSTOP_PRESET_COUNT - 1));
+                        if (ImGui::BeginCombo("f-stop", CameraPresets::FSTOP_PRESETS[fs_idx].name)) {
+                            for (size_t i = 0; i < CameraPresets::FSTOP_PRESET_COUNT; ++i) {
+                                bool is_selected = (cam.fstop_preset_index == (int)i);
+                                if (ImGui::Selectable(CameraPresets::FSTOP_PRESETS[i].name, is_selected)) {
+                                    cam.fstop_preset_index = (int)i;
+                                    exposure_changed = true;
+                                }
+                                if (is_selected) ImGui::SetItemDefaultFocus();
+                            }
+                            ImGui::EndCombo();
+                        }
+                    }
+                    ImGui::PopItemWidth();
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Drives EXPOSURE and Cinema lens imperfections.\n"
+                                          "Depth of field still comes from the Aperture dial.");
+
+                    // EV Compensation — ★★ bu da yalnizca Physical modda okunur
+                    //   (`Camera::exposureFactor()` icinde carpilir). Manual ve
+                    //   Auto modlarinda gecerli olan post zincirinin KENDI EV'si.
                     ImGui::PushItemWidth(150);
                     if (ImGui::SliderFloat("EV Comp", &cam.ev_compensation, -2.0f, 2.0f, "%+.1f EV")) {
                         exposure_changed = true;
                     }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Exposure Value compensation");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera EV compensation (Physical Camera mode only)");
                     ImGui::PopItemWidth();
+
+                    if (!dials_live) ImGui::EndDisabled();
 
                     // Trigger Update if changed
                     if (exposure_changed) {
-                        // Enable physical exposure mode when ISO/Shutter/F-stop are modified
-                        cam.use_physical_exposure = true;
-                        
+                        // ★★★ Burada eskiden `cam.use_physical_exposure = true`
+                        //   vardi; o bayrak artik modun kendisi tarafindan
+                        //   suruluyor. Kadranin sonucu ekrana POST ZINCIRINDEN
+                        //   ulasir: syncDisplay yeni carpani `g_display_post`e
+                        //   yazar, `apply_tonemap` converge olmus karenin de
+                        //   yeniden tonemap edilmesini saglar.
                         if (ctx.backend_ptr) {
                             ctx.renderer.syncCameraToBackend(cam);
                             ctx.backend_ptr->resetAccumulation();
                         }
                         ctx.renderer.resetCPUAccumulation();
+                        rtpost::syncDisplay(ctx.color_processor, &cam, false);
+                        ctx.apply_tonemap = true;
                     }
 
-                    // Calculate and show exposure info
-                    // Use literal ISO value (cam.iso) for EV calc, not just preset index multiplier
-                    float iso_mult = (float)cam.iso / 100.0f; 
-                    float shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[cam.shutter_preset_index].speed_seconds; 
-                    float aperture_area = cam.aperture * cam.aperture;
-                    cam.calculated_ev = log2f(100.0f / (iso_mult * shutter_time * aperture_area + 0.0001f)) + cam.ev_compensation;
-
-                    ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.7f, 1.0f), "Exposure: %.1f EV", cam.calculated_ev);
-
-                    if (cam.auto_exposure) {
+                    // ★★★ SONUC, AYAR DEGIL: shader'a giden carpan.
+                    //   Buradaki eski satir `cam.calculated_ev`i kendi
+                    //   formuluyle hesaplayip yaziyordu -- ve o formul f-sayisi
+                    //   yerine DoF `aperture`ini kullaniyordu, yani hicbir yerde
+                    //   uygulanmayan bir sayiyi "Exposure" diye gosteriyordu.
+                    //   `g_display_post.camera_exposure` post modunun KAPISINDAN
+                    //   gecmis degerdir; `post.get_exposure` ayni sayiyi doner.
+                    ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.7f, 1.0f),
+                                       "Camera exposure: x%.4f", g_display_post.camera_exposure);
+                    if (!dials_live) {
                         ImGui::SameLine();
-                        ImGui::TextDisabled("(Auto Active)");
+                        ImGui::TextDisabled("(dials not read)");
                     }
                 }
                 
@@ -2606,10 +2737,15 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Distance to the focused object");
                     
                     // Simple Depth of Field
-                    float dof_strength = 1.0f - std::min(1.0f, cam.aperture * 20.0f);  // Invert for intuitive slider
+                    float dof_strength = cam.depth_of_field
+                                       ? (1.0f - std::min(1.0f, cam.aperture * 20.0f))
+                                       : 1.0f;  // Invert for intuitive slider
                     if (ImGui::SliderFloat("Background Blur", &dof_strength, 0.0f, 1.0f, "%.2f")) {
                         cam.aperture = (1.0f - dof_strength) * 0.05f;
                         cam.lens_radius = cam.aperture * 0.5f;
+                        // ★ Basit mod kadranini cevirmek anahtari da surer;
+                        //   yoksa kadran hicbir sey yapmiyor gorunurdu.
+                        cam.depth_of_field = (cam.aperture > 1e-5f);
                         if (ctx.backend_ptr) {
                             ctx.renderer.syncCameraToBackend(cam);
                             ctx.backend_ptr->resetAccumulation();

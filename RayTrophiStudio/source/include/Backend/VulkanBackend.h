@@ -1213,20 +1213,12 @@ public:
     // Skinning Compute Pipeline
     bool createSkinningPipeline(const std::vector<uint32_t>& computeSPV);
     bool hasSkinningPipeline() const;
-    // Skins ONE BLAS and refits its acceleration structure, in one command
-    // buffer, submitted and fence-waited on the spot. So the RT cost per frame
-    // is (skin + AS refit + submit + wait) x skinned-BLAS-count, on top of the
-    // TLAS update — which is why Vulkan RT is slower than the raster viewport
-    // on the same character even though BOTH run the same skinning.spv over the
-    // same descriptor pool. The difference is acceleration-structure work, not
-    // the skinning maths.
-    //
-    // ★ There WAS a `dispatchSkinningAll(...)` declared here, commented
-    // "batch: 1 submit for all BLASes". It was never defined and never called —
-    // a declaration advertising an optimisation that does not exist, which is
-    // worse than no declaration: it answers "why is RT slow?" with a lie.
-    // Removed (CLAUDE.md rule 5). Batching the per-BLAS submits into one command
-    // buffer is still the real win available here; it is a separate piece of work.
+    // Preferred Rendered/Vulkan RT path: one palette upload and one command
+    // submission for every skinned BLAS. False means the caller should use the
+    // established single-BLAS fallback; no partial batch is submitted.
+    bool dispatchSkinningBatch(const std::vector<Matrix4x4>& boneMatrices);
+
+    // Single-BLAS compatibility/fallback path.
     void dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix4x4>& boneMatrices);
     bool dispatchSkinningToBuffers(BufferHandle& baseVertexBuffer,
                                    BufferHandle& baseNormalBuffer,

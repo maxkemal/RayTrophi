@@ -242,7 +242,12 @@ void SceneUI::processAnimations(UIContext& ctx) {
                      c_changed = true;
                  }
                  // Others: Aperture, Focal Length
-                 if (kf.camera.has_aperture) { ctx.scene.camera->aperture = kf.camera.has_aperture; c_changed = true; }
+                 // ★★★ Buraya BAYRAK yaziliyordu: `aperture = has_aperture`,
+                 //   yani anahtarlanmis her karede aciklik 1.0 oluyordu
+                 //   (kadranin ust sinirinin ~4 kati). Deger alani
+                 //   `lens_radius`'tur -- TimelineWidget ayni yerde dogru
+                 //   okuyordu, bu kopya okumuyordu.
+                 if (kf.camera.has_aperture) { ctx.scene.camera->aperture = kf.camera.lens_radius; c_changed = true; }
                  if (kf.camera.has_focus) { ctx.scene.camera->focus_dist = kf.camera.focus_distance; c_changed = true; }
 
                  if (c_changed) anything_changed = true;

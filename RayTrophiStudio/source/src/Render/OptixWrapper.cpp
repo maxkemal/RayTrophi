@@ -1,4 +1,6 @@
 #include "PostProcess/Exposure.h"
+#include <vector>
+#include <cstdlib>   // std::getenv (RAYTROPHI_OPTIX_VALIDATION)
 #include "oidn_blend_cuda.h"
 #include "OptixWrapper.h"
 #include "fft_ocean.cuh"
@@ -15,6 +17,7 @@
 #include <cmath>        // std::isfinite for hair validation
 #include <set>          // for unique_nodes in TLAS building
 #include <atomic>
+#include <mutex>
 #include <future>
 #include <thread>
 
@@ -36,6 +39,18 @@
 #include <HittableList.h>
 #include "Triangle.h"
 #include "../include/sbt_data.h"
+
+// First-CUDA-error latch. Defined below in an anonymous namespace; some call
+// sites come BEFORE that definition, so the forward declaration is required.
+namespace {
+void rtNoteCudaError(const char* site);
+void rtLatchCudaError(cudaError_t err, const char* site);
+void rtNoteCudaError(cudaError_t observed, const char* site);
+void reportDisplayPostFailure(const char* site, cudaError_t err, const void* hdr,
+                              const void* display, int width, int height);
+}
+#define RT_STRINGIFY_(x) #x
+#define RT_STRINGIFY(x) RT_STRINGIFY_(x)
 #define OPTIX_CHECK(call)                                                       \
     do {                                                                        \
         OptixResult res = call;                                                 \
@@ -67,6 +82,11 @@
                 " (" + std::to_string(static_cast<int>(err)) + ")" +            \
                 " at " + std::string(__FILE__) + ":" + std::to_string(__LINE__) \
             );                                                                  \
+            /* Latch BEFORE dying. This macro used to terminate without         \
+               touching the latch, so the terminate handler reported "no CUDA   \
+               error latched -> independent fault" for a crash this macro       \
+               itself caused. A silent tripwire is worse than none. */          \
+            rtLatchCudaError(err, "CUDA_CHECK " __FILE__ ":" RT_STRINGIFY(__LINE__));\
             std::terminate();                                                   \
         }                                                                       \
     } while (0)
@@ -90,7 +110,7 @@ cudaTextureObject_t sanitizeCudaTextureObject(cudaTextureObject_t texture) {
     cudaResourceDesc resourceDesc = {};
     const cudaError_t descErr = cudaGetTextureObjectResourceDesc(&resourceDesc, texture);
     if (descErr != cudaSuccess) {
-        cudaGetLastError();
+        rtNoteCudaError(descErr, "getTextureObjectResourceDesc");
         return 0;
     }
 
@@ -155,10 +175,174 @@ OptixWrapper::OptixWrapper()
 
    // initialize();
 }
+// ===========================================================================
+// FIRST-CUDA-ERROR LATCH (2026-09-17)
+//
+//   `unspecified launch failure (719)` is STICKY: once the context is poisoned
+//   every subsequent CUDA call returns the same error. This file had about ten
+//   `cudaGetLastError()` calls that swallowed it silently, and the consequence
+//   was that the error got reported not where it ORIGINATED but at the first
+//   place that did not swallow it. That is why the call stack and the line
+//   number mislead.
+//
+//   The latch records the first error and where it surfaced ONCE, then keeps
+//   swallowing the rest -- so it adds no noise but never loses the origin.
+//   The swallowing behaviour is deliberate: turning these into throwing checks
+//   would close the faulty path and destroy the measurement at the same time.
+// ===========================================================================
+// Bridge to the crash log file owned by Main.cpp.
+void rtEmergencyLog(const std::string& message);
+
+namespace {
+std::atomic<int>  g_rtFirstCudaError{0};      // cudaSuccess
+std::string       g_rtFirstCudaErrorSite;
+std::mutex        g_rtFirstCudaErrorMutex;
+
+void rtNoteCudaError(const char* site) {
+    rtLatchCudaError(cudaGetLastError(), site);
+}
+
+// Same, but for callers that ALREADY have the failing call's own return code.
+// Prefer this everywhere the code is in hand: cudaGetLastError() reports the
+// thread's error state, which may belong to some earlier unrelated call, and
+// attributing that to this site both misnames the fault and blocks the real one
+// from being latched. The cudaGetLastError() call is still made, because
+// clearing the (non-sticky) state is what lets the next launch run.
+void rtNoteCudaError(cudaError_t observed, const char* site) {
+    const cudaError_t cleared = cudaGetLastError();
+    rtLatchCudaError(observed != cudaSuccess ? observed : cleared, site);
+}
+
+// Is this error STICKY, i.e. does it poison the CUDA context so that every
+// later call returns it too? Only sticky errors justify the "the line numbers
+// below do not point at the origin" warning, and only sticky errors are fatal.
+// A plain cudaErrorInvalidValue is a local, recoverable complaint -- the
+// process keeps running, and saying otherwise sends the reader hunting a crash
+// that never happened.
+bool rtCudaErrorIsSticky(cudaError_t e) {
+    switch (e) {
+        case cudaErrorLaunchFailure:
+        case cudaErrorLaunchTimeout:
+        case cudaErrorIllegalAddress:
+        case cudaErrorMisalignedAddress:
+        case cudaErrorIllegalInstruction:
+        case cudaErrorInvalidAddressSpace:
+        case cudaErrorInvalidPc:
+        case cudaErrorHardwareStackError:
+        case cudaErrorECCUncorrectable:
+        case cudaErrorAssert:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Latches an EXPLICIT error code. Callers that already consumed the error (the
+// CUDA_CHECK macro, or any API call whose return value was checked directly)
+// must use this one -- cudaGetLastError() would come back clean and the latch
+// would silently record nothing.
+void rtLatchCudaError(cudaError_t e, const char* site) {
+    if (e == cudaSuccess) return;
+    const bool sticky = rtCudaErrorIsSticky(e);
+    bool displaced = false;
+
+    // ! First-error-wins alone is WRONG here. A harmless non-sticky error
+    //   (cudaErrorInvalidValue left over from an unrelated call) would take the
+    //   slot and permanently block the sticky fault we are actually hunting --
+    //   the instrument would hide exactly what it was built to catch. So a
+    //   sticky error is allowed to displace a latched non-sticky one, once.
+    int prev = g_rtFirstCudaError.load();
+    for (;;) {
+        const bool displace = (prev == 0) ||
+                              (sticky && !rtCudaErrorIsSticky(static_cast<cudaError_t>(prev)));
+        if (!displace) return;  // we already hold an equally or more serious error
+        if (g_rtFirstCudaError.compare_exchange_weak(prev, static_cast<int>(e))) {
+            displaced = (prev != 0);
+            break;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_rtFirstCudaErrorMutex);
+        g_rtFirstCudaErrorSite = site ? site : "?";
+    }
+    std::string msg = std::string(displaced
+                        ? "[CUDA] STICKY error DISPLACED the earlier non-sticky latch: "
+                        : "[CUDA] FIRST error surfaced here: ") +
+                    (site ? site : "?") + " -> " + cudaGetErrorString(e) +
+                    " (" + std::to_string((int)e) + "). ";
+    msg += sticky
+        ? "STICKY: every CUDA call AFTER this returns the same error, so the line "
+          "numbers below do NOT point at the origin."
+        : "Not sticky: this is a local complaint, the context is still usable and "
+          "the process is expected to keep running. It does NOT explain a crash.";
+    SCENE_LOG_ERROR(msg);
+    // Also write into the SAME timestamped crash file: if the app dies the
+    // normal log buffer may never reach disk, and the ORDER of the two
+    // events can only be read when they share one file.
+    rtEmergencyLog(msg);
+}
+
+// Display-resolve failures used to run through CUDA_CHECK, which calls
+// std::terminate() outright -- so a frame that simply had no buffers yet took
+// the whole process down, logged as "unspecified launch failure (719)" because
+// the old bool return was mapped to cudaErrorLaunchFailure (= 719).
+//
+// Presentation is not worth a process. Log it (rate limited: it would otherwise
+// repeat every frame), latch it only when it is a genuine device fault, and let
+// the caller skip the frame.
+void reportDisplayPostFailure(const char* site, cudaError_t err,
+                              const void* hdr, const void* display,
+                              int width, int height) {
+    static std::atomic<int> s_logged{0};
+    if (s_logged.fetch_add(1) < 8) {
+        std::string msg = std::string("[OptiX] display post skipped (") + site + "): " +
+                          cudaGetErrorString(err) + " (" + std::to_string((int)err) + ")" +
+                          " hdr=" + (hdr ? "ok" : "NULL") +
+                          " display=" + (display ? "ok" : "NULL") +
+                          " extent=" + std::to_string(width) + "x" + std::to_string(height);
+        if (err == cudaErrorInvalidValue) {
+            msg += " -- buffers not allocated yet, NOT a device fault; frame skipped.";
+        }
+        SCENE_LOG_WARN(msg);
+    }
+    // cudaErrorInvalidValue is our own argument check, so there is nothing in the
+    // CUDA error state to latch and latching it would poison the first-error site.
+    if (err != cudaErrorInvalidValue) {
+        rtNoteCudaError(err, site && std::string(site) == "progressive"
+                        ? "progressive: display post launch"
+                        : "launch: display post launch");
+    }
+}
+}  // namespace
+
+int rtOptixFirstCudaError() { return g_rtFirstCudaError.load(); }
+std::string rtOptixFirstCudaErrorSite() {
+    std::lock_guard<std::mutex> lock(g_rtFirstCudaErrorMutex);
+    return g_rtFirstCudaErrorSite;
+}
+
 void OptixWrapper::partialCleanup() {
     std::lock_guard<std::recursive_mutex> sceneLock(scene_resource_mutex_);
     // Sadece buildFromData'da oluşturulan kaynakları temizle
     // stream ve context gibi önemli yapılar korunur
+
+    // THE MOST DANGEROUS RELEASE SITE (2026-09-17).
+    //   Below this point we free geometry (`d_vertices`, `d_indices`), the
+    //   framebuffer and the pinned host buffers -- memory an in-flight launch
+    //   and the acceleration structure still REFERENCE. The mutex guards only
+    //   the HOST side; it does not stop work already running on the GPU.
+    //   This function runs on scene rebuild and on backend switches, which is
+    //   exactly the window where "RayFusion -> OptiX crashed" happens.
+    //   It is called rarely, so the wait costs nothing per frame.
+    if (stream) {
+        // Latch the sync's OWN result. rtNoteCudaError() here read
+        // cudaGetLastError(), which reports whatever any EARLIER call left in the
+        // thread's error state -- so an unrelated, harmless error got attributed
+        // to this site and then blocked the real fault from ever being latched.
+        rtLatchCudaError(cudaStreamSynchronize(stream), "partialCleanup: sync before releasing");
+    }
+
     bool freedAny = false;
 
     if (d_vertices) {
@@ -380,16 +564,6 @@ void OptixWrapper::clearScene() {
     }
     d_gas_volumes_capacity = 0;
 
-    if (d_pick_buffer) {
-        cudaFree(d_pick_buffer);
-        d_pick_buffer = nullptr;
-    }
-    if (d_pick_depth_buffer) {
-        cudaFree(d_pick_depth_buffer);
-        d_pick_depth_buffer = nullptr;
-    }
-    pick_buffer_size = 0;
-
     // Hair scene resources
     if (m_d_hairVertices) { cudaFree(reinterpret_cast<void*>(m_d_hairVertices)); m_d_hairVertices = 0; }
     if (m_d_hairIndices)  { cudaFree(reinterpret_cast<void*>(m_d_hairIndices));  m_d_hairIndices = 0; }
@@ -408,8 +582,7 @@ void OptixWrapper::clearScene() {
     params.vdb_volume_count = 0;
     params.gas_volumes = nullptr;
     params.gas_volume_count = 0;
-    params.pick_buffer = nullptr;
-    params.pick_depth_buffer = nullptr;
+    params.accum_prev_zero_count = nullptr;
     params_dirty = true;
 
     if (d_params) {
@@ -470,9 +643,13 @@ void OptixWrapper::launch(int w, int h) {
     }
 
     OPTIX_CHECK(optixLaunch(pipeline, stream, d_params, sizeof(RayGenParams), &sbt, w, h, 1));
-    if (params.accumulation_buffer)
-        CUDA_CHECK(launchOptixDisplayPost(params.accumulation_buffer, d_framebuffer, w, h, stream,
-            params.camera.vignetting_enabled ? params.camera.vignetting_amount : 0.0f, params.camera.vignetting_falloff) ? cudaSuccess : cudaErrorLaunchFailure);
+    if (params.accumulation_buffer) {
+        const cudaError_t post_err = runOptixDisplayPost(params.accumulation_buffer, d_framebuffer, w, h, stream,
+            params.camera.vignetting_enabled ? params.camera.vignetting_amount : 0.0f, params.camera.vignetting_falloff);
+        if (post_err != cudaSuccess) {
+            reportDisplayPostFailure("launch", post_err, params.accumulation_buffer, d_framebuffer, w, h);
+        }
+    }
 }
 
 void OptixWrapper::downloadFramebuffer(uchar4* host_ptr, int width, int height) {
@@ -514,7 +691,8 @@ bool OptixWrapper::downloadDenoiserBuffers(std::vector<float>& color, std::vecto
     const cudaError_t e3 = useAuxiliary ? cudaMemcpy(nrm.data(), src_normal, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost) : cudaSuccess;
     if (e1 != cudaSuccess || e2 != cudaSuccess || e3 != cudaSuccess) {
         // Clear any sticky CUDA error so subsequent launches don't inherit it.
-        cudaGetLastError();
+        rtNoteCudaError(e1 != cudaSuccess ? e1 : (e2 != cudaSuccess ? e2 : e3),
+                        "downloadDenoiserBuffers: accumulation/albedo/normal copy");
         return false;
     }
 
@@ -558,10 +736,10 @@ bool OptixWrapper::downloadStylizePositionBuffer(std::vector<float>& position) {
     std::vector<float4> pos(pixelCount);
     // Raw cudaMemcpy (not CUDA_CHECK): on a resize race we'd rather return false and
     // retry next frame than terminate. No Y-flip — the OptiX GPU buffer is already
-    // bottom-up (see getPickedObjectId), matching the CPU AOV layout.
+    // bottom-up, matching the CPU AOV layout.
     const cudaError_t e = cudaMemcpy(pos.data(), src, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost);
     if (e != cudaSuccess) {
-        cudaGetLastError();
+        rtNoteCudaError(e, "downloadStylizePosition: position AOV copy");
         position.clear();
         return false;
     }
@@ -608,8 +786,9 @@ bool OptixWrapper::applyStylizeGPU(SDL_Surface* surface,
     // Reuse a persistent uint32 staging buffer; (re)allocate only on size change.
     if (!d_stylize_color || stylize_color_w != w || stylize_color_h != h) {
         if (d_stylize_color) { cudaFree(d_stylize_color); d_stylize_color = nullptr; }
-        if (cudaMalloc(&d_stylize_color, colorBytes) != cudaSuccess) {
-            cudaGetLastError();
+        const cudaError_t colorAllocErr = cudaMalloc(&d_stylize_color, colorBytes);
+        if (colorAllocErr != cudaSuccess) {
+            rtNoteCudaError(colorAllocErr, "applyStylizeGPU: stylize color buffer allocation");
             d_stylize_color = nullptr;
             return false;
         }
@@ -637,7 +816,7 @@ bool OptixWrapper::applyStylizeGPU(SDL_Surface* surface,
 
     if (!StylizeGPU::launchStylize(reinterpret_cast<uint32_t*>(d_stylize_color),
                                    pos, alb, nrm, kp, profile, stream)) {
-        cudaGetLastError();
+        rtNoteCudaError("applyStylizeGPU: launchStylize");
         return false;
     }
 
@@ -714,6 +893,10 @@ void OptixWrapper::cleanup() {
     host_converged_count_write_slot = 0;
 
     // Persistent buffers
+    if (d_accum_prev_zero) {
+        cudaFree(d_accum_prev_zero);
+        d_accum_prev_zero = nullptr;
+    }
     if (d_params_persistent) {
         cudaFree(reinterpret_cast<void*>(d_params_persistent));
         d_params_persistent = 0;
@@ -822,9 +1005,33 @@ void OptixWrapper::initialize() {
 
     cudaFree(0); // CUDA başlat
 
+    // The log callback was NULLPTR: OptiX's own diagnostics were discarded
+    // silently. "CUDA error: unspecified launch failure (719)" is merely the
+    // part of such a fault that REACHES us -- OptiX usually names the invalid
+    // record or buffer at the same moment, but nobody was listening.
+    // The same lesson was already paid for on the Vulkan side
+    // (RAYTROPHI_VK_VALIDATION).
     OptixDeviceContextOptions options = {};
-    options.logCallbackFunction = nullptr;
+    options.logCallbackFunction = [](unsigned int level, const char* tag,
+                                     const char* message, void*) {
+        const std::string text = std::string("[OptiX] ") + (tag ? tag : "?") + ": " +
+                                 (message ? message : "");
+        if (level <= 2)      SCENE_LOG_ERROR(text);
+        else if (level == 3) SCENE_LOG_WARN(text);
+        else                 SCENE_LOG_INFO(text);
+    };
     options.logCallbackLevel = 4;
+
+    // Validation mode is OPT-IN: it checks every record and every launch, so it
+    // is expensive, but it is the only thing that names an "unspecified" error
+    // like 719. Exposed through an environment variable so it can be enabled in
+    // Release too, because that is where the fault actually shows up.
+    if (const char* v = std::getenv("RAYTROPHI_OPTIX_VALIDATION")) {
+        if (v[0] == '1' || v[0] == 'y' || v[0] == 'Y') {
+            options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+            SCENE_LOG_INFO("[OptiX] Validation mode force-enabled via RAYTROPHI_OPTIX_VALIDATION.");
+        }
+    }
 
     OPTIX_CHECK(optixInit());
     OPTIX_CHECK(optixDeviceContextCreate(0, &options, &context));
@@ -1602,8 +1809,53 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // Framebuffer for display (uchar4)
     const bool resolution_changed = (prev_width != width || prev_height != height);
     if (!d_framebuffer || resolution_changed) {
+        // ★★★★★ SERBEST BIRAKMADAN ONCE UCUSTAKI ISI BEKLE (2026-09-17).
+        //   Burada iki ayri use-after-free vardi ve ikisi de sessizdi:
+        //   1) `d_framebuffer` o anda bir launch'in ve ona bagli asenkron
+        //      kopyanin HEDEFI olabilir.
+        //   2) Daha kotusu: `host_output_copy_pending[slot] = false` satiri,
+        //      bekleyen asenkron kopyayi OLAYI HIC BEKLEMEDEN "tamamlandi"
+        //      ilan ediyor ve hemen ardindan `cudaFreeHost` o kopyanin
+        //      yazmakta oldugu SABITLENMIS host bellegini birakiyordu.
+        //      Bayragi false yapmak kopyayi durdurmaz; yalnizca bizi kor eder.
+        //
+        //   Belirti: "CUDA error: unspecified launch failure (719)", ve hata
+        //   bir sonraki senkron kontrolde raporlandigi icin CAGRI YIGINI
+        //   yaniltir -- hata bu satirlarda dogar, asagidaki launch'ta gorunur.
+        //   RayFusion/Solid -> OptiX gecisi tam bu durumdur: cozunurluk degisir
+        //   ve onceki backend'in isi henuz bitmemistir. Vulkan RT -> OptiX
+        //   cokmez cunku cozunurluk zaten esittir ve bu dal hic calismaz.
+        //
+        //   Bekleme yalnizca gercekten birakilacak bir sey varken yapilir,
+        //   yani ilk tahsiste maliyeti yoktur.
+        const bool freeingSomething =
+            (d_framebuffer != nullptr) ||
+            (host_output_buffers[0] != nullptr) || (host_output_buffers[1] != nullptr);
+        if (freeingSomething) {
+            // Latch the sync's OWN result. rtNoteCudaError() here read
+            // cudaGetLastError(), which reports whatever any EARLIER call left in the
+            // thread's error state -- so an unrelated, harmless error got attributed
+            // to this site and then blocked the real fault from ever being latched.
+            rtLatchCudaError(cudaStreamSynchronize(stream), "resize: sync before releasing framebuffer/pinned");
+        }
+
+        // Null the handle BEFORE reallocating. cudaMalloc's result was unchecked
+        // here, so a failed allocation left d_framebuffer holding the address we
+        // had just freed -- non-null, therefore "alive" to every later check, and
+        // handed straight to optixLaunch. Same class as the device-lost path:
+        // a non-null pointer is not evidence of a live buffer.
         if (d_framebuffer) cudaFree(d_framebuffer);
-        cudaMalloc(&d_framebuffer, pixel_count * sizeof(uchar4));
+        d_framebuffer = nullptr;
+        const cudaError_t fbAllocErr = cudaMalloc(&d_framebuffer, pixel_count * sizeof(uchar4));
+        if (fbAllocErr != cudaSuccess) {
+            d_framebuffer = nullptr;
+            rtNoteCudaError(fbAllocErr, "resize: framebuffer allocation");
+            SCENE_LOG_ERROR("[OptiX] framebuffer allocation failed (" +
+                            std::to_string(width) + "x" + std::to_string(height) +
+                            ") - skipping this frame.");
+            rendering_in_progress = false;
+            return;
+        }
         for (int slot = 0; slot < 2; ++slot) {
             if (host_output_buffers[slot]) {
                 cudaFreeHost(host_output_buffers[slot]);
@@ -1614,6 +1866,13 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         host_output_buffer_capacity = 0;
         host_output_display_slot = -1;
         host_output_write_slot = 0;
+        if (resolution_changed) {
+            ++accum_wipe_resolution;
+            accum_last_wipe_from[0] = prev_width;
+            accum_last_wipe_from[1] = prev_height;
+            accum_last_wipe_to[0] = width;
+            accum_last_wipe_to[1] = height;
+        }
         prev_width = width;
         prev_height = height;
         accumulation_valid = false; // Force reset on resolution change
@@ -1626,6 +1885,15 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     }
 
     if (!host_output_buffers[0] || !host_output_buffers[1] || host_output_buffer_capacity < pixel_bytes) {
+        // Ayni tehlike: bekleyen bir asenkron kopyanin HEDEFI olan sabitlenmis
+        // host bellegini birakmadan once ucustaki isi bekle.
+        if (host_output_buffers[0] || host_output_buffers[1]) {
+            // Latch the sync's OWN result. rtNoteCudaError() here read
+            // cudaGetLastError(), which reports whatever any EARLIER call left in the
+            // thread's error state -- so an unrelated, harmless error got attributed
+            // to this site and then blocked the real fault from ever being latched.
+            rtLatchCudaError(cudaStreamSynchronize(stream), "progressive: sync before pinned reallocation");
+        }
         for (int slot = 0; slot < 2; ++slot) {
             if (host_output_buffers[slot]) {
                 cudaFreeHost(host_output_buffers[slot]);
@@ -1641,8 +1909,20 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
     // High-precision accumulation buffer (float4: RGB + sample count)
     if (!d_accumulation_float4 || !accumulation_valid) {
+        ++accum_wipe_count;
         if (d_accumulation_float4) cudaFree(d_accumulation_float4);
-        cudaMalloc(&d_accumulation_float4, pixel_count * sizeof(float4));
+        d_accumulation_float4 = nullptr;
+        const cudaError_t accumAllocErr = cudaMalloc(&d_accumulation_float4, pixel_count * sizeof(float4));
+        if (accumAllocErr != cudaSuccess) {
+            d_accumulation_float4 = nullptr;
+            accumulation_valid = false;
+            rtNoteCudaError(accumAllocErr, "resize: accumulation allocation");
+            SCENE_LOG_ERROR("[OptiX] accumulation buffer allocation failed (" +
+                            std::to_string(width) + "x" + std::to_string(height) +
+                            ") - skipping this frame.");
+            rendering_in_progress = false;
+            return;
+        }
         cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
         accumulation_valid = true;
     }
@@ -1697,6 +1977,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
     if (camera_changed) {
         // Camera moved - reset accumulation and variance (async to avoid CPU stall)
+        ++accum_wipe_camera;
         cudaMemsetAsync(d_accumulation_float4, 0, pixel_count * sizeof(float4), stream);
         if (d_denoiser_albedo) cudaMemsetAsync(d_denoiser_albedo, 0, pixel_count * sizeof(float4), stream);
         if (d_denoiser_normal) cudaMemsetAsync(d_denoiser_normal, 0, pixel_count * sizeof(float4), stream);
@@ -1747,11 +2028,6 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // Samples per pass: 1 for smooth progressive updates
     // Could increase for faster convergence at cost of UI responsiveness
     int samples_this_pass = 1;
-    
-    // GPU PICKING - Ensure pick buffers are allocated (safety net for first render)
-    if (!d_pick_buffer || pick_buffer_size != static_cast<size_t>(width) * height) {
-        ensurePickBuffers(width, height);
-    }
 
     // ------------------ SETUP PARAMS -----------------------
     params.framebuffer = d_framebuffer;
@@ -1766,10 +2042,6 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
     params.material_count = m_material_count;
     params.volumetric_infos = reinterpret_cast<GpuVolumetricInfo*>(d_volumetric_infos);
-    
-    // GPU PICKING - Set pick buffer pointers for shader access
-    params.pick_buffer = d_pick_buffer;
-    params.pick_depth_buffer = d_pick_depth_buffer;
 
 
 
@@ -1857,6 +2129,19 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // IMPORTANT: Since frame_number and current_pass change every pass, we MUST upload every time
     // during active rendering. The dirty flag optimization is for preventing uploads when idle.
     
+    // Teshis sayaci: her launch'tan ONCE sifirlanir, sonra okunur. Params'a
+    // bagladiktan SONRA yuklemek sart, yoksa cihaz eski isaretciyi gorur.
+    if (!d_accum_prev_zero) {
+        const cudaError_t counterAllocErr =
+            cudaMalloc(reinterpret_cast<void**>(&d_accum_prev_zero), sizeof(unsigned int));
+        if (counterAllocErr != cudaSuccess) {
+            d_accum_prev_zero = nullptr;
+            rtNoteCudaError(counterAllocErr, "progressive: diagnostic counter allocation");
+        }
+    }
+    if (d_accum_prev_zero) cudaMemsetAsync(d_accum_prev_zero, 0, sizeof(unsigned int), stream);
+    params.accum_prev_zero_count = d_accum_prev_zero;
+
     cudaMemcpyAsync(reinterpret_cast<void*>(d_params_persistent), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice, stream);
     params_dirty = false;  // Reset dirty flag after upload
 
@@ -1888,8 +2173,21 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
             &sbt,
             width, height, 1
         ));
-        CUDA_CHECK(launchOptixDisplayPost(d_accumulation_float4, d_framebuffer, width, height, stream,
-            params.camera.vignetting_enabled ? params.camera.vignetting_amount : 0.0f, params.camera.vignetting_falloff) ? cudaSuccess : cudaErrorLaunchFailure);
+        if (d_accum_prev_zero) {
+            unsigned int v = 0u;
+            const cudaError_t counterReadErr = cudaMemcpyAsync(&v, d_accum_prev_zero, sizeof(unsigned int),
+                                cudaMemcpyDeviceToHost, stream);
+            if (counterReadErr == cudaSuccess) {
+                accum_prev_zero_host = v;   // bir kare gecikmeli okunabilir; teshis icin yeterli
+            } else {
+                rtNoteCudaError(counterReadErr, "progressive: diagnostic counter readback");
+            }
+        }
+        const cudaError_t post_err = runOptixDisplayPost(d_accumulation_float4, d_framebuffer, width, height, stream,
+            params.camera.vignetting_enabled ? params.camera.vignetting_amount : 0.0f, params.camera.vignetting_falloff);
+        if (post_err != cudaSuccess) {
+            reportDisplayPostFailure("progressive", post_err, d_accumulation_float4, d_framebuffer, width, height);
+        }
     } else {
         // Empty scene or invalid state - evaluate world/atmosphere on CPU.
         partial_framebuffer.resize(pixel_count);
@@ -2131,9 +2429,12 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera, float exposure_overr
     params.camera.v = optix_to_float3(cpuCamera.v);
     params.camera.w = optix_to_float3(cpuCamera.w);
 
-    params.camera.lens_radius = static_cast<float>(cpuCamera.lens_radius);
+    // ★ Kapiyi burada uygulariz; cekirdek yalnizca yaricapi gorur.
+    params.camera.lens_radius = static_cast<float>(cpuCamera.effectiveLensRadius());
     params.camera.focus_dist = static_cast<float>(cpuCamera.focus_dist);
-	params.camera.aperture = static_cast<float>(cpuCamera.aperture);
+	// ★ Kapi burada da uygulanir; cekirdek "lens kapali" durumunu ayrica
+	//   bilmez, yalnizca sifir buyuklukler gorur.
+	params.camera.aperture = static_cast<float>(cpuCamera.effectiveAperture());
     params.camera.blade_count = cpuCamera.blade_count;
     params.camera.distortion = cpuCamera.distortion;
     
@@ -2422,7 +2723,32 @@ bool OptixWrapper::SaveSurface(SDL_Surface* surface, const char* filename) {
 }
 
 void OptixWrapper::resetBuffers(int width, int height) {
+    ++accum_reset_buffers_calls;
     if (prev_width != width || prev_height != height) {
+        // ★★★★★ UCUSTAKI ISI BEKLE, SONRA SERBEST BIRAK (2026-09-17).
+        //   Asagidaki cudaFree'ler `d_framebuffer` dahil her tamponu birakiyor
+        //   ve bu tamponlari o anda BIR LAUNCH ile ona bagli asenkron kopya
+        //   kullaniyor olabilir. Senkronizasyonsuz birakmak cihaz tarafinda
+        //   use-after-free'dir ve belirtisi tam olarak
+        //   "CUDA error: unspecified launch failure (719)".
+        //
+        //   ★★★★ Bu, cozunurluk her kare "degismis" gibi gorundugu surece SIK
+        //   tetikleniyordu (bkz. BUG_CHANGE_GATE_HALF_UPDATED.md): Solid'den
+        //   dogrudan OptiX'e gecis cokuyordu, Vulkan RT uzerinden gecis
+        //   cokmuyordu -- cunku ikincisinde cozunurluk zaten esitti ve bu dal
+        //   hic calismiyordu. Kapi duzeltilince cokme "gecti" gibi goruldu,
+        //   ama TEHLIKE DEGISMEDI: yalnizca tetikleyici seyreldi. Gercek bir
+        //   cozunurluk degisimi render ucustayken bunu geri getirirdi.
+        //
+        //   Bu bekleme yalnizca gercekten yeniden tahsis edilirken olur, yani
+        //   kare basina bir maliyeti yok. Ayni ders TLAS icin zaten odenmisti
+        //   (ucustaki trace sirasinda AS yikmak = device lost).
+        // Latch the sync's OWN result. rtNoteCudaError() here read
+        // cudaGetLastError(), which reports whatever any EARLIER call left in the
+        // thread's error state -- so an unrelated, harmless error got attributed
+        // to this site and then blocked the real fault from ever being latched.
+        rtLatchCudaError(cudaStreamSynchronize(stream), "resetBuffers: sync before releasing");
+
         if (d_accumulation_buffer) { cudaFree(d_accumulation_buffer); d_accumulation_buffer = nullptr; }
         if (d_variance_buffer) { cudaFree(d_variance_buffer); d_variance_buffer = nullptr; }
         if (d_sample_count_buffer) { cudaFree(d_sample_count_buffer); d_sample_count_buffer = nullptr; }
@@ -2466,9 +2792,6 @@ void OptixWrapper::resetBuffers(int width, int height) {
         accumulated_samples = 0;
         accumulation_valid = false;
     }
-    
-    // GPU PICKING - Always ensure pick buffers exist (handles first-time allocation)
-    ensurePickBuffers(width, height);
 
     cudaMemset(d_accumulation_buffer, 0, sizeof(float) * width * height * 3);
     cudaMemset(d_variance_buffer, 0, sizeof(float) * width * height);
@@ -2476,6 +2799,13 @@ void OptixWrapper::resetBuffers(int width, int height) {
     
     if (d_accumulation_float4) {
         cudaMemset(d_accumulation_float4, 0, sizeof(float4) * width * height);
+        // ★★★★★ Pikselleri sifirlayip SAYACI sifirlamamak, olcu aletini
+        //   yalanci yapar: `accumulated_samples` ilerlemis bir birikim
+        //   raporlarken tamponda piksel basina 1 ornek kalir. 2026-09-17'de
+        //   olculdu: sayac 35, tamponun her pikselinde .w = 1.
+        //   Sifirlama KOSULSUZ oldugu icin (resize kosulunun disinda) sayac da
+        //   kosulsuz sifirlanmali -- ikisi ayni olayin iki yarisi.
+        accumulated_samples = 0;
     }
     if (d_denoiser_albedo) {
         cudaMemset(d_denoiser_albedo, 0, sizeof(float4) * width * height);
@@ -2495,6 +2825,28 @@ void OptixWrapper::resetBuffers(int width, int height) {
 bool OptixWrapper::isAccumulationComplete() const {
     int target_max_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
     return accumulated_samples >= target_max_samples;
+}
+
+bool OptixWrapper::sampleAccumulationW(float& meanW, float& maxW, float& centerW) const {
+    meanW = maxW = centerW = -1.0f;
+    if (!d_accumulation_float4 || prev_width <= 0 || prev_height <= 0) return false;
+    const int row = prev_height / 2;
+    std::vector<float4> line(static_cast<size_t>(prev_width));
+    const float4* src = reinterpret_cast<const float4*>(d_accumulation_float4) +
+                        static_cast<size_t>(row) * prev_width;
+    const cudaError_t rowReadErr = cudaMemcpy(line.data(), src, line.size() * sizeof(float4),
+                                              cudaMemcpyDeviceToHost);
+    if (rowReadErr != cudaSuccess) {
+        rtNoteCudaError(rowReadErr, "sampleAccumulationW: accumulation row readback");
+        return false;
+    }
+    double sum = 0.0;
+    float mx = 0.0f;
+    for (const auto& p : line) { sum += p.w; if (p.w > mx) mx = p.w; }
+    meanW = static_cast<float>(sum / line.size());
+    maxW = mx;
+    centerW = line[line.size() / 2].w;
+    return true;
 }
 
 void OptixWrapper::resetAccumulation() {
@@ -4684,132 +5036,6 @@ void OptixWrapper::updateGasVolumeBuffer(const std::vector<GpuGasVolume>& volume
     
     // Mark params dirty
     params_dirty = true;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GPU PICKING - Object selection from rendered frame
-// ═══════════════════════════════════════════════════════════════════════════════
-
-void OptixWrapper::ensurePickBuffers(int width, int height) {
-    size_t required_size = static_cast<size_t>(width) * height;
-    
-    bool was_allocated = (d_pick_buffer != nullptr && pick_buffer_size > 0);
-    
-    if (pick_buffer_size != required_size) {
-        // Free old buffers
-        if (d_pick_buffer) {
-            cudaFree(d_pick_buffer);
-            d_pick_buffer = nullptr;
-        }
-        if (d_pick_depth_buffer) {
-            cudaFree(d_pick_depth_buffer);
-            d_pick_depth_buffer = nullptr;
-        }
-        
-        // Allocate new buffers
-        if (required_size > 0) {
-            cudaError_t err = cudaMalloc(&d_pick_buffer, required_size * sizeof(int));
-            if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("[OptiX] Pick buffer allocation failed");
-                pick_buffer_size = 0;
-                return;
-            }
-            
-            err = cudaMalloc(&d_pick_depth_buffer, required_size * sizeof(float));
-            if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("[OptiX] Pick depth buffer allocation failed");
-                cudaFree(d_pick_buffer);
-                d_pick_buffer = nullptr;
-                pick_buffer_size = 0;
-                return;
-            }
-            
-            // Initialize to -1
-            cudaMemset(d_pick_buffer, 0xFF, required_size * sizeof(int)); // -1 in two's complement
-            
-            pick_buffer_size = required_size;
-           // SCENE_LOG_INFO("[OptiX] Pick buffers allocated: " + std::to_string(width) + "x" + std::to_string(height));
-            
-            // CRITICAL: If this is first allocation, reset accumulation to trigger frame_number=0
-            // This ensures the shader writes object IDs to the pick buffer
-            if (!was_allocated) {
-                accumulated_samples = 0;
-              //  SCENE_LOG_INFO("[OptiX] Pick buffer first allocation - resetting to frame 0");
-            }
-        }
-    }
-    
-    // Update params
-    params.pick_buffer = d_pick_buffer;
-    params.pick_depth_buffer = d_pick_depth_buffer;
-    params_dirty = true;
-}
-
-int OptixWrapper::getPickedObjectId(int x, int y, int viewport_width, int viewport_height) {
-    if (!d_pick_buffer || pick_buffer_size == 0) {
-        SCENE_LOG_INFO("[OptiX] Pick buffer not ready (ptr=" + std::to_string((uint64_t)d_pick_buffer) + " size=" + std::to_string(pick_buffer_size) + ")");
-        return -1;
-    }
-    
-    // Scale from viewport coordinates to render buffer coordinates
-    // viewport_width/height = 0 means no scaling (coordinates are already in render space)
-    int render_x = x;
-    int render_y = y;
-    if (viewport_width > 0 && viewport_height > 0 && 
-        (viewport_width != Image_width || viewport_height != Image_height)) {
-        render_x = (x * Image_width) / viewport_width;
-        render_y = (y * Image_height) / viewport_height;
-    }
-    
-    // CRITICAL: Flip Y-coordinate!
-    // SDL/ImGui (x,y) -> (0,0) is TOP-LEFT
-    // GPU Buffer Pixel Indexing -> (0,0) is BOTTOM-LEFT (in our renderer's j-loop)
-    // Conversion: buffer_y = (height - 1) - screen_y
-    render_y = (Image_height - 1) - render_y;
-
-    // Bounds check
-    if (render_x < 0 || render_x >= Image_width || render_y < 0 || render_y >= Image_height) {
-        SCENE_LOG_INFO("[OptiX] Pick out of bounds (" + std::to_string(render_x) + "," + std::to_string(render_y) + ") vs (" + std::to_string(Image_width) + "," + std::to_string(Image_height) + ")");
-        return -1;
-    }
-    
-    // Read single value from GPU
-    int pixel_idx = render_y * Image_width + render_x;
-    int object_id = -1;
-    
-    cudaError_t err = cudaMemcpy(&object_id, d_pick_buffer + pixel_idx, sizeof(int), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        SCENE_LOG_ERROR("[OptiX] Pick buffer read failed");
-        return -1;
-    }
-    
-   // SCENE_LOG_INFO("[OptiX] Pick at (" + std::to_string(render_x) + "," + std::to_string(render_y) + ") = object_id " + std::to_string(object_id));
-    return object_id;
-}
-
-std::string OptixWrapper::getPickedObjectName(int x, int y, int viewport_width, int viewport_height) {
-    int object_id = getPickedObjectId(x, y, viewport_width, viewport_height);
-    if (object_id < 0) {
-        return "";
-    }
-    
-    // In TLAS mode, object_id is mesh_idx (SBT index)
-    // Get mesh name directly from accel_manager
-    if (accel_manager) {
-        std::string name = accel_manager->getMeshNameByIndex(object_id);
-        if (!name.empty()) {
-           // SCENE_LOG_INFO("[GPU Pick] mesh_idx=" + std::to_string(object_id) + " -> name='" + name + "'");
-            return name;
-        }
-    }
-    
-    // Fallback: Look up instance ID to node name mapping (for GAS mode)
-    auto it = instance_to_node.find(object_id);
-    if (it != instance_to_node.end()) {
-        return it->second;
-    }
-    
-    return "";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

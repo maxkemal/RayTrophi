@@ -2,6 +2,12 @@
 
 > **Durum:** AKTİF — kök neden bulundu ve düzeltildi, DERLENMEDİ/doğrulanmadı (2026-09-04)
 
+**2026-09-06 ölçüm güncellemesi:** açık uygulamada hem render hem viewport
+tablosunda 2 hacim, viewport'ta 1 dense gas mirror buffer ve `RECORDED` çizim
+kaydı ölçüldü. Aşağıdaki eski yayımlama arızası bu sahnede tekrar etmiyor;
+hacim yine görünmüyor. Yeni shader ışın hesabı bulgusu ve henüz derlenmemiş
+düzeltme: [REALTIME_VOLUME_FINITE_RAYS.md](REALTIME_VOLUME_FINITE_RAYS.md).
+
 ## Belirti
 
 Canlı gaz domain'i **Rendered (Vulkan RT)** modunda doğru çıkıyor,

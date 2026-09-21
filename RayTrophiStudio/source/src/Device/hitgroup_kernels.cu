@@ -686,6 +686,7 @@ extern "C" __global__ void __anyhit__ah() {
         float mask = (hgd->opacity_has_alpha) ? opacity_val.w : opacity_val.x;
         alpha *= mask; 
     }
+    alpha = SurfaceCoverage::materialCoverageOpacity(alpha, hgd->material_id >= 0 && optixLaunchParams.materials && (optixLaunchParams.materials[hgd->material_id].flags & MATERIAL_FLAG_ALPHA_CUTOUT) != 0);
     if (alpha < 0.1f) alpha = 0.0f;
     if (alpha < 1.0f) {
         float3 ray_origin = optixGetWorldRayOrigin();
@@ -734,6 +735,17 @@ extern "C" __global__ void __anyhit__shadow() {
     }
 
     // --- Transmissive surface: coloured pass-through shadow ---
+    if (mat && (mat->flags & MATERIAL_FLAG_ALPHA_CUTOUT) != 0) {
+        float coverage = mat->opacity;
+        if (hgd->has_opacity_tex) {
+            float4 texel = tex2D<float4>(hgd->opacity_tex, uv.x, uv.y);
+            coverage *= hgd->opacity_has_alpha ? texel.w : texel.x;
+        }
+        if (SurfaceCoverage::materialCoverageOpacity(coverage, true) == 0.0f) {
+            optixIgnoreIntersection();
+            return;
+        }
+    }
     if (mat) {
         float tr = mat->transmission;
         if (hgd->has_transmission_tex) {
@@ -797,6 +809,7 @@ extern "C" __global__ void __anyhit__shadow() {
         float mask = (hgd->opacity_has_alpha) ? opacity_val.w : opacity_val.x;
         alpha *= mask;
     }
+    alpha = SurfaceCoverage::materialCoverageOpacity(alpha, hgd->material_id >= 0 && optixLaunchParams.materials && (optixLaunchParams.materials[hgd->material_id].flags & MATERIAL_FLAG_ALPHA_CUTOUT) != 0);
     if (alpha < 0.1f) alpha = 0.0f;
     if (alpha < 1.0f) {
         float3 ray_origin = optixGetWorldRayOrigin();

@@ -157,6 +157,7 @@ void TemplateHubUI::performAutosaveRecovery(UIContext& context, SceneUI& ui, Sce
     auto auto_path = StartupPreferencesManager::instance().getAutosavePath();
     if (std::filesystem::exists(auto_path)) {
         hide();
+        enterSolidViewportForSceneLoad(ui, "hub:autosave_recovery");
         g_ProjectManager.openProject(auto_path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
     }
 }
@@ -173,6 +174,7 @@ void TemplateHubUI::render(UIContext& context, SceneUI& ui, SceneHistory* histor
 
         if (mode == StartupMode::OpenLastProject && !recent_projects_.empty() && recent_projects_[0].exists && !recent_projects_[0].path.empty()) {
             visible_ = false;
+            enterSolidViewportForSceneLoad(ui, "hub:startup_open_last");
             g_ProjectManager.openProject(recent_projects_[0].path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
             return;
         } else if (mode == StartupMode::StartEmpty) {
@@ -465,12 +467,22 @@ void TemplateHubUI::renderSidebar(UIContext& context, SceneUI& ui, SceneHistory*
             
             if (recent.exists) {
                 ImGui::PushStyleColor(ImGuiCol_Text, theme_text);
-                if (ImGui::Selectable(recent.display_name.c_str(), false)) {
-                    hide();
-                    if (!recent.path.empty() && std::filesystem::exists(recent.path)) {
-                        g_ProjectManager.openProject(recent.path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
-                    } else {
-                        launchTemplate("raytrophi.start.general_scene", "discard", context, ui, history);
+                // ★ TEK TIK AÇMAZ. Bu liste bir kısayol listesi; tek tıkla açmak
+                //   yanlışlıkla proje değiştirip üzerinde çalışılan sahneyi
+                //   kapatıyordu. Tek tık SEÇER (görsel geri bildirim), açmak
+                //   çift tık ister.
+                const bool is_selected = (selected_recent_path_ == recent.path);
+                if (ImGui::Selectable(recent.display_name.c_str(), is_selected,
+                                      ImGuiSelectableFlags_AllowDoubleClick)) {
+                    selected_recent_path_ = recent.path;
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        hide();
+                        if (!recent.path.empty() && std::filesystem::exists(recent.path)) {
+                            enterSolidViewportForSceneLoad(ui, "hub:recent_double_click");
+                            g_ProjectManager.openProject(recent.path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
+                        } else {
+                            launchTemplate("raytrophi.start.general_scene", "discard", context, ui, history);
+                        }
                     }
                 }
                 ImGui::PopStyleColor();
@@ -486,6 +498,7 @@ void TemplateHubUI::renderSidebar(UIContext& context, SceneUI& ui, SceneHistory*
                 if (recent.exists && !recent.path.empty()) {
                     if (ImGui::MenuItem("Open Project")) {
                         hide();
+                        enterSolidViewportForSceneLoad(ui, "hub:recent_context_menu");
                         g_ProjectManager.openProject(recent.path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
                     }
                     if (ImGui::MenuItem("Show in Explorer")) {
@@ -892,6 +905,9 @@ void TemplateHubUI::launchTemplate(const std::string& template_id, const std::st
         return;
     }
 
+    // ★ Solid'e düşürmeyi BURADA yapma: TemplateSession::open kuralı kendisi
+    //   uyguluyor ve hub/açılış/IPC'nin ortak boğazı orası. İki yerde yapmak,
+    //   ileride biri değişince sessizce ayrışan iki kod yolu üretirdi.
     const auto opened = raytrophi::templates::TemplateSession::instance().open(
         template_id, policy, context, ui, history);
 

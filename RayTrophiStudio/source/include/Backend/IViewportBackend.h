@@ -21,8 +21,15 @@ public:
 
     // Refit a flat (direct SoA) mesh's raster vertices straight from its DNA SoA (no per-face
     // Triangle facades). Returns false if unsupported / mesh not found so the caller can fall back.
+    // dirtyVertices (optional): the SoA vertex indices the caller KNOWS it wrote
+    // since the last refit. It lets the backend skip its whole-mesh diff, which
+    // is memory-bandwidth bound (~19 ms on a 2M-vertex mesh). Pass it only when
+    // the list provably covers every write since the last refit -- an incomplete
+    // list makes the viewport show stale geometry with no error. nullptr means
+    // "I don't know", and the backend then diffs everything.
     virtual bool updateRasterMeshFromMeshSoA(const std::string& /*nodeName*/,
-                                             const class TriangleMesh* /*mesh*/) { return false; }
+                                             const class TriangleMesh* /*mesh*/,
+                                             const std::vector<uint32_t>* /*dirtyVertices*/ = nullptr) { return false; }
     virtual bool cloneRasterObjectByNodeName(
         const std::string& sourceNodeName,
         const std::string& newNodeName,

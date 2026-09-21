@@ -442,6 +442,7 @@
     <ClInclude Include="source\include\Paint\TerrainPaintAdapter.h" />
     <ClInclude Include="source\include\ParticleSimulation.h" />
     <ClInclude Include="source\include\SimCache.h" />
+    <ClInclude Include="source\include\SimFrameCompress.h" />
     <ClInclude Include="source\include\MeshEdit\HalfEdgeMesh.h" />
     <ClInclude Include="source\include\MeshEdit\MeshTool.h" />
     <ClInclude Include="source\include\MeshEdit\MeshOperation.h" />
@@ -1441,6 +1442,7 @@
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Pose.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanSkinningBatch.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp" />
     <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp" />
     <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp" />
@@ -1763,6 +1765,7 @@
     <ClCompile Include="source\src\Api\RtApiMeshTransaction.cpp" />
     <ClCompile Include="source\src\UI\MeshEditToolDock.cpp" />
     <ClCompile Include="source\src\Api\RtIpcMeshTools.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcMeshEdit.cpp" />
     <ClCompile Include="source\src\Api\RtIpcMeshToolDescriptors.cpp" />
     <ClCompile Include="source\src\Api\RtApiMeshEdit.cpp" />
     <ClCompile Include="source\src\Api\RtApiSpline.cpp" />
@@ -1919,14 +1922,25 @@
     <ClInclude Include="source\include\Animation\RigPoseAuthoringState.h" />
     <ClInclude Include="source\include\Animation\RigPoseAuthoringMath.h" />
     <ClInclude Include="source\include\Animation\RigPoseAuthoring.h" />
+    <ClInclude Include="source\include\Animation\RigBoneCurves.h" />
+    <ClInclude Include="source\include\Animation\RigClipRuntimeSync.h" />
+    <ClInclude Include="source\include\Animation\RigTimelineProjection.h" />
+    <ClInclude Include="source\include\Animation\RigDrivenControls.h" />
     <ClInclude Include="source\include\Api\RtApiRigPoseAuthoring.h" />
     <ClInclude Include="source\include\UI\RigPoseAuthoringUI.h" />
+    <ClInclude Include="source\include\UI\RigFingerFKUI.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\src\Animation\RigPoseAuthoringMath.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\Animation\RigPoseAuthoring.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigBoneCurves.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigClipRuntimeSync.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigTimelineProjection.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigDrivenControls.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\Api\RtApiRigPoseAuthoring.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\UI\RigPoseAuthoringUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\UI\RigFingerFKUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\UI\RigFingerFKViewportUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigJointRules.h" />
@@ -1937,10 +1951,12 @@
     <ClCompile Include="source\src\UI\RigJointProfileUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigControlDisplay.h" />
     <ClInclude Include="source\include\Animation\RigIK.h" />
     <ClInclude Include="source\include\Api\RtApiRigIK.h" />
     <ClInclude Include="source\include\UI\RigIKUI.h" />
     <ClInclude Include="source\src\Api\RtRigIKBindings.h" />
+    <ClCompile Include="source\src\Animation\RigControlDisplay.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\Animation\RigIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\Api\RtApiRigIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ClCompile Include="source\src\Api\RtIpcRigIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>

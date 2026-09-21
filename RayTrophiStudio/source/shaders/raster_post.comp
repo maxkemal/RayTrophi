@@ -1,0 +1,170 @@
+#version 460
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REALTIME RASTER POST — alan derinligi (DoF) + goruntuleme donusumu
+// ═══════════════════════════════════════════════════════════════════════════
+// Girdi : HDR sahne hedefi (RGBA16F, scene-linear) + derinlik (D32)
+// Cikti : 8-bit sRGB hedef (viewport'un okudugu kare)
+//
+// ★★★★ NEDEN BU GECIS VAR: DoF, parlak bir noktanin DAIRE olarak acilmasidir.
+//   Bu ancak tonemap'ten ONCE, kirpilmamis HDR degerlerde yapilabilir. Raster
+//   viewport eskiden goruntuleme donusumunu HER SHADER'IN ICINDE uyguluyordu
+//   (material_preview_frag / sky / volume / sdf_surface), yani ortada
+//   bulanistirilacak HDR bir ara hedef YOKTU: elde olan 8-bit, display-encoded
+//   bir kareydi. Onu bulanistirmak bokeh degil GRI LEKE uretir -- parlak nokta
+//   tonemap'te zaten kirpilmistir. Bu yuzden o dort shader artik ham
+//   scene-linear yaziyor ve zincir TEK yerde, burada kosuyor.
+//
+// ★★★ Ekran arayuzu (izgara, gizmo, edit overlay, partikul) bu gecise GIRMEZ:
+//   onlar display-referred cizimlerdir ve post'tan SONRAKI LDR gecisinde
+//   cizilir. Tonemap'ten gecirmek onlarin yazili renklerini bozardi.
+//
+// ★★ CoC formulu path tracer'in lens modeliyle AYNI olmak zorunda: Rendered
+//   ile Realtime ayni sahnede farkli bulaniklik verirse "onizleme yalan
+//   soyluyor" sinifina girer. Turetme:
+//     lens noktasi d kadar kayar, isin odak duzlemindeki F'ye nisan alir;
+//     t derinligindeki bir nokta icin dunya sapmasi = |d| * |zf - t| / zf,
+//     aci = sapma / t, piksel = aci / (2*tan(fov/2)) * yukseklik.
+//   => CoC_px = h * lensRadius * |zf - t| / (zf * t * 2 * tanHalfFovY)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#include "post_chain.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inHDR;    // scene-linear RGBA16F
+layout(set = 0, binding = 1) uniform sampler2D inDepth;  // D32_SFLOAT, [0,1]
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D outLDR;
+
+layout(push_constant) uniform Push {
+    uint  width;
+    uint  height;
+
+    // Goruntuleme donusumu — `g_display_post` aynasindan gelir, tonemap.comp
+    // ile AYNI alanlar (post_chain.glsl tek tanim).
+    float postExposure;
+    float postGamma;
+    float postSaturation;
+    float postColorTemperature;
+    float postVignetteStrength;
+    uint  postToneMapping;
+    uint  postVignetteEnabled;
+    float postCameraExposure;
+
+    // Alan derinligi
+    float focusDist;      // metre, kameranin odak mesafesi
+    float lensRadius;     // dunya birimi (aperture * 0.5) -- 0 ise DoF KAPALI
+    float tanHalfFovY;
+    float depthA;         // zFar * zNear
+    float depthB;         // zNear - zFar        } t = A / (d*B + C)
+    float depthC;         // zFar
+    float maxCoC;         // piksel tavani (performans)
+    uint  maxTaps;        // orneklem tavani
+} pc;
+
+const float GOLDEN_ANGLE = 2.39996323;
+
+float linearDepth(float d) {
+    // Arka duzlemde (d==1) payda sifira gider; sonsuz yerine cok buyuk bir
+    // mesafe donmesi DoF acisindan dogru davranistir (arka plan tam bulanik).
+    float denom = d * pc.depthB + pc.depthC;
+    return (abs(denom) < 1e-9) ? 1e9 : (pc.depthA / denom);
+}
+
+float cocPixels(float z) {
+    if (z <= 1e-4 || pc.focusDist <= 1e-4 || pc.lensRadius <= 1e-6) return 0.0;
+    float coc = float(pc.height) * pc.lensRadius * abs(pc.focusDist - z) /
+                (pc.focusDist * z * 2.0 * max(pc.tanHalfFovY, 1e-4));
+    return min(coc, pc.maxCoC);
+}
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    if (px.x >= pc.width || px.y >= pc.height) return;
+
+    vec2 texel = 1.0 / vec2(max(pc.width, 1u), max(pc.height, 1u));
+    vec2 uv = (vec2(px) + vec2(0.5)) * texel;
+
+    vec4 center = texture(inHDR, uv);
+    vec3 color = center.rgb;
+
+    // ── Alan derinligi ──────────────────────────────────────────────────────
+    // ★ lensRadius == 0 (varsayilan kamera) ise TEK bir doku okumasi bile
+    //   fazladan yapilmaz: DoF kapaliyken bu gecis duz bir tonemap'tir.
+    if (pc.lensRadius > 1e-6) {
+        float z0 = linearDepth(texture(inDepth, uv).r);
+        float r0 = cocPixels(z0);
+
+        // ★★ Arama yaricapi YALNIZCA merkezin CoC'u olamaz: onde duran bulanik
+        //   bir nesne, arkasindaki KESKIN pikselin uzerine tasmalidir (gercek
+        //   lens bunu yapar). Kaba bir halka ile komsulugun en buyuk CoC'una
+        //   bakilir; bakilmazsa bulanik bir siluetin kenari jilet gibi kalir ve
+        //   bu "DoF calisiyor ama ucuz duruyor" diye raporlanir.
+        float searchR = r0;
+        if (pc.maxCoC > 1.0) {
+            for (int i = 0; i < 8; ++i) {
+                float a = float(i) * (6.2831853 / 8.0);
+                vec2 o = vec2(cos(a), sin(a)) * pc.maxCoC;
+                float zc = linearDepth(texture(inDepth, uv + o * texel).r);
+                // Sadece ONDEKI (daha yakin) komsu tasabilir.
+                if (zc < z0) searchR = max(searchR, cocPixels(zc));
+            }
+        }
+
+        if (searchR > 0.75) {
+            // ★★★ KARESEL OLCEK: Bir bokeh dairesini radyal bant olmadan
+            //   orneklemek icin gereken orneklem sayisi ~ alan = pi*r^2 ile
+            //   orantilidir. Dogrusal olcek (searchR*2) buyuk CoC'ta yalnizca
+            //   32 ornekle dort yarim tur atar; altin aci spirali tamamlanmadan
+            //   kesilen dairenin bant izleri "blok/cizgi" olarak gorunur.
+            //   Karesel olcek (searchR^2 * 0.35) kucuk dairede ucuz,
+            //   buyuk dairede yeterli orneklem uretir.
+            int taps = int(clamp(searchR * searchR * 0.35, 8.0, float(max(pc.maxTaps, 8u))));
+            // Merkez orneklemi: kendi dairesiyle agirliklanir (enerji korunumu
+            // icin 1/(pi r^2) ile orantili; sabit pi sadelesir).
+            // ★ Payda min 0.25: r0 kucukken 1/r0^2 patlayip merkezi baskin
+            //   yapar ve "parlak nokta" artefakti olusur.
+            float w0 = 1.0 / max(r0 * r0, 0.25);
+            vec3 acc = color * w0;
+            float wsum = w0;
+
+            for (int i = 0; i < taps; ++i) {
+                float t = (float(i) + 0.5) / float(taps);
+                float radius = searchR * sqrt(t);          // esit alan dagilimi
+                float angle = float(i) * GOLDEN_ANGLE;
+                vec2 offset = vec2(cos(angle), sin(angle)) * radius;
+
+                vec2 suv = uv + offset * texel;
+                float zt = linearDepth(texture(inDepth, suv).r);
+                float ct = cocPixels(zt);
+
+                // ★★★ SCATTER-AS-GATHER: bir orneklem merkeze ancak KENDI
+                //   dairesi merkezi ORTUYORSA katkida bulunur. Bu kural
+                //   olmadan keskin bir arka plan, onundeki bulanik nesnenin
+                //   uzerine sizar ve belirti "arka plan hayalet birakiyor"
+                //   olur -- yanlis tarafa bakarsin.
+                float influence = clamp(ct - radius + 1.0, 0.0, 1.0);
+                if (influence <= 0.0) continue;
+
+                float w = influence / max(ct * ct, 0.25);
+                acc += texture(inHDR, suv).rgb * w;
+                wsum += w;
+            }
+            color = acc / max(wsum, 1e-6);
+        }
+    }
+
+    // ── Goruntuleme donusumu (TEK yer) ──────────────────────────────────────
+    RtPostParams p;
+    p.exposure         = pc.postExposure;
+    p.gamma            = pc.postGamma;
+    p.saturation       = pc.postSaturation;
+    p.colorTemperature = pc.postColorTemperature;
+    p.vignetteStrength = pc.postVignetteStrength;
+    p.toneMapping      = pc.postToneMapping;
+    p.vignetteEnabled  = pc.postVignetteEnabled;
+    p.cameraExposure   = pc.postCameraExposure;
+
+    vec3 srgb = rtApplyPost(color, p, uv);
+    imageStore(outLDR, ivec2(px), vec4(srgb, clamp(center.a, 0.0, 1.0)));
+}

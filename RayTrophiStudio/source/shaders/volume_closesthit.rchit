@@ -641,26 +641,22 @@ bool volSampleLight(LightData light, vec3 pos, float ru, float rv,
 //
 // The phase function and shadow transmittance are still evaluated once per
 // segment. They vary smoothly; the singularity lives in 1/r^2.
-float volSegmentInvSqAverage(vec3 rayOrigin, vec3 rayDir, vec3 lightPos,
-                             float t0, float t1) {
+float volSegmentInvSqAverageExt(vec3 rayOrigin, vec3 rayDir, vec3 lightPos,
+                                float t0, float t1, float minH) {
     float dt = t1 - t0;
     if (dt <= 1e-9) return 0.0;
     vec3 toLight = lightPos - rayOrigin;
     float tc = dot(toLight, rayDir);              // closest approach along the ray
     float h2 = max(dot(toLight, toLight) - tc * tc, 0.0);
-    float h = sqrt(h2);
-    if (h < 1e-4) {
-        // Ray passes (numerically) through the light: the integral is
-        // 1/(t0-tc) - 1/(t1-tc), which still diverges if the segment contains
-        // tc. Clamp with a small radius so a light sitting exactly on the ray
-        // produces a bright but finite sample instead of an inf that poisons
-        // the whole accumulation buffer.
-        h = 1e-4;
-        h2 = h * h;
-    }
+    float h = max(sqrt(h2), max(minH, 1e-4));
     float a0 = atan((t0 - tc) / h);
     float a1 = atan((t1 - tc) / h);
     return (a1 - a0) / (h * dt);
+}
+
+float volSegmentInvSqAverage(vec3 rayOrigin, vec3 rayDir, vec3 lightPos,
+                             float t0, float t1) {
+    return volSegmentInvSqAverageExt(rayOrigin, rayDir, lightPos, t0, t1, 1e-4);
 }
 
 // ============================================================
@@ -2124,6 +2120,8 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
     return nearestHit <= rangeFar ? nearestHit : -1.0;
 }
 
+#include "volume_overlap_selection.glsl"
+
 void main() {
     // Volume instance index from gl_InstanceCustomIndexEXT
     // (Set via TLASInstance::customIndex when building TLAS for volume objects)
@@ -2208,6 +2206,9 @@ void main() {
     // in the same leaf and the accessor's cached path skips the tree walk entirely.
     // Non-NanoVDB volumes (homogeneous, procedural, cloud) ignore these handles.
     // ══════════════════════════════════════════════════════════════════════════
+    selectForegroundGas(rayOrigin, rayDir, volCount, payload.volumeTraversalMask,
+                        volIdx, vol, tNear, tFar, cameraInsideVolume);
+    const float selectedVolumeSpan = tFar - tNear;
     pnanovdb_buf_t        vdbBuf;
     pnanovdb_map_handle_t vdbMapH;
     pnanovdb_readaccessor_t vdbAcc;
@@ -3028,6 +3029,18 @@ void main() {
             // surface that has no consistent orientation of its own.
             if (takeGlassLobe) {
                 float isoIor = (im.ior > 1.0001) ? im.ior : 1.33;
+                // Same absence the triangle glass lobe had: scatterGlass returns
+                // without NEE, and scene lights carry no geometry in the TLAS, so
+                // the mirror lobe of a transmissive material bound to a liquid had
+                // no light to find. The NEE block further down never runs on this
+                // draw (we return below), which is precisely why it went unnoticed.
+                // Front face only, and the band's own exit push owns the origin.
+                if (!startInside) {
+                    addDielectricDirectLighting(hitPos, Ng, Ng, N, rayDir,
+                                                isoIor, ss.roughness,
+                                                vec3(0.0), 0.0, exitPush,
+                                                payload.seed);
+                }
                 scatterGlass(hitPos,
                              /*macroNormal  */ Ng,  // level-set gradient: the real surface
                              /*shadingNormal*/ N,   // normal-mapped, if a map is bound
@@ -3708,6 +3721,7 @@ void main() {
     // radiance with another's visibility. Variance is resolved across samples.
     vec3  emitterPos = vec3(0.0);
     vec3  emitterRadiance = vec3(0.0);
+    float emitterMinRadius = 1e-4;
     bool  hasEmitter = false;
     float cachedEmitterShadow = 1.0;
     bool  cachedEmitterShadowValid = false;
@@ -3731,6 +3745,7 @@ void main() {
                                 (int(blockIndex) / bdim.x) % bdim.y,
                                 int(blockIndex) / (bdim.x * bdim.y));
                 float blockWorld = vol.majorant_block * max(vol.voxel_size, 1e-6);
+                emitterMinRadius = max(blockWorld * 0.5, 1e-4);
                 vec3 gridOrigin = vec3(vol._ext_reserved[3], vol._ext_reserved[4],
                                        vol._ext_reserved[5]);
                 // Jitter inside the block so a coarse block grid does not read as
@@ -4086,8 +4101,8 @@ void main() {
             if (hasEmitter) {
                 vec3 toEmitter = emitterPos - samplePos;
                 float emitterDist = length(toEmitter);
-                if (emitterDist > 1e-3) {
-                    vec3 emitterDir = toEmitter / emitterDist;
+                if (emitterDist > emitterMinRadius * 0.5) {
+                    vec3 emitterDir = toEmitter / max(emitterDist, 1e-4);
                     float ePhase = dualLobeHG(dot(rayDir, emitterDir), stepAnisotropy,
                                               vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
                     vec3 eAlbedoRGB = vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
@@ -4104,9 +4119,10 @@ void main() {
                             vdbBuf, vdbMapH, vdbAcc, -1.0);
                         cachedEmitterShadowValid = true;
                     }
-                    float eFalloff = volSegmentInvSqAverage(
-                        rayOrigin, rayDir, emitterPos, t, t + dt);
-                    inscatter += emitterRadiance * eFalloff * ePhase
+                    float eFalloff = volSegmentInvSqAverageExt(
+                        rayOrigin, rayDir, emitterPos, t, t + dt, emitterMinRadius);
+                    float selfFade = clamp(emitterDist / max(emitterMinRadius * 2.0, 1e-3), 0.0, 1.0);
+                    inscatter += emitterRadiance * eFalloff * ePhase * selfFade
                                * cachedEmitterShadow * stepScatterColor * eAlbedoRGB;
                 }
             }
@@ -4191,6 +4207,7 @@ void main() {
             // CPU parity integration:
             // step_color = source * (1 - step_transmittance)
             // accumulated += step_color * current_transparency
+            inscatter = clampVolumeRadiance(inscatter, 8.0);
             accumulated_radiance += transmittance * (inscatter + emis) * one_minus_sampleT;
         } else if (any(greaterThan(emis, vec3(0.0)))) {
             // Emission-only medium segment
@@ -4402,7 +4419,7 @@ void main() {
         // So use the raw box interval from the intersection shader — tNear/tFar
         // here may already be clamped by the arbiter or the solid probe, which
         // would make a healthy full traversal look degenerate.
-        float rawSpan = volumeHitAttrib.y - max(volumeHitAttrib.x, 0.0);
+        float rawSpan = selectedVolumeSpan;
         bool degenerateSpan = rawSpan < max(0.01, vol.voxel_size * 0.5);
 
         // Requiring BOTH is strictly narrower than the trap: a trapped segment is

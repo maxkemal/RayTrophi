@@ -103,18 +103,21 @@ skinning matematiğinde değil, **sonrasında**:
 |---|---|---|
 | Skin | ✔ | ✔ |
 | BLAS refit | — | ✔ (aynı komut tamponunda) |
-| Submit + fence | mesh başına | BLAS başına |
+| Submit + fence | mesh başına | bütün skinned BLAS'lar için bir kez |
 | Kare başına ek | — | `drainInFlightTraces()` + `updateTLAS` |
 
 Yani RT **tasarım gereği** daha pahalı ve maliyet **hızlandırma yapısı işi**,
 skinning değil.
 
-★ Başlıkta bir yalan vardı: header'da `dispatchSkinningAll(...)` bildirilmişti,
-yorumu `batch: 1 submit for all BLASes`. **Hiç tanımlanmamış ve hiç
-çağrılmamıştı.** Var olmayan bir optimizasyonu ilan eden bir bildirim, hiç
-bildirim olmamasından kötüdür: "RT neden yavaş?" sorusuna yanlış cevap verir.
-Söküldü (kural 5). Per-BLAS submit'leri tek komut tamponunda toplamak hâlâ
-buradaki gerçek kazanç — ayrı bir iş.
+**2026-09-19 devamı:** Rendered/Vulkan RT yolu artık gerçekten toplu çalışıyor.
+`dispatchSkinningBatch` global bone palette'ini kare başına bir kez yüklüyor;
+bütün compute dispatch'lerini ve BLAS `MODE_UPDATE` refitlerini tek command
+buffer'a kaydedip tek fence bekliyor. Refit scratch tamponları BLAS üzerinde
+kalıcı ve yalnız büyüyor. Hazırlık tamamlanamazsa batch hiçbir kısmi GPU işi
+göndermeden eski `dispatchSkinning` yoluna düşüyor; bu yol doğruluk fallback'i
+olarak korunuyor. TLAS güncellemesi ve önceki trace'i drain etme zorunluluğu
+devam ediyor, dolayısıyla RT raster kadar ucuz olmaz; kaldırılan maliyet karakter
+alt-mesh sayısıyla çarpılan submit/fence, palette kopyası ve scratch alloc/free'dir.
 
 ---
 

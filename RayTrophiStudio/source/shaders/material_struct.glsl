@@ -25,6 +25,7 @@
 // =============================================================================
 #ifndef MATERIAL_STRUCT_GLSL
 #define MATERIAL_STRUCT_GLSL
+#include "surface_coverage.h"
 
 struct Material {
     // Block 1: Albedo + opacity

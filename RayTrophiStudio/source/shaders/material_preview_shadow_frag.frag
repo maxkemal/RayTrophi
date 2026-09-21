@@ -26,15 +26,8 @@ bool validTexture(uint id) {
     return id > 0u && id < max(pc.materialMeta.w, 1u);
 }
 
-vec2 applyUVTransform(vec2 originalUV, const GpuMaterial mat) {
-    vec2 uv = originalUV - vec2(0.5);
-    uv *= vec2(mat.uv_scale_x != 0.0 ? mat.uv_scale_x : 1.0,
-               mat.uv_scale_y != 0.0 ? mat.uv_scale_y : 1.0);
-    float a = radians(mat.uv_rotation_degrees);
-    float c = cos(a), s = sin(a);
-    uv = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
-    return uv + vec2(0.5 + mat.uv_offset_x, 0.5 + mat.uv_offset_y);
-}
+#include "material_preview_uv.glsl"
+#include "material_preview_opacity.glsl"
 
 void main() {
     bool impostor = (vMaterialID & 0x80000000u) != 0u;
@@ -42,14 +35,13 @@ void main() {
     uint index = min(vMaterialID & 0x7fffffffu, count - 1u);
     GpuMaterial mat = materials[index];
     if (impostor) return;
+    // Only the camera prepass excludes transmission. Atlas behavior is retained.
+    if ((pc.materialMeta.y & (1u << 30u)) != 0u &&
+        (((mat.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) == 0u && mat.opacity < 0.999) || mat.transmission > 0.001 ||
+         mat.transmission_tex != 0u || (mat.flags & ((1u << 17u) | (1u << 19u) | (1u << 24u))) != 0u)) discard;
 
-    float opacity = clamp(mat.opacity, 0.0, 1.0);
-    if (validTexture(mat.opacity_tex)) {
-        vec4 texel = texture(textures[nonuniformEXT(mat.opacity_tex)],
-                             applyUVTransform(vTexCoord, mat));
-        bool alpha = ((mat.flags & 256u) != 0u) || (mat.opacity_tex == mat.albedo_tex);
-        opacity *= alpha ? texel.a : texel.r;
-        if (opacity < 0.1) discard;
-    }
+    float opacity = previewSurfaceOpacity(mat, applyUVTransform(vTexCoord, mat), false);
     if (opacity == 0.0) discard;
+    // Partial-alpha receivers must not hide the opaque surface behind them.
+    if ((pc.materialMeta.y & (1u << 30u)) != 0u && opacity < 0.999) discard;
 }

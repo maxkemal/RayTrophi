@@ -59,7 +59,7 @@ void RenderStateManager::markDirty(DirtyScope scope) {
             g_camera_dirty = true;
             break;
         case DirtyScope::World:
-            g_world_dirty = true;
+            markWorldDirty();
             break;
         case DirtyScope::Transforms:
             g_gpu_refit_pending = true;
@@ -100,6 +100,9 @@ void RenderStateManager::clearDirty(DirtyScope scope) {
         case DirtyScope::Textures:   g_materials_dirty = false; break;
         case DirtyScope::Lights:     g_lights_dirty = false; break;
         case DirtyScope::Camera:     g_camera_dirty = false; break;
+        // ★ Yalniz RENDER backend'inin bayragi. Viewport adapter'inin
+        //   bayragini burada silmek, tam da duzeltilen "bir tuketici
+        //   otekinin bildirimini yutuyor" hatasini geri getirirdi.
         case DirtyScope::World:      g_world_dirty = false; break;
         case DirtyScope::Transforms:
             g_gpu_refit_pending = false;

@@ -1,0 +1,165 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_nonuniform_qualifier : require
+layout(local_size_x=8,local_size_y=8) in;
+const float RF_PI=3.14159265358979323846;
+layout(set=0,binding=0) uniform accelerationStructureEXT rfScene;
+// light.w  = gölgelendirilebilen örnek orani (radyans guveni)
+// surface  = xyz geometrik normal, w derinlik
+// aux.x    = OLCULEN gokyuzu gorunurlugu [0,1]
+// aux.y    = gorunurluk verdikti veren ornek orani (0 = OLCUM YOK)
+// ★★★★★ aux, light.w'den AYRI bir guven tasir ve bu ayrim bu gecisin BUTUN
+//   MESELESI. Bir isin duvara carpip malzemesi cozulemediginde radyansi
+//   BILINMEZ ama gorusun KAPALI oldugu OLCULMUSTUR. Ikisini tek sayiya
+//   katlamak, "ne kadar isik geldigini bilmiyorum"u "onumde hicbir sey yok"a
+//   cevirir -- ve tuketici o orani ENGELSIZ gokyuzuyle doldurdugu icin
+//   engellenen her isin pikseli KARARTMAK yerine AYDINLATIR.
+struct GiPixel { vec4 light; vec4 surface; vec4 aux; };
+layout(set=0,binding=1,std430) writeonly buffer RawGi { uvec4 rawMeta; GiPixel raw[]; };
+layout(set=0,binding=2) uniform sampler2D rfEnvRadiance;
+layout(set=0,binding=3) uniform sampler2D giDepth;
+layout(push_constant) uniform Push {
+    mat4 invViewProj;
+    vec4 params; // bounce helper uses z = maximum trace distance
+    // x = zamansal birikim karesi (TAA ornek indisi; 0 = birikim yok)
+    vec4 params2; // z = scene light count, w = bindless capacity
+    uvec4 shape; // width, height, samples, spatial filter radius
+} pc;
+vec2 rfDirectionToUv(vec3 d) {
+    d=normalize(d);
+    return vec2(fract(atan(d.z,d.x)/(2.0*RF_PI)+0.5),acos(clamp(d.y,-1.0,1.0))/RF_PI);
+}
+// No pixel-wide atomic hot spot. Probe dispatches retain their own counters.
+#define RF_BOUNCE_COUNT(counter)
+#define RF_ENV_SCALE pc.params2.y
+// ★★★★★ Emissive UCGEN NEE bu gecise ACIK. Onemli olan yer BURASI, ikinci
+//   sicrama degil: emissive bir lambanin yandaki duvari aydinlatmasi BIRINCI
+//   sicramadir ve bugune kadar o duvarin yarim kure isininin SANSINA
+//   bulunuyordu. Sayi 0 ise hem NEE hem emission bastirmasi kapali kalir --
+//   ikisi ayni kapiya bagli olmak zorunda.
+#define RF_EMISSIVE_COUNT uint(pc.params.x)
+#include "rayfusion_probe_bounce.glsl"
+#include "screen_gi_surface.glsl"
+void main() {
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel,ivec2(pc.shape.xy)))) return;
+    uint index=uint(pixel.y)*pc.shape.x+uint(pixel.x);
+    vec3 p,n; float z,bias;
+    raw[index].light=vec4(0);
+    raw[index].surface=vec4(0,0,0,1);
+    raw[index].aux=vec4(0);
+    if (!giSurface(pixel,p,n,z,bias) || bias>=pc.params.z) return;
+    raw[index].surface=vec4(n,z);
+    vec3 tangent=normalize(cross(abs(n.y)<0.99?vec3(0,1,0):vec3(1,0,0),n));
+    // ★★★★★ KARE ILE DEGISEN TOHUM. Eskiden `rfHash(index+1u)` idi ve yorumu
+    //   "independent of frame number: no temporal accumulation" diyordu -- o
+    //   zaman DOGRU bir tercihti: ortalamasini alacak bir sey yokken donmus
+    //   gurultu en azindan TITREMEZ.
+    //
+    //   2026-09-14'te raster TAA eklendi ve bu tercihi TERSINE CEVIRDI. Donmus
+    //   gurultu her karede AYNI oldugu icin TAA onu ortalayamaz; 16 kare
+    //   biriktirmek ayni goruntuyu 16 kez toplamak demektir. Yani gurultu,
+    //   yakinsayan bir TAA'nin altinda bile aynen durur -- ve belirtisi
+    //   "TAA calismiyor" gibi okunur, oysa TAA dogru calisir, ortalayacak
+    //   FARK yoktur.
+    //
+    // ★★★ Sayac olarak `m_taaFrameIndex` kullaniliyor, ve bu bilincli:
+    //   TAA kapaliyken 0'da kalir, yani tohum yine sabitlenir ve donmus gurultu
+    //   geri gelir -- ortalama alacak bir sey yokken ZATEN dogru olan davranis.
+    //   Tohum tam olarak biriktiren bir sey varken, o kadar sure cozulur.
+    //   4 ornek x 16 kare = 64 etkin ornek, ISIN SAYISI ARTMADAN.
+    uint seed=rfHash(index+1u+uint(pc.params2.x)*2654435761u);
+    float rotation=rfRandom(seed);
+    vec3 sum=vec3(0);
+    uint supportedSamples=0u;
+    // ★★★ Gorunurluk muhasebesi radyans muhasebesinden AYRI yurur.
+    //   skySamples   : isin hicbir seye carpmadi -> o yonde gokyuzu GORUNUYOR
+    //   blockedSamples: isin bir seye carpti -> o yonde gokyuzu KAPALI,
+    //                   malzemesini cozebilsek de cozemesek de.
+    // ★★ Yonler KOSINUS agirlikli PDF'ten cekildigi icin duz oran ZATEN
+    //   kosinus agirlikli ortalama gorunurluktur. Buraya ayrica bir cos(theta)
+    //   carpani eklemek tahmini IKI KEZ agirliklandirip yanli hale getirir.
+    uint skySamples=0u;
+    uint blockedSamples=0u;
+    for (uint sampleIndex=0u;sampleIndex<pc.shape.z;++sampleIndex) {
+        float u=(float(sampleIndex)+rfRandom(seed))/float(pc.shape.z);
+        float phi=2.0*RF_PI*fract(rotation+float(sampleIndex)*0.61803398875);
+        vec3 direction=tangent*(sqrt(u)*cos(phi))+cross(n,tangent)*(sqrt(u)*sin(phi))+n*sqrt(1.0-u);
+        vec3 origin=p+n*bias;
+        rayQueryEXT query;
+        vec3 radiance=vec3(0);
+        rayQueryInitializeEXT(query,rfScene,gl_RayFlagsNoOpaqueEXT,0xFFu,origin,0.001,direction,pc.params.z);
+        while (rayQueryProceedEXT(query)) {
+            if (rayQueryGetIntersectionTypeEXT(query,false)==gl_RayQueryCandidateIntersectionTriangleEXT &&
+                rfCandidateOccludes(rayQueryGetIntersectionInstanceCustomIndexEXT(query,false),
+                    rayQueryGetIntersectionPrimitiveIndexEXT(query,false),rayQueryGetIntersectionBarycentricsEXT(query,false)))
+                rayQueryConfirmIntersectionEXT(query);
+        }
+        if (rayQueryGetIntersectionTypeEXT(query,true)==gl_RayQueryCommittedIntersectionNoneEXT) {
+            ++skySamples;
+            // Finite-distance experiment: geometry beyond the radius is approximated by environment.
+            // ★★★★★ MIP 0 DEGIL: bu bir yarim kure integralinin tek ornegi ve mip 0
+            //   ayni maliyete secilebilecek EN YUKSEK VARYANSLI seviyeydi. Gurultunun
+            //   atmosferli sahnelerdeki ana kokuydu -- bkz. rfEnvHemisphereLod.
+            radiance=max(textureLod(rfEnvRadiance,rfDirectionToUv(direction),
+                                    rfEnvHemisphereLod(pc.shape.z)).rgb,vec3(0))*RF_ENV_SCALE;
+        } else {
+            // ★★★★★ ENGEL, asagidaki HICBIR eleme kapisindan ONCE sayilir.
+            //   Buraya girmis olmak "isin bir yuzeye carpti" demektir; altta
+            //   elenen sey o yuzeyin RENGI, VARLIGI degil. Bu satiri elemenin
+            //   altina tasimak, cozulemeyen her duvari "acik gokyuzu" ilan eder
+            //   -- olculmus bir engeli, olcumun YOKLUGUNA cevirir.
+            ++blockedSamples;
+            uint instance=rayQueryGetIntersectionInstanceCustomIndexEXT(query,true);
+            uint triangle=rayQueryGetIntersectionPrimitiveIndexEXT(query,true);
+            vec2 bary=rayQueryGetIntersectionBarycentricsEXT(query,true);
+            RfBounceMaterial mat; vec2 uv; bool validUv; uvec2 addr; uvec3 corner;
+            // Reject this SAMPLE, not all work already measured for the pixel.
+            // Whole-pixel rejection made usable coverage decrease as q^samples.
+            if (!rfResolveHit(instance,triangle,bary,mat,uv,validUv,addr,corner) || mat.diffuse.w<0.5) continue;
+            // ★★★★★ Arka yuz REDDEDILMEZ. `rfBounceRadiance` normali gelen isina
+            //   dogru cevirir (satir ~373), tipki referans `closesthit.rchit`
+            //   gibi. Eski `continue`, kapali bir ic mekanda orneklerin buyuk
+            //   cogunlugunu atiyordu -- ve atilan her ornek `supportedSamples`
+            //   disinda kaldigi icin tuketici o orani ENGELSIZ gokyuzuyle
+            //   dolduruyordu: engellenen isin pikseli karartmak yerine
+            //   AYDINLATIYORDU.
+            radiance=rfBounceRadiance(instance,triangle,rayQueryGetIntersectionObjectToWorldEXT(query,true),bary,
+                origin+direction*rayQueryGetIntersectionTEXT(query,true),direction,rfHash(seed+sampleIndex));
+        }
+        if (any(isnan(radiance)) || any(isinf(radiance))) continue;
+        sum+=max(radiance,vec3(0));
+        ++supportedSamples;
+    }
+    // ★★★★★ NEE BIRINCI yuzeyde, ornek dongusunun DISINDA: bu bir yarim kure
+    //   ornegi degil, dogrudan isik ornegi. Icine koymak onu ornek sayisiyla
+    //   carpip sonra bolmek olurdu -- ayni deger, bosa atilmis golge isinlari.
+    // ★ Cift sayim yok: `rfBounceRadiance` bu listede temsil edilen bir
+    //   malzemenin emission'ini artik DONDURMUYOR (tek sayim kapisi).
+    // Gorunurluk, radyanstan BAGIMSIZ yazilir: asagidaki erken donuslerin
+    // hicbiri bu olcumu dusurmemeli.
+    {
+        const uint verdicts=skySamples+blockedSamples;
+        raw[index].aux=verdicts>0u
+            ? vec4(float(skySamples)/float(verdicts),
+                   float(verdicts)/float(pc.shape.z),0.0,0.0)
+            : vec4(0.0);   // OLCUM YOK -- 1.0 degil. Varsayilan bir olcum degildir.
+    }
+    vec3 emissive=rfEmissiveNee(p+n*bias,n,seed);
+    if (any(isnan(emissive)) || any(isinf(emissive))) emissive=vec3(0);
+    if (supportedSamples==0u) {
+        // ★★★ Yarim kure orneklerinin hepsi elendiginde bile NEE katkisi
+        //   GECERLIDIR: o golge isini gercekten atildi ve gercekten ulasti.
+        //   Burada donmek, olculmus bir isigi atmak olurdu. `light.w` yine
+        //   0 kalir -- tuketici ambient'i kendi fallback'iyle harmanlar.
+        if (any(greaterThan(emissive,vec3(0.0))))
+            raw[index].light=vec4(max(emissive,vec3(0)),1.0/float(pc.shape.z));
+        return;
+    }
+    vec3 result=emissive+sum/float(supportedSamples); // cosine PDF cancels Lambert's 1/pi
+    if (any(isnan(result)) || any(isinf(result))) return;
+    // Consumer mixes only the unknown fraction with its established ambient.
+    raw[index].light=vec4(max(result,vec3(0)),float(supportedSamples)/float(pc.shape.z));
+}

@@ -17,6 +17,8 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
             case ParticleSystemPreset::Flamethrower:preset_name = "Flamethrower"; break;
             case ParticleSystemPreset::BurningFuelSpill:preset_name = "Burning Fuel Spill"; break;
             case ParticleSystemPreset::IgnitedFuelJet:preset_name = "Ignited Fuel Jet"; break;
+            case ParticleSystemPreset::NuclearCinematic:preset_name = "Nuclear Detonation (Cinematic)"; break;
+            case ParticleSystemPreset::NuclearPhysical:preset_name = "Nuclear Detonation (Physical)"; break;
         }
         // This replaces the old policy that avoided
         // spawning a brand-new system on every click — consecutive preset presses
@@ -108,8 +110,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 sys.render.shape = ParticleRenderShape::Sphere;
                 sys.render.emissive = true;
                 sys.render.base_color = Vec3(1.0f, 0.75f, 0.3f);
-                sys.render.color_end  = Vec3(1.0f, 0.2f, 0.05f);
-                sys.render.color_buckets = 10;
                 sys.render.emission_strength = 8.0f;
                 break;
             }
@@ -209,8 +209,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 sys.render.shape = ParticleRenderShape::Tetra;  // chunky debris (or set SceneMeshes)
                 sys.render.emissive = true;
                 sys.render.base_color = Vec3(1.0f, 0.8f, 0.4f);
-                sys.render.color_end  = Vec3(0.25f, 0.06f, 0.02f);
-                sys.render.color_buckets = 8;
                 sys.render.emission_strength = 6.0f;
                 break;
             }
@@ -342,8 +340,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 sys.render.shape = ParticleRenderShape::Tetra;
                 sys.render.emissive = true;
                 sys.render.base_color = Vec3(1.0f, 0.72f, 0.3f);
-                sys.render.color_end  = Vec3(0.2f, 0.08f, 0.03f);
-                sys.render.color_buckets = 8;
                 sys.render.emission_strength = 5.0f;
                 break;
             }
@@ -426,8 +422,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 sys.render.shape = ParticleRenderShape::Sphere;
                 sys.render.emissive = true;
                 sys.render.base_color = Vec3(1.0f, 0.82f, 0.42f);
-                sys.render.color_end  = Vec3(0.6f, 0.1f, 0.02f);
-                sys.render.color_buckets = 10;
                 sys.render.emission_strength = 9.0f;
                 break;
             }
@@ -531,8 +525,6 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 sys.render.shape = ParticleRenderShape::Sphere;
                 sys.render.emissive = true;
                 sys.render.base_color = Vec3(1.0f, 0.82f, 0.32f);
-                sys.render.color_end = Vec3(0.85f, 0.08f, 0.01f);
-                sys.render.color_buckets = 10;
                 sys.render.emission_strength = 7.0f;
                 break;
             }
@@ -759,6 +751,334 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
 
                 // The coupled SurfaceSDF and gas domain are the final render.
                 sys.render.render_in_raytrace = false;
+                break;
+            }
+            // ── Nuclear detonation ───────────────────────────────────────────
+            //
+            // ★ Two presets, ONE recipe at two scales, and the scale is a single
+            // factor every length below is written against. Two hand-tuned
+            // copies would drift apart the first time either was calibrated.
+            //
+            // They stay SEPARATE presets rather than one with a size dial
+            // because they are not the same shot at two sizes: the cinematic one
+            // is tuned to be iterated on (metre-scale box, viewport-affordable
+            // cell count, a few seconds of sim), the physical one is a
+            // kilometre-scale offline domain. A shared dial would give every
+            // parameter here a hidden "which scale am I in" meaning.
+            //
+            // ★ What makes this a mushroom rather than a big fire:
+            //   1. `gas_ambient_stratification` gives the plume a ceiling of its
+            //      OWN (h* ≈ heat anomaly / stratification). Without it the cap
+            //      is shaped by the domain lid — it silently changes when the
+            //      box is resized, and looks exactly like a settled cloud.
+            //   2. High vorticity confinement rolls the rising cap into a torus.
+            //      That roll is what reads as "mushroom" instead of "column".
+            //   3. A LATE ground-level dust source. The stem is not blast
+            //      debris; it is the afterwind — air drawn back in behind the
+            //      departing fireball, lifting dust seconds later. Authored as a
+            //      time-windowed flow source that starts AFTER the fireball has
+            //      cleared the ground.
+            //
+            // The burn is short and violent (high burn_rate, fast flame
+            // dissipation) unlike Fireball's slow deflagration: a weapon's light
+            // is over in a fraction of a second and everything after it is hot
+            // dust. Copying Fireball's long fuel burn is the obvious mistake and
+            // it produces a petrol fireball wearing a mushroom's shape.
+            case ParticleSystemPreset::NuclearCinematic:
+            case ParticleSystemPreset::NuclearPhysical: {
+                const bool physical = (preset == ParticleSystemPreset::NuclearPhysical);
+                // Length scale, in metres per cinematic unit.
+                const float S = physical ? 80.0f : 1.0f;
+                // ★ Time does NOT scale with S. The solver's seconds are the
+                // timeline's seconds, and a shot nobody can sit through is not a
+                // better shot; the physical preset stretches the stages only far
+                // enough for them to read at its size.
+                const float T = physical ? 6.0f : 1.0f;
+
+                rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
+                rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
+                rt->setGravity(Vec3(0.0f, -9.81f, 0.0f));
+                rt->setLinearDrag(0.8f);
+
+                // Blast debris. These are NOT the stem: they arc and fall back.
+                // Kept sparse on the physical preset, where a single fragment is
+                // sub-voxel and reads as noise rather than as debris.
+                RayTrophiSim::ParticleEmitterDesc debris;
+                debris.name = "Detonation Debris";
+                // ** RE-DERIVED 2026-09-21. Spawning AT the origin rather than
+                // a quarter-unit up: the fireball's own source sits at 1.2, so
+                // lifting the debris only pushed it into the flash where it was
+                // invisible. A direction shorter than unit length biases the
+                // cone downward without narrowing the spread, which is what
+                // makes the fragments arc instead of fountaining.
+                debris.point = Vec3(0.0f, 0.0f, 0.0f);
+                debris.direction = Vec3(0.0f, 0.7f, 0.0f);
+                debris.rate_per_second = 0.0f;
+                debris.burst_count = physical ? 120 : 320;
+                debris.speed = 11.9f * (physical ? 6.0f : 1.0f);
+                debris.spread = 2.6f;
+                // Long enough to still be falling while the stem forms; at
+                // 3.5 the arcs were gone before the cap had shape.
+                debris.lifetime_seconds = 5.85f * T;
+                // ** Was left at the 1.0 default, which is NOT neutral: drag is
+                // 0.8 and gravity 9.81, so a heavier fragment flattened its arc.
+                debris.mass = 0.4f;
+                debris.start_size = 0.09f * S; debris.end_size = 0.02f * S;
+                debris.size_jitter = 0.6f;
+                debris.start_opacity = 1.0f; debris.end_opacity = 0.0f;
+                debris.start_color = Vec3(1.0f, 0.93f, 0.62f);
+                debris.end_color = Vec3(0.35f, 0.18f, 0.10f);
+                debris.angular_velocity = 3.0f; debris.angular_jitter = 5.0f;
+                debris.seed = 0x4e554b45u;
+                rt->addEmitter(debris);
+
+                // ★ Debris carries dust and heat, NOT fuel. The fuel is spent in
+                // the first flash; depositing more along the debris arcs would
+                // keep re-igniting the column and turn the stem back into a fire
+                // plume — which is exactly what the Fireball preset wants and
+                // this one must not have.
+                rt->physicsSettings().grid_density_deposit = 2.2f;
+                rt->physicsSettings().grid_temperature_deposit = 3.0f;
+                rt->physicsSettings().grid_fuel_deposit = 0.0f;
+
+                RayTrophiSim::SimulationGridDomainDesc dom;
+                dom.name = physical ? "Nuclear Gas (Physical)" : "Nuclear Gas";
+                dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
+                dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+                dom.gas_maccormack_advection = true;
+                dom.bounds_min = Vec3(-11.0f * S, 0.0f, -11.0f * S);
+                dom.bounds_max = Vec3( 11.0f * S, 34.0f * S,  11.0f * S);
+                // Cinematic: 22x34x22 m at 0.22 -> 100x155x100 (~1.5M cells).
+                // Physical: 1760x2720x1760 m at 17.6 m -> the SAME cell count.
+                // ★ The physical preset is not FINER, it is BIGGER. Holding the
+                // cell count fixed is what makes the two comparable: if the cap
+                // settles at a different fraction of the domain height, that is
+                // the scale talking and not the resolution.
+                // ** RE-DERIVED 2026-09-21 from a hand-tuned scene. 0.17 gives
+                // 130x200x130 (3.4M cells) at cinematic scale - finer than the
+                // 0.22 this shipped with, and the cap holds its torus at it.
+                dom.voxel_size = 0.17f * S;
+                dom.quality_profile = physical
+                    ? RayTrophiSim::SimulationDomainQualityProfile::Final
+                    : RayTrophiSim::SimulationDomainQualityProfile::Preview;
+                dom.resource_budget_mb = physical ? 4096u : 1536u;
+                dom.channels |= static_cast<uint32_t>(
+                    RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
+                dom.fire_enabled = true;
+                dom.ignition_temperature = 0.12f;
+                dom.burn_rate = 9.0f;            // weapon, not deflagration
+                dom.heat_release = 7.0f;
+                dom.smoke_generation = 2.6f;     // the cloud is mostly this
+                dom.flame_dissipation = 3.4f;    // the flash is brief
+                dom.fire_max_temperature = 10.0f;
+                dom.fire_expansion = 1.15f;      // the shock; drives the ground ring
+                dom.gas_buoyancy_heat = 2.6f;
+                dom.gas_buoyancy_density = 0.02f;
+                // ── Ground dust, lifted by the blast's own wind. ★ This REPLACES
+                // a "Ground Dust Skirt" flow source that this preset shipped
+                // with: a ring at the origin whose radius the author typed, which
+                // did not follow the shock and looked the same on every frame.
+                // Now the shock scours the floor it crosses and the skirt expands
+                // with the front, because that is what actually happens.
+                //
+                // ★ The afterwind stage below ALSO lifts its own dust through this
+                // rule, which is why its flow source no longer carries any: a
+                // mushroom's stem is ground material pulled up behind the
+                // fireball, not smoke injected at the base.
+                dom.gas_surface_dust_enabled = true;
+                // Lower than the 6 m/s default: the afterwind's ground-level
+                // inflow is gentler than the shock, and it has to clear the bar
+                // too or there is no stem at all.
+                dom.gas_surface_dust_threshold = 4.0f;
+                dom.gas_surface_dust_emission = 0.6f;
+                dom.gas_surface_dust_max_density = 2.5f;
+                // ★ MEASURED 2026-09-20: with an unlimited reservoir this preset
+                // produced a uniform ground SHEET (widest slice pinned at 0.07 m,
+                // growing 4 -> 10 m) and a stem as thick as the cap. A finite
+                // reserve is what turns it back into a front that passes.
+                dom.gas_surface_dust_supply = 3.0f;
+
+                // ── Field loss. ★ MEASURED 2026-09-20: without this override the
+                // cloud is gone by ten seconds. The solver's global rates are
+                // 0.5/s for smoke and heat alike, chosen for the thin smoke a
+                // spark carries, and a hybrid preset runs in Spark mode so it
+                // inherits them: peak heat 9.8 -> 0.04 and 311k active cells ->
+                // 8.9k, with every authored parameter here correct.
+                dom.gas_dissipation_override = true;
+                // Pulverised ground and condensate do not evaporate. This is the
+                // number that decides whether there is still a cloud at all.
+                dom.gas_density_dissipation = 0.012f;
+                // The cloud SHOULD cool -- that is what settles it -- just not
+                // 20x faster than it rises.
+                dom.gas_temperature_dissipation = 0.22f;
+                // Fuel is spent in the flash and must not linger.
+                dom.gas_fuel_dissipation = 0.5f;
+                // ★★★ THE PARAMETER THIS PRESET EXISTS FOR.
+                // Cap altitude ≈ (settled heat anomaly) / stratification, and the
+                // target is ~26 of the box's 34 units — inside the domain with
+                // visible headroom, which is how you can SEE that the ceiling is
+                // the physics and not the lid.
+                //
+                // ★★ THIS VALUE IS COUPLED TO gas_temperature_dissipation ABOVE
+                // and the two MUST be re-derived together. A plume that cools
+                // slower keeps its lift longer and settles higher; slowing the
+                // cooling from 0.5/s to 0.22/s without raising this would push
+                // the cap straight into the lid, which is exactly the failure
+                // this parameter was added to remove.
+                //
+                // ★ The 6.5 is EXTRAPOLATED from the 2026-09-20 run (anomaly ~2.4
+                // under the old 0.5/s decay), NOT measured under the new rate.
+                // Test-NuclearPreset.ps1 prints the value the measured cloud
+                // implies — trust that over this comment.
+                dom.gas_ambient_stratification = 6.5f / (26.0f * S);
+                dom.gas_vorticity = 1.15f;       // rolls the cap into a torus
+                dom.turbulence_strength = 0.72f;
+                dom.turbulence_scale = 1.6f / S; // spatial FREQUENCY: inverse length
+                // ** ASKING FOR 8 IS NOT GETTING 8. effectiveTurbulenceOctaves
+                // clamps to what the voxel can actually advect (4 cells per
+                // wavelength), and at 0.17 m with scale 1.6 that is THREE. The
+                // extra five are requested so the same preset resolves more
+                // detail when the domain is refined, and are discarded until
+                // then - gas.get_settings reports turbulence_octaves_effective,
+                // which is the number to trust.
+                dom.turbulence_octaves = 8;
+                // ★ MEASURED 2026-09-20: at 0.56 with lacunarity 2 the octave
+                // amplitudes RISE (1.12^o), so octave 4 — wavelength 0.245 m
+                // against a 0.1375 m voxel — was the STRONGEST component. That is
+                // grid-scale speckle, and it is what made the cap read as
+                // chewed-up lumps instead of a rolling torus.
+                dom.turbulence_persistence = 0.40f;
+                dom.turbulence_speed = 0.8f;
+                dom.shader = VolumeShader::createExplosionPreset();
+                dom.shader_preset = "fire";
+                if (dom.shader) {
+                    // A weapon's core is white, not orange. Raising
+                    // temperature_max is what stops it clipping to a flat orange
+                    // disc at the top of the blackbody ramp.
+                    // ** RE-DERIVED 2026-09-21 from a hand-tuned scene. The
+                    // flash reads white without blowing the whole cap out: the
+                    // window starts well above ambient so cooled smoke stops
+                    // glowing, and the intensity is a quarter of what this
+                    // shipped with because density_multiplier below more than
+                    // doubled.
+                    dom.shader->emission.blackbody_intensity = 16.667f;
+                    dom.shader->emission.temperature_min = 1340.0f;
+                    dom.shader->emission.temperature_max = 5000.0f;
+                    dom.shader->emission.temperature_scale = 1.6f;
+                    // Condensation read: this cap is water and pulverised
+                    // ground, not soot — bright, weakly absorbing, strongly
+                    // forward-scattering.
+                    // ★ An APPEARANCE claim, not a phase change. There is no
+                    // moisture channel in the gas grid, so nothing here
+                    // condenses; it is a look that happens to be the right one.
+                    dom.shader->scattering.color = Vec3(0.82f, 0.80f, 0.78f);
+                    // ** The big one: sigma_s 5.5 -> 0.39 and sigma_a 0.9 ->
+                    // 0.39, with density_multiplier carrying the opacity instead.
+                    // At 5.5 a single voxel was effectively opaque, so the march
+                    // terminated a step or two in and the cap rendered as a hard
+                    // shell - no depth, and the internal rolls invisible.
+                    dom.shader->scattering.coefficient = 0.84f;
+                    dom.shader->scattering.anisotropy = 0.55f;
+                    dom.shader->scattering.multi_scatter = 0.85f;
+                    // ** RE-BALANCED 2026-09-21: sigma_a is now 2x sigma_s and
+                    // density_multiplier came DOWN. The previous pair made the
+                    // cap read as a flat white cut-out; absorbing more per unit
+                    // density while carrying less total density is what gives
+                    // the lobes their shading and keeps the bright side off the
+                    // clip point.
+                    dom.shader->absorption.coefficient = 1.72f;
+                    dom.shader->density.multiplier = 13.194f;
+                    dom.shader->density.cutoff_threshold = 0.007f;
+                    dom.shader->absorption.color = Vec3(0.20f, 0.18f, 0.16f);
+                }
+                rt->addGridDomain(dom);
+
+                // ── Stage 1: the detonation. One frame's worth.
+                RayTrophiSim::SimulationFlowSourceDesc core;
+                core.name = "Detonation Core";
+                core.domain_index = 0;
+                core.position = Vec3(0.0f, 1.2f * S, 0.0f);
+                // ** RE-DERIVED 2026-09-21: 0.9 was ~5 voxels across at this
+                // grid and the flash had no room to form a pressure structure.
+                core.radius = 3.02f * S;
+                core.velocity = Vec3(0.0f, 0.0f, 0.0f);  // fire_expansion does the work
+                core.density = 1.1f;
+                core.temperature = 10.0f;
+                // ** THE FUEL MOVED HERE, and that is the weapon reading: a
+                // device burns its charge in the first flash, it does not feed a
+                // plume. Stage 2 dropped from 5.0 to 0.3 to pay for this.
+                core.fuel = 87.6f;
+                core.falloff = 0.5f;
+                core.use_time_limit = true;
+                core.start_time = 0.0f;
+                core.end_time = 0.05f * T;
+                rt->addFlowSource(core);
+
+                // ── Stage 2: the fireball's own burn, already rising.
+                RayTrophiSim::SimulationFlowSourceDesc fireball;
+                fireball.name = "Fireball Rise";
+                fireball.domain_index = 0;
+                fireball.position = Vec3(0.0f, 2.2f * S, 0.0f);
+                fireball.radius = 1.8f * S;
+                fireball.velocity = Vec3(0.0f, 5.0f, 0.0f);
+                fireball.velocity_coupling = 6.0f;
+                fireball.density = 0.9f;
+                fireball.temperature = 6.0f;
+                fireball.fuel = 0.0f;   // see the note on core.fuel above
+                fireball.falloff = 0.9f;
+                fireball.use_time_limit = true;
+                fireball.start_time = 0.05f * T;
+                fireball.end_time = 0.55f * T;
+                rt->addFlowSource(fireball);
+
+                // ── Stage 3: the AFTERWIND — this is the stem, and its TIMING
+                // is the whole trick. It starts after the fireball has cleared
+                // the ground, so the dust it lifts is drawn up BEHIND the cap
+                // into a narrow column instead of joining the blast.
+                RayTrophiSim::SimulationFlowSourceDesc stem;
+                stem.name = "Stem Afterwind";
+                stem.domain_index = 0;
+                stem.position = Vec3(0.0f, 0.5f * S, 0.0f);
+                stem.radius = 1.95f * S;
+                stem.velocity = Vec3(0.0f, 11.0f, 0.0f);
+                stem.velocity_coupling = 9.0f;
+                // ★★ THIS USED TO BE 0.0, AND THE REASON IT WAS ZERO STILL
+                // STANDS - it is being overridden deliberately, not forgotten.
+                //
+                // The original note: this source is a WIND, not a smoke emitter,
+                // and the material it carries up should be dust the surface rule
+                // lifted off the ground under it, because that is what a stem is
+                // made of. Injecting smoke here makes the stem look right whether
+                // or not gas_surface_dust_enabled does anything.
+                //
+                // ★ SO THE COST IS EXPLICIT: with a non-zero density here, the
+                // stem is NO LONGER EVIDENCE that the ground-dust rule works. To
+                // test that rule, set this to 0 and check a stem still forms.
+                // Test-NuclearPreset.ps1's skirt assertions still cover the
+                // ground ring, which is the other half of the same feature.
+                stem.density = 2.35f;
+                stem.temperature = 0.9f;   // warm enough to rise, too cool to cap
+                // ***** BACK TO ZERO, AND THIS ONE IS LOAD-BEARING.
+                // At 0.5 the column re-ignited along its whole length and the
+                // stem rendered as an orange fire pillar from ground to cap -
+                // exactly what the original note on this preset warned: fuel
+                // deposited along the column turns the stem back into a fire
+                // plume. A real stem is dark lifted dust. MEASURED by eye
+                // 2026-09-21: at 0.0 the column goes dark and keeps only the
+                // residual blackbody glow near the top, which is correct.
+                stem.fuel = 0.0f;
+                stem.falloff = 1.1f;
+                stem.use_time_limit = true;
+                stem.start_time = 0.45f * T;
+                stem.end_time = 4.5f * T;
+                rt->addFlowSource(stem);
+
+                sys.blend_mode = ParticleBlendMode::Additive;
+                sys.render.render_in_raytrace = true;
+                sys.render.shape = ParticleRenderShape::Sphere;
+                sys.render.emissive = true;
+                sys.render.base_color = Vec3(1.0f, 0.86f, 0.58f);
+                sys.render.emission_strength = 14.0f;
                 break;
             }
         }

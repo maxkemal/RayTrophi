@@ -78,7 +78,10 @@ public:
     void syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) override;
     void syncRasterSkinnedVertices(const std::vector<std::shared_ptr<Hittable>>& objects,
                                    const std::vector<Matrix4x4>& boneMatrices) override;
-    bool updateRasterMeshFromMeshSoA(const std::string& nodeName, const TriangleMesh* mesh) override;
+    bool updateRasterMeshFromMeshSoA(const std::string& nodeName, const TriangleMesh* mesh,
+                                     const std::vector<uint32_t>* dirtyVertices = nullptr) override;
+    // Counts hinted refits so every Nth one re-runs the full diff as an audit.
+    uint64_t m_soaRefitHintedCalls = 0;
 protected:
     bool ensureInteractiveViewportResourcesImpl(const std::string& shaderDir, int width, int height) override;
     void destroyInteractiveViewportResourcesImpl(bool keepPipeline = false) override;

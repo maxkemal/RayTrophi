@@ -410,13 +410,11 @@ void drawSimulationDomainControls(
                         case RayTrophiSim::SimulationDomainQualityProfile::Interactive:
                             domain.max_auto_resolution = 96;
                             domain.resource_budget_mb = 512;
-                            domain.force_disk_cache = false;
                             domain.turbulence_octaves = std::min(domain.turbulence_octaves, 2);
                             break;
                         case RayTrophiSim::SimulationDomainQualityProfile::Preview:
                             domain.max_auto_resolution = 192;
                             domain.resource_budget_mb = 1024;
-                            domain.force_disk_cache = false;
                             domain.turbulence_octaves = std::clamp(domain.turbulence_octaves, 2, 4);
                             break;
                         case RayTrophiSim::SimulationDomainQualityProfile::Final: {
@@ -430,14 +428,22 @@ void drawSimulationDomainControls(
                             else if (total_ram_gb_f >= 16.0) dyn_budget_mb = 6144;
                             domain.resource_budget_mb = dyn_budget_mb;
                             domain.enforce_resource_budget = true;
-                            domain.force_disk_cache = false;
                             domain.turbulence_octaves = std::max(domain.turbulence_octaves, 4);
                             break;
                         }
                         case RayTrophiSim::SimulationDomainQualityProfile::Cinema:
                             domain.max_auto_resolution = 1024;
-                            domain.enforce_resource_budget = false; // RAM limit lifted
-                            domain.force_disk_cache = true;         // disk bake mandatory
+                            // * NO RAM LIMIT HERE, AND THAT IS NOW THE WHOLE
+                            //   STORY. This used to also set force_disk_cache,
+                            //   commented "disk bake mandatory" - a field that
+                            //   was written in eight places, serialized, and
+                            //   READ BY NOTHING. Cinema therefore lifted the RAM
+                            //   ceiling and promised a disk bake that never ran:
+                            //   the two settings that were supposed to balance
+                            //   each other, and only one of them existed.
+                            //   The disk bake is a button in the Simulation
+                            //   panel and has to be pressed.
+                            domain.enforce_resource_budget = false;
                             domain.use_sparse_tiles = true;         // required at cinema res
                             domain.turbulence_octaves = std::max(domain.turbulence_octaves, 6);
                             break;
@@ -521,9 +527,83 @@ void drawSimulationDomainControls(
                         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f),
                                            "  (clamped by Max Auto Resolution = %d - raise it below to go higher)", eff_cap);
                     }
+
+                    // *** THE ROW ABOVE PREVIEWS ONE CLAMP; THE SOLVER APPLIES TWO.
+                    //
+                    // Max Auto Resolution is mirrored here, but the adaptive CELL
+                    // BUDGET clamp (y-aspect headroom, 512^3 hard cap, and the
+                    // optional resource budget) runs only inside the solver, which
+                    // then writes the result back into the live state. So this row
+                    // could promise 160x315x160 while the grid being stepped was
+                    // 160x247x160 - and the memory figure beside it described a
+                    // grid that was never built. The Active Resolution row further
+                    // down had the truth all along, which is worse, not better: two
+                    // rows in one panel disagreeing, and the wrong one sitting next
+                    // to the slider where the decision is made.
+                    if (particles && selected_domain_index >= 0) {
+                        const auto& live_states = particles->gridDomainStates();
+                        const std::size_t live_index =
+                            static_cast<std::size_t>(selected_domain_index);
+                        if (live_index < live_states.size() && live_states[live_index].valid) {
+                            const auto& live = live_states[live_index];
+                            if (live.resolution_x > 0 && live.resolution_y > 0 && live.resolution_z > 0 &&
+                                (live.resolution_x != eff_x || live.resolution_y != eff_y ||
+                                 live.resolution_z != eff_z)) {
+                                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f),
+                                    "  in use: %dx%dx%d - the solver clamped this further",
+                                    live.resolution_x, live.resolution_y, live.resolution_z);
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip(
+                                        "The estimate above is what this panel asked for. The solver also\n"
+                                        "applies an adaptive cell budget and a hard 512^3 cap, then writes\n"
+                                        "the resolution it actually built back here.\n"
+                                        "Voxel size follows the value IN USE, not the requested one.");
+                                }
+                            }
+                        }
+                    }
                     if (grid_mb > 3000.0) {
                         ImGui::SameLine();
                         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), " - OOM/freeze risk");
+                    }
+
+                    // **** THE ROW ABOVE IS THE LIVE GRID, AND IT IS NOT WHAT
+                    // RUNS THE MACHINE OUT OF MEMORY. The timeline frame cache
+                    // is, because it holds EVERY scrubbable frame while the live
+                    // grid holds one. That distinction was invisible here: the
+                    // resolution decision is made on this row, and the only
+                    // cache figure in the whole UI lived in another panel.
+                    //
+                    // * MEASURED, NOT ESTIMATED. Tile-sparse + half compression
+                    //   made the per-frame cost depend on how much of the domain
+                    //   actually holds smoke - 0.9 MB on a frame with a small
+                    //   fireball, a few MB once the cloud fills out. Any formula
+                    //   from cell count alone would be wrong in both directions,
+                    //   and it was wrong by ~68x before compression landed.
+                    const std::size_t cache_bytes = scene.simFrameCacheBytes();
+                    const int cache_frames = scene.cachedSimFrameCount();
+                    if (cache_frames > 0) {
+                        const double cache_mb_total = cache_bytes / (1024.0 * 1024.0);
+                        const double per_frame_mb = cache_mb_total / static_cast<double>(cache_frames);
+                        const double budget_mb_total =
+                            static_cast<double>(scene.simFrameCacheBudgetBytes()) / (1024.0 * 1024.0);
+                        const double used_fraction =
+                            budget_mb_total > 0.0 ? cache_mb_total / budget_mb_total : 0.0;
+                        const ImVec4 cache_col =
+                            (used_fraction > 0.85) ? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)
+                          : (used_fraction > 0.50) ? ImVec4(1.0f, 0.75f, 0.30f, 1.0f)
+                                                   : ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
+                        ImGui::TextColored(cache_col,
+                            "Frame cache: %.0f MB over %d frames (~%.1f MB/frame, budget %.0f MB)",
+                            cache_mb_total, cache_frames, per_frame_mb, budget_mb_total);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Measured, not estimated - compressed size of the frames currently cached.\n"
+                                "This is the figure that limits how much timeline you can scrub, and it\n"
+                                "grows with how much of the domain holds smoke, not with cell count alone.\n"
+                                "When the budget is reached the oldest frames are dropped; bake to disk\n"
+                                "(Simulation panel) to scrub a long range without holding it in RAM.");
+                        }
                     }
                 }
 
@@ -821,11 +901,115 @@ void drawSimulationDomainControls(
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Density-driven lift. Keep modest for stable smoke columns.");
                         }
+                        ImGui::DragFloat("Stratification", &domain.gas_ambient_stratification,
+                                         0.002f, 0.0f, 5.0f, "%.4f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Stable layering of the air inside this box: how much the\n"
+                                "SURROUNDING temperature rises per metre above the domain floor.\n"
+                                "0 = uniform air, so a hot plume climbs until the lid stops it.\n"
+                                "Above 0 the plume stops where its heat anomaly runs out and\n"
+                                "spreads sideways - this is what gives a mushroom cap an\n"
+                                "altitude of its own: roughly (plume heat) / (this value) metres.");
+                        }
                         ImGui::DragFloat("Solved Vorticity", &domain.gas_vorticity,
                                          0.01f, 0.0f, 50.0f, "%.3f");
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Grid-solver vorticity confinement. Separate from procedural turbulence.");
                         }
+                        ImGui::Separator();
+                        ImGui::Checkbox("Surface Dust", &domain.gas_surface_dust_enabled);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Wind lifts dust off the domain floor and off the tops of\n"
+                                "colliders, once it blows hard enough ACROSS them.\n"
+                                "This is what gives a blast a ground skirt that EXPANDS with\n"
+                                "its own shock front, instead of a ring placed at the origin\n"
+                                "whose radius never changes. It is not blast-only: thruster\n"
+                                "wash, a passing vehicle and a door blown in all use it.\n"
+                                "Only the HORIZONTAL wind counts - otherwise a rising plume\n"
+                                "would manufacture dust from its own updraft and never stop.");
+                        }
+                        if (domain.gas_surface_dust_enabled) {
+                            ImGui::Indent();
+                            ImGui::DragFloat("Lift Threshold m/s", &domain.gas_surface_dust_threshold,
+                                             0.1f, 0.0f, 200.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Below this wind speed a surface gives up NOTHING.\n"
+                                    "That hard floor is the point: it is why still air over a\n"
+                                    "dusty ground is clear, and why the skirt has a sharp edge\n"
+                                    "that travels with the shock instead of a soft haze.");
+                            }
+                            ImGui::DragFloat("Dust Heat", &domain.gas_surface_dust_temperature,
+                                             0.01f, 0.0f, 5.0f, "%.2f");
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Heat carried by ground the blast scours up.\n"
+                                    "0 = cold dust: it spreads as a flat, ground-hugging sheet\n"
+                                    "and never billows, which is what a dense suspension does.\n"
+                                    "A small value lets the heated fraction climb into a surge.\n"
+                                    "Too high and the whole skirt lifts off as a second mushroom.");
+                            ImGui::DragFloat("Dust Yield", &domain.gas_surface_dust_emission,
+                                             0.01f, 0.0f, 20.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Smoke released per m/s of wind ABOVE the threshold, per second.");
+                            }
+                            ImGui::DragFloat("Ground Reserve", &domain.gas_surface_dust_supply,
+                                             0.05f, 0.0f, 50.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "How much dust a patch of ground holds IN TOTAL before it is\n"
+                                    "scoured clean. There is no replenishment.\n"
+                                    "This is what makes a blast's skirt a travelling RING: the\n"
+                                    "shock strips the ground it crosses and moves on. Set it to 0\n"
+                                    "for an unlimited supply and the ring fills itself in behind\n"
+                                    "the front into a uniform carpet.");
+                            }
+                            ImGui::DragFloat("Dust Ceiling", &domain.gas_surface_dust_max_density,
+                                             0.05f, 0.0f, 20.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Density a surface cell will not be pushed past. 0 = uncapped.\n"
+                                    "The surface has an INFINITE supply, so a wind that keeps\n"
+                                    "blowing keeps producing; this is the only thing bounding it.");
+                            }
+                            ImGui::Unindent();
+                        }
+                        ImGui::Separator();
+                        ImGui::Checkbox("Override Field Loss", &domain.gas_dissipation_override);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "How fast smoke, heat and fuel fade, per second.\n"
+                                "OFF = the solver's global rates. Those are tuned for the thin\n"
+                                "smoke a spark carries (0.5/s) and every hybrid particle+gas\n"
+                                "effect inherits them, which erases a long-lived cloud: over ten\n"
+                                "seconds only 0.5%% of it survives, and it does not fade evenly -\n"
+                                "the whole cloud drops below visibility at nearly the same moment.\n"
+                                "Turn this on for smoke that has to LAST.\n"
+                                "Note: this is NOT Flame Dissipation above, which decays the flame\n"
+                                "field and leaves smoke and heat untouched.");
+                        }
+                        if (domain.gas_dissipation_override) {
+                            ImGui::Indent();
+                            ImGui::DragFloat("Smoke Loss /s", &domain.gas_density_dissipation,
+                                             0.005f, 0.0f, 5.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("0 = the smoke never thins out on its own.");
+                            }
+                            ImGui::DragFloat("Heat Loss /s", &domain.gas_temperature_dissipation,
+                                             0.005f, 0.0f, 5.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Cooling rate. This is COUPLED to Stratification: a plume that\n"
+                                    "cools slower keeps its lift longer and settles HIGHER, so\n"
+                                    "changing this moves the cap and the two must be tuned together.");
+                            }
+                            ImGui::DragFloat("Fuel Loss /s", &domain.gas_fuel_dissipation,
+                                             0.005f, 0.0f, 5.0f, "%.3f");
+                            ImGui::Unindent();
+                        }
+                        ImGui::Separator();
                         ImGui::Checkbox("MacCormack Advection", &domain.gas_maccormack_advection);
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Limited second-order transport. Preserves wisps, sharp flame fronts\n"

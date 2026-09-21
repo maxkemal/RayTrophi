@@ -1,4 +1,4 @@
-﻿// ===============================================================================
+// ===============================================================================
 // SCENE UI - SELECTION & INTERACTION
 // ===============================================================================
 // This file handles Mouse picking, Marquee selection, and Delete operations.
@@ -18,6 +18,7 @@
 #include "Backend/IViewportBackend.h"
 #include "HittableInstance.h"
 #include "TriangleMesh.h"  // Flat/proxy: direct-mesh selection dereferences HitRecord.tri_mesh
+#include "Api/RtApi.h"   // GPU obje secimi (rtapi::pickObjectGpu)
 #include "InstanceManager.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
@@ -310,6 +311,7 @@ void syncSelectionSceneState(UIContext& ctx, bool syncLights, bool syncCamera) {
 
 
 void SceneUI::handleMarqueeSelection(UIContext& ctx) {
+    if(ctx.scene.rigView.edit_mode)return;
     ImGuiIO& io = ImGui::GetIO();
 
     // Profile spline authoring owns right-drag selection for its control cage.
@@ -413,6 +415,7 @@ void SceneUI::handleDeleteShortcut(UIContext& ctx)
 }
 
 void SceneUI::handleMouseSelection(UIContext& ctx) {
+    if(ctx.scene.rigView.edit_mode)return;
     // Only select if not interacting with UI or Gizmo
     if (ImGui::IsMouseClicked(0)) {
         bool capture = ImGui::GetIO().WantCaptureMouse;
@@ -706,8 +709,26 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             }
         }
 
+
+
+
         // Check if Ctrl is held for multi-selection
         bool ctrl_held = ImGui::GetIO().KeyCtrl;
+
+        // --- RayFusion AS Warmup (seçim hassasiyeti için) ---
+        // Seçim CPU BVH uzerinden yapilir. CPU BVH Vulkan RT'nin updateGeometry()
+        // gecisindan besleniyor. Dogrudan RayFusion'da AS hic kurulmadi ise BVH
+        // eskimis transform'larla calisir → kucuk objeler kayar.
+        // ensureRayFusionSceneAS() imza eslesmesini kontrol eder; maliyetsiz.
+        {
+            auto tryWarmupAS = [](Backend::IBackend* b) {
+                if (!b) return;
+                if (auto* vba = dynamic_cast<Backend::VulkanBackendAdapter*>(b))
+                    vba->ensureRayFusionSceneAS();
+            };
+            tryWarmupAS(ctx.backend_ptr);
+            tryWarmupAS(g_viewport_backend.get());
+        }
 
         int x, y;
         SDL_GetMouseState(&x, &y);
@@ -718,6 +739,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         float u = (float)x / win_w;
         float v = (float)y / win_h;
         v = 1.0f - v;
+
 
         if (ctx.scene.camera) {
 
@@ -994,34 +1016,66 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             float closest_so_far = 1e9f;
             HitRecord temp_rec;
 
-            // GPU PICKING PATH: Use pick buffer for O(1) object selection
-            // Skip GPU pick if rebuild is pending (pick buffer is stale after object delete/add)
+            // ===============================================================
+            // GPU SECIM: KIMLIGI GPU VERIR, YUZEYI CPU.
+            //
+            // * Ikisi de gerekli, ve nedeni yalnizca hiz degil. Asagidaki her
+            //   sey `rec`e bagli -- ucgen, uv, malzeme, terrain_id, alt eleman
+            //   -- ve ISIK/KAMERA/ALAN oncelik karsilastirmasi bir MESAFE
+            //   ister (`closest_so_far`). GPU bunlarin hicbirini vermiyor;
+            //   yalnizca "bu pikselde hangi obje var" diyor.
+            //
+            // * Eski GPU yolu (`if (false && ...)`) tam da burada sessizce
+            //   bozuktu: basariya ulastiginda CPU taramasini ATLIYOR, yani
+            //   `closest_so_far` 1e9'da KALIYORDU. Sonuc: sahnedeki herhangi
+            //   bir isik/kamera gizmosu, objenin ONUNDE olmasa bile oncelik
+            //   karsilastirmasini kazaniyordu. Belirtisi "yanlis obje secildi"
+            //   -- yani yolun kapatilma gerekcesi olan belirtinin ta kendisi.
+            //
+            // O yuzden GPU'nun adlandirdigi objeyi CPU ile bir kez vuruyoruz:
+            // tarama O(sahne) degil O(o obje). Kimlik GPU'dan geldigi icin
+            // "kucuk obje secilemiyor / yanlis obje seciliyor" sinifi kapanir;
+            // yuzey CPU'dan geldigi icin asagisi degismeden calisir.
+            //
+            // * Ad onbellegi (`mesh_cache`) YOK. Eski yol ID->ad->onbellek
+            //   cozumlemesi yapiyordu ve o onbellek bayatliyordu; burada ad
+            //   dogrudan `world.objects` uzerinde eslestiriliyor. nodeName bir
+            //   GRUPTUR, kimlik degil (cok materyalli import TEK objedir), bu
+            //   yuzden esleseni tek tek degil HEPSI vurulur, en yakini alinir.
             extern bool g_optix_rebuild_pending;
             extern bool g_vulkan_rebuild_pending;
-            bool gpu_pick_success = false;
+            const bool rebuild_pending = g_optix_rebuild_pending || g_vulkan_rebuild_pending;
+
             std::string gpu_picked_name;
-            
-            bool use_gpu = ctx.render_settings.use_optix;
-            bool has_ptr = (ctx.backend_ptr != nullptr);
-            bool rebuild_pending = g_optix_rebuild_pending || g_vulkan_rebuild_pending;
-            
-            // Temporary safety fallback: GPU pick name lookup occasionally returns an unsafe path
-            // into the selection cache. Keep selection stable by forcing CPU/BVH picking here.
-            if (false && use_gpu && has_ptr && !rebuild_pending) {
-                // Pass viewport dimensions for coordinate scaling
-                int vp_w = static_cast<int>(win_w);
-                int vp_h = static_cast<int>(win_h);
-                int object_id = ctx.backend_ptr->getPickedObjectId(x, y, vp_w, vp_h);
-                if (object_id >= 0) {
-                    gpu_picked_name = ctx.backend_ptr->getPickedObjectName(x, y, vp_w, vp_h);
-                    // Only mark as success if name found AND exists in mesh_cache
-                    if (!gpu_picked_name.empty() && mesh_cache.find(gpu_picked_name) != mesh_cache.end()) {
-                        // [FIX] Ignore ForceField visualization meshes
-                        if (gpu_picked_name.find("ForceField") == std::string::npos && 
-                            gpu_picked_name.find("Force Field") == std::string::npos) {
-                            gpu_pick_success = true;
-                        }
-                       // SCENE_LOG_INFO("GPU Pick: " + gpu_picked_name);
+            if (!rebuild_pending) {
+                // u,v yukarida (~738) hesaplandi ve v ZATEN cevrildi.
+                // `scene.pick_gpu` <-> `scene.pick_ray` uyum taramasi tam bu
+                // koordinatlarla yapildi (35 noktada 34 uyum), o yuzden burada
+                // koordinat donusumu YOK -- uydurulacak her donusum o olcumu
+                // gecersiz kilardi.
+                rtapi::GpuPickResult gp;
+                const rtapi::Result gr = rtapi::pickObjectGpu(u, v, gp);
+                if (gr.ok && gp.ok && gp.hit && !gp.object.empty() &&
+                    gp.object.find("ForceField") == std::string::npos &&
+                    gp.object.find("Force Field") == std::string::npos) {
+                    gpu_picked_name = gp.object;
+                }
+            }
+
+            if (!gpu_picked_name.empty()) {
+                for (const auto& obj : ctx.scene.world.objects) {
+                    if (!obj) continue;
+                    std::string obj_name;
+                    if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                        obj_name = tm->nodeName;
+                    } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                        obj_name = tri->getNodeName();
+                    }
+                    if (obj_name != gpu_picked_name) continue;
+                    if (obj->hit(r, 0.001f, closest_so_far, temp_rec)) {
+                        hit = true;
+                        closest_so_far = temp_rec.t;
+                        rec = temp_rec;
                     }
                 }
             }
@@ -1029,7 +1083,11 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             // =======================================================================
             // CPU BVH PICKING: Faster fallback for large scenes (e.g. 1.2M triangles)
             // =======================================================================
-            if (!gpu_pick_success) {
+            // * Buraya dusmenin iki mesru yolu var: GPU secim yolu yok
+            //   (Vulkan raster backend'i hazir degil, ya da rebuild bekliyor),
+            //   veya GPU bir obje adlandirdi ama isin onu SIYIRDI -- siluet
+            //   pikseli. Ikisinde de tam tarama dogru cevabi verir.
+            if (!hit) {
                 // Lazy CPU BVH refit. Sculpt defers the whole-mesh Embree refit to avoid a
                 // freeze on brush release (see g_cpu_bvh_stale); the picking fallback is the
                 // first consumer that actually needs an up-to-date BVH, so bring it current
@@ -1260,7 +1318,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             // both GPU picking and CPU surface picking miss. The narrow region keeps
             // normal clicks precise while preventing a newly staged/added flat mesh
             // from becoming unselectable until an Open/Import rebuild occurs.
-            if (!hit && !gpu_pick_success) {
+            if (!hit) {
                 constexpr float point_pick_radius = 1.0f;
                 performObjectMarqueeSelection(
                     ctx,
@@ -1269,55 +1327,6 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     static_cast<float>(x) + point_pick_radius,
                     static_cast<float>(y) + point_pick_radius);
                 return;
-            }
-
-            // ===========================================================================
-            // GPU PICK SUCCESS PATH: Direct mesh selection from pick buffer result
-            // ===========================================================================
-            if (gpu_pick_success && !gpu_picked_name.empty()) {
-                // Find the object in mesh_cache using GPU-provided name
-                auto cache_it = mesh_cache.find(gpu_picked_name);
-                if (cache_it != mesh_cache.end() && !cache_it->second.empty()) {
-                    auto& first_tri = cache_it->second[0].second;
-                    int index = cache_it->second[0].first;
-                    
-                    if (ctrl_held) {
-                        SelectableItem item;
-                        item.type = SelectableType::Object;
-                        item.object = first_tri;
-                        item.object_index = index;
-                        item.name = first_tri->getNodeName();
-                        
-                        if (ctx.selection.isSelected(item)) {
-                            ctx.selection.removeFromSelection(item);
-                        } else {
-                            ctx.selection.addToSelection(item);
-                        }
-                    } else {
-                        ctx.selection.selectObject(first_tri, index, first_tri->getNodeName());
-                        
-                        // Bind terrain tools/graph by the persistent mesh ID. Name
-                        // lookup remains only for legacy meshes without terrain_id.
-                        TerrainObject* terrain = first_tri->terrain_id >= 0
-                            ? TerrainManager::getInstance().getTerrain(first_tri->terrain_id)
-                            : nullptr;
-                        std::string tName = first_tri->getNodeName();
-                        if (!terrain && tName.find("Terrain_") == 0) {
-                            size_t chunkPos = tName.find("_Chunk");
-                            if (chunkPos != std::string::npos) {
-                                tName = tName.substr(0, chunkPos);
-                            }
-                            terrain = TerrainManager::getInstance().getTerrainByName(tName);
-                        }
-                        if (terrain) {
-                            terrain_brush.active_terrain_id = terrain->id;
-                            show_terrain_tab = true;
-                        }
-                    }
-                    return; // GPU pick selection done
-                }
-                // Note: If gpu_pick_success is true but cache lookup failed, we already
-                // handled that above by setting gpu_pick_success = false before CPU scan
             }
 
             if (hit && (rec.t < closest_t)) {
@@ -1554,8 +1563,40 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     }
 
                     if (found_tri && found_mesh) {
+                        // ★★★★★ INDEKS TAZE TARAMADAN GELIR, ONBELLEKTEN DEGIL.
+                        //
+                        //   Eski hali onbellegi TERCIH ediyordu:
+                        //     index = tri_to_index.count(found_tri) ? tri_to_index[...]
+                        //                                           : direct_index;
+                        //   Oysa `direct_index` hemen yukarida, BU TIKTA, kimlik
+                        //   karsilastirmasiyla (`world_mesh.get() == rec.tri_mesh`)
+                        //   GUNCEL `world.objects` uzerinden bulunmustu. Yani
+                        //   otoriter olan deger, bayat olabilecek bir onbellegin
+                        //   YEDEGI yapilmisti.
+                        //
+                        // ★★★★ Belirti tam olarak buydu (olculdu 2026-09-16):
+                        //   "isaret edilen obje ile secilen obje KONUMLARI farkli,
+                        //   cok nadir tutarli". `object_index` dogrudan
+                        //   `world.objects`e indeks olarak kullaniliyor, yani bayat
+                        //   bir indeks gizmoyu BASKA BIR OBJENIN uzerine oturtur --
+                        //   isabet, mesh ve AD dogru oldugu halde. Ayni olcumde
+                        //   `linear_flat_object` DOGRU geliyordu; yanlis olan tek
+                        //   sey indeksti.
+                        //
+                        // ★★★ Onbellekler ham POINTER ile anahtarlanmis ve 710
+                        //   nesneli bir sahnede `world.objects` yeniden kuruluyor
+                        //   (scatter, import, gizleme). Pointer geri donusebilir,
+                        //   indeks kaymistir: "cok nadir tutarli" tam olarak
+                        //   bayat indeksin tesadufen hala dogru oldugu durumdur.
+                        //
+                        // ★★ Onbellek SILINMIYOR, DUZELTILIYOR: dogru degeri geri
+                        //   yaziyoruz ki bir sonraki tik da dogru olsun. Bir cache
+                        //   isabeti cagiranin bekledigi seyi dondurmek zorundadir.
                         auto idxIt = tri_to_index.find(found_tri.get());
-                        int index = (idxIt != tri_to_index.end()) ? idxIt->second : direct_index;
+                        int index = direct_index >= 0
+                            ? direct_index
+                            : ((idxIt != tri_to_index.end()) ? idxIt->second : -1);
+                        if (direct_index >= 0) tri_to_index[found_tri.get()] = direct_index;
                         const std::string& name = rec.tri_mesh->nodeName;
                         if (ctrl_held) {
                             SelectableItem item;
@@ -1646,6 +1687,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
 // ============================================================================
 // OPTIMIZED VERSION - O(n) instead of O(n�)
 void SceneUI::triggerDelete(UIContext& ctx) {
+    if(ctx.scene.rigView.edit_mode)return;
     if (!ctx.selection.hasSelection()) return;
 
     // Collect all items to delete (supports multi-selection)
@@ -2172,6 +2214,7 @@ void SceneUI::drawMarqueeRect() {
 }
 
 void SceneUI::triggerDuplicate(UIContext& ctx) {
+    if(ctx.scene.rigView.edit_mode)return;
     SceneSelection& sel = ctx.selection;
     if (!sel.hasSelection()) return;
 

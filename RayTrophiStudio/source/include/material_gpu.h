@@ -10,6 +10,7 @@
 */
 #pragma once  
 #include <cuda_runtime.h>  
+#include "../shaders/surface_coverage.h"
 #include <functional>
 #include <cmath>
 #include <type_traits>

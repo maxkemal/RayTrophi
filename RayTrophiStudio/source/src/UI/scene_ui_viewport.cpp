@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - VIEWPORT OVERLAYS
 // ═══════════════════════════════════════════════════════════════════════════════
 // This file contains viewport overlay components:
@@ -15,6 +15,7 @@
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
+#include "PostProcess/PostService.h"   // drawExposureInfo(): pozlama modunun sahibi
 #include "SceneSelection.h"
 #include "scene_data.h"   // Explicit include
 #include "Triangle.h"
@@ -365,8 +366,37 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
         viewportTooltip("Overlays", "Histogram, focus peaking, zebra and AF tools.", proCol);
 
         if (ImGui::BeginPopup("ProCameraPopup")) {
-            ImGui::Text("Pro Camera Features");
+            // ═══════════════════════════════════════════════════════════════
+            // ★★★★ BU UC OVERLAY, CPU RENDER KARESINI OKUR -- viewport'u DEGIL.
+            //   `ctx.renderer.getFrameBuffer()` yalnizca CPU render'i doldurur;
+            //   Material/Solid raster viewport'unda o tampon BOSTUR. Zebra ve
+            //   focus peaking bu durumda sessizce `return` ediyordu, yani
+            //   kutuyu isaretlemek HICBIR SEY yapmiyordu ve bunun ekranda hicbir
+            //   isareti yoktu. Kullanicinin "pek kullanisli degil" demesinin
+            //   sebebi begeni degil, KORLUK.
+            //   ★★★ Ozelligi silmek yerine korlugu GORUNUR yaptik: kaynak
+            //   yoksa kutular kapali ve sebebi yazili. "Yok" ile "olcemedim"
+            //   ayni sey degildir; bir onay kutusunun sessizce hicbir sey
+            //   yapmasi bu deponun en pahali hata sinifidir.
+            //   ★ Bunlari viewport karesine baglamak ayri bir istir (readback
+            //   yolu `render.probe`de zaten var) -- yapilana kadar YALAN
+            //   SOYLEMEMELIDIRLER.
+            // ═══════════════════════════════════════════════════════════════
+            ImGui::Text("Monitoring (CPU render frame)");
             ImGui::Separator();
+
+            const bool frame_source =
+                !ctx.renderer.getFrameBuffer().empty() &&
+                ctx.renderer.getImageWidth() > 0 && ctx.renderer.getImageHeight() > 0;
+
+            if (!frame_source) {
+                ImGui::TextColored(ImVec4(0.98f, 0.78f, 0.35f, 1.0f), "No CPU render frame.");
+                ImGui::TextDisabled("These read the CPU renderer's buffer, not the");
+                ImGui::TextDisabled("viewport. Start a CPU render to feed them.");
+                ImGui::Separator();
+                ImGui::BeginDisabled();
+            }
+
             ImGui::Checkbox("Histogram", &viewport_settings.show_histogram);
             if (viewport_settings.show_histogram) {
                 ImGui::Indent();
@@ -389,14 +419,16 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
                 ImGui::SliderFloat("Threshold##Zebra", &viewport_settings.zebra_threshold, 0.8f, 1.0f, "%.2f");
                 ImGui::Unindent();
             }
+
+            if (!frame_source) ImGui::EndDisabled();
+
+            // ★★ AF noktalari BURADAN TASINDI: kamera panelinde, Focus
+            //   Distance'in yanindalar. Sebebi "yer acmak" degil -- AF bir
+            //   izleme overlay'i degil, ODAK MESAFESINI YAZAN bir arac
+            //   (AF-C her karede `cam.focus_dist`i degistirir). Kamera
+            //   durumunu degistiren bir sey, kamera panelinde yasar.
             ImGui::Separator();
-            ImGui::Checkbox("AF Points", &viewport_settings.show_af_points);
-            if (viewport_settings.show_af_points) {
-                ImGui::Indent();
-                ImGui::Combo("Mode##AF", &viewport_settings.af_mode, "Single\0Zone 9\0Zone 21\0Wide\0Center Weighted\0");
-                ImGui::Combo("Focus Mode", &viewport_settings.focus_mode, "MF (Manual)\0AF-S (Single)\0AF-C (Continuous)\0");
-                ImGui::Unindent();
-            }
+            ImGui::TextDisabled("AF points moved to the Camera panel");
             ImGui::EndPopup();
         }
 
@@ -776,9 +808,12 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
 void SceneUI::drawFocusIndicator(UIContext& ctx) {
     if (!ctx.scene.camera) return;
 
-    // Only show when DOF is enabled
-    float aperture = ctx.scene.camera->aperture;
-    if (aperture < 0.001f) return;  // DOF disabled
+    // ★★★ Gosterge, bulanikligin GERCEKTEN mumkun oldugu durumu yansitir:
+    //   kapi `aperture` degil `effectiveLensRadius()`. Kullanicinin gordugu
+    //   davranis dogruydu ("DoF etkili olunca halka kendiliginden cikiyor"),
+    //   yanlis olan kapinin KAPANAMAMASIYDI -- artik anahtar kapaninca halka
+    //   da gider ve aciklik degeri korunur.
+    if (ctx.scene.camera->effectiveLensRadius() < 1e-6f) return;
 
     // Only show if the toggles are enabled
     if (!viewport_settings.show_camera_hud) return;
@@ -1364,6 +1399,35 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
 
     Camera& cam = *ctx.scene.camera;
 
+    // ═════════════════════════════════════════════════════════════════════════
+    // ★★★★ POZLAMA MODUNUN SAHIBI POST ZINCIRIDIR, KAMERA DEGIL.
+    //   Yeni post yapisinda (`rtpost::ExposureSettings`, Render Settings >
+    //   "Exposure & Color Management") mod uc degerden biridir:
+    //     0 Manual EV       - yalnizca post'un kendi EV'si uygulanir,
+    //     1 Physical Camera - ISO / enstantane / f-stop OKUNUR,
+    //     2 Auto Histogram  - HDR histogramindan olculur.
+    //   `rtpost::syncDisplay()` mode==1 iken kameranin `auto_exposure` ve
+    //   `use_physical_exposure` bayraklarini ZORLAR, diger modlarda kadranlari
+    //   HIC okumaz -- yani bu ucgenin eskiden yazdigi o iki bayrak OLU idi.
+    //   Ucgen onlari yazmaya devam etseydi kadranlari cevirir ve goruntude
+    //   hicbir sey olmadigini gorurdun: bu deponun en pahali hata sinifi
+    //   (panelin yalan soylemesi). Bu yuzden ucgen artik MODU surer.
+    // ═════════════════════════════════════════════════════════════════════════
+    const auto& exposure_settings = ctx.color_processor.params.exposure_settings;
+    const int exposure_mode = exposure_settings.mode;
+    const bool dials_live = (exposure_mode == 1);   // Physical Camera
+
+    // Mod degisikligi ayarin SAHIBINDEN gecer: dogrulama, `apply_tonemap` ve
+    // proje kirliligi IPC'nin kullandigi yolun (post.configure_exposure)
+    // aynisidir. Basarisizlik (ornegin final render kilidi) yutulmaz.
+    auto set_exposure_mode = [this, &ctx](const char* key) {
+        const auto result = rtpost::configure(ctx, nlohmann::json{{"mode", key}});
+        if (result.contains("__error")) {
+            addViewportMessage(result["__error"].get<std::string>(), 3.0f,
+                               ImVec4(1.0f, 0.45f, 0.35f, 1.0f));
+        }
+    };
+
     // Read ISO from preset
     int& iso_idx = cam.iso_preset_index;
     if (iso_idx < 0) iso_idx = 0;
@@ -1385,6 +1449,9 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     // Calculate EV (Exposure Value) - Correct formula
     // EV = log2(N² / t) where N = f-number, t = shutter time in seconds
     // For ISO: EV_100 = EV + log2(ISO/100)
+    // ★★ Bu sayi KADRANLARIN okumasidir, uygulanan carpan degil: Manual EV ve
+    //   Auto Histogram modlarinda kadranlar hic okunmaz. Uygulanan carpan
+    //   asagida `g_display_post.camera_exposure` olarak ayrica yazilir.
     float ev100 = log2f((f_stop * f_stop) / shutter_seconds);
     float ev = ev100 - log2f((float)iso / 100.0f);
 
@@ -1403,6 +1470,9 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     ImU32 col_border = IM_COL32(200, 200, 200, 150);
     ImU32 col_label = IM_COL32(255, 255, 255, 255);  // White labels
     ImU32 col_value = IM_COL32(255, 220, 100, 255);  // Bright amber
+    // ★ Kadranlar okunmadiginda SOLUK cizilir: rakam hala dogru (kameranin
+    //   ayari odur) ama goruntuye girmiyor. Parlak cizmek yalan olurdu.
+    ImU32 col_value_idle = IM_COL32(170, 165, 150, 150);
     ImU32 col_value_hover = IM_COL32(100, 200, 255, 255);  // Blue when hovering
     ImU32 col_ev_positive = IM_COL32(255, 150, 80, 255);
     ImU32 col_ev_negative = IM_COL32(80, 150, 255, 255);
@@ -1439,6 +1509,16 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
             if (iso_hover) { dragging = 1; drag_start_x = mouse.x; drag_start_idx = iso_idx; hud_captured_mouse = true; }
             else if (shutter_hover) { dragging = 2; drag_start_x = mouse.x; drag_start_idx = shutter_idx; hud_captured_mouse = true; }
             else if (aperture_hover) { dragging = 3; drag_start_x = mouse.x; drag_start_idx = fstop_idx; hud_captured_mouse = true; }
+
+            // ★★★ Kadrana dokunmak "fiziksel kamera istiyorum" demektir. Eski
+            //   kod bunu `auto_exposure=false, use_physical_exposure=true`
+            //   yazarak ifade ediyordu; o iki bayragin karsiligi artik POST
+            //   MODUDUR. Mod degismezse kadran doner ama goruntu kimildamaz.
+            if (dragging > 0 && !dials_live) {
+                set_exposure_mode("physical");
+                addViewportMessage("Exposure Mode: Physical Camera", 3.0f,
+                                   ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
+            }
         }
     }
 
@@ -1471,31 +1551,35 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
             int old_idx = fstop_idx;
             fstop_idx = std::max(0, std::min(new_idx, (int)CameraPresets::FSTOP_PRESET_COUNT - 1));
             if (fstop_idx != old_idx) {
-                // Update actual aperture and lens_radius from f-stop preset
-                float f_val = CameraPresets::FSTOP_PRESETS[fstop_idx].f_number;
-                cam.aperture = CameraPresets::FSTOP_PRESETS[fstop_idx].aperture_value;
-                cam.lens_radius = cam.aperture * 0.5f;
-                cam.fstop_preset_index = fstop_idx; // Synch preset index
+                // ★★★★ 2026-09-06 II: bu kadran YALNIZCA preset indeksini
+                //   yaziyordu, kamera panelindeki f-stop kadrani ise
+                //   `aperture`i yaziyor ve gosterdigi sayiyi ONDAN turetiyordu.
+                //   Yani ucgeni cevirince panelin f-sayisi KIMILDAMIYORDU:
+                //   ayni ada sahip iki kadran, iki farkli sayi. Duzeltmesi
+                //   `setFNumber` -- aciklik ve preset indeksi TEK yazardan
+                //   cikar. Bulanikligi ise ayrica `depth_of_field` anahtari
+                //   eler, o yuzden f-stop cevirmek DoF'u zorla acmaz.
+                cam.setFNumber(CameraPresets::FSTOP_PRESETS[fstop_idx].f_number);
+                cam.fstop_preset_index = fstop_idx;
                 value_changed = true;
             }
         }
 
-        // When manually changing exposure, disable auto and enable physical exposure
+        // ★★ Kadranin sonucu ekrana POST ZINCIRINDEN ulasir: `syncDisplay`
+        //   yeni `camera_exposure` carpanini `g_display_post`e yazar, backend
+        //   imzasi degistigi icin converge olmus kare de yeniden tonemap edilir
+        //   (yoksa "durgun viewport'ta kadran olu" belirtisi geri gelirdi).
+        //   `syncCameraToBackend` yine gerekli: f-stop ayni zamanda Cinema lens
+        //   kusurlarini surer, o RENDER tarafi bir degisiklik.
         if (value_changed) {
-            cam.auto_exposure = false;  // Disable auto exposure
-            cam.use_physical_exposure = true;  // Enable physical calculation (GPU parity)
-
-            // Update GPU and reset render
             if (ctx.backend_ptr) {
                 ctx.renderer.syncCameraToBackend(cam);
                 ctx.backend_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
+            rtpost::syncDisplay(ctx.color_processor, ctx.scene.camera.get(), false);
+            ctx.apply_tonemap = true;
             ProjectManager::getInstance().markModified();
-
-            // Set warning message timer
-            static float warning_timer = 0.0f;
-            warning_timer = 3.0f;  // Show for 3 seconds
         }
     }
     else {
@@ -1503,60 +1587,75 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // AE (Auto Exposure) TOGGLE - Small button in center of triangle
+    // MOD ROZETI - ucgenin ortasindaki kucuk dugme
+    // ★★★ Bu dugme artik `cam.auto_exposure`i degil POST MODUNU gosterir ve
+    //   degistirir; rozet uzerindeki yazi o an gecerli olan moddur, yani
+    //   kadranlarin canli olup olmadigi HUD'dan okunabilir.
+    //   Tiklamak AE ile fiziksel kamera arasinda gider gelir (Manual EV modunda
+    //   iken tiklamak AE'yi acar) -- Render Settings paneli ucunu de sunar.
     // ─────────────────────────────────────────────────────────────────────────
-    const char* ae_text = "AE";
+    const char* ae_text = (exposure_mode == 2) ? "AE"
+                        : (exposure_mode == 1) ? "PHYS"
+                                               : "MAN";
     ImVec2 ae_size = ImGui::CalcTextSize(ae_text);
     float ae_x = cx - ae_size.x * 0.5f;
     float ae_y = cy + 12;  // Just below EV
 
-    // Hitbox for AE toggle
+    // Hitbox for the mode toggle
     bool ae_hover = (mouse.x >= ae_x - 8 && mouse.x <= ae_x + ae_size.x + 8 &&
         mouse.y >= ae_y - 4 && mouse.y <= ae_y + ae_size.y + 4);
 
-    // Click to toggle auto exposure
+    // Click toggles between metered auto exposure and the physical dials
     if (ae_hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.WantCaptureMouse) {
-        cam.auto_exposure = !cam.auto_exposure;
         hud_captured_mouse = true; // Prevent viewport selection
-
-        if (ctx.backend_ptr) {
-            ctx.renderer.syncCameraToBackend(cam);
-            ctx.backend_ptr->resetAccumulation();
+        if (exposure_mode == 2) {
+            set_exposure_mode("physical");
+            addViewportMessage("Exposure Mode: Physical Camera", 3.0f,
+                               ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
+        } else {
+            set_exposure_mode("auto_histogram");
+            addViewportMessage("Exposure Mode: Auto Histogram", 3.0f,
+                               ImVec4(0.5f, 1.0f, 0.6f, 1.0f));
         }
-        ctx.renderer.resetCPUAccumulation();
-        ProjectManager::getInstance().markModified();
     }
 
-    // Draw AE button - Green=ON, Red=OFF
-    ImU32 ae_bg = cam.auto_exposure ? IM_COL32(50, 150, 50, 220) : IM_COL32(150, 50, 50, 220);
+    // Rozet rengi = mod. Yesil AE, kehribar fiziksel kadranlar, gri manuel EV.
+    ImU32 ae_bg = (exposure_mode == 2) ? IM_COL32(50, 150, 50, 220)
+                : (exposure_mode == 1) ? IM_COL32(150, 105, 30, 220)
+                                       : IM_COL32(80, 80, 90, 220);
     ImU32 ae_col = ae_hover ? IM_COL32(255, 255, 255, 255) : IM_COL32(220, 220, 220, 255);
 
     draw_list->AddRectFilled(ImVec2(ae_x - 6, ae_y - 3), ImVec2(ae_x + ae_size.x + 6, ae_y + ae_size.y + 3), ae_bg, 4.0f);
     draw_list->AddText(ImVec2(ae_x, ae_y), ae_col, ae_text);
 
-    // Show warning message only once when auto exposure is first disabled
-    static bool was_auto_on = true;
-    static float warning_timer = 0.0f;
+    // ★ Kadranlar okunmuyorsa bunu SOYLE. Eskiden buradaki uyari "Auto Exposure
+    //   OFF" derdi ve bu, kadranlarin canli oldugu anlamina geliyordu -- yeni
+    //   modelde artik dogru degil.
+    // ★ Ucgenin ALTINDAKI satirlar tek bir y IMLECINDEN akar. Eskiden her biri
+    //   kendi sabit offset'ini tasiyordu (+12 / +26 / +35) ve mod notu gorunur
+    //   oldugunda lens bilgisinin UZERINE biniyordu -- bir satirin varligina
+    //   bagli bir yerlesim, sabit offset'lerle tutulamaz.
+    // ★★★★ Yerlesim ucgenin GEOMETRISINDEN degil, EN ALTTA CIZILEN ogeden
+    //   baslar. Alt koselerin deger yazilari `v.y + 16`da duruyor, ucgenin
+    //   geometrik tabani ise (cy + h*0.5) ONLARIN USTUNDE kaliyor: h = 85 *
+    //   0.866 = 73.6 icin taban cy+36.8, SH/AP yazilari cy+45..59. Yani ilk
+    //   bilgi satiri HER ZAMAN o iki degerin uzerine biniyordu.
+    //   ★ Ders: bir sekle gore hizalanan yerlesim, seklin DISINA tasan
+    //   etiketleri gormez. Olcu, cizilen en alt pikseldir.
+    const float dial_text_bottom = v_shutter.y + 16.0f + ImGui::GetTextLineHeight();
+    float info_y = (std::max)(cy + height * 0.5f, dial_text_bottom) + 8.0f;
+    const float info_step = 16.0f;
 
-    if (was_auto_on && !cam.auto_exposure) {
-        warning_timer = 3.0f;  // Trigger warning
-    }
-    was_auto_on = cam.auto_exposure;
-
-    if (warning_timer > 0.0f) {
-        warning_timer -= io.DeltaTime;
-        const char* warning = "Auto Exposure OFF";
-        ImVec2 warn_size = ImGui::CalcTextSize(warning);
-        float warn_x = cx - warn_size.x * 0.5f;
-        float warn_y = cy + height * 0.5f + 30;
-
-        // Fade out effect
-        float alpha = std::min(warning_timer, 1.0f);
-        ImU32 warn_bg = IM_COL32(0, 0, 0, (int)(180 * alpha));
-        ImU32 warn_text = IM_COL32(255, 200, 50, (int)(255 * alpha));
-
-        draw_list->AddRectFilled(ImVec2(warn_x - 5, warn_y - 2), ImVec2(warn_x + warn_size.x + 5, warn_y + warn_size.y + 2), warn_bg, 3.0f);
-        draw_list->AddText(ImVec2(warn_x, warn_y), warn_text, warning);
+    if (!dials_live) {
+        const char* note = (exposure_mode == 2) ? "Metered - dials inactive"
+                                                : "Manual EV - dials inactive";
+        ImVec2 note_size = ImGui::CalcTextSize(note);
+        float note_x = cx - note_size.x * 0.5f;
+        draw_list->AddRectFilled(ImVec2(note_x - 5, info_y - 2),
+                                 ImVec2(note_x + note_size.x + 5, info_y + note_size.y + 2),
+                                 IM_COL32(0, 0, 0, 150), 3.0f);
+        draw_list->AddText(ImVec2(note_x, info_y), IM_COL32(200, 200, 210, 220), note);
+        info_y += info_step;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1565,7 +1664,7 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     char iso_text[16];
     snprintf(iso_text, sizeof(iso_text), "%d", CameraPresets::ISO_PRESETS[iso_idx].iso_value);
     ImVec2 iso_size = ImGui::CalcTextSize(iso_text);
-    ImU32 iso_col = (iso_hover || dragging == 1) ? col_value_hover : col_value;
+    ImU32 iso_col = (iso_hover || dragging == 1) ? col_value_hover : (dials_live ? col_value : col_value_idle);
 
     // Label with shadow for visibility
     draw_list->AddText(ImVec2(v_iso.x - 9, v_iso.y - 23), IM_COL32(0, 0, 0, 200), "ISO");
@@ -1578,7 +1677,7 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     // ─────────────────────────────────────────────────────────────────────────
     const char* shutter_name = CameraPresets::SHUTTER_SPEED_PRESETS[shutter_idx].name;
     ImVec2 shutter_size = ImGui::CalcTextSize(shutter_name);
-    ImU32 shutter_col = (shutter_hover || dragging == 2) ? col_value_hover : col_value;
+    ImU32 shutter_col = (shutter_hover || dragging == 2) ? col_value_hover : (dials_live ? col_value : col_value_idle);
 
     draw_list->AddText(ImVec2(v_shutter.x - 9, v_shutter.y + 3), IM_COL32(0, 0, 0, 200), "SH");
     draw_list->AddText(ImVec2(v_shutter.x - 8, v_shutter.y + 4), col_label, "SH");
@@ -1591,7 +1690,7 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     char aperture_text[16];
     snprintf(aperture_text, sizeof(aperture_text), "f/%.1f", CameraPresets::FSTOP_PRESETS[fstop_idx].f_number);
     ImVec2 aperture_size = ImGui::CalcTextSize(aperture_text);
-    ImU32 aperture_col = (aperture_hover || dragging == 3) ? col_value_hover : col_value;
+    ImU32 aperture_col = (aperture_hover || dragging == 3) ? col_value_hover : (dials_live ? col_value : col_value_idle);
 
     draw_list->AddText(ImVec2(v_aperture.x - 1, v_aperture.y + 3), IM_COL32(0, 0, 0, 200), "AP");
     draw_list->AddText(ImVec2(v_aperture.x, v_aperture.y + 4), col_label, "AP");
@@ -1600,28 +1699,66 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
 
     // ─────────────────────────────────────────────────────────────────────────
     // EV (Center of triangle)
+    // ★★★ Her modda O MODUN gercekten uyguladigi sayi yazilir:
+    //   Physical -> kadranlarin fotografik EV'si, Manual -> post'un EV'si,
+    //   Auto     -> olcumun UYGULANMIS EV'si (hedef degil; hedef henuz
+    //               adapte edilmemis olabilir ve o an ekranda olan bu degildir).
+    //   Olcum daha gecerli degilse "EV --" yazilir; sifir YAZILMAZ, cunku
+    //   "olcemedim" ile "0 EV olctum" ayni sey degildir.
     // ─────────────────────────────────────────────────────────────────────────
     ImU32 ev_col = col_ev_neutral;
-    if (ev > 12.0f) ev_col = col_ev_positive;  // Bright scene
-    else if (ev < 8.0f) ev_col = col_ev_negative;  // Dark scene
-
-    char ev_text[16];
-    snprintf(ev_text, sizeof(ev_text), "EV %.0f", ev);
+    char ev_text[24];
+    if (exposure_mode == 2) {
+        const auto telemetry = rtpost::exposureTelemetry();
+        if (telemetry.valid) {
+            snprintf(ev_text, sizeof(ev_text), "%+.1f EV", telemetry.applied_ev);
+            if (telemetry.applied_ev > 1.0f) ev_col = col_ev_positive;
+            else if (telemetry.applied_ev < -1.0f) ev_col = col_ev_negative;
+        } else {
+            snprintf(ev_text, sizeof(ev_text), "EV --");
+            ev_col = IM_COL32(200, 200, 210, 220);
+        }
+    } else if (exposure_mode == 0) {
+        snprintf(ev_text, sizeof(ev_text), "%+.1f EV", exposure_settings.ev);
+        if (exposure_settings.ev > 1.0f) ev_col = col_ev_positive;
+        else if (exposure_settings.ev < -1.0f) ev_col = col_ev_negative;
+    } else {
+        snprintf(ev_text, sizeof(ev_text), "EV %.0f", ev);
+        if (ev > 12.0f) ev_col = col_ev_positive;  // Bright scene
+        else if (ev < 8.0f) ev_col = col_ev_negative;  // Dark scene
+    }
     ImVec2 ev_size = ImGui::CalcTextSize(ev_text);
     draw_list->AddText(ImVec2(cx - ev_size.x * 0.5f + 1, cy - 3), IM_COL32(0, 0, 0, 200), ev_text);
     draw_list->AddText(ImVec2(cx - ev_size.x * 0.5f, cy - 4), ev_col, ev_text);
 
-    // Drag hint
-    if (iso_hover || shutter_hover || aperture_hover) {
-        const char* hint = "<< drag >>";
-        ImVec2 hint_size = ImGui::CalcTextSize(hint);
-        draw_list->AddText(ImVec2(cx - hint_size.x * 0.5f, cy + height * 0.5f + 10), col_value_hover, hint);
+    // ★★ SONUC satiri: shader'a giden carpan. Kadranin gercekten is yaptigini
+    //   (veya yapmadigini) tek bakista gosteren sayi budur -- `post.get_exposure`
+    //   ayni degeri `camera_exposure` olarak dondurur.
+    if (dials_live) {
+        char applied_text[24];
+        snprintf(applied_text, sizeof(applied_text), "x%.3f", g_display_post.camera_exposure);
+        ImVec2 applied_size = ImGui::CalcTextSize(applied_text);
+        draw_list->AddText(ImVec2(cx - applied_size.x * 0.5f + 1, info_y + 1),
+                           IM_COL32(0, 0, 0, 150), applied_text);
+        draw_list->AddText(ImVec2(cx - applied_size.x * 0.5f, info_y),
+                           IM_COL32(200, 210, 230, 200), applied_text);
+        info_y += info_step;
     }
-    
+
+    // Drag hint — ★ yeri HER ZAMAN ayrilir. Yalnizca gorununce yer kaplasaydi
+    //   fareyi kadranin uzerine getirmek asagidaki lens satirlarini asagi
+    //   itip HUD'u zipratirdi.
+    if (iso_hover || shutter_hover || aperture_hover) {
+        const char* hint = dials_live ? "<< drag >>" : "<< drag: switches to Physical >>";
+        ImVec2 hint_size = ImGui::CalcTextSize(hint);
+        draw_list->AddText(ImVec2(cx - hint_size.x * 0.5f, info_y), col_value_hover, hint);
+    }
+    info_y += info_step;
+
     // ─────────────────────────────────────────────────────────────────────────
     // LENS INFO (Below the triangle - transparent overlay)
     // ─────────────────────────────────────────────────────────────────────────
-    float lens_y = cy + height * 0.5f + 35.0f;  // Moved up (was +50)
+    float lens_y = info_y + 6.0f;  // ★ imlecin altindan devam eder, sabit offset degil
     
     // Calculate focal length from FOV
     float fov = (float)cam.vfov;
@@ -1660,6 +1797,57 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     // Increased spacing (+18px instead of +15/16) to prevent overlap
     draw_list->AddText(ImVec2(cx - lens2_size.x * 0.5f + 1, lens_y + 19), IM_COL32(0, 0, 0, 150), lens_line2);
     draw_list->AddText(ImVec2(cx - lens2_size.x * 0.5f, lens_y + 18), col_lens_label, lens_line2);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LENS ANAHTARI (DOF) - rapor + tek tiklamalik cevirme
+    // ★★★ Neden HUD'da: DoF kapaninca FOKUS HALKASI da kayboluyor, yani HUD'un
+    //   kendi odak araci ortadan kalkiyor ve HUD'dan geri donmenin yolu
+    //   kalmiyordu. Bir aracin kendini kapatip geri acilamamasi, kullanicinin
+    //   "bir daha cikmiyor" dedigi arizanin ta kendisiydi -- ters yonu.
+    // ★★★★ Ama burada YALNIZCA anahtar var; aciklik/odak kadranlari YOK.
+    //   Ayarin sahibi kamera panelidir. HUD'u ikinci bir ayar paneline
+    //   cevirmek, bu deponun tekrar tekrar odedigi bedeldir: ayni deger iki
+    //   yerde tutulur, biri gunceller, digeri yalan soyler.
+    // ★★ AP kadrani DoF kapaliyken de f-sayisini (pozlamayi) surer; bu rozet,
+    //   "cevirdim ama bulaniklik degismedi"nin cevabini ekranda tutar.
+    // ─────────────────────────────────────────────────────────────────────────
+    {
+        const bool dof_on = cam.depth_of_field;
+        char dof_text[24];
+        if (dof_on) snprintf(dof_text, sizeof(dof_text), "DOF f/%.1f", cam.fNumber());
+        else        snprintf(dof_text, sizeof(dof_text), "DOF off");
+        ImVec2 dof_size = ImGui::CalcTextSize(dof_text);
+        float dof_x = cx - dof_size.x * 0.5f;
+        float dof_y = lens_y + 36.0f;
+
+        const bool dof_hover = (mouse.x >= dof_x - 6 && mouse.x <= dof_x + dof_size.x + 6 &&
+                                mouse.y >= dof_y - 3 && mouse.y <= dof_y + dof_size.y + 3);
+
+        if (dof_hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.WantCaptureMouse) {
+            hud_captured_mouse = true;   // viewport secimini engelle
+            cam.depth_of_field = !cam.depth_of_field;
+            // ★ Aciklik hic yazilmamissa f-sayisindan turet; yoksa rozet
+            //   "acik" der ve goruntude hicbir sey olmaz.
+            if (cam.depth_of_field && cam.aperture <= 1e-5f) cam.setFNumber(cam.fNumber());
+            cam.markDirty();
+            if (ctx.backend_ptr) {
+                ctx.renderer.syncCameraToBackend(cam);
+                ctx.backend_ptr->resetAccumulation();
+            }
+            ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
+            addViewportMessage(cam.depth_of_field ? "Depth of Field: ON" : "Depth of Field: OFF (pinhole)",
+                               2.0f, ImVec4(0.65f, 0.85f, 1.0f, 1.0f));
+        }
+
+        const ImU32 dof_bg = dof_on ? IM_COL32(40, 80, 60, 190) : IM_COL32(55, 55, 60, 170);
+        const ImU32 dof_fg = dof_hover ? IM_COL32(255, 255, 255, 255)
+                           : (dof_on ? IM_COL32(150, 230, 180, 230)
+                                     : IM_COL32(165, 165, 175, 190));
+        draw_list->AddRectFilled(ImVec2(dof_x - 6, dof_y - 3),
+                                 ImVec2(dof_x + dof_size.x + 6, dof_y + dof_size.y + 3), dof_bg, 4.0f);
+        draw_list->AddText(ImVec2(dof_x, dof_y), dof_fg, dof_text);
+    }
 }
 
 // ============================================================================
@@ -2195,6 +2383,19 @@ void SceneUI::drawLensInfoHUD(UIContext& ctx) {
     }
     
     float bx = x + 44.0f;
+    draw_list->AddRectFilled(ImVec2(bx, y), ImVec2(bx + 38, y + 12), backend_color, 2.0f);
+    draw_list->AddText(ImVec2(bx + 4, y - 1.0f), IM_COL32(255, 255, 255, 230), backend_label);
+    
+    // Shake indicator (if active)
+    if (cam.enable_camera_shake) {
+        float sx = bx + 42.0f;
+        draw_list->AddRectFilled(ImVec2(sx, y), ImVec2(sx + 38, y + 12), IM_COL32(200, 100, 50, 180), 2.0f);
+        draw_list->AddText(ImVec2(sx + 4, y - 1.0f), IM_COL32(255, 255, 255, 230), "SHAKE");
+    }
+    
+    if (tinyFont) ImGui::PopFont();
+
+    
     draw_list->AddRectFilled(ImVec2(bx, y), ImVec2(bx + 38, y + 12), backend_color, 2.0f);
     draw_list->AddText(ImVec2(bx + 4, y - 1.0f), IM_COL32(255, 255, 255, 230), backend_label);
     

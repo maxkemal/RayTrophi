@@ -16,6 +16,30 @@ constexpr uint32_t kPrefilterHeight = 128u;
 constexpr uint32_t kPrefilterMipCount = 9u;
 constexpr uint32_t kBrdfSize = 256u;
 constexpr uint32_t kDescriptorSetCount = 1u + kPrefilterMipCount + 1u;
+// Equirect bake of the canonical world. Matches the prefilter width so mip 0
+// is a resample, not an upscale.
+constexpr uint32_t kSkyCaptureWidth = 256u;
+constexpr uint32_t kSkyCaptureHeight = 128u;
+
+struct SkyCapturePush {
+    float cameraPos[4]{};
+    float worldColor[4]{};
+    float worldParams[4]{};
+    float worldSun[4]{};
+    float atmosphereA[4]{};
+    float atmosphereB[4]{};
+    uint32_t modeFlagsSize[4]{};
+};
+static_assert(sizeof(SkyCapturePush) == 112u, "world_sky_capture.comp push ABI");
+
+uint64_t hashBytes(const void* data, size_t size, uint64_t seed = 1469598103934665603ull) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        seed ^= bytes[i];
+        seed *= 1099511628211ull;
+    }
+    return seed;
+}
 
 struct IblPush {
     uint32_t phase = 0;
@@ -107,13 +131,56 @@ public:
     VkPipeline pipeline = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kDescriptorSetCount> descriptorSets{};
     VkDescriptorSet boundPreviewSet = VK_NULL_HANDLE;
-    int64_t sourceTextureId = 0;
+    bool boundCurrent = false; // what the preview set actually points at
+    // Which producer the generated maps came from, and the exact inputs it was
+    // built from. 0 = none, 1 = HDRI texture, 2 = baked Physical Sky.
+    int sourceKind = 0;
+    uint64_t sourceSignature = 0;
     bool brdfReady = false;
     bool generated = false;
     bool ready = false;
+
+    // Physical Sky bake. Absent shaders leave skyReady false and Physical Sky
+    // keeps the per-fragment cone; it must never be reported as prefiltered.
+    // Irradiance readback for the RayFusion probe producer. The probe field
+    // needs the same numbers the shader samples, so it is taken from the baked
+    // image rather than recomputed on the CPU -- a second evaluation of the sky
+    // would be a second producer, and the two would drift.
+    VulkanRT::BufferHandle irradianceStaging;
+
+    VulkanRT::ImageHandle skyCapture;
+    VkDescriptorSetLayout skyLayout = VK_NULL_HANDLE;
+    VkDescriptorPool skyPool = VK_NULL_HANDLE;
+    VkPipelineLayout skyPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline skyPipeline = VK_NULL_HANDLE;
+    VkDescriptorSet skySet = VK_NULL_HANDLE;
+    uint64_t skySignature = 0;
+    bool skyCaptured = false;
+    bool skyReady = false;
 };
 
+// Raw environment radiance for producers that integrate the cosine lobe
+// themselves. Prefiltered mip 0 is roughness 0, i.e. the mirror sample, i.e.
+// the environment radiance -- and it exists for BOTH producers (HDRI and the
+// Physical Sky bake), so a ray-query consumer does not need to know which one
+// is current. Handing back the irradiance map instead would integrate twice.
+bool VulkanBackendAdapter::getMaterialPreviewEnvRadiance(VkImageView& view,
+                                                         VkSampler& sampler) const {
+    view = VK_NULL_HANDLE;
+    sampler = VK_NULL_HANDLE;
+    const auto state = m_materialPreviewIbl;
+    if (!state || !state->ready || !state->generated) return false;
+    if (!state->prefiltered.view || !state->prefiltered.sampler) return false;
+    view = state->prefiltered.view;
+    sampler = state->prefiltered.sampler;
+    return true;
+}
+
 bool VulkanBackendAdapter::ensureMaterialPreviewIblResources(const std::string& shaderDir) {
+    // Cached before every early-out: the per-frame probe service has no shader
+    // directory of its own, and threading one through the frame loop would put
+    // a filesystem path into the hot path for no gain.
+    if (!shaderDir.empty()) m_rayFusionShaderDir = shaderDir;
     if (!m_device || !m_device->isInitialized()) return false;
     if (m_materialPreviewIbl && m_materialPreviewIbl->ready) return true;
 
@@ -277,20 +344,298 @@ bool VulkanBackendAdapter::ensureMaterialPreviewIblResources(const std::string& 
     m_device->endSingleTimeCommands(transition);
 
     state->ready = true;
+    // Optional: a missing capture shader leaves Physical Sky on the cone
+    // integral, which is slow but correct. It must not fail IBL creation.
+    ensureWorldSkyCaptureResources(shaderDir);
     refreshMaterialPreviewIbl();
+    return true;
+}
+
+bool VulkanBackendAdapter::ensureIrradianceStaging() {
+    auto state = m_materialPreviewIbl;
+    if (!state || !m_device) return false;
+    if (state->irradianceStaging.buffer) return true;
+    VulkanRT::BufferCreateInfo info;
+    info.size = uint64_t(kIrradianceWidth) * kIrradianceHeight * 4u * sizeof(float);
+    info.usage = VulkanRT::BufferUsage::TRANSFER_DST;
+    info.location = VulkanRT::MemoryLocation::GPU_TO_CPU;
+    state->irradianceStaging = m_device->createBuffer(info);
+    return state->irradianceStaging.buffer != VK_NULL_HANDLE;
+}
+
+bool VulkanBackendAdapter::packPreviewWorldUniforms(
+    float* worldColor, float* worldParams, float* worldSun,
+    float* atmosphereA, float* atmosphereB) const {
+    // ONE packer. The raster preview globals and the sky bake must read the
+    // same numbers out of m_cachedWorld; two copies of this arithmetic would
+    // let the baked ambient drift from the drawn background, and the only
+    // symptom would be "the colour is a bit off".
+    const bool hasWorldEnv = m_envTexID > 0 &&
+        m_uploadedImages.find(m_envTexID) != m_uploadedImages.end();
+    const bool nishitaOverlay = m_cachedWorld.mode == WORLD_MODE_NISHITA &&
+        m_cachedWorld.advanced.env_overlay_enabled != 0 && hasWorldEnv;
+
+    worldColor[0] = m_cachedWorld.color.x;
+    worldColor[1] = m_cachedWorld.color.y;
+    worldColor[2] = m_cachedWorld.color.z;
+    worldColor[3] = m_cachedWorld.mode == WORLD_MODE_NISHITA
+        ? m_cachedWorld.nishita.sun_size : m_cachedWorld.color_intensity;
+    worldParams[0] = nishitaOverlay
+        ? m_cachedWorld.advanced.env_overlay_rotation *
+            (3.14159265358979323846f / 180.0f)
+        : m_cachedWorld.env_rotation;
+    worldParams[1] = nishitaOverlay
+        ? m_cachedWorld.advanced.env_overlay_intensity
+        : m_cachedWorld.env_intensity;
+    worldParams[2] = m_cachedWorld.nishita.atmosphere_intensity;
+    worldParams[3] = nishitaOverlay
+        ? static_cast<float>(m_cachedWorld.advanced.env_overlay_blend_mode)
+        : 0.0f;
+    worldSun[0] = m_cachedWorld.nishita.sun_direction.x;
+    worldSun[1] = m_cachedWorld.nishita.sun_direction.y;
+    worldSun[2] = m_cachedWorld.nishita.sun_direction.z;
+    worldSun[3] = m_cachedWorld.nishita.sun_intensity;
+    atmosphereA[0] = static_cast<float>(m_cachedWorld.advanced.multi_scatter_enabled);
+    atmosphereA[1] = m_cachedWorld.advanced.multi_scatter_factor;
+    atmosphereA[2] = m_cachedWorld.nishita.mie_anisotropy;
+    atmosphereA[3] = m_cachedWorld.nishita.mie_density;
+    atmosphereB[0] = m_cachedWorld.nishita.planet_radius;
+    atmosphereB[1] = m_cachedWorld.nishita.atmosphere_height;
+    atmosphereB[2] = 0.0f;
+    atmosphereB[3] = 0.0f;
+    return nishitaOverlay;
+}
+
+bool VulkanBackendAdapter::ensureWorldSkyCaptureResources(const std::string& shaderDir) {
+    auto state = m_materialPreviewIbl;
+    if (!state || !m_device || !m_device->isInitialized()) return false;
+    if (state->skyReady) return true;
+
+    const auto words = loadIblSpv(shaderDir + "/world_sky_capture.spv");
+    if (words.empty()) {
+        static bool warned = false;
+        if (!warned) {
+            SCENE_LOG_WARN("[MaterialPreview] world_sky_capture.spv is missing; Physical Sky "
+                           "keeps the per-fragment cone integral until shaders are rebuilt.");
+            warned = true;
+        }
+        return false;
+    }
+
+    VkDevice device = m_device->getDevice();
+    VkDescriptorSetLayoutBinding bindings[4]{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    for (uint32_t i = 1; i < 4; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo dlci{};
+    dlci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dlci.bindingCount = 4;
+    dlci.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(device, &dlci, nullptr, &state->skyLayout) != VK_SUCCESS)
+        return false;
+
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.size = sizeof(SkyCapturePush);
+    VkPipelineLayoutCreateInfo plci{};
+    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &state->skyLayout;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pushRange;
+    if (vkCreatePipelineLayout(device, &plci, nullptr, &state->skyPipelineLayout) != VK_SUCCESS)
+        return false;
+
+    VkShaderModuleCreateInfo smci{};
+    smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smci.codeSize = words.size() * sizeof(uint32_t);
+    smci.pCode = words.data();
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(device, &smci, nullptr, &module) != VK_SUCCESS) return false;
+    VkComputePipelineCreateInfo cpci{};
+    cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpci.layout = state->skyPipelineLayout;
+    cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpci.stage.module = module;
+    cpci.stage.pName = "main";
+    const VkResult pipelineResult = vkCreateComputePipelines(
+        device, VK_NULL_HANDLE, 1, &cpci, nullptr, &state->skyPipeline);
+    vkDestroyShaderModule(device, module, nullptr);
+    if (pipelineResult != VK_SUCCESS) return false;
+
+    VkDescriptorPoolSize poolSizes[2] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1u},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3u}
+    };
+    VkDescriptorPoolCreateInfo dpci{};
+    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.poolSizeCount = 2;
+    dpci.pPoolSizes = poolSizes;
+    dpci.maxSets = 1u;
+    if (vkCreateDescriptorPool(device, &dpci, nullptr, &state->skyPool) != VK_SUCCESS)
+        return false;
+    VkDescriptorSetAllocateInfo dsai{};
+    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsai.descriptorPool = state->skyPool;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts = &state->skyLayout;
+    if (vkAllocateDescriptorSets(device, &dsai, &state->skySet) != VK_SUCCESS)
+        return false;
+
+    state->skyCapture = m_device->createImage2D(
+        kSkyCaptureWidth, kSkyCaptureHeight, VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (!state->skyCapture.image) return false;
+    // Repeat in azimuth so the prefilter wrap-around taps do not clamp into a
+    // seam at the back of the sky.
+    state->skyCapture.sampler = makeIblSampler(device, 0.0f, true);
+    if (!state->skyCapture.sampler) return false;
+
+    VkCommandBuffer transition = m_device->beginSingleTimeCommands();
+    if (transition == VK_NULL_HANDLE) return false;
+    recordIblImageBarrier(transition, state->skyCapture.image, 1,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_GENERAL);
+    m_device->endSingleTimeCommands(transition);
+
+    state->skyReady = true;
+    return true;
+}
+
+bool VulkanBackendAdapter::refreshWorldSkyCapture(uint64_t& signature) {
+    signature = 0;
+    auto state = m_materialPreviewIbl;
+    if (!state || !state->skyReady || !m_device) return false;
+
+    SkyCapturePush push{};
+    // cameraPos stays zero on purpose: it is read only by the sun-disc branch,
+    // and the bake excludes the disc. An altitude term here would rebake the
+    // whole chain on every camera move.
+    const bool overlay = packPreviewWorldUniforms(
+        push.worldColor, push.worldParams, push.worldSun,
+        push.atmosphereA, push.atmosphereB);
+
+    std::array<VulkanRT::ImageHandle, 3> luts{};
+    bool hasLuts = true;
+    for (uint32_t i = 0; i < 3; ++i) {
+        luts[i] = m_device->m_lutImages[i];
+        if (!luts[i].view || !luts[i].sampler) hasLuts = false;
+    }
+    VulkanRT::ImageHandle environment{};
+    auto envIt = m_uploadedImages.find(m_envTexID);
+    const bool hasWorldEnv = m_envTexID > 0 && envIt != m_uploadedImages.end() &&
+        envIt->second.view && envIt->second.sampler;
+    if (hasWorldEnv) environment = envIt->second;
+    // Every sampler the bake declares must point at a real image: a compute
+    // stage reading an unwritten descriptor is undefined behaviour, not an
+    // empty sample. The flags above already say which ones carry meaning.
+    const VulkanRT::ImageHandle* skyView = hasLuts ? &luts[1] : nullptr;
+    const VulkanRT::ImageHandle* transmittance = hasLuts ? &luts[0] : nullptr;
+    const VulkanRT::ImageHandle* env = hasWorldEnv ? &environment : nullptr;
+    const VulkanRT::ImageHandle* filler = skyView ? skyView : env;
+    if (!filler) return false; // nothing sampleable yet; keep the cone fallback
+    if (!skyView) skyView = filler;
+    if (!transmittance) transmittance = filler;
+    if (!env) env = filler;
+
+    push.modeFlagsSize[0] = static_cast<uint32_t>(m_cachedWorld.mode);
+    push.modeFlagsSize[1] = (hasWorldEnv ? 2u : 0u) | (overlay ? 4u : 0u) |
+                            (hasLuts ? 8u : 0u);
+    push.modeFlagsSize[2] = kSkyCaptureWidth;
+    push.modeFlagsSize[3] = kSkyCaptureHeight;
+
+    uint64_t stamp = hashBytes(&push, sizeof(push));
+    const VkImageView views[3] = {skyView->view, transmittance->view, env->view};
+    stamp = hashBytes(views, sizeof(views), stamp);
+    signature = stamp;
+    if (state->skyCaptured && state->skySignature == stamp) return true;
+
+    VkDescriptorImageInfo outInfo{};
+    outInfo.imageView = state->skyCapture.view;
+    outInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkDescriptorImageInfo sources[3]{};
+    const VulkanRT::ImageHandle* handles[3] = {skyView, transmittance, env};
+    for (uint32_t i = 0; i < 3; ++i) {
+        sources[i].sampler = handles[i]->sampler;
+        sources[i].imageView = handles[i]->view;
+        sources[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    VkWriteDescriptorSet writes[4]{};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = state->skySet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[0].pImageInfo = &outInfo;
+    for (uint32_t i = 0; i < 3; ++i) {
+        writes[1 + i] = writes[0];
+        writes[1 + i].dstBinding = 1u + i;
+        writes[1 + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1 + i].pImageInfo = &sources[i];
+    }
+    drainInteractiveViewportInFlight();
+    vkUpdateDescriptorSets(m_device->getDevice(), 4, writes, 0, nullptr);
+
+    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return false;
+    if (state->skyCaptured)
+        recordIblImageBarrier(cmd, state->skyCapture.image, 1,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, state->skyPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            state->skyPipelineLayout, 0, 1, &state->skySet, 0, nullptr);
+    vkCmdPushConstants(cmd, state->skyPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(push), &push);
+    vkCmdDispatch(cmd, (kSkyCaptureWidth + 7u) / 8u, (kSkyCaptureHeight + 7u) / 8u, 1);
+    recordIblImageBarrier(cmd, state->skyCapture.image, 1,
+                          VK_IMAGE_LAYOUT_GENERAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_device->endSingleTimeCommands(cmd);
+
+    state->skySignature = stamp;
+    state->skyCaptured = true;
     return true;
 }
 
 void VulkanBackendAdapter::refreshMaterialPreviewIbl() {
     auto state = m_materialPreviewIbl;
-    if (!state || !state->ready || !m_device || m_envTexID <= 0) return;
-    auto sourceIt = m_uploadedImages.find(m_envTexID);
-    if (sourceIt == m_uploadedImages.end() || !sourceIt->second.view ||
-        !sourceIt->second.sampler)
-        return;
-    if (state->generated && state->sourceTextureId == m_envTexID) return;
+    if (!state || !state->ready || !m_device) return;
 
-    const VulkanRT::ImageHandle& source = sourceIt->second;
+    // Two producers, one consumer. The shader reads irradiance + prefilter +
+    // BRDF and does not care which one filled them; sourceKind is what makes
+    // that answerable from outside instead of guessed from the world mode.
+    VulkanRT::ImageHandle source{};
+    int kind = 0;
+    uint64_t signature = 0;
+    if (m_cachedWorld.mode == WORLD_MODE_NISHITA) {
+        if (!refreshWorldSkyCapture(signature)) return;
+        source = state->skyCapture;
+        kind = 2;
+    } else if (m_cachedWorld.mode == WORLD_MODE_HDRI && m_envTexID > 0) {
+        auto sourceIt = m_uploadedImages.find(m_envTexID);
+        if (sourceIt == m_uploadedImages.end() || !sourceIt->second.view ||
+            !sourceIt->second.sampler)
+            return;
+        source = sourceIt->second;
+        kind = 1;
+        signature = static_cast<uint64_t>(m_envTexID);
+    } else {
+        return; // solid colour world needs no prefiltered environment
+    }
+    if (!source.view || !source.sampler) return;
+    if (state->generated && state->sourceKind == kind &&
+        state->sourceSignature == signature)
+        return;
     VkDescriptorImageInfo sourceInfo{};
     sourceInfo.sampler = source.sampler;
     sourceInfo.imageView = source.view;
@@ -315,6 +660,10 @@ void VulkanBackendAdapter::refreshMaterialPreviewIbl() {
         vkUpdateDescriptorSets(m_device->getDevice(), 2, writes, 0, nullptr);
     }
 
+    // Regeneration overwrites images an in-flight frame may still be sampling:
+    // once a producer has been current, the preview set points straight at
+    // them. Paid per regeneration, not per frame.
+    if (state->generated) drainInteractiveViewportInFlight();
     VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) return;
     if (state->generated) {
@@ -345,6 +694,43 @@ void VulkanBackendAdapter::refreshMaterialPreviewIbl() {
     };
 
     dispatch(0u, 0u, kIrradianceWidth, kIrradianceHeight, 128u, 0.0f);
+
+    // Copy the freshly written irradiance out while the image is still GENERAL.
+    // Doing it after the chain would mean transitioning back out of
+    // SHADER_READ_ONLY, i.e. touching an image an in-flight frame samples.
+    const bool wantProbeReadback = ensureIrradianceStaging();
+    if (wantProbeReadback) {
+        VkImageMemoryBarrier toTransfer{};
+        toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toTransfer.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toTransfer.image = state->irradiance.image;
+        toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                             1, &toTransfer);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {kIrradianceWidth, kIrradianceHeight, 1};
+        vkCmdCopyImageToBuffer(cmd, state->irradiance.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               state->irradianceStaging.buffer, 1, &region);
+
+        VkImageMemoryBarrier backToGeneral = toTransfer;
+        backToGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        backToGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        backToGeneral.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        backToGeneral.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+                             1, &backToGeneral);
+    }
     for (uint32_t mip = 0; mip < kPrefilterMipCount; ++mip) {
         const uint32_t width = std::max(1u, kPrefilterWidth >> mip);
         const uint32_t height = std::max(1u, kPrefilterHeight >> mip);
@@ -367,7 +753,19 @@ void VulkanBackendAdapter::refreshMaterialPreviewIbl() {
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
     m_device->endSingleTimeCommands(cmd);
-    state->sourceTextureId = m_envTexID;
+    if (wantProbeReadback) {
+        constexpr size_t kFloats = size_t(kIrradianceWidth) * kIrradianceHeight * 4u;
+        std::vector<float> irradiance(kFloats);
+        m_device->downloadBuffer(state->irradianceStaging, irradiance.data(),
+                                 kFloats * sizeof(float));
+        // The signature carries the producer kind so switching HDRI <-> sky
+        // invalidates the probe field instead of blending two worlds.
+        setMaterialPreviewProbeSource(irradiance.data(), kIrradianceWidth,
+                                      kIrradianceHeight,
+                                      signature ^ (uint64_t(kind) << 60));
+    }
+    state->sourceKind = kind;
+    state->sourceSignature = signature;
     state->brdfReady = true;
     state->generated = true;
     state->boundPreviewSet = VK_NULL_HANDLE;
@@ -382,9 +780,19 @@ bool VulkanBackendAdapter::bindMaterialPreviewIblDescriptors(
         state = std::make_shared<MaterialPreviewIblResources>();
         m_materialPreviewIbl = state;
     }
+    // The prefiltered maps are only honest while the producer still matches the
+    // world mode: switching Nishita -> HDRI leaves a fully generated sky bake
+    // behind, and reporting that as ready would light the scene from the
+    // previous world.
     const bool current = state && state->ready && state->generated &&
-        state->sourceTextureId == m_envTexID && m_envTexID > 0;
-    if (state && state->boundPreviewSet != set) {
+        ((state->sourceKind == 1 && m_cachedWorld.mode == WORLD_MODE_HDRI &&
+          m_envTexID > 0) ||
+         (state->sourceKind == 2 && m_cachedWorld.mode == WORLD_MODE_NISHITA));
+    // ★ Rebinding on set change alone was enough while the only producer was an
+    //   HDRI uploaded before the first bind. Physical Sky bakes after the first
+    //   frame, so the set must also be rewritten when current flips - otherwise
+    //   the fallback stays bound forever and GI silently never arrives.
+    if (state && (state->boundPreviewSet != set || state->boundCurrent != current)) {
         drainInteractiveViewportInFlight();
         const VulkanRT::ImageHandle* images[3] = {
             current ? &state->irradiance : &fallback,
@@ -406,6 +814,7 @@ bool VulkanBackendAdapter::bindMaterialPreviewIblDescriptors(
         }
         vkUpdateDescriptorSets(m_device->getDevice(), 3, writes, 0, nullptr);
         state->boundPreviewSet = set;
+        state->boundCurrent = current;
     }
     return current;
 }
@@ -413,11 +822,33 @@ bool VulkanBackendAdapter::bindMaterialPreviewIblDescriptors(
 bool VulkanBackendAdapter::getMaterialPreviewIblStatus(
     MaterialPreviewIblStatus& out) const {
     out = {};
+    // ★★★★ Arka plan raporu IBL'den BAGIMSIZ olcuulur: sky pass'in kapisi
+    //   IBL'e degil, env dokusuna ve atmosfer LUT'larina bakiyor. Ayni
+    //   girdiler, ayni sira -- yoksa rapor "cizilen" degil "istenen" olur.
+    {
+        const bool hasWorldEnv =
+            m_envTexID > 0 && m_uploadedImages.find(m_envTexID) != m_uploadedImages.end();
+        bool hasAtmosphereLuts = m_device != nullptr;
+        for (int i = 0; hasAtmosphereLuts && i < 3; ++i) {
+            if (!m_device->m_lutImages[i].view || !m_device->m_lutImages[i].sampler)
+                hasAtmosphereLuts = false;
+        }
+        if (m_cachedWorld.mode == WORLD_MODE_HDRI)
+            out.background_source = hasWorldEnv ? "hdri" : "solid_fallback";
+        else if (m_cachedWorld.mode == WORLD_MODE_NISHITA)
+            out.background_source = hasAtmosphereLuts ? "sky" : "sky_analytic_fallback";
+        else
+            out.background_source = "color";
+    }
     const auto state = m_materialPreviewIbl;
     if (!state) return false;
     out.supported = state->ready && state->pipeline != VK_NULL_HANDLE;
+    out.sky_capture_supported = state->skyReady;
     out.ready = out.supported && state->generated &&
-        state->sourceTextureId == m_envTexID && m_envTexID > 0;
+        ((state->sourceKind == 1 && m_cachedWorld.mode == WORLD_MODE_HDRI &&
+          m_envTexID > 0) ||
+         (state->sourceKind == 2 && m_cachedWorld.mode == WORLD_MODE_NISHITA));
+    out.source = !out.ready ? "none" : (state->sourceKind == 2 ? "sky" : "hdri");
     return true;
 }
 
@@ -430,6 +861,12 @@ void VulkanBackendAdapter::destroyMaterialPreviewIblResources() {
     VkDevice device = m_device->getDevice();
     for (VkImageView view : state.prefilterMipViews)
         if (view) vkDestroyImageView(device, view, nullptr);
+    if (state.skyPipeline) vkDestroyPipeline(device, state.skyPipeline, nullptr);
+    if (state.skyPipelineLayout) vkDestroyPipelineLayout(device, state.skyPipelineLayout, nullptr);
+    if (state.skyPool) vkDestroyDescriptorPool(device, state.skyPool, nullptr);
+    if (state.skyLayout) vkDestroyDescriptorSetLayout(device, state.skyLayout, nullptr);
+    if (state.skyCapture.image) m_device->destroyImage(state.skyCapture);
+    if (state.irradianceStaging.buffer) m_device->destroyBuffer(state.irradianceStaging);
     if (state.irradiance.image) m_device->destroyImage(state.irradiance);
     if (state.prefiltered.image) m_device->destroyImage(state.prefiltered);
     if (state.brdf.image) m_device->destroyImage(state.brdf);

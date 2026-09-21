@@ -857,6 +857,9 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         root["camera"]["vup"] = vec3ToJson(scene.camera->vup);
         root["camera"]["vfov"] = scene.camera->vfov;
         root["camera"]["aperture"] = scene.camera->aperture;
+        // ★★ Anahtar AYRI bir olgu; yazilmazsa okurken "aciklik > 0" geri
+        //   dususuyle tahmin edilir (eski dosyalarin niyeti buydu).
+        root["camera"]["depth_of_field"] = scene.camera->depth_of_field;
         root["camera"]["focus_dist"] = scene.camera->focus_dist;
     }
 
@@ -1002,6 +1005,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         sj["blend_mode"] = (int)system.blend_mode;
 
         // Render Settings
+        sj["render"]["emitter_only"] = system.render.emitter_only;
         sj["render"]["render_in_raytrace"] = system.render.render_in_raytrace;
         sj["render"]["shape"] = (int)system.render.shape;
         sj["render"]["size_multiplier"] = system.render.size_multiplier;
@@ -1009,9 +1013,6 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         sj["render"]["emissive"] = system.render.emissive;
         sj["render"]["inherit_color_from_emitter"] = system.render.inherit_color_from_emitter;
         sj["render"]["base_color"] = vec3ToJson(system.render.base_color);
-        sj["render"]["color_end"] = vec3ToJson(system.render.color_end);
-        sj["render"]["color_buckets"] = system.render.color_buckets;
-        sj["render"]["over_life_color"] = system.render.over_life_color;
         sj["render"]["emission_strength"] = system.render.emission_strength;
         sj["render"]["roughness"] = system.render.roughness;
 
@@ -1143,6 +1144,13 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         
         scene.camera->vfov = vfov;
         scene.camera->aperture = (float)aperture;
+        // ★★★ ESKI dosyalarin tek kapali-anahtari "aciklik = 0" idi; alan
+        //   yoksa NIYETI o sekilde okuruz. Sabit bir `true`, DoF'u kapatmis
+        //   her eski sahneyi sessizce bulaniklastirirdi.
+        bool dof_on = (aperture > 0.001);
+        bool dof_saved = false;
+        if (!cam["depth_of_field"].get(dof_saved)) dof_on = dof_saved;
+        scene.camera->depth_of_field = dof_on;
         scene.camera->focus_dist = (float)focus_dist;
         scene.camera->update_camera_vectors();
     }
@@ -1489,10 +1497,15 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
             if (sj.contains("visible")) system.visible = sj["visible"];
             if (sj.contains("enabled")) system.enabled = sj["enabled"];
             if (sj.contains("blend_mode")) system.blend_mode = (SceneData::ParticleBlendMode)sj["blend_mode"];
+            // A scene with no render block predates emitter-only mode.
+            system.render.emitter_only = false;
 
             // Deserialise Render Settings
             if (sj.contains("render")) {
                 const auto& rj = sj["render"];
+                // Old scenes predate the carrier-only mode and rendered their
+                // particles, so preserve that appearance when the key is absent.
+                system.render.emitter_only = rj.value("emitter_only", false);
                 if (rj.contains("render_in_raytrace")) system.render.render_in_raytrace = rj["render_in_raytrace"];
                 if (rj.contains("shape")) system.render.shape = (SceneData::ParticleRenderShape)rj["shape"];
                 if (rj.contains("size_multiplier")) system.render.size_multiplier = rj["size_multiplier"];
@@ -1500,9 +1513,6 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                 if (rj.contains("emissive")) system.render.emissive = rj["emissive"];
                 if (rj.contains("inherit_color_from_emitter")) system.render.inherit_color_from_emitter = rj["inherit_color_from_emitter"];
                 if (rj.contains("base_color")) system.render.base_color = jsonToVec3(rj["base_color"]);
-                if (rj.contains("color_end")) system.render.color_end = jsonToVec3(rj["color_end"]);
-                if (rj.contains("color_buckets")) system.render.color_buckets = rj["color_buckets"];
-                if (rj.contains("over_life_color")) system.render.over_life_color = rj["over_life_color"];
                 if (rj.contains("emission_strength")) system.render.emission_strength = rj["emission_strength"];
                 if (rj.contains("roughness")) system.render.roughness = rj["roughness"];
 

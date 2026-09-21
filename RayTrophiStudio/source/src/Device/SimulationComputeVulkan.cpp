@@ -923,7 +923,7 @@ private:
             { "sim_grid_maccormack_scalar",         "sim_grid_maccormack_scalar.spv",      7, 28 },
             { "sim_grid_maccormack_velocity",       "sim_grid_maccormack_velocity.spv",   10, 24 },
             { "sim_gas_inject",                     "sim_gas_inject.spv",                   7, 112 },
-            { "sim_gas_buoyancy",                   "sim_gas_buoyancy.spv",                 3, 36 },
+            { "sim_gas_buoyancy",                   "sim_gas_buoyancy.spv",                 3, 44 },
             { "sim_gas_force_evaluate",             "sim_gas_force_evaluate.spv",           7, 48 },
             { "sim_gas_force_gather",               "sim_gas_force_gather.spv",             6, 48 },
             { "sim_particle_force_integrate",        "sim_particle_force_integrate.spv",      7, 40 },

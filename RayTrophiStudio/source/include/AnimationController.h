@@ -146,6 +146,7 @@ public:
     bool update(float deltaTime, const BoneData& boneData);
     
     const std::vector<Matrix4x4>& getFinalBoneMatrices() const { return cachedFinalBoneMatrices; }
+    const std::unordered_map<std::string, Matrix4x4>& getJointGlobalTransforms() const { return cachedJointGlobals; }
     bool areBoneMatricesDirty() const { return boneMatricesDirty; }
     void clearDirtyFlag() { boneMatricesDirty = false; }
     
@@ -180,6 +181,7 @@ private:
     Quaternion lastRootRotation;
     
     std::vector<Matrix4x4> cachedFinalBoneMatrices;
+    std::unordered_map<std::string, Matrix4x4> cachedJointGlobals;
     bool boneMatricesDirty = true;
     float lastUpdateTime = -1.0f;
     bool globalPaused = false;

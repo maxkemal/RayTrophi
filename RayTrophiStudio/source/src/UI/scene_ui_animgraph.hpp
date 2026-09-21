@@ -22,6 +22,7 @@
 #include "AnimationNodes.h"
 #include "AnimationController.h"
 #include "Animation/AnimationData.h"   // AnimationData (was reached through AnimatedObject.h)
+#include "Animation/RigClipRuntimeSync.h"
 #include "NodeSystem/NodeEditorChrome.h"
 
 #include <cstdio>
@@ -34,11 +35,12 @@
 #include <vector>
 #include <SceneSelection.h>
 #include <Backend/IViewportBackend.h>
+#include <UI/RigPoseViewUI.h>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern bool g_camera_dirty;
 extern bool g_lights_dirty;
-extern bool g_world_dirty;
+void markWorldDirty();
 
 // ============================================================================
 // ANIMATION GRAPH UI STATE
@@ -81,6 +83,8 @@ struct AnimGraphUIState {
     bool isCreatingLink = false;
     uint32_t linkStartPinId = 0;
     bool linkStartIsOutput = true;  // true if dragging from output pin
+    uint32_t pendingAutoConnectPinId = 0;
+    bool pendingAutoConnectIsOutput = true;
     
     // Pin positions cache (filled during node draw, used for link drawing)
     std::unordered_map<uint32_t, ImVec2> pinScreenPositions;
@@ -136,7 +140,7 @@ inline bool isAnimGraphRuntimeStale(SceneData& scene, const std::string& charact
 inline void requestAnimGraphViewportWake(UIContext& ctx) {
     g_camera_dirty = true;
     g_lights_dirty = true;
-    g_world_dirty = true;
+    markWorldDirty();
     if (ctx.backend_ptr) {
         ctx.backend_ptr->resetAccumulation();
     }
@@ -266,6 +270,8 @@ inline void drawAnimGraphSettingsAndStatus(UIContext& ctx, const std::string& ch
             }
         }
         
+        ImGui::Spacing();
+        RigUI::drawRigPoseViewControls(ctx, characterName, true);
         ImGui::Spacing();
         if (activeModelCtx) {
             ImGui::Checkbox("Use Graph", &activeModelCtx->useAnimGraph);
@@ -559,7 +565,7 @@ inline void drawAnimationParametersPanel(UIContext& ctx,
             case 0: evalCtx.floatParams[newParamName] = 0.0f; break;
             case 1: evalCtx.boolParams[newParamName] = false; break;
             case 2: evalCtx.intParams[newParamName] = 0; break;
-            case 3: break;
+            case 3: evalCtx.triggerParams[newParamName] = newParamName; break;
         }
         newParamName[0] = '\0';
     }
@@ -635,6 +641,28 @@ inline void syncRuntimeNodeFromAsset(AnimationGraph::AnimationNodeGraph* assetGr
     nlohmann::json nodeJson;
     assetNode->onSave(nodeJson);
     runtimeNode->onLoad(nodeJson);
+
+    // onLoad may REBUILD dynamic pins: StateMachineNode::onLoad clears inputs and adds one
+    // input per state, and those fresh pins come back with id 0. The runtime graph's links
+    // address pins by id, so a wiped id disconnects every state input at once - the machine
+    // then evaluates to an empty pose and the character freezes the moment its node is
+    // selected in the inspector. AnimationNodeGraph::loadFromJson already re-applies pin ids
+    // after onLoad for exactly this reason; this is the second call site and needs the same
+    // treatment. Asset and runtime are clones of each other, so the asset's pin ids ARE the
+    // runtime's ids.
+    auto mirrorPinIds = [&](const std::vector<NodeSystem::Pin>& src, std::vector<NodeSystem::Pin>& dst) {
+        for (size_t i = 0; i < dst.size(); ++i) {
+            if (i < src.size() && src[i].id != 0) {
+                dst[i].id = src[i].id;
+            } else if (dst[i].id == 0) {
+                dst[i].id = runtimeGraph->nextPinId++;
+            }
+            dst[i].nodeId = runtimeNode->id;
+            runtimeGraph->nextPinId = std::max(runtimeGraph->nextPinId, dst[i].id + 1);
+        }
+    };
+    mirrorPinIds(assetNode->inputs, runtimeNode->inputs);
+    mirrorPinIds(assetNode->outputs, runtimeNode->outputs);
 }
 
 // ============================================================================
@@ -672,6 +700,21 @@ inline void drawNodePropertiesPanel(UIContext& ctx,
                 if (runtimeClip) {
                     assetClip->currentTime = runtimeClip->currentTime;
                     assetClip->isPlaying = runtimeClip->isPlaying;
+                }
+            }
+
+            // Same idea for the state machine: which state is live belongs to the runtime
+            // instance and is NOT serialized (it used to be, and the asset's stale copy was
+            // written back over the runtime's every frame). Read it for display only.
+            if (auto* assetSm = dynamic_cast<AnimationGraph::StateMachineNode*>(node)) {
+                if (runtimeGraph && runtimeGraph != graph) {
+                    if (auto* runtimeSm = dynamic_cast<AnimationGraph::StateMachineNode*>(
+                            runtimeGraph->findNodeById(nodeId))) {
+                        assetSm->currentStateName = runtimeSm->currentStateName;
+                        assetSm->targetStateName = runtimeSm->targetStateName;
+                        assetSm->isTransitioning = runtimeSm->isTransitioning;
+                        assetSm->transitionProgress = runtimeSm->transitionProgress;
+                    }
                 }
             }
 
@@ -755,17 +798,45 @@ inline void drawNodePropertiesPanel(UIContext& ctx,
                             }
                         }
 
-                        const char* conds[] = {"Bool", "Float >", "Float <", "Trigger"};
+                        const char* conds[] = {"None (Exit Time)", "Bool", "Float >", "Float <", "Trigger"};
                         int cType = (int)trans.conditionType;
-                        if (ImGui::Combo("Condition Type", &cType, conds, 4)) trans.conditionType = (AnimationGraph::StateMachineNode::Transition::ConditionType)cType;
+                        if (ImGui::Combo("Condition Type", &cType, conds, 5)) trans.conditionType = (AnimationGraph::StateMachineNode::Transition::ConditionType)cType;
                         
                         if (trans.conditionType == AnimationGraph::StateMachineNode::Transition::ConditionType::FloatGreater || 
                             trans.conditionType == AnimationGraph::StateMachineNode::Transition::ConditionType::FloatLess) {
                             ImGui::DragFloat("Compare Val", &trans.compareValue, 0.1f);
                         }
                         
+                        if (trans.conditionType == AnimationGraph::StateMachineNode::Transition::ConditionType::Trigger && !trans.parameterName.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::Button("Fire Trigger")) {
+                                graph->evalContext.triggerParams[trans.parameterName] = trans.parameterName;
+                                if (auto* runtimeGraph = getRuntimeGraphForCharacter(ctx.scene, g_animGraphUI.activeCharacter)) {
+                                    runtimeGraph->evalContext.triggerParams[trans.parameterName] = trans.parameterName;
+                                }
+                            }
+                        }
+
                         if (ImGui::Button("Delete Transition")) {
                             smNode->transitions.erase(smNode->transitions.begin() + t);
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Test Transition")) {
+                            smNode->currentStateName = trans.fromState;
+                            smNode->targetStateName = trans.toState;
+                            smNode->transitionProgress = 0.0f;
+                            smNode->isTransitioning = true;
+                            if (auto* runtimeGraph = getRuntimeGraphForCharacter(ctx.scene, g_animGraphUI.activeCharacter)) {
+                                for (auto& node : runtimeGraph->nodes) {
+                                    if (auto* rSmNode = dynamic_cast<AnimationGraph::StateMachineNode*>(node.get())) {
+                                        rSmNode->currentStateName = trans.fromState;
+                                        rSmNode->targetStateName = trans.toState;
+                                        rSmNode->transitionProgress = 0.0f;
+                                        rSmNode->isTransitioning = true;
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         ImGui::TreePop();
                     }
@@ -1499,10 +1570,13 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
         if (resizeHovered || g_animGraphUI.resizingNodeId == node->id) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         }
-        if (ImGui::IsItemActivated() || (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
+        if (!g_animGraphUI.isCreatingLink && (ImGui::IsItemActivated() || (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left)))) {
             g_animGraphUI.resizingNodeId = node->id;
         }
-        if (g_animGraphUI.resizingNodeId == node->id && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        if (g_animGraphUI.isCreatingLink) {
+            g_animGraphUI.resizingNodeId = 0;
+        }
+        if (!g_animGraphUI.isCreatingLink && g_animGraphUI.resizingNodeId == node->id && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             node->uiWidth += ImGui::GetIO().MouseDelta.x / zoom;
             node->uiWidth = std::clamp(node->uiWidth, 110.0f, 360.0f);
         }
@@ -1736,6 +1810,7 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
                 
                 // Start drag from input
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    g_animGraphUI.resizingNodeId = 0;
                     g_animGraphUI.isCreatingLink = true;
                     g_animGraphUI.linkStartPinId = pin.id;
                     g_animGraphUI.linkStartIsOutput = false;
@@ -1770,6 +1845,7 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
                 
                 // Start drag from output
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    g_animGraphUI.resizingNodeId = 0;
                     g_animGraphUI.isCreatingLink = true;
                     g_animGraphUI.linkStartPinId = pin.id;
                     g_animGraphUI.linkStartIsOutput = true;
@@ -1778,15 +1854,22 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
         }
     }
 
-    // ========== CANCEL LINK CREATION ==========
+    // ========== CANCEL / AUTO-CONNECT LINK CREATION ==========
     if (g_animGraphUI.isCreatingLink) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             g_animGraphUI.isCreatingLink = false;
             g_animGraphUI.linkStartPinId = 0;
+            g_animGraphUI.pendingAutoConnectPinId = 0;
         }
         
-        // Complete on release (if not over a valid pin, cancel)
+        // Complete on release over empty space -> trigger Node Picker popup for auto connect
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            if (g_animGraphUI.linkStartPinId != 0) {
+                g_animGraphUI.pendingAutoConnectPinId = g_animGraphUI.linkStartPinId;
+                g_animGraphUI.pendingAutoConnectIsOutput = g_animGraphUI.linkStartIsOutput;
+                g_animGraphUI.showAddNodePopup = true;
+                g_animGraphUI.addNodePopupPos = ImGui::GetMousePos();
+            }
             g_animGraphUI.isCreatingLink = false;
             g_animGraphUI.linkStartPinId = 0;
         }
@@ -2122,6 +2205,21 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
                     if (typeId == "FinalPose") {
                         graph->outputNode = static_cast<AnimationGraph::FinalPoseNode*>(newNode.get());
                     }
+
+                    // Auto-connect if node was created from dragging a link cable into empty space
+                    if (g_animGraphUI.pendingAutoConnectPinId != 0) {
+                        if (g_animGraphUI.pendingAutoConnectIsOutput) {
+                            if (!newNode->inputs.empty()) {
+                                graph->connect(g_animGraphUI.pendingAutoConnectPinId, newNode->inputs[0].id);
+                            }
+                        } else {
+                            if (!newNode->outputs.empty()) {
+                                graph->connect(newNode->outputs[0].id, g_animGraphUI.pendingAutoConnectPinId);
+                            }
+                        }
+                        g_animGraphUI.pendingAutoConnectPinId = 0;
+                    }
+
                     graph->nodes.push_back(std::move(newNode));
                     markAnimGraphRuntimeStale(ctx.scene, g_animGraphUI.activeCharacter);
                 }
@@ -2129,6 +2227,10 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
         }
 
         ImGui::EndPopup();
+    } else {
+        if (g_animGraphUI.pendingAutoConnectPinId != 0) {
+            g_animGraphUI.pendingAutoConnectPinId = 0;
+        }
     }
 
     if (ImGui::BeginPopup("LocalNodeContextPopup")) {
@@ -2407,8 +2509,13 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
         if (UIWidgets::IconActionButton("AnimGraphSyncScene", UIWidgets::IconType::Duplicate, "Sync Scene", false,
                                         ImVec4(0.72f, 0.84f, 1.0f, 1.0f), ImVec2(105.0f, 24.0f),
                                         "Build quick starter graphs from scene clips and refresh controller data.")) {
-            auto& animCtrl = AnimationController::getInstance();
-            animCtrl.registerClips(ctx.scene.animationDataList);
+            for (const auto& model : ctx.scene.importedModelContexts) {
+                RigAuthoring::synchronizeClipRuntime(ctx.scene, model.importName);
+            }
+            if (ctx.scene.importedModelContexts.empty()) {
+                AnimationController::getInstance().registerClips(
+                    ctx.scene.animationDataList);
+            }
 
             for (const auto& anim : ctx.scene.animationDataList) {
                 if (!anim) continue;
@@ -2556,7 +2663,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
         currentGraph = nullptr;
     }
 
-    // ========== MAIN CONTENT: Left Panel | Resize Handle | Node Canvas ==========
+    // ========== MAIN CONTENT: Left Panel | Resize Handle | Node Canvas | Right Panel ==========
     static float leftPanelWidth = 250.0f;
     static float rightPanelWidth = 300.0f;
     const float minPanelWidth = 150.0f;
@@ -2564,6 +2671,14 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
 
     float availHeight = ImGui::GetContentRegionAvail().y;
     float availWidth = ImGui::GetContentRegionAvail().x;
+
+    // Dynamically clamp panel widths to ensure node canvas gets at least 180px and right panel never overflows parent window
+    float maxLeftWidth = std::max(minPanelWidth, availWidth - rightPanelWidth - 180.0f - 12.0f);
+    leftPanelWidth = std::clamp(leftPanelWidth, minPanelWidth, std::min(maxPanelWidth, maxLeftWidth));
+
+    float maxRightWidth = std::max(minPanelWidth, availWidth - leftPanelWidth - 180.0f - 12.0f);
+    rightPanelWidth = std::clamp(rightPanelWidth, minPanelWidth, std::min(maxPanelWidth, maxRightWidth));
+
     AnimationGraph::AnimationNodeGraph* runtimeGraphForActiveCharacter =
         getRuntimeGraphForCharacter(ctx.scene, g_animGraphUI.activeCharacter);
 
@@ -2648,7 +2763,8 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
     }
     if (ImGui::IsItemActive()) {
         leftPanelWidth += ImGui::GetIO().MouseDelta.x;
-        leftPanelWidth = std::clamp(leftPanelWidth, minPanelWidth, maxPanelWidth);
+        float maxL = std::max(minPanelWidth, availWidth - rightPanelWidth - 180.0f - 12.0f);
+        leftPanelWidth = std::clamp(leftPanelWidth, minPanelWidth, std::min(maxPanelWidth, maxL));
     }
 
     // Draw resize handle indicator
@@ -2661,9 +2777,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
     ImGui::SameLine();
 
     // Node canvas
-    // Calculate the maximum space we can take taking the right panel into account
-    float canvasWidth = availWidth - leftPanelWidth - rightPanelWidth - 16.0f;
-    if (canvasWidth < 200.0f) canvasWidth = 200.0f; // Limit to min width
+    float canvasWidth = std::max(180.0f, availWidth - leftPanelWidth - rightPanelWidth - 12.0f);
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.09f, 0.12f, 0.92f));
     ImGui::BeginChild("AnimNodeCanvas", ImVec2(canvasWidth, availHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
@@ -2700,7 +2814,8 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
     }
     if (ImGui::IsItemActive()) {
         rightPanelWidth -= ImGui::GetIO().MouseDelta.x;
-        rightPanelWidth = std::clamp(rightPanelWidth, minPanelWidth, maxPanelWidth);
+        float maxR = std::max(minPanelWidth, availWidth - leftPanelWidth - 180.0f - 12.0f);
+        rightPanelWidth = std::clamp(rightPanelWidth, minPanelWidth, std::min(maxPanelWidth, maxR));
     }
 
     // Draw right resize handle indicator
@@ -2711,9 +2826,9 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
 
     ImGui::SameLine();
     
-    // Right panel
+    // Right panel (fill remaining width up to right edge of parent window)
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.10f, 0.14f, 0.82f));
-    ImGui::BeginChild("AnimRightPanel", ImVec2(rightPanelWidth, availHeight), true, ImGuiWindowFlags_NoMove);
+    ImGui::BeginChild("AnimRightPanel", ImVec2(0, availHeight), true, ImGuiWindowFlags_NoMove);
     
     if (currentGraph) {
         AnimationGraph::AnimNodeBase* selectedNode = nullptr;
@@ -2736,28 +2851,25 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
 
         const bool runtimeStale = isAnimGraphRuntimeStale(ctx.scene, g_animGraphUI.activeCharacter);
         
-        // Draw Selected Node Info directly inline
+        // Draw Selected Node Info compactly
         ImGui::TextDisabled("Selected:");
         ImGui::SameLine();
         ImGui::Text("%s", selectedNode ? selectedNode->name.c_str() : "(None)");
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
-        ImGui::Text("Type: %s", selectedNode ? selectedNode->getTypeId().c_str() : "-");
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
+        
+        ImGui::TextDisabled("Type: %s |", selectedNode ? selectedNode->getTypeId().c_str() : "-");
         ImGui::SameLine();
         ImGui::TextColored(runtimeStale ? ImVec4(1.0f, 0.55f, 0.35f, 1.0f) : ImVec4(0.45f, 0.9f, 0.55f, 1.0f),
-            "Sync: %s", runtimeStale ? "Pending Push" : "Live");
+            "%s", runtimeStale ? "Pending Push" : "Live");
         
         ImGui::Spacing();
         
-        // Tabs inline
-        if (UIWidgets::HorizontalTab("Properties", UIWidgets::IconType::System, g_animGraphUI.rightPanelTab == 0, 96.0f)) g_animGraphUI.rightPanelTab = 0;
+        // Tabs dynamically sizing to fit panel width
+        float tabWidth = std::max(50.0f, (ImGui::GetContentRegionAvail().x - 12.0f) / 3.0f);
+        if (UIWidgets::HorizontalTab("Properties", UIWidgets::IconType::System, g_animGraphUI.rightPanelTab == 0, tabWidth)) g_animGraphUI.rightPanelTab = 0;
         ImGui::SameLine();
-        if (UIWidgets::HorizontalTab("State", UIWidgets::IconType::Graph, g_animGraphUI.rightPanelTab == 1, 75.0f)) g_animGraphUI.rightPanelTab = 1;
+        if (UIWidgets::HorizontalTab("State", UIWidgets::IconType::Graph, g_animGraphUI.rightPanelTab == 1, tabWidth)) g_animGraphUI.rightPanelTab = 1;
         ImGui::SameLine();
-        if (UIWidgets::HorizontalTab("Runtime", UIWidgets::IconType::AnimGraph, g_animGraphUI.rightPanelTab == 2, 85.0f)) g_animGraphUI.rightPanelTab = 2;
+        if (UIWidgets::HorizontalTab("Runtime", UIWidgets::IconType::AnimGraph, g_animGraphUI.rightPanelTab == 2, tabWidth)) g_animGraphUI.rightPanelTab = 2;
         
         ImGui::Separator();
         ImGui::Spacing();

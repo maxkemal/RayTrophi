@@ -1,114 +1,156 @@
-# Sıradaki build kontrolleri
+# Sıradaki derlemede bakılacaklar
 
-> **Durum:** CANLI — her partide üzerine yazılır. Son güncelleme: 2026-09-17 (14. parti).
+> **Durum:** AKTİF — 2026-09-21: nükleer preset elle ayarlanan değerlerle
+> güncellendi, `gas.step_stats` açıldı, GPU yükleme defterinin ilk yarısı girdi.
+> Arka plan: [GAZ_ADIMI_TASIMA_MALIYETI.md](GAZ_ADIMI_TASIMA_MALIYETI.md).
 
-## Silme kaynağı BULUNDU: Ctrl+Z tuş işleyicisi
-
-Sayaçlar tam olarak doğru yere götürdü. `sculpt.cache_wipe.rebuildMeshCache_ran`
-ölçümde **hiç görünmedi** → `ensureEditableMeshCache` içindeki yol koşmamış.
-`rebuildMeshCache` 6 kez koşmuş, 3'ünde korunacak cache vardı, `restore_refused`
-toplamı **0** → koruma/geri yükleme **çalışıyordu**. SceneLog da
-`object(''->'Plane_1')` diyor, yani cache gerçekten sıfırlanmış. Log sırası:
-
-```
-History: Undo - Sculpt Plane_1
-Undo: Sculpt Plane_1
-[ensureEditableMeshCache] rebuild reason: object(''->'Plane_1') ...
-```
-
-Kaynak `scene_ui.cpp`'deki Ctrl+Z işleyicisi:
-
-```cpp
-history.undo(ctx);
-rebuildMeshCache(ctx.scene.world.objects);
-mesh_overlay_cache = MeshOverlayCache{};
-editable_mesh_cache = EditableMeshCache{};   // ← koşulsuz siliyor
-```
-
-Komut ne yaptıysa yapsın cache atılıyor — ve `rebuildMeshCache`'in cache'i
-özenle saklayıp geri yüklemesini de bir sonraki satır iptal ediyor. Koruma
-"çalışıyor" ölçülüyordu çünkü gerçekten çalışıyordu; sonra çöpe atılıyordu.
-
-**Düzeltme:** `SceneCommand::handlesUiCacheSync()` (varsayılan **false**).
-`FlatSculptEditCommand` bunu `apply()` içinde gerçekten ne olduğuna göre
-döndürüyor: `adoptExternalFlatSoaEdit` başardıysa true, rebuild yedeğine
-düştüyse false. `SceneHistory::undo/redo` bunu çağırana bildiriyor, tuş
-işleyicisi de yalnızca false ise eski toptan geçersizleştirmeyi yapıyor.
-Denetlenmemiş her komut eskisi gibi davranıyor.
-
-## CPU seçiliyken Solid'de maliyet artışı — ÖLÇÜLDÜ
-
-| bölüm | çağrı | çağrı başına |
-|---|---|---|
-| `loop.viewport_render_cpu` | 100 | **132 ms** |
-| `loop.viewport_render` (GPU) | 815 | 2,8 ms |
-
-47 kat. CPU render backend'i seçiliyken her sculpt darbesi `start_render`
-kurduğu için CPU yolu görüntüyü baştan izliyor — Solid gösterilirken o sonuç
-ekrana **gitmiyor** bile. Yani bu harcanan iş.
-
-**Bu partide düzeltilmedi.** Doğru kapı "viewport Solid gösterirken CPU izleme
-tetiklenmesin" ama `start_render` çok yerden kuruluyor ve CPU sonucunun render
-önizleme paneli gibi başka tüketicileri olabilir; undo düzeltmesiyle aynı
-build'de test edilmesini istemiyorum.
-
-Ayrıca not: `accel.cpu.bvh_refit` 43 çağrı / **0,66 ms toplam** — 12. partinin
-CPU BVH düzeltmesi sağlam, artış oradan gelmiyor.
-
-Değişen dosyalar: `include/SceneCommand.h`, `src/Utils/SceneCommand.cpp`,
-`include/SceneHistory.h`, `src/Utils/SceneHistory.cpp`, `include/scene_ui.h`,
-`src/UI/scene_ui.cpp`.
+Sıralama: bağımsız ve hızlı görüleni önce, diğerlerinin sonucunu maskeleyeni sonra.
 
 ---
 
-## 1. Derleme
+# ★★★★★ 0. ÖNCE BU — GERİ YÜKLENEN İŞ VE CANLI BİR ABI UYUŞMAZLIĞI
 
-**Ne görmen gerek:** temiz derleme.
-**Bozuksa:** `invalidateUiCachesAfterHistoryStep` bulunamadı → `scene_ui.h`
-bildirimi sınıf gövdesine girmemiş.
+2026-09-21'de `git checkout -- src/Physics/ParticleSimulation.cpp` çalıştırdım
+(residency denemesini geri almak için) ve o dosyadaki **commit edilmemiş
+önceki parti işlerini de sildim**. Kaybolanlar geri yazıldı:
 
-## 2. Ctrl+Z hızı
+- `params.ambient_stratification` eşlemesi
+- `params.surface_dust_*` eşlemesi (altısı birden)
+- `gas_dissipation_override` → density/temperature/fuel oranları
+- `effectiveTurbulenceOctaves` kırpması
+- `GasBuoyancyGpuConstants`'ın `stratification` + `voxel_size` alanları
 
-Sculpt paneline gir, uzun bir darbe, Ctrl+Z.
-**Ne görmen gerek:** bekleme yok; bir darbe atmakla karşılaştırılabilir
-(komutun kendisi ~14 ms ölçülüyor).
+★★★ **Bir önceki derlemede CANLI bir hata vardı:** `sim_gas_buoyancy.comp` ve
+`SimulationComputeVulkan.cpp` push aralığını **44 byte** ilan ediyordu, host
+struct ise **36**. Host 36 byte itiyordu, shader `stratification` ve
+`voxel_size`'ı **ilklenmemiş bellekten** okuyordu. Validation hatası yok, çökme
+yok — sadece çöple sürülen bir kaldırma terimi.
+
+★★ Ve bunun ortaya çıkardığı daha büyük şey: `surface_dust_enabled`
+`SolverParams` içinde `false` varsayılanlı ve **hiçbir zaman true yapılmamış**.
+Yani yüzey-tozu özelliği **hiçbir sahnede bir kez bile çalışmamış**. Zemin tozu
+sandığımız şey, senin elle eklediğin `stem.density = 2.35` idi.
+
+**Ne görmen gerek:** `static_assert(sizeof(GasBuoyancyGpuConstants) == 44)`
+derleniyor. Sahnede mantar hâlâ oturuyor ve tepe domain tavanına değmiyor.
+
+**★★★ Bozuksa ne demek:** Bulut ŞİMDİ davranış değiştirdiyse bu bir regresyon
+DEĞİL — stratification ve dissipation override ilk kez gerçekten uygulanıyor.
+Tepe artık `h* = anomali / stratification`'a göre oturmalı; 0.25 ile hedef
+~26 m. Yeni yükseklik bundan çok farklıysa oranı yeniden kalibre et.
+
+**⚠ HEMEN COMMIT AL.** Bu iş üç partidir commit edilmemiş durumda duruyordu ve
+tek bir `git checkout` onu sildi.
+
+---
+
+## 1. ★★★ ÖNCE BU: simülasyon sonucu DEĞİŞMEMELİ
+
+Yükleme defteri bir performans değişikliği; görüntüyü değiştirmemeli.
+
 ```powershell
-Invoke-RtIpc perf.list @{} | Where-Object { $_.name -like 'ensureEditableMeshCache*' -or $_.name -like 'sculpt.cache_rebuild.*' -or $_.name -like 'sculpt.undo.*' } | Format-Table name,count,total_ms,max_ms -AutoSize
+Invoke-RtIpc timeline.set_frame @{ frame = 100 }
+Invoke-RtIpc gas.measure_plume @{ domain = 'Nuclear Gas' }
 ```
-**Ne görmen gerek:** `ensureEditableMeshCache.build[sculpt]` sayısı
-**Ctrl+Z ile artmıyor** (panele ilk girişteki 1 kurulumda kalıyor).
-**Bozuksa ne demek:** hâlâ artıyorsa cache'i başka bir yer siliyor; SceneLog'daki
-`rebuild reason:` satırı yine kimin ne değiştirdiğini yazacak.
 
-## 3. ★★★ UNDO DOĞRULUĞU — bu partinin riski burada
+**Ne görmen gerek:** `top_above_floor`, `active_cells`, `peak_temperature`
+2026-09-21 ölçümüyle aynı bantta (f100'de top 34.00, ~1.05M hücre, peakT ~1.99).
 
-Artık undo'dan sonra cache **silinmiyor**, yani doğruluk tamamen
-`adoptExternalFlatSoaEdit`'in yeniden tohumlamasına bağlı. Sıra:
+**★★★ Bozuksa ne demek — ve bu partinin EN SİNSİ arızası bu:** duman duvarlardan
+sızıyorsa ya da bulut şeklini kaybettiyse, `GridFluid::step` sonrasındaki
+geçersiz kılma çalışmıyordur. Belirti çökme değil: `boundaries + solids`'in
+sonuçları yok sayılır ve domain sessizce sızdırır. Çökmez, **makul görünür**.
 
-1. Darbe vur → **Ctrl+Z** → **yeni bir darbe vur**: eski şekil geri gelmemeli.
-2. Ctrl+Z → **Ctrl+Y** (redo) → şekil geri gelmeli, sonra yine Ctrl+Z.
-3. Ctrl+Z'den sonra **aynı yere** darbe vur: fırça tutmalı (PBVH sınırları).
-4. Undo sonrası **darbenin dış kenarına** bak: ince bir iz kalmamalı.
+---
 
-**Bunlar bozuksa** eskiden toptan silme hatayı örtüyordu — şimdi örtmüyor. Hangi
-adımda bozulduğunu yaz, `adoptExternalFlatSoaEdit` içindeki tohumlamayı ona göre
-düzelteceğim. Tuş işleyicisini geri almak çözüm değil, sadece 1 saniyeyi geri
-getirir.
+## 2. Yeni ölçü aleti çalışıyor mu
 
-## 4. Sculpt DIŞI undo geriye gitmedi mi
+```powershell
+Invoke-RtIpc gas.step_stats @{ domain = 'Nuclear Gas' }
+```
 
-Bir objeyi taşı → Ctrl+Z. Bir obje sil → Ctrl+Z. Materyal değiştir → Ctrl+Z.
-**Ne görmen gerek:** hepsi eskisi gibi. Bu komutlar `handlesUiCacheSync()`
-varsayılanını (false) kullandığı için eski toptan geçersizleştirmeden geçiyor.
-**Bozuksa ne demek:** bir komut yanlışlıkla true dönüyor.
+**Ne görmen gerek:** `measured = true` ve dolu aşama satırları
+(`gpu_velocity_advect_ms`, `gpu_pressure_ms`, `analysis_ms`, `cpu_boundary_ms`, …)
+artı `cfl`, `resolution`, `cell_count`.
 
-## 5. Kalan sıra
+**Bozuksa ne demek:** `measured = false` ise o domain adım atmamıştır — timeline'ı
+oynat. Metot hiç yoksa dört dokunuştan biri eksiktir (`authorize()` fail-closed
+çalışır, yani sessizce reddeder).
 
-- **CPU seçiliyken Solid'de 132 ms'lik boşa CPU izleme** (yukarıda). Sıradaki
-  en büyük kalem.
-- `sculpt.enter.pbvh` max 420 ms — panel girişinin ikinci yarısı.
-- `raster.solid.soa_refit.diff` — hâlâ tüm mesh'i tarıyor.
-- Edit overlay sculpt sırasında da çiziliyor (`edit_mode=true`); ölçümde büyük
-  çıkmadı ama `ui.editable_mesh_overlay` izlenmeli.
-- Undo geçmişi belleği: vuruş başına ~186 bin vertex × 52 bayt ≈ 9,7 MB; sınır
-  yok.
+---
+
+## 3. Yükleme sayısı düşmeli
+
+**Ne görmen gerek:** `gpu_scalar_advect_ms` belirgin düşmüş olmalı — tek başına
+adım başına üç yüz-arayüzü yüklemesi kalktı. `gpu_velocity_advect_ms` de bir
+miktar düşer (artık indirme sonrası handle takası var, ek kopya yok).
+
+**⚠ Beklentiyi doğru tut:** adım toplamının yarıya inmesini BEKLEME. Yalnızca
+hız alanları dönüştürüldü ve host çözücü hâlâ zincirin ortasında. Ölçülü bir
+düşüş doğru sonuçtur.
+
+---
+
+## 4. Nükleer preset — sahneden okunan değerlerle
+
+Preset'i yeniden uygula (`particle.add_preset` ya da panel) ve karşılaştır.
+
+**Gaz / domain:** voxel 0.17, `turbulence_octaves` 8 (etkin 3), stratification 0.25.
+
+**Akış kaynakları:** core r=3.02 / fuel=87.6, fireball r=1.80 / **fuel=0**,
+stem r=1.95 / density=2.35 / **fuel=0**.
+
+**Shader:** density_multiplier **13.194**, σs **0.84**, σa **1.72**,
+blackbody **16.667**, pencere 1340-5000, cutoff 0.007.
+
+**Debris emitter:** point **(0,0,0)**, direction **(0,0.7,0)**, speed **11.9**,
+lifetime **5.85 s**, mass **0.4**, burst 320.
+
+**★ İki tavizi bilerek taşıyoruz:**
+- `stem.density = 2.35` (0 değil) → sap artık zemin-tozu kuralının kanıtı DEĞİL.
+  Kuralı sınamak için density'yi 0 yapıp sap hâlâ oluşuyor mu diye bak.
+- `debris.mass = 0.4` → sürükleme 0.8 ve yerçekimi 9.81 ile birlikte yayı
+  belirler; 1.0 varsayılanı nötr değildi.
+
+---
+
+## 5. Görsel durum — neyin ÇÖZÜLDÜĞÜ, neyin kaldığı
+
+2026-09-21 ölçümü (aynı sahne, elle ayarlanmış):
+
+| kare | tavan | tepe | centroid | peakT |
+|---|---|---|---|---|
+| 20 | Hayır | 8,84 | 5,38 | 9,16 |
+| 45 | Hayır | 17,17 | 12,30 | 5,27 |
+| 90 | Hayır | 30,94 | 23,22 | 2,53 |
+| 140 | **Hayır** | **31,28** | 23,43 | 2,42 |
+
+**✔ ÇÖZÜLDÜ — tavan.** `touching_ceiling` artık hiçbir karede true değil ve
+tepe 31,3'te OTURUYOR (domain 34). Yükseklik artık kapak değil fizik.
+
+**✔ ÇÖZÜLDÜ — kor sap.** `stem.fuel` 0'a alındı; sütun karardı, yalnızca üst
+kısımda artık blackbody parıltısı kaldı ki doğrusu bu.
+
+**✔ BÜYÜK ÖLÇÜDE ÇÖZÜLDÜ — kırpılma.** σa/σs oranı ve daha düşük
+density_multiplier ile kapak loblarında gölge ve derinlik var.
+
+**⚠ KALDI — zemin eteği yükselmiyor.** `max_width` hâlâ 22,10 (= domain
+genişliği) ve en geniş dilim **y=0,09**'da. Yani zemin katmanı duvardan duvara
+yayılıyor ama YÜKSELMİYOR: görüntüde kabaran bir base surge değil, yanan ince
+bir hat okunuyor. Adaylar: `surface_dust_max_density` (2,5) tavanı,
+`gas_buoyancy_density` (0,02) ile kaldırılan tozun hafifliği, ya da domain
+genişliğinin yanal yayılmayı erken duvara dayaması.
+
+**⚠ KALDI — sap çok tekdüze.** Dikey ve düzgün; gerçek sap düzensizdir ve
+kapağa doğru genişler. `turbulence_octaves_effective` 3 ve voxel 0,17 ile
+sütun ölçeğinde kıvrım üretecek frekans yok.
+
+---
+
+## 6. Sırada (bu partide değil)
+
+- Defteri skaler alanlara genişletmek — ama önce 3. maddenin ölçümü gelsin.
+- `boundaries + solids` neden CPU'da (40 ms)? GPU portu var, devrede değil.
+  Zincirin ortasındaki yapısal round-trip'i kaldıracak tek şey bu.
+- Boş hücreleri dispatch'ten çıkarmak (aktif hücreler ~%31).
+- Advection alt adımlama — `cfl` artık `gas.step_stats`'ta, önce onu oku.

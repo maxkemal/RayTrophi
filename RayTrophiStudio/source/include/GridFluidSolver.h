@@ -53,6 +53,27 @@ struct SolverParams {
     float buoyancy_heat = 1.0f;
     float buoyancy_density = 0.0f;
     float ambient_temperature = 0.0f;
+    // Stable stratification: how much the ENVIRONMENT's temperature rises per
+    // world unit of height above the domain floor. 0 = uniform atmosphere (the
+    // old behaviour). Positive values give the plume a neutral-buoyancy height
+    // h* = anomaly / ambient_stratification, which is what makes a rising column
+    // stop and spread instead of climbing until it hits the domain ceiling.
+    // See buoyantAnomaly() in GridFluidSolver.cpp for the sign convention.
+    float ambient_stratification = 0.0f;
+
+    // ── Surface dust lofting (wind erosion threshold) ────────────────────────
+    // A surface releases material only once the wind ACROSS it exceeds
+    // `surface_dust_threshold`, then in proportion to the excess. This is what
+    // makes a blast's ground skirt expand with its own shock front instead of
+    // being a ring someone placed. See addSurfaceDust in GridFluidSolver.cpp.
+    bool  surface_dust_enabled = false;
+    float surface_dust_threshold = 6.0f;      // m/s of horizontal speed
+    float surface_dust_emission = 0.25f;      // density per (m/s excess) per second
+    float surface_dust_max_density = 2.0f;    // 0 = uncapped
+    // Total density one ground column can ever give up. 0 = unlimited, which is
+    // what produces a carpet instead of a travelling ring; see FluidGrid.
+    float surface_dust_supply = 3.0f;
+    float surface_dust_temperature = 0.0f;    // lofted ground is COLD
 
     float vorticity = 0.0f;          // vorticity confinement strength (0 = off)
 
@@ -66,7 +87,15 @@ struct SolverParams {
     float turbulence_scale = 1.2f;       // base spatial frequency
     int   turbulence_octaves = 3;        // FBM octaves (1-8)
     float turbulence_lacunarity = 2.0f;  // frequency multiplier per octave
-    float turbulence_persistence = 0.5f; // amplitude decay per octave
+    // ★★★ NOT "amplitude decay per octave", which is what this said and it was
+    // WRONG. The curl contributes a factor of the frequency, so the velocity
+    // amplitude of octave o is `scale * (lacunarity * persistence)^o`. At the
+    // old default — lacunarity 2, persistence 0.5 — that product is exactly 1.0,
+    // i.e. every octave contributes EQUALLY and the dial labelled "decay"
+    // decays nothing. Above 0.5 it AMPLIFIES the finest octaves.
+    // For a Kolmogorov-like cascade (v ~ k^-1/3) the value is
+    // lacunarity^(-4/3) = 0.397 at lacunarity 2.
+    float turbulence_persistence = 0.4f;  // per-octave AMPLITUDE x lacunarity
     float turbulence_speed = 0.5f;       // animation evolution speed
     int   turbulence_seed = 42;
 
@@ -89,6 +118,7 @@ struct SolverParams {
     bool skip_velocity_advection = false;   // lets a caller run velocity advection first
     bool skip_scalar_advection = false;     // lets an external GPU path advect scalars
     bool skip_combustion = false;           // lets an external GPU path burn fuel first
+    bool skip_surface_dust = false;         // lets a caller suppress the surface source
     bool skip_buoyancy = false;             // lets an external GPU path add buoyancy first
     bool skip_force_fields = false;          // lets an external GPU path apply shared fields first
     bool skip_vorticity = false;            // lets an external GPU path add confinement first
@@ -136,6 +166,7 @@ struct GasSolverStats {
     float advect_scalar_ms = 0.0f;   // density + temperature + fuel
     float boundary_ms = 0.0f;        // wall BCs + solid scalars/faces, both calls
     float combustion_ms = 0.0f;
+    float surface_dust_ms = 0.0f;    // wind-lofted ground/solid-top dust
     float buoyancy_ms = 0.0f;
     float force_fields_ms = 0.0f;
     float vorticity_ms = 0.0f;

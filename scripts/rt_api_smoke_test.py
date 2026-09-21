@@ -796,6 +796,19 @@ assert abs(em["rate_per_second"] - 64.0) < 1e-4
 assert em["index"] == pt_emitters_before
 assert len(rt.particle.emitters()) == pt_emitters_before + 1
 
+# Carrier-only mode is system-scoped: it must be visible through the inventory
+# and writable without disabling/removing the emitter runtime.
+pt_systems = rt.particle.list_systems()
+assert pt_systems, "adding an emitter must ensure a particle system"
+pt_active = next((s for s in pt_systems if s["active"]), pt_systems[0])
+pt_emitter_only_before = pt_active["emitter_only"]
+rt.particle.set_system_emitter_only(str(pt_active["index"]), True)
+pt_after_mode = rt.particle.list_systems()[pt_active["index"]]
+assert pt_after_mode["emitter_only"] is True
+assert len(rt.particle.emitters()) == pt_emitters_before + 1
+rt.particle.set_system_emitter_only(
+    str(pt_active["index"]), pt_emitter_only_before)
+
 # Addressable by index AND by name.
 by_index = rt.particle.get_emitter(str(em["index"]))
 by_name = rt.particle.get_emitter("SmokeEmitter")
@@ -905,7 +918,7 @@ if pt_emitters_before == 0:
     rt.particle.add_emitter(name="SmokeEmitterClear")
     rt.particle.clear_emitters()
     assert len(rt.particle.emitters()) == 0
-print("[rt-smoke] rt.particle emitters + physics + stats + spawn: OK")
+print("[rt-smoke] rt.particle emitter-only + emitters + physics + stats + spawn: OK")
 
 # 5.6c - rt.anim skeletal playback (transport + graph parameters only)
 for fn in ("characters", "character", "clips", "play", "stop", "set_paused",

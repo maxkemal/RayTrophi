@@ -179,14 +179,38 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
         UIWidgets::HelpMarker("GPU instance preparation supports scatter topology BUILD and transform UPDATE. Unsupported edits retain the conservative CPU fallback.");
     }
 
+    // ★★★ Bir yukleme ipligi aktifken bu blok CALISTIRILAMAZ.
+    //
+    // Buradaki tarama InstanceManager'in grup vektorunu ve her kaynagin ucgen
+    // vektorunu gezer; `newProject()` -> `InstanceManager::clearAll()` bunlari
+    // yukleyici ipliginde yok eder. Kare dongusundeki iki kapi (scene_ui.cpp
+    // menu cizimden sonra, Main.cpp ui.draw'dan sonra) bu panelin cizilmesini
+    // zaten engelliyor; bu ucuncu kapi savunma amaclidir, cunku serbest
+    // birakilmis bir vektoru yinelemenin belirtisi bir hata degil ERISIM
+    // IHLALI'dir -- ve okuyan taraf oldugu icin sucu da baska yerde arattirir.
+    const bool sceneLoadActive = g_scene_loading_in_progress.load(std::memory_order_acquire);
     uint64_t foliageLogical = 0;
     uint64_t foliageRecords = 0;
     for (const auto& group : InstanceManager::getInstance().getGroups()) {
+        if (sceneLoadActive) break;
         if (group.point_sphere_mode) continue;
         foliageLogical += group.instances.size();
         std::vector<uint32_t> recordsPerSource(group.sources.size(), 0u);
         for (size_t si = 0; si < group.sources.size(); ++si) {
             const auto& source = group.sources[si];
+            // ★ Flat SoA kaynaklar ONCE. Proje sidecar'indan yuklenen her scatter
+            // kaynagi `flat_meshes` ile gelir ve `triangles` BOS kalir
+            // (InstanceManager::deserializeFast). Yalnizca facade'i sayan eski
+            // kod bu kaynaklari sifir kayit sayiyordu: panel, dosyadan acilmis
+            // her sahne icin foliage VRAM'ini oldugundan AZ gosteriyordu.
+            // Cok materyalli import'ta her materyal kendi TriangleMesh'i olur ve
+            // hepsi ayni nodeName'i paylasir -- yani mesh sayisi = GPU kayit
+            // sayisi, facade tarafinda sayilan `nodeName#materialID` ile ayni sey.
+            if (!source.flat_meshes.empty()) {
+                recordsPerSource[si] =
+                    static_cast<uint32_t>((std::max)(size_t(1), source.flat_meshes.size()));
+                continue;
+            }
             const auto* centered = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
             const auto* tris = (centered && !centered->empty()) ? centered : &source.triangles;
             std::unordered_set<std::string> parts;

@@ -53,6 +53,7 @@ AnimationController::AnimationController() {
 void AnimationController::clear() {
     // Clear all cached bone matrices
     cachedFinalBoneMatrices.clear();
+    cachedJointGlobals.clear();
     
     // Clear clips and index map
     clips.clear();
@@ -93,11 +94,14 @@ void AnimationController::registerClips(const std::vector<std::shared_ptr<Animat
     // If 'clips' vector reallocates, those pointers break.
     
     // To be safe, we'll store old clip names that were playing
-    std::vector<std::pair<int, std::string>> playingClips;
+    struct SavedClips { int layer; std::string a, b; };
+    std::vector<SavedClips> playingClips;
     for (int i = 0; i < layers.size(); ++i) {
-        if (layers[i].blendState.clipA) {
-            playingClips.push_back({i, layers[i].blendState.clipA->name});
-        }
+        auto& state = layers[i].blendState;
+        playingClips.push_back({i, state.clipA ? state.clipA->name : std::string(),
+                               state.clipB ? state.clipB->name : std::string()});
+        state.clipA = nullptr;
+        state.clipB = nullptr;
     }
 
     clips.clear();
@@ -114,9 +118,8 @@ void AnimationController::registerClips(const std::vector<std::shared_ptr<Animat
     
     // RE-LINK pointers in layers
     for (auto& pair : playingClips) {
-        int layerIdx = pair.first;
-        const std::string& clipName = pair.second;
-        layers[layerIdx].blendState.clipA = getClip(clipName);
+        layers[pair.layer].blendState.clipA = pair.a.empty() ? nullptr : getClip(pair.a);
+        layers[pair.layer].blendState.clipB = pair.b.empty() ? nullptr : getClip(pair.b);
     }
 
     // Initialize default layer if empty
@@ -361,13 +364,14 @@ bool AnimationController::update(float deltaTime, const BoneData& boneData) {
     // Recalculate bone matrices if dirty
     if (boneMatricesDirty) {
         // Resize matrices if needed
-        size_t numBones = boneData.boneNameToIndex.size();
+        size_t numBones = boneData.getBoneIndexCapacity();
         if (cachedFinalBoneMatrices.size() != numBones) {
             cachedFinalBoneMatrices.resize(numBones);
         }
         
         // Initialize to identity
         std::fill(cachedFinalBoneMatrices.begin(), cachedFinalBoneMatrices.end(), Matrix4x4::identity());
+        cachedJointGlobals.clear();
         
         // Cache for global transforms during this update pass
         std::unordered_map<std::string, Matrix4x4> globalTransformCache;
@@ -426,6 +430,12 @@ bool AnimationController::update(float deltaTime, const BoneData& boneData) {
                 
                 // Proper Skinning Formula: GlobalInverse * BoneGlobal * BoneOffset
                 Matrix4x4 boneMatrix = globalInv * animatedGlobal * offset;
+                const auto previousGlobal = cachedJointGlobals.find(boneName);
+                if (layer.weight < 1.0f && layer.blendMode == BlendMode::Replace && previousGlobal != cachedJointGlobals.end()) {
+                    cachedJointGlobals[boneName] = blendTransforms(previousGlobal->second, animatedGlobal, layer.weight, BlendMode::Replace);
+                } else {
+                    cachedJointGlobals[boneName] = animatedGlobal;
+                }
                 
                 // Blend with existing matrix (from previous layers)
                 // Since we isolated models, layers for DIFFERENT models won't compete for the same boneIndex.
@@ -443,6 +453,10 @@ bool AnimationController::update(float deltaTime, const BoneData& boneData) {
             }
         }
         
+        // Preserve helper/ancestor globals as well as indexed joints for overlays.
+        for (const auto& entry : globalTransformCache) {
+            if (cachedJointGlobals.find(entry.first) == cachedJointGlobals.end()) cachedJointGlobals.emplace(entry);
+        }
         stateChanged = true;
     }
     

@@ -12,6 +12,7 @@
 #include "imgui.h"
 #include "MaterialManager.h"
 #include "PBRMaterialSnapshot.h"
+#include "UI/MaterialCoverageUI.h"
 #include "PrincipledBSDF.h"
 #include "Volumetric.h"
 #include "scene_data.h"
@@ -1993,6 +1994,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             changed = true;
         }
 
+        MaterialCoverageUI::draw(mat_id, *pbsdf);
         float opacity = pbsdf->opacityProperty.alpha;
         bool opKeyed = isMatKeyed(mat_id, false, true, false, false, false, false, false, false);
         if (SceneUI::DrawSmartFloat("opac", "Alpha", &opacity, 0.0f, 1.0f, "%.3f", opKeyed,

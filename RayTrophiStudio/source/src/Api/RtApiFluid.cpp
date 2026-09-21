@@ -453,7 +453,35 @@ Result getGasShaderSettings(const std::string& domain_id_or_name,
     out_settings.temperature_max = s.emission.temperature_max;
     out_settings.scattering_coefficient = s.scattering.coefficient;
     out_settings.absorption_coefficient = s.absorption.coefficient;
+    out_settings.voxel_step_multiplier = s.quality.voxel_step_multiplier;
+    out_settings.max_steps = s.quality.max_steps;
+    out_settings.shadow_steps = s.quality.shadow_steps;
+    out_settings.shadow_stride = s.quality.shadow_stride;
+    out_settings.shadow_strength = s.quality.shadow_strength;
     return Result::success();
+}
+
+// ★★★ A SHADER EDIT THAT ONLY RAISES g_gas_volumes_dirty IS A NO-OP ON THE
+// IMAGE, and it is a no-op that reads back CORRECTLY — which is why it survived.
+//
+// MEASURED 2026-09-20 over IPC: gas.set_shader density_multiplier 3.47 -> 0.15,
+// gas.get_shader returned 0.15, and the captured viewport was BYTE-IDENTICAL to
+// the frame before the call. Forcing a redraw by an unrelated route then
+// changed the image completely.
+//
+// Two separate omissions, and fixing either alone still leaves it broken:
+//   1. g_gas_volumes_dirty drives updateBackendGasVolumes — the LEGACY gas path
+//      — and never reaches the volume SSBO these shaders read. The packet only
+//      republishes through syncVDBVolumesToGPU, which is what the panel calls.
+//   2. Nothing asked for a frame, so even a correct packet would sit unseen
+//      until some other interaction happened to repaint.
+static void republishGasLookAndRepaint() {
+    if (!g_ctx) return;
+    g_gas_volumes_dirty = true;
+    SceneUI::syncVDBVolumesToGPU(*g_ctx);
+    g_ctx->renderer.resetCPUAccumulation();
+    if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+    g_ctx->start_render = true;
 }
 
 Result updateGasShaderSettings(const std::string& domain_id_or_name,
@@ -492,7 +520,7 @@ Result updateGasShaderSettings(const std::string& domain_id_or_name,
         domain->shader_preset = domain->fire_enabled ? "fire" : "smoke";
     }
     if (preset_changed) {
-        g_gas_volumes_dirty = true;
+        republishGasLookAndRepaint();
         return Result::success();
     }
     auto& s = *domain->shader;
@@ -506,7 +534,16 @@ Result updateGasShaderSettings(const std::string& domain_id_or_name,
         std::max(s.emission.temperature_min + 1.0f, settings.temperature_max);
     s.scattering.coefficient = std::max(0.0f, settings.scattering_coefficient);
     s.absorption.coefficient = std::max(0.0f, settings.absorption_coefficient);
-    g_gas_volumes_dirty = true;
+    // Same clamps the panel applies, so a scripted value and a dragged slider
+    // cannot produce different states.
+    s.quality.voxel_step_multiplier =
+        std::max(0.1f, std::min(8.0f, settings.voxel_step_multiplier));
+    s.quality.adaptive_stepping = true;
+    s.quality.max_steps = std::max(16, std::min(1024, settings.max_steps));
+    s.quality.shadow_steps = std::max(0, std::min(48, settings.shadow_steps));
+    s.quality.shadow_stride = std::max(1, std::min(16, settings.shadow_stride));
+    s.quality.shadow_strength = std::max(0.0f, std::min(1.0f, settings.shadow_strength));
+    republishGasLookAndRepaint();
     return Result::success();
 }
 
@@ -1606,6 +1643,17 @@ Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSetti
     out.structural_event_interval = it->structural_event_interval;
     out.buoyancy_heat = it->gas_buoyancy_heat;
     out.buoyancy_density = it->gas_buoyancy_density;
+    out.ambient_stratification = it->gas_ambient_stratification;
+    out.surface_dust_enabled = it->gas_surface_dust_enabled;
+    out.surface_dust_threshold = it->gas_surface_dust_threshold;
+    out.surface_dust_emission = it->gas_surface_dust_emission;
+    out.surface_dust_temperature = it->gas_surface_dust_temperature;
+    out.surface_dust_max_density = it->gas_surface_dust_max_density;
+    out.surface_dust_supply = it->gas_surface_dust_supply;
+    out.dissipation_override = it->gas_dissipation_override;
+    out.density_dissipation = it->gas_density_dissipation;
+    out.temperature_dissipation = it->gas_temperature_dissipation;
+    out.fuel_dissipation = it->gas_fuel_dissipation;
     out.vorticity = it->gas_vorticity;
     out.fire_expansion = it->fire_expansion;
     out.turbulence_strength = it->turbulence_strength;
@@ -1614,6 +1662,9 @@ Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSetti
     out.turbulence_lacunarity = it->turbulence_lacunarity;
     out.turbulence_persistence = it->turbulence_persistence;
     out.turbulence_speed = it->turbulence_speed;
+    out.turbulence_octaves_effective = RayTrophiSim::effectiveTurbulenceOctaves(
+        it->turbulence_octaves, it->turbulence_scale,
+        it->turbulence_lacunarity, it->voxel_size);
     return Result::success();
 }
 
@@ -1657,6 +1708,17 @@ Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDo
     it->structural_event_interval = std::max(1.0f / 120.0f, s.structural_event_interval);
     it->gas_buoyancy_heat = s.buoyancy_heat;
     it->gas_buoyancy_density = s.buoyancy_density;
+    it->gas_ambient_stratification = std::max(0.0f, s.ambient_stratification);
+    it->gas_surface_dust_enabled = s.surface_dust_enabled;
+    it->gas_surface_dust_threshold = std::max(0.0f, s.surface_dust_threshold);
+    it->gas_surface_dust_emission = std::max(0.0f, s.surface_dust_emission);
+    it->gas_surface_dust_temperature = std::max(0.0f, s.surface_dust_temperature);
+    it->gas_surface_dust_max_density = std::max(0.0f, s.surface_dust_max_density);
+    it->gas_surface_dust_supply = std::max(0.0f, s.surface_dust_supply);
+    it->gas_dissipation_override = s.dissipation_override;
+    it->gas_density_dissipation = std::max(0.0f, s.density_dissipation);
+    it->gas_temperature_dissipation = std::max(0.0f, s.temperature_dissipation);
+    it->gas_fuel_dissipation = std::max(0.0f, s.fuel_dissipation);
     it->gas_vorticity = std::max(0.0f, s.vorticity);
     it->fire_expansion = std::max(0.0f, s.fire_expansion);
     it->turbulence_strength = std::max(0.0f, s.turbulence_strength);
@@ -1665,6 +1727,167 @@ Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDo
     it->turbulence_lacunarity = std::max(1.0f, s.turbulence_lacunarity);
     it->turbulence_persistence = std::clamp(s.turbulence_persistence, 0.0f, 1.0f);
     it->turbulence_speed = s.turbulence_speed;
+    return Result::success();
+}
+
+Result measureGasPlume(const std::string& domain_id_or_name,
+                       float density_threshold,
+                       GasPlumeMeasurement& out) {
+    out = GasPlumeMeasurement{};
+    out.threshold = (density_threshold > 0.0f) ? density_threshold : 0.01f;
+    if (!g_ctx) return notBound();
+
+    // Resolve to the LIVE state, preferring a stepped domain over a merely
+    // declared one — same rule as getFluidDomain, and for the same reason: a
+    // name can exist on a runtime that has never run.
+    const RayTrophiSim::SimulationGridDomainState* state = nullptr;
+    const RayTrophiSim::SimulationGridDomainDesc* desc = nullptr;
+    auto consider = [&](RayTrophiSim::ParticleSimulationSystem& sys) {
+        const auto& domains = sys.gridDomains();
+        const auto& states = sys.gridDomainStates();
+        for (std::size_t i = 0; i < domains.size(); ++i) {
+            if (domains[i].name != domain_id_or_name) continue;
+            const bool live = (i < states.size() && states[i].valid);
+            if (desc && !live) continue;
+            desc = &domains[i];
+            state = live ? &states[i] : nullptr;
+            if (live) return true;
+        }
+        return false;
+    };
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (!system.runtime) continue;
+        if (consider(*system.runtime)) break;
+    }
+    if (!desc) consider(g_ctx->scene.ensureParticleSimulationSystem());
+
+    if (!desc) return Result::fail("gas domain not found: " + domain_id_or_name);
+    if (desc->type != RayTrophiSim::SimulationDomainType::Gas)
+        return Result::fail("not a gas domain: " + domain_id_or_name);
+
+    // ★ Everything below this point leaves `measured` false rather than
+    // reporting zeros. A domain that exists but has never been stepped, or whose
+    // density channel is off, has NOT been measured as empty — the difference is
+    // the whole reason this flag exists.
+    if (!state) return Result::success();
+    const auto& grid = state->grid;
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const std::size_t cells =
+        static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz);
+    if (cells == 0u || grid.density.size() != cells) return Result::success();
+    const bool has_temp = (grid.temperature.size() == cells);
+
+    out.measured = true;
+    out.total_cells = static_cast<uint64_t>(cells);
+
+    const float h = grid.voxel_size;
+    const Vec3 origin = grid.origin;
+
+    int min_i = nx, min_j = ny, min_k = nz;
+    int max_i = -1, max_j = -1, max_k = -1;
+    double wsum = 0.0, cx = 0.0, cy = 0.0, cz = 0.0, tsum = 0.0;
+    uint64_t active = 0;
+    float peak_t = 0.0f;
+
+    // Per-layer horizontal extent, so the widest slice and ITS height fall out
+    // of the same pass. For a mushroom these two numbers are what separate a
+    // capped cloud from a column that is still climbing.
+    std::vector<int> layer_min_i(static_cast<std::size_t>(ny), nx);
+    std::vector<int> layer_max_i(static_cast<std::size_t>(ny), -1);
+    std::vector<int> layer_min_k(static_cast<std::size_t>(ny), nz);
+    std::vector<int> layer_max_k(static_cast<std::size_t>(ny), -1);
+
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const std::size_t c = grid.cellIndex(i, j, k);
+                const float d = grid.density[c];
+                if (!(d > out.threshold)) continue;
+                ++active;
+                if (i < min_i) min_i = i;  if (i > max_i) max_i = i;
+                if (j < min_j) min_j = j;  if (j > max_j) max_j = j;
+                if (k < min_k) min_k = k;  if (k > max_k) max_k = k;
+                const std::size_t jj = static_cast<std::size_t>(j);
+                if (i < layer_min_i[jj]) layer_min_i[jj] = i;
+                if (i > layer_max_i[jj]) layer_max_i[jj] = i;
+                if (k < layer_min_k[jj]) layer_min_k[jj] = k;
+                if (k > layer_max_k[jj]) layer_max_k[jj] = k;
+                const double w = static_cast<double>(d);
+                wsum += w;
+                cx += w * (origin.x + (static_cast<double>(i) + 0.5) * h);
+                cy += w * (origin.y + (static_cast<double>(j) + 0.5) * h);
+                cz += w * (origin.z + (static_cast<double>(k) + 0.5) * h);
+                if (has_temp) {
+                    const float t = grid.temperature[c];
+                    tsum += static_cast<double>(t);
+                    if (t > peak_t) peak_t = t;
+                }
+            }
+
+    out.active_cells = active;
+    out.fill_fraction = static_cast<float>(
+        static_cast<double>(active) / static_cast<double>(cells));
+    if (active == 0) {
+        // Measured, and genuinely empty. Bounds stay min > max so a caller that
+        // ignores active_cells still gets an obviously empty box rather than a
+        // plausible one centred on the origin.
+        out.bounds_min = Vec3(1.0f, 1.0f, 1.0f);
+        out.bounds_max = Vec3(-1.0f, -1.0f, -1.0f);
+        return Result::success();
+    }
+
+    out.bounds_min = Vec3(origin.x + static_cast<float>(min_i) * h,
+                          origin.y + static_cast<float>(min_j) * h,
+                          origin.z + static_cast<float>(min_k) * h);
+    out.bounds_max = Vec3(origin.x + static_cast<float>(max_i + 1) * h,
+                          origin.y + static_cast<float>(max_j + 1) * h,
+                          origin.z + static_cast<float>(max_k + 1) * h);
+    if (wsum > 0.0) {
+        out.centroid = Vec3(static_cast<float>(cx / wsum),
+                            static_cast<float>(cy / wsum),
+                            static_cast<float>(cz / wsum));
+    }
+    out.top_above_floor = out.bounds_max.y - origin.y;
+    out.centroid_above_floor = out.centroid.y - origin.y;
+
+    for (int j = 0; j < ny; ++j) {
+        const std::size_t jj = static_cast<std::size_t>(j);
+        if (layer_max_i[jj] < 0) continue;
+        const float wx = static_cast<float>(layer_max_i[jj] - layer_min_i[jj] + 1) * h;
+        const float wz = static_cast<float>(layer_max_k[jj] - layer_min_k[jj] + 1) * h;
+        const float w = std::max(wx, wz);
+        if (w > out.max_width) {
+            out.max_width = w;
+            out.max_width_height = (static_cast<float>(j) + 0.5f) * h;
+        }
+    }
+
+    // Pressure field shape (see GasPlumeMeasurement: a projection multiplier,
+    // not pascals). Swept over the WHOLE domain, not just the active cells: the
+    // rarefaction behind a shock sits in air the density threshold rejects.
+    if (grid.pressure.size() == cells) {
+        float pmin = grid.pressure[0], pmax = grid.pressure[0];
+        int pmin_j = 0;
+        for (int k = 0; k < nz; ++k)
+            for (int j = 0; j < ny; ++j)
+                for (int i = 0; i < nx; ++i) {
+                    const float pv = grid.pressure[grid.cellIndex(i, j, k)];
+                    if (pv < pmin) { pmin = pv; pmin_j = j; }
+                    if (pv > pmax) pmax = pv;
+                }
+        out.pressure_measured = true;
+        out.pressure_min = pmin;
+        out.pressure_max = pmax;
+        out.pressure_min_height = (static_cast<float>(pmin_j) + 0.5f) * h;
+    }
+
+    out.peak_temperature = peak_t;
+    out.mean_temperature = has_temp
+        ? static_cast<float>(tsum / static_cast<double>(active))
+        : 0.0f;
+    // The lid test uses the top CELL, not a world epsilon: a plume occupying the
+    // last layer is clipped regardless of how big the voxels are.
+    out.touching_ceiling = (max_j >= ny - 1);
     return Result::success();
 }
 

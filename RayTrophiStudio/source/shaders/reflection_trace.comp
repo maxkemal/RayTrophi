@@ -1,0 +1,289 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+// RayFusion — piksel basina spekuler yansima.
+//
+// ★★★★★ BU GECIS ENV LOOKUP'INI DEGISTIRIR, METALIK BIR TERIM EKLEMEZ.
+//   Fragment shader `envSpecular = prefiltered(R) * agirlik` yazdi ve agirligi
+//   G-buffer'a birakti. Burada yapilan tam olarak su:
+//
+//       hdr += agirlik * (izlenenRadyans - prefiltered(R))
+//
+//   Iki sonucu var ve ikisi de kasitli:
+//
+//   1. ISIN ISKALARSA HICBIR SEY DEGISMEZ. Iskalayan isin gokyuzunu gorur,
+//      izlenenRadyans ile cikarilan terim AYNI lookup olur ve fark sifirdir.
+//      Dikis -- izlenen ve izlenmeyen bolge arasindaki gorunur sinir -- bu
+//      yuzden YAPISAL OLARAK olusamaz, "ayni filtreyi kullanmaya dikkat
+//      ettigimiz" icin degil.
+//   2. GECIS HIC KOSMAZSA GORUNTU BUGUNKUNUN AYNISI OLUR. Fragment shader
+//      env terimini zaten ekledi; burasi bir DUZELTMEDIR, bir kaynak degil.
+//      Donanim yoksa, kapali ise veya dispatch elenirse viewport sessizce
+//      eski davranisa doner -- kararmaz, siyah spekuler kalmaz.
+//
+// ★★ Ve yansimanin metalik ile SINIRLI OLMAMASI da buradan gelir: agirlik bir
+//   Fresnel terimi (F0*brdf.x + brdf.y) oldugu icin verniklenmis ahsap, boyali
+//   zemin, seramik ve plastik ayni carpandan gecer. Kapi roughness + agirliktir,
+//   `metallic > x` DEGIL -- o kapi tam olarak bu yuzeyleri elerdi.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+const float RF_PI = 3.14159265358979323846;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT rfScene;
+
+// Bu gecisin KABUL ALETI. `rays > 0` iken `shaded == 0`, her isinin bir
+// occluder'a carptigi ve yayinlanan goruntunun yansima kapaliyken uretilenle
+// BIREBIR AYNI oldugu anlamina gelir. Kapi sayisi (`gated`) bunu asla
+// soyleyemez: o yalnizca kac pikselin yansima ISTEDIGINI olcer.
+layout(set = 0, binding = 1, std430) buffer RfReflectionCounters {
+    uint rfGatedPixels;
+    uint rfRays;
+    uint rfShadedHits;
+    uint rfSkyMisses;
+    uint rfCountersPad[4];
+};
+
+layout(set = 0, binding = 2) uniform sampler2D rfEnvRadiance;
+layout(set = 0, binding = 3) uniform sampler2D rfDepth;
+
+layout(push_constant) uniform Push {
+    mat4 invViewProj;
+    vec4 cameraPos;  // .xyz dunya uzayinda kamera
+    vec4 params;     // x tmin tabani, y agirlik kapisi, z max mesafe, w roughness kapisi
+    vec4 params2;    // x gokyuzu donmesi, y env olcegi, z isik sayisi, w bindless kapasite
+    uvec4 shape;     // width, height, ornek sayisi, env mip sayisi
+} pc;
+
+// ★ Bu lookup fragment shader'in `textureLod(worldPrefiltered, worldDirToUV(R),
+//   reflectionRoughness * 8.0)` cagrisiyla BIREBIR ayni olmak ZORUNDA: cikarilan
+//   terim ile eklenen terim ayni degil ise, fark sifir yerine bir OFSET olur ve
+//   belirtisi "parlak yuzeyler biraz fazla/az parliyor" olur -- yani hicbir
+//   yerde yazmayan bir kalibrasyon hatasi.
+// ★★ `worldParams.x` (gokyuzu donmesi) push constant'tan gelir. Onu atlamak,
+//   dondurulmus bir gokyuzunde cikarilan terimin YANLIS yonden okunmasi olurdu.
+vec2 rfWorldDirToUv(vec3 d) {
+    d = normalize(d);
+    float phi = atan(d.z, d.x) - pc.params2.x;
+    return vec2(fract(phi / (2.0 * RF_PI) + 0.5),
+                acos(clamp(d.y, -1.0, 1.0)) / RF_PI);
+}
+
+vec3 rfPrefilteredEnv(vec3 direction, float roughness) {
+    float lod = clamp(roughness * float(pc.shape.w), 0.0, float(pc.shape.w));
+    return max(textureLod(rfEnvRadiance, rfWorldDirToUv(direction), lod).rgb, vec3(0.0)) *
+           pc.params2.y;
+}
+
+// `rayfusion_probe_bounce.glsl` bu adi bekliyor. ★ Onun gokyuzu okumasi
+// donmeyi UYGULAMIYOR (screen GI ve probe bounce ile ayni davranis); burada
+// duzeltmek o iki gecisin goruntusunu de degistirir ve olcumu karistirirdi.
+// Ikinci mertebe bir fark: yalnizca ISABET eden bir isinin kendi gokyuzu
+// ornegini etkiler, cikarilan terimi etkilemez.
+vec2 rfDirectionToUv(vec3 d) {
+    d = normalize(d);
+    return vec2(fract(atan(d.z, d.x) / (2.0 * RF_PI) + 0.5),
+                acos(clamp(d.y, -1.0, 1.0)) / RF_PI);
+}
+
+// Piksel basina atomic sicak noktasi yok; bu gecisin kendi sayaclari var.
+#define RF_BOUNCE_COUNT(counter)
+#define RF_ENV_SCALE pc.params2.y
+// Yansima isininin CARPTIGI yuzey de emissive isik gorur: `cameraPos.w`
+// emissive ucgen sayisini tasir (0 = yol kapali, emission bastirmasi da kapali).
+#define RF_EMISSIVE_COUNT uint(pc.cameraPos.w)
+#include "rayfusion_probe_bounce.glsl"
+#include "rayfusion_reflection_gbuffer.glsl"
+
+layout(set = 0, binding = 9)  uniform sampler2D rfGbufferNormal;
+layout(set = 0, binding = 10) uniform sampler2D rfGbufferSpecular;
+
+// ★★★★ Bu gecis artik HDR'a YAZMIYOR, bir DELTA yayinliyor; kompozit
+//   `reflection_filter.comp` icinde. Sebep gurultunun kaynagi: isabet eden isin
+//   lobun icinde bir yon seciyor ve roughness 0,30'da o lob ~20 derece -- tek
+//   ornek yapisal olarak gurultulu. Filtre yaricapi lobun EKRAN AYAK IZIYLE
+//   olcekleniyor, ve aynada SIFIR kaliyor.
+// ★ Yarim hassasiyette paketli (8 bayt/piksel): 4K'da tam hassasiyet 133 MB
+//   ederdi ve delta zaten bir tahmindir. `.w` gecerlilik bayragi -- kirpilmis
+//   bir sifir ile "bu pikselde yansima yok" AYNI SEY DEGIL, ve filtre
+//   komsulardan deger cekerken bu ikisini ayirmak zorunda.
+struct RfReflectionDelta { uvec2 packed; };
+layout(set = 0, binding = 13, std430) writeonly buffer RfReflectionDeltas {
+    RfReflectionDelta rfDeltas[];
+};
+void rfStoreDelta(uint index, vec3 delta, bool valid) {
+    rfDeltas[index].packed = uvec2(packHalf2x16(delta.xy),
+                                   packHalf2x16(vec2(delta.z, valid ? 1.0 : 0.0)));
+}
+
+// GGX VNDF (Heitz 2018). Gorunur normal dagilimindan orneklenir, yani
+// maskelenmis yarim kure hic denenmez.
+vec3 rfSampleVndf(vec3 viewTangent, float alpha, float u1, float u2) {
+    vec3 vh = normalize(vec3(alpha * viewTangent.x, alpha * viewTangent.y, viewTangent.z));
+    float lensq = vh.x * vh.x + vh.y * vh.y;
+    vec3 t1 = lensq > 0.0 ? vec3(-vh.y, vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+    vec3 t2 = cross(vh, t1);
+    float r = sqrt(clamp(u1, 0.0, 1.0));
+    float phi = 2.0 * RF_PI * u2;
+    float p1 = r * cos(phi);
+    float p2 = r * sin(phi);
+    float s = 0.5 * (1.0 + vh.z);
+    p2 = (1.0 - s) * sqrt(max(1.0 - p1 * p1, 0.0)) + s * p2;
+    vec3 nh = p1 * t1 + p2 * t2 + sqrt(max(1.0 - p1 * p1 - p2 * p2, 0.0)) * vh;
+    return normalize(vec3(alpha * nh.x, alpha * nh.y, max(nh.z, 0.0)));
+}
+
+bool rfWorldFromDepth(ivec2 pixel, float depth, out vec3 world) {
+    world = vec3(0.0);
+    vec2 ndc = (vec2(pixel) + 0.5) / vec2(pc.shape.xy) * 2.0 - 1.0;
+    vec4 h = pc.invViewProj * vec4(ndc, depth, 1.0);
+    if (abs(h.w) < 1e-12) return false;
+    world = h.xyz / h.w;
+    return !any(isnan(world)) && !any(isinf(world));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(pc.shape.xy)))) return;
+    uint index = uint(pixel.y) * pc.shape.x + uint(pixel.x);
+
+    // ★★★★★ ILK IS: kaydi GECERSIZ yaz. Her erken cikis yolu bunu devralir,
+    //   cunku tampon kareler arasi YASIYOR -- temizlenmemis bir delta, onceki
+    //   karenin yansimasini bu karede TEKRAR kompozit etmek demek olurdu ve
+    //   belirtisi "kamera dururken yansima birikiyor" olurdu.
+    rfStoreDelta(index, vec3(0.0), false);
+
+    vec4 packed = texelFetch(rfGbufferSpecular, pixel, 0);
+    vec3 weight = max(packed.rgb, vec3(0.0));
+    float roughness = clamp(packed.a, 0.0, 1.0);
+
+    // ★★★ Kapi LOBA kurulu, malzeme sinifina degil. `weight` grazing acida
+    //   Fresnel ile yukseldigi icin kaba-ish bir dielektrik zemin tam gorunur
+    //   oldugu yerde gecer, tepeden bakista elenir.
+    float weightPeak = max(weight.r, max(weight.g, weight.b));
+    if (weightPeak <= pc.params.y || roughness > pc.params.w) return;
+
+    float depth = texelFetch(rfDepth, pixel, 0).r;
+    if (depth >= 1.0) return;
+
+    vec3 position;
+    if (!rfWorldFromDepth(pixel, depth, position)) return;
+    vec3 normal = rfOctDecodeNormal(texelFetch(rfGbufferNormal, pixel, 0).xy);
+    if (dot(normal, normal) < 1e-12) return;
+
+    vec3 view = pc.cameraPos.xyz - position;
+    float viewDistance = length(view);
+    if (!(viewDistance > 1e-6)) return;
+    view /= viewDistance;
+    if (dot(normal, view) <= 0.0) normal = -normal;
+
+    atomicAdd(rfGatedPixels, 1u);
+
+    // ★★★★★ ISIN BASLANGICI OLCULMUS DEGIL, GERI KURULMUS bir noktadir ve
+    //   belirsizligi mesafeyle z^2 gibi buyur. SABIT bir tmin yakinda dogru,
+    //   uzakta yuzeyin ALTINDA baslar ve isin kendi zeminini vurur; belirtisi
+    //   duz zeminde 1 piksel yuksekliginde YATAY kirli cizgilerdir (duz bir
+    //   yuzeyde sabit-derinlik egrileri ekranda tam olarak yatay oldugu icin).
+    //   Belirsizligi TAHMIN ETMIYORUZ, PROJEKSIYONA SORUYORUZ: ayni pikseli bir
+    //   miktar daha yakin bir derinlikte geri kurup aradaki dunya mesafesini
+    //   olcuyoruz. Ayni ders `rayfusion_rt_shadow.comp` icinde odendi.
+    vec3 nearer;
+    float tmin = pc.params.x;
+    if (rfWorldFromDepth(pixel, max(depth - 1e-5, 0.0), nearer))
+        tmin = max(tmin, length(nearer - position) * 2.0);
+
+    vec3 tangent = normalize(abs(normal.z) < 0.99 ? cross(vec3(0.0, 0.0, 1.0), normal)
+                                                  : cross(vec3(1.0, 0.0, 0.0), normal));
+    vec3 bitangent = cross(normal, tangent);
+    mat3 toWorld = mat3(tangent, bitangent, normal);
+    vec3 viewTangent = normalize(vec3(dot(view, tangent), dot(view, bitangent), dot(view, normal)));
+
+    // ★ Alpha = roughness^2, fragment shader'in `reflectionRoughness`'iyla ayni
+    //   parametrizasyon. Bu deger specular AA'dan GECMIS haliyle geliyor: egri
+    //   bir vurgunun bir pikselin altina dusup kaybolmasini onleyen genisletme
+    //   yansimada da gecerlidir, cunku ayni lobun integralidir.
+    float alpha = max(roughness * roughness, 1e-4);
+    uint sampleCount = max(pc.shape.z, 1u);
+    uint seed = rfHash(uint(pixel.y) * pc.shape.x + uint(pixel.x) + 1u);
+
+    vec3 traced = vec3(0.0);
+    vec3 reference = vec3(0.0);
+    uint used = 0u;
+
+    for (uint index = 0u; index < sampleCount; ++index) {
+        vec3 half3 = rfSampleVndf(viewTangent, alpha, rfRandom(seed), rfRandom(seed));
+        vec3 localDirection = reflect(-viewTangent, half3);
+        if (localDirection.z <= 0.0) continue;
+        vec3 direction = normalize(toWorld * localDirection);
+        vec3 origin = position + normal * tmin;
+
+        atomicAdd(rfRays, 1u);
+        rayQueryEXT query;
+        rayQueryInitializeEXT(query, rfScene, gl_RayFlagsNoOpaqueEXT, 0xFFu,
+                              origin, tmin, direction, pc.params.z);
+        while (rayQueryProceedEXT(query)) {
+            if (rayQueryGetIntersectionTypeEXT(query, false) ==
+                    gl_RayQueryCandidateIntersectionTriangleEXT &&
+                rfCandidateOccludes(
+                    rayQueryGetIntersectionInstanceCustomIndexEXT(query, false),
+                    rayQueryGetIntersectionPrimitiveIndexEXT(query, false),
+                    rayQueryGetIntersectionBarycentricsEXT(query, false)))
+                rayQueryConfirmIntersectionEXT(query);
+        }
+
+        // ★★★ Cikarilan terim HER ZAMAN R yonunden okunur, orneklenen yonden
+        //   DEGIL: fragment shader'in ekledigi sey tam olarak odur. Orneklenen
+        //   yonden okumak, eklenen ve cikarilan terimleri birbirinden ayirir ve
+        //   iskalayan isinlar da goruntuyu degistirmeye baslar.
+        vec3 mirror = reflect(-view, normal);
+        vec3 envAlongMirror = rfPrefilteredEnv(mirror, roughness);
+
+        if (rayQueryGetIntersectionTypeEXT(query, true) ==
+                gl_RayQueryCommittedIntersectionNoneEXT) {
+            // Iskalama: gokyuzu. Cikarilan ile eklenen ayni olsun diye AYNI
+            // lookup kullanilir -- fark sifir, piksel dokunulmamis kalir.
+            atomicAdd(rfSkyMisses, 1u);
+            traced += envAlongMirror;
+            reference += envAlongMirror;
+            ++used;
+            continue;
+        }
+
+        uint instance = rayQueryGetIntersectionInstanceCustomIndexEXT(query, true);
+        uint triangle = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+        vec2 bary = rayQueryGetIntersectionBarycentricsEXT(query, true);
+        RfBounceMaterial material; vec2 uv; bool uvValid; uvec2 address; uvec3 corner;
+        // Destegi olmayan isabet, olculmus isi ATMADAN elenir: butun pikseli
+        // reddetmek kullanilabilir kapsami q^samples gibi dusururdu.
+        if (!rfResolveHit(instance, triangle, bary, material, uv, uvValid, address, corner) ||
+            material.diffuse.w < 0.5) continue;
+        if (!rayQueryGetIntersectionFrontFaceEXT(query, true) &&
+            !rfThinHit(instance, triangle, bary)) continue;
+
+        vec3 radiance = rfBounceRadiance(
+            instance, triangle, rayQueryGetIntersectionObjectToWorldEXT(query, true), bary,
+            origin + direction * rayQueryGetIntersectionTEXT(query, true), direction,
+            rfHash(seed + index));
+        if (any(isnan(radiance)) || any(isinf(radiance))) continue;
+
+        atomicAdd(rfShadedHits, 1u);
+        traced += max(radiance, vec3(0.0));
+        reference += envAlongMirror;
+        ++used;
+    }
+
+    if (used == 0u) return;
+
+    // ★ VNDF ile orneklenen radyansin ortalamasi, split-sum'in "prefiltered
+    //   radyans" terimiyle AYNI nicelik. Bu yuzden burada tam bir BRDF
+    //   degerlendirmesi YOK ve agirlik G-buffer'dan geliyor: tuketiciyi
+    //   degistirmemek, yerine gectigi yolla enerji tutarliligini korumanin en
+    //   kisa yolu.
+    vec3 delta = weight * (traced - reference) / float(used);
+    if (any(isnan(delta)) || any(isinf(delta))) return;
+
+    rfStoreDelta(index, delta, true);
+}

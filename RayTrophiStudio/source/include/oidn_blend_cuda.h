@@ -63,4 +63,9 @@ bool launchVulkanDenoiserPrepKernel(void* dstFloat4Dev,
                                     cudaStream_t stream);
 
 void launchPostHistogram(const float*, int width, int height, int stride, cudaStream_t);
-bool launchOptixDisplayPost(const void*, void*, int width, int height, cudaStream_t, float lensAmount, float lensFalloff);
+// Returns cudaSuccess when the display-resolve launch was accepted.
+// cudaErrorInvalidValue means the buffers are not allocated yet (no device
+// fault); any other value is the real launch error. A failure is never fatal --
+// it means "skip presenting this frame". Renamed from launchOptixDisplayPost
+// when the return type changed, so no caller can keep reading it as a bool.
+cudaError_t runOptixDisplayPost(const void*, void*, int width, int height, cudaStream_t, float lensAmount, float lensFalloff);

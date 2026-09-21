@@ -1,5 +1,11 @@
 # RayTrophi Realtime Renderer Roadmap
 
+> **2026-09-07 yeni kullanıcı yönlendirmesi:** ürün hedefi **RayFusion** adlı
+> raster + RT melez render modudur; önce dolaylı aydınlatma ağı, sonra hair.
+> Yeni mimari sözleşme: [RAYFUSION_RENDERER.md](RAYFUSION_RENDERER.md).
+> Aşağıdaki park kararı ve başarısız uygulama incelemesi tarihsel olarak
+> korunur; yeni hedefin uygulanmış olduğu anlamına gelmez.
+
 > **Durum:** TASLAK — ayri bir Realtime render yolu olarak **PARK EDILDI**
 > (2026-08-31). Asagidaki urun sozlesmesi, frame graph ve kalite profilleri
 > **gecerli analiz** olarak duruyor; yanlis olan **sirasiydi**. Faz 0.5a'da

@@ -282,7 +282,7 @@ namespace UIWidgets {
         AddFace, MergeVertices, WeldVertices, DissolveTopology,
         LoopCutTool, ExtrudeFaceTool, DeleteFaceTool, ShadeFlatTool, ShadeSmoothTool,
         Wind, Gravity, Physics, Vortex, Noise, Magnet,
-        Camera, Light, Mesh,
+        Camera, Light, Mesh, Bone,
         Timeline, Console, Graph, AnimGraph, Assets,
         LightPoint, LightDir, LightSpot, LightArea,
         HairAddTool, HairRemoveTool, HairCutTool, HairCombTool, HairLengthTool, 

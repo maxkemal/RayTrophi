@@ -59,6 +59,7 @@ struct MeshParam {
     uint proxyElementCount;    // proxy mesh'in indexCount/vertexCount'u
     uint proxyFlags;           // bit1: proxy indexli cizim
     uint proxyOutBase;         // proxy'nin KENDI cikti bolgesinin tabani
+    uint targetShare;          // bu mesh'in sahne hedefinden payi, Q16 kesir
 };
 
 layout(set = 0, binding = 0, std430) readonly buffer SrcMatrices { vec4 srcMat[]; };
@@ -240,7 +241,18 @@ void finalize(uint meshIndex) {
         //   olmadan oran cozumu tohumdan asagi cok yavas inerdi.
         if (maxObservedDistSq > 0.0) d = min(d, maxObservedDistSq);
 
-        uint allowed = max(1u, g.scatterTriangleTarget / p.trianglesPerInstance);
+        // ★★★★ Hedef MESH BASINA PAYA gore cozulur, sahnenin TAMAMINA gore
+        //   DEGIL. finalize() mesh basina kostugu icin g.scatterTriangleTarget'i
+        //   dogrudan okumak, her mesh'e butun butceyi vermek demekti; 35 cull
+        //   mesh'te efektif tavan 35 KATI oluyordu ve oran her kare 1,5'e
+        //   yapisip esigi clamp'e kaciriyordu (olculen: 1033 instance'in 28'i
+        //   proxy). bkz. docs/dev/RASTER_MICROTRIANGLE_WALL.md
+        //
+        //   Pay Q16 kesir; carpim float'ta yapiliyor cunku hedef * 65536
+        //   32-bit'i tasirdi.
+        float meshTarget = float(g.scatterTriangleTarget) *
+                           (float(p.targetShare) * (1.0 / 65536.0));
+        uint allowed = max(1u, uint(meshTarget / float(p.trianglesPerInstance)));
         uint seen    = max(1u, full);
         // Yuzey dagilimi varsayimi (bkz. dosya basi): sayi ~ lodDistSq, yani
         // bu tek adimlik bir cozumdur. Kirpma yalnizca salinimi bastirir.

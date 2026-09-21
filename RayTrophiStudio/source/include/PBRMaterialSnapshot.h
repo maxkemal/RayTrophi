@@ -16,6 +16,7 @@ struct PBRMaterialSnapshot {
     float transmission = 0.0f;
     float dispersion = 0.0f;   // spectral dispersion strength (0 = off)
     float opacity = 1.0f;
+    bool alphaCutout = false;
 
     float subsurface = 0.0f;
     Vec3 subsurfaceColor = Vec3(1.0f);
@@ -83,6 +84,7 @@ inline PBRMaterialSnapshot capturePBRMaterialSnapshot(const PrincipledBSDF& pbsd
     s.transmission = pbsdf.transmission;
     s.dispersion = pbsdf.dispersion;
     s.opacity = pbsdf.opacityProperty.alpha;
+    s.alphaCutout = pbsdf.coverage.alphaCutout;
 
     s.subsurface = pbsdf.getSubsurface();
     s.subsurfaceColor = pbsdf.getSubsurfaceColor();
@@ -147,6 +149,8 @@ inline void applyPBRMaterialSnapshotToGpuMaterial(const PBRMaterialSnapshot& s, 
     gpu.transmission = s.transmission;
     gpu.dispersion = s.dispersion;
     gpu.opacity = s.opacity;
+    if (s.alphaCutout) gpu.flags |= MATERIAL_FLAG_ALPHA_CUTOUT;
+    else gpu.flags &= ~MATERIAL_FLAG_ALPHA_CUTOUT;
 
     gpu.subsurface = s.subsurface;
     gpu.subsurface_color = make_float3(
@@ -219,6 +223,7 @@ inline Backend::IBackend::MaterialData makeBackendMaterialDataFromSnapshot(const
     data.transmission = s.transmission;
     data.dispersion = s.dispersion;
     data.opacity = s.opacity;
+    if (s.alphaCutout) data.flags |= MATERIAL_FLAG_ALPHA_CUTOUT;
 
     data.subsurface = s.subsurface;
     data.subsurfaceColor = s.subsurfaceColor;

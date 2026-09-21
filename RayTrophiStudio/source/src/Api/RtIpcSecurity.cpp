@@ -334,6 +334,24 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "mesh.asset.validate" || method == "mesh.operation.plan" ||
         method == "mesh.operation.self_test" || method == "mesh.tools.describe") return Read;
     if (method == "mesh.operation.commit_positions") return SceneWrite;
+    // Polygon editing. Selection and state are reads; every operator rebuilds
+    // topology and records undo, so they are SceneWrite.
+    //
+    // ★ mesh.edit.get_state / get_selection build the editable cache to answer,
+    // but they REPORT topology and selection rather than changing either, so
+    // they stay Read -- a read-only agent must be able to ask which faces an
+    // operator would touch without being able to run one.
+    if (method == "mesh.edit.get_state" || method == "mesh.edit.get_selection") return Read;
+    // The selection setters change what the next operator will act on, which
+    // is effectively staging a scene edit, so they carry SceneWrite with the
+    // operators rather than a weaker grade of their own.
+    if (method == "mesh.edit.begin" || method == "mesh.edit.select" ||
+        method == "mesh.edit.select_by_normal" || method == "mesh.edit.select_by_box" ||
+        method == "mesh.edit.clear_selection") return SceneWrite;
+    if (method == "mesh.extrude" || method == "mesh.inset" || method == "mesh.bevel" ||
+        method == "mesh.loop_cut" || method == "mesh.dissolve_edges" ||
+        method == "mesh.dissolve_vertices" || method == "mesh.merge_vertices" ||
+        method == "mesh.weld_vertices") return SceneWrite;
     if (method == "rig.preview_bind" || method == "rig.preview_fit" ||
         method == "rig.preflight" || method == "rig.weight_stats" ||
         method == "rig.suggest_joint_profile" ||
@@ -361,6 +379,17 @@ uint32_t requiredCapabilities(const std::string& method) {
         // Live analysis-field measurement; reads published scalar arrays and
         // changes neither graph nor terrain state.
         method == "terrain.field_stats" ||
+        // Live gas-field measurement (plume extent, cap height, fill). Reads
+        // the stepped grid and changes nothing. Same reason as the terrain
+        // stats above: "measure_plume" matches none of the substring
+        // heuristics below, so without this line it falls through to the
+        // gas. namespace and is graded SceneWrite -- and a measurement that
+        // needs write authority is a measurement scripts stop taking.
+        method == "gas.measure_plume" ||
+        // Same reason: "step_stats" matches none of the substring heuristics
+        // below, so it would fall through to the gas. namespace and be
+        // graded SceneWrite. It reads last step's timers and mutates nothing.
+        method == "gas.step_stats" ||
         method == "forcefield.evaluate" || method == "particle.stats" ||
         method == "particle.emitters" || method == "anim.characters" ||
         method == "anim.character" || method == "anim.clips" ||

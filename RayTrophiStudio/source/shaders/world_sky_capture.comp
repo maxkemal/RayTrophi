@@ -1,0 +1,72 @@
+#version 450
+
+// Bakes the canonical world into an equirect image so the existing IBL builder
+// (material_preview_ibl.comp) can produce irradiance + GGX prefilter mips for
+// Physical Sky, exactly as it already does for an HDRI.
+//
+// Measured reason this exists: with Nishita the raster ambient block ran a
+// 9-tap cone integral per lobe, twice per fragment, on a forward pass with no
+// depth prepass — ~60 ms of a 102 ms frame. The sky is a function of direction
+// alone, so it belongs in a directional cache, not in the inner loop.
+//
+// The radiance itself comes from canonical_world.glsl, the SAME function the
+// background and the fragment path use. Writing a second sky here would be the
+// classic silent divergence: the background and the ambient would disagree.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0, rgba32f) uniform writeonly image2D skyCapture;
+layout(binding = 1) uniform sampler2D atmosphereSkyView;
+layout(binding = 2) uniform sampler2D atmosphereTransmittance;
+layout(binding = 3) uniform sampler2D worldEnvironment;
+
+layout(push_constant) uniform CapturePush {
+    vec4 cameraPos;     // xyz used by the transmittance lookup
+    vec4 worldColorIn;
+    vec4 worldParamsIn;
+    vec4 worldSunIn;
+    vec4 atmosphereAIn;
+    vec4 atmosphereBIn;
+    uvec4 modeFlagsSize; // worldMode, sceneFlags, width, height
+} pc;
+
+// canonical_world.glsl reads these as bare names, the way the fragment stage
+// declares them in its uniform block. The names are the ABI.
+#define worldMode   pc.modeFlagsSize.x
+#define sceneFlags  pc.modeFlagsSize.y
+#define worldColor  pc.worldColorIn
+#define worldParams pc.worldParamsIn
+#define worldSun    pc.worldSunIn
+#define atmosphereA pc.atmosphereAIn
+#define atmosphereB pc.atmosphereBIn
+
+#include "canonical_world.glsl"
+
+const float kPi = 3.14159265358979323846;
+
+void main() {
+    const uvec2 size = pc.modeFlagsSize.zw;
+    const uvec2 texel = gl_GlobalInvocationID.xy;
+    if (texel.x >= size.x || texel.y >= size.y) return;
+
+    // Texel centre in the consumer's UV convention (worldDirToUV), so the
+    // rotation the consumer subtracts is added back here. Otherwise an overlay
+    // rotation would spin the baked sky and nothing would report it.
+    const vec2 uv = (vec2(texel) + 0.5) / vec2(size);
+    const float phi = (uv.x - 0.5) * 2.0 * kPi + worldParams.x;
+    const float theta = uv.y * kPi;
+    const float sinTheta = sin(theta);
+    const vec3 direction = normalize(vec3(cos(phi) * sinTheta,
+                                          cos(theta),
+                                          sin(phi) * sinTheta));
+
+    // No sun disc: the sun reaches the raster path as an analytic directional
+    // light. Baking it here would light every diffuse surface twice.
+    vec3 radiance = sampleCanonicalWorldEx(direction, false);
+    radiance = max(radiance, vec3(0.0));
+    // A non-finite sample would poison every mip of the prefilter chain, and
+    // the failure would look like "the scene went dark", not like a bad texel.
+    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = vec3(0.0);
+
+    imageStore(skyCapture, ivec2(texel), vec4(radiance, 1.0));
+}

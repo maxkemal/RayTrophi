@@ -146,10 +146,21 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     attachment.alphaBlendOp = VK_BLEND_OP_ADD;
     attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    // ★★★ HDR gecisi artik UC renk eklentisi tasiyor (1-2 = RayFusion reflection
+    //   G-buffer: oct normal, ve speküler agirlik + roughness) ve blend eklenti SAYISI gecisle uyusmak zorunda. Hacim
+    //   G-buffer'a YAZMAZ: yansima icin bir yuzey beyan etmiyor.
+    const bool rfHdrPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE;
+    VkPipelineColorBlendAttachmentState attachments[3]{};
+    attachments[0] = attachment;
+    attachments[1].colorWriteMask = 0;
+    attachments[1].blendEnable = VK_FALSE;
+    attachments[2].colorWriteMask = 0;
+    attachments[2].blendEnable = VK_FALSE;
+
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = 1;
-    blend.pAttachments = &attachment;
+    blend.attachmentCount = rfHdrPass ? 3u : 1u;
+    blend.pAttachments = attachments;
     const VkDynamicState dynamicStates[2] = {
         VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{};
@@ -170,7 +181,15 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     pci.pColorBlendState = &blend;
     pci.pDynamicState = &dynamic;
     pci.layout = m_interactiveViewport.materialPreviewPipelineLayout;
-    pci.renderPass = m_interactiveViewport.renderPass;
+    // ★ Hacim scene-referred: HDR gecisi (emission kirpilmadan bokeh
+    //   uretebilsin diye de gerekli).
+    // ★★ HDR gecisi YOKSA (temel adaptorun kendi viewport kopyasi onu hic
+    //   kurmaz) LDR gecisine baglanir. Null bir render pass ile pipeline
+    //   yaratmak API hatasidir; sessizce basarisiz olan bir pipeline ise
+    //   "hacim gorunmuyor" diye raporlanir ve gunler yakar.
+    pci.renderPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE
+                   ? m_interactiveViewport.hdrRenderPass
+                   : m_interactiveViewport.renderPass;
     pci.subpass = 0;
     const VkResult result = vkCreateGraphicsPipelines(
         device, VK_NULL_HANDLE, 1, &pci, nullptr, &state.pipeline);

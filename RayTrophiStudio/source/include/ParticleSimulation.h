@@ -240,6 +240,40 @@ struct ParticlePhysicsSettings {
     bool grid_deposit_fade_with_age = true;
 };
 
+// How many turbulence octaves this grid can actually CARRY.
+//
+// ★★★ THE FINEST OCTAVES WERE BEING INJECTED BELOW THE VOXEL SIZE. The curl
+// noise's per-octave velocity amplitude is `scale * (lacunarity*persistence)^o`
+// — the curl itself contributes a factor of the frequency — so with the shipped
+// lacunarity 2 and persistence 0.56 that factor is 1.12^o and the amplitude
+// RISES with octave. MEASURED 2026-09-20 on the nuclear preset: octave 4 had the
+// largest amplitude of the five and a wavelength of 0.245 m against a 0.1375 m
+// voxel, i.e. 1.8 cells per wave. Below ~2 cells a wave cannot be advected at
+// all, it just re-seeds the same cells every step, and the result is grid-scale
+// speckle that vorticity confinement then organises into lumps.
+//
+// ★ Four cells per wavelength, not two: Nyquist is the point where a wave stops
+// existing, not the point where semi-Lagrangian advection still carries it.
+//
+// ★★ This CLAMPS rather than warns, so it must stay visible: the effective
+// count is reported back through GasDomainSettings, because a dial that reads 5
+// while 3 are running is the same class of lie as a panel reporting a value the
+// core never received.
+inline int effectiveTurbulenceOctaves(int requested, float scale,
+                                      float lacunarity, float voxel_size) {
+    if (requested <= 1) return (std::max)(requested, 0);
+    const float h = (std::max)(voxel_size, 1.0e-6f);
+    const float s = (std::max)(scale, 1.0e-4f);
+    const float lac = (std::max)(lacunarity, 1.0001f);
+    // Finest allowed frequency: wavelength >= 4 cells  =>  f <= 2*pi / (4h).
+    const float f_max = 6.28318530718f / (4.0f * h);
+    if (s >= f_max) return 1;                       // even the base is too fine
+    const float ratio = f_max / s;                  // lacunarity^(o-1) <= ratio
+    const int allowed =
+        1 + static_cast<int>(std::floor(std::log(ratio) / std::log(lac)));
+    return (std::max)(1, (std::min)(requested, allowed));
+}
+
 struct SimulationGridDomainDesc {
     std::string name = "Grid Domain";
     // Defaults to Gas so existing projects deserialize unchanged. Fluid domains
@@ -274,7 +308,6 @@ struct SimulationGridDomainDesc {
     // When true the solver writes baked grid frames to disk instead of holding
     // the full working set in RAM — enables grid resolutions beyond what system
     // memory can sustain (512+). Set automatically by the Cinema profile.
-    bool force_disk_cache = false;
     float voxel_size = 0.1f;
     float padding = 0.0f;
     bool adaptive_lock_floor = true;
@@ -374,7 +407,88 @@ struct SimulationGridDomainDesc {
     float thermal_oxygen = 1.0f;   // 0..1, throttles pyrolysis inside this box
     float gas_buoyancy_heat = 1.0f;
     float gas_buoyancy_density = 0.08f;
+    // Stable stratification of this domain's atmosphere, in heat units per
+    // world unit of height ABOVE THE DOMAIN FLOOR. 0 = uniform ambient (the old
+    // behaviour; every existing project deserializes unchanged).
+    //
+    // ★ This is what gives a rising plume a ceiling of its own. Without it the
+    // column climbs until the domain lid stops it, which means the shape of a
+    // mushroom cap is set by the BOX, not by the physics — it changes when you
+    // resize the domain and looks identical to a correctly settled cloud.
+    // With it, the cap sits at h* = anomaly / gas_ambient_stratification, a
+    // number the author chooses and a script can measure.
+    float gas_ambient_stratification = 0.0f;
     float gas_vorticity = 0.35f;
+    // ── Per-domain field loss rates (per second; factor = exp(-rate*dt)) ─────
+    //
+    // ★★★ THE VALUES THESE REPLACE WERE GLOBAL AND INVISIBLE. Density,
+    // temperature and fuel loss lived only in ParticleSimulation's `base_params`
+    // -- density_dissipation was 0.5/s for every NON-Gas physics mode, a rate
+    // chosen for the thin smoke a spark carries. Every hybrid effect (discrete
+    // particles + a fire grid) runs in Spark mode and inherited it, so a
+    // ten-second shot lost exp(-5) of its cloud: MEASURED 2026-09-20, a nuclear
+    // plume went from 311k active cells to 8.9k and peak heat 9.8 -> 0.04 while
+    // every authored parameter was correct.
+    //
+    // ★ It does not fade, it FALLS OFF A CLIFF: an exponential takes the whole
+    // cloud under the visibility threshold at nearly the same instant, so the
+    // symptom reads as "the top cooled and vanished" rather than as a loss rate.
+    //
+    // ★★ And the panel has a `flame_dissipation` dial, which is the first knob
+    // anyone reaches for and the wrong one -- it decays the flame interaction
+    // field, not the smoke or the heat.
+    //
+    // Off by default, and the defaults below MIRROR the old globals, so both an
+    // existing project and a freshly ticked checkbox behave exactly as before.
+    // ★ A separate flag rather than a sentinel value: 0.0 is a legal, useful
+    // rate (no loss at all), so it cannot also mean "inherit".
+    // ── Surface dust: wind lifts ground, instead of an author placing it ────
+    //
+    // ★★★ This is what makes a blast's ground skirt PHYSICAL. The alternative,
+    // and what the nuclear preset shipped with first, is a flow source at the
+    // origin: it produces a ring whose radius the author typed, which does not
+    // follow the shock, does not follow terrain, and is identical on frame 1
+    // and frame 100 regardless of what the blast actually did.
+    //
+    // With this, the shock's own wind scours whatever surface it crosses and
+    // the ring EXPANDS with the front. It is not blast-specific either: a
+    // landing thruster, a passing vehicle or a door blown in all raise dust
+    // from the same rule.
+    bool  gas_surface_dust_enabled = false;
+    // Horizontal wind speed, in m/s, a surface must see before it gives up any
+    // material at all. ★ Below it, NOTHING moves — that is why still air over a
+    // dusty floor is clear air and not a permanent haze.
+    float gas_surface_dust_threshold = 6.0f;
+    float gas_surface_dust_emission = 0.25f;
+    // ***** THE DIAL THAT DECIDES WHETHER THE BASE SURGE RISES.
+    //
+    // GridFluidSolver has carried surface_dust_temperature since the surface
+    // dust rule landed, defaulted to 0.0 with the comment "lofted ground is
+    // COLD" - and it was never wired to the domain desc, the panel or IPC, so
+    // there was no way to set it from anywhere. It has been exactly 0 on every
+    // scene this feature has ever run on.
+    //
+    // MEASURED 2026-09-21: the lifted dust spreads wall to wall (widest slice
+    // 22.1 m) at a height of 0.09 m and never billows. That is CORRECT physics
+    // for cold dust - a dense suspension is a ground-hugging density current -
+    // but a real base surge also gets heated by the ground it scours, and the
+    // heated fraction is what climbs. With this at 0 that fraction does not
+    // exist, so the surge can only ever be a flat sheet.
+    //
+    // * Keep it SMALL. This is warmed ground, not fire: a value near the
+    // afterwind's 0.9 makes the whole skirt lift off and read as a second
+    // mushroom instead of a surge.
+    float gas_surface_dust_temperature = 0.0f;
+    float gas_surface_dust_max_density = 2.0f;
+    // Total density one ground column can EVER release. ★ This is what makes
+    // the skirt a travelling ring instead of a carpet: a shock scours the ground
+    // it crosses and moves on. 0 = unlimited, i.e. every column keeps producing
+    // behind the front and the ring fills itself in.
+    float gas_surface_dust_supply = 3.0f;
+    bool  gas_dissipation_override = false;
+    float gas_density_dissipation = 0.5f;
+    float gas_temperature_dissipation = 0.5f;
+    float gas_fuel_dissipation = 0.25f;
     // Advection scheme. Plain semi-Lagrangian is first-order and smears smoke
     // into mush within a few dozen frames; MacCormack adds a limited
     // second-order correction (one extra pass) and is what keeps wisps and
@@ -392,7 +506,12 @@ struct SimulationGridDomainDesc {
     float turbulence_scale = 1.2f;
     int   turbulence_octaves = 3;
     float turbulence_lacunarity = 2.0f;
-    float turbulence_persistence = 0.5f;
+    // See SolverParams::turbulence_persistence: with the frequency factor the
+    // curl brings, this times `turbulence_lacunarity` is what decides whether
+    // the spectrum decays. 0.5 at lacunarity 2 is FLAT, not decaying.
+    // ★ Changing this default is safe for existing projects — every serializer
+    // writes the field explicitly, so only a newly created domain reads it.
+    float turbulence_persistence = 0.4f;
     float turbulence_speed = 0.5f;
     // Per-domain volume render shader (host material data; created lazily by the
     // render bridge / UI). Travels with the domain for serialization and is
@@ -891,6 +1010,49 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle interaction;
     ComputeBufferHandle pressure;
     ComputeBufferHandle divergence;
+
+    // === DEVICE UPLOAD LEDGER ==============================================
+    // MEASURED 2026-09-20: every gas stage ran upload -> dispatch ->
+    // synchronize -> download, SEVEN times per step. On a 130x200x130 domain
+    // each grid field is ~13 MB and the panel counted 35 uploads plus 20
+    // downloads per step. Consecutive GPU stages were re-uploading exactly what
+    // the previous stage had just downloaded.
+    //
+    // ** THE ROUND TRIPS ARE NOT ALL GRATUITOUS. GridFluid::step runs on the
+    // HOST in the middle of the GPU chain (boundaries + solids, 40 ms), so one
+    // download/upload pair around it is structural, not waste. What this ledger
+    // removes is the repetition BETWEEN consecutive device stages.
+    //
+    // One bit per field, meaning "the device copy is current". Set after an
+    // upload and after a download (both copies then agree), cleared whenever
+    // the host writes. Downloads are deliberately left in place: with the host
+    // copy always refreshed, a missed invalidation costs a redundant upload
+    // instead of a silently stale read.
+    //
+    // ** THE DEFAULT MUST BE ZERO. A cleared ledger means "upload everything",
+    // which is merely slow. The opposite default would claim a freshly
+    // allocated buffer already held the field, and the solver would advect
+    // uninitialised memory - fast, silent and wrong.
+    enum class GridField : uint32_t {
+        VelX = 0, VelY, VelZ, Density, Temperature, Fuel, Interaction,
+        Pressure, Divergence, Count
+    };
+    uint32_t device_current = 0;
+
+    static uint32_t gridFieldBit(GridField f) {
+        return 1u << static_cast<uint32_t>(f);
+    }
+    bool deviceHasCurrent(GridField f) const {
+        return (device_current & gridFieldBit(f)) != 0u;
+    }
+    void markDeviceCurrent(GridField f) { device_current |= gridFieldBit(f); }
+    // The host wrote this field, so the device copy is stale.
+    void markHostWrote(GridField f) { device_current &= ~gridFieldBit(f); }
+    // Any host stage that touches the grid, plus reset/resize/cache scrub.
+    // Deliberately blunt: five call sites instead of dozens of write points,
+    // and over-invalidating costs a transfer while under-invalidating is wrong.
+    void invalidateDeviceCopies() { device_current = 0; }
+
     // Per-block density maximum consumed by the RT volume march. Sized from the
     // block resolution, which is tracked separately from the cell resolution so
     // a domain resize reallocates it instead of publishing a majorant that

@@ -1,0 +1,112 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_nonuniform_qualifier : require
+layout(local_size_x=8, local_size_y=8) in;
+layout(set=0,binding=0) uniform accelerationStructureEXT rfScene;
+layout(set=0,binding=1) uniform sampler2D rfDepth;
+layout(set=0,binding=2,std430) buffer RtMask {
+    uvec4 metadata;      // magic, w, h, birincil isik
+    uvec4 coverage;      // kapsanan isik kumesi -- yalnizca tuketici okur
+    vec2 pixels[];       // std430: 32. bayttan baslar
+};
+// RayFusion::HitInstance ile birebir: 3 x 16 = 48 bayt.
+struct HitInstance {
+    uvec2 positions; uvec2 materialIds; uvec2 uvs;
+    uvec2 indices;      // 0 = mesh INDEKSSIZ (flat SoA, kose basina bir vertex)
+    uint vertexCount; uint triangleCount; uint hash; uint pad;
+};
+layout(set=0,binding=3,std430) readonly buffer Hits { HitInstance hits[]; };
+#define GpuMaterial Material
+#include "material_struct.glsl"
+#include "material_preview_uv.glsl"
+layout(set=0,binding=4,std430) readonly buffer Materials { Material materials[]; };
+layout(set=0,binding=5) uniform sampler2D textures[];
+layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Ids { uint ids[]; };
+layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer UVs { float uv[]; };
+layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Idx { uint idx[]; };
+layout(push_constant) uniform Push {
+    mat4 invViewProj;
+    vec4 sunDirection;
+    vec4 params; // tmin, tmax, width, height
+    uvec4 flags; // texture capacity, material count, instance count, light index
+} pc;
+bool occludes(uint instance, uint triangle, vec2 bary) {
+    if(instance>=pc.flags.z)return true;
+    HitInstance hit=hits[instance];
+    if(triangle>=hit.triangleCount || all(equal(hit.materialIds,uvec2(0))))return true;
+    // ★★★★★ primitiveIndex, BLAS'in kuruldugu UCGENLENMEYE gore cozulur. Welded
+    //   (indeksli) mesh'te kose = index buffer'daki deger; `triangle*3` dogrudan
+    //   vertex dizisine girmek, ucgeni depolama sirasindan UYDURMAK demektir.
+    uvec3 corner=uvec3(triangle*3u,triangle*3u+1u,triangle*3u+2u);
+    if(!all(equal(hit.indices,uvec2(0)))){
+        Idx table=Idx(hit.indices);
+        corner=uvec3(table.idx[corner.x],table.idx[corner.y],table.idx[corner.z]);
+        // Bozuk indeks buffer'i opak occluder sayilir: bu fonksiyonun butun
+        // "bilmiyorum" dallari gibi fail-closed.
+        if(any(greaterThanEqual(corner,uvec3(hit.vertexCount))))return true;
+    }
+    uint id=Ids(hit.materialIds).ids[corner.x]&0x7fffffffu;
+    if(id>=pc.flags.y)return true;
+    Material mat=materials[id];
+    float opacity=clamp(mat.opacity,0.0,1.0);
+    if(opacity==0.0)return false;
+    if(mat.opacity_tex==0u || all(equal(hit.uvs,uvec2(0))))return materialCoverageOpacity(opacity,(mat.flags&MATERIAL_FLAGS_PREVIEW_CUTOUT)!=0u)>0.0;
+    // Preparation rejects missing/out-of-range texture slots.
+    if(mat.opacity_tex>=pc.flags.x)return true;
+    UVs coords=UVs(hit.uvs);
+    vec2 a=vec2(coords.uv[corner.x*2u],coords.uv[corner.x*2u+1u]);
+    vec2 b=vec2(coords.uv[corner.y*2u],coords.uv[corner.y*2u+1u]);
+    vec2 c=vec2(coords.uv[corner.z*2u],coords.uv[corner.z*2u+1u]);
+    vec2 uv=a*(1.0-bary.x-bary.y)+b*bary.x+c*bary.y;
+    uv.y=1.0-uv.y; // same convention as material_preview_shadow.vert
+    vec4 texel=textureLod(textures[nonuniformEXT(mat.opacity_tex)],applyUVTransform(uv,mat),0.0);
+    bool alpha=(mat.flags&256u)!=0u || mat.opacity_tex==mat.albedo_tex;
+    return materialCoverageOpacity(opacity*(alpha?texel.a:texel.r),(mat.flags&MATERIAL_FLAGS_PREVIEW_CUTOUT)!=0u)>=0.1;
+}
+void main(){
+    ivec2 pix=ivec2(gl_GlobalInvocationID.xy);
+    uint width=uint(pc.params.z),height=uint(pc.params.w);
+    if(pix.x>=int(width)||pix.y>=int(height))return;
+    uint offset=uint(pix.y)*width+uint(pix.x);
+    float depth=texelFetch(rfDepth,pix,0).r;
+    pixels[offset]=vec2(1.0,depth);
+    if(depth>=1.0)return;
+    vec2 ndc=(vec2(pix)+0.5)/vec2(width,height)*2.0-1.0;
+    vec4 world=pc.invViewProj*vec4(ndc,depth,1.0);
+    if(abs(world.w)<1e-12)return;
+    vec3 origin=world.xyz/world.w;
+    // ★★★★★ ISIN BASLANGICI OLCULMUS DEGIL, GERI KURULMUS bir noktadir ve
+    //   belirsizligi mesafeyle z^2 gibi buyur: standart projeksiyonda derinligin
+    //   bir kac ULP'si 100 m'de milimetre, 1 km'de YARIM METRE eder. Sabit bir
+    //   tmin (0,02) yakinda dogru, uzakta yuzeyin ALTINDA baslar; isin kendi
+    //   zeminini vurur. Belirtisi: duz zeminde 1 piksel yuksekliginde YATAY
+    //   kirli cizgiler -- duz bir yuzeyde sabit-derinlik egrileri ekranda tam
+    //   olarak yatay oldugu icin. Onde temiz, ufka dogru yogunlasir; kamera
+    //   kimildadikca desen yeniden dagilir. 2026-09-09'da ekran goruntusuyle
+    //   dogrulandi.
+    // ★ Belirsizligi TAHMIN ETMIYORUZ, PROJEKSIYONA SORUYORUZ: ayni pikseli bir
+    //   miktar daha yakin bir derinlikte geri kurup aradaki dunya mesafesini
+    //   olcuyoruz. Boylece near/far duzlemleri veya derinlik formati degisince
+    //   burada duzeltilecek bir sabit kalmiyor.
+    const float kDepthSlack=1.0e-6; // D32_SFLOAT'ta ~8 ULP, D24_UNORM'da ~16 kuantum
+    vec4 nearer=pc.invViewProj*vec4(ndc,max(depth-kDepthSlack,0.0),1.0);
+    float slack=abs(nearer.w)<1e-12?0.0:length(nearer.xyz/nearer.w-origin);
+    // Kendine carpma, gunes yonu ile yuzey arasindaki acinin SINUSU ile boluner.
+    // Normali burada bilmiyoruz; 3x, sin>=1/3'e (~19 derece) kadar guvenli. Daha
+    // buyuk bir katsayi golgeyi nesneden koparir (peter-panning).
+    float tmin=max(pc.params.x,slack*3.0);
+    rayQueryEXT query;
+    // Force non-opaque even for BLAS/instances marked opaque: inspect cutouts.
+    rayQueryInitializeEXT(query,rfScene,
+        gl_RayFlagsTerminateOnFirstHitEXT|gl_RayFlagsNoOpaqueEXT,
+        0xFFu,origin,tmin,normalize(pc.sunDirection.xyz),pc.params.y);
+    while(rayQueryProceedEXT(query)){
+        if(rayQueryGetIntersectionTypeEXT(query,false)==gl_RayQueryCandidateIntersectionTriangleEXT &&
+           occludes(rayQueryGetIntersectionInstanceCustomIndexEXT(query,false),
+                    rayQueryGetIntersectionPrimitiveIndexEXT(query,false),
+                    rayQueryGetIntersectionBarycentricsEXT(query,false)))rayQueryConfirmIntersectionEXT(query);
+    }
+    pixels[offset].x=rayQueryGetIntersectionTypeEXT(query,true)==gl_RayQueryCommittedIntersectionNoneEXT?1.0:0.0;
+}

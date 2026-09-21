@@ -60,6 +60,13 @@ TemplateOpenResult TemplateSession::open(const std::string& template_id,
         template_id, ProjectManager::getInstance().hasUnsavedChanges(), policy);
     if (!plan.ready) return rejected(template_id, plan.code, plan.errors, plan.warnings);
 
+    // ★★★ Sahne yüklemesi ağır viewport modunda BAŞLAYAMAZ. Bu, template
+    //   açmanın TEK boğazı: hub, açılış ve IPC hepsi buradan geçiyor, o yüzden
+    //   kural çağıranlarda değil burada uygulanır. Plan hazır olduktan SONRA,
+    //   sahneye dokunmadan ÖNCE — reddedilen bir açılış modu değiştirmemeli.
+    //   Bkz. scene_ui.h'deki kural.
+    enterSolidViewportForSceneLoad(ui, "template_session:open");
+
     // Support opening custom user templates and project-based templates
     if (plan.scene_type == "project") {
         bool opened_proj = ProjectManager::getInstance().openProject(
@@ -179,7 +186,7 @@ TemplateOpenResult TemplateSession::open(const std::string& template_id,
 
     g_camera_dirty = true;
     g_lights_dirty = true;
-    g_world_dirty = true;
+    markWorldDirty();
     g_geometry_dirty = true;
     g_materials_dirty = true;
     g_gas_volumes_dirty = true;

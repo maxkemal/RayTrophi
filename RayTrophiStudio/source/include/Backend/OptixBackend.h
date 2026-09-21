@@ -99,8 +99,6 @@ public:
     void updateObjectTransform(const std::string& nodeName, const Matrix4x4& transform) override;
     void syncCamera(const Camera& cam) override;
     void hideInstancesByNodeName(const std::string& nodeName) override;
-    int getPickedObjectId(int x, int y, int viewport_width, int viewport_height) override;
-    std::string getPickedObjectName(int x, int y, int viewport_width, int viewport_height) override;
 
     // Legacy OptiX support (for transitional refactor)
     OptixWrapper* getOptixWrapper() { return m_optix; }

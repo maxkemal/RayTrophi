@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Kaynak Dosyalar">
@@ -188,6 +188,9 @@
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
     <ClInclude Include="source\include\SimCache.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SimFrameCompress.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
     <ClInclude Include="source\include\MeshEdit\HalfEdgeMesh.h">
@@ -1002,6 +1005,9 @@
     <ClCompile Include="source\src\Api\RtIpcMeshTools.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMeshEdit.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtIpcMeshToolDescriptors.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
@@ -1474,6 +1480,9 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanSkinningBatch.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp">
@@ -2101,14 +2110,25 @@
     <ClInclude Include="source\include\Animation\RigPoseAuthoringState.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\Animation\RigPoseAuthoringMath.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\Animation\RigPoseAuthoring.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigBoneCurves.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigClipRuntimeSync.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigTimelineProjection.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\Animation\RigDrivenControls.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\Api\RtApiRigPoseAuthoring.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\UI\RigPoseAuthoringUI.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\RigFingerFKUI.h"><Filter>Header Files</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\src\Animation\RigPoseAuthoringMath.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Animation\RigPoseAuthoring.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigBoneCurves.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigClipRuntimeSync.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigTimelineProjection.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\Animation\RigDrivenControls.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtApiRigPoseAuthoring.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\UI\RigPoseAuthoringUI.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigFingerFKUI.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\RigFingerFKViewportUI.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigJointRules.h"><Filter>Header Files</Filter></ClInclude>
@@ -2119,10 +2139,12 @@
     <ClCompile Include="source\src\UI\RigJointProfileUI.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="source\include\Animation\RigControlDisplay.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\Animation\RigIK.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\Api\RtApiRigIK.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\include\UI\RigIKUI.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="source\src\Api\RtRigIKBindings.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="source\src\Animation\RigControlDisplay.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Animation\RigIK.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtApiRigIK.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtIpcRigIK.cpp"><Filter>Source Files</Filter></ClCompile>

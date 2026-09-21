@@ -10667,11 +10667,17 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
         // the consume path still displays each slot; covers both rigid and skinned paths.
         drainInFlightTraces();
 
-        // 1. Refit each skinned BLAS (compute + AS update in one command buffer)
+        // 1. Skin and refit every skinned BLAS in one command buffer. Resource
+        // preparation happens before submission; retain the established
+        // single-BLAS implementation as a correctness fallback.
         if (!b.empty()) {
-            for (uint32_t i = 0; i < (uint32_t)m_device->m_blasList.size(); ++i) {
-                if (m_device->m_blasList[i].hasSkinning) {
-                    m_device->dispatchSkinning(i, b);
+            if (!m_device->dispatchSkinningBatch(b)) {
+                for (uint32_t i = 0;
+                     i < static_cast<uint32_t>(m_device->m_blasList.size());
+                     ++i) {
+                    if (m_device->m_blasList[i].hasSkinning) {
+                        m_device->dispatchSkinning(i, b);
+                    }
                 }
             }
         }

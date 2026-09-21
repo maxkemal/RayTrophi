@@ -1,4 +1,6 @@
+#include "Animation/SkinWeightContract.h"
 #include "Import/UfbxReader.h"
+#include "Import/UfbxSkeletonSeeds.h"
 #include "UfbxMaterials.h"
 #include "Triangle.h"
 #include "TriangleMesh.h"
@@ -104,6 +106,8 @@ void buildSkeleton(const ufbx_scene& scene,
     auto addChain = [&](const ufbx_node* n) {
         for (const ufbx_node* c = n; c; c = c->parent) technical.insert(c);
     };
+
+    collectExplicitFbxJoints(scene, technical, indexed);
 
     size_t conflicting = 0;
     for (const ufbx_skin_deformer* skin : scene.skin_deformers) {
@@ -351,16 +355,11 @@ void emit(const ufbx_mesh& source, const Part& part, const std::string& name,
                 dst.emplace_back(bone, float(sw.weight));
                 sum += float(sw.weight);
             }
-            // ★ ufbx states outright that FBX weights are NOT guaranteed
-            // normalized, and an unnormalized set does not fail — it shrinks or
-            // inflates the mesh around the bones, which reads as a rigging bug.
-            // Correct files are left byte-identical; only broken ones are fixed,
-            // and the caller says so once.
-            if (sum > 1e-6f && std::fabs(sum - 1.0f) > 1e-3f) {
-                for (auto& influence : dst) influence.second /= sum;
+            // Report source weights needing the shared producer contract.
+            if (!std::isfinite(sum) || std::fabs(sum - 1.0f) > 1e-5f || dst.size() > 4)
                 renormalized = true;
-            }
         }
+        RigAuthoring::canonicalizeSkinWeights(weights);
         geo.skin_weights = std::move(weights);
         ++out.stats.skinned_mesh_count;
     }
@@ -469,8 +468,10 @@ bool readUfbx(const std::string& path, const ImportOptions& requested,
         // a character frozen in its neutral expression with no error anywhere —
         // the "plausible-looking result" this repo keeps paying for.
         if (scene->blend_deformers.count || scene->cache_deformers.count) {
-            error = "ufbx: this FBX uses blend shapes (morph targets) or geometry "
-                    "caches, which are not supported yet. The file was NOT imported "
+            error = "ufbx: unsupported FBX deformers: blend_shapes=" +
+                    std::to_string(scene->blend_deformers.count) +
+                    ", geometry_caches=" + std::to_string(scene->cache_deformers.count) +
+                    ". These deformers are not supported yet. The file was NOT imported "
                     "partially - importing it without those deformers would give a "
                     "character frozen in its neutral pose and no error.";
             return false;
@@ -610,8 +611,12 @@ bool readUfbx(const std::string& path, const ImportOptions& requested,
         model.stats.seconds_total = elapsed(start);
         if (repeatedNodes) SCENE_LOG_INFO("[ufbx] Reused triangulation for " + std::to_string(repeatedNodes) +
             " repeated mesh node(s); flat geometry still owned per node (no implicit instancing).");
-        if (options.loadGeometry && model.objects.empty()) {
-            error = "ufbx: no polygon geometry in file";
+        // loadGeometry requests mesh content when present; it does not require
+        // a mesh. Explicit joints and imported clips are valid scene content.
+        const bool hasSkeleton = model.bones && !model.bones->boneNameToIndex.empty();
+        if (options.loadGeometry && model.objects.empty() &&
+                !hasSkeleton && model.animations.empty()) {
+            error = "ufbx: no polygon geometry, skeleton joints or animation clips in file";
             return false;
         }
         out = std::move(model);

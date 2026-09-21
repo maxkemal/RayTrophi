@@ -238,6 +238,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             item["name"] = info.name;
             item["triangles"] = info.triangle_count;
             item["vertices"] = info.vertex_count;
+            item["meshes"] = info.mesh_count;
+            item["has_bounds"] = info.has_bounds;
+            if (info.has_bounds) {
+                item["world_min"] = py::make_tuple(info.world_min.x, info.world_min.y, info.world_min.z);
+                item["world_max"] = py::make_tuple(info.world_max.x, info.world_max.y, info.world_max.z);
+            }
             result.append(std::move(item));
         }
         return result;
@@ -1508,6 +1514,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["id"] = s.id;
             d["name"] = s.name;
             d["active"] = s.active;
+            d["emitter_only"] = s.emitter_only;
+            d["render_in_raytrace"] = s.render_in_raytrace;
             d["domain_count"] = s.domain_count;
             d["flow_source_count"] = s.flow_source_count;
             d["emitter_count"] = s.emitter_count;
@@ -1516,6 +1524,31 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         return out;
     });
+
+    particle.def("set_system_emitter_only",
+                 [](const std::string& system, bool emitter_only) {
+        requireResult(rtapi::setParticleSystemEmitterOnly(system, emitter_only));
+    }, py::arg("system"), py::arg("emitter_only"),
+       "Use the system only as a gas/fluid emitter source, hiding carrier "
+       "particles from RayFusion, Solid and ray-traced renders.");
+
+    particle.def("add_preset", [](const std::string& preset) -> py::dict {
+        rtapi::ParticleSystemInfo info;
+        requireResult(rtapi::addParticleSystemPreset(preset, info));
+        py::dict d;
+        d["index"] = info.index;
+        d["id"] = info.id;
+        d["name"] = info.name;
+        d["active"] = info.active;
+        d["domain_count"] = info.domain_count;
+        d["flow_source_count"] = info.flow_source_count;
+        d["emitter_count"] = info.emitter_count;
+        d["collider_count"] = info.collider_count;
+        return d;
+    }, py::arg("preset"),
+       "Create one of the authored particle presets additively. Slugs: campfire, "
+       "explosion, smoke, ground_burst, fireball, flamethrower, burning_fuel_spill, "
+       "ignited_fuel_jet, nuclear_cinematic, nuclear_physical.");
 
     particle.def("clear_systems", []() { requireResult(rtapi::clearParticleSystems()); });
 
@@ -2276,16 +2309,59 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["structural_event_interval"] = s.structural_event_interval;
         d["buoyancy_heat"] = s.buoyancy_heat;
         d["buoyancy_density"] = s.buoyancy_density;
+        d["ambient_stratification"] = s.ambient_stratification;
+        d["surface_dust_enabled"] = s.surface_dust_enabled;
+        d["surface_dust_threshold"] = s.surface_dust_threshold;
+        d["surface_dust_emission"] = s.surface_dust_emission;
+        d["surface_dust_temperature"] = s.surface_dust_temperature;
+        d["surface_dust_max_density"] = s.surface_dust_max_density;
+        d["surface_dust_supply"] = s.surface_dust_supply;
+        d["dissipation_override"] = s.dissipation_override;
+        d["density_dissipation"] = s.density_dissipation;
+        d["temperature_dissipation"] = s.temperature_dissipation;
+        d["fuel_dissipation"] = s.fuel_dissipation;
         d["vorticity"] = s.vorticity;
         d["fire_expansion"] = s.fire_expansion;
         d["turbulence_strength"] = s.turbulence_strength;
         d["turbulence_scale"] = s.turbulence_scale;
         d["turbulence_octaves"] = s.turbulence_octaves;
+        d["turbulence_octaves_effective"] = s.turbulence_octaves_effective;
         d["turbulence_lacunarity"] = s.turbulence_lacunarity;
         d["turbulence_persistence"] = s.turbulence_persistence;
         d["turbulence_speed"] = s.turbulence_speed;
         return d;
     };
+    gas.def("measure_plume", [](const std::string& domain, float density_threshold) -> py::dict {
+        rtapi::GasPlumeMeasurement m;
+        requireResult(rtapi::measureGasPlume(domain, density_threshold, m));
+        py::dict d;
+        // ★ Check `measured` before anything else: every extent below reads 0
+        // both for an empty domain and for one that could not be sampled.
+        d["measured"] = m.measured;
+        d["threshold"] = m.threshold;
+        d["active_cells"] = m.active_cells;
+        d["total_cells"] = m.total_cells;
+        d["fill_fraction"] = m.fill_fraction;
+        d["bounds_min"] = py::make_tuple(m.bounds_min.x, m.bounds_min.y, m.bounds_min.z);
+        d["bounds_max"] = py::make_tuple(m.bounds_max.x, m.bounds_max.y, m.bounds_max.z);
+        d["centroid"] = py::make_tuple(m.centroid.x, m.centroid.y, m.centroid.z);
+        d["top_above_floor"] = m.top_above_floor;
+        d["centroid_above_floor"] = m.centroid_above_floor;
+        d["max_width"] = m.max_width;
+        d["max_width_height"] = m.max_width_height;
+        d["peak_temperature"] = m.peak_temperature;
+        d["mean_temperature"] = m.mean_temperature;
+        d["touching_ceiling"] = m.touching_ceiling;
+        d["pressure_measured"] = m.pressure_measured;
+        d["pressure_min"] = m.pressure_min;
+        d["pressure_max"] = m.pressure_max;
+        d["pressure_min_height"] = m.pressure_min_height;
+        return d;
+    }, py::arg("domain"), py::arg("density_threshold") = 0.01f,
+       "Measure the live gas field: plume extent, cap height above the domain "
+       "floor, widest slice and its height, peak/mean heat, and whether the "
+       "plume is clipped by the domain lid.");
+
     gas.def("get_settings", [gas_settings_to_dict](const std::string& domain) {
         rtapi::GasDomainSettings settings;
         requireResult(rtapi::getGasDomainSettings(domain, settings));
@@ -2313,6 +2389,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_GAS_KW(structural_event_interval, float);
         RT_GAS_KW(buoyancy_heat, float);
         RT_GAS_KW(buoyancy_density, float);
+        RT_GAS_KW(ambient_stratification, float);
+        RT_GAS_KW(surface_dust_enabled, bool);
+        RT_GAS_KW(surface_dust_threshold, float);
+        RT_GAS_KW(surface_dust_emission, float);
+        RT_GAS_KW(surface_dust_temperature, float);
+        RT_GAS_KW(surface_dust_max_density, float);
+        RT_GAS_KW(surface_dust_supply, float);
+        RT_GAS_KW(dissipation_override, bool);
+        RT_GAS_KW(density_dissipation, float);
+        RT_GAS_KW(temperature_dissipation, float);
+        RT_GAS_KW(fuel_dissipation, float);
         RT_GAS_KW(vorticity, float);
         RT_GAS_KW(fire_expansion, float);
         RT_GAS_KW(turbulence_strength, float);
@@ -2337,8 +2424,58 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["temperature_max"] = s.temperature_max;
         d["scattering_coefficient"] = s.scattering_coefficient;
         d["absorption_coefficient"] = s.absorption_coefficient;
+        d["voxel_step_multiplier"] = s.voxel_step_multiplier;
+        d["max_steps"] = s.max_steps;
+        d["shadow_steps"] = s.shadow_steps;
+        d["shadow_stride"] = s.shadow_stride;
+        d["shadow_strength"] = s.shadow_strength;
         return d;
     };
+    gas.def("step_stats", [](const std::string& domain) {
+        rtapi::GasStepStats s;
+        requireResult(rtapi::getGasStepStats(domain, s));
+        py::dict d;
+        d["measured"] = s.measured;
+        if (!s.measured) return d;
+        d["resolution"] = py::make_tuple(s.resolution[0], s.resolution[1], s.resolution[2]);
+        d["total_ms"] = s.total_ms;
+        d["voxelize_ms"] = s.voxelize_ms;
+        d["analysis_ms"] = s.analysis_ms;
+        d["gpu_collider_source_ms"] = s.gpu_collider_source_ms;
+        d["gpu_msf_ms"] = s.gpu_msf_ms;
+        d["gpu_source_upload_ms"] = s.gpu_source_upload_ms;
+        d["gpu_fluid_combustion_ms"] = s.gpu_fluid_combustion_ms;
+        d["gpu_velocity_advect_ms"] = s.gpu_velocity_advect_ms;
+        d["gpu_scalar_advect_ms"] = s.gpu_scalar_advect_ms;
+        d["gpu_combustion_ms"] = s.gpu_combustion_ms;
+        d["gpu_body_forces_ms"] = s.gpu_body_forces_ms;
+        d["gpu_dissipation_ms"] = s.gpu_dissipation_ms;
+        d["gpu_pressure_ms"] = s.gpu_pressure_ms;
+        d["gpu_publish_ms"] = s.gpu_publish_ms;
+        d["gpu_majorant_ms"] = s.gpu_majorant_ms;
+        d["cpu_total_ms"] = s.cpu_total_ms;
+        d["cpu_advect_velocity_ms"] = s.cpu_advect_velocity_ms;
+        d["cpu_advect_scalar_ms"] = s.cpu_advect_scalar_ms;
+        d["cpu_boundary_ms"] = s.cpu_boundary_ms;
+        d["cpu_combustion_ms"] = s.cpu_combustion_ms;
+        d["cpu_surface_dust_ms"] = s.cpu_surface_dust_ms;
+        d["cpu_buoyancy_ms"] = s.cpu_buoyancy_ms;
+        d["cpu_force_fields_ms"] = s.cpu_force_fields_ms;
+        d["cpu_vorticity_ms"] = s.cpu_vorticity_ms;
+        d["cpu_turbulence_ms"] = s.cpu_turbulence_ms;
+        d["cpu_dissipation_ms"] = s.cpu_dissipation_ms;
+        d["cpu_pressure_ms"] = s.cpu_pressure_ms;
+        d["max_density"] = s.max_density;
+        d["max_temperature"] = s.max_temperature;
+        d["max_speed"] = s.max_speed;
+        d["cfl"] = s.cfl;
+        d["cell_count"] = s.cell_count;
+        d["active_density_cells"] = s.active_density_cells;
+        d["grid_memory_bytes"] = s.grid_memory_bytes;
+        d["burning_cells"] = s.burning_cells;
+        d["solid_cells"] = s.solid_cells;
+        return d;
+    }, py::arg("domain"));
     gas.def("get_shader", [gas_shader_to_dict](const std::string& domain) {
         rtapi::GasShaderSettings s;
         requireResult(rtapi::getGasShaderSettings(domain, s));
@@ -2359,6 +2496,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_GASSHADER_KW(temperature_max, float);
         RT_GASSHADER_KW(scattering_coefficient, float);
         RT_GASSHADER_KW(absorption_coefficient, float);
+        RT_GASSHADER_KW(voxel_step_multiplier, float);
+        RT_GASSHADER_KW(max_steps, int);
+        RT_GASSHADER_KW(shadow_steps, int);
+        RT_GASSHADER_KW(shadow_stride, int);
+        RT_GASSHADER_KW(shadow_strength, float);
 #undef RT_GASSHADER_KW
         requireResult(rtapi::updateGasShaderSettings(domain, s));
     }, py::arg("domain"));
@@ -4633,6 +4775,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["first_frame"] = s.first_frame;
         d["last_frame"] = s.last_frame;
         d["config_signature"] = s.config_signature;
+        d["ram_bytes"] = s.ram_bytes;
+        d["budget_bytes"] = s.budget_bytes;
+        d["budget_reached"] = s.budget_reached;
         return d;
     }, "Bake state. 'valid' (disk bake bound), 'baking' (running) and "
        "'ram_frames' (timeline scrub cache) are SEPARATE: all three can read "

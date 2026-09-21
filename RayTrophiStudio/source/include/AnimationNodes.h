@@ -86,6 +86,7 @@ namespace AnimationGraph {
         std::vector<BoneTransform> trsTransforms;
         std::vector<Matrix4x4> boneTransforms; // Cached matrices for final output
         std::unordered_map<std::string, BoneTransform> extraTransforms; // For animated nodes without skin weights
+        std::unordered_map<std::string, Matrix4x4> jointGlobalTransforms; // Evaluated hierarchy globals, before skin offsets
         std::vector<std::string> boneNames;    // For debugging
         float blendWeight = 1.0f;
         float normalizedTime = 0.0f;          // 0-1 playback progress
@@ -576,8 +577,8 @@ namespace AnimationGraph {
             
             // Condition
             std::string parameterName;
-            enum class ConditionType { Bool, FloatGreater, FloatLess, Trigger };
-            ConditionType conditionType = ConditionType::Bool;
+            enum class ConditionType { None = 0, Bool = 1, FloatGreater = 2, FloatLess = 3, Trigger = 4 };
+            ConditionType conditionType = ConditionType::None;
             float compareValue = 0.0f;
             
             bool evaluate(AnimationEvalContext& ctx) const;
@@ -588,8 +589,15 @@ namespace AnimationGraph {
         std::string currentStateName;
         
         void onSave(nlohmann::json& j) const override {
-             j["currentState"] = currentStateName;
-             
+             // currentStateName / targetStateName / transitionProgress are RUNTIME
+             // state, NOT asset data, so they are deliberately absent here.
+             // They used to be serialized, and the node inspector mirrors the
+             // selected asset node into the live runtime node every frame through
+             // onSave/onLoad: the asset's stale "currentState" overwrote the
+             // runtime's state on the very next frame after a transition completed,
+             // so the machine re-fired the same transition forever. Permanently
+             // transitioning reads on screen as permanently frozen.
+
              // States
              nlohmann::json statesJson = nlohmann::json::array();
              for(const auto& s : states) {
@@ -619,8 +627,10 @@ namespace AnimationGraph {
         }
         
         void onLoad(const nlohmann::json& j) override {
-             currentStateName = j.value("currentState", "");
-             
+             // No currentState here on purpose (see onSave). computePose() recovers
+             // an invalid/empty current state from the default state, which is also
+             // the right thing to do when a project is opened.
+
              if(j.contains("states")) {
                  states.clear();
                  inputs.clear();

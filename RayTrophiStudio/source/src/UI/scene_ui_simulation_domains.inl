@@ -348,13 +348,11 @@
                         case RayTrophiSim::SimulationDomainQualityProfile::Interactive:
                             domain.max_auto_resolution = 96;
                             domain.resource_budget_mb = 512;
-                            domain.force_disk_cache = false;
                             domain.turbulence_octaves = std::min(domain.turbulence_octaves, 2);
                             break;
                         case RayTrophiSim::SimulationDomainQualityProfile::Preview:
                             domain.max_auto_resolution = 192;
                             domain.resource_budget_mb = 1024;
-                            domain.force_disk_cache = false;
                             domain.turbulence_octaves = std::clamp(domain.turbulence_octaves, 2, 4);
                             break;
                         case RayTrophiSim::SimulationDomainQualityProfile::Final: {
@@ -368,14 +366,22 @@
                             else if (total_ram_gb_f >= 16.0) dyn_budget_mb = 6144;
                             domain.resource_budget_mb = dyn_budget_mb;
                             domain.enforce_resource_budget = true;
-                            domain.force_disk_cache = false;
                             domain.turbulence_octaves = std::max(domain.turbulence_octaves, 4);
                             break;
                         }
                         case RayTrophiSim::SimulationDomainQualityProfile::Cinema:
                             domain.max_auto_resolution = 1024;
-                            domain.enforce_resource_budget = false; // RAM limit lifted
-                            domain.force_disk_cache = true;         // disk bake mandatory
+                            // * NO RAM LIMIT HERE, AND THAT IS NOW THE WHOLE
+                            //   STORY. This used to also set force_disk_cache,
+                            //   commented "disk bake mandatory" - a field that
+                            //   was written in eight places, serialized, and
+                            //   READ BY NOTHING. Cinema therefore lifted the RAM
+                            //   ceiling and promised a disk bake that never ran:
+                            //   the two settings that were supposed to balance
+                            //   each other, and only one of them existed.
+                            //   The disk bake is a button in the Simulation
+                            //   panel and has to be pressed.
+                            domain.enforce_resource_budget = false;
                             domain.use_sparse_tiles = true;         // required at cinema res
                             domain.turbulence_octaves = std::max(domain.turbulence_octaves, 6);
                             break;

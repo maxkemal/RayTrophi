@@ -55,7 +55,7 @@ constexpr uint32_t kLocalSize = 256;
 
 } // namespace
 
-static_assert(sizeof(RasterGpuCull::MeshBinding) == 48,
+static_assert(sizeof(RasterGpuCull::MeshBinding) == 52,
               "MeshBinding must match the MeshParam struct in raster_cull.comp");
 
 struct RasterGpuCull::Impl {

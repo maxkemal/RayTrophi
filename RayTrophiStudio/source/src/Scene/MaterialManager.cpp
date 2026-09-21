@@ -520,6 +520,7 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 matJson["normalProperty"] = serializeProperty(pbsdf->normalProperty, sceneDir);
                 matJson["heightProperty"] = serializeProperty(pbsdf->heightProperty, sceneDir);
                 matJson["opacityProperty"] = serializeProperty(pbsdf->opacityProperty, sceneDir);
+                matJson["alpha_cutout"] = pbsdf->coverage.alphaCutout;
                 matJson["emissionProperty"] = serializeProperty(pbsdf->emissionProperty, sceneDir);
                 matJson["transmissionProperty"] = serializeProperty(pbsdf->transmissionProperty, sceneDir);
                 
@@ -694,6 +695,7 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
                 deserializeProperty(pbsdf->normalProperty, matJson["normalProperty"], sceneDir, TextureType::Normal, &textureCache, &textureStats);
             if (matJson.contains("heightProperty"))
                 deserializeProperty(pbsdf->heightProperty, matJson["heightProperty"], sceneDir, TextureType::Unknown, &textureCache, &textureStats);
+            pbsdf->coverage.alphaCutout = matJson.value("alpha_cutout", false);
             if (matJson.contains("opacityProperty"))
                 deserializeProperty(pbsdf->opacityProperty, matJson["opacityProperty"], sceneDir, TextureType::Opacity, &textureCache, &textureStats);
             if (matJson.contains("emissionProperty"))

@@ -59,7 +59,6 @@ namespace {
 struct SourceState {
     uint64_t signature = 0;       // primitive/material config hash
     uint64_t content_hash = 1;    // alive particle transforms hash (1 = "never synced")
-    uint64_t bucket_hash = 1;     // over-life age-bucket (source_index) hash
 };
 std::unordered_map<int, SourceState> g_source_state;
 
@@ -72,24 +71,15 @@ uint64_t quantize(float v) {
     return static_cast<uint64_t>(static_cast<int64_t>(std::lround(v * 1000.0f)));
 }
 
-Vec3 lerpColor(const Vec3& a, const Vec3& b, float t) {
-    return Vec3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
-}
-
 uint64_t renderSignature(const SceneData::ParticleRenderSettings& r) {
     uint64_t h = 1469598103934665603ull;
     h = hashCombine(h, static_cast<uint64_t>(r.shape));
     h = hashCombine(h, static_cast<uint64_t>(r.sphere_subdivisions));
-    h = hashCombine(h, static_cast<uint64_t>(std::max(1, std::min(r.color_buckets, 64))));
     h = hashCombine(h, r.emissive ? 1ull : 0ull);
-    h = hashCombine(h, r.over_life_color ? 1ull : 0ull);
     h = hashCombine(h, r.inherit_color_from_emitter ? 1ull : 0ull);
     h = hashCombine(h, quantize(r.base_color.x));
     h = hashCombine(h, quantize(r.base_color.y));
     h = hashCombine(h, quantize(r.base_color.z));
-    h = hashCombine(h, quantize(r.color_end.x));
-    h = hashCombine(h, quantize(r.color_end.y));
-    h = hashCombine(h, quantize(r.color_end.z));
     h = hashCombine(h, quantize(r.emission_strength));
     h = hashCombine(h, quantize(r.roughness));
     if (r.shape == SceneData::ParticleRenderShape::SceneMeshes) {
@@ -102,8 +92,8 @@ uint64_t renderSignature(const SceneData::ParticleRenderSettings& r) {
     return h;
 }
 
-// ── Preset material for one color bucket. Built/updated by stable name so a
-// gradient edit refreshes the existing material instead of leaking a new one.
+// One shared built-in particle material per system. Built/updated by stable name
+// so an appearance edit refreshes it instead of leaking a new material.
 uint16_t ensureParticleMaterial(const std::string& name, const Vec3& color,
                                 const SceneData::ParticleRenderSettings& r,
                                 float emission_scale = 1.0f) {
@@ -484,6 +474,7 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
         // re-enabling a cheap refill rather than a full recreate.
         const bool alive = system.runtime != nullptr;
         const bool wants = alive && system.visible && system.enabled &&
+                           !system.render.emitter_only &&
                            system.render.render_in_raytrace;
 
         if (!alive) {
@@ -527,28 +518,24 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
         }
         group->transient = true;
 
-        // (Re)build the sources on config change. Two modes, both feeding the
-        // per-source scatter material path (no shader change):
+        // (Re)build the sources on config change. Two modes feed the per-source
+        // scatter material path (no shader change):
         //   * SceneMeshes: one ScatterSource per weighted scene-mesh node (debris);
         //     each keeps its own material. Particles pick a source by weighted CDF.
-        //   * Built-in: one ScatterSource per color bucket (same primitive mesh, a
-        //     material sampled along base_color -> color_end); particles pick a
-        //     bucket by stable hash -> per-particle color variety (spark look).
+        //   * Built-in: one primitive source and one shared material. Particle
+        //     gradients belong to the lightweight billboard path; multiplying
+        //     geometry and global materials for color buckets was unnecessary.
         // Structural (BLAS/material set), so a full rebuild bakes per-instance data.
         SourceState& st = g_source_state[system.render_instance_group_id];
         uint64_t sig = renderSignature(system.render);
-        // Editing the first emitter's start/end colors must invalidate the bucket
-        // materials when the inherit toggle is on, otherwise the bridge keeps
-        // serving the cached colors and the appearance edit looks ignored.
+        // Editing the first emitter's start color must invalidate the shared
+        // material when the inherit toggle is on.
         if (system.render.inherit_color_from_emitter &&
             system.runtime && !system.runtime->emitters().empty()) {
             const auto& em = system.runtime->emitters().front();
             sig = hashCombine(sig, quantize(em.start_color.x));
             sig = hashCombine(sig, quantize(em.start_color.y));
             sig = hashCombine(sig, quantize(em.start_color.z));
-            sig = hashCombine(sig, quantize(em.end_color.x));
-            sig = hashCombine(sig, quantize(em.end_color.y));
-            sig = hashCombine(sig, quantize(em.end_color.z));
         }
         const bool want_scene_meshes =
             system.render.shape == SceneData::ParticleRenderShape::SceneMeshes &&
@@ -568,49 +555,36 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
                 }
             }
 
-            // Built-in primitive buckets (also the fallback when no scene mesh
-            // resolved). base_color -> color_end gradient sampled into N materials.
+            // Built-in primitive (also the fallback when no scene mesh resolved).
             if (group->sources.empty()) {
-                const int build_buckets = std::max(1, std::min(system.render.color_buckets, 64));
-                group->sources.reserve(static_cast<std::size_t>(build_buckets));
                 const SceneData::ParticleRenderShape prim_shape =
                     (system.render.shape == SceneData::ParticleRenderShape::SceneMeshes)
                         ? SceneData::ParticleRenderShape::Sphere
                         : system.render.shape;
-                // Over-life: bucket index maps to AGE, so dim the emission toward
-                // the end of life (sparks fade out). Variety mode keeps full glow.
-                const bool over_life = system.render.over_life_color;
-                // Single source of truth: when inherit is on, the gradient mirrors
-                // the first emitter's Solid-billboard start/end colors so the user
-                // does not have to maintain two color pairs (appearance panel +
-                // RT panel). Toggle off to author RT-only colors.
-                Vec3 grad_start = system.render.base_color;
-                Vec3 grad_end   = system.render.color_end;
+                Vec3 material_color = system.render.base_color;
                 if (system.render.inherit_color_from_emitter &&
                     system.runtime && !system.runtime->emitters().empty()) {
-                    const auto& em = system.runtime->emitters().front();
-                    grad_start = em.start_color;
-                    grad_end   = em.end_color;
+                    material_color = system.runtime->emitters().front().start_color;
                 }
-                for (int b = 0; b < build_buckets; ++b) {
-                    const float t = (build_buckets > 1) ? static_cast<float>(b) / (build_buckets - 1) : 0.0f;
-                    const Vec3 col = lerpColor(grad_start, grad_end, t);
-                    const float emis_scale = over_life ? (1.0f - 0.85f * t) : 1.0f;
-                    const std::string mat_name = "[PSysMat] #" + std::to_string(system.id) + " b" + std::to_string(b);
-                    const std::string geo_node = "[PSysGeo] #" + std::to_string(system.id) + " b" + std::to_string(b);
-                    const uint16_t mat = ensureParticleMaterial(mat_name, col, system.render, emis_scale);
+                const std::string mat_name =
+                    "[PSysMat] #" + std::to_string(system.id);
+                const std::string geo_node =
+                    "[PSysGeo] #" + std::to_string(system.id);
+                const uint16_t mat = ensureParticleMaterial(
+                    mat_name, material_color, system.render);
 
-                    ScatterSource src;
-                    src.name = geo_node;
-                    src.weight = 1.0f;
-                    buildPrimitive(prim_shape, system.render.sphere_subdivisions,
-                                   mat, geo_node, src.triangles);
-                    for (auto& tri : src.triangles) {
-                        if (tri) tri->setMaterialID(mat);
+                ScatterSource src;
+                src.name = geo_node;
+                src.weight = 1.0f;
+                buildPrimitive(prim_shape, system.render.sphere_subdivisions,
+                               mat, geo_node, src.triangles);
+                for (auto& tri : src.triangles) {
+                    if (tri) {
+                        tri->setMaterialID(mat);
                     }
-                    src.computeCenter();
-                    group->sources.push_back(std::move(src));
                 }
+                src.computeCenter();
+                group->sources.push_back(std::move(src));
             }
             st.signature = sig;
             structural_change = true;
@@ -646,8 +620,8 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
             structural_change = true;  // backend must (re)create the scatter slots
         }
 
-        // Weighted source-pick CDF from the actually-built sources (uniform for
-        // built-in color buckets, weighted for scene-mesh debris). Indices line up
+        // Weighted source-pick CDF from the actually-built sources (one source for
+        // built-in geometry, weighted for scene-mesh debris). Indices line up
         // with group->sources so the backend's per-instance bindings are correct.
         const std::size_t nsrc = group->sources.size();
         std::vector<float> src_cdf(nsrc, 0.0f);
@@ -660,23 +634,14 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
         // hash, so only 3D-asymmetric shapes get rotation.
         const bool apply_rotation =
             system.render.shape != SceneData::ParticleRenderShape::Sphere;
-        // Over-life color is DISABLED: making each particle's material follow its
-        // age needs a per-frame material change, which the cheap TLAS refit can't
-        // do, so it forced a full rebuild — and emitter spawn/die churn made that
-        // happen EVERY frame (continuous rebuild). The real fix is a per-instance
-        // color buffer the refit re-uploads + the closesthit reads (shader path).
-        // Until then over-life falls back to the cheap stable color VARIETY.
-        const bool over_life = false;
-
         uint64_t content = 1469598103934665603ull;     // transforms (drives cheap refit)
-        uint64_t bucket_sig = 1469598103934665603ull;   // over-life age buckets (drives rebuild)
         std::size_t alive_drawn = 0;
         for (std::size_t i = 0; i < inst.size(); ++i) {
             InstanceTransform& tr = inst[i];
             tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
 
-            // Stable per-slot hash drives the source pick (color bucket / weighted
-            // debris mesh) + a random base orientation. STABLE is essential: the
+            // Stable per-slot hash drives the weighted debris source pick plus a
+            // random base orientation. STABLE is essential: the
             // cheap TLAS refit only updates transforms, so a particle's
             // material/source_index must not change frame-to-frame (it is only
             // re-read on a structural rebuild). A slot hash is deterministic, so the
@@ -713,20 +678,6 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
             if (alive) {
                 tr.position = Vec3(px, py, pz);
                 tr.scale = Vec3(sz, sz, sz);
-                if (over_life) {
-                    // Bucket = age fraction -> color/emission walk the gradient as
-                    // the particle ages (matches the Solid billboard fade).
-                    const float age = (i < buf.age_seconds.size()) ? buf.age_seconds[i] : 0.0f;
-                    const float life = (i < buf.lifetime_seconds.size()) ? buf.lifetime_seconds[i] : 1.0f;
-                    const float frac = (life > 1e-5f) ? std::min(0.9999f, std::max(0.0f, age / life)) : 0.0f;
-                    src_index = std::min(static_cast<int>(nsrc) - 1,
-                                         static_cast<int>(frac * static_cast<float>(nsrc)));
-                    tr.source_index = src_index;
-                    // Bucket changes drive a (rare) full rebuild; transform motion
-                    // between crossings stays on the cheap refit path.
-                    bucket_sig = hashCombine(bucket_sig, static_cast<uint64_t>(i));
-                    bucket_sig = hashCombine(bucket_sig, static_cast<uint64_t>(src_index));
-                }
                 if (apply_rotation) {
                     const float spin = (i < buf.rotation.size()) ? buf.rotation[i] : 0.0f;
                     const float spin_deg = spin * (180.0f / 3.14159265f);
@@ -750,14 +701,8 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
         }
         content = hashCombine(content, static_cast<uint64_t>(alive_drawn));
 
-        // A bucket crossing (over-life) changes per-instance materials, which only a
-        // full rebuild can apply. Pure transform motion stays on the cheap refit —
-        // so over-life only pays the rebuild when a particle actually steps to the
-        // next age color, not every frame.
-        const bool buckets_changed = over_life && (bucket_sig != st.bucket_hash);
-        if (structural_change || buckets_changed) {
+        if (structural_change) {
             st.content_hash = content;
-            st.bucket_hash = bucket_sig;
             group->gpu_dirty = true;
             structural_change = true;
         } else if (content != st.content_hash) {
@@ -1893,7 +1838,7 @@ void SceneData::releaseDomainFluidFoamInstances() {
 // CPU render WITHOUT entering world.objects (no GPU double-render, no UI churn).
 //
 // Each primitive ScatterSource already holds origin-centred unit-diameter
-// triangles with the bucket material baked in. We build ONE child EmbreeBVH per
+// triangles with the shared material baked in. We build ONE child EmbreeBVH per
 // source (cached on source.bvh, reused until the bridge clears sources on a
 // config change) and instance it per particle via the same machinery foliage
 // uses. Embree natively instances the child scene; the ParallelBVH fallback uses

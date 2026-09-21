@@ -1,0 +1,84 @@
+; FBX 7.4.0 project file
+; Test fixture: Armature -> Hip -> Knee -> Ankle, no mesh/skin/animation.
+FBXHeaderExtension:  {
+    FBXHeaderVersion: 1003
+    FBXVersion: 7400
+    Creator: "RayTrophi rig authoring fixture"
+}
+GlobalSettings:  {
+    Version: 1000
+    Properties70:  {
+        P: "UpAxis", "int", "Integer", "",1
+        P: "UpAxisSign", "int", "Integer", "",1
+        P: "FrontAxis", "int", "Integer", "",2
+        P: "FrontAxisSign", "int", "Integer", "",-1
+        P: "CoordAxis", "int", "Integer", "",0
+        P: "CoordAxisSign", "int", "Integer", "",1
+        P: "UnitScaleFactor", "double", "Number", "",100
+        P: "OriginalUnitScaleFactor", "double", "Number", "",100
+    }
+}
+Documents:  {
+    Count: 1
+    Document: 1, "", "Scene" {
+        RootNode: 0
+    }
+}
+Definitions:  {
+    Version: 100
+    Count: 7
+    ObjectType: "Model" { Count: 4 }
+    ObjectType: "NodeAttribute" { Count: 3 }
+}
+Objects:  {
+    Model: 100, "Model::Armature", "Null" {
+        Version: 232
+        Properties70:  {
+            P: "Lcl Translation", "Lcl Translation", "", "A",2,0,0
+            P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+            P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+        }
+    }
+    Model: 101, "Model::Hip", "LimbNode" {
+        Version: 232
+        Properties70:  {
+            P: "Lcl Translation", "Lcl Translation", "", "A",0,2,0
+            P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+            P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+        }
+    }
+    Model: 102, "Model::Knee", "LimbNode" {
+        Version: 232
+        Properties70:  {
+            P: "Lcl Translation", "Lcl Translation", "", "A",0,-1,0
+            P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+            P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+        }
+    }
+    Model: 103, "Model::Ankle", "LimbNode" {
+        Version: 232
+        Properties70:  {
+            P: "Lcl Translation", "Lcl Translation", "", "A",0,-1,0.2
+            P: "Lcl Rotation", "Lcl Rotation", "", "A",0,0,0
+            P: "Lcl Scaling", "Lcl Scaling", "", "A",1,1,1
+        }
+    }
+    NodeAttribute: 201, "NodeAttribute::Hip", "LimbNode" {
+        TypeFlags: "Skeleton"
+    }
+    NodeAttribute: 202, "NodeAttribute::Knee", "LimbNode" {
+        TypeFlags: "Skeleton"
+    }
+    NodeAttribute: 203, "NodeAttribute::Ankle", "LimbNode" {
+        TypeFlags: "Skeleton"
+    }
+}
+Connections:  {
+    C: "OO",100,0
+    C: "OO",101,100
+    C: "OO",102,101
+    C: "OO",103,102
+    C: "OO",201,101
+    C: "OO",202,102
+    C: "OO",203,103
+}

@@ -75,7 +75,7 @@ void VulkanBackendAdapter::destroyMaterialPreviewTransmissionResources() {
 
 bool VulkanBackendAdapter::ensureMaterialPreviewTransmissionResources(uint32_t width,
                                                                       uint32_t height) {
-    if (!m_device || !m_interactiveViewport.colorImage.image ||
+    if (!m_device || !m_interactiveViewport.hdrColorImage.image ||
         !m_interactiveViewport.depthImage.image ||
         m_interactiveViewport.materialPreviewDescSet == VK_NULL_HANDLE) return false;
     if (m_materialPreviewTransmission &&
@@ -86,8 +86,12 @@ bool VulkanBackendAdapter::ensureMaterialPreviewTransmissionResources(uint32_t w
     auto r = std::make_shared<MaterialPreviewTransmissionResources>();
     r->width = width;
     r->height = height;
+    // ★★★ HDR: bu anlik goruntu artik scene-linear RGBA16F. Kirilma/hacim
+    //   shader'lari onu ORNEKLIYOR; 8-bit birakmak, arkasi kirpilmis bir
+    //   goruntuden kirilma hesaplamak demekti (parlak arka plan cam icinde
+    //   duz beyaza yapisirdi).
     r->sceneColor = m_device->createImage2D(
-        width, height, VK_FORMAT_R8G8B8A8_UNORM,
+        width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
     r->sceneDepth = m_device->createImage2D(
@@ -121,7 +125,8 @@ bool VulkanBackendAdapter::ensureMaterialPreviewTransmissionResources(uint32_t w
     }
 
     VkAttachmentDescription attachments[2]{};
-    attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+    // ★ Replay gecisi HDR sahne hedefine cizer (post ondan SONRA kosar).
+    attachments[0].format = VK_FORMAT_R16G16B16A16_SFLOAT;
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -151,7 +156,7 @@ bool VulkanBackendAdapter::ensureMaterialPreviewTransmissionResources(uint32_t w
         destroyMaterialPreviewTransmissionResources();
         return false;
     }
-    VkImageView views[2] = {m_interactiveViewport.colorImage.view,
+    VkImageView views[2] = {m_interactiveViewport.hdrColorImage.view,
                             m_interactiveViewport.depthImage.view};
     VkFramebufferCreateInfo fbci{};
     fbci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -195,6 +200,54 @@ bool VulkanBackendAdapter::ensureMaterialPreviewTransmissionResources(uint32_t w
     return true;
 }
 
+bool VulkanBackendAdapter::materialPreviewMeshNeedsTransmission(const RasterMeshBuffer& mesh) const {
+    return rasterMeshMayTransmit(mesh.materialUsage, mesh.cpuMatIds, mesh.vertexCount,
+        m_cachedGpuMaterials, m_interactiveViewport.materialPreviewBoundMaterialCount,
+        m_rasterMaterialPrograms, m_interactiveViewport.materialPreviewUsesExternalMaterials);
+}
+
+bool VulkanBackendAdapter::materialPreviewTransmissionHasWork() const {
+    if (!m_materialPreviewTransmission) return false;
+    // The SDF surface and volume passes are recorded INSIDE the replay and both
+    // gate on this same counter, so a volume scene still needs the whole thing.
+    if (m_device && m_device->m_volumeCount > 0u) return true;
+    for (const auto& entry : m_rasterMeshes) {
+        if (materialPreviewMeshNeedsTransmission(entry.second)) return true;
+    }
+    return false;
+}
+
+void VulkanBackendAdapter::initMaterialPreviewTransmissionSnapshot(VkCommandBuffer cmd) {
+    if (!m_materialPreviewTransmission || !cmd) return;
+    auto& r = *m_materialPreviewTransmission;
+    if (r.snapshotValid) return;
+    VkClearColorValue black{};
+    VkClearDepthStencilValue farDepth{1.0f, 0u};  // "far" bir windows.h makrosu
+    VkImageSubresourceRange colorRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageSubresourceRange depthRange{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    imageBarrier(cmd, r.sceneColor.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vkCmdClearColorImage(cmd, r.sceneColor.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         &black, 1, &colorRange);
+    imageBarrier(cmd, r.sceneColor.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    imageBarrier(cmd, r.sceneDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vkCmdClearDepthStencilImage(cmd, r.sceneDepth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                &farDepth, 1, &depthRange);
+    imageBarrier(cmd, r.sceneDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    r.snapshotValid = true;
+}
+
 void VulkanBackendAdapter::prepareMaterialPreviewTransmissionThickness(VkCommandBuffer cmd) {
     if (!m_materialPreviewTransmission || !cmd) return;
     auto& r = *m_materialPreviewTransmission;
@@ -214,7 +267,7 @@ void VulkanBackendAdapter::recordMaterialPreviewTransmissionPass(
         m_interactiveViewport.materialPreviewPipeline == VK_NULL_HANDLE) return;
     auto& r = *m_materialPreviewTransmission;
 
-    imageBarrier(cmd, m_interactiveViewport.colorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
+    imageBarrier(cmd, m_interactiveViewport.hdrColorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -238,7 +291,7 @@ void VulkanBackendAdapter::recordMaterialPreviewTransmissionPass(
     colorCopy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     colorCopy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     colorCopy.extent = {width, height, 1};
-    vkCmdCopyImage(cmd, m_interactiveViewport.colorImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+    vkCmdCopyImage(cmd, m_interactiveViewport.hdrColorImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    r.sceneColor.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &colorCopy);
     VkImageCopy depthCopy = colorCopy;
     depthCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -253,14 +306,16 @@ void VulkanBackendAdapter::recordMaterialPreviewTransmissionPass(
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    imageBarrier(cmd, m_interactiveViewport.colorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
+    imageBarrier(cmd, m_interactiveViewport.hdrColorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                  VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     imageBarrier(cmd, m_interactiveViewport.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT,
                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                 VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+                 VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
     r.snapshotValid = true;
     imageBarrier(cmd, r.backDepth.image, VK_IMAGE_ASPECT_COLOR_BIT,
                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
@@ -278,11 +333,8 @@ void VulkanBackendAdapter::recordMaterialPreviewTransmissionPass(
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    // Participating media integrate against the opaque snapshot first. The SDF
-    // dielectric is then allowed to replace nearer pixels and refract the same
-    // stable snapshot without read/write attachment feedback.
-    recordMaterialPreviewVolumePass(
-        cmd, viewProj, view, width, height, true);
+    // Dielectrics read the stable opaque snapshot before foreground media
+    // are composited. Otherwise the SDF overwrites even gas in front of it.
     recordMaterialPreviewSdfSurfacePass(
         cmd, viewProj, view, width, height, true);
 
@@ -311,6 +363,7 @@ void VulkanBackendAdapter::recordMaterialPreviewTransmissionPass(
                        0, sizeof(push), &push);
 
     for (const auto& [key, mesh] : m_rasterMeshes) {
+        if (!materialPreviewMeshNeedsTransmission(mesh)) continue;
         const bool cullDriven = m_rasterGpuCullActive && m_rasterGpuCull &&
                                 mesh.cullDrawSlot != UINT32_MAX;
         VkBuffer instances = cullDriven
@@ -340,6 +393,41 @@ void VulkanBackendAdapter::recordMaterialPreviewTransmissionPass(
             } else vkCmdDraw(cmd, mesh.vertexCount, mesh.instanceCount, 0, first);
         }
     }
+    vkCmdEndRenderPass(cmd);
+
+    // Refresh only depth after surface replay. No refraction draws follow, so
+    // binding 18 can now delimit media at the nearest opaque/SDF surface.
+    // This preserves foreground gas; refracted media behind glass still need
+    // a separate background-media integration path.
+    imageBarrier(cmd, m_interactiveViewport.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT);
+    imageBarrier(cmd, r.sceneDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vkCmdCopyImage(cmd, m_interactiveViewport.depthImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   r.sceneDepth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &depthCopy);
+    imageBarrier(cmd, r.sceneDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    imageBarrier(cmd, m_interactiveViewport.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                 VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+    imageBarrier(cmd, m_interactiveViewport.hdrColorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+    recordMaterialPreviewVolumePass(cmd, viewProj, view, width, height, true);
     vkCmdEndRenderPass(cmd);
 }
 

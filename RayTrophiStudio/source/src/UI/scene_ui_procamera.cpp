@@ -15,11 +15,15 @@
 #include "Hittable.h"
 #include "ParallelBVHNode.h"
 #include "Camera.h"
+#include "Backend/VulkanBackend.h"
 #include <cstdio>
 #include "imgui.h"
 #include <cmath>
 #include <algorithm>
 #include <array>
+
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+
 
 // =============================================================================
 // HISTOGRAM OVERLAY (Draggable, real camera viewfinder style)
@@ -350,15 +354,41 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
     }
 
     // Colors
-    ImU32 col_out_of_focus = IM_COL32(150, 150, 150, 150);  // Gray (not in focus)
+    // ★★★ Pasif nokta ESKIDEN gri-yari saydamdi (150,150,150,150) ve sahnenin
+    //   uzerinde neredeyse gorunmuyordu -- yani odak noktasi SECMEK, once
+    //   noktayi bulmayi gerektiriyordu. Gercek vizorler bunu renkle degil
+    //   KONTRASTLA cozer: parlak parantez + altina koyu golge, boylece hem
+    //   aydinlik hem karanlik zeminde okunur. Renk yalnizca DURUMU tasir.
+    ImU32 col_out_of_focus = IM_COL32(235, 235, 240, 205);  // Bright neutral (not in focus)
+    ImU32 col_hover        = IM_COL32(120, 200, 255, 255);  // Blue (mouse is over it)
     ImU32 col_in_focus = IM_COL32(0, 255, 0, 255);          // Bright GREEN (in focus!)
     ImU32 col_selected = IM_COL32(255, 100, 100, 255);      // Red (selected point)
+    ImU32 col_shadow       = IM_COL32(0, 0, 0, 170);        // Contrast pass under every bracket
 
     float point_size = 12.0f;
     int point_idx = 0;
 
     float start_x = cx - (grid_cols - 1) * spacing_x * 0.5f;
     float start_y = cy - (grid_rows - 1) * spacing_y * 0.5f;
+
+    // --- RayFusion AS Warmup ---
+    // RayFusion modunda TLAS yalnizca MaterialPreviewShadow render döngüsünden
+    // uyandiriliyor. AF noktasi BVH probelari ise CPU Embree BVH'ini kullanir;
+    // bu BVH sahne geometrisiyle senkronize kalabilmek icin Vulkan RT'nin
+    // updateGeometry() gecisindan besleniyor. Dogrudan RayFusion'da (Vulkan RT
+    // moduna hic gecilmeden) AS hic kurulmadi ise CPU BVH eskimis transform'larla
+    // calisir ve AF noktalari yanlis derinlik okur veya hic isabet etmez.
+    // ensureRayFusionSceneAS() cagrilmasi AS'i "sicak" tutar: imza eslesmesi
+    // ucuz, gercek rebuild yalnizca sahne degisince tetiklenir.
+    {
+        auto tryWarmupAS = [](Backend::IBackend* b) {
+            if (!b) return;
+            if (auto* vba = dynamic_cast<Backend::VulkanBackendAdapter*>(b))
+                vba->ensureRayFusionSceneAS();
+        };
+        tryWarmupAS(ctx.backend_ptr);
+        tryWarmupAS(g_viewport_backend.get());
+    }
 
     // Get BVH for raycasting
     const auto* bvh = ctx.scene.bvh.get();
@@ -409,8 +439,10 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
                     // Base tolerance: 3.0%
                     float tolerance = focus_dist * 0.03f;
                     
-                    if (cam.aperture > 0.0f) {
-                        tolerance /= (1.0f + cam.aperture * 10.0f);
+                    // ★ Sig alan derinliginde odak toleransi daralir; DoF
+                    //   kapaliyken daralmasi anlamsizdir (her sey keskindir).
+                    if (cam.effectiveAperture() > 0.0f) {
+                        tolerance /= (1.0f + cam.effectiveAperture() * 10.0f);
                     }
                     tolerance = std::max(tolerance, 0.05f);
                     
@@ -420,6 +452,18 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
                 }
             }
 
+            float half = point_size;
+            float corner = 5.0f;
+
+            // ★★ Hover ONCE hesaplanir: "hangi noktaya tikliyorum" sorusunun
+            //   cevabi cizimin KENDISI olmali. Isaretci alanini parantezden
+            //   biraz genis tut -- 12 px'lik bir kare fareyle nisan almak icin
+            //   kucuk, ve isabetsiz tiklama odagi baska bir yere atiyordu.
+            ImVec2 mouse = io.MousePos;
+            float hit = half + 4.0f;
+            bool mouse_over = (mouse.x >= px - hit && mouse.x <= px + hit &&
+                              mouse.y >= py - hit && mouse.y <= py + hit);
+
             // Determine bracket color based on focus state
             ImU32 bracket_col = col_out_of_focus;
             if (is_in_focus) {
@@ -428,34 +472,40 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
             if (is_selected) {
                 bracket_col = col_selected;  // Override with red if selected
             }
-
-            // Draw AF point bracket (camera viewfinder style)
-            float half = point_size;
-            float corner = 5.0f;
-            float thickness = (is_in_focus || is_selected) ? 2.5f : 1.5f;
-
-            // Top-left
-            draw_list->AddLine(ImVec2(px - half, py - half), ImVec2(px - half + corner, py - half), bracket_col, thickness);
-            draw_list->AddLine(ImVec2(px - half, py - half), ImVec2(px - half, py - half + corner), bracket_col, thickness);
-            // Top-right
-            draw_list->AddLine(ImVec2(px + half, py - half), ImVec2(px + half - corner, py - half), bracket_col, thickness);
-            draw_list->AddLine(ImVec2(px + half, py - half), ImVec2(px + half, py - half + corner), bracket_col, thickness);
-            // Bottom-left
-            draw_list->AddLine(ImVec2(px - half, py + half), ImVec2(px - half + corner, py + half), bracket_col, thickness);
-            draw_list->AddLine(ImVec2(px - half, py + half), ImVec2(px - half, py + half - corner), bracket_col, thickness);
-            // Bottom-right
-            draw_list->AddLine(ImVec2(px + half, py + half), ImVec2(px + half - corner, py + half), bracket_col, thickness);
-            draw_list->AddLine(ImVec2(px + half, py + half), ImVec2(px + half, py + half - corner), bracket_col, thickness);
-
-            // Center dot when in focus
-            if (is_in_focus) {
-                draw_list->AddCircleFilled(ImVec2(px, py), 3.0f, col_in_focus, 8);
+            if (mouse_over && !is_selected) {
+                bracket_col = col_hover;     // Which point a click would take
             }
 
-            // Handle click to select point
-            ImVec2 mouse = io.MousePos;
-            bool mouse_over = (mouse.x >= px - half && mouse.x <= px + half &&
-                              mouse.y >= py - half && mouse.y <= py + half);
+            float thickness = (is_in_focus || is_selected || mouse_over) ? 2.5f : 1.8f;
+
+            // Draw AF point bracket (camera viewfinder style)
+            // ★ Iki gecis: once koyu golge (1 px kaydirilmis, biraz kalin),
+            //   sonra parantez. Tek gecis, acik zeminde beyaz-uzeri-beyaz olur.
+            auto drawBracket = [&](ImU32 color, float width, float ox, float oy) {
+                const float l = px - half + ox, r = px + half + ox;
+                const float t = py - half + oy, b = py + half + oy;
+                // Top-left
+                draw_list->AddLine(ImVec2(l, t), ImVec2(l + corner, t), color, width);
+                draw_list->AddLine(ImVec2(l, t), ImVec2(l, t + corner), color, width);
+                // Top-right
+                draw_list->AddLine(ImVec2(r, t), ImVec2(r - corner, t), color, width);
+                draw_list->AddLine(ImVec2(r, t), ImVec2(r, t + corner), color, width);
+                // Bottom-left
+                draw_list->AddLine(ImVec2(l, b), ImVec2(l + corner, b), color, width);
+                draw_list->AddLine(ImVec2(l, b), ImVec2(l, b - corner), color, width);
+                // Bottom-right
+                draw_list->AddLine(ImVec2(r, b), ImVec2(r - corner, b), color, width);
+                draw_list->AddLine(ImVec2(r, b), ImVec2(r, b - corner), color, width);
+            };
+
+            drawBracket(col_shadow, thickness + 1.4f, 1.0f, 1.0f);
+            drawBracket(bracket_col, thickness, 0.0f, 0.0f);
+
+            // Center dot when in focus (shadowed for the same reason)
+            if (is_in_focus) {
+                draw_list->AddCircleFilled(ImVec2(px + 1.0f, py + 1.0f), 3.6f, col_shadow, 8);
+                draw_list->AddCircleFilled(ImVec2(px, py), 3.0f, col_in_focus, 8);
+            }
 
             if (mouse_over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.WantCaptureMouse) {
                 viewport_settings.af_selected_point = point_idx;
@@ -562,10 +612,6 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
 // =============================================================================
 // PRO CAMERA SETTINGS PANEL (Stub - settings via PRO button popup)
 // =============================================================================
-void SceneUI::drawProCameraPanel(UIContext& ctx) {
-    (void)ctx;  // Settings accessed via viewport controls PRO button popup
-}
-
 // Continuous Autofocus Update (Called independently of draw)
 void SceneUI::updateAutofocus(UIContext& ctx) {
     if (!ctx.scene.camera || !ctx.scene.bvh) return;

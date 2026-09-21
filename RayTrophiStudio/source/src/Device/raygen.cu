@@ -196,6 +196,12 @@ extern "C" __global__ void __raygen__rg() {
     if (accum_buffer != nullptr) {
         float4 prev = accum_buffer[pixel_index];
         float prev_samples = prev.w;
+        // Diagnostic: did this pixel see NO previous samples? If the .w the host
+        // reads and the .w the kernel sees disagree, the root is in memory, not
+        // in the blend arithmetic.
+        if (optixLaunchParams.accum_prev_zero_count != nullptr && !(prev_samples > 0.0f)) {
+            atomicAdd(optixLaunchParams.accum_prev_zero_count, 1u);
+        }
         prev_samples_for_variance = prev_samples;
         prev_mean_lum_for_variance = compute_luminance(make_float3(prev.x, prev.y, prev.z));
         if (prev_samples > 0.0f) {

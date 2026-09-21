@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "ParticleSimulation.h"
+#include "ParticleSystemUsage.h"
 
 namespace rtapi {
 namespace {
@@ -135,6 +136,32 @@ Result resolveEmitterIndex(const std::string& index_or_name, std::size_t& out_in
         if (emitters[i].name == index_or_name) { out_index = i; return Result::success(); }
     }
     return Result::fail("particle emitter not found: " + index_or_name);
+}
+
+Result resolveSystemIndex(const std::string& index_or_name, std::size_t& out_index) {
+    const auto& systems = g_ctx->scene.particle_systems;
+    if (systems.empty()) {
+        return Result::fail("no particle systems in the scene");
+    }
+    const bool numeric = !index_or_name.empty() &&
+        std::all_of(index_or_name.begin(), index_or_name.end(),
+                    [](unsigned char c) { return std::isdigit(c) != 0; });
+    if (numeric) {
+        const long value = std::atol(index_or_name.c_str());
+        if (value < 0 || static_cast<std::size_t>(value) >= systems.size()) {
+            return Result::fail(
+                "particle system index out of range: " + index_or_name);
+        }
+        out_index = static_cast<std::size_t>(value);
+        return Result::success();
+    }
+    for (std::size_t i = 0; i < systems.size(); ++i) {
+        if (systems[i].name == index_or_name) {
+            out_index = i;
+            return Result::success();
+        }
+    }
+    return Result::fail("particle system not found: " + index_or_name);
 }
 
 ParticleEmitterInfo infoFromEmitter(const ParticleEmitterDesc& desc, int index) {
@@ -368,6 +395,8 @@ Result listParticleSystems(std::vector<ParticleSystemInfo>& out) {
         info.id = sys.id;
         info.name = sys.name;
         info.active = (static_cast<int>(i) == g_ctx->scene.active_particle_system_index);
+        info.emitter_only = sys.render.emitter_only;
+        info.render_in_raytrace = sys.render.render_in_raytrace;
         if (sys.runtime) {
             info.domain_count = static_cast<int>(sys.runtime->gridDomains().size());
             info.flow_source_count = static_cast<int>(sys.runtime->flowSources().size());
@@ -376,6 +405,98 @@ Result listParticleSystems(std::vector<ParticleSystemInfo>& out) {
         }
         out.push_back(std::move(info));
     }
+    return Result::success();
+}
+
+// Slug -> authored preset recipe. The slugs are the panel's list in lowercase
+// snake_case; keeping them as data rather than an if-chain means adding a
+// preset is one line here and the error message below stays complete.
+namespace {
+struct ParticlePresetSlug {
+    const char* slug;
+    SceneData::ParticleSystemPreset preset;
+};
+constexpr ParticlePresetSlug kParticlePresetSlugs[] = {
+    {"campfire",            SceneData::ParticleSystemPreset::Campfire},
+    {"explosion",           SceneData::ParticleSystemPreset::Explosion},
+    {"smoke",               SceneData::ParticleSystemPreset::Smoke},
+    {"ground_burst",        SceneData::ParticleSystemPreset::GroundBurst},
+    {"fireball",            SceneData::ParticleSystemPreset::Fireball},
+    {"flamethrower",        SceneData::ParticleSystemPreset::Flamethrower},
+    {"burning_fuel_spill",  SceneData::ParticleSystemPreset::BurningFuelSpill},
+    {"ignited_fuel_jet",    SceneData::ParticleSystemPreset::IgnitedFuelJet},
+    {"nuclear_cinematic",   SceneData::ParticleSystemPreset::NuclearCinematic},
+    {"nuclear_physical",    SceneData::ParticleSystemPreset::NuclearPhysical},
+};
+}  // namespace
+
+Result addParticleSystemPreset(const std::string& preset, ParticleSystemInfo& out) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+
+    std::string slug = preset;
+    std::transform(slug.begin(), slug.end(), slug.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // Accept the panel's spacing/hyphen spellings so a get -> set round trip and
+    // an obvious guess both land, rather than failing on punctuation.
+    std::replace(slug.begin(), slug.end(), ' ', '_');
+    std::replace(slug.begin(), slug.end(), '-', '_');
+
+    const ParticlePresetSlug* match = nullptr;
+    for (const auto& entry : kParticlePresetSlugs) {
+        if (slug == entry.slug) { match = &entry; break; }
+    }
+    if (!match) {
+        std::string known;
+        for (const auto& entry : kParticlePresetSlugs) {
+            if (!known.empty()) known += ", ";
+            known += entry.slug;
+        }
+        return Result::fail("unknown particle preset '" + preset + "'; known: " + known);
+    }
+
+    const std::size_t before = g_ctx->scene.particle_systems.size();
+    SceneData::ParticleSystemObject& sys =
+        g_ctx->scene.addParticleSystemPreset(match->preset);
+    if (g_ctx->scene.particle_systems.size() != before + 1u) {
+        // The scene logs this too, but a script must FAIL here rather than hand
+        // back a plausible-looking info block for a system that was not created.
+        return Result::fail("particle preset '" + slug + "' did not create a system");
+    }
+
+    out = ParticleSystemInfo{};
+    out.index = static_cast<int>(g_ctx->scene.particle_systems.size()) - 1;
+    out.id = sys.id;
+    out.name = sys.name;
+    out.active = (out.index == g_ctx->scene.active_particle_system_index);
+    out.emitter_only = sys.render.emitter_only;
+    out.render_in_raytrace = sys.render.render_in_raytrace;
+    if (sys.runtime) {
+        out.domain_count = static_cast<int>(sys.runtime->gridDomains().size());
+        out.flow_source_count = static_cast<int>(sys.runtime->flowSources().size());
+        out.emitter_count = static_cast<int>(sys.runtime->emitters().size());
+        out.collider_count = static_cast<int>(sys.runtime->colliders().size());
+    }
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result setParticleSystemEmitterOnly(const std::string& index_or_name,
+                                    bool emitter_only) {
+    if (!g_ctx) {
+        return notBound();
+    }
+    if (renderJobActive()) {
+        return Result::fail("scene is locked by the final render job");
+    }
+    std::size_t index = 0;
+    if (Result result = resolveSystemIndex(index_or_name, index); !result) {
+        return result;
+    }
+    if (!ParticleSystemUsage::setEmitterOnly(g_ctx->scene, index, emitter_only)) {
+        return Result::fail("could not update particle system: " + index_or_name);
+    }
+    g_ctx->renderer.resetCPUAccumulation();
     return Result::success();
 }
 
@@ -479,6 +600,84 @@ Result getParticleStats(ParticleStatsInfo& out) {
     out.integrate_ms = stats.integrate_ms;
     out.self_collision_ms = stats.self_collision_ms;
     out.grid_domain_ms = stats.grid_domain_ms;
+    return Result::success();
+}
+
+Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) {
+    if (!g_ctx) return notBound();
+    auto& runtime = scriptSimulationRuntime();
+    const auto& domains = runtime.gridDomains();
+    const auto& states = runtime.gridDomainStates();
+
+    std::size_t index = domains.size();
+    for (std::size_t i = 0; i < domains.size(); ++i) {
+        if (domains[i].name == domain_id_or_name) { index = i; break; }
+    }
+    if (index >= domains.size()) {
+        // Fall back to a plain index so a script can drive an unnamed domain.
+        char* end = nullptr;
+        const long parsed = std::strtol(domain_id_or_name.c_str(), &end, 10);
+        if (end && *end == '\0' && parsed >= 0 &&
+            static_cast<std::size_t>(parsed) < domains.size()) {
+            index = static_cast<std::size_t>(parsed);
+        } else {
+            return Result::fail("grid domain not found: " + domain_id_or_name);
+        }
+    }
+    if (index >= states.size()) return Result::fail("domain has no live state yet");
+
+    const auto& state = states[index];
+    const auto& gs = state.gas_stats;
+    // ★ `measured` is load-bearing and must be read before any number below.
+    // Every timing is 0.0 both for "this stage is free" and for "no step ran",
+    // and a caller that skips this flag records an idle domain as a 0 ms step —
+    // which in an optimisation A/B reads as a total win.
+    out.measured = state.valid && gs.stepped;
+    if (!out.measured) return Result::success();
+
+    out.resolution[0] = state.resolution_x;
+    out.resolution[1] = state.resolution_y;
+    out.resolution[2] = state.resolution_z;
+    out.cell_count = gs.cell_count;
+    out.active_density_cells = state.active_density_cells;
+    out.grid_memory_bytes = gs.grid_memory_bytes;
+
+    out.total_ms = gs.total_ms;
+    out.voxelize_ms = gs.voxelize_ms;
+    out.analysis_ms = gs.analysis_ms;
+
+    out.gpu_collider_source_ms = gs.gpu_collider_source_ms;
+    out.gpu_msf_ms = gs.gpu_msf_ms;
+    out.gpu_source_upload_ms = gs.gpu_source_upload_ms;
+    out.gpu_fluid_combustion_ms = gs.gpu_fluid_combustion_ms;
+    out.gpu_velocity_advect_ms = gs.gpu_velocity_advect_ms;
+    out.gpu_scalar_advect_ms = gs.gpu_scalar_advect_ms;
+    out.gpu_combustion_ms = gs.gpu_combustion_ms;
+    out.gpu_body_forces_ms = gs.gpu_body_forces_ms;
+    out.gpu_dissipation_ms = gs.gpu_dissipation_ms;
+    out.gpu_pressure_ms = gs.gpu_pressure_ms;
+    out.gpu_publish_ms = gs.gpu_publish_ms;
+    out.gpu_majorant_ms = gs.gpu_majorant_ms;
+
+    out.cpu_total_ms = gs.cpu.total_ms;
+    out.cpu_advect_velocity_ms = gs.cpu.advect_velocity_ms;
+    out.cpu_advect_scalar_ms = gs.cpu.advect_scalar_ms;
+    out.cpu_boundary_ms = gs.cpu.boundary_ms;
+    out.cpu_combustion_ms = gs.cpu.combustion_ms;
+    out.cpu_surface_dust_ms = gs.cpu.surface_dust_ms;
+    out.cpu_buoyancy_ms = gs.cpu.buoyancy_ms;
+    out.cpu_force_fields_ms = gs.cpu.force_fields_ms;
+    out.cpu_vorticity_ms = gs.cpu.vorticity_ms;
+    out.cpu_turbulence_ms = gs.cpu.turbulence_ms;
+    out.cpu_dissipation_ms = gs.cpu.dissipation_ms;
+    out.cpu_pressure_ms = gs.cpu.pressure_ms;
+
+    out.max_density = state.max_density;
+    out.max_temperature = gs.max_temperature;
+    out.max_speed = gs.max_speed;
+    out.cfl = gs.cfl;
+    out.burning_cells = gs.burning_cells;
+    out.solid_cells = gs.solid_cells;
     return Result::success();
 }
 
