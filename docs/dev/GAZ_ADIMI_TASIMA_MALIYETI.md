@@ -400,3 +400,47 @@ velocity'yi hiç yüklemiyordu.
 Doğrulandı: `burning_cells` 3037/adım, preset'ler tutuşuyor, `total_ms` 163.30 —
 `interaction` yüklemesinin bedeli ölçüm gürültüsünün içinde kaldı.
 
+---
+
+## 2026-09-21 (geç) — Son iki host aşaması da GPU'da: 163 → 157 ms
+
+`sim_gas_scalar_dissipate` ve `sim_gas_surface_dust` eklendi. Host çözücüsü gaz
+yolunda **boş**.
+
+| satır | önce | sonra |
+|---|---|---|
+| `cpu_total_ms` | 6.42 | **0.001** |
+| `cpu_surface_dust_ms` | 3.17 | 0.000 |
+| `cpu_dissipation_ms` | 2.88 | 0.000 |
+| `gpu_scalar_dissipate_ms` | — | **0.015** |
+| `gpu_surface_dust_ms` | — | 5.22 |
+| `gpu_combustion_ms` | 2.50 | 2.50 |
+| `total_ms` | 163.30 | **156.92** |
+
+★ **`gpu_surface_dust_ms` 5.22 yanıltıcı ve nedeni kaydedilmeli:** kernel
+16 900 sütun üzerinde çalışıyor, yani mikrosaniyelik iş. Maliyetin çoğu
+(a) scalar advection host'ta `swap` ettiği için density/temperature'ın yeniden
+yüklenmesi — ama bunu **zaten combustion ödüyordu**, o yüzden yer değiştirdi,
+ve (b) reservoir'ın 68 KB'lık round-trip'indeki `compute->synchronize()`.
+Düzeltmesi: reservoir'ı `gasSyncGridToHost`'un mevcut batch'ine almak.
+
+### Fizik: ilk kez birebir DEĞİL, ve bu beklenen
+
+| kare | ölçülen | referans | fark |
+|---|---|---|---|
+| 40 | 211 741 | 211 742 | 1 hücre |
+| 80 | 721 318 | 721 307 | 11 |
+| 120 | 959 083 | 959 364 | 281 (%0.03) |
+
+`top`, `centroid`, `peakT` değişmedi. Sapma **büyüyen** tipte, yani kaotik bir
+sistemde yuvarlama imzası. Kaynağı `sqrt`: Vulkan'da 2.5 ULP'ye kadar sapabilir,
+`std::sqrt` doğru yuvarlanır. Dissipation birebir aynı formülü kullanıyor
+(`exp(-rate*dt)` sonra çarpma), orası katkı vermiyor.
+
+> **Kural olarak kaydedildi:** aritmetik **kaldırıldığında** birebir aynılık
+> beklenir, **taşındığında** beklenmez. Ayırt edici, sapmanın büyüyen mi yoksa
+> ilk kareden itibaren sistematik mi olduğudur — toz iki kez eklenseydi `fill`
+> baştan yüksek çıkardı, çıkmadı (0.28375 / 0.28384).
+
+Devir notu: `docs/dev/GAZ_DERSLERI_VE_FLUID_DEVRI.md`.
+

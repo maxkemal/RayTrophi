@@ -2454,6 +2454,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["gpu_publish_ms"] = s.gpu_publish_ms;
         d["gpu_majorant_ms"] = s.gpu_majorant_ms;
         d["gpu_host_sync_ms"] = s.gpu_host_sync_ms;
+        d["gpu_surface_dust_ms"] = s.gpu_surface_dust_ms;
+        d["gpu_scalar_dissipate_ms"] = s.gpu_scalar_dissipate_ms;
         d["cpu_total_ms"] = s.cpu_total_ms;
         d["cpu_advect_velocity_ms"] = s.cpu_advect_velocity_ms;
         d["cpu_advect_scalar_ms"] = s.cpu_advect_scalar_ms;

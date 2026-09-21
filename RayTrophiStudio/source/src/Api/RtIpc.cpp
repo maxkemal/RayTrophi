@@ -5490,6 +5490,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                 j["gpu_publish_ms"] = s.gpu_publish_ms;
                 j["gpu_majorant_ms"] = s.gpu_majorant_ms;
                 j["gpu_host_sync_ms"] = s.gpu_host_sync_ms;
+                j["gpu_surface_dust_ms"] = s.gpu_surface_dust_ms;
+                j["gpu_scalar_dissipate_ms"] = s.gpu_scalar_dissipate_ms;
                 j["cpu_total_ms"] = s.cpu_total_ms;
                 j["cpu_advect_velocity_ms"] = s.cpu_advect_velocity_ms;
                 j["cpu_advect_scalar_ms"] = s.cpu_advect_scalar_ms;

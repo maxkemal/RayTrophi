@@ -539,6 +539,18 @@ void addSurfaceDust(FluidGrid& grid, const SolverParams& params, float dt) {
     if (cells == 0u || grid.density.size() != cells) return;
 
     const bool has_solid = (grid.solid.size() == cells);
+    // ***** has_solid DOES NOT MEAN "THERE IS A SOLID".
+    //
+    // grid.solid is allocated for every domain by FluidGrid::resize, so the
+    // size check below is true even when nothing has ever been voxelised. The
+    // "tops of solids" pass at the bottom of this function therefore walked all
+    // nx*ny*nz cells every step to prove there were none - most of this
+    // function's 3.2 ms, spent on a domain with no colliders at all.
+    //
+    // The compact list is the thing that actually answers the question: valid
+    // and empty means "the voxeliser ran and found nothing".
+    const bool any_solid =
+        has_solid && !(grid.solid_cells_valid && grid.solid_cells.empty());
     const bool has_temp = (params.channel_temperature && grid.temperature.size() == cells);
     const float threshold = std::max(0.0f, params.surface_dust_threshold);
     const float emission = std::max(0.0f, params.surface_dust_emission);
@@ -598,7 +610,7 @@ void addSurfaceDust(FluidGrid& grid, const SolverParams& params, float dt) {
             for (int i = 0; i < nx; ++i) loft(i, 0, k);
     }
     // Tops of solids. Skipped entirely when the domain has no colliders.
-    if (has_solid) {
+    if (any_solid) {
         const std::size_t stride_y = static_cast<std::size_t>(nx);
         for (int k = 0; k < nz; ++k)
             for (int j = 1; j < ny; ++j)
@@ -1357,16 +1369,18 @@ void step(FluidGrid& grid,
     cursor = Clock::now();
 
     // 4) Dissipation.
-    if (params.channel_density) {
-        dissipate(grid.density, params.density_dissipation, dt);
+    if (!params.skip_scalar_dissipation) {
+        if (params.channel_density) {
+            dissipate(grid.density, params.density_dissipation, dt);
+        }
+        if (params.channel_temperature) {
+            dissipate(grid.temperature, params.temperature_dissipation, dt);
+        }
+        if (params.channel_fuel) {
+            dissipate(grid.fuel, params.fuel_dissipation, dt);
+        }
+        mark(cursor, stats ? &stats->dissipation_ms : nullptr);
     }
-    if (params.channel_temperature) {
-        dissipate(grid.temperature, params.temperature_dissipation, dt);
-    }
-    if (params.channel_fuel) {
-        dissipate(grid.fuel, params.fuel_dissipation, dt);
-    }
-    mark(cursor, stats ? &stats->dissipation_ms : nullptr);
 
     // 5) Make the velocity field incompressible.
     if (params.channel_velocity) {

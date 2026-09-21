@@ -3233,6 +3233,8 @@ struct GasStepStats {
     float gpu_publish_ms = 0.0f;
     float gpu_majorant_ms = 0.0f;
     float gpu_host_sync_ms = 0.0f;
+    float gpu_surface_dust_ms = 0.0f;
+    float gpu_scalar_dissipate_ms = 0.0f;
 
     // Host operator chain that still had to run.
     float cpu_total_ms = 0.0f;
