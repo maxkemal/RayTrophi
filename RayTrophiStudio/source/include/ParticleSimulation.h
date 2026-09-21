@@ -418,6 +418,22 @@ struct SimulationGridDomainDesc {
     // With it, the cap sits at h* = anomaly / gas_ambient_stratification, a
     // number the author chooses and a script can measure.
     float gas_ambient_stratification = 0.0f;
+
+    // ***** PRESSURE SOLVER SWEEPS, AND THE REASON THIS IS NOT A CONSTANT ANY
+    // MORE.
+    //
+    // It was hard-coded to 40 in stepGridDomains, which made the single most
+    // expensive stage of the gas step (45 ms, ~29% of it) impossible to
+    // measure: without varying the count there is no slope and no intercept, so
+    // "is projection bandwidth-bound or is it still paying for transfers" could
+    // only be argued, not answered.
+    //
+    // ** THIS IS A CONVERGENCE DIAL, NOT A QUALITY DIAL. Red-black SOR
+    // propagates information one cell per sweep, so 40 sweeps cross a fifth of
+    // a 200-cell-tall domain. Lowering it does not make the smoke coarser, it
+    // makes the velocity field less divergence-free - which looks like gas
+    // leaking through walls and losing its swirl, not like a softer image.
+    int gas_pressure_iterations = 40;
     float gas_vorticity = 0.35f;
     // ── Per-domain field loss rates (per second; factor = exp(-rate*dt)) ─────
     //

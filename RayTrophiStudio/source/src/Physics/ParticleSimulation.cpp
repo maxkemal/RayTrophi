@@ -4347,6 +4347,46 @@ bool gasEnsureOnHost(SimulationComputeContext* compute,
     return true;
 }
 
+// Does GridFluid::step have anything left to do for this domain?
+//
+// ***** THIS PREDICATE IS WHAT LETS THE READBACK MOVE TO THE END OF THE STEP.
+//
+// Every stage of the gas step now has a GPU path, and the caller sets a skip_*
+// flag for each one it ran. When all of them are set, GridFluid::step still
+// runs setWallBcs, clearSolidScalars and enforceSolidBoundaries - and for an
+// OPEN boundary with no colliders those three do nothing at all. There is then
+// no host stage between the device stages, so nothing has to come home in the
+// middle of the chain.
+//
+// ** IT IS DELIBERATELY CONSERVATIVE. A closed boundary or a single collider
+// makes it false and the old path runs unchanged, because the cost of being
+// wrong here is not a slow frame - it is walls that stop working, or a plume
+// that advances on velocity from before the body forces. Anything this
+// predicate is not certain about, it answers false to.
+bool hostGasStepIsNoOp(const FluidSim::FluidGrid& grid,
+                       const GridFluid::SolverParams& params) {
+    if (!params.skip_velocity_advection) return false;
+    if (!params.skip_scalar_advection) return false;
+    if (!params.skip_combustion) return false;
+    if (!params.skip_surface_dust) return false;
+    if (!params.skip_buoyancy) return false;
+    if (!params.skip_force_fields) return false;
+    if (!params.skip_vorticity) return false;
+    if (!params.skip_turbulence) return false;
+    if (!params.skip_scalar_dissipation) return false;
+    if (!params.skip_velocity_dissipation_clamp) return false;
+    if (!params.skip_pressure_projection) return false;
+    // setWallBcs only writes for a Closed boundary; Open and Periodic return on
+    // its first line.
+    if (params.boundary != GridFluid::Boundary::Open) return false;
+    // A solid anywhere means clearSolidScalars / enforceSolidBoundaries have
+    // faces to pin. grid.solid is allocated for every domain, so the compact
+    // list is the only honest answer (see addSurfaceDust for the same trap).
+    if (!grid.solid_cells_valid) return false;
+    if (!grid.solid_cells.empty()) return false;
+    return true;
+}
+
 // Bring every device-only field back before a HOST stage touches the grid.
 //
 // ***** THIS IS THE ONE STRUCTURAL READBACK. GridFluid::step runs on the host
@@ -4459,17 +4499,34 @@ bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
         ok = ok && buffers[i].valid();
     }
     compute->beginTransferBatch();
-    if (!velocity_is_resident) {
-        ok = ok &&
-             compute->uploadBuffer(buffers[0], grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-             compute->uploadBuffer(buffers[1], grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-             compute->uploadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
-    }
+    // Same as the dissipation clamp: the ledger answers per field, so the
+    // caller's velocity_is_resident is not consulted for the upload.
+    ok = ok &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelX, buffers[0],
+                           grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelY, buffers[1],
+                           grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelZ, buffers[2],
+                           grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = ok &&
          compute->uploadBuffer(buffers[3], grid.pressure.data(), grid.pressure.size() * sizeof(float)) &&
          compute->uploadBuffer(buffers[4], grid.divergence.data(), grid.divergence.size() * sizeof(float));
     if (!grid.interaction.empty()) {
-        ok = ok && compute->uploadBuffer(
+        // ***** THE FLAME CHANNEL, AND THE FOURTH TIME THIS EXACT SHAPE HAS
+        // COST A BUG IN THIS WORK.
+        //
+        // Combustion writes interaction on the device and leaves it there. This
+        // was a plain uploadBuffer, so it pushed the stale host copy back over
+        // it every step - before the readback that feeds the host. The flame
+        // field then never reached the host at all, which is why the panel
+        // reported "Burning cells: 0" on a plume that was visibly burning, and
+        // why the expansion term at binding 5 was reading a dead field.
+        //
+        // ** THE SYMPTOM WAS A COUNTER, NOT THE IMAGE, and that is the trap:
+        // an instrument reading zero looks like a broken instrument. It was the
+        // last unguarded upload in the gas step.
+        ok = ok && gasEnsureOnDevice(
+            compute, gpu_buffers, GasGridField::Interaction,
             buffers[5],
             grid.interaction.data(),
             grid.interaction.size() * sizeof(float));
@@ -4702,11 +4759,17 @@ bool runGpuVelocityAdvection(FluidSim::FluidGrid& grid,
     }
     compute->synchronize();
 
-    ok = ok &&
-         compute->downloadBuffer(buffers[result_base + 0], grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-         compute->downloadBuffer(buffers[result_base + 1], grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-         compute->downloadBuffer(buffers[result_base + 2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
-
+    // ***** THE READBACK THAT USED TO FOLLOW THIS IS GONE.
+    //
+    // It copied the advected faces into the host vectors for one reason: the
+    // host solver ran next and needed them. It does not any more - every stage
+    // between here and the end of the step is a kernel - so this was 41 MB of
+    // download whose only consumer was a stage that no longer exists.
+    //
+    // ** THE RESULT WAS ALREADY ON THE DEVICE AND CORRECTLY PLACED. The handle
+    // swap below has always been there; the download was never what made the
+    // next stage work.
+    //
     // ** THE RESULT IS IN SCRATCH, SO THE HANDLES ARE SWAPPED.
     //
     // The advected values live in scratch_vel_* (or scratch2_vel_* after the
@@ -4730,9 +4793,13 @@ bool runGpuVelocityAdvection(FluidSim::FluidGrid& grid,
         std::swap(gpu_buffers.vel_x, *scratch_x);
         std::swap(gpu_buffers.vel_y, *scratch_y);
         std::swap(gpu_buffers.vel_z, *scratch_z);
-        gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
-        gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
-        gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
+        // Device-only now, not synced: the host vectors still hold the
+        // PRE-advection faces. Any host stage that runs before the end-of-step
+        // readback must go through the ledger, and hostGasStepIsNoOp is what
+        // guarantees there is none.
+        gpu_buffers.markDeviceWrote(GasGridField::VelX);
+        gpu_buffers.markDeviceWrote(GasGridField::VelY);
+        gpu_buffers.markDeviceWrote(GasGridField::VelZ);
     } else {
         gpu_buffers.invalidateDeviceCopies();
     }
@@ -5486,14 +5553,20 @@ bool uploadGpuGasVelocity(FluidSim::FluidGrid& grid,
         !gpu_buffers.vel_z.valid()) {
         return false;
     }
+    // One upload for the whole body-force chain - or none at all, when
+    // velocity advection left its result on the device, which is now the normal
+    // case.
     compute->beginTransferBatch();
     bool ok =
-        compute->uploadBuffer(gpu_buffers.vel_x, grid.vel_x.data(),
-                              grid.vel_x.size() * sizeof(float)) &&
-        compute->uploadBuffer(gpu_buffers.vel_y, grid.vel_y.data(),
-                              grid.vel_y.size() * sizeof(float)) &&
-        compute->uploadBuffer(gpu_buffers.vel_z, grid.vel_z.data(),
-                              grid.vel_z.size() * sizeof(float));
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelX,
+                          gpu_buffers.vel_x, grid.vel_x.data(),
+                          grid.vel_x.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelY,
+                          gpu_buffers.vel_y, grid.vel_y.data(),
+                          grid.vel_y.size() * sizeof(float)) &&
+        gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelZ,
+                          gpu_buffers.vel_z, grid.vel_z.data(),
+                          grid.vel_z.size() * sizeof(float));
     return compute->endTransferBatch() && ok;
 }
 
@@ -6108,13 +6181,20 @@ bool runGpuVelocityDissipationClamp(FluidSim::FluidGrid& grid,
     buffers[1] = gpu_buffers.vel_y;
     buffers[2] = gpu_buffers.vel_z;
 
+    // ** velocity_is_resident IS NO LONGER CONSULTED FOR THE UPLOAD, and that
+    // is the point: a caller's belief about residency was a second, weaker copy
+    // of what the ledger already knows per field. The parameter survives only
+    // for keep_velocity_resident below, which is about the READBACK.
     bool ok = buffers[0].valid() && buffers[1].valid() && buffers[2].valid();
-    if (!velocity_is_resident) {
-        ok = ok &&
-             compute->uploadBuffer(buffers[0], grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-             compute->uploadBuffer(buffers[1], grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-             compute->uploadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
-    }
+    compute->beginTransferBatch();
+    ok = ok &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelX, buffers[0],
+                           grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelY, buffers[1],
+                           grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelZ, buffers[2],
+                           grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
+    ok = compute->endTransferBatch() && ok;
     if (!ok) {
         return false;
     }
@@ -6139,6 +6219,9 @@ bool runGpuVelocityDissipationClamp(FluidSim::FluidGrid& grid,
     cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
     ok = compute->dispatch(cmd);
     if (ok && keep_velocity_resident) {
+        gpu_buffers.markDeviceWrote(GasGridField::VelX);
+        gpu_buffers.markDeviceWrote(GasGridField::VelY);
+        gpu_buffers.markDeviceWrote(GasGridField::VelZ);
         return true;
     }
     compute->synchronize();
@@ -9420,7 +9503,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
     base_params.buoyancy_density = physics_settings_.buoyancy * 0.15f;
     base_params.ambient_temperature = 0.0f;
     base_params.vorticity = std::max(0.0f, physics_settings_.vorticity);
-    base_params.pressure_iterations = 40;
+    base_params.pressure_iterations = 40;  // replaced per domain below
     base_params.sor_omega = 1.7f;
     base_params.density_dissipation = physics_settings_.mode == ParticlePhysicsMode::Gas
         ? std::max(0.0f, physics_settings_.viscosity) * 0.35f
@@ -10902,6 +10985,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // solver never saw: the panel was telling the truth about the DESC
             // and the truth about the desc was not the truth about the sim.
             params.ambient_stratification = domain.gas_ambient_stratification;
+            params.pressure_iterations =
+                std::clamp(domain.gas_pressure_iterations, 1, 200);
 
             // surface_dust_enabled defaults to FALSE in SolverParams, so the
             // ground-dust rule had never executed once on any scene.
@@ -11264,18 +11349,47 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     gas_vorticity_pre_run &&
                     runGpuTurbulence(state.grid, params, dt, context.time_seconds,
                                      context.compute, *gpu_buffers, true, true);
-                gas_velocity_chain_resident =
-                    gas_turbulence_pre_run &&
-                    downloadGpuGasVelocity(state.grid, context.compute, *gpu_buffers);
+                // ***** AND THE OTHER 82 MB. The chain's result stays on the
+                // device; the next consumer is the dissipation clamp, which is
+                // also a kernel, and it now asks the ledger instead of being
+                // told by a caller.
+                gas_velocity_chain_resident = gas_turbulence_pre_run;
+                if (gas_velocity_chain_resident) {
+                    gpu_buffers->markDeviceWrote(GasGridField::VelX);
+                    gpu_buffers->markDeviceWrote(GasGridField::VelY);
+                    gpu_buffers->markDeviceWrote(GasGridField::VelZ);
+                }
             }
             // One row for the whole chain: buoyancy/fields/vorticity/turbulence
             // share a single velocity upload+readback, so splitting them would
             // report a transfer cost four times over.
             gas_gpu_mark(state.gas_stats.gpu_body_forces_ms);
             if (!gas_velocity_chain_resident) {
-                // Host velocity is still the untouched post-advection
-                // checkpoint. Re-run all velocity forces on the CPU below
-                // rather than mixing a partial GPU chain with CPU stages.
+                // ***** THE RECOVERY CHANGED WITH THE READBACK, AND GETTING IT
+                // WRONG HERE WOULD DOUBLE THE FORCES.
+                //
+                // This used to say "host velocity is still the untouched
+                // post-advection checkpoint" - true only because velocity
+                // advection read its result back. It does not any more, so on a
+                // mid-chain failure the DEVICE holds a partially forced field
+                // and the HOST holds the pre-advection one. Neither is the
+                // clean post-advection checkpoint the CPU redo assumed.
+                //
+                // The honest recovery is to go back one stage further: declare
+                // the host copy authoritative for velocity and let the CPU redo
+                // advection as well. Downloading the device copy instead would
+                // hand the CPU a field that already has some of the forces in
+                // it, and it would apply them again - a frame that does not
+                // crash and does not warn, just kicks.
+                //
+                // * Only the three velocity fields are marked. A blunt
+                // invalidateDeviceCopies() here would also discard combustion's
+                // device-only result while skip_combustion stayed true, and the
+                // burn would silently vanish for that frame.
+                gpu_buffers->markHostWrote(GasGridField::VelX);
+                gpu_buffers->markHostWrote(GasGridField::VelY);
+                gpu_buffers->markHostWrote(GasGridField::VelZ);
+                gpu_velocity_advection_pre_run = false;
                 gas_buoyancy_pre_run = false;
                 gas_force_fields_pre_run = false;
                 gas_vorticity_pre_run = false;
@@ -11316,7 +11430,26 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // device-only, which is exactly why it lands BEFORE any of them do: the
         // net goes up before anyone walks the wire. The first attempt at device
         // residency did it the other way round and the tree broke silently.
-        if (gpu_buffers && !gasSyncGridToHost(context.compute, *gpu_buffers, state.grid)) {
+        // ***** WHEN THE HOST SOLVER HAS NOTHING TO DO, NOTHING HAS TO COME
+        // HOME IN THE MIDDLE OF THE CHAIN.
+        //
+        // The readback below exists to feed GridFluid::step. Every stage now has
+        // a GPU path, so for an open-boundary domain with no colliders that
+        // call does literally nothing - and paying 40-95 MB of download to feed
+        // it would be the original defect wearing a new hat.
+        //
+        // The host consumers (the analysis scan, measure_plume, the bake) still
+        // need the grid, and they are served by ONE readback at the end of the
+        // step instead. Same bytes, once, after the device is finished.
+        const bool host_step_is_no_op =
+            gpu_buffers && hostGasStepIsNoOp(state.grid, params);
+        if (host_step_is_no_op) {
+            // The row would otherwise keep reporting the last step that really
+            // ran, which reads as "the host solver still costs 6 ms".
+            state.gas_stats.cpu = GridFluid::GasSolverStats{};
+        }
+        if (!host_step_is_no_op && gpu_buffers &&
+            !gasSyncGridToHost(context.compute, *gpu_buffers, state.grid)) {
             // Could not bring a field back. The host copy is not trustworthy,
             // so say so once rather than let the solver read it.
             static bool logged_sync_fail = false;
@@ -11328,7 +11461,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             }
         }
         gas_gpu_mark(state.gas_stats.gpu_host_sync_ms);
-        if (is_sparse_vdb) {
+        if (host_step_is_no_op) {
+            // Nothing to run, and - just as importantly - nothing to
+            // invalidate: the device copies below stay valid.
+        } else if (is_sparse_vdb) {
             GridFluid::stepSparseVDB(state.grid, params, dt, context.force_snapshot,
                                      context.time_seconds, &state.gas_stats.cpu);
         } else {
@@ -11346,7 +11482,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // WHICH fields it wrote varies per step and per domain; enumerating them
         // here would be a second copy of that logic, drifting from the first.
         // Over-invalidating costs one upload, under-invalidating is wrong.
-        if (gpu_buffers) {
+        if (gpu_buffers && !host_step_is_no_op) {
             gpu_buffers->invalidateDeviceCopies();
         }
         if (gpu_grid_ready) {
@@ -11411,24 +11547,56 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // consumer. Velocity and pressure are already current after the GPU
             // projection; these channels may have been changed by CPU-side
             // force/turbulence/dissipation stages in GridFluid::step.
+            // ***** THE ONE READBACK OF THE STEP, AND IT BELONGS HERE.
+            //
+            // Everything after this line reads the HOST grid: this publication,
+            // the field analysis scan, gas.measure_plume, the bake and the VDB
+            // export. Putting the sync after the publication - which is where it
+            // first went - let the publication upload a host copy that was still
+            // several stages out of date, straight over the device result.
+            //
+            // It is a no-op when nothing was left on the device.
+            if (!gasSyncGridToHost(context.compute, *gpu_buffers, state.grid)) {
+                static bool logged_tail_sync_fail = false;
+                if (!logged_tail_sync_fail) {
+                    SCENE_LOG_WARN("[SimCompute] gas grid readback before the "
+                                   "field publication failed; counters, cache "
+                                   "and the RT bridge may lag by one step.");
+                    logged_tail_sync_fail = true;
+                }
+            }
+            gas_gpu_mark(state.gas_stats.gpu_host_sync_ms);
+
+            // ***** AND THE PUBLICATION ASKS THE LEDGER LIKE EVERY OTHER
+            // CONSUMER.
+            //
+            // These four were plain uploadBuffer calls - the last ones in the
+            // gas step that were not on the ledger - and they were correct only
+            // because a mid-chain readback used to leave the host authoritative
+            // just before them. The moment that readback moved, they began
+            // writing a stale host copy over combustion's and surface dust's
+            // device-only results: the explosion came out weak and nothing
+            // warned. Third occurrence of this exact shape in this work.
             context.compute->beginTransferBatch();
             bool fields_published =
-                context.compute->uploadBuffer(
-                    gpu_buffers->density,
-                    state.grid.density.data(),
-                    state.grid.density.size() * sizeof(float)) &&
-                context.compute->uploadBuffer(
-                    gpu_buffers->temperature,
-                    state.grid.temperature.data(),
-                    state.grid.temperature.size() * sizeof(float)) &&
-                context.compute->uploadBuffer(
-                    gpu_buffers->fuel,
-                    state.grid.fuel.data(),
-                    state.grid.fuel.size() * sizeof(float)) &&
-                context.compute->uploadBuffer(
-                    gpu_buffers->interaction,
-                    state.grid.interaction.data(),
-                    state.grid.interaction.size() * sizeof(float));
+                gasEnsureOnDevice(context.compute, *gpu_buffers,
+                                  GasGridField::Density, gpu_buffers->density,
+                                  state.grid.density.data(),
+                                  state.grid.density.size() * sizeof(float)) &&
+                gasEnsureOnDevice(context.compute, *gpu_buffers,
+                                  GasGridField::Temperature,
+                                  gpu_buffers->temperature,
+                                  state.grid.temperature.data(),
+                                  state.grid.temperature.size() * sizeof(float)) &&
+                gasEnsureOnDevice(context.compute, *gpu_buffers,
+                                  GasGridField::Fuel, gpu_buffers->fuel,
+                                  state.grid.fuel.data(),
+                                  state.grid.fuel.size() * sizeof(float)) &&
+                gasEnsureOnDevice(context.compute, *gpu_buffers,
+                                  GasGridField::Interaction,
+                                  gpu_buffers->interaction,
+                                  state.grid.interaction.data(),
+                                  state.grid.interaction.size() * sizeof(float));
             fields_published =
                 context.compute->endTransferBatch() && fields_published;
             gpu_buffers->gpu_resident_fields_valid = fields_published;
@@ -11549,6 +11717,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // telemetry that costs more than the stage it is measuring is telemetry
         // nobody can leave on. The per-channel pointers are null when a channel
         // is off, so a disabled channel is skipped rather than reported as zero.
+        // The step's single readback already ran, just before the field
+        // publication above - which is the first host consumer, not this scan.
         const auto analysis_begin = SimulationClock::now();
         const bool is_gas_state = (state.type == SimulationDomainType::Gas);
         const std::size_t cells =

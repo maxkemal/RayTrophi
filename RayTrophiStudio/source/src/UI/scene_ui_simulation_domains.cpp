@@ -901,6 +901,19 @@ void drawSimulationDomainControls(
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Density-driven lift. Keep modest for stable smoke columns.");
                         }
+                        ImGui::DragInt("Pressure Sweeps",
+                                       &domain.gas_pressure_iterations,
+                                       1.0f, 1, 200);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Red-black SOR sweeps used to make the velocity field\n"
+                                "divergence-free. The most expensive stage of the gas step.\n"
+                                "\n"
+                                "Script/IPC name: pressure_iterations\n"
+                                "A CONVERGENCE dial, not a quality dial: each sweep carries\n"
+                                "information one cell, so too few does not soften the image -\n"
+                                "it lets gas leak through walls and lose its swirl.");
+                        }
                         ImGui::DragFloat("Stratification", &domain.gas_ambient_stratification,
                                          0.002f, 0.0f, 5.0f, "%.4f");
                         if (ImGui::IsItemHovered()) {
