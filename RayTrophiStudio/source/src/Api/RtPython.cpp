@@ -2453,6 +2453,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["gpu_pressure_ms"] = s.gpu_pressure_ms;
         d["gpu_publish_ms"] = s.gpu_publish_ms;
         d["gpu_majorant_ms"] = s.gpu_majorant_ms;
+        d["gpu_host_sync_ms"] = s.gpu_host_sync_ms;
         d["cpu_total_ms"] = s.cpu_total_ms;
         d["cpu_advect_velocity_ms"] = s.cpu_advect_velocity_ms;
         d["cpu_advect_scalar_ms"] = s.cpu_advect_scalar_ms;
@@ -2471,6 +2472,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["cfl"] = s.cfl;
         d["cell_count"] = s.cell_count;
         d["active_density_cells"] = s.active_density_cells;
+        d["active_blocks"] = s.active_blocks;
+        d["total_blocks"] = s.total_blocks;
         d["grid_memory_bytes"] = s.grid_memory_bytes;
         d["burning_cells"] = s.burning_cells;
         d["solid_cells"] = s.solid_cells;

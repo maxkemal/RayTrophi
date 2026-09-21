@@ -639,6 +639,8 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     out.resolution[1] = state.resolution_y;
     out.resolution[2] = state.resolution_z;
     out.cell_count = gs.cell_count;
+    out.active_blocks = gs.active_blocks;
+    out.total_blocks = gs.total_blocks;
     out.active_density_cells = state.active_density_cells;
     out.grid_memory_bytes = gs.grid_memory_bytes;
 
@@ -658,6 +660,7 @@ Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) 
     out.gpu_pressure_ms = gs.gpu_pressure_ms;
     out.gpu_publish_ms = gs.gpu_publish_ms;
     out.gpu_majorant_ms = gs.gpu_majorant_ms;
+    out.gpu_host_sync_ms = gs.gpu_host_sync_ms;
 
     out.cpu_total_ms = gs.cpu.total_ms;
     out.cpu_advect_velocity_ms = gs.cpu.advect_velocity_ms;

@@ -24,6 +24,10 @@ layout(push_constant) uniform PC {
     int bx; int by; int bz;      // majorant grid resolution (blocks)
     int  emissive_capacity;      // max entries the emissive list can hold
     float emissive_threshold;    // block max temperature above which it emits
+    // Active-block list: the same compaction, for a different consumer. See the
+    // append at the bottom of main().
+    int  active_capacity;        // max entries, 0 = do not build the list
+    float active_threshold;      // block max below which the block is empty
 } pc;
 
 layout(set=0,binding=0) readonly buffer Density  { float density[]; };
@@ -34,6 +38,9 @@ layout(set=0,binding=2) readonly buffer Temperature { float temperature[]; };
 // the fields live on the device: pulling them back to pick emitters would cost
 // a full sync every step, and the volume shader can read this list directly.
 layout(set=0,binding=3) buffer EmissiveList { uint emissive[]; };
+// Blocks that contain anything the SOLVER has to touch. Same [0]=count layout
+// as the emitter list above.
+layout(set=0,binding=4) buffer ActiveList { uint activeBlocks[]; };
 
 void main() {
     uint id = gl_GlobalInvocationID.x;
@@ -90,5 +97,33 @@ void main() {
         // Overflow is deliberate and silent-but-bounded: the count keeps
         // climbing past capacity so the consumer can tell it is sampling a
         // subset, while the writes stop at the allocated end.
+    }
+
+    // ***** ACTIVE-BLOCK LIST - the solver's empty-space skip.
+    //
+    // The emitter list above answers "which blocks light the scene". This one
+    // answers "which blocks does the solver have to step at all", and it is
+    // free here: the reduction over the block has already been done.
+    //
+    // ***** THE TEST IS DENSITY **OR** HEAT, AND THAT IS LOAD-BEARING.
+    // The renderer's skip only cares about density, because a cell with no
+    // density emits and scatters nothing no matter how hot it is. The SOLVER
+    // does not get that luxury: buoyancy is driven by the temperature anomaly,
+    // so a hot block with no smoke in it still accelerates the air. Reusing the
+    // renderer's density-only criterion here would silently drop exactly the
+    // rising thermals that have outrun their smoke - and it would look like a
+    // plausible "the plume stops short", not like a bug.
+    //
+    // ! Fuel is NOT tested, because this kernel does not read it. That rests on
+    // fuel only ever existing where a source also injected density. True for
+    // every current source, but it is an assumption, not an invariant - if a
+    // fuel-only emitter is ever added, this is the line that has to learn about
+    // it.
+    if (pc.active_capacity > 0 &&
+        (m > pc.active_threshold || hottest > pc.active_threshold)) {
+        uint slot = atomicAdd(activeBlocks[0], 1u);
+        if (slot < uint(pc.active_capacity)) {
+            activeBlocks[1u + slot] = id;
+        }
     }
 }

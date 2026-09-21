@@ -956,7 +956,7 @@ private:
             { "sim_msf_wet",                        "sim_msf_wet.spv",                      3, 48 },
             // Block-max majorant for the live dense gas RT path. 2 SSBO
             // (density in, per-block max out) + 32B push constant.
-            { "sim_gas_majorant",                   "sim_gas_majorant.spv",                 4, 32 },
+            { "sim_gas_majorant",                   "sim_gas_majorant.spv",                 5, 40 },
             // Mesh subdivision (linear 1->4). 2 SSBO (in/out tris) + 16B push-const.
             { "subdivide_linear",                   "subdivide_linear.spv",                2, 16 },
             // Catmull-Clark GPU refine (Phase 3b): per-level sparse stencil apply (5 SSBO:
