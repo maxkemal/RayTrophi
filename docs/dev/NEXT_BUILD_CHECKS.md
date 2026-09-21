@@ -1,19 +1,17 @@
 # Sıradaki derlemede kontrol edilecekler
 
-> **Durum:** CANLI — 2026-09-21, cihaz yerleşik gaz alt zinciri **doğrulandı**,
-> anahtar söküldü, `gpu_host_sync_ms` satırı eklendi.
-> Bu partide **yalnız C++** değişti — `compile_shaders.bat` gerekmiyor.
+> **Durum:** REFERANS — 2026-09-21. Son parti derlendi ve **doğrulandı**;
+> bekleyen kontrol maddesi yok. Bir sonraki parti bu dosyanın üzerine yazacak.
 
-Önceki partinin fizik doğrulaması bitti ve ölçümü
-`docs/dev/GAZ_ADIMI_TASIMA_MALIYETI.md`'ye geçti. Bu parti onun **temizliği**:
-davranış değişmemeli.
+Ölçümlerin tamamı `docs/dev/GAZ_ADIMI_TASIMA_MALIYETI.md`'de.
 
 ---
 
-## 1. ★★★★★ Fizik yine birebir aynı olmalı
+## Doğrulanan hâl (2026-09-21 son derleme)
 
-Anahtar artık yok, yani karşılaştıracak ikinci yol da yok. Referans, bir önceki
-derlemede ölçülen ve senin görsel olarak da onayladığın tablodur:
+**Fizik referansı** — `gas.reset` + `timeline.set_frame 1..120` +
+`gas.measure_plume`, nükleer sahne. Bu tablo üç ardışık derlemede **son haneye
+kadar** aynı çıktı; bir değişiklik fiziği bozduysa ilk burada görünür.
 
 | kare | hücre | fill | tepe | merkez | peakT | meanT |
 |---|---|---|---|---|---|---|
@@ -21,69 +19,33 @@ derlemede ölçülen ve senin görsel olarak da onayladığın tablodur:
 | 80 | 721 307 | 0.21340 | 31.790 | 22.530 | 5.5467 | 2.27425 |
 | 120 | 959 364 | 0.28384 | 34.000 | 28.940 | 3.8441 | 1.29586 |
 
-```
-gas.reset  →  timeline.set_frame 1..120  →  gas.measure_plume
-```
-
-**Ne görmen gerek:** aynı sayılar. Sökülen dal zaten hiç çalışmıyordu (anahtar
-varsayılan olarak açıktı), yani tek satır bile değişmemeli.
-
-**Bozuksa ne demek:** sökerken yanlış dalı aldım — combustion'ın CPU yedeği
-devreye girmiştir. Belirtisi hız değil, **farklı sayılar** olur.
-
-## 2. ★★★ Yeni satır: `gpu_host_sync_ms`
-
-```
-gas.step_stats  →  gpu_host_sync_ms
-```
-
-**Ne görmen gerek:** sıfırdan büyük, kabaca **4 × 12.89 MB'lık bir indirme**
-kadar (geçen ölçümdeki muhasebeye göre ~7 ms civarı). Panelde de yeni bir satır
-var: *"grid readback (for host solver)"*.
-
-**Bozuksa ne demek:** 0.0 kalıyorsa mark yanlış yere kondu ve satır **yalan
-söylüyor** — bu en sinsi hâli, çünkü "çok hızlı" diye okunur. Panelde
-`phase_sum` ile `total_ms` arasındaki fark da kapanmış olmalı; kapanmadıysa
-ölçülmeyen başka bir boşluk daha var.
-
-★ Bu satır bir sonraki iş için var: `boundaries + solids`'in GPU'ya taşınması
-**tam olarak bu sayı kadar** değerli. Satır olmadan o iş yapılır ve ödülü
-ölçülemez.
-
-## 3. Panel ve script paritesi
-
-`gas.step_stats` ve `gas.get_settings` çıktısında artık
-`device_resident_chain` **olmamalı**; `gpu_host_sync_ms` **olmalı**.
-
-⚠ **Kaydedilmiş projeler:** senin `.rtp` dosyanda `gas_device_resident_chain`
-hâlâ yazılı (ben onu IPC'den `false` yapmıştım). Okuyucu söküldüğü için o değer
-artık **sessizce yok sayılıyor** ve yerleşiklik her zaman açık. İstenen
-davranış bu, ama bilerek olsun.
-
-## 4. Hız — beklenti küçük
-
-| | ölçülen |
-|---|---|
-| `gpu_combustion_ms` | 14.09 → **6.79** |
-| `total_ms` | 218.15 → **212.83** |
-
-Adımın tamamında ~%2.4. Sebebi açık ve kalıcı: `gasSyncGridToHost` combustion'ın
-bıraktığı indirmeyi **geri ekliyor**. `boundaries + solids` host'ta ve zincirin
-ortasında durdukça bu böyle kalır.
+**Adım maliyeti:** `total_ms` **163.30** (oturum başı ~203–218).
+**Sıvı tutuşma:** `burning_cells` ~3037/adım, preset'ler tutuşuyor.
+**Blok doluluğu:** 6634 / 7225 = %91.8 → seyrek dispatch elenmiş durumda.
 
 ---
 
-## Sıradaki iş (bu parti değil)
+## Açık kalanlar (kod değil, karar bekleyenler)
 
-1. `boundaries + solids` → GPU. Yapısal geri okumayı kaldırır; değeri artık
-   `gpu_host_sync_ms` ile ölçülebilir.
-2. Scalar advection'ın handle takası (hâlâ indirip host'ta `swap` ediyor).
-3. Sonra pressure projection'ı **yeniden** ölç (47 ms) — transferler kalkmadan
-   ölçülen değeri iterasyon maliyeti sanmak hata olur.
-
-## Açık kalanlar
-
+- **`.gitignore:44` satırı `*.ps1`** — `scripts/ipc/*.ps1`'in hiçbiri
+  versiyonlanmıyor. CLAUDE.md'nin "bu projenin QA altyapısı" dediği katman bu.
+  Muhtemelen kaza; dokunulmadı.
+- `max_velocity` `gas.get_settings`/`gas.get` çıktısında **yok** — `max_speed`
+  tripwire'ını doğrulamak için gereken tavan script'ten okunamıyor (kural 1).
+- `temperature_scale` IPC'den açılmadı (kural 1).
+- Adım atarken süreç CPU'su 16 çekirdeğin **%26.4'ü** (boşta %0), oysa zamanlama
+  satırlarının topladığı host işi ~11 ms/163 ms. Fark **ölçülmedi**. İlk
+  şüpheli OpenMP'nin varsayılan spin-wait'i ve GPU fence beklemesi. Yeniden
+  derleme gerektirmeyen test: `OMP_WAIT_POLICY=PASSIVE` ile başlatıp tekrar
+  ölçmek.
 - Kapak f110'dan sonra domain tavanında (34 m). Parametreyle çözülmez.
-- `temperature_scale` IPC'den açılmadı (kural 1 boşluğu).
 - Canlı domain'de `density_dissipation = 0.63`, doğrulanmış değer **0.18**
   (preset'te 0.18 yazıyor). Kaydedilmiş proje değeri preset'i eziyor.
+
+## Sıradaki optimizasyon
+
+Host'ta yalnız surface dust (~3.2 ms) ve skaler dissipation (~2.9 ms) kaldı.
+İkisi GPU'ya geçerse `GridFluid::step` gaz yolunda tamamen atlanabilir ve
+`gpu_host_sync_ms` (7.06 ms) da kalkar. Ondan sonrası pressure projection
+(46.52 ms) ve **transferler kalktığına göre yeniden ölçülmesi gerekir** —
+eski değeri iterasyon maliyeti sanmak hata olur.

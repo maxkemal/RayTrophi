@@ -425,8 +425,7 @@ constexpr ParticlePresetSlug kParticlePresetSlugs[] = {
     {"flamethrower",        SceneData::ParticleSystemPreset::Flamethrower},
     {"burning_fuel_spill",  SceneData::ParticleSystemPreset::BurningFuelSpill},
     {"ignited_fuel_jet",    SceneData::ParticleSystemPreset::IgnitedFuelJet},
-    {"nuclear_cinematic",   SceneData::ParticleSystemPreset::NuclearCinematic},
-    {"nuclear_physical",    SceneData::ParticleSystemPreset::NuclearPhysical},
+    {"nuclear",             SceneData::ParticleSystemPreset::Nuclear},
 };
 }  // namespace
 

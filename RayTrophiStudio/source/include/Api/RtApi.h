@@ -3296,7 +3296,7 @@ Result clearParticleSystems();
 //
 // `preset` is the lowercase slug: campfire | explosion | smoke | ground_burst |
 // fireball | flamethrower | burning_fuel_spill | ignited_fuel_jet |
-// nuclear_cinematic | nuclear_physical.
+// nuclear.
 Result addParticleSystemPreset(const std::string& preset, ParticleSystemInfo& out);
 
 // Measured extent of a gas domain's live field — the instrument that makes a

@@ -7904,16 +7904,18 @@ public:
         Flamethrower = 5,
         BurningFuelSpill = 6,
         IgnitedFuelJet = 7,
-        // Two nuclear detonations, deliberately kept as SEPARATE presets rather
-        // than one with a scale dial. They are not the same shot at two sizes:
-        // the cinematic one is tuned to be iterated on (metre-scale box, a
-        // viewport-affordable voxel count, a few seconds of sim) while the
-        // physical one is a kilometre-scale offline domain. Folding them into
-        // one preset would mean every parameter below carries a hidden "which
-        // scale am I in" meaning, and the fast one would rot because nobody
-        // would run it.
-        NuclearCinematic = 8,
-        NuclearPhysical = 9
+        // ***** ONE nuclear preset, at the metre scale the viewport can
+        // iterate on. A second, kilometre-scale "physical" variant existed and
+        // was removed: it shared this recipe through a single length factor S,
+        // so every value here carried a hidden "which scale am I in" meaning
+        // while only one of the two was ever actually run and calibrated.
+        //
+        // ** If a scaled variant is ever wanted again, the rule that made the
+        // sharing work is worth keeping: lengths scale with S, and the two
+        // values that are PER UNIT LENGTH - gas_ambient_stratification (heat
+        // per unit height) and turbulence_scale (a spatial frequency) - scale
+        // as 1/S. Times do NOT scale: the solver's seconds are the timeline's.
+        Nuclear = 8
     };
 
     ParticleSystemObject& addParticleSystemPreset(

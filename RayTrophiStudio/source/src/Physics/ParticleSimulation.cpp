@@ -4506,6 +4506,38 @@ bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
     cmd.kernel = "sim_grid_subtract_gradient";
     cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
     ok = ok && compute->dispatch(cmd);
+
+    // ***** THE POST-PROJECTION SANITIZE, MOVED ONTO THE DEVICE FOR FREE.
+    //
+    // Pressure can produce a face larger than the pre-projection clamp allowed,
+    // or propagate a non-finite value, and the next advection would smear it
+    // across the grid - so this pass is not optional. It used to run on the
+    // HOST (sanitizeProjectedVelocity) immediately after the readback below:
+    // a serial scan of vel_x/y/z, ~10.3M floats, and it was billed into
+    // gpu_publish_ms rather than to a row of its own.
+    //
+    // ** HERE IT COSTS NO TRANSFER AT ALL. The velocity is already on the
+    // device and about to be downloaded anyway, so inserting the dispatch
+    // BEFORE the readback replaces a full host sweep with a kernel on data
+    // that has not moved. factor = 1.0 makes the existing dissipate kernel a
+    // pure clamp+scrub; it already zeroes NaN/Inf before clamping, which is
+    // exactly what the host version did and in the same order.
+    GridVelocityDissipationGpuConstants sanitize;
+    sanitize.nx = grid.nx;
+    sanitize.ny = grid.ny;
+    sanitize.nz = grid.nz;
+    sanitize.factor = 1.0f;                     // clamp + scrub only, no decay
+    sanitize.max_velocity = params.max_velocity;
+    ComputeDispatch sanitize_cmd;
+    sanitize_cmd.kernel = "sim_grid_velocity_dissipate_clamp";
+    // buffers[0..2] are vel_x / vel_y / vel_z - the same handles this function
+    // reads back below.
+    sanitize_cmd.buffers = buffers;
+    sanitize_cmd.buffer_count = 3;
+    sanitize_cmd.constants = &sanitize;
+    sanitize_cmd.constants_size = sizeof(sanitize);
+    sanitize_cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
+    ok = ok && compute->dispatch(sanitize_cmd);
     compute->synchronize();
 
     compute->beginTransferBatch();
@@ -10788,17 +10820,47 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 }
             }
 
-            // Upload freshly injected flow sources (fuel, temp, density, vel) to GPU
+            // ***** THE INPUT SIDE OF THE TWO DEVICE-ONLY DEPOSITS BELOW.
+            //
+            // MSF pyrolysis and liquid surface combustion both READ-MODIFY-WRITE
+            // these gas fields on the device (gas_temperature[gid] + heat,
+            // atomicAdd on gas_fuel). So the device must already hold the
+            // current values or the deposit is added to whatever was left there.
+            //
+            // ** INTERACTION IS IN THE LIST NOW AND IT WAS NOT BEFORE. Both
+            // deposits write the flame channel; the old block uploaded only
+            // fuel/temperature/density, so the flame they added was layered on
+            // a stale device copy.
+            //
+            // * The comment this replaces said it uploaded "(fuel, temp,
+            // density, vel)". It never uploaded velocity.
             if (context.compute && context.compute->supportsDispatch()) {
                 context.compute->beginTransferBatch();
-                if (gpu_buffers->fuel.valid() && !state.grid.fuel.empty()) {
-                    context.compute->uploadBuffer(gpu_buffers->fuel, state.grid.fuel.data(), state.grid.fuel.size() * sizeof(float));
+                if (!state.grid.fuel.empty()) {
+                    gasEnsureOnDevice(context.compute, *gpu_buffers,
+                                      GasGridField::Fuel, gpu_buffers->fuel,
+                                      state.grid.fuel.data(),
+                                      state.grid.fuel.size() * sizeof(float));
                 }
-                if (gpu_buffers->temperature.valid() && !state.grid.temperature.empty()) {
-                    context.compute->uploadBuffer(gpu_buffers->temperature, state.grid.temperature.data(), state.grid.temperature.size() * sizeof(float));
+                if (!state.grid.temperature.empty()) {
+                    gasEnsureOnDevice(context.compute, *gpu_buffers,
+                                      GasGridField::Temperature,
+                                      gpu_buffers->temperature,
+                                      state.grid.temperature.data(),
+                                      state.grid.temperature.size() * sizeof(float));
                 }
-                if (gpu_buffers->density.valid() && !state.grid.density.empty()) {
-                    context.compute->uploadBuffer(gpu_buffers->density, state.grid.density.data(), state.grid.density.size() * sizeof(float));
+                if (!state.grid.density.empty()) {
+                    gasEnsureOnDevice(context.compute, *gpu_buffers,
+                                      GasGridField::Density, gpu_buffers->density,
+                                      state.grid.density.data(),
+                                      state.grid.density.size() * sizeof(float));
+                }
+                if (!state.grid.interaction.empty()) {
+                    gasEnsureOnDevice(context.compute, *gpu_buffers,
+                                      GasGridField::Interaction,
+                                      gpu_buffers->interaction,
+                                      state.grid.interaction.data(),
+                                      state.grid.interaction.size() * sizeof(float));
                 }
                 context.compute->endTransferBatch();
             }
@@ -10886,6 +10948,29 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 }
                 fluid_combustion_deposit_pre_run =
                     ran || fluid_combustion_deposit_pre_run;
+            }
+            // ***** A DEVICE-ONLY DEPOSIT THAT NEVER TOLD THE LEDGER.
+            //
+            // MSF pyrolysis and liquid surface combustion write the gas fields
+            // straight into the device buffers and hand back nothing. Scalar
+            // advection, a few lines below, asks the ledger whether it needs to
+            // upload - and without these marks the answer was yes, so it pushed
+            // the stale HOST copy over the deposit. Every step. The liquid
+            // evaporated fuel and released heat into a buffer that was
+            // overwritten before anything could burn it, which reads as
+            // "the liquid will not ignite" no matter how low the ignition
+            // temperature is set, because ignition was never the gate.
+            //
+            // ** THIS IS THE PARAMETER I DELETED, DONE PROPERLY. The old
+            // runGpuScalarAdvection took `scalar_inputs_resident` and the caller
+            // fed it exactly this flag. Replacing it with the ledger was right -
+            // one boolean could not answer for three fields - but the ledger
+            // only works if the PRODUCER is wired in too, and this one was not.
+            if (fluid_combustion_deposit_pre_run || msf_fields_live) {
+                gpu_buffers->markDeviceWrote(GasGridField::Density);
+                gpu_buffers->markDeviceWrote(GasGridField::Temperature);
+                gpu_buffers->markDeviceWrote(GasGridField::Fuel);
+                gpu_buffers->markDeviceWrote(GasGridField::Interaction);
             }
             gas_gpu_mark(state.gas_stats.gpu_fluid_combustion_ms);
             gpu_velocity_advection_pre_run = runGpuVelocityAdvection(state.grid, params, dt, context.compute, *gpu_buffers);
@@ -11067,7 +11152,15 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // The velocity limiter above runs before projection. Pressure can
             // generate a larger correction (or propagate a non-finite value),
             // which then feeds vorticity and looks like a delayed explosion.
-            sanitizeProjectedVelocity(state.grid, params.max_velocity);
+            //
+            // ** ONLY THE CPU FALLBACK STILL NEEDS IT HERE. When the GPU
+            // projection ran, it sanitized on the device before its readback,
+            // so repeating the scan on the host would cost ~10.3M floats to
+            // confirm a result that is already clamped. The guard is the same
+            // flag that chose the fallback, so the two can never disagree.
+            if (!gpu_projection_ok) {
+                sanitizeProjectedVelocity(state.grid, params.max_velocity);
+            }
             // Publish the final post-dissipation scalar/flame fields for the RT
             // consumer. Velocity and pressure are already current after the GPU
             // projection; these channels may have been changed by CPU-side
