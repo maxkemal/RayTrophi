@@ -665,3 +665,379 @@ geniş çünkü duvara sıkışmış.
    22,02 m'ye ulaşıyor, yani en az iki katı genişlik istiyor.
 
 ⚠ 2 ve 3 önbelleği siler (202 kare).
+
+---
+
+## 2026-09-21 — Tepe bulutunun çökmesi: h* = peakT / stratification
+
+Belirti: bulut yükseliyor, f120'den sonra hızla zemine iniyor, "hâlâ çok sıcak
+olmasına rağmen".
+
+### Ölçüm (strat = 0.25, temperature_dissipation = 0.22)
+
+| kare | tepe | merkez | peakT | h\* = T/0.25 | merkez − h\* |
+|---|---|---|---|---|---|
+| 60 | 20.40 | 14.65 | 6.65 | 26.6 | −11.96 |
+| 90 | 25.67 | 18.47 | 5.05 | 20.2 | −1.73 |
+| 110 | 27.20 | 18.52 | 4.21 | 16.8 | +1.69 |
+| 130 | 27.20 | 17.09 | 3.50 | 14.0 | +3.09 |
+| 160 | 26.86 | 13.58 | 2.66 | 10.6 | +2.94 |
+| 200 | 26.86 | 8.52 | 1.84 | 7.4 | +1.15 |
+
+Son sütun her karede ±3 m. **Bulut denge yüksekliğinde duruyor; inen şey
+dengenin kendisi.** Ölçülen sönüm oranı ln(6.65/1.84)/5.83 s = 0.220/s, yani
+`temperature_dissipation` ile birebir — 24 fps varsayımıyla da tutarlı.
+
+★ Bu bir regresyon değil: `ambient_stratification` solver'a ilk kez bu
+derlemede kopyalanıyor (bkz. GAZ_ADIMI_TASIMA_MALIYETI.md, geri yüklenen
+eşlemeler). Önceki derlemelerde tabakalaşma hiç uygulanmıyordu.
+
+### ★★ Yanlış çıkan ilk düzeltme: dissipation 0.22 → 0.03
+
+Gerekçem şuydu: emission yolunda gaz domain'i için `temp *= 3000` var ve
+`temperature_max = 5000`, dolayısıyla T > 1.67 olan her hücre azami parlaklığa
+kıstırılıyor; peakT o pencerede 6.65 → 1.84, ikisi de clamp'in üstünde; demek
+ki sönüm görsel olarak bedava.
+
+**Yanlıştı.** peakT'ye bakıp bütün alan hakkında hüküm verdim. Gözün gördüğü
+sönme `mean_temperature`'dan geliyor: 0.22'de meanT 2.73 → 0.54 (kelvin 1620,
+u ≈ 0.08, yani karanlık), 0.03'te meanT ~6'da kalıyor ve **bütün hücreler
+clamp'in üstünde** — bulut domain'i doldurup masif beyaz bir bloğa dönüştü
+(f200 fill_fraction 0.68). Ders: *tepe değeri bir alanın tamamı hakkında
+konuşmaz.*
+
+### Ölçülen en iyi hal: dissipation 0.22, stratification 0.25 → 0.09
+
+| kare | tepe | peakT | meanT | h\* = T/0.09 | fill | lid |
+|---|---|---|---|---|---|---|
+| 60 | 22.27 | 6.62 | 2.73 | 73.6 | 0.140 | hayır |
+| 90 | 31.11 | 5.03 | 2.06 | 55.9 | 0.300 | hayır |
+| 110 | 34.00 | 4.19 | 1.62 | 46.5 | 0.414 | **EVET** |
+| 200 | 34.00 | 1.83 | 0.54 | 20.4 | 0.678 | **EVET** |
+
+h\* bütün çekim boyunca bulutun üstünde kalıyor, yani geri çağırıcı kuvvet hiç
+devreye girmiyor: bulut **itildiği için değil, soğuduğu için** duruyor. Çöküş
+tamamen kayboldu (f200'de tepe 8.52 yerine 34), sütun koyu, zemin eteği koyu
+ve kabarıyor (surface dust ilk kez çalışıyor).
+
+### ⚠ Kalan kısıt: domain tavanı
+
+f110'dan itibaren `touching_ceiling = true`. Domain 22.1 × **34** × 22.1
+(130×200×130, voxel 0.17). h\* f110'da 46.5 — tavanın üstünde.
+
+★★★ Ve bu bir parametre sorunu değil, **yapısal bir kısıt**: sıcaklık çekim
+boyunca 3.6 kat düşüyor, dolayısıyla h\* de 3.6 kat aralıkta geziyor. Bu
+aralığın üstü tavana çarpıyorsa altı zemine çöküyor. Tek bir stratification
+değeri ikisini birden kurtaramaz.
+
+Gerçek çözüm ikisinden biri:
+
+1. **Domain'i yükselt** (~55 m → y'de 324 hücre, ~5.5M hücre). Ucuz değil ama
+   tek satır.
+2. ★★★ **Kaldırma kuvvetini, görünüm için sönümlenen alandan ayır.** Emission
+   ayrı bir fade kanalından (flame/fuel) okunmalı ki ısı görüntüyü yakmadan
+   kalabilsin. Bu partinin dışında; asıl doğru olan bu.
+
+---
+
+## ★★★★★ 2026-09-21 — Soğuyan bulut neden hâlâ beyaz: emisyon sıcaklığa BAĞLI DEĞİL
+
+Soru: "blackbody emisyon rengini temperature'den almıyor mu ki soğuyan yapı
+hâlâ beyaz oluyor?"
+
+**Renk alıyor. Parlaklık almıyor.**
+
+### Ölçüm
+
+f200'de `blackbody_intensity` 16.667 → 0 yapıldı: bulut **tamamen siyah**
+bir siluete döndü. Yani gördüğümüz beyaz, güneş alan duman değil, emisyon.
+(Yan bulgu: hacim neredeyse hiç saçılan ışık almıyor — ayrı bir konu.)
+
+16.667 → 2.0 (8 kat düşük): kapak **yine beyaz**, yalnızca kenarlarda turuncu
+bir halka belirdi. Yoğunluk sekizde birken bile clip ediyor.
+
+### Kök neden
+
+```glsl
+vec3 blackbodyToRGB(float kelvin){
+    if (temp <= 66.0) { r = 1.0; }        // <6600 K: KIRMIZI HEP 1.0
+    ...
+    if (temp >= 66.0) { b = 1.0; }        // >6600 K: MAVİ HEP 1.0
+}
+...
+vec3 eEmis = eColor * ed * vol.blackbody_intensity;   // ← magnitude YOK
+```
+
+Bu Tanner Helland yaklaşımı bir **kromatiklik** döndürür: her sıcaklıkta en az
+bir kanal 1.0'a sabitli. Yalnızca yoğunlukla çarpılınca:
+
+| | 1620 K | 5000 K |
+|---|---|---|
+| kırmızı kanal | **1.00** | **1.00** |
+| yeşil | 0.45 | 0.83 |
+| mavi | 0.00 | 0.69 |
+
+**Aynı parlaklık.** Soğumak tonu değiştirir, enerjiyi değiştirmez. Isısının
+%90'ını kaybetmiş bir bulut, ışın boyunca yeterince kalınsa kırmızı kanalı
+zaten clip etmiştir; her ek adım yeşili ve maviyi de clip'e sürükler → beyaz.
+Ton yalnızca sütunun ince olduğu yerde, yani siluet kenarında hayatta kalır —
+iki ölçüm görüntüsünün ikisinde de tam olarak bu görülüyor.
+
+★ `volume_closesthit.rchit` içindeki mevcut yorum bu arızayı zaten tarif
+ediyordu, sebebini bilmeden: *"Temperature alone cannot tell a flame from the
+hot smoke sitting above it: both are hot, so the whole plume glows."* İkisi de
+parlak, çünkü **parlaklık sıcaklığın fonksiyonu değildi.**
+
+### Düzeltme
+
+Planck-integre radyans T⁴ ile gider (Stefan-Boltzmann). Yazarın belirlediği
+`temperature_max`'e normalize edildi, böylece **en sıcak gaz bugünkü
+parlaklığını aynen korur**, yalnızca soğuk gaz kararır:
+
+```glsl
+e_radiance = pow(clamp(authoredKelvin / rangeMax, 0.0, 1.0), 4.0);
+```
+
+1340/5000 aralığında en soğuk görünür hücre çekirdekten ~190 kat sönük.
+
+Dört çağrı yerine uygulandı: raster march, Vulkan RT ana march, RT emitter
+bloğu (ışık yayan hacmin komşu yüzeyleri aydınlatması) ve CPU/OptiX yolu.
+**Yalnızca blackbody koluna** — yazılmış bir renk rampası nihai renk hakkında
+bir beyandır, onu T⁴ ile ölçeklemek yazarla kavga etmek olurdu.
+
+### ★★ Bu, yükseklik/parlaklık gerilimini de çözüyor
+
+Önceki bölümde "ısıyı tutarsan bulut beyaza patlıyor, sönümlersen bulut
+çöküyor, ikisi aynı alan" diye bir çıkmaz tarif edilmişti. O çıkmaz bu
+arızanın sonucuydu: sönüm, parlaklığı düşürmenin **tek** yoluydu. T⁴ ile
+parlaklık sıcaklığa dik biçimde bağlı olduğundan, artık ısı tutulup bulut
+havada kalırken parlaklık kendi başına sönebilir.
+
+⚠ Dolayısıyla `temperature_dissipation` ve `ambient_stratification` T⁴
+derlendikten SONRA yeniden ayarlanmalı. Bu bölümden önceki bütün kalibrasyon
+sayıları ölü emisyon modeline göre seçildi.
+
+---
+
+## ★★★★★ Kullanıcının ayrımı teşhisi kapattı: SADECE nükleer preset çöküyor
+
+Kullanıcı 2026-09-21'de şunu bildirdi: *"diğer mushroom preset tepe bulut
+çökmüyor sadece nükleer presette oluyor."*
+
+Tek satırda doğrulandı:
+
+```
+ParticleSimulation.h:420   float gas_ambient_stratification = 0.0f;   // VARSAYILAN
+SceneDataParticlePresets.cpp:933   dom.gas_ambient_stratification = 6.5f / (26.0f * S);
+```
+
+**Bütün depoda bu alanı yazan TEK yer nükleer preset.** Ve `buoyantAnomaly`
+ilk satırında erken dönüyor:
+
+```cpp
+if (params.ambient_stratification == 0.0f) return excess;
+```
+
+Yani diğer bütün preset'lerde env terimi, clamp, geri çağırıcı kuvvet —
+hiçbiri **hiç çalışmıyor.** Bulutları çökmüyor çünkü onları aşağı itecek bir
+mekanizma yok; ısıları bitene kadar yükseliyorlar.
+
+### Bu iki şeyi birden kanıtlıyor
+
+1. **Çöküşün sebebi tabakalaşma terimi**, başka hiçbir şey değil. Diferansiyel
+   deney kendiliğinden yapılmış oldu: aynı çözücü, aynı render, tek fark bu
+   alan.
+2. **2026-09-21 kaldırma kuvveti düzeltmesinin etki alanı bir preset.**
+   `gas_ambient_stratification` varsayılanı 0 olduğu için presence kapısı da
+   clamp'in kaldırılması da yalnızca nükleer sahneyi (ve elle bu dial'e
+   dokunulmuş sahneleri) etkiler. Diğer preset'lerde tek bir kod yolu bile
+   değişmiyor.
+
+### ★ Ve satırın kendisi hatayı taşıyor
+
+```cpp
+dom.gas_ambient_stratification = 6.5f / (26.0f * S);
+```
+
+Niyet açık: *"6.5'lik bir anomali 26·S metrede dengelensin."* Ama anomali
+**6.5'te kalmıyor** — 0.22/s ile üstel sönüyor, ve h\* = anomali/strat olduğu
+için tavan da onunla birlikte iniyor. Formül, sönümün anında geçersiz kıldığı
+bir zirve-sıcaklık varsayımını kodluyor.
+
+Zaten satırın üstündeki yorum bunu yarı yarıya itiraf ediyormuş:
+
+> ★ The 6.5 is EXTRAPOLATED from the 2026-09-20 run, NOT measured under the
+> new rate.
+
+**Ekstrapolasyon bir ölçüm değildir** — ve burada ekstrapole edilen şey,
+zamanla sabit olmayan bir büyüklüğün tek bir anıydı.
+
+---
+
+## ★★★★★ Denge bir HÂL değil, bir ANDI — sönüm hedefi yanlış yerdeydi
+
+Kullanıcı 2026-09-21'de bildirdi: *"ambient_stratification 0.01'in üstüne
+çıkınca geç de olsa çöküyor, 0.03'te 170'lerde yavaş da olsa çöküyor."*
+
+Yani presence kapısı ve clamp'in kaldırılması çöküşü **yavaşlattı ama
+kaldırmadı.** Canlı sahnede strat = 0.03 ile ölçüm (meanT üzerinden,
+`buoyancy_heat` 2.6):
+
+| kare | merkez | meanT | env | anomali | kuvvet |
+|---|---|---|---|---|---|
+| 90 | 25.6 | 2.04 | 0.77 | +1.27 | +3.30 |
+| **130** | **30.0** | 0.88 | 0.90 | **−0.02** | **−0.06** |
+| 160 | 30.4 | 0.41 | 0.91 | −0.50 | −1.31 |
+| 200 | 29.7 | 0.25 | 0.89 | −0.64 | −1.66 |
+
+★ **f130'da bulut gerçekten nötr kaldırmaya ulaşıp 30 m'de park etti** — doğru
+davranış, bir kapağın yapması gereken tam olarak bu. Sonra sıcaklığı dengenin
+**içinden geçip** düşmeye devam etti, anomali negatife gömüldü ve orada kaldı:
+
+```
+anomaly = excess − strat·h     ve     excess → 0
+⇒ anomaly → −strat·h  = SABİT, hiç bitmeyen aşağı kuvvet
+```
+
+Yakınsadığı değer −strat·h·buoyancy_heat = −2.34 m/s². Denge bir **hâl**
+değil, bulutun içinden geçtiği bir **an**dı. Yazarın denediği hiçbir
+stratification değerinin çöküşü kaldıramamasının sebebi bu: 0.01 ve 0.03
+terimi kaldırmıyor, sadece yavaşlatıyor.
+
+### Kök: sönüm GLOBAL ambient'a çekiyor, kaldırma YEREL çevreye bakıyor
+
+`dissipate()` sıcaklığı tek bir global değere çekiyordu. `buoyantAnomaly` ise
+parseli yükseklikle **artan** bir çevreye karşı ölçüyor. İkisi baştan beri
+farklı bir "sıfır" tanımlıyordu ve bu uyuşmazlık kalıcıydı.
+
+`dissipateTemperatureStratified()` hedefi yerel çevre yaptı:
+
+```
+excess → strat·h·presence     ⇒     anomaly → 0
+```
+
+Artık kaldırma teriminin aradığı sabit nokta var: bulut durduğu yerde kalır.
+
+★ Hedef de **presence ile kapılı**, ve bunun sebebi fizik değil: aynı alan
+**blackbody emisyonunu sürüyor.** Çevre profilini boş hücrelere yazmak açık
+havayı parlatırdı. *Üreticinin tek tüketicisi kendisi değil.*
+
+⚠ Büyük stratification'da kalan sıcaklık ihmal edilebilir değil: 0.25'te 26
+m'de park eden bir hücre excess 6.5 taşır ve bu parlaktır. Kapak yüksekliğini
+**büyük stratification ile değil, küçük stratification + yüksek domain** ile
+kurmanın bir sebebi daha.
+
+★ Ayrıca iki yol baştan beri farklı sönüyormuş: yoğun yol 0'a, seyrek VDB yolu
+`ambient_temperature`'a. İkisi de yeni hedefe çekildi.
+
+---
+
+## ★★★★★ Nihai biçim: çevre kaldırmayı İPTAL EDER, TERSİNE ÇEVİREMEZ
+
+Gevşeme-hedefi denemesi de çöküşü kaldırmadı. Ölçüm (strat = 0.05) sebebini
+verdi:
+
+| kare | hücre | meanT | hedef | toplam ısı |
+|---|---|---|---|---|
+| 130 | 1391748 | 1.319 | 1.485 | 1836235 |
+| 160 | 1538403 | 0.844 | 1.499 | 1298773 |
+| 200 | 1959861 | 0.770 | 1.476 | 1508226 |
+
+Toplam ısı **sönmüyor** — gevşeme hedefi çalışıyor. Ortalamanın düşmesi
+soğuma değil **seyrelme**: hücre sayısı 1.39M → 1.96M.
+
+★ Ve arıza tam buradaydı: genişleyen bulut sürekli **T = 0 ile yeni hücre
+dolduruyor**, o hücrelerin hedefi ise `strat·h`. Yani büyüyen kenar kendi
+aşağı kuvvetini imal ediyor ve 0.22/s'lik gevşeme buna yetişemiyor. Alanı
+çevre profiline eşitlemeye çalışmak, genişleyen bir bulutla kalıcı olarak
+kavga eder. **Yanlış kaldıraçtı; geri alındı** (kural 5 — tek iş için iki
+mekanizma yaşatma).
+
+### Doğru biçim
+
+```cpp
+return excess - std::min(env, std::max(excess, 0.0f));
+```
+
+Denenip ölçülen üç biçim:
+
+| biçim | sonuç |
+|---|---|
+| `max(excess-env, -abs(excess))` | sıralama ters: ılık batar, soğuk asılı kalır |
+| `excess - env` | denge bir AN; anomali −strat·h'ye oturur, kalıcı iniş |
+| **`excess - min(env, max(excess,0))`** | **h\* üstünde kuvvet YOK; bulut durduğu yerde kalır** |
+
+★★ Gerekçe dial'in ne için var olduğunda: preset notu açıkça yazıyor —
+*"gives the plume a ceiling of its OWN"*. **Tavan bir yükselişi durdurur,
+aşağı itmez.**
+
+★ Ve hiçbir şey kaybedilmiyor: soğuk ağır dumanın aşağı kuvveti **zaten ayrı
+ve doğru işaretli bir terim olarak var** — `buoyancy_density * d`.
+Tabakalaşmanın da aşağı itmesi, mevcut bir kuvveti yanlış işaret
+konvansiyonuyla ikinci kez uygulamaktı.
+
+★ Sınır sonuca değil `env`'e konuldu ki tabakalaşmasız hâl ile **sürekli**
+kalsın: `excess <= 0` için çevre tam olarak sıfır katkı verir ve anomali
+`excess`'tir — `ambient_stratification == 0` erken çıkışıyla bit-aynı. Diğer
+bütün preset'ler bu alanı 0'da bıraktığı için burada bir basamak görmemeleri
+şart.
+
+---
+
+## ★★★★★ Son eksik parça: duman hiç TEMİZLENMİYORDU
+
+Kullanıcı: *"180 frame gibi dumana dönüşen sütun çökmese de yükselip
+zayıflamıyor... ısı kaybedip zayıflama veya yükselip zayıflaması yok."*
+
+Kaldırma kuvveti artık doğruydu ama bulut **duruyor ve yalnızca yayılıyordu**.
+
+### Kaynaklar zaten kapalıydı
+
+`flow_source.list` okundu:
+
+| kaynak | start → end (s) | kare |
+|---|---|---|
+| Detonation Core | 0.00 → 0.05 | 0 → 1 |
+| Fireball Rise | 0.05 → 0.55 | 1 → 13 |
+| Stem Afterwind | 0.45 → 4.50 | 11 → **108** |
+
+f108'den sonra **domain'e tek gram yeni kütle girmiyor.** Yani aktif hücrenin
+1.61M → 2.60M büyümesi üretim değil, saf **yayılma**.
+
+### Kök: `density_dissipation = 0.012/s`
+
+8.3 saniyede dumanın yalnızca **%9'u** temizleniyor. Kaynak kapalı, temizlik
+yok: bulut sonsuza kadar orada duruyor ve yayıldıkça domain'i dolduruyor.
+Doluluk hiçbir kararlı hâle ulaşmıyordu (0.25 → 0.48 → 0.64 → 0.77).
+
+### 0.012 → 0.18
+
+| kare | hücre | fill | tepe | merkez |
+|---|---|---|---|---|
+| 90 | 1 042 832 | 0.309 | 32.1 | 25.0 |
+| 110 | 1 288 238 | 0.381 | 34.0 | 28.5 |
+| 140 | 1 187 734 | 0.351 | 34.0 | 30.2 |
+| 170 | 1 164 291 | 0.344 | 34.0 | 30.5 |
+| 200 | 1 188 893 | 0.352 | 34.0 | 30.3 |
+
+Hücre sayısı f110'da tepe yapıp **düşüyor ve sabitleniyor**: yayılma ile
+temizlik dengeye geliyor. Görsel olarak koyu gri sütun, incelen yarı saydam
+duman, közlü kapak — istenen "yükselip zayıflama" bu ayarla geliyor.
+
+★ Yan etki ve hoş olanı: duman inceldikçe `presence` kapısı düşüyor, dolayısıyla
+çevre terimi zayıflıyor ve incelen duman kaldırma kuvvetini geri kazanıyor.
+İki mekanizma aynı yoğunluk ölçüsünü paylaştığı için bu bedava geliyor.
+
+### Sahnede doğrulanan değerler
+
+```
+ambient_stratification = 0.05
+density_dissipation    = 0.18      (preset'te 0.012)
+temperature_dissipation= 0.22
+temperature_max        = 20000     (preset'te 5000)
+```
+
+⚠ Hiçbiri `SceneDataParticlePresets.cpp`'ye girmedi.
+
+⚠ Kalan tek kusur: kapak hâlâ f110'dan sonra domain tavanında (34 m).
+Parametreyle çözülmez.

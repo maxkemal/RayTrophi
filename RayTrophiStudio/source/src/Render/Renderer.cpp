@@ -6549,7 +6549,13 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             if (shader && shader->emission.color_ramp.enabled) {
                                 step_emission = toVec3f(shader->emission.color_ramp.sample(t_ramp)) * d * shader->emission.blackbody_intensity;
                             } else {
-                                step_emission = toVec3f(blackbody_to_rgb(kelvin)) * d * (shader ? shader->emission.blackbody_intensity : 10.0f);
+                                // T^4 radiance; blackbody_to_rgb is a chromaticity
+                                // only. See the note in volume_closesthit.rchit -
+                                // without this, cooling changes hue and nothing
+                                // else, and every thick plume clips to white.
+                                const float radiance = std::pow(
+                                    std::clamp(authored_kelvin / t_max, 0.0f, 1.0f), 4.0f);
+                                step_emission = toVec3f(blackbody_to_rgb(kelvin)) * radiance * d * (shader ? shader->emission.blackbody_intensity : 10.0f);
                             }
                         }
 

@@ -3765,17 +3765,23 @@ void main() {
                     float rangeMin = max(vol._ext_reserved[6], 0.0);
                     float rangeMax = (vol.max_temperature > rangeMin + 1.0)
                         ? vol.max_temperature : (rangeMin + 1500.0);
-                    float eKelvin = (et > 20.0)
+                    // Units come from the volume, not the sample - see the
+                    // note in the main march below.
+                    bool eKelvinUnits = (vol.volume_type == 4 && vol.source_type == 5);
+                    float eKelvin = (eKelvinUnits || et > 20.0)
                         ? clamp(et, rangeMin, rangeMax)
                         : mix(rangeMin, rangeMax, clamp(et, 0.0, 1.0));
                     vec3 eColor;
+                    float eRadiance = 1.0;
                     if (vol.color_ramp_enabled != 0 && vol.ramp_stop_count > 0) {
                         float tr = clamp((eKelvin - rangeMin) / max(rangeMax - rangeMin, 1.0), 0.0, 1.0);
                         eColor = sampleColorRamp(vol, clamp(tr * vol.temperature_scale, 0.0, 1.0));
                     } else {
                         eColor = blackbodyToRGB(eKelvin * vol.temperature_scale);
+                        // T^4 radiance - see the note in the main march below.
+                        eRadiance = pow(clamp(eKelvin / rangeMax, 0.0, 1.0), 4.0);
                     }
-                    vec3 eEmis = eColor * ed * vol.blackbody_intensity;
+                    vec3 eEmis = eColor * eRadiance * ed * vol.blackbody_intensity;
                     float eReaction = sampleFlame(vol, emitterPos);
                     eEmis *= (1.0 + eReaction);   // matches the march's reaction boost
                     // Radiant intensity of the block: emission per unit length
@@ -3951,7 +3957,28 @@ void main() {
                     ? vol.max_temperature : (rangeMin + 1500.0);
                 // Simulation grids arrive as Kelvin-scaled heat. Normalized
                 // fallbacks map into the same authored temperature interval.
-                float authoredKelvin = (temperature > 20.0)
+                            // ***** A PER-SAMPLE MAGNITUDE TEST CANNOT GUESS UNITS.
+                //
+                // `temp > 20` is asking "is this Kelvin, or an authored 0..1 field?" - and
+                // it gets the answer wrong for exactly the cells that are nearly empty. A
+                // live gas cell with solver heat 0.005 becomes 15 after the x3000 scale,
+                // fails the test, and falls into the normalised branch, where
+                // clamp(15,0,1) saturates to 1.0 and hands back rangeMAX. The faintest gas
+                // in the domain was being reported as the hottest.
+                //
+                // It was survivable while emission carried no radiance: those cells got a
+                // blue-white hue at the same magnitude as everything else and the low
+                // density kept them dim. Under the T^4 term it inverts the image - they sit
+                // at radiance 1.0 while genuinely hot gas at 10000 K gets 0.0625, i.e. the
+                // coldest gas renders SIXTEEN TIMES brighter than the fireball. Raising the
+                // density cutoff hides it because it skips those cells entirely, which is
+                // how it was first noticed.
+                //
+                // The units are not a property of the sample, they are a property of the
+                // VOLUME - and the same flag that applied the x3000 already knows. Ask that
+                // instead of guessing per sample.
+                bool kelvinUnits = (vol.volume_type == 4 && vol.source_type == 5);
+                float authoredKelvin = (kelvinUnits || temperature > 20.0)
                     ? clamp(temperature, rangeMin, rangeMax)
                     : mix(rangeMin, rangeMax, clamp(temperature, 0.0, 1.0));
                 float t_ramp = clamp(
@@ -3959,12 +3986,34 @@ void main() {
                     0.0, 1.0);
 
                 vec3 e_color;
+                float e_radiance = 1.0;
                 if (vol.color_ramp_enabled != 0 && vol.ramp_stop_count > 0) {
                     e_color = sampleColorRamp(vol, clamp(t_ramp * vol.temperature_scale, 0.0, 1.0));
                 } else {
                     // The authored interval constrains blackbody color; Temp
                     // Scale then provides the intentional artistic offset.
                     e_color = blackbodyToRGB(authoredKelvin * vol.temperature_scale);
+                    // ***** BLACKBODY COLOUR IS A CHROMATICITY, NOT A RADIANCE.
+                    // blackbodyToRGB returns the Tanner Helland approximation,
+                    // where one channel is pinned at 1.0 at EVERY temperature
+                    // (red below 6600 K, blue above). Multiplied only by density
+                    // it made a 1600 K ember emit exactly as much energy as a
+                    // 5000 K fireball - just redder. Cooling could change the
+                    // hue and nothing else, so a cloud that had lost 90% of its
+                    // heat still rendered as a white slab: with the red channel
+                    // already clipped, every extra step of depth dragged green
+                    // and blue up to clip too.
+                    //
+                    // Planck-integrated radiance goes as T^4 (Stefan-Boltzmann).
+                    // Normalised against the AUTHORED max so the hottest gas
+                    // keeps exactly the brightness it has today and only the
+                    // cooler gas darkens - at rangeMin/rangeMax = 1340/5000 the
+                    // coldest visible cell is ~190x dimmer than the core.
+                    //
+                    // Applied to the blackbody branch only. An authored colour
+                    // ramp is a statement about the FINAL colour, so scaling it
+                    // by T^4 would fight the author instead of helping them.
+                    e_radiance = pow(clamp(authoredKelvin / rangeMax, 0.0, 1.0), 4.0);
                 }
                 // ── Combustion reaction boost ───────────────────────────────
                 // Temperature alone cannot tell a flame from the hot smoke
@@ -3981,7 +4030,7 @@ void main() {
                 // scene; the reaction zone becoming a distinct, brighter source
                 // is the signal that was missing, and it cannot dim anything.
                 // Kept density-coupled, so empty cells never emit.
-                vec3 baseEmission = e_color * density * vol.blackbody_intensity;
+                vec3 baseEmission = e_color * e_radiance * density * vol.blackbody_intensity;
                 vec3 reactionEmission = vec3(0.0);
                 if (vol.flame_address != 0) {
                     float reaction = sampleFlame(vol, samplePos);
