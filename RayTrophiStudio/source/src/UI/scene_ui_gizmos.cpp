@@ -1055,7 +1055,7 @@ void SceneUI::uploadParticleBillboards(UIContext& ctx) {
     };
 
     for (const auto& system : ctx.scene.particle_systems) {
-        if (!system.visible || !system.runtime) {
+        if (!system.visible || !system.runtime || system.render.emitter_only) {
             continue;
         }
         std::vector<float>& out = (system.blend_mode == SceneData::ParticleBlendMode::Alpha)

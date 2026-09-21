@@ -17,6 +17,7 @@ layout(location = 0) out vec4 outColor;
 #include "pbr_texture_policy.glsl"
 #include "material_preview_transmission.glsl"
 #include "post_chain.glsl"
+#include "material_preview_ray.glsl"
 
 layout(set = 0, binding = 0, std430) readonly buffer MaterialBuffer {
     GpuMaterial materials[];
@@ -61,16 +62,7 @@ layout(set = 0, binding = 6, std430) readonly buffer PreviewSceneGlobalsBuffer {
 };
 
 const uint PREVIEW_MAX_LIGHTS = 32u;
-struct PreviewShadowRecord {
-    mat4 viewProj[6];
-    vec4 atlasRect[6];
-    uvec4 meta;
-    vec4 params;
-};
-layout(set = 0, binding = 7, std430) readonly buffer PreviewShadowBuffer {
-    PreviewShadowRecord shadowRecords[PREVIEW_MAX_LIGHTS + 1u];
-};
-layout(set = 0, binding = 8) uniform sampler2D previewShadowAtlas;
+#include "material_preview_shadow_data.glsl"
 
 // binding 20 aliases VulkanDevice::m_volumeBuffer. One record is 624 bytes =
 // 156 uints. Offsets below are byte offsets from vulkan_volume_types.h and are
@@ -373,57 +365,7 @@ uint pointShadowFace(vec3 d) {
 
 float evaluateShadow(uint recordIndex, int lightType, vec3 lightPosition,
                      vec3 p, vec3 n, vec3 l) {
-    if ((sceneFlags & 1u) == 0u || recordIndex > PREVIEW_MAX_LIGHTS ||
-        shadowRecords[recordIndex].meta.x == 0u) return 1.0;
-    uint faceCount = min(shadowRecords[recordIndex].meta.z, 6u);
-    uint face = lightType == 0 ? pointShadowFace(p - lightPosition) : 0u;
-    vec3 biased = p + n * shadowRecords[recordIndex].params.y;
-    vec3 ndc = vec3(0.0);
-    vec2 localUv = vec2(0.0);
-    bool found = false;
-    if (lightType == 1 && faceCount > 1u) {
-        for (uint cascade = 0u; cascade < 6u; ++cascade) {
-            if (cascade >= faceCount) break;
-            vec4 c = shadowRecords[recordIndex].viewProj[cascade] * vec4(biased, 1.0);
-            if (c.w <= 0.0) continue;
-            vec3 q = c.xyz / c.w;
-            vec2 uv = q.xy * 0.5 + 0.5;
-            if (q.z > 0.0 && q.z < 1.0 && all(greaterThanEqual(uv, vec2(0.0))) &&
-                all(lessThanEqual(uv, vec2(1.0)))) {
-                face = cascade; ndc = q; localUv = uv; found = true; break;
-            }
-        }
-    } else if (face < faceCount) {
-        vec4 c = shadowRecords[recordIndex].viewProj[face] * vec4(biased, 1.0);
-        if (c.w > 0.0) {
-            ndc = c.xyz / c.w;
-            localUv = ndc.xy * 0.5 + 0.5;
-            found = ndc.z > 0.0 && ndc.z < 1.0 &&
-                all(greaterThanEqual(localUv, vec2(0.0))) &&
-                all(lessThanEqual(localUv, vec2(1.0)));
-        }
-    }
-    if (!found) return 1.0;
-    vec4 rect = shadowRecords[recordIndex].atlasRect[face];
-    vec2 atlasUv = rect.xy + localUv * rect.zw;
-    float bias = shadowRecords[recordIndex].params.x *
-                 max(0.25, 1.0 - max(dot(n, l), 0.0));
-    float texel = shadowRecords[recordIndex].params.z;
-    int radius = (pc.materialMeta.y & 0xffu) <= 1u ? 1 : 2;
-    float lit = 0.0;
-    float samples = 0.0;
-    vec2 lo = rect.xy + vec2(texel * 0.5);
-    vec2 hi = rect.xy + rect.zw - vec2(texel * 0.5);
-    for (int y = -2; y <= 2; ++y) {
-        for (int x = -2; x <= 2; ++x) {
-            if (abs(x) > radius || abs(y) > radius) continue;
-            float stored = texture(previewShadowAtlas,
-                clamp(atlasUv + vec2(x, y) * texel, lo, hi)).r;
-            lit += ndc.z - bias <= stored ? 1.0 : 0.0;
-            samples += 1.0;
-        }
-    }
-    return lit / max(samples, 1.0);
+    return rtPreviewShadow(recordIndex, p, n, l, lightPosition, pc.materialMeta.y & 0xffu);
 }
 
 RtPostParams sdfPostParams() {
@@ -441,12 +383,8 @@ RtPostParams sdfPostParams() {
 
 void main() {
     mat4 invViewProj = inverse(pc.viewProj);
-    vec4 nearH = invViewProj * vec4(vNdc, 0.0, 1.0);
-    vec4 farH  = invViewProj * vec4(vNdc, 1.0, 1.0);
-    vec3 nearP = nearH.xyz / nearH.w;
-    vec3 farP  = farH.xyz / farH.w;
-    vec3 ro = nearP;
-    vec3 rd = normalize(farP - nearP);
+    vec3 ro, rd;
+    rtPreviewWorldRay(invViewProj, vNdc, ro, rd);
 
     float nearestT = 1e30;
     vec3 nearestN = vec3(0.0, 1.0, 0.0);
@@ -617,10 +555,13 @@ void main() {
             vec2(mat.uv_offset_x, mat.uv_offset_y)).rgb * mat.emission_strength;
     }
     vec3 color = direct + env + diffuseAmbient + emission;
-    color = rtApplyPost(color, sdfPostParams(),
-                        gl_FragCoord.xy / max(postC.xy, vec2(1.0)));
-    // Opaque snapshot pixels already passed through the same display transform;
-    // composite them afterwards to avoid applying tone mapping twice.
+    // *** GORUNTULEME DONUSUMU BURADAN SOKULDU (2026-09-06).
+    //   Bu shader artik SCENE-LINEAR yaziyor; zincir (exposure -> operator ->
+    //   grade -> vignette -> sRGB) tek yerde, `raster_post.comp` icinde kosuyor.
+    //   Zorunluydu: alan derinligi bu shader'larin ciktisini BULANISTIRIR ve
+    //   bokeh, parlak noktanin daire olarak acilmasidir. Tonemap'ten gecmis bir
+    //   deger o noktayi zaten kirpmistir; onu bulanistirmak gri leke uretir.
+    // Anlik goruntu de scene-linear; ayni uzayda toplanir.
     if (sceneRefractionValid) color += sceneThrough * transmissionWeight;
     outColor = vec4(color, 1.0);
 }

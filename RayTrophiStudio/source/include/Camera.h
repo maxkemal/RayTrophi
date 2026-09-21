@@ -50,6 +50,22 @@ public:
     bool visible = true;
     int blade_count = 6;
     float aperture = 0.0f;
+
+    // ★★★★★ ALAN DERINLIGININ ACIK OLMASI, `aperture`in KENDISI DEGILDIR.
+    //   2026-09-06'ya kadar tek kapali-anahtar `aperture == 0` idi. Bu bir
+    //   DEGER degil bir SENTINEL'di, ve f-sayisi kadranini buraya baglar
+    //   baglamaz oldu: hicbir f-sayisi sifir aciklik uretmez, yani geri
+    //   donusun TEK yolu yok oldu. Kullanicinin belirtisi tam olarak buydu --
+    //   "f-stop'a bir kez dokundum, DoF bir daha kapanmiyor".
+    //   ★★ Yeni sozlesme:
+    //     `aperture`        = her zaman FIZIKSEL aciklik (f-sayisinin ikizi),
+    //     `depth_of_field`  = lens diski ORNEKLENSIN mi.
+    //   Kapatmak degeri yok etmez; geri acmak ayni bulanikligi aninda verir.
+    //   ★★★ Ve kapiyi tuketiciler tek tek kurmaz: hepsi
+    //   `effectiveLensRadius()` / `effectiveAperture()` uzerinden gecer. Ayni
+    //   "AND"i dort backend'e kopyalamak bu deponun adi konmus hata sinifi.
+    bool depth_of_field = false;
+
     float focus_dist = 10.0f;
     Vec3 origin;
     Vec3 u, v, w;
@@ -113,7 +129,99 @@ public:
     Vec3 lower_left_corner;
     Vec3 horizontal;
     Vec3 vertical;
-    float lens_radius = 0.0f;
+    float lens_radius = 0.0f;   // FIZIKSEL yaricap (= aperture * 0.5). Kapi DEGIL.
+
+    // ★★★ TEK TANIM: "lens gercekten orneklenecek mi" sorusunun cevabi.
+    //   Ortografik kamerada lens yoktur; onu cagiran taraf ayrica eler cunku
+    //   ortografik yol zaten farkli bir isin uretimidir.
+    float effectiveAperture() const { return depth_of_field ? aperture : 0.0f; }
+    float effectiveLensRadius() const { return depth_of_field ? aperture * 0.5f : 0.0f; }
+
+    // ── f-sayisi <-> aciklik: TEK EGRI, iki yonu de birbirinin TERSI ────────
+    // ★★★★★ 2026-09-06'ya kadar UC ayri donusum vardi ve UCU DE farkli sayi
+    //   veriyordu:
+    //     preset combo'su : FSTOP_PRESETS[i].aperture_value  (f/2.8 -> 1.20)
+    //     f-stop slider'i : (focal_mm / f) * 0.01            (f/2.8 -> 0.18)
+    //     panel gosterimi : focal_mm / aperture              (0.18  -> f/280!)
+    //   Yani combo'dan f/2.8 secip slider'i oynatmak bulanikligi 7 KAT
+    //   degistiriyordu ve panelin gosterdigi f-sayisi ust sinira yapisiyordu.
+    //   Hicbiri hata vermiyordu -- yalnizca "kadran tuhaf davraniyor".
+    //
+    //   ★★★ Cozum: OTORITE PRESET TABLOSUDUR. Tablo elle ayarlanmis sanatsal
+    //   bir olcektir (1/f DEGIL), o yuzden ara degerler tabloyu log-log
+    //   INTERPOLE eder. Boylece preset degerlerinde gorunum AYNEN korunur --
+    //   tabloyu bir formulle degistirmek her mevcut sahnenin bulanikligini
+    //   sessizce degistirirdi.
+    static float apertureForFNumber(float f_number) {
+        const int n = (int)CameraPresets::FSTOP_PRESET_COUNT;
+        if (n < 3) return 0.0f;                    // 0 = "Custom", egri 1..n-1
+        const float f_lo = CameraPresets::FSTOP_PRESETS[1].f_number;
+        const float f_hi = CameraPresets::FSTOP_PRESETS[n - 1].f_number;
+        if (f_number <= f_lo) return CameraPresets::FSTOP_PRESETS[1].aperture_value;
+        if (f_number >= f_hi) return CameraPresets::FSTOP_PRESETS[n - 1].aperture_value;
+        for (int i = 1; i < n - 1; ++i) {
+            const float a = CameraPresets::FSTOP_PRESETS[i].f_number;
+            const float b = CameraPresets::FSTOP_PRESETS[i + 1].f_number;
+            if (f_number >= a && f_number <= b) {
+                const float t = (std::log(f_number) - std::log(a)) /
+                                (std::log(b) - std::log(a));
+                const float la = std::log(CameraPresets::FSTOP_PRESETS[i].aperture_value);
+                const float lb = std::log(CameraPresets::FSTOP_PRESETS[i + 1].aperture_value);
+                return std::exp(la + (lb - la) * t);
+            }
+        }
+        return CameraPresets::FSTOP_PRESETS[n - 1].aperture_value;
+    }
+
+    // ★★ Ters yon AYNI tablodan okunur; aciklik f-sayisinde MONOTON AZALIR.
+    static float fNumberForAperture(float ap) {
+        const int n = (int)CameraPresets::FSTOP_PRESET_COUNT;
+        if (n < 3 || ap <= 1e-6f) return 16.0f;
+        if (ap >= CameraPresets::FSTOP_PRESETS[1].aperture_value)
+            return CameraPresets::FSTOP_PRESETS[1].f_number;
+        if (ap <= CameraPresets::FSTOP_PRESETS[n - 1].aperture_value)
+            return CameraPresets::FSTOP_PRESETS[n - 1].f_number;
+        for (int i = 1; i < n - 1; ++i) {
+            const float a = CameraPresets::FSTOP_PRESETS[i].aperture_value;
+            const float b = CameraPresets::FSTOP_PRESETS[i + 1].aperture_value;
+            if (ap <= a && ap >= b) {
+                const float t = (std::log(ap) - std::log(a)) / (std::log(b) - std::log(a));
+                const float la = std::log(CameraPresets::FSTOP_PRESETS[i].f_number);
+                const float lb = std::log(CameraPresets::FSTOP_PRESETS[i + 1].f_number);
+                return std::exp(la + (lb - la) * t);
+            }
+        }
+        return CameraPresets::FSTOP_PRESETS[n - 1].f_number;
+    }
+
+    // ★★★ TEK OKUYUCU. Preset seciliyse tablo degeri, degilse aciklidan
+    //   turetilir -- pozlama ile panelin ayni sayiyi gormesinin sarti budur.
+    float fNumber() const {
+        if (fstop_preset_index > 0 &&
+            fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT)
+            return CameraPresets::FSTOP_PRESETS[fstop_preset_index].f_number;
+        if (aperture > 1e-5f) return fNumberForAperture(aperture);
+        return 16.0f;
+    }
+
+    // ★★★ TEK YAZAR: f-sayisini degistiren HER yuzey (HUD ucgeni, kamera
+    //   paneli, preset combo'su, `camera.set_fstop_preset`) buradan gecer,
+    //   boylece aciklik ile preset indeksi asla ayrismaz. Preset'e oturuyorsa
+    //   indeks de oturur; oturmazsa "Custom" (0) yazilir.
+    //   ★ ANAHTARA DOKUNMAZ: f-sayisi bulanikligin MIKTARIDIR, VARLIGI degil.
+    void setFNumber(float f_number) {
+        if (f_number < 0.5f) f_number = 0.5f;
+        if (f_number > 128.0f) f_number = 128.0f;
+        aperture = apertureForFNumber(f_number);
+        lens_radius = aperture * 0.5f;
+        fstop_preset_index = 0;
+        for (int i = 1; i < (int)CameraPresets::FSTOP_PRESET_COUNT; ++i) {
+            if (std::abs(CameraPresets::FSTOP_PRESETS[i].f_number - f_number) < 0.01f) {
+                fstop_preset_index = i;
+                break;
+            }
+        }
+    }
     
     // ═══════════════════════════════════════════════════════════════════════════
     // PROFESSIONAL EXPOSURE SETTINGS
@@ -127,7 +235,12 @@ public:
     int body_preset_index = 1;         // Default: Generic Full Frame
     bool auto_exposure = true;         // Default to manual to use above settings
     float ev_compensation = 0.0f;      // EV compensation (-2 to +2)
-    float calculated_ev = 0.0f;        // Calculated exposure value (output)
+    // ★ `calculated_ev` 2026-09-06'da SOKULDU: tek yazani ve tek okuyani
+    //   hierarchy panelindeki bir satirdi, formulu f-sayisi yerine DoF
+    //   `aperture`ini kullaniyordu ve degeri hicbir yerde uygulanmiyordu --
+    //   "Exposure" etiketiyle gosterilen olculmemis bir sayiydi. Uygulanan
+    //   carpan: `g_display_post.camera_exposure` (post modunun kapisindan
+    //   gecmis) veya ham kamera terimi icin `Camera::exposureFactor()`.
 
     // ═══════════════════════════════════════════════════════════════════════
     // POZLAMA CARPANI -- TEK TANIM
@@ -145,10 +258,23 @@ public:
     //   motorda isik siddeti keyfi birimde ve mutlak formul her sahneyi
     //   karartir. Buradaki baseline zaten "siyah viewport'u onlemek icin"
     //   kalibre edilmis (asagidaki yorum orijinaldir).
+    // ★★★ Oncelik sirasindan GECMIS deger. Kameranin kendi bayraklarini okur;
+    //   yeni post yapisinda ekrana giden carpan bu DEGILDIR (bkz.
+    //   `rtpost::syncDisplay` ve `g_display_post.camera_exposure`) -- mod
+    //   Physical Camera degilse kamera terimi 1.0'dir.
     float exposureFactor() const {
         const float ev_comp = std::pow(2.0f, ev_compensation);
         if (auto_exposure) return ev_comp;
         if (!use_physical_exposure) return ev_comp;
+        return physicalExposureFactor();
+    }
+
+    // ★★ Bayraklardan BAGIMSIZ fiziksel terim (ISO x enstantane / f^2).
+    //   Post zinciri bunu dogrudan cagirir; eskiden ayni sonuc icin Camera'nin
+    //   TAM KOPYASI cikarilip iki bayrak zorlaniyordu -- her karede, ve
+    //   `nodeName` uzunsa her karede bir tahsisle.
+    float physicalExposureFactor() const {
+        const float ev_comp = std::pow(2.0f, ev_compensation);
 
         float iso_mult = 1.0f;
         if (iso_preset_index >= 0 &&
@@ -160,15 +286,11 @@ public:
             shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) {
             shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[shutter_preset_index].speed_seconds;
         }
-        float f_num = 16.0f;
-        if (fstop_preset_index > 0 &&
-            fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
-            f_num = CameraPresets::FSTOP_PRESETS[fstop_preset_index].f_number;
-        } else if (aperture > 0.001f) {
-            // Main.cpp'deki CPU yolunun yaptigi geri dusus; burada da var ki
-            // iki yol ayni sayiyi uretsin.
-            f_num = 0.8f / aperture;
-        }
+        // ★★★ f-sayisinin TEK tanimi `fNumber()`. Buradaki eski geri dusus
+        //   (`0.8f / aperture`) panelin yazma formulunun tersi DEGILDI; artik
+        //   ikisi ayni fonksiyondan geliyor. Custom f-stop'lu sahnelerde
+        //   pozlama bu yuzden degisir -- beklenen ve DUZELTILMIS davranistir.
+        const float f_num = fNumber();
 
         const float aperture_sq = f_num * f_num;
         const float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);

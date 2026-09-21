@@ -14,6 +14,10 @@ layout(location = 6) in vec4 inModelCol3;
 // UV coordinates (binding 4)
 layout(location = 7) in vec2 inTexCoord;
 
+// Derinlik on gecisi (material_preview_shadow.vert) AYNI ifadeyi kullanir ve o
+// da invariant; ikisinin derinligi bit bazinda esit olmak ZORUNDA.
+invariant gl_Position;
+
 layout(location = 0) out vec3 vWorldNormal;
 layout(location = 1) flat out uint vMaterialID;
 layout(location = 2) out vec2 vTexCoord;

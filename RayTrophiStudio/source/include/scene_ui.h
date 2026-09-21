@@ -420,6 +420,24 @@ public:
      };
      FlatSoaNormalScratch flat_soa_normal_scratch;
 
+     // ***** Which SoA vertices this STROKE has written since the last GPU sync,
+     //   handed to the raster refit so it can skip its whole-mesh diff (measured
+     //   19 ms per sync on a 2M-vertex mesh, memory-bandwidth bound over ~96 MB).
+     //   Valid ONLY while a sculpt stroke is active, and that restriction is the
+     //   whole safety argument: many other paths write P_orig on a flat mesh
+     //   (terrain, rivers, skinning/GeometryCache, rig binding, importers,
+     //   rtapi sculpt, mesh-edit publishers) and none of them record here, so a
+     //   hint kept across idle time would be silently incomplete. During a drag
+     //   nothing else edits that mesh. Outside a stroke the refit still does the
+     //   full diff, and it periodically re-runs it DURING a stroke too, so a
+     //   systematic miss shows up in raster.solid.soa_refit.audit_* instead of
+     //   as stale geometry nobody reports.
+     std::vector<uint32_t> flat_soa_stroke_dirty_ids;
+     std::vector<uint64_t> flat_soa_stroke_dirty_bits;  // dedupe, 1 bit/SoA vertex
+     std::string flat_soa_stroke_dirty_object;
+     bool flat_soa_stroke_dirty_valid = false;
+     void invalidateFlatSoaStrokeDirtyHint();
+
      // Stamp array behind EditableVertexMembership: "is this vertex in the set
      // the brush just solved". Replaces a binary search that ran per triangle
      // corner inside the per-vertex anti-flip guard.

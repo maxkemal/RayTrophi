@@ -33,6 +33,7 @@
 #include "scene_ui_debris.hpp"
 #include "scene_ui_material_mass.hpp"
 #include "scene_ui_molten_transfer.hpp"
+#include "scene_ui_particle_usage.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -349,7 +350,8 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     ImGui::SetTooltip("Interactive preview holds every frame in RAM and grows with\n"
                                       "crowded/long sims. Bake to disk (above) — scrubbing then streams\n"
                                       "from disk and the RAM frame cache is bypassed.\n"
-                                      "(Estimate covers soft/cloth + particles + rigid; excludes fluid grid.)");
+                                      "(Covers soft/cloth + particles + rigid AND the fluid/gas grid,\n"
+                                      "which is MEASURED compressed size rather than an estimate.)");
             }
         }
         if (!baking && active) {
@@ -467,6 +469,14 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 { "Burning Fuel Spill", SceneData::ParticleSystemPreset::BurningFuelSpill,
                   "Coupled Vulkan APIC oil surface plus Gas combustion domain.\n"
                   "The exposed liquid surface owns finite fuel and feeds heat/smoke into the flame." },
+                { "Nuclear Detonation (Cinematic)", SceneData::ParticleSystemPreset::NuclearCinematic,
+                  "Metre-scale nuclear shot, tuned to be iterated on: flash, rolling cap,\n"
+                  "cold ground skirt and a late afterwind stem. The cap stops at an altitude\n"
+                  "the domain's Stratification sets, not at the domain lid." },
+                { "Nuclear Detonation (Physical)", SceneData::ParticleSystemPreset::NuclearPhysical,
+                  "The same recipe at kilometre scale (1.8 x 2.7 km, ~18 m voxels, Final\n"
+                  "profile). Same cell count as the cinematic preset, so the two are\n"
+                  "comparable. Offline: expect seconds per simulated frame." },
                 { "Ignited Fuel Jet", SceneData::ParticleSystemPreset::IgnitedFuelJet,
                   "Production Vulkan liquid-fire shot: a continuous amber fuel jet spreads over\n"
                   "the floor, a short delayed pilot ignites it, then finite surface fuel sustains\n"
@@ -566,6 +576,8 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         }
         auto* active_obj = scene.activeParticleSystemObject();
         if (active_obj) {
+            const bool emitter_only = ParticleUsageUI::draw(ui_ctx);
+            if (!emitter_only) {
             ImGui::Spacing();
             int blend = static_cast<int>(active_obj->blend_mode);
             const char* blend_names[] = { "Additive (Fire/Spark Glow)", "Alpha (Smoke/Dust Shadows)" };
@@ -612,9 +624,9 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     ImGui::SetTooltip("Allows particles to act as light sources by emitting visual luminance.");
                 }
 
-                ImGui::Checkbox("Inherit Colors from Emitter", &rs.inherit_color_from_emitter);
+                ImGui::Checkbox("Inherit Color from Emitter", &rs.inherit_color_from_emitter);
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Ray-traced particle colors will inherit their values from the first attached emitter's start/end color values.");
+                    ImGui::SetTooltip("The shared ray-traced particle material inherits the first emitter's start color.");
                 }
 
                 ImGui::BeginDisabled(rs.inherit_color_from_emitter);
@@ -622,16 +634,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 if (ImGui::ColorEdit3("Color Start##PartRTColS", cstart)) {
                     rs.base_color = Vec3(cstart[0], cstart[1], cstart[2]);
                 }
-                float cend[3] = { rs.color_end.x, rs.color_end.y, rs.color_end.z };
-                if (ImGui::ColorEdit3("Color End##PartRTColE", cend)) {
-                    rs.color_end = Vec3(cend[0], cend[1], cend[2]);
-                }
                 ImGui::EndDisabled();
-
-                ImGui::SliderInt("Color Variations", &rs.color_buckets, 1, 32);
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Defines how many distinct color steps are evaluated along the start-end color gradient to create particle variety.");
-                }
 
                 if (rs.emissive) {
                     ImGui::DragFloat("Emission Strength", &rs.emission_strength, 0.05f, 0.0f, 100.0f, "%.2f");
@@ -684,6 +687,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         ImGui::TextDisabled("  (Select an object in scene list and click 'Add Selected Mesh')");
                     }
                 }
+            }
             }
         }
             ImGui::EndTabItem();

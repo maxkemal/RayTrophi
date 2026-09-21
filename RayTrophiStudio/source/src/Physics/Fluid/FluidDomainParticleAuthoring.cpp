@@ -72,6 +72,7 @@ bool ParticleSimulationSystem::clearFluidDomainParticles(
             // Vulkan particle/density view while the domain is empty and has
             // not run another solver step yet.
             buffers.gpu_resident_fields_valid = false;
+            buffers.invalidateDeviceCopies();
             buffers.foam_render.count = 0;
             ++buffers.foam_render.version;
             buffers.foam_expected_pending = false;

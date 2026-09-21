@@ -1399,9 +1399,22 @@ struct GasBuoyancyGpuConstants {
     float ambient_temperature = 0.0f;
     int has_density = 1;
     int has_temperature = 1;
+    // ***** THESE TWO WENT MISSING AND THE MISMATCH WAS SILENT.
+    //
+    // sim_gas_buoyancy.comp declares them, and the kernel table in
+    // SimulationComputeVulkan.cpp declares the push range as 44 bytes. With the
+    // host struct back at 36 the host pushed 36 bytes into a 44-byte range and
+    // the shader read BOTH of these from uninitialised memory - no validation
+    // error, no crash, just a buoyancy term driven by whatever was in the
+    // buffer. A push-constant ABI has THREE declarations (shader, kernel table,
+    // host struct) and nothing checks that they agree.
+    float stratification = 0.0f;
+    float voxel_size = 0.0f;
 };
-static_assert(sizeof(GasBuoyancyGpuConstants) == 36,
-              "sim_gas_buoyancy push-constant ABI changed");
+static_assert(sizeof(GasBuoyancyGpuConstants) == 44,
+              "sim_gas_buoyancy push-constant ABI changed - update the shader "
+              "and the kernel table push size in SimulationComputeVulkan.cpp "
+              "in the same commit");
 
 struct GasForceFieldGpuConstants {
     int nx = 0;
@@ -4235,6 +4248,46 @@ bool uploadGpuGasColliderFields(
     return compute->endTransferBatch() && ok;
 }
 
+// === DEVICE UPLOAD HELPERS =================================================
+// Replace the raw uploadBuffer calls each gas stage ran around its dispatch.
+// See the ledger in ParticleSimulation.h for the measurement that motivated
+// them.
+//
+// ** A FAILED UPLOAD MUST NOT LEAVE THE LEDGER CLAIMING SUCCESS. Every false
+// return leaves the field marked exactly as it was, so a caller that falls back
+// to the CPU solver still finds the device copy honestly described.
+
+using GasGridField = SimulationGridDomainComputeBuffers::GridField;
+
+// Upload only when the device copy is stale. Returns false only on a real
+// transfer failure; "already there" is success with no work done.
+bool gasEnsureOnDevice(SimulationComputeContext* compute,
+                       SimulationGridDomainComputeBuffers& buffers,
+                       GasGridField field,
+                       ComputeBufferHandle handle,
+                       const void* host_data,
+                       std::size_t size_bytes) {
+    if (!compute || !handle.valid() || host_data == nullptr || size_bytes == 0) {
+        return false;
+    }
+    if (buffers.deviceHasCurrent(field)) {
+        return true;
+    }
+    if (!compute->uploadBuffer(handle, host_data, size_bytes)) {
+        return false;
+    }
+    buffers.markDeviceCurrent(field);
+    return true;
+}
+
+// A download leaves both copies in agreement, so the device copy is still
+// current and the next stage may skip its upload. Callers keep their existing
+// downloadBuffer calls and add this afterwards.
+void gasNoteDownloaded(SimulationGridDomainComputeBuffers& buffers,
+                       GasGridField field) {
+    buffers.markDeviceCurrent(field);
+}
+
 bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
                               const GridFluid::SolverParams& params,
                               float dt,
@@ -4382,6 +4435,7 @@ bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
     // on persistent device buffers. Do not advertise residency after a readback:
     // later stages must upload the freshly projected CPU values.
     gpu_buffers.gpu_resident_fields_valid = false;
+    gpu_buffers.invalidateDeviceCopies();
     return ok;
 }
 
@@ -4427,9 +4481,12 @@ bool runGpuVelocityAdvection(FluidSim::FluidGrid& grid,
     }
     compute->beginTransferBatch();
     ok = ok &&
-         compute->uploadBuffer(buffers[0], grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-         compute->uploadBuffer(buffers[1], grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-         compute->uploadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelX, buffers[0],
+                           grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelY, buffers[1],
+                           grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelZ, buffers[2],
+                           grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
     if (!ok) {
         return false;
@@ -4471,10 +4528,36 @@ bool runGpuVelocityAdvection(FluidSim::FluidGrid& grid,
          compute->downloadBuffer(buffers[result_base + 0], grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
          compute->downloadBuffer(buffers[result_base + 1], grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
          compute->downloadBuffer(buffers[result_base + 2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
-    // The advected values live in scratch_vel_* and were copied into the CPU
-    // vectors above. The primary device velocity buffers still contain the
-    // pre-advection values, so they are not a valid resident source.
-    gpu_buffers.gpu_resident_fields_valid = false;
+
+    // ** THE RESULT IS IN SCRATCH, SO THE HANDLES ARE SWAPPED.
+    //
+    // The advected values live in scratch_vel_* (or scratch2_vel_* after the
+    // MacCormack pass) and were copied into the CPU vectors above. The PRIMARY
+    // device buffers still hold the pre-advection values, which is why this
+    // used to declare the device copy invalid outright - and why the next stage
+    // then re-uploaded all three face arrays.
+    //
+    // Swapping the handles makes the advected values the primary buffers in
+    // place, at zero transfer cost, so the device and host copies now agree and
+    // the next stage can skip its upload. The old primaries become scratch,
+    // which is what scratch means: nothing may carry scratch contents across a
+    // stage boundary.
+    if (ok) {
+        ComputeBufferHandle* scratch_x = (result_base == 6) ? &gpu_buffers.scratch2_vel_x
+                                                            : &gpu_buffers.scratch_vel_x;
+        ComputeBufferHandle* scratch_y = (result_base == 6) ? &gpu_buffers.scratch2_vel_y
+                                                            : &gpu_buffers.scratch_vel_y;
+        ComputeBufferHandle* scratch_z = (result_base == 6) ? &gpu_buffers.scratch2_vel_z
+                                                            : &gpu_buffers.scratch_vel_z;
+        std::swap(gpu_buffers.vel_x, *scratch_x);
+        std::swap(gpu_buffers.vel_y, *scratch_y);
+        std::swap(gpu_buffers.vel_z, *scratch_z);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
+        gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
+    } else {
+        gpu_buffers.invalidateDeviceCopies();
+    }
     return ok;
 }
 
@@ -4584,6 +4667,7 @@ bool runGpuGasInjection(FluidSim::FluidGrid& grid,
         compute->downloadBuffer(buffers[6], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
     gpu_buffers.gpu_resident_fields_valid = false;
+    gpu_buffers.invalidateDeviceCopies();
     return ok;
 }
 
@@ -4769,6 +4853,7 @@ bool runGpuCombustion(FluidSim::FluidGrid& grid,
         }
         if (ok) {
             gpu_buffers.gpu_resident_fields_valid = false;
+            gpu_buffers.invalidateDeviceCopies();
             return true;
         }
     }
@@ -4862,6 +4947,8 @@ bool runGpuBuoyancy(FluidSim::FluidGrid& grid,
                 (params.channel_density && grid.density.size() == n) ? 1 : 0;
             constants.has_temperature =
                 (params.channel_temperature && grid.temperature.size() == n) ? 1 : 0;
+            constants.stratification = params.ambient_stratification;
+            constants.voxel_size = grid.voxel_size;
             ComputeDispatch cmd;
             cmd.kernel = "sim_gas_buoyancy";
             cmd.buffers = buffers;
@@ -4884,6 +4971,7 @@ bool runGpuBuoyancy(FluidSim::FluidGrid& grid,
         }
         if (ok) {
             gpu_buffers.gpu_resident_fields_valid = false;
+            gpu_buffers.invalidateDeviceCopies();
             return true;
         }
     }
@@ -5065,6 +5153,7 @@ bool runGpuGasForceFields(
     ok = compute->endTransferBatch() && ok;
     if (ok) {
         gpu_buffers.gpu_resident_fields_valid = false;
+        gpu_buffers.invalidateDeviceCopies();
     }
     return ok;
 }
@@ -5143,6 +5232,7 @@ bool runGpuVorticity(FluidSim::FluidGrid& grid,
         compute->downloadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
     if (ok) gpu_buffers.gpu_resident_fields_valid = false;
+ gpu_buffers.invalidateDeviceCopies();
     return ok;
 }
 
@@ -5222,7 +5312,8 @@ bool runGpuTurbulence(FluidSim::FluidGrid& grid,
        compute->downloadBuffer(gather_buffers[1],grid.vel_y.data(),grid.vel_y.size()*sizeof(float)) &&
        compute->downloadBuffer(gather_buffers[2],grid.vel_z.data(),grid.vel_z.size()*sizeof(float));
     ok=compute->endTransferBatch() && ok;
-    if(ok) gpu_buffers.gpu_resident_fields_valid=false;
+    if(ok) gpu_buffers.gpu_resident_fields_valid = false;
+ gpu_buffers.invalidateDeviceCopies();
     return ok;
 }
 
@@ -5469,7 +5560,8 @@ bool runGpuColliderGasSource(FluidSim::FluidGrid& grid,
        compute->downloadBuffer(bufs[2],grid.fuel.data(),grid.fuel.size()*sizeof(float)) &&
        compute->downloadBuffer(bufs[3],grid.interaction.data(),grid.interaction.size()*sizeof(float));
     ok=compute->endTransferBatch()&&ok;
-    if(ok)b.gpu_resident_fields_valid=false;
+    if(ok)b.gpu_resident_fields_valid = false;
+b.invalidateDeviceCopies();
     return ok;
 }
 
@@ -5534,6 +5626,7 @@ bool runGpuVelocityDissipationClamp(FluidSim::FluidGrid& grid,
          compute->downloadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
     gpu_buffers.gpu_resident_fields_valid = false;
+    gpu_buffers.invalidateDeviceCopies();
     return ok;
 }
 
@@ -5556,12 +5649,27 @@ bool runGpuScalarAdvection(FluidSim::FluidGrid& grid,
     vel_buffers[2] = gpu_buffers.vel_z;
 
     bool ok = vel_buffers[0].valid() && vel_buffers[1].valid() && vel_buffers[2].valid();
-    if (!gpu_buffers.gpu_resident_fields_valid) {
-        ok = ok &&
-              compute->uploadBuffer(vel_buffers[0], grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
-              compute->uploadBuffer(vel_buffers[1], grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-              compute->uploadBuffer(vel_buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
-    }
+    // ***** THIS GATE USED TO BE gpu_resident_fields_valid, AND IT COULD NEVER
+    // BE TRUE *HERE*.
+    //
+    // That flag is real and does work - but only for consumers that run AFTER a
+    // step. It is set from `fields_published` at the very END of the step, when
+    // the scalar fields are uploaded for the RT bridge, and cleared again at the
+    // TOP of the next step. Scalar advection runs in between, so it read false
+    // on every step of every domain for the life of the flag: all three face
+    // arrays were re-uploaded immediately after velocity advection had just
+    // downloaded them.
+    //
+    // * The lesson is the gap between where a flag is SET and where it is READ,
+    // not that the flag was fake. Grepping for `= true` finds nothing here
+    // because the assignment is `= fields_published`.
+    ok = ok &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelX, vel_buffers[0],
+                           grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelY, vel_buffers[1],
+                           grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
+         gasEnsureOnDevice(compute, gpu_buffers, GasGridField::VelZ, vel_buffers[2],
+                           grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     if (!ok) {
         return false;
     }
@@ -7286,6 +7394,7 @@ void ParticleSimulationSystem::resetGridDomainStates() {
     // must not remain visible to the RT bridge.
     for (auto& buffers : grid_domain_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
+        buffers.invalidateDeviceCopies();
         buffers.fluid_combustion_state_needs_reset = true;
     }
 }
@@ -7302,6 +7411,7 @@ void ParticleSimulationSystem::setGridDomainStates(const std::vector<SimulationG
     // live solve republishes these persistent buffers normally.
     for (auto& buffers : grid_domain_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
+        buffers.invalidateDeviceCopies();
         buffers.fluid_combustion_state_needs_reset = true;
     }
 }
@@ -10222,6 +10332,42 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             params.turbulence_lacunarity = domain.turbulence_lacunarity;
             params.turbulence_persistence = domain.turbulence_persistence;
             params.turbulence_speed = domain.turbulence_speed;
+            // ** Asking for more octaves than the voxel can advect just adds
+            // grid-scale speckle. Clamp to what 4 cells per wavelength allows;
+            // the requested count is kept on the desc so the same scene resolves
+            // more detail when the domain is refined.
+            params.turbulence_octaves = RayTrophiSim::effectiveTurbulenceOctaves(
+                domain.turbulence_octaves, domain.turbulence_scale,
+                domain.turbulence_lacunarity, state.grid.voxel_size);
+
+            // ***** EVERYTHING BELOW WAS MISSING, AND EACH ONE IS A WHOLE
+            // FEATURE THAT SILENTLY DID NOTHING.
+            //
+            // The desc fields exist, the panel writes them, IPC reports them,
+            // the project file stores them and the bake signature hashes them -
+            // but nothing copied them into SolverParams, so the solver ran on
+            // its own defaults. `gas.get_settings` therefore reported values the
+            // solver never saw: the panel was telling the truth about the DESC
+            // and the truth about the desc was not the truth about the sim.
+            params.ambient_stratification = domain.gas_ambient_stratification;
+
+            // surface_dust_enabled defaults to FALSE in SolverParams, so the
+            // ground-dust rule had never executed once on any scene.
+            params.surface_dust_enabled = domain.gas_surface_dust_enabled;
+            params.surface_dust_threshold = domain.gas_surface_dust_threshold;
+            params.surface_dust_emission = domain.gas_surface_dust_emission;
+            params.surface_dust_temperature = domain.gas_surface_dust_temperature;
+            params.surface_dust_max_density = domain.gas_surface_dust_max_density;
+            params.surface_dust_supply = domain.gas_surface_dust_supply;
+
+            // Without this the domain inherits the global rates (0.5/s for smoke
+            // and heat alike), which are tuned for the thin smoke a spark
+            // carries and erase a detonation cloud within ten seconds.
+            if (domain.gas_dissipation_override) {
+                params.density_dissipation = domain.gas_density_dissipation;
+                params.temperature_dissipation = domain.gas_temperature_dissipation;
+                params.fuel_dissipation = domain.gas_fuel_dissipation;
+            }
         }
         params.channel_density = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Density);
         params.channel_temperature = hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Temperature);
@@ -10252,6 +10398,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         if (domain_has_solid && !gpu_collider_supported &&
             i < grid_domain_compute_buffers_.size()) {
             grid_domain_compute_buffers_[i].gpu_resident_fields_valid = false;
+            // Same reset for the per-field upload ledger: between steps the host
+            // may have been edited (panel, script, cache restore), so the device
+            // copies start the step unproven.
+            grid_domain_compute_buffers_[i].invalidateDeviceCopies();
         }
         state.gas_gpu_requested = is_gpu_backend;
         state.gas_gpu_active = false;
@@ -10513,6 +10663,20 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             GridFluid::step(state.grid, params, dt, context.force_snapshot,
                             context.time_seconds, &state.gas_stats.cpu);
         }
+        // ***** THE HOST SOLVER JUST WROTE THE GRID, SO EVERY DEVICE COPY IS
+        // STALE. This is the one invalidation the whole upload ledger depends
+        // on, and it is easy to miss because the failure is silent: the stages
+        // below would skip their uploads and advect the values from BEFORE
+        // boundaries + solids ran. Nothing crashes; the walls simply stop
+        // working and the domain leaks.
+        //
+        // * Blunt on purpose. GridFluid::step honours the skip_* flags above, so
+        // WHICH fields it wrote varies per step and per domain; enumerating them
+        // here would be a second copy of that logic, drifting from the first.
+        // Over-invalidating costs one upload, under-invalidating is wrong.
+        if (gpu_buffers) {
+            gpu_buffers->invalidateDeviceCopies();
+        }
         if (gpu_grid_ready) {
             gas_gpu_cursor = SimulationClock::now();
             bool gas_post_velocity_resident = false;
@@ -10721,47 +10885,156 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 ? state.grid.interaction.data() : nullptr;
             const uint8_t* solid = (want_counters && state.grid.solid.size() == cells)
                 ? state.grid.solid.data() : nullptr;
-            const std::size_t row = static_cast<std::size_t>(state.grid.nx);
-            const std::size_t slab = row * static_cast<std::size_t>(state.grid.ny);
-            for (std::size_t cell = 0; cell < cells; ++cell) {
-                if (dens) {
-                    const float value = dens[cell];
-                    if (value > 1e-4f) {
-                        ++state.active_density_cells;
-                        state.max_density = std::max(state.max_density, value);
-                        const int x = static_cast<int>(cell % row);
-                        const int y = static_cast<int>((cell / row) %
-                                                       static_cast<std::size_t>(state.grid.ny));
-                        const int z = static_cast<int>(cell / slab);
-                        state.active_density_min[0] = std::min(state.active_density_min[0], x);
-                        state.active_density_min[1] = std::min(state.active_density_min[1], y);
-                        state.active_density_min[2] = std::min(state.active_density_min[2], z);
-                        state.active_density_max[0] = std::max(state.active_density_max[0], x);
-                        state.active_density_max[1] = std::max(state.active_density_max[1], y);
-                        state.active_density_max[2] = std::max(state.active_density_max[2], z);
+            // **** MEASURED 2026-09-20: this scan was 115.52 ms, 22% of a
+            // 526 ms gas step - the single largest CPU item, and it computes
+            // nothing the solver needs, only what the panel reports plus the
+            // density bounds the RT bridge consumes. Two reasons it cost that
+            // much on 6.3M cells, and neither was memory bandwidth (~107 MB of
+            // reads should be ~11 ms):
+            //
+            //   1. It ran on ONE thread.
+            //   2. It recovered x/y/z from the flat index with an integer
+            //      divide and a modulo PER ACTIVE CELL - 508k of them.
+            //
+            // Both are gone: the walk is now nested z/y/x (the indices are loop
+            // counters, no division at all) and each z slab reduces into its own
+            // partial, so there is no cross-thread contention and no OpenMP
+            // reduction clause. MSVC OpenMP 2.0 has no max/min reduction, so
+            // per-slab partials are the portable form as well as the fast one.
+            //
+            // * The combine below runs in slab order, so the floating-point sums
+            // are deterministic run to run. They are NOT bit-identical to the
+            // old single-accumulator order; total_density in particular is a sum
+            // of 6.3M floats, and the partial-sum order is the more accurate one.
+            const int nx = state.grid.nx;
+            const int ny = state.grid.ny;
+            const int nz = state.grid.nz;
+
+            struct SlabPartial {
+                std::size_t active_density_cells = 0;
+                float max_density = 0.0f;
+                int min_x = 0, min_y = 0, min_z = 0;   // seeded per slab below
+                int max_x = -1, max_y = -1, max_z = -1;
+                double total_density = 0.0;
+                float max_temperature = 0.0f;
+                std::size_t active_fuel_cells = 0;
+                double total_fuel = 0.0;
+                std::size_t burning_cells = 0;
+                std::size_t solid_cells = 0;
+            };
+            std::vector<SlabPartial> partials(static_cast<std::size_t>(nz));
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+            for (int z = 0; z < nz; ++z) {
+                SlabPartial local;
+                // Same sentinel convention the caller uses for the domain-wide
+                // bounds: start past the far edge so the first active cell wins.
+                local.min_x = nx; local.min_y = ny; local.min_z = nz;
+                const std::size_t slab_base =
+                    static_cast<std::size_t>(z) * static_cast<std::size_t>(nx) *
+                    static_cast<std::size_t>(ny);
+                for (int y = 0; y < ny; ++y) {
+                    const std::size_t row_base =
+                        slab_base + static_cast<std::size_t>(y) *
+                                        static_cast<std::size_t>(nx);
+                    for (int x = 0; x < nx; ++x) {
+                        const std::size_t cell = row_base + static_cast<std::size_t>(x);
+                        if (dens) {
+                            const float value = dens[cell];
+                            if (value > 1e-4f) {
+                                ++local.active_density_cells;
+                                local.max_density = std::max(local.max_density, value);
+                                local.min_x = std::min(local.min_x, x);
+                                local.min_y = std::min(local.min_y, y);
+                                local.min_z = std::min(local.min_z, z);
+                                local.max_x = std::max(local.max_x, x);
+                                local.max_y = std::max(local.max_y, y);
+                                local.max_z = std::max(local.max_z, z);
+                            }
+                            local.total_density += static_cast<double>(value);
+                        }
+                        if (temp) {
+                            local.max_temperature =
+                                std::max(local.max_temperature, temp[cell]);
+                        }
+                        if (fuel && fuel[cell] > 1e-4f) {
+                            ++local.active_fuel_cells;
+                            local.total_fuel += static_cast<double>(fuel[cell]);
+                        }
+                        if (flame && flame[cell] > 1e-3f) ++local.burning_cells;
+                        if (solid && solid[cell] != 0u) ++local.solid_cells;
                     }
-                    state.gas_stats.total_density += value;
                 }
-                if (temp) {
-                    state.gas_stats.max_temperature =
-                        std::max(state.gas_stats.max_temperature, temp[cell]);
-                }
-                if (fuel && fuel[cell] > 1e-4f) {
-                    ++state.gas_stats.active_fuel_cells;
-                    state.gas_stats.total_fuel += fuel[cell];
-                }
-                if (flame && flame[cell] > 1e-3f) ++state.gas_stats.burning_cells;
-                if (solid && solid[cell] != 0u) ++state.gas_stats.solid_cells;
+                partials[static_cast<std::size_t>(z)] = local;
             }
+
+            double total_density_sum = 0.0;
+            double total_fuel_sum = 0.0;
+            for (std::size_t slab = 0; slab < partials.size(); ++slab) {
+                const SlabPartial& partial = partials[slab];
+                state.active_density_cells += partial.active_density_cells;
+                state.max_density = std::max(state.max_density, partial.max_density);
+                // * A slab with no active cell keeps its sentinel bounds, which
+                //   would otherwise pull the domain minimum to INT_MAX. max_x
+                //   stays -1 exactly when the slab found nothing, so it is the
+                //   one safe test for "this partial has bounds to contribute".
+                if (partial.max_x >= 0) {
+                    state.active_density_min[0] = std::min(state.active_density_min[0], partial.min_x);
+                    state.active_density_min[1] = std::min(state.active_density_min[1], partial.min_y);
+                    state.active_density_min[2] = std::min(state.active_density_min[2], partial.min_z);
+                    state.active_density_max[0] = std::max(state.active_density_max[0], partial.max_x);
+                    state.active_density_max[1] = std::max(state.active_density_max[1], partial.max_y);
+                    state.active_density_max[2] = std::max(state.active_density_max[2], partial.max_z);
+                }
+                total_density_sum += partial.total_density;
+                state.gas_stats.max_temperature =
+                    std::max(state.gas_stats.max_temperature, partial.max_temperature);
+                state.gas_stats.active_fuel_cells += partial.active_fuel_cells;
+                total_fuel_sum += partial.total_fuel;
+                state.gas_stats.burning_cells += partial.burning_cells;
+                state.gas_stats.solid_cells += partial.solid_cells;
+            }
+            state.gas_stats.total_density += static_cast<float>(total_density_sum);
+            state.gas_stats.total_fuel += static_cast<float>(total_fuel_sum);
         }
         if (want_counters) {
             state.gas_stats.cell_count = cells;
-            // Peak face speed for the CFL number. Three face arrays, so this is
-            // the one part that cannot ride the cell loop above.
-            float max_abs_face = 0.0f;
-            for (float v : state.grid.vel_x) max_abs_face = std::max(max_abs_face, std::abs(v));
-            for (float v : state.grid.vel_y) max_abs_face = std::max(max_abs_face, std::abs(v));
-            for (float v : state.grid.vel_z) max_abs_face = std::max(max_abs_face, std::abs(v));
+            // Peak face speed for the CFL number. Face arrays, so this cannot
+            // ride the cell loop above: ~19M floats, previously three serial
+            // walks.
+            // Same chunked-partial shape as the cell scan above; max is
+            // order-independent, so this one IS bit-identical to the old result.
+            auto parallelMaxAbs = [](const std::vector<float>& values) -> float {
+                const std::ptrdiff_t n = static_cast<std::ptrdiff_t>(values.size());
+                if (n <= 0) return 0.0f;
+                const std::ptrdiff_t kChunk = 65536;
+                const std::ptrdiff_t chunks = (n + kChunk - 1) / kChunk;
+                std::vector<float> chunk_max(static_cast<std::size_t>(chunks), 0.0f);
+                const float* data = values.data();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+                for (std::ptrdiff_t c = 0; c < chunks; ++c) {
+                    const std::ptrdiff_t begin = c * kChunk;
+                    const std::ptrdiff_t end = std::min(begin + kChunk, n);
+                    float local = 0.0f;
+                    for (std::ptrdiff_t i = begin; i < end; ++i) {
+                        local = std::max(local, std::abs(data[i]));
+                    }
+                    chunk_max[static_cast<std::size_t>(c)] = local;
+                }
+                float result = 0.0f;
+                for (std::size_t c = 0; c < chunk_max.size(); ++c) {
+                    result = std::max(result, chunk_max[c]);
+                }
+                return result;
+            };
+            const float max_abs_face =
+                std::max(parallelMaxAbs(state.grid.vel_x),
+                         std::max(parallelMaxAbs(state.grid.vel_y),
+                                  parallelMaxAbs(state.grid.vel_z)));
             state.gas_stats.max_speed = max_abs_face;
             const float h = state.grid.voxel_size > 1e-6f ? state.grid.voxel_size : 1.0f;
             state.gas_stats.cfl = max_abs_face * dt / h;
@@ -12078,6 +12351,7 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         // Device-resident fields belong to the old grid; the RT bridge must not
         // keep presenting them while the new layout fills in.
         buffers.gpu_resident_fields_valid = false;
+        buffers.invalidateDeviceCopies();
     }
 
     buffers.resolution_x = grid.nx;

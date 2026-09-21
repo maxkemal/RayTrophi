@@ -1,0 +1,112 @@
+#version 460
+
+// RayFusion — yansima deltasinin ROUGHNESS-ORANLI filtresi ve HDR kompoziti.
+//
+// ★★★★★ NEDEN AYRI BIR GECIS, ve neden yaricap roughness'la olcekleniyor:
+//
+//   Yansima gurultusunun kaynagi ISKALAMA degil ISABET. Iskalayan isin
+//   prefiltered env'i roughness'a uygun mip'ten okuyor, yani varyansi sifir.
+//   Isabet eden isin ise lobun ICINDE bir yon seciyor: roughness 0,15'te
+//   alpha 0,02 ve lob birkac derece -- ama roughness 0,30'da alpha 0,09 ve lob
+//   ~20 derece. Kontrastli bir sahnenin 20 derecelik konisinden TEK ornek,
+//   yapisal olarak gurultuludur; ornek sayisini artirmak bunu ancak sqrt(N) ile
+//   iyilestirir.
+//
+// ★★★ Cozum lobun KENDI EKRAN AYAK IZINI kullanmak: yaricap roughness ile
+//   buyur. Ve bunun tersi de sart -- AYNADA YARICAP SIFIR. Bir aynayi
+//   bulanistirmak onu ayna olmaktan cikarir, ve bu "gurultu azaldi" diye
+//   raporlanip "yansimalar neden bulanik" diye geri gelir. radius == 0 yolunda
+//   hic tap atilmaz, delta dogrudan kompozit edilir.
+//
+// ★★ Yaricap KAPIYA gore normalize edilir (`pc.params.w` = roughness kapisi),
+//   sabit bir roughness'a gore degil: kullanici kapiyi buyutunce filtre onunla
+//   birlikte buyumek zorunda, yoksa kapinin ustundeki her yeni piksel
+//   filtresiz -- yani en gurultulu haliyle -- gelir.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 3)  uniform sampler2D rfDepth;
+layout(set = 0, binding = 9)  uniform sampler2D rfGbufferNormal;
+layout(set = 0, binding = 10) uniform sampler2D rfGbufferSpecular;
+layout(set = 0, binding = 11, rgba16f) uniform image2D rfHdrColor;
+
+// Trace gecisinin yazdigi delta. ★ Yarim hassasiyette paketli (piksel basina 8
+//   bayt, 16 degil): bu bir HDR goruntuye EKLENECEK bir fark ve 4K'da tam
+//   hassasiyet 133 MB, yarim 66 MB eder. Deltanin kendisi zaten bir tahmin.
+struct RfReflectionDelta { uvec2 packed; };
+layout(set = 0, binding = 13, std430) readonly buffer RfReflectionDeltas {
+    RfReflectionDelta rfDeltas[];
+};
+
+layout(push_constant) uniform Push {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 params;   // x tmin tabani, y agirlik kapisi, z max mesafe, w roughness kapisi
+    vec4 params2;
+    uvec4 shape;   // width, height, ornek sayisi, env mip sayisi
+} pc;
+
+#include "rayfusion_reflection_gbuffer.glsl"
+
+const int kMaxRadius = 3;
+
+bool rfLoadDelta(ivec2 pixel, out vec3 delta) {
+    delta = vec3(0.0);
+    if (any(lessThan(pixel, ivec2(0))) || any(greaterThanEqual(pixel, ivec2(pc.shape.xy))))
+        return false;
+    RfReflectionDelta record = rfDeltas[uint(pixel.y) * pc.shape.x + uint(pixel.x)];
+    vec2 rg = unpackHalf2x16(record.packed.x);
+    vec2 bv = unpackHalf2x16(record.packed.y);
+    if (bv.y < 0.5) return false;  // bu pikselde yansima yok
+    delta = vec3(rg, bv.x);
+    return !any(isnan(delta)) && !any(isinf(delta));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(pc.shape.xy)))) return;
+
+    vec3 delta;
+    if (!rfLoadDelta(pixel, delta)) return;
+
+    float roughness = clamp(texelFetch(rfGbufferSpecular, pixel, 0).a, 0.0, 1.0);
+    float gate = max(pc.params.w, 1e-4);
+    int radius = int(floor(float(kMaxRadius) * clamp(roughness / gate, 0.0, 1.0) + 0.5));
+
+    if (radius > 0) {
+        float depth = texelFetch(rfDepth, pixel, 0).r;
+        vec3 normal = rfOctDecodeNormal(texelFetch(rfGbufferNormal, pixel, 0).xy);
+        vec3 sum = delta;
+        float weights = 1.0;
+        for (int y = -radius; y <= radius; ++y)
+        for (int x = -radius; x <= radius; ++x) {
+            if (x == 0 && y == 0) continue;
+            ivec2 q = pixel + ivec2(x, y);
+            vec3 neighbour;
+            if (!rfLoadDelta(q, neighbour)) continue;
+            // ★ Kenar duyarli: SILUET gecmeyen ve ayni duzleme bakan komsular.
+            //   Derinlik farkini goreli olcuyoruz, cunku mutlak bir esik yakinda
+            //   dogru uzakta yanlis olur -- geri kurulmus derinligin hatasi
+            //   mesafeyle z^2 gibi buyur (ayni ders tmin'de odendi).
+            float neighbourDepth = texelFetch(rfDepth, q, 0).r;
+            if (abs(neighbourDepth - depth) > 0.01 * max(depth, 1e-4)) continue;
+            vec3 neighbourNormal = rfOctDecodeNormal(texelFetch(rfGbufferNormal, q, 0).xy);
+            float facing = dot(normal, neighbourNormal);
+            if (facing < 0.9) continue;
+            // ★ Komsunun roughness'i COK farkliysa lobu da farklidir: keskin bir
+            //   aynanin yanindaki kaba yuzeyden deger cekmek, aynayi
+            //   bulanistirmanin dolayli yoludur.
+            float neighbourRoughness = clamp(texelFetch(rfGbufferSpecular, q, 0).a, 0.0, 1.0);
+            if (abs(neighbourRoughness - roughness) > 0.5 * gate) continue;
+            float weight = exp(-float(x * x + y * y) * 0.35) * facing;
+            sum += neighbour * weight;
+            weights += weight;
+        }
+        delta = sum / weights;
+    }
+
+    vec4 current = imageLoad(rfHdrColor, pixel);
+    // `reference` fragment shader'in EKLEDIGI terimdi, yani geri cikarmak
+    // matematiksel olarak guvenli; bu kirpma o sozlesmenin ikinci savunma hatti.
+    imageStore(rfHdrColor, pixel, vec4(max(current.rgb + delta, vec3(0.0)), current.a));
+}

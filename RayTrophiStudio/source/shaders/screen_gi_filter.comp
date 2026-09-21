@@ -1,0 +1,203 @@
+#version 460
+layout(local_size_x=8,local_size_y=8) in;
+struct GiPixel { vec4 light; vec4 surface; vec4 aux; };
+layout(set=0,binding=1,std430) readonly buffer RawGi { uvec4 rawMeta; GiPixel raw[]; };
+layout(set=0,binding=9,std430) writeonly buffer FilteredGi { uvec4 meta; GiPixel filtered[]; };
+// ★★★★★ OLCUM TAMPONU. Bu geciste binding 10 daha once BOS BIR YER TUTUCUYDU
+//   (layout'ta beyan edilmis, gecerli bir tamponla doldurulmus, hic okunmamis).
+//   Simdi ambient'in neden fazla parlak oldugunu SORULABILIR yapan sayaclari
+//   tasiyor.
+// ★★★ PIKSELLERIN 1/64'U ornege girer. Her piksel icin atomicAdd yapmak bu
+//   gecisi bir atomik sicak noktaya cevirirdi -- ve olctugu seyi degistiren bir
+//   enstruman olcum degildir. 1680x945'te ~25 bin ornek, ortalamanin hatasi
+//   binde birin altinda.
+layout(set=0,binding=10,std430) buffer GiStats {
+    uint visSumQ;      // sum(gorunurluk * 4096)
+    uint visCount;     // gorunurluk verdikti olan piksel
+    uint fullConf;     // light.w >= 1 olan piksel  <-- 1. hipotez
+    uint anyConf;      // light.w > 0 olan piksel
+    uint sampled;      // ornege giren toplam piksel (payda)
+    uint lumSumQ;      // sum(suzulmus GI luminansi * 1024)
+    // Kendi olcumu OLMAYAN ama komsudan DOLDURULAN piksel. Ayri sayilir ve
+    // `visCount`a KARISTIRILMAZ: kapsama orani "kendi olcumu olan" demeye
+    // devam etmeli, yoksa doldurmanin ne kadar is yaptigi gorunmez olur --
+    // yani duzeltme kendi olcu aletini bozardi.
+    uint visFilled;
+    uint reserved1;
+} giStats;
+layout(push_constant) uniform Push { mat4 invViewProj; vec4 params; vec4 params2; uvec4 shape; } pc;
+vec3 worldAt(ivec2 p,float z) {
+    vec4 h=pc.invViewProj*vec4((vec2(p)+0.5)/vec2(pc.shape.xy)*2.0-1.0,z,1);
+    return h.xyz/h.w;
+}
+float giLuminance(vec3 c) { return dot(c,vec3(0.2126,0.7152,0.0722)); }
+
+// ★★★★★ FIREFLY REDDI, ve bu filtrenin neden gurultuyu BUYUTTUGU.
+//
+//   Bu bir blur: tek parlak bir ornegi reddetmek yerine 25 piksele YAYAR. Yani
+//   luminance kesmesi olmayan bir kenar duyarli blur, bir gurultulu ornegi
+//   gorunur bir LEKEYE cevirir. Belirtisi "gurultu" degil "lekeli aydinlatma"
+//   olur ve blur'un kendisi suclu gibi gorunmez.
+//
+// ★★★ Iki gecis kullaniliyor, ve tek gecisli hicbir varyant bunu dogru yapmaz:
+//   esigi merkezin luminansina kurmak, merkez firefly oldugunda ise yaramaz;
+//   yuruyen ortalamaya kurmak ise SIRAYA BAGLI olur (ayni komsu kumesi,
+//   tarama yonune gore farkli sonuc verir). Ilk gecis komsulugun agirlikli
+//   ortalama luminansini olcer, ikincisi her ornegi onun katina kirpar.
+// ★★ Bedeli OLCULUYOR, tahmin edilmiyor: tap sayisi iki katina cikti ve bu
+//   gecis kendi RasterStage'inde (screen_gi_filter) zaten ayri raporlaniyor.
+const float kGiFireflyFactor = 4.0;
+
+// Ornekleyici + sayaclar. `light.w<=0` ile erken donen piksellerin de sayilmasi
+// SART: "hicbir ornegi golgelendirilemedi" tam olarak olcmek istedigimiz durum.
+void giAccumulateStats(ivec2 p,GiPixel center,vec3 filteredLight) {
+    if ((p.x & 7) != 0 || (p.y & 7) != 0) return;
+    atomicAdd(giStats.sampled,1u);
+    if (center.surface.w>=1.0) return;   // bu pikselde yuzey yok: olcum de yok
+    if (center.aux.y>0.0) {
+        atomicAdd(giStats.visSumQ,uint(clamp(center.aux.x,0.0,1.0)*4096.0));
+        atomicAdd(giStats.visCount,1u);
+    } else if (center.surface.w<1.0) {
+        // Yuzey VAR ama verdikt YOK: doldurmanin aday havuzu tam olarak bu.
+        atomicAdd(giStats.visFilled,1u);
+    }
+    if (center.light.w>0.0) atomicAdd(giStats.anyConf,1u);
+    if (center.light.w>=0.999) atomicAdd(giStats.fullConf,1u);
+    atomicAdd(giStats.lumSumQ,uint(clamp(giLuminance(filteredLight),0.0,64.0)*1024.0));
+}
+
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p,ivec2(pc.shape.xy)))) return;
+    uint i=uint(p.y)*pc.shape.x+uint(p.x);
+    GiPixel center=raw[i];
+    filtered[i]=center; // center depth is NEVER filtered
+    // ★★★★★ Gorunurluk, ISIK GUVENINDEN ONCE ve ONDAN BAGIMSIZ suzulur.
+    //   Eski sira burada `light.w<=0` ile donuyordu -- yani hicbir ornegi
+    //   golgelendirilemeyen piksel filtreyi hic gormuyordu. Oysa gokyuzu
+    //   gorunurlugune EN COK ihtiyaci olan piksel tam olarak odur: radyansi
+    //   bilinmiyor ama onunu bir duvarin kestigi OLCULMUS durumda.
+    vec3 world=worldAt(p,center.surface.w);
+    vec3 n=center.surface.xyz;
+    ivec2 next=min(p+ivec2(1,0),ivec2(pc.shape.xy)-1);
+    float footprint=max(length(worldAt(next,center.surface.w)-world),0.001);
+    int radius=int(pc.shape.w);
+
+    // ── GORUNURLUK FILTRESI ─────────────────────────────────────────────────
+    // Firefly kirpmasi YOK ve gerekmiyor: gorunurluk [0,1] araliginda sinirli
+    // bir skalerdir, bir ornek ortalamayi ele geciremez. Ayni kenar duyarli
+    // agirliklar, ama agirlik ISIK guveni degil GORUNURLUK guvenidir.
+    if (center.aux.y>0.0) {
+        float visSum=center.aux.x*center.aux.y;
+        float visWeights=center.aux.y;
+        for (int y=-radius;y<=radius;++y) for (int x=-radius;x<=radius;++x) {
+            if (x==0 && y==0) continue;
+            ivec2 q=p+ivec2(x,y);
+            if (any(lessThan(q,ivec2(0))) || any(greaterThanEqual(q,ivec2(pc.shape.xy)))) continue;
+            GiPixel sv=raw[uint(q.y)*pc.shape.x+uint(q.x)];
+            if (sv.aux.y<=0.0) continue;
+            vec3 delta=worldAt(q,sv.surface.w)-world;
+            float normalWeight=pow(max(dot(n,sv.surface.xyz),0.0),32.0);
+            float plane=max(abs(dot(n,delta)),abs(dot(sv.surface.xyz,delta)));
+            float w=normalWeight*exp(-plane/(footprint*0.5))*exp(-float(x*x+y*y)*0.25)*sv.aux.y;
+            visSum+=sv.aux.x*w; visWeights+=w;
+        }
+        filtered[i].aux=vec4(visWeights>0.0?visSum/visWeights:center.aux.x,
+                             center.aux.y,0.0,0.0);
+    } else if (center.surface.w<1.0) {
+        // ★★★★★ KENDI OLCUMU OLMAYAN PIKSEL. Eski hali burada hicbir sey
+        //   yapmiyordu, ve bu bir eksiklik degil bir ARIZAYDI: tuketici
+        //   `aux.y<=0` gorunce reddediyor, probe tahminine dusuyor, problar
+        //   kapaliysa o da 1.0 donuyordu. Yani "olcemedim" sessizce
+        //   "gokyuzune tamamen acik"a donusuyordu -- mumkun olan EN PARLAK
+        //   cevap, ve tam olarak bildirilen belirti: "gokyuzu rengi dogrudan
+        //   aydinlatilmayan yuzeyleri boyuyor".
+        //
+        // ★★★★ Gorunurluk YUMUSAK ve yavas degisen bir alandir; komsudan
+        //   tasimak radyans tasimaktan cok daha dusuk riskli (radyans
+        //   tasimak gorunur bir isik sizintisi olurdu, ve asagidaki isik
+        //   filtresi bu yuzden komsudan DOLDURMUYOR).
+        //
+        // ★★★ Sonuc bir OLCUM DEGIL, o yuzden oyle isaretleniyor: aux.z=1
+        //   "bu deger komsudan dolduruldu" der ve aux.y dusuk bir guvenle
+        //   yazilir. Doldurulmus bir degeri olculmus gibi yayinlamak, bu
+        //   deponun en pahali hata sinifini (panelin yalan soylemesi) shader
+        //   tarafinda tekrarlamak olurdu.
+        float visSum=0.0, visWeights=0.0;
+        for (int y=-radius;y<=radius;++y) for (int x=-radius;x<=radius;++x) {
+            if (x==0 && y==0) continue;
+            ivec2 q=p+ivec2(x,y);
+            if (any(lessThan(q,ivec2(0))) || any(greaterThanEqual(q,ivec2(pc.shape.xy)))) continue;
+            GiPixel sv=raw[uint(q.y)*pc.shape.x+uint(q.x)];
+            if (sv.aux.y<=0.0 || sv.surface.w>=1.0) continue;
+            vec3 delta=worldAt(q,sv.surface.w)-world;
+            float normalWeight=pow(max(dot(n,sv.surface.xyz),0.0),32.0);
+            float plane=max(abs(dot(n,delta)),abs(dot(sv.surface.xyz,delta)));
+            float w=normalWeight*exp(-plane/(footprint*0.5))*exp(-float(x*x+y*y)*0.25)*sv.aux.y;
+            visSum+=sv.aux.x*w; visWeights+=w;
+        }
+        // Hicbir komsu konusamadiysa HICBIR SEY yazilmaz: aux.y 0 kalir ve
+        // tuketici reddeder. Uydurmak, duzeltmenin kendisini yalanci yapardi.
+        if (visWeights>0.0)
+            filtered[i].aux=vec4(visSum/visWeights,
+                                 min(visWeights,1.0),   // dusuk guven, dogru sekilde
+                                 1.0,                   // DOLDURULDU isareti
+                                 0.0);
+    }
+    if (center.light.w<=0.0) { giAccumulateStats(p,center,vec3(0)); return; } // never fill from neighbors
+
+    // ── 1. GECIS: komsulugun agirlikli ortalama luminansi ────────────────────
+    // Merkez DAHIL: merkezin kendisi firefly ise onu da kirpmak istiyoruz, ve
+    // tek bir ornek 25'lik bir kumenin ortalamasini esigin ustune cikaramaz.
+    float meanWeight=center.light.w;
+    float meanSum=giLuminance(center.light.rgb)*center.light.w;
+    for (int y=-radius;y<=radius;++y) for (int x=-radius;x<=radius;++x) {
+        if (x==0 && y==0) continue;
+        ivec2 q=p+ivec2(x,y);
+        if (any(lessThan(q,ivec2(0))) || any(greaterThanEqual(q,ivec2(pc.shape.xy)))) continue;
+        GiPixel sampleValue=raw[uint(q.y)*pc.shape.x+uint(q.x)];
+        if (sampleValue.light.w<=0.0) continue;
+        vec3 delta=worldAt(q,sampleValue.surface.w)-world;
+        float normalWeight=pow(max(dot(n,sampleValue.surface.xyz),0.0),32.0);
+        float plane=max(abs(dot(n,delta)),abs(dot(sampleValue.surface.xyz,delta)));
+        float weight=normalWeight*exp(-plane/(footprint*0.5))*exp(-float(x*x+y*y)*0.25)*sampleValue.light.w;
+        meanSum+=giLuminance(sampleValue.light.rgb)*weight;
+        meanWeight+=weight;
+    }
+    // ★ Esik YOK ise kirpma da yok: butun komsuluk sifirsa (tamamen golgede bir
+    //   yuzey) bir esik UYDURMAK, gercek bir sifiri kirpilmis bir deger gibi
+    //   gostermek olurdu.
+    float meanLuminance=meanWeight>0.0?meanSum/meanWeight:0.0;
+    float ceiling=meanLuminance*kGiFireflyFactor;
+    bool clampActive=ceiling>0.0;
+
+    // ── 2. GECIS: kirparak topla ────────────────────────────────────────────
+    // Kirpma RENGI korur, yalnizca siddeti iner: kanallari ayri ayri kirpmak
+    // parlak bir kirmizi firefly'i SARIYA cevirirdi.
+    vec3 centerLight=center.light.rgb;
+    if (clampActive) {
+        float lum=giLuminance(centerLight);
+        if (lum>ceiling) centerLight*=ceiling/lum;
+    }
+    vec3 sum=centerLight*center.light.w; float weights=center.light.w;
+    for (int y=-radius;y<=radius;++y) for (int x=-radius;x<=radius;++x) {
+        if (x==0 && y==0) continue;
+        ivec2 q=p+ivec2(x,y);
+        if (any(lessThan(q,ivec2(0))) || any(greaterThanEqual(q,ivec2(pc.shape.xy)))) continue;
+        GiPixel sampleValue=raw[uint(q.y)*pc.shape.x+uint(q.x)];
+        if (sampleValue.light.w<=0.0) continue;
+        vec3 delta=worldAt(q,sampleValue.surface.w)-world;
+        float normalWeight=pow(max(dot(n,sampleValue.surface.xyz),0.0),32.0);
+        float plane=max(abs(dot(n,delta)),abs(dot(sampleValue.surface.xyz,delta)));
+        float weight=normalWeight*exp(-plane/(footprint*0.5))*exp(-float(x*x+y*y)*0.25)*sampleValue.light.w;
+        vec3 light=sampleValue.light.rgb;
+        if (clampActive) {
+            float lum=giLuminance(light);
+            if (lum>ceiling) light*=ceiling/lum;
+        }
+        sum+=light*weight; weights+=weight;
+    }
+    filtered[i].light=vec4(sum/weights,center.light.w); // preserve this pixel's fallback fraction
+
+    giAccumulateStats(p,center,sum/weights);
+}

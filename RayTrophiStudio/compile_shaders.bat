@@ -32,8 +32,8 @@ for %%f in (%SHADER_DIR%\*.comp) do (
     echo   OK: %%~nf.spv
 )
 
-REM Compile raster shaders (.vert, .frag)
-for %%e in (vert frag) do (
+REM Compile raster shaders (.vert, .frag, .geom)
+for %%e in (vert frag geom) do (
     for %%f in (%SHADER_DIR%\*.%%e) do (
         echo Compiling: %%~nxf
         "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 -O
@@ -54,6 +54,10 @@ for %%e in (vert frag) do (
 )
 
 REM Compile ray tracing shaders (.rgen, .rmiss, .rchit, .rahit, .rint)
+REM Same material shader, explicit early tests for exact prepass coverage only.
+"%GLSLC%" "%SHADER_DIR%\material_preview_frag.frag" -DPREVIEW_COVERED_SHADING=1 -o "%OUTPUT_DIR%\material_preview_covered.spv" --target-env=vulkan1.3 -O
+if errorlevel 1 goto :error
+
 for %%e in (rgen rmiss rchit rahit rint) do (
     for %%f in (%SHADER_DIR%\*.%%e) do (
         REM Skip shadow_anyhit.rchit — superseded by shadow_anyhit.rahit (correct any-hit stage)
@@ -112,11 +116,9 @@ for %%p in ("%OUT1%" "%OUT2%" "%OUT3%") do (
     )
 )
 echo Deploy complete.
-pause
 exit /b 0
 
 :error
 echo.
 echo ===== Compilation FAILED =====
-pause
 exit /b 1

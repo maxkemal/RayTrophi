@@ -1,0 +1,417 @@
+<div id="rt-rig-concept" aria-label="RayTrophi rig control interface concept">
+  <style>
+    #rt-rig-concept {
+      color: light-dark(#1e232b, #e8edf5);
+      font-family: Inter, system-ui, sans-serif;
+      color-scheme: light dark;
+    }
+    #rt-rig-concept .rt-window {
+      min-height: 610px;
+      overflow: hidden;
+      border: 1px solid light-dark(#c7ced8, #323945);
+      border-radius: 10px;
+      background: light-dark(#eef1f5, #161a20);
+      display: grid;
+      grid-template-columns: 46px minmax(360px, 1fr) 270px;
+      grid-template-rows: 42px 1fr 92px;
+    }
+    #rt-rig-concept .rt-top {
+      grid-column: 1 / 4;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 12px;
+      border-bottom: 1px solid light-dark(#c7ced8, #323945);
+      background: light-dark(#f8fafc, #20252d);
+    }
+    #rt-rig-concept .rt-brand {
+      font-weight: 500;
+      margin-right: auto;
+    }
+    #rt-rig-concept .rt-mode {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #rt-rig-concept .rt-rail {
+      grid-row: 2 / 4;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 5px;
+      border-right: 1px solid light-dark(#c7ced8, #323945);
+      background: light-dark(#e4e8ee, #1c2128);
+    }
+    #rt-rig-concept .rt-rail button {
+      width: 34px;
+      height: 34px;
+    }
+    #rt-rig-concept .rt-view {
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(light-dark(#c7ccd4, #2a3039) 1px, transparent 1px),
+        linear-gradient(90deg, light-dark(#c7ccd4, #2a3039) 1px, transparent 1px),
+        light-dark(#d9dee5, #242a32);
+      background-size: 36px 36px;
+    }
+    #rt-rig-concept .rt-view-tools {
+      position: absolute;
+      z-index: 8;
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    #rt-rig-concept .rt-tool-group {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    #rt-rig-concept .rt-stage {
+      position: absolute;
+      inset: 62px 20px 18px;
+    }
+    #rt-rig-concept .rt-body {
+      position: absolute;
+      width: 190px;
+      height: 390px;
+      left: 50%;
+      top: 48%;
+      transform: translate(-50%, -50%);
+      opacity: .72;
+    }
+    #rt-rig-concept .rt-head,
+    #rt-rig-concept .rt-torso,
+    #rt-rig-concept .rt-pelvis,
+    #rt-rig-concept .rt-limb {
+      position: absolute;
+      background: light-dark(#8993a2, #697586);
+    }
+    #rt-rig-concept .rt-head {
+      width: 42px;
+      height: 50px;
+      border-radius: 48%;
+      left: 74px;
+      top: 0;
+    }
+    #rt-rig-concept .rt-torso {
+      width: 82px;
+      height: 126px;
+      border-radius: 36px 36px 22px 22px;
+      left: 54px;
+      top: 58px;
+    }
+    #rt-rig-concept .rt-pelvis {
+      width: 78px;
+      height: 48px;
+      border-radius: 18px 18px 28px 28px;
+      left: 56px;
+      top: 176px;
+    }
+    #rt-rig-concept .rt-limb {
+      height: 18px;
+      border-radius: 9px;
+      transform-origin: 9px 9px;
+    }
+    #rt-rig-concept .rt-arm-left { width: 116px; left: 22px; top: 76px; transform: rotate(155deg); }
+    #rt-rig-concept .rt-arm-right { width: 116px; left: 52px; top: 76px; transform: rotate(25deg); }
+    #rt-rig-concept .rt-leg-left { width: 166px; left: 70px; top: 208px; transform: rotate(97deg); }
+    #rt-rig-concept .rt-leg-right { width: 166px; left: 102px; top: 208px; transform: rotate(83deg); }
+    #rt-rig-concept .rt-control {
+      position: absolute;
+      z-index: 5;
+      min-width: 34px;
+      min-height: 34px;
+      border: 2px solid currentColor;
+      background: transparent;
+      color: light-dark(#276fa7, #65b7f2);
+      display: grid;
+      place-items: center;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    #rt-rig-concept .rt-control[data-side="right"] { color: light-dark(#a84646, #ff8585); }
+    #rt-rig-concept .rt-control[data-side="center"] { color: light-dark(#8a6c05, #f0cf59); }
+    #rt-rig-concept .rt-control.is-selected {
+      color: light-dark(#bd6500, #ffad42);
+      background: light-dark(rgba(255, 173, 66, .13), rgba(255, 173, 66, .1));
+    }
+    #rt-rig-concept .rt-control[data-pinned="true"] { box-shadow: inset 0 0 0 2px light-dark(#21956a, #65d6a6); }
+    #rt-rig-concept .rt-hand { border-radius: 7px; }
+    #rt-rig-concept .rt-foot { width: 50px; border-radius: 16px 5px 5px 16px; }
+    #rt-rig-concept .rt-ring { border-radius: 50%; }
+    #rt-rig-concept .rt-diamond { transform: rotate(45deg); border-radius: 3px; }
+    #rt-rig-concept .rt-diamond span { transform: rotate(-45deg); }
+    #rt-rig-concept .rt-root { left: calc(50% - 42px); top: 82%; width: 84px; border-radius: 50%; }
+    #rt-rig-concept .rt-chest { left: calc(50% - 22px); top: 29%; width: 44px; border-radius: 50%; }
+    #rt-rig-concept .rt-head-control { left: calc(50% - 18px); top: 12%; border-radius: 50%; }
+    #rt-rig-concept .rt-left-hand { left: calc(50% - 142px); top: 35%; }
+    #rt-rig-concept .rt-right-hand { left: calc(50% + 108px); top: 35%; }
+    #rt-rig-concept .rt-left-foot { left: calc(50% - 72px); top: 87%; }
+    #rt-rig-concept .rt-right-foot { left: calc(50% + 23px); top: 87%; }
+    #rt-rig-concept .rt-left-pole { left: calc(50% - 116px); top: 53%; }
+    #rt-rig-concept .rt-right-pole { left: calc(50% + 82px); top: 53%; }
+    #rt-rig-concept .rt-dock {
+      grid-column: 3;
+      grid-row: 2 / 4;
+      padding: 12px;
+      border-left: 1px solid light-dark(#c7ced8, #323945);
+      background: light-dark(#f4f6f9, #1d2229);
+    }
+    #rt-rig-concept .rt-dock h3 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      font-weight: 500;
+    }
+    #rt-rig-concept .rt-muted {
+      color: light-dark(#626c79, #9ba6b5);
+      font-size: 12px;
+    }
+    #rt-rig-concept .rt-section {
+      padding: 12px 0;
+      border-bottom: 1px solid light-dark(#d4dae2, #343b46);
+    }
+    #rt-rig-concept .rt-section:last-child { border-bottom: 0; }
+    #rt-rig-concept .rt-field {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    #rt-rig-concept .rt-segment {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      margin-top: 8px;
+    }
+    #rt-rig-concept .rt-status {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+    #rt-rig-concept .rt-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: light-dark(#21956a, #65d6a6);
+    }
+    #rt-rig-concept .rt-timeline {
+      grid-column: 2;
+      grid-row: 3;
+      padding: 10px 12px;
+      border-top: 1px solid light-dark(#c7ced8, #323945);
+      background: light-dark(#f4f6f9, #1d2229);
+    }
+    #rt-rig-concept .rt-track {
+      position: relative;
+      height: 30px;
+      margin-top: 9px;
+      border-top: 1px solid light-dark(#c7ced8, #3d4653);
+    }
+    #rt-rig-concept .rt-key {
+      position: absolute;
+      top: 7px;
+      width: 10px;
+      height: 10px;
+      transform: rotate(45deg);
+      background: light-dark(#bd6500, #ffad42);
+    }
+    #rt-rig-concept .rt-playhead {
+      position: absolute;
+      top: -1px;
+      bottom: -20px;
+      left: 42%;
+      width: 1px;
+      background: light-dark(#b13a3a, #ff6f6f);
+    }
+    @media (max-width: 760px) {
+      #rt-rig-concept .rt-window {
+        grid-template-columns: 42px 1fr;
+        grid-template-rows: 42px 430px auto 88px;
+      }
+      #rt-rig-concept .rt-top { grid-column: 1 / 3; }
+      #rt-rig-concept .rt-rail { grid-row: 2 / 5; }
+      #rt-rig-concept .rt-dock { grid-column: 2; grid-row: 3; border-left: 0; border-top: 1px solid light-dark(#c7ced8, #323945); }
+      #rt-rig-concept .rt-timeline { grid-column: 2; grid-row: 4; }
+    }
+  </style>
+
+  <div class="rt-window">
+    <header class="rt-top">
+      <span class="rt-brand">RayTrophi Studio · Character</span>
+      <div class="rt-mode" aria-label="Rig workspace mode">
+        <button class="btn" id="rt-setup-tab" aria-pressed="false" type="button">Setup</button>
+        <button class="btn btn-primary" id="rt-animate-tab" aria-pressed="true" type="button">Animate</button>
+      </div>
+      <button class="btn btn-primary" type="button"><i data-lucide="diamond" aria-hidden="true"></i> Key</button>
+    </header>
+
+    <aside class="rt-rail" aria-label="Context rail">
+      <button class="btn btn-ghost" type="button" aria-label="Scene"><i data-lucide="box" aria-hidden="true"></i></button>
+      <button class="btn btn-primary" type="button" aria-label="Character"><i data-lucide="person-standing" aria-hidden="true"></i></button>
+      <button class="btn btn-ghost" type="button" aria-label="Animation"><i data-lucide="clapperboard" aria-hidden="true"></i></button>
+      <button class="btn btn-ghost" type="button" aria-label="Weights"><i data-lucide="scan" aria-hidden="true"></i></button>
+    </aside>
+
+    <main class="rt-view" id="rt-shared-view">
+      <div class="rt-view-tools">
+        <div class="rt-tool-group">
+          <button class="btn btn-primary rt-density" data-density="primary" type="button">Primary</button>
+          <button class="btn rt-density" data-density="secondary" type="button">Secondary</button>
+          <button class="btn rt-density" data-density="deform" type="button">Deform</button>
+        </div>
+        <div class="rt-tool-group">
+          <button class="btn" id="rt-body-map" type="button"><i data-lucide="map" aria-hidden="true"></i> Body map</button>
+          <button class="btn" type="button"><i data-lucide="eye" aria-hidden="true"></i> Shapes</button>
+        </div>
+      </div>
+      <div class="rt-stage">
+        <div class="rt-body" aria-hidden="true">
+          <div class="rt-head"></div><div class="rt-torso"></div><div class="rt-pelvis"></div>
+          <div class="rt-limb rt-arm-left"></div><div class="rt-limb rt-arm-right"></div>
+          <div class="rt-limb rt-leg-left"></div><div class="rt-limb rt-leg-right"></div>
+        </div>
+        <button class="rt-control rt-ring rt-root" data-control="C_Root" data-side="center" type="button">ROOT</button>
+        <button class="rt-control rt-ring rt-chest" data-control="C_Chest" data-side="center" type="button">C</button>
+        <button class="rt-control rt-ring rt-head-control" data-control="C_Head" data-side="center" type="button">H</button>
+        <button class="rt-control rt-hand rt-left-hand is-selected" data-control="L_Hand_IK" data-side="left" data-pinned="true" type="button">L</button>
+        <button class="rt-control rt-hand rt-right-hand" data-control="R_Hand_IK" data-side="right" type="button">R</button>
+        <button class="rt-control rt-foot rt-left-foot" data-control="L_Foot_IK" data-side="left" data-pinned="true" type="button">L</button>
+        <button class="rt-control rt-foot rt-right-foot" data-control="R_Foot_IK" data-side="right" data-pinned="true" type="button">R</button>
+        <button class="rt-control rt-diamond rt-left-pole" data-control="L_Knee_Pole" data-side="left" data-level="secondary" type="button"><span>◆</span></button>
+        <button class="rt-control rt-diamond rt-right-pole" data-control="R_Knee_Pole" data-side="right" data-level="secondary" type="button"><span>◆</span></button>
+      </div>
+    </main>
+
+    <aside class="rt-dock" aria-live="polite">
+      <section class="rt-section">
+        <div class="rt-muted">Selected control</div>
+        <h3 id="rt-selected-name">L_Hand_IK</h3>
+        <div class="rt-status"><span class="rt-status-dot"></span><span id="rt-selected-state">IK · position pinned</span></div>
+      </section>
+      <section class="rt-section">
+        <div class="rt-muted">Kinematics</div>
+        <div class="rt-segment">
+          <button class="btn" id="rt-fk" type="button">FK</button>
+          <button class="btn btn-primary" id="rt-ik" type="button">IK</button>
+        </div>
+        <button class="btn btn-block" id="rt-match" type="button">Match FK ← IK</button>
+      </section>
+      <section class="rt-section">
+        <div class="rt-muted">Transform channels</div>
+        <div class="rt-field"><span>Move</span><span>X · Y · Z</span></div>
+        <div class="rt-field"><span>Rotate</span><span>X · Y · Z</span></div>
+        <div class="rt-field"><span>Scale</span><span class="rt-muted">Locked</span></div>
+      </section>
+      <section class="rt-section">
+        <label class="form-check form-switch">
+          <input class="form-check-input" id="rt-pin-position" type="checkbox" checked>
+          <span class="form-check-label">Pin position</span>
+        </label>
+        <label class="form-check form-switch">
+          <input class="form-check-input" type="checkbox">
+          <span class="form-check-label">Pin orientation</span>
+        </label>
+      </section>
+      <section class="rt-section">
+        <button class="btn btn-primary btn-block" type="button"><i data-lucide="diamond-plus" aria-hidden="true"></i> Key selected control</button>
+      </section>
+    </aside>
+
+    <footer class="rt-timeline">
+      <div class="viz-row"><strong>Walk_Loop</strong><span class="rt-muted">Frame 24 / 58 · Auto Key on</span></div>
+      <div class="rt-track" aria-label="Control key timeline">
+        <span class="rt-key" style="left:8%"></span><span class="rt-key" style="left:28%"></span>
+        <span class="rt-key" style="left:42%"></span><span class="rt-key" style="left:68%"></span>
+        <span class="rt-key" style="left:91%"></span><span class="rt-playhead"></span>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    (() => {
+      const root = document.getElementById('rt-rig-concept');
+      const state = { presentation: 'Semantic shapes', shapeScale: 1, showSecondary: false };
+      const name = root.querySelector('#rt-selected-name');
+      const selectedState = root.querySelector('#rt-selected-state');
+      const pin = root.querySelector('#rt-pin-position');
+      const fk = root.querySelector('#rt-fk');
+      const ik = root.querySelector('#rt-ik');
+      const match = root.querySelector('#rt-match');
+
+      function render() {
+        root.querySelectorAll('.rt-control').forEach((control) => {
+          control.style.scale = state.shapeScale;
+          const secondary = control.dataset.level === 'secondary';
+          control.hidden = secondary && !state.showSecondary;
+          if (state.presentation === 'Minimal rings') control.style.borderRadius = '50%';
+          else control.style.borderRadius = '';
+        });
+      }
+
+      root.querySelectorAll('.rt-control').forEach((control) => {
+        control.addEventListener('click', () => {
+          root.querySelectorAll('.rt-control').forEach((item) => item.classList.remove('is-selected'));
+          control.classList.add('is-selected');
+          name.textContent = control.dataset.control;
+          pin.checked = control.dataset.pinned === 'true';
+          selectedState.textContent = `IK · ${pin.checked ? 'position pinned' : 'free'}`;
+        });
+      });
+      root.querySelectorAll('.rt-density').forEach((button) => {
+        button.addEventListener('click', () => {
+          root.querySelectorAll('.rt-density').forEach((item) => item.classList.remove('btn-primary'));
+          button.classList.add('btn-primary');
+          state.showSecondary = button.dataset.density !== 'primary';
+          render();
+        });
+      });
+      pin.addEventListener('change', () => {
+        selectedState.textContent = `IK · ${pin.checked ? 'position pinned' : 'free'}`;
+      });
+      fk.addEventListener('click', () => {
+        fk.classList.add('btn-primary'); ik.classList.remove('btn-primary');
+        selectedState.textContent = 'FK · matched'; match.textContent = 'Match IK ← FK';
+      });
+      ik.addEventListener('click', () => {
+        ik.classList.add('btn-primary'); fk.classList.remove('btn-primary');
+        selectedState.textContent = `IK · ${pin.checked ? 'position pinned' : 'free'}`;
+        match.textContent = 'Match FK ← IK';
+      });
+      root.querySelector('#rt-setup-tab').addEventListener('click', () => {
+        root.querySelector('#rt-setup-tab').classList.add('btn-primary');
+        root.querySelector('#rt-setup-tab').setAttribute('aria-pressed', 'true');
+        root.querySelector('#rt-animate-tab').classList.remove('btn-primary');
+        root.querySelector('#rt-animate-tab').setAttribute('aria-pressed', 'false');
+      });
+      root.querySelector('#rt-animate-tab').addEventListener('click', () => {
+        root.querySelector('#rt-animate-tab').classList.add('btn-primary');
+        root.querySelector('#rt-animate-tab').setAttribute('aria-pressed', 'true');
+        root.querySelector('#rt-setup-tab').classList.remove('btn-primary');
+        root.querySelector('#rt-setup-tab').setAttribute('aria-pressed', 'false');
+      });
+      render();
+      if (globalThis.Tweak) {
+        const tweak = new Tweak({ container: root, onChange: render });
+        tweak.addSelect(state, 'presentation', {
+          label: 'Control presentation',
+          options: ['Semantic shapes', 'Minimal rings']
+        });
+        tweak.addSlider(state, 'shapeScale', {
+          label: 'Control scale', min: .75, max: 1.5, step: .05, reference: 'viewport.control-scale'
+        });
+        tweak.addToggle(state, 'showSecondary', {
+          label: 'Show secondary controls', reference: 'viewport.secondary-controls'
+        });
+      }
+    })();
+  </script>
+</div>

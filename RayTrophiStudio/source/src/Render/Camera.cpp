@@ -58,9 +58,17 @@ Ray Camera::get_ray(float s, float t) const {
     // Some polygon samplers can produce non-finite values for an invalid/zero
     // blade configuration; multiplying those by zero still yields NaN and
     // forces the primary ray into the -Z fallback path.
+    // ★★★ Kapi `lens_radius` degil `effectiveLensRadius()`: DoF anahtari
+    //   kapaliyken aciklik korunur ama lens ORNEKLENMEZ.
+    const float lens_r = effectiveLensRadius();
     Vec3 rd(0.0f, 0.0f, 0.0f);
-    if (lens_radius > 1e-6f && blade_count >= 3) {
-        rd = random_in_unit_polygon(blade_count);
+    if (lens_r > 1e-6f && blade_count >= 3) {
+        // ★★★★ `random_in_unit_polygon` BIRIM diski orneklerdir; yaricapla
+        //   carpilmadan kullaniliyordu, yani CPU yolunda aciklik ne olursa
+        //   olsun sapma 1 DUNYA BIRIMI'ne kadar cikiyordu. Belirti "CPU
+        //   render'da DoF asiri" idi ve kadranla olceklenmedigi icin
+        //   kalibrasyon turlarina gomulurdu.
+        rd = random_in_unit_polygon(blade_count) * lens_r;
     }
     Vec3 offset = u * rd.x + v * rd.y;
     // IMPORTANT: CPU renderer assumes ray/HitRecord t values are world-space distances.

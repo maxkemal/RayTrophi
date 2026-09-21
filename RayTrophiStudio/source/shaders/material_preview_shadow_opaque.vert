@@ -6,6 +6,9 @@ layout(location = 4) in vec4 inModelCol1;
 layout(location = 5) in vec4 inModelCol2;
 layout(location = 6) in vec4 inModelCol3;
 
+// Ayni gerekce icin ayni ifade: bkz. material_preview_shadow.vert.
+invariant gl_Position;
+
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
     mat4 view;
@@ -18,5 +21,6 @@ layout(push_constant) uniform MaterialPreviewPushConstants {
 
 void main() {
     mat4 model = mat4(inModelCol0, inModelCol1, inModelCol2, inModelCol3);
-    gl_Position = pc.viewProj * model * vec4(inPosition, 1.0);
+    vec4 worldPos = model * vec4(inPosition, 1.0);
+    gl_Position = pc.viewProj * worldPos;
 }

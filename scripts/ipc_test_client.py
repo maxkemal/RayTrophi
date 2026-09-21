@@ -483,6 +483,22 @@ def main():
     run_test("particle.add_emitter", {"name": "IpcEmitter", "rate_per_second": 48.0,
                                        "speed": 3.0, "point": [0.0, 2.0, 0.0]},
              "particle.add_emitter")
+    particle_systems_response = run_test(
+        "particle.list_systems", {}, "particle.list_systems")
+    particle_systems = ((particle_systems_response or {}).get("result") or {}).get(
+        "systems", [])
+    if particle_systems:
+        active_system = next(
+            (s for s in particle_systems if s.get("active")), particle_systems[0])
+        emitter_only_before = bool(active_system.get("emitter_only", False))
+        system_handle = str(active_system["index"])
+        run_test("particle.set_system_emitter_only",
+                 {"system": system_handle, "emitter_only": True},
+                 "particle.set_system_emitter_only(on)")
+        run_test("particle.set_system_emitter_only",
+                 {"system": system_handle,
+                  "emitter_only": emitter_only_before},
+                 "particle.set_system_emitter_only(restore)")
     run_test("particle.get_emitter", {"emitter": "IpcEmitter"}, "particle.get_emitter(by name)")
     run_test("particle.set_emitter", {"emitter": "IpcEmitter", "speed": 9.0,
                                        "burst_count": 16}, "particle.set_emitter")

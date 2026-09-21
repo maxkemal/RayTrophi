@@ -2046,7 +2046,7 @@ void main() {
     // Opaque pixel — continue to shading normally
 
     // --- MODE 2: glass/transmission adjustment ---
-    if (mat.opacity < 0.99 && metallic < 0.1 && transmission < 0.01) {
+    if ((mat.flags & MATERIAL_FLAG_ALPHA_CUTOUT) == 0u && mat.opacity < 0.99 && metallic < 0.1 && transmission < 0.01) {
         transmission = 1.0 - mat.opacity;
     }
 
@@ -2458,6 +2458,27 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
     }
     else if (takeGlassLobe) {
         {
+            // ── Direct light on the MIRROR lobe ──────────────────────────────
+            // scatterGlass returns without running NEE (correct: its Fresnel
+            // split is a specular decision, not a BRDF evaluation). But scene
+            // lights in this renderer are ANALYTIC — lights.l[] has no geometry
+            // in the TLAS — so the reflected ray cannot find one however far it
+            // travels. The result was not a weak specular lobe on glass, it was
+            // no lobe at all: only the environment (a Physical Sky sun disk, an
+            // emissive mesh) ever showed up in a glass reflection. Water hit
+            // this same wall and grew its own estimator; glass shares it now.
+            //
+            // Weight is 1 here, not `transmission`: this branch is already
+            // entered with probability = transmission and carries no 1/p
+            // compensation, so the estimator is the glass lobe's whole share.
+            // Front face only — a shadow ray leaving an interior hit is blocked
+            // by the shell it starts inside.
+            if (surfaceFrontFace) {
+                addDielectricDirectLighting(hitPos, geomNormal, worldNormal, worldNormal,
+                                            rayDir, ior, roughness,
+                                            vec3(0.0), 0.0, 0.0, payload.seed);
+            }
+
             // NOTE: glass-marble FULL VOLUME (real-interior medium march, MAT_FLAG_MARBLE_VOLUME)
             // was disabled — it was too camera-angle dependent and the interior dust/dirt never
             // read as intended. The flag + serialize fields are kept dormant (saved scenes load
@@ -2753,4 +2774,3 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
         payload.bounceType = BOUNCE_RESIN;
     }
 }
-

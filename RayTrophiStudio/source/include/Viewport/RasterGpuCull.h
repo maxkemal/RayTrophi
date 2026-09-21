@@ -48,7 +48,7 @@ namespace Backend {
 class RasterGpuCull final {
 public:
     // `raster_cull.comp` icindeki MeshParam ile BIREBIR ayni duzen (std430,
-    // hepsi uint => dizi adimi 48 bayt). Buradaki bir alani degistirirsen
+    // hepsi uint => dizi adimi 52 bayt). Buradaki bir alani degistirirsen
     // shader'daki karsiligini da degistir; static_assert yalnizca boyutu
     // korur, SIRAYI koruyamaz.
     struct MeshBinding {
@@ -66,6 +66,23 @@ public:
         // Proxy'nin KENDI cikti bolgesinin tabani. Tam ve proxy ayri
         // bolgelere, ikisi de onden doldurulur; iki taban da CPU'da bilinir.
         uint32_t proxyOutBase         = 0;
+        // ★★★★ Bu mesh'in sahne ucgen hedefinden aldigi PAY, Q16 kesir
+        //   (65536 = hedefin tamami). 0 = pay yok.
+        //
+        //   Neden var: shader eskiden her mesh icin `allowed` degerini
+        //   g.scatterTriangleTarget'in TAMAMINA karsi cozuyordu. finalize()
+        //   mesh basina kostugu icin 35 cull mesh'in her biri butun butceyi
+        //   kendisinin saniyordu -- efektif tavan 35 KATI. Olculen sonuc: geri
+        //   besleme orani her kare 1,5'e yapisir, mesafe esigi clamp'e kacar,
+        //   1033 instance'in yalnizca 28'i proxy'ye duser. Yani butce hic
+        //   uygulanmadi ve bugune kadarki her raster olcumu LOD'suz raster.
+        //   bkz. docs/dev/RASTER_MICROTRIANGLE_WALL.md
+        //
+        //   Pay TALEBE orantili: demand = instanceCount * trianglesPerInstance.
+        //   Mutlak ucgen sayisi degil KESIR tutuluyor, cunku hedefin kendisi
+        //   (m_rasterScatterTriangleTarget) her kare adapte oluyor ama bu
+        //   binding yalnizca layout degisince yeniden kuruluyor.
+        uint32_t targetShare          = 0;
     };
 
     static constexpr uint32_t kNoSlot       = 0xFFFFFFFFu;

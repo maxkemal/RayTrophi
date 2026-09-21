@@ -1,4 +1,4 @@
-﻿#include "PostProcess/PostService.h"
+#include "PostProcess/PostService.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -9321,74 +9321,22 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     // ─────────────────────────────────────────────────────────────────────────
     if (UIWidgets::BeginSection("Ray Marching Quality", ImVec4(0.7f, 0.7f, 0.7f, 1.0f), false)) { // Closed by default
         ImGui::Indent();
-        enum VolumeQualityPresetUI { VolQualityDraft = 0, VolQualityMedium = 1, VolQualityHigh = 2, VolQualityUltra = 3, VolQualityCustom = 4 };
-        const char* qualityPresetNames[] = { "Draft", "Medium", "High", "Ultra", "Custom" };
-        int qualityPreset = shader->quality.quality_preset;
-        if (qualityPreset < VolQualityDraft || qualityPreset > VolQualityCustom) {
-            qualityPreset = VolQualityMedium;
-            shader->quality.quality_preset = VolQualityMedium;
-            changed = true;
-        }
-        if (ImGui::Combo("Quality Preset", &qualityPreset, qualityPresetNames, IM_ARRAYSIZE(qualityPresetNames))) {
-            // Preset value rationale (post Aşama-2/3 + accessor cache + Aşama A shadow_steps cut):
-            //   - OptiX hardcoded fallback uses step=0.1, max=100, shadow=4.
-            //   - Old presets were 5-10× OptiX's values — preview burning GPU cycles for
-            //     imperceptible quality past shadow=4 / max=192 on diffuse media.
-            //   - New presets give clear tiers: Fast = fluid editing, Balanced ≈ OptiX
-            //     parity, Exact = converged stills / blackbody fire detail.
-            shader->quality.adaptive_stepping = true;
-            if (qualityPreset == VolQualityDraft) {
-                shader->quality.voxel_step_multiplier = 1.75f;
-                shader->quality.max_steps = 128;
-                shader->quality.shadow_steps = 2;
-                shader->quality.shadow_stride = 4;
-                shader->quality.quality_preset = VolQualityDraft;
-                changed = true;
-            } else if (qualityPreset == VolQualityMedium) {
-                shader->quality.voxel_step_multiplier = 0.875f;
-                shader->quality.max_steps = 256;
-                shader->quality.shadow_steps = 4;
-                shader->quality.shadow_stride = 4;
-                shader->quality.quality_preset = VolQualityMedium;
-                changed = true;
-            } else if (qualityPreset == VolQualityHigh) {
-                shader->quality.voxel_step_multiplier = 0.425f;
-                shader->quality.max_steps = 512;
-                shader->quality.shadow_steps = 8;
-                shader->quality.shadow_stride = 2;
-                shader->quality.quality_preset = VolQualityHigh;
-                changed = true;
-            } else if (qualityPreset == VolQualityUltra) {
-                shader->quality.voxel_step_multiplier = 0.25f;
-                shader->quality.max_steps = 1024;
-                shader->quality.shadow_steps = 12;
-                shader->quality.shadow_stride = 1;
-                shader->quality.quality_preset = VolQualityUltra;
-                changed = true;
-            } else {
-                shader->quality.quality_preset = VolQualityCustom;
-                changed = true;
-            }
-        }
-        UIWidgets::HelpMarker("Primary spacing follows source voxel size. Draft: 1.75, Medium: 0.875, High: 0.425, Ultra: 0.25 voxels/sample. Max Steps is a strict per-ray cost ceiling; low values can visibly reduce quality.");
+        // ★ THE PRESET COMBO WAS REMOVED 2026-09-20, and rule 5 is why.
+        // It only wrote these same four sliders, so it duplicated the authority
+        // without adding any — and one of the values it wrote (Voxels/Sample)
+        // did nothing in the realtime raster viewport at all, because that
+        // shader re-clamped the step to a per-viewport constant. A control that
+        // sets dials the user can already see, some of them dead, reads as a
+        // quality guarantee it cannot make. The defaults now carry that job.
+        UIWidgets::HelpMarker("Primary spacing follows source voxel size: 0.5 samples every other voxel, 1.0 one per voxel. Max Steps is a strict per-ray cost ceiling and is the dial that actually bounds cost — the realtime viewport applies its own ceiling on top (96/256/512 by viewport preset).");
 
         if (ImGui::SliderFloat("Voxels / Sample", &shader->quality.voxel_step_multiplier, 0.1f, 8.0f, "%.3f", ImGuiSliderFlags_Logarithmic)) {
             shader->quality.adaptive_stepping = true;
-            shader->quality.quality_preset = VolQualityCustom;
             changed = true;
         }
-        if (ImGui::SliderInt("Max Steps", &shader->quality.max_steps, 16, 1024)) {
-            shader->quality.quality_preset = VolQualityCustom;
-            changed = true;
-        }
-        if (ImGui::SliderInt("Shadow Steps", &shader->quality.shadow_steps, 0, 48)) {
-            shader->quality.quality_preset = VolQualityCustom;
-            changed = true;
-        }
-        if (ImGui::SliderInt("Shadow Update Stride", &shader->quality.shadow_stride, 1, 16)) {
-            shader->quality.quality_preset = VolQualityCustom;
-            changed = true;
-        }
+        if (ImGui::SliderInt("Max Steps", &shader->quality.max_steps, 16, 1024)) changed = true;
+        if (ImGui::SliderInt("Shadow Steps", &shader->quality.shadow_steps, 0, 48)) changed = true;
+        if (ImGui::SliderInt("Shadow Update Stride", &shader->quality.shadow_stride, 1, 16)) changed = true;
         UIWidgets::HelpMarker("1 evaluates self-shadow at every lit primary sample. 2-4 reuses the last result and usually gives the largest Vulkan RT speedup.");
         if (ImGui::SliderFloat("Shadow Strength", &shader->quality.shadow_strength, 0.0f, 1.0f)) changed = true;
 

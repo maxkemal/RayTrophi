@@ -454,7 +454,13 @@ struct RayGenParams {
     // Uzamsal tutarlılık ve temporal akümülasyon için
     float* variance_buffer;      // Piksellerin varyans değerlerini saklamak için
     float* accumulation_buffer;  // Temporal akümülasyon için önceki frame verisi
-    int* sample_count_buffer;    // Her piksel için kullanılan örnek sayısını saklamak için
+    int* sample_count_buffer;
+    // DIAGNOSTIC: number of pixels where the kernel READ a sample count of 0
+    // from the accumulation buffer. When the host counter and the buffer's .w
+    // disagree, only the KERNEL can say which one is lying -- every host-side
+    // read goes through the same suspect memory it is trying to measure.
+    // Costs nothing while null.
+    unsigned int* accum_prev_zero_count;    // Her piksel için kullanılan örnek sayısını saklamak için
     float temporal_blend;        // Temporal akümülasyon karışım faktörü (0 = sadece yeni, 1 = sadece eski)
     int tile_x, tile_y;
     int tile_width, tile_height;
@@ -493,8 +499,6 @@ struct RayGenParams {
     // ═══════════════════════════════════════════════════════════════════════════
     // GPU PICKING (Object ID buffer for viewport selection)
     // ═══════════════════════════════════════════════════════════════════════════
-    int* pick_buffer;         // Per-pixel object ID (SBT index), -1 = no hit
-    float* pick_depth_buffer; // Per-pixel hit distance (for depth sorting)
     
     // ═══════════════════════════════════════════════════════════════════════════
     // HAIR RENDERING (OptiX Curve Primitives)

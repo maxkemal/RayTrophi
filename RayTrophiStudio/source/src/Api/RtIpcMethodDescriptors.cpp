@@ -1633,7 +1633,7 @@ static const MethodParam params_gas_get_shader[] = {
 static const MethodDescriptor desc_gas_get_shader = {
     "gas.get_shader", "gas",
     "Read a gas domain's volume shading settings",
-    nullptr,
+    "Reports the ray-march budget too (voxel_step_multiplier, max_steps, shadow_steps/stride/strength).",
     "read", "Read", false, "any",
     "gas|get|shader|render|appearance|volume",
     "gas.set_shader",
@@ -1655,6 +1655,23 @@ static const MethodDescriptor desc_gas_list_domains = {
     true
 };
 static const MethodRegistration reg_gas_list_domains(desc_gas_list_domains);
+
+static const MethodParam params_gas_measure_plume[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"density_threshold", "float", false, "", "0.01", nullptr},
+};
+static const MethodDescriptor desc_gas_measure_plume = {
+    "gas.measure_plume", "gas",
+    "Measure a live gas field: plume extent, cap height above the domain floor, widest slice, peak/mean heat, lid clipping",
+    "Check `measured` FIRST: every extent reads 0 both for an empty domain and for one that could not be sampled. `touching_ceiling` true means the cap's shape is the domain lid, not the stratification, and the other numbers describe a clipped cloud.",
+    "write", "SceneWrite", false, "any",
+    "gas|measure|plume|verify|volume",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_gas_measure_plume, 2,
+    true
+};
+static const MethodRegistration reg_gas_measure_plume(desc_gas_measure_plume);
 
 static const MethodParam params_gas_pressure_pulse[] = {
     {"domain", "any", true, "", nullptr, nullptr},
@@ -1770,12 +1787,16 @@ static const MethodParam params_gas_set_settings[] = {
     {"burn_rate", "float", false, "How fast fuel is consumed once lit", nullptr, nullptr},
     {"heat_release", "float", false, "Temperature added per unit of fuel burned", nullptr, nullptr},
     {"smoke_generation", "float", false, "Smoke produced per unit of fuel burned", nullptr, nullptr},
+    {"ambient_stratification", "float", false, "", nullptr, nullptr},
     {"buoyancy_density", "float", false, "", nullptr, nullptr},
     {"buoyancy_heat", "float", false, "", nullptr, nullptr},
+    {"density_dissipation", "float", false, "", nullptr, nullptr},
+    {"dissipation_override", "bool", false, "", nullptr, nullptr},
     {"enforce_resource_budget", "bool", false, "", nullptr, nullptr},
     {"fire_expansion", "float", false, "", nullptr, nullptr},
     {"fire_max_temperature", "float", false, "", nullptr, nullptr},
     {"flame_dissipation", "float", false, "", nullptr, nullptr},
+    {"fuel_dissipation", "float", false, "", nullptr, nullptr},
     {"quality_profile", "string", false, "", nullptr, nullptr},
     {"render_to_nanovdb", "bool", false, "", nullptr, nullptr},
     {"resource_budget_mb", "int", false, "", nullptr, nullptr},
@@ -1783,6 +1804,13 @@ static const MethodParam params_gas_set_settings[] = {
     {"structural_event_interval", "float", false, "", nullptr, nullptr},
     {"structural_min_intensity", "float", false, "", nullptr, nullptr},
     {"structural_pressure_scale", "float", false, "", nullptr, nullptr},
+    {"surface_dust_emission", "float", false, "", nullptr, nullptr},
+    {"surface_dust_enabled", "bool", false, "", nullptr, nullptr},
+    {"surface_dust_max_density", "float", false, "", nullptr, nullptr},
+    {"surface_dust_supply", "float", false, "", nullptr, nullptr},
+    {"surface_dust_temperature", "float", false, "", nullptr, nullptr},
+    {"surface_dust_threshold", "float", false, "", nullptr, nullptr},
+    {"temperature_dissipation", "float", false, "", nullptr, nullptr},
     {"turbulence_lacunarity", "float", false, "", nullptr, nullptr},
     {"turbulence_octaves", "int", false, "", nullptr, nullptr},
     {"turbulence_persistence", "float", false, "", nullptr, nullptr},
@@ -1800,7 +1828,7 @@ static const MethodDescriptor desc_gas_set_settings = {
     "gas|set|settings|simulation|fire|smoke|ignite|burn|buoyancy|turbulence",
     "gas.get_settings|gas.set_shader|flow_source.create",
     "gas.create_domain", "gas.set_shader|flow_source.create|timeline.set_frame", "gas.get_settings|render.probe", "simulation_cache",
-    params_gas_set_settings, 27,
+    params_gas_set_settings, 38,
     true
 };
 static const MethodRegistration reg_gas_set_settings(desc_gas_set_settings);
@@ -1811,20 +1839,25 @@ static const MethodParam params_gas_set_shader[] = {
     {"blackbody_intensity", "float", false, "", nullptr, nullptr},
     {"density_cutoff", "float", false, "", nullptr, nullptr},
     {"density_multiplier", "float", false, "", nullptr, nullptr},
+    {"max_steps", "int", false, "", nullptr, nullptr},
     {"preset", "string", false, "", nullptr, nullptr},
     {"scattering_coefficient", "float", false, "", nullptr, nullptr},
+    {"shadow_steps", "int", false, "", nullptr, nullptr},
+    {"shadow_strength", "float", false, "", nullptr, nullptr},
+    {"shadow_stride", "int", false, "", nullptr, nullptr},
     {"temperature_max", "float", false, "", nullptr, nullptr},
     {"temperature_min", "float", false, "", nullptr, nullptr},
+    {"voxel_step_multiplier", "float", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_gas_set_shader = {
     "gas.set_shader", "gas",
-    "Set a gas domain's volume appearance: preset, density and absorption/scattering, blackbody emission and the temperature range it maps",
-    "temperature_min/max define the window mapped to emission colour; a flame outside that window renders black however hot it is.",
+    "Set a gas domain's volume appearance and ray-march budget: preset, density, absorption/scattering, blackbody emission and the temperature range it maps, plus sample spacing and step ceilings",
+    "temperature_min/max define the window mapped to emission colour; a flame outside that window renders black however hot it is. voxel_step_multiplier is the primary sample spacing in VOXELS (0.5 = one sample every other voxel), so it follows domain resolution rather than a world constant; max_steps is a strict per-ray ceiling and is the dial that actually bounds cost. The realtime raster viewport applies its own ceiling on top (96/256/512 by viewport quality preset), so raising max_steps past it changes RT and the final render but not the viewport.",
     "write", "SceneWrite", false, "any",
-    "gas|set|shader|render|appearance|volume|fire|colour|emission|blackbody",
+    "gas|set|shader|render|appearance|volume|fire|colour|emission|blackbody|quality|raymarch|steps",
     "gas.get_shader|gas.set_settings",
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_shader, 9,
+    params_gas_set_shader, 14,
     true
 };
 static const MethodRegistration reg_gas_set_shader(desc_gas_set_shader);
@@ -1844,6 +1877,22 @@ static const MethodDescriptor desc_gas_step = {
     true
 };
 static const MethodRegistration reg_gas_step(desc_gas_step);
+
+static const MethodParam params_gas_step_stats[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_gas_step_stats = {
+    "gas.step_stats", "gas",
+    "Per-stage timing breakdown of the last gas solver step: every GPU stage, the host residual, the field analysis scan, plus grid size, CFL and field peaks",
+    "Read `measured` FIRST - every timing is 0.0 both for a free stage and for a step that never ran, so an idle domain otherwise records as a 0 ms step, which in an optimisation A/B reads as a total win. Times are HOST WALL TIME around each call, so a GPU row includes the submit/fence the host waited on; that is the cost the frame pays, not isolated kernel time, and reading it as kernel time makes a transfer-bound stage look compute-bound. cfl above 1 means the semi-Lagrangian trace jumps more than one cell per step and smears detail.",
+    "write", "SceneWrite", false, "any",
+    "gas|step|stats|simulation|performance|timing|profiling|optimisation|cfl",
+    "particle.stats|gas.get_settings|gas.measure_plume|perf.get_gpu_memory",
+    nullptr, nullptr, nullptr, nullptr,
+    params_gas_step_stats, 1,
+    true
+};
+static const MethodRegistration reg_gas_step_stats(desc_gas_step_stats);
 
 static const MethodDescriptor desc_gas_structural_impulse_stats = {
     "gas.structural_impulse_stats", "gas",
@@ -2816,6 +2865,246 @@ static const MethodDescriptor desc_mesh_asset_validate = {
 };
 static const MethodRegistration reg_mesh_asset_validate(desc_mesh_asset_validate);
 
+static const MethodParam params_mesh_bevel[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"width", "float", true, "Bevel width in OBJECT-LOCAL units; must be positive", "0.0", nullptr},
+    {"segments", "int", false, "Profile segments; 1 is a flat chamfer, more rounds it", "1", nullptr},
+    {"round", "bool", false, "Use a rounded profile instead of a flat chamfer", "false", nullptr},
+};
+static const MethodDescriptor desc_mesh_bevel = {
+    "mesh.bevel", "mesh",
+    "Bevel the selected edges into a chamfer or rounded profile",
+    "Needs an EDGE selection. This is the operator that produces rounded hard edges; subdivision is not a substitute, as catmull_clark at level 2 turns a box into a blob while a bevel keeps the silhouette and softens only the edge. MEASURED: the distance is in OBJECT-LOCAL units, not metres - it is multiplied by the object's scale on its way to world space, so on an object scaled 0.2 in Y a request of 0.5 moves the face 0.1 m. This matches edit-mode convention; read scene.object_info's world_size if you need the world result.",
+    "write", "SceneWrite", true, "any",
+    "mesh|bevel|edge|chamfer|round|topology|model",
+    "mesh.loop_cut|mesh.edit.select_by_box",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_bevel, 4,
+    true
+};
+static const MethodRegistration reg_mesh_bevel(desc_mesh_bevel);
+
+static const MethodParam params_mesh_dissolve_edges[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_dissolve_edges = {
+    "mesh.dissolve_edges", "mesh",
+    "Dissolve the selected interior edges, merging their faces",
+    "Needs an EDGE selection. Edges whose removal would leave invalid topology are refused as a group rather than partially applied.",
+    "write", "SceneWrite", true, "any",
+    "mesh|dissolve|edges|edge|merge|cleanup|topology",
+    "mesh.dissolve_vertices|mesh.loop_cut",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_dissolve_edges, 1,
+    true
+};
+static const MethodRegistration reg_mesh_dissolve_edges(desc_mesh_dissolve_edges);
+
+static const MethodParam params_mesh_dissolve_vertices[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_dissolve_vertices = {
+    "mesh.dissolve_vertices", "mesh",
+    "Dissolve the selected vertices, merging the faces around them",
+    "Needs a VERTEX selection.",
+    "write", "SceneWrite", true, "any",
+    "mesh|dissolve|vertices|vertex|merge|cleanup|topology",
+    "mesh.dissolve_edges|mesh.merge_vertices",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_dissolve_vertices, 1,
+    true
+};
+static const MethodRegistration reg_mesh_dissolve_vertices(desc_mesh_dissolve_vertices);
+
+static const MethodParam params_mesh_edit_begin[] = {
+    {"object", "string", true, "Object to edit", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_edit_begin = {
+    "mesh.edit.begin", "mesh",
+    "Build the editable cache for an object and make it the active edit target",
+    "Every operator does this implicitly; call it only to inspect or select before editing. Returns the same state block as mesh.edit.get_state.",
+    "write", "SceneWrite", false, "any",
+    "mesh|edit|begin|topology|select",
+    "mesh.edit.get_state|mesh.edit.select",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_edit_begin, 1,
+    true
+};
+static const MethodRegistration reg_mesh_edit_begin(desc_mesh_edit_begin);
+
+static const MethodParam params_mesh_edit_clear_selection[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_edit_clear_selection = {
+    "mesh.edit.clear_selection", "mesh",
+    "Clear the mesh edit selection in every domain",
+    "",
+    "write", "SceneWrite", false, "any",
+    "mesh|edit|clear|selection|select|deselect",
+    "mesh.edit.select|mesh.edit.get_state",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_edit_clear_selection, 1,
+    true
+};
+static const MethodRegistration reg_mesh_edit_clear_selection(desc_mesh_edit_clear_selection);
+
+static const MethodParam params_mesh_edit_get_selection[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"domain", "string", true, "Element domain", "", "vertex|edge|face"},
+};
+static const MethodDescriptor desc_mesh_edit_get_selection = {
+    "mesh.edit.get_selection", "mesh",
+    "Return the selected element ids in one domain",
+    "Element ids are indices into the editable cache and are INVALIDATED by any operator that changes topology - read mesh.edit.get_state again instead of reusing a list across operations.",
+    "read", "Read", false, "any",
+    "mesh|edit|get|selection|select|ids|read",
+    "mesh.edit.select|mesh.edit.get_state",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_edit_get_selection, 2,
+    true
+};
+static const MethodRegistration reg_mesh_edit_get_selection(desc_mesh_edit_get_selection);
+
+static const MethodParam params_mesh_edit_get_state[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_edit_get_state = {
+    "mesh.edit.get_state", "mesh",
+    "Report topology and selection counts for the mesh edit target",
+    "half_edge_valid false means the operators fall back to the legacy triangle-soup path, where several of them refuse outright - without reading it you cannot tell an unsupported selection from a mesh whose topology never built. An empty object with no active edit target is a valid answer, not an error.",
+    "read", "Read", false, "any",
+    "mesh|edit|get|state|topology|selection|counts",
+    "mesh.edit.select|mesh.edit.select_by_normal|mesh.edit.get_state",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_edit_get_state, 1,
+    true
+};
+static const MethodRegistration reg_mesh_edit_get_state(desc_mesh_edit_get_state);
+
+static const MethodParam params_mesh_edit_select[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"domain", "string", true, "Element domain", "", "vertex|edge|face"},
+    {"ids", "array", false, "Element ids; required unless 'all' is true", nullptr, nullptr},
+    {"mode", "string", false, "How the ids combine with the current selection", "set", "set|add|remove"},
+    {"all", "bool", false, "Select every element in the domain, ignoring 'ids'", "false", nullptr},
+};
+static const MethodDescriptor desc_mesh_edit_select = {
+    "mesh.edit.select", "mesh",
+    "Select mesh elements by id, or select every element in a domain",
+    "Pass 'all': true instead of 'ids' for a whole domain. Element ids are indices into the editable cache and are INVALIDATED by any operator that changes topology - read mesh.edit.get_state again instead of reusing a list across operations.",
+    "write", "SceneWrite", false, "any",
+    "mesh|edit|select|selection|vertex|edge|face",
+    "mesh.edit.select_by_normal|mesh.edit.select_by_box|mesh.edit.get_selection",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_edit_select, 5,
+    true
+};
+static const MethodRegistration reg_mesh_edit_select(desc_mesh_edit_select);
+
+static const MethodParam params_mesh_edit_select_by_box[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"domain", "string", false, "Element domain", "face", "vertex|edge|face"},
+    {"mode", "string", false, "How the matches combine with the current selection", "set", "set|add|remove"},
+    {"world_space", "bool", false, "Compare in world space (default) rather than object space", "true", nullptr},
+};
+static const MethodDescriptor desc_mesh_edit_select_by_box = {
+    "mesh.edit.select_by_box", "mesh",
+    "Select elements fully contained in an axis-aligned box",
+    "Containment is total, not overlap: an edge needs both endpoints inside and a face needs every vertex inside, because a partially covered element is one the operators reject. world_space compares against the object's world transform, so a rotated object still selects correctly.",
+    "write", "SceneWrite", false, "any",
+    "mesh|edit|select|by|box|region|volume",
+    "mesh.edit.select|mesh.edit.select_by_normal",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_edit_select_by_box, 4,
+    true
+};
+static const MethodRegistration reg_mesh_edit_select_by_box(desc_mesh_edit_select_by_box);
+
+static const MethodParam params_mesh_edit_select_by_normal[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"max_angle", "float", false, "Maximum angle in degrees between normal and direction", "30.0", nullptr},
+    {"mode", "string", false, "How the matches combine with the current selection", "set", "set|add|remove"},
+};
+static const MethodDescriptor desc_mesh_edit_select_by_normal = {
+    "mesh.edit.select_by_normal", "mesh",
+    "Select faces whose normal points within an angle of a direction",
+    "This is how an automated caller reaches 'the top face' without knowing any face id. Faces only; the normal is area-weighted (Newell) so a non-planar ngon still resolves. 'matched' reports how many faces qualified BEFORE the mode was applied.",
+    "write", "SceneWrite", false, "any",
+    "mesh|edit|select|by|normal|direction|face|top",
+    "mesh.edit.select|mesh.edit.select_by_box",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_edit_select_by_normal, 3,
+    true
+};
+static const MethodRegistration reg_mesh_edit_select_by_normal(desc_mesh_edit_select_by_normal);
+
+static const MethodParam params_mesh_extrude[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"distance", "float", true, "Extrude distance in OBJECT-LOCAL units; must be non-zero, negative pushes inward", "0.0", nullptr},
+};
+static const MethodDescriptor desc_mesh_extrude = {
+    "mesh.extrude", "mesh",
+    "Extrude the selected faces along their normal",
+    "Needs a FACE selection. The extruded faces' original triangles are consumed as the new volume's bottom cap rather than left inside it. Returns the post-edit state, so the new element counts arrive without a second call. MEASURED: the distance is in OBJECT-LOCAL units, not metres - it is multiplied by the object's scale on its way to world space, so on an object scaled 0.2 in Y a request of 0.5 moves the face 0.1 m. This matches edit-mode convention; read scene.object_info's world_size if you need the world result.",
+    "write", "SceneWrite", true, "any",
+    "mesh|extrude|face|topology|model",
+    "mesh.inset|mesh.bevel|mesh.edit.select_by_normal",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_extrude, 2,
+    true
+};
+static const MethodRegistration reg_mesh_extrude(desc_mesh_extrude);
+
+static const MethodParam params_mesh_inset[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"amount", "float", true, "Inset distance in OBJECT-LOCAL units; must be positive", "0.0", nullptr},
+};
+static const MethodDescriptor desc_mesh_inset = {
+    "mesh.inset", "mesh",
+    "Inset the selected faces, producing a border ring and a smaller centre face",
+    "Needs a FACE selection. Typically paired with mesh.extrude to build a rim. MEASURED: the distance is in OBJECT-LOCAL units, not metres - it is multiplied by the object's scale on its way to world space, so on an object scaled 0.2 in Y a request of 0.5 moves the face 0.1 m. This matches edit-mode convention; read scene.object_info's world_size if you need the world result.",
+    "write", "SceneWrite", true, "any",
+    "mesh|inset|face|topology|model",
+    "mesh.extrude|mesh.bevel",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_inset, 2,
+    true
+};
+static const MethodRegistration reg_mesh_inset(desc_mesh_inset);
+
+static const MethodParam params_mesh_loop_cut[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"t", "float", false, "Cut position along the ring, strictly between 0 and 1", "0.5", nullptr},
+};
+static const MethodDescriptor desc_mesh_loop_cut = {
+    "mesh.loop_cut", "mesh",
+    "Insert a loop cut across the selected quad edge ring",
+    "Needs an EDGE selection on a supported quad ring; t is the position along the ring and must lie strictly between 0 and 1.",
+    "write", "SceneWrite", true, "any",
+    "mesh|loop|cut|edge|ring|topology|model",
+    "mesh.bevel|mesh.dissolve_edges",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_loop_cut, 2,
+    true
+};
+static const MethodRegistration reg_mesh_loop_cut(desc_mesh_loop_cut);
+
+static const MethodParam params_mesh_merge_vertices[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+};
+static const MethodDescriptor desc_mesh_merge_vertices = {
+    "mesh.merge_vertices", "mesh",
+    "Merge the selected vertices into their common centre",
+    "Needs a VERTEX selection. Merges by SELECTION, unlike mesh.weld_vertices which merges by distance.",
+    "write", "SceneWrite", true, "any",
+    "mesh|merge|vertices|vertex|collapse|cleanup",
+    "mesh.weld_vertices|mesh.dissolve_vertices",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_merge_vertices, 1,
+    true
+};
+static const MethodRegistration reg_mesh_merge_vertices(desc_mesh_merge_vertices);
+
 static const MethodParam params_mesh_operation_commit_positions[] = {
     {"object", "string", false, "", "", nullptr},
     {"positions", "any", false, "", nullptr, nullptr},
@@ -3022,6 +3311,23 @@ static const MethodDescriptor desc_mesh_tools_list = {
     false
 };
 static const MethodRegistration reg_mesh_tools_list(desc_mesh_tools_list);
+
+static const MethodParam params_mesh_weld_vertices[] = {
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"distance", "float", true, "Weld threshold in OBJECT-LOCAL units; must be positive", "0.0", nullptr},
+};
+static const MethodDescriptor desc_mesh_weld_vertices = {
+    "mesh.weld_vertices", "mesh",
+    "Weld selected vertices that lie within a distance of each other",
+    "Needs a VERTEX selection. The threshold is an absolute distance, not a fraction of the mesh. MEASURED: the distance is in OBJECT-LOCAL units, not metres - it is multiplied by the object's scale on its way to world space, so on an object scaled 0.2 in Y a request of 0.5 moves the face 0.1 m. This matches edit-mode convention; read scene.object_info's world_size if you need the world result.",
+    "write", "SceneWrite", true, "any",
+    "mesh|weld|vertices|vertex|merge|distance|cleanup",
+    "mesh.merge_vertices|mesh.dissolve_vertices",
+    nullptr, nullptr, nullptr, nullptr,
+    params_mesh_weld_vertices, 2,
+    true
+};
+static const MethodRegistration reg_mesh_weld_vertices(desc_mesh_weld_vertices);
 
 static const MethodParam params_modifiers_add[] = {
     {"object", "string", true, "", nullptr, nullptr},
@@ -3808,6 +4114,22 @@ static const MethodDescriptor desc_particle_add_emitter = {
 };
 static const MethodRegistration reg_particle_add_emitter(desc_particle_add_emitter);
 
+static const MethodParam params_particle_add_preset[] = {
+    {"preset", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_particle_add_preset = {
+    "particle.add_preset", "particle",
+    "Create an authored particle preset additively (campfire, explosion, fireball, nuclear_cinematic, nuclear_physical, ...)",
+    "A preset that can only be created from the panel cannot be calibrated by a script. Pair with gas.measure_plume to close the loop: create, step, measure.",
+    "write", "SceneWrite", false, "any",
+    "particle|add|preset|particles|gas|authoring|create",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_add_preset, 1,
+    true
+};
+static const MethodRegistration reg_particle_add_preset(desc_particle_add_preset);
+
 static const MethodDescriptor desc_particle_clear = {
     "particle.clear", "particle",
     "Delete the live particles without touching the emitters",
@@ -3990,6 +4312,23 @@ static const MethodDescriptor desc_particle_set_physics = {
     true
 };
 static const MethodRegistration reg_particle_set_physics(desc_particle_set_physics);
+
+static const MethodParam params_particle_set_system_emitter_only[] = {
+    {"system", "string", true, "", nullptr, nullptr},
+    {"emitter_only", "bool", false, "", "true", nullptr},
+};
+static const MethodDescriptor desc_particle_set_system_emitter_only = {
+    "particle.set_system_emitter_only", "particle",
+    nullptr,
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "particle|set|system|emitter|only",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_set_system_emitter_only, 2,
+    false
+};
+static const MethodRegistration reg_particle_set_system_emitter_only(desc_particle_set_system_emitter_only);
 
 static const MethodParam params_particle_spawn[] = {
     {"position", "vec3", true, "", nullptr, nullptr},
@@ -5110,7 +5449,7 @@ static const MethodParam params_rig_apply_pose_preview[] = {
 static const MethodDescriptor desc_rig_apply_pose_preview = {
     "rig.apply_pose_preview", "rig",
     "Commit a pose preview and Auto Key IK controls or undriven FK bones",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton; mesh binding is optional and only enables deformation preview. Imported rigs remain read-only. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses scene FPS; create_pose_clip.fps controls clip ticks. Matrices are row-major rigid local transforms. Preview replaces the previous preview; frame changes and mode exit discard unkeyed overrides. Keys persist; clip selection and Auto Key are transient.",
     "write", "SceneWrite", true, "ok",
     "rig|apply|pose|preview|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -5147,7 +5486,7 @@ static const MethodParam params_rig_bind_mesh[] = {
 static const MethodDescriptor desc_rig_bind_mesh = {
     "rig.bind_mesh", "rig",
     "Bind actual flat mesh parts and publish initial weights as one undoable transaction",
-    "Initial bind only: authoring-owned meshless, clip-free rig and static unskinned actual flat mesh parts. Exact mesh name takes precedence over model:<importName> group. Preserves part names/topology/materials/UV; converts flat local P_orig/N_orig (fallback P/N) through inverse(actor placement)*source base into common rig bind space. All parts share actor Transform; inverse joint-global rest offsets and model inverse identity. Root anatomy role is nondeforming; segment weights belong to parent joint, nearest outgoing segment per joint, inverse squared distance regularized by extent*1e-4 (minimum 1e-9), strongest four merged/normalized via common contract, negligible entries pruned. No visibility/interior or alignment certification. Rejects animation, skin, modifiers/geometry graphs/deltas, incomplete or invalid normals/geometry, reflected/singular transforms. Limits: 256 parts, 2M vertices, 100M vertex-segment evaluations, 4096 joints. Existing canEditRig guards apply. Requires preview object from rig.preview_bind. Rebuilds weights and validates rig_revision/rig_token/mesh_token; never trusts submitted weights/can_bind. Stale rig/mesh tokens fail rig_bind_stale_preview before canonical/history mutation. Commit swaps cloned DNA geometry, transforms, owned context, global bone snapshot and affected source memberships. Refreshes CPU BVH and OptiX/Vulkan/raster influence geometry, invalidates animation groups; undo/redo restore state and schedule the same refresh. Explicit part registry persists to native project; missing/deleted part identity retained, not manufactured. No weighted rebind, second bind append, weight painting, weighted rest/topology/clip migration or Pose/IK authoring. Errors additionally rig_bind_invalid_preview, rig_already_bound, api_not_bound, history_not_bound, scene_locked, rig_bind_failed. Python rt.rig.bind_mesh(character,mesh,preview).",
+    "Initial bind only: authoring-owned meshless rig and static unskinned actual flat mesh parts. Existing authored clips are preserved and republished to the character controller/Ozz runtime; clips no longer prevent binding. Exact mesh name takes precedence over model:<importName> group. Preserves part names/topology/materials/UV; converts flat local P_orig/N_orig (fallback P/N) through inverse(actor placement)*source base into common rig bind space. All parts share actor Transform; inverse joint-global rest offsets and model inverse identity. Root anatomy role is nondeforming; segment weights belong to parent joint, nearest outgoing segment per joint, inverse squared distance regularized by extent*1e-4 (minimum 1e-9), strongest four merged/normalized via common contract, negligible entries pruned. No visibility/interior or alignment certification. Rejects existing skin, modifiers/geometry graphs/deltas, incomplete or invalid normals/geometry, reflected/singular transforms. Limits: 256 parts, 2M vertices, 100M vertex-segment evaluations, 4096 joints. Requires preview object from rig.preview_bind. Rebuilds weights and validates rig_revision/rig_token/mesh_token; never trusts submitted weights/can_bind. Stale rig/mesh tokens fail rig_bind_stale_preview before canonical/history mutation. Commit swaps cloned DNA geometry, transforms, owned context, global bone snapshot and affected source memberships. Refreshes CPU BVH and OptiX/Vulkan/raster influence geometry, invalidates animation groups; undo/redo restore state and schedule the same refresh. Explicit part registry persists to native project; missing/deleted part identity retained, not manufactured. No weighted rebind or second bind append. Errors additionally rig_bind_invalid_preview, rig_already_bound, api_not_bound, history_not_bound, scene_locked, rig_bind_failed. Python rt.rig.bind_mesh(character,mesh,preview).",
     "SceneWrite", "SceneWrite", true, "{ok: bool}",
     "rig|bind|mesh",
     "rig.preview_bind|rig.get_binding|rig.weight_stats",
@@ -5163,7 +5502,7 @@ static const MethodParam params_rig_cancel_pose_preview[] = {
 static const MethodDescriptor desc_rig_cancel_pose_preview = {
     "rig.cancel_pose_preview", "rig",
     "Discard a pose preview and restore the committed pose",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton; mesh binding is optional and only enables deformation preview. Imported rigs remain read-only. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Preview state is transient and keys remain canonical AnimationData.",
     "write", "SceneWrite", false, "ok",
     "rig|cancel|pose|preview|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -5241,13 +5580,13 @@ static const MethodRegistration reg_rig_copy_from(desc_rig_copy_from);
 
 static const MethodParam params_rig_create[] = {
     {"character", "any", false, "New character identity; must be unique and not overlap another character prefix.", nullptr, nullptr},
-    {"template_id", "string", false, "", "root", "['root', 'chain3', 'humanoid', 'quadruped', 'insect6', 'avian']"},
+    {"template_id", "string", false, "", "root", "['root', 'chain3', 'humanoid', 'humanoid_detailed', 'quadruped', 'insect6', 'avian']"},
     {"height", "float", false, "Positive finite rest layout height <=10000; default 1.8. Catalogue gives family-specific UI suggestions.", "1.8", nullptr},
 };
 static const MethodDescriptor desc_rig_create = {
     "rig.create", "rig",
-    "Create an owned meshless root or three-joint-chain rig with undo and project persistence",
-    "Creates NodeHierarchy canonical rest state, BoneData, skeletonNodes and ozz bridge together. Stable joint keys use character_name. Character/name use 1-128 ASCII letters, digits, underscore or hyphen. Rejects existing/overlapping character prefixes and flat-mesh node prefixes. No skin weights or mesh binding. Service failures return named codes (Python ValueError / IPC code): rig_name_conflict, invalid_rig_name/invalid_bone_name, unknown_rig_template, unknown_character, unknown_parent_bone/unknown_bone, bone_name_conflict, rig_not_owned, rig_edit_requires_unskinned, rig_edit_requires_no_clips, invalid_rest_transform, rig_rest_requires_rigid_transform, scene_locked or history_not_bound. Shape/type errors use Python TypeError/ValueError and IPC invalid_parameter. Validation/staging happens before scene changes. Template IDs now include humanoid (27 joints), quadruped (26), insect6 (36), avian (32), alongside root and chain3. The shared builder creates canonical rest hierarchy plus anatomy roles, symmetry pairs and contiguous limb chains before existing four-representation finish/undo/persistence. No mesh fit, weights, IK or detailed fingers/feathers. Avian includes paired five-joint wing chains, two leg chains, tail and beak; it is a bird fitting seed, not a bat/insect flight system. Height is overall layout scale in scene units, insect including antennae. Root/chain3 layouts and empty anatomy remain compatible.",
+    "Create an owned meshless rig from a canonical template with undo and project persistence",
+    "Creates NodeHierarchy canonical rest state, BoneData, skeletonNodes and ozz bridge together. Stable joint keys use character_name. Character/name use 1-128 ASCII letters, digits, underscore or hyphen. Rejects existing/overlapping character prefixes and flat-mesh node prefixes. No skin weights or mesh binding. Service failures return named codes (Python ValueError / IPC code): rig_name_conflict, invalid_rig_name/invalid_bone_name, unknown_rig_template, unknown_character, unknown_parent_bone/unknown_bone, bone_name_conflict, rig_not_owned, rig_edit_requires_unskinned, rig_edit_requires_no_clips, invalid_rest_transform, rig_rest_requires_rigid_transform, scene_locked or history_not_bound. Shape/type errors use Python TypeError/ValueError and IPC invalid_parameter. Validation/staging happens before scene changes. Template IDs include humanoid (27 joints), humanoid_detailed v2 (70 joints with a nine-joint pelvis-to-head chain and paired four-joint digits), quadruped (26), insect6 (36) and avian (32), alongside root and chain3. The shared builder creates canonical rest hierarchy plus anatomy roles, symmetry pairs, contiguous chains and optional derived fit rules before existing four-representation finish/undo/persistence. Detailed fingers are geometry and envelope-ready deform segments; grouped finger FK, authored joint axes and twist joints remain separate capabilities. Existing templates and saved hierarchy snapshots remain compatible.",
     "SceneWrite", "SceneWrite", true, "{ok:true}",
     "rig|create",
     "rig.add_bone|rig.set_rest_transform|rig.list_bones|project.save|project.open",
@@ -5367,7 +5706,7 @@ static const MethodParam params_rig_create_pose_clip[] = {
 static const MethodDescriptor desc_rig_create_pose_clip = {
     "rig.create_pose_clip", "rig",
     "Create and select an editable native bone-channel clip seeded with rest keys",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton; mesh binding is optional. Creates canonical AnimationData bone channels at rest and selects the clip. Mutations require active pose mode and no render job. FPS controls clip ticks per second; rest transforms and weights are unchanged.",
     "write", "SceneWrite", true, "ok",
     "rig|create|pose|clip|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -5394,14 +5733,35 @@ static const MethodDescriptor desc_rig_delete_bone = {
 };
 static const MethodRegistration reg_rig_delete_bone(desc_rig_delete_bone);
 
+static const MethodParam params_rig_edit_pose_key[] = {
+    {"character", "string", true, "Active Pose character", nullptr, nullptr},
+    {"bone", "string", true, "Existing prefixed bone key", nullptr, nullptr},
+    {"channel", "string", true, "position or rotation", nullptr, "position|rotation"},
+    {"source_frame", "int", true, "Exact source frame in 0..1000000", nullptr, nullptr},
+    {"target_frame", "int", true, "Destination frame in 0..1000000", nullptr, nullptr},
+    {"value", "array", false, "Optional [x,y,z] or [w,x,y,z]; null preserves value", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_edit_pose_key = {
+    "rig.edit_pose_key", "rig",
+    "Move or replace one canonical authored bone key",
+    "Edits AnimationData through one undoable pose command. Position keys are atomic XYZ vectors and rotation keys are normalized quaternions; Timeline tracks are disposable projections. Null value preserves the key value and changes only time. Destination collisions reject without mutation. A bone driven by timed IK at the source or destination rejects with rig_ik_use_control_keys_or_bake. Requires active Pose, selected editable clip and no pending preview/render job.",
+    "write", "SceneWrite", true, "ok",
+    "rig|edit|pose|key|curve|graph|timeline",
+    "rig.insert_pose_keys|rig.remove_pose_keys|rig.get_pose_state",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_edit_pose_key, 6,
+    true
+};
+static const MethodRegistration reg_rig_edit_pose_key(desc_rig_edit_pose_key);
+
 static const MethodParam params_rig_get_anatomy[] = {
     {"character", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_rig_get_anatomy = {
     "rig.get_anatomy", "rig",
-    "Read canonical rig anatomy roles, symmetry pairs and limb chains",
+    "Read canonical rig anatomy roles, symmetry pairs, chains and fit rules",
     "Returns version 1 anatomy schema. Old projects default to custom family and empty arrays. Read works for any known model; setting requires an owned unskinned clip-free rig. Family is a semantic tag, not auto-rig generation.",
-    "Read", "Read", false, "{version: 1, family: custom|humanoid|quadruped|insect|avian, roles: [{role,bone}], symmetry: [{left,right}], chains: [{name,bones}]}",
+    "Read", "Read", false, "Versioned anatomy object; v7 may include fit_rules and control_rig definitions",
     "rig|get|anatomy",
     "rig.set_anatomy|rig.list_bones",
     nullptr, nullptr, nullptr, nullptr,
@@ -5433,7 +5793,7 @@ static const MethodParam params_rig_get_bone_envelope[] = {
 static const MethodDescriptor desc_rig_get_bone_envelope = {
     "rig.get_bone_envelope", "rig",
     "Read the resolved tapered envelope profile for one bone segment",
-    "Returns a stored per-bone override or category-derived defaults. Radii are fractions of canonical character height; start/end extensions are fractions of bone length. The bone must own an outgoing deforming segment.",
+    "Returns a stored per-bone override or category-derived defaults. Radii are fractions of canonical character height; start/end extensions are fractions of bone length. Detailed humanoid digit roles default to 30% of extremity_radius, clamped to .005, so closely spaced fingers do not inherit a palm-sized capsule. The bone must own an outgoing deforming segment.",
     "read", "Read", false, "Bone profile, override flag and rig revision",
     "rig|get|bone|envelope|weights|profile|read",
     "rig.apply_bone_envelope|rig.set_envelope_overlay|rig.get_weight_map",
@@ -5449,15 +5809,31 @@ static const MethodParam params_rig_get_controls[] = {
 static const MethodDescriptor desc_rig_get_controls = {
     "rig.get_controls", "rig",
     "Inspect owned bound-rig IK, chain and aim controls",
-    "Owned bound rig, no render job. Rows report solver, bones, root/mid/tip keys, enabled, blend, contact, target_world, pole_world, tip_world, target_error_world, aim_error_degrees, aim_axis/up_axis, orientation state, spline state/guide and length_actor. Residual is measured after IK blend and joint rules. Limb definitions persist in anatomy v3, full chains in v4 and aim controls in v5; runtime handle selection is transient. Position contacts apply to limb/chain controls. Timed target keys and bake support all solver types.",
-    "read", "Read", false, "character, rig_revision, controls, selected_control, handle, coordinate_space, contact_kind, target_keys",
+    "Owned bound rig, no render job. Rows report solver, bones, root/mid/tip keys, enabled, blend, contact, target_world, pole_world, tip_world, target_error_world, aim_error_degrees, aim_axis/up_axis, orientation state, spline state/guide, length_actor and placement-scaled length_world. Each row has a display descriptor with semantic, side/color role and target/pole/FK shape, level, scale and channel metadata. The top-level display_contract version 2 declares hybrid_anatomical_clamped visual sizing from length_world, a screen_constant_minimum hit space, Primary/Secondary/Deform levels, built-in shape/color vocabularies and the contact marker. Presentation is derived by the shared RigControlDisplay core from canonical anatomy roles. Two-bone rows also report root/mid fk_handles in world space. Display data does not alter solver state or deform bones. Residual is measured after IK blend and joint rules. Limb definitions persist in anatomy v3, full chains in v4 and aim controls in v5; runtime handle selection is transient. Position contacts apply to limb/chain controls. Timed target keys and bake support all solver types.",
+    "read", "Read", false, "character, rig_revision, controls, display_contract, selected_control, handle, coordinate_space, contact_kind, target_keys",
     "rig|get|controls|pose|IK|FK|contact",
-    "rig.create_controls|rig.create_chain_control|rig.create_aim_control|rig.select_control|rig.set_ik_target|rig.set_ik_fk|rig.set_ik_contact|rig.get_pose_state",
+    "rig.create_controls|rig.create_chain_control|rig.create_aim_control|rig.select_control|rig.set_ik_target|rig.set_ik_fk|rig.match_ik_to_fk|rig.match_fk_to_ik|rig.set_ik_contact|rig.get_pose_state",
     nullptr, nullptr, nullptr, nullptr,
     params_rig_get_controls, 1,
     true
 };
 static const MethodRegistration reg_rig_get_controls(desc_rig_get_controls);
+
+static const MethodParam params_rig_get_driven_controls[] = {
+    {"character", "string", true, "Rig character name", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_get_driven_controls = {
+    "rig.get_driven_controls", "rig",
+    "Read the data-driven scalar control rig attached to a skeleton",
+    "Read-only. Returns persisted control definitions including display anchor/shape, range/default and explicit local-axis bone drivers. Definitions are template-independent; owned custom rigs may author them through anatomy v7.",
+    "Read", "Read", false, "{character,rig_revision,controls:[RigDrivenControl]}",
+    "rig|get|driven|controls|control rig|scalar controls|authoring",
+    "rig.get_anatomy|rig.preview_control_values|rig.apply_pose_preview",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_get_driven_controls, 1,
+    true
+};
+static const MethodRegistration reg_rig_get_driven_controls(desc_rig_get_driven_controls);
 
 static const MethodDescriptor desc_rig_get_envelope_overlay = {
     "rig.get_envelope_overlay", "rig",
@@ -5479,7 +5855,7 @@ static const MethodParam params_rig_get_fit_setup[] = {
 static const MethodDescriptor desc_rig_get_fit_setup = {
     "rig.get_fit_setup", "rig",
     "Prepare read-only coarse alignment and 2D landmark editing data",
-    "Uses canonical flat mesh preflight and actual rest hierarchy plus actor placement. Mesh samples and bounds match viewport world coordinates using local P_orig (fallback P) and the final object transform once. Produces height/center-based coarse world-space positions for every node and at most 8192 projected mesh sample points. Does not infer anatomy or change the scene. Requires editable owned rig and finite volumetric unskinned mesh. +Y up / +Z forward and rest pose require user confirmation. Errors include rig_fit_requires_height, rig_fit_mesh_not_ready, rig_fit_input_missing, rig_fit_limit and shared ownership/preflight errors. Draft landmarks are request data, not persisted authoring state. Targets also accept model:<importName> multipart groups from rig.list_fit_targets. Exact existing mesh names take precedence. Group processing preserves independent scene geometry/transforms and hashes combined viewport world positions/indices for stale preview detection. Group errors: unknown_mesh_group, ambiguous_mesh_group, mesh_group_has_no_flat_parts, mesh_group_invalid_geometry, mesh_group_too_large.",
+    "Uses canonical flat mesh preflight and actual rest hierarchy plus actor placement. Produces height/center-based coarse world-space positions and at most 8192 mesh samples. Joint rows report fit_editable and fit_group. Anatomy v6 fit_rules mark deterministic derived joints; clients edit guides while preview_fit recomputes derived positions. Requires editable owned rig and finite volumetric unskinned mesh. +Y up / +Z forward and rest pose require user confirmation. Draft landmarks are request data, not persisted authoring state.",
     "Read", "Read", false, "RigFitSetup",
     "rig|get|fit|setup",
     "rig.preflight|rig.preview_fit",
@@ -5636,7 +6012,7 @@ static const MethodParam params_rig_get_pose_coverage[] = {
 static const MethodDescriptor desc_rig_get_pose_coverage = {
     "rig.get_pose_coverage", "rig",
     "Read flat bound-mesh weight coverage without changing weights",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton. Meshless rigs return skeleton pose capability with no deformation coverage; bound rigs additionally report flat mesh influence coverage. Read-only.",
     "read", "Read", false, "PoseCoverage",
     "rig|get|pose|coverage|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -5652,7 +6028,7 @@ static const MethodParam params_rig_get_pose_state[] = {
 static const MethodDescriptor desc_rig_get_pose_state = {
     "rig.get_pose_state", "rig",
     "Read the evaluated local pose, editable clips and rig revision",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position. limit_hits lists bones projected by enabled joint rules; during preview it reports the original request, otherwise sampled clip/pose constraints.",
+    "Requires an authoring-owned skeleton; mesh binding is optional. Reports the evaluated local pose, editable clips, rig revision, constraint hits and keyed_bones_at_frame for the selected clip/current frame. Matrices are row-major rigid local transforms. Rest transforms and skin weights are unchanged.",
     "read", "Read", false, "PoseState",
     "rig|get|pose|state|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -5721,13 +6097,13 @@ static const MethodDescriptor desc_rig_get_selection = {
 static const MethodRegistration reg_rig_get_selection(desc_rig_get_selection);
 
 static const MethodParam params_rig_get_template[] = {
-    {"template_id", "any", false, "", nullptr, "['root', 'chain3', 'humanoid', 'quadruped', 'insect6', 'avian']"},
+    {"template_id", "any", false, "", nullptr, "['root', 'chain3', 'humanoid', 'humanoid_detailed', 'quadruped', 'insect6', 'avian']"},
     {"height", "float", false, "Positive finite layout height, <=10000; default 1.8", "1.8", nullptr},
 };
 static const MethodDescriptor desc_rig_get_template = {
     "rig.get_template", "rig",
     "Read a scaled template hierarchy and anatomy without creating scene state",
-    "Calls the same template builder as rig.create; returned keys use Template_ prefix for inspection. Hierarchy/anatomy schema v1 contains canonical hierarchy serialization and anatomy; actual creation uses requested character prefix. All joints have identity rest rotation, unit scale and template positions. Height is ground-origin to highest joint endpoint, in scene units; insect height includes antennae. No scene/history/selection/runtime mutations. Errors: unknown_rig_template, invalid_rig_height, invalid_rig_template_definition and anatomy validation errors. template_version is recipe provenance: humanoid is v3, quadruped/insect6 are v2; avian/root/chain3 are v1. Read and create use identical recipes.",
+    "Calls the same template builder as rig.create; returned keys use Template_ prefix for inspection. Hierarchy/anatomy serialization contains the canonical hierarchy and anatomy; actual creation uses the requested character prefix. All joints have identity rest rotation, unit scale and template positions. Height is ground-origin to highest joint endpoint, in scene units; insect height includes antennae. No scene/history/selection/runtime mutations. Errors: unknown_rig_template, invalid_rig_height, invalid_rig_template_definition and anatomy validation errors. template_version is recipe provenance: humanoid is v3, humanoid_detailed and quadruped/insect6 are v2; avian/root/chain3 are v1. The 70-joint detailed humanoid adds three spine joints, two neck joints and paired digits. Anatomy v6 fit_rules identify deterministic joints derived between editable guides. Read and create use identical recipes.",
     "Read", "Read", false, "{template_id,template_version,height,nodeHierarchy,anatomy}",
     "rig|get|template",
     "rig.list_templates|rig.create|rig.get_anatomy",
@@ -5810,7 +6186,7 @@ static const MethodParam params_rig_insert_pose_keys[] = {
 static const MethodDescriptor desc_rig_insert_pose_keys = {
     "rig.insert_pose_keys", "rig",
     "Insert or replace position and quaternion keys for explicit bones at the current frame",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position. When the selected clip has timed IK, driven bone insertion fails rig_ik_use_control_keys_or_bake; use insert_ik_key or bake_ik_channels.",
+    "Requires an authoring-owned skeleton; mesh binding is optional. Inserts canonical position/quaternion keys at the current frame without changing rest or weights. When the selected clip has timed IK, driven bone insertion fails rig_ik_use_control_keys_or_bake; use insert_ik_key or bake_ik_channels.",
     "write", "SceneWrite", true, "ok",
     "rig|insert|pose|keys|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -5865,7 +6241,7 @@ static const MethodRegistration reg_rig_list_fit_targets(desc_rig_list_fit_targe
 static const MethodDescriptor desc_rig_list_templates = {
     "rig.list_templates", "rig",
     "List shared rig template catalogue with anatomy family, version and joint counts",
-    "Read-only, scene-independent catalogue: root, chain3, humanoid, quadruped, insect6, avian. Layout is +Y up, +Z forward, +X character-left. default_height is a UI suggestion; rig.create/get_template retain height=1.8 historical default unless supplied. Templates are rest skeleton layouts with neutral rotations; no fitting, weights or IK. Humanoid basic v3 restores sagittal depth and mild forward knee/elbow hints; quadruped and insect6 basic v2 use revised proportions; avian, root and chain3 are v1. Avian default_height is 0.6 scene units. Existing saved rigs retain their concrete hierarchy.",
+    "Read-only, scene-independent catalogue: root, chain3, humanoid, humanoid_detailed, quadruped, insect6 and avian. Layout is +Y up, +Z forward, +X character-left. default_height is a UI suggestion; rig.create/get_template retain height=1.8 historical default unless supplied. Templates are rest skeleton layouts with neutral rotations; fitting, binding and control creation remain explicit later operations. Humanoid basic v3 has 27 joints; humanoid_detailed v2 has 70 joints with denser spine/neck and paired digits. Its anatomy fit_rules derive intermediate spine, neck and phalanx positions from editable guides. Existing saved rigs retain their concrete hierarchy.",
     "Read", "Read", false, "[{template_id,template_version,label,family,joint_count,default_height,up_axis,forward_axis,left_axis}]",
     "rig|list|templates",
     "rig.get_template|rig.create",
@@ -5874,6 +6250,42 @@ static const MethodDescriptor desc_rig_list_templates = {
     true
 };
 static const MethodRegistration reg_rig_list_templates(desc_rig_list_templates);
+
+static const MethodParam params_rig_match_fk_to_ik[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"rig_revision", "integer", true, "", nullptr, nullptr},
+    {"control", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_match_fk_to_ik = {
+    "rig.match_fk_to_ik", "rig",
+    "Bake a visible two-bone IK result into FK and switch fully to FK",
+    "Active owned bound Pose, no render job, matching revision. Only canonical two-bone limb controls are accepted. Copies the achieved root/mid/tip local rotations into the FK input, clears contact and disables IK, preserving the visible pose. Apply commits through the shared pose transaction; Cancel restores the prior state. Chain/aim controls fail rig_ik_match_requires_two_bone.",
+    "write", "SceneWrite", false, "ok; transient pose preview",
+    "rig|match|fk|to|ik|pose|IK|FK|snap",
+    "rig.get_controls|rig.match_ik_to_fk|rig.apply_pose_preview|rig.cancel_pose_preview",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_match_fk_to_ik, 3,
+    true
+};
+static const MethodRegistration reg_rig_match_fk_to_ik(desc_rig_match_fk_to_ik);
+
+static const MethodParam params_rig_match_ik_to_fk[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"rig_revision", "integer", true, "", nullptr, nullptr},
+    {"control", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_match_ik_to_fk = {
+    "rig.match_ik_to_fk", "rig",
+    "Match a two-bone IK control to the visible FK pose and switch fully to IK",
+    "Active owned bound Pose, no render job, matching revision. Only canonical two-bone limb controls are accepted. Captures the visible tip position, bend plane and world tip orientation, disables contact, enables orientation hold and switches to full IK without changing the visible pose. Apply commits through the shared pose transaction; Cancel restores the prior state. Chain/aim controls fail rig_ik_match_requires_two_bone.",
+    "write", "SceneWrite", false, "ok; transient pose preview",
+    "rig|match|ik|to|fk|pose|IK|FK|snap",
+    "rig.get_controls|rig.match_fk_to_ik|rig.apply_pose_preview|rig.cancel_pose_preview",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_match_ik_to_fk, 3,
+    true
+};
+static const MethodRegistration reg_rig_match_ik_to_fk(desc_rig_match_ik_to_fk);
 
 static const MethodParam params_rig_mirror_pose[] = {
     {"character", "string", true, "", nullptr, nullptr},
@@ -5948,6 +6360,24 @@ static const MethodDescriptor desc_rig_preview_bind = {
 };
 static const MethodRegistration reg_rig_preview_bind(desc_rig_preview_bind);
 
+static const MethodParam params_rig_preview_control_values[] = {
+    {"character", "string", true, "Active Pose-mode rig name", nullptr, nullptr},
+    {"values", "object", true, "Object mapping control IDs to scalar values", nullptr, nullptr},
+    {"rig_revision", "uint", true, "Nonnegative revision from rig.get_pose_state or rig.get_driven_controls", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_preview_control_values = {
+    "rig.preview_control_values", "rig",
+    "Preview sparse scalar control values through the generic control-rig evaluator",
+    "Requires active Pose mode. Values map persisted control IDs to finite values inside each definition's range. Evaluation starts from the committed pose, applies explicit local-axis drivers atomically and then uses the existing IK and joint-limit evaluation. Rest and weights are unchanged. Apply uses the normal undo and Auto Key path. Errors include rig_control_values_invalid, rig_control_values_empty, rig_control_unknown, rig_control_value_out_of_range, rig_control_unknown_bone and rig_edit_stale_revision.",
+    "SceneWrite", "SceneWrite", true, "ok",
+    "rig|preview|control|values|control rig|scalar controls|bone keys|authoring",
+    "rig.get_driven_controls|rig.apply_pose_preview|rig.cancel_pose_preview",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_preview_control_values, 3,
+    true
+};
+static const MethodRegistration reg_rig_preview_control_values(desc_rig_preview_control_values);
+
 static const MethodParam params_rig_preview_envelope_weights[] = {
     {"character", "string", true, "", nullptr, nullptr},
     {"torso_radius", "float", false, "", "0.16", nullptr},
@@ -5958,7 +6388,7 @@ static const MethodParam params_rig_preview_envelope_weights[] = {
 static const MethodDescriptor desc_rig_preview_envelope_weights = {
     "rig.preview_envelope_weights", "rig",
     "Preview bounded anatomical capsule weights on an authored bound rig",
-    "Read-only recomputation over canonical flat P_orig positions of every part in the authored binding registry. Each parent-owned bone segment receives a height-relative capsule radius selected from anatomy roles: torso, limb or hand/foot extremity. Influence is zero outside the capsule, falls smoothly inside, keeps the strongest four and normalizes through the shared weight contract. Vertices outside every capsule use the nearest segment and are counted as fallback_vertices, so preview never invents unweighted rows. Edit Bone UI enables the separate transient viewport overlay after a successful preview; the IPC operation itself leaves view state unchanged. Does not support arbitrary imported skins or parts missing canonical bind positions. Limits: 256 parts, 2M vertices and 4096 joints. Settings: torso_radius .02..0.50, limb_radius .01..0.30, extremity_radius .005..0.20 of character height; falloff .5..8.",
+    "Read-only recomputation over canonical flat P_orig positions of every part in the authored binding registry. Each parent-owned bone segment receives a height-relative capsule radius selected from anatomy roles: torso, limb, hand/foot extremity or detailed-hand digit. Digit radius is max(.005, extremity_radius * .3) until a per-bone profile overrides it. Influence is zero outside the capsule, falls smoothly inside, keeps the strongest four and normalizes through the shared weight contract. Vertices outside every capsule use the nearest segment and are counted as fallback_vertices, so preview never invents unweighted rows. Edit Bone UI enables the separate transient viewport overlay after a successful preview; the IPC operation itself leaves view state unchanged. Does not support arbitrary imported skins or parts missing canonical bind positions. Limits: 256 parts, 2M vertices and 4096 joints. Settings: torso_radius .02..0.50, limb_radius .01..0.30, extremity_radius .005..0.20 of character height; falloff .5..8.",
     "read", "Read", false, "Envelope report with counts, radii and fallback vertices; scene unchanged",
     "rig|preview|envelope|weights|capsule|skin",
     "rig.apply_envelope_weights|rig.get_weight_map|rig.weight_stats|rig.get_binding",
@@ -5976,8 +6406,8 @@ static const MethodParam params_rig_preview_fit[] = {
 };
 static const MethodDescriptor desc_rig_preview_fit = {
     "rig.preview_fit", "rig",
-    "Validate complete world-space manual joint landmarks and return a commit preview",
-    "Read-only manual mode. Requires complete finite landmarks and nonzero parent segments. Reports segment lengths and bounds containment, not surface interior or automatic fit residual. can_commit is false for any outside-bounds point; interior_verified remains false. Returns rig_revision and a content token over flat viewport source positions, indices and object final transform. No scene/history changes. Errors: rig_fit_axes_unconfirmed, rig_fit_incomplete_landmarks, rig_fit_invalid_landmark, rig_fit_zero_length_bone, rig_fit_mesh_not_ready, rig_fit_failed plus shared rig/preflight errors. Targets also accept model:<importName> multipart groups from rig.list_fit_targets. Exact existing mesh names take precedence. Group processing preserves independent scene geometry/transforms and hashes combined viewport world positions/indices for stale preview detection. Group errors: unknown_mesh_group, ambiguous_mesh_group, mesh_group_has_no_flat_parts, mesh_group_invalid_geometry, mesh_group_too_large. Bounds checks include a reported scale/float-precision tolerance to avoid rejecting boundary landmarks solely for rounding.",
+    "Validate world-space fit guides, resolve derived joints and return a commit preview",
+    "Read-only. Legacy anatomy requires complete finite manual landmarks. Anatomy v6 requires every non-derived guide and deterministically replaces fit-rule targets by linear interpolation; supplied derived values cannot affect preview or commit. Reports resolved landmarks, segment lengths and bounds containment, not surface interior or automatic fit residual. can_commit is false for any outside-bounds point. Errors include rig_fit_axes_unconfirmed, rig_fit_incomplete_landmarks, rig_fit_invalid_landmark, rig_fit_zero_length_bone and rig_anatomy_fit_rule_dependency.",
     "Read", "Read", false, "RigFitPreview",
     "rig|preview|fit",
     "rig.get_fit_setup|rig.commit_fit",
@@ -6021,7 +6451,7 @@ static const MethodParam params_rig_preview_pose_locals[] = {
 static const MethodDescriptor desc_rig_preview_pose_locals = {
     "rig.preview_pose_locals", "rig",
     "Preview explicit absolute local rigid matrices with revision validation",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton; mesh binding is optional. Absolute row-major rigid local matrices replace the transient preview for supplied bones after revision validation. Rest, weights and committed keys are unchanged until apply/key operations.",
     "write", "SceneWrite", false, "ok",
     "rig|preview|pose|locals|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -6040,7 +6470,7 @@ static const MethodParam params_rig_preview_pose_transform[] = {
 static const MethodDescriptor desc_rig_preview_pose_transform = {
     "rig.preview_pose_transform", "rig",
     "Preview a rigid world delta on explicit bones with revision validation",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton; mesh binding is optional. Applies a rigid world-space delta to the transient bone preview after revision validation. Rest, weights and committed keys remain unchanged.",
     "write", "SceneWrite", false, "ok",
     "rig|preview|pose|transform|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -6049,6 +6479,41 @@ static const MethodDescriptor desc_rig_preview_pose_transform = {
     true
 };
 static const MethodRegistration reg_rig_preview_pose_transform(desc_rig_preview_pose_transform);
+
+static const MethodParam params_rig_remove_ik_key[] = {
+    {"character", "any", true, "", nullptr, nullptr},
+    {"rig_revision", "any", true, "", nullptr, nullptr},
+    {"control", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_remove_ik_key = {
+    "rig.remove_ik_key", "rig",
+    "Remove one IK control key at the current frame",
+    "Requires active owned bound Pose, no preview/render job, selected editable clip and matching rig_revision. Removes only the exact current-frame key for the named control; contact intervals and keys at other times remain unchanged. Empty channels are removed. Missing keys fail rig_edit_no_change. One undo step and native persistence.",
+    "write", "SceneWrite", false, "ok",
+    "rig|remove|ik|key|pose|IK|timeline",
+    "rig.get_ik_channels|rig.insert_ik_key|rig.clear_ik_channels",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_remove_ik_key, 3,
+    true
+};
+static const MethodRegistration reg_rig_remove_ik_key(desc_rig_remove_ik_key);
+
+static const MethodParam params_rig_remove_pose_keys[] = {
+    {"bones", "any", false, "", nullptr, nullptr},
+    {"character", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_remove_pose_keys = {
+    "rig.remove_pose_keys", "rig",
+    "Remove position and quaternion keys for explicit bones at the current frame",
+    "Requires active owned bound Pose, no preview/render job and a selected editable clip. Removes exact current-frame position and rotation keys atomically for every requested bone; other frames and clip duration remain unchanged. Duplicate/unknown bones reject without mutation. Missing keys fail rig_edit_no_change. One undo step and native persistence.",
+    "write", "SceneWrite", true, "ok",
+    "rig|remove|pose|keys|FK|bone keys|timeline",
+    "rig.insert_pose_keys|rig.get_pose_state|rig.remove_ik_key",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_remove_pose_keys, 2,
+    true
+};
+static const MethodRegistration reg_rig_remove_pose_keys(desc_rig_remove_pose_keys);
 
 static const MethodParam params_rig_rename_bone[] = {
     {"character", "any", false, "Owned rig name", nullptr, nullptr},
@@ -6148,7 +6613,7 @@ static const MethodParam params_rig_select_pose_clip[] = {
 static const MethodDescriptor desc_rig_select_pose_clip = {
     "rig.select_pose_clip", "rig",
     "Select an editable native clip and clear transient pose overrides",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton; mesh binding is optional. Selects only a rigAuthoring clip owned by the character and clears transient FK/IK preview state.",
     "write", "SceneWrite", false, "ok",
     "rig|select|pose|clip|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -6159,13 +6624,13 @@ static const MethodDescriptor desc_rig_select_pose_clip = {
 static const MethodRegistration reg_rig_select_pose_clip(desc_rig_select_pose_clip);
 
 static const MethodParam params_rig_set_anatomy[] = {
-    {"anatomy", "any", false, "Full version 1 canonical anatomy object; use rig.get_anatomy to read/edit existing values", nullptr, nullptr},
+    {"anatomy", "any", false, "Full canonical anatomy object version 1..7; use rig.get_anatomy to preserve existing fields", nullptr, nullptr},
     {"character", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_rig_set_anatomy = {
     "rig.set_anatomy", "rig",
     "Replace a rig anatomy definition through validated shared authoring core",
-    "One undo command; native project persistence stores anatomy beside canonical hierarchy. Full version 1 schema required, unknown fields rejected. Unique role identifiers, existing bone keys, disjoint distinct symmetry pairs and unique contiguous base-to-tip parent chains (2..4096 joints) required. Max 4096 roles/pairs and 1024 chains. IDs are 1..128 ASCII letters/digits/underscore/hyphen/dot. Family is custom/humanoid/quadruped/insect/avian. Owned unskinned clip-free eligibility and scoped edit lock apply. Rename rekeys anatomy; reparent that disconnects a chain is rejected; delete of an anatomy-referenced bone requires removing those references first. Copy remaps anatomy to new keys. No IK, fitting or limits; basic templates can generate this metadata. Errors: rig_anatomy_invalid_schema, rig_anatomy_invalid_family, rig_anatomy_invalid_role, rig_anatomy_duplicate_role, rig_anatomy_unknown_bone, rig_anatomy_invalid_symmetry, rig_anatomy_invalid_chain_name, rig_anatomy_invalid_chain_length, rig_anatomy_duplicate_chain_bone, rig_anatomy_chain_disconnected, rig_anatomy_limit, rig_edit_no_change and shared eligibility/scene errors.",
+    "One undo command; native project persistence stores anatomy beside canonical hierarchy. Versioned schemas 1..7 are accepted with strict unknown-field rejection. V6 fit_rules derive deterministic joints. V7 control_rig adds template-independent scalar controls with explicit display anchors, ranges and local-axis bone drivers. All referenced bones must exist; rename rekeys anchors/drivers and referenced bones cannot be deleted accidentally. Owned unskinned clip-free eligibility and scoped edit lock apply. Errors include rig_anatomy_invalid_fit_rule, rig_anatomy_invalid_driven_control, rig_anatomy_invalid_control_driver and existing anatomy/edit errors.",
     "SceneWrite", "SceneWrite", true, "{ok: true}",
     "rig|set|anatomy",
     "rig.get_anatomy|rig.rename_bone|rig.reparent_bone|rig.delete_bone|rig.copy_from",
@@ -6408,7 +6873,7 @@ static const MethodParam params_rig_set_pose_auto_key[] = {
 static const MethodDescriptor desc_rig_set_pose_auto_key = {
     "rig.set_pose_auto_key", "rig",
     "Enable or disable key insertion when a pose preview is applied",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton; mesh binding is optional. Enabling Auto Key requires a selected editable clip. The setting is transient; generated bone keys are canonical AnimationData.",
     "write", "SceneWrite", false, "ok",
     "rig|set|pose|auto|key|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -6424,7 +6889,7 @@ static const MethodParam params_rig_set_pose_frame[] = {
 static const MethodDescriptor desc_rig_set_pose_frame = {
     "rig.set_pose_frame", "rig",
     "Pause playback and move to an integer authoring frame",
-    "7A/8A: requires an owned rig with a bound flat mesh; imported rigs remain read-only for pose authoring. Mutations require active pose mode and no render job. Rest transforms and weights are never modified. Frame time uses the scene FPS; create_pose_clip.fps controls clip ticks per second. Matrices are row-major 16 numbers, rigid translation/rotation only. Preview replaces the previous preview relative to the committed pose; frame changes and mode exit discard unkeyed overrides. Keys persist in native projects; clip selection and Auto Key are transient. Unweighted vertices retain their bind position.",
+    "Requires an authoring-owned skeleton in Pose mode; mesh binding is optional. Pauses playback, moves the shared Timeline frame and discards uncommitted frame-local preview state.",
     "write", "SceneWrite", false, "ok",
     "rig|set|pose|frame|FK|bone keys|authoring",
     "rig.set_mode|rig.get_pose_state|rig.preview_pose_locals|rig.apply_pose_preview",
@@ -6552,6 +7017,22 @@ static const MethodDescriptor desc_rig_transform_rest = {
     true
 };
 static const MethodRegistration reg_rig_transform_rest(desc_rig_transform_rest);
+
+static const MethodParam params_rig_unbind_mesh[] = {
+    {"character", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_unbind_mesh = {
+    "rig.unbind_mesh", "rig",
+    "Detach all bound mesh parts while preserving the authored skeleton and clips",
+    "Owned rigs only. Restores existing parts to bind P_orig/N_orig, clears skin influences and explicit rig membership, but preserves flat topology/materials/UV, actor placement, skeleton hierarchy, anatomy, controls and AnimationData clips. Missing registered parts are removed from the binding registry without manufacturing geometry. One heavy undo step restores geometry, weights, membership and runtime clips. Errors: rig_not_bound, rig_not_owned, ambiguous_character, ambiguous_mesh_name, rig_revision_overflow, api_not_bound, history_not_bound, scene_locked, rig_unbind_failed. Python rt.rig.unbind_mesh(character).",
+    "SceneWrite", "SceneWrite", true, "{ok: bool}",
+    "rig|unbind|mesh",
+    "rig.get_binding|rig.bind_mesh|rig.get_pose_state",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_unbind_mesh, 1,
+    true
+};
+static const MethodRegistration reg_rig_unbind_mesh(desc_rig_unbind_mesh);
 
 static const MethodParam params_rig_weight_stats[] = {
     {"mesh", "any", false, "Exact individual flat mesh nodeName; groups not accepted", nullptr, nullptr},
@@ -6925,8 +7406,8 @@ static const MethodParam params_scene_object_info[] = {
 };
 static const MethodDescriptor desc_scene_object_info = {
     "scene.object_info", "scene",
-    "Return vertex and triangle counts for one object",
-    nullptr,
+    "Report an object's triangle/vertex counts and its local and world bounding box",
+    "has_bounds false means the object carries no geometry, and the bound fields are then ABSENT rather than zeroed - a zeroed box would read as a point at the origin. world_size/world_center are derived from the world box and are what an assembly check needs (does this leg actually reach that rail). 'meshes' counts how many meshes carry the name: a multi-material import is one object spread over several meshes, and the counts are the aggregate, not a first-hit sample.",
     "write", "SceneWrite", false, "ObjectInfo",
     "scene|object|info",
     "scene.list_objects",

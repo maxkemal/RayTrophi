@@ -16,10 +16,12 @@
 #include "Ray.h"
 #include "Hittable.h"
 #include "MaterialProgram.h"
+#include "MaterialCoverage.h"
 #include <memory>
 
 class PrincipledBSDF : public Material {
 public:
+    MaterialCoverage coverage;
     struct SurfaceDepositionSettings {
         bool enabled = false;
         float thickness_scale = 1.0f;

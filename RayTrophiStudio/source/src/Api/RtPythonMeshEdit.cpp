@@ -6,9 +6,17 @@
 #include "MeshEdit/SplineSerialization.h"
 #include "MeshEdit/ProfileAuthoringService.h"
 #include "Api/RtApiInternal.h"
+#include "RtPyCommon.h"   // vec3FromPython, shared by every binding TU
 
 #include <stdexcept>
 #include <pybind11/numpy.h>
+// ★ std::vector<> arguments, RETURNS and default arguments all need this
+// caster. Without it a vector default argument fails at MODULE REGISTRATION
+// time ("could not convert default argument ... type not registered yet"),
+// which kills the whole embedded interpreter rather than the one binding --
+// so the cost of the missing include is paid by every script, not just the
+// function that needed it.
+#include <pybind11/stl.h>
 #include "json.hpp"
 
 namespace py = pybind11;
@@ -322,6 +330,140 @@ void registerMeshEditBindings(py::module_& mesh) {
     }, py::arg("sections"), py::arg("object") = "",
        py::arg("samples_per_section") = 24,
        py::arg("cap_start") = true, py::arg("cap_end") = true);
+
+    // ── Polygon editing ───────────────────────────────────────────────
+    // ★ These operators existed on SceneUI long before any script could
+    // reach them; mesh.tools.list advertised them as scriptable while the
+    // only entry point was a button. Parity with IPC is the point here --
+    // whatever an agent can drive over the pipe, a script can drive too.
+    auto stateDict = [](const rtapi::MeshEditState& state) {
+        py::dict out;
+        out["object"] = state.object;
+        out["cache_valid"] = state.cache_valid;
+        out["half_edge_valid"] = state.half_edge_valid;
+        out["vertices"] = state.vertex_count;
+        out["edges"] = state.edge_count;
+        out["faces"] = state.face_count;
+        out["triangles"] = state.triangle_count;
+        out["selected_vertices"] = state.selected_vertices;
+        out["selected_edges"] = state.selected_edges;
+        out["selected_faces"] = state.selected_faces;
+        out["half_edge_manifold"] = state.half_edge_manifold;
+        out["non_manifold_edges"] = state.non_manifold_edges;
+        out["skipped_polygons"] = state.skipped_polygons;
+        out["half_edge_message"] = state.half_edge_message;
+        return out;
+    };
+    auto parseDomain = [](const std::string& name) {
+        if (name == "vertex") return rtapi::MeshElementDomain::Vertex;
+        if (name == "edge") return rtapi::MeshElementDomain::Edge;
+        if (name == "face") return rtapi::MeshElementDomain::Face;
+        throw std::runtime_error("domain must be one of vertex|edge|face");
+    };
+    auto parseMode = [](const std::string& name) {
+        if (name == "set") return rtapi::MeshSelectMode::Set;
+        if (name == "add") return rtapi::MeshSelectMode::Add;
+        if (name == "remove") return rtapi::MeshSelectMode::Remove;
+        throw std::runtime_error("mode must be one of set|add|remove");
+    };
+    auto readState = [stateDict](const std::string& object) {
+        rtapi::MeshEditState state;
+        const rtapi::Result result = rtapi::meshEditGetState(object, state);
+        if (!result.ok) throw std::runtime_error(result.error);
+        return stateDict(state);
+    };
+    auto run = [readState](const std::string& object, const rtapi::Result& result) {
+        if (!result.ok) throw std::runtime_error(result.error);
+        return readState(object);
+    };
+
+    mesh.def("edit_begin", [readState](const std::string& object) {
+        const rtapi::Result result = rtapi::meshEditBegin(object);
+        if (!result.ok) throw std::runtime_error(result.error);
+        return readState(object);
+    }, py::arg("object"));
+
+    mesh.def("edit_state", [readState](const std::string& object) {
+        return readState(object);
+    }, py::arg("object") = "");
+
+    mesh.def("select", [readState, parseDomain, parseMode](
+                 const std::string& object, const std::string& domain,
+                 const std::vector<int>& ids, const std::string& mode, bool all) {
+        const rtapi::Result result = all
+            ? rtapi::meshEditSelectAll(object, parseDomain(domain))
+            : rtapi::meshEditSelect(object, parseDomain(domain), parseMode(mode), ids);
+        if (!result.ok) throw std::runtime_error(result.error);
+        return readState(object);
+    }, py::arg("object"), py::arg("domain"), py::arg("ids") = std::vector<int>{},
+       py::arg("mode") = "set", py::arg("all") = false);
+
+    mesh.def("clear_selection", [readState](const std::string& object) {
+        const rtapi::Result result = rtapi::meshEditClearSelection(object);
+        if (!result.ok) throw std::runtime_error(result.error);
+        return readState(object);
+    }, py::arg("object") = "");
+
+    mesh.def("get_selection", [parseDomain](const std::string& object,
+                                            const std::string& domain) {
+        std::vector<int> ids;
+        const rtapi::Result result = rtapi::meshEditGetSelection(object, parseDomain(domain), ids);
+        if (!result.ok) throw std::runtime_error(result.error);
+        return ids;
+    }, py::arg("object"), py::arg("domain"));
+
+    mesh.def("select_by_normal", [readState, parseMode](
+                 const std::string& object, py::handle direction,
+                 float max_angle, const std::string& mode) {
+        const rtapi::Result result = rtapi::meshEditSelectByNormal(
+            object, vec3FromPython(direction), max_angle, parseMode(mode), nullptr);
+        if (!result.ok) throw std::runtime_error(result.error);
+        return readState(object);
+    }, py::arg("object"), py::arg("direction"), py::arg("max_angle") = 30.0f,
+       py::arg("mode") = "set");
+
+    mesh.def("select_by_box", [readState, parseDomain, parseMode](
+                 const std::string& object, py::handle box_min, py::handle box_max,
+                 const std::string& domain, const std::string& mode, bool world_space) {
+        const rtapi::Result result = rtapi::meshEditSelectByBox(
+            object, vec3FromPython(box_min), vec3FromPython(box_max),
+            parseDomain(domain), parseMode(mode), world_space, nullptr);
+        if (!result.ok) throw std::runtime_error(result.error);
+        return readState(object);
+    }, py::arg("object"), py::arg("min"), py::arg("max"), py::arg("domain") = "face",
+       py::arg("mode") = "set", py::arg("world_space") = true);
+
+    mesh.def("extrude", [run](const std::string& object, float distance) {
+        return run(object, rtapi::meshExtrudeFaces(object, distance));
+    }, py::arg("object"), py::arg("distance"));
+
+    mesh.def("inset", [run](const std::string& object, float amount) {
+        return run(object, rtapi::meshInsetFaces(object, amount));
+    }, py::arg("object"), py::arg("amount"));
+
+    mesh.def("bevel", [run](const std::string& object, float width, int segments, bool round) {
+        return run(object, rtapi::meshBevelEdges(object, width, segments, round));
+    }, py::arg("object"), py::arg("width"), py::arg("segments") = 1, py::arg("round") = false);
+
+    mesh.def("loop_cut", [run](const std::string& object, float t) {
+        return run(object, rtapi::meshLoopCut(object, t));
+    }, py::arg("object"), py::arg("t") = 0.5f);
+
+    mesh.def("dissolve_edges", [run](const std::string& object) {
+        return run(object, rtapi::meshDissolveEdges(object));
+    }, py::arg("object") = "");
+
+    mesh.def("dissolve_vertices", [run](const std::string& object) {
+        return run(object, rtapi::meshDissolveVertices(object));
+    }, py::arg("object") = "");
+
+    mesh.def("merge_vertices", [run](const std::string& object) {
+        return run(object, rtapi::meshMergeVertices(object));
+    }, py::arg("object") = "");
+
+    mesh.def("weld_vertices", [run](const std::string& object, float distance) {
+        return run(object, rtapi::meshWeldVertices(object, distance));
+    }, py::arg("object"), py::arg("distance"));
 }
 
 } // namespace rtpy

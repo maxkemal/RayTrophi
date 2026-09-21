@@ -1,5 +1,8 @@
 #version 450
 #extension GL_EXT_nonuniform_qualifier : enable
+#ifdef PREVIEW_COVERED_SHADING
+layout(early_fragment_tests) in;
+#endif
 #include "procedural_detail.glsl"
 #include "pbr_texture_policy.glsl"
 // ★★★ Goruntuleme donusumu artik BURADA TANIMLI DEGIL: tek tanim
@@ -18,6 +21,15 @@ layout(location = 7) flat in vec3 vWorldToObject1;
 layout(location = 8) flat in vec3 vWorldToObject2;
 
 layout(location = 0) out vec4 outColor;
+// ★★★ RayFusion reflection G-buffer. Bu iki cikis, yansima compute gecisinin
+//   OKUDUGU seydir ve onlari yazan shader, ayni degerlerle golgelendiren
+//   shader'in KENDISIDIR. Normali derinlikten geri kurmak bir secenek degildi:
+//   yansimada yon hatasi normal hatasinin 2 KATI ve roughness 0,05'te lob ~3
+//   derece -- depth turevinden gelen geometrik normal o lobun icine sigmaz, ve
+//   normal map orada hic yok. Kanal sozlesmesi:
+//   rayfusion_reflection_gbuffer.glsl icinde, TEK yerde.
+layout(location = 1) out vec2 outRfNormal;
+layout(location = 2) out vec4 outRfSpecular;
 
 // Material buffer struct — single source of truth shared by every material-reading
 // shader. This shader historically called the type `GpuMaterial`; alias it so the
@@ -47,6 +59,7 @@ layout(set = 0, binding = 1) uniform sampler2D textures[];
 #define materialTextures textures
 #include "material_program.glsl"
 #include "material_preview_transmission.glsl"
+#include "material_preview_screen_gi.glsl"
 
 // Baked equirectangular environment maps for specular reflection lookup.
 // [0] = studio  [1] = outdoor  (128×64 RGBA32F, uploaded at pipeline init)
@@ -136,16 +149,9 @@ RtPostParams previewPostParams() {
 }
 
 const uint kPreviewMaxSceneLights = 32u;
-struct PreviewShadowRecord {
-    mat4 viewProj[6];
-    vec4 atlasRect[6];     // xy offset, zw scale
-    uvec4 meta;            // x=valid, y=light type, z=face count, w=light index
-    vec4 params;           // depth bias, normal bias, atlas texel, PCF radius
-};
-layout(set = 0, binding = 7, std430) readonly buffer PreviewShadowBuffer {
-    PreviewShadowRecord shadowRecords[kPreviewMaxSceneLights + 1u];
-};
-layout(set = 0, binding = 8) uniform sampler2D previewShadowAtlas;
+#include "material_preview_rt_shadow.glsl"
+#define RT_PREVIEW_SCREEN_SHADOW
+#include "material_preview_shadow_data.glsl"
 layout(set = 0, binding = 9) uniform sampler2D worldEnvironment;
 layout(set = 0, binding = 10) uniform sampler2D atmosphereTransmittance;
 layout(set = 0, binding = 11) uniform sampler2D atmosphereSkyView;
@@ -238,158 +244,14 @@ uint pointShadowFace(vec3 d) {
 }
 
 float evaluatePreviewShadow(uint lightIndex, vec3 P, vec3 N, vec3 L) {
-    if ((sceneFlags & 1u) == 0u || lightIndex > kPreviewMaxSceneLights) return 1.0;
-    if (shadowRecords[lightIndex].meta.x == 0u) return 1.0;
-
-    uint lightType = shadowRecords[lightIndex].meta.y;
-    uint faceCount = min(shadowRecords[lightIndex].meta.z, 6u);
-    uint face = (lightIndex < kPreviewMaxSceneLights && lightType == 0u)
-        ? pointShadowFace(P - sceneLights[lightIndex].position.xyz) : 0u;
-    if (face >= faceCount) return 1.0;
-
-    vec3 biasedP = P + N * shadowRecords[lightIndex].params.y;
-    vec4 clip = vec4(0.0);
-    vec3 ndc = vec3(0.0);
-    vec2 localUV = vec2(0.0);
-    bool projectionFound = false;
-    // Directional lights and Physical Sky sun store near-to-far cascades in
-    // the existing six-face record. Select the smallest projection containing
-    // the receiver; no shadow ABI growth or split-distance buffer is needed.
-    if (lightType == 1u && faceCount > 1u) {
-        for (uint cascade = 0u; cascade < 6u; ++cascade) {
-            if (cascade >= faceCount) break;
-            vec4 candidateClip = shadowRecords[lightIndex].viewProj[cascade] *
-                                 vec4(biasedP, 1.0);
-            if (candidateClip.w <= 0.0) continue;
-            vec3 candidateNdc = candidateClip.xyz / candidateClip.w;
-            vec2 candidateUV = candidateNdc.xy * 0.5 + 0.5;
-            bool inside = candidateNdc.z > 0.0 && candidateNdc.z < 1.0 &&
-                all(greaterThanEqual(candidateUV, vec2(0.0))) &&
-                all(lessThanEqual(candidateUV, vec2(1.0)));
-            if (inside) {
-                face = cascade;
-                clip = candidateClip;
-                ndc = candidateNdc;
-                localUV = candidateUV;
-                projectionFound = true;
-                break;
-            }
-        }
-    } else {
-        clip = shadowRecords[lightIndex].viewProj[face] * vec4(biasedP, 1.0);
-        if (clip.w > 0.0) {
-            ndc = clip.xyz / clip.w;
-            localUV = ndc.xy * 0.5 + 0.5;
-            projectionFound = ndc.z > 0.0 && ndc.z < 1.0 &&
-                all(greaterThanEqual(localUV, vec2(0.0))) &&
-                all(lessThanEqual(localUV, vec2(1.0)));
-        }
-    }
-    if (!projectionFound) return 1.0;
-
-    vec4 rect = shadowRecords[lightIndex].atlasRect[face];
-    vec2 atlasUV = rect.xy + localUV * rect.zw;
-    float bias = shadowRecords[lightIndex].params.x *
-                 max(0.25, 1.0 - max(dot(N, L), 0.0));
-    float lit = 0.0;
-    float radius = max(shadowRecords[lightIndex].params.w, 1.0);
-    vec2 halfTexel = vec2(shadowRecords[lightIndex].params.z * 0.5);
-    vec2 rectMin = rect.xy + halfTexel;
-    vec2 rectMax = rect.xy + rect.zw - halfTexel;
-    // Quality changes receiver filtering only. Atlas allocation and caster
-    // submissions remain bounded by the CPU-side preset budget.
-    int kernelHalfWidth = previewQualityMode() >= 3u ? 2 : 1;
-    float sampleCount = float((kernelHalfWidth * 2 + 1) *
-                              (kernelHalfWidth * 2 + 1));
-    for (int y = -kernelHalfWidth; y <= kernelHalfWidth; ++y) {
-        for (int x = -kernelHalfWidth; x <= kernelHalfWidth; ++x) {
-            vec2 uv = clamp(atlasUV + vec2(x, y) *
-                            shadowRecords[lightIndex].params.z * radius,
-                            rectMin, rectMax);
-            float storedDepth = texture(previewShadowAtlas, uv).r;
-            lit += (ndc.z - bias <= storedDepth) ? 1.0 : 0.0;
-        }
-    }
-    return lit / sampleCount;
+    vec3 lightPosition = lightIndex < kPreviewMaxSceneLights ? sceneLights[lightIndex].position.xyz : vec3(0);
+    return rtPreviewShadow(lightIndex, P, N, L, lightPosition, previewQualityMode());
 }
 
-vec2 worldDirToUV(vec3 d) {
-    d = normalize(d);
-    float phi = atan(d.z, d.x) - worldParams.x;
-    return vec2(fract(phi / (2.0 * 3.14159265359) + 0.5),
-                acos(clamp(d.y, -1.0, 1.0)) / 3.14159265359);
-}
-
-vec3 sampleCanonicalWorld(vec3 d) {
-    d = normalize(d);
-    if (worldMode == 1u) {
-        if ((sceneFlags & 2u) != 0u)
-            return texture(worldEnvironment, worldDirToUV(d)).rgb * max(worldParams.y, 0.0);
-        return vec3(0.0);
-    }
-
-    if (worldMode == 2u) {
-        vec3 result;
-        if ((sceneFlags & 8u) != 0u) {
-            float azimuth = atan(d.z, d.x) / (2.0 * 3.14159265359);
-            if (azimuth < 0.0) azimuth += 1.0;
-            result = texture(atmosphereSkyView,
-                             vec2(azimuth, (1.0 - clamp(d.y, -1.0, 1.0)) * 0.5)).rgb;
-            // Match miss.rmiss: the LUT is single scatter; RT adds bounded
-            // second/third order scatter before exposing it as sky radiance.
-            if (atmosphereA.x > 0.5) {
-                vec3 scatteringAlbedo = vec3(0.8, 0.85, 0.9);
-                vec3 secondOrder = result * scatteringAlbedo * 0.5 * exp(-0.5 * 0.3);
-                vec3 thirdOrder = secondOrder * scatteringAlbedo * 0.25 * exp(-0.5 * 0.1);
-                result += secondOrder * atmosphereA.y +
-                          thirdOrder * (atmosphereA.y * 0.5);
-            }
-        } else {
-            float up = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
-            vec3 horizon = vec3(0.42, 0.53, 0.68);
-            vec3 zenith = vec3(0.09, 0.24, 0.52);
-            vec3 ground = max(worldColor.rgb, vec3(0.025));
-            vec3 sky = mix(horizon, zenith, pow(up, 0.65));
-            result = mix(ground, sky, smoothstep(0.0, 0.12, d.y)) *
-                     max(worldParams.z / 10.0, 0.0);
-        }
-        vec3 sunDir = dot(worldSun.xyz, worldSun.xyz) > 1e-8
-            ? normalize(worldSun.xyz) : vec3(0.0, 1.0, 0.0);
-        float sunSize = max(worldColor.w, 0.05);
-        float elevation = degrees(asin(clamp(sunDir.y, -1.0, 1.0)));
-        if (elevation < 15.0)
-            sunSize *= 1.0 + (15.0 - max(elevation, -10.0)) * 0.04;
-        float sunRadius = radians(sunSize * 0.5);
-        float mu = dot(d, sunDir);
-        if (mu > cos(sunRadius) && worldSun.w > 0.0) {
-            float radial = acos(clamp(mu, -1.0, 1.0)) / max(sunRadius, 1e-6);
-            float limb = 1.0 - 0.6 * (1.0 - sqrt(max(0.0, 1.0 - radial * radial)));
-            float edge = 1.0 - smoothstep(0.85, 1.0, radial);
-            vec3 transSun = vec3(1.0);
-            if ((sceneFlags & 8u) != 0u) {
-                float u = clamp((max(0.01, sunDir.y) + 0.2) / 1.2, 0.0, 1.0);
-                float radius = max(atmosphereB.x, 1.0);
-                float altitude = max(0.0, length(pc.cameraPos.xyz + vec3(0.0, radius, 0.0)) - radius);
-                float v = clamp(altitude / max(atmosphereB.y, 1.0), 0.0, 1.0);
-                transSun = texture(atmosphereTransmittance, vec2(u, v)).rgb;
-            }
-            result += transSun * worldSun.w * 80000.0 * limb * edge;
-        }
-        if ((sceneFlags & 4u) != 0u) {
-            vec3 sampled = texture(worldEnvironment, worldDirToUV(d)).rgb;
-            float strength = max(worldParams.y, 0.0);
-            float amount = min(strength, 1.0);
-            vec3 overlay = sampled * strength;
-            int blendMode = int(worldParams.w + 0.5);
-            if (blendMode == 1) result *= mix(vec3(1.0), sampled, amount);
-            else if (blendMode == 2) result += overlay;
-            else if (blendMode == 3) result = overlay;
-            else result = mix(result, overlay, amount);
-        }
-        return result;
-    }
-    return max(worldColor.rgb * worldColor.w, vec3(0.0));
-}
+#include "canonical_world.glsl"
+#include "probe_field.glsl"
+#include "rayfusion_specular_visibility.glsl"
+#include "rayfusion_reflection_gbuffer.glsl"
 
 // RT integrates the environment over the GGX/cosine lobe. A single bent
 // lookup (mix(R,N,roughness^2)) over-selects the blue zenith of Physical Sky,
@@ -706,32 +568,7 @@ vec3 sampleEnvSpecular(vec3 reflectDir, uint lightingPreset) {
 }
 
 // Apply material UV transform: scale → rotate → offset → tiling
-vec2 applyUVTransform(vec2 originalUV, const GpuMaterial mat) {
-    vec2 uv = originalUV - vec2(0.5);
-
-    // Scale
-    float sx = (mat.uv_scale_x != 0.0) ? mat.uv_scale_x : 1.0;
-    float sy = (mat.uv_scale_y != 0.0) ? mat.uv_scale_y : 1.0;
-    uv *= vec2(sx, sy);
-
-    // Rotation
-    if (mat.uv_rotation_degrees != 0.0) {
-        float angle = mat.uv_rotation_degrees * (3.14159265359 / 180.0);
-        float c = cos(angle), s = sin(angle);
-        uv = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
-    }
-
-    // Offset and Pivot
-    uv += vec2(0.5);
-    uv += vec2(mat.uv_offset_x, mat.uv_offset_y);
-
-    // Tiling
-    float tx = (mat.uv_tiling_x != 0.0) ? mat.uv_tiling_x : 1.0;
-    float ty = (mat.uv_tiling_y != 0.0) ? mat.uv_tiling_y : 1.0;
-    uv *= vec2(tx, ty);
-
-    return uv;
-}
+#include "material_preview_uv.glsl"
 
 // Derivative-based TBN (tangent from screen-space partial derivatives)
 // Returns a new perturbed normal using the normal map sample.
@@ -764,6 +601,9 @@ vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec3 nmSample, float strengt
     return normalize(mat3(T, B, N) * tNormal);
 }
 
+#include "raster_material_policy.h"
+#include "material_preview_opacity.glsl"
+
 void main() {
     vec3 N = normalize(vWorldNormal);
     uint qualityMode = previewQualityMode();
@@ -783,6 +623,21 @@ void main() {
     uint materialIndex = min(vMaterialID & 0x7FFFFFFFu, materialCount - 1u);
     GpuMaterial mat = materials[materialIndex];
 
+    uint drawPhase = previewDrawPhase();
+    uint graphOffset = matProgramOffset(materialIndex);
+    // Reject provably opaque replay fragments before terrain, textures and
+    // graph evaluation. Maps are authoritative and graphs may write transmission
+    // or opacity; partial opacity also becomes legacy glass below. All of those
+    // cases must retain the per-fragment classification path.
+    if (drawPhase == PREVIEW_PHASE_TRANSMISSION &&
+        (isImpostor ||
+         !rasterMaterialMayTransmit(mat.transmission, mat.opacity,
+             validTexture(mat.transmission_tex), validTexture(mat.opacity_tex),
+             graphOffset != MATPROG_NONE, (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u,
+             (mat.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u))) {
+        discard;
+    }
+
     vec2 uv = applyUVTransform(vTexCoord, mat);
 
     // ── Procedural tile-break (independent slider, applied before texture sampling) ──
@@ -791,6 +646,21 @@ void main() {
     if (mat.tile_break_strength > 0.0 &&
         (validTexture(mat.albedo_tex) || validTexture(mat.roughness_tex) || validTexture(mat.normal_tex))) {
         uv = pd_tileBreak(uv, vWorldPos, mat.tile_break_strength);
+    }
+
+    // Coverage first: transparent needle/card pixels must not fetch normal,
+    // roughness, terrain layers, or evaluate lighting before being discarded.
+    // A graph may REPLACE opacity, so only its final output may reject it.
+    float opacity = previewSurfaceOpacity(mat, uv, isImpostor);
+    if (graphOffset == MATPROG_NONE) {
+        if (opacity == 0.0) discard;
+        // Once opacity is sampled, opaque texels of a mixed card can also
+        // leave replay before the rest of the material is evaluated.
+        if (drawPhase == PREVIEW_PHASE_TRANSMISSION &&
+            !rasterMaterialMayTransmit(mat.transmission, opacity,
+                validTexture(mat.transmission_tex), false, false,
+                (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u,
+                (mat.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u)) discard;
     }
 
     // ── Terrain Splat-Layer Blending (FLAG_TERRAIN = bit 16) ──
@@ -969,7 +839,6 @@ void main() {
         graphAttrs[graphAttr] = 0.0;
     MatProgOut graphOut = mp_defaultOut();
     uint graphWritten = 0u;
-    uint graphOffset = matProgramOffset(materialIndex);
     if (graphOffset != MATPROG_NONE) {
         graphOut = evalMaterialProgram(
             graphOffset, rawUV, vWorldPos, N, 0.5, vObjectOrigin,
@@ -1010,25 +879,11 @@ void main() {
     //   "kabalasmaz", BOSALIR. Ustelik tek bir texel'in maskesini butun
     //   impostor'a uygulamanin fiziksel bir karsiligi da yok: proxy zaten
     //   yaprak deseninin degil SILUETIN yaklasikligidir.
-    float opacity = clamp(mat.opacity, 0.0, 1.0);
-    if (isImpostor) {
-        opacity = 1.0;
-    } else if (validTexture(mat.opacity_tex)) {
-        vec4 opacityTexel = texture(textures[nonuniformEXT(mat.opacity_tex)], uv);
-        // flags bit 8: RGBA texture (opacity in .a); clear: grayscale mask (opacity in .r)
-        // If opacity_tex == albedo_tex the user wired the same RGBA texture to both slots:
-        // always read .a in that case — reading .r would bleed colour into the mask.
-        bool useAlpha = ((mat.flags & 256u) != 0u) || (mat.opacity_tex == mat.albedo_tex);
-        float maskValue = useAlpha ? opacityTexel.a : opacityTexel.r;
-        opacity *= maskValue;
-        // Hard floor matching RT pipeline (closesthit line ~1824):
-        // values < 0.1 are treated as fully transparent to kill texture-compression ghosts.
-        if (opacity < 0.1) opacity = 0.0;
-    }
     if (!isImpostor && (graphWritten & MP_SLOT_OPACITY) != 0u) {
         opacity = clamp(graphOut.opacity, 0.0, 1.0);
         if (opacity < 0.1) opacity = 0.0;
     }
+    opacity = materialCoverageOpacity(opacity, !isImpostor && (mat.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u);
     if (opacity == 0.0) {
         discard;
     }
@@ -1037,12 +892,10 @@ void main() {
     if (!isImpostor && opacity < 0.99 && metallic < 0.1 && transmission < 0.01)
         transmission = 1.0 - opacity;
 
-    // The backend records the same canonical draw list twice. Classification
-    // stays here because transmission texture and Material Graph outputs are
-    // per-fragment; CPU material-level sorting would misclassify mapped glass.
+    // Replay retains only meshes that MAY transmit. Final classification stays
+    // per-fragment for opacity/transmission maps and Material Graph outputs.
     // Phase 0 preserves combined rendering until snapshot descriptors are
     // valid, avoiding a half-wired frame during resize/reload.
-    uint drawPhase = previewDrawPhase();
     bool transmissiveFragment = !isImpostor &&
         (transmission > 0.001 || (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u);
     if (drawPhase == PREVIEW_PHASE_OPAQUE && transmissiveFragment) {
@@ -1321,11 +1174,96 @@ void main() {
 
     vec3 ambient = vec3(0.0);
     vec3 envSpecular = vec3(0.0);
+    // ★★★ Yansima compute gecisinin uygulayacagi AGIRLIK. Bu, `envSpecular`in
+    //   ortam radyansi DISINDAKI her carpani -- yani yansima gecisi izlenen
+    //   radyansi bununla carpinca, yerine gectigi env lookup'iyla ENERJI OLARAK
+    //   TUTARLI olur.
+    // ★ Bu yuzden yansima "metalik ozelligi" DEGIL: agirlik bir Fresnel terimi
+    //   oldugu icin verniklenmis ahsap, boyali zemin, seramik ve plastik ayni
+    //   yoldan, hic ek kod olmadan devralir. Grazing acida agirlik zaten
+    //   yukselir, tepeden bakista dusertir -- kapi tam olarak orada acilir.
+    // ★ Yalnizca scene lighting (preset 3) doldurur: studio/matcap yollari
+    //   yazili sahne isiklarini temsil etmiyor, `rfSpecularSkyVisibility` de
+    //   ayni sebeple oraya dokunmuyor.
+    vec3 rfEnvSpecularWeight = vec3(0.0);
     if (lightingPreset == 3u) {
         vec3 R = reflect(-V, N);
-        if (worldMode == 1u && (sceneFlags & 32u) != 0u) {
-            float intensity = max(worldParams.y, 0.0);
-            vec3 irradiance = texture(worldIrradiance, worldDirToUV(N)).rgb * intensity;
+        // ★★★★ Prefiltered ambient is now the path for BOTH producers. Measured
+        //   before this change: the Nishita branch below ran a 9-tap cone
+        //   integral per lobe, twice per fragment, on a forward pass with no
+        //   depth prepass - ~60 ms of a 102 ms frame. Sky radiance depends only
+        //   on direction, so it belongs in a directional cache, and that cache
+        //   is the same slot a probe field will later fill.
+        if ((sceneFlags & 32u) != 0u) {
+            // The sky bake already carries its own intensities; only the HDRI
+            // path still scales by the environment intensity dial.
+            float intensity = worldMode == 1u ? max(worldParams.y, 0.0) : 1.0;
+            vec3 irradiance;
+            float screenGiConfidence;
+            bool screenGiValid = sampleScreenGi(N, irradiance, screenGiConfidence);
+            // ★★★ RayFusion Adım 1a: AYNI değer, FARKLI boru. Probe alanı bu
+            //   pikseli kapsıyorsa ambient oradan okunur. İlk üretici hâlâ aynı
+            //   gökyüzü bake'i olduğu için görüntü DEĞİŞMEMELİ; değişen tek şey,
+            //   ışın geldiği gün yalnızca üreticinin değişecek olması.
+            //   Kapsanmayan piksel global okumada kalır — sessizce kararmaz.
+            vec3 probeIrradiance;
+            if (!screenGiValid || screenGiConfidence < 1.0) {
+                // ★★★★★ GOKYUZU GORUNURLUGU DIFUZ TERIME DE UYGULANIR.
+                //
+                //   Bu satirlar olmadan asimetri suydu: `envSpecular` satir
+                //   ~1521'de `rfSpecularSkyVisibility` ile engelleniyordu ama
+                //   DIFUZ ambient hicbir gorunurluk testi gormuyordu. Odayi
+                //   duz maviye boyayan terim tam olarak difuz olandir --
+                //   parlak lob dogru davranirken oda gokyuzuyle doluyordu.
+                //
+                //   Asagidaki `fallbackIrradiance`in her iki kaynagi da INSAASI
+                //   GEREGI ENGELSIZDIR: `worldIrradiance` yalnizca yone bagli
+                //   bir on-suzulmus kuredir ve `sky_bake` ureticisi de hicbir
+                //   isin atmaz. Yani bu deger "acik arazide bu normale dusen
+                //   isima"dir; kapali bir odada tam gucuyle uygulamak, duvarlari
+                //   yokmus saymaktir.
+                //
+                // ★★★ Kaynak SIRASI, guclu olcumden zayifina:
+                //   1) Ekran-uzayi OLCUM: bu karede bu pikselden gercekten
+                //      atilmis yarim kure isinlari. Yuzey-kaynakli, parallaks
+                //      hatasi yok, kosinus agirlikli.
+                //   2) Probe tahmini (`rfSpecularSkyVisibility`, N boyunca):
+                //      ekran-uzayi olcum yoksa. Probe-kaynakli oldugu icin
+                //      parallaks tasir, ama hicbir seyden iyidir.
+                //   3) Hicbiri konusamiyorsa 1.0 -- yani DAVRANIS DEGISMEZ.
+                //      Bu, "olcemedim"in sessizce "gorus acik"a donusmedigi
+                //      TEK yer: ustteki iki kol da olcum YOKLUGUNU ayri bir
+                //      donus degeriyle bildirir, varsayilan bir deger degil.
+                float skyVisibility;
+                if (!sampleScreenGiSkyVisibility(N, skyVisibility))
+                    skyVisibility = rfSpecularSkyVisibility(vWorldPos, N, N);
+
+                vec3 fallbackIrradiance = texture(worldIrradiance, worldDirToUV(N)).rgb * intensity;
+                if (rfSampleProbeField(vWorldPos, N, probeIrradiance))
+                    fallbackIrradiance = probeIrradiance * intensity;
+                // ★★★★★ GORUNURLUK KAYNAK SECIMINDEN SONRA uygulanir.
+                //
+                //   Onceki halinde once gokyuzu okumasi olceklenip sonra probe
+                //   kolu onu TAMAMEN EZIYORDU -- yani olcum yapilip cope
+                //   atiliyordu. Ve baskin kaynak tam olarak o koldur.
+                //
+                // ★★★ Probe alani, YUZEYIN degil PROBE'un bulundugu yerin
+                //   isimasini verir. Izgara oda sinirlarina oturmadigi icin
+                //   (olculdu: spacing 3, kapsam [-6,6]x[-3,3]x[-6,6], oda bundan
+                //   kucuk) ODANIN DISINDAKI bir probe ACIK GOKYUZU gorur ve o
+                //   deger iceride bir duvara uygulanir. Ekran-uzayi olcum ise
+                //   YUZEY kaynaklidir: o pikselin yarim kuresinin ne kadarinin
+                //   gercekten gokyuzune baktigini bu karede olcer.
+                //
+                // ★★ Cift sayim riski kabul edildi ve OLCUMLE tartildi: `traced`
+                //   uretici kendi gorunurlugunu tasiyabilir, ama bu sahnede
+                //   `bounce_requested: false` -- yani probe pratikte yalnizca
+                //   gokyuzu tasiyor, neredeyse engelsiz. Olculen hata 10x fazla
+                //   aydinlatmaydi; cift sayimin riski ise bir miktar fazla
+                //   karartmadir. Yanlis yonu kucuk olani secildi.
+                fallbackIrradiance *= skyVisibility;
+                irradiance = screenGiValid ? mix(fallbackIrradiance, irradiance, screenGiConfidence) : fallbackIrradiance;
+            }
             vec3 prefiltered = textureLod(worldPrefiltered, worldDirToUV(R),
                                           reflectionRoughness * 8.0).rgb * intensity;
             vec2 brdf = texture(worldBrdfLut,
@@ -1336,6 +1274,16 @@ void main() {
                       ambientBaseWeight;
             envSpecular = prefiltered * (F0 * brdf.x + brdf.y) *
                           ambientBaseWeight;
+            rfEnvSpecularWeight = (F0 * brdf.x + brdf.y) * ambientBaseWeight;
+            // The sun disc is deliberately absent from the bake - it reaches
+            // this surface as an analytic directional light, and baking it into
+            // irradiance would light every diffuse surface twice. A near-mirror
+            // must still show it, so those surfaces take one direct sample.
+            // One tap, not the nine-tap cone that was measured.
+            if (worldMode == 2u && reflectionRoughness <= 0.025) {
+                envSpecular = sampleCanonicalWorld(R) *
+                              (F0 * brdf.x + brdf.y) * ambientBaseWeight;
+            }
             if (mat.clearcoat > 0.001) {
                 float ccRoughness = clamp(mat.clearcoat_roughness, 0.02, 1.0);
                 vec3 ccEnv = textureLod(worldPrefiltered, worldDirToUV(R),
@@ -1347,9 +1295,15 @@ void main() {
                                mat.clearcoat * coatEnvTint;
             }
         } else {
-            vec3 envDiffuse = worldMode == 2u
-                ? samplePhysicalSkyFiltered(N, 1.0)
-                : sampleCanonicalWorld(N);
+            // Fully metallic/transmitting surfaces have no diffuse term. Avoid
+            // the 5/9-tap sky integral when its contribution is exactly zero;
+            // partial materials retain the complete existing filter.
+            vec3 envDiffuse = vec3(0.0);
+            if (any(notEqual(diffuseColor, vec3(0.0)))) {
+                envDiffuse = worldMode == 2u
+                    ? samplePhysicalSkyFiltered(N, 1.0)
+                    : sampleCanonicalWorld(N);
+            }
             // Physical Sky gets a bounded deterministic approximation of RT's
             // rough GGX environment integral instead of a blue-biased bent ray.
             vec3 envReflection = worldMode == 2u
@@ -1361,6 +1315,9 @@ void main() {
             ambient = envDiffuse * diffuseColor * (vec3(1.0) - fresnelAmb) *
                       ambientBaseWeight;
             envSpecular = envReflection * fresnelAmb *
+                          mix(1.0, 0.18, reflectionRoughness * reflectionRoughness) *
+                          ambientBaseWeight;
+            rfEnvSpecularWeight = fresnelAmb *
                           mix(1.0, 0.18, reflectionRoughness * reflectionRoughness) *
                           ambientBaseWeight;
             if (mat.clearcoat > 0.001) {
@@ -1416,13 +1373,15 @@ void main() {
     // Keep the diffuse sub-layer energy split consistent outside direct
     // lights too. Environment back-lighting is deliberately a bounded lookup,
     // not screen refraction or a claim of thick-transmission parity.
-    vec3 backEnvironment = lightingPreset == 3u
-        ? sampleCanonicalWorld(-N)
-        : samplePreviewEnvironment(-N, lightingPreset);
     ambient = ambient * boundedScatterTint *
               (1.0 - translucency);
-    ambient += backEnvironment * diffuseColor * boundedScatterTint * translucency *
-               (1.0 / PI) * ambientBaseWeight;
+    if (translucency > 0.0 && any(notEqual(diffuseColor, vec3(0.0)))) {
+        vec3 backEnvironment = lightingPreset == 3u
+            ? sampleCanonicalWorld(-N)
+            : samplePreviewEnvironment(-N, lightingPreset);
+        ambient += backEnvironment * diffuseColor * boundedScatterTint * translucency *
+                   (1.0 / PI) * ambientBaseWeight;
+    }
 
     // ── Glass / resin / thin-film surface ────────────────────────────────
     // The material contract mirrors Vulkan RT here (texture/graph
@@ -1609,6 +1568,9 @@ void main() {
         envSpecular = vec3(0.0);
     }
 
+    if (!sceneReflectionValid && lightingPreset == 3u)
+        envSpecular *= rfSpecularSkyVisibility(vWorldPos, N, reflect(-V, N));
+
     vec3 color = (ambient + diffuseLit + sheenLit) * resinBaseAttenuation
                + specularLit + envSpecular
                + transmissionLit
@@ -1620,8 +1582,12 @@ void main() {
     //   shader ACES uygularken projenin tone_mapping ayari `none` idi ve
     //   ustune CPU post gecisi zaten sRGB'ye kodlanmis 8-bit degerlere
     //   exposure uyguluyordu -- CIFT KODLAMA.
-    color = rtApplyPost(color, previewPostParams(),
-                        gl_FragCoord.xy / max(postC.xy, vec2(1.0)));
+    // *** GORUNTULEME DONUSUMU BURADAN SOKULDU (2026-09-06).
+    //   Bu shader artik SCENE-LINEAR yaziyor; zincir (exposure -> operator ->
+    //   grade -> vignette -> sRGB) tek yerde, `raster_post.comp` icinde kosuyor.
+    //   Zorunluydu: alan derinligi bu shader'larin ciktisini BULANISTIRIR ve
+    //   bokeh, parlak noktanin daire olarak acilmasidir. Tonemap'ten gecmis bir
+    //   deger o noktayi zaten kirpmistir; onu bulanistirmak gri leke uretir.
 
     if (sceneReflectionValid) {
         vec3 reflectionFresnel = fresnelSchlickRoughness(
@@ -1646,8 +1612,9 @@ void main() {
         opacity * (1.0 - dielectricPass * interiorPass), 0.015, 1.0);
     if (drawPhase == PREVIEW_PHASE_TRANSMISSION) {
         if (sceneRefractionValid) {
-            // previewOpaqueColor is already display-referred by the same post
-            // chain. Add it after rtApplyPost so it is never tone-mapped twice.
+            // * Anlik goruntu ARTIK O DA scene-linear: ayni uzayda
+            //   topluyoruz, "iki kez tonemap" tehlikesi yok -- zincir bu
+            //   shader'dan sonra, tek sefer kosuyor.
             color += sceneThrough * dielectricPass;
         }
         // Both scene continuation and refracted-environment fallback already
@@ -1657,4 +1624,34 @@ void main() {
         outputOpacity = 1.0;
     }
     outColor = vec4(color, outputOpacity);
+
+    // ─── RayFusion reflection G-buffer ───────────────────────────────────────
+    // ★★★ Speküler agirligi UC durumda sifirliyoruz, ve ucu de "yansima yok"
+    //   degil "bu yuzey bu karede yansima BEYAN ETMIYOR" demek:
+    //
+    //   1. Transmission fazi. Cam/resin yuzeyinin yansimasini ekran uzayi
+    //      yolu (tracePreviewOpaqueReflection) zaten uretiyor; buraya
+    //      yazsaydik, ARKASINDAKI opak yuzeyin normalini silerdik -- derinlik
+    //      testi bir yarisaydam fragment'i elemez. Belirtisi "camin arkasindaki
+    //      metal yansimayi kaybetti" olurdu ve sebebi camda gorunmezdi.
+    //   2. Ekran uzayi yansimasi GECERLI. `envSpecular` yukarida sifirlandi;
+    //      agirligi burada birakmak ayni yansimayi IKI kez eklerdi.
+    //   3. Scene lighting disinda `rfEnvSpecularWeight` hic doldurulmadi.
+    //
+    // ★ `reflectionRoughness` her zaman yazilir: kapi agirlikta, roughness'ta
+    //   degil. Kapiyi roughness'a kurmak temizlenmis her texel'i (gokyuzu
+    //   dahil) "mukemmel ayna" ilan etmek olurdu.
+    vec3 rfWeight = rfEnvSpecularWeight;
+    if (drawPhase == PREVIEW_PHASE_TRANSMISSION || sceneReflectionValid)
+        rfWeight = vec3(0.0);
+    // ★★★★ DORDUNCU durum ve en sinsisi: YARISAYDAM fragment. Yansima gecisi
+    //   `agirlik * (izlenen - env)` ekliyor, yani fragment shader'in env
+    //   terimini EKLEDIGINI varsayiyor. Blend acikken eklenen miktar alfa ile
+    //   olceklenir (`src * alpha`), ama G-buffer'a yazilan agirlik
+    //   olceklenmemistir -- geri cikarma FAZLA cikarir ve belirtisi "yari
+    //   saydam yuzeyler yansimada kararmis" olur. Kimse bunu yansima hatasi
+    //   diye raporlamaz. Bu yuzden tam opak olmayan fragment env yolunda kalir.
+    if (outputOpacity < 0.999) rfWeight = vec3(0.0);
+    outRfNormal = rfOctEncodeNormal(N);
+    outRfSpecular = vec4(max(rfWeight, vec3(0.0)), reflectionRoughness);
 }

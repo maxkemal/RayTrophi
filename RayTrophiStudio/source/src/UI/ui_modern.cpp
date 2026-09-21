@@ -3137,6 +3137,44 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                 dl->AddLine(vBRight, vBottom, wCol, thickness * 0.8f);
             }
             break;
+        case UIWidgets::IconType::Bone:
+            {
+                // Octahedral Bone / Rig Joint Icon
+                // Head (bottom-left joint) -> Flare midpoint -> Tail (top-right joint)
+                ImVec2 vHead(cp.x - is * 0.26f, cp.y + is * 0.30f);
+                ImVec2 vTail(cp.x + is * 0.26f, cp.y - is * 0.30f);
+
+                // Octahedron widest flare points (3D octahedral cross section)
+                ImVec2 vFlareL(cp.x - is * 0.22f, cp.y - is * 0.04f);
+                ImVec2 vFlareR(cp.x + is * 0.04f, cp.y + is * 0.22f);
+                ImVec2 vFlareFront(cp.x - is * 0.08f, cp.y + is * 0.08f);
+
+                // 3D Facet Fills (Top & Front faces of Octahedron)
+                ImVec2 faceTop[]   = { vHead, vFlareL, vTail, vFlareFront };
+                ImVec2 faceRight[] = { vHead, vFlareFront, vTail, vFlareR };
+
+                dl->AddConvexPolyFilled(faceTop, 4, IM_COL32(60, 180, 255, 75));
+                dl->AddConvexPolyFilled(faceRight, 4, IM_COL32(30, 130, 220, 110));
+
+                // Outer Edges of the Bone
+                dl->AddLine(vHead, vFlareL, col, thickness * 1.0f);
+                dl->AddLine(vFlareL, vTail, col, thickness * 1.0f);
+                dl->AddLine(vHead, vFlareR, col, thickness * 1.0f);
+                dl->AddLine(vFlareR, vTail, col, thickness * 1.0f);
+
+                // Central 3D Octahedral Ridge Lines
+                dl->AddLine(vHead, vFlareFront, IM_COL32(120, 220, 255, 220), thickness * 1.2f);
+                dl->AddLine(vFlareFront, vTail, IM_COL32(120, 220, 255, 220), thickness * 1.2f);
+                dl->AddLine(vFlareL, vFlareR, IM_COL32(255, 255, 255, 90), thickness * 0.8f);
+
+                // Joint Spheres (Head Joint & Tail Joint)
+                dl->AddCircleFilled(vHead, is * 0.11f, IM_COL32(255, 170, 40, 255), 12);
+                dl->AddCircle(vHead, is * 0.11f, IM_COL32(255, 220, 100, 255), 12, thickness * 0.9f);
+
+                dl->AddCircleFilled(vTail, is * 0.08f, IM_COL32(80, 220, 255, 255), 10);
+                dl->AddCircle(vTail, is * 0.08f, IM_COL32(180, 245, 255, 255), 10, thickness * 0.8f);
+            }
+            break;
         case UIWidgets::IconType::Timeline:
             for(int i=0; i<3; i++) dl->AddLine(ImVec2(p.x, p.y + is*0.3f*i + 2), ImVec2(p.x + is, p.y + is*0.3f*i + 2), col, thickness);
             dl->AddRectFilled(ImVec2(cp.x-1, p.y), ImVec2(cp.x+1, p.y+is), col); // Needle

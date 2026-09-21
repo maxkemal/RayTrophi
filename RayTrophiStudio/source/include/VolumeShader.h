@@ -402,13 +402,12 @@ public:
     // ═══════════════════════════════════════════════════════════════════════════
     struct QualitySettings {
         float step_size = 0.15f;          ///< Legacy/custom fixed world-space step
-        float voxel_step_multiplier = 1.0f; ///< Primary sample spacing in voxels
-        int max_steps = 64;               ///< Maximum steps per ray
+        float voxel_step_multiplier = 0.5f; ///< Primary sample spacing in voxels
+        int max_steps = 256;              ///< Maximum steps per ray (the real cost ceiling)
         int shadow_steps = 8;              ///< Steps for self-shadowing
         int shadow_stride = 4;             ///< Reuse one shadow result across N primary samples
         float shadow_strength = 0.8f;      ///< Self-shadow intensity (0-1)
         bool adaptive_stepping = true;     ///< Adjust step based on density
-        int quality_preset = 1;            ///< 0=Draft, 1=Medium, 2=High, 3=Ultra, 4=Custom
 
         // Serialization
         json toJson() const {
@@ -420,7 +419,6 @@ public:
             j["shadow_stride"] = shadow_stride;
             j["shadow_strength"] = shadow_strength;
             j["adaptive_stepping"] = adaptive_stepping;
-            j["quality_preset"] = quality_preset;
             return j;
         }
 
@@ -436,14 +434,9 @@ public:
             if (j.contains("shadow_strength")) shadow_strength = j["shadow_strength"];
             if (j.contains("adaptive_stepping")) adaptive_stepping = j["adaptive_stepping"];
             if (!has_voxel_multiplier) adaptive_stepping = false;
-            if (j.contains("quality_preset")) {
-                quality_preset = j["quality_preset"];
-            } else {
-                // Backward compatibility for old scene files without preset selection.
-                quality_preset = 1; // Balanced
-            }
-            if (!has_voxel_multiplier) quality_preset = 4; // migrated fixed-step custom
-            if (quality_preset < 0 || quality_preset > 4) quality_preset = 1;
+            // `quality_preset` was dropped 2026-09-20. It is deliberately not
+            // read back: it only ever mirrored the four dials below, and an old
+            // scene already carries those dials' values.
             if (voxel_step_multiplier < 0.1f) voxel_step_multiplier = 0.1f;
             if (voxel_step_multiplier > 8.0f) voxel_step_multiplier = 8.0f;
             if (shadow_stride < 1) shadow_stride = 1;
@@ -498,7 +491,6 @@ public:
         // 0.7 voxels still oversamples the grid, so detail is not what was lost.
         shader->quality.step_size = 0.05f;
         shader->quality.voxel_step_multiplier = 0.7f;
-        shader->quality.quality_preset = 2;
         shader->quality.max_steps = 192;
         shader->quality.shadow_steps = 8;
         shader->quality.shadow_stride = 4;
@@ -523,7 +515,6 @@ public:
         
         shader->quality.step_size = 0.2f;
         shader->quality.voxel_step_multiplier = 0.875f;
-        shader->quality.quality_preset = 1;
         shader->quality.max_steps = 512;
         shader->quality.shadow_steps = 8;
         shader->quality.shadow_strength = 0.9f;

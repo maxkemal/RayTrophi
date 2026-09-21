@@ -1,0 +1,67 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,std430) readonly buffer Volumes { uint volumeWords[]; };
+layout(set=0,binding=1,std430) buffer Shadows { uint shadowWords[]; };
+layout(push_constant) uniform Push {
+    mat4 invViewProj;
+    uvec4 tileInfo; // tile, tilesPerRow, tileSize, layers
+    uvec4 settings; // volumeCount, integration steps, perspective, padding
+} pc;
+#include "material_preview_volume_fields.glsl"
+
+void main() {
+    uvec2 pixel=gl_GlobalInvocationID.xy;
+    uint tileSize=pc.tileInfo.z, layers=pc.tileInfo.w;
+    if(any(greaterThanEqual(pixel,uvec2(tileSize))))return;
+    uint side=pc.tileInfo.y*tileSize;
+    uvec2 atlasPixel=uvec2(pc.tileInfo.x%pc.tileInfo.y,pc.tileInfo.x/pc.tileInfo.y)*tileSize+pixel;
+    uint base=4228u+(atlasPixel.y*side+atlasPixel.x)*(layers+2u);
+    vec2 ndc=(vec2(pixel)+0.5)/float(tileSize)*2.0-1.0;
+    vec4 h0=pc.invViewProj*vec4(ndc,0,1), h1=pc.invViewProj*vec4(ndc,1,1);
+    vec3 ro=h0.xyz/h0.w, delta=h1.xyz/h1.w-ro;
+    float rayLength=length(delta); vec3 rd=delta/rayLength;
+    uint ids[16]; float starts[16],ends[16]; uint count=0u;
+    float first=rayLength,last=0.0;
+    // A bounded number of intersecting media, independent of SDF slot order.
+    for(uint vi=0u;vi<pc.settings.x;++vi){
+        if(volInt(vi,172u)==0 || volInt(vi,428u)==4)continue;
+        float a,b;if(!rayVolumeInterval(vi,ro,rd,a,b))continue;
+        a=max(a,0.0);b=min(b,rayLength);if(b<=a)continue;
+        if(count==16u)break;
+        ids[count]=vi;starts[count]=a;ends[count]=b;++count;
+        first=min(first,a);last=max(last,b);
+    }
+    // Store linear light-axis depth, not nonlinear perspective depth. This
+    // concentrates all layers on the occupied interval and lets receivers in
+    // front of the medium remain lit, including point/spot light projections.
+    float z0=pc.settings.z!=0u?1.0/h0.w:0.0;
+    float z1=pc.settings.z!=0u?1.0/h1.w:1.0;
+    shadowWords[base]=floatBitsToUint(count>0u?mix(z0,z1,first/rayLength):1.0);
+    shadowWords[base+1u]=floatBitsToUint(count>0u?mix(z0,z1,last/rayLength):0.0);
+    float tau=0.0;
+    uint substeps=max(pc.settings.y/layers,1u);
+    for(uint layer=0u;layer<layers;++layer){
+        if(count>0u){
+            float layerStart=mix(first,last,float(layer)/float(layers));
+            float layerEnd=mix(first,last,float(layer+1u)/float(layers));
+            for(uint j=0u;j<count;++j){
+                float a=max(layerStart,starts[j]),b=min(layerEnd,ends[j]);
+                if(b<=a)continue;
+                uint vi=ids[j];
+                vec3 absorption=max(volVec3(vi,120u),vec3(0));
+                float peak=max(absorption.x,max(absorption.y,absorption.z));
+                absorption=peak>1e-5?absorption/peak:vec3(1);
+                float sigma=max(volFloat(vi,100u),0.0)+max(volFloat(vi,132u),0.0)*dot(absorption,vec3(.2126,.7152,.0722));
+                float dt=(b-a)/float(substeps);
+                for(uint s=0u;s<substeps;++s){
+                    vec3 p=ro+rd*(a+(float(s)+0.5)*dt);
+                    tau+=sampleField(vi,volAddress(vi,232u),p)*sigma*dt*clamp(volFloat(vi,164u),0.0,1.0);
+                }
+            }
+        }
+        shadowWords[base+2u+layer]=floatBitsToUint(min(tau,32.0));
+    }
+}

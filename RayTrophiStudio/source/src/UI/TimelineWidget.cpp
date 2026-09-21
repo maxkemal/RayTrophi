@@ -27,6 +27,9 @@
 #include "OptixWrapper.h"  // For direct instance transform updates
 #include "ui_modern.h"
 #include "MeshEdit/SplineAnimation.h"
+#include "Animation/RigSelection.h"
+#include "Animation/RigTimelineProjection.h"
+#include "Api/RtApi.h"
 
 #include <thread>
 
@@ -515,11 +518,21 @@ void TimelineWidget::draw(UIContext& ctx) {
         is_playing = false;
     }
     
-    // Sync new AnimationData entries every frame — cheap (count compare + early return)
+    // Sync non-skeletal AnimationData entries every frame — cheap count gate.
     syncFromAnimationData(ctx);
     
     // PERFORMANCE: Handle selection change with minimal overhead
     handleSelectionSync(ctx);
+
+    std::string rigPreferredTrack;
+    if (RigAuthoring::synchronizeRigTimelineProjection(
+            ctx.scene, rig_projected_tracks_, rig_projection_signature_, rigPreferredTrack)) {
+        tracks_dirty = true;
+        graph_fit_pending = true;
+    }
+    if (!rigPreferredTrack.empty()) {
+        selected_track = rigPreferredTrack;
+    }
 
     static size_t last_scene_track_count = std::numeric_limits<size_t>::max();
     if (ctx.scene.timeline.tracks.size() != last_scene_track_count) {
@@ -1207,9 +1220,9 @@ void TimelineWidget::draw(UIContext& ctx) {
                 }
 
                 if (changed || advancedChanged || environmentChanged || weatherChanged) {
-                    extern bool g_world_dirty;
+                    extern void markWorldDirty();
                     extern bool g_gas_volumes_dirty;
-                    g_world_dirty = true;
+                    markWorldDirty();
                     const bool volumeLightingChanged = changed || advancedChanged || weatherChanged;
                     if (volumeLightingChanged) {
                         g_gas_volumes_dirty = true;
@@ -1418,12 +1431,18 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     // --- TOOLBAR BUTTONS ---
     bool has_selection = !selected_track.empty();
     bool has_keyframe_selected = has_selection && selected_keyframe_frame >= 0;
+    const auto& pose = ctx.scene.rigView.pose;
+    const bool pose_key_target = pose.active && !pose.character.empty() &&
+        (!pose.control.empty() || !RigAuthoring::selectedBones(ctx.scene).empty());
 
     // Keyframe buttons
     if (UIWidgets::IconActionButton("TimelineAddKey", UIWidgets::IconType::AddKey, "Key",
                                     false, ImVec4(0.42f, 0.86f, 1.0f, 1.0f), ImVec2(60.0f, 22.0f),
-                                    "Insert keyframe", has_selection)) {
-        insertKeyframeForTrack(ctx, selected_track, current_frame);
+                                    pose.active ? "Insert selected rig control/bone key"
+                                                : "Insert keyframe",
+                                    pose.active ? pose_key_target : has_selection)) {
+        insertKeyframeForTrack(
+            ctx, pose.active ? pose.character : selected_track, current_frame);
         tracks_dirty = true;
     }
     
@@ -1432,7 +1451,8 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     if (UIWidgets::IconActionButton("TimelineRemoveKey", UIWidgets::IconType::RemoveKey, "Delete",
                                     false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(72.0f, 22.0f),
                                     "Delete selected keyframe", has_keyframe_selected)) {
-        deleteKeyframe(ctx, selected_track, selected_keyframe_frame);
+        deleteKeyframe(ctx, pose.active ? pose.character : selected_track,
+                       selected_keyframe_frame);
         selected_keyframe_frame = -1;
         tracks_dirty = true;
     }
@@ -1441,7 +1461,10 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     
     if (UIWidgets::IconActionButton("TimelineDuplicateKey", UIWidgets::IconType::Duplicate, "Duplicate",
                                     false, ImVec4(0.86f, 0.68f, 1.0f, 1.0f), ImVec2(90.0f, 22.0f),
-                                    "Duplicate keyframe (+10 frames)", has_keyframe_selected)) {
+                                    pose.active
+                                        ? "Rig key duplication is pending canonical curve editing"
+                                        : "Duplicate keyframe (+10 frames)",
+                                    has_keyframe_selected && !pose.active)) {
         duplicateKeyframe(ctx, selected_track, selected_keyframe_frame, selected_keyframe_frame + 10);
         tracks_dirty = true;
     }
@@ -2079,12 +2102,14 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
                             if (ImGui::IsMouseClicked(0)) {
                                 selected_track = full_track_name;
                                 selected_keyframe_frame = kf.frame;
-                                is_dragging_keyframe = true;
+                                is_dragging_keyframe =
+                                    rig_projected_tracks_.count(track.entity_name) == 0;
                                 drag_start_frame = kf.frame;
                             }
                             
                             // Right click to open context menu for keyframe
-                            if (ImGui::IsMouseClicked(1)) {
+                            if (ImGui::IsMouseClicked(1) &&
+                                rig_projected_tracks_.count(track.entity_name) == 0) {
                                 selected_track = full_track_name;
                                 selected_keyframe_frame = kf.frame;
                                 ImGui::OpenPopup("KeyframeContextMenu");
@@ -2996,7 +3021,10 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
     
     // I key - Insert keyframe (global shortcut)
     if (ImGui::IsKeyPressed(ImGuiKey_I) && !io.WantTextInput) {
-        if (!selected_track.empty()) {
+        if (ctx.scene.rigView.pose.active) {
+            insertKeyframeForTrack(ctx, ctx.scene.rigView.pose.character, current_frame);
+            tracks_dirty = true;
+        } else if (!selected_track.empty()) {
             insertKeyframeForTrack(ctx, selected_track, current_frame);
             tracks_dirty = true;
         }
@@ -3004,7 +3032,12 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
     
     // Delete/X key - Delete selected keyframe (timeline focused only)
     if (timeline_focused && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) && !io.WantTextInput) {
-        if (!selected_track.empty() && selected_keyframe_frame >= 0) {
+        if (ctx.scene.rigView.pose.active) {
+            const int frame = selected_keyframe_frame >= 0 ? selected_keyframe_frame : current_frame;
+            deleteKeyframe(ctx, ctx.scene.rigView.pose.character, frame);
+            selected_keyframe_frame = -1;
+            tracks_dirty = true;
+        } else if (!selected_track.empty() && selected_keyframe_frame >= 0) {
             deleteKeyframe(ctx, selected_track, selected_keyframe_frame);
             selected_keyframe_frame = -1;
             tracks_dirty = true;
@@ -3024,6 +3057,14 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
     for (size_t animIdx = lastSyncedAnimCount; animIdx < currentCount; ++animIdx) {
         const auto& anim = ctx.scene.animationDataList[animIdx];
         if (!anim) continue;
+        bool skeletal = anim->rigAuthoring;
+        for (const auto& model : ctx.scene.importedModelContexts) {
+            if (model.importName == anim->modelName && model.hasSkeletonRepresentation) {
+                skeletal = true;
+                break;
+            }
+        }
+        if (skeletal) continue;
         {
             double tps = anim->ticksPerSecond > 0 ? anim->ticksPerSecond : 24.0;
             
@@ -3148,6 +3189,18 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
     auto [entity_name, channel] = parseTrackName(ctx.scene, track_name);
 
     if (findImportedModelContextByName(ctx.scene, entity_name)) {
+        const auto& pose = ctx.scene.rigView.pose;
+        if (pose.active && pose.character == entity_name) {
+            if (frame != ctx.scene.timeline.current_frame && !rtapi::setRigPoseFrame(frame).ok) {
+                return;
+            }
+            if (!pose.control.empty()) {
+                rtapi::insertRigIKKey(entity_name, pose.control, pose.revision);
+            } else {
+                rtapi::insertRigPoseKeys(entity_name, RigAuthoring::selectedBones(ctx.scene));
+            }
+            return;
+        }
         Keyframe kf(frame);
         kf.has_anim_graph = true;
         ctx.scene.timeline.insertKeyframe(entity_name, kf);
@@ -3482,6 +3535,19 @@ static void clearKeyframeChannel(Keyframe& kf, ChannelType channel) {
 
 void TimelineWidget::deleteKeyframe(UIContext& ctx, const std::string& track_name, int frame) {
     auto [entity_name, channel] = parseTrackName(ctx.scene, track_name);
+
+    const auto& pose = ctx.scene.rigView.pose;
+    if (pose.active && pose.character == entity_name) {
+        if (frame != ctx.scene.timeline.current_frame && !rtapi::setRigPoseFrame(frame).ok) {
+            return;
+        }
+        if (!pose.control.empty()) {
+            rtapi::removeRigIKKey(entity_name, pose.control, pose.revision);
+        } else {
+            rtapi::removeRigPoseKeys(entity_name, RigAuthoring::selectedBones(ctx.scene));
+        }
+        return;
+    }
     
     auto it = ctx.scene.timeline.tracks.find(entity_name);
     if (it != ctx.scene.timeline.tracks.end()) {
@@ -4492,6 +4558,12 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
     // --- Resolve track data ---
     auto [entity_name, _chan] = parseTrackName(ctx.scene, selected_track);
     auto track_it = ctx.scene.timeline.tracks.find(entity_name);
+    const bool rig_projection = rig_projected_tracks_.count(entity_name) != 0;
+    if (rig_projection) {
+        dl->AddText(ImVec2(canvas_pos.x + 8.0f, canvas_pos.y + 22.0f),
+                    IM_COL32(130, 205, 255, 220),
+                    "Rig curve: position XYZ edit/time; rotation time only");
+    }
 
     GraphTrackType track_type = getGraphTrackType(ctx, selected_track);
     int total_channels = CURVE_CHANNEL_COUNT;
@@ -4695,7 +4767,7 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
         if (in_canvas && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyCtrl) {
             bool handle_clicked = false;
             // 1. Check if we clicked on the selected key's handles
-            if (graph_sel_channel >= 0 && graph_sel_frame >= 0) {
+            if (!rig_projection && graph_sel_channel >= 0 && graph_sel_frame >= 0) {
                 Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
                 bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light) ||
                                 (track_type == GraphTrackType::Camera && kf && kf->has_camera) ||
@@ -4752,6 +4824,7 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
                     graph_sel_frame = best_frame;
                     drag_start_frame = best_frame; // Remember starting frame for horizontal drag
                     graph_drag_mode = 1; // key drag
+                    graph_key_dragged_ = false;
                 } else {
                     graph_sel_channel = -1;
                     graph_sel_frame = -1;
@@ -4760,10 +4833,27 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
             }
         }
 
+        if (graph_drag_mode == 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            graph_key_dragged_ = true;
+        }
+
+        if (rig_projection && graph_drag_mode == 1 &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+            graph_sel_channel >= 0 && graph_sel_frame >= 0) {
+            int target_frame = pixelXToFrame(
+                mouse.x - canvas_pos.x, canvas_width);
+            target_frame = std::clamp(target_frame, start_frame, end_frame);
+            if (RigAuthoring::previewRigTimelineCurveDrag(
+                    track, graph_sel_channel, graph_sel_frame, target_frame,
+                    pixelYToValue(mouse.y - canvas_pos.y, canvas_height)))
+                graph_sel_frame = target_frame;
+        }
+
         // Drag selected key value (Y) AND frame (X) — both applied LIVE so the key
         // tracks the cursor in real time. Horizontal used to defer its moveKeyframe to
         // release, which made the X move feel unpredictable next to the live Y move.
-        if (graph_drag_mode == 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+        if (!rig_projection && graph_drag_mode == 1 &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
             graph_sel_channel >= 0 && graph_sel_frame >= 0) {
             Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
             bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light) ||
@@ -4793,7 +4883,8 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
         }
 
         // Handle dragging curve tangents
-        if ((graph_drag_mode == 2 || graph_drag_mode == 3) && ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+        if (!rig_projection && (graph_drag_mode == 2 || graph_drag_mode == 3) &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
             graph_sel_channel >= 0 && graph_sel_frame >= 0) {
             Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
             bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light) ||
@@ -4829,7 +4920,40 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
         }
 
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            if (graph_drag_mode == 1 && graph_sel_channel >= 0 && graph_sel_frame >= 0 && track_it != ctx.scene.timeline.tracks.end()) {
+            if (rig_projection && graph_drag_mode == 1 && graph_sel_channel >= 0 &&
+                graph_sel_frame >= 0 && track_it != ctx.scene.timeline.tracks.end()) {
+                const bool position_channel = graph_sel_channel < 3;
+                int cursor_frame = pixelXToFrame(
+                    mouse.x - canvas_pos.x, canvas_width);
+                cursor_frame = std::clamp(cursor_frame, start_frame, end_frame);
+                const int preview_frame = graph_sel_frame;
+                nlohmann::json value = nullptr;
+                Vec3 position;
+                const bool source_found = RigAuthoring::readRigTimelineCurvePreview(
+                    track, graph_sel_channel, preview_frame, position);
+                if (source_found && position_channel) {
+                    value = {position.x, position.y, position.z};
+                }
+                const bool should_commit = graph_key_dragged_ &&
+                    cursor_frame == preview_frame &&
+                    (position_channel || preview_frame != drag_start_frame);
+                bool committed = false;
+                if (should_commit && source_found) {
+                    const auto result = rtapi::editRigPoseKey(
+                        ctx.scene.rigView.pose.character, entity_name,
+                        position_channel ? "position" : "rotation",
+                        drag_start_frame, preview_frame, value);
+                    if (result.ok) {
+                        committed = true;
+                    }
+                }
+                if (graph_key_dragged_) {
+                    graph_sel_frame = committed ? preview_frame : drag_start_frame;
+                    rig_projection_signature_ = 0;
+                    tracks_dirty = true;
+                }
+            } else if (!rig_projection && graph_drag_mode == 1 && graph_sel_channel >= 0 &&
+                graph_sel_frame >= 0 && track_it != ctx.scene.timeline.tracks.end()) {
                 int new_frame = pixelXToFrame(mouse.x - canvas_pos.x, canvas_width);
                 new_frame = std::clamp(new_frame, start_frame, end_frame);
                 if (new_frame != drag_start_frame) {
@@ -4841,10 +4965,12 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
                 }
             }
             graph_drag_mode = 0;
+            graph_key_dragged_ = false;
         }
 
         // Keyboard delete shortcut for selected curve key
-        if (ImGui::IsWindowFocused() && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) &&
+        if (!rig_projection && ImGui::IsWindowFocused() &&
+            (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) &&
             !ImGui::GetIO().WantTextInput && graph_sel_channel >= 0 && graph_sel_frame >= 0) {
             Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
             bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light && graph_sel_channel < CURVE_LIGHT_CHANNEL_COUNT) ||
@@ -4886,7 +5012,8 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
         }
 
         // Right-click context menu for key operations
-        if (in_canvas && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && graph_sel_channel >= 0 && graph_sel_frame >= 0) {
+        if (!rig_projection && in_canvas && ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
+            graph_sel_channel >= 0 && graph_sel_frame >= 0) {
             ImGui::OpenPopup("GraphKeyContextMenu");
         }
         if (ImGui::BeginPopup("GraphKeyContextMenu")) {

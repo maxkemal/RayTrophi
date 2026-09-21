@@ -645,7 +645,16 @@ __device__ float3 importance_sample_ggx(float u1, float u2, float roughness, con
     return normalize(tangentX * H.x + tangentY * H.y + N * H.z);
 }
 
-__device__ float3 ggx_glass_effective_normal(float u1, float u2, float roughness, const float3& N, const float3& V) {
+// GGX NDF half-vector sampling for the glass interface — returns a MICROFACET
+// NORMAL, which is what transmission_scatter then reflects/refracts about.
+//
+// It used to return normalize(reflect(-V, halfVec)) — a DIRECTION — while the
+// caller used it as a normal, so every rough-glass ray was reflected twice (and
+// refracted about a direction, which means nothing). Roughness == 0 skipped the
+// blend and hid it; any positive value flattened the lobe. The Vulkan twin
+// (ggxSampleHemisphere in bsdf_scatter.glsl) carries a warning about exactly
+// this — same bug, in the copy that never got the fix.
+__device__ float3 ggx_glass_micro_normal(float u1, float u2, float roughness, const float3& N, const float3& V) {
     float safeRoughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
     float alpha = safeRoughness * safeRoughness;
     float phi = 2.0f * M_PIf * u1;
@@ -659,7 +668,7 @@ __device__ float3 ggx_glass_effective_normal(float u1, float u2, float roughness
     float3 tangentY = cross(N, tangentX);
     float3 halfVec = normalize(tangentX * halfVecLocal.x + tangentY * halfVecLocal.y + N * halfVecLocal.z);
 
-    return normalize(reflect(-V, halfVec));
+    return halfVec;
 }
 __device__ float schlick(float cos_theta, float eta) {
     float r0 = (1.0f - eta) / (1.0f + eta);
@@ -1058,7 +1067,7 @@ __device__ bool transmission_scatter(
         const float sample_roughness = fmaxf(roughness, 0.02f);
         const float blend = fminf(fmaxf(roughness / 0.02f, 0.0f), 1.0f);
         const float smooth_blend = blend * blend * (3.0f - 2.0f * blend);
-        const float3 sampled_normal = ggx_glass_effective_normal(
+        const float3 sampled_normal = ggx_glass_micro_normal(
             random_float(rng),
             random_float(rng),
             sample_roughness,
@@ -1268,6 +1277,7 @@ __device__ __noinline__ bool scatter_material(
     }
     float opacity = material.opacity;
     opacity *= get_alpha_gpu(material, payload, uv);
+    opacity = SurfaceCoverage::materialCoverageOpacity(opacity, (material.flags & MATERIAL_FLAG_ALPHA_CUTOUT) != 0);
 
 
     if (opacity < 1.0f) {

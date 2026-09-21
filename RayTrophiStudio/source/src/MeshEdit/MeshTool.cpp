@@ -99,11 +99,32 @@ void registerBuiltInMeshTools() {
         MeshSelectionDomain::Edge, MeshToolAvailability::Implemented,
         editCpu, true, true, true,
         "Dissolve selected interior edges while preserving valid topology."});
+    // ★ This was registered as Planned while SceneUI::bevelSelectedEdges had
+    // been implemented for a long time. The catalogue understated the tool in
+    // exactly the way it overstated the others: availability described intent,
+    // not the code. A "planned" tool is hidden from the default listing, so
+    // the one real rounding operator in the edit workspace was invisible to
+    // every caller that asked what the application can do.
     registry.registerTool({
         "edit.edge_bevel", "Bevel Selected Edges", MeshToolWorkspace::Edit,
-        MeshSelectionDomain::Edge, MeshToolAvailability::Planned,
-        editCpu, false, false, false,
-        "Planned edit-mode edge bevel; object modifier bevel is not this tool."});
+        MeshSelectionDomain::Edge, MeshToolAvailability::Implemented,
+        editCpu, true, true, true,
+        "Bevel selected edges into a flat chamfer or a rounded profile."});
+    registry.registerTool({
+        "edit.dissolve_vertices", "Dissolve Vertices", MeshToolWorkspace::Edit,
+        MeshSelectionDomain::Vertex, MeshToolAvailability::Implemented,
+        editCpu, true, true, true,
+        "Dissolve selected vertices, merging the faces around them."});
+    registry.registerTool({
+        "edit.merge_vertices", "Merge Vertices To Centre", MeshToolWorkspace::Edit,
+        MeshSelectionDomain::Vertex, MeshToolAvailability::Implemented,
+        editCpu, true, true, true,
+        "Merge selected vertices into their common centre."});
+    registry.registerTool({
+        "edit.weld_vertices", "Weld Vertices By Distance", MeshToolWorkspace::Edit,
+        MeshSelectionDomain::Vertex, MeshToolAvailability::Implemented,
+        editCpu, true, true, true,
+        "Weld selected vertices lying within an absolute distance of each other."});
     registry.registerTool({
         "profile.sweep", "Profile Sweep", MeshToolWorkspace::Profile,
         MeshSelectionDomain::Object, MeshToolAvailability::PreviewOnly,

@@ -1,0 +1,209 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+// RayFusion Adım 1b-α — probe ÜRETİCİSİ artık ışın izliyor.
+//
+// ★★★ Tüketici (probe_field.glsl / rfSampleProbeField) bu dosyadan HABERSİZ ve
+//   öyle kalmalı. Dikiş ambient okumasıdır: 1a'da bu texel'leri CPU gökyüzü
+//   bake'inden dolduruyorduk, şimdi ışın dolduruyor. Tüketici bir satır bile
+//   değişmediyse, görüntüdeki fark GERÇEKTEN üreticiden gelmiştir — ölçüm
+//   ancak böyle bir şey söyleyebilir.
+//
+// ★★ Tüketicinin BİRİMİ: rfSampleProbeField normal yönünde TEK texel okur ve
+//   sonucu doğrudan albedo ile çarpar. Yani bir texel "normali bu olan yüzeyin
+//   gördüğü kosinüs ağırlıklı ORTALAMA ışıma"dır (irradiance/PI) — ham yön
+//   ışıması değil. Kosinüs integralini bu shader yapar; yapmazsak değer
+//   sessizce PI kadar ve yanlış lob şeklinde kayar.
+//
+// Yapı: her workgroup BİR probe. 64 çağrı önce 64 ışın izler (paylaşılan küre
+// örneklemesi), sonra AYNI 64 çağrı bu ışın kümesinden 64 oktahedral texel'i
+// kosinüs ağırlığıyla toplar. 64 ışın 64 texel'e hizmet eder; texel başına ayrı
+// ışın atmak aynı bilgiyi 64 kez satın almak olurdu.
+
+const uint RF_PROBE_SIDE = 8u;
+const uint RF_PROBE_TEXELS = RF_PROBE_SIDE * RF_PROBE_SIDE;
+const uint RF_RAYS = 64u;
+const float RF_PI = 3.14159265358979323846;
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT rfScene;
+
+// RayFusion::ProbeTexel ile birebir: 2 x vec4 = 32 bayt.
+struct RfProbeTexelOut {
+    vec4 irradiance;
+    vec4 distance;
+};
+layout(std430, set = 0, binding = 1) writeonly buffer RfProbeOut {
+    RfProbeTexelOut rfOut[];
+};
+
+// Işıma kaynağı: prefiltered ortam mip 0 (roughness 0, yani aynadaki ham
+// ışıma). İki üretici için de aynı doku olduğu için HDRI ve Physical Sky ayrı
+// yollara ayrılmıyor. Işıma, irradiance DEĞİL: kosinüs integrali aşağıda
+// yapılıyor, ön-integre edilmiş haritayı kullanmak iki kez integre etmek olurdu.
+layout(set = 0, binding = 2) uniform sampler2D rfEnvRadiance;
+
+layout(std430, set = 0, binding = 3) readonly buffer RfProbeOrigins {
+    vec4 rfOrigins[]; // xyz = dünya konumu, w kullanılmıyor
+};
+
+layout(push_constant) uniform RfProbeTracePush {
+    vec4 params;  // x = probe sayısı, y = tmin, z = tmax, w = ışın sayısı
+    vec4 params2; // x = kosinüs kuvveti (mesafe lobu), yzw ayrılmış
+} pc;
+
+shared vec3  sRadiance[RF_RAYS];
+shared vec3  sDirection[RF_RAYS];
+shared float sDistance[RF_RAYS];
+// ★★★ İki sayaç, iki ayrı soruyu cevaplıyor ve ikisi de ÖLÇÜM ALETİ:
+//   sHitCount   — ışınların kaçı bir şeye çarptı. SIFIR kalıyorsa ışınlar
+//                 sahneyi hiç görmüyordur, ve sonuç "her yön gökyüzü" olur —
+//                 yani 1a ile BİREBİR aynı görüntü. Bu partinin en sinsi
+//                 arızası tam olarak budur: doğru görünen bir hiçlik.
+//   sBackCount  — kaçı ARKA yüze çarptı. Yüksekse probe geometrinin İÇİNDE
+//                 doğmuştur; onun ölçümü "siyah" değil "ölçülemedi"dir.
+shared uint  sHitCount;
+shared uint  sBackCount;
+
+// material_preview_ibl.comp'taki directionToUv ile AYNI olmak zorunda: örneklenen
+// doku onun yazdığı dokudur. Ayrışırsa belirti "ambient biraz yanlış" olur.
+vec2 rfDirectionToUv(vec3 d) {
+    d = normalize(d);
+    return vec2(fract(atan(d.z, d.x) / (2.0 * RF_PI) + 0.5),
+                acos(clamp(d.y, -1.0, 1.0)) / RF_PI);
+}
+
+// probe_field.glsl'deki rfOctDecode ile AYNI formül.
+vec3 rfOctDecode(vec2 e) {
+    vec3 v = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) {
+        vec2 s = vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+        v.xy = (1.0 - abs(v.yx)) * s;
+    }
+    return normalize(v);
+}
+
+// Fibonacci küresi: sabit ve deterministik. Jitter yok, çünkü sonuç jitter'lı
+// olsaydı gürültüyü süzmek için geçmiş ağırlığı gerekirdi ve o da ÖLÇÜMÜ
+// bulanıklaştırırdı. Aynı sahne iki kez aynı sayıyı vermeli.
+vec3 rfSphereDirection(uint index, uint count) {
+    const float golden = 2.39996322972865332;
+    float z = 1.0 - (2.0 * float(index) + 1.0) / float(count);
+    float r = sqrt(max(0.0, 1.0 - z * z));
+    float phi = float(index) * golden;
+    return vec3(r * cos(phi), z, r * sin(phi));
+}
+
+void main() {
+    const uint probeIndex = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (probeIndex >= uint(pc.params.x)) return;
+
+    const vec3 origin = rfOrigins[probeIndex].xyz;
+    const float tmin = pc.params.y;
+    const float tmax = pc.params.z;
+    const uint rayCount = min(uint(pc.params.w), RF_RAYS);
+
+    if (lane == 0u) { sHitCount = 0u; sBackCount = 0u; }
+    barrier();
+
+    // ── 1. faz: ışınlar ────────────────────────────────────────────────────
+    vec3 radiance = vec3(0.0);
+    float hitDistance = tmax;
+    if (lane < rayCount) {
+        const vec3 direction = rfSphereDirection(lane, rayCount);
+
+        rayQueryEXT query;
+        rayQueryInitializeEXT(query, rfScene, gl_RayFlagsOpaqueEXT, 0xFFu,
+                              origin, tmin, direction, tmax);
+        while (rayQueryProceedEXT(query)) {
+            if (rayQueryGetIntersectionTypeEXT(query, false) == gl_RayQueryCandidateIntersectionAABBEXT) {
+                rayQueryGenerateIntersectionEXT(query, rayQueryGetIntersectionTEXT(query, false));
+            }
+        }
+
+        uint hitType = rayQueryGetIntersectionTypeEXT(query, true);
+        if (hitType == gl_RayQueryCommittedIntersectionTriangleEXT ||
+            hitType == gl_RayQueryCommittedIntersectionGeneratedEXT) {
+            // 1b-α: isabet eden yön KARANLIK sayılıyor. Yüzeyin kendi albedosu
+            // ve sıçrayan ışık 1b-β'nin işi (instance başına geometri/malzeme
+            // tablosu ister). Buraya bir sabit albedo koymak ÖLÇÜLMEMİŞ bir
+            // sayıyı ölçüm gibi göstermek olurdu; sıfır ise dürüst bir alt
+            // sınır ve farkı tam olarak GÖRÜNÜRLÜK kadar yapar.
+            hitDistance = rayQueryGetIntersectionTEXT(query, true);
+            radiance = vec3(0.0);
+            atomicAdd(sHitCount, 1u);
+            if (hitType == gl_RayQueryCommittedIntersectionTriangleEXT) {
+                if (!rayQueryGetIntersectionFrontFaceEXT(query, true))
+                    atomicAdd(sBackCount, 1u);
+            }
+        } else {
+            hitDistance = tmax;
+            // textureLod, texture DEGIL: compute'ta ortulu LOD turevi yoktur ve
+            // ortulu ornekleme mipmap'li bir sampler'da tanimsizdir. Mip 0 =
+            // roughness 0 = ham isima, yani istenen kaynak.
+            radiance = max(textureLod(rfEnvRadiance,
+                                      rfDirectionToUv(direction), 0.0).rgb,
+                           vec3(0.0));
+        }
+        sDirection[lane] = direction;
+        sRadiance[lane] = radiance;
+        sDistance[lane] = hitDistance;
+    } else {
+        sDirection[lane] = vec3(0.0, 1.0, 0.0);
+        sRadiance[lane] = vec3(0.0);
+        sDistance[lane] = tmax;
+    }
+
+    barrier();
+    memoryBarrierShared();
+
+    // ── 2. faz: texel'ler ──────────────────────────────────────────────────
+    if (lane >= RF_PROBE_TEXELS) return;
+
+    const uint tx = lane % RF_PROBE_SIDE;
+    const uint ty = lane / RF_PROBE_SIDE;
+    const vec2 e = ((vec2(tx, ty) + 0.5) / float(RF_PROBE_SIDE)) * 2.0 - 1.0;
+    const vec3 normal = rfOctDecode(e);
+
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    float distSum = 0.0;
+    float distSqSum = 0.0;
+    float distWeightSum = 0.0;
+    const float distancePower = max(pc.params2.x, 1.0);
+
+    for (uint i = 0u; i < rayCount; ++i) {
+        const float cosine = dot(normal, sDirection[i]);
+        if (cosine <= 0.0) continue;
+        sum += sRadiance[i] * cosine;
+        weightSum += cosine;
+        // Mesafe için daha DAR bir lob: momentler bir yüzeyin arkasındaki
+        // engeli temsil etmeli, yarım küreyi değil. Geniş lobla ortalanan
+        // mesafe her yöne aynı çıkar ve görünürlük testi anlamını yitirir.
+        const float dw = pow(cosine, distancePower);
+        distSum += sDistance[i] * dw;
+        distSqSum += sDistance[i] * sDistance[i] * dw;
+        distWeightSum += dw;
+    }
+
+    // weightSum 0 olamaz (küresel dağılımda her normalin karşısında ışın var),
+    // ama bölme korunuyor: sıfıra bölünmüş bir NaN ambient'i sessizce siyah
+    // yapar ve o siyah "ölçüm" gibi görünür.
+    const vec3 irradiance = weightSum > 1e-5 ? sum / weightSum : vec3(0.0);
+    const float meanDistance = distWeightSum > 1e-5 ? distSum / distWeightSum : tmax;
+    const float meanSquare = distWeightSum > 1e-5 ? distSqSum / distWeightSum
+                                                  : tmax * tmax;
+
+    // zw, CPU'nun probe'u kabul edip etmeyeceğine karar verdiği kanallar.
+    // Tüketici bunları okumaz; karar CPU'da verilir ki reddedilen probe hiç
+    // yayınlanmasın ve tüketici kendi geri düşme yoluna gitsin.
+    const float hitFraction = float(sHitCount) / float(max(rayCount, 1u));
+    const float backFraction = float(sBackCount) / float(max(rayCount, 1u));
+
+    const uint outIndex = probeIndex * RF_PROBE_TEXELS + lane;
+    rfOut[outIndex].irradiance = vec4(max(irradiance, vec3(0.0)), 1.0);
+    rfOut[outIndex].distance = vec4(meanDistance, meanSquare,
+                                    backFraction, hitFraction);
+}

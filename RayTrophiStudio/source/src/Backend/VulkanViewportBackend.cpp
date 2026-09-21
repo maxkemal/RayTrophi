@@ -5615,7 +5615,8 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
 }
 
 bool VulkanViewportBackend::updateRasterMeshFromMeshSoA(const std::string& nodeName,
-                                                        const TriangleMesh* mesh) {
+                                                        const TriangleMesh* mesh,
+                                                        const std::vector<uint32_t>* dirtyVertices) {
     // * Measured so the incremental path can be told apart from a full rebuild.
     // Without it, "sculpting is slow" cannot be attributed: a dab that silently
     // falls back to buildRasterGeometry looks exactly like a dab that is simply
@@ -5743,6 +5744,24 @@ bool VulkanViewportBackend::updateRasterMeshFromMeshSoA(const std::string& nodeN
     if (uvFullDirty) rmb.cpuUVs.assign(uvFloatCount, 0.0f);
     if (matFullDirty) rmb.cpuMatIds.assign(vertCount, 0u);
 
+    // ***** The diff below reads the WHOLE mesh (positions + normals + the
+    //   mirror = ~96 MB on 2M vertices) and measured 19 ms of the 27 ms refit.
+    //   When the caller hands us the exact vertices it wrote, that scan is pure
+    //   overhead -- but trusting the list blindly would make a missed vertex
+    //   show as stale geometry with no error at all. So: use the hint, and
+    //   periodically run the full diff anyway as a self-healing audit. The
+    //   audit both REPAIRS any drift (it uploads whatever it finds) and makes a
+    //   systematic miss visible as audit_full_verts running above
+    //   audit_hint_verts, instead of silently.
+    const bool haveHint = (dirtyVertices != nullptr) && indexedRaster &&
+                          !pnFullDirty && !uvFullDirty && !matFullDirty;
+    constexpr uint64_t kAuditEveryNthHintedRefit = 8;
+    bool auditThisCall = false;
+    if (haveHint) {
+        auditThisCall = (++m_soaRefitHintedCalls % kAuditEveryNthHintedRefit) == 0;
+    }
+    const bool useHintOnly = haveHint && !auditThisCall;
+
     // Dirty tracking is per chunk, and the chunk boundaries double as upload
     // run boundaries: a spatially local edit collapses into a few contiguous
     // uploads instead of one min..max span that covers the whole buffer
@@ -5756,7 +5775,34 @@ bool VulkanViewportBackend::updateRasterMeshFromMeshSoA(const std::string& nodeN
     // mesh transform -- so this mirrors updateRasterMeshFromTriangles' shared
     // transform branch. For a welded (indexed) raster the slot index IS the SoA
     // vertex index, so the GPU index buffer stays valid and is never re-uploaded.
-    {
+    if (useHintOnly || auditThisCall) {
+        // Write the hinted slots into the mirror and mark their chunks. For a
+        // welded (indexed) raster the slot index IS the SoA vertex index.
+        RTPERF_SCOPE("raster.solid.soa_refit.hint_apply");
+        for (const uint32_t v : *dirtyVertices) {
+            const size_t slot = static_cast<size_t>(v);
+            if (slot >= vertCount) continue;
+            const Vec3 p = Porig[v];
+            const Vec3 n = Norig ? Norig[v] : Vec3(0.0f, 1.0f, 0.0f);
+            float* dp = &rmb.cpuPositions[slot * 3];
+            float* dn = &rmb.cpuNormals[slot * 3];
+            dp[0] = p.x; dp[1] = p.y; dp[2] = p.z;
+            dn[0] = n.x; dn[1] = n.y; dn[2] = n.z;
+            const int c = static_cast<int>(slot * kChunks / (vertCount ? vertCount : 1));
+            const int ci = (c < 0) ? 0 : (c >= kChunks ? kChunks - 1 : c);
+            const uint32_t s = static_cast<uint32_t>(slot);
+            if (s < pnLo[ci]) pnLo[ci] = s;
+            if (s > pnHi[ci]) pnHi[ci] = s;
+        }
+        if (auditThisCall) {
+            size_t hintVerts = 0;
+            for (int c = 0; c < kChunks; ++c) {
+                if (pnLo[c] != UINT32_MAX) hintVerts += (size_t)pnHi[c] - pnLo[c] + 1;
+            }
+            rtperf::recordFast("raster.solid.soa_refit.audit_hint_verts", (double)hintVerts);
+        }
+    }
+    if (!useHintOnly) {
         RTPERF_SCOPE("raster.solid.soa_refit.diff");
         #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
         for (int c = 0; c < kChunks; ++c) {
@@ -5796,9 +5842,21 @@ bool VulkanViewportBackend::updateRasterMeshFromMeshSoA(const std::string& nodeN
                     if (s > mHi) mHi = s;
                 }
             }
-            pnLo[c] = pLo; pnHi[c] = pHi;
+            // The hint pass above may already have marked this chunk; keep the
+            // union so an audit call never narrows what the hint claimed.
+            if (pLo < pnLo[c]) pnLo[c] = pLo;
+            if (pHi > pnHi[c]) pnHi[c] = pHi;
             uvLo[c] = uLo; uvHi[c] = uHi;
             miLo[c] = mLo; miHi[c] = mHi;
+        }
+        if (auditThisCall) {
+            size_t fullVerts = 0;
+            for (int c = 0; c < kChunks; ++c) {
+                if (pnLo[c] != UINT32_MAX) fullVerts += (size_t)pnHi[c] - pnLo[c] + 1;
+            }
+            // Should track audit_hint_verts. Persistently higher = the hint is
+            // missing writes, and the geometry between audits was stale.
+            rtperf::recordFast("raster.solid.soa_refit.audit_full_verts", (double)fullVerts);
         }
     }
 

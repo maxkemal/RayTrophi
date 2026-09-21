@@ -10,6 +10,21 @@
 */
 #pragma once
 
+// ===========================================================================
+// THIS PATH IS FROZEN (2026-09-16). See docs/dev/OPTIX_DONDURULDU.md
+//
+//   The OptiX/CUDA path is in MAINTENANCE MODE: it takes no new features and
+//   only preserves current behaviour. A capability that works only here is
+//   INCOMPLETE -- Vulkan is the primary GPU path.
+//
+//   BUT IT CANNOT BE REMOVED, and the reason is counter-intuitive: a TDR does
+//   NOT kill OptiX. A TDR resets only the Vulkan driver; raster and Vulkan RT
+//   crash while the CUDA/OptiX context SURVIVES. That makes OptiX the real
+//   lifeboat in this product. The assumption "same GPU, so it dies too" is
+//   WRONG, and it is exactly the first guess anyone makes without reading this.
+// ===========================================================================
+
+
 #include <optix.h>
 #include <cuda_runtime.h>
 #include <vector>
@@ -106,6 +121,37 @@ public:
     // Cycles-style accumulation status
     bool isAccumulationComplete() const;
     int getAccumulatedSamples() const { return accumulated_samples; }
+    // Accumulation-wipe instrument; see the note next to accum_wipe_count.
+    uint64_t getAccumWipeCount() const { return accum_wipe_count; }
+    uint64_t getAccumWipeResolutionCount() const { return accum_wipe_resolution; }
+    uint64_t getAccumWipeCameraCount() const { return accum_wipe_camera; }
+    uint64_t getResetBuffersCalls() const { return accum_reset_buffers_calls; }
+    // Is the accumulation buffer's .w (sample count) actually PERSISTENT across
+    // launches? If the counter says 35 while the image carries one-sample
+    // noise, the kernel is taking the `prev_samples == 0` branch every frame --
+    // and the only way to know is to read the BUFFER ITSELF. The host counter
+    // is not evidence here; it is the thing that is lying.
+    // Samples the middle row: cheap and diagnostic.
+    bool sampleAccumulationW(float& meanW, float& maxW, float& centerW) const;
+    // How many pixels the kernel saw with "no previous samples" in the last
+    // launch, plus the dimensions of the region we read -- the latter exists to
+    // validate the INSTRUMENT ITSELF.
+    unsigned int getAccumPrevZeroLastLaunch() const { return accum_prev_zero_host; }
+    void getAccumSampleGeometry(int& readW, int& readH, int& imgW, int& imgH) const {
+        readW = prev_width; readH = prev_height;
+        imgW = params.image_width; imgH = params.image_height;
+    }
+    // Separates the "it stops at 35" half in a single read: the adaptive
+    // sampling gate and its thresholds. If these are sane and the image is
+    // still noisy, the fault is somewhere else.
+    bool  getUseAdaptiveSampling() const { return params.use_adaptive_sampling != 0; }
+    int   getMinSamplesParam() const { return params.min_samples; }
+    float getVarianceThresholdParam() const { return params.variance_threshold; }
+    int   getSamplesPerPixelParam() const { return params.samples_per_pixel; }
+    void getAccumLastWipeSizes(int& fromW, int& fromH, int& toW, int& toH) const {
+        fromW = accum_last_wipe_from[0]; fromH = accum_last_wipe_from[1];
+        toW = accum_last_wipe_to[0];     toH = accum_last_wipe_to[1];
+    }
     void resetAccumulation();  // Reset accumulation for new frame (animation)
     
     // Stream access for synchronized GPU updates
@@ -337,13 +383,13 @@ private:
     cudaDeviceProp props;
     // OptiX context
     OptixDeviceContext context = nullptr;
-    // header dosyasında
+    // in the header file
     std::vector<SbtRecord<HitGroupData>> hitgroup_records;
     
     //  Texture CUDA array tracking (memory leak fix)
     std::vector<cudaArray_t> texture_arrays;
     
-    // TLAS/BLAS acceleration structure managerstum süper
+    // TLAS/BLAS acceleration structure manager
     std::unique_ptr<OptixAccelManager> accel_manager;
     bool use_tlas_mode = true;  // Set to true to use TLAS/BLAS instead of single GAS
     
@@ -430,7 +476,7 @@ private:
     int* d_converged_count = nullptr;  // Atomic counter for adaptive sampling debug
     std::vector<uchar4> partial_framebuffer;
 
-    // Son ekran güncellemesinden bu yana işlenen piksellerin koordinatlarını biriktirir.
+    // Accumulates the coordinates of pixels processed since the last screen update.
     std::vector<std::pair<int, int>> accumulated_coords;
     int prev_width = 0;
     int prev_height = 0;
@@ -447,7 +493,7 @@ private:
     int host_converged_count_latest = 0;
     uint32_t host_converged_count_write_slot = 0;
     uchar4* d_framebuffer = nullptr;
-    // (İleride pipeline ve SBT buraya gelir)
+    // (pipeline and SBT will live here later)
     struct Tile {
         int x, y;
         int width, height;
@@ -479,6 +525,28 @@ private:
     uint64_t computeDisplayPostSignature() const;
     int accumulated_samples = 0;              // Total samples accumulated so far
     bool accumulation_valid = false;          // Is current accumulation buffer valid?
+    // ACCUMULATION-WIPE INSTRUMENT (2026-09-16). Symptom: "the counter climbs
+    // but the image does not accumulate". The mechanism is the accumulation
+    // buffer being REALLOCATED AND ZEROED whenever `accumulation_valid` is
+    // false; that branch does NOT reset `accumulated_samples`, so the counter
+    // keeps climbing and reports progress the pixels do not have.
+    // When two numbers contradict each other, the only way to tell which one
+    // is right is to count the WIPES.
+    uint64_t accum_wipe_count = 0;         // how many times the buffer was zeroed
+    uint64_t accum_wipe_resolution = 0;    // how many of those were resolution changes
+    // The camera branch is counted SEPARATELY because it is a different
+    // mechanism: cudaMemsetAsync, not a realloc. Counting only the realloc
+    // would have shown "wipe_count 0" while the camera path re-zeroed every
+    // single frame -- an instrument going quiet mistaken for proof of absence.
+    uint64_t accum_wipe_camera = 0;
+    unsigned int* d_accum_prev_zero = nullptr;   // device-side counter
+    unsigned int  accum_prev_zero_host = 0u;     // last value read back
+    // The unconditional memset inside resetBuffers() destroys accumulation;
+    // counting the calls settles "is it running every frame" in one read.
+    uint64_t accum_reset_buffers_calls = 0;
+    int accum_last_wipe_from[2]{0, 0};     // resolution BEFORE the last wipe
+    int accum_last_wipe_to[2]{0, 0};       // and AFTER -- if these two keep
+                                           // swapping, that is the root
     float4* d_accumulation_float4 = nullptr;  // High precision accumulation buffer (float4)
     float4* d_denoiser_albedo = nullptr;
     float4* d_denoiser_normal = nullptr;
@@ -514,27 +582,9 @@ private:
     bool hasDirtyParams() const { return params_dirty; }
     size_t d_temp_buffer_size = 0; // Usage tracking for temp buffer optimization
     
-    // ═══════════════════════════════════════════════════════════════════════════
-    // GPU PICKING (Object ID buffer for viewport selection)
-    // ═══════════════════════════════════════════════════════════════════════════
-    int* d_pick_buffer = nullptr;          // Per-pixel object ID (-1 = no hit)
-    float* d_pick_depth_buffer = nullptr;  // Per-pixel hit distance
-    size_t pick_buffer_size = 0;           // Current allocation size
-    
     // Cached scene data for incremental SBT/TLAS updates
     std::vector<GpuMaterial> m_cached_materials;
     std::vector<OptixGeometryData::TextureBundle> m_cached_textures;
     std::vector<OptixGeometryData::VolumetricInfo> m_cached_volumetrics;
     int m_material_count = 0;
-    
-public:
-    // Get object ID at screen coordinates (returns -1 if no hit or buffer not ready)
-    // viewport_width/height = screen size for coordinate scaling (0 = no scaling)
-    int getPickedObjectId(int x, int y, int viewport_width = 0, int viewport_height = 0);
-    
-    // Get object name at screen coordinates (returns empty string if no hit)
-    std::string getPickedObjectName(int x, int y, int viewport_width = 0, int viewport_height = 0);
-    
-    // Ensure pick buffers are allocated for current resolution
-    void ensurePickBuffers(int width, int height);
 };

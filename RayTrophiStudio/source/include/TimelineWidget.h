@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
+#include <cstdint>
 
 // Forward declarations
 struct UIContext;
@@ -129,6 +131,7 @@ public:
     int getStartFrame() const { return start_frame; }
     int getEndFrame() const { return end_frame; }
     bool isPlaying() const { return is_playing; }
+    void pausePlayback() { is_playing = false; }
 
     // Set each frame while the timeline window (dope sheet OR graph editor — they share
     // one window) has keyboard focus. Both of those claim Delete/X for keyframe deletion,
@@ -160,6 +163,8 @@ public:
         last_selection_.clear();
         selection_sync_force_ = false;
         lastSyncedAnimCount = 0;  // re-sync animation data after project reload
+        rig_projected_tracks_.clear();
+        rig_projection_signature_ = 0;
         // Graph editor state
         editor_mode = TimelineEditorMode::DopeSheet;
         for (int i = 0; i < CURVE_CHANNEL_COUNT; ++i) graph_channel_visible[i] = true;
@@ -169,6 +174,7 @@ public:
         graph_sel_channel = -1;
         graph_sel_frame = -1;
         graph_drag_mode = 0;
+        graph_key_dragged_ = false;
         anim_reapply_requested_ = false;
         graph_groups_expanded.clear();
     }
@@ -238,6 +244,8 @@ private:
     std::string last_selection_;
     bool selection_sync_force_ = false;
     size_t lastSyncedAnimCount = 0;  // how many AnimationData entries have been synced
+    std::set<std::string> rig_projected_tracks_;
+    std::uint64_t rig_projection_signature_ = 0;
     
     // Selection & Interaction
 
@@ -260,6 +268,7 @@ private:
     int graph_sel_channel = -1;           // selected curve key: channel index (CURVE_*)
     int graph_sel_frame = -1;             // selected curve key: frame
     int graph_drag_mode = 0;              // 0=none 1=key 2=in-handle 3=out-handle
+    bool graph_key_dragged_ = false;
     // Graph edits (value/handle drags, interp changes) happen at an unchanged
     // current_frame, so draw()'s "frame changed?" gate would skip re-applying
     // keyframes to the scene; this flag forces one re-apply pass.

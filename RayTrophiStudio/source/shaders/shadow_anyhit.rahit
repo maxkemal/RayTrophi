@@ -206,6 +206,7 @@ void main() {
                                           0.88 + fibre * 0.08, loss);
             }
         }
+        alpha = materialCoverageOpacity(alpha, (cmat.flags & MATERIAL_FLAG_ALPHA_CUTOUT) != 0u);
         if (alpha >= 0.99) return;              // opaque enough — accept the hit
         if (alpha < 0.1) ignoreIntersectionEXT; // closesthit parity: <0.1 snaps to fully transparent
         // Stochastic transparency, P(accept) = alpha. Same per-pixel/sample/hit
@@ -349,6 +350,14 @@ void main() {
     // angle: a flat pane facing the light stays bright, curved rims / grazing
     // surfaces darken → the classic bright-core / dark-rim glass shadow.
     // Applied once per interface crossed (entry + exit → closed objects darken twice).
+    if ((mat.flags & MATERIAL_FLAG_ALPHA_CUTOUT) != 0u) {
+        float coverage = mat.opacity;
+        if (mat.opacity_tex > 0u) {
+            vec4 texel = textureLod(materialTextures[nonuniformEXT(int(mat.opacity_tex))], hitUV, 0.0);
+            coverage *= ((mat.flags & MAT_FLAG_OPACITY_RGBA) != 0u || mat.opacity_tex == mat.albedo_tex) ? texel.a : texel.r;
+        }
+        if (materialCoverageOpacity(coverage, true) == 0.0) { ignoreIntersectionEXT; return; }
+    }
     float trValue = mat.transmission;
     if (int(mat.transmission_tex) > 0) {
         trValue = textureLod(materialTextures[nonuniformEXT(int(mat.transmission_tex))], hitUV, 0.0).r;
@@ -419,6 +428,7 @@ void main() {
     }
 
     // --- Fast paths for fully transparent / fully opaque ---
+    maskValue = materialCoverageOpacity(maskValue, (mat.flags & MATERIAL_FLAG_ALPHA_CUTOUT) != 0u);
     if (maskValue < 0.001) {
         ignoreIntersectionEXT;
         return;

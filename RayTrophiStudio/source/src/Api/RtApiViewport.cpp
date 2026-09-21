@@ -1,3 +1,5 @@
+#include "Viewport/MaterialPreviewVolumeShadow.h"
+#include "Api/RtApiRasterDiagnostics.h"
 /*
  * =========================================================================
  * Project:       RayTrophi Studio
@@ -41,12 +43,17 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <vector>
 #include "stb_image_write.h"
 
 // The interactive raster viewport. Owned by the UI layer; declared there as a
 // file-local extern, so it is re-declared rather than pulled from a header.
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+
+// scene_ui.h'deki sahne-yukleme kalkani. Basligi cekmek yerine burada
+// bildiriliyor: RtApiViewport.cpp UI basliklarina bagli degil ve oyle kalmali.
+extern bool g_scene_load_solid_guard;
 
 namespace rtapi {
 
@@ -201,12 +208,13 @@ bool viewportCaptureEnabled() {
     return g_capture_requested.load(std::memory_order_relaxed);
 }
 
-namespace {
-
 // Every backend that could own the raster viewport. g_viewport_backend is the
 // dedicated one; on machines without it the render backend serves Solid itself.
 // Missing either of them is how a setting reaches "the other" object and looks
 // like it did nothing.
+// Not file-local any more: RtApiRayFusion.cpp asks the same question, and a
+// second copy of "which objects might be the viewport" is exactly how one
+// caller ends up reading a backend the other never looked at.
 void forEachViewportBackend(const std::function<void(Backend::IBackend&)>& fn) {
     Backend::IBackend* viewport = g_viewport_backend.get();  // IViewportBackend : IBackend
     if (viewport) fn(*viewport);
@@ -214,8 +222,6 @@ void forEachViewportBackend(const std::function<void(Backend::IBackend&)>& fn) {
         fn(*g_ctx->backend_ptr);
     }
 }
-
-} // namespace
 
 Result setViewportCapture(bool enabled) {
     g_capture_requested.store(enabled, std::memory_order_relaxed);
@@ -386,6 +392,7 @@ ViewportFrameTelemetryInfo viewportFrameTelemetry() {
     out.present_latency_frames = static_cast<int>(t.present_latency_frames);
     out.global_instance_buffer  = t.global_instance_buffer;
     out.gpu_culling             = t.gpu_culling;
+    out.depth_prepass           = t.depth_prepass;
     out.total_instances         = t.total_instances;
     out.cull_mesh_count         = t.cull_mesh_count;
     out.draw_calls              = t.draw_calls;
@@ -395,6 +402,11 @@ ViewportFrameTelemetryInfo viewportFrameTelemetry() {
     out.full_instances          = t.full_instances;
     out.proxy_instances         = t.proxy_instances;
     out.scatter_triangle_target = t.scatter_triangle_target;
+    // Teshis sayaclari: `available` false iken de tasinir -- surucu kaybi
+    // ring'i olduren seyin ta kendisi, yani "olcum yok" dedigi an tam da
+    // okunmasi gereken andir.
+    out.stale_descset_rebuilds  = t.stale_descset_rebuilds;
+    out.device_lost             = t.device_lost;
     return out;
 }
 
@@ -447,6 +459,194 @@ Result setViewportShading(const std::string& mode, int matcap_preset) {
     return Result::success();
 }
 
+Result setRtShadow(bool enabled) {
+    bool applied = false;
+    forEachViewportBackend([enabled, &applied](Backend::IBackend& b) {
+        applied = b.setRtShadow(enabled) || applied;
+    });
+    if (!applied)
+        return Result::fail("no viewport backend owns an RT shadow pass");
+    SCENE_LOG_INFO(enabled
+        ? "[Viewport] Same-frame RT directional shadows requested; viewport.rt_shadow reports readiness."
+        : "[Viewport] RT shadows disabled; cascade shadows active.");
+    return Result::success();
+}
+
+RtShadowInfo rtShadow() {
+    RtShadowInfo out;
+    forEachViewportBackend([&out](Backend::IBackend& b) {
+        bool supported = false, ready = false;
+        uint32_t rays = 0, cascadesReplaced = 0;
+        std::string reason;
+        b.getRtShadowStatus(supported, ready, rays, cascadesReplaced, reason);
+        out.supported = out.supported || supported;
+        out.ready = out.ready || ready;
+        out.enabled = out.enabled || b.rtShadowAllowed();
+        if (rays > out.rays) out.rays = rays;
+        if (cascadesReplaced > out.cascades_replaced)
+            out.cascades_replaced = cascadesReplaced;
+        if (out.reason.empty()) out.reason = reason;
+    });
+    return out;
+}
+
+RasterTimingInfo rasterTimings() {
+    RasterTimingInfo out;
+    bool found = false;
+    forEachViewportBackend([&out, &found](Backend::IBackend& b) {
+        if (found) return; // first viewport backend owns the window
+        Backend::RasterStageTimings t;
+        if (!b.getRasterStageTimings(t)) return;
+        found = true;
+        out.available = t.available;
+        out.gpu_supported = t.gpu_supported;
+        out.gpu_unsupported_reason = t.gpu_unsupported_reason;
+        out.frames = t.frames;
+        out.frames_with_gpu = t.frames_with_gpu;
+        out.frame_cpu_mean_ms = t.frame_cpu_mean_ms;
+        out.frame_cpu_p95_ms = t.frame_cpu_p95_ms;
+        out.frame_gpu_mean_ms = t.frame_gpu_mean_ms;
+        out.frame_gpu_p95_ms = t.frame_gpu_p95_ms;
+        out.window_wall_ms = t.window_wall_ms;
+        for (const auto& stage : t.stages) {
+            RasterStageInfo s;
+            s.name = stage.name;
+            s.cpu_mean_ms = stage.cpu_mean_ms;
+            s.cpu_p95_ms = stage.cpu_p95_ms;
+            s.gpu_mean_ms = stage.gpu_mean_ms;
+            s.gpu_p95_ms = stage.gpu_p95_ms;
+            s.frames_ran = stage.frames_ran;
+            out.stages.push_back(std::move(s));
+        }
+        out.shading = t.applied.shading;
+        out.screen_gi = t.applied.screen_gi;
+        out.reflection = t.applied.reflection;
+        out.quality_preset = t.applied.quality_preset;
+        out.lighting_preset = t.applied.lighting_preset;
+        out.width = t.applied.width;
+        out.height = t.applied.height;
+        out.depth_prepass = t.applied.depth_prepass;
+        out.gpu_culling = t.applied.gpu_culling;
+        out.global_instance_buffer = t.applied.global_instance_buffer;
+        out.rt_shadow_requested = t.applied.rt_shadow_requested;
+        out.rt_shadow_ready = t.applied.rt_shadow_ready;
+        out.rt_cascades_replaced = t.applied.rt_cascades_replaced;
+        out.directional_cascades = t.applied.directional_cascades;
+        out.shadowed_lights = t.applied.shadowed_lights;
+        out.scene_lights = t.applied.scene_lights;
+        out.volume_count = t.applied.volume_count;
+        out.visible_triangles = t.applied.visible_triangles;
+        out.total_instances = t.applied.total_instances;
+        out.draw_calls = t.applied.draw_calls;
+        out.warnings = t.warnings;
+    });
+    if (!found)
+        out.warnings.push_back("no viewport backend owns a raster timing window");
+    return out;
+}
+
+Result resetRasterTimings() {
+    bool applied = false;
+    forEachViewportBackend([&applied](Backend::IBackend& b) {
+        applied = b.resetRasterStageTimings() || applied;
+    });
+    if (!applied)
+        return Result::fail("no viewport backend owns a raster timing window");
+    return Result::success();
+}
+
+Result setRasterDepthPrepass(bool enabled) {
+    bool applied = false;
+    forEachViewportBackend([enabled, &applied](Backend::IBackend& b) {
+        applied = b.setRasterDepthPrepass(enabled) || applied;
+    });
+    if (!applied)
+        return Result::fail("no viewport backend owns a raster depth prepass");
+    if (!enabled) {
+        // ★★★ Aranarak bulunmali: kapaliyken sahne DOGRU cizilir, yalniz her
+        //   ortusen foliage katmani tam scene shader'ini yeniden kosar.
+        SCENE_LOG_INFO("[Viewport] Derinlik on gecisi istegi KAPALI; RT golge "
+                       "gerektiginde on gecisi zorlar. Son kaydedilen kare icin "
+                       "viewport.raster_depth_prepass effective/forced_by_rt_shadow alanlarini okuyun.");
+    } else {
+        SCENE_LOG_INFO("[Viewport] Derinlik on gecisi ACIK.");
+    }
+    return Result::success();
+}
+
+bool rasterDepthPrepass() {
+    bool enabled = false;
+    forEachViewportBackend([&enabled](Backend::IBackend& b) {
+        enabled = b.rasterDepthPrepassAllowed() || enabled;
+    });
+    return enabled;
+}
+
+RasterDepthPrepassInfo rasterDepthPrepassStatus() {
+    RasterDepthPrepassInfo out;
+    out.enabled = rasterDepthPrepass();
+    const auto timings = rasterTimings();
+    out.observed = timings.available && timings.frames > 0;
+    out.effective = out.observed && timings.depth_prepass;
+    out.forced_by_rt_shadow = out.effective && timings.rt_shadow_ready;
+    return out;
+}
+
+Result setRasterGpuInstancing(bool enabled) {
+    bool applied = false;
+    forEachViewportBackend([enabled, &applied](Backend::IBackend& b) {
+        applied = b.setRasterGpuInstancing(enabled) || applied;
+    });
+    if (!applied)
+        return Result::fail("no viewport backend owns a raster instance layout");
+    if (!enabled) {
+        // ★★★★ Aranarak bulunmali. Kapali oldugunda sahne DOGRU cizilir, yalniz
+        //   yavas: GPU culling ve scatter LOD proxy'leri devre disi kalir ve
+        //   gorunur kume her degistiginde tam kare halkasi drenaji odenir.
+        //   Aylar sonra "realtime neden yavas" diye sorulursa cevap burasi.
+        SCENE_LOG_WARN("[Viewport] Raster GPU instancing KAPATILDI: global instance "
+                       "buffer, GPU culling ve scatter LOD proxy'leri devre disi. "
+                       "Sahne dogru gorunur, yalnizca yavastir. "
+                       "viewport.frame_telemetry icinde gpu_culling, visible_triangles "
+                       "ve resource_drains alanlarini okuyun.");
+    } else {
+        SCENE_LOG_INFO("[Viewport] Raster GPU instancing ACIK.");
+    }
+    return Result::success();
+}
+
+bool rasterGpuInstancing() {
+    bool enabled = false;
+    forEachViewportBackend([&enabled](Backend::IBackend& b) {
+        enabled = b.rasterGpuInstancingAllowed() || enabled;
+    });
+    return enabled;
+}
+
+Result setSceneLoadGuard(bool enabled) {
+    // ★ Durum degismediyse de basarilidir; cagiran idempotent kurabilsin.
+    const bool previous = g_scene_load_solid_guard;
+    g_scene_load_solid_guard = enabled;
+    if (previous != enabled) {
+        if (enabled) {
+            SCENE_LOG_INFO("[Viewport] Sahne yukleme kalkani ACIK: acilislar Solid'e duser.");
+        } else {
+            // ★★★★ Bu satir ARANARAK bulunmali. Kapali kalkan, aylar sonra
+            //   gelen bir device-lost raporunun sessiz sebebi olabilir.
+            SCENE_LOG_WARN(
+                "[Viewport] Sahne yukleme kalkani KAPATILDI. Proje/template acilislari artik "
+                "Material/Rendered bagliyken kosacak -- bu BILEREK ariza uretmek icindir "
+                "(device-lost tekrar uretimi). viewport.frame_telemetry icindeki "
+                "stale_descset_rebuilds ve device_lost alanlarini okuyun.");
+        }
+    }
+    return Result::success();
+}
+
+bool sceneLoadGuard() {
+    return g_scene_load_solid_guard;
+}
+
 ViewportQualityInfo viewportQuality() {
     ViewportQualityInfo out;
     const RasterViewportQualityPreset preset =
@@ -460,6 +660,10 @@ ViewportQualityInfo viewportQuality() {
          g_ctx->backend_ptr->supportsViewportMode(Backend::ViewportMode::Solid));
     out.shadow_atlas_resolution = rasterShadowAtlasSize();
     out.shadow_tile_resolution = rasterShadowTileSize(preset);
+    const auto volumeBudget = Backend::volumeShadowBudget(preset);
+    out.volume_shadow_tile_resolution = static_cast<int>(volumeBudget.tileSize);
+    out.volume_shadow_depth_layers = static_cast<int>(volumeBudget.layers);
+    out.volume_shadow_steps = static_cast<int>(volumeBudget.steps);
     const int tilesPerRow = out.shadow_atlas_resolution / out.shadow_tile_resolution;
     out.shadow_tile_capacity = tilesPerRow * tilesPerRow;
     out.shadow_light_budget = rasterShadowLightBudget(preset);
@@ -504,6 +708,165 @@ Result setViewportQuality(const std::string& preset) {
     g_ctx->renderer.resetCPUAccumulation();
     if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
     return Result::success();
+}
+
+Result setViewportDepthOfField(bool enabled, float max_coc_pixels, int max_taps) {
+    if (!g_ctx) return Result::fail("Engine context not bound");
+    // ★★★ Degerler KIRPILMAZ, REDDEDILIR: sessizce kirpilan bir kadran, ajanin
+    //   "ayarladim" deyip baska bir degeri olcmesi demektir.
+    if (!(max_coc_pixels >= 1.0f && max_coc_pixels <= 128.0f))
+        return Result::fail("max_coc_pixels must be in [1, 128] pixels");
+    if (max_taps < 8 || max_taps > 128)
+        return Result::fail("max_taps must be in [8, 128]");
+
+    ::render_settings.realtime_depth_of_field = enabled;
+    ::render_settings.realtime_dof_max_coc = max_coc_pixels;
+    ::render_settings.realtime_dof_max_taps = max_taps;
+
+    // Post gecisi her karede push-constant'tan okur; birikim sifirlanmasi
+    // gerekmez, ama durgun viewport yeni kare cizmez -> dirty.
+    g_ctx->start_render = true;
+    if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
+    g_ctx->renderer.resetCPUAccumulation();
+    return Result::success();
+}
+
+Result setViewportTaa(bool enabled, int samples) {
+    if (!g_ctx) return Result::fail("Engine context not bound");
+    // ★★★ KIRPMA YOK, REDDETME VAR: sessizce kirpilan bir kadran, cagiranin
+    //   "64 ornek istedim" deyip 16'yi olcmesi demektir.
+    if (samples < 1 || samples > 256)
+        return Result::fail("samples must be in [1, 256]");
+    ::render_settings.realtime_taa = enabled;
+    ::render_settings.realtime_taa_samples = samples;
+    // Birikimi backend sifirlar (setRenderParams); burada yalnizca durgun
+    // viewport'un yeni bir kare cizmesini istiyoruz.
+    g_ctx->start_render = true;
+    return Result::success();
+}
+
+ViewportTaaInfo viewportTaa() {
+    ViewportTaaInfo info;
+    info.enabled = ::render_settings.realtime_taa;
+    info.target_samples = ::render_settings.realtime_taa_samples;
+    if (!g_ctx) {
+        info.inactive_reason = "Engine context not bound";
+        return info;
+    }
+    // ★★★★ OLCUM raster viewport'u SUREN adapter'dan okunur ve backend'ler
+    //   uzerinde OR'lanMAZ: RT adapter'inin TAA'si yoktur ve olsaydi bile
+    //   ekranda o cizmiyor olurdu. Bu alanin tamami "ayar ile ekranda olan
+    //   ayrisabilir mi" sorusunu cevaplamak icin var.
+    bool reported = false;
+    forEachViewportBackend([&](Backend::IBackend& backend) {
+        if (reported) return;
+        Backend::IBackend::RasterTaaStatus st{};
+        if (!backend.getRasterTaaStatus(st)) return;
+        reported = true;
+        info.supported = st.supported;
+        info.accumulated_samples = static_cast<int>(st.accumulated_samples);
+        info.converged = st.converged;
+        info.last_ms = static_cast<float>(st.last_ms);
+        info.inactive_reason = st.inactive_reason;
+    });
+    if (!reported) info.inactive_reason = "no raster viewport backend is alive";
+    return info;
+}
+
+// ★★ Nokta sayisi alan modundan TURETILIR; iki yerde tutulursa "Zone 21
+//   seciliyken 9 nokta" gibi kendi icinde celisen bir rapor cikardi.
+//   (Overlay 3x3 cizer, mod 2 ise 5x5.)
+static int afPointCount(int area_mode) { return (area_mode == 2) ? 25 : 9; }
+
+Result setViewportAf(bool enabled, int area_mode, int focus_mode, int selected_point) {
+    if (!g_ctx) return Result::fail("Engine context not bound");
+    if (!g_ctx->scene_ui_ptr) return Result::fail("UI is not available");
+    // ★★★ KIRPMA YOK, REDDETME VAR: sessizce kirpilan bir indeks, ajanin
+    //   "21. noktayi sectim" deyip merkeze odaklanmasi demektir.
+    if (area_mode < 0 || area_mode > 4)
+        return Result::fail("area_mode must be in [0, 4] (single, zone9, zone21, wide, center_weighted)");
+    if (focus_mode < 0 || focus_mode > 2)
+        return Result::fail("focus_mode must be in [0, 2] (mf, af_s, af_c)");
+    const int count = afPointCount(area_mode);
+    if (selected_point < 0 || selected_point >= count)
+        return Result::fail("selected_point must be in [0, " + std::to_string(count - 1) +
+                            "] for this area_mode");
+
+    auto& vs = g_ctx->scene_ui_ptr->viewport_settings;
+    vs.show_af_points = enabled;
+    vs.af_mode = area_mode;
+    vs.focus_mode = focus_mode;
+    vs.af_selected_point = selected_point;
+    g_ctx->start_render = true;
+    return Result::success();
+}
+
+ViewportAfInfo viewportAf() {
+    ViewportAfInfo info;
+    if (!g_ctx || !g_ctx->scene_ui_ptr) {
+        info.inactive_reason = "UI is not available";
+        return info;
+    }
+    const auto& vs = g_ctx->scene_ui_ptr->viewport_settings;
+    info.enabled = vs.show_af_points;
+    info.area_mode = vs.af_mode;
+    info.focus_mode = vs.focus_mode;
+    info.selected_point = vs.af_selected_point;
+    info.point_count = afPointCount(vs.af_mode);
+
+    // ★★★ Kapilar overlay'in KENDI erken cikislariyla ayni sirada olmali;
+    //   ayri tutulursa rapor ile cizim ayrisir ve "acik ama gorunmuyor"
+    //   sorusunun cevabi hicbir yerde olmaz.
+    if (!info.enabled)                 info.inactive_reason = "disabled by setting";
+    else if (!vs.show_camera_hud)      info.inactive_reason = "camera HUD is off (viewport draws no overlay)";
+    else if (!g_ctx->scene.camera)     info.inactive_reason = "no active camera";
+    else if (!g_ctx->scene.bvh)        info.inactive_reason = "scene has no BVH - AF cannot measure distance";
+    else if (g_ctx->is_animation_mode) info.inactive_reason = "sequence render is running (AF probes are disabled)";
+    else                               info.active = true;
+    return info;
+}
+
+ViewportDepthOfFieldInfo viewportDepthOfField() {
+    ViewportDepthOfFieldInfo info;
+    if (!g_ctx) return info;
+    info.enabled = ::render_settings.realtime_depth_of_field;
+    info.max_coc_pixels = ::render_settings.realtime_dof_max_coc;
+    info.max_taps = ::render_settings.realtime_dof_max_taps;
+
+    const Camera* cam = g_ctx->scene.camera.get();
+    if (cam) {
+        // ★★★ ETKIN aciklik: kamera anahtari kapaliysa 0. Fiziksel degeri
+        //   raporlamak, "aciklik 0.2 ama ekran keskin" gibi kendi icinde
+        //   celisen bir rapor uretirdi.
+        info.camera_aperture = cam->effectiveAperture();
+        info.camera_depth_of_field = cam->depth_of_field;
+        info.camera_focus_distance = static_cast<float>(cam->focus_dist);
+    }
+    // ★★★ "Aktif mi" sorusunun cevabi TEK BIR bayrak degildir; dort kapi var
+    //   ve hangisinin kapali oldugunu SOYLEMEK zorundayiz. Yalnizca `false`
+    //   dondurmek, cagiran tarafta "bilgi eksikligi"ni "olctum, sifir"a
+    //   cevirir -- bu deponun adi konmus hata sinifi.
+    // ★★ shading_mode: 0=Solid, 1=Material/Realtime raster, 2=Rendered, 3=Matcap.
+    //   DoF gecisi RASTER yolundadir, yani mod 1. Mod 2 (Rendered) path
+    //   tracer'dir ve DoF'u zaten lens ornekleyerek yapar -- oradaki bulaniklik
+    //   bu ayardan etkilenmez, karistirmak "acik ama calismiyor" uretir.
+    const bool materialMode = g_ctx->scene_ui_ptr &&
+                              g_ctx->scene_ui_ptr->viewport_settings.shading_mode == 1;
+    if (!info.enabled)                    info.inactive_reason = "disabled by setting";
+    else if (!materialMode)               info.inactive_reason = "shading mode is not Material";
+    else if (cam && cam->orthographic)    info.inactive_reason = "orthographic camera has no lens";
+    else if (cam && !cam->depth_of_field)
+        // ★★★★ BESINCI KAPI (2026-09-06 II). Kamera anahtari kapaliyken
+        //   aciklik dolu olabilir; "aperture is 0" demek YANLIS bir teshis
+        //   olurdu ve kullaniciyi f-stop kadranini cevirmeye gonderirdi --
+        //   yani hicbir sey degistirmeyen bir eyleme.
+        info.inactive_reason = "camera depth of field is off (camera.set_depth_of_field)";
+    else if (info.camera_aperture <= 1e-5f)
+        info.inactive_reason = "camera aperture is 0 (open a lens with camera.set_aperture)";
+    else if (info.camera_focus_distance <= 1e-4f)
+        info.inactive_reason = "camera focus distance is 0";
+    else                                  info.active = true;
+    return info;
 }
 
 ViewportPreviewLightingInfo viewportPreviewLighting() {
@@ -572,18 +935,42 @@ ViewportPreviewLightingInfo viewportPreviewLighting() {
                 ++out.shadowed_light_count;
             }
             out.world_ambient = true;
-            if (g_ctx->renderer.world.getMode() == WORLD_MODE_HDRI) {
+            // Physical Sky now also has a prefiltered producer, so the report
+            // may no longer be gated on HDRI: gating it there would show the
+            // sky path as a permanent fallback while it was actually running.
+            {
                 Backend::MaterialPreviewIblStatus ibl{};
+                // ★★★★ `forEachViewportBackend` ONCE raster viewport adapter'ini,
+                //   sonra render backend'ini verir. Diger alanlar OR'lanir (bir
+                //   yetenek herhangi birinde varsa vardir), ama ARKA PLAN
+                //   OR'lanamaz: arizanin tanimi zaten "RT adapter dogru, raster
+                //   adapter degil". OR, tam olarak aranan ayrismayi gizlerdi.
+                bool backgroundTaken = false;
                 forEachViewportBackend([&](Backend::IBackend& backend) {
                     Backend::MaterialPreviewIblStatus candidate{};
                     if (backend.getMaterialPreviewIblStatus(candidate)) {
                         ibl.supported = ibl.supported || candidate.supported;
-                        ibl.ready = ibl.ready || candidate.ready;
+                        ibl.sky_capture_supported = ibl.sky_capture_supported ||
+                            candidate.sky_capture_supported;
+                        if (candidate.ready && !ibl.ready) {
+                            ibl.ready = true;
+                            ibl.source = candidate.source;
+                        }
+                        if (!backgroundTaken) {
+                            ibl.background_source = candidate.background_source;
+                            backgroundTaken = true;
+                        }
                     }
                 });
+                const bool worldNeedsIbl =
+                    g_ctx->renderer.world.getMode() == WORLD_MODE_HDRI ||
+                    g_ctx->renderer.world.getMode() == WORLD_MODE_NISHITA;
                 out.world_ibl_supported = ibl.supported;
+                out.world_sky_capture_supported = ibl.sky_capture_supported;
                 out.world_ibl_ready = ibl.ready;
-                out.world_ibl_fallback = !ibl.ready;
+                out.world_ibl_fallback = worldNeedsIbl && !ibl.ready;
+                out.world_ibl_source = ibl.ready ? ibl.source : "none";
+                out.world_background_source = ibl.background_source;
             }
         }
         if (g_ctx->scene_ui_ptr)

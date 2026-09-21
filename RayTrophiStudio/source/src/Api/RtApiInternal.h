@@ -53,7 +53,7 @@ std::vector<uint16_t> objectMaterialIds(UIContext& ctx, const std::string& objec
 // drift from the object-scoped one's field mapping or validation range.
 enum class MaterialParamKind {
     BaseColor, Roughness, Metallic, Specular, Emission, EmissionStrength,
-    Transmission, Ior, Opacity,
+    Transmission, Ior, Opacity, AlphaCutout,
     IsBubble, BubbleIor, BubbleFilm,
     ResinDensity, ResinColor, ResinRoughness, ResinInclusion, ResinDirt,
     ResinDirtColor, ResinInclusionScale, ResinShard, ResinShardHue, ResinObjectSpace,

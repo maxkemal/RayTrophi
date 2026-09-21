@@ -131,6 +131,22 @@ struct ObjectInfo {
     std::string name;
     size_t triangle_count = 0;
     size_t vertex_count = 0;
+    // ★ Bounds are the reason this struct exists for an automated caller.
+    // Without them an agent that assembles geometry (legs meeting a rail,
+    // a cushion resting on a frame) can only EYEBALL the result in a
+    // screenshot -- it cannot measure whether two parts actually touch.
+    // Triangle/vertex counts answer "how heavy", never "where".
+    bool has_bounds = false;
+    Vec3 local_min;      // Object-space AABB over every mesh carrying this name
+    Vec3 local_max;
+    Vec3 world_min;      // Same corners pushed through the world transform
+    Vec3 world_max;
+    // ★ How many meshes carry this name. Multi-material import produces ONE
+    // object spread over SEVERAL flat meshes, and the counts above used to
+    // come from whichever mesh was found FIRST -- reporting a fraction of
+    // the object as if it were the whole. A caller seeing mesh_count > 1
+    // knows the aggregate is real rather than a first-hit sample.
+    size_t mesh_count = 0;
 };
 
 // ★★★★★ SECIM TESHISI. Bu depoda secim IPC'de HIC YOKTU, ve kuralin kendi
@@ -2198,6 +2214,21 @@ struct SimCacheStatus {
     int      last_frame = 0;
     bool     has_range = false;      // false when ram_frames == 0
     uint64_t config_signature = 0;   // authored config hash the cache was built from
+    // ★★★ MEASURED SIZE, and the reason the cap is now in bytes. The scrub
+    // cache used to be bounded by a FRAME COUNT, which bounds memory only if a
+    // frame has a fixed size — at 64^3 a frame is ~4 MiB and 600 frames is
+    // 2.4 GiB, at 160x248x160 the same 600 frames is 137 GiB. The old RAM
+    // estimator also excluded grid states outright, so the one number a script
+    // or the UI could read was blind to the largest consumer by two orders of
+    // magnitude. `ram_bytes` covers the compressed grid cache; `budget_bytes`
+    // is the ceiling at which capture stops accepting new frames.
+    uint64_t ram_bytes = 0;
+    uint64_t budget_bytes = 0;
+    // ★ Capture REFUSES past the budget rather than evicting: a scrub cache that
+    // silently drops frames the user believes are baked reads as "the sim
+    // changed when I scrubbed back", which is indistinguishable from a solver
+    // bug. True means frames in the baked range may be missing for that reason.
+    bool     budget_reached = false;
 };
 Result simCacheStatus(SimCacheStatus& out);
 // Blocking on purpose: baking is an explicit action, and the caller asked for
@@ -3156,6 +3187,68 @@ struct ParticleStatsInfo {
     float grid_domain_ms = 0.0f;
 };
 
+// ★★★ THE GAS STEP'S STAGE BREAKDOWN, which existed only in the panel.
+//
+// The panel has printed these rows for a long time; a script could read the
+// step TOTAL and nothing else. So "which stage got slower" was a question only
+// a human with the panel open could answer, and every optimisation A/B in this
+// area was run by pasting a screenshot. That is the panel-only failure this
+// repo's first rule exists for, and it bit during the 2026-09-20 transfer-cost
+// investigation.
+//
+// ★ All times are HOST WALL TIME measured around the call, so a GPU row
+// includes whatever submit/fence the host waited on. That is the cost the frame
+// actually pays; it is NOT isolated kernel time, and reading it as such will
+// make a transfer-bound stage look compute-bound.
+struct GasStepStats {
+    bool  measured = false;      // ★ false = no step ran, NOT "zero milliseconds"
+    int   resolution[3] = {0, 0, 0};
+    std::size_t cell_count = 0;
+    std::size_t active_density_cells = 0;
+    std::size_t grid_memory_bytes = 0;
+
+    float total_ms = 0.0f;
+    float voxelize_ms = 0.0f;
+    float analysis_ms = 0.0f;
+
+    // Device stages, in execution order.
+    float gpu_collider_source_ms = 0.0f;
+    float gpu_msf_ms = 0.0f;
+    float gpu_source_upload_ms = 0.0f;
+    float gpu_fluid_combustion_ms = 0.0f;
+    float gpu_velocity_advect_ms = 0.0f;
+    float gpu_scalar_advect_ms = 0.0f;
+    float gpu_combustion_ms = 0.0f;
+    float gpu_body_forces_ms = 0.0f;
+    float gpu_dissipation_ms = 0.0f;
+    float gpu_pressure_ms = 0.0f;
+    float gpu_publish_ms = 0.0f;
+    float gpu_majorant_ms = 0.0f;
+
+    // Host operator chain that still had to run.
+    float cpu_total_ms = 0.0f;
+    float cpu_advect_velocity_ms = 0.0f;
+    float cpu_advect_scalar_ms = 0.0f;
+    float cpu_boundary_ms = 0.0f;
+    float cpu_combustion_ms = 0.0f;
+    float cpu_surface_dust_ms = 0.0f;
+    float cpu_buoyancy_ms = 0.0f;
+    float cpu_force_fields_ms = 0.0f;
+    float cpu_vorticity_ms = 0.0f;
+    float cpu_turbulence_ms = 0.0f;
+    float cpu_dissipation_ms = 0.0f;
+    float cpu_pressure_ms = 0.0f;
+
+    // Field state, so a timing regression can be told apart from a heavier sim.
+    float max_density = 0.0f;
+    float max_temperature = 0.0f;
+    float max_speed = 0.0f;
+    float cfl = 0.0f;            // > 1: the semi-Lagrangian trace smears detail
+    std::size_t burning_cells = 0;
+    std::size_t solid_cells = 0;
+};
+Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out);
+
 std::vector<ParticleEmitterInfo> listParticleEmitters();
 Result getParticleEmitter(const std::string& index_or_name, ParticleEmitterInfo& out);
 Result addParticleEmitter(const ParticleEmitterInfo& info, ParticleEmitterInfo& out);
@@ -3171,13 +3264,89 @@ struct ParticleSystemInfo {
     uint32_t id = 0;
     std::string name;
     bool active = false;
+    bool emitter_only = true;
+    bool render_in_raytrace = false;
     int domain_count = 0;
     int flow_source_count = 0;
     int emitter_count = 0;
     int collider_count = 0;
 };
 Result listParticleSystems(std::vector<ParticleSystemInfo>& out);
+Result setParticleSystemEmitterOnly(const std::string& index_or_name,
+                                    bool emitter_only);
 Result clearParticleSystems();
+
+// Create one of the authored production presets (the same recipes the particle
+// panel's preset list installs), additively: existing systems are untouched.
+//
+// ★★★ This exists because a preset that can only be created by clicking is a
+// preset nobody can CALIBRATE. Every nuclear/explosion recipe is twenty coupled
+// numbers whose only honest test is "run it and measure the cloud", and that
+// loop cannot close while its first step is a human pressing a button. See
+// measureGasPlume below for the other half.
+//
+// `preset` is the lowercase slug: campfire | explosion | smoke | ground_burst |
+// fireball | flamethrower | burning_fuel_spill | ignited_fuel_jet |
+// nuclear_cinematic | nuclear_physical.
+Result addParticleSystemPreset(const std::string& preset, ParticleSystemInfo& out);
+
+// Measured extent of a gas domain's live field — the instrument that makes a
+// plume recipe testable without a human looking at it.
+//
+// ★★★ `measured` is NOT decoration. Every extent below reads 0 both when the
+// domain is genuinely empty and when the field could not be sampled (no live
+// runtime, GPU-resident data not read back, domain never stepped). Without this
+// flag a script watching a cloud rise would read "height 0" and conclude the
+// detonation failed — a plausible, completely wrong observation. Callers MUST
+// check it before acting on any number here.
+struct GasPlumeMeasurement {
+    bool measured = false;
+    // Cells whose density exceeds `threshold`, and the fraction of the domain
+    // they occupy. A cloud that fills the box has outgrown its domain.
+    uint64_t active_cells = 0;
+    uint64_t total_cells = 0;
+    float fill_fraction = 0.0f;
+    // World-space AABB of those cells. Empty (min > max) when active_cells == 0.
+    Vec3 bounds_min;
+    Vec3 bounds_max;
+    // Density-weighted centroid, and the plume's top as a HEIGHT ABOVE THE
+    // DOMAIN FLOOR — the quantity stratification is authored against, so a test
+    // can assert the cap landed where the recipe said it would.
+    Vec3 centroid;
+    float top_above_floor = 0.0f;
+    float centroid_above_floor = 0.0f;
+    // Widest horizontal extent, and the height at which it occurs. For a
+    // mushroom these separate the cap from the stem: a plume whose widest slice
+    // sits at its own top has NOT capped, it is still a rising column.
+    float max_width = 0.0f;
+    float max_width_height = 0.0f;
+    // Peak and mean temperature over the active cells, in the solver's
+    // normalized heat units. `peak_temperature` is what fire_max_temperature
+    // clamps; `mean_temperature` is roughly the anomaly stratification balances.
+    float peak_temperature = 0.0f;
+    float mean_temperature = 0.0f;
+    // ★ Whether the top of the plume is touching the domain lid. When true the
+    // cap's shape is the BOX talking, not the stratification, and every other
+    // number here is describing a clipped cloud.
+    bool touching_ceiling = false;
+    float threshold = 0.01f;
+    // ── Projection pressure, reported so a CONDENSATION model can be decided
+    //    on data instead of on assumption. ★ These are the incompressible
+    //    projection's Lagrange multiplier, NOT pascals: there is no absolute
+    //    pressure in this solver. What they are good for is the SHAPE of the
+    //    field — whether the expansion front is followed by a region of
+    //    genuinely lower pressure (a rarefaction), which is the thing a
+    //    condensation disc would key off.
+    //    `pressure_measured` is false when the channel is off or unsized; the
+    //    values then read 0, which is not the same as "no pressure".
+    bool  pressure_measured = false;
+    float pressure_min = 0.0f;
+    float pressure_max = 0.0f;
+    float pressure_min_height = 0.0f;   // above the domain floor
+};
+Result measureGasPlume(const std::string& domain_id_or_name,
+                       float density_threshold,
+                       GasPlumeMeasurement& out);
 
 Result getParticlePhysics(ParticlePhysicsInfo& out);
 Result updateParticlePhysics(const ParticlePhysicsInfo& info);
@@ -3451,7 +3620,35 @@ struct GasDomainSettings {
     float structural_event_interval = 0.25f;
     float buoyancy_heat = 1.0f;
     float buoyancy_density = 0.08f;
+    // Stable stratification in heat units per world unit ABOVE THE DOMAIN
+    // FLOOR. 0 = uniform ambient. A rising plume settles at
+    // h* = anomaly / ambient_stratification instead of climbing to the lid, so
+    // this is the knob that gives a mushroom cap an altitude the author owns.
+    float ambient_stratification = 0.0f;
     float vorticity = 0.35f;
+    // Per-second loss rates for the domain's own fields. Off by default, in
+    // which case the solver's global rates apply -- those are tuned for
+    // spark-carried smoke (0.5/s) and will erase a long-lived cloud. See
+    // SimulationGridDomainDesc for the measurement that found this.
+    // Wind-lofted surface dust. Off by default. When on, any surface seeing a
+    // horizontal wind faster than `surface_dust_threshold` releases smoke in
+    // proportion to the excess — which is how a blast's ground skirt gets a
+    // radius the shock earned rather than one the author typed.
+    bool  surface_dust_enabled = false;
+    float surface_dust_threshold = 6.0f;
+    float surface_dust_emission = 0.25f;
+    // Heat carried by lofted ground. 0 = cold dust, which spreads as a flat
+    // density current and never billows. Keep it small; see the note on
+    // gas_surface_dust_temperature in ParticleSimulation.h.
+    float surface_dust_temperature = 0.0f;
+    float surface_dust_max_density = 2.0f;
+    // Total density one ground column can ever release. 0 = unlimited, which
+    // turns the blast's travelling ring into a uniform carpet.
+    float surface_dust_supply = 3.0f;
+    bool  dissipation_override = false;
+    float density_dissipation = 0.5f;
+    float temperature_dissipation = 0.5f;
+    float fuel_dissipation = 0.25f;
     float fire_expansion = 0.0f;
     float turbulence_strength = 0.0f;
     float turbulence_scale = 1.2f;
@@ -3459,6 +3656,13 @@ struct GasDomainSettings {
     float turbulence_lacunarity = 2.0f;
     float turbulence_persistence = 0.5f;
     float turbulence_speed = 0.5f;
+    // ★ MEASUREMENT, NOT A SETTING. Octaves the grid can actually carry at this
+    // voxel size; writes to it are ignored. `turbulence_octaves` above is what
+    // was asked for, and the two differ whenever the finest octave's wavelength
+    // falls under four cells — at which point the noise is grid-scale speckle
+    // rather than turbulence, and a dial reading 5 while 3 run is exactly the
+    // panel-lies failure this field exists to prevent.
+    int turbulence_octaves_effective = 3;
 };
 
 struct CombustibleFluidSettings {
@@ -3568,6 +3772,20 @@ struct GasShaderSettings {
     float temperature_max = 1900.0f;  // Kelvin
     float scattering_coefficient = 0.15f;
     float absorption_coefficient = 0.5f;
+    // ── Ray march budget ────────────────────────────────────────────────────
+    // Panel-only until 2026-09-20, which made the march impossible to tune or
+    // verify from a script — and the march is exactly what the blocking
+    // complaint was about. voxel_step_multiplier is the primary sample spacing
+    // in VOXELS (0.5 = one sample every other voxel), so it follows the domain
+    // resolution instead of a world-space constant. max_steps is a strict
+    // per-ray ceiling; the realtime raster viewport applies its own ceiling on
+    // top (96/256/512 by viewport quality preset), so raising max_steps past
+    // that does nothing there while still affecting RT and the final render.
+    float voxel_step_multiplier = 0.5f;
+    int   max_steps = 256;
+    int   shadow_steps = 8;
+    int   shadow_stride = 4;
+    float shadow_strength = 0.8f;
 };
 
 Result getGasShaderSettings(const std::string& domain_id_or_name,
@@ -4679,6 +4897,83 @@ Result paintSculptMask(const std::string& object_name, const std::vector<Vec3>& 
 Result applySculptMaskOperation(const std::string& object_name,
                                 const std::string& operation,
                                 unsigned int seed = 1337, bool undo = true);
+
+// ---------------------------------------------------------------------------
+// Polygon mesh editing (extrude / inset / bevel / loop cut / dissolve / weld).
+//
+// ★★★ These operators were IMPLEMENTED long before this header reached them.
+// mesh.tools.list advertised every one of them with "scriptable": true and
+// "ipc_exposed": true, but nothing could CALL them -- the only way in was a
+// button in the edit-mode overlay. The catalogue was reporting intent, not
+// reach, which is the failure this repo keeps paying for: an instrument that
+// reports fullness.
+//
+// ★★ Selection is part of the capability, not a detail below it. Each
+// operator consumes the editable cache's selection, so an operator without a
+// selection API is a lever with nothing attached -- it would return "nothing
+// selected" forever and look like a broken operator rather than a missing
+// one.
+//
+// ★ Ids are indices into the editable cache: faces index polygon_faces,
+// edges index polygon_edges, vertices index vertices. They are only stable
+// until the topology changes, so an operator INVALIDATES them -- read the
+// state back after each commit rather than reusing a list across operations.
+// ---------------------------------------------------------------------------
+enum class MeshElementDomain { Vertex, Edge, Face };
+enum class MeshSelectMode { Set, Add, Remove };
+
+struct MeshEditState {
+    std::string object;
+    bool cache_valid = false;
+    bool half_edge_valid = false;   // false => operators fall back to triangle soup
+    size_t vertex_count = 0;
+    size_t edge_count = 0;          // polygon edges
+    size_t face_count = 0;          // polygon faces (quads/ngons, not triangles)
+    size_t triangle_count = 0;
+    size_t selected_vertices = 0;
+    size_t selected_edges = 0;
+    size_t selected_faces = 0;
+    // ★ Why the half-edge build failed. half_edge_valid alone is a defaulted
+    // measurement -- "non-manifold mesh" and "build never ran" read the same.
+    std::string half_edge_message;
+    bool half_edge_manifold = true;
+    size_t non_manifold_edges = 0;
+    size_t skipped_polygons = 0;
+};
+
+// Builds the editable cache for `object` and makes it the active edit target.
+// Every operator below calls this implicitly, so it is only needed to inspect
+// or select before editing.
+Result meshEditBegin(const std::string& object);
+// `object` empty reports the currently active edit object.
+Result meshEditGetState(const std::string& object, MeshEditState& out);
+Result meshEditSelect(const std::string& object, MeshElementDomain domain,
+                      MeshSelectMode mode, const std::vector<int>& ids);
+Result meshEditSelectAll(const std::string& object, MeshElementDomain domain);
+Result meshEditClearSelection(const std::string& object);
+Result meshEditGetSelection(const std::string& object, MeshElementDomain domain,
+                            std::vector<int>& out);
+
+// ★ Geometric selection. An automated caller does not know face ids -- it
+// knows "the top face" or "everything in this box". Without these the id
+// list is unreachable in practice and the operators stay theoretical.
+Result meshEditSelectByNormal(const std::string& object, const Vec3& direction,
+                              float max_angle_degrees, MeshSelectMode mode,
+                              size_t* out_count = nullptr);
+Result meshEditSelectByBox(const std::string& object, const Vec3& box_min,
+                           const Vec3& box_max, MeshElementDomain domain,
+                           MeshSelectMode mode, bool world_space,
+                           size_t* out_count = nullptr);
+
+Result meshExtrudeFaces(const std::string& object, float distance);
+Result meshInsetFaces(const std::string& object, float amount);
+Result meshBevelEdges(const std::string& object, float width, int segments,
+                      bool round_profile);
+Result meshLoopCut(const std::string& object, float t);
+Result meshDissolveEdges(const std::string& object);
+Result meshDissolveVertices(const std::string& object);
+Result meshMergeVertices(const std::string& object);
+Result meshWeldVertices(const std::string& object, float distance);
 
 // ---------------------------------------------------------------------------
 // Scripting. Execution stays on the main thread; Python exceptions are caught

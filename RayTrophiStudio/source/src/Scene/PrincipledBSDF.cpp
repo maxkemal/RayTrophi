@@ -194,7 +194,7 @@ void PrincipledBSDF::setOpacityTexture(const std::shared_ptr<Texture>& tex, floa
 
 float PrincipledBSDF::get_opacity(const Vec2& uv) const {
     Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
-    return opacityProperty.evaluateOpacity(sampleUv);
+    return coverage.opacity(opacityProperty.evaluateOpacity(sampleUv));
 }
 
 float PrincipledBSDF::get_roughness(float u, float v) const {
@@ -1388,6 +1388,7 @@ PrincipledBSDF::PrincipledBSDF(const PrincipledBSDF& other)
     translucent = other.translucent;
     anisotropic = other.anisotropic;
     transmission = other.transmission;
+    coverage = other.coverage;
     sheen = other.sheen;
     sheen_tint = other.sheen_tint;
     surface_deposition = other.surface_deposition;
@@ -1421,6 +1422,7 @@ PrincipledBSDF& PrincipledBSDF::operator=(const PrincipledBSDF& other) {
     translucent = other.translucent;
     anisotropic = other.anisotropic;
     transmission = other.transmission;
+    coverage = other.coverage;
     sheen = other.sheen;
     sheen_tint = other.sheen_tint;
     surface_deposition = other.surface_deposition;

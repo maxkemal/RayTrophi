@@ -64,6 +64,19 @@ struct RasterFrameTelemetry {
     // Sunulan karenin kaç kare geride olduğu (0 = bu kare, 1 = bir önceki).
     std::uint32_t present_latency_frames = 0;
 
+    // TESHIS: material-preview descriptor set'i, altindaki VkImage'lari yok
+    // eden bir doku purge'unden sonra BAYAT yakalandi ve cizimden once yeniden
+    // kuruldu. Bkz. docs/dev/BUG_VIEWPORT_DEVICE_LOST_ON_PROJECT_OPEN.md
+    //
+    // Bu sayinin DEGER olmasi sart: tripwire yalnizca log'a yazsaydi, olcum
+    // "log'a bak" diye bir insan adimina bagli kalirdi -- yani otomatik
+    // tekrarlanamazdi. > 0 = o kok neden sinifi GORULDU.
+    std::uint64_t stale_descset_rebuilds = 0;
+
+    // Surucu bu oturumda raster gonderiminde kayboldu mu. Cokme senaryosunun
+    // sonucu da bir DEGER olmali: bir script "actim, cokmedi" diyebilmeli.
+    bool device_lost = false;
+
     // ── Geometri gönderimi ──────────────────────────────────────────────────
     // ★★★ Bu blok, sunum telemetrisinin cevaplayamadığı soruyu ölçer:
     // "raster mı yavaş, yoksa CPU instance taraması mı?" Bu ayrımı ölçen bir
@@ -75,6 +88,10 @@ struct RasterFrameTelemetry {
     // yalnız yavaştır. Tam olarak bu yüzden ölçülüyor.
     bool global_instance_buffer = false;
     bool gpu_culling = false;
+    // ★ Derinlik on gecisi bu karede KOSTU mu. Kolun acik olmasi yetmez:
+    //   pipeline kurulamamis olabilir ve o zaman sessizce eski yola dusulur.
+    //   Olcu aleti ISTENENI degil UYGULANANI gostermeli.
+    bool depth_prepass = false;
 
     // Sahnedeki TOPLAM instance (culling öncesi) ve mesh sayısı.
     std::uint32_t total_instances = 0;

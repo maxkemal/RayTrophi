@@ -67,9 +67,25 @@ TemplateUiApplyResult TemplateUiStateAdapter::apply(const TemplateUiState& state
         {"solid", 0}, {"material_preview", 1}, {"rendered", 2}, {"matcap", 3}};
     const auto shading = shading_modes.find(state.viewport_shading);
     if (shading != shading_modes.end()) {
-        ui.viewport_settings.shading_mode = shading->second;
-        g_solid_viewport_active = shading->second != 2;
-        g_material_preview_viewport_active = shading->second == 1;
+        // ★★★ Bir template AĞIR bir viewport modunu (Material/Rendered)
+        //   DAYATAMAZ. Template açmak bir sahne yüklemesidir ve yükleme, ağır
+        //   bir mod bağlıyken GPU durumunu söküp kurunca raster gönderiminde
+        //   VK_ERROR_DEVICE_LOST üretiyor. Hafif modlar (Solid, Matcap) aynen
+        //   uygulanır. Bkz. scene_ui.h'deki kural ve
+        //   docs/dev/BUG_VIEWPORT_DEVICE_LOST_ON_PROJECT_OPEN.md
+        //
+        // ★ Kısıtlama SESSİZ DEĞİL: template ne istediğini beyan etti, biz
+        //   uygulamadık — bu uyarı hub'ın detay panelinde görünür.
+        int applied = shading->second;
+        if (applied == 1 || applied == 2) {
+            result.warnings.push_back(
+                "viewport shading '" + state.viewport_shading +
+                "' was downgraded to 'solid': scene load may not force a heavy viewport mode");
+            applied = 0;
+        }
+        ui.viewport_settings.shading_mode = applied;
+        g_solid_viewport_active = applied != 2;
+        g_material_preview_viewport_active = applied == 1;
     } else {
         result.warnings.push_back("viewport shading was not applied: " + state.viewport_shading);
     }

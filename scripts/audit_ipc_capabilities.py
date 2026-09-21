@@ -135,6 +135,18 @@ def required(method, namespaces):
         return "Read"
     if method == "mesh.operation.commit_positions":
         return "SceneWrite"
+    # Polygon editing. get_state/get_selection build the editable cache to
+    # answer but report rather than change, so they stay Read; the selection
+    # setters stage what the next operator will reshape and carry SceneWrite
+    # with the operators themselves.
+    if method in ("mesh.edit.get_state", "mesh.edit.get_selection"):
+        return "Read"
+    if method in ("mesh.edit.begin", "mesh.edit.select", "mesh.edit.select_by_normal",
+                  "mesh.edit.select_by_box", "mesh.edit.clear_selection",
+                  "mesh.extrude", "mesh.inset", "mesh.bevel", "mesh.loop_cut",
+                  "mesh.dissolve_edges", "mesh.dissolve_vertices",
+                  "mesh.merge_vertices", "mesh.weld_vertices"):
+        return "SceneWrite"
     # viewport.* drives and measures the engine (not the rt.ui panel-drawing
     # exception). Must come BEFORE the ".status" read heuristic below, or only
     # the query half of the namespace is classified and the command half falls

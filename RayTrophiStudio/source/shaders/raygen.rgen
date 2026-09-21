@@ -1013,6 +1013,7 @@ void main() {
         uint cullMask = 0xFFu;
         if (useSkipVolumeAABBs) cullMask &= RT_MASK_VOLUME_HANDOFF;
         if (useSkipGasVolumes)  cullMask &= RT_MASK_GAS_HANDOFF;
+        payload.volumeTraversalMask = cullMask;
 
         traceRayEXT(
             topLevelAS,

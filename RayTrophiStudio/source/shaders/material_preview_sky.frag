@@ -138,6 +138,11 @@ void main() {
     else
         sky = max(worldColor.rgb * worldColor.w, vec3(0.0));
 
-    outColor = vec4(rtApplyPost(sky, previewPostParams(),
-                                gl_FragCoord.xy / max(postC.xy, vec2(1.0))), 1.0);
+    // *** GORUNTULEME DONUSUMU BURADAN SOKULDU (2026-09-06).
+    //   Bu shader artik SCENE-LINEAR yaziyor; zincir (exposure -> operator ->
+    //   grade -> vignette -> sRGB) tek yerde, `raster_post.comp` icinde kosuyor.
+    //   Zorunluydu: alan derinligi bu shader'larin ciktisini BULANISTIRIR ve
+    //   bokeh, parlak noktanin daire olarak acilmasidir. Tonemap'ten gecmis bir
+    //   deger o noktayi zaten kirpmistir; onu bulanistirmak gri leke uretir.
+    outColor = vec4(sky, 1.0);
 }

@@ -1,4 +1,4 @@
-#include "PostProcess/PostService.h"
+﻿#include "PostProcess/PostService.h"
 /*
 * =========================================================================
 * Project:       RayTrophi Studio
@@ -44,6 +44,13 @@
 #include "NodeSystem/NodeRegistry.h"  // typeId -> factory (Faz 3d)
 #include "KeyframeSystem.h"    // TimelineManager / Keyframe / TransformKeyframe (Faz 3c)
 #include "ProjectManager.h"
+#include <chrono>
+#include "Autosave.h"
+#include "Backend/OptixBackend.h"
+#include "OptixWrapper.h"
+// Ilk CUDA hatasi mandali (OptixWrapper.cpp'de tanimli).
+int rtOptixFirstCudaError();
+std::string rtOptixFirstCudaErrorSite();
 #include "SceneExporter.h"          // scene.export_gltf (rtapi::exportSceneGltf)
 #include "Api/RtPython.h"
 #include "MaterialManager.h"
@@ -76,6 +83,7 @@ extern std::string g_seq_save_dir;
 extern bool        g_seq_save_denoise;
 extern bool        g_camera_dirty;   // Core/Main.cpp — arms backend camera-buffer resync
 extern bool        g_world_dirty;    // Core/Main.cpp — arms backend world/sky resync
+void               markWorldDirty(); // ★ RENDER + VIEWPORT bayraklarini BIRLIKTE kurar
 extern bool        g_lights_dirty;   // Core/Main.cpp — arms backend light-buffer resync
 extern bool        g_solid_viewport_active;
 extern bool        g_geometry_dirty;
@@ -144,6 +152,7 @@ bool parseMaterialParam(const std::string& name, MaterialParamKind& out, bool& i
     if (name == "transmission") { out = MaterialParamKind::Transmission; return true; }
     if (name == "ior") { out = MaterialParamKind::Ior; return true; }
     if (name == "opacity") { out = MaterialParamKind::Opacity; return true; }
+    if (name == "alpha_cutout") { out = MaterialParamKind::AlphaCutout; return true; }
     // Thin-shell film.
     if (name == "is_bubble") { out = MaterialParamKind::IsBubble; return true; }
     if (name == "bubble_ior") { out = MaterialParamKind::BubbleIor; return true; }
@@ -182,6 +191,7 @@ MaterialValue readMaterialValue(const PrincipledBSDF& material, MaterialParamKin
         case MaterialParamKind::Transmission:     value.scalar = material.transmission; break;
         case MaterialParamKind::Ior:              value.scalar = material.ior; break;
         case MaterialParamKind::Opacity:          value.scalar = material.opacityProperty.alpha; break;
+        case MaterialParamKind::AlphaCutout:      value.scalar = material.coverage.alphaCutout ? 1.0f : 0.0f; break;
         // Bools and ints ride the scalar (bool: >0.5 = true; int: rounded) so
         // the undo record below stays one type. A separate value variant would
         // buy nothing and would have to be threaded through every edit path.
@@ -212,6 +222,7 @@ MaterialValue readMaterialValue(const PrincipledBSDF& material, MaterialParamKin
 
 void writeMaterialValue(PrincipledBSDF& material, MaterialParamKind kind, const MaterialValue& value) {
     switch (kind) {
+        case MaterialParamKind::AlphaCutout: material.coverage.setCutout(value.scalar); break;
         case MaterialParamKind::BaseColor:        material.albedoProperty.color = value.color; break;
         case MaterialParamKind::Roughness:        material.roughnessProperty.color = Vec3(value.scalar); break;
         case MaterialParamKind::Metallic:         material.metallicProperty.intensity = value.scalar; break;
@@ -260,6 +271,7 @@ Result validateMaterialParamValue(MaterialParamKind kind, bool is_color, const M
         return Result::success();
     }
     if (!std::isfinite(value.scalar)) return Result::fail("value must be finite");
+    if (kind == MaterialParamKind::AlphaCutout && !MaterialCoverage::validCutoutValue(value.scalar)) return Result::fail("alpha_cutout must be 0 (legacy) or 1 (cutout)");
     const bool unit_range = kind == MaterialParamKind::Roughness ||
                             kind == MaterialParamKind::Metallic ||
                             kind == MaterialParamKind::Specular ||
@@ -460,6 +472,139 @@ void notifySceneLoaded() {
     g_scene_loaded_pending = true;
 }
 
+namespace {
+// Bir isabetten OBJE ADI cikarir. Flat SoA ONCE denenir: bu depoda geometri
+// her zaman flat SoA'dir ve yalnizca facade'a bakan kod flat mesh'leri
+// "yok" sayar -- tam olarak "obje secilemiyor"un sessiz uretim yolu.
+std::string facadeNameFromHit(const HitRecord& rec) {
+    return rec.triangle ? rec.triangle->getNodeName() : std::string();
+}
+std::string flatNameFromHit(const HitRecord& rec) {
+    return rec.tri_mesh ? rec.tri_mesh->nodeName : std::string();
+}
+std::string pickedNameFromHit(const HitRecord& rec) {
+    if (rec.tri_mesh && !rec.tri_mesh->nodeName.empty()) return rec.tri_mesh->nodeName;
+    if (rec.triangle) return rec.triangle->getNodeName();
+    return std::string();
+}
+bool isHelperName(const std::string& n) {
+    return n.find("ForceField") != std::string::npos ||
+           n.find("Force Field") != std::string::npos;
+}
+} // namespace
+
+Result pickRayDiagnostics(float u, float v, PickDiagnostics& out) {
+    out = {};
+    if (!g_ctx) return {false, "no UI context"};
+    if (!g_ctx->scene.camera) return {false, "scene has no camera"};
+    if (!std::isfinite(u) || !std::isfinite(v) || u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
+        return {false, "u and v are normalized screen coordinates in [0,1]"};
+
+    const Ray viewportRay = g_ctx->scene.camera->get_viewport_ray(u, v);
+    const Ray renderRay   = g_ctx->scene.camera->get_ray(u, v);
+    const Vec3 dv = viewportRay.direction.normalize();
+    const Vec3 dr = renderRay.direction.normalize();
+    for (int i = 0; i < 3; ++i) { out.viewport_ray_dir[i] = dv[i]; out.render_ray_dir[i] = dr[i]; }
+    out.ray_divergence_deg = std::acos(std::clamp(dv.dot(dr), -1.0f, 1.0f)) * 57.2957795f;
+    out.depth_of_field = g_ctx->scene.camera->effectiveAperture() > 0.0f;
+    out.world_objects = g_ctx->scene.world.objects.size();
+
+    // Etkilesimli yolun SECECEGI isin. Olcum ikisini de yapar ama HANGISININ
+    // gercekten kullanildigini bilmeden iki yon arasindaki fark yorumlanamaz.
+    // Kosul `useInteractiveViewportSelectionFallback` ile BIREBIR ayni olmak
+    // zorunda; ayrilirsa enstruman baska bir secimi tarif eder.
+    out.shading_mode = ui.viewport_settings.shading_mode;
+    out.interactive_fallback_ray =
+        (g_viewport_backend != nullptr || dynamic_cast<Backend::IViewportBackend*>(g_ctx->backend_ptr) != nullptr) &&
+        out.shading_mode != 2;
+
+    // ── BVH yolu ────────────────────────────────────────────────────────────
+    HitRecord rec{};
+    out.bvh_present = static_cast<bool>(g_ctx->scene.bvh);
+    if (g_ctx->scene.bvh) {
+        HitRecord tmp{};
+        if (g_ctx->scene.bvh->hit(viewportRay, 0.001f, 1e30f, tmp)) {
+            out.bvh_hit = true;
+            out.bvh_object = pickedNameFromHit(tmp);
+            out.bvh_t = tmp.t;
+        }
+    }
+
+    // ── Dogrusal tarama: BVH'ye HIC bakmaz ──────────────────────────────────
+    // Yavas oldugu icin degil, BAGIMSIZ oldugu icin burada: BVH'nin AABB
+    // budamasini atlar, yani BVH'nin bayat olup olmadigini ancak bu cevap
+    // gosterebilir. Teshis yolu oldugu icin maliyeti kabul ediliyor.
+    float closest = 1e30f;
+    const TriangleMesh* hitMesh = nullptr;
+    for (size_t i = 0; i < g_ctx->scene.world.objects.size(); ++i) {
+        const auto& obj = g_ctx->scene.world.objects[i];
+        if (!obj) continue;
+        HitRecord tmp{};
+        if (!obj->hit(viewportRay, 0.001f, closest, tmp)) continue;
+        const std::string name = pickedNameFromHit(tmp);
+        if (isHelperName(name)) continue;
+        closest = tmp.t;
+        out.linear_hit = true;
+        out.linear_object = name;
+        out.linear_t = tmp.t;
+        out.linear_has_facade = tmp.triangle != nullptr;
+        out.linear_has_flat = tmp.tri_mesh != nullptr;
+        out.linear_facade_object = facadeNameFromHit(tmp);
+        out.linear_flat_object = flatNameFromHit(tmp);
+        out.linear_hit_point[0] = tmp.point.x;
+        out.linear_hit_point[1] = tmp.point.y;
+        out.linear_hit_point[2] = tmp.point.z;
+        out.linear_hit_index = static_cast<int>(i);
+        hitMesh = tmp.tri_mesh;
+        if (std::dynamic_pointer_cast<TriangleMesh>(obj)) out.linear_hit_entry_kind = "TriangleMesh";
+        else if (std::dynamic_pointer_cast<HittableInstance>(obj)) out.linear_hit_entry_kind = "HittableInstance";
+        else if (std::dynamic_pointer_cast<Triangle>(obj)) out.linear_hit_entry_kind = "Triangle";
+        else out.linear_hit_entry_kind = "other";
+    }
+    // ★★★★ SECIMIN YAPTIGI ARAMANIN BIREBIR AYNISI: POINTER kimligi
+    //   (`world_mesh.get() == rec.tri_mesh`), isim DEGIL. Isimle aramak baska
+    //   bir soruyu cevaplardi ve enstruman olctugu seyden ayrilirdi -- bir
+    //   instance'in paylasilan kaynak mesh'i ile tiklanan kopyasi AYNI ada
+    //   sahip olabilir ama AYNI POINTER degildir, ve ariza tam orada.
+    if (hitMesh) {
+        for (size_t i = 0; i < g_ctx->scene.world.objects.size(); ++i) {
+            auto wm = std::dynamic_pointer_cast<TriangleMesh>(g_ctx->scene.world.objects[i]);
+            if (wm && wm.get() == hitMesh) { out.linear_identity_index = static_cast<int>(i); break; }
+        }
+    }
+
+    // ★★★ "Ikisi de isabet etmedi" ANLASMA SAYILMAZ. Oyle saymak, hicbir sey
+    //   bulamayan bir olcumu "her sey yolunda"ya cevirirdi.
+    out.paths_agree = out.bvh_hit && out.linear_hit && out.bvh_object == out.linear_object;
+    out.ok = true;
+    return {true, ""};
+}
+
+Result pickObjectGpu(float u, float v, GpuPickResult& out) {
+    out = GpuPickResult{};
+    if (!g_ctx) return {false, "no UI context"};
+    if (!std::isfinite(u) || !std::isfinite(v) || u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
+        return {false, "u and v are normalized screen coordinates in [0,1]"};
+
+    // Viewport backend ONCE denenir: raster'i cizen odur, ve secim cizilenle
+    // ayni geometriyi sormak zorunda.
+    Backend::VulkanBackendAdapter* vba =
+        dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get());
+    if (!vba) vba = dynamic_cast<Backend::VulkanBackendAdapter*>(g_ctx->backend_ptr);
+    if (!vba) return {false, "no Vulkan raster backend"};
+
+    Backend::VulkanBackendAdapter::ObjectPickResult r;
+    vba->pickObjectAtNormalized(u, v, r);
+    out.ok = r.ok;
+    out.hit = r.hit;
+    out.object = r.object;
+    out.instance_index = r.instance_index;
+    out.mesh_key = r.mesh_key;
+    out.reason = r.reason;
+    out.gpu_ms = r.gpu_ms;
+    return {true, ""};
+}
+
 std::vector<std::string> listObjects() {
     std::vector<std::string> names;
     if (!g_ctx) return names;
@@ -496,13 +641,82 @@ bool objectExists(const std::string& name) {
 
 Result getObjectInfo(const std::string& name, ObjectInfo& out) {
     if (!g_ctx) return notBound();
-    TriangleMesh* tm = objectExists(name) ? findFlatMesh(*g_ctx, name) : nullptr;
-    if (!tm) return Result::fail("object not found: " + name);
+    if (!objectExists(name)) return Result::fail("object not found: " + name);
 
     out = {};
     out.name = name;
-    out.triangle_count = tm->num_triangles();
-    out.vertex_count = tm->num_vertices();
+
+    // ★ Walk EVERY mesh carrying this name, not just the first hit. A
+    // multi-material import is one object spread over several flat meshes,
+    // so a first-hit read reports a slice of the object as the whole -- and
+    // nothing in the reply would say so.
+    Vec3 lo(0.0f), hi(0.0f);
+    bool seen = false;
+    auto accumulate = [&](const Vec3& p) {
+        if (!seen) { lo = hi = p; seen = true; return; }
+        lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y); lo.z = std::min(lo.z, p.z);
+        hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y); hi.z = std::max(hi.z, p.z);
+    };
+
+    for (auto& obj : g_ctx->scene.world.objects) {
+        if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (tm->nodeName != name) continue;
+            ++out.mesh_count;
+            out.triangle_count += tm->num_triangles();
+            out.vertex_count += tm->num_vertices();
+            if (!tm->geometry) continue;
+            const Vec3* positions = tm->geometry->get_positions_orig();
+            const size_t count = tm->geometry->get_vertex_count();
+            if (!positions) continue;
+            for (size_t i = 0; i < count; ++i) accumulate(positions[i]);
+        }
+    }
+
+    // Facade path: objects still built from per-face Triangles never appear
+    // as a TriangleMesh, so a flat-only sweep reports them as empty.
+    if (out.mesh_count == 0) {
+        for (auto& obj : g_ctx->scene.world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (!tri || tri->getNodeName() != name) continue;
+            ++out.triangle_count;
+            out.vertex_count += 3;
+            accumulate(tri->getV0());
+            accumulate(tri->getV1());
+            accumulate(tri->getV2());
+        }
+    }
+
+    if (!seen) {
+        // Bounds genuinely absent (an object with no geometry). Report that
+        // rather than leaving zeroed corners that read as a point at origin.
+        return Result::success();
+    }
+
+    out.has_bounds = true;
+    out.local_min = lo;
+    out.local_max = hi;
+
+    Matrix4x4 world;
+    if (getObjectWorldTransform(name, world, nullptr).ok) {
+        // Transform all eight corners: rotation turns the local box, so
+        // mapping only min/max would shrink or skew the result.
+        bool first = true;
+        Vec3 wlo(0.0f), whi(0.0f);
+        for (int corner = 0; corner < 8; ++corner) {
+            const Vec3 local((corner & 1) ? hi.x : lo.x,
+                             (corner & 2) ? hi.y : lo.y,
+                             (corner & 4) ? hi.z : lo.z);
+            const Vec3 p = world.transform_point(local);
+            if (first) { wlo = whi = p; first = false; continue; }
+            wlo.x = std::min(wlo.x, p.x); wlo.y = std::min(wlo.y, p.y); wlo.z = std::min(wlo.z, p.z);
+            whi.x = std::max(whi.x, p.x); whi.y = std::max(whi.y, p.y); whi.z = std::max(whi.z, p.z);
+        }
+        out.world_min = wlo;
+        out.world_max = whi;
+    } else {
+        out.world_min = lo;
+        out.world_max = hi;
+    }
     return Result::success();
 }
 
@@ -1618,6 +1832,99 @@ Result saveProject(const std::string& filepath) {
     return Result::success();
 }
 
+static void fillAutosaveStatus(const raytrophi::autosave::Status& in, AutosaveStatus& out) {
+    out.enabled = in.enabled;
+    out.interval_sec = in.interval_sec;
+    out.path = in.path;
+    out.file_exists = in.file_exists;
+    out.file_bytes = in.file_bytes;
+    out.seconds_since_last_write = in.seconds_since_last_write;
+    out.seconds_until_next = in.seconds_until_next;
+    out.last_write_ms = in.last_write_ms;
+    out.last_reason = in.last_reason;
+    out.last_ok = in.last_ok;
+    out.last_error = in.last_error;
+    out.write_count = in.write_count;
+    out.skipped_unmodified = in.skipped_unmodified;
+    out.scene_is_modified = in.scene_is_modified;
+}
+
+Result autosaveNow(const std::string& reason, AutosaveStatus& out) {
+    out = AutosaveStatus{};
+    if (!g_ctx) return notBound();
+    if (rendering_in_progress.load() || g_render_job.state == RenderJobState::Rendering)
+        return Result::fail("cannot autosave while rendering");
+    const std::string tag = reason.empty() ? std::string("manual") : reason;
+    const bool ok = raytrophi::autosave::writeNow(
+        g_ctx->scene, g_ctx->render_settings, g_ctx->renderer, tag);
+    fillAutosaveStatus(raytrophi::autosave::status(), out);
+    if (!ok) return Result::fail(out.last_error.empty() ? "autosave failed" : out.last_error);
+    return Result::success();
+}
+
+Result viewportRecoveryStatus(ViewportRecoveryStatus& out) {
+    out = ViewportRecoveryStatus{};
+    out.viewport_alive = (g_viewport_backend != nullptr);
+    out.rebuild_pending = g_viewport_rebuild_pending_after_loss.load(std::memory_order_acquire);
+    out.device_lost_count = g_viewport_device_lost_count.load(std::memory_order_acquire);
+    out.rebuild_attempts = g_viewport_rebuild_attempts.load(std::memory_order_acquire);
+    out.consecutive_losses = g_viewport_recovery_consecutive_losses.load(std::memory_order_acquire);
+    out.given_up = g_viewport_recovery_given_up.load(std::memory_order_acquire);
+    out.max_streak = 3;   // kViewportRecoveryMaxStreak (Main.cpp)
+    const long long notBefore = g_viewport_rebuild_not_before_ms.load(std::memory_order_acquire);
+    if (notBefore != 0) {
+        const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        out.gate_remaining_ms = static_cast<double>(notBefore - nowMs);
+        if (out.gate_remaining_ms < 0.0) out.gate_remaining_ms = 0.0;
+    }
+    return Result::success();
+}
+
+Result viewportRetryDeviceRecovery() {
+    g_viewport_recovery_given_up.store(false, std::memory_order_release);
+    g_viewport_recovery_consecutive_losses.store(0, std::memory_order_release);
+    g_viewport_rebuild_pending_after_loss.store(true, std::memory_order_release);
+    g_viewport_rebuild_not_before_ms.store(0, std::memory_order_release);
+    return Result::success();
+}
+
+Result optixAccumStatus(OptixAccumStatus& out) {
+    out = OptixAccumStatus{};
+    if (!g_ctx) return notBound();
+    auto* ob = dynamic_cast<Backend::OptixBackend*>(g_ctx->backend_ptr);
+    if (!ob) return Result::success();   // available=false; "OptiX yok" bir HATA degil
+    OptixWrapper* w = ob->getOptixWrapper();
+    if (!w) return Result::success();
+    out.available = true;
+    out.accumulated_samples = w->getAccumulatedSamples();
+    out.wipe_count = w->getAccumWipeCount();
+    out.wipe_resolution = w->getAccumWipeResolutionCount();
+    out.wipe_camera = w->getAccumWipeCameraCount();
+    w->getAccumLastWipeSizes(out.last_wipe_from[0], out.last_wipe_from[1],
+                             out.last_wipe_to[0], out.last_wipe_to[1]);
+    out.buffer_w_read = w->sampleAccumulationW(out.buffer_w_mean, out.buffer_w_max,
+                                               out.buffer_w_center);
+    out.adaptive_sampling = w->getUseAdaptiveSampling();
+    out.min_samples = w->getMinSamplesParam();
+    out.variance_threshold = w->getVarianceThresholdParam();
+    out.samples_per_pixel = w->getSamplesPerPixelParam();
+    out.prev_zero_pixels = w->getAccumPrevZeroLastLaunch();
+    w->getAccumSampleGeometry(out.read_w, out.read_h, out.image_w, out.image_h);
+    out.reset_buffers_calls = w->getResetBuffersCalls();
+    out.set_render_params_calls = g_set_render_params_calls.load(std::memory_order_acquire);
+    out.set_render_params_reason = g_set_render_params_reason;
+    out.first_cuda_error = rtOptixFirstCudaError();
+    out.first_cuda_error_site = rtOptixFirstCudaErrorSite();
+    return Result::success();
+}
+
+Result autosaveStatus(AutosaveStatus& out) {
+    out = AutosaveStatus{};
+    fillAutosaveStatus(raytrophi::autosave::status(), out);
+    return Result::success();
+}
+
 Result openProject(const std::string& filepath) {
     if (!g_ctx) return notBound();
     if (rendering_in_progress.load() || g_render_job.state == RenderJobState::Rendering)
@@ -1636,6 +1943,13 @@ Result openProject(const std::string& filepath) {
     // scene's geometry — silently, with no error anywhere. The UI's open path
     // has cleared them for a while; this one never did.
     ui.resetFractureState(g_ctx->scene);
+
+    // ★★★ KURAL/PARITE: script yolu da panel yolu gibi Solid'e duser. Bu satir
+    //   olmadan `project.open` cagiran bir ajan, panelden imkansiz olan bir
+    //   durumu (agir mod bagliyken sahne sokme) uretebilirdi -- ve o durum
+    //   surucuyu kaybettiriyor. Bkz. scene_ui.h'deki kural.
+    //   Sonuc `viewport.shading` ile OLCULEBILIR: acilistan sonra 'solid'.
+    enterSolidViewportForSceneLoad(ui, "ipc:project.open");
 
     const bool ok = ProjectManager::getInstance().openProject(
         filepath, g_ctx->scene, g_ctx->render_settings, g_ctx->renderer, g_ctx->backend_ptr);
@@ -1800,6 +2114,10 @@ Result getCamera(CameraState& out) {
     out.fov = cam->vfov;                 // UI treats vfov as the authoritative field
     out.focus_distance = cam->focus_dist;
     out.aperture = cam->aperture;
+    out.depth_of_field = cam->depth_of_field;
+    // ★★★ UYGULANAN buyukluk: kapi kapaliysa 0. `aperture`e bakip "bulaniklik
+    //   var" diye olcmek, anahtari gormemek demektir.
+    out.effective_lens_radius = cam->effectiveLensRadius();
     out.auto_exposure = cam->auto_exposure;
     out.use_physical_exposure = cam->use_physical_exposure;
     out.iso_preset_index = cam->iso_preset_index;
@@ -1814,10 +2132,21 @@ Result getCamera(CameraState& out) {
     if (cam->shutter_preset_index >= 0 &&
         cam->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT)
         out.shutter_seconds = CameraPresets::SHUTTER_SPEED_PRESETS[cam->shutter_preset_index].speed_seconds;
-    if (cam->fstop_preset_index >= 0 &&
-        cam->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT)
-        out.f_number = CameraPresets::FSTOP_PRESETS[cam->fstop_preset_index].f_number;
-    out.exposure_factor = cam->exposureFactor();
+    // ★★ TEK tanim: preset indeksi 0 (Custom) ise f-sayisi aciklidan
+    //   TURETILIR. Eskiden burada yalnizca preset okunurdu, yani Custom bir
+    //   kamerada `camera.get` her zaman sabit 2.8 raporlardi -- olcum degil,
+    //   varsayilan.
+    out.f_number = cam->fNumber();
+    // ★★★★ UYGULANAN carpan, kameranin kendi hesabi DEGIL. 2026-09-06'ya kadar
+    //   burasi `cam->exposureFactor()` dondururdu; o fonksiyon kameranin kendi
+    //   `auto_exposure` / `use_physical_exposure` bayraklarini okur, oysa yeni
+    //   post yapisinda pozlama modunun sahibi POST ZINCIRIDIR
+    //   (`rtpost::ExposureSettings.mode`, bkz. `post.get_exposure`): mod
+    //   Physical Camera degilse bu kadranlar HIC okunmaz ve carpan 1.0'dir.
+    //   Eski satir, ajanin "kadrani cevirdim, carpan degisti" diye olcup
+    //   goruntude hicbir sey degismedigini gormemesi demekti -- olcu aleti
+    //   ayarin degil, uygulanan degerin aynasi olmali.
+    out.exposure_factor = g_display_post.camera_exposure;
     return Result::success();
 }
 
@@ -1860,6 +2189,19 @@ Result setCameraFocusDistance(float focus_distance) {
     Camera* cam = activeCamera();
     if (!cam) return Result::fail("no active camera in the scene");
     cam->focus_dist = focus_distance;
+    cameraChanged(*cam);
+    return Result::success();
+}
+
+Result setCameraDepthOfField(bool enabled) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    Camera* cam = activeCamera();
+    if (!cam) return Result::fail("no active camera in the scene");
+    cam->depth_of_field = enabled;
+    // ★ Aciklik hic yazilmamissa f-sayisindan turet, yoksa "actim ama hicbir
+    //   sey olmadi" -- varsayilan kamerada aciklik 0'dir.
+    if (enabled && cam->aperture <= 1e-5f) cam->setFNumber(cam->fNumber());
     cameraChanged(*cam);
     return Result::success();
 }
@@ -1937,8 +2279,16 @@ Result setCameraFStopPreset(int index) {
                             std::to_string((int)CameraPresets::FSTOP_PRESET_COUNT - 1) + "]");
     Camera* cam = activeCamera();
     if (!cam) return Result::fail("no active camera in the scene");
-    // ★★ Bu preset pozlamayi VE Cinema modu lens kusurlarini surer, ama DoF'u
-    //   surmez -- DoF hala `aperture` kadranindan gelir. Kayitli borc.
+    // ★★★★ 2026-09-06 II: kayitli borc ODENDI. Bu preset eskiden yalnizca
+    //   pozlamayi ve Cinema lens kusurlarini suruyordu; panelin f-stop kadrani
+    //   ise ayni anda `aperture`i yaziyordu. Yani ayni ada sahip iki yuzey iki
+    //   farkli sey yapiyordu ve `camera.get`in f-sayisi ile panelin gosterdigi
+    //   ayrisabiliyordu -- CLAUDE.md'nin "panel ile script ayni seyi yapmali"
+    //   kurali tam olarak bunu yasaklar.
+    //   ★ Bulaniklik yine de zorla ACILMAZ: `depth_of_field` ayri bir anahtar,
+    //   burada yazilan aciklik anahtar kapaliyken orneklenmez.
+    //   Index 0 = "Custom": preset f-sayisi yoktur, aciklik oldugu gibi kalir.
+    if (index > 0) cam->setFNumber(CameraPresets::FSTOP_PRESETS[index].f_number);
     cam->fstop_preset_index = index;
     cameraChanged(*cam);
     return Result::success();
@@ -1962,7 +2312,7 @@ Result setCameraEvCompensation(float ev) {
 namespace {
 
 void worldChanged() {
-    g_world_dirty = true;
+    markWorldDirty();
     resetAccumulation();
     if (g_ctx) g_ctx->start_render = true;
 }

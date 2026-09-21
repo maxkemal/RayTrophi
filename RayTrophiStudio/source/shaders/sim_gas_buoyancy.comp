@@ -14,6 +14,12 @@ layout(push_constant) uniform PC {
     // heat_weight*(0 - ambient) into a constant domain-wide downdraft.
     int has_density;
     int has_temperature;
+    // Stable stratification, in heat units per world unit of height above the
+    // domain floor. 0 = the old uniform-ambient atmosphere. See addBuoyancy in
+    // GridFluidSolver.cpp for why this is a POTENTIAL-temperature gradient (it
+    // rises with height) and not the meteorological lapse rate.
+    float stratification;
+    float voxel_size;
 } pc;
 
 layout(set=0,binding=0) readonly buffer Density     { float density[]; };
@@ -38,7 +44,17 @@ void main(){
     float t=pc.has_temperature!=0
         ? .5*(temperature[below]+temperature[above])
         : pc.ambient_temperature;
-    float force=pc.density_weight*d+
-        pc.heat_weight*(t-pc.ambient_temperature);
+    float excess=t-pc.ambient_temperature;
+    // Environment's potential temperature at this face's height above the
+    // domain floor. The face at index y sits at y*voxel_size.
+    float env=pc.stratification*max(float(y)*pc.voxel_size,0.0);
+    // ★ The restoring term is BOUNDED by the parcel's own anomaly. Subtracting
+    // `env` unconditionally would give still, empty air (excess == 0) a downward
+    // force that grows with height — the same class of bug the has_temperature
+    // fallback above exists to prevent, except it would look like a plausible
+    // "the smoke settles" instead of a broken field. Clamping at -|excess| makes
+    // the environment feel exactly nothing and needs no presence threshold.
+    float heat_term=max(excess-env,-abs(excess));
+    float force=pc.density_weight*d+pc.heat_weight*heat_term;
     vel_y[id]+=force*pc.dt;
 }

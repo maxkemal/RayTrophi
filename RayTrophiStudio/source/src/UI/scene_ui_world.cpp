@@ -1682,8 +1682,8 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         // DEFERRED: Don't call setWorld()/resetAccumulation() here!
         // Let Main loop handle it once per frame after flushLUT() to avoid
         // double GPU transfer and ensure LUT is fresh before upload.
-        extern bool g_world_dirty;
-        g_world_dirty = true;
+        extern void markWorldDirty();
+        markWorldDirty();
         // World/atmosphere parameters live in the world buffer. Re-uploading
         // all VDB/gas volume payloads here made every sky slider scale with the
         // scene's volume data and could disturb the active volume descriptor.
@@ -1777,8 +1777,8 @@ void SceneUI::processSunSync(UIContext& ctx) {
                  world.setNishitaParams(params);
                  
                  // Mark world dirty so GPU gets updated sky direction
-                 extern bool g_world_dirty;
-                 g_world_dirty = true;
+                 extern void markWorldDirty();
+                 markWorldDirty();
              }
              break; // Sync with first directional light
         }

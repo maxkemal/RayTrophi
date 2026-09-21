@@ -1,3 +1,4 @@
+#include "Animation/RigBindingScope.h"
 #include "PostProcess/PostService.h"
 #include "ProjectManager.h"
 #include "globals.h"
@@ -7,6 +8,11 @@
 #include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"
 #include "Animation/AnimationData.h"
+#include "Animation/RigSerialization.h"
+#include "Animation/RigIKTimeline.h"
+#include "Animation/RigAnatomy.h"
+#include "Animation/RigEditing.h"
+#include <stdexcept>
 #include "Triangle.h"
 #include "OptixAccelManager.h"
 #include "InstanceManager.h"
@@ -31,6 +37,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <limits>
 #include <memory>
@@ -1165,6 +1172,7 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
         }
         ctx.members.clear();
     }
+    RigAuthoring::clearSelection(scene); scene.rigView.edit_mode=false; scene.rigView.edit_character.clear(); scene.rigView.pose_views.clear(); scene.rigView.pose_view_dirty.clear();
     scene.importedModelContexts.clear();
     
     // Clear scene-level animation and bone data
@@ -1483,6 +1491,8 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                 json j_anim;
                 j_anim["name"] = anim->name;
                 j_anim["modelName"] = anim->modelName;
+                j_anim["rigAuthoring"] = anim->rigAuthoring;
+                j_anim["ikChannels"] = RigAuthoring::serializeIKChannels(anim->ikChannels);
                 j_anim["duration"] = anim->duration;
                 j_anim["ticksPerSecond"] = anim->ticksPerSecond;
                 j_anim["startFrame"] = anim->startFrame;
@@ -1728,6 +1738,30 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         for (const auto& ctx : scene.importedModelContexts) {
             json c;
             c["importName"] = ctx.importName;
+            c["authoringOwned"] = ctx.authoringOwned;
+            c["rigRevision"] = ctx.rigRevision;
+            c["rigTemplateId"] = ctx.rigTemplateId;
+            c["rigTemplateVersion"] = ctx.rigTemplateVersion;
+            c["rigBoundMeshes"] = ctx.rigBoundMeshes;
+            c["rigWeightAlgorithm"] = ctx.rigWeightAlgorithm;
+            c["rigEnvelopeSettings"] = {
+                {"torso_radius", ctx.rigEnvelopeTorsoRadius},
+                {"limb_radius", ctx.rigEnvelopeLimbRadius},
+                {"extremity_radius", ctx.rigEnvelopeExtremityRadius},
+                {"falloff", ctx.rigEnvelopeFalloff}};
+            c["rigEnvelopeProfiles"] = json::array();
+            for (const auto& profile : ctx.rigEnvelopeProfiles) {
+                c["rigEnvelopeProfiles"].push_back(
+                    {{"bone", profile.bone},
+                     {"start_radius", profile.startRadius},
+                     {"end_radius", profile.endRadius},
+                     {"start_extension", profile.startExtension},
+                     {"end_extension", profile.endExtension},
+                     {"falloff", profile.falloff}});
+            }
+            c["rigSceneTransform"] = RigAuthoring::serializeRigPlacement(ctx.rigSceneTransform);
+            c["nodeHierarchy"] = RigAuthoring::serializeRigHierarchy(ctx.nodeHierarchy);
+            c["rigAnatomy"] = RigAuthoring::serializeRigAnatomy(ctx.rigAnatomy);
             c["animGraphAssetKey"] = ctx.animGraphAssetKey;
             c["hasAnimation"] = ctx.hasAnimation;
             c["globalInverseTransform"] = mat4ToJson(ctx.globalInverseTransform);
@@ -2529,6 +2563,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             // Imported Models Contexts
             simdjson::dom::array imc_arr;
             if (!root["importedModelContexts"].get(imc_arr)) {
+                RigAuthoring::clearSelection(scene); scene.rigView.edit_mode=false; scene.rigView.edit_character.clear(); scene.rigView.pose_views.clear(); scene.rigView.pose_view_dirty.clear();
                 scene.importedModelContexts.clear();
                 for (auto j_ctx_el : imc_arr) {
                     auto j_ctx = sjsonToNlohmann(j_ctx_el);
@@ -2548,6 +2583,84 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     ctx.preferOzzRuntime = j_ctx.value("preferOzzRuntime", true);
                     ctx.loggedOzzRuntimeUsage = false;
                     ctx.visible = j_ctx.value("visible", true);
+                    ctx.authoringOwned = j_ctx.value("authoringOwned", false);
+                    ctx.rigRevision = j_ctx.value("rigRevision", uint64_t{0});
+                    ctx.rigTemplateId = j_ctx.value("rigTemplateId", std::string{});
+                    ctx.rigTemplateVersion = j_ctx.value("rigTemplateVersion", 1);
+                    if (j_ctx.contains("rigBoundMeshes")) {
+                        std::string error;
+                        if (!RigAuthoring::readRigBoundMeshes(
+                                j_ctx["rigBoundMeshes"], ctx.rigBoundMeshes, error)) {
+                            throw std::runtime_error(error);
+                        }
+                    }
+                    ctx.rigWeightAlgorithm =
+                        j_ctx.value("rigWeightAlgorithm", std::string{});
+                    if (ctx.rigWeightAlgorithm != "" &&
+                        ctx.rigWeightAlgorithm != "nearest_segment" &&
+                        ctx.rigWeightAlgorithm != "anatomical_capsule_v1") {
+                        throw std::runtime_error("Invalid rig weight algorithm");
+                    }
+                    if (j_ctx.contains("rigEnvelopeSettings")) {
+                        const auto& settings = j_ctx["rigEnvelopeSettings"];
+                        ctx.rigEnvelopeTorsoRadius = settings.value("torso_radius", .16f);
+                        ctx.rigEnvelopeLimbRadius = settings.value("limb_radius", .065f);
+                        ctx.rigEnvelopeExtremityRadius =
+                            settings.value("extremity_radius", .05f);
+                        ctx.rigEnvelopeFalloff = settings.value("falloff", 2.f);
+                        const bool validEnvelope =
+                            std::isfinite(ctx.rigEnvelopeTorsoRadius) &&
+                            ctx.rigEnvelopeTorsoRadius >= .02f &&
+                            ctx.rigEnvelopeTorsoRadius <= .5f &&
+                            std::isfinite(ctx.rigEnvelopeLimbRadius) &&
+                            ctx.rigEnvelopeLimbRadius >= .01f &&
+                            ctx.rigEnvelopeLimbRadius <= .3f &&
+                            std::isfinite(ctx.rigEnvelopeExtremityRadius) &&
+                            ctx.rigEnvelopeExtremityRadius >= .005f &&
+                            ctx.rigEnvelopeExtremityRadius <= .2f &&
+                            std::isfinite(ctx.rigEnvelopeFalloff) &&
+                            ctx.rigEnvelopeFalloff >= .5f && ctx.rigEnvelopeFalloff <= 8.f;
+                        if (!validEnvelope)
+                            throw std::runtime_error("Invalid rig envelope settings");
+                    }
+                    if (j_ctx.contains("rigEnvelopeProfiles")) {
+                        const auto& profiles = j_ctx["rigEnvelopeProfiles"];
+                        if (!profiles.is_array() || profiles.size() > 4096)
+                            throw std::runtime_error("Invalid rig envelope profiles");
+                        std::unordered_set<std::string> envelopeBones;
+                        for (const auto& value : profiles) {
+                            RigAuthoring::EnvelopeBoneProfile profile;
+                            profile.bone = value.at("bone").get<std::string>();
+                            profile.startRadius = value.at("start_radius").get<float>();
+                            profile.endRadius = value.at("end_radius").get<float>();
+                            profile.startExtension = value.at("start_extension").get<float>();
+                            profile.endExtension = value.at("end_extension").get<float>();
+                            profile.falloff = value.at("falloff").get<float>();
+                            const bool validProfile =
+                                !profile.bone.empty() && envelopeBones.insert(profile.bone).second &&
+                                std::isfinite(profile.startRadius) &&
+                                profile.startRadius >= .005f && profile.startRadius <= .5f &&
+                                std::isfinite(profile.endRadius) &&
+                                profile.endRadius >= .005f && profile.endRadius <= .5f &&
+                                std::isfinite(profile.startExtension) &&
+                                profile.startExtension >= 0.f &&
+                                profile.startExtension <= .75f &&
+                                std::isfinite(profile.endExtension) &&
+                                profile.endExtension >= 0.f && profile.endExtension <= .75f &&
+                                std::isfinite(profile.falloff) && profile.falloff >= .5f &&
+                                profile.falloff <= 8.f;
+                            if (!validProfile)
+                                throw std::runtime_error("Invalid rig envelope profile");
+                            ctx.rigEnvelopeProfiles.push_back(std::move(profile));
+                        }
+                    }
+                    if (j_ctx.contains("nodeHierarchy")) {
+                        std::string error;
+                        if (!RigAuthoring::deserializeRigHierarchy(j_ctx["nodeHierarchy"], ctx.nodeHierarchy, error))
+                            throw std::runtime_error("Model hierarchy " + ctx.importName + ": " + error);
+                    }
+                    if(j_ctx.contains("rigSceneTransform")){std::string error;if(!RigAuthoring::deserializeRigPlacement(j_ctx["rigSceneTransform"],ctx.rigSceneTransform,error))throw std::runtime_error("Rig placement " + ctx.importName + ": " + error);}
+                    if(j_ctx.contains("rigAnatomy")){std::string error;if(!RigAuthoring::deserializeRigAnatomy(j_ctx["rigAnatomy"],ctx.nodeHierarchy,ctx.rigAnatomy,error))throw std::runtime_error("Rig anatomy " + ctx.importName + ": " + error);}
                     if (!ctx.animGraphAssetKey.empty()) {
                         auto itGraph = g_animGraphUI.graphs.find(ctx.animGraphAssetKey);
                         if (itGraph != g_animGraphUI.graphs.end() && itGraph->second) {
@@ -2568,6 +2681,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     AnimationData anim;
                     anim.name = j_anim.value("name", "");
                     anim.modelName = j_anim.value("modelName", "");
+                    anim.rigAuthoring = j_anim.value("rigAuthoring", false);
+                    if (j_anim.contains("ikChannels")) { std::string error; if (!RigAuthoring::deserializeIKChannels(j_anim["ikChannels"], anim.ikChannels, error)) throw std::runtime_error(error); }
                     anim.duration = j_anim.value("duration", 0.0);
                     anim.ticksPerSecond = j_anim.value("ticksPerSecond", 24.0);
                     anim.startFrame = j_anim.value("startFrame", 0);
@@ -2621,6 +2736,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                          }
                     }
                     
+                    { std::string error; if (!RigAuthoring::validateIKClipChannels(scene, anim, error)) throw std::runtime_error(error); }
                     scene.animationDataList.push_back(std::make_shared<AnimationData>(anim));
                 }
             }
@@ -2721,9 +2837,21 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 ctx.members.push_back(obj);
             }
         }
+        if (ctx.nodeHierarchy.empty()) {
+            std::string error;
+            if (!RigAuthoring::rebuildLegacyRigHierarchy(scene.boneData, ctx.importName, ctx.nodeHierarchy, error)) {
+                SCENE_LOG_ERROR("[ProjectManager] Cannot restore legacy rig hierarchy " + ctx.importName + ": " + error);
+                return false;
+            }
+        }
         ctx.rebuildSkeletonRepresentation(scene.boneData);
     }
 
+    std::string rigRuntimeError;
+    if (!RigAuthoring::restoreOwnedRigRuntime(scene, rigRuntimeError)) {
+        SCENE_LOG_ERROR("[ProjectManager] " + rigRuntimeError);
+        return false;
+    }
     if (!scene.animationDataList.empty() && !scene.boneData.boneNameToIndex.empty()) {
         renderer.initializeAnimationSystem(scene);
         renderer.updateAnimationWithGraph(scene, 0.0f, true);
@@ -2739,7 +2867,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     g_needs_optix_sync.store(true);
     g_camera_dirty = true;
     g_lights_dirty = true;
-    g_world_dirty = true;
+    markWorldDirty();
     g_geometry_dirty = true;
     g_materials_dirty = true;
     g_gas_volumes_dirty = true;
@@ -3988,6 +4116,7 @@ json ProjectManager::serializeCameras(const std::vector<std::shared_ptr<Camera>>
         c["rig_mode"] = static_cast<int>(cam->rig_mode);
         c["dolly_pos"] = cam->dolly_position;
         c["lens_radius"] = cam->lens_radius;
+        c["depth_of_field"] = cam->depth_of_field;
         c["blade_count"] = cam->blade_count;
         c["distortion"] = cam->distortion;
         c["body_preset_index"] = cam->body_preset_index;
@@ -4032,8 +4161,13 @@ void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
         cam->enable_motion_blur = c.value("enable_motion_blur", false);
         cam->rig_mode = static_cast<Camera::RigMode>(c.value("rig_mode", 0));
         cam->dolly_position = c.value("dolly_pos", 0.0f);
-        cam->lens_radius = c.value("lens_radius", aperture * 0.5f);
-        cam->lens_radius = c.value("lens_radius", aperture * 0.5f);
+        cam->lens_radius = c.value("lens_radius", aperture * 0.5f);   // (ayni satir iki kez yazilmisti)
+        // ★★★★ ESKI PROJELERIN NIYETI: anahtar yokken tek kapali-anahtar
+        //   "aciklik = 0" idi. Varsayilani `aperture > 0.001` yapmak, o
+        //   dosyalari YAZILDIKLARI ANLAMLA okur: aciklik acik birakilmissa
+        //   DoF isteniyordu, sifirlanmissa istenmiyordu. Sabit bir `true`
+        //   varsayilani, DoF'u kapatmis her eski sahneyi sessizce bulaniklastirirdi.
+        cam->depth_of_field = c.value("depth_of_field", aperture > 0.001f);
 
         cam->distortion = c.value("distortion", 0.0f);
         cam->body_preset_index = c.value("body_preset_index", 1); // Default to Full Frame (index 1)
@@ -4091,6 +4225,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["denoiser_blend_factor"] = settings.denoiser_blend_factor;
     j["quality_preset"] = static_cast<int>(settings.quality_preset);
     j["raster_viewport_quality_preset"] = static_cast<int>(settings.raster_viewport_quality_preset);
+    j["viewport_automatic_cutout"] = settings.viewport_automatic_cutout;
     j["material_preview_lighting_preset"] = static_cast<int>(settings.material_preview_lighting_preset);
     j["grid_fade_distance"] = settings.grid_fade_distance;
     j["grid_opacity"] = settings.grid_opacity;
@@ -4146,6 +4281,7 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     // girmez ve preset SESSIZCE default'a duser -- yani kullanici Full kaydeder,
     // proje Auto acilir ve bunu soyleyen bir satir olmaz.
     {
+        settings.viewport_automatic_cutout = j.value("viewport_automatic_cutout", true);
         const int rq = j.value("raster_viewport_quality_preset",
                                static_cast<int>(RasterViewportQualityPreset::Auto));
         settings.raster_viewport_quality_preset =
@@ -5505,7 +5641,6 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["quality_profile"] = static_cast<uint32_t>(domain.quality_profile);
         d["resource_budget_mb"] = domain.resource_budget_mb;
         d["enforce_resource_budget"] = domain.enforce_resource_budget;
-        d["force_disk_cache"] = domain.force_disk_cache;
         d["voxel_size"] = domain.voxel_size;
         d["padding"] = domain.padding;
         d["channels"] = domain.channels;
@@ -5724,6 +5859,17 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["fire_expansion"] = domain.fire_expansion;
         d["gas_buoyancy_heat"] = domain.gas_buoyancy_heat;
         d["gas_buoyancy_density"] = domain.gas_buoyancy_density;
+        d["gas_ambient_stratification"] = domain.gas_ambient_stratification;
+        d["gas_surface_dust_enabled"] = domain.gas_surface_dust_enabled;
+        d["gas_surface_dust_threshold"] = domain.gas_surface_dust_threshold;
+        d["gas_surface_dust_emission"] = domain.gas_surface_dust_emission;
+        d["gas_surface_dust_temperature"] = domain.gas_surface_dust_temperature;
+        d["gas_surface_dust_max_density"] = domain.gas_surface_dust_max_density;
+        d["gas_surface_dust_supply"] = domain.gas_surface_dust_supply;
+        d["gas_dissipation_override"] = domain.gas_dissipation_override;
+        d["gas_density_dissipation"] = domain.gas_density_dissipation;
+        d["gas_temperature_dissipation"] = domain.gas_temperature_dissipation;
+        d["gas_fuel_dissipation"] = domain.gas_fuel_dissipation;
         d["gas_vorticity"] = domain.gas_vorticity;
         d["gas_maccormack_advection"] = domain.gas_maccormack_advection;
         d["turbulence_strength"] = domain.turbulence_strength;
@@ -5799,6 +5945,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         s["visible"] = system.visible;
         s["enabled"] = system.enabled;
         s["blend_mode"] = static_cast<int>(system.blend_mode);
+        s["emitter_only"] = system.render.emitter_only;
         s["emitters"] = json::array();
         s["colliders"] = json::array();
         s["domains"] = json::array();
@@ -6092,8 +6239,6 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             item.value("resource_budget_mb", domain.resource_budget_mb), 128u, 32768u);
         domain.enforce_resource_budget =
             item.value("enforce_resource_budget", domain.enforce_resource_budget);
-        domain.force_disk_cache =
-            item.value("force_disk_cache", domain.force_disk_cache);
         domain.voxel_size = item.value("voxel_size", domain.voxel_size);
         domain.padding = item.value("padding", domain.padding);
         domain.channels = item.value("channels", domain.channels);
@@ -6387,6 +6532,18 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.fire_expansion = item.value("fire_expansion", domain.fire_expansion);
         domain.gas_buoyancy_heat = item.value("gas_buoyancy_heat", domain.gas_buoyancy_heat);
         domain.gas_buoyancy_density = item.value("gas_buoyancy_density", domain.gas_buoyancy_density);
+        domain.gas_ambient_stratification = item.value("gas_ambient_stratification", domain.gas_ambient_stratification);
+        domain.gas_surface_dust_enabled = item.value("gas_surface_dust_enabled", domain.gas_surface_dust_enabled);
+        domain.gas_surface_dust_threshold = item.value("gas_surface_dust_threshold", domain.gas_surface_dust_threshold);
+        domain.gas_surface_dust_emission = item.value("gas_surface_dust_emission", domain.gas_surface_dust_emission);
+        domain.gas_surface_dust_temperature =
+            item.value("gas_surface_dust_temperature", domain.gas_surface_dust_temperature);
+        domain.gas_surface_dust_max_density = item.value("gas_surface_dust_max_density", domain.gas_surface_dust_max_density);
+        domain.gas_surface_dust_supply = item.value("gas_surface_dust_supply", domain.gas_surface_dust_supply);
+        domain.gas_dissipation_override = item.value("gas_dissipation_override", domain.gas_dissipation_override);
+        domain.gas_density_dissipation = item.value("gas_density_dissipation", domain.gas_density_dissipation);
+        domain.gas_temperature_dissipation = item.value("gas_temperature_dissipation", domain.gas_temperature_dissipation);
+        domain.gas_fuel_dissipation = item.value("gas_fuel_dissipation", domain.gas_fuel_dissipation);
         domain.gas_vorticity = item.value("gas_vorticity", domain.gas_vorticity);
         domain.gas_maccormack_advection =
             item.value("gas_maccormack_advection", domain.gas_maccormack_advection);
@@ -6466,14 +6623,18 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
 
     // Build one ParticleSystemObject with its own registered runtime, populated
     // straight from JSON (runtime is the source of truth — no descriptor staging).
-    auto adoptSystem = [&](uint32_t id, const std::string& name, bool visible, bool enabled,
-                           int blend_mode, const json* settings, const json* emitters, const json* colliders, const json* domains, const json* flow_sources) {
+    auto adoptSystem = [&](uint32_t id, const std::string& name, bool visible,
+                           bool enabled, int blend_mode, bool emitter_only,
+                           const json* settings, const json* emitters,
+                           const json* colliders, const json* domains,
+                           const json* flow_sources) {
         SceneData::ParticleSystemObject system;
         system.id = id;
         system.name = name;
         system.visible = visible;
         system.enabled = enabled;
         system.blend_mode = static_cast<SceneData::ParticleBlendMode>(blend_mode == 1 ? 1 : 0);
+        system.render.emitter_only = emitter_only;
         system.runtime = scene.createParticleRuntime();
         if (settings) parseSettingsInto(*settings, *system.runtime);
         if (emitters && emitters->is_array()) {
@@ -6533,12 +6694,15 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             const bool visible = item.value("visible", defaults.visible);
             const bool enabled = item.value("enabled", defaults.enabled);
             const int blend_mode = item.value("blend_mode", static_cast<int>(defaults.blend_mode));
+            // Systems saved before this setting existed displayed particles.
+            const bool emitter_only = item.value("emitter_only", false);
             const json* settings = item.contains("settings") ? &item["settings"] : nullptr;
             const json* emitters = item.contains("emitters") ? &item["emitters"] : nullptr;
             const json* colliders = item.contains("colliders") ? &item["colliders"] : nullptr;
             const json* domains = item.contains("domains") ? &item["domains"] : nullptr;
             const json* flow_sources = item.contains("flow_sources") ? &item["flow_sources"] : nullptr;
-            adoptSystem(id, name, visible, enabled, blend_mode, settings, emitters, colliders, domains, flow_sources);
+            adoptSystem(id, name, visible, enabled, blend_mode, emitter_only,
+                        settings, emitters, colliders, domains, flow_sources);
             max_id = std::max(max_id, id);
         }
 
@@ -6555,7 +6719,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         const json* colliders = j.contains("colliders") ? &j["colliders"] : nullptr;
         const json* domains = j.contains("domains") ? &j["domains"] : nullptr;
         const json* flow_sources = j.contains("flow_sources") ? &j["flow_sources"] : nullptr;
-        adoptSystem(1u, "Particle System 1", true, true, 0, settings, emitters, colliders, domains, flow_sources);
+        adoptSystem(1u, "Particle System 1", true, true, 0, false,
+                    settings, emitters, colliders, domains, flow_sources);
         scene.next_particle_system_id = 2u;
         scene.active_particle_system_index = scene.particle_systems.empty() ? -1 : 0;
     }

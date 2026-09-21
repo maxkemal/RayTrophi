@@ -111,10 +111,18 @@ karşı" yaşatmak bu kod tabanında tekrar tekrar sessiz arızaya dönüştü. 
 sessizce **anlam** değiştirme: alanın adı da değişmeli ki eski veri yanlış
 okunmasın.
 
-## 6. Vulkan birincil GPU yolu
+## 6. Vulkan birincil GPU yolu — ve OptiX DONDURULDU
 
 CUDA/OptiX hızlı ama ikincil. Bir şey yalnızca birinde çalışıyorsa Vulkan'da
 çalışmalı.
+
+★ 2026-09-16'dan beri OptiX **bakım modunda**: yeni özellik almaz. Ama
+**silinemez, devre dışı bırakılamaz** — ve gerekçesi sezgiye aykırı olduğu için
+burada yazıyor: **TDR OptiX'i öldürmez.** TDR yalnızca Vulkan sürücüsünü
+sıfırlar; raster ve Vulkan RT çöker, CUDA/OptiX bağlamı ayakta kalır. Yani
+OptiX gerçek cankurtaran. "Aynı GPU, o da ölür" varsayımı yanlıştır ve bu
+dosyayı okumadan yapılacak ilk tahmin tam olarak odur.
+Ayrıntı: `docs/dev/OPTIX_DONDURULDU.md`.
 
 ## 7. Tek branch: `main`
 

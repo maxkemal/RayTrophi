@@ -8,6 +8,19 @@ layout(location = 5) in vec4 inModelCol2;
 layout(location = 6) in vec4 inModelCol3;
 layout(location = 7) in vec2 inTexCoord;
 
+// ★★★★★ INVARIANT, ve gl_Position asagida ANA vertex shader'la BIREBIR AYNI
+//   ifadeyle hesaplanir. Bu shader derinlik ON GECISINI de suruyor; ana gecis
+//   `pc.viewProj * (model * p)` yazarken burada `pc.viewProj * model * p`
+//   yaziliydi -- GLSL'de soldan birlesme, yani once mat4*mat4. Matematiksel
+//   olarak ayni, SAYISAL olarak degil: iki gecisin derinligi son bitlerde
+//   ayrilir. Bunun iki bedeli var ve ikisi de olculmustu:
+//     1) LEQUAL derinlik testi ana gecisin bazi fragmanlarini DUSURUR,
+//     2) ekran uzayi ray golge maskesinin derinlik dogrulamasi (2e-7, yani
+//        ~2 ULP) TUTMAZ; o fragman maskeyi reddeder ve isik cascade'i devrettigi
+//        icin tamamen AYDINLIK kalir. Belirtisi: kamera her kimildadiginda
+//        "anlamsiz golge bozulmasi".
+invariant gl_Position;
+
 layout(location = 0) flat out uint vMaterialID;
 layout(location = 1) out vec2 vTexCoord;
 
@@ -23,7 +36,8 @@ layout(push_constant) uniform MaterialPreviewPushConstants {
 
 void main() {
     mat4 model = mat4(inModelCol0, inModelCol1, inModelCol2, inModelCol3);
-    gl_Position = pc.viewProj * model * vec4(inPosition, 1.0);
+    vec4 worldPos = model * vec4(inPosition, 1.0);
+    gl_Position = pc.viewProj * worldPos;
     vMaterialID = inMaterialID;
     vTexCoord = vec2(inTexCoord.x, 1.0 - inTexCoord.y);
 }

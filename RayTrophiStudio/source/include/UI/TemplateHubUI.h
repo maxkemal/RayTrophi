@@ -76,6 +76,9 @@ private:
 
     std::vector<RecentProjectEntry> recent_projects_;
     std::filesystem::path recent_config_path_;
+    // ★ Son projeler listesinde tek tık SEÇER, çift tık AÇAR. Bu alan yalnızca
+    //   seçim vurgusu içindir; açma kararını taşımaz.
+    std::filesystem::path selected_recent_path_;
 };
 
 } // namespace raytrophi::templates

@@ -38,6 +38,7 @@
 #include "RtIpcRayFusion.h"
 #include "RtIpcAgentDiscovery.h"
 #include "RtIpcMeshTools.h"
+#include "RtIpcMeshEdit.h"
 #include "scene_ui.h"
 
 #include <algorithm>
@@ -647,6 +648,11 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (dispatchRayFusionIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, rayfusion_result)) return rayfusion_result;
     json mesh_tool_result;
     if (dispatchMeshToolMethod(method, params, mesh_tool_result)) return mesh_tool_result;
+    // Polygon editing (mesh.edit.* selection + the extrude/inset/bevel/loop
+    // cut/dissolve/weld operators) runs through enqueueQuery so the frame loop
+    // owns the topology change, unlike the read-only tool catalogue above.
+    json mesh_edit_result;
+    if (dispatchMeshEditIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, mesh_edit_result)) return mesh_edit_result;
 
     json post_result;
     if (dispatchViewportCutoutIpc(method, params, [](RtIpcTemplateQuery q) { return enqueueQuery(std::move(q)); }, post_result)) return post_result;
@@ -1340,9 +1346,26 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::ObjectInfo info;
             rtapi::Result r = rtapi::getObjectInfo(name, info);
             if (!r.ok) return json{{"__error", r.error}};
-            return json{{"name", info.name},
-                        {"triangles", info.triangle_count},
-                        {"vertices", info.vertex_count}};
+            json out{{"name", info.name},
+                     {"triangles", info.triangle_count},
+                     {"vertices", info.vertex_count},
+                     {"meshes", info.mesh_count},
+                     {"has_bounds", info.has_bounds}};
+            // ★ Bounds are what lets an automated caller MEASURE an assembly
+            // instead of eyeballing a screenshot. They are absent -- not
+            // zeroed -- when the object carries no geometry, so "no bounds"
+            // never reads as "a point at the origin".
+            if (info.has_bounds) {
+                const Vec3 size = info.world_max - info.world_min;
+                const Vec3 center = (info.world_max + info.world_min) * 0.5f;
+                out["local_min"] = vec3ToJson(info.local_min);
+                out["local_max"] = vec3ToJson(info.local_max);
+                out["world_min"] = vec3ToJson(info.world_min);
+                out["world_max"] = vec3ToJson(info.world_max);
+                out["world_size"] = vec3ToJson(size);
+                out["world_center"] = vec3ToJson(center);
+            }
+            return out;
         });
     }
 
@@ -2751,10 +2774,22 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"structural_event_interval", s.structural_event_interval},
                         {"buoyancy_heat", s.buoyancy_heat},
                         {"buoyancy_density", s.buoyancy_density},
+                        {"ambient_stratification", s.ambient_stratification},
+                        {"surface_dust_enabled", s.surface_dust_enabled},
+                        {"surface_dust_threshold", s.surface_dust_threshold},
+                        {"surface_dust_emission", s.surface_dust_emission},
+                        {"surface_dust_temperature", s.surface_dust_temperature},
+                        {"surface_dust_max_density", s.surface_dust_max_density},
+                        {"surface_dust_supply", s.surface_dust_supply},
+                        {"dissipation_override", s.dissipation_override},
+                        {"density_dissipation", s.density_dissipation},
+                        {"temperature_dissipation", s.temperature_dissipation},
+                        {"fuel_dissipation", s.fuel_dissipation},
                         {"vorticity", s.vorticity}, {"fire_expansion", s.fire_expansion},
                         {"turbulence_strength", s.turbulence_strength},
                         {"turbulence_scale", s.turbulence_scale},
                         {"turbulence_octaves", s.turbulence_octaves},
+                        {"turbulence_octaves_effective", s.turbulence_octaves_effective},
                         {"turbulence_lacunarity", s.turbulence_lacunarity},
                         {"turbulence_persistence", s.turbulence_persistence},
                         {"turbulence_speed", s.turbulence_speed}};
@@ -2785,6 +2820,17 @@ json dispatchMethod(const std::string& method, const json& params) {
             RT_GAS_JSON(structural_event_interval, float);
             RT_GAS_JSON(buoyancy_heat, float);
             RT_GAS_JSON(buoyancy_density, float);
+            RT_GAS_JSON(ambient_stratification, float);
+            RT_GAS_JSON(surface_dust_enabled, bool);
+            RT_GAS_JSON(surface_dust_threshold, float);
+            RT_GAS_JSON(surface_dust_emission, float);
+            RT_GAS_JSON(surface_dust_temperature, float);
+            RT_GAS_JSON(surface_dust_max_density, float);
+            RT_GAS_JSON(surface_dust_supply, float);
+            RT_GAS_JSON(dissipation_override, bool);
+            RT_GAS_JSON(density_dissipation, float);
+            RT_GAS_JSON(temperature_dissipation, float);
+            RT_GAS_JSON(fuel_dissipation, float);
             RT_GAS_JSON(vorticity, float);
             RT_GAS_JSON(fire_expansion, float);
             RT_GAS_JSON(turbulence_strength, float);
@@ -2795,6 +2841,34 @@ json dispatchMethod(const std::string& method, const json& params) {
             RT_GAS_JSON(turbulence_speed, float);
 #undef RT_GAS_JSON
             return rtapi::updateGasDomainSettings(domain, s);
+        });
+    }
+    if (method == "gas.measure_plume") {
+        std::string domain = requireString(params, "domain");
+        float threshold = params.value("density_threshold", 0.01f);
+        return enqueueQuery([domain, threshold](UIContext&) {
+            rtapi::GasPlumeMeasurement m;
+            rtapi::Result r = rtapi::measureGasPlume(domain, threshold, m);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"measured", m.measured},
+                        {"threshold", m.threshold},
+                        {"active_cells", m.active_cells},
+                        {"total_cells", m.total_cells},
+                        {"fill_fraction", m.fill_fraction},
+                        {"bounds_min", json::array({m.bounds_min.x, m.bounds_min.y, m.bounds_min.z})},
+                        {"bounds_max", json::array({m.bounds_max.x, m.bounds_max.y, m.bounds_max.z})},
+                        {"centroid", json::array({m.centroid.x, m.centroid.y, m.centroid.z})},
+                        {"top_above_floor", m.top_above_floor},
+                        {"centroid_above_floor", m.centroid_above_floor},
+                        {"max_width", m.max_width},
+                        {"max_width_height", m.max_width_height},
+                        {"peak_temperature", m.peak_temperature},
+                        {"mean_temperature", m.mean_temperature},
+                        {"touching_ceiling", m.touching_ceiling},
+                        {"pressure_measured", m.pressure_measured},
+                        {"pressure_min", m.pressure_min},
+                        {"pressure_max", m.pressure_max},
+                        {"pressure_min_height", m.pressure_min_height}};
         });
     }
     if (method == "gas.get_shader") {
@@ -2812,7 +2886,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"temperature_min", s.temperature_min},
                 {"temperature_max", s.temperature_max},
                 {"scattering_coefficient", s.scattering_coefficient},
-                {"absorption_coefficient", s.absorption_coefficient}};
+                {"absorption_coefficient", s.absorption_coefficient},
+                {"voxel_step_multiplier", s.voxel_step_multiplier},
+                {"max_steps", s.max_steps},
+                {"shadow_steps", s.shadow_steps},
+                {"shadow_stride", s.shadow_stride},
+                {"shadow_strength", s.shadow_strength}};
         });
     }
     if (method == "gas.set_shader") {
@@ -2831,6 +2910,11 @@ json dispatchMethod(const std::string& method, const json& params) {
             RT_GASSHADER_JSON(temperature_max, float);
             RT_GASSHADER_JSON(scattering_coefficient, float);
             RT_GASSHADER_JSON(absorption_coefficient, float);
+            RT_GASSHADER_JSON(voxel_step_multiplier, float);
+            RT_GASSHADER_JSON(max_steps, int);
+            RT_GASSHADER_JSON(shadow_steps, int);
+            RT_GASSHADER_JSON(shadow_stride, int);
+            RT_GASSHADER_JSON(shadow_strength, float);
 #undef RT_GASSHADER_JSON
             return rtapi::updateGasShaderSettings(domain, s);
         });
@@ -4066,7 +4150,10 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"has_range", s.has_range},
                         {"first_frame", s.first_frame},
                         {"last_frame", s.last_frame},
-                        {"config_signature", s.config_signature}};
+                        {"config_signature", s.config_signature},
+                        {"ram_bytes", s.ram_bytes},
+                        {"budget_bytes", s.budget_bytes},
+                        {"budget_reached", s.budget_reached}};
         });
     }
     if (method == "sim_cache.bake") {
@@ -5311,12 +5398,35 @@ json dispatchMethod(const std::string& method, const json& params) {
             for (const auto& s : systems) {
                 arr.push_back(json{
                     {"index", s.index}, {"id", s.id}, {"name", s.name},
-                    {"active", s.active}, {"domain_count", s.domain_count},
+                    {"active", s.active}, {"emitter_only", s.emitter_only},
+                    {"render_in_raytrace", s.render_in_raytrace},
+                    {"domain_count", s.domain_count},
                     {"flow_source_count", s.flow_source_count},
                     {"emitter_count", s.emitter_count},
                     {"collider_count", s.collider_count}});
             }
             return json{{"systems", arr}};
+        });
+    }
+    if (method == "particle.set_system_emitter_only") {
+        std::string system = requireString(params, "system");
+        bool emitter_only = params.value("emitter_only", true);
+        return enqueueResult([system, emitter_only](UIContext&) {
+            return rtapi::setParticleSystemEmitterOnly(system, emitter_only);
+        });
+    }
+    if (method == "particle.add_preset") {
+        std::string preset = requireString(params, "preset");
+        return enqueueQuery([preset](UIContext&) {
+            rtapi::ParticleSystemInfo info;
+            rtapi::Result r = rtapi::addParticleSystemPreset(preset, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"index", info.index}, {"id", info.id}, {"name", info.name},
+                        {"active", info.active},
+                        {"domain_count", info.domain_count},
+                        {"flow_source_count", info.flow_source_count},
+                        {"emitter_count", info.emitter_count},
+                        {"collider_count", info.collider_count}};
         });
     }
     if (method == "particle.clear_systems") {
@@ -5353,6 +5463,54 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"integrate_ms", info.integrate_ms},
                         {"self_collision_ms", info.self_collision_ms},
                         {"grid_domain_ms", info.grid_domain_ms}};
+        });
+    }
+    if (method == "gas.step_stats") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::GasStepStats s;
+            auto r = rtapi::getGasStepStats(domain, s);
+            if (!r.ok) return json{{"ok", false}, {"error", r.error}};
+            json j{{"ok", true}, {"measured", s.measured}};
+            if (!s.measured) return j;
+            j["resolution"] = json::array({s.resolution[0], s.resolution[1], s.resolution[2]});
+                j["total_ms"] = s.total_ms;
+                j["voxelize_ms"] = s.voxelize_ms;
+                j["analysis_ms"] = s.analysis_ms;
+                j["gpu_collider_source_ms"] = s.gpu_collider_source_ms;
+                j["gpu_msf_ms"] = s.gpu_msf_ms;
+                j["gpu_source_upload_ms"] = s.gpu_source_upload_ms;
+                j["gpu_fluid_combustion_ms"] = s.gpu_fluid_combustion_ms;
+                j["gpu_velocity_advect_ms"] = s.gpu_velocity_advect_ms;
+                j["gpu_scalar_advect_ms"] = s.gpu_scalar_advect_ms;
+                j["gpu_combustion_ms"] = s.gpu_combustion_ms;
+                j["gpu_body_forces_ms"] = s.gpu_body_forces_ms;
+                j["gpu_dissipation_ms"] = s.gpu_dissipation_ms;
+                j["gpu_pressure_ms"] = s.gpu_pressure_ms;
+                j["gpu_publish_ms"] = s.gpu_publish_ms;
+                j["gpu_majorant_ms"] = s.gpu_majorant_ms;
+                j["cpu_total_ms"] = s.cpu_total_ms;
+                j["cpu_advect_velocity_ms"] = s.cpu_advect_velocity_ms;
+                j["cpu_advect_scalar_ms"] = s.cpu_advect_scalar_ms;
+                j["cpu_boundary_ms"] = s.cpu_boundary_ms;
+                j["cpu_combustion_ms"] = s.cpu_combustion_ms;
+                j["cpu_surface_dust_ms"] = s.cpu_surface_dust_ms;
+                j["cpu_buoyancy_ms"] = s.cpu_buoyancy_ms;
+                j["cpu_force_fields_ms"] = s.cpu_force_fields_ms;
+                j["cpu_vorticity_ms"] = s.cpu_vorticity_ms;
+                j["cpu_turbulence_ms"] = s.cpu_turbulence_ms;
+                j["cpu_dissipation_ms"] = s.cpu_dissipation_ms;
+                j["cpu_pressure_ms"] = s.cpu_pressure_ms;
+                j["max_density"] = s.max_density;
+                j["max_temperature"] = s.max_temperature;
+                j["max_speed"] = s.max_speed;
+                j["cfl"] = s.cfl;
+                j["cell_count"] = s.cell_count;
+                j["active_density_cells"] = s.active_density_cells;
+                j["grid_memory_bytes"] = s.grid_memory_bytes;
+                j["burning_cells"] = s.burning_cells;
+                j["solid_cells"] = s.solid_cells;
+            return j;
         });
     }
     if (method == "particle.spawn") {

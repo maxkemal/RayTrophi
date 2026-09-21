@@ -112,7 +112,13 @@ bool TriangleMesh::applySkinning(const std::vector<Matrix4x4>& finalBoneMatrices
 bool TriangleMesh::bounding_box(float time0, float time1, AABB& output_box) const {
     if (!geometry || geometry->get_vertex_count() == 0) return false;
     
-    const Vec3* positions = geometry->get_attribute_data<Vec3>("P");
+    // Ayni sozlesme: asagida kutuya `transform` uygulandigi icin buradaki
+    // konumlar YEREL olmali. `hit()` ile ayni kaynagi okumak zorunda, yoksa
+    // kutu ile isabet farkli yerleri tarif eder ve BVH budamasi dogru objeyi
+    // eler -- hicbir hata vermeden.
+    const Vec3* positions = hasSkinWeights() ? geometry->get_positions()
+                                             : geometry->get_positions_orig();
+    if (!positions) positions = geometry->get_attribute_data<Vec3>("P");
     if (!positions) return false;
     
     Vec3 min_pt = positions[0];
@@ -177,8 +183,32 @@ bool TriangleMesh::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, b
     if (local_bvh) {
         // Reserved for future local BVH integration
     } else {
-        const Vec3* positions = geometry->get_attribute_data<Vec3>("P");
-        const Vec3* normals = geometry->get_attribute_data<Vec3>("N");
+        // ★★★★★ KAYNAK TAMPON EmbreeBVH ILE AYNI OLMAK ZORUNDA. Bu fonksiyon
+        //   isini `inv(transform)` ile YEREL uzaya cevirip test ediyor, yani
+        //   yerel konumlar lazim. EmbreeBVH ayni mesh icin dunyayi
+        //   `getFinal() * P_orig` diye kuruyor -- ayni matematigin diger yuzu.
+        //   Ama burasi "P"yi okuyordu, ve EmbreeBVH'deki yorumun soyledigi gibi:
+        //   "P is a separately-baked cache that is NOT reliably re-baked when
+        //   only this mesh's transform changes (it has no facade in the
+        //   dynamic-triangle refit list)".
+        //
+        // ★★★★ Sonuc bir REGRESYON: BVH yolu P_orig'e gecirilip duzeltildi,
+        //   dogrudan yol duzeltilmedi. CPU BVH varken secim dogru calisiyor
+        //   (sculpt/edit modu bu yoldan gider), BVH YOKKEN her sey bu
+        //   duzeltilmemis yola dusuyor. Olculdu 2026-09-16: `bvh_present:
+        //   False` iken bedroom.rtp'de 710 nesneden 77 ornekte yalnizca 13'u,
+        //   saat.rtp'de 43 nesneden 1'i carpilabiliyordu -- ve kullanicinin
+        //   ayirt edicisi tam buydu: "edit mesh modu bu sahnede bile dogru
+        //   alt alanlari secebiliyor".
+        //
+        // ★★★ Skinli mesh ISTISNA ve EmbreeBVH de ayni istisnayi yapiyor:
+        //   orada canli skin ciktisi "P"de yasar ve P_orig bind pozudur.
+        const Vec3* positions = hasSkinWeights() ? geometry->get_positions()
+                                                 : geometry->get_positions_orig();
+        if (!positions) positions = geometry->get_attribute_data<Vec3>("P");
+        const Vec3* normals = hasSkinWeights() ? geometry->get_normals()
+                                               : geometry->get_normals_orig();
+        if (!normals) normals = geometry->get_attribute_data<Vec3>("N");
         const Vec2* uvs = geometry->get_attribute_data<Vec2>("uv");
         const uint16_t* materialIDs = geometry->get_attribute_data<uint16_t>("materialID");
         

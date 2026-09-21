@@ -385,23 +385,169 @@ void addToFaces(FluidGrid& grid, int i, int j, int k, const Vec3& f) {
     grid.velZAt(i, j, k + 1) += f.z * 0.5f;
 }
 
+// Buoyant anomaly of one cell against a possibly stratified environment.
+//
+// ★ `ambient_stratification` is a POTENTIAL-temperature gradient, not the
+// meteorological lapse rate, and it is POSITIVE for a stable atmosphere — the
+// opposite sign to the "air gets colder as you climb" intuition. The reason is
+// that this solver has no adiabatic cooling: a rising parcel carries its
+// temperature unchanged. That is exactly what a parcel does in potential-
+// temperature coordinates, where a stably stratified environment's value RISES
+// with height. Writing it as a lapse rate would have made the plume accelerate
+// upward forever instead of stopping.
+//
+// The height is measured from the DOMAIN FLOOR, not from world zero, so moving
+// a domain moves its atmosphere with it. That keeps the neutral-buoyancy height
+// a property the author sets (h* = anomaly / stratification) rather than a
+// consequence of where the box happens to sit.
+//
+// ★ The restoring term is bounded by the parcel's own |anomaly|. Subtracting it
+// unconditionally would give still, empty air a downward force growing with
+// height — a domain-wide phantom downdraft that would read as "the smoke
+// settles nicely" and never be reported as a bug.
+inline float buoyantAnomaly(const SolverParams& params,
+                            float temp,
+                            float height_above_floor) {
+    const float excess = temp - params.ambient_temperature;
+    if (params.ambient_stratification == 0.0f) return excess;
+    const float env = params.ambient_stratification * std::max(height_above_floor, 0.0f);
+    return std::max(excess - env, -std::abs(excess));
+}
+
+// ── Surface dust lofting (wind erosion / saltation threshold) ───────────────
+//
+// ★★★ THIS REPLACES A FLOW SOURCE THAT FAKED IT. A blast's ground skirt is not
+// a dust emitter someone placed at the origin: the shock sweeps outward, its
+// wind scours whatever surface it crosses, and the dust ring EXPANDS with the
+// front. Authored as a source, the ring has a radius the author typed; here it
+// has a radius the blast earned, it follows terrain, and it appears wherever
+// any fast wind touches a surface - a landing thruster, a car, a door blown in.
+//
+// The model is the standard threshold one: a surface releases material only
+// once the wind over it exceeds a threshold, and then in proportion to the
+// EXCESS. Below the threshold nothing moves at all, which is why still air over
+// dust is still air and not a permanent haze.
+//
+// ★ The velocity read is HORIZONTAL only. Dust is lifted by the shear of wind
+// blowing ACROSS a surface, not by the flow into or out of it. Including the
+// normal component would make every rising plume manufacture dust out of its
+// own updraft - a feedback loop that looks like "lots of nice dust" until you
+// notice it never stops.
+//
+// ★ Surfaces are the domain's bottom layer plus any cell resting on a solid.
+// The solid scan is skipped entirely when the domain holds no colliders, so the
+// common case costs O(nx*nz), not O(cells) - this stage is a SURFACE pass and
+// deliberately has no GPU counterpart: uploading and reading back the MAC field
+// would cost more than the sweep it saves.
+//
+// ★★★ THE SURFACE HAS A FINITE RESERVOIR, and that is what makes the skirt a
+// travelling RING rather than a carpet. A shock scours the ground it crosses
+// and moves on; with an unlimited supply every cell that ever saw the threshold
+// wind keeps producing behind the front and the ring fills itself in. Measured
+// 2026-09-20: a uniform sheet at 0.07 m growing 4 -> 10 m, and a stem as thick
+// as the cap. `surface_dust_supply` = 0 restores the old unlimited behaviour.
+void addSurfaceDust(FluidGrid& grid, const SolverParams& params, float dt) {
+    if (!params.surface_dust_enabled) return;
+    if (!params.channel_density) return;
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const std::size_t cells =
+        static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz);
+    if (cells == 0u || grid.density.size() != cells) return;
+
+    const bool has_solid = (grid.solid.size() == cells);
+    const bool has_temp = (params.channel_temperature && grid.temperature.size() == cells);
+    const float threshold = std::max(0.0f, params.surface_dust_threshold);
+    const float emission = std::max(0.0f, params.surface_dust_emission);
+    const float ceiling = std::max(0.0f, params.surface_dust_max_density);
+    const float supply = std::max(0.0f, params.surface_dust_supply);
+    if (emission <= 0.0f) return;
+
+    // Lazily size the reservoir to the ground footprint. Full means untouched.
+    const std::size_t columns = static_cast<std::size_t>(nx) * static_cast<std::size_t>(nz);
+    if (supply > 0.0f && grid.surface_dust_supply.size() != columns) {
+        grid.surface_dust_supply.assign(columns, 1.0f);
+    }
+
+    // Cell-centred horizontal speed from the two MAC face pairs.
+    auto horizontalSpeed = [&](int i, int j, int k) {
+        const float ux = 0.5f * (grid.velXAt(i, j, k) + grid.velXAt(i + 1, j, k));
+        const float uz = 0.5f * (grid.velZAt(i, j, k) + grid.velZAt(i, j, k + 1));
+        return std::sqrt(ux * ux + uz * uz);
+    };
+
+    auto loft = [&](int i, int j, int k) {
+        const float speed = horizontalSpeed(i, j, k);
+        if (speed <= threshold) return;
+        const std::size_t c = grid.cellIndex(i, j, k);
+        if (has_solid && grid.solid[c] != 0u) return;   // inside the obstacle
+        float added = emission * (speed - threshold) * dt;
+        if (added <= 0.0f) return;
+        if (supply > 0.0f) {
+            const std::size_t col =
+                static_cast<std::size_t>(i) + static_cast<std::size_t>(k) *
+                                              static_cast<std::size_t>(nx);
+            float& remaining = grid.surface_dust_supply[col];
+            // ★ Take what is left, not what the wind asked for. A strong enough
+            // gust strips the column in one step and that column is finished;
+            // clamping the RATE instead would leave every column producing
+            // forever at a lower level, which is the carpet again in slow motion.
+            const float available = remaining * supply;
+            if (available <= 0.0f) return;
+            added = std::min(added, available);
+            remaining = std::max(0.0f, remaining - added / supply);
+        }
+        float& d = grid.density[c];
+        d = (ceiling > 0.0f) ? std::min(d + added, ceiling) : (d + added);
+        // ★ Dust is COLD, and saying so matters. Lofted ground is what makes the
+        // skirt read as separate from the cap; give it heat and it rises with
+        // the fireball and the two merge into one shapeless cloud.
+        if (has_temp) {
+            grid.temperature[c] +=
+                (params.surface_dust_temperature - grid.temperature[c]) *
+                std::min(1.0f, added);
+        }
+    };
+
+    // Floor layer.
+    if (ny > 0) {
+        for (int k = 0; k < nz; ++k)
+            for (int i = 0; i < nx; ++i) loft(i, 0, k);
+    }
+    // Tops of solids. Skipped entirely when the domain has no colliders.
+    if (has_solid) {
+        const std::size_t stride_y = static_cast<std::size_t>(nx);
+        for (int k = 0; k < nz; ++k)
+            for (int j = 1; j < ny; ++j)
+                for (int i = 0; i < nx; ++i) {
+                    const std::size_t c = grid.cellIndex(i, j, k);
+                    if (grid.solid[c] != 0u) continue;
+                    if (grid.solid[c - stride_y] == 0u) continue;  // nothing under it
+                    loft(i, j, k);
+                }
+    }
+}
+
 void addBuoyancy(FluidGrid& grid, const SolverParams& params, float dt) {
     const Vec3 up = upFromGravity(params.gravity);
     const bool has_density = params.channel_density;
     const bool has_temp = params.channel_temperature;
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     for (int k = 0; k < nz; ++k)
-        for (int j = 0; j < ny; ++j)
+        for (int j = 0; j < ny; ++j) {
+            // Cell centre height above the domain floor; matches the GPU kernel,
+            // which derives the same quantity from its MAC face index.
+            const float height = (static_cast<float>(j) + 0.5f) * grid.voxel_size;
             for (int i = 0; i < nx; ++i) {
                 const std::size_t c = grid.cellIndex(i, j, k);
                 const float dens = has_density ? grid.density[c] : 0.0f;
                 const float temp = has_temp ? grid.temperature[c] : 0.0f;
-                const float b = (params.buoyancy_heat * (temp - params.ambient_temperature) +
+                const float b = (params.buoyancy_heat * buoyantAnomaly(params, temp, height) +
                                  params.buoyancy_density * dens) * dt;
                 if (b != 0.0f) {
                     addToFaces(grid, i, j, k, up * b);
                 }
             }
+        }
 }
 
 void addForceFields(FluidGrid& grid,
@@ -1088,6 +1234,15 @@ void step(FluidGrid& grid,
     if (params.channel_velocity) enforceSolidBoundaries(grid);
     mark(cursor, stats ? &stats->boundary_ms : nullptr);
 
+    // 1b) Surface dust. A source, and it runs BEFORE buoyancy so the dust this
+    // step's wind lifted is part of what this step's buoyancy sorts out. After
+    // the boundary pass, so a wind that has just been zeroed at a wall does not
+    // get to scour it.
+    if (!params.skip_surface_dust) {
+        addSurfaceDust(grid, params, dt);
+        mark(cursor, stats ? &stats->surface_dust_ms : nullptr);
+    }
+
     // 2) Combustion: burn fuel -> heat + smoke (before buoyancy so released heat
     // lifts this step). Opt-in; no-op when fire is disabled.
     if (!params.skip_combustion) {
@@ -1249,7 +1404,11 @@ void stepSparseVDB(FluidGrid& grid,
                     openvdb::Coord coord(i, j, k);
                     float d = density_acc.getValue(coord);
                     float t = temp_acc.getValue(coord);
-                    float temp_diff = t - params.ambient_temperature;
+                    // Same stratified anomaly as the dense CPU and GPU paths.
+                    // VDB coordinates are cell indices on the same lattice, so
+                    // the height measure is identical.
+                    float temp_diff = buoyantAnomaly(
+                        params, t, (static_cast<float>(j) + 0.5f) * grid.voxel_size);
                     float buoyancy_force = params.buoyancy_heat * temp_diff + params.buoyancy_density * d;
                     
                     // Apply buoyancy and gravity to velocity Y

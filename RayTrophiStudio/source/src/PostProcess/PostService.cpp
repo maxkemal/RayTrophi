@@ -1,6 +1,7 @@
 #include "PostProcess/PostService.h"
 #include "Api/RtApiInternal.h"
 #include "Camera.h"
+#include "ProjectManager.h"   // configure(): ayar projeye yaziliyor
 #include <chrono>
 #include <cmath>
 
@@ -94,6 +95,9 @@ json configure(UIContext& ctx,const json& patch) {
     updateExposure(next,0,false);
     syncDisplay(ctx.color_processor,ctx.scene.camera.get(),false);
     ctx.apply_tonemap=true; ctx.render_settings.persistent_tonemap=true;
+    // ★ Bu ayar projeye yazilir (`exposure_v2`), o yuzden kirletilir. Tek yerde:
+    //   panel, viewport HUD'u ve IPC ucu de bu fonksiyondan geciyor.
+    ProjectManager::getInstance().markModified();
     return inspect(ctx);
 }
 json reset(UIContext& ctx) {
@@ -111,10 +115,11 @@ void syncDisplay(ColorProcessor& p,const Camera* camera,bool freeze) {
     g_display_post.tone_mapping=static_cast<int>(cp.tone_mapping_type);
     g_display_post.vignette_enabled=cp.enable_vignette?1:0;
     float cameraExposure=1;
-    if(camera && cp.exposure_settings.mode==1) {
-        Camera physical=*camera; physical.auto_exposure=false; physical.use_physical_exposure=true;
-        cameraExposure=physical.exposureFactor();
-    }
+    // KAPI: kadranlar yalnizca Physical Camera modunda okunur. Diger modlarda
+    // kamera terimi 1.0 kalir -- bu, "kadrani cevirdim ama goruntu kimildamadi"
+    // sorusunun tek dogru cevabidir ve panellerin (HUD ucgeni dahil) kadranlari
+    // kapali cizmesinin sebebi.
+    if(camera && cp.exposure_settings.mode==1) cameraExposure=camera->physicalExposureFactor();
     g_display_post.camera_exposure=cameraExposure;
     p.resolved_exposure=g_display_post.exposure*cameraExposure;
 }

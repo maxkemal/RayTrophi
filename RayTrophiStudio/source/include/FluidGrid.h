@@ -230,6 +230,22 @@ public:
     // negative inside fluid). Lazy (sized by the projection only when ghost-fluid
     // is enabled). Rebuilt each step from the particle positions.
     std::vector<float> fluid_phi;
+    // ── Surface dust reservoir, nx*nz, one value per ground column ──────────
+    //
+    // ★★★ WITHOUT THIS THE SKIRT IS A CARPET, NOT A RING. A real shock scours
+    // the ground it crosses and moves on, leaving nothing behind — that is why
+    // the dust forms a travelling ring with a sharp edge. With an unlimited
+    // supply every cell that ever saw the threshold wind keeps producing for as
+    // long as any wind lasts, so the ring fills in behind itself into a uniform
+    // sheet. MEASURED 2026-09-20: widest slice sat at 0.07 m and grew 4 -> 10 m
+    // as a solid layer, and the stem came out as thick as the cap.
+    //
+    // Remaining fraction, 1 = untouched, 0 = scoured clean. There is no
+    // replenishment: ground that has been stripped stays stripped for the shot.
+    // Kept per COLUMN rather than per cell because the reservoir belongs to the
+    // ground, not to the air above it, and a column is the only place a floor
+    // and a collider top can share one meaning.
+    std::vector<float> surface_dust_supply;
 
     static constexpr float weightToFloat(uint8_t w) { return static_cast<float>(w) * (1.0f / 255.0f); }
 
@@ -299,6 +315,7 @@ public:
         std::vector<uint8_t>().swap(v_weight);
         std::vector<uint8_t>().swap(w_weight);
         std::vector<float>().swap(fluid_phi);
+        std::vector<float>().swap(surface_dust_supply);
         // A (re)allocation can change the cell count / layout, so the cached
         // collider-voxelization signature is no longer trustworthy — force the
         // next voxelizeCollidersIntoGrid to do a full restamp.
@@ -334,6 +351,11 @@ public:
         std::fill(interaction.begin(), interaction.end(), 0.0f);
         std::fill(pressure.begin(), pressure.end(), 0.0f);
         std::fill(divergence.begin(), divergence.end(), 0.0f);
+        // ★ The dust reservoir refills to FULL, not to zero. "Reset" means the
+        // ground is untouched again; zeroing it would mean the shot starts on
+        // ground that has already been scoured, and the skirt would simply never
+        // appear — a silent, plausible-looking absence.
+        std::fill(surface_dust_supply.begin(), surface_dust_supply.end(), 1.0f);
         
         // Clear tile activity
         std::fill(tile_active_mask.begin(), tile_active_mask.end(), 0);

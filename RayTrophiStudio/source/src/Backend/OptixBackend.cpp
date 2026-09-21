@@ -417,7 +417,12 @@ void OptixBackend::setCamera(const CameraParams& params) {
     cam.vfov = params.fov;
     cam.aspect_ratio = params.aspectRatio; 
     cam.aperture = params.aperture;
-    cam.lens_radius = params.aperture * 0.5f; // [DOF FIX] Ensure lens_radius is set for OptiX kernel
+    cam.lens_radius = params.aperture * 0.5f;
+    // ★★ Backend::CameraParams::aperture ETKIN aciklitir (kapi senkron
+    //   sirasinda uygulanir), bu yuzden gecici Camera'nin anahtari ondan
+    //   turetilir. Yazilmazsa varsayilan `false` kalir ve OptiX yolunda DoF
+    //   HIC calismazdi -- "acik ama hicbir sey olmuyor" sinifi.
+    cam.depth_of_field = (params.aperture > 1e-5f);
     cam.focus_dist = params.focusDistance;
     // Ensure exposure-related fields are forwarded to the CPU Camera struct
     cam.ev_compensation = params.ev_compensation;
@@ -659,14 +664,6 @@ void OptixBackend::syncCamera(const Camera& cam) {
 
 void OptixBackend::hideInstancesByNodeName(const std::string& nodeName) {
     if (m_optix) m_optix->hideInstancesByNodeName(nodeName);
-}
-
-int OptixBackend::getPickedObjectId(int x, int y, int viewport_width, int viewport_height) {
-    return m_optix ? m_optix->getPickedObjectId(x, y, viewport_width, viewport_height) : -1;
-}
-
-std::string OptixBackend::getPickedObjectName(int x, int y, int viewport_width, int viewport_height) {
-    return m_optix ? m_optix->getPickedObjectName(x, y, viewport_width, viewport_height) : "";
 }
 
 // Factory implementation

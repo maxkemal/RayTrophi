@@ -86,13 +86,26 @@ __global__ void postFloat4Kernel(const float4* hdr,uchar4* display,int width,int
     display[i]=make_uchar4(uint8_t(c.x*255+.5f),uint8_t(c.y*255+.5f),uint8_t(c.z*255+.5f),display[i].w);
 }
 }
-bool launchOptixDisplayPost(const void* hdr,void* display,int width,int height,cudaStream_t stream,float lensAmount,float lensFalloff) {
-    if(!hdr || !display || width<=0 || height<=0)return false;
+// Enqueues the display-resolve kernel. Returns cudaSuccess when the launch was
+// accepted.
+//
+// ! The return value is a DIAGNOSIS, not a yes/no. It used to be a bool, and the
+//   OptiX caller turned every false into cudaErrorLaunchFailure -- which is 719,
+//   "unspecified launch failure". So the ordinary "buffers are not allocated
+//   yet" case (switching straight from Solid into OptiX before the first resize)
+//   was reported as a device fault and killed the process through CUDA_CHECK.
+//   cudaErrorInvalidValue now means exactly that: bad arguments, no device fault.
+//   Anything else is the real error from the launch.
+//
+// ! Display resolve is a PRESENTATION step. A failure means "skip this frame",
+//   never "abort the process".
+cudaError_t runOptixDisplayPost(const void* hdr,void* display,int width,int height,cudaStream_t stream,float lensAmount,float lensFalloff) {
+    if(!hdr || !display || width<=0 || height<=0)return cudaErrorInvalidValue;
     launchPostHistogram(static_cast<const float*>(hdr),width,height,4,stream);
     const auto& p=g_display_post;
     OidnPostParamsDevice dp{p.exposure,p.camera_exposure,p.gamma,p.saturation,p.color_temperature,p.vignette_strength,
         uint32_t(p.tone_mapping),uint32_t(p.vignette_enabled)};
     postFloat4Kernel<<<dim3((width+15)/16,(height+15)/16),dim3(16,16),0,stream>>>(
         static_cast<const float4*>(hdr),static_cast<uchar4*>(display),width,height,dp,lensAmount,lensFalloff);
-    return cudaGetLastError()==cudaSuccess;
+    return cudaGetLastError();
 }

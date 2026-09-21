@@ -198,6 +198,7 @@ void main() {
     payload.primaryMeta = plMetaReset(0u) | PL_PRIMARY_DONE;
     payload.skipVolumeAABBs = false;
     payload.skipGasVolumes = false;
+    payload.volumeTraversalMask = 0x01u; // photon trace below excludes domain volumes
 
     for (int bounce = 0; bounce < 8; ++bounce) {
         payload.radiance      = vec3(0.0);

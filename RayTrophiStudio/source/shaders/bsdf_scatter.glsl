@@ -1069,18 +1069,31 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
     payload.bounceType     = didRefract ? BOUNCE_TRANSMISSION : BOUNCE_GLASS_REFLECT;
 }
 
-// Explicit-light response for Water V3. The generic material NEE block is
-// intentionally bypassed by the water fast path, so water needs its own
-// dielectric GGX estimator or scene lights only appear through secondary rays.
-void addWaterV3DirectLighting(vec3 hitPos,
-                              vec3 carrierNormalIn,
-                              vec3 macroNormalIn,
-                              vec3 shadingNormalIn,
-                              vec3 rayDir,
-                              float ior,
-                              float roughness,
-                              float foamCoverage,
-                              inout uint seed) {
+// Explicit-light response for a dielectric INTERFACE (water surface, glass).
+// Every path that owns its own Fresnel split bypasses the generic material NEE
+// block, so it needs this estimator or scene lights only appear through
+// secondary rays.
+//
+// ★ And for a specular lobe "only through secondary rays" means NEVER: scene
+// lights here are ANALYTIC (lights.l[] carries no geometry in the TLAS), so a
+// mirror/GGX lobe has nothing to hit. Skipping NEE on glass did not dim its
+// highlight, it deleted it — a glass ball under a lamp reflected the
+// environment and nothing else. Water hit this exact wall first; the estimator
+// is shared so the next dielectric that needs it does not rediscover it.
+//
+// diffuseWeight blends in an opaque sub-layer over the interface (water foam);
+// 0 = pure dielectric interface.
+void addDielectricDirectLighting(vec3 hitPos,
+                                 vec3 carrierNormalIn,
+                                 vec3 macroNormalIn,
+                                 vec3 shadingNormalIn,
+                                 vec3 rayDir,
+                                 float ior,
+                                 float roughness,
+                                 vec3 diffuseAlbedo,
+                                 float diffuseWeight,
+                                 float originPush,
+                                 inout uint seed) {
     if (cam.lightCount == 0u) return;
 
     vec3 carrierNormal = safeNormalize(carrierNormalIn, vec3(0.0, 1.0, 0.0));
@@ -1106,7 +1119,13 @@ void addWaterV3DirectLighting(vec3 hitPos,
 
     // Offsetting with the interpolated normal can leave the origin below an
     // adjacent triangle. Always use the true oriented carrier face here.
-    vec3 shadowOrigin = offset_ray(hitPos, carrierNormal);
+    //
+    // originPush > 0: a level-set caller (the fluid isosurface) owns ONE exit
+    // distance for the whole band; L is outward here (NdotL > 0 above), which is
+    // exactly the branch seatOutsideBand short-circuits, so pushing along L
+    // reproduces it without a second epsilon living in this file.
+    vec3 shadowOrigin = (originPush > 0.0) ? (hitPos + L * originPush)
+                                           : offset_ray(hitPos, carrierNormal);
     float tMax = min(max(distanceToLight - 1e-3, SHADOW_TMIN * 2.0), 10000.0);
     shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
     uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
@@ -1132,9 +1151,9 @@ void addWaterV3DirectLighting(vec3 hitPos,
     vec3 F = vec3(f0Scalar) + (vec3(1.0) - vec3(f0Scalar)) * pow(1.0 - VdotH, 5.0);
     vec3 dielectricSpecular = F * D * (Gv * Gl) / max(4.0 * NdotV * NdotL, 1e-6);
 
-    float foam = clamp(foamCoverage, 0.0, 1.0);
-    vec3 foamDiffuse = mix(vec3(0.72, 0.76, 0.75), vec3(0.98), foam) * INV_PI;
-    vec3 brdf = dielectricSpecular * (1.0 - foam) + foamDiffuse * foam;
+    float subWeight = clamp(diffuseWeight, 0.0, 1.0);
+    vec3 brdf = dielectricSpecular * (1.0 - subWeight)
+              + clamp(diffuseAlbedo, vec3(0.0), vec3(1.0)) * INV_PI * subWeight;
     vec3 Li = lights.l[lightIndex].color.rgb * lights.l[lightIndex].color.a * lightAttenuation;
 
     int lightType = int(lights.l[lightIndex].position.w + 0.5);
@@ -1789,10 +1808,12 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 carrierNormal, vec3 rayDir,
     float waterRoughness = max(roughness, capillaryRoughness);
     bool waterFrontFace = dot(rayDir, carrierNormal) < 0.0;
     if (waterFrontFace) {
-        addWaterV3DirectLighting(hitPos, carrierNormal, macroShadingNormal,
-                                 shadingNormal, rayDir,
-                                 ior, mix(waterRoughness, 0.8, totalFoam),
-                                 totalFoam, seed);
+        addDielectricDirectLighting(hitPos, carrierNormal, macroShadingNormal,
+                                    shadingNormal, rayDir,
+                                    ior, mix(waterRoughness, 0.8, totalFoam),
+                                    mix(vec3(0.72, 0.76, 0.75), vec3(0.98),
+                                        clamp(totalFoam, 0.0, 1.0)),
+                                    totalFoam, 0.0, seed);
     }
 
     // Foam is a shading lobe, not animated geometry. This avoids the legacy

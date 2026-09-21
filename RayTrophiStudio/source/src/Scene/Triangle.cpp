@@ -821,6 +821,9 @@ void Triangle::updateTransformedVertices() {
 
 void Triangle::updateTransformedVerticesWith(const Matrix4x4& finalTransform,
                                              const Matrix4x4& normalTransform) {
+    // Canonical skinned P/N are produced by skinning in mesh-local space.
+    // Transform-only synchronization must not overwrite them with bind data.
+    if (parentMesh && parentMesh->hasSkinWeights()) return;
     const size_t idxOffset = static_cast<size_t>(faceIndex) * 3;
     if (parentMesh && parentMesh->geometry &&
         idxOffset + 2 < parentMesh->geometry->indices.size()) {

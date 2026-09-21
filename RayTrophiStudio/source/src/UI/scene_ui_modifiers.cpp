@@ -1,4 +1,4 @@
-#include "scene_ui.h"
+﻿#include "scene_ui.h"
 #include "Api/RtApi.h"
 #include "MeshEdit/ProfileSplineEditor.h"
 #include "ui_modern.h"
@@ -2683,7 +2683,16 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         if (hasAnyOptions) ImGui::Spacing();
                         ImGui::SliderFloat("Loop Cut Pos", &mesh_loop_cut_position, 0.05f, 0.95f, "%.2f");
                         ImGui::TextDisabled("Relative position of the loop cut along ring edges.");
-                        ImGui::TextDisabled("Edge Bevel deferred: topology kernel migration in progress.");
+                        ImGui::Spacing();
+                        // ★ Bevel's width/segments/round were reachable from IPC and from
+                        // nowhere else -- the button would have run on whatever the
+                        // defaults happened to be. A field a script can write has to be
+                        // editable in the panel too, or the two drift apart unseen.
+                        ImGui::SliderFloat("Bevel Width", &mesh_edge_bevel_width, 0.001f, 0.5f, "%.3f", ImGuiSliderFlags_Logarithmic);
+                        ImGui::SliderInt("Bevel Segments", &mesh_edge_bevel_segments, 1, 16);
+                        ImGui::Checkbox("Round Profile", &mesh_edge_bevel_round);
+                        ImGui::TextDisabled("Width is in OBJECT-LOCAL units (scaled by the object).");
+                        ImGui::TextDisabled("High-valence corners (cylinder poles) are refused, not damaged.");
                         hasAnyOptions = true;
                     }
 
@@ -5872,10 +5881,17 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
         { "VertexMerge", "Merge Center", "Merge Center\nCollapse selected vertices to their center point.", "Disabled: Requires at least 2 selected vertices.", UIWidgets::IconType::MergeVertices, ImVec4(0.78f, 0.70f, 1.0f, 1.0f), canMergeVertices, 4 },
         { "VertexWeldByDistance", "Weld Distance", "Weld Distance\nSnap nearby selected vertices together using the weld distance.", "Disabled: Requires at least 2 selected vertices.", UIWidgets::IconType::WeldVertices, ImVec4(0.72f, 0.84f, 1.0f, 1.0f), canWeldVertices, 5 },
         { "VertexDissolve", "Dissolve Vert", "Dissolve Vert\nRemove selected vertices, preserving surrounding faces.", "Disabled: Requires selected vertex/vertices.", UIWidgets::IconType::DissolveTopology, ImVec4(1.0f, 0.66f, 0.54f, 1.0f), (isVertexMode || isCombinedMode) && selectedVertexCount >= 1, 6 },
-        // Deferred until the library-backed topology kernel replaces the current
-        // experimental path (multi-selection, corner cleanup and winding are not
-        // yet production-safe).
-        // { "EdgeBevel", "Bevel Edge", "Bevel Edge", "Deferred: topology kernel migration.", UIWidgets::IconType::LoopCutTool, ImVec4(0.98f, 0.80f, 0.42f, 1.0f), false, 14 },
+        // Restored 2026-09-20. The three risks it was deferred over were measured
+        // one by one on the live build: multi-selection is fine (a partial
+        // 4-edge set and a full 12-edge set both close at Euler chi=2), clamp
+        // holds at a width larger than the face, and winding survives the flat
+        // single-segment path that does no normal blending.
+        //
+        // The one real failure is CORNER CLEANUP at HIGH-VALENCE vertices --
+        // a fan-capped cylinder's pole has valence 32 and its corner patch
+        // cannot be built. That case no longer publishes a broken mesh: bevel
+        // now refuses and says so, so the button cannot quietly damage a model.
+        { "EdgeBevel", "Bevel Edge", "Bevel Edge Round or chamfer the selected edges.", "Disabled: Requires selected edge(s).", UIWidgets::IconType::LoopCutTool, ImVec4(0.98f, 0.80f, 0.42f, 1.0f), hasSelectedEdges, 14 },
         { "EdgeDissolve", "Dissolve Edge", "Dissolve Edge\nRemove selected edges, preserving polygon flow.", "Disabled: Requires selected edge(s).", UIWidgets::IconType::DissolveTopology, ImVec4(1.0f, 0.68f, 0.52f, 1.0f), hasSelectedEdges, 7 },
         { "FaceDelete", "Delete Face", "Delete Face\nRemove selected faces, leaving an open boundary.", "Disabled: Requires selected face(s).", UIWidgets::IconType::DeleteFaceTool, ImVec4(1.0f, 0.48f, 0.42f, 1.0f), hasSelectedFaces, 8 }
     };

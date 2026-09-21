@@ -13,6 +13,9 @@
 #include "Animation/AnimationData.h"
 #include "AnimationController.h"
 #include "Animation/GeometryCache.h"
+#include "Animation/RigView.h"
+#include "Animation/RigAnatomy.h"
+#include "Animation/RigEnvelopeWeights.h"
 #include "Animation/NodeHierarchy.h"   // ImportedModelContext::nodeHierarchy
 #include "KeyframeSystem.h"
 #include "VDBVolume.h"
@@ -20,6 +23,7 @@
 #include "ForceField.h"
 #include "ParticleSimulation.h"
 #include "SimCache.h"
+#include "SimFrameCompress.h"
 #include "SimulationSystems.h"
 #include "SimulationWorld.h"
 #include "SimulationComputeVulkanContext.h"
@@ -87,6 +91,7 @@ namespace OzzRuntime {
  * - importedModelContexts: Keeps AssimpLoaders alive for animation
  */
 struct SceneData {
+    RigAuthoring::ViewState rigView;
     SceneData() {
         syncSimulationWorld();
     }
@@ -407,6 +412,21 @@ struct SceneData {
         // struct is now importer-agnostic. See Animation/NodeHierarchy.h.
         RayTrophi::NodeHierarchy nodeHierarchy;
         std::string importName;
+        bool rigPoseViewCpuRestorePending=false;
+        bool rigPoseViewCpuApplied=false; // Transient rest display cache, not serialized.
+        RigAuthoring::RigAnatomy rigAnatomy;
+        Matrix4x4 rigSceneTransform = Matrix4x4::identity(); // Owned meshless actor placement; independent of rest/animation.
+        bool authoringOwned = false;
+        uint64_t rigRevision = 0;
+        std::vector<std::string> rigBoundMeshes; // Canonical exact flat part identities; persisted.
+        std::string rigWeightAlgorithm;
+        float rigEnvelopeTorsoRadius = .16f;
+        float rigEnvelopeLimbRadius = .065f;
+        float rigEnvelopeExtremityRadius = .05f;
+        float rigEnvelopeFalloff = 2.f;
+        std::vector<RigAuthoring::EnvelopeBoneProfile> rigEnvelopeProfiles;
+        std::string rigTemplateId;
+        int rigTemplateVersion=1; // Recipe provenance; saved hierarchy remains authoritative.
         bool hasAnimation = false;                  // True if this model has animation data
         Matrix4x4 globalInverseTransform;           // Matrix to correct FBX axis/scale (from Root node)
         bool animationOnlyImport = false;          // True when the import has animation/skeleton but no mesh members
@@ -432,6 +452,8 @@ struct SceneData {
         // This allows applying root motion to the correct TransformHandle
         std::vector<std::shared_ptr<class Hittable>> members; 
         std::vector<SkeletonNode> skeletonNodes;
+        RigAuthoring::JointGlobals rigJointGlobals;
+        std::string rigPoseSource = "bind";
         std::vector<int> skeletonRootNodes;
 
         void rebuildSkeletonRepresentation(const BoneData& allBoneData) {
@@ -2025,30 +2047,21 @@ struct SceneData {
 
     // Per-system configuration for how particles appear in the real render.
     struct ParticleRenderSettings {
+        // Carrier-only mode: particles continue simulating and depositing into
+        // gas/fluid domains, but are not mirrored into viewport billboards or RT
+        // instances. New systems default to the production emitter workflow.
+        bool emitter_only = true;
         bool render_in_raytrace = true;       // bridge into the RT instance channel
         ParticleRenderShape shape = ParticleRenderShape::Sphere;
         float size_multiplier = 1.0f;         // scales SoA per-particle size
         int sphere_subdivisions = 1;          // icosphere refinement for Sphere shape
-        // Built-in primitive material look. Per-particle color variety comes from
-        // sampling the base_color -> color_end gradient into `color_buckets`
-        // materials; each particle picks one by a stable hash (spark look, no
-        // shader change). Set color_end == base_color for a uniform color.
+        // Built-in primitive material look. One material is shared by all
+        // instances; per-particle gradients remain a billboard concern.
         bool emissive = true;                 // sparks glow; granular -> false
-        // When true, the bucket gradient endpoints are pulled from the first
-        // emitter's start_color/end_color so the appearance panel is the single
-        // source of truth (Solid billboards + RT instances stay in sync without
-        // the user having to edit two color pairs). Toggle off to author RT-only
-        // colors that diverge from the billboard fade.
+        // When true, the shared RT material uses the first emitter's start color.
+        // Billboard gradients continue to read the per-particle colors directly.
         bool inherit_color_from_emitter = true;
-        Vec3 base_color = Vec3(1.0f, 0.6f, 0.2f);   // gradient start (orange)
-        Vec3 color_end = Vec3(1.0f, 0.25f, 0.08f);  // gradient end (deep red)
-        int color_buckets = 8;                // distinct colors sampled along the gradient
-        // Over-life color: each particle's bucket follows its AGE (start->end as it
-        // ages, like the Solid billboards) + emissive dims out. This needs the
-        // material to change per frame, which the cheap TLAS refit can't do, so it
-        // forces a full rebuild each motion frame — opt-in (heavier). Off = stable
-        // per-particle color variety (cheap refit). Ignored for SceneMeshes.
-        bool over_life_color = false;
+        Vec3 base_color = Vec3(1.0f, 0.6f, 0.2f);
         float emission_strength = 6.0f;       // used when emissive
         float roughness = 0.6f;               // used when not emissive
         // SceneMeshes source list (weighted). Only used when shape == SceneMeshes.
@@ -2166,7 +2179,53 @@ struct SceneData {
     // default). Playing the timeline switches to a deterministic bake from frame
     // 0: each frame's grid state is cached; scrubbing restores from the cache (or
     // resimulates the gap). "Reset Simulation" returns to free-run.
-    std::map<int, std::vector<std::vector<RayTrophiSim::SimulationGridDomainState>>> sim_frame_cache_;
+    // One grid domain's cached frame: metadata verbatim, field data tile-sparse
+    // and half-precision (SimFrameCompress.h).
+    //
+    // ★★★ The old member held `SimulationGridDomainState` directly, which meant
+    // a DEEP COPY of the whole FluidGrid — nine float arrays including pressure,
+    // divergence and all three MAC velocities. MEASURED 2026-09-20 on a
+    // 160x248x160 domain: 218 MiB per frame, so 100 frames wanted 21.3 GiB and
+    // the bake had to be cut short. The disk format in SimCache.cpp already
+    // stored only four of those arrays for the same purpose; this path never
+    // inherited that, and on top of it the fields were 92% empty.
+    struct CachedGridDomain {
+        // Everything except the bulk arrays. `meta.grid` keeps its dimensions,
+        // origin and voxel size; its vectors are left empty and refilled on
+        // restore. Particles/foam (fluid domains) ride along uncompressed —
+        // they are already sparse by construction.
+        RayTrophiSim::SimulationGridDomainState meta;
+        RayTrophiSim::SimFrameCompress::Field density, temperature, fuel, interaction;
+        // ★ Velocity is stored only on KEYFRAMES. Scrubbing and rendering never
+        // read it — SimCache's disk reader has always returned it zero-filled —
+        // but RESUMING the simulation from a scrubbed frame does. Keeping every
+        // 25th frame means a resume can start from a nearby keyframe instead of
+        // paying 33% of the cache for a field almost no frame will ever use.
+        //
+        // ★★ Pressure and divergence are not stored AT ALL. Pressure is re-solved
+        // from scratch every step (it is only ever an initial guess for the SOR
+        // sweeps) and divergence is a scratch buffer. Caching them preserved
+        // nothing and cost 22% of every frame.
+        bool has_velocity = false;
+        RayTrophiSim::SimFrameCompress::Field vel_x, vel_y, vel_z;
+        std::size_t bytes() const {
+            return sizeof(CachedGridDomain) +
+                   density.bytes() + temperature.bytes() +
+                   fuel.bytes() + interaction.bytes() +
+                   vel_x.bytes() + vel_y.bytes() + vel_z.bytes();
+        }
+    };
+    std::map<int, std::vector<std::vector<CachedGridDomain>>> sim_frame_cache_;
+    // Running total of the compressed grid cache, maintained on insert/clear.
+    //
+    // ★★★ THE OLD CAP WAS COUNTED IN FRAMES (kMaxCachedSimFrames), which bounds
+    // memory only if a frame has a fixed size. It does not: at 64^3 a frame is
+    // ~4 MiB and 600 frames is 2.4 GiB, while at 160x248x160 the same 600 frames
+    // is 137 GiB. A limit that scales with the thing it limits is not a limit.
+    std::size_t sim_frame_cache_bytes_ = 0;
+    // See nearestVelocityKeyframeAtOrBelow. Starts true: a freshly reset
+    // simulation is at rest on purpose, which IS its real velocity.
+    bool sim_live_velocity_valid_ = true;
     // Rigid bodies are frame-cached in LOCKSTEP with sim_frame_cache_ (captured in
     // captureSimFrame, replayed in restoreRigidFrame). This is what keeps the rigid
     // motion identical on replay: the bake is the only pass where rigid (order 50)
@@ -2304,6 +2363,89 @@ struct SceneData {
     }
 
     static constexpr int kMaxCachedSimFrames = 600;
+    // Byte ceiling for the compressed grid scrub cache. With tile-sparse halves
+    // a 160x248x160 plume frame lands near 5 MiB, so this is on the order of a
+    // thousand frames — the frame cap above stays as the secondary guard.
+    static constexpr std::size_t kSimFrameCacheBudgetBytes = 4ull * 1024ull * 1024ull * 1024ull;
+    // Store MAC velocity on every Nth cached frame only. See CachedGridDomain.
+    static constexpr int kSimCacheVelocityKeyframeStride = 25;
+
+    static std::vector<CachedGridDomain> compressGridDomainStates(
+        const std::vector<RayTrophiSim::SimulationGridDomainState>& states,
+        bool with_velocity) {
+        namespace SFC = RayTrophiSim::SimFrameCompress;
+        std::vector<CachedGridDomain> out;
+        out.reserve(states.size());
+        for (const auto& st : states) {
+            CachedGridDomain c;
+            c.meta = st;                       // metadata + particles/foam
+            const int nx = st.grid.nx, ny = st.grid.ny, nz = st.grid.nz;
+            SFC::compress(st.grid.density,     nx, ny, nz, c.density);
+            SFC::compress(st.grid.temperature, nx, ny, nz, c.temperature);
+            SFC::compress(st.grid.fuel,        nx, ny, nz, c.fuel);
+            SFC::compress(st.grid.interaction, nx, ny, nz, c.interaction);
+            c.has_velocity = with_velocity;
+            if (with_velocity) {
+                // ★ MAC faces: each component is one wider on its own axis.
+                // Passing the cell dims here would silently truncate a face
+                // array and the error would only show as a slightly wrong
+                // resume, never as a failure.
+                SFC::compress(st.grid.vel_x, nx + 1, ny, nz, c.vel_x);
+                SFC::compress(st.grid.vel_y, nx, ny + 1, nz, c.vel_y);
+                SFC::compress(st.grid.vel_z, nx, ny, nz + 1, c.vel_z);
+            }
+            // Drop the bulk arrays from the metadata copy; they are the payload.
+            std::vector<float>().swap(c.meta.grid.density);
+            std::vector<float>().swap(c.meta.grid.temperature);
+            std::vector<float>().swap(c.meta.grid.fuel);
+            std::vector<float>().swap(c.meta.grid.interaction);
+            std::vector<float>().swap(c.meta.grid.vel_x);
+            std::vector<float>().swap(c.meta.grid.vel_y);
+            std::vector<float>().swap(c.meta.grid.vel_z);
+            std::vector<float>().swap(c.meta.grid.pressure);
+            std::vector<float>().swap(c.meta.grid.divergence);
+            out.push_back(std::move(c));
+        }
+        return out;
+    }
+
+    static std::vector<RayTrophiSim::SimulationGridDomainState>
+    decompressGridDomainStates(const std::vector<CachedGridDomain>& cached) {
+        namespace SFC = RayTrophiSim::SimFrameCompress;
+        std::vector<RayTrophiSim::SimulationGridDomainState> out;
+        out.reserve(cached.size());
+        for (const auto& c : cached) {
+            RayTrophiSim::SimulationGridDomainState st = c.meta;
+            const int nx = st.grid.nx, ny = st.grid.ny, nz = st.grid.nz;
+            const std::size_t cells =
+                static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *
+                static_cast<std::size_t>(nz);
+            SFC::decompress(c.density,     st.grid.density);
+            SFC::decompress(c.temperature, st.grid.temperature);
+            SFC::decompress(c.fuel,        st.grid.fuel);
+            SFC::decompress(c.interaction, st.grid.interaction);
+            if (c.has_velocity) {
+                SFC::decompress(c.vel_x, st.grid.vel_x);
+                SFC::decompress(c.vel_y, st.grid.vel_y);
+                SFC::decompress(c.vel_z, st.grid.vel_z);
+            } else if (cells > 0u) {
+                // ★ Correctly SIZED zeros, not empty vectors: a zero-length
+                // velocity array means "no velocity channel" to the solver,
+                // which is a different statement from "at rest".
+                SFC::zeroFill(st.grid.vel_x, static_cast<std::size_t>(nx + 1) * ny * nz);
+                SFC::zeroFill(st.grid.vel_y, static_cast<std::size_t>(nx) * (ny + 1) * nz);
+                SFC::zeroFill(st.grid.vel_z, static_cast<std::size_t>(nx) * ny * (nz + 1));
+            }
+            // Pressure and divergence are never cached; the solver rebuilds both.
+            if (cells > 0u) {
+                SFC::zeroFill(st.grid.pressure, cells);
+                SFC::zeroFill(st.grid.divergence, cells);
+            }
+            out.push_back(std::move(st));
+        }
+        return out;
+    }
+
     // Config signature for automatic memory-cache invalidation: when the sim
     // SETUP changes (add/remove of any sim element, rigid-body param edits, …)
     // the bake cache is dropped automatically instead of relying on manual reset.
@@ -3500,6 +3642,8 @@ struct SceneData {
     // ── Timeline simulation driver ───────────────────────────────────────────
     void clearSimFrameCache() {
         sim_frame_cache_.clear();
+        sim_frame_cache_bytes_ = 0;
+        sim_live_velocity_valid_ = true;
         rigid_frame_cache_.clear();  // rigid is cached in lockstep; never outlive the fluid cache
         soft_frame_cache_.clear();   // soft deformation cache, same lockstep
         particle_frame_cache_.clear(); // discrete particle SoA, same lockstep
@@ -4096,6 +4240,18 @@ struct SceneData {
             return h;
         };
         auto qf = [](float f) { return static_cast<uint64_t>(static_cast<int64_t>(f * 1000.0f)); };
+        // ★ Bit-exact, for AUTHORED solver parameters only. `qf` quantises at
+        // 1/1000, which is right for live-ish values (it stops float jitter from
+        // dropping the cache every frame) and WRONG for a dial whose useful
+        // range is small: the physical nuclear preset's stratification is
+        // 0.003125, so qf maps it and every neighbouring value onto the same 3
+        // and the bake would survive a change that moves the cap by metres.
+        // These fields are written by the panel/API and never by a step, so they
+        // cannot jitter and exactness costs nothing.
+        auto bf = [](float f) {
+            uint32_t u = 0; std::memcpy(&u, &f, sizeof(u));
+            return static_cast<uint64_t>(u);
+        };
         uint64_t h = 1469598103934665603ull;
         h = mix(h, particle_systems.size());
         for (const auto& s : particle_systems) {
@@ -4126,6 +4282,62 @@ struct SceneData {
                 h = mix(h, static_cast<uint64_t>(gd.resolution_y));
                 h = mix(h, static_cast<uint64_t>(gd.resolution_z));
                 h = mix(h, qf(gd.voxel_size));
+                // ★★★ THE SOLVER PARAMETERS, and they were ALL missing.
+                //
+                // The 2026-08-17 fix above added the DISCRETISATION and stopped
+                // there, so a bake survived every change to the physics running
+                // inside that grid: buoyancy, vorticity, turbulence, combustion,
+                // dissipation. MEASURED 2026-09-20 — `gas.set_settings` was used
+                // to change turbulence_persistence, the timeline was scrubbed,
+                // and the replayed frame came back BIT-IDENTICAL (top 6.33,
+                // width 9.64, 36805 active cells) with the signature unchanged.
+                //
+                // ★★ That is the worst shape a stale cache can take. It does not
+                // fail, it does not warn, and it does not even look wrong: it
+                // looks like the PARAMETER does nothing. Anyone calibrating a
+                // plume against a baked timeline was tuning a dial wired to
+                // nothing and would have concluded the feature was broken.
+                //
+                // ★ Authored fields only, same rule as above: everything here is
+                // written by the panel/API and never by a step, so hashing it
+                // cannot thrash the cache the way a live field would.
+                h = mix(h, static_cast<uint64_t>(gd.channels));
+                h = mix(h, gd.fire_enabled ? 1ull : 0ull);
+                h = mix(h, bf(gd.ignition_temperature));
+                h = mix(h, bf(gd.burn_rate));
+                h = mix(h, bf(gd.heat_release));
+                h = mix(h, bf(gd.smoke_generation));
+                h = mix(h, bf(gd.flame_dissipation));
+                h = mix(h, bf(gd.fire_max_temperature));
+                h = mix(h, bf(gd.fire_expansion));
+                h = mix(h, bf(gd.gas_buoyancy_heat));
+                h = mix(h, bf(gd.gas_buoyancy_density));
+                h = mix(h, bf(gd.gas_ambient_stratification));
+                h = mix(h, bf(gd.gas_vorticity));
+                h = mix(h, gd.gas_maccormack_advection ? 1ull : 0ull);
+                h = mix(h, bf(gd.turbulence_strength));
+                h = mix(h, bf(gd.turbulence_scale));
+                h = mix(h, static_cast<uint64_t>(gd.turbulence_octaves));
+                h = mix(h, bf(gd.turbulence_lacunarity));
+                h = mix(h, bf(gd.turbulence_persistence));
+                h = mix(h, bf(gd.turbulence_speed));
+                h = mix(h, gd.gas_surface_dust_enabled ? 1ull : 0ull);
+                h = mix(h, bf(gd.gas_surface_dust_threshold));
+                h = mix(h, bf(gd.gas_surface_dust_emission));
+                h = mix(h, bf(gd.gas_surface_dust_temperature));
+                h = mix(h, bf(gd.gas_surface_dust_max_density));
+                h = mix(h, bf(gd.gas_surface_dust_supply));
+                h = mix(h, gd.gas_dissipation_override ? 1ull : 0ull);
+                h = mix(h, bf(gd.gas_density_dissipation));
+                h = mix(h, bf(gd.gas_temperature_dissipation));
+                h = mix(h, bf(gd.gas_fuel_dissipation));
+                h = mix(h, gd.thermal_override_enabled ? 1ull : 0ull);
+                h = mix(h, bf(gd.thermal_ambient_kelvin));
+                h = mix(h, bf(gd.thermal_oxygen));
+                h = mix(h, gd.structural_coupling_enabled ? 1ull : 0ull);
+                h = mix(h, bf(gd.structural_pressure_scale));
+                h = mix(h, bf(gd.structural_min_intensity));
+                h = mix(h, bf(gd.structural_event_interval));
             }
             h = mix(h, s.runtime->emitters().size());
             // Emitter config (rate/velocity/spread/lifetime/shape/etc.) must
@@ -4541,6 +4753,11 @@ struct SceneData {
     bool simBakeActive() const { return sim_bake_active_; }
     uint64_t simConfigSignature() const { return last_sim_config_sig_; }
     std::size_t simFrameCacheCount() const { return sim_frame_cache_.size(); }
+    // Compressed size of the grid scrub cache, and the ceiling capture stops at.
+    std::size_t simFrameCacheBytes() const { return sim_frame_cache_bytes_; }
+    static constexpr std::size_t simFrameCacheBudgetBytes() {
+        return kSimFrameCacheBudgetBytes;
+    }
     bool simFrameCacheRange(int& out_first, int& out_last) const {
         if (sim_frame_cache_.empty()) return false;
         out_first = sim_frame_cache_.begin()->first;
@@ -4548,22 +4765,53 @@ struct SceneData {
         return true;
     }
 
-    int nearestCachedSimFrameAtOrBelow(int frame) const {
+    // Nearest cached frame at or below `frame` that actually carries MAC
+    // velocity.
+    //
+    // ★ There used to be a plain `nearestCachedSimFrameAtOrBelow` beside this
+    // one and it is GONE, not kept for convenience. Both of its callers rewind
+    // in order to STEP FORWARD, so the render-only answer was never the right
+    // one for either; leaving it would mean the next caller picks the wrong
+    // lookup and gets a plume that silently resumes from rest.
+    //
+    // ★★★ THE DISTINCTION THE VELOCITY KEYFRAMES CREATED. Restoring a cached
+    // frame and then STEPPING FORWARD from it are two different demands: the
+    // first needs only the fields the renderer reads, the second needs the
+    // velocity the solver continues from. Rewinding to a render-only frame and
+    // resuming would restart the gas from rest — the plume stalls for a few
+    // frames and then re-accelerates, which looks like a solver hiccup and is
+    // never reported as a cache bug.
+    int nearestVelocityKeyframeAtOrBelow(int frame) const {
         int best = -1;
         for (const auto& kv : sim_frame_cache_) {
-            if (kv.first <= frame && kv.first > best) best = kv.first;
+            if (kv.first > frame || kv.first <= best) continue;
+            bool has_velocity = false;
+            for (const auto& per_system : kv.second)
+                for (const auto& d : per_system)
+                    if (d.has_velocity) { has_velocity = true; break; }
+            if (has_velocity) best = kv.first;
         }
         return best;
     }
 
+    // Whether the live simulation state's velocity came from a real keyframe.
+    // False after restoring a render-only frame, which means the state is fine
+    // to LOOK at and not fine to CONTINUE from.
+    bool simLiveVelocityValid() const { return sim_live_velocity_valid_; }
+
     // Rough RAM footprint of the in-memory sim frame caches, for the UI "cache is
     // getting big — bake to disk" nudge. Covers the per-frame body (soft/cloth verts)
     // + particle (SoA columns) + rigid (poses) snapshots — the ones that balloon with
-    // crowded/long scenes. Fluid/gas GRID states (sim_frame_cache_) are NOT included:
-    // their per-cell size isn't cheaply known here, so this under-reports pure-fluid
-    // scenes (a disk bake is recommended there regardless).
+    // crowded/long scenes.
+    //
+    // ★★★ Grid states used to be EXCLUDED here, with the reason written in as
+    // "their per-cell size isn't cheaply known". They were also by far the
+    // largest consumer — 218 MiB per frame on the measured domain against a few
+    // MiB for everything else — so the one nudge that existed to warn about a
+    // ballooning cache was structurally blind to the case that balloons. The
+    // compressed cache tracks its own size, so it is now both cheap and exact.
     std::size_t estimateSimCacheBytes() const {
-        std::size_t bytes = 0;
+        std::size_t bytes = sim_frame_cache_bytes_;
         for (const auto& f : soft_frame_cache_)
             for (const auto& n : f.second)
                 bytes += n.second.size() * sizeof(Vec3);
@@ -5554,20 +5802,38 @@ struct SceneData {
     }
 
     void captureSimFrame(int frame) {
-        if (static_cast<int>(sim_frame_cache_.size()) >= kMaxCachedSimFrames &&
-            sim_frame_cache_.find(frame) == sim_frame_cache_.end()) {
-            return; // cache cap reached; keep what we have
+        const bool already_cached = sim_frame_cache_.find(frame) != sim_frame_cache_.end();
+        if (!already_cached &&
+            (static_cast<int>(sim_frame_cache_.size()) >= kMaxCachedSimFrames ||
+             sim_frame_cache_bytes_ >= kSimFrameCacheBudgetBytes)) {
+            // ★ Refuse rather than evict. A scrub cache that silently drops
+            // frames the user believes are baked reads as "the sim changed when
+            // I scrubbed back", which is indistinguishable from a solver bug.
+            return;
+        }
+        if (already_cached) {
+            for (const auto& per_system : sim_frame_cache_[frame])
+                for (const auto& d : per_system)
+                    sim_frame_cache_bytes_ -= (std::min)(sim_frame_cache_bytes_, d.bytes());
         }
         auto& entry = sim_frame_cache_[frame];
         entry.clear();
         entry.reserve(particle_systems.size());
+        // ★ Velocity keyframe stride. A resume after a scrub rewinds to the
+        // nearest keyframe at or below the target; between keyframes the cache
+        // is render-only, which is what SimCache's disk format has always been.
+        const bool velocity_keyframe = (frame % kSimCacheVelocityKeyframeStride) == 0;
         for (auto& system : particle_systems) {
             if (system.runtime) {
-                entry.push_back(system.runtime->captureGridDomainStatesForCache(
-                    simulation_world.compute()));
+                entry.push_back(compressGridDomainStates(
+                    system.runtime->captureGridDomainStatesForCache(
+                        simulation_world.compute()),
+                    velocity_keyframe));
             }
             else entry.emplace_back();
         }
+        for (const auto& per_system : entry)
+            for (const auto& d : per_system) sim_frame_cache_bytes_ += d.bytes();
         // Capture the discrete particle SoA in the SAME pass so a cached-frame
         // replay restores the actual particles (grid states alone left them empty).
         auto& psnap = particle_frame_cache_[frame];
@@ -5664,6 +5930,7 @@ struct SceneData {
         // Soft/cloth deformation is mesh-resident and cached per frame; replay it so
         // a cached-frame scrub/loop shows the cloth's shape instead of a frozen mesh.
         restoreSoftFrame(frame);
+        bool restored_velocity = true;
         auto it = sim_frame_cache_.find(frame);
         if (it != sim_frame_cache_.end() && it->second.size() == particle_systems.size()) {
             // Restore the discrete particle SoA from the lockstep cache (if present
@@ -5677,7 +5944,11 @@ struct SceneData {
                 (mit != msf_frame_cache_.end() && mit->second.size() == particle_systems.size());
             for (std::size_t i = 0; i < particle_systems.size(); ++i) {
                 if (particle_systems[i].runtime) {
-                    particle_systems[i].runtime->setGridDomainStates(it->second[i]);
+                    particle_systems[i].runtime->setGridDomainStates(
+                        decompressGridDomainStates(it->second[i]));
+                    for (const auto& d : it->second[i]) {
+                        if (!d.has_velocity) restored_velocity = false;
+                    }
                     if (have_particles) {
                         particle_systems[i].runtime->restoreSoA(
                             pit->second[i].buffers, pit->second[i].alive_count);
@@ -5697,10 +5968,16 @@ struct SceneData {
             // the collider gizmo/voxel mask starts at the previous live pose and
             // only converges toward the object over subsequent simulation steps.
             applySimSourceObjectPosesForFrame(frame);
+            sim_live_velocity_valid_ = restored_velocity;
             return true;
         }
         // Disk fallback: stream the frame from the on-disk bake cache (render-only).
         if (restoreSimFrameFromDisk(frame, fixed_dt)) {
+            // ★ The disk format has NEVER carried velocity (SimCache.h says so
+            // in its own header). That was always true and always unrecorded;
+            // now it is recorded, so resuming from a disk frame rewinds the same
+            // way a render-only RAM frame does.
+            sim_live_velocity_valid_ = false;
             return true;
         }
         return false;
@@ -6387,7 +6664,7 @@ struct SceneData {
             } else {
                 // Uncached: rewind to nearest cached <= target, then resim (capped).
                 if (tl_frame < sim_timeline_frame_) {
-                    const int nearest = nearestCachedSimFrameAtOrBelow(tl_frame);
+                    const int nearest = nearestVelocityKeyframeAtOrBelow(tl_frame);
                     if (nearest >= 0 && restoreSimFrame(nearest, fixed_dt)) {
                         sim_timeline_frame_ = nearest;
                         syncRigidToFrame(nearest, fixed_dt, kMaxStepsPerTick);
@@ -6400,6 +6677,17 @@ struct SceneData {
                 // Resume soft bodies from the (cached) frame we're stepping FROM, so
                 // crossing the cache boundary continues the cloth/soft motion instead
                 // of rebuilding it at rest and re-animating from the start.
+                // ★ A scrub landed on a render-only frame and playback is now
+                // stepping FORWARD from it. No rewind fired, because the target
+                // is ahead — so without this the gas would continue from rest.
+                if (!sim_live_velocity_valid_) {
+                    const int key = nearestVelocityKeyframeAtOrBelow(sim_timeline_frame_);
+                    if (key >= 0 && key != sim_timeline_frame_ &&
+                        restoreSimFrame(key, fixed_dt)) {
+                        sim_timeline_frame_ = key;
+                        syncRigidToFrame(key, fixed_dt, kMaxStepsPerTick);
+                    }
+                }
                 soft_resume_frame_ = sim_timeline_frame_;
                 soft_resume_dt_ = fixed_dt;
                 int steps = 0;
@@ -6504,7 +6792,7 @@ struct SceneData {
         // off the live state is already correct for forward steps, so the rewind
         // only triggers on a genuine backward jump (reset + resim from 0).
         if (sim_timeline_frame_ < 0 || tl_frame < sim_timeline_frame_) {
-            const int nearest = cache_frames ? nearestCachedSimFrameAtOrBelow(tl_frame) : -1;
+            const int nearest = cache_frames ? nearestVelocityKeyframeAtOrBelow(tl_frame) : -1;
             if (nearest >= 0 && restoreSimFrame(nearest, fixed_dt)) {
                 sim_timeline_frame_ = nearest;
                 syncRigidToFrame(nearest, fixed_dt, nearest + 1);
@@ -7615,7 +7903,17 @@ public:
         Fireball = 4,
         Flamethrower = 5,
         BurningFuelSpill = 6,
-        IgnitedFuelJet = 7
+        IgnitedFuelJet = 7,
+        // Two nuclear detonations, deliberately kept as SEPARATE presets rather
+        // than one with a scale dial. They are not the same shot at two sizes:
+        // the cinematic one is tuned to be iterated on (metre-scale box, a
+        // viewport-affordable voxel count, a few seconds of sim) while the
+        // physical one is a kilometre-scale offline domain. Folding them into
+        // one preset would mean every parameter below carries a hidden "which
+        // scale am I in" meaning, and the fast one would rot because nobody
+        // would run it.
+        NuclearCinematic = 8,
+        NuclearPhysical = 9
     };
 
     ParticleSystemObject& addParticleSystemPreset(

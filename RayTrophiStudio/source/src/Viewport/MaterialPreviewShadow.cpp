@@ -1,6 +1,7 @@
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterGpuCull.h"
 #include "Viewport/RasterInstanceUpload.h"
+#include "Viewport/MaterialPreviewVolumeShadow.h"
 #include "AreaLight.h"
 #include "SpotLight.h"
 #include "globals.h"
@@ -31,6 +32,7 @@ static_assert(sizeof(ShadowRecordGPU) == 512u, "Preview shadow GLSL ABI changed"
 struct ShadowView {
     Matrix4x4 viewProj;
     uint32_t tile = 0;
+    bool perspective = false;
 };
 
 struct PreviewPush {
@@ -166,6 +168,12 @@ public:
     uint32_t shadowedLights = 0;
     bool worldSunShadow = false;
     bool ready = false;
+    std::string shaderDir;
+    std::unique_ptr<MaterialPreviewVolumeShadow> volumeShadow;
+    bool volumeShadowFailed = false;
+    VkDeviceSize recordsCapacity = 0;
+    uint32_t deepSide = 0, deepLayers = 0, deepSteps = 0;
+    bool deepEnabled = false;
 };
 
 bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::string& shaderDir) {
@@ -222,10 +230,12 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
     }
 
     VulkanRT::BufferCreateInfo bci{};
-    bci.size = sizeof(state->cpuRecords);
+    bci.size = sizeof(state->cpuRecords) + 16u;
     bci.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_DST;
     bci.location = VulkanRT::MemoryLocation::GPU_ONLY;
     state->records = m_device->createBuffer(bci);
+    state->recordsCapacity = bci.size;
+    state->shaderDir = shaderDir;
     if (!state->records.buffer) {
         vkDestroySampler(device, state->sampler, nullptr);
         m_device->destroyImage(state->atlas);
@@ -396,10 +406,21 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
         VkPipelineColorBlendAttachmentState attachmentBlend{};
         attachmentBlend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
             VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        // ★★★ HDR gecisi artik UC renk eklentisi tasiyor (1-2 = RayFusion
+        //   reflection G-buffer) ve blend eklenti SAYISI gecisle uyusmak
+        //   zorunda. Gokyuzu G-buffer'a YAZMAZ: yansiyacak bir yuzey degil,
+        //   yansimanin kendisinin fallback'i.
+        const bool rfHdrPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE;
+        VkPipelineColorBlendAttachmentState skyAttachments[3]{};
+        skyAttachments[0] = attachmentBlend;
+        skyAttachments[1].colorWriteMask = 0;
+        skyAttachments[1].blendEnable = VK_FALSE;
+        skyAttachments[2].colorWriteMask = 0;
+        skyAttachments[2].blendEnable = VK_FALSE;
         VkPipelineColorBlendStateCreateInfo cb{};
         cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        cb.attachmentCount = 1;
-        cb.pAttachments = &attachmentBlend;
+        cb.attachmentCount = rfHdrPass ? 3u : 1u;
+        cb.pAttachments = skyAttachments;
         VkDynamicState dynStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         VkPipelineDynamicStateCreateInfo dyn{};
         dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
@@ -418,7 +439,11 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
         pci.pColorBlendState = &cb;
         pci.pDynamicState = &dyn;
         pci.layout = m_interactiveViewport.materialPreviewPipelineLayout;
-        pci.renderPass = m_interactiveViewport.renderPass;
+        // ★ Gokyuzu scene-referred: HDR gecisi.
+        // ★★ HDR gecisi yoksa LDR'ye baglanir (bkz. SdfSurface/Volume).
+        pci.renderPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE
+                       ? m_interactiveViewport.hdrRenderPass
+                       : m_interactiveViewport.renderPass;
         return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pci, nullptr,
                                          &state->skyPipeline) == VK_SUCCESS;
     };
@@ -457,13 +482,30 @@ void VulkanBackendAdapter::destroyMaterialPreviewShadowResources() {
     m_materialPreviewShadows.reset();
 }
 
+void VulkanBackendAdapter::materialPreviewShadowAtlasState(
+        bool& active, uint32_t& shadowedLights) const {
+    auto state = m_materialPreviewShadows;
+    // "No views" is the state the RT shadow handoff produces, and it is NOT the
+    // same as "no atlas resources". Both report active=false here because for a
+    // timing question they mean the same thing -- the atlas pass drew nothing.
+    active = state && state->ready && !state->views.empty();
+    shadowedLights = state ? state->shadowedLights : 0u;
+}
+
 void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
+    // BEFORE every early return. This counter is read by viewport.rt_shadow as
+    // "cascade views the ray pass took over THIS frame"; a stale value left
+    // behind by a frame that never reached the light loop would report a
+    // handoff that did not happen -- the instrument lying about the very thing
+    // it was added to prove.
+    m_rtShadowCascadesReplaced = 0;
     auto state = m_materialPreviewShadows;
     if (!state || !state->ready) return;
     state->views.clear();
     state->shadowedLights = 0;
     state->worldSunShadow = false;
     state->cpuRecords = {};
+    state->deepEnabled = false;
     if (m_viewportMode != ViewportMode::MaterialPreview ||
         ::render_settings.material_preview_lighting_preset != MaterialPreviewLightingPreset::Scene) {
         return;
@@ -487,6 +529,99 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
         rasterDirectionalShadowCascades(
             ::render_settings.raster_viewport_quality_preset));
 
+    // ★★★★★ CASCADE HANDOFF. The ray pass shadows exactly one directional light
+    //   (or the world sun) at full screen resolution, so drawing that light's
+    //   cascades as well is the whole scene rasterised again for a result
+    //   nothing reads. In a foliage scene those draws ARE the shadow cost: every
+    //   leaf card runs the alpha pipeline -- an opacity texture fetch and a
+    //   discard -- once per cascade.
+    //
+    //   ★★★ Two things make standing down safe, and both are conditions, not
+    //   hopes:
+    //
+    //   1. WHO ELSE READS THE ATLAS. rtScreenShadow() lives only in the raster
+    //      MESH consumer. material_preview_sdf_surface.frag and
+    //      material_preview_volume.frag call rtPreviewShadow() with no screen
+    //      mask at all, and the deep (volume transmittance) atlas is written per
+    //      shadow VIEW. All three exist only when there are volumes, so a single
+    //      volumeCount test covers them. With volumes present the cascades stay
+    //      and nothing is saved -- that is the honest answer, not a workaround.
+    //
+    //   2. WHETHER THE RAY PASS ACTUALLY RAN. Not whether it is expected to:
+    //      m_rtShadowCoveredLastFrame is last frame's MEASURED outcome. The
+    //      scene AS is built one call after this one (see the boundSet reseat
+    //      below, which forces this order), so this frame's readiness is not
+    //      knowable here. Standing down on a measured success makes the miss
+    //      self-correcting and one frame long.
+    //
+    //   ★★ What is GIVEN UP, deliberately: fragments rtScreenShadow declines --
+    //   impostors, transparent replay, and any fragment whose depth does not
+    //   match the prepass -- lose this light's shadow instead of falling back to
+    //   the atlas. That is the trade this switch IS; if it shows, the answer is
+    //   to move those fragments onto rays, not to bring the cascades back.
+    // ★★★★ Bir isik degil bir KUME. Dunya gunesi ile ona SENKRONLANMIS bir
+    //   directional sahne isigi ayni fiziksel gunestir; raster ikisi icin de
+    //   ayri cascade cizerdi, oysa tek ekran maskesi ikisini de karsiliyor.
+    //   Kapsam kararini burada TEKRAR URETMIYORUZ: ray pass'in kullandigi ayni
+    //   yordam, ayni kare. Iki yerde ayri yazilmis bir kural, bu dosyada zaten
+    //   bir kez "bir isik iki kez golgelendi / hic golgelenmedi" olarak geri
+    //   dondu.
+    RtShadowCoverage rayCoverage{};
+    bool rayOwnsLight = false;
+    {
+        std::string reason;
+        rayOwnsLight = m_rtShadowCoveredLastFrame && m_device &&
+                       m_device->m_volumeCount == 0u &&
+                       rtShadowCoveredLight(rayCoverage, reason);
+    }
+
+    // The deep atlas follows the existing quality/light/cascade budget. A
+    // compute texel spans 4-8 opaque-shadow texels, with depth layers storing
+    // transmittance through the occupied interval instead of a binary blocker.
+    const auto quality = ::render_settings.raster_viewport_quality_preset;
+    const auto volumeBudget = volumeShadowBudget(quality);
+    state->deepSide = volumeBudget.atlasSize;
+    state->deepLayers = volumeBudget.layers;
+    state->deepSteps = volumeBudget.steps;
+    if (m_device->m_volumeCount > 0u && m_device->m_volumeBuffer.buffer && !state->volumeShadowFailed) {
+        if (!state->volumeShadow) {
+            auto compute = std::make_unique<MaterialPreviewVolumeShadow>(m_device->getDevice());
+            if (compute->initialize(state->shaderDir)) state->volumeShadow = std::move(compute);
+            else {
+                state->volumeShadowFailed = true;
+                SCENE_LOG_WARN("[MaterialPreview] Volume shadow compute unavailable; rebuild material_preview_volume_shadow.spv.");
+            }
+        }
+        if (state->volumeShadow) {
+            const VkDeviceSize bytes = sizeof(state->cpuRecords) + 16u +
+                VkDeviceSize(state->deepSide) * state->deepSide * (state->deepLayers + 2u) * sizeof(float);
+            if (state->recordsCapacity < bytes) {
+                drainInteractiveViewportInFlight();
+                VulkanRT::BufferCreateInfo info{};
+                info.size = bytes;
+                info.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_DST;
+                info.location = VulkanRT::MemoryLocation::GPU_ONLY;
+                auto replacement = m_device->createBuffer(info);
+                if (replacement.buffer) {
+                    m_device->destroyBuffer(state->records);
+                    state->records = replacement;
+                    state->recordsCapacity = bytes;
+                    state->boundSet = VK_NULL_HANDLE;
+                } else {
+                    state->volumeShadowFailed = true;
+                    SCENE_LOG_WARN("[MaterialPreview] Volume shadow buffer allocation failed; volume shadows disabled until viewport resources are recreated.");
+                }
+            }
+            if (state->recordsCapacity >= bytes) {
+                if (state->volumeShadow->bindingsChanged(m_device->m_volumeBuffer.buffer, state->records.buffer)) {
+                    drainInteractiveViewportInFlight();
+                    state->volumeShadow->bind(m_device->m_volumeBuffer.buffer, state->records.buffer);
+                }
+                state->deepEnabled = true;
+            }
+        }
+    }
+
     auto addView = [&](ShadowRecordGPU& record, uint32_t face, const Matrix4x4& matrix) {
         const uint32_t tile = nextTile++;
         matrixToGL(matrix, record.viewProj[face]);
@@ -498,7 +633,7 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
             static_cast<float>(tile / state->frameTilesPerRow) * scale;
         record.atlasRect[face][2] = scale;
         record.atlasRect[face][3] = scale;
-        state->views.push_back({matrix, tile});
+        state->views.push_back({matrix, tile, record.meta[1] != 1u});
     };
 
     auto addDirectionalViews = [&](ShadowRecordGPU& record, Vec3 toLight,
@@ -535,7 +670,8 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
 
     if (m_cachedWorld.mode == WORLD_MODE_NISHITA &&
         m_cachedWorld.nishita.sun_intensity > 0.0f &&
-        nextTile < state->frameTileCapacity) {
+        nextTile < state->frameTileCapacity &&
+        !(rayOwnsLight && rayCoverage.worldSun)) {
         const uint32_t sunCascadeCount = std::min(
             requestedDirectionalCascades,
             state->frameTileCapacity - nextTile);
@@ -555,6 +691,10 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
                  m_cachedWorld.nishita.sun_direction.z),
             sunCascadeCount);
         state->worldSunShadow = true;
+    } else if (rayOwnsLight && rayCoverage.worldSun &&
+               m_cachedWorld.mode == WORLD_MODE_NISHITA &&
+               m_cachedWorld.nishita.sun_intensity > 0.0f) {
+        m_rtShadowCascadesReplaced += requestedDirectionalCascades;
     }
 
     for (const auto& light : m_cachedLights) {
@@ -565,6 +705,15 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
         const uint32_t faces = type == LightType::Point ? 6u :
             (type == LightType::Directional
                 ? requestedDirectionalCascades : 1u);
+        // The ray pass owns this light this frame. meta[0] stays 0, so
+        // rtPreviewShadow() returns the screen visibility alone. Note the light
+        // budget is NOT spent here either: another light gets the tiles.
+        if (rayOwnsLight && gpuLightIndex < kMaxLights &&
+            (rayCoverage.sceneLightMask & (1u << gpuLightIndex)) != 0u) {
+            m_rtShadowCascadesReplaced += faces;
+            ++gpuLightIndex;
+            continue;
+        }
         if (state->shadowedLights >= state->frameLightBudget ||
             faces == 0u ||
             nextTile + faces > state->frameTileCapacity) {
@@ -692,9 +841,21 @@ void VulkanBackendAdapter::updateMaterialPreviewShadowWorldBindings() {
                 state->boundLutViews[i] = atmosphereLuts[i].view;
         }
     }
-    const bool hasPrefilteredIbl =
-        bindMaterialPreviewIblDescriptors(set, world) &&
-        m_cachedWorld.mode == WORLD_MODE_HDRI;
+    // Signature-gated: an unchanged world costs a hash comparison, a changed
+    // sun costs one 256x128 bake plus the prefilter chain. The mode/producer
+    // agreement now lives inside the bind call, which is where the producer is
+    // actually known.
+    refreshMaterialPreviewIbl();
+    const bool hasPrefilteredIbl = bindMaterialPreviewIblDescriptors(set, world);
+    // RayFusion step 1a. The service call is budget-limited, so the field fills
+    // over a few frames and the counters actually move -- which is the only way
+    // to see that this pipe is alive, since the image is meant to look the same.
+    // Step 2: keep an acceleration structure resident. Gated on the raster
+    // geometry generation, so camera motion costs a comparison and a scene edit
+    // costs a rebuild -- which is exactly the bill that has to be measured.
+    ensureRayFusionSceneAS();
+    serviceMaterialPreviewProbeField();
+    bindMaterialPreviewProbeDescriptors(set);
 
     if (m_interactiveViewport.materialPreviewSceneGlobalsMapped) {
         struct alignas(16) SceneGlobals {
@@ -715,9 +876,11 @@ void VulkanBackendAdapter::updateMaterialPreviewShadowWorldBindings() {
         } globals{};
         static_assert(sizeof(SceneGlobals) == 144u, "Preview scene globals GLSL ABI changed");
         globals.lightCount = m_device->m_lightCount > kMaxLights ? kMaxLights : m_device->m_lightCount;
-        const bool nishitaOverlay =
-            m_cachedWorld.mode == WORLD_MODE_NISHITA &&
-            m_cachedWorld.advanced.env_overlay_enabled != 0 && hasWorldEnv;
+        // The world half of these globals is packed by the shared packer, so
+        // the drawn background and the baked ambient cannot disagree.
+        const bool nishitaOverlay = packPreviewWorldUniforms(
+            globals.worldColor, globals.worldParams, globals.worldSun,
+            globals.atmosphereA, globals.atmosphereB);
         globals.flags = (state && state->ready ? 1u : 0u) |
                         (hasWorldEnv ? 2u : 0u) |
                         (nishitaOverlay ? 4u : 0u) |
@@ -726,32 +889,6 @@ void VulkanBackendAdapter::updateMaterialPreviewShadowWorldBindings() {
                         (hasPrefilteredIbl ? 32u : 0u);
         globals.shadowedCount = state ? state->shadowedLights : 0u;
         globals.worldMode = static_cast<uint32_t>(m_cachedWorld.mode);
-        globals.worldColor[0] = m_cachedWorld.color.x;
-        globals.worldColor[1] = m_cachedWorld.color.y;
-        globals.worldColor[2] = m_cachedWorld.color.z;
-        globals.worldColor[3] = m_cachedWorld.mode == WORLD_MODE_NISHITA
-            ? m_cachedWorld.nishita.sun_size : m_cachedWorld.color_intensity;
-        globals.worldParams[0] = nishitaOverlay
-            ? m_cachedWorld.advanced.env_overlay_rotation *
-                (3.14159265358979323846f / 180.0f)
-            : m_cachedWorld.env_rotation;
-        globals.worldParams[1] = nishitaOverlay
-            ? m_cachedWorld.advanced.env_overlay_intensity
-            : m_cachedWorld.env_intensity;
-        globals.worldParams[2] = m_cachedWorld.nishita.atmosphere_intensity;
-        globals.worldParams[3] = nishitaOverlay
-            ? static_cast<float>(m_cachedWorld.advanced.env_overlay_blend_mode)
-            : 0.0f;
-        globals.worldSun[0] = m_cachedWorld.nishita.sun_direction.x;
-        globals.worldSun[1] = m_cachedWorld.nishita.sun_direction.y;
-        globals.worldSun[2] = m_cachedWorld.nishita.sun_direction.z;
-        globals.worldSun[3] = m_cachedWorld.nishita.sun_intensity;
-        globals.atmosphereA[0] = static_cast<float>(m_cachedWorld.advanced.multi_scatter_enabled);
-        globals.atmosphereA[1] = m_cachedWorld.advanced.multi_scatter_factor;
-        globals.atmosphereA[2] = m_cachedWorld.nishita.mie_anisotropy;
-        globals.atmosphereA[3] = m_cachedWorld.nishita.mie_density;
-        globals.atmosphereB[0] = m_cachedWorld.nishita.planet_radius;
-        globals.atmosphereB[1] = m_cachedWorld.nishita.atmosphere_height;
 
         // ★★ Onizleme artik projenin post zincirinden geciyor (post_chain.glsl).
         //   Kaynak g_display_post, onun kaynagi da ColorProcessor -- yani
@@ -830,23 +967,40 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
 
     VkBufferMemoryBarrier recordsBarrier{};
     recordsBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    recordsBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    recordsBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     recordsBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     recordsBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     recordsBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     recordsBarrier.buffer = state->records.buffer;
     recordsBarrier.offset = 0;
-    recordsBarrier.size = sizeof(state->cpuRecords);
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    recordsBarrier.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 1, &recordsBarrier, 0, nullptr);
     vkCmdUpdateBuffer(cmd, state->records.buffer, 0,
                       sizeof(state->cpuRecords), state->cpuRecords.data());
+    const uint32_t deepMeta[4] = {state->deepSide, state->deepLayers, state->deepEnabled ? 1u : 0u, 0u};
+    vkCmdUpdateBuffer(cmd, state->records.buffer, sizeof(state->cpuRecords), sizeof(deepMeta), deepMeta);
     recordsBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    recordsBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    recordsBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
                          0, nullptr, 1, &recordsBarrier, 0, nullptr);
+    if (state->deepEnabled) {
+        const uint32_t tileSize = state->deepSide / state->frameTilesPerRow;
+        for (const auto& shadowView : state->views) {
+            float inverse[16];
+            matrixToGL(shadowView.viewProj.inverse(), inverse);
+            state->volumeShadow->record(cmd, inverse, shadowView.tile,
+                state->frameTilesPerRow, tileSize, state->deepLayers,
+                m_device->m_volumeCount, state->deepSteps, shadowView.perspective);
+        }
+        recordsBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        recordsBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                             0, nullptr, 1, &recordsBarrier, 0, nullptr);
+    }
 
     VkImageMemoryBarrier toDepth{};
     toDepth.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;

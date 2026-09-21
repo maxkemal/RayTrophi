@@ -1,0 +1,151 @@
+#version 460
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REALTIME RASTER TAA — zamansal kenar yumusatma + gurultu birikimi
+// ═══════════════════════════════════════════════════════════════════════════
+// Girdi : bu karenin HDR sahne hedefi (RGBA16F, scene-linear, JITTERLI)
+//         derinlik (D32), ve onceki karenin COZULMUS HDR gecmisi
+// Cikti : bu karenin cozulmus HDR'i (bir sonraki karenin gecmisi olur)
+//
+// ★★★★★ NEDEN BU GECIS VAR -- ve neden AYNI anda iki soruna bakiyor:
+//
+//   Raster viewport'ta anti-aliasing HIC yoktu: ne MSAA, ne jitter, ne gecmis
+//   kare. Kenarlar 1:1 orneklenmis merdivenlerdi ve RT ile yan yana konunca
+//   fark "RT daha yumusak" degil, "raster KIRIK" olarak okunuyordu.
+//
+//   Ayni zamanda ekran-uzayi GI (4 ornek/piksel) ve yansimalar (1 ornek)
+//   GECMIS KARE OLMADAN calisiyordu; yani her kare taze gurultu uretiyorlardi
+//   ve tek carelerini -- ucuz bir mekansal filtre -- zaten kullaniyorlardi.
+//   Mekansal filtre gurultuyu YAYMAKTAN baska bir sey yapamaz; varyansi
+//   dusuren tek sey daha fazla ORNEK'tir.
+//
+//   Bu iki sorun AYNI mekanizmanin eksikligiydi: zamanda ornek biriktirmek.
+//   Jitter + gecmis, kenar icin alan orneklemesi, GI/yansima icin Monte Carlo
+//   ortalamasi demektir. Ayri ayri cozmek (MSAA + ayri bir denoiser) iki kat
+//   maliyet ve iki kat kod olurdu.
+//
+// ★★★ SAHNE-LINEER UZAYDA calisiyoruz, tonemap'ten ONCE. Bu bir tercih degil
+//   zorunluluk: DoF de tonemap'ten once kosuyor (raster_post.comp) ve TAA
+//   ondan da once gelmeli -- bulanistirilmis bir goruntude gecmis kareyi
+//   hizalamak, hizalanacak keskin ozelligi silmis olmak demektir.
+//   Ama sahne-lineer uzayda basit bir ortalama YANLISTIR: tek bir parlak
+//   piksel (firefly) ortalamayi ele gecirir ve gecmise "yapisir". Karis'in
+//   luminans agirligi tam olarak bunu kapatir ve asagida uygulaniyor.
+//
+// ★★ HAYALET (ghosting) KONTROLU: gecmis, bu karenin 3x3 komsulugunun renk
+//   kutusuna KIRPILIR. Kutu YCoCg'de kuruluyor cunku RGB'de eksene hizali bir
+//   kutu, kroma yonunde gereksiz genis kalir ve hayaleti gecirir.
+//
+// ★ EKRAN ARAYUZU BU GECISE GIRMEZ: izgara, gizmo, secim, partikul post'tan
+//   SONRAKI LDR gecisinde ciziliyor. Onlari zamanda biriktirmek, imlecin
+//   arkasinda iz birakirdi.
+// ═══════════════════════════════════════════════════════════════════════════
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inHDR;      // bu kare, jitterli
+layout(set = 0, binding = 1) uniform sampler2D inDepth;    // D32, [0,1]
+layout(set = 0, binding = 2) uniform sampler2D inHistory;  // onceki cozum
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D outResolved;
+
+layout(push_constant) uniform Push {
+    // ★★★★ TEK matris: `prevViewProj * inverse(viewProjUnjittered)`. Iki ayri
+    //   mat4 gondermek 128 bayti asiyordu ve `maxPushConstantsSize` bircok
+    //   GPU'da TAM 128'dir -- yani pipeline kurulmaz ve belirti "bu makinede
+    //   TAA yok" olur. Carpimi CPU'da bir kez yapmak ayrica piksel basina bir
+    //   matris carpimini de kaldiriyor.
+    mat4  reprojection;     // bu karenin NDC+derinligi -> onceki karenin clip'i
+    uint  width;
+    uint  height;
+    // Karisim orani. 1.0 = yalniz bu kare (gecmis yok). Cagiran bunu
+    // 1/orneksayisi olarak surer, yani ilk kare TAM, sonrakiler giderek
+    // daha az agirlik alir -- hareketsiz kamerada gercek bir ortalama.
+    float blend;
+    // 0 = gecmis gecersiz (kamera atladi, boyut degisti, ilk kare).
+    // ★ Bu bir DEGER degil KONTROL durumu: blend=1.0 ile kodlamak,
+    //   "gecmis yok" ile "gecmis var ama agirligi 1" durumlarini ayni
+    //   sayiya katlardi ve ikincisi mesru bir durumdur.
+    uint  historyValid;
+} pc;
+
+vec3 rgbToYCoCg(vec3 c) {
+    return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+                0.5  * c.r - 0.5 * c.b,
+               -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+
+vec3 yCoCgToRgb(vec3 c) {
+    float t = c.x - c.z;
+    return vec3(t + c.y, c.x + c.z, t - c.y);
+}
+
+// Karis: sahne-lineer HDR'de agirlikli ortalama, parlak orneklerin
+// agirligini luminansla ters orantili kucultur. Firefly'in gecmise
+// yapismasini engelleyen tek satir budur.
+float karisWeight(vec3 c) { return 1.0 / (1.0 + max(max(c.r, c.g), c.b)); }
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+    const vec2 texel = 1.0 / vec2(pc.width, pc.height);
+    const vec2 uv = (vec2(p) + 0.5) * texel;
+
+    const vec3 current = max(texture(inHDR, uv).rgb, vec3(0.0));
+
+    // ── Komsuluk kutusu (YCoCg) ────────────────────────────────────────────
+    // Ayni dongude hem kutuyu hem de "gecmis yoksa ne yazariz"i uretiyoruz.
+    vec3 boxMin = vec3(1e30), boxMax = vec3(-1e30);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            vec3 s = rgbToYCoCg(max(texture(inHDR, uv + vec2(dx, dy) * texel).rgb, vec3(0.0)));
+            boxMin = min(boxMin, s);
+            boxMax = max(boxMax, s);
+        }
+    }
+
+    if (pc.historyValid == 0u) {
+        imageStore(outResolved, p, vec4(current, 1.0));
+        return;
+    }
+
+    // ── Yeniden izdusum ────────────────────────────────────────────────────
+    // ★★★ Derinlik JITTERLI cizildi ama biz JITTERSIZ matrisle cozuyoruz.
+    //   Hata alt-piksel mertebesinde ve bilincli: alternatifi, jitteri
+    //   derinlikten geri sokmek icin ikinci bir matris tasimak olurdu ve
+    //   kazanc komsuluk kirpmasinin toleransinin altinda kalirdi.
+    const float depth = texture(inDepth, uv).r;
+    if (depth >= 1.0) {
+        // Gokyuzu: sonsuzda, yeniden izdusum tanimsiz. Yine de biriktirmek
+        // ISTIYORUZ (gokyuzu de jitterli orneklendi) -- ama yalnizca kamera
+        // donmediyse dogru olur; kutu kirpmasi geri kalanini halleder.
+        vec3 hist = max(texture(inHistory, uv).rgb, vec3(0.0));
+        vec3 h = clamp(rgbToYCoCg(hist), boxMin, boxMax);
+        hist = max(yCoCgToRgb(h), vec3(0.0));
+        float wc = karisWeight(current), wh = karisWeight(hist);
+        float a = pc.blend * wc, b = (1.0 - pc.blend) * wh;
+        imageStore(outResolved, p, vec4((current * a + hist * b) / max(a + b, 1e-6), 1.0));
+        return;
+    }
+
+    const vec3 ndc = vec3(uv * 2.0 - 1.0, depth);
+    vec4 prevClip = pc.reprojection * vec4(ndc, 1.0);
+    if (prevClip.w <= 1e-9) { imageStore(outResolved, p, vec4(current, 1.0)); return; }
+    const vec2 prevUv = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
+    if (any(lessThan(prevUv, vec2(0.0))) || any(greaterThan(prevUv, vec2(1.0)))) {
+        // Ekran disindan geldi: gecmis YOK. Kirpmak degil, atmak dogru --
+        // kenardaki pikseli komsusuna kirpmak, ekran kenari boyunca bir
+        // surunme izi uretir.
+        imageStore(outResolved, p, vec4(current, 1.0));
+        return;
+    }
+
+    vec3 hist = max(texture(inHistory, prevUv).rgb, vec3(0.0));
+    vec3 hy = clamp(rgbToYCoCg(hist), boxMin, boxMax);
+    hist = max(yCoCgToRgb(hy), vec3(0.0));
+
+    const float wc = karisWeight(current);
+    const float wh = karisWeight(hist);
+    const float a = pc.blend * wc;
+    const float b = (1.0 - pc.blend) * wh;
+    imageStore(outResolved, p, vec4((current * a + hist * b) / max(a + b, 1e-6), 1.0));
+}

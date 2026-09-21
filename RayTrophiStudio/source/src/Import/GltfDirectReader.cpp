@@ -1,3 +1,4 @@
+#include "Animation/SkinWeightContract.h"
 /*
 * =========================================================================
 * Project:       RayTrophi Studio
@@ -655,7 +656,13 @@ uint16_t GltfReader::materialIdFor(const cgltf_material* mat) {
             pbr->setClearcoat(mat->clearcoat.clearcoat_factor,
                               mat->clearcoat.clearcoat_roughness_factor);
         }
-        // alphaMode MASK/BLEND both mean "alpha is meaningful". OPAQUE means an
+        // MASK is surface coverage, including assets imported for scatter.
+        // BLEND retains continuous opacity; optical transmission is independent.
+        // The shared coverage path currently has a fixed 0.5 threshold.
+        // Preserve legacy handling for custom cutoffs until they are supported.
+        pbr->coverage.alphaCutout = mat->alpha_mode == cgltf_alpha_mode_mask &&
+                                   mat->alpha_cutoff == 0.5f;
+        // OPAQUE means an
         // alpha channel present in the image must be IGNORED, so honour it —
         // otherwise a stray alpha channel silently punches holes in a solid mesh.
         if (mat->alpha_mode == cgltf_alpha_mode_opaque) {
@@ -919,12 +926,8 @@ void GltfReader::emitPrimitive(const cgltf_node* node,
                 if (boneIt == out_.bones->boneNameToIndex.end()) continue;
                 dst.emplace_back(static_cast<int>(boneIt->second), static_cast<float>(w[k]));
             }
-            // Strongest influence first — the skinning paths assume this order.
-            std::sort(dst.begin(), dst.end(),
-                      [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
-                          return a.second > b.second;
-                      });
         }
+        RigAuthoring::canonicalizeSkinWeights(weights);
         triMesh->geometry->skin_weights = std::move(weights);
         ++out_.stats.skinned_mesh_count;
     }

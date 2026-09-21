@@ -1,5 +1,10 @@
 # Post-processing and histogram exposure
 
+> **Durum:** REFERANS — the exposure/color contract in force. The mode gate
+> described here is the single authority; camera dials only apply under
+> `physical`. Camera-side surfaces were wired to it on 2026-09-06 (last
+> section), WRITTEN, NOT COMPILED.
+
 Implemented 2026-09-05. The user reported that the application compiled and the
 new controls worked on 2026-09-05. Codex did not build shaders/C++ or launch the
 application. This is a general user confirmation, not a recorded cross-backend
@@ -192,3 +197,78 @@ This is separate from the normal Studio build.
   histogram metering, center weighting and temporal exposure concepts.
 - [OpenColorIO](https://github.com/AcademySoftwareFoundation/OpenColorIO): future
   full color-management integration; not a dependency of this implementation.
+
+---
+
+## 2026-09-06 — the camera-side surfaces were still driving the OLD gate
+
+**Yazildi, DERLENMEDI.** Kullanicinin bildirdigi belirti: *"render settings'teki
+EV/pozlama ayarlari ile kamera HUD ucgeninin AE / f-stop / enstantane ayarlari
+bagli degil."* Dogruydu, ve nedeni tam olarak bu deponun en pahali hata sinifi:
+
+> Pozlama modunun sahibi bu partiyle post zinciri oldu (`ExposureSettings.mode`),
+> ama **kadranlari suren yuzeyler hala kameranin bayraklarini yaziyordu.**
+> `rtpost::syncDisplay` physical modda `auto_exposure` / `use_physical_exposure`
+> bayraklarini zaten ZORLUYOR, diger modlarda kadranlari hic okumuyor — yani o
+> iki bayragi yazan her panel **hicbir seyi degistirmiyordu, ama degistiriyormus
+> gibi gorunuyordu.**
+
+### Ne baglandi
+
+| Yuzey | Onceden | Simdi |
+|---|---|---|
+| Viewport pozlama ucgeni (`drawExposureInfo`) | `cam.auto_exposure` / `use_physical_exposure` yazardi | Rozet MODU gosterir/degistirir (`AE` / `PHYS` / `MAN`), kadrana dokunmak `physical` moduna gecirir |
+| Ucgenin ortasindaki sayi | her zaman kadranlarin fotografik EV'si | mod basina: physical = kadran EV'si, manual = post EV'si, auto = **uygulanmis** olcum EV'si (olcum yoksa `EV --`, sifir DEGIL) |
+| Ucgenin kadranlari | her zaman parlak | mod physical degilse **soluk** + "dials inactive" notu; ayrica uygulanan carpan `x%.3f` yazilir |
+| Kamera paneli (hierarchy, Pro/Cinema) | "Auto Exposure" checkbox + `calculated_ev` | Mod combo'su + kapali kadranlar + `g_display_post.camera_exposure` |
+| `camera.get.exposure_factor` | `Camera::exposureFactor()` (kameranin kendi bayraklari) | **UYGULANAN** deger (`g_display_post.camera_exposure`) |
+
+★★★ IPC tarafi ozellikle onemliydi: `exposure_factor` bir ajanin "kadran
+gercekten calisti mi" sorusuna verdigi tek cevap. Kameranin kendi hesabini
+dondururken, ajan carpanin degistigini olcup goruntude hicbir sey olmadigini
+goremiyordu — **olcu aleti ayarin degil, uygulananin aynasi olmali.**
+
+### Ayrica sokulenler (hepsi ayni kokten)
+
+- **`VulkanBackendAdapter::setCamera` icindeki formul kopyasi.** Sonucu
+  (`m_camera.exposureFactor`) hicbir yerde okunmuyordu; traversal push-constant'i
+  yillardir sabit 1.0. Olu ama canli gorunen bir formul, kalibrasyon turunda
+  "hangisi?" diye saatler yakar.
+- **`Renderer.cpp`'deki IKI kopya** (ana yol + yakinsamis piksel yolu). Ikisi
+  birbirinden de ayrilmisti: yakinsamis piksel yalnizca `2^EV` uyguluyordu, yani
+  fiziksel modda ekran yama yama olurdu ve kimse buna "bug" demezdi, "gurultu"
+  derdi. Ikisi de `g_display_post.camera_exposure` okuyor.
+- **`Camera::calculated_ev`.** Tek yazani ve okuyani lying panel satiriydi;
+  formulu f-sayisi yerine DoF `aperture`ini kullaniyordu ve degeri hicbir yerde
+  uygulanmiyordu. "Exposure" etiketiyle gosterilen **olculmemis bir sayi**.
+- **HUD f-stop kadraninin `cam.aperture`a yazmasi.** Ayni preseti yazan
+  `camera.set_fstop_preset` IPC'si DoF'a dokunmuyor; panel dokunuyordu. Sozlesme
+  nettir: `aperture` = DoF, `fstop_preset_index` = pozlama + Cinema lens
+  kusurlari. Panel ile script ayni seyi yapmali.
+
+Yeni: `Camera::physicalExposureFactor()` — bayraklardan bagimsiz fiziksel terim.
+`syncDisplay` bunun icin her karede Camera'nin **tam kopyasini** cikarip iki
+bayragi zorluyordu (`nodeName` uzunsa her karede bir tahsis).
+
+### ⚠ Ayni kapiya BAGLANMAYAN tek yol: OptiX
+
+`OptixWrapper::setCameraParams` hala kameranin bayraklarindan dallanip
+`params.camera.exposure_factor`i **render icinde** uyguluyor, ustelik OptiX'in
+goruntuleme yolu `g_display_post.camera_exposure`i de tasiyor. Bugun ikisi
+carpismyor cunku bayraklar artik varsayilanda kaliyor (`auto_exposure=true`,
+`ev_comp=0` ⇒ terim 1.0) — ama **kamera EV kompanzasyonu OptiX'te iki kez
+uygulanabilir.** Vulkan'daki cozum aynen gecerli: render icinde 1.0 gonder,
+pozlamayi yalnizca display'e birak. Ayri parti: OptiX'in display zinciri zaten
+tek-donusum birlesmesinin disinda (bkz. bu notun ust bolumleri) ve dogrulamasi
+render edip olcmeyi gerektirir.
+
+### Kabul testi
+
+`scripts/ipc/Probe-CameraExposure.ps1` **yeniden yazildi** — eski hali
+`camera.set_auto_exposure` ile kapiyi suruyordu, yani yeni modelde 1. kapisi
+**korlukten** gecer, 3. kapisi (duyarlilik, kamera EV'siyle olcuyordu) kalir ve
+gerisini atlardi. Yeni 5. kapi dogrudan **modun kendisini** olcer: ayni
+kadranlarla `manual` -> `physical` gecisi carpani 1.0'dan cikarmali ve bu
+goruntude gorunmeli. Son satir `post.get_exposure.camera_exposure` ile
+`camera.get.exposure_factor`in ayni sayi oldugunu dogrular — ayrisirlarsa panel
+yalan soyluyor demektir.

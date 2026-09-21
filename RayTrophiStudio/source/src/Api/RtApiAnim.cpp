@@ -350,4 +350,120 @@ Result getAnimGraphPlayback(const std::string& character, AnimPlaybackInfo& out)
     return Result::success();
 }
 
+namespace {
+
+const char* conditionName(AnimationGraph::StateMachineNode::Transition::ConditionType t) {
+    using C = AnimationGraph::StateMachineNode::Transition::ConditionType;
+    switch (t) {
+        case C::Bool:          return "bool";
+        case C::FloatGreater:  return "float_greater";
+        case C::FloatLess:     return "float_less";
+        case C::Trigger:       return "trigger";
+        case C::None:
+        default:               return "none";
+    }
+}
+
+// Does this state actually have a pose behind it? StateMachineNode::computePose
+// resolves a state either through its pose node id or, for older graphs, through
+// the input pin sitting at the state's own index. Neither miss is an error at
+// runtime: the state just yields an empty pose. Measuring it here is the whole
+// point — a disconnected state and a working one are otherwise indistinguishable
+// from outside the editor.
+bool statePoseIsConnected(AnimationGraph::AnimationNodeGraph& graph,
+                          const AnimationGraph::StateMachineNode& sm,
+                          size_t stateIndex) {
+    const auto& state = sm.states[stateIndex];
+    if (state.nodeId != 0) {
+        return graph.findNodeById(state.nodeId) != nullptr;
+    }
+    if (stateIndex >= sm.inputs.size()) return false;
+    const uint32_t pinId = sm.inputs[stateIndex].id;
+    if (pinId == 0) return false;
+    for (const auto& link : graph.links) {
+        if (link.endPinId == pinId) return true;
+    }
+    return false;
+}
+
+AnimationGraph::StateMachineNode* findStateMachine(AnimationGraph::AnimationNodeGraph& graph,
+                                                   unsigned int nodeId) {
+    for (auto& node : graph.nodes) {
+        auto* sm = dynamic_cast<AnimationGraph::StateMachineNode*>(node.get());
+        if (!sm) continue;
+        if (nodeId == 0 || sm->id == nodeId) return sm;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+Result listAnimStateMachines(const std::string& character,
+                             std::vector<AnimStateMachineInfo>& out) {
+    out.clear();
+    std::shared_ptr<AnimationGraph::AnimationNodeGraph> graph;
+    if (Result r = requireGraph(character, graph); !r) return r;
+
+    for (auto& node : graph->nodes) {
+        auto* sm = dynamic_cast<AnimationGraph::StateMachineNode*>(node.get());
+        if (!sm) continue;
+
+        AnimStateMachineInfo info;
+        info.node_id = sm->id;
+        info.current_state = sm->currentStateName;
+        info.target_state = sm->isTransitioning ? sm->targetStateName : std::string{};
+        info.transitioning = sm->isTransitioning;
+        info.transition_progress = sm->transitionProgress;
+
+        for (size_t i = 0; i < sm->states.size(); ++i) {
+            AnimStateMachineStateInfo s;
+            s.name = sm->states[i].name;
+            s.is_default = sm->states[i].isDefault;
+            s.is_current = (sm->states[i].name == sm->currentStateName);
+            s.pose_node_id = sm->states[i].nodeId;
+            s.pose_connected = statePoseIsConnected(*graph, *sm, i);
+            info.states.push_back(std::move(s));
+        }
+
+        for (const auto& t : sm->transitions) {
+            AnimStateMachineTransitionInfo ti;
+            ti.from = t.fromState;
+            ti.to = t.toState;
+            ti.condition = conditionName(t.conditionType);
+            ti.parameter = t.parameterName;
+            ti.compare_value = t.compareValue;
+            ti.has_exit_time = t.hasExitTime;
+            ti.exit_time = t.exitTime;
+            ti.blend_time = t.blendTime;
+            info.transitions.push_back(std::move(ti));
+        }
+
+        info.recent_events = graph->debugTrace.eventLog;
+        out.push_back(std::move(info));
+    }
+    return Result::success();
+}
+
+Result forceAnimState(const std::string& character, const std::string& state,
+                      unsigned int node_id) {
+    if (state.empty()) return Result::fail("state name must not be empty");
+    std::shared_ptr<AnimationGraph::AnimationNodeGraph> graph;
+    if (Result r = requireGraph(character, graph); !r) return r;
+
+    AnimationGraph::StateMachineNode* sm = findStateMachine(*graph, node_id);
+    if (!sm) {
+        return Result::fail(node_id == 0
+            ? "character's animation graph has no state machine node: " + character
+            : "state machine node not found: " + std::to_string(node_id));
+    }
+    // forceState() is a no-op for an unknown name, which would report success while
+    // changing nothing — the "default is not a measurement" failure. Check first.
+    const bool known = std::any_of(sm->states.begin(), sm->states.end(),
+        [&](const AnimationGraph::StateMachineNode::State& s) { return s.name == state; });
+    if (!known) return Result::fail("state machine has no state named: " + state);
+
+    sm->forceState(state);
+    return Result::success();
+}
+
 } // namespace rtapi
