@@ -4119,7 +4119,7 @@ static const MethodParam params_particle_add_preset[] = {
 };
 static const MethodDescriptor desc_particle_add_preset = {
     "particle.add_preset", "particle",
-    "Create an authored particle preset additively (campfire, explosion, fireball, nuclear_cinematic, nuclear_physical, ...)",
+    "Create an authored particle preset additively (campfire, explosion, fireball, nuclear, ...)",
     "A preset that can only be created from the panel cannot be calibrated by a script. Pair with gas.measure_plume to close the loop: create, step, measure.",
     "write", "SceneWrite", false, "any",
     "particle|add|preset|particles|gas|authoring|create",

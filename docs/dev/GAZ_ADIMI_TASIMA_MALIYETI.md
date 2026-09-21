@@ -324,3 +324,79 @@ karşılaştırma aleti, kalıcı bir ikinci kod yolu değil.
 `gpu_sum` toplamı da bu satırı içeriyor, yani `phase_sum` ile `total_ms`
 arasındaki açıklanmayan fark kapanıyor.
 
+---
+
+## 2026-09-21 (akşam) — Host taramaları kaldırıldı: 213 → 163 ms
+
+Cihaz yerleşikliği bittikten sonra kalan host kalıntısına bakıldı ve **teşhis
+ilk bakışta yanlıştı**: "host'ta `boundaries + solids` kaldı" diyordum. Ölçünce
+ikisi de bu sahnede bedavaydı — `setWallBcs` ilk satırında dönüyor (boundary
+"open") ve `enforceSolidBoundaries` boş katı listesinde erken çıkıyor.
+
+23 ms başka bir şeydi: **`clampVelocity`**, `vel_x/y/z` üzerinde ~10.3M float'lık
+seri bir tarama. Ve ikinci bir tanesi daha vardı: `sanitizeProjectedVelocity`,
+GPU projeksiyonundan sonra host'ta, aynı büyüklükte.
+
+★ **İkisi de adı başka şey olan satırlara yazılıyordu** — birincisi
+`cpu_boundary_ms`'e, ikincisi `gpu_publish_ms`'e. Yani adımın en pahalı iki host
+işi, ikisi de kendilerini açıklamayan etiketlerin altında duruyordu. Optimizasyon
+hedefini zamanlama tablosundan seçerken bu ders ikinci kez geldi.
+
+**Yapılan:** ikinci tarama projeksiyonun **indirmesinden önce** cihazda bir
+dispatch'e dönüştü (`sim_grid_velocity_dissipate_clamp`, `factor = 1.0` ile saf
+clamp+scrub) — veri zaten oradaydı ve zaten inecekti, yani **transfer maliyeti
+sıfır**. Birincisi `skip_pressure_projection` açıkken atlandı: gerekçesi
+"projeksiyon sıçraması" ve orada projeksiyon hiç çalışmıyor.
+
+| satır | önce | sonra |
+|---|---|---|
+| `cpu_boundary_ms` | 23.07 | **0.00** |
+| `gpu_publish_ms` | 26.20 | **4.53** |
+| `cpu_total_ms` | 31.01 | **6.42** |
+| `gpu_host_sync_ms` | (yoktu) | **7.06** |
+| `total_ms` | 212.83 | **163.30** |
+
+Fizik f40/f80/f120'de birebir aynı kaldı.
+
+### Kalan dağılım (163.30 ms)
+
+| aşama | ms |
+|---|---|
+| pressure projection | 46.52 |
+| velocity advection | 26.97 |
+| scalar advection | 19.44 |
+| body forces | 14.51 |
+| host readback (`gpu_host_sync_ms`) | 7.06 |
+| host solver kalıntısı (`cpu_total_ms`) | 6.42 |
+| combustion | 5.46 |
+| velocity dissipation | 5.86 |
+| source upload | 4.72 |
+| publish | 4.53 |
+| analysis scan | 4.61 |
+
+Sıradaki: host kalıntısı artık yalnız surface dust (~3.2) + skaler dissipation
+(~2.9). İkisi GPU'ya geçerse `GridFluid::step` gaz yolunda tamamen atlanabilir ve
+7.06 ms'lik yapısal geri okuma da kalkar. Ondan sonrası pressure projection'dır
+ve **transferler kalktığına göre artık yeniden ölçülmesi gerekir.**
+
+### ★★★ Ve bir regresyon: sıvı tutuşmuyordu
+
+MSF pyrolysis ile sıvı yüzey yanması gaz alanlarını **doğrudan cihaz
+tamponlarına** yazıp geriye hiçbir şey vermiyor. Defter bu üreticileri
+tanımıyordu, dolayısıyla skaler advection "yükle" cevabını alıp **bayat host
+kopyasını depozitin üstüne yazıyordu.** Sıvı buharlaşan yakıtı ve ısıyı, hiçbir
+şeyin yakamadığı bir tampona bırakıyordu — tutuşma eşiği hiç kapı değildi, o
+yüzden 0'a çekmek işe yaramadı.
+
+Bu, kaldırılan `scalar_inputs_resident` parametresinin tam olarak engellediği
+şeydi. Kaldırmak doğruydu (tek boolean üç alan için cevap veremez) ama **defter
+ancak ÜRETİCİ de bağlıysa çalışır** ve bu ikisi bağlanmamıştı.
+
+★ Yan bulgu: depozitler `interaction` (alev) kanalını okuyup yazıyor ama
+öncesindeki yükleme bloğu onu hiç yüklemiyordu — alev bayat bir cihaz kopyasının
+üstüne ekleniyordu. O bloğun yorumu da "(fuel, temp, density, **vel**)" diyordu ve
+velocity'yi hiç yüklemiyordu.
+
+Doğrulandı: `burning_cells` 3037/adım, preset'ler tutuşuyor, `total_ms` 163.30 —
+`interaction` yüklemesinin bedeli ölçüm gürültüsünün içinde kaldı.
+

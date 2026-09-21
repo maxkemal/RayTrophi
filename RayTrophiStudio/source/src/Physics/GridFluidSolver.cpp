@@ -1397,7 +1397,24 @@ void step(FluidGrid& grid,
         // pre-projection field was CFL-clamped (especially around strong local
         // divergence and coarse/open boundaries). Never carry that spike into
         // the next advection/vorticity step.
-        clampVelocity(grid, params.max_velocity);
+        // ***** THE CLAMP BELONGS TO THE PROJECTION, SO IT GOES WHERE THE
+        // PROJECTION WENT.
+        //
+        // Its whole justification is the spike a pressure solve can create. If
+        // an external GPU path owns projection, none happened HERE, and that
+        // caller clamps on the device straight afterwards - so this call was a
+        // serial scan of ~10.3M floats per step to clamp a field nothing had
+        // disturbed since the last clamp.
+        //
+        // * It was also billed to boundary_ms, a row named after the two cheap
+        // calls beside it: with an OPEN boundary setWallBcs returns on its
+        // first line and enforceSolidBoundaries early-outs on an empty solid
+        // list, so ~23 ms sat under a label that accounted for none of it.
+        // This is the same reasoning already written for the pre-projection
+        // enforceSolidBoundaries above.
+        if (!params.skip_pressure_projection) {
+            clampVelocity(grid, params.max_velocity);
+        }
         setWallBcs(grid, params.boundary);
         enforceSolidBoundaries(grid);
         mark(cursor, stats ? &stats->boundary_ms : nullptr);

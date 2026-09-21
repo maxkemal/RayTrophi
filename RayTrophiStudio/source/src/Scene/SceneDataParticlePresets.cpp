@@ -17,8 +17,7 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
             case ParticleSystemPreset::Flamethrower:preset_name = "Flamethrower"; break;
             case ParticleSystemPreset::BurningFuelSpill:preset_name = "Burning Fuel Spill"; break;
             case ParticleSystemPreset::IgnitedFuelJet:preset_name = "Ignited Fuel Jet"; break;
-            case ParticleSystemPreset::NuclearCinematic:preset_name = "Nuclear Detonation (Cinematic)"; break;
-            case ParticleSystemPreset::NuclearPhysical:preset_name = "Nuclear Detonation (Physical)"; break;
+            case ParticleSystemPreset::Nuclear:preset_name = "Nuclear Detonation"; break;
         }
         // This replaces the old policy that avoided
         // spawning a brand-new system on every click — consecutive preset presses
@@ -755,16 +754,14 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
             }
             // ── Nuclear detonation ───────────────────────────────────────────
             //
-            // ★ Two presets, ONE recipe at two scales, and the scale is a single
-            // factor every length below is written against. Two hand-tuned
-            // copies would drift apart the first time either was calibrated.
-            //
-            // They stay SEPARATE presets rather than one with a size dial
-            // because they are not the same shot at two sizes: the cinematic one
-            // is tuned to be iterated on (metre-scale box, viewport-affordable
-            // cell count, a few seconds of sim), the physical one is a
-            // kilometre-scale offline domain. A shared dial would give every
-            // parameter here a hidden "which scale am I in" meaning.
+            // ★★ ONE recipe, at ONE scale, and that is the point of this
+            // block's history. It used to serve two presets through a length
+            // factor S (cinematic S=1, physical S=80) and a time factor T. The
+            // physical variant was removed because only the cinematic one was
+            // ever run and calibrated: every number here was tuned against
+            // S=1, so the second preset was a set of untested values wearing
+            // the same recipe. The factors are folded out rather than pinned
+            // to 1, so nothing below pretends to be scale-aware when it is not.
             //
             // ★ What makes this a mushroom rather than a big fire:
             //   1. `gas_ambient_stratification` gives the plume a ceiling of its
@@ -784,16 +781,7 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
             // is over in a fraction of a second and everything after it is hot
             // dust. Copying Fireball's long fuel burn is the obvious mistake and
             // it produces a petrol fireball wearing a mushroom's shape.
-            case ParticleSystemPreset::NuclearCinematic:
-            case ParticleSystemPreset::NuclearPhysical: {
-                const bool physical = (preset == ParticleSystemPreset::NuclearPhysical);
-                // Length scale, in metres per cinematic unit.
-                const float S = physical ? 80.0f : 1.0f;
-                // ★ Time does NOT scale with S. The solver's seconds are the
-                // timeline's seconds, and a shot nobody can sit through is not a
-                // better shot; the physical preset stretches the stages only far
-                // enough for them to read at its size.
-                const float T = physical ? 6.0f : 1.0f;
+            case ParticleSystemPreset::Nuclear: {
 
                 rt->applyPhysicsModePreset(RayTrophiSim::ParticlePhysicsMode::Spark);
                 rt->applyQualityModePreset(RayTrophiSim::ParticleQualityMode::Realtime);
@@ -814,16 +802,16 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 debris.point = Vec3(0.0f, 0.0f, 0.0f);
                 debris.direction = Vec3(0.0f, 0.7f, 0.0f);
                 debris.rate_per_second = 0.0f;
-                debris.burst_count = physical ? 120 : 320;
-                debris.speed = 11.9f * (physical ? 6.0f : 1.0f);
+                debris.burst_count = 320;
+                debris.speed = 11.9f;
                 debris.spread = 2.6f;
                 // Long enough to still be falling while the stem forms; at
                 // 3.5 the arcs were gone before the cap had shape.
-                debris.lifetime_seconds = 5.85f * T;
+                debris.lifetime_seconds = 5.85f;
                 // ** Was left at the 1.0 default, which is NOT neutral: drag is
                 // 0.8 and gravity 9.81, so a heavier fragment flattened its arc.
                 debris.mass = 0.4f;
-                debris.start_size = 0.09f * S; debris.end_size = 0.02f * S;
+                debris.start_size = 0.09f; debris.end_size = 0.02f;
                 debris.size_jitter = 0.6f;
                 debris.start_opacity = 1.0f; debris.end_opacity = 0.0f;
                 debris.start_color = Vec3(1.0f, 0.93f, 0.62f);
@@ -842,12 +830,12 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 rt->physicsSettings().grid_fuel_deposit = 0.0f;
 
                 RayTrophiSim::SimulationGridDomainDesc dom;
-                dom.name = physical ? "Nuclear Gas (Physical)" : "Nuclear Gas";
+                dom.name = "Nuclear Gas";
                 dom.backend = RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
                 dom.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
                 dom.gas_maccormack_advection = true;
-                dom.bounds_min = Vec3(-11.0f * S, 0.0f, -11.0f * S);
-                dom.bounds_max = Vec3( 11.0f * S, 34.0f * S,  11.0f * S);
+                dom.bounds_min = Vec3(-11.0f, 0.0f, -11.0f);
+                dom.bounds_max = Vec3( 11.0f, 34.0f,  11.0f);
                 // Cinematic: 22x34x22 m at 0.22 -> 100x155x100 (~1.5M cells).
                 // Physical: 1760x2720x1760 m at 17.6 m -> the SAME cell count.
                 // ★ The physical preset is not FINER, it is BIGGER. Holding the
@@ -857,11 +845,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 // ** RE-DERIVED 2026-09-21 from a hand-tuned scene. 0.17 gives
                 // 130x200x130 (3.4M cells) at cinematic scale - finer than the
                 // 0.22 this shipped with, and the cap holds its torus at it.
-                dom.voxel_size = 0.17f * S;
-                dom.quality_profile = physical
-                    ? RayTrophiSim::SimulationDomainQualityProfile::Final
-                    : RayTrophiSim::SimulationDomainQualityProfile::Preview;
-                dom.resource_budget_mb = physical ? 4096u : 1536u;
+                dom.voxel_size = 0.17f;
+                dom.quality_profile =
+                    RayTrophiSim::SimulationDomainQualityProfile::Preview;
+                dom.resource_budget_mb = 1536u;
                 dom.channels |= static_cast<uint32_t>(
                     RayTrophiSim::SimulationGridDomainChannelFlags::Fuel);
                 dom.fire_enabled = true;
@@ -959,10 +946,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 //
                 // Stratification is heat per world unit of HEIGHT, so it scales
                 // as 1/S - the same inverse-length rule as turbulence_scale.
-                dom.gas_ambient_stratification = 0.05f / S;
+                dom.gas_ambient_stratification = 0.05f;
                 dom.gas_vorticity = 1.15f;       // rolls the cap into a torus
                 dom.turbulence_strength = 0.72f;
-                dom.turbulence_scale = 1.6f / S; // spatial FREQUENCY: inverse length
+                dom.turbulence_scale = 1.6f; // spatial FREQUENCY: inverse length
                 // ** ASKING FOR 8 IS NOT GETTING 8. effectiveTurbulenceOctaves
                 // clamps to what the voxel can actually advect (4 cells per
                 // wavelength), and at 0.17 m with scale 1.6 that is THREE. The
@@ -1038,10 +1025,10 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 RayTrophiSim::SimulationFlowSourceDesc core;
                 core.name = "Detonation Core";
                 core.domain_index = 0;
-                core.position = Vec3(0.0f, 1.2f * S, 0.0f);
+                core.position = Vec3(0.0f, 1.2f, 0.0f);
                 // ** RE-DERIVED 2026-09-21: 0.9 was ~5 voxels across at this
                 // grid and the flash had no room to form a pressure structure.
-                core.radius = 3.02f * S;
+                core.radius = 3.02f;
                 core.velocity = Vec3(0.0f, 0.0f, 0.0f);  // fire_expansion does the work
                 core.density = 1.1f;
                 core.temperature = 10.0f;
@@ -1052,15 +1039,15 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 core.falloff = 0.5f;
                 core.use_time_limit = true;
                 core.start_time = 0.0f;
-                core.end_time = 0.05f * T;
+                core.end_time = 0.05f;
                 rt->addFlowSource(core);
 
                 // ── Stage 2: the fireball's own burn, already rising.
                 RayTrophiSim::SimulationFlowSourceDesc fireball;
                 fireball.name = "Fireball Rise";
                 fireball.domain_index = 0;
-                fireball.position = Vec3(0.0f, 2.2f * S, 0.0f);
-                fireball.radius = 1.8f * S;
+                fireball.position = Vec3(0.0f, 2.2f, 0.0f);
+                fireball.radius = 1.8f;
                 fireball.velocity = Vec3(0.0f, 5.0f, 0.0f);
                 fireball.velocity_coupling = 6.0f;
                 fireball.density = 0.9f;
@@ -1068,8 +1055,8 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 fireball.fuel = 0.0f;   // see the note on core.fuel above
                 fireball.falloff = 0.9f;
                 fireball.use_time_limit = true;
-                fireball.start_time = 0.05f * T;
-                fireball.end_time = 0.55f * T;
+                fireball.start_time = 0.05f;
+                fireball.end_time = 0.55f;
                 rt->addFlowSource(fireball);
 
                 // ── Stage 3: the AFTERWIND — this is the stem, and its TIMING
@@ -1079,8 +1066,8 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 RayTrophiSim::SimulationFlowSourceDesc stem;
                 stem.name = "Stem Afterwind";
                 stem.domain_index = 0;
-                stem.position = Vec3(0.0f, 0.5f * S, 0.0f);
-                stem.radius = 1.95f * S;
+                stem.position = Vec3(0.0f, 0.5f, 0.0f);
+                stem.radius = 1.95f;
                 stem.velocity = Vec3(0.0f, 11.0f, 0.0f);
                 stem.velocity_coupling = 9.0f;
                 // ★★ THIS USED TO BE 0.0, AND THE REASON IT WAS ZERO STILL
@@ -1110,8 +1097,8 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 stem.fuel = 0.0f;
                 stem.falloff = 1.1f;
                 stem.use_time_limit = true;
-                stem.start_time = 0.45f * T;
-                stem.end_time = 4.5f * T;
+                stem.start_time = 0.45f;
+                stem.end_time = 4.5f;
                 rt->addFlowSource(stem);
 
                 sys.blend_mode = ParticleBlendMode::Additive;

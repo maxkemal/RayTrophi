@@ -469,14 +469,10 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 { "Burning Fuel Spill", SceneData::ParticleSystemPreset::BurningFuelSpill,
                   "Coupled Vulkan APIC oil surface plus Gas combustion domain.\n"
                   "The exposed liquid surface owns finite fuel and feeds heat/smoke into the flame." },
-                { "Nuclear Detonation (Cinematic)", SceneData::ParticleSystemPreset::NuclearCinematic,
-                  "Metre-scale nuclear shot, tuned to be iterated on: flash, rolling cap,\n"
-                  "cold ground skirt and a late afterwind stem. The cap stops at an altitude\n"
-                  "the domain's Stratification sets, not at the domain lid." },
-                { "Nuclear Detonation (Physical)", SceneData::ParticleSystemPreset::NuclearPhysical,
-                  "The same recipe at kilometre scale (1.8 x 2.7 km, ~18 m voxels, Final\n"
-                  "profile). Same cell count as the cinematic preset, so the two are\n"
-                  "comparable. Offline: expect seconds per simulated frame." },
+                { "Nuclear Detonation", SceneData::ParticleSystemPreset::Nuclear,
+                  "Metre-scale nuclear shot: flash, rolling cap, cold ground skirt and a\n"
+                  "late afterwind stem. The cap stops at an altitude the domain's\n"
+                  "Stratification sets, not at the domain lid." },
                 { "Ignited Fuel Jet", SceneData::ParticleSystemPreset::IgnitedFuelJet,
                   "Production Vulkan liquid-fire shot: a continuous amber fuel jet spreads over\n"
                   "the floor, a short delayed pilot ignites it, then finite surface fuel sustains\n"

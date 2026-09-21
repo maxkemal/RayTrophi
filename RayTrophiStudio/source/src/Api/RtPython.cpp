@@ -1548,7 +1548,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, py::arg("preset"),
        "Create one of the authored particle presets additively. Slugs: campfire, "
        "explosion, smoke, ground_burst, fireball, flamethrower, burning_fuel_spill, "
-       "ignited_fuel_jet, nuclear_cinematic, nuclear_physical.");
+       "ignited_fuel_jet, nuclear.");
 
     particle.def("clear_systems", []() { requireResult(rtapi::clearParticleSystems()); });
 
