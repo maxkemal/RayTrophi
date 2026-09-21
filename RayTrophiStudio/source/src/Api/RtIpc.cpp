@@ -2775,6 +2775,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"buoyancy_heat", s.buoyancy_heat},
                         {"buoyancy_density", s.buoyancy_density},
                         {"ambient_stratification", s.ambient_stratification},
+                        {"pressure_iterations", s.pressure_iterations},
                         {"surface_dust_enabled", s.surface_dust_enabled},
                         {"surface_dust_threshold", s.surface_dust_threshold},
                         {"surface_dust_emission", s.surface_dust_emission},
@@ -2821,6 +2822,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             RT_GAS_JSON(buoyancy_heat, float);
             RT_GAS_JSON(buoyancy_density, float);
             RT_GAS_JSON(ambient_stratification, float);
+            RT_GAS_JSON(pressure_iterations, int);
             RT_GAS_JSON(surface_dust_enabled, bool);
             RT_GAS_JSON(surface_dust_threshold, float);
             RT_GAS_JSON(surface_dust_emission, float);

@@ -1,15 +1,55 @@
 # Sıradaki derlemede kontrol edilecekler
 
-> **Durum:** CANLI — 2026-09-21. Host kalıntısının son iki aşaması GPU'ya
-> taşındı. **İKİ YENİ SHADER VAR → `compile_shaders.bat` ŞART.**
-
-Yeni kernel'ler: `sim_gas_scalar_dissipate.comp`, `sim_gas_surface_dust.comp`.
-Push-constant aralıkları 36 ve 40 bayt olarak `SimulationComputeVulkan.cpp`'ye
-kaydedildi; üçü (shader / tablo / host struct) `static_assert` ile bağlı.
+> **Durum:** CANLI — 2026-09-21. Önceki derlemedeki **zayıf patlama regresyonu
+> bulundu ve düzeltildi.** Yalnız C++ — `compile_shaders.bat` gerekmiyor.
 
 ---
 
-## 1. ★★★★★ Fizik yine birebir aynı olmalı
+## 0. ★★★★★ Ne oldu: RT yayınlaması deftere sormuyordu
+
+**Belirti:** patlama çok zayıf. f40'ta meanT **0.50** (referans 3.41), aktif
+hücre 120 312 (referans 211 741). Değerler kontrol edildi, **hepsi aynıydı** —
+yani kod.
+
+**Kök:** adım sonundaki alan yayınlaması dört alanı düz `uploadBuffer` ile
+gönderiyordu. Gaz adımındaki deftere bağlanmamış **son** yükleme oydu, ve
+doğru çalışmasının tek sebebi zincirin ortasındaki geri okumanın host'u
+otoriter bırakmasıydı. Bir önceki partide o geri okumayı adımın sonuna
+taşıyınca, yayınlama **bayat host kopyasını** combustion'ın ve surface dust'ın
+cihaz-only sonuçlarının üstüne yazmaya başladı — her adımda.
+
+**Düzeltme:** geri okuma yayınlamanın **üstüne** alındı (ilk host tüketicisi
+analiz taraması değil, yayınlamanın kendisiymiş), ve dört yükleme
+`gasEnsureOnDevice`'a çevrildi.
+
+★ **Bu aynı şeklin üçüncü tekrarı** — `runGpuTurbulence`, MSF/sıvı depozitleri,
+ve şimdi yayınlama. Ortak nokta: *bir aşamanın deftere bağlanmamış olması,
+zincirin başka bir yeri değişene kadar zararsız görünür.*
+
+---
+
+## 0b. ★★★★ DÖRDÜNCÜSÜ: projeksiyon alev kanalını eziyordu
+
+**Belirti:** görüntü doğru ama `Burning cells` her karede **0**. "Ölçüm hatası
+olabilir" diye bakıldı — değildi.
+
+`runGpuPressureProjection` `grid.interaction`'ı düz `uploadBuffer` ile
+gönderiyordu. Combustion alevi cihaza yazıp orada bırakıyor; projeksiyon bayat
+host kopyasını üstüne yazıyor, **üstelik host'u besleyen geri okumadan önce**.
+Alev alanı host'a hiç ulaşmıyordu.
+
+★ **Sadece sayacı bozmuyordu:** binding 5'teki termal genleşme terimi de ölü bir
+alan okuyordu. Yani bu kozmetik değil.
+
+★★ **Tuzağı not et:** sıfır okuyan bir alet, bozuk alet gibi görünür. Bu
+partide "ölçüm hatası" sanılan şey gerçek bir veri yolu hatasıydı.
+
+**Kontrol:** `gas.step_stats` → `burning_cells` sıfırdan büyük olmalı.
+(Önceki çalışan derlemede ~3037/adım.)
+
+---
+
+## 1. ★★★★★ Fizik referansı
 
 ```
 gas.reset  →  timeline.set_frame 1..120  →  gas.measure_plume
@@ -17,101 +57,76 @@ gas.reset  →  timeline.set_frame 1..120  →  gas.measure_plume
 
 | kare | hücre | fill | tepe | merkez | peakT | meanT |
 |---|---|---|---|---|---|---|
-| 40 | 211 742 | 0.06265 | 16.150 | 11.292 | 8.0034 | 3.41141 |
-| 80 | 721 307 | 0.21340 | 31.790 | 22.530 | 5.5467 | 2.27425 |
-| 120 | 959 364 | 0.28384 | 34.000 | 28.940 | 3.8441 | 1.29586 |
+| 40 | 211 741 | 0.06265 | 16.150 | 11.293 | 8.0049 | 3.41137 |
+| 80 | 721 318 | 0.21341 | 31.790 | 22.530 | 5.5467 | 2.27427 |
+| 120 | 959 083 | 0.28375 | 34.000 | 28.940 | 3.8441 | 1.29608 |
 
-Bu tablo dört ardışık derlemede aynı çıktı. İki aşama host'tan GPU'ya taşındı,
-yani **aritmetik yeniden yazıldı** — burası bu partinin gerçek sınavı.
+Bu partide aritmetik değişmedi → **birebir aynı olmalı.**
 
-**★ En sinsi başarısızlık:** `meanT` ve `hücre` doğru ama **tepe (top)** ve
-zemin eteği yanlış. Surface dust sadece taban katmanını üretir; kernel'de MAC
-indeksi yanlışsa rüzgâr hızı yanlış hücreden okunur ve toz **yanlış yerde**
-kalkar. Bulut yine makul görünür. Ayırt edici: f120'de `top = 34.0` ve
-`centroid = 28.94`.
+**Hızlı ön kontrol (30 saniye, tam taramadan önce bunu yap):** `gas.reset`,
+30 kare, `gas.step_stats` → **`burning_cells` sıfırdan büyük olmalı.** Bozuk
+derlemede **0**'dı. Sıfırsa daha ileri gitme.
 
-**Dissipation için ayırt edici:** `meanT` ve `fill`. Faktör yanlışsa
-(`exp(-rate*dt)` yerine başka bir şey) bulut ya hiç incelmez ya da erir.
+## 2. ★★★★ Hız
 
-## 2. ★★★★ Yeni satırlar sıfır olmamalı
-
-```
-gas.step_stats → gpu_surface_dust_ms, gpu_scalar_dissipate_ms
-cpu_surface_dust_ms, cpu_dissipation_ms  →  ikisi de ~0 olmalı
-```
-
-| satır | önce | beklenen |
+| satır | iki parti önce | beklenen |
 |---|---|---|
-| `cpu_surface_dust_ms` | 3.17 | **~0** |
-| `cpu_dissipation_ms` | 2.88 | **~0** |
-| `cpu_total_ms` | 6.42 | **~0.3** |
-| `gpu_surface_dust_ms` | (yoktu) | küçük, >0 |
-| `gpu_scalar_dissipate_ms` | (yoktu) | küçük, >0 |
-| `total_ms` | 163.30 | **~157** |
+| `gpu_velocity_advect_ms` | 25.5 | ~15–19 |
+| `gpu_body_forces_ms` | 16.1 | çok küçük (aşağıya bak) |
+| `gpu_host_sync_ms` | 6.7 | tekrar dolu, artık **adım sonunda** |
+| `total_ms` | 156.9 | **~130–140** |
 
-**★ Bozuksa ne demek — ve bunu özellikle kontrol et:** `gpu_surface_dust_ms`
-sıfırdan büyük **ama** `cpu_surface_dust_ms` de sıfırdan büyükse, GPU yolu
-`false` dönüyor ve host yeniden yapıyordur. İkisi birden çalışırsa toz **iki kez**
-eklenir; belirtisi çökme değil, **daha kalın bir zemin eteği**.
+⚠ **★★★ ÖLÇÜ ALETİ HAKKINDA UYARI — bunu okumadan rakamları yorumlama.**
+Aşamalar artık `synchronize()` çağırmadığı için CPU tarafındaki zamanlayıcılar
+**GPU işini değil, kuyruğa bırakma süresini** ölçüyor. Bozuk derlemede
+`gpu_body_forces_ms` **0.04** çıktı; iş kaybolmadı, bir sonraki senkronizasyona
+(çoğunlukla `gpu_pressure_ms`) taşındı.
 
-★ `runGpuGasSurfaceDust` collider'lı domain'de **kasten `false` döner** (kernel
-yalnız taban katmanını yapar, host sürümü katıların üstünü de yürür). Yani
-collider'lı bir sahnede `cpu_surface_dust_ms > 0` görmek **doğru davranıştır**.
+> Yani `total_ms` hâlâ dürüst, ama **aşama satırları artık birbiriyle
+> kıyaslanamaz.** Bunu gerçekten çözmek GPU timestamp query'leri ister; o
+> yapılana kadar optimizasyon hedefi **satırlardan seçilmemeli.** Bu notun
+> tamamı zaten bu hatanın üç kez yapılmasının kaydı.
 
-## 3. Bir şey DEĞİŞMEDİ: yapısal geri okuma
+## 3. ★★★ Yeni dial: `pressure_iterations`
 
-`gpu_host_sync_ms` (~7 ms) **duruyor ve bu partide kalkmıyor**. Host çözücüsü
-artık boş, ama host **tüketicileri** hâlâ ızgarayı okuyor: alan analiz taraması
-(`max_speed`, `burning_cells`, `active_density_cells`), `gas.measure_plume`,
-bake/cache yazımı ve VDB dışa aktarımı. Onlar deftere bağlanmadan geri okumayı
-kaldırmak, bake'in **bayat veri yazması** demek olur — sessizce.
+```
+gas.set_settings domain='Nuclear Gas' pressure_iterations=<N>
+```
+Panelde **"Pressure Sweeps"**, varsayılan 40 (eskiden koda gömülüydü).
 
-> Bu, kendi kuralımızın aynısı: **her TÜKETİCİ deftere bağlanmadan hiçbir
-> ÜRETİCİ indirmeyi bırakamaz.**
+**Ölçüm:** N = 10/20/40/80 için `gpu_pressure_ms`. Doğrusal ve kesişim ≈ 0 →
+projeksiyon bant-bound, kaldıraç algoritmik. Kesişim büyük → önce o sabit
+maliyet alınır. `gpu_pressure_ms` şu an senkronize eden az sayıdaki satırdan
+biri olduğu için **bu ölçüm hâlâ güvenilir.**
+
+⚠ Yakınsama dial'i, kalite dial'i değil: düşürmek görüntüyü yumuşatmaz, gazı
+duvarlardan sızdırır ve girdabı öldürür. `top` ve `fill`'e bak.
+
+## 4. Çökme yolu
+
+Zincir yarıda kalırsa hız alanları `markHostWrote` ile host'a devrediliyor ve
+**advection da CPU'da yeniden yapılıyor**. Bozuksa kuvvetler iki kez uygulanır;
+belirtisi çökme değil, ani bir tekme. Log'da `falling back` görürsen bak.
 
 ---
 
-## VRAM: ölçüldü, ve ölç aleti kör
-
-`perf.get_gpu_memory` (bu sahne, açıkken):
-
-| | bayt |
-|---|---|
-| izlenen device-local | 672 MB |
-| **izlenmeyen** | **1001 MB** |
-| toplam VRAM kullanımı | 1.67 GB / 12.1 GB |
-
-★ Gaz domain'inin compute tamponları (~25 alan × 13.5 MB ≈ **340 MB**)
-kategorilerin **hiçbirinde görünmüyor** — render tarafında `other` 16 KB.
-Yani optimize edeceğimiz şey, izlenmeyen 1 GB'ın içinde.
-
-**Bu yüzden VRAM'e dokunmadan önce yapılacak iş bir kernel değil, bir sayaç:**
-`ensureComputeBuffer` tahsislerini `simulation` kategorisi altında muhasebeye
-sokmak. Aksi hâlde bu oturumda iki kez yaptığımız hatayı üçüncü kez yaparız —
-hedefi, o hedefi göstermeyen bir tablodan seçmek.
-
-İzlendikten sonraki bariz adaylar (önce ölç, sonra kes):
-- `scratch_scalar` / `scratch_scalar2` / `scratch2_vel_x|y|z` — ping-pong
-  tamponları; kaçı aynı anda canlı?
-- `divergence` ve `pressure` yalnız projeksiyon içinde yaşıyor.
-- `msf_accum_*` dört alan, MSF kapalıyken de tahsis ediliyor mu?
-
 ## Sıradaki
 
-1. Bu partiyi ölç (yukarıdaki 1–2).
-2. VRAM muhasebesine `simulation` kategorisi.
-3. Pressure projection (46.52 ms, adımın %28'i) — **transferler kalktığına göre
-   yeniden ölçülmeli**; eski değerini iterasyon maliyeti sanmak hata olur.
-4. Aynı dersleri fluid (APIC) yoluna taşımak: orada da aşama başına
-   upload→dispatch→download kalıbı ve "adı başka şey olan zamanlama satırları"
-   olup olmadığına bakmak.
+1. Bu partiyi ölç (0 → 1 → 2).
+2. **GPU timestamp query'leri** — artık aşama satırları güvenilir değil ve bu,
+   sıradaki her optimizasyon kararının önkoşulu.
+3. Analysis scan'i GPU'ya (host'taki son tam ızgara tarama).
+4. VRAM muhasebesine `simulation` kategorisi (`perf.get_gpu_memory` 672 MB
+   izliyor, **1001 MB izlemiyor**).
+5. Projeksiyon: 3. maddedeki taramanın sonucuna göre.
+
+Devir notu: `docs/dev/GAZ_DERSLERI_VE_FLUID_DEVRI.md`.
 
 ## Açık kalanlar
 
-- `max_velocity` `gas.get_settings`/`gas.get` çıktısında yok (kural 1).
-- `temperature_scale` IPC'den açılmadı (kural 1).
-- Adım atarken süreç CPU'su 16 çekirdeğin %26.4'ü, oysa zamanlama satırlarının
-  topladığı host işi ~11 ms/163 ms. **Ölçülmedi.** Yeniden derleme gerektirmeyen
-  test: `OMP_WAIT_POLICY=PASSIVE` ile başlatıp tekrar ölçmek.
+- `max_velocity` ve `temperature_scale` IPC'de yok (kural 1).
+- Adım atarken süreç CPU'su 16 çekirdeğin %26.4'ü; açıklanmadı.
+  Test: `OMP_WAIT_POLICY=PASSIVE`.
+- `runGpuVelocityAdvection`'daki `compute->synchronize()` artık geri okuma
+  olmadığı için saf duraklama; kaldırılabilir.
 - Kapak f110'dan sonra domain tavanında (34 m).
-- Canlı domain'de `density_dissipation = 0.63`, doğrulanmış değer 0.18.

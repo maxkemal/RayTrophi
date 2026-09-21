@@ -2310,6 +2310,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["buoyancy_heat"] = s.buoyancy_heat;
         d["buoyancy_density"] = s.buoyancy_density;
         d["ambient_stratification"] = s.ambient_stratification;
+        d["pressure_iterations"] = s.pressure_iterations;
         d["surface_dust_enabled"] = s.surface_dust_enabled;
         d["surface_dust_threshold"] = s.surface_dust_threshold;
         d["surface_dust_emission"] = s.surface_dust_emission;
@@ -2390,6 +2391,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_GAS_KW(buoyancy_heat, float);
         RT_GAS_KW(buoyancy_density, float);
         RT_GAS_KW(ambient_stratification, float);
+        RT_GAS_KW(pressure_iterations, int);
         RT_GAS_KW(surface_dust_enabled, bool);
         RT_GAS_KW(surface_dust_threshold, float);
         RT_GAS_KW(surface_dust_emission, float);

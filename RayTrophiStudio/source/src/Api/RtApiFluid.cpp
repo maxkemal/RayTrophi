@@ -1644,6 +1644,7 @@ Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSetti
     out.buoyancy_heat = it->gas_buoyancy_heat;
     out.buoyancy_density = it->gas_buoyancy_density;
     out.ambient_stratification = it->gas_ambient_stratification;
+    out.pressure_iterations = it->gas_pressure_iterations;
     out.surface_dust_enabled = it->gas_surface_dust_enabled;
     out.surface_dust_threshold = it->gas_surface_dust_threshold;
     out.surface_dust_emission = it->gas_surface_dust_emission;
@@ -1709,6 +1710,7 @@ Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDo
     it->gas_buoyancy_heat = s.buoyancy_heat;
     it->gas_buoyancy_density = s.buoyancy_density;
     it->gas_ambient_stratification = std::max(0.0f, s.ambient_stratification);
+    it->gas_pressure_iterations = std::clamp(s.pressure_iterations, 1, 200);
     it->gas_surface_dust_enabled = s.surface_dust_enabled;
     it->gas_surface_dust_threshold = std::max(0.0f, s.surface_dust_threshold);
     it->gas_surface_dust_emission = std::max(0.0f, s.surface_dust_emission);

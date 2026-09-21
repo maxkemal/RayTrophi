@@ -1797,6 +1797,7 @@ static const MethodParam params_gas_set_settings[] = {
     {"fire_max_temperature", "float", false, "", nullptr, nullptr},
     {"flame_dissipation", "float", false, "", nullptr, nullptr},
     {"fuel_dissipation", "float", false, "", nullptr, nullptr},
+    {"pressure_iterations", "int", false, "", nullptr, nullptr},
     {"quality_profile", "string", false, "", nullptr, nullptr},
     {"render_to_nanovdb", "bool", false, "", nullptr, nullptr},
     {"resource_budget_mb", "int", false, "", nullptr, nullptr},
@@ -1828,7 +1829,7 @@ static const MethodDescriptor desc_gas_set_settings = {
     "gas|set|settings|simulation|fire|smoke|ignite|burn|buoyancy|turbulence",
     "gas.get_settings|gas.set_shader|flow_source.create",
     "gas.create_domain", "gas.set_shader|flow_source.create|timeline.set_frame", "gas.get_settings|render.probe", "simulation_cache",
-    params_gas_set_settings, 38,
+    params_gas_set_settings, 39,
     true
 };
 static const MethodRegistration reg_gas_set_settings(desc_gas_set_settings);

@@ -444,3 +444,65 @@ sistemde yuvarlama imzası. Kaynağı `sqrt`: Vulkan'da 2.5 ULP'ye kadar sapabil
 
 Devir notu: `docs/dev/GAZ_DERSLERI_VE_FLUID_DEVRI.md`.
 
+---
+
+## 2026-09-21 (kapanış) — Hız zinciri uctan uca cihazda: 157 → 122.65 ms
+
+Hız alanı adımda **dört kez** tur atıyordu (205 MB/adım) ve gerekçesi tek şeydi:
+arada duran `GridFluid::step` host'ta hız istiyordu. Bir önceki partiden beri o
+aşama hiçbir şey yapmıyor ama kod haberdar değildi.
+
+| | önce | sonra |
+|---|---|---|
+| velocity advection | 41 MB indir | 0 (handle takası zaten vardı) |
+| body forces | 41 yükle + 41 indir | 0 |
+| dissipation clamp | 41 yükle | 0 |
+| projection | 41 indir | 41 indir (tek kalan) |
+
+Geri okuma **kaldırılmadı, taşındı**: `hostGasStepIsNoOp` doğruysa adım
+ortasındaki senkronizasyon atlanıyor ve tek bir `gasSyncGridToHost` **alan
+yayınlamasından hemen önce** çalışıyor.
+
+| satır | önce | sonra |
+|---|---|---|
+| `gpu_velocity_advect_ms` | 25.50 | 15.80 |
+| `gpu_scalar_advect_ms` | 19.63 | 16.69 |
+| `gpu_body_forces_ms` | 16.15 | 0.04 (bkz. uyarı) |
+| `gpu_host_sync_ms` | 6.72 | 7.24 (artık sonda) |
+| **`total_ms`** | **156.92** | **122.65** |
+
+Oturum başındaki ~203–218 ms'den **%43 düşüş**. Fizik f40/f80/f120'de birebir
+aynı; `burning_cells` 3037.4, bir önceki çalışan derlemenin aynı sayısı.
+
+### ⚠⚠⚠ Ölçü aleti artık aşama bazında YALAN SÖYLÜYOR
+
+Aşamalar `synchronize()` çağırmayı bıraktığı için CPU zamanlayıcıları GPU işini
+değil **kuyruğa bırakmayı** ölçüyor. `gpu_body_forces_ms` 0.04, `gpu_publish_ms`
+0.00, `gpu_dissipation_ms` 0.01 — iş kaybolmadı, bir sonraki senkronizasyona
+(çoğunlukla `gpu_pressure_ms` = 49.21) taşındı.
+
+> `total_ms` hâlâ dürüst, **aşama satırları değil.** GPU timestamp query'leri
+> yapılana kadar optimizasyon hedefi satırlardan seçilmemeli. Bu, aynı hatanın
+> bu çalışmadaki dördüncü biçimi.
+
+### ★★★★ Aynı kalıbın üçüncü ve dördüncü tekrarı
+
+1. **Alan yayınlaması** dört alanı düz `uploadBuffer` ile gönderiyordu. Geri
+   okuma adım sonuna taşınınca bayat host kopyasını combustion'ın ve surface
+   dust'ın cihaz-only sonuçlarının üstüne yazmaya başladı. **Belirti: zayıf
+   patlama, `burning_cells` 0, yakıt tüketilmiyor.** İlk host tüketicisi analiz
+   taraması değil, yayınlamanın kendisiymiş.
+2. **Projeksiyon** `grid.interaction`'ı düz `uploadBuffer` ile gönderiyordu ve
+   geri okumadan ÖNCE çalışıyor — alev alanı host'a hiç ulaşmıyordu.
+   **Belirti: görüntü doğru ama `Burning cells` her karede 0.** Kozmetik değildi:
+   binding 5'teki termal genleşme terimi de ölü bir alan okuyordu.
+
+★★ **Sıfır okuyan bir alet, bozuk alet gibi görünür.** "Ölçüm hatası" sanılan
+şey gerçek bir veri yolu hatasıydı.
+
+### `pressure_iterations` IPC'ye açıldı
+
+Koda gömülü 40'tı. Panelde "Pressure Sweeps". Sebebi ölçüm: N = 10/20/40/80 ile
+`gpu_pressure_ms`'in eğimi ve kesişimi çıkarılmadan projeksiyonun gerçekten
+bant-bound olup olmadığı **tartışılabilir ama cevaplanamaz.**
+

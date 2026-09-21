@@ -3636,6 +3636,10 @@ struct GasDomainSettings {
     // h* = anomaly / ambient_stratification instead of climbing to the lid, so
     // this is the knob that gives a mushroom cap an altitude the author owns.
     float ambient_stratification = 0.0f;
+    // Red-black SOR sweeps in the pressure projection. A convergence dial:
+    // too few and the field stops being divergence-free, which reads as gas
+    // leaking and losing its swirl rather than as a softer image.
+    int pressure_iterations = 40;
     float vorticity = 0.35f;
     // Per-second loss rates for the domain's own fields. Off by default, in
     // which case the solver's global rates apply -- those are tuned for

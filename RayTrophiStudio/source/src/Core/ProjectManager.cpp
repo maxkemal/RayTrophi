@@ -5860,6 +5860,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["gas_buoyancy_heat"] = domain.gas_buoyancy_heat;
         d["gas_buoyancy_density"] = domain.gas_buoyancy_density;
         d["gas_ambient_stratification"] = domain.gas_ambient_stratification;
+        d["gas_pressure_iterations"] = domain.gas_pressure_iterations;
         d["gas_surface_dust_enabled"] = domain.gas_surface_dust_enabled;
         d["gas_surface_dust_threshold"] = domain.gas_surface_dust_threshold;
         d["gas_surface_dust_emission"] = domain.gas_surface_dust_emission;
@@ -6533,6 +6534,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.gas_buoyancy_heat = item.value("gas_buoyancy_heat", domain.gas_buoyancy_heat);
         domain.gas_buoyancy_density = item.value("gas_buoyancy_density", domain.gas_buoyancy_density);
         domain.gas_ambient_stratification = item.value("gas_ambient_stratification", domain.gas_ambient_stratification);
+        domain.gas_pressure_iterations =
+            item.value("gas_pressure_iterations", domain.gas_pressure_iterations);
         domain.gas_surface_dust_enabled = item.value("gas_surface_dust_enabled", domain.gas_surface_dust_enabled);
         domain.gas_surface_dust_threshold = item.value("gas_surface_dust_threshold", domain.gas_surface_dust_threshold);
         domain.gas_surface_dust_emission = item.value("gas_surface_dust_emission", domain.gas_surface_dust_emission);
