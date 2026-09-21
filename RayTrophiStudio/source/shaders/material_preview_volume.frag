@@ -109,18 +109,62 @@ vec3 emissionAt(uint vi,vec3 p,float density){
     uint64_t flameAddress=volAddress(vi,536u);
     bool hasTemp=tempAddress!=0ul;
     float temp=hasTemp?sampleRawField(vi,tempAddress,p):density;
-    if(hasTemp && volInt(vi,168u)==4 && volInt(vi,428u)==5)temp*=3000.0;
+    bool kelvinUnits=hasTemp && volInt(vi,168u)==4 && volInt(vi,428u)==5;
+    if(kelvinUnits)temp*=3000.0;
     // An authored temperature/flame field is authoritative: empty/cold cells
     // must not glow through the legacy density fallback.
     float flame=flameAddress!=0ul?clamp(sampleRawField(vi,flameAddress,p),0.0,1.0):0.0;
     if(hasTemp && temp<=0.0 && flame<=0.0)return vec3(0);
     float lo=max(volFloat(vi,488u),0.0);
     float hi=volFloat(vi,268u)>lo+1.0?volFloat(vi,268u):lo+1500.0;
-    float kelvin=temp>20.0?clamp(temp,lo,hi):mix(lo,hi,clamp(temp,0.0,1.0));
+    // ***** A PER-SAMPLE MAGNITUDE TEST CANNOT GUESS UNITS.
+    //
+    // `temp > 20` is asking "is this Kelvin, or an authored 0..1 field?" - and
+    // it gets the answer wrong for exactly the cells that are nearly empty. A
+    // live gas cell with solver heat 0.005 becomes 15 after the x3000 scale,
+    // fails the test, and falls into the normalised branch, where
+    // clamp(15,0,1) saturates to 1.0 and hands back rangeMAX. The faintest gas
+    // in the domain was being reported as the hottest.
+    //
+    // It was survivable while emission carried no radiance: those cells got a
+    // blue-white hue at the same magnitude as everything else and the low
+    // density kept them dim. Under the T^4 term it inverts the image - they sit
+    // at radiance 1.0 while genuinely hot gas at 10000 K gets 0.0625, i.e. the
+    // coldest gas renders SIXTEEN TIMES brighter than the fireball. Raising the
+    // density cutoff hides it because it skips those cells entirely, which is
+    // how it was first noticed.
+    //
+    // The units are not a property of the sample, they are a property of the
+    // VOLUME - and the same flag that applied the x3000 already knows. Ask that
+    // instead of guessing per sample.
+    float kelvin=(kelvinUnits||temp>20.0)?clamp(temp,lo,hi)
+                                         :mix(lo,hi,clamp(temp,0.0,1.0));
     float u=clamp((kelvin-lo)/max(hi-lo,1.0),0.0,1.0);
     float scale=max(volFloat(vi,260u),0.001);
-    vec3 c=volInt(vi,272u)!=0?rampColor(vi,clamp(u*scale,0.0,1.0)):blackbody(kelvin*scale);
-    vec3 e=c*density*volFloat(vi,264u)*(1.0+flame);
+    bool useRamp=volInt(vi,272u)!=0;
+    vec3 c=useRamp?rampColor(vi,clamp(u*scale,0.0,1.0)):blackbody(kelvin*scale);
+    // ***** BLACKBODY COLOUR IS A CHROMATICITY, NOT A RADIANCE.
+    // blackbodyToRGB returns the Tanner Helland approximation,
+    // where one channel is pinned at 1.0 at EVERY temperature
+    // (red below 6600 K, blue above). Multiplied only by density
+    // it made a 1600 K ember emit exactly as much energy as a
+    // 5000 K fireball - just redder. Cooling could change the
+    // hue and nothing else, so a cloud that had lost 90% of its
+    // heat still rendered as a white slab: with the red channel
+    // already clipped, every extra step of depth dragged green
+    // and blue up to clip too.
+    //
+    // Planck-integrated radiance goes as T^4 (Stefan-Boltzmann).
+    // Normalised against the AUTHORED max so the hottest gas
+    // keeps exactly the brightness it has today and only the
+    // cooler gas darkens - at rangeMin/rangeMax = 1340/5000 the
+    // coldest visible cell is ~190x dimmer than the core.
+    //
+    // Applied to the blackbody branch only. An authored colour
+    // ramp is a statement about the FINAL colour, so scaling it
+    // by T^4 would fight the author instead of helping them.
+    float radiance=useRamp?1.0:pow(clamp(kelvin/hi,0.0,1.0),4.0);
+    vec3 e=c*radiance*density*volFloat(vi,264u)*(1.0+flame);
     float l=dot(e,vec3(0.2126,0.7152,0.0722));
     return l>64.0?e*(64.0/l):e;
 }

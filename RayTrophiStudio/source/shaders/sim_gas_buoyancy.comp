@@ -47,14 +47,28 @@ void main(){
     float excess=t-pc.ambient_temperature;
     // Environment's potential temperature at this face's height above the
     // domain floor. The face at index y sits at y*voxel_size.
-    float env=pc.stratification*max(float(y)*pc.voxel_size,0.0);
-    // ★ The restoring term is BOUNDED by the parcel's own anomaly. Subtracting
-    // `env` unconditionally would give still, empty air (excess == 0) a downward
-    // force that grows with height — the same class of bug the has_temperature
-    // fallback above exists to prevent, except it would look like a plausible
-    // "the smoke settles" instead of a broken field. Clamping at -|excess| makes
-    // the environment feel exactly nothing and needs no presence threshold.
-    float heat_term=max(excess-env,-abs(excess));
+    //
+    // ***** GATED ON SMOKE PRESENCE, NOT CLAMPED. This used to end in
+    // max(excess-env,-abs(excess)), which kept still empty air from picking up
+    // a phantom downdraft but inverted the ordering it was protecting: warm gas
+    // above its equilibrium sank while fully cold gas hovered, so the heat left
+    // in a cap was the thing dragging the cap down. Empty air is not a cold
+    // parcel, it is not a parcel at all, and density is what tells them apart.
+    // Keep this IDENTICAL to buoyantAnomaly() in GridFluidSolver.cpp - the three
+    // paths (dense CPU, sparse VDB, this kernel) must agree or the same scene
+    // drifts depending on which one ran.
+    float presence=pc.has_density!=0
+        ? clamp(d/0.01,0.0,1.0)     // kStratificationPresenceDensity
+        : 0.0;                      // no density channel: stratification OFF
+    float env=pc.stratification*max(float(y)*pc.voxel_size,0.0)*presence;
+    // ***** The environment can CANCEL buoyancy, not reverse it. A ceiling
+    // stops a rise; it does not push down. Above the neutral height the parcel
+    // stops being lifted and stays where it stopped. Cold heavy smoke still
+    // sinks through density_weight*d, which is its own correctly-signed term.
+    // Bounding `env` rather than the result keeps this continuous with
+    // stratification == 0. Keep IDENTICAL to buoyantAnomaly() in
+    // GridFluidSolver.cpp.
+    float heat_term=excess-min(env,max(excess,0.0));
     float force=pc.density_weight*d+pc.heat_weight*heat_term;
     vel_y[id]+=force*pc.dt;
 }

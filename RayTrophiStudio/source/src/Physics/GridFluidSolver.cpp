@@ -385,6 +385,12 @@ void addToFaces(FluidGrid& grid, int i, int j, int k, const Vec3& f) {
     grid.velZAt(i, j, k + 1) += f.z * 0.5f;
 }
 
+// Density at which a cell counts as fully "smoke" rather than open air, in the
+// absolute units of the density channel. Matches the default threshold
+// gas.measure_plume uses to decide what is plume, so the solver and the
+// measurement agree on where the cloud is.
+inline constexpr float kStratificationPresenceDensity = 0.01f;
+
 // Buoyant anomaly of one cell against a possibly stratified environment.
 //
 // ★ `ambient_stratification` is a POTENTIAL-temperature gradient, not the
@@ -401,17 +407,95 @@ void addToFaces(FluidGrid& grid, int i, int j, int k, const Vec3& f) {
 // a property the author sets (h* = anomaly / stratification) rather than a
 // consequence of where the box happens to sit.
 //
-// ★ The restoring term is bounded by the parcel's own |anomaly|. Subtracting it
-// unconditionally would give still, empty air a downward force growing with
-// height — a domain-wide phantom downdraft that would read as "the smoke
-// settles nicely" and never be reported as a bug.
+// ***** THE ENVIRONMENT TERM IS GATED ON SMOKE PRESENCE, NOT CLAMPED.
+//
+// This used to end in `std::max(excess - env, -std::abs(excess))`. The clamp
+// existed for a real reason: without it, still empty air (excess == 0) picks
+// up a downward force that grows with height, a domain-wide phantom downdraft
+// that reads as "the smoke settles nicely" and never gets reported as a bug.
+//
+// But bounding the RESULT by the parcel's own anomaly inverts the ordering it
+// was meant to protect. MEASURED 2026-09-21 on the nuclear scene, cap centre
+// at 17.0 m with stratification 0.25, so env = 4.25:
+//
+//     excess = 1.20 (warm)  ->  max(-3.05, -1.20) = -1.20  ->  force -3.1
+//     excess = 0.00 (cold)  ->  max(-4.25,  0.00) =  0.00  ->  force  0.0
+//
+// Warm gas sank and cold gas hovered, and the warmer the parcel the harder it
+// was pushed down, up to the clamp. The heat still left in the cap was the
+// very thing dragging it to the ground - exactly backwards, and precisely what
+// "it still looks hot, why is it collapsing?" was seeing.
+//
+// The honest fix is to remove the reason the clamp was needed. Empty air is
+// not a cold parcel, it is NOT A PARCEL: the solver could not tell the two
+// apart because it only looked at temperature, and temperature is 0 for both.
+// Density can tell them apart. Gating `env` on smoke presence makes an empty
+// cell contribute nothing BY CONSTRUCTION, so the restoring term can be the
+// true (excess - env) with no bound, and the ordering is restored:
+//
+//     excess = 1.20 (warm)  ->  -3.05
+//     excess = 0.00 (cold)  ->  -4.25   <- now sinks HARDER than the warm gas
+//
+// ! This makes a cooled cloud descend FASTER than before, not slower. That is
+// correct physics for a dissipating temperature field - a parcel that has
+// radiated its heat away really is colder than the environment it climbed into
+// - and it means buoyancy_heat and ambient_stratification both have to be
+// re-tuned against the corrected term. The old numbers were fitted to a bound
+// that no longer exists.
+//
+// ! With no density channel there is no way to distinguish smoke from air, so
+// stratification is switched OFF rather than guessed at. Deliberate: a silent
+// phantom downdraft is worse than a documented missing feature.
 inline float buoyantAnomaly(const SolverParams& params,
                             float temp,
+                            float density,
                             float height_above_floor) {
     const float excess = temp - params.ambient_temperature;
     if (params.ambient_stratification == 0.0f) return excess;
-    const float env = params.ambient_stratification * std::max(height_above_floor, 0.0f);
-    return std::max(excess - env, -std::abs(excess));
+    // Ramped rather than a hard test, so a cell drifting across the threshold
+    // does not gain the whole restoring force in a single step.
+    const float presence =
+        std::clamp(density / kStratificationPresenceDensity, 0.0f, 1.0f);
+    if (presence <= 0.0f) return excess;
+    const float env = params.ambient_stratification *
+                      std::max(height_above_floor, 0.0f) * presence;
+    // ***** THE ENVIRONMENT CAN CANCEL BUOYANCY, IT CANNOT REVERSE IT.
+    //
+    // Two earlier shapes of this line were measured and both collapse the cap:
+    //
+    //   max(excess - env, -|excess|)   the original clamp. Warm gas sank and
+    //       cold gas hovered - the ordering was inverted, so the heat left in
+    //       the cap was the thing dragging it down.
+    //
+    //   excess - env                   unbounded. The cloud DOES reach neutral
+    //       buoyancy (measured: parked at 30 m on f130, anomaly -0.02) and then
+    //       its temperature carries on past the equilibrium, so the anomaly
+    //       settles at -strat*h and never comes back. Equilibrium was a moment
+    //       the cloud passed through, not a state it could hold. Relaxing the
+    //       temperature toward the environment profile instead was tried next
+    //       and does hold the total heat - but an EXPANDING cloud keeps filling
+    //       fresh cells at T=0 whose target is strat*h, so the growing edge
+    //       manufactures its own downward force faster than the relaxation can
+    //       charge it. Measured at strat 0.05: cells 1.39M -> 1.96M while the
+    //       mean sat 0.70 below target, and the cap still sank.
+    //
+    // One-sided is the shape that matches what the dial is FOR. The preset note
+    // says it plainly: it exists to give the plume "a ceiling of its own" so the
+    // cap is not shaped by the domain lid. A ceiling stops a rise; it does not
+    // push down. Above h* the parcel simply stops being lifted and stays where
+    // it stopped, which is what a stabilising cap does.
+    //
+    // * And nothing is lost, because the downward force for cold heavy smoke
+    // ALREADY EXISTS as its own correctly-signed term: buoyancy_density * d in
+    // addBuoyancy(). Letting stratification push down too was duplicating a
+    // force that was already there, with the wrong sign convention attached.
+    //
+    // * Written as a bound on `env` rather than on the result so it stays
+    // continuous with the unstratified case: for excess <= 0 the environment
+    // contributes exactly nothing and the anomaly is `excess`, bit-identical to
+    // the `ambient_stratification == 0` early-out above. Every preset other
+    // than the nuclear one leaves this at 0, so they must not see a step here.
+    return excess - std::min(env, std::max(excess, 0.0f));
 }
 
 // ── Surface dust lofting (wind erosion / saltation threshold) ───────────────
@@ -541,7 +625,8 @@ void addBuoyancy(FluidGrid& grid, const SolverParams& params, float dt) {
                 const std::size_t c = grid.cellIndex(i, j, k);
                 const float dens = has_density ? grid.density[c] : 0.0f;
                 const float temp = has_temp ? grid.temperature[c] : 0.0f;
-                const float b = (params.buoyancy_heat * buoyantAnomaly(params, temp, height) +
+                const float b = (params.buoyancy_heat *
+                                     buoyantAnomaly(params, temp, dens, height) +
                                  params.buoyancy_density * dens) * dt;
                 if (b != 0.0f) {
                     addToFaces(grid, i, j, k, up * b);
@@ -1408,7 +1493,7 @@ void stepSparseVDB(FluidGrid& grid,
                     // VDB coordinates are cell indices on the same lattice, so
                     // the height measure is identical.
                     float temp_diff = buoyantAnomaly(
-                        params, t, (static_cast<float>(j) + 0.5f) * grid.voxel_size);
+                        params, t, d, (static_cast<float>(j) + 0.5f) * grid.voxel_size);
                     float buoyancy_force = params.buoyancy_heat * temp_diff + params.buoyancy_density * d;
                     
                     // Apply buoyancy and gravity to velocity Y

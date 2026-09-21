@@ -910,7 +910,13 @@ void drawSimulationDomainControls(
                                 "0 = uniform air, so a hot plume climbs until the lid stops it.\n"
                                 "Above 0 the plume stops where its heat anomaly runs out and\n"
                                 "spreads sideways - this is what gives a mushroom cap an\n"
-                                "altitude of its own: roughly (plume heat) / (this value) metres.");
+                                "altitude of its own: roughly (plume heat) / (this value) metres.\n"
+                                "\n"
+                                "Script/IPC name: ambient_stratification\n"
+                                "The air can CANCEL a plume's lift, never reverse it. Setting this\n"
+                                "too high costs cap altitude; it cannot push the cap back down.\n"
+                                "Heat per unit of HEIGHT, so it scales as 1/scale when a scene is\n"
+                                "resized - the same inverse-length rule as Turbulence Scale.");
                         }
                         ImGui::DragFloat("Solved Vorticity", &domain.gas_vorticity,
                                          0.01f, 0.0f, 50.0f, "%.3f");
@@ -995,18 +1001,36 @@ void drawSimulationDomainControls(
                             ImGui::DragFloat("Smoke Loss /s", &domain.gas_density_dissipation,
                                              0.005f, 0.0f, 5.0f, "%.3f");
                             if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("0 = the smoke never thins out on its own.");
+                                ImGui::SetTooltip(
+                                    "Script/IPC name: density_dissipation\n"
+                                    "0 = the smoke never thins out on its own. MEASURED on the\n"
+                                    "nuclear preset: at 0.012 only 9%% of the smoke is gone after\n"
+                                    "8 seconds, and since every flow source there finishes by 4.5 s\n"
+                                    "nothing produces and nothing removes - the cloud just spreads\n"
+                                    "until it fills the box, which reads as the cap collapsing.\n"
+                                    "At 0.18 removal balances spreading and the cloud reaches a\n"
+                                    "steady size instead of growing forever.");
                             }
                             ImGui::DragFloat("Heat Loss /s", &domain.gas_temperature_dissipation,
                                              0.005f, 0.0f, 5.0f, "%.3f");
                             if (ImGui::IsItemHovered()) {
                                 ImGui::SetTooltip(
-                                    "Cooling rate. This is COUPLED to Stratification: a plume that\n"
-                                    "cools slower keeps its lift longer and settles HIGHER, so\n"
-                                    "changing this moves the cap and the two must be tuned together.");
+                                    "Script/IPC name: temperature_dissipation\n"
+                                    "Cooling rate. COUPLED to Stratification: a plume that cools\n"
+                                    "slower keeps its lift longer and settles HIGHER, so changing\n"
+                                    "this moves the cap and the two are tuned together.\n"
+                                    "The coupling is no longer dangerous - getting it wrong costs\n"
+                                    "cap ALTITUDE, it can no longer turn the cap around and drive\n"
+                                    "it into the ground.");
                             }
                             ImGui::DragFloat("Fuel Loss /s", &domain.gas_fuel_dissipation,
                                              0.005f, 0.0f, 5.0f, "%.3f");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "Script/IPC name: fuel_dissipation\n"
+                                    "How fast unburnt fuel disappears. Fuel that lingers keeps\n"
+                                    "re-igniting, which turns a rising column back into a flame.");
+                            }
                             ImGui::Unindent();
                         }
                         ImGui::Separator();

@@ -905,32 +905,61 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 // inherits them: peak heat 9.8 -> 0.04 and 311k active cells ->
                 // 8.9k, with every authored parameter here correct.
                 dom.gas_dissipation_override = true;
-                // Pulverised ground and condensate do not evaporate. This is the
-                // number that decides whether there is still a cloud at all.
-                dom.gas_density_dissipation = 0.012f;
+                // ***** MEASURED 2026-09-21: 0.012f WAS EFFECTIVELY ZERO.
+                // Over the 8.3 s shot it removes 9% of the smoke. Every flow
+                // source is finished by 4.5 s (frame 108), so after that nothing
+                // produces and nothing removes: the cloud simply sat there and
+                // spread until it filled the box. Active cells and fill never
+                // reached a steady state - 0.25 -> 0.48 -> 0.64 -> 0.77 - and a
+                // full domain has only one free direction left, which is why
+                // this read as the cap "collapsing" long after the buoyancy term
+                // had been fixed.
+                //
+                // At 0.18 removal balances spreading: cells peak at frame 110
+                // and settle back (1.29M -> 1.19M, fill 0.35 flat). That plateau
+                // is what reads on screen as smoke that thins as it climbs.
+                //
+                // * Pulverised ground still does not evaporate - this is not
+                // evaporation. It is the sub-grid dispersal that a 0.17 m voxel
+                // cannot represent: real smoke keeps mixing into clear air long
+                // after it stops being resolvable.
+                //
+                // * Bonus, and it falls out for free: as the smoke thins its
+                // `presence` drops, so the stratification term weakens and the
+                // thinning cloud recovers lift. Buoyancy and dissipation read
+                // the same density, so the two stay consistent by construction.
+                dom.gas_density_dissipation = 0.18f;
                 // The cloud SHOULD cool -- that is what settles it -- just not
                 // 20x faster than it rises.
                 dom.gas_temperature_dissipation = 0.22f;
                 // Fuel is spent in the flash and must not linger.
                 dom.gas_fuel_dissipation = 0.5f;
-                // ★★★ THE PARAMETER THIS PRESET EXISTS FOR.
-                // Cap altitude ≈ (settled heat anomaly) / stratification, and the
-                // target is ~26 of the box's 34 units — inside the domain with
-                // visible headroom, which is how you can SEE that the ceiling is
-                // the physics and not the lid.
+                // ★★★ THE PARAMETER THIS PRESET EXISTS FOR: the plume gets a
+                // ceiling of its OWN rather than one shaped by the domain lid,
+                // so the cap does not silently change when the box is resized.
                 //
-                // ★★ THIS VALUE IS COUPLED TO gas_temperature_dissipation ABOVE
-                // and the two MUST be re-derived together. A plume that cools
-                // slower keeps its lift longer and settles higher; slowing the
-                // cooling from 0.5/s to 0.22/s without raising this would push
-                // the cap straight into the lid, which is exactly the failure
-                // this parameter was added to remove.
+                // ★★ STILL COUPLED TO gas_temperature_dissipation ABOVE - a plume
+                // that cools slower keeps its lift longer and settles higher - but
+                // the coupling is no longer dangerous. The term is one-sided now,
+                // so getting this wrong costs cap ALTITUDE and can no longer turn
+                // the cap around and drive it into the ground.
                 //
-                // ★ The 6.5 is EXTRAPOLATED from the 2026-09-20 run (anomaly ~2.4
-                // under the old 0.5/s decay), NOT measured under the new rate.
-                // Test-NuclearPreset.ps1 prints the value the measured cloud
-                // implies — trust that over this comment.
-                dom.gas_ambient_stratification = 6.5f / (26.0f * S);
+                // ** RE-DERIVED 2026-09-21 against the ONE-SIDED term.
+                // The old 6.5/(26*S) = 0.25/S encoded "an anomaly of 6.5 balances
+                // at 26 m" - but the anomaly does not stay at 6.5, it decays at
+                // 0.22/s, so the ceiling it computed collapsed with it. The
+                // environment term can no longer push down (see buoyantAnomaly in
+                // GridFluidSolver.cpp), so this dial now only decides how early
+                // the lift is cancelled, and it wants to be much smaller.
+                //
+                // MEASURED: at 0.05/S the cap rises and parks; at 0.25/S it parks
+                // lower but still reaches the lid on momentum; at 1.2/S the rise
+                // is suppressed so hard the gas accumulates in place and the
+                // domain's own box edges become visible in frame.
+                //
+                // Stratification is heat per world unit of HEIGHT, so it scales
+                // as 1/S - the same inverse-length rule as turbulence_scale.
+                dom.gas_ambient_stratification = 0.05f / S;
                 dom.gas_vorticity = 1.15f;       // rolls the cap into a torus
                 dom.turbulence_strength = 0.72f;
                 dom.turbulence_scale = 1.6f / S; // spatial FREQUENCY: inverse length
@@ -963,7 +992,19 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                     // doubled.
                     dom.shader->emission.blackbody_intensity = 16.667f;
                     dom.shader->emission.temperature_min = 1340.0f;
-                    dom.shader->emission.temperature_max = 5000.0f;
+                    // ***** 5000 WAS BELOW THE SCENE'S OWN RANGE.
+                    // Gas temperature reaches the shader as solver heat x3000, so
+                    // this scene spans 5475-19769 K - every cell in the cap sat
+                    // ABOVE the clamp and rendered at one flat maximum, which is
+                    // what made the cap a white slab with no internal shading.
+                    //
+                    // Since the T^4 radiance term landed this value has a second
+                    // job: it is also what the radiance is normalised against, so
+                    // putting it below the scene's peak pins the whole cloud at
+                    // radiance 1.0 and throws the fix away. It must sit at or
+                    // above peak_temperature x 3000 - gas.measure_plume reports
+                    // that directly.
+                    dom.shader->emission.temperature_max = 20000.0f;
                     dom.shader->emission.temperature_scale = 1.6f;
                     // Condensation read: this cap is water and pulverised
                     // ground, not soot — bright, weakly absorbing, strongly
