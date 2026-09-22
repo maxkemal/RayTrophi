@@ -175,6 +175,40 @@ const bool any_solid =
     has_solid && !(grid.solid_cells_valid && grid.solid_cells.empty());
 ```
 
+## 5b. ★★★★★ Ders: "küçük kazanç" ÇÖZÜNÜRLÜĞÜN FONKSİYONUDUR
+
+Bu notun bütün rakamları **7 054 336 hücrelik** bir sahneden. Koddaki hard cap
+**134 217 728** (512³) — **19 katı**. Bir kalemin bugün kaç ms olduğu, onun
+önemli olup olmadığını SÖYLEMEZ; hangi terimle ölçeklendiği söyler.
+
+- **Transferler hücreyle doğrusal.** Gaz adımından kaldırılan 8 B/hücre bugün
+  56 MB / 8,6 ms, 512³'te **1 074 MB / 163 ms**. Kalan hız geri okuması
+  (12 B/hücre) cap'te **244 ms**.
+- **Host RAM de doğrusal.** GPU yolunda okunmayan `pressure` + `divergence`
+  vektörleri cap'te **1,07 GB**. Canlı ızgara 35,4 B/hücre → cap'te tek kare
+  **4,75 GB**.
+- **★★★ Ama çözücü daha DİK ölçeklenir.** SOR'un maliyeti hücreyle doğrusal,
+  gereken süpürme sayısı ise domainin DOĞRUSAL boyutuyla büyür (bilgi süpürme
+  başına bir hücre ilerler). Doğrusal boyutta 3,1 kat → transferler ~19 kat,
+  SOR ~90 kat. **Yani baskın terim çözünürlükle yer değiştirir.**
+
+★★ **Kuralın kendisi:** bir öncelik listesini tek bir sahnede ölçüp sabit
+sanma. Her kalemin yanına **hangi terimle ölçeklendiğini** yaz (hücre, hücre×
+doğrusal boyut, partikül, kare). Yoksa liste bir sonraki çözünürlükte sessizce
+yanlış olur — ve bu notun fizik referans tablosuna tam olarak bu oldu: mutlak
+hücre sayıları tutuyordu, çözünürlük değişti, tablo hâlâ makul görünüyordu.
+
+★ **Fluid için doğrudan sonuç:** 153³ = 3,58M hücre ve ~500 bin partikül ile
+alınan her ölçüm iki ayrı terim taşıyor. Partikül başına maliyetler hücre
+sayısıyla ölçeklenmez, ızgara maliyetleri partikül sayısıyla ölçeklenmez.
+İkisini ayırmadan alınan bir "şu aşama %X" tablosu, çözünürlük ya da partikül
+yoğunluğu değiştiğinde taşınamaz.
+
+★ **Round-trip oranı da burada:** cihazdan çıkmayan bir kernel aynı GPU'da
+125 GB/s ölçüldü, round-trip yapan aşamalar 4,7–7,3 GB/s. Round-trip'ten
+kurtardığın her bayt, kernel işinden kurtardığın ~19 bayta bedeldir. Fluid'de
+de önce bu oranı ara.
+
 ## 6. Kayan nokta: birebir aynılık nereye kadar beklenir
 
 Aritmetik **taşındığında** (host → kernel) birebir aynılık beklenmez; aritmetik
