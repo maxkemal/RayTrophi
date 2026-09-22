@@ -602,6 +602,70 @@ Result getParticleStats(ParticleStatsInfo& out) {
     return Result::success();
 }
 
+Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& out) {
+    if (!g_ctx) return notBound();
+    auto& runtime = scriptSimulationRuntime();
+    const auto& domains = runtime.gridDomains();
+    const auto& states = runtime.gridDomainStates();
+
+    std::size_t index = domains.size();
+    for (std::size_t i = 0; i < domains.size(); ++i) {
+        if (domains[i].name == domain_id_or_name) {
+            index = i;
+            break;
+        }
+    }
+    if (index >= domains.size()) {
+        char* end = nullptr;
+        const long parsed = std::strtol(domain_id_or_name.c_str(), &end, 10);
+        if (end && *end == '\0' && parsed >= 0 &&
+            static_cast<std::size_t>(parsed) < domains.size()) {
+            index = static_cast<std::size_t>(parsed);
+        } else {
+            return Result::fail("grid domain not found: " + domain_id_or_name);
+        }
+    }
+    if (domains[index].type != RayTrophiSim::SimulationDomainType::Fluid) {
+        return Result::fail("domain is not fluid: " + domain_id_or_name);
+    }
+    if (index >= states.size()) return Result::fail("domain has no live state yet");
+
+    const auto& state = states[index];
+    const auto& transfer = state.fluid_transfer_stats;
+    out = FluidStepStats{};
+    out.measured = state.valid && transfer.measured;
+    if (!out.measured) return Result::success();
+
+    const auto& fluid = state.fluid_stats;
+    out.resolution[0] = state.resolution_x;
+    out.resolution[1] = state.resolution_y;
+    out.resolution[2] = state.resolution_z;
+    out.particle_count = state.particles.size();
+    out.gpu_status = fluid.gpu_status;
+    out.p2g_on_gpu = fluid.p2g_on_gpu;
+    out.pressure_on_gpu = fluid.pressure_on_gpu;
+    out.g2p_on_gpu = fluid.g2p_on_gpu;
+    out.density_on_gpu = fluid.density_on_gpu;
+    out.p2g_ms = fluid.p2g_ms;
+    out.pressure_ms = fluid.pressure_ms;
+    out.g2p_ms = fluid.g2p_ms;
+    out.advect_ms = fluid.advect_ms;
+    out.density_ms = fluid.density_ms;
+    out.upload_bytes = transfer.upload_bytes;
+    out.download_bytes = transfer.download_bytes;
+    out.upload_calls = transfer.upload_calls;
+    out.download_calls = transfer.download_calls;
+    out.dispatch_calls = transfer.dispatch_calls;
+    out.batch_end_calls = transfer.batch_end_calls;
+    out.synchronize_calls = transfer.synchronize_calls;
+    out.upload_call_ms = transfer.upload_call_ms;
+    out.download_call_ms = transfer.download_call_ms;
+    out.dispatch_call_ms = transfer.dispatch_call_ms;
+    out.batch_end_ms = transfer.batch_end_ms;
+    out.synchronize_ms = transfer.synchronize_ms;
+    return Result::success();
+}
+
 Result getGasStepStats(const std::string& domain_id_or_name, GasStepStats& out) {
     if (!g_ctx) return notBound();
     auto& runtime = scriptSimulationRuntime();

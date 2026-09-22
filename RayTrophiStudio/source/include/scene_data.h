@@ -24,6 +24,7 @@
 #include "ParticleSimulation.h"
 #include "SimCache.h"
 #include "SimFrameCompress.h"
+#include "SimFrameCacheMemory.h"
 #include "SimulationSystems.h"
 #include "SimulationWorld.h"
 #include "SimulationComputeVulkanContext.h"
@@ -2210,6 +2211,7 @@ struct SceneData {
         RayTrophiSim::SimFrameCompress::Field vel_x, vel_y, vel_z;
         std::size_t bytes() const {
             return sizeof(CachedGridDomain) +
+                   RayTrophiSim::SimFrameCacheMemory::metaAllocationBytes(meta) +
                    density.bytes() + temperature.bytes() +
                    fuel.bytes() + interaction.bytes() +
                    vel_x.bytes() + vel_y.bytes() + vel_z.bytes();
@@ -2379,6 +2381,7 @@ struct SceneData {
         for (const auto& st : states) {
             CachedGridDomain c;
             c.meta = st;                       // metadata + particles/foam
+            c.meta.fluid_transfer_stats = {};  // diagnostics belong to a solver step
             const int nx = st.grid.nx, ny = st.grid.ny, nz = st.grid.nz;
             SFC::compress(st.grid.density,     nx, ny, nz, c.density);
             SFC::compress(st.grid.temperature, nx, ny, nz, c.temperature);
@@ -2416,6 +2419,7 @@ struct SceneData {
         out.reserve(cached.size());
         for (const auto& c : cached) {
             RayTrophiSim::SimulationGridDomainState st = c.meta;
+            st.fluid_transfer_stats = {};
             const int nx = st.grid.nx, ny = st.grid.ny, nz = st.grid.nz;
             const std::size_t cells =
                 static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *

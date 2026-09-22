@@ -141,7 +141,8 @@ struct Field {
 
     bool empty() const { return tile_index.empty(); }
     std::size_t bytes() const {
-        return tile_index.size() * sizeof(int32_t) + data.size() * sizeof(uint16_t);
+        return tile_index.capacity() * sizeof(int32_t) +
+               data.capacity() * sizeof(uint16_t);
     }
     void clear() {
         dim_x = dim_y = dim_z = 0;

@@ -1,0 +1,479 @@
+﻿{
+    "domain":  "Grid Domain 1",
+    "dt":  0.016666666666666666,
+    "warmup":  5,
+    "samples":  30,
+    "voxel_size":  0.03267974033951759,
+    "bounds_min":  [
+                       -2.5,
+                       -2.5,
+                       -2.5
+                   ],
+    "bounds_max":  [
+                       2.5,
+                       2.5,
+                       2.5
+                   ],
+    "backend_before":  "vulkan",
+    "backend_after":  "vulkan",
+    "particles_before":  487245,
+    "particles_after":  495578,
+    "grid_domain_median_ms":  202.25550842285156,
+    "grid_domain_p90_ms":  216.7579040527344,
+    "ipc_wall_median_ms":  219.8033,
+    "ipc_wall_p90_ms":  714.0326,
+    "memory_before":  {
+                          "blas_compaction_enabled":  true,
+                          "devices":  [
+                                          {
+                                              "allocations":  46,
+                                              "backend":  "vulkan",
+                                              "categories":  {
+                                                                 "accel_struct":  {
+                                                                                      "allocations":  4,
+                                                                                      "device_local_bytes":  6656,
+                                                                                      "host_bytes":  256
+                                                                                  },
+                                                                 "geometry":  {
+                                                                                  "allocations":  1,
+                                                                                  "device_local_bytes":  1536,
+                                                                                  "host_bytes":  0
+                                                                              },
+                                                                 "other":  {
+                                                                               "allocations":  25,
+                                                                               "device_local_bytes":  14672,
+                                                                               "host_bytes":  233439328
+                                                                           },
+                                                                 "render_target":  {
+                                                                                       "allocations":  15,
+                                                                                       "device_local_bytes":  310168320,
+                                                                                       "host_bytes":  0
+                                                                                   },
+                                                                 "scratch":  {
+                                                                                 "allocations":  1,
+                                                                                 "device_local_bytes":  2304,
+                                                                                 "host_bytes":  0
+                                                                             },
+                                                                 "texture":  {
+                                                                                 "allocations":  0,
+                                                                                 "device_local_bytes":  0,
+                                                                                 "host_bytes":  0
+                                                                             }
+                                                             },
+                                              "compaction":  {
+                                                                 "bytes_after":  2944,
+                                                                 "bytes_before":  4224,
+                                                                 "compacted":  1,
+                                                                 "failures":  0,
+                                                                 "skipped_skinned":  0,
+                                                                 "supported":  true
+                                                             },
+                                              "device_local_bytes":  310193488,
+                                              "host_bytes":  233439584,
+                                              "role":  "render",
+                                              "tracked":  true
+                                          },
+                                          {
+                                              "allocations":  71,
+                                              "backend":  "vulkan",
+                                              "categories":  {
+                                                                 "accel_struct":  {
+                                                                                      "allocations":  3,
+                                                                                      "device_local_bytes":  3328,
+                                                                                      "host_bytes":  256
+                                                                                  },
+                                                                 "geometry":  {
+                                                                                  "allocations":  7,
+                                                                                  "device_local_bytes":  251536,
+                                                                                  "host_bytes":  0
+                                                                              },
+                                                                 "other":  {
+                                                                               "allocations":  38,
+                                                                               "device_local_bytes":  71443568,
+                                                                               "host_bytes":  75316736
+                                                                           },
+                                                                 "render_target":  {
+                                                                                       "allocations":  18,
+                                                                                       "device_local_bytes":  176209920,
+                                                                                       "host_bytes":  0
+                                                                                   },
+                                                                 "scratch":  {
+                                                                                 "allocations":  1,
+                                                                                 "device_local_bytes":  2176,
+                                                                                 "host_bytes":  0
+                                                                             },
+                                                                 "texture":  {
+                                                                                 "allocations":  4,
+                                                                                 "device_local_bytes":  963584,
+                                                                                 "host_bytes":  0
+                                                                             }
+                                                             },
+                                              "compaction":  {
+                                                                 "bytes_after":  3456,
+                                                                 "bytes_before":  11520,
+                                                                 "compacted":  3,
+                                                                 "failures":  0,
+                                                                 "skipped_skinned":  0,
+                                                                 "supported":  true
+                                                             },
+                                              "device_local_bytes":  248874112,
+                                              "host_bytes":  75316992,
+                                              "role":  "viewport",
+                                              "tracked":  true
+                                          }
+                                      ],
+                          "tracked_device_local_bytes":  559067600,
+                          "untracked_bytes":  1105346096,
+                          "vram_budget_bytes":  12115742720,
+                          "vram_measured":  true,
+                          "vram_usage_bytes":  1664413696
+                      },
+    "memory_after":  {
+                         "blas_compaction_enabled":  true,
+                         "devices":  [
+                                         {
+                                             "allocations":  46,
+                                             "backend":  "vulkan",
+                                             "categories":  {
+                                                                "accel_struct":  {
+                                                                                     "allocations":  4,
+                                                                                     "device_local_bytes":  6656,
+                                                                                     "host_bytes":  256
+                                                                                 },
+                                                                "geometry":  {
+                                                                                 "allocations":  1,
+                                                                                 "device_local_bytes":  1536,
+                                                                                 "host_bytes":  0
+                                                                             },
+                                                                "other":  {
+                                                                              "allocations":  25,
+                                                                              "device_local_bytes":  14672,
+                                                                              "host_bytes":  233439328
+                                                                          },
+                                                                "render_target":  {
+                                                                                      "allocations":  15,
+                                                                                      "device_local_bytes":  310168320,
+                                                                                      "host_bytes":  0
+                                                                                  },
+                                                                "scratch":  {
+                                                                                "allocations":  1,
+                                                                                "device_local_bytes":  2304,
+                                                                                "host_bytes":  0
+                                                                            },
+                                                                "texture":  {
+                                                                                "allocations":  0,
+                                                                                "device_local_bytes":  0,
+                                                                                "host_bytes":  0
+                                                                            }
+                                                            },
+                                             "compaction":  {
+                                                                "bytes_after":  2944,
+                                                                "bytes_before":  4224,
+                                                                "compacted":  1,
+                                                                "failures":  0,
+                                                                "skipped_skinned":  0,
+                                                                "supported":  true
+                                                            },
+                                             "device_local_bytes":  310193488,
+                                             "host_bytes":  233439584,
+                                             "role":  "render",
+                                             "tracked":  true
+                                         },
+                                         {
+                                             "allocations":  71,
+                                             "backend":  "vulkan",
+                                             "categories":  {
+                                                                "accel_struct":  {
+                                                                                     "allocations":  3,
+                                                                                     "device_local_bytes":  3328,
+                                                                                     "host_bytes":  256
+                                                                                 },
+                                                                "geometry":  {
+                                                                                 "allocations":  7,
+                                                                                 "device_local_bytes":  251536,
+                                                                                 "host_bytes":  0
+                                                                             },
+                                                                "other":  {
+                                                                              "allocations":  38,
+                                                                              "device_local_bytes":  71443568,
+                                                                              "host_bytes":  75316736
+                                                                          },
+                                                                "render_target":  {
+                                                                                      "allocations":  18,
+                                                                                      "device_local_bytes":  176209920,
+                                                                                      "host_bytes":  0
+                                                                                  },
+                                                                "scratch":  {
+                                                                                "allocations":  1,
+                                                                                "device_local_bytes":  2176,
+                                                                                "host_bytes":  0
+                                                                            },
+                                                                "texture":  {
+                                                                                "allocations":  4,
+                                                                                "device_local_bytes":  963584,
+                                                                                "host_bytes":  0
+                                                                            }
+                                                            },
+                                             "compaction":  {
+                                                                "bytes_after":  3456,
+                                                                "bytes_before":  11520,
+                                                                "compacted":  3,
+                                                                "failures":  0,
+                                                                "skipped_skinned":  0,
+                                                                "supported":  true
+                                                            },
+                                             "device_local_bytes":  248874112,
+                                             "host_bytes":  75316992,
+                                             "role":  "viewport",
+                                             "tracked":  true
+                                         }
+                                     ],
+                         "tracked_device_local_bytes":  559067600,
+                         "untracked_bytes":  1105346096,
+                         "vram_budget_bytes":  12115742720,
+                         "vram_measured":  true,
+                         "vram_usage_bytes":  1664413696
+                     },
+    "rows":  [
+                 {
+                     "sample":  1,
+                     "ipc_wall_ms":  220.38580000000002,
+                     "world_total_ms":  202.84701538085935,
+                     "grid_domain_ms":  202.84599304199219,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  2,
+                     "ipc_wall_ms":  212.90120000000002,
+                     "world_total_ms":  204.31289672851565,
+                     "grid_domain_ms":  204.31199645996097,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  3,
+                     "ipc_wall_ms":  221.2477,
+                     "world_total_ms":  203.7987060546875,
+                     "grid_domain_ms":  203.79769897460935,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  4,
+                     "ipc_wall_ms":  217.86950000000002,
+                     "world_total_ms":  200.87550354003903,
+                     "grid_domain_ms":  200.87458801269531,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  5,
+                     "ipc_wall_ms":  218.71620000000001,
+                     "world_total_ms":  201.40739440917969,
+                     "grid_domain_ms":  201.406494140625,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  6,
+                     "ipc_wall_ms":  221.63840000000002,
+                     "world_total_ms":  204.89309692382813,
+                     "grid_domain_ms":  204.89219665527344,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  7,
+                     "ipc_wall_ms":  218.0831,
+                     "world_total_ms":  200.98979187011719,
+                     "grid_domain_ms":  200.9888916015625,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  8,
+                     "ipc_wall_ms":  219.8033,
+                     "world_total_ms":  202.98419189453125,
+                     "grid_domain_ms":  202.98329162597656,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  9,
+                     "ipc_wall_ms":  220.40210000000002,
+                     "world_total_ms":  203.314208984375,
+                     "grid_domain_ms":  203.31320190429688,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  10,
+                     "ipc_wall_ms":  219.9237,
+                     "world_total_ms":  202.48689270019531,
+                     "grid_domain_ms":  202.48599243164065,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  11,
+                     "ipc_wall_ms":  217.31310000000002,
+                     "world_total_ms":  200.19039916992188,
+                     "grid_domain_ms":  200.18949890136719,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  12,
+                     "ipc_wall_ms":  214.2696,
+                     "world_total_ms":  196.93479919433591,
+                     "grid_domain_ms":  196.93341064453125,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  13,
+                     "ipc_wall_ms":  218.01590000000002,
+                     "world_total_ms":  200.3905029296875,
+                     "grid_domain_ms":  200.38969421386719,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  14,
+                     "ipc_wall_ms":  218.7209,
+                     "world_total_ms":  200.79341125488281,
+                     "grid_domain_ms":  200.79240417480469,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  15,
+                     "ipc_wall_ms":  213.4061,
+                     "world_total_ms":  195.63600158691409,
+                     "grid_domain_ms":  195.63510131835935,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  16,
+                     "ipc_wall_ms":  215.7409,
+                     "world_total_ms":  198.70039367675781,
+                     "grid_domain_ms":  198.69938659667969,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  17,
+                     "ipc_wall_ms":  229.4273,
+                     "world_total_ms":  211.5972900390625,
+                     "grid_domain_ms":  211.59640502929688,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  18,
+                     "ipc_wall_ms":  714.0326,
+                     "world_total_ms":  201.739501953125,
+                     "grid_domain_ms":  201.73858642578125,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  19,
+                     "ipc_wall_ms":  721.264,
+                     "world_total_ms":  220.12229919433591,
+                     "grid_domain_ms":  220.12060546875,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  20,
+                     "ipc_wall_ms":  712.2442,
+                     "world_total_ms":  203.14480590820313,
+                     "grid_domain_ms":  203.14369201660156,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  21,
+                     "ipc_wall_ms":  842.2414,
+                     "world_total_ms":  331.42178344726563,
+                     "grid_domain_ms":  331.4208984375,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  22,
+                     "ipc_wall_ms":  703.0961,
+                     "world_total_ms":  204.28311157226565,
+                     "grid_domain_ms":  204.28190612792969,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  23,
+                     "ipc_wall_ms":  707.5118,
+                     "world_total_ms":  202.25660705566409,
+                     "grid_domain_ms":  202.25550842285156,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  24,
+                     "ipc_wall_ms":  707.03320000000008,
+                     "world_total_ms":  205.9913024902344,
+                     "grid_domain_ms":  205.99031066894531,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  25,
+                     "ipc_wall_ms":  774.6553,
+                     "world_total_ms":  272.66827392578125,
+                     "grid_domain_ms":  272.66720581054688,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  26,
+                     "ipc_wall_ms":  330.6834,
+                     "world_total_ms":  216.75880432128903,
+                     "grid_domain_ms":  216.7579040527344,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  27,
+                     "ipc_wall_ms":  215.57750000000001,
+                     "world_total_ms":  198.54888916015625,
+                     "grid_domain_ms":  198.548095703125,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  28,
+                     "ipc_wall_ms":  205.8674,
+                     "world_total_ms":  188.672607421875,
+                     "grid_domain_ms":  188.67169189453125,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  29,
+                     "ipc_wall_ms":  216.6791,
+                     "world_total_ms":  199.75799560546875,
+                     "grid_domain_ms":  199.7572021484375,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 },
+                 {
+                     "sample":  30,
+                     "ipc_wall_ms":  216.8416,
+                     "world_total_ms":  199.75180053710935,
+                     "grid_domain_ms":  199.75079345703125,
+                     "particle_count":  495578,
+                     "backend":  "vulkan"
+                 }
+             ]
+}

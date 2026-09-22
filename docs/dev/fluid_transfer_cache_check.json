@@ -1,0 +1,306 @@
+﻿{
+    "domain":  "Grid Domain 1",
+    "dt":  0.016666666666666666,
+    "warmup":  0,
+    "samples":  1,
+    "voxel_size":  0.03267974033951759,
+    "bounds_min":  [
+                       -2.5,
+                       -2.5,
+                       -2.5
+                   ],
+    "bounds_max":  [
+                       2.5,
+                       2.5,
+                       2.5
+                   ],
+    "backend_before":  "vulkan",
+    "backend_after":  "vulkan",
+    "particles_before":  500000,
+    "particles_after":  499845,
+    "grid_domain_median_ms":  342.59820556640625,
+    "grid_domain_p90_ms":  342.59820556640625,
+    "ipc_wall_median_ms":  855.9714,
+    "ipc_wall_p90_ms":  855.9714,
+    "memory_before":  {
+                          "blas_compaction_enabled":  true,
+                          "devices":  [
+                                          {
+                                              "allocations":  6,
+                                              "backend":  "vulkan",
+                                              "categories":  {
+                                                                 "accel_struct":  {
+                                                                                      "allocations":  0,
+                                                                                      "device_local_bytes":  0,
+                                                                                      "host_bytes":  0
+                                                                                  },
+                                                                 "geometry":  {
+                                                                                  "allocations":  0,
+                                                                                  "device_local_bytes":  0,
+                                                                                  "host_bytes":  0
+                                                                              },
+                                                                 "other":  {
+                                                                               "allocations":  6,
+                                                                               "device_local_bytes":  4496,
+                                                                               "host_bytes":  0
+                                                                           },
+                                                                 "render_target":  {
+                                                                                       "allocations":  0,
+                                                                                       "device_local_bytes":  0,
+                                                                                       "host_bytes":  0
+                                                                                   },
+                                                                 "scratch":  {
+                                                                                 "allocations":  0,
+                                                                                 "device_local_bytes":  0,
+                                                                                 "host_bytes":  0
+                                                                             },
+                                                                 "texture":  {
+                                                                                 "allocations":  0,
+                                                                                 "device_local_bytes":  0,
+                                                                                 "host_bytes":  0
+                                                                             }
+                                                             },
+                                              "compaction":  {
+                                                                 "bytes_after":  0,
+                                                                 "bytes_before":  0,
+                                                                 "compacted":  0,
+                                                                 "failures":  0,
+                                                                 "skipped_skinned":  0,
+                                                                 "supported":  true
+                                                             },
+                                              "device_local_bytes":  4496,
+                                              "host_bytes":  0,
+                                              "role":  "render",
+                                              "tracked":  true
+                                          },
+                                          {
+                                              "allocations":  73,
+                                              "backend":  "vulkan",
+                                              "categories":  {
+                                                                 "accel_struct":  {
+                                                                                      "allocations":  4,
+                                                                                      "device_local_bytes":  19761920,
+                                                                                      "host_bytes":  4194304
+                                                                                  },
+                                                                 "geometry":  {
+                                                                                  "allocations":  11,
+                                                                                  "device_local_bytes":  260176,
+                                                                                  "host_bytes":  0
+                                                                              },
+                                                                 "other":  {
+                                                                               "allocations":  37,
+                                                                               "device_local_bytes":  64032928,
+                                                                               "host_bytes":  70751776
+                                                                           },
+                                                                 "render_target":  {
+                                                                                       "allocations":  16,
+                                                                                       "device_local_bytes":  148684800,
+                                                                                       "host_bytes":  0
+                                                                                   },
+                                                                 "scratch":  {
+                                                                                 "allocations":  1,
+                                                                                 "device_local_bytes":  7177216,
+                                                                                 "host_bytes":  0
+                                                                             },
+                                                                 "texture":  {
+                                                                                 "allocations":  4,
+                                                                                 "device_local_bytes":  963584,
+                                                                                 "host_bytes":  0
+                                                                             }
+                                                             },
+                                              "compaction":  {
+                                                                 "bytes_after":  39296,
+                                                                 "bytes_before":  102656,
+                                                                 "compacted":  19,
+                                                                 "failures":  0,
+                                                                 "skipped_skinned":  0,
+                                                                 "supported":  true
+                                                             },
+                                              "device_local_bytes":  240880624,
+                                              "host_bytes":  74946080,
+                                              "role":  "viewport",
+                                              "tracked":  true
+                                          }
+                                      ],
+                          "tracked_device_local_bytes":  240885120,
+                          "untracked_bytes":  827273856,
+                          "vram_budget_bytes":  12113719296,
+                          "vram_measured":  true,
+                          "vram_usage_bytes":  1068158976
+                      },
+    "memory_after":  {
+                         "blas_compaction_enabled":  true,
+                         "devices":  [
+                                         {
+                                             "allocations":  6,
+                                             "backend":  "vulkan",
+                                             "categories":  {
+                                                                "accel_struct":  {
+                                                                                     "allocations":  0,
+                                                                                     "device_local_bytes":  0,
+                                                                                     "host_bytes":  0
+                                                                                 },
+                                                                "geometry":  {
+                                                                                 "allocations":  0,
+                                                                                 "device_local_bytes":  0,
+                                                                                 "host_bytes":  0
+                                                                             },
+                                                                "other":  {
+                                                                              "allocations":  6,
+                                                                              "device_local_bytes":  4496,
+                                                                              "host_bytes":  0
+                                                                          },
+                                                                "render_target":  {
+                                                                                      "allocations":  0,
+                                                                                      "device_local_bytes":  0,
+                                                                                      "host_bytes":  0
+                                                                                  },
+                                                                "scratch":  {
+                                                                                "allocations":  0,
+                                                                                "device_local_bytes":  0,
+                                                                                "host_bytes":  0
+                                                                            },
+                                                                "texture":  {
+                                                                                "allocations":  0,
+                                                                                "device_local_bytes":  0,
+                                                                                "host_bytes":  0
+                                                                            }
+                                                            },
+                                             "compaction":  {
+                                                                "bytes_after":  0,
+                                                                "bytes_before":  0,
+                                                                "compacted":  0,
+                                                                "failures":  0,
+                                                                "skipped_skinned":  0,
+                                                                "supported":  true
+                                                            },
+                                             "device_local_bytes":  4496,
+                                             "host_bytes":  0,
+                                             "role":  "render",
+                                             "tracked":  true
+                                         },
+                                         {
+                                             "allocations":  73,
+                                             "backend":  "vulkan",
+                                             "categories":  {
+                                                                "accel_struct":  {
+                                                                                     "allocations":  4,
+                                                                                     "device_local_bytes":  19761920,
+                                                                                     "host_bytes":  4194304
+                                                                                 },
+                                                                "geometry":  {
+                                                                                 "allocations":  11,
+                                                                                 "device_local_bytes":  260176,
+                                                                                 "host_bytes":  0
+                                                                             },
+                                                                "other":  {
+                                                                              "allocations":  37,
+                                                                              "device_local_bytes":  64032928,
+                                                                              "host_bytes":  70751776
+                                                                          },
+                                                                "render_target":  {
+                                                                                      "allocations":  16,
+                                                                                      "device_local_bytes":  148684800,
+                                                                                      "host_bytes":  0
+                                                                                  },
+                                                                "scratch":  {
+                                                                                "allocations":  1,
+                                                                                "device_local_bytes":  7177216,
+                                                                                "host_bytes":  0
+                                                                            },
+                                                                "texture":  {
+                                                                                "allocations":  4,
+                                                                                "device_local_bytes":  963584,
+                                                                                "host_bytes":  0
+                                                                            }
+                                                            },
+                                             "compaction":  {
+                                                                "bytes_after":  39296,
+                                                                "bytes_before":  102656,
+                                                                "compacted":  19,
+                                                                "failures":  0,
+                                                                "skipped_skinned":  0,
+                                                                "supported":  true
+                                                            },
+                                             "device_local_bytes":  240880624,
+                                             "host_bytes":  74946080,
+                                             "role":  "viewport",
+                                             "tracked":  true
+                                         }
+                                     ],
+                         "tracked_device_local_bytes":  240885120,
+                         "untracked_bytes":  827273856,
+                         "vram_budget_bytes":  12113719296,
+                         "vram_measured":  true,
+                         "vram_usage_bytes":  1068158976
+                     },
+    "cache_before":  {
+                         "baking":  false,
+                         "budget_bytes":  4294967296,
+                         "budget_reached":  false,
+                         "cache_dir":  "",
+                         "config_signature":  17581785396529057246,
+                         "first_frame":  0,
+                         "has_range":  false,
+                         "last_frame":  0,
+                         "ram_bytes":  0,
+                         "ram_frames":  0,
+                         "valid":  false
+                     },
+    "cache_after":  {
+                        "baking":  false,
+                        "budget_bytes":  4294967296,
+                        "budget_reached":  false,
+                        "cache_dir":  "",
+                        "config_signature":  17581785396529057246,
+                        "first_frame":  0,
+                        "has_range":  false,
+                        "last_frame":  0,
+                        "ram_bytes":  0,
+                        "ram_frames":  0,
+                        "valid":  false
+                    },
+    "transfer_stats":  true,
+    "rows":  [
+                 {
+                     "sample":  1,
+                     "ipc_wall_ms":  855.9714,
+                     "world_total_ms":  342.59991455078125,
+                     "grid_domain_ms":  342.59820556640625,
+                     "particle_count":  499845,
+                     "backend":  "vulkan",
+                     "step_stats":  {
+                                        "advect_ms":  27.655099868774414,
+                                        "batch_end_calls":  14,
+                                        "batch_end_ms":  227.93229999999997,
+                                        "density_ms":  6.575500011444092,
+                                        "density_on_gpu":  true,
+                                        "dispatch_call_ms":  0.6271999999999995,
+                                        "dispatch_calls":  168,
+                                        "download_bytes":  142846140,
+                                        "download_call_ms":  1.8628999999999998,
+                                        "download_calls":  15,
+                                        "g2p_ms":  21.47369956970215,
+                                        "g2p_on_gpu":  true,
+                                        "gpu_status":  "GPU on Vulkan Simulation Compute: P2G/pressure(MGPCG)/G2P/density/advect+boundaries. Reseed topology CPU. forces GPU.",
+                                        "measured":  true,
+                                        "ok":  true,
+                                        "p2g_ms":  72.45040130615234,
+                                        "p2g_on_gpu":  true,
+                                        "particle_count":  499845,
+                                        "pressure_ms":  116.67550659179688,
+                                        "pressure_on_gpu":  true,
+                                        "resolution":  [
+                                                           153,
+                                                           153,
+                                                           153
+                                                       ],
+                                        "synchronize_calls":  2,
+                                        "synchronize_ms":  6.256900000000001,
+                                        "upload_bytes":  220103944,
+                                        "upload_call_ms":  20.8818,
+                                        "upload_calls":  20
+                                    }
+                 }
+             ]
+}
