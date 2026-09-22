@@ -193,6 +193,9 @@
     <ClInclude Include="source\include\SimFrameCompress.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\SimFrameCacheMemory.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\MeshEdit\HalfEdgeMesh.h">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClInclude>
@@ -287,6 +290,9 @@
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidParticles.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidGpuParticleUpload.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h">

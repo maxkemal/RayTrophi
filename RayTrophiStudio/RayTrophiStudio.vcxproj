@@ -443,6 +443,7 @@
     <ClInclude Include="source\include\ParticleSimulation.h" />
     <ClInclude Include="source\include\SimCache.h" />
     <ClInclude Include="source\include\SimFrameCompress.h" />
+    <ClInclude Include="source\include\SimFrameCacheMemory.h" />
     <ClInclude Include="source\include\MeshEdit\HalfEdgeMesh.h" />
     <ClInclude Include="source\include\MeshEdit\MeshTool.h" />
     <ClInclude Include="source\include\MeshEdit\MeshOperation.h" />
@@ -533,6 +534,7 @@
     <ClInclude Include="source\include\MeshEditToolDock.h" />
     <ClInclude Include="source\include\GridFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticles.h" />
+    <ClInclude Include="source\include\Fluid\FluidGpuParticleUpload.h" />
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleSolidRecovery.h" />
     <ClInclude Include="source\include\Fluid\FluidObject.h" />

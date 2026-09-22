@@ -69,6 +69,25 @@ struct ComputeDispatch {
     std::size_t constants_size = 0;
 };
 
+// ── GPU kernel timing (timestamp queries) ───────────────────────────────────
+//
+// ★★★ WHY THIS EXISTS. Once the solver stages stopped calling synchronize()
+// after every dispatch, the CPU-side timers around them stopped measuring GPU
+// work and started measuring ENQUEUE time. The symptom was a body-force row
+// reporting 0.03 ms while the work itself had simply moved into whichever later
+// row happened to synchronize. Totals stayed honest; per-stage rows became
+// incomparable, which is worse than having no rows at all because they still
+// look like a ranking. A GPU timestamp is taken by the device around the
+// dispatch itself, so it stays true no matter where the submission boundary is.
+//
+// Accumulates per kernel name across every submission while enabled; the caller
+// reads and clears. `calls` is the dispatch count that produced `ms`.
+struct GpuKernelTiming {
+    std::string kernel;
+    double      ms    = 0.0;
+    uint32_t    calls = 0;
+};
+
 struct ComputeBackendCaps {
     bool available = false;
     bool supports_async = false;
@@ -134,6 +153,23 @@ public:
     }
 
     virtual bool supportsDispatch() const { return false; }
+
+    // GPU timestamp timing. Off by default: a timestamp pair per dispatch costs
+    // a little device time and a query-pool readback per submission, so it is a
+    // diagnostic, not a permanent tax. Backends without timestamp support on
+    // the compute queue report false from supportsGpuTimestamps() and ignore
+    // the rest.
+    virtual bool supportsGpuTimestamps() const { return false; }
+    virtual void setGpuTimestampsEnabled(bool enabled) { (void)enabled; }
+    virtual bool gpuTimestampsEnabled() const { return false; }
+    virtual void resetGpuTimings() {}
+    // Returns the accumulated per-kernel table. `reset` clears the accumulator
+    // so the next call measures a fresh interval. False when unsupported.
+    virtual bool fetchGpuTimings(std::vector<GpuKernelTiming>& out, bool reset) {
+        (void)out;
+        (void)reset;
+        return false;
+    }
 };
 
 class CpuSimulationComputeBackend final : public ISimulationComputeBackend {
@@ -203,8 +239,59 @@ public:
     bool dispatch(const ComputeDispatch& cmd);
     bool supportsDispatch() const;  // true when the backend can run kernels (GPU)
 
+    bool supportsGpuTimestamps() const;
+    void setGpuTimestampsEnabled(bool enabled);
+    bool gpuTimestampsEnabled() const;
+    void resetGpuTimings();
+    bool fetchGpuTimings(std::vector<GpuKernelTiming>& out, bool reset);
+
+    struct TransferStats {
+        bool measured = false;
+        uint64_t upload_bytes = 0;
+        uint64_t download_bytes = 0;
+        uint32_t upload_calls = 0;
+        uint32_t download_calls = 0;
+        uint32_t dispatch_calls = 0;
+        uint32_t batch_end_calls = 0;
+        uint32_t synchronize_calls = 0;
+        double upload_call_ms = 0.0;
+        double download_call_ms = 0.0;
+        double dispatch_call_ms = 0.0;
+        double batch_end_ms = 0.0;
+        double synchronize_ms = 0.0;
+    };
+
+    TransferStats* setTransferProbe(TransferStats* probe);
+
 private:
     std::unique_ptr<ISimulationComputeBackend> backend_;
+    mutable TransferStats* transfer_probe_ = nullptr;
+};
+
+class SimulationTransferProbeScope {
+public:
+    SimulationTransferProbeScope(SimulationComputeContext* compute,
+                                 SimulationComputeContext::TransferStats& stats)
+        : compute_(compute) {
+        stats = {};
+        stats.measured = true;
+        if (compute_) {
+            previous_ = compute_->setTransferProbe(&stats);
+        }
+    }
+
+    ~SimulationTransferProbeScope() {
+        if (compute_) {
+            compute_->setTransferProbe(previous_);
+        }
+    }
+
+    SimulationTransferProbeScope(const SimulationTransferProbeScope&) = delete;
+    SimulationTransferProbeScope& operator=(const SimulationTransferProbeScope&) = delete;
+
+private:
+    SimulationComputeContext* compute_ = nullptr;
+    SimulationComputeContext::TransferStats* previous_ = nullptr;
 };
 
 // Implemented in the CUDA backend translation unit (SimulationComputeCuda.cu).

@@ -2,6 +2,7 @@
 #include "globals.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -199,14 +200,38 @@ bool SimulationComputeContext::uploadBuffer(ComputeBufferHandle handle,
                                             const void* data,
                                             std::size_t size_bytes,
                                             std::size_t dst_offset_bytes) {
-    return backend_->uploadBuffer(handle, data, size_bytes, dst_offset_bytes);
+    if (!transfer_probe_) {
+        return backend_->uploadBuffer(handle, data, size_bytes, dst_offset_bytes);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = backend_->uploadBuffer(handle, data, size_bytes, dst_offset_bytes);
+    if (transfer_probe_) {
+        ++transfer_probe_->upload_calls;
+        transfer_probe_->upload_bytes += size_bytes;
+        transfer_probe_->upload_call_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+    }
+    return ok;
 }
 
 bool SimulationComputeContext::downloadBuffer(ComputeBufferHandle handle,
                                               void* data,
                                               std::size_t size_bytes,
                                               std::size_t src_offset_bytes) const {
-    return backend_->downloadBuffer(handle, data, size_bytes, src_offset_bytes);
+    if (!transfer_probe_) {
+        return backend_->downloadBuffer(handle, data, size_bytes, src_offset_bytes);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = backend_->downloadBuffer(handle, data, size_bytes, src_offset_bytes);
+    if (transfer_probe_) {
+        ++transfer_probe_->download_calls;
+        transfer_probe_->download_bytes += size_bytes;
+        transfer_probe_->download_call_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+    }
+    return ok;
 }
 
 void SimulationComputeContext::beginFrame(uint64_t frame_index) {
@@ -218,7 +243,18 @@ void SimulationComputeContext::endFrame() {
 }
 
 void SimulationComputeContext::synchronize() {
+    if (!transfer_probe_) {
+        backend_->synchronize();
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
     backend_->synchronize();
+    if (transfer_probe_) {
+        ++transfer_probe_->synchronize_calls;
+        transfer_probe_->synchronize_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+    }
 }
 
 void SimulationComputeContext::beginTransferBatch() {
@@ -226,7 +262,25 @@ void SimulationComputeContext::beginTransferBatch() {
 }
 
 bool SimulationComputeContext::endTransferBatch() {
-    return backend_->endTransferBatch();
+    if (!transfer_probe_) {
+        return backend_->endTransferBatch();
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = backend_->endTransferBatch();
+    if (transfer_probe_) {
+        ++transfer_probe_->batch_end_calls;
+        transfer_probe_->batch_end_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+    }
+    return ok;
+}
+
+SimulationComputeContext::TransferStats* SimulationComputeContext::setTransferProbe(
+    TransferStats* probe) {
+    TransferStats* previous = transfer_probe_;
+    transfer_probe_ = probe;
+    return previous;
 }
 
 void* SimulationComputeContext::nativeBufferPtr(ComputeBufferHandle handle) const {
@@ -239,11 +293,42 @@ uint64_t SimulationComputeContext::bufferDeviceAddress(
 }
 
 bool SimulationComputeContext::dispatch(const ComputeDispatch& cmd) {
-    return backend_->dispatch(cmd);
+    if (!transfer_probe_) {
+        return backend_->dispatch(cmd);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = backend_->dispatch(cmd);
+    if (transfer_probe_) {
+        ++transfer_probe_->dispatch_calls;
+        transfer_probe_->dispatch_call_ms +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+    }
+    return ok;
 }
 
 bool SimulationComputeContext::supportsDispatch() const {
     return backend_->supportsDispatch();
+}
+
+bool SimulationComputeContext::supportsGpuTimestamps() const {
+    return backend_->supportsGpuTimestamps();
+}
+
+void SimulationComputeContext::setGpuTimestampsEnabled(bool enabled) {
+    backend_->setGpuTimestampsEnabled(enabled);
+}
+
+bool SimulationComputeContext::gpuTimestampsEnabled() const {
+    return backend_->gpuTimestampsEnabled();
+}
+
+void SimulationComputeContext::resetGpuTimings() {
+    backend_->resetGpuTimings();
+}
+
+bool SimulationComputeContext::fetchGpuTimings(std::vector<GpuKernelTiming>& out, bool reset) {
+    return backend_->fetchGpuTimings(out, reset);
 }
 
 void logSimulationComputeInfo(const std::string& message) {
