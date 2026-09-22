@@ -5682,5 +5682,25 @@
     "notes": "Read `measured` FIRST - every timing is 0.0 both for a free stage and for a step that never ran, so an idle domain otherwise records as a 0 ms step, which in an optimisation A/B reads as a total win. Times are HOST WALL TIME around each call, so a GPU row includes the submit/fence the host waited on; that is the cost the frame pays, not isolated kernel time, and reading it as kernel time makes a transfer-bound stage look compute-bound. cfl above 1 means the semi-Lagrangian trace jumps more than one cell per step and smears detail.",
     "tags": "simulation|gas|performance|timing|profiling|optimisation|cfl",
     "related": "particle.stats|gas.get_settings|gas.measure_plume|perf.get_gpu_memory"
+  },
+  "fluid.step_stats": {
+    "summary": "Read the last fluid step's requested GPU transfer bytes, call times, and actual GPU path",
+    "notes": "Read measured first. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters.",
+    "tags": "fluid|simulation|performance|transfer|measurement",
+    "related": "fluid.step|particle.stats|perf.get_gpu_memory"
+  },
+  "perf.gpu_kernel_timings": {
+    "summary": "Device time per compute kernel, measured by GPU timestamp queries",
+    "returns": "supported/enabled flags, total_ms and a descending kernel table (kernel, ms, calls)",
+    "tags": "perf|gpu|timing|profile|simulation|compute|read",
+    "related": "perf.set_gpu_kernel_timing|perf.get_gpu_memory|gas.step_stats",
+    "notes": "The CPU stage timers in gas.step_stats measure ENQUEUE time once the solver stages stop calling synchronize, so their per-stage rows are not comparable with each other; the work simply lands in whichever later row does synchronize. These numbers come from timestamps the device writes around each dispatch, so they stay true wherever the submission boundary falls. Off by default: enable with perf.set_gpu_kernel_timing, step the frames you want, then read with reset=true. Do not read in the same batch as the stepping that feeds it. supported=false means the compute queue has no timestamp support at all - that is absence, not a measured zero."
+  },
+  "perf.set_gpu_kernel_timing": {
+    "summary": "Turn GPU timestamp instrumentation of the simulation compute backend on or off",
+    "returns": "ok",
+    "tags": "perf|gpu|timing|profile|simulation|compute|toggle",
+    "related": "perf.gpu_kernel_timings|perf.get_gpu_memory",
+    "notes": "Writes a timestamp pair around every compute dispatch and reads the query pool back after each submission, so it is a diagnostic rather than a permanent tax. Fails when the compute queue reports no timestamp support. Toggling closes the open command buffer first so the query pool and its label list cannot fall out of step."
   }
 }

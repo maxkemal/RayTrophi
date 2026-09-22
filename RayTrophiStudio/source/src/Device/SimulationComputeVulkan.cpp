@@ -95,6 +95,7 @@ public:
         if (!initCommandPool())     return;
         if (!initDescriptorPool())  return;
         if (!initDescLayouts())     return;
+        initTimestampPool();
         loadPipelines();
         m_ready = true;
     }
@@ -110,6 +111,7 @@ public:
         for (auto& dl : m_descLayouts)
             if (dl != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, dl, nullptr);
         if (m_descPool)  vkDestroyDescriptorPool(m_device, m_descPool, nullptr);
+        if (m_queryPool) vkDestroyQueryPool(m_device, m_queryPool, nullptr);
         destroyStaging(m_stagingUp);
         destroyStaging(m_stagingDown);
         for (auto& s : m_retiredStaging) destroyStaging(s);
@@ -140,6 +142,41 @@ public:
     }
 
     bool supportsDispatch() const override { return m_ready; }
+
+    // ── GPU timestamp timing ─────────────────────────────────────────────────
+
+    bool supportsGpuTimestamps() const override { return m_timestampsSupported; }
+
+    void setGpuTimestampsEnabled(bool enabled) override {
+        if (!m_timestampsSupported) return;
+        if (m_timestampsEnabled == enabled) return;
+        // Turning instrumentation on or off mid-command-buffer would leave the
+        // pool half reset and the label list out of step with the slots. Close
+        // the submission first, then flip.
+        if (m_recording) synchronize();
+        m_timestampsEnabled = enabled;
+        m_tsCursor = 0;
+        m_tsOverflowed = false;
+        m_tsLabels.clear();
+    }
+
+    bool gpuTimestampsEnabled() const override { return m_timestampsEnabled; }
+
+    void resetGpuTimings() override { m_kernelTimes.clear(); }
+
+    bool fetchGpuTimings(std::vector<GpuKernelTiming>& out, bool reset) override {
+        if (!m_timestampsSupported) return false;
+        out.clear();
+        out.reserve(m_kernelTimes.size());
+        for (const auto& kv : m_kernelTimes)
+            out.push_back(GpuKernelTiming{kv.first, kv.second.ms, kv.second.calls});
+        std::sort(out.begin(), out.end(),
+                  [](const GpuKernelTiming& a, const GpuKernelTiming& b) {
+                      return a.ms > b.ms;
+                  });
+        if (reset) m_kernelTimes.clear();
+        return true;
+    }
 
     // ── Buffer management ─────────────────────────────────────────────────────
 
@@ -482,6 +519,11 @@ public:
         vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
         vkResetFences(m_device, 1, &m_fence);
 
+        // Read the timestamps BEFORE the command buffer is reset: resetting it
+        // does not clear the pool, but collecting here keeps the pool's lifetime
+        // reasoning in one place with the submission that wrote it.
+        if (m_timestampsEnabled) collectKernelTimestamps();
+
         vkResetCommandBuffer(m_cmdBuf, 0);
         vkResetDescriptorPool(m_device, m_descPool, 0);
         m_recording = false;
@@ -568,6 +610,13 @@ public:
         }
         vkUpdateDescriptorSets(m_device, cmd.buffer_count, writes.data(), 0, nullptr);
 
+        // ── Opening timestamp ────────────────────────────────────────────
+        // Every dispatch is followed by a full compute->compute barrier below,
+        // so by the time this one starts recording the previous kernel has
+        // already drained. TOP_OF_PIPE here therefore marks this dispatch's
+        // start rather than an overlapped predecessor's.
+        const bool ts_this_dispatch = beginKernelTimestamp(kernel);
+
         // Record pipeline bind + descriptor bind + push constants + dispatch.
         vkCmdBindPipeline(m_cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pe.pipeline);
         vkCmdBindDescriptorSets(m_cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -590,6 +639,11 @@ public:
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              0, 1, &mb, 0, nullptr, 0, nullptr);
+
+        // The closing timestamp sits AFTER the barrier on purpose: the barrier
+        // is part of what this dispatch costs the chain, and leaving it out
+        // would hide it in nobody's row.
+        if (ts_this_dispatch) endKernelTimestamp();
         return true;
     }
 
@@ -639,6 +693,31 @@ private:
 
     bool     m_ready          = false;
     bool     m_recording      = false;
+
+    // ── GPU timestamp timing ──────────────────────────────────────────────
+    //
+    // A pair of timestamps per dispatch, written into one pool that is reset at
+    // the start of every command buffer and read back after that submission's
+    // fence. The accumulator is keyed by kernel name because the solver calls
+    // the same kernel many times per step and the useful number is the total.
+    //
+    // ★ The slot cursor is per COMMAND BUFFER, not per step: synchronize() may
+    //   run several times inside one solver step (every download batch ends in
+    //   one), and each submission gets a freshly reset pool.
+    static constexpr uint32_t kTimestampSlots = 2048;  // 1024 dispatches/submit
+    VkQueryPool m_queryPool        = VK_NULL_HANDLE;
+    bool        m_timestampsSupported = false;
+    bool        m_timestampsEnabled   = false;
+    double      m_timestampPeriodNs   = 0.0;
+    uint32_t    m_tsCursor            = 0;    // next free slot in this cmdbuf
+    bool        m_tsOverflowed        = false;
+    // Kernel name per timestamp PAIR, in recording order for this cmdbuf.
+    std::vector<std::string> m_tsLabels;
+    struct KernelTimeAccum {
+        double   ms    = 0.0;
+        uint32_t calls = 0;
+    };
+    std::unordered_map<std::string, KernelTimeAccum> m_kernelTimes;
     bool     m_has_float_atomics = false;
     bool     m_has_shader_float64 = false;
 
@@ -680,6 +759,34 @@ private:
     std::vector<Staging> m_retiredStaging;
 
     // ── Initialization ────────────────────────────────────────────────────────
+
+    // Timestamps are optional: a queue family may report timestampValidBits == 0
+    // even on a device whose limits advertise a period. Checking the FAMILY (not
+    // just the device) is the part that is easy to get wrong — on a dedicated
+    // compute/transfer queue this is exactly where support disappears.
+    void initTimestampPool() {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        if (props.limits.timestampPeriod <= 0.0f) return;
+
+        uint32_t familyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &familyCount, nullptr);
+        if (m_queueFamily >= familyCount) return;
+        std::vector<VkQueueFamilyProperties> families(familyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &familyCount, families.data());
+        if (families[m_queueFamily].timestampValidBits == 0) return;
+
+        VkQueryPoolCreateInfo qi{};
+        qi.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qi.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = kTimestampSlots;
+        if (vkCreateQueryPool(m_device, &qi, nullptr, &m_queryPool) != VK_SUCCESS) {
+            m_queryPool = VK_NULL_HANDLE;
+            return;
+        }
+        m_timestampPeriodNs   = static_cast<double>(props.limits.timestampPeriod);
+        m_timestampsSupported = true;
+    }
 
     bool initCommandPool() {
         VkCommandPoolCreateInfo pi{};
@@ -928,6 +1035,8 @@ private:
             { "sim_gas_force_gather",               "sim_gas_force_gather.spv",             6, 48 },
             { "sim_particle_force_integrate",        "sim_particle_force_integrate.spv",      7, 40 },
             { "sim_gas_combustion",                 "sim_gas_combustion.spv",               4, 40 },
+            // VelocityMaxAbsGpuConstants = 4 uints = 16
+            { "sim_grid_velocity_max_abs",          "sim_grid_velocity_max_abs.spv",        4, 16 },
             { "sim_gas_scalar_dissipate",           "sim_gas_scalar_dissipate.spv",         3, 36 },
             { "sim_gas_surface_dust",               "sim_gas_surface_dust.spv",             5, 40 },
             { "sim_gas_vorticity_curl",             "sim_gas_vorticity_curl.spv",           8, 28 },
@@ -1235,6 +1344,62 @@ private:
         vkResetFences(m_device, 1, &m_fence);
     }
 
+    // Returns true when a pair was actually opened (so the caller knows to
+    // close it). Silently stops instrumenting once the pool is full rather than
+    // writing past it — an overflow must not corrupt the numbers that were
+    // already valid, and `m_tsOverflowed` records that the table is partial.
+    bool beginKernelTimestamp(const std::string& kernel) {
+        if (!m_timestampsEnabled || !m_queryPool) return false;
+        if (m_tsCursor + 2 > kTimestampSlots) {
+            m_tsOverflowed = true;
+            return false;
+        }
+        vkCmdWriteTimestamp(m_cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            m_queryPool, m_tsCursor);
+        m_tsLabels.push_back(kernel);
+        m_tsCursor += 2;
+        return true;
+    }
+
+    void endKernelTimestamp() {
+        vkCmdWriteTimestamp(m_cmdBuf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            m_queryPool, m_tsCursor - 1);
+    }
+
+    // Called after the fence in synchronize(), so the results are ready and no
+    // WAIT bit is needed. AVAILABILITY is still requested per query: a pool slot
+    // whose command was recorded but never executed (a path that returned early)
+    // would otherwise contribute a garbage delta.
+    void collectKernelTimestamps() {
+        if (!m_queryPool || m_tsCursor == 0 || m_tsLabels.empty()) {
+            m_tsCursor = 0;
+            m_tsLabels.clear();
+            return;
+        }
+        const uint32_t count = m_tsCursor;
+        std::vector<uint64_t> results(static_cast<std::size_t>(count) * 2, 0ull);
+        const VkResult qr = vkGetQueryPoolResults(
+            m_device, m_queryPool, 0, count,
+            results.size() * sizeof(uint64_t), results.data(),
+            sizeof(uint64_t) * 2,
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (qr == VK_SUCCESS || qr == VK_NOT_READY) {
+            for (std::size_t pair = 0; pair < m_tsLabels.size(); ++pair) {
+                const std::size_t b = pair * 4;       // 2 queries x (value, avail)
+                if (b + 3 >= results.size()) break;
+                if (results[b + 1] == 0ull || results[b + 3] == 0ull) continue;
+                const uint64_t t0 = results[b + 0];
+                const uint64_t t1 = results[b + 2];
+                if (t1 <= t0) continue;               // wrapped or unordered
+                auto& acc = m_kernelTimes[m_tsLabels[pair]];
+                acc.ms += static_cast<double>(t1 - t0) * m_timestampPeriodNs * 1e-6;
+                acc.calls += 1u;
+            }
+        }
+        m_tsCursor = 0;
+        m_tsLabels.clear();
+    }
+
     bool ensureRecording() {
         if (m_recording) return true;
         VkCommandBufferBeginInfo bi{};
@@ -1242,6 +1407,14 @@ private:
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(m_cmdBuf, &bi) != VK_SUCCESS) return false;
         m_recording = true;
+        // A query must be reset before it is written, and the reset has to be
+        // recorded into the same command buffer that writes it.
+        if (m_timestampsEnabled && m_queryPool) {
+            vkCmdResetQueryPool(m_cmdBuf, m_queryPool, 0, kTimestampSlots);
+            m_tsCursor = 0;
+            m_tsOverflowed = false;
+            m_tsLabels.clear();
+        }
         return true;
     }
 };

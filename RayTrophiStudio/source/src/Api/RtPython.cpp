@@ -2278,6 +2278,39 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::stepFluidSimulation(dt));
     }, py::arg("dt") = 0.0166667f);
 
+    fluid.def("step_stats", [](const std::string& domain) {
+        rtapi::FluidStepStats s;
+        requireResult(rtapi::getFluidStepStats(domain, s));
+        py::dict d;
+        d["measured"] = s.measured;
+        if (!s.measured) return d;
+        d["resolution"] = py::make_tuple(s.resolution[0], s.resolution[1], s.resolution[2]);
+        d["particle_count"] = s.particle_count;
+        d["gpu_status"] = s.gpu_status;
+        d["p2g_on_gpu"] = s.p2g_on_gpu;
+        d["pressure_on_gpu"] = s.pressure_on_gpu;
+        d["g2p_on_gpu"] = s.g2p_on_gpu;
+        d["density_on_gpu"] = s.density_on_gpu;
+        d["p2g_ms"] = s.p2g_ms;
+        d["pressure_ms"] = s.pressure_ms;
+        d["g2p_ms"] = s.g2p_ms;
+        d["advect_ms"] = s.advect_ms;
+        d["density_ms"] = s.density_ms;
+        d["upload_bytes"] = s.upload_bytes;
+        d["download_bytes"] = s.download_bytes;
+        d["upload_calls"] = s.upload_calls;
+        d["download_calls"] = s.download_calls;
+        d["dispatch_calls"] = s.dispatch_calls;
+        d["batch_end_calls"] = s.batch_end_calls;
+        d["synchronize_calls"] = s.synchronize_calls;
+        d["upload_call_ms"] = s.upload_call_ms;
+        d["download_call_ms"] = s.download_call_ms;
+        d["dispatch_call_ms"] = s.dispatch_call_ms;
+        d["batch_end_ms"] = s.batch_end_ms;
+        d["synchronize_ms"] = s.synchronize_ms;
+        return d;
+    }, py::arg("domain"));
+
     // Gas domains share the production grid-domain implementation with
     // rt.fluid, so expose the complete lifecycle/control surface under the
     // semantically correct rt.gas namespace as well.
@@ -4474,6 +4507,33 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "Also mirror completed sections into the Scene Log. Off by default.");
     perf.def("logging", [] { return rtapi::perfLogging(); },
        "Whether Scene Log mirroring is on.");
+    perf.def("gpu_kernel_timings", [](bool reset) {
+        const rtapi::GpuKernelTimingReport r = rtapi::gpuKernelTimings(reset);
+        py::list kernels;
+        for (const auto& k : r.kernels) {
+            py::dict kd;
+            kd["kernel"] = k.kernel;
+            kd["ms"] = k.ms;
+            kd["calls"] = k.calls;
+            kernels.append(kd);
+        }
+        py::dict out;
+        // ★ `supported` false means the compute queue has no timestamps. That is
+        //   ABSENCE, not a measured zero — an empty kernel list under
+        //   supported=false says nothing about what the GPU did.
+        out["supported"] = r.supported;
+        out["enabled"] = r.enabled;
+        out["total_ms"] = r.total_ms;
+        out["kernels"] = kernels;
+        return out;
+    }, py::arg("reset") = false,
+       "Device time per compute kernel since the last reset, descending. Unlike "
+       "the CPU stage rows this stays true when stages stop synchronizing.");
+    perf.def("set_gpu_kernel_timing", [](bool enabled) {
+        requireResult(rtapi::setGpuKernelTiming(enabled));
+    }, py::arg("enabled"),
+       "Make the simulation compute backend write timestamps around each "
+       "dispatch. Off by default.");
     perf.def("get_gpu_memory", [] {
         const rtapi::GpuMemoryReport r = rtapi::gpuMemoryReport();
         py::list devices;

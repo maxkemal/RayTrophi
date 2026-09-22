@@ -298,6 +298,13 @@ uint32_t requiredCapabilities(const std::string& method) {
     // and means a profile CURVE. Two unrelated meanings of one word in one
     // method table is a reading trap, not a naming preference.
     if (method == "perf.reset" || method == "perf.set_logging") return Read;
+    // GPU kernel timing: a pure diagnostic pair. Reading returns an accumulator
+    // and the toggle only makes the compute backend write timestamps around its
+    // own dispatches — it changes no scene, render or file state. Named here
+    // rather than left to the substring heuristics because neither name ends in
+    // .get/.list and "set_" would otherwise read as a mutator.
+    if (method == "perf.gpu_kernel_timings" ||
+        method == "perf.set_gpu_kernel_timing") return Read;
     // Changes how the NEXT acceleration structures are allocated: a render
     // setting, not a diagnostic toggle. (perf.get_gpu_memory is Read via .get.)
     if (method == "perf.set_blas_compaction") return Render;

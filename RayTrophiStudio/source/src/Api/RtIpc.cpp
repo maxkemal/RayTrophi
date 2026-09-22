@@ -4118,6 +4118,30 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"devices", devices}};
         });
     }
+    // Enqueued for the same reason as get_gpu_memory: it reaches into the
+    // simulation's compute backend, which a scene teardown can replace.
+    if (method == "perf.gpu_kernel_timings") {
+        const bool reset = params.value("reset", false);
+        return enqueueQuery([reset](UIContext&) {
+            const rtapi::GpuKernelTimingReport r = rtapi::gpuKernelTimings(reset);
+            json kernels = json::array();
+            for (const auto& k : r.kernels) {
+                kernels.push_back(json{{"kernel", k.kernel},
+                                       {"ms", k.ms},
+                                       {"calls", k.calls}});
+            }
+            return json{{"supported", r.supported},
+                        {"enabled", r.enabled},
+                        {"total_ms", r.total_ms},
+                        {"kernels", kernels}};
+        });
+    }
+    if (method == "perf.set_gpu_kernel_timing") {
+        const bool enabled = requireBool(params, "enabled");
+        return enqueueResult([enabled](UIContext&) {
+            return rtapi::setGpuKernelTiming(enabled);
+        });
+    }
     if (method == "perf.set_blas_compaction") {
         const bool enabled = requireBool(params, "enabled");
         return enqueueResult([enabled](UIContext&) {
@@ -5465,6 +5489,41 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"integrate_ms", info.integrate_ms},
                         {"self_collision_ms", info.self_collision_ms},
                         {"grid_domain_ms", info.grid_domain_ms}};
+        });
+    }
+    if (method == "fluid.step_stats") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::FluidStepStats s;
+            auto r = rtapi::getFluidStepStats(domain, s);
+            if (!r.ok) return json{{"ok", false}, {"error", r.error}};
+            json j{{"ok", true}, {"measured", s.measured}};
+            if (!s.measured) return j;
+            j["resolution"] = json::array({s.resolution[0], s.resolution[1], s.resolution[2]});
+            j["particle_count"] = s.particle_count;
+            j["gpu_status"] = s.gpu_status;
+            j["p2g_on_gpu"] = s.p2g_on_gpu;
+            j["pressure_on_gpu"] = s.pressure_on_gpu;
+            j["g2p_on_gpu"] = s.g2p_on_gpu;
+            j["density_on_gpu"] = s.density_on_gpu;
+            j["p2g_ms"] = s.p2g_ms;
+            j["pressure_ms"] = s.pressure_ms;
+            j["g2p_ms"] = s.g2p_ms;
+            j["advect_ms"] = s.advect_ms;
+            j["density_ms"] = s.density_ms;
+            j["upload_bytes"] = s.upload_bytes;
+            j["download_bytes"] = s.download_bytes;
+            j["upload_calls"] = s.upload_calls;
+            j["download_calls"] = s.download_calls;
+            j["dispatch_calls"] = s.dispatch_calls;
+            j["batch_end_calls"] = s.batch_end_calls;
+            j["synchronize_calls"] = s.synchronize_calls;
+            j["upload_call_ms"] = s.upload_call_ms;
+            j["download_call_ms"] = s.download_call_ms;
+            j["dispatch_call_ms"] = s.dispatch_call_ms;
+            j["batch_end_ms"] = s.batch_end_ms;
+            j["synchronize_ms"] = s.synchronize_ms;
+            return j;
         });
     }
     if (method == "gas.step_stats") {

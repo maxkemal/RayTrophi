@@ -1744,6 +1744,11 @@ Result measureGasPlume(const std::string& domain_id_or_name,
     // name can exist on a runtime that has never run.
     const RayTrophiSim::SimulationGridDomainState* state = nullptr;
     const RayTrophiSim::SimulationGridDomainDesc* desc = nullptr;
+    // ★ The owning runtime and index are kept too: the pressure field is no
+    // longer downloaded every step, so measuring it means asking the runtime
+    // that holds the device buffer, not reading the state's host vector.
+    RayTrophiSim::ParticleSimulationSystem* owner = nullptr;
+    std::size_t owner_index = 0;
     auto consider = [&](RayTrophiSim::ParticleSimulationSystem& sys) {
         const auto& domains = sys.gridDomains();
         const auto& states = sys.gridDomainStates();
@@ -1753,6 +1758,8 @@ Result measureGasPlume(const std::string& domain_id_or_name,
             if (desc && !live) continue;
             desc = &domains[i];
             state = live ? &states[i] : nullptr;
+            owner = live ? &sys : nullptr;
+            owner_index = i;
             if (live) return true;
         }
         return false;
@@ -1867,13 +1874,30 @@ Result measureGasPlume(const std::string& domain_id_or_name,
     // Pressure field shape (see GasPlumeMeasurement: a projection multiplier,
     // not pascals). Swept over the WHOLE domain, not just the active cells: the
     // rarefaction behind a shock sits in air the density threshold rejects.
-    if (grid.pressure.size() == cells) {
-        float pmin = grid.pressure[0], pmax = grid.pressure[0];
+    //
+    // ★★★ THE GATE USED TO BE `grid.pressure.size() == cells` AND THAT WAS A
+    // LIE WAITING TO HAPPEN. The vector stays allocated for the life of the
+    // domain, so the size test answers "the field is here" about storage, not
+    // about content. Now that the solver keeps pressure on the device, the host
+    // vector would have passed that test while holding whatever was left from
+    // the last step that happened to read it back — and pressure_measured
+    // would have said true over it.
+    //
+    // Ask the runtime instead: it consults the ledger and either hands back the
+    // current host copy or pulls the device one. A failure leaves
+    // pressure_measured false, which is the honest answer.
+    std::vector<float> pressure;
+    if (owner &&
+        owner->downloadGasPressureField(owner_index,
+                                        g_ctx->scene.simulation_world.compute(),
+                                        pressure) &&
+        pressure.size() == cells) {
+        float pmin = pressure[0], pmax = pressure[0];
         int pmin_j = 0;
         for (int k = 0; k < nz; ++k)
             for (int j = 0; j < ny; ++j)
                 for (int i = 0; i < nx; ++i) {
-                    const float pv = grid.pressure[grid.cellIndex(i, j, k)];
+                    const float pv = pressure[grid.cellIndex(i, j, k)];
                     if (pv < pmin) { pmin = pv; pmin_j = j; }
                     if (pv > pmax) pmax = pv;
                 }

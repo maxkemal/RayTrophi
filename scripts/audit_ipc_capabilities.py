@@ -89,6 +89,11 @@ def required(method, namespaces):
     # a Scene Log mirror), so the C++ classifies them Read explicitly.
     if method in ("perf.reset", "perf.set_logging"):
         return "Read"
+    # GPU kernel timing: a diagnostic pair. Neither name ends in .get/.list and
+    # "set_" would otherwise read as a mutator, so both are named explicitly on
+    # both sides of this mirror.
+    if method in ("perf.gpu_kernel_timings", "perf.set_gpu_kernel_timing"):
+        return "Read"
     if method == "perf.set_blas_compaction":
         return "Render"
     if method == "spline.animation.self_test":

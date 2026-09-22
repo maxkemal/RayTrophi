@@ -1,0 +1,72 @@
+// sim_grid_velocity_max_abs.comp - max |v| over the three MAC face arrays.
+//
+// ***** THIS KERNEL EXISTS TO STOP A DOWNLOAD, NOT TO SAVE ARITHMETIC.
+//
+// The host analysis scan computed max_speed and the CFL number from the host
+// copies of vel_x/y/z. That was ~9-12 ms of OpenMP work, which looked like the
+// whole cost - but it was also the ONLY per-step reason the velocity field had
+// to come home at all. MEASURED 2026-09-22: that readback is 85 MB per step,
+// several times what the scan itself costs. The scan was not an 11 ms item; it
+// was the gate on an 85 MB one.
+//
+// ** FLOAT MAX VIA UINT ATOMICS, AND IT IS EXACT, NOT AN APPROXIMATION.
+// For non-negative IEEE-754 floats the bit pattern is monotonically ordered as
+// an unsigned integer, so atomicMax on floatBitsToUint(abs(v)) gives exactly
+// the same answer as a float comparison. Every value here is an abs(), so the
+// negative half of the encoding (which is ordered backwards) never appears.
+// This matters because float atomics are an OPTIONAL Vulkan feature and uint
+// atomics are core: the CPU fallback this replaces must not come back on a
+// device that merely lacks VK_EXT_shader_atomic_float.
+//
+// ** The output is NOT cleared here. Clearing it from inside the kernel would
+// race with the workgroups that already reduced into it. The host zeroes the
+// single uint before dispatching.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint count_x;    // vel_x elements = (nx+1)*ny*nz
+    uint count_y;    // vel_y elements = nx*(ny+1)*nz
+    uint count_z;    // vel_z elements = nx*ny*(nz+1)
+    uint total;      // count_x + count_y + count_z
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer VelX { float vel_x[]; };
+layout(set = 0, binding = 1) readonly buffer VelY { float vel_y[]; };
+layout(set = 0, binding = 2) readonly buffer VelZ { float vel_z[]; };
+layout(set = 0, binding = 3)          buffer Out  { uint  max_abs_bits[]; };
+
+shared uint s_max[256];
+
+void main() {
+    // One flat index space over the three arrays: the face counts differ per
+    // axis, so dispatching per-array would mean three dispatches and three
+    // barriers for one number.
+    uint id = gl_GlobalInvocationID.x;
+    float v = 0.0;
+    if (id < pc.total) {
+        if (id < pc.count_x) {
+            v = abs(vel_x[id]);
+        } else if (id < pc.count_x + pc.count_y) {
+            v = abs(vel_y[id - pc.count_x]);
+        } else {
+            v = abs(vel_z[id - pc.count_x - pc.count_y]);
+        }
+    }
+
+    uint lane = gl_LocalInvocationID.x;
+    s_max[lane] = floatBitsToUint(v);
+    barrier();
+
+    // Tree reduction inside the workgroup first, so the whole dispatch performs
+    // one atomic per 256 elements instead of one per element.
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            s_max[lane] = max(s_max[lane], s_max[lane + stride]);
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        atomicMax(max_abs_bits[0], s_max[0]);
+    }
+}

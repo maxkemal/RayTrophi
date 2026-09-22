@@ -1964,6 +1964,39 @@ Result perfReset();
 Result perfSetLogging(bool enabled);
 bool perfLogging();
 
+// -- GPU kernel timing: what the solver actually spends on the device ---------
+//
+// ★★★ THE ROWS ABOVE MEASURE THE CPU, AND FOR THE SIMULATION THAT STOPPED
+// BEING THE SAME THING. When the gas chain became device-resident the stages
+// stopped calling synchronize(), so a host timer around a stage now measures
+// how long it took to ENQUEUE that stage, not how long the GPU spent on it.
+// The work does not disappear — it is billed to whichever later stage happens
+// to synchronize. The observed shape was a body-force row reading 0.03 ms while
+// the pressure row grew by the same amount, which reads like a ranking and is
+// not one.
+//
+// These numbers come from timestamps the DEVICE writes around each dispatch,
+// so they stay true wherever the submission boundary falls. Keyed by kernel
+// name and summed over every dispatch since the last reset.
+//
+// ★ Off by default. Enable, step the frames you care about, then read with
+//   reset=true. Do NOT read in the same batch as the frame that feeds it: the
+//   counter you read would be the previous interval's.
+struct GpuKernelTime {
+    std::string kernel;
+    double   ms = 0.0;      // total device time since the last reset
+    uint32_t calls = 0;     // dispatches that produced `ms`
+};
+struct GpuKernelTimingReport {
+    bool supported = false;   // false = the compute queue has no timestamps,
+                              // which is ABSENCE, not "measured zero"
+    bool enabled = false;
+    std::vector<GpuKernelTime> kernels;  // descending by ms
+    double total_ms = 0.0;
+};
+GpuKernelTimingReport gpuKernelTimings(bool reset);
+Result setGpuKernelTiming(bool enabled);
+
 // -- GPU memory: who holds the VRAM ------------------------------------------
 //
 // *** The driver's number (vram_usage_bytes) is process-wide: with a dedicated
@@ -3186,6 +3219,35 @@ struct ParticleStatsInfo {
     float self_collision_ms = 0.0f;
     float grid_domain_ms = 0.0f;
 };
+
+struct FluidStepStats {
+    bool measured = false;
+    int resolution[3] = {0, 0, 0};
+    std::size_t particle_count = 0;
+    std::string gpu_status;
+    bool p2g_on_gpu = false;
+    bool pressure_on_gpu = false;
+    bool g2p_on_gpu = false;
+    bool density_on_gpu = false;
+    float p2g_ms = 0.0f;
+    float pressure_ms = 0.0f;
+    float g2p_ms = 0.0f;
+    float advect_ms = 0.0f;
+    float density_ms = 0.0f;
+    uint64_t upload_bytes = 0;
+    uint64_t download_bytes = 0;
+    uint32_t upload_calls = 0;
+    uint32_t download_calls = 0;
+    uint32_t dispatch_calls = 0;
+    uint32_t batch_end_calls = 0;
+    uint32_t synchronize_calls = 0;
+    double upload_call_ms = 0.0;
+    double download_call_ms = 0.0;
+    double dispatch_call_ms = 0.0;
+    double batch_end_ms = 0.0;
+    double synchronize_ms = 0.0;
+};
+Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& out);
 
 // ★★★ THE GAS STEP'S STAGE BREAKDOWN, which existed only in the panel.
 //
