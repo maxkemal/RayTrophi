@@ -10,6 +10,52 @@
 
 ---
 
+## IPC'ye nasıl bağlanılır (önce bu)
+
+Uygulama açıksa yerel pipe zaten kalkmıştır; **token gerekmez** (kimlik
+doğrulaması yalnız uzak/TLS istekleri için).
+
+```powershell
+# 1. Açık mı?
+Test-Path '\\.\pipe\RayTrophiStudio'         # True olmalı
+
+# 2. Değilse başlat (IPC hazır olunca "HAZIR" der)
+.\scripts\ipc\Start-RayTrophi.ps1
+
+# 3. Modülü yükle ve çağır
+Import-Module .\scripts\ipc\RtIpc.psm1 -Force
+Invoke-RtIpc agent.discover @{}
+Invoke-RtIpc gas.list_domains @{}
+Invoke-RtIpc particle.stats @{}
+```
+
+`Invoke-RtIpc <metot> @{ parametre = değer }` — sonuç PowerShell nesnesi olarak
+döner, `| ConvertTo-Json -Depth 5` ile bakılır.
+
+**Hangi metot var:**
+```powershell
+Invoke-RtIpc agent.list_methods @{ domain = 'fluid' }   # alan alan liste
+Invoke-RtIpc agent.describe     @{ method = 'fluid.step' }
+```
+`agent.discover @{ domain = ... }` filtre uygulamaz — alan filtresi için
+`agent.list_methods` kullan.
+
+★ **Türkçe locale tuzağı:** çıktıda ondalık **virgül** görünür (`0,063`).
+Karşılaştırma veya eşik kontrolü yaparken `[double]` çevir, string karşılaştırma.
+
+★★ **Sayacı yazdığın çağrıyla aynı partide okuma.** Bir ayarı yazıp hemen
+sayacı okursan **önceki** durumu ölçersin; araya bir kare koy
+(`timeline.set_frame`).
+
+★★★ **Script testi kare döngüsüne kördür.** `physics.step` gibi çağrılar
+uygulama kendi karesini işlerken geri alınabilir. Çözücüyü ilerletmek için
+`timeline.set_frame` kullan — o gerçekten çözücüleri sürüyor.
+
+⚠ Script'ler **iki yerde** yaşıyor: `scripts/...` ve `x64/Release/scripts/...`.
+Uygulama ikincisinden okur; yalnız ilkini güncellemek eski scripti koşturur.
+
+---
+
 ## 0. Nerede duruyoruz
 
 3.4M hücreli gaz domain'i (130×200×130), Vulkan compute, RTX-sınıfı GPU.

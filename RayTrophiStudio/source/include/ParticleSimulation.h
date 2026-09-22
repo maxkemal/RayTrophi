@@ -12,6 +12,7 @@
 #include "GridFluidSolver.h"   // GridFluid::GasSolverStats (gas step telemetry)
 #include "VolumeShader.h"
 #include "SimulationWorld.h"
+#include "SimulationCompute.h"
 
 #include <memory>
 #include <atomic>
@@ -966,6 +967,7 @@ struct SimulationGridDomainState {
     // Fluid-only runtime state. Empty for Gas domains.
     Fluid::FluidParticles particles;
     Fluid::APICSolverStats fluid_stats;
+    SimulationComputeContext::TransferStats fluid_transfer_stats;
     // Whitewater secondary particles (spray/foam/bubbles). Render-only — never
     // fed back into the pressure solve, so it cannot affect liquid mass.
     Fluid::FoamParticles foam;
@@ -1143,11 +1145,11 @@ struct SimulationGridDomainComputeBuffers {
         device_current = 0;
         host_current = ~0u;
     }
-    // True when some field only exists on the device, i.e. a host stage may not
-    // run until it has been brought back.
-    bool anyDeviceOnly() const {
-        return (device_current & ~host_current) != 0u;
-    }
+    // ★ `anyDeviceOnly()` USED TO LIVE HERE AND WAS REMOVED, not left unused.
+    // Pressure and divergence are device-only by design now, so it answered
+    // "something is stale" unconditionally. A predicate that can only return
+    // one value is worse than no predicate: it reads like a test. Ask
+    // hostHasCurrent(field) about the field you actually need.
 
     // Per-block density maximum consumed by the RT volume march. Sized from the
     // block resolution, which is tracked separately from the cell resolution so
@@ -1170,6 +1172,25 @@ struct SimulationGridDomainComputeBuffers {
     // source draws down. Tiny next to a field - 68 KB at this resolution -
     // which is why it is round-tripped every step instead of tracked.
     ComputeBufferHandle gas_surface_dust_supply;
+    // ── max |v| reduced on the device ────────────────────────────────────────
+    //
+    // ★★★ THIS ONE FLOAT IS WHAT KEEPS 85 MB AT HOME. max_speed and the CFL
+    // number were the last per-step reason the velocity field had to be
+    // downloaded; the host scan that produced them looked like a ~10 ms item
+    // and was actually the gate on the largest transfer in the step.
+    //
+    // Stored as the raw uint bit pattern because the kernel reduces with
+    // atomicMax on uints (exact for non-negative floats, and uint atomics are
+    // core Vulkan where float atomics are an extension).
+    ComputeBufferHandle gas_velocity_max_abs;
+    // Host mirror, filled by the end-of-step readback. NEGATIVE means NOT
+    // MEASURED this step - the host must then fall back to its own scan rather
+    // than report 0.0, which would read as "the gas has stopped".
+    float gas_velocity_max_abs_host = -1.0f;
+    // True only when THIS step actually dispatched the reduction. Separate from
+    // the value above because "the kernel ran" and "the result is home" are two
+    // different facts, and the readback sits several stages later.
+    bool gas_velocity_max_abs_valid = false;
     int gas_active_block_count = -1;
     ComputeBufferHandle scratch_vel_x;
     ComputeBufferHandle scratch_vel_y;
@@ -1290,6 +1311,7 @@ struct SimulationGridDomainComputeBuffers {
     // Jacobi preconditioner remains the fallback.
     std::vector<SimulationGridDomainMGLevelBuffers> mg_levels;
     std::size_t fluid_particle_capacity = 0;
+    std::size_t fluid_uploaded_particle_count = 0;
     int resolution_x = 0;
     int resolution_y = 0;
     int resolution_z = 0;
@@ -1989,6 +2011,20 @@ public:
                                 const SimulationComputeContext& compute,
                                 std::vector<float>& density_out,
                                 std::vector<float>& temperature_out) const;
+    /// Pull a gas domain's pressure field home ON DEMAND.
+    ///
+    /// ★★★ WHY THIS EXISTS: pressure stopped being downloaded every step. It
+    /// has exactly one reader, gas.measure_plume, and that runs when an agent
+    /// asks — so paying 28 MB per step to keep it warm meant the solver funded
+    /// a question nobody was asking. The ledger is what makes the pull safe: it
+    /// knows whether the host copy is current or the device holds the only one.
+    ///
+    /// Returns false rather than zeros when the field cannot be produced. The
+    /// caller MUST propagate that as "not measured": a pressure field of zeros
+    /// reads as a perfectly uniform domain, which is a physical claim.
+    bool downloadGasPressureField(std::size_t domain_index,
+                                  const SimulationComputeContext& compute,
+                                  std::vector<float>& pressure_out) const;
     const SimulationGpuFoamRenderBuffer* gridDomainFoamRenderBuffer(std::size_t domain_index) const;
     void setGridDomainStates(const std::vector<SimulationGridDomainState>& states); // timeline cache restore
     SimulationGridDomainDesc& addGridDomain(const SimulationGridDomainDesc& desc);

@@ -3,6 +3,7 @@
 #include "Fluid/FluidLevelSet.h"   // buildSubstanceViscosityField
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/GranularGpuDispatch.h"
+#include "Fluid/FluidGpuParticleUpload.h"
 
 #include "GridFluidSolver.h"
 #include "globals.h"
@@ -1372,6 +1373,17 @@ struct GridVelocityDissipationGpuConstants {
     float max_velocity = 0.0f;
 };
 
+// sim_grid_velocity_max_abs: the three MAC face counts plus their sum, so the
+// kernel can walk one flat index space over arrays of three different lengths.
+struct VelocityMaxAbsGpuConstants {
+    uint32_t count_x = 0u;
+    uint32_t count_y = 0u;
+    uint32_t count_z = 0u;
+    uint32_t total = 0u;
+};
+static_assert(sizeof(VelocityMaxAbsGpuConstants) == 16,
+              "sim_grid_velocity_max_abs push-constant ABI changed");
+
 struct GasInjectionGpuConstants {
     int nx = 0;
     int ny = 0;
@@ -1726,10 +1738,15 @@ void splatFluidDensityCPU(SimulationGridDomainState& state, const Fluid::APICSol
 bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
                                    SimulationComputeContext* compute,
                                    SimulationGridDomainComputeBuffers& gpu_buffers,
-                                   bool upload_positions_only = false) {
+                                   bool upload_positions_only = false,
+                                   bool reuse_current_upload = false) {
     const std::size_t particle_count = state.particles.size();
     if (!compute || particle_count == 0) {
         return false;
+    }
+    if (reuse_current_upload &&
+        FluidGpuParticleUpload::canReuse(gpu_buffers, *compute, particle_count)) {
+        return true;
     }
 
     const ComputeBufferUsage usage = ComputeBufferUsage::Storage |
@@ -1742,6 +1759,7 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
     if (!gpu_buffers.fluid_positions.valid() ||
         gpu_buffers.fluid_positions.backend != compute->backendType() ||
         gpu_buffers.fluid_particle_capacity < particle_count) {
+        FluidGpuParticleUpload::invalidate(gpu_buffers);
         // Flow emitters change the live particle count frequently. Allocating
         // these buffers at the exact count made every growth destroy/recreate
         // all three streams; a transient allocation/upload failure then sent
@@ -1804,7 +1822,7 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
         return false;
     }
 
-    // One batched submission for all three particle streams (on Vulkan each
+    // One batched submission for all four particle streams (on Vulkan each
     // separate uploadBuffer is a queue submit + fence wait). Consumers that
     // only read positions (density splat after advection) skip the velocity +
     // affine streams — ~80% of the per-call upload volume.
@@ -1824,7 +1842,10 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
                                    state.particles.mass_fraction.data(),
                                    particle_count * sizeof(float));
     }
-    return compute->endTransferBatch() && ok;
+    const bool uploaded = compute->endTransferBatch() && ok;
+    FluidGpuParticleUpload::record(
+        gpu_buffers, particle_count, upload_positions_only, uploaded);
+    return uploaded;
 }
 
 bool runGpuFluidParticleIntegrateForces(SimulationGridDomainState& state,
@@ -2175,7 +2196,8 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
                     SimulationGridDomainComputeBuffers& gpu_buffers,
                     const Fluid::APICSolverParams& fluid_params,
                     float dt,
-                    bool upload_granular_state = true) {
+                    bool upload_granular_state = true,
+                    bool reuse_particle_inputs = false) {
     auto& grid = state.grid;
     const std::size_t particle_count = state.particles.size();
     if (!compute || !compute->supportsDispatch() || particle_count == 0 ||
@@ -2184,7 +2206,8 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         return false;
     }
     const auto p2g_phase0 = SimulationClock::now();
-    if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers)) {
+    if (!ensureGpuFluidParticleBuffers(
+            state, compute, gpu_buffers, false, reuse_particle_inputs)) {
         return false;
     }
     const bool granular = fluid_params.granular_enabled;
@@ -4401,14 +4424,37 @@ bool hostGasStepIsNoOp(const FluidSim::FluidGrid& grid,
 bool gasSyncGridToHost(SimulationComputeContext* compute,
                        SimulationGridDomainComputeBuffers& buffers,
                        FluidSim::FluidGrid& grid) {
-    if (!buffers.anyDeviceOnly()) {
-        return true;
-    }
+    // ★ NOT `anyDeviceOnly()` ANY MORE. Pressure and divergence are now
+    // permanently device-only by design, so that blunt test would answer "yes,
+    // something is stale" on every call and never let the fast path fire again.
+    // The question this function actually needs to ask is about the PUBLISHED
+    // fields, which is what the loop below already decides per entry - so the
+    // early-out is gone rather than left to always miss. An empty batch costs
+    // nothing: endTransferBatch only submits when a download was recorded.
     struct Entry {
         GasGridField field;
         ComputeBufferHandle handle;
         std::vector<float>* data;
     };
+    // ***** THIS TABLE IS THE PUBLICATION SET, NOT THE FIELD LIST.
+    //
+    // A field belongs here when a HOST stage reads it OR WRITES it. The second
+    // half of that sentence cost a broken build: a read-modify-write does not
+    // look like a read, so the flow-source deposit's
+    // `value += (target - value) * blend` on the MAC faces never showed up in a
+    // search for consumers - and velocity was removed from this list on the
+    // strength of that search.
+    //
+    // Pressure and divergence are out and they stay out, for a different
+    // reason: runGpuPressureProjection COLD-STARTS both (std::fill to zero)
+    // before every solve, so no host write to them can survive to matter, and
+    // the only reader left, gas.measure_plume, pulls on demand through
+    // downloadGasPressureField. 56 MB a step.
+    //
+    // ★ A GasSyncScope enum briefly split this into "host solver" and
+    // "publication" lists. It was removed rather than kept: once velocity had
+    // to be in both, the two lists were identical, and a distinction that does
+    // not distinguish reads like a safeguard while being none.
     const Entry entries[] = {
         { GasGridField::VelX,        buffers.vel_x,       &grid.vel_x },
         { GasGridField::VelY,        buffers.vel_y,       &grid.vel_y },
@@ -4417,12 +4463,12 @@ bool gasSyncGridToHost(SimulationComputeContext* compute,
         { GasGridField::Temperature, buffers.temperature, &grid.temperature },
         { GasGridField::Fuel,        buffers.fuel,        &grid.fuel },
         { GasGridField::Interaction, buffers.interaction, &grid.interaction },
-        { GasGridField::Pressure,    buffers.pressure,    &grid.pressure },
-        { GasGridField::Divergence,  buffers.divergence,  &grid.divergence },
     };
+    const std::size_t entry_count = sizeof(entries) / sizeof(entries[0]);
     bool ok = true;
     if (compute) compute->beginTransferBatch();
-    for (const Entry& e : entries) {
+    for (std::size_t idx = 0; idx < entry_count; ++idx) {
+        const Entry& e = entries[idx];
         if (buffers.hostHasCurrent(e.field)) continue;
         if (e.data->empty()) {
             // A channel that is switched off has no host storage. Nothing to
@@ -4433,7 +4479,28 @@ bool gasSyncGridToHost(SimulationComputeContext* compute,
         ok = gasEnsureOnHost(compute, buffers, e.field, e.handle, e.data->data(),
                              e.data->size() * sizeof(float)) && ok;
     }
+    // ★ The reduced max |v| rides THIS batch rather than getting a readback of
+    // its own. Four bytes cost nothing to move; what costs is the submit and
+    // fence that a separate download would force, and this batch already pays
+    // one. A four-byte transfer with its own drain would have been a worse
+    // trade than the 85 MB it replaced.
+    uint32_t max_abs_bits = 0u;
+    bool max_abs_requested = false;
+    if (compute && buffers.gas_velocity_max_abs_valid &&
+        buffers.gas_velocity_max_abs.valid()) {
+        max_abs_requested = compute->downloadBuffer(
+            buffers.gas_velocity_max_abs, &max_abs_bits, sizeof(uint32_t));
+    }
     if (compute && !compute->endTransferBatch()) ok = false;
+    if (max_abs_requested && ok) {
+        float value = 0.0f;
+        std::memcpy(&value, &max_abs_bits, sizeof(float));
+        // The kernel reduced abs() values, so a negative decode means the bits
+        // were never written - report NOT MEASURED instead of a speed.
+        buffers.gas_velocity_max_abs_host = (value >= 0.0f) ? value : -1.0f;
+    } else {
+        buffers.gas_velocity_max_abs_host = -1.0f;
+    }
     if (!ok) {
         // Half a sync is worse than none: force every later stage to upload
         // from the host copy rather than trust a partial readback.
@@ -4598,16 +4665,18 @@ bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
     // Pressure can produce a face larger than the pre-projection clamp allowed,
     // or propagate a non-finite value, and the next advection would smear it
     // across the grid - so this pass is not optional. It used to run on the
-    // HOST (sanitizeProjectedVelocity) immediately after the readback below:
-    // a serial scan of vel_x/y/z, ~10.3M floats, and it was billed into
-    // gpu_publish_ms rather than to a row of its own.
+    // HOST (sanitizeProjectedVelocity) over vel_x/y/z, ~10.3M floats, billed
+    // into gpu_publish_ms rather than to a row of its own.
     //
-    // ** HERE IT COSTS NO TRANSFER AT ALL. The velocity is already on the
-    // device and about to be downloaded anyway, so inserting the dispatch
-    // BEFORE the readback replaces a full host sweep with a kernel on data
-    // that has not moved. factor = 1.0 makes the existing dissipate kernel a
-    // pure clamp+scrub; it already zeroes NaN/Inf before clamping, which is
-    // exactly what the host version did and in the same order.
+    // ** HERE IT COSTS NO TRANSFER AT ALL, and since this batch there is no
+    // readback in this function at all - the velocity simply stays where it
+    // already is. factor = 1.0 makes the existing dissipate kernel a pure
+    // clamp+scrub; it already zeroes NaN/Inf before clamping, which is exactly
+    // what the host version did and in the same order.
+    //
+    // ★ It must stay BEFORE the max |v| reduction below: reducing first would
+    // report a peak that the clamp then removes, so the panel's max_speed and
+    // CFL would describe a velocity field that never existed.
     GridVelocityDissipationGpuConstants sanitize;
     sanitize.nx = grid.nx;
     sanitize.ny = grid.ny;
@@ -4624,40 +4693,118 @@ bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
     sanitize_cmd.constants_size = sizeof(sanitize);
     sanitize_cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
     ok = ok && compute->dispatch(sanitize_cmd);
+
+    // ***** max |v| IS REDUCED HERE, WHERE THE VELOCITY IS FINAL.
+    //
+    // The host analysis scan used to compute it from the downloaded faces. That
+    // scan was the LAST per-step consumer of host velocity, so as long as it
+    // existed the 85 MB readback below could not be removed no matter how
+    // device-resident the rest of the chain became. One kernel and four bytes
+    // replace it.
+    //
+    // ★ The output must be zeroed BEFORE the reduction, and from the host: a
+    // kernel that cleared its own target would race the workgroups that had
+    // already reduced into it. This upload rides the projection's existing
+    // batch, so it records a copy and a barrier, not a submission.
+    bool max_abs_dispatched = false;
+    if (ok && gpu_buffers.gas_velocity_max_abs.valid()) {
+        const uint32_t zero = 0u;
+        compute->beginTransferBatch();
+        bool clear_ok = compute->uploadBuffer(gpu_buffers.gas_velocity_max_abs,
+                                              &zero, sizeof(uint32_t));
+        clear_ok = compute->endTransferBatch() && clear_ok;
+        if (clear_ok) {
+            VelocityMaxAbsGpuConstants max_abs;
+            max_abs.count_x = static_cast<uint32_t>(grid.vel_x.size());
+            max_abs.count_y = static_cast<uint32_t>(grid.vel_y.size());
+            max_abs.count_z = static_cast<uint32_t>(grid.vel_z.size());
+            max_abs.total = max_abs.count_x + max_abs.count_y + max_abs.count_z;
+            ComputeBufferHandle max_abs_buffers[4] = {
+                buffers[0], buffers[1], buffers[2],
+                gpu_buffers.gas_velocity_max_abs
+            };
+            ComputeDispatch max_abs_cmd;
+            max_abs_cmd.kernel = "sim_grid_velocity_max_abs";
+            max_abs_cmd.buffers = max_abs_buffers;
+            max_abs_cmd.buffer_count = 4;
+            max_abs_cmd.constants = &max_abs;
+            max_abs_cmd.constants_size = sizeof(max_abs);
+            max_abs_cmd.groups.groups_x = (max_abs.total + 255u) / 256u;
+            max_abs_dispatched = compute->dispatch(max_abs_cmd);
+        }
+    }
+    // NOT MEASURED is a distinct state from "zero speed". The host mirror stays
+    // negative until the end-of-step readback fills it, and the analysis scan
+    // falls back to its own sweep when it is.
+    gpu_buffers.gas_velocity_max_abs_host = -1.0f;
+    gpu_buffers.gas_velocity_max_abs_valid = max_abs_dispatched;
+
+    // ***** VELOCITY AND PRESSURE STILL COME HOME. DIVERGENCE DOES NOT.
+    //
+    // ★★★★★ THE FIRST ATTEMPT REMOVED ALL THREE AND BROKE THE SIM, AND THE
+    // REASON IS WORTH MORE THAN THE OPTIMISATION WAS.
+    //
+    // The search was for host READERS of each field, and it was thorough: the
+    // analysis scan (replaced by the reduction above), gas.measure_plume
+    // (pulls on demand now), the frame cache (downloads its own copy). Every
+    // reader was accounted for, so the readback looked dead.
+    //
+    // It was not, because the host also WRITES these fields. The flow-source
+    // deposit does
+    //
+    //     float& value = grid.velXAt(x, y, z);
+    //     value += (resolved.velocity.x - value) * blend;
+    //
+    // and the same for grid.pressure - a READ-MODIFY-WRITE, which makes the
+    // host a consumer without ever appearing in a search for consumers. With
+    // the field left on the device, the deposit blended into a stale host copy
+    // and the step-start invalidateDeviceCopies() then published that stale
+    // copy over the device's projected velocity. Every step. The symptom was
+    // not a crash: the plume grew for a few frames, stalled, and restarted
+    // small, with total density down 12x.
+    //
+    // ★★ THE RULE THIS COST: "no host reader" IS NOT "no host consumer". A
+    // read-modify-write is a read. Search for writes to the field as well, and
+    // treat `+=` on a host array as proof that the host must hold the current
+    // value.
+    //
+    // ★ VELOCITY COMES BACK. PRESSURE AND DIVERGENCE DO NOT, and the reason is
+    // fifty lines above this one: THIS FUNCTION COLD-STARTS BOTH.
+    //
+    //     std::fill(grid.pressure.begin(),   grid.pressure.end(),   0.0f);
+    //     std::fill(grid.divergence.begin(), grid.divergence.end(), 0.0f);
+    //
+    // Whatever the host deposit added to grid.pressure is erased by that fill
+    // before the solver ever sees it, so the host copy's CONTENT cannot matter
+    // to the next step - only velocity's can. Pressure has one reader left,
+    // gas.measure_plume, which pulls it on demand.
+    //
+    // 28 MB (divergence) + 28 MB (pressure) stay on the device; the 85 MB of
+    // velocity is the price of the deposit still being a host stage. Moving
+    // that deposit onto the device (sim_gas_injection already does this work)
+    // is what would buy it back.
     compute->synchronize();
 
     compute->beginTransferBatch();
     ok = ok &&
          compute->downloadBuffer(buffers[0], grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
          compute->downloadBuffer(buffers[1], grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
-         compute->downloadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float)) &&
-         compute->downloadBuffer(buffers[3], grid.pressure.data(), grid.pressure.size() * sizeof(float)) &&
-         compute->downloadBuffer(buffers[4], grid.divergence.data(), grid.divergence.size() * sizeof(float));
+         compute->downloadBuffer(buffers[2], grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
     ok = compute->endTransferBatch() && ok;
+
     // The CPU grid remains authoritative until the complete gas step is chained
     // on persistent device buffers. Do not advertise residency after a readback:
     // later stages must upload the freshly projected CPU values.
     gpu_buffers.gpu_resident_fields_valid = false;
+
     // ***** A READBACK IS THE ONE MOMENT THE TWO COPIES AGREE.
-    //
-    // These two flags were being set together and they do not mean the same
-    // thing:
     //
     //   gpu_resident_fields_valid = "the DEVICE copy is authoritative"
     //   the ledger bit            = "the device copy EQUALS the host copy"
     //
     // After a download the first is false - the host is authoritative again -
     // but the second is TRUE, and that is exactly what the ledger exists to
-    // record. Clearing it here made every stage re-upload fields the previous
-    // stage had just handed back, which is why converting velocity advection to
-    // the ledger measured as no gain at all: NINE of the fifteen invalidate
-    // sites sat directly after a readback and wiped the ledger before the next
-    // stage could read it.
-    //
-    // MEASURED 2026-09-21: a kernel that never leaves the device
-    // (sim_gas_majorant) moves 25.8 MB in 0.202 ms = 125 GB/s. The
-    // round-tripping stages manage 4.7-7.3 GB/s on the same GPU in the same
-    // step. That gap is this line.
+    // record.
     //
     // * The ok/else guard is repeated at every site rather than hoisted: a
     // failed batch leaves the host copy half written, so neither side may be
@@ -4666,10 +4813,18 @@ bool runGpuPressureProjection(FluidSim::FluidGrid& grid,
         gasNoteDownloaded(gpu_buffers, GasGridField::VelX);
         gasNoteDownloaded(gpu_buffers, GasGridField::VelY);
         gasNoteDownloaded(gpu_buffers, GasGridField::VelZ);
-        gasNoteDownloaded(gpu_buffers, GasGridField::Pressure);
-        gasNoteDownloaded(gpu_buffers, GasGridField::Divergence);
+        // ★★★ AND THESE TWO MUST BE MARKED, NOT JUST LEFT ALONE. The step
+        // began with invalidateDeviceCopies(), which says "the host is current
+        // for everything". If the solve leaves that standing, the host copy of
+        // pressure - still holding this step's cold-start ZEROS - counts as
+        // current, and gas.measure_plume would report a perfectly uniform
+        // pressure field with pressure_measured = true. A field of zeros is a
+        // physical claim, and a plausible one.
+        gpu_buffers.markDeviceWrote(GasGridField::Pressure);
+        gpu_buffers.markDeviceWrote(GasGridField::Divergence);
     } else {
         gpu_buffers.invalidateDeviceCopies();
+        gpu_buffers.gas_velocity_max_abs_valid = false;
     }
     return ok;
 }
@@ -4757,7 +4912,19 @@ bool runGpuVelocityAdvection(FluidSim::FluidGrid& grid,
             result_base = 6;
         }
     }
-    compute->synchronize();
+
+    // ***** AND THE SYNCHRONIZE THAT SERVED IT IS GONE TOO. MEASURED 2026-09-22:
+    // this row read 33.97 ms while its two kernels cost 4.38 ms on the device.
+    // The 29 ms difference was this one call: it submitted the command buffer
+    // and blocked until the GPU had drained EVERYTHING outstanding, for the
+    // sole purpose of making a download valid - and that download was deleted
+    // in the batch below without deleting the wait that existed to serve it.
+    //
+    // ★★★ THE GENERAL SHAPE: removing a readback leaves its barrier behind,
+    // and the leftover barrier is invisible because it is not wrong, only
+    // pointless. Nothing fails, the numbers stay correct, and the stage keeps
+    // billing time nobody can explain. Whenever a download is deleted, look
+    // immediately above it for the synchronize that only existed for it.
 
     // ***** THE READBACK THAT USED TO FOLLOW THIS IS GONE.
     //
@@ -7658,35 +7825,50 @@ ParticleSimulationSystem::captureGridDomainStatesForCache(
     for (std::size_t i = 0; i < count; ++i) {
         auto& state = snapshot[i];
         const auto& buffers = grid_domain_compute_buffers_[i];
+        // ***** THE GATE ASKS THE LEDGER NOW, NOT gpu_resident_fields_valid.
+        //
+        // That flag means "the RENDER fields are device-authoritative", which
+        // is a narrower claim than "the host copy of every field is stale". It
+        // was an adequate gate only while the step brought velocity home every
+        // frame: when it was false, the host copy was fresh anyway. Since this
+        // batch the step leaves velocity on the device, so a false flag would
+        // make the snapshot keep a velocity field several steps old - and a
+        // cached frame with stale velocity does not fail, it resumes slightly
+        // wrong when you scrub back to it.
         if (!state.valid ||
             state.type != SimulationDomainType::Gas ||
-            buffers.backend != ComputeBackendType::VulkanCompute ||
-            !buffers.gpu_resident_fields_valid) {
+            buffers.backend != ComputeBackendType::VulkanCompute) {
             continue;
         }
 
-        auto download = [&](ComputeBufferHandle handle,
+        // ★ And per FIELD, because the ledger can answer per field. The step's
+        // publication sync already brought the four scalars home, so copying
+        // them back out of the device is ~113 MB of pure repetition on every
+        // cached frame.
+        auto download = [&](SimulationGridDomainComputeBuffers::GridField field,
+                            ComputeBufferHandle handle,
                             std::vector<float>& destination) {
-            return destination.empty() ||
-                   (handle.valid() &&
-                    compute.downloadBuffer(
-                        handle,
-                        destination.data(),
-                        destination.size() * sizeof(float)));
+            if (destination.empty()) return true;
+            if (buffers.hostHasCurrent(field)) return true;
+            return handle.valid() &&
+                   compute.downloadBuffer(handle,
+                                          destination.data(),
+                                          destination.size() * sizeof(float));
         };
 
         // Cache snapshots must own the authoritative GPU fields. Download into
         // the COPY, not the live state, so the zero-copy simulation/render path
         // remains resident and the next solve does not upload the snapshot back.
+        using CacheField = SimulationGridDomainComputeBuffers::GridField;
         compute.beginTransferBatch();
         bool ok =
-            download(buffers.vel_x, state.grid.vel_x) &&
-            download(buffers.vel_y, state.grid.vel_y) &&
-            download(buffers.vel_z, state.grid.vel_z) &&
-            download(buffers.density, state.grid.density) &&
-            download(buffers.temperature, state.grid.temperature) &&
-            download(buffers.fuel, state.grid.fuel) &&
-            download(buffers.interaction, state.grid.interaction);
+            download(CacheField::VelX, buffers.vel_x, state.grid.vel_x) &&
+            download(CacheField::VelY, buffers.vel_y, state.grid.vel_y) &&
+            download(CacheField::VelZ, buffers.vel_z, state.grid.vel_z) &&
+            download(CacheField::Density, buffers.density, state.grid.density) &&
+            download(CacheField::Temperature, buffers.temperature, state.grid.temperature) &&
+            download(CacheField::Fuel, buffers.fuel, state.grid.fuel) &&
+            download(CacheField::Interaction, buffers.interaction, state.grid.interaction);
         ok = compute.endTransferBatch() && ok;
         if (!ok) {
             // Preserve the pre-existing snapshot as a safe fallback. Its
@@ -7838,6 +8020,55 @@ bool ParticleSimulationSystem::downloadGasDenseFields(
     }
     density_out.swap(density);
     temperature_out.swap(temperature);
+    return true;
+}
+
+bool ParticleSimulationSystem::downloadGasPressureField(
+    std::size_t domain_index,
+    const SimulationComputeContext& compute,
+    std::vector<float>& pressure_out) const {
+    if (domain_index >= grid_domain_states_.size() ||
+        domain_index >= grid_domain_compute_buffers_.size()) {
+        return false;
+    }
+    const auto& state = grid_domain_states_[domain_index];
+    const auto& buffers = grid_domain_compute_buffers_[domain_index];
+    if (!state.valid || state.type != SimulationDomainType::Gas) return false;
+    if (!buffers.pressure.valid()) return false;
+
+    // ★ The ledger decides where the current copy is, NOT the vector's size.
+    // grid.pressure stays allocated whether or not it holds this step's values,
+    // so asking `size() == cells` would answer "present" about a field the
+    // device overwrote ten stages ago.
+    const std::size_t cells =
+        static_cast<std::size_t>(state.resolution_x) *
+        static_cast<std::size_t>(state.resolution_y) *
+        static_cast<std::size_t>(state.resolution_z);
+    if (cells == 0) return false;
+
+    // ★★★ THE DEVICE COPY IS PREFERRED, NOT THE HOST ONE. Asking
+    // hostHasCurrent() first looks equivalent and is not: the step begins with
+    // invalidateDeviceCopies(), which sets the host bit for EVERY field, so a
+    // question arriving mid-step would be answered from grid.pressure - and
+    // grid.pressure at that moment holds the projection's cold-start ZEROS.
+    // A uniform zero pressure field is a plausible-looking physical claim.
+    using PressureField = SimulationGridDomainComputeBuffers::GridField;
+    const bool device_has_it = buffers.deviceHasCurrent(PressureField::Pressure);
+    if (!device_has_it) {
+        if (!buffers.hostHasCurrent(PressureField::Pressure)) return false;
+        if (state.grid.pressure.size() != cells) return false;
+        pressure_out = state.grid.pressure;
+        return true;
+    }
+    if (buffers.backend != ComputeBackendType::VulkanCompute) return false;
+
+    std::vector<float> pressure(cells, 0.0f);
+    if (!compute.downloadBuffer(buffers.pressure, pressure.data(), cells * sizeof(float))) {
+        // A failed read is not a measured field. The caller must leave its
+        // pressure_measured flag false rather than report these zeros.
+        return false;
+    }
+    pressure_out.swap(pressure);
     return true;
 }
 
@@ -8047,6 +8278,11 @@ void ParticleSimulationSystem::setGridDomainStates(const std::vector<SimulationG
     for (auto& buffers : grid_domain_compute_buffers_) {
         buffers.gpu_resident_fields_valid = false;
         buffers.invalidateDeviceCopies();
+        // The reduced max |v| describes the frame we just scrubbed AWAY from.
+        // Clearing it to the not-measured sentinel makes the next scan fall
+        // back to the host sweep for one step rather than report the old speed.
+        buffers.gas_velocity_max_abs_valid = false;
+        buffers.gas_velocity_max_abs_host = -1.0f;
         buffers.fluid_combustion_state_needs_reset = true;
     }
 }
@@ -9747,10 +9983,16 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         if (state.type == SimulationDomainType::Fluid) {
             if (state.particles.empty()) {
                 state.fluid_stats = Fluid::APICSolverStats{};
+                state.fluid_transfer_stats = {};
                 // Nothing to push, but the delta must not survive to ambush the
                 // first particles that arrive later.
                 state.domain_motion_delta = Vec3(0.0f, 0.0f, 0.0f);
                 continue;
+            }
+            SimulationTransferProbeScope fluid_transfer_probe(
+                context.compute, state.fluid_transfer_stats);
+            if (i < grid_domain_compute_buffers_.size()) {
+                FluidGpuParticleUpload::invalidate(grid_domain_compute_buffers_[i]);
             }
             auto fluid_params = (i < grid_domains_.size())
                 ? grid_domains_[i].fluid_params
@@ -10184,7 +10426,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                                                      gpu_buffers,
                                                                      step_params,
                                                                      dt,
-                                                                     !granular_state_resident);
+                                                                     !granular_state_resident,
+                                                                     granular_substep == 0);
                         if (step_params.p2g_precomputed &&
                             granular_state_can_stay_resident)
                             granular_state_resident = true;
@@ -11443,6 +11686,16 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // step instead. Same bytes, once, after the device is finished.
         const bool host_step_is_no_op =
             gpu_buffers && hostGasStepIsNoOp(state.grid, params);
+        // ★★★ RESET BEFORE THE STEP, NOT AFTER IT. The reduction is dispatched
+        // inside the pressure projection, and the projection does not always
+        // run (skip_pressure_projection, or a chain that fell back). Leaving
+        // the flag set would let the end-of-step readback collect LAST step's
+        // number and report it as this step's max_speed - one frame stale,
+        // entirely plausible-looking, and invisible in a still image.
+        if (gpu_buffers) {
+            gpu_buffers->gas_velocity_max_abs_valid = false;
+            gpu_buffers->gas_velocity_max_abs_host = -1.0f;
+        }
         if (host_step_is_no_op) {
             // The row would otherwise keep reporting the last step that really
             // ran, which reads as "the host solver still costs 6 ms".
@@ -11697,7 +11950,17 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         }
     }
 
-    for (auto& state : grid_domain_states_) {
+    // ★ Indexed, not a range-for: the analysis scan needs this domain's compute
+    // buffers to read the device-reduced max |v|, and those live in a parallel
+    // vector. A range-for gave no way to reach them.
+    for (std::size_t analysis_index = 0;
+         analysis_index < grid_domain_states_.size();
+         ++analysis_index) {
+        auto& state = grid_domain_states_[analysis_index];
+        const SimulationGridDomainComputeBuffers* analysis_buffers =
+            (analysis_index < grid_domain_compute_buffers_.size())
+                ? &grid_domain_compute_buffers_[analysis_index]
+                : nullptr;
         if (!state.valid) {
             continue;
         }
@@ -11889,10 +12152,29 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 }
                 return result;
             };
-            const float max_abs_face =
-                std::max(parallelMaxAbs(state.grid.vel_x),
-                         std::max(parallelMaxAbs(state.grid.vel_y),
-                                  parallelMaxAbs(state.grid.vel_z)));
+            // ***** THE DEVICE ANSWER FIRST, AND IT IS NOT AN APPROXIMATION.
+            //
+            // sim_grid_velocity_max_abs reduces the same abs() over the same
+            // faces; max is order-independent, so the two agree bit for bit.
+            // What differs is what it costs: the host version needs the whole
+            // velocity field at home, and MEASURED 2026-09-22 that readback was
+            // 85 MB per step - several times the ~10 ms the scan itself takes.
+            //
+            // ★★★ A NEGATIVE MIRROR MEANS NOT MEASURED, NOT ZERO SPEED. Zero
+            // would set cfl to 0 and read as a gas that has stopped moving,
+            // which is a physical claim and a plausible-looking one. Falling
+            // back to the host sweep is correct but slow; that is the right way
+            // round for a value the panel shows.
+            float max_abs_face = -1.0f;
+            if (analysis_buffers &&
+                analysis_buffers->gas_velocity_max_abs_host >= 0.0f) {
+                max_abs_face = analysis_buffers->gas_velocity_max_abs_host;
+            } else {
+                max_abs_face =
+                    std::max(parallelMaxAbs(state.grid.vel_x),
+                             std::max(parallelMaxAbs(state.grid.vel_y),
+                                      parallelMaxAbs(state.grid.vel_z)));
+            }
             state.gas_stats.max_speed = max_abs_face;
             const float h = state.grid.voxel_size > 1e-6f ? state.grid.voxel_size : 1.0f;
             state.gas_stats.cfl = max_abs_face * dt / h;
@@ -12844,6 +13126,8 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.gas_emissive_list);
     destroy(buffers.gas_active_blocks);
     destroy(buffers.gas_surface_dust_supply);
+    destroy(buffers.gas_velocity_max_abs);
+    buffers.gas_velocity_max_abs_host = -1.0f;
     buffers.gas_emissive_valid = false;
     buffers.gas_majorant_dim[0] = 0;
     buffers.gas_majorant_dim[1] = 0;
@@ -12896,6 +13180,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     buffers.resolution_y = 0;
     buffers.resolution_z = 0;
     buffers.fluid_particle_capacity = 0;
+    FluidGpuParticleUpload::invalidate(buffers);
     buffers.backend = ComputeBackendType::CPU;
 }
 
@@ -12991,6 +13276,12 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
                             static_cast<std::size_t>(std::max(1, grid.nx)) *
                                 static_cast<std::size_t>(std::max(1, grid.nz)) *
                                 sizeof(float),
+                            render_field_usage);
+        // One uint: the reduced max |v| bit pattern. Sized independently of the
+        // grid so a resize never reallocates it.
+        ensureComputeBuffer(compute, buffers.gas_velocity_max_abs,
+                            "GridDomainGasVelocityMaxAbs",
+                            sizeof(uint32_t),
                             render_field_usage);
         ensureComputeBuffer(compute, buffers.gas_active_blocks,
                             "GridDomainGasActiveBlocks",

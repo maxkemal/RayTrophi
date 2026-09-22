@@ -1410,6 +1410,22 @@ static const MethodDescriptor desc_fluid_step = {
 };
 static const MethodRegistration reg_fluid_step(desc_fluid_step);
 
+static const MethodParam params_fluid_step_stats[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_step_stats = {
+    "fluid.step_stats", "fluid",
+    "Read the last fluid step's requested GPU transfer bytes, call times, and actual GPU path",
+    "Read measured first. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters.",
+    "write", "SceneWrite", false, "any",
+    "fluid|step|stats|simulation|performance|transfer|measurement",
+    "fluid.step|particle.stats|perf.get_gpu_memory",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_step_stats, 1,
+    true
+};
+static const MethodRegistration reg_fluid_step_stats(desc_fluid_step_stats);
+
 static const MethodParam params_forcefield_create[] = {
     {"type", "string", true, "", nullptr, nullptr},
     {"name", "string", false, "", "", nullptr},
@@ -4409,6 +4425,22 @@ static const MethodDescriptor desc_perf_get_gpu_memory = {
 };
 static const MethodRegistration reg_perf_get_gpu_memory(desc_perf_get_gpu_memory);
 
+static const MethodParam params_perf_gpu_kernel_timings[] = {
+    {"reset", "bool", false, "", "false", nullptr},
+};
+static const MethodDescriptor desc_perf_gpu_kernel_timings = {
+    "perf.gpu_kernel_timings", "perf",
+    "Device time per compute kernel, measured by GPU timestamp queries",
+    "The CPU stage timers in gas.step_stats measure ENQUEUE time once the solver stages stop calling synchronize, so their per-stage rows are not comparable with each other; the work simply lands in whichever later row does synchronize. These numbers come from timestamps the device writes around each dispatch, so they stay true wherever the submission boundary falls. Off by default: enable with perf.set_gpu_kernel_timing, step the frames you want, then read with reset=true. Do not read in the same batch as the stepping that feeds it. supported=false means the compute queue has no timestamp support at all - that is absence, not a measured zero.",
+    "read", "Read", false, "supported/enabled flags, total_ms and a descending kernel table (kernel, ms, calls)",
+    "perf|gpu|kernel|timings|timing|profile|simulation|compute|read",
+    "perf.set_gpu_kernel_timing|perf.get_gpu_memory|gas.step_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_perf_gpu_kernel_timings, 1,
+    true
+};
+static const MethodRegistration reg_perf_gpu_kernel_timings(desc_perf_gpu_kernel_timings);
+
 static const MethodDescriptor desc_perf_list = {
     "perf.list", "perf",
     "List every recorded build/render timing section, newest write first",
@@ -4450,6 +4482,22 @@ static const MethodDescriptor desc_perf_set_blas_compaction = {
     true
 };
 static const MethodRegistration reg_perf_set_blas_compaction(desc_perf_set_blas_compaction);
+
+static const MethodParam params_perf_set_gpu_kernel_timing[] = {
+    {"enabled", "bool", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_perf_set_gpu_kernel_timing = {
+    "perf.set_gpu_kernel_timing", "perf",
+    "Turn GPU timestamp instrumentation of the simulation compute backend on or off",
+    "Writes a timestamp pair around every compute dispatch and reads the query pool back after each submission, so it is a diagnostic rather than a permanent tax. Fails when the compute queue reports no timestamp support. Toggling closes the open command buffer first so the query pool and its label list cannot fall out of step.",
+    "read", "Read", false, "ok",
+    "perf|set|gpu|kernel|timing|profile|simulation|compute|toggle",
+    "perf.gpu_kernel_timings|perf.get_gpu_memory",
+    nullptr, nullptr, nullptr, nullptr,
+    params_perf_set_gpu_kernel_timing, 1,
+    true
+};
+static const MethodRegistration reg_perf_set_gpu_kernel_timing(desc_perf_set_gpu_kernel_timing);
 
 static const MethodParam params_perf_set_logging[] = {
     {"enabled", "bool", true, "", nullptr, nullptr},
