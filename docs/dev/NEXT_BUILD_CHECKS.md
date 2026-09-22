@@ -173,23 +173,86 @@ CPU projeksiyonu çalışır. Log'da `falling back` ara.
 
 ---
 
+## ★★★★★ ÇÖZÜNÜRLÜKLE ÖLÇEKLEME — sıradakileri okumadan önce bu
+
+Bu notta ölçülen her rakam **7 054 336 hücrelik** bir sahneden geliyor.
+Koddaki `MAX_GRID_DOMAIN_CELLS_HARD_CAP` **134 217 728** (512³), yani bugünkü
+sahnenin **19 katı**. Bu bölüm var çünkü "şu an küçük görünen kalem" ile
+"önemsiz kalem" aynı şey değil ve bu ayrımı yapmayan bir öncelik listesi
+çözünürlük büyüdüğünde sessizce yanlış olur — bu notun fizik referans tablosuna
+olan tam olarak buydu.
+
+### Transferler hücreyle DOĞRUSAL
+
+| kalem | B/hücre | bugün 7,05M | 256³ = 16,8M | **512³ = 134M** |
+|---|---|---|---|---|
+| bu partide kaldırılan (pressure+divergence) | 8 | 56 MB / 8,6 ms | 134 MB / 20,3 ms | **1 074 MB / 163 ms** |
+| kalan hız geri okuması | 12 | 85 MB / 12,8 ms | 201 MB / 30,5 ms | **1 611 MB / 244 ms** |
+| projeksiyonun yüklediği SIFIRLAR | 8 | 56 MB / 8,6 ms | 134 MB / 20,3 ms | **1 074 MB / 163 ms** |
+
+(6,6 GB/s ölçülen round-trip bant genişliğinde.)
+
+★★ **Ve round-trip ile cihazda kalmak arasındaki oran 19 kat:** cihazdan
+çıkmayan bir kernel (`sim_gas_majorant`) aynı GPU'da **125 GB/s** ölçüldü,
+round-trip yapan aşamalar **4,7–7,3 GB/s**. Yani **round-trip'ten kurtardığın
+her bayt, kernel işinden kurtardığın ~19 bayta bedeldir.**
+
+### Host RAM de aynı eğride
+
+`grid.pressure` + `grid.divergence` = 8 B/hücre ve **bu partiden sonra GPU
+yolunda hiç okunmuyorlar**: bugün 56 MB, 512³'te **1,07 GB**. Aşağıdaki 1.
+madde (sıfırlamayı cihaza taşımak) yapılırsa bu iki vektör **tembel** hale
+gelebilir — yalnız CPU fallback'i çalışırsa ayrılır. Fizik değişmeden 1 GB.
+
+Canlı ızgaranın kendisi 35,4 B/hücre (panel: 249,3 MB / 7,05M) → 512³'te tek
+kare için **4,75 GB**.
+
+### ★★★ ÇÖZÜCÜ İSE DAHA DİK ÖLÇEKLENİYOR — ve sıralama yer değiştiriyor
+
+"Bugün MGPCG'nin ödül tavanı adımın %21'i" **yalnız bu çözünürlükte** doğru.
+
+SOR'un maliyeti hücreyle doğrusal, ama **gereken süpürme sayısı domainin
+DOĞRUSAL boyutuyla** büyüyor: bilgi süpürme başına bir hücre ilerler. Bugün
+256 hücre yüksekliğinde 40 süpürme kullanıyoruz, yani zaten yakınsamamış —
+basınç taramasında `meanT`'nin N=80'de bile tırmanması bunun kanıtı. Yakınsamayı
+sabit tutmak istersen maliyet ~N⁴ gider.
+
+166 → 512 doğrusal boyutta 3,1 kat:
+
+- **transferler ~19 kat** (hücreyle doğrusal)
+- **SOR ~90 kat** (hücre × süpürme sayısı)
+
+⚠ **Yani öncelik sırası çözünürlüğün fonksiyonu:** bugün transfer baskın,
+cap'te çözücü baskın. Bir sonraki ajan "SOR adımın %21'i, boş ver" diye okumasın
+— o cümle 7M hücre için yazıldı.
+
+Sıra yine de transferden başlıyor, iki sebeple: ölçülmüş ve bugün de pahalılar,
+ve yukarıdaki 19 kat oran her bir baytı çözücü işinden daha değerli yapıyor.
+
+---
+
 ## Sıradaki
 
-1. **★★★ Projeksiyon her adım 56 MB SIFIR yüklüyor.** `std::fill(pressure, 0)`
+1. **★★★ Projeksiyon her adım 8 B/hücre SIFIR yüklüyor.** `std::fill(pressure, 0)`
    + `std::fill(divergence, 0)` host'ta yapılıp ikisi de `uploadBuffer` ile
    gönderiliyor. Cihaz tarafı bir temizleme (ya da `sim_gas_divergence`'ın zaten
    her hücreyi yazdığı doğrulanırsa divergence için hiçbir şey) bunu bedavaya
    indirir. **Bu partide bulundu, bilerek yapılmadı** — bozuk bir derlemenin
    üstüne ikinci bir değişiklik koymamak için.
-2. **Hızın kalan 85 MB'ı** ancak flow-source depoziti cihaza taşınırsa gider.
-   `sim_gas_injection` bu işi zaten yapıyor; `injectFlowSourcesIntoGridDomains`
-   o yola bağlanmalı. Asıl kaldıraç bu.
+   ★ Devamı: bu yapılınca host `pressure`/`divergence` vektörleri tembel
+   ayrılabilir (yukarıdaki RAM bölümü).
+2. **Hızın 12 B/hücre'si** ancak flow-source depoziti cihaza taşınırsa gider.
+   Engel bir okuyucu değil, bir **read-modify-write**: depozit host dizisinde
+   `value += (target - value) * blend` yapıyor. `sim_gas_injection` bu işi zaten
+   cihazda yapıyor; `injectFlowSourcesIntoGridDomains` o yola bağlanmalı.
+   **Tek kalemde en büyük kaldıraç.**
 3. Kernel-dışı kütleyi böl: `Probe-GpuKernelTime.ps1`'in `Unaccounted` satırı.
    Transfer mi, fence mi, submit mi — ayrılmadı. Mevcut `TransferStats` sondası
    (`synchronize_calls`, `synchronize_ms`, `batch_end_ms`) gaz adımına
    bağlanırsa tek ölçümle çıkar.
-4. **Ancak kernel-dışı kütle küçüldükten sonra** SOR baskın olur; MGPCG kararı o
-   noktada. Bugün ödülün tavanı adımın ~%21'i.
+4. **MGPCG.** Bugünkü sahnede tavan adımın ~%21'i, ama yukarıdaki ölçekleme
+   bölümüne bak: yüksek ızgarada baskın terim bu olur. Karar çözünürlükle
+   birlikte verilmeli, tek bir ölçümle değil.
 5. VRAM muhasebesine `simulation` kategorisi.
 
 Devir notu: `docs/dev/GAZ_DERSLERI_VE_FLUID_DEVRI.md`.
