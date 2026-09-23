@@ -292,7 +292,218 @@ Ham veriler: `fluid_transfer_153cube_500k.json` (önce) ve
 koşusu `fluid_transfer_153cube_500k_reuse.json` emitterin 250.000'den
 500.000'e doluşunu içerir; sabit yük süre karşılaştırmasına katılmadı.
 
+### İkinci kesinti: FLIP ön-anlık görüntüsünü cihazda kopyalama
+
+P2G üç MAC hız alanını GPU'da üretip CPU'ya indiriyor. `Fluid::step` bunların
+P2G sonrası, boundary öncesi halini FLIP için CPU'da kopyalıyor. Split-step
+çağrısı sırasında GPU hız tamponları değişmediğinden FLIP scratch tamponlarına
+aynı alanları CPU üzerinden tekrar yüklemek gereksiz. 153³ gridde üç yüz
+alanının toplamı **43.259.832 bayt = 41,26 MiB/adım**.
+
+Vulkan GPU P2G başarılıysa `FluidGpuFlipSnapshot.h`, mevcut
+`sim_fluid_cg_copy` kernelini üç yüz boyutuyla çağırır. GPU P2G çalışmadıysa,
+backend Vulkan değilse veya kopyalama başarısızsa eski CPU snapshot yüklemesi
+kullanılır. Basınç aşaması kaynak hız tamponlarını yeniden yükleyebildiği için
+kopyalardan sonra açık senkronizasyon vardır; bu ek submit/fence maliyeti süre
+ölçümünde görülecek. Yeni shader veya solver aritmetiği eklenmedi.
+
+**Sonraki kullanıcı derlemesinden sonra ölçüm hedefi**, aynı 500.000 parçacık,
+153³, `flip_blend > 0` sahnesinde host → GPU baytının 188.105.804'ten
+**144.845.972**'ye, upload çağrısının 16'dan **13**'e ve batch bitişinin
+13'ten **12**'ye inmesidir. Üç yeni GPU dispatch ve bir explicit sync
+beklenir. Download baytı **142.846.140** kalmalı. Bu yalnız aktarım
+beklentisidir; süre ve görsel/fizik davranışı yeni derlemede ayrıca ölçülecek.
+
+### İkinci kesinti sonrası canlı ölçüm (2026-09-22)
+
+Kullanıcının yeni derlemesinde aynı 153³ Vulkan sahnesi 500.000 parçacığa
+ilerletildi, ardından sabit parçacık sayısıyla 30 adım ölçüldü. Karşılaştırma
+önceki `fluid_transfer_153cube_500k_reuse_steady.json` ve yeni
+`fluid_transfer_153cube_flipcopy_steady.json` verilerindendir.
+
+| Sayaç, 30 sabit adım | FLIP host upload | GPU kopyası |
+|---|---:|---:|
+| Host → GPU | 188.105.804 bayt | 144.845.972 bayt |
+| Upload çağrısı | 16 | 13 |
+| GPU → host | 142.846.140 bayt | 142.846.140 bayt |
+| Dispatch çağrısı | 168 | 171 |
+| Batch bitişi | 13 | 12 |
+| Explicit sync | 2 | 3 |
+| `grid_domain_ms` medyan | 214,52 ms | 213,34 ms |
+| `grid_domain_ms` P90 | 234,28 ms | 232,76 ms |
+
+Her yeni adımda `measured=true`, `ok=true` ve P2G/pressure/G2P/density GPU
+bayrakları açıktı. **43.259.832 bayt/adım aktarım kesintisi doğrulandı.**
+Medyan süre farkı yalnız 1,18 ms; ayrı koşuların gürültüsünden büyük bir hız
+kazanımı iddia edilmez. Adveksiyon aşaması medyanı 19,34'ten 23,81 ms'ye
+çıktı, pressure 51,62'den 49,04 ms'ye indi; aşama CPU zamanlayıcıları GPU
+işinin tamamını izole etmediğinden bu satırlar tek başına regresyon kanıtı
+değildir. Görsel/fizik eşdeğerliği sayaçlardan çıkarılamaz.
+
+### Üçüncü kesinti: P2G → G2P parçacık hızı
+
+P2G, `fluid_velocities` tamponunu okur ve değiştirmez. GPU P2G başarılıysa
+`Fluid::step` ilk split-step çağrısında dış kuvvetleri ve P2G'yi atlar;
+bu çağrı parçacık hızını yazmaz. G2P'nin FLIP `v_old` terimi için aynı
+parçacık hızını CPU'dan yeniden yüklemesi bu durumda tekrardır.
+
+G2P artık yalnız GPU P2G başarılıysa ve adım içi tam parçacık upload damgası
+aynı sayıda geçerli buffer'ı gösteriyorsa cihazdaki hızı kullanır. CPU P2G,
+GPU fallback veya geçersiz damgada eski upload çalışır. 500.000 parçacıkta
+beklenen ek kesinti `500.000 × sizeof(Vec3)` = **6.000.000 bayt/adım** ve
+bir upload çağrısıdır. Önceki sabit sahneye göre yeni derleme hedefi
+**138.845.972 upload baytı**, **12 upload çağrısı**, değişmeyen
+**142.846.140 download baytı**, 171 dispatch ve 12 batch bitişidir.
+Süre ve fizik davranışı derleme sonrası ayrıca kontrol edilecek.
+
+### Üçüncü kesinti sonrası canlı ölçüm (2026-09-22)
+
+Yeni derlemede açık 153³ Vulkan sahnesi 60 adımda 500.000 parçacığa
+ulaştırıldı. Sonraki 30 adımın tamamında parçacık sayısı sabit, `measured=true`,
+`ok=true` ve P2G/pressure/G2P/density GPU bayrakları açıktı.
+
+| Sayaç | Önceki derleme | G2P yeniden kullanımı |
+|---|---:|---:|
+| Host → GPU | 144.845.972 bayt | 138.845.972 bayt |
+| Upload çağrısı | 13 | 12 |
+| GPU → host | 142.846.140 bayt | 142.846.140 bayt |
+| Dispatch / batch / sync | 171 / 12 / 3 | 171 / 12 / 3 |
+| `grid_domain_ms` medyan | 213,34 ms | 211,86 ms |
+| `grid_domain_ms` P90 | 232,76 ms | 228,67 ms |
+| G2P aşaması medyan | 21,32 ms | 21,07 ms |
+
+**6.000.000 bayt/adım ve bir upload çağrısı kesintisi doğrulandı.** Süre
+farkı ayrı koşular arasında küçük kaldı; büyük bir hızlanma iddiası yok.
+Ham yeni veri: `fluid_transfer_153cube_g2p_reuse_steady.json`.
+
+### Dördüncü kesinti: basınç → G2P MAC hızları
+
+GPU basınç çözümü üç MAC hız alanını GPU'da üretip CPU'ya indiriyor. Ardından
+`enforceGridSolidFaceBoundaries` yalnız katı hücrelere bitişik yüzleri
+sıfırlıyor. Gridde katı hücre yoksa bu işlev hiçbir değer yazmaz; G2P'nin
+aynı üç alanı GPU'ya yeniden yüklemesi tekrardır.
+
+G2P artık yalnız **Vulkan GPU basınç çözümü başarılı, granular kapalı ve
+`grid.hasAnySolid() == false`** olduğunda cihazdaki projeksiyon sonucunu
+doğrudan kullanır. Collider, granular, CPU fallback ve diğer backend yolları
+eski yüklemeyi kullanır. Parçacık hızı da mevcut damgayla geçerliyse boş
+transfer batch'i açılmaz.
+
+153³ grid için beklenen ek kesinti **43.259.832 bayt/adım** ve üç upload
+çağrısıdır. Son sabit sahneye göre yeni derleme hedefi **95.586.140 upload
+baytı**, **9 upload çağrısı**, **142.846.140 download baytı**, 171 dispatch,
+11 batch bitişi ve 3 explicit sync'tir. Host grid okumaları hâlâ kullanıldığı
+için pressure sonundaki download bu adımda kaldırılmadı. Süre ve fizik
+eşdeğerliği yeni derlemede ölçülecek.
+
+## SurfaceSDF raster proxy ve Vulkan device loss incelemesi
+
+`x64/Release/SceneLog.txt` içinde ilk başarısızlık Rendered moda geçişten
+hemen sonra `submitTraceTonemapAsync: vkQueueSubmit failed (result=-4)` olarak
+göründü. `-4`, `VK_ERROR_DEVICE_LOST`. Aynı zaman aralığında Windows System
+logunda iki `nvlddmkm` Event 153 (`Error occurred on GPUID: 700`) vardı.
+Event 4101 veya LiveKernelEvent 141/117 kaydı bulunmadığından klasik TDR kesin
+olarak kanıtlanmadı. BLAS CPU denetimi `invalid_indices=0` ve
+`non_finite_vertices=0` bildirdi; bu da bozuk giriş geometrisini desteklemiyor.
+
+Kod denetimi ayrı ve somut bir yük hatası buldu. SurfaceSDF, Solid/Matcap'in
+native SDF geçişi olmadığı için parçacık kürelerini uyumluluk proxy'si olarak
+kullanıyordu. Bütçe doğrudan `fluid_max_particles` olduğundan 500.000
+parçacıklı sahne 500.000 raster instance üretiyordu. RayFusion kendi 65.536
+TLAS instance sınırına dayanıyordu. Rendered backend de aynı transient havuzu
+kendi TLAS'ına ekliyordu; sıfır ölçekli gizli slotlar bile instance listesinde
+kalıyordu.
+
+Düzeltme:
+
+- Yalnız SurfaceSDF uyumluluk proxy'si, parçacık dizisine yayılmış en fazla
+  32.768 örnek kullanır. Açıkça seçilen Particles modu ve substance Splat
+  bağları tam yazarlık bütçesini korur.
+- SurfaceSDF uyumluluk grubu `rendered_rt_excluded` olarak işaretlenir. Ayrı
+  viewport backend'i onu yalnız raster uyumluluk görünümü için kullanabilir;
+  RayFusion ve tam Vulkan RT grubu hızlandırma yapılarında atlar, SurfaceSDF
+  volume slotunu kullanır.
+- Raster submit sonrasında device loss logu tek seferle sınırlandı; kayıp queue
+  her kare yeniden kirletilip 153 aynı hata satırı üretilmez.
+- Güncel açık sahne kaydı, `scene AS yielded` ve Rendered geçişinden sonra eski
+  viewport backend'inin 65.536 instance'lık RayFusion AS'ını yeniden kurduğunu
+  gösterdi. `waitIdle` yalnız GPU kuyruğunu boşaltıyordu; eşzamanlı CPU tarafı
+  `ensureRayFusionSceneAS` çağrısını seri hale getirmiyordu. RayFusion AS kurma,
+  okuma, yield ve reclaim işlemleri artık backend'in mevcut recursive mutex'i
+  altında çalışır. Yield, başlamış bir CPU kurulumunun bitmesini bekler; kapıyı
+  kapattıktan sonra yeni kurulum başlayamaz.
+
+Sonraki derlemede 500.000 SurfaceSDF parçacığı için Solid/RayFusion global
+instance kapasitesi yaklaşık **32.768 proxy + gerçek sahne instance'ları**
+olmalı. Vulkan RT'ye geçişte fluid proxy grubu RT TLAS instance sayısına
+girmemeli. Particles/Splat modunda bu sınır beklenmez.
+
+### Splat → SurfaceSDF yaşam döngüsü
+
+Canlı doğrulamada Splat modu 500.001 raster instance ve RayFusion'ın 65.536
+TLAS sınırını üretti. SurfaceSDF'ye geri dönüldüğünde grup yalnız sıfır ölçeğe
+çekilmişti; CPU transformları, 500.001 viewport instance yuvası ve RayFusion
+imza girdileri yaşamaya devam etti. Sonuç, SurfaceSDF görünürken yaklaşık
+49 ms'lik 65.536 instance RayFusion AS kurulumu ve 500.001 kapasiteli global
+instance buffer oldu.
+
+Saf SurfaceSDF artık native SDF tüketicisi aktifken parçacık grubunu tamamen
+siler ve domain havuz kapasitesini sıfırlar. Solid/Matcap uyumluluk küresi daha
+sonra gerekirse sınırlı kapasiteyle yeniden oluşturulur. Bu uyumluluk grubu
+RayFusion geometri imzası, BLAS kaynak kümesi, instance imzası ve TLAS listesinden
+de çıkarılır. Açık Particles modu ve substance Splat bağları bu yaşam döngüsünün
+dışındadır ve seçilebilir gerçek geometri olarak korunur.
+
+Yeni derlemede aynı sahnenin beklenen geçişi:
+
+- Splat açıkken viewport kapasitesi yaklaşık 500.001 ve RayFusion kendi 65.536
+  instance sınırına ulaşabilir; bu kullanıcı tarafından seçilen geometri
+  maliyetidir.
+- Material Preview içinde SurfaceSDF'ye dönünce fluid instance grubu silinmeli;
+  tek küplü test sahnesinde `total_instances=1` ve RayFusion `1 instances`
+  seviyesine dönmelidir.
+- Solid içinde SurfaceSDF uyumluluk proxy'si yaklaşık 32.768 raster instance
+  tutabilir, fakat RayFusion AS sayısına girmemelidir.
+
 ## Sayaçların gerçek kapsamı
+
+### Ortak SurfaceSDF havuzu: Solid, Matcap ve RayFusion
+
+Solid ve Matcap artık Material Preview/RayFusion ile aynı
+`VulkanDevice::m_volumeBuffer` kaydını ve aynı NanoVDB grid adresini okur.
+Yeni bir SDF grid kopyası veya ikinci parçacık havuzu oluşturulmaz. Render pass
+uyumluluğu için iki küçük grafik pipeline vardır: HDR Material Preview/RayFusion
+varyantı ve LDR Solid/Matcap varyantı. İkisi aynı descriptor setindeki volume
+SSBO'ya bağlıdır.
+
+Native pipeline başarıyla kurulduktan sonra saf SurfaceSDF domain'in sphere
+instance grubu silinir ve havuz kapasitesi sıfırlanır. Shader veya pipeline
+kurulamazsa Solid/Matcap için 32.768 instance ile sınırlı uyumluluk proxy'si
+kalır. Açık Particles modu ve substance `Splat` override'ları bu kapıdan bağımsız
+olarak tam Splat desteğini korur ve mod değişiminde yeniden oluşturulabilir.
+
+Bu değişiklik CPU `InstanceTransform` havuzunu, raster instance kayıtlarını,
+global instance buffer kapasitesini ve RayFusion BLAS/TLAS adaylarını SurfaceSDF
+modunda kaldırır. Fluid solver parçacık SoA'sı, pressure/velocity gridleri ve
+render için gerekli tek SDF alanı yaşamaya devam eder; bu yüzden toplam RAM sıfıra
+inmez. Beklenen kazanç, önceki 500.000 sphere proxy'sinin host ve viewport
+kopyalarının tamamıdır.
+
+İlk canlı denemede iki entegrasyon hatası bulundu. SurfaceSDF tam ekran pipeline'ı
+Solid içinde grid çiziminden önce bağlı kalıyor ve grid draw çağrılarını yanlış
+pipeline ile yürütüyordu; grid artık kendi solid pipeline ve descriptor setini
+her modda açıkça geri bağlıyor. Ayrıca canlı volume yayın kapısı yalnız Material
+Preview modunu kabul ediyordu. Kapı artık native SDF pipeline hazır olduğunda
+Solid, Matcap ve Material Preview raster modlarının tamamını kabul eder. Böylece
+play sırasında her yeni SDF alanı aynı kare yenileme yolunu uyandırır.
+
+Sphere proxy kaldırılınca RayFusion'ın üçgen TLAS gölge sorgusu SurfaceSDF'yi
+occluder olarak göremiyordu. RT gölge compute geçişi artık aynı volume SSBO'yu
+doğrudan bağlar. Üçgen ray query ışığı kesmediyse ışın yalnız kesişen SurfaceSDF
+AABB'lerinde NanoVDB alanını yürür ve katı/opak bağlı materyalin iso yüzeyini
+gölge maskesine ekler. Bu yol BLAS, TLAS instance veya Splat havuzu oluşturmaz.
+Yüksek transmission ya da çok düşük opacity taşıyan SDF materyalleri şimdilik
+opak gölgeleyici sayılmaz; renkli geçirgen gölge ayrı bir transmittance çalışmasıdır.
 
 | Gösterilen satır | Kodun ölçtüğü aralık | Yorum sınırı |
 |---|---|---|
@@ -358,3 +569,64 @@ instrumentasyona uygun olduğunu seçtirir. Sonraki kod partisi transferi
 advection ve density içinde ayrı saymalı; `total_ms` gerçek domain adımını
 kapsamalı ve bu ölçüler script ile IPC'de aynı çekirdek verisinden okunmalı.
 Bu ayrım yapılmadan MGPCG veya advection alt adımlama değiştirilmez.
+
+## Solid ve Matcap için hafif gaz görünümü
+
+Solid ve Matcap artık VDB ile canlı gas domain verisini mevcut
+`VulkanDevice::m_volumeBuffer` ve NanoVDB adreslerinden doğrudan raymarch eder.
+Bu yol ayrı bir grid, voxel kopyası, particle proxy, BLAS veya TLAS ayırmaz.
+Material Preview ile aynı descriptor ve shader modülünü kullanır; render pass
+uyumluluğu için yalnızca küçük bir LDR grafik pipeline varyantı bulunur.
+
+Workbench dalı yoğunluk sönümünü, authored smoke rengini ve varsa emisyonu
+gösterir. Sahne ışığı döngüsü, shadow atlas sorguları ve volume self-shadow
+örnekleri Solid/Matcap içinde çalışmaz. Adım tavanları kalite seviyesine göre
+48/96/160'tır; Material Preview'ın 96/256/512 ayrıntılı yolu korunur. Böylece
+Solid görünüm simülasyon kontrolü için ucuz bir hacim önizlemesi sağlar, ayrıntılı
+aydınlatma Material Preview ve RayFusion'da kalır.
+
+Solid/Matcap pipeline'ı ilk yoğunluk katkısının raster derinliğini yazar ve
+mevcut mesh depth buffer'ına `LESS_OR_EQUAL` testi uygular; depth buffer'ı
+değiştirmez. Böylece tamamen bir mesh arkasında kalan hacim öne bindirilmez.
+Bir mesh hacmin ortasından geçiyorsa bu basit ilk-vuruş testi hacmi iki parçaya
+ayırmaz; tam kesişim kompozisyonu ayrı bir depth snapshot gerektirir.
+
+Bu yol Vulkan raster fragment shader'ıdır. Ray tracing pipeline, ray query,
+BLAS/TLAS veya RT çekirdeği istemez. NanoVDB verisini cihaz adresi üzerinden
+okuduğu için uygulamanın mevcut Vulkan buffer device address ve shader `int64`
+desteğine dayanır.
+
+### Vulkan yetenek katmanlarının RT'den ayrılması
+
+Native SDF/gas görünümü artık donanımsal RT modu üzerinden dolaylı biçimde
+açılmaz. Cihaz oluşturma `bufferDeviceAddress` ve `shaderInt64` özelliklerini
+ayrı sorgular, etkinleştirir ve `supportsNativeVolumeRaymarch()` kapısında
+birleştirir. Vulkan 1.2'nin core BDA yolu ile eski KHR extension yolu birlikte
+desteklenir; cihaz adresi fonksiyonu da core ve KHR adlarıyla aranır.
+
+Ray Query ayrıca kendi feature struct'ıyla sorgulanıp etkinleştirilir. Extension
+adının bulunması tek başına artık RayFusion RT aşamalarını açmaz. BLAS/TLAS,
+RT shadow, reflection ve probe trace donanımsal RT kapılarında kalır. RT'siz
+güçlü bir Vulkan cihazı BDA ve shader int64 sağlıyorsa Solid/Matcap SDF ile
+gas raymarch çalışabilir; RayFusion'ın RT aşamaları ayrılmaz ve gökyüzü/raster
+fallback üreticileri kullanılmaya devam eder.
+
+`scripts/audit_vulkan_feature_tiers.py` dört sanal profili denetler: güçlü
+BDA'lı RT'siz cihaz, RT pipeline'lı fakat Ray Query'siz cihaz, tam RT cihazı
+ve BDA'sız eski cihaz. BDA'sız cihazda native volume yolu kapanır ve mevcut
+bounded SurfaceSDF particle proxy fallback'i korunur.
+
+Gerçek RT'siz donanım olmadan çalışma zamanını doğrulamak için aynı GPU'da RT
+extension seçimi kapatılabilir:
+
+```powershell
+$env:RAYTROPHI_DISABLE_HARDWARE_RT = '1'
+.\RayTrophiStudio.exe
+Remove-Item Env:RAYTROPHI_DISABLE_HARDWARE_RT
+```
+
+Başlangıç kaydında `nativeVolume=yes`, `BDA=yes`, `shaderInt64=yes` ve
+`hardwareRT=no`, `rayQuery=no` görülmelidir. Solid/Matcap SDF ve gas görünmeli;
+RayFusion temel raster/probe fallback görünümü çalışmalı; RT shadow, reflection,
+probe trace ve BLAS/TLAS ayrılmamalıdır. Bu override yalnız test sürecinin
+ortamında geçerlidir.

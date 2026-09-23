@@ -375,6 +375,7 @@ inline std::size_t particlePoolCapacityFor(std::size_t soa_slots) {
 // rebuild was racing the in-flight render and was a crash vector.
 constexpr std::size_t kFluidInstanceHardCeiling = 1000000;
 constexpr std::size_t kFluidPoolChunk = 16384;
+constexpr std::size_t kFluidSurfaceProxyInstanceCeiling = 32768;
 
 inline std::size_t fluidRenderBudget(std::size_t ui_max_particles) {
     const std::size_t budget = (ui_max_particles == 0) ? kFluidInstanceHardCeiling
@@ -938,11 +939,12 @@ void SceneData::syncFluidParticleRenderInstances(bool enable_rt_geometry) {
             destroyFluidParticleRenderGroup(obj);
             continue;
         }
-        // Solid/Matcap still need a compatibility splat-sphere proxy. Material
-        // Preview owns a native SurfaceSDF pass, so drawing that proxy there as
-        // well makes two depth representations race during camera movement.
+        // Keep the bounded sphere fallback only until the native LDR SDF
+        // pipeline has proved available. After that, sphere instances belong
+        // only to the explicit Splat mode.
         const bool needs_raster_sdf_proxy =
-            g_solid_viewport_active && !g_material_preview_viewport_active;
+            g_solid_viewport_active && !g_material_preview_viewport_active &&
+            !g_native_surface_sdf_viewport_available;
         const bool lifecycle_alive = obj.visible && obj.enabled;
         const bool wants = lifecycle_alive &&
             (obj.render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
@@ -1152,10 +1154,12 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             const auto& state  = states[d];
             const bool is_fluid = state.type == RayTrophiSim::SimulationDomainType::Fluid;
 
-            // Material Preview renders SurfaceSDF directly. Solid/Matcap retain
-            // the compatibility particle proxy until they share that pass.
+            // Solid, Matcap, Material Preview and RayFusion share the native
+            // SurfaceSDF volume allocation. Keep the bounded sphere fallback
+            // only until that pipeline has been created successfully.
             const bool needs_raster_sdf_proxy =
-                g_solid_viewport_active && !g_material_preview_viewport_active;
+                g_solid_viewport_active && !g_material_preview_viewport_active &&
+                !g_native_surface_sdf_viewport_available;
 
             // Explicit particle/Splat authoring always wins. The compatibility
             // proxy only fills SurfaceSDF in raster modes without a native pass.
@@ -1168,9 +1172,13 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     has_splat_override |= b.representation ==
                         RayTrophiSim::Fluid::SubstanceRepresentation::Splat;
             }
+            const bool has_explicit_splats =
+                d < domains.size() &&
+                (domains[d].fluid_render_mode ==
+                     RayTrophiSim::Fluid::FluidRenderMode::Particles ||
+                 has_splat_override);
             const bool render_eligible = enable_rt_geometry && lifecycle_alive &&
-                (domains[d].fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::Particles ||
-                 has_splat_override || needs_raster_sdf_proxy);
+                (has_explicit_splats || needs_raster_sdf_proxy);
 
             int& group_id = system.domain_particle_render_group_ids[d];
 
@@ -1187,11 +1195,30 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 continue;
             }
 
-            // Mode-only visibility changes are transform updates, not topology
-            // changes. Preserve the pool while SurfaceSDF takes over in Rendered.
+            // Preserve explicit splat pools across temporary backend visibility
+            // changes. Pure SurfaceSDF releases its compatibility pool below.
             if (!render_eligible) {
                 InstanceGroup* existing = (group_id >= 0) ? im.getGroup(group_id) : nullptr;
+                // A pure SurfaceSDF consumer has no use for the particle pool.
+                // Keeping it hidden retained every CPU transform and every
+                // viewport instance allocation after a temporary Splat edit.
+                // Delete it here; Solid/Matcap recreates its bounded fallback
+                // only if that compatibility preview is requested again.
+                if (!has_explicit_splats && !needs_raster_sdf_proxy) {
+                    if (existing) {
+                        im.deleteGroup(group_id);
+                        structural_change = true;
+                    }
+                    if (group_id >= 0) g_fluid_source_state.erase(group_id);
+                    group_id = -1;
+                    system.domain_particle_pool_capacities[d] = 0;
+                    continue;
+                }
                 if (!existing) continue;
+                if (existing->rendered_rt_excluded != !has_explicit_splats) {
+                    existing->rendered_rt_excluded = !has_explicit_splats;
+                    structural_change = true;
+                }
                 bool had_visible = false;
                 for (auto& tr : existing->instances) {
                     had_visible |= tr.scale.x != 0.0f || tr.scale.y != 0.0f || tr.scale.z != 0.0f;
@@ -1243,6 +1270,10 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 g_fluid_source_state.erase(group_id);
             }
             group->transient = true;
+            if (group->rendered_rt_excluded != !has_explicit_splats) {
+                group->rendered_rt_excluded = !has_explicit_splats;
+                structural_change = true;
+            }
 
             // Source rebuild on geometry/material-routing changes. Scene mesh
             // faces keep their authored materials unless an explicit binding
@@ -1341,13 +1372,20 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             }
 
             // ── Pool grows monotonically, in chunks, and is budget-capped. ───
-            // Budget tracks the UI's Max Particles (clamped to the hardware
-            // ceiling). draw_count is what we render; cap is the chunk-rounded
-            // pool size. Chunked growth means a filling sim doesn't trigger a
-            // structural BLAS rebuild every frame.
+            // Explicit splats track the UI Max Particles value. SurfaceSDF's
+            // raster compatibility proxy has its own smaller ceiling below.
+            // draw_count is what we render; cap is the chunk-rounded pool size.
+            // Chunked growth prevents a structural BLAS rebuild on every spawn.
             std::vector<std::vector<std::size_t>> source_particles(group->sources.size());
             const std::size_t budget = fluidRenderBudget(dconfig.fluid_max_particles);
             std::size_t accepted_particles = 0;
+            std::size_t accepted_proxy_particles = 0;
+            const std::size_t proxy_budget =
+                std::min(budget, kFluidSurfaceProxyInstanceCeiling);
+            const std::size_t proxy_stride = proxy_budget > 0
+                ? std::max<std::size_t>(
+                      1, (state.particles.size() + proxy_budget - 1) / proxy_budget)
+                : 1;
             for (std::size_t pi = 0; pi < state.particles.size(); ++pi) {
                 const uint32_t tag = pi < state.particles.substance_tag.size()
                     ? state.particles.substance_tag[pi] : RayTrophiSim::Fluid::kSubstanceUntagged;
@@ -1370,9 +1408,14 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     }
                     break;
                 }
-                if ((splat || needs_raster_sdf_proxy) && accepted_particles < budget) {
+                const bool sampled_proxy =
+                    !splat && needs_raster_sdf_proxy &&
+                    accepted_proxy_particles < proxy_budget &&
+                    pi % proxy_stride == 0;
+                if ((splat || sampled_proxy) && accepted_particles < budget) {
                     source_particles[source_index].push_back(pi);
                     ++accepted_particles;
+                    if (sampled_proxy) ++accepted_proxy_particles;
                 }
             }
 
