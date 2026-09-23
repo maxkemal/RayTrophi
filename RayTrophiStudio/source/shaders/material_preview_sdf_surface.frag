@@ -381,6 +381,60 @@ RtPostParams sdfPostParams() {
     return p;
 }
 
+vec3 sdfMatcapColor(vec3 worldNormal, int preset) {
+    vec3 viewNormal = normalize(mat3(pc.view) * worldNormal);
+    vec2 uv = viewNormal.xy * 0.5 + 0.5;
+    float diagonal = uv.y * 0.6 + uv.x * 0.4;
+    vec3 highlight = vec3(0.95, 0.90, 0.82);
+    vec3 midtone = vec3(0.65, 0.67, 0.72);
+    vec3 shadow = vec3(0.25, 0.30, 0.45);
+    float specularStrength = 0.55;
+
+    if (preset == 3) {
+        highlight = vec3(0.92, 0.78, 0.65);
+        midtone = vec3(0.72, 0.50, 0.38);
+        shadow = vec3(0.35, 0.20, 0.15);
+        specularStrength = 0.30;
+    } else if (preset == 4) {
+        highlight = vec3(0.95, 0.95, 0.97);
+        midtone = vec3(0.55, 0.58, 0.62);
+        shadow = vec3(0.12, 0.13, 0.16);
+        specularStrength = 0.85;
+    } else if (preset == 5) {
+        highlight = vec3(0.98, 0.96, 0.94);
+        midtone = vec3(0.82, 0.80, 0.85);
+        shadow = vec3(0.55, 0.52, 0.58);
+        specularStrength = 0.45;
+    } else if (preset == 6) {
+        highlight = vec3(0.72, 0.88, 0.70);
+        midtone = vec3(0.28, 0.52, 0.32);
+        shadow = vec3(0.08, 0.18, 0.10);
+        specularStrength = 0.50;
+    } else if (preset == 7) {
+        highlight = vec3(0.95, 0.82, 0.65);
+        midtone = vec3(0.72, 0.45, 0.22);
+        shadow = vec3(0.25, 0.12, 0.06);
+        specularStrength = 0.70;
+    } else if (preset == 8) {
+        highlight = vec3(0.50, 0.50, 0.55);
+        midtone = vec3(0.15, 0.15, 0.18);
+        shadow = vec3(0.03, 0.03, 0.05);
+        specularStrength = 0.90;
+    } else if (preset == 9) {
+        highlight = vec3(0.95, 0.85, 0.78);
+        midtone = vec3(0.82, 0.62, 0.52);
+        shadow = vec3(0.45, 0.25, 0.20);
+        specularStrength = 0.25;
+    }
+
+    vec3 base = mix(shadow, midtone, smoothstep(0.0, 0.5, diagonal));
+    base = mix(base, highlight, smoothstep(0.5, 1.0, diagonal));
+    float highlightLobe = pow(
+        max(1.0 - length(uv - vec2(0.60, 0.72)) * 3.0, 0.0), 6.0);
+    float rim = smoothstep(0.0, 0.5, 1.0 - length(uv - vec2(0.5)));
+    return clamp(base * rim + vec3(highlightLobe * specularStrength), 0.0, 1.0);
+}
+
 void main() {
     mat4 invViewProj = inverse(pc.viewProj);
     vec3 ro, rd;
@@ -409,6 +463,20 @@ void main() {
     float depth = clip.z / clip.w;
     if (clip.w <= 1e-6 || depth < -1e-5 || depth > 1.00001) discard;
     gl_FragDepth = clamp(depth, 0.0, 1.0);
+
+    int viewportShading = int(pc.cameraPos.w + 0.5);
+    if (viewportShading == 1) {
+        vec3 n = normalize(nearestN);
+        vec3 lightDir = normalize(vec3(0.45, 0.8, 0.35));
+        float fill = 0.35 + max(dot(n, lightDir), 0.0) * 0.65;
+        outColor = vec4(vec3(0.74, 0.76, 0.80) * fill, 1.0);
+        return;
+    }
+    if (viewportShading == 2) {
+        int preset = int(pc.lightDir1.w + 0.5);
+        outColor = vec4(sdfMatcapColor(normalize(nearestN), preset), 1.0);
+        return;
+    }
 
     float materialSlot = volFloat(nearestVolume, 556u);
     bool hasMaterial = materialSlot >= 1.0 && uint(materialSlot - 1.0) < pc.materialMeta.x;

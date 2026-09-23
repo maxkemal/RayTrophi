@@ -53,6 +53,7 @@ layout(set = 0, binding = 20, std430) readonly buffer PreviewVolumeRawBuffer {
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
     mat4 view;
+    // cameraPos.w: lightweight Solid/Matcap workbench shading
     vec4 cameraPos;
     // lightDir0.w: opaque depth snapshot is valid
     vec4 lightDir0;
@@ -238,7 +239,9 @@ void main(){
     }
     if(count==0)discard;
 
+    bool workbench=pc.cameraPos.w>0.5;
     vec3 accum=vec3(0); vec3 trans=vec3(1);
+    float firstContributionT=1e30;
     uint quality=pc.materialMeta.y&0xffu;
     // ★★★ THIS IS A COST CEILING, NOT THE STEP COUNT.
     //
@@ -249,7 +252,8 @@ void main(){
     // nothing at all — silhouette diff 20.5/255 between the two top presets
     // proves the march had not converged even at 160. The volume's own
     // max_steps is the real dial; this only stops one volume eating the frame.
-    int cap=quality<=1u?96:(quality==2u?256:512);
+    int cap=workbench?(quality<=1u?48:(quality==2u?96:160))
+                     :(quality<=1u?96:(quality==2u?256:512));
     for(int interval=0;interval<16;++interval){
         if(interval>=count)break;
         uint vi=ids[interval];float length=ends[interval]-starts[interval];
@@ -281,7 +285,18 @@ void main(){
             }
             float density=sampleField(vi,volAddress(vi,232u),p);
             if(density<=0.0){t+=dt;continue;}
+            firstContributionT=min(firstContributionT,t);
             int s=shaded; ++shaded; t+=dt;
+            if(workbench){
+                float extinction=max(volFloat(vi,100u)+volFloat(vi,132u),0.35);
+                float sampleAlpha=1.0-exp(-density*extinction*dt);
+                vec3 authoredColor=max(volVec3(vi,88u),vec3(0.12));
+                vec3 simpleColor=authoredColor*(0.35+0.65*clamp(density,0.0,1.0));
+                simpleColor+=emissionAt(vi,p,density);
+                accum+=trans*simpleColor*sampleAlpha;
+                trans*=vec3(1.0-sampleAlpha);
+                continue;
+            }
             vec3 sigmaS=max(volVec3(vi,88u),vec3(0))*max(volFloat(vi,100u),0.0)*density;
             vec3 sigmaA=max(volVec3(vi,120u),vec3(0))*max(volFloat(vi,132u),0.0)*density;
             vec3 sigmaT=max(sigmaS+sigmaA,vec3(1e-6));
@@ -315,11 +330,15 @@ void main(){
     }
     float alpha=clamp(1.0-dot(trans,vec3(0.2126,0.7152,0.0722)),0.0,1.0);
     if(alpha<1e-5)discard;
+    vec4 firstClip=pc.viewProj*vec4(ro+rd*firstContributionT,1.0);
+    float firstDepth=firstClip.z/firstClip.w;
+    if(firstClip.w<=1e-6 || firstDepth<0.0 || firstDepth>1.0)discard;
+    gl_FragDepth=clamp(firstDepth,0.0,1.0);
     // *** GORUNTULEME DONUSUMU BURADAN SOKULDU (2026-09-06).
     //   Bu shader artik SCENE-LINEAR yaziyor; zincir (exposure -> operator ->
     //   grade -> vignette -> sRGB) tek yerde, `raster_post.comp` icinde kosuyor.
     //   Zorunluydu: alan derinligi bu shader'larin ciktisini BULANISTIRIR ve
     //   bokeh, parlak noktanin daire olarak acilmasidir. Tonemap'ten gecmis bir
     //   deger o noktayi zaten kirpmistir; onu bulanistirmak gri leke uretir.
-    outColor=vec4(accum,alpha);
+    outColor=vec4(workbench?clamp(accum,vec3(0),vec3(1)):accum,alpha);
 }

@@ -12,9 +12,11 @@ namespace Backend {
 
 class MaterialPreviewSdfSurfaceResources {
 public:
-    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipeline previewPipeline = VK_NULL_HANDLE;
+    VkPipeline solidPipeline = VK_NULL_HANDLE;
     VkBuffer boundVolumeBuffer = VK_NULL_HANDLE;
     bool missingShaderReported = false;
+    bool unsupportedDeviceReported = false;
 };
 
 namespace {
@@ -50,9 +52,13 @@ static_assert(sizeof(PreviewPush) == 208u, "Material preview push ABI changed");
 
 void VulkanBackendAdapter::destroyMaterialPreviewSdfSurfaceResources() {
     if (!m_materialPreviewSdfSurface || !m_device) return;
-    if (m_materialPreviewSdfSurface->pipeline != VK_NULL_HANDLE) {
+    if (m_materialPreviewSdfSurface->previewPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device->getDevice(),
-                          m_materialPreviewSdfSurface->pipeline, nullptr);
+                          m_materialPreviewSdfSurface->previewPipeline, nullptr);
+    }
+    if (m_materialPreviewSdfSurface->solidPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device->getDevice(),
+                          m_materialPreviewSdfSurface->solidPipeline, nullptr);
     }
     m_materialPreviewSdfSurface.reset();
 }
@@ -63,8 +69,24 @@ bool VulkanBackendAdapter::ensureMaterialPreviewSdfSurfaceResources(
         m_interactiveViewport.materialPreviewPipelineLayout == VK_NULL_HANDLE ||
         m_interactiveViewport.materialPreviewDescSet == VK_NULL_HANDLE) return false;
 
+    if (!m_device->getCapabilities().supportsNativeVolumeRaymarch()) {
+        g_native_surface_sdf_viewport_available = false;
+        if (!m_materialPreviewSdfSurface) {
+            m_materialPreviewSdfSurface =
+                std::make_shared<MaterialPreviewSdfSurfaceResources>();
+        }
+        if (!m_materialPreviewSdfSurface->unsupportedDeviceReported) {
+            m_materialPreviewSdfSurface->unsupportedDeviceReported = true;
+            SCENE_LOG_WARN(
+                "[Viewport] Native SurfaceSDF needs buffer device address and "
+                "shaderInt64; Solid/Matcap keeps the bounded particle proxy.");
+        }
+        return false;
+    }
+
     if (m_materialPreviewSdfSurface &&
-        m_materialPreviewSdfSurface->pipeline != VK_NULL_HANDLE) {
+        m_materialPreviewSdfSurface->previewPipeline != VK_NULL_HANDLE &&
+        m_materialPreviewSdfSurface->solidPipeline != VK_NULL_HANDLE) {
         updateMaterialPreviewSdfSurfaceBinding();
         return true;
     }
@@ -82,8 +104,8 @@ bool VulkanBackendAdapter::ensureMaterialPreviewSdfSurfaceResources(
         if (!state.missingShaderReported) {
             state.missingShaderReported = true;
             SCENE_LOG_WARN(
-                "[MaterialPreview] Realtime SurfaceSDF shader is missing; "
-                "fluid SDF stays on the existing particle proxy until shaders are compiled.");
+                "[Viewport] Shared SurfaceSDF shader is missing; Solid/Matcap "
+                "keeps the bounded particle proxy until shaders are compiled.");
         }
         return false;
     }
@@ -147,7 +169,6 @@ bool VulkanBackendAdapter::ensureMaterialPreviewSdfSurfaceResources(
     //   G-buffer: oct normal, ve speküler agirlik + roughness) ve blend eklenti SAYISI gecisle uyusmak zorunda. Bu gecis
     //   G-buffer'a YAZMAZ -- yazsaydi arkasindaki opak yuzeyin normalini
     //   silerdi. LDR'ye dusuldugunde tek eklentiye geri doner.
-    const bool rfHdrPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE;
     VkPipelineColorBlendAttachmentState attachments[3]{};
     attachments[0] = attachment;
     attachments[1].colorWriteMask = 0;
@@ -155,10 +176,6 @@ bool VulkanBackendAdapter::ensureMaterialPreviewSdfSurfaceResources(
     attachments[2].colorWriteMask = 0;
     attachments[2].blendEnable = VK_FALSE;
 
-    VkPipelineColorBlendStateCreateInfo blend{};
-    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = rfHdrPass ? 3u : 1u;
-    blend.pAttachments = attachments;
     const VkDynamicState dynamicStates[2] = {
         VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{};
@@ -176,7 +193,6 @@ bool VulkanBackendAdapter::ensureMaterialPreviewSdfSurfaceResources(
     pci.pRasterizationState = &raster;
     pci.pMultisampleState = &multisample;
     pci.pDepthStencilState = &depth;
-    pci.pColorBlendState = &blend;
     pci.pDynamicState = &dynamic;
     pci.layout = m_interactiveViewport.materialPreviewPipelineLayout;
     // ★ SDF yuzeyi scene-referred: HDR gecisinde cizilir, post zincirinden
@@ -185,23 +201,49 @@ bool VulkanBackendAdapter::ensureMaterialPreviewSdfSurfaceResources(
     //   kurmaz) LDR gecisine baglanir. Null bir render pass ile pipeline
     //   yaratmak API hatasidir; sessizce basarisiz olan bir pipeline ise
     //   "hacim gorunmuyor" diye raporlanir ve gunler yakar.
-    pci.renderPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE
-                   ? m_interactiveViewport.hdrRenderPass
-                   : m_interactiveViewport.renderPass;
     pci.subpass = 0;
-    const VkResult result = vkCreateGraphicsPipelines(
-        device, VK_NULL_HANDLE, 1, &pci, nullptr, &state.pipeline);
+
+    auto createPipeline = [&](VkRenderPass renderPass, uint32_t colorAttachmentCount,
+                              VkPipeline& pipeline) {
+        VkPipelineColorBlendStateCreateInfo blend{};
+        blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        blend.attachmentCount = colorAttachmentCount;
+        blend.pAttachments = attachments;
+        pci.pColorBlendState = &blend;
+        pci.renderPass = renderPass;
+        return vkCreateGraphicsPipelines(
+            device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipeline);
+    };
+
+    const VkRenderPass previewRenderPass =
+        m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE
+            ? m_interactiveViewport.hdrRenderPass
+            : m_interactiveViewport.renderPass;
+    const uint32_t previewAttachmentCount =
+        m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE ? 3u : 1u;
+    const VkResult previewResult = createPipeline(
+        previewRenderPass, previewAttachmentCount, state.previewPipeline);
+    const VkResult solidResult = createPipeline(
+        m_interactiveViewport.renderPass, 1u, state.solidPipeline);
     vkDestroyShaderModule(device, fragModule, nullptr);
     vkDestroyShaderModule(device, vertModule, nullptr);
-    if (result != VK_SUCCESS) {
-        state.pipeline = VK_NULL_HANDLE;
+    if (previewResult != VK_SUCCESS || solidResult != VK_SUCCESS) {
+        if (state.previewPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, state.previewPipeline, nullptr);
+            state.previewPipeline = VK_NULL_HANDLE;
+        }
+        if (state.solidPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, state.solidPipeline, nullptr);
+            state.solidPipeline = VK_NULL_HANDLE;
+        }
         SCENE_LOG_WARN(
-            "[MaterialPreview] Realtime SurfaceSDF pipeline creation failed; "
+            "[Viewport] Shared SurfaceSDF pipeline creation failed; "
             "the raster viewport remains usable without the optional pass.");
         return false;
     }
 
     updateMaterialPreviewSdfSurfaceBinding();
+    g_native_surface_sdf_viewport_available = true;
     return true;
 }
 
@@ -242,18 +284,29 @@ void VulkanBackendAdapter::recordMaterialPreviewSdfSurfacePass(
     // (see the mid-rebuild branch in VulkanBackend_Volumes.cpp) — which reads as
     // the surface blinking out. Name the gate so a disappearance is attributable
     // without a bisect. Change-gated: one line per state transition.
-    const bool gateMode  = (m_viewportMode == ViewportMode::MaterialPreview);
+    const bool gateMode = m_viewportMode == ViewportMode::MaterialPreview ||
+                          m_viewportMode == ViewportMode::Solid ||
+                          m_viewportMode == ViewportMode::Matcap;
+    const bool previewMode = m_viewportMode == ViewportMode::MaterialPreview;
+    const char* shadingMode = previewMode
+        ? "MaterialPreview"
+        : (m_viewportMode == ViewportMode::Matcap ? "Matcap" : "Solid");
+    const VkPipeline pipeline = m_materialPreviewSdfSurface
+        ? (previewMode ? m_materialPreviewSdfSurface->previewPipeline
+                       : m_materialPreviewSdfSurface->solidPipeline)
+        : VK_NULL_HANDLE;
     const bool gatePipe  = m_materialPreviewSdfSurface &&
-                           m_materialPreviewSdfSurface->pipeline != VK_NULL_HANDLE;
+                           pipeline != VK_NULL_HANDLE;
     const bool gateSet   = m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE;
     const bool gateCount = m_device && m_device->m_volumeCount > 0u;
     const bool gateBound = m_materialPreviewSdfSurface &&
                            m_materialPreviewSdfSurface->boundVolumeBuffer != VK_NULL_HANDLE;
-    SCENE_LOG_ON_CHANGE("mpsdf.gate",
+    SCENE_LOG_ON_CHANGE("surface_sdf.gate",
         (long long)((gateMode ? 1 : 0) | (gatePipe ? 2 : 0) | (gateSet ? 4 : 0) |
                     (gateCount ? 8 : 0) | (gateBound ? 16 : 0)) * 1000ll +
             (long long)(m_device ? m_device->m_volumeCount : 0u),
-        std::string("[MPSdf] pass gates: mode=") + (gateMode ? "1" : "0") +
+        std::string("[SurfaceSDF] pass gates: shading=") + shadingMode +
+        " mode=" + (gateMode ? "1" : "0") +
         " pipeline=" + (gatePipe ? "1" : "0") +
         " descSet=" + (gateSet ? "1" : "0") +
         " volumeCount=" + std::to_string(m_device ? m_device->m_volumeCount : 0u) +
@@ -266,7 +319,7 @@ void VulkanBackendAdapter::recordMaterialPreviewSdfSurfacePass(
     if (!cmd || !gateMode || !gatePipe || !gateSet || !gateCount || !gateBound) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      m_materialPreviewSdfSurface->pipeline);
+                      pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_interactiveViewport.materialPreviewPipelineLayout,
                             0, 1, &m_interactiveViewport.materialPreviewDescSet,
@@ -282,8 +335,14 @@ void VulkanBackendAdapter::recordMaterialPreviewSdfSurfacePass(
     push.cameraPos[0] = m_camera.origin.x;
     push.cameraPos[1] = m_camera.origin.y;
     push.cameraPos[2] = m_camera.origin.z;
-    // w is unused by the shared preview ABI. It tells only this shader that
-    // bindings 17/18 contain the opaque image captured before the SDF draw.
+    push.cameraPos[3] = previewMode ? 0.0f
+        : (m_viewportMode == ViewportMode::Matcap ? 2.0f : 1.0f);
+    push.lightDir1[3] = static_cast<float>(
+        m_interactiveViewport.matcapUserLoaded
+            ? 2
+            : m_interactiveViewport.matcapPreset);
+    // lightDir0.w tells the preview branch that bindings 17/18 contain the
+    // opaque image captured before the SDF draw.
     push.lightDir0[3] = opaqueSnapshotReady ? 1.0f : 0.0f;
     uint32_t quality = 2u;
     if (::render_settings.raster_viewport_quality_preset ==

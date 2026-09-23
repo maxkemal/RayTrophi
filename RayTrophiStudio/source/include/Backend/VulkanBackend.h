@@ -113,6 +113,7 @@ struct GPUCapabilities {
     bool supports16BitFloat = false;
     bool supportsInt64Atomics = false;
     bool supportsBufferDeviceAddress = false;
+    bool supportsShaderInt64 = false;
     bool supportsDescriptorIndexing = false;
     // VK_EXT_memory_budget: the only live VRAM reading we have. Without it the
     // app can only report what it THINKS it allocated.
@@ -127,6 +128,10 @@ struct GPUCapabilities {
     bool supportsExternalMemoryWin32 = false;   // VK_KHR_external_memory_win32
     uint8_t deviceUUID[16] = {};                // VK_UUID_SIZE — for CUDA device matching
     bool hasDeviceUUID = false;
+
+    bool supportsNativeVolumeRaymarch() const {
+        return supportsBufferDeviceAddress && supportsShaderInt64;
+    }
 };
 
 // ============================================================================
@@ -2082,7 +2087,7 @@ public:
     // backend is never told the mode changed.
     void yieldRayFusionSceneAS();
     void reclaimRayFusionSceneAS();
-    bool isRayFusionSceneASYielded() const { return m_rayFusionSceneASYielded; }
+    bool isRayFusionSceneASYielded() const;
 
     // RayFusion step 2: acceleration structure residency in the raster viewport.
     // The device was already created with preferHardwareRT; what was missing is
@@ -2917,6 +2922,7 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
         AABB worldBBox;            // world-space AABB (localBBox transformed)
         uint8_t mask = 0xFF;       // visibility
         int scatterGroupId = -1;   // direct InstanceManager lookup for large scatter groups
+        bool rayFusionExcluded = false;
         uint32_t scatterInstanceIndex = UINT32_MAX;
         Matrix4x4 scatterSourceTransform = Matrix4x4::identity();
         int8_t scatterLodHint = -1; // -1=reclassify, 0=full, 1=proxy during paint

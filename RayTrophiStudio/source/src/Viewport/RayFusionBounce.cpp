@@ -85,7 +85,8 @@ float finitePositive(float f) { return std::isfinite(f) ? std::max(f, 0.0f) : 0.
 }
 
 bool VulkanBackendAdapter::setRayFusionProbeBounce(bool enabled) {
-    if (!m_device || !m_device->hasHardwareRT()) return false;
+    if (!m_device || !m_device->hasHardwareRT() ||
+        !m_device->getCapabilities().supportsRayQuery) return false;
     if (!m_rayFusionBounce) m_rayFusionBounce = std::make_shared<RayFusionBounceResources>();
     m_rayFusionBounce->status.requested = enabled;
     // ★★★★★ RASTER VIEWPORT'UN KAPISI `m_interactiveViewport.dirty`, ve bu
@@ -114,7 +115,8 @@ uint64_t VulkanBackendAdapter::prepareRayFusionBounce() {
     auto& s = *m_rayFusionBounce;
     auto& status = s.status;
     status.active = false;
-    if (!m_device || !m_device->hasHardwareRT()) return 0;
+    if (!m_device || !m_device->hasHardwareRT() ||
+        !m_device->getCapabilities().supportsRayQuery) return 0;
     // Timed because this runs on EVERY raster frame and scales with the scene,
     // not with what the bounce is asked to do. An unmeasured per-frame cost is
     // how this path came to own the frame without appearing anywhere.
