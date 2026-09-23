@@ -3,8 +3,11 @@ from pathlib import Path
 from itertools import product
 import math
 import re
-
-root = Path(__file__).resolve().parents[1]
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from rt_repo_root import repo_root as _repo_root
+root = _repo_root()
 src = root / 'RayTrophiStudio/source'
 read = lambda p: (src / p).read_text(encoding='utf-8')
 overlay = read('src/Viewport/RayFusionProbeOverlay.cpp')

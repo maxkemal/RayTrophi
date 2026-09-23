@@ -21,8 +21,11 @@ agree, and only a script checks that they do.
 import re
 import sys
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from rt_repo_root import repo_root as _repo_root
+ROOT = _repo_root()
 HEADERS = [
     ROOT / "RayTrophiStudio/source/include/TerrainNodesV2.h",
     ROOT / "RayTrophiStudio/source/include/TerrainSurfaceNodes.h",

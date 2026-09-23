@@ -56,8 +56,11 @@ assert 7 * visibility(2, 5, 3) == 0.875
 def ramp(x):
     return sum((c[0] + 0.5) * 3 * w for c, w in neighbours((x, 0, 0)))
 assert abs(ramp(-1e-6) - ramp(1e-6)) < 3e-6
-
-root = Path(__file__).resolve().parents[1]
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from rt_repo_root import repo_root as _repo_root
+root = _repo_root()
 shader = (root / 'RayTrophiStudio/source/shaders/probe_field.glsl').read_text(encoding='utf-8')
 # Link the reference's essential contracts to the actual source, without
 # presenting these text assertions as shader compilation or visual validation.

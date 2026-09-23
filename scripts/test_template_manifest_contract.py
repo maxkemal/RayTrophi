@@ -13,9 +13,11 @@ import json
 import re
 import sys
 from pathlib import Path
-
-
-ROOT = Path(__file__).resolve().parents[1]
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from rt_repo_root import repo_root as _repo_root
+ROOT = _repo_root()
 CONTRACT = ROOT / "docs" / "template_hub"
 SCHEMA_PATH = CONTRACT / "template_manifest.schema.json"
 EXAMPLES = CONTRACT / "examples"
