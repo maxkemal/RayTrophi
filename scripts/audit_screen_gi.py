@@ -7,8 +7,11 @@ import struct
 import sys
 import json
 import xml.etree.ElementTree as ET
-
-ROOT=Path(__file__).resolve().parents[1]
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from rt_repo_root import repo_root as _repo_root
+ROOT = _repo_root()
 SRC=ROOT/'RayTrophiStudio/source'
 read=lambda p:(SRC/p).read_text(encoding='utf-8')
 host=read('src/Viewport/ScreenGi.cpp')

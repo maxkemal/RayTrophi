@@ -1,8 +1,11 @@
 """Source-only checks for coverage authoring and exact-prepass shading. No builds."""
 from pathlib import Path
 import re
-
-ROOT = Path(__file__).resolve().parent.parent
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from rt_repo_root import repo_root as _repo_root
+ROOT = _repo_root()
 SRC = ROOT / 'RayTrophiStudio/source'
 def read(name):
     return (SRC / name).read_text(encoding='utf-8-sig')

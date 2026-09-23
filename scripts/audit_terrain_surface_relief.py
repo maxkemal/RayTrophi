@@ -4,9 +4,11 @@
 import re
 import sys
 from pathlib import Path
-
-
-ROOT = Path(__file__).resolve().parent.parent
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from rt_repo_root import repo_root as _repo_root
+ROOT = _repo_root()
 UMBRELLA = ROOT / "RayTrophiStudio/source/include/TerrainNodesV2.h"
 NODE_HEADER = ROOT / "RayTrophiStudio/source/include/TerrainSurfaceNodes.h"
 NODE_SOURCE = ROOT / "RayTrophiStudio/source/src/Physics/TerrainSurfaceNodes.cpp"

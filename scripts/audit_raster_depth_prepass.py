@@ -21,8 +21,11 @@ deger kumesinde kodlanmaz).
 import re
 import sys
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from rt_repo_root import repo_root as _repo_root
+ROOT = _repo_root()
 SRC = ROOT / "RayTrophiStudio" / "source"
 
 fails = []
@@ -94,7 +97,12 @@ else:
                      "bind noktasi olusmus olabilir.")
 
 # --- 4) pipeline durumu: derinlik yazar, renk yazmaz -----------------------
-m = re.search(r"dpCBA\.colorWriteMask\s*=\s*([^;]+);", vp_code)
+# ★★★ Dizi de skaler de kabul: prepass pipeline'i HDR gecisinin eklenti
+#   SAYISIYLA uyusmak zorunda oldugu icin `dpCBA` bir DIZI oldu ve bu
+#   denetim o gun sessizce yanlis alarma dondu -- kod dogruyken FAIL
+#   veriyordu. Bir QA aletinin yanlis alarmi, kacirdigi hata kadar
+#   pahalidir: once guvenilirligini, sonra bakilmasini kaybeder.
+m = re.search(r"dpCBA(?:\[\w+\])?\.colorWriteMask\s*=\s*([^;]+);", vp_code)
 if not m:
     fails.append("on gecis renk yazim maskesi ayarlanmiyor.")
 elif m.group(1).strip() != "0":
@@ -102,7 +110,7 @@ elif m.group(1).strip() != "0":
                  "gecis HDR hedefine yaziyor ve asil gecisin ustune biniyor.")
 if not re.search(r"dpDS\.depthWriteEnable\s*=\s*VK_TRUE", vp_code):
     fails.append("on gecis derinlik YAZMIYOR; o zaman bir sey yapmiyor demektir.")
-if not re.search(r"dpCBA\.blendEnable\s*=\s*VK_FALSE", vp_code):
+if not re.search(r"dpCBA(?:\[\w+\])?\.blendEnable\s*=\s*VK_FALSE", vp_code):
     fails.append("on geciste harmanlama kapatilmamis.")
 
 # --- 5) ISTEK ile UYGULANAN ayri alanlarda ---------------------------------
