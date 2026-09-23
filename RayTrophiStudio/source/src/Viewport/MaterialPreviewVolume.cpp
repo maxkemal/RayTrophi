@@ -12,9 +12,11 @@ namespace Backend {
 
 class MaterialPreviewVolumeResources {
 public:
-    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipeline previewPipeline = VK_NULL_HANDLE;
+    VkPipeline solidPipeline = VK_NULL_HANDLE;
     VkBuffer boundVolumeBuffer = VK_NULL_HANDLE;
     bool missingShaderReported = false;
+    bool unsupportedDeviceReported = false;
 };
 
 namespace {
@@ -50,9 +52,13 @@ static_assert(sizeof(PreviewPush) == 208u, "Material preview push ABI changed");
 
 void VulkanBackendAdapter::destroyMaterialPreviewVolumeResources() {
     if (!m_materialPreviewVolume || !m_device) return;
-    if (m_materialPreviewVolume->pipeline != VK_NULL_HANDLE) {
+    if (m_materialPreviewVolume->previewPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device->getDevice(),
-                          m_materialPreviewVolume->pipeline, nullptr);
+                          m_materialPreviewVolume->previewPipeline, nullptr);
+    }
+    if (m_materialPreviewVolume->solidPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device->getDevice(),
+                          m_materialPreviewVolume->solidPipeline, nullptr);
     }
     m_materialPreviewVolume.reset();
 }
@@ -63,8 +69,23 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
         m_interactiveViewport.materialPreviewPipelineLayout == VK_NULL_HANDLE ||
         m_interactiveViewport.materialPreviewDescSet == VK_NULL_HANDLE) return false;
 
+    if (!m_device->getCapabilities().supportsNativeVolumeRaymarch()) {
+        if (!m_materialPreviewVolume) {
+            m_materialPreviewVolume =
+                std::make_shared<MaterialPreviewVolumeResources>();
+        }
+        if (!m_materialPreviewVolume->unsupportedDeviceReported) {
+            m_materialPreviewVolume->unsupportedDeviceReported = true;
+            SCENE_LOG_WARN(
+                "[Viewport] Native gas/VDB raymarch needs buffer device address "
+                "and shaderInt64; the raster volume pass is disabled.");
+        }
+        return false;
+    }
+
     if (m_materialPreviewVolume &&
-        m_materialPreviewVolume->pipeline != VK_NULL_HANDLE) {
+        m_materialPreviewVolume->previewPipeline != VK_NULL_HANDLE &&
+        m_materialPreviewVolume->solidPipeline != VK_NULL_HANDLE) {
         updateMaterialPreviewVolumeBinding();
         return true;
     }
@@ -135,6 +156,7 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depth.depthTestEnable = VK_FALSE;
     depth.depthWriteEnable = VK_FALSE;
+    depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     VkPipelineColorBlendAttachmentState attachment{};
     attachment.blendEnable = VK_TRUE;
     // Shader output is premultiplied front-to-back radiance + opacity.
@@ -149,18 +171,6 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     // ★★★ HDR gecisi artik UC renk eklentisi tasiyor (1-2 = RayFusion reflection
     //   G-buffer: oct normal, ve speküler agirlik + roughness) ve blend eklenti SAYISI gecisle uyusmak zorunda. Hacim
     //   G-buffer'a YAZMAZ: yansima icin bir yuzey beyan etmiyor.
-    const bool rfHdrPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE;
-    VkPipelineColorBlendAttachmentState attachments[3]{};
-    attachments[0] = attachment;
-    attachments[1].colorWriteMask = 0;
-    attachments[1].blendEnable = VK_FALSE;
-    attachments[2].colorWriteMask = 0;
-    attachments[2].blendEnable = VK_FALSE;
-
-    VkPipelineColorBlendStateCreateInfo blend{};
-    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = rfHdrPass ? 3u : 1u;
-    blend.pAttachments = attachments;
     const VkDynamicState dynamicStates[2] = {
         VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{};
@@ -178,7 +188,6 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     pci.pRasterizationState = &raster;
     pci.pMultisampleState = &multisample;
     pci.pDepthStencilState = &depth;
-    pci.pColorBlendState = &blend;
     pci.pDynamicState = &dynamic;
     pci.layout = m_interactiveViewport.materialPreviewPipelineLayout;
     // ★ Hacim scene-referred: HDR gecisi (emission kirpilmadan bokeh
@@ -187,18 +196,50 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     //   kurmaz) LDR gecisine baglanir. Null bir render pass ile pipeline
     //   yaratmak API hatasidir; sessizce basarisiz olan bir pipeline ise
     //   "hacim gorunmuyor" diye raporlanir ve gunler yakar.
-    pci.renderPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE
-                   ? m_interactiveViewport.hdrRenderPass
-                   : m_interactiveViewport.renderPass;
     pci.subpass = 0;
-    const VkResult result = vkCreateGraphicsPipelines(
-        device, VK_NULL_HANDLE, 1, &pci, nullptr, &state.pipeline);
+
+    auto createPipeline = [&](VkRenderPass renderPass,
+                              uint32_t colorAttachmentCount,
+                              bool depthTest,
+                              VkPipeline& pipeline) {
+        VkPipelineColorBlendAttachmentState attachments[3]{};
+        attachments[0] = attachment;
+        attachments[1].colorWriteMask = 0;
+        attachments[2].colorWriteMask = 0;
+
+        VkPipelineColorBlendStateCreateInfo blend{};
+        blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        blend.attachmentCount = colorAttachmentCount;
+        blend.pAttachments = attachments;
+        depth.depthTestEnable = depthTest ? VK_TRUE : VK_FALSE;
+        pci.pColorBlendState = &blend;
+        pci.renderPass = renderPass;
+        return vkCreateGraphicsPipelines(
+            device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipeline);
+    };
+
+    const bool hasHdrPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE;
+    const VkRenderPass previewRenderPass = hasHdrPass
+        ? m_interactiveViewport.hdrRenderPass
+        : m_interactiveViewport.renderPass;
+    const VkResult previewResult = createPipeline(
+        previewRenderPass, hasHdrPass ? 3u : 1u, false,
+        state.previewPipeline);
+    const VkResult solidResult = createPipeline(
+        m_interactiveViewport.renderPass, 1u, true, state.solidPipeline);
     vkDestroyShaderModule(device, fragModule, nullptr);
     vkDestroyShaderModule(device, vertModule, nullptr);
-    if (result != VK_SUCCESS) {
-        state.pipeline = VK_NULL_HANDLE;
+    if (previewResult != VK_SUCCESS || solidResult != VK_SUCCESS) {
+        if (state.previewPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, state.previewPipeline, nullptr);
+            state.previewPipeline = VK_NULL_HANDLE;
+        }
+        if (state.solidPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, state.solidPipeline, nullptr);
+            state.solidPipeline = VK_NULL_HANDLE;
+        }
         SCENE_LOG_WARN(
-            "[MaterialPreview] Realtime volume pipeline creation failed; "
+            "[Viewport] Shared realtime volume pipeline creation failed; "
             "the raster viewport remains usable without the optional pass.");
         return false;
     }
@@ -239,9 +280,14 @@ void VulkanBackendAdapter::recordMaterialPreviewVolumePass(
     // screen cannot tell them apart — both produce an empty frame. Name which
     // gate refused, so the next run answers "was the pass even recorded?"
     // without another bisect. Change-gated: one line per state transition.
-    const bool gateMode   = (m_viewportMode == ViewportMode::MaterialPreview);
-    const bool gatePipe   = m_materialPreviewVolume &&
-                            m_materialPreviewVolume->pipeline != VK_NULL_HANDLE;
+    const bool previewMode = m_viewportMode == ViewportMode::MaterialPreview;
+    const bool gateMode = previewMode || m_viewportMode == ViewportMode::Solid ||
+                          m_viewportMode == ViewportMode::Matcap;
+    const VkPipeline pipeline = m_materialPreviewVolume
+        ? (previewMode ? m_materialPreviewVolume->previewPipeline
+                       : m_materialPreviewVolume->solidPipeline)
+        : VK_NULL_HANDLE;
+    const bool gatePipe = pipeline != VK_NULL_HANDLE;
     const bool gateSet    = m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE;
     const bool gateCount  = m_device && m_device->m_volumeCount > 0u;
     const bool gateBound  = m_materialPreviewVolume &&
@@ -260,8 +306,7 @@ void VulkanBackendAdapter::recordMaterialPreviewVolumePass(
             : "  -> SKIPPED"));
     if (!cmd || !gateMode || !gatePipe || !gateSet || !gateCount || !gateBound) return;
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      m_materialPreviewVolume->pipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_interactiveViewport.materialPreviewPipelineLayout,
                             0, 1, &m_interactiveViewport.materialPreviewDescSet,
@@ -277,6 +322,7 @@ void VulkanBackendAdapter::recordMaterialPreviewVolumePass(
     push.cameraPos[0] = m_camera.origin.x;
     push.cameraPos[1] = m_camera.origin.y;
     push.cameraPos[2] = m_camera.origin.z;
+    push.cameraPos[3] = previewMode ? 0.0f : 1.0f;
     push.lightDir0[3] = opaqueSnapshotReady ? 1.0f : 0.0f;
     uint32_t quality = 2u;
     if (::render_settings.raster_viewport_quality_preset ==

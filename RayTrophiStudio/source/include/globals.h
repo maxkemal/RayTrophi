@@ -668,9 +668,9 @@ extern bool g_optix_rebuild_pending;
 // g_gpu_refit_pending / g_*_rebuild_pending), so it never burns CPU off-path.
 extern bool g_particle_cpu_geometry_dirty;
 extern bool g_solid_viewport_active; // true for every interactive raster shading mode (not Rendered)
-// Material Preview has a native NanoVDB SurfaceSDF pass. The fluid bridge uses
-// this distinction to suppress only its compatibility sphere proxy there while
-// keeping that proxy available in Solid/Matcap until those modes share the pass.
+// Set after the shared SurfaceSDF shader has created its Material Preview and
+// Solid/Matcap pipelines. The fluid bridge retains a bounded fallback until then.
+extern bool g_native_surface_sdf_viewport_available;
 extern bool g_material_preview_viewport_active;
 // ★★★ TWO Vulkan DEVICES, ONE SET OF DEVICE ADDRESSES. A live dense gas domain
 // publishes raw VkDeviceAddresses owned by the simulation compute device. When a

@@ -16,8 +16,9 @@ struct alignas(16) RtShadowPush {
     float sunDirection[4];
     float params[4];
     uint32_t flags[4];
+    uint32_t volumeMeta[4];
 };
-static_assert(sizeof(RtShadowPush) == 112u, "RT shadow push ABI");
+static_assert(sizeof(RtShadowPush) == 128u, "RT shadow push ABI");
 // material_preview_rt_shadow.glsl: uvec4 rtShadowMeta + uvec4 rtShadowCoverage.
 constexpr uint32_t kRtShadowHeaderBytes = 32u;
 void bufferBarrier(VkCommandBuffer cmd, VkBuffer buffer, VkAccessFlags src,
@@ -73,8 +74,8 @@ bool VulkanBackendAdapter::ensureRtShadowResources(uint32_t width, uint32_t heig
     s.textureCount=(std::min)(uint32_t(VULKAN_TEXTURE_CAPACITY),
         props.limits.maxPerStageDescriptorSampledImages>1u?
         props.limits.maxPerStageDescriptorSampledImages-1u:1u);
-    VkDescriptorSetLayoutBinding bindings[6]{};
-    for(uint32_t i=0;i<6;++i) {
+    VkDescriptorSetLayoutBinding bindings[7]{};
+    for(uint32_t i=0;i<7;++i) {
         bindings[i].binding=i; bindings[i].descriptorCount=1;
         bindings[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
         bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -84,14 +85,14 @@ bool VulkanBackendAdapter::ensureRtShadowResources(uint32_t width, uint32_t heig
     bindings[5].descriptorCount=s.textureCount;
     if (!s.setLayout) {
         VkDescriptorSetLayoutCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        ci.bindingCount=6;ci.pBindings=bindings;
+        ci.bindingCount=7;ci.pBindings=bindings;
         if(vkCreateDescriptorSetLayout(vk,&ci,nullptr,&s.setLayout)!=VK_SUCCESS) {
             s.reason="shadow descriptor layout failed";return false;
         }
     }
     if(!s.pool) {
         VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,3},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,4},
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,s.textureCount+1u}};
         VkDescriptorPoolCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         ci.maxSets=1;ci.poolSizeCount=3;ci.pPoolSizes=sizes;
@@ -320,11 +321,15 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     }
     VkDescriptorBufferInfo buffers[]={{s.mask.buffer,0,VK_WHOLE_SIZE},
         {s.hits.buffer,0,VK_WHOLE_SIZE},{s.materials.buffer,0,VK_WHOLE_SIZE}};
+    const VkBuffer volumeBuffer = m_device->m_volumeBuffer.buffer
+        ? m_device->m_volumeBuffer.buffer
+        : s.mask.buffer;
+    VkDescriptorBufferInfo volumeInfo{volumeBuffer, 0, VK_WHOLE_SIZE};
     VkWriteDescriptorSetAccelerationStructureKHR acceleration{};
     acceleration.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
     acceleration.accelerationStructureCount=1;acceleration.pAccelerationStructures=&tlas;
-    VkWriteDescriptorSet writes[6]{};
-    for(uint32_t i=0;i<6;++i) {
+    VkWriteDescriptorSet writes[7]{};
+    for(uint32_t i=0;i<7;++i) {
         writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[i].dstSet=s.set;
         writes[i].dstBinding=i;writes[i].descriptorCount=1;
         writes[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -334,7 +339,9 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     for(uint32_t i=0;i<3;++i)writes[i+2].pBufferInfo=&buffers[i];
     writes[5].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[5].descriptorCount=s.textureCount;writes[5].pImageInfo=textures.data();
-    vkUpdateDescriptorSets(m_device->getDevice(),6,writes,0,nullptr);
+    writes[6].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[6].pBufferInfo=&volumeInfo;
+    vkUpdateDescriptorSets(m_device->getDevice(),7,writes,0,nullptr);
     s.reason.clear();s.prepared=true;m_rtShadowCoveredLastFrame=true;
     prepareScreenGiFrame();
     return true;
@@ -366,6 +373,9 @@ void VulkanBackendAdapter::recordRtShadowPass(VkCommandBuffer cmd,const Matrix4x
     push.params[0]=0.02f;push.params[1]=1e5f;push.params[2]=float(width);push.params[3]=float(height);
     push.flags[0]=s.textureCount;push.flags[1]=uint32_t(m_cachedGpuMaterials.size());
     push.flags[2]=s.instanceCount;push.flags[3]=s.coverage.primaryLight;
+    push.volumeMeta[0] = m_device->m_volumeBuffer.buffer
+        ? m_device->m_volumeCount
+        : 0u;
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,s.pipeline);
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,s.layout,0,1,&s.set,0,nullptr);
     vkCmdPushConstants(cmd,s.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),&push);

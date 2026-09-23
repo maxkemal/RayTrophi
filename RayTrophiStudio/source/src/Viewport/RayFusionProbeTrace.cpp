@@ -99,9 +99,12 @@ bool VulkanBackendAdapter::ensureRayFusionProbeTraceResources(uint32_t capacity)
     // cevirirdi. 64 probe'luk sonuc tamponu 128 KB.
     capacity = capacity < 64u ? 64u : capacity;
     if (!m_device || !m_device->isInitialized()) return false;
-    if (!m_device->hasHardwareRT()) {
+    if (!m_device->hasHardwareRT() ||
+        !m_device->getCapabilities().supportsRayQuery) {
         if (m_rayFusionProbeTrace)
-            m_rayFusionProbeTrace->inactiveReason = "device reports no hardware ray tracing";
+            m_rayFusionProbeTrace->inactiveReason = m_device->hasHardwareRT()
+                ? "device reports no ray query support"
+                : "device reports no hardware ray tracing";
         return false;
     }
     auto state = m_rayFusionProbeTrace;

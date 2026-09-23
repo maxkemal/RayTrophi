@@ -4505,9 +4505,24 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         recordMaterialPreviewSdfSurfacePass(
             cmd, viewProj, view, static_cast<uint32_t>(width),
             static_cast<uint32_t>(height), false);
+    } else if (!hdrPassActive &&
+               (m_viewportMode == ViewportMode::Solid ||
+                m_viewportMode == ViewportMode::Matcap)) {
+        // Solid and Matcap shade the same volume SSBO used by Material Preview
+        // and RayFusion. Their lightweight gas path skips scene lighting and
+        // shadow queries; no second grid or particle proxy is needed.
+        recordMaterialPreviewVolumePass(
+            cmd, viewProj, view, static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height), false);
+        recordMaterialPreviewSdfSurfacePass(
+            cmd, viewProj, view, static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height), false);
     }
     markRasterStage(cmd, RasterStage::VolumeSdf,
-                    useMaterialPreview && !m_materialPreviewTransmission);
+                    (useMaterialPreview && !m_materialPreviewTransmission) ||
+                    (!hdrPassActive &&
+                     (m_viewportMode == ViewportMode::Solid ||
+                      m_viewportMode == ViewportMode::Matcap)));
 
     // ======================================================================
     // HDR -> POST -> LDR gecisi
@@ -4835,13 +4850,16 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         m_interactiveViewport.gridNormalBuffer.buffer &&
         m_interactiveViewport.identityInstanceBuffer.buffer &&
         m_interactiveViewport.gridVertexCount > 0) {
-        if (useMaterialPreview) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
-            if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        m_interactiveViewport.pipelineLayout,
-                                        0, 1, &m_interactiveViewport.matcapDescSet, 0, nullptr);
-            }
+        // SurfaceSDF also records in the Solid/Matcap render pass and leaves its
+        // own fullscreen pipeline bound. Grid drawing must restore the solid
+        // pipeline explicitly in every shading mode.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_interactiveViewport.solidPipeline);
+        if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_interactiveViewport.pipelineLayout,
+                                    0, 1, &m_interactiveViewport.matcapDescSet,
+                                    0, nullptr);
         }
         Matrix4x4 identity = Matrix4x4::identity();
         Matrix4x4 gridMvp = proj * view;
@@ -5127,10 +5145,13 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 g_vulkan_device_lost_msg =
                     "Raster frame submission returned VK_ERROR_DEVICE_LOST";
                 render_settings.backend_changed = true;
-                m_interactiveViewport.dirty = true;
-                SCENE_LOG_ERROR(
-                    "[Viewport] Vulkan device lost while submitting a raster frame; "
-                    "no retry will be attempted on the lost queue.");
+                if (!m_loggedRasterDeviceLost) {
+                    m_loggedRasterDeviceLost = true;
+                    SCENE_LOG_ERROR(
+                        "[Viewport] Vulkan device lost while submitting a raster "
+                        "frame; the backend will be rebuilt and this message is "
+                        "logged once.");
+                }
                 presentCachedRasterFrame();
                 publishRasterTelemetry(false, 0.0, cpuRecordMs, slotWaitMs,
                                        submitMs, 0.0, 0.0, 0.0);
@@ -7589,6 +7610,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                     ri.transform = inst.toMatrix() * entry.sourceToScatter;
                     ri.mask = 0xFF;
                     ri.scatterGroupId = group.id;
+                    ri.rayFusionExcluded = group.rendered_rt_excluded;
                     ri.scatterInstanceIndex = static_cast<uint32_t>(i);
                     ri.scatterSourceTransform = entry.sourceToScatter;
                 }

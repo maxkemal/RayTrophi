@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace VulkanRT {
@@ -419,6 +420,7 @@ public:
 };
 
 bool VulkanBackendAdapter::ensureRayFusionSceneAS() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     auto state = m_rayFusionSceneAS;
     if (!state) {
         state = std::make_shared<RayFusionSceneASResources>();
@@ -450,11 +452,11 @@ bool VulkanBackendAdapter::ensureRayFusionSceneAS() {
         fresh->inactiveReason = "backend is not serving the interactive viewport";
         return false;
     }
-    if (!m_device->hasHardwareRT()) {
-        // Not a failure to hide: the device was created with preferHardwareRT,
-        // so this means the GPU or driver declined, and every RayFusion step
-        // that needs rays is blocked behind it.
-        state->inactiveReason = "device reports no hardware ray tracing";
+    if (!m_device->hasHardwareRT() ||
+        !m_device->getCapabilities().supportsRayQuery) {
+        state->inactiveReason = m_device->hasHardwareRT()
+            ? "device reports no ray query support"
+            : "device reports no hardware ray tracing";
         return false;
     }
     if (m_rasterMeshes.empty()) {
@@ -466,9 +468,16 @@ bool VulkanBackendAdapter::ensureRayFusionSceneAS() {
     // than the thing it guards is worth nothing if it can miss a change; the
     // cost of computing it is reported so it can be judged, not assumed.
     const auto signatureStart = std::chrono::steady_clock::now();
+    std::unordered_set<std::string> rayFusionMeshKeys;
+    rayFusionMeshKeys.reserve(m_rasterMeshes.size());
+    for (const auto& instance : m_rasterInstances) {
+        if (instance.rayFusionExcluded) continue;
+        rayFusionMeshKeys.insert(instance.meshKey);
+    }
     uint64_t geometrySignature = 1469598103934665603ull;
     for (const auto& [meshKey, mesh] : m_rasterMeshes) {
         if (mesh.isScatterProxy) continue;
+        if (rayFusionMeshKeys.find(meshKey) == rayFusionMeshKeys.end()) continue;
         geometrySignature = hashMix(geometrySignature, meshKey.data(), meshKey.size());
         geometrySignature = hashMix(geometrySignature, mesh.vertexCount);
         geometrySignature = hashMix(geometrySignature,
@@ -482,6 +491,7 @@ bool VulkanBackendAdapter::ensureRayFusionSceneAS() {
     }
     uint64_t instanceSignature = 1469598103934665603ull;
     for (const auto& instance : m_rasterInstances) {
+        if (instance.rayFusionExcluded) continue;
         instanceSignature = hashMix(instanceSignature, instance.meshKey.data(),
                                     instance.meshKey.size());
         instanceSignature = hashMix(instanceSignature, &instance.transform,
@@ -575,6 +585,7 @@ bool VulkanBackendAdapter::ensureRayFusionSceneAS() {
         // Impostor proxies are a raster LOD, not geometry: tracing them would
         // put a camera-facing billboard into the world the rays see.
         if (mesh.isScatterProxy) continue;
+        if (rayFusionMeshKeys.find(meshKey) == rayFusionMeshKeys.end()) continue;
         if (!mesh.vertexBuffer.buffer || mesh.vertexCount < 3u) {
             ++state->meshesSkipped;
             continue;
@@ -659,6 +670,7 @@ bool VulkanBackendAdapter::ensureRayFusionSceneAS() {
 //   an in-flight drain. And it cannot go stale the way a dirty flag can, since
 //   it is derived from the very values the skinning shader consumes.
 void VulkanBackendAdapter::noteSkinnedPose(const std::vector<Matrix4x4>& boneMatrices) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     // An empty pose is not a pose: callers already refuse to skin without
     // matrices, and treating "no data" as a new pose would refit on nothing.
     if (boneMatrices.empty()) return;
@@ -680,6 +692,7 @@ void VulkanBackendAdapter::noteSkinnedPose(const std::vector<Matrix4x4>& boneMat
 // During playback it runs once per POSE, not once per rendered frame -- on the
 // measured scene that was 33 refits a second against 84 rendered frames.
 void VulkanBackendAdapter::refreshRayFusionSkinnedBLAS() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     auto state = m_rayFusionSceneAS;
     if (!state || !m_device) return;
     if (state->skinnedBlasIndices.empty()) {
@@ -748,6 +761,7 @@ void VulkanBackendAdapter::refreshRayFusionSkinnedBLAS() {
 }
 
 bool VulkanBackendAdapter::rebuildRayFusionTLAS() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     auto state = m_rayFusionSceneAS;
     if (!state || !m_device) return false;
 
@@ -763,6 +777,7 @@ bool VulkanBackendAdapter::rebuildRayFusionTLAS() {
         state->worldMax[axis] = -std::numeric_limits<float>::max();
     }
     for (const auto& instance : m_rasterInstances) {
+        if (instance.rayFusionExcluded) continue;
         // *** scene.delete does NOT erase anything: it sets mask = 0 and leaves
         //   the mesh and the instance resident so undo is instant. The raster
         //   draw loop skips mask == 0, and the traced scene MUST make the same
@@ -853,6 +868,7 @@ bool VulkanBackendAdapter::rebuildRayFusionTLAS() {
 
 bool VulkanBackendAdapter::getRayFusionHitInstances(
     std::vector<RayFusion::HitInstance>& out) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     out.clear();
     const auto state = m_rayFusionSceneAS;
     if (!state || !state->ready) return false;
@@ -930,6 +946,7 @@ bool VulkanBackendAdapter::getRayFusionEmissiveTriangles(
     std::vector<RayFusion::EmissiveTriangle>& out,
     std::vector<uint8_t>& materialInNee,
     RayFusion::BounceStatus& status) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     out.clear();
     materialInNee.assign(m_cachedGpuMaterials.size(), 0u);
     status.emissiveTriangles = 0;
@@ -1118,6 +1135,7 @@ bool VulkanBackendAdapter::getRayFusionEmissiveTriangles(
 }
 
 bool VulkanBackendAdapter::getRayFusionSceneASStatus(RayFusionSceneASStatus& out) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     out = {};
     out.hardware_rt = m_device && m_device->hasHardwareRT();
     out.yielded = m_rayFusionSceneASYielded;
@@ -1166,6 +1184,7 @@ bool VulkanBackendAdapter::getRayFusionSceneASStatus(RayFusionSceneASStatus& out
 }
 
 void VulkanBackendAdapter::destroyRayFusionSceneAS() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     auto state = m_rayFusionSceneAS;
     if (!state || !m_device) {
         m_rayFusionSceneAS.reset();
@@ -1179,6 +1198,7 @@ void VulkanBackendAdapter::destroyRayFusionSceneAS() {
 }
 
 void VulkanBackendAdapter::yieldRayFusionSceneAS() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_rayFusionSceneASYielded) return;
     m_rayFusionSceneASYielded = true;
     if (!m_rayFusionSceneAS) return;
@@ -1193,9 +1213,15 @@ void VulkanBackendAdapter::yieldRayFusionSceneAS() {
 }
 
 void VulkanBackendAdapter::reclaimRayFusionSceneAS() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     // Only lifts the gate; the next ensureRayFusionSceneAS rebuilds lazily
     // from the (still resident) raster geometry.
     m_rayFusionSceneASYielded = false;
+}
+
+bool VulkanBackendAdapter::isRayFusionSceneASYielded() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    return m_rayFusionSceneASYielded;
 }
 
 } // namespace Backend

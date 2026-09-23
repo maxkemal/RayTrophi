@@ -119,6 +119,12 @@ echo Deploy complete.
 exit /b 0
 
 :error
+set "FAILURE_CODE=%errorlevel%"
+if "%FAILURE_CODE%"=="0" set "FAILURE_CODE=1"
 echo.
 echo ===== Compilation FAILED =====
-exit /b 1
+echo Exit code: %FAILURE_CODE%
+echo Review the compiler output above. This window will remain open.
+echo.
+pause
+endlocal & exit /b %FAILURE_CODE%

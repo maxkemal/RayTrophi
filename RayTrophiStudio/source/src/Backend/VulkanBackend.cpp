@@ -772,6 +772,22 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
     if (validationLayers) setupDebugMessenger();
     if (!selectPhysicalDevice(preferHardwareRT)) return false;
     if (!createLogicalDevice(preferHardwareRT)) return false;
+    if (m_capabilities.supportsBufferDeviceAddress) {
+        fpGetBufferDeviceAddressKHR =
+            reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
+                vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddressKHR"));
+        if (!fpGetBufferDeviceAddressKHR) {
+            fpGetBufferDeviceAddressKHR =
+                reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
+                    vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddress"));
+        }
+        if (!fpGetBufferDeviceAddressKHR) {
+            m_capabilities.supportsBufferDeviceAddress = false;
+            VK_WARN() << "[VulkanDevice] Buffer device address was enabled but its "
+                      << "entry point is unavailable; native volume raymarch is disabled."
+                      << std::endl;
+        }
+    }
     if (!createCommandPool()) return false;
     detectCapabilities();
     if (!createDescriptorPool()) return false;
@@ -787,6 +803,17 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
 
     VK_INFO() << "[VulkanDevice] Ready: " << m_capabilities.deviceName
               << " | VRAM: " << (m_capabilities.dedicatedVRAM / (1024*1024)) << " MB" << std::endl;
+    VK_INFO() << "[VulkanDevice] Feature tiers"
+              << " | nativeVolume="
+              << (m_capabilities.supportsNativeVolumeRaymarch() ? "yes" : "no")
+              << " | BDA="
+              << (m_capabilities.supportsBufferDeviceAddress ? "yes" : "no")
+              << " | shaderInt64="
+              << (m_capabilities.supportsShaderInt64 ? "yes" : "no")
+              << " | hardwareRT=" << (hasHardwareRT() ? "yes" : "no")
+              << " | rayQuery="
+              << (m_capabilities.supportsRayQuery ? "yes" : "no")
+              << std::endl;
     VK_INFO() << "[VulkanDevice] Texture compression support"
               << " | BC4: " << (m_capabilities.supportsBC4 ? "yes" : "no")
               << " | BC5: " << (m_capabilities.supportsBC5 ? "yes" : "no")
@@ -1235,13 +1262,26 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
 
     std::vector<const char*> deviceExtensions;
 
-    // Buffer device address (required for RT)
-    bool hasBDA = hasExtension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
-    if (hasBDA) deviceExtensions.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    // Buffer device address is also the zero-copy NanoVDB addressing layer for
+    // raster Solid/Matcap. Vulkan 1.2 promotes it to core, independently of RT.
+    VkPhysicalDeviceProperties deviceProperties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &deviceProperties);
+    const bool hasBDAExtension =
+        hasExtension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    const bool hasCoreBDA = deviceProperties.apiVersion >= VK_API_VERSION_1_2;
+    const bool hasBDA = hasBDAExtension || hasCoreBDA;
+    if (hasBDAExtension) {
+        deviceExtensions.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    }
 
     // Descriptor indexing
-    bool hasDescIdx = hasExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
-    if (hasDescIdx) deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    const bool hasDescIdxExtension =
+        hasExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    const bool hasCoreDescIdx = deviceProperties.apiVersion >= VK_API_VERSION_1_2;
+    const bool hasDescIdx = hasDescIdxExtension || hasCoreDescIdx;
+    if (hasDescIdxExtension) {
+        deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    }
 
     // Shader float atomics (VK_EXT_shader_atomic_float). The fluid P2G scatter
     // and density splat compute kernels do atomicAdd() on float SSBOs; without
@@ -1291,8 +1331,6 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         if (hasSPIRV14) deviceExtensions.push_back(VK_KHR_SPIRV_1_4_EXTENSION_NAME);
         if (hasShaderFloatCtrl) deviceExtensions.push_back(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
         m_capabilities.rtMode = RayTracingMode::HARDWARE_KHR;
-        m_capabilities.supportsRayQuery = hasRayQuery;
-        m_capabilities.supportsBufferDeviceAddress = true;
     } else {
         m_capabilities.rtMode = RayTracingMode::COMPUTE;
     }
@@ -1311,6 +1349,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR supportedRtPipelineFeatures{};
     supportedRtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
 
+    VkPhysicalDeviceRayQueryFeaturesKHR supportedRayQueryFeatures{};
+    supportedRayQueryFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+
     VkPhysicalDeviceDescriptorIndexingFeatures supportedDescIdxFeatures{};
     supportedDescIdxFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
 
@@ -1320,11 +1362,13 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     supportedFeatures.pNext = &supportedBdaFeatures;
     supportedBdaFeatures.pNext = &supportedAccelFeatures;
     supportedAccelFeatures.pNext = &supportedRtPipelineFeatures;
-    supportedRtPipelineFeatures.pNext = &supportedDescIdxFeatures;
+    supportedRtPipelineFeatures.pNext = &supportedRayQueryFeatures;
+    supportedRayQueryFeatures.pNext = &supportedDescIdxFeatures;
     supportedDescIdxFeatures.pNext = &supportedAtomicFloatFeatures;
     vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supportedFeatures);
 
     const bool canUseBDA = hasBDA && supportedBdaFeatures.bufferDeviceAddress == VK_TRUE;
+    const bool canUseShaderInt64 = supportedFeatures.features.shaderInt64 == VK_TRUE;
     // All three feature bits are required by the material-preview pipeline:
     //   - runtimeDescriptorArray              → `sampler2D textures[]`
     //   - shaderSampledImageArrayNonUniformIndexing → `nonuniformEXT(...)`
@@ -1337,8 +1381,12 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         supportedDescIdxFeatures.runtimeDescriptorArray == VK_TRUE &&
         supportedDescIdxFeatures.shaderSampledImageArrayNonUniformIndexing == VK_TRUE &&
         supportedDescIdxFeatures.descriptorBindingPartiallyBound == VK_TRUE;
-    const bool canUseAccelStruct = hasAccelStruct && supportedAccelFeatures.accelerationStructure == VK_TRUE;
-    const bool canUseRTPipeline = hasRTPipeline && supportedRtPipelineFeatures.rayTracingPipeline == VK_TRUE;
+    const bool canUseAccelStruct = hasAccelStruct &&
+        supportedAccelFeatures.accelerationStructure == VK_TRUE;
+    const bool canUseRTPipeline = hasRTPipeline &&
+        supportedRtPipelineFeatures.rayTracingPipeline == VK_TRUE;
+    const bool canUseRayQuery = hasRayQuery &&
+        supportedRayQueryFeatures.rayQuery == VK_TRUE;
     const bool canUseSamplerAnisotropy = supportedFeatures.features.samplerAnisotropy == VK_TRUE;
     // Only the buffer (SSBO) float-atomic-add variant is needed by the fluid
     // kernels — they do not use shared-memory float atomics.
@@ -1381,8 +1429,11 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
             deviceExtensions.end());
     }
 
-    if (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && (!canUseBDA || !canUseAccelStruct || !canUseRTPipeline)) {
-        VK_WARN() << "[VulkanDevice] Downgrading to compute mode because required RT feature bits are unavailable." << std::endl;
+    if (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR &&
+        (!canUseBDA || !canUseAccelStruct || !canUseRTPipeline)) {
+        VK_WARN() << "[VulkanDevice] Downgrading to compute mode because required "
+                     "RT feature bits are unavailable."
+                  << std::endl;
         deviceExtensions.erase(
             std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME),
             deviceExtensions.end());
@@ -1406,6 +1457,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.features.samplerAnisotropy = canUseSamplerAnisotropy ? VK_TRUE : VK_FALSE;
     features2.features.shaderFloat64 = canUseShaderFloat64 ? VK_TRUE : VK_FALSE;
+    features2.features.shaderInt64 = canUseShaderInt64 ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeatures{};
     bdaFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
@@ -1413,11 +1465,24 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures{};
     accelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-    accelFeatures.accelerationStructure = (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseAccelStruct) ? VK_TRUE : VK_FALSE;
+    accelFeatures.accelerationStructure =
+        (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseAccelStruct)
+            ? VK_TRUE
+            : VK_FALSE;
 
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
     rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    rtPipelineFeatures.rayTracingPipeline = (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseRTPipeline) ? VK_TRUE : VK_FALSE;
+    rtPipelineFeatures.rayTracingPipeline =
+        (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseRTPipeline)
+            ? VK_TRUE
+            : VK_FALSE;
+
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.rayQuery =
+        (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseRayQuery)
+            ? VK_TRUE
+            : VK_FALSE;
 
     VkPhysicalDeviceDescriptorIndexingFeatures descIdxFeatures{};
     descIdxFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
@@ -1451,6 +1516,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         *nextLink = &rtPipelineFeatures;
         nextLink = &rtPipelineFeatures.pNext;
     }
+    if (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseRayQuery) {
+        *nextLink = &rayQueryFeatures;
+        nextLink = &rayQueryFeatures.pNext;
+    }
     if (canUseDescIdx) {
         *nextLink = &descIdxFeatures;
         nextLink = &descIdxFeatures.pNext;
@@ -1478,6 +1547,12 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     bool enabledSamplerAnisotropy = (result == VK_SUCCESS) && canUseSamplerAnisotropy;
     bool enabledAtomicFloat = (result == VK_SUCCESS) && canUseAtomicFloat;
     bool enabledShaderFloat64 = (result == VK_SUCCESS) && canUseShaderFloat64;
+    bool enabledBDA = (result == VK_SUCCESS) && canUseBDA;
+    bool enabledShaderInt64 = (result == VK_SUCCESS) && canUseShaderInt64;
+    bool enabledRayQuery =
+        (result == VK_SUCCESS) &&
+        m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR &&
+        canUseRayQuery;
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateDevice failed: " << result << std::endl;
         // Log requested extensions for diagnostics
@@ -1513,12 +1588,18 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         // instead of invoking undefined float-atomic behaviour.
         enabledAtomicFloat = false;
         enabledShaderFloat64 = false;
+        enabledBDA = false;
+        enabledShaderInt64 = false;
+        enabledRayQuery = false;
         VK_INFO() << "[VulkanDevice] Device created with fallback (no HW RT, descriptor indexing disabled). Continuing in compute mode." << std::endl;
     }
     // Latch enabled-at-create descriptor indexing state into capabilities.
     // detectCapabilities() must NOT overwrite this — it now preserves the flag.
     m_capabilities.supportsDescriptorIndexing = enabledDescIdx;
     m_capabilities.supportsSamplerAnisotropy = enabledSamplerAnisotropy;
+    m_capabilities.supportsBufferDeviceAddress = enabledBDA;
+    m_capabilities.supportsShaderInt64 = enabledShaderInt64;
+    m_capabilities.supportsRayQuery = enabledRayQuery;
 
     vkGetDeviceQueue(m_device, m_computeQueueFamily, 0, &m_computeQueue);
 
@@ -1599,10 +1680,14 @@ void VulkanDevice::loadRayTracingFunctions() {
     LOAD_VK_FUNC(CmdTraceRaysKHR);
     LOAD_VK_FUNC(CreateRayTracingPipelinesKHR);
     LOAD_VK_FUNC(GetRayTracingShaderGroupHandlesKHR);
-    LOAD_VK_FUNC(GetBufferDeviceAddressKHR);
     LOAD_VK_FUNC(CmdCopyAccelerationStructureKHR);
     LOAD_VK_FUNC(CmdWriteAccelerationStructuresPropertiesKHR);
     #undef LOAD_VK_FUNC
+    if (!fpGetBufferDeviceAddressKHR) {
+        fpGetBufferDeviceAddressKHR =
+            reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
+                vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddress"));
+    }
     m_compactionStats.supported =
         fpCmdCopyAccelerationStructureKHR && fpCmdWriteAccelerationStructuresPropertiesKHR;
 
@@ -8146,7 +8231,16 @@ bool VulkanBackendAdapter::initialize() {
                       << std::endl;
         }
     }
-    bool ok = m_device->initialize(true, validation);
+    bool preferHardwareRT = true;
+    if (const char* v = std::getenv("RAYTROPHI_DISABLE_HARDWARE_RT")) {
+        if (v[0] == '1' || v[0] == 'y' || v[0] == 'Y') {
+            preferHardwareRT = false;
+            VK_INFO() << "[Vulkan] Hardware RT force-disabled for feature-tier testing; "
+                         "raster, compute and native BDA volumes remain eligible."
+                      << std::endl;
+        }
+    }
+    bool ok = m_device->initialize(preferHardwareRT, validation);
     if (ok) {
         m_sceneTextureManager->initialize(captureRuntimeRenderCapabilities(), "VulkanBackendAdapter");
     }
@@ -11597,6 +11691,8 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
     for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
         const auto& group = instanceGroups[gi];
+        if (m_viewportMode == ViewportMode::Rendered &&
+            group.rendered_rt_excluded) continue;
         if (group.instances.empty() || group.sources.empty()) continue;
 
         auto& meta = scatterMeta[gi];
@@ -11687,6 +11783,8 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
     for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
         const auto& group = instanceGroups[gi];
+        if (m_viewportMode == ViewportMode::Rendered &&
+            group.rendered_rt_excluded) continue;
         if (group.instances.empty() || group.sources.empty()) continue;
 
         // NOTE: point_sphere_mode (foam) groups are rendered on Vulkan via the SAME
@@ -15166,6 +15264,8 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
     scatterGroupsById.reserve(scatterGroups.size());
     dirtyScatterGroups.reserve(scatterGroups.size());
     for (const auto& group : scatterGroups) {
+        if (m_viewportMode == ViewportMode::Rendered &&
+            group.rendered_rt_excluded) continue;
         if (!group.instances.empty()) {
             scatterGroupsById.emplace(group.id, &group);
             const auto revisionIt = m_scatterTransformRevisions.find(group.id);
@@ -15754,6 +15854,8 @@ bool VulkanBackendAdapter::refreshRasterScatterInstances() {
     m_rasterInstances.reserve(m_rasterInstances.size() + scatterCount);
 
     for (const auto& group : groups) {
+        if (m_viewportMode == ViewportMode::Rendered &&
+            group.rendered_rt_excluded) continue;
         if (group.instances.empty() || group.sources.empty()) continue;
         struct RasterSourceEntry { std::string meshKey; Matrix4x4 sourceToScatter = Matrix4x4::identity(); };
         std::vector<std::vector<RasterSourceEntry>> sourceEntries(group.sources.size());
@@ -15797,6 +15899,7 @@ bool VulkanBackendAdapter::refreshRasterScatterInstances() {
                 instance.transform = transform.toMatrix() * sourceEntry.sourceToScatter;
                 instance.mask = 0xFF;
                 instance.scatterGroupId = group.id;
+                instance.rayFusionExcluded = group.rendered_rt_excluded;
                 instance.scatterInstanceIndex = static_cast<uint32_t>(instanceIndex);
                 instance.scatterSourceTransform = sourceEntry.sourceToScatter;
                 if (m_rasterScatterPaintActive) {
@@ -15870,6 +15973,8 @@ bool VulkanBackendAdapter::refreshRtScatterInstances() {
     };
     const auto& groups = InstanceManager::getInstance().getGroups();
     for (const auto& group : groups) {
+        if (m_viewportMode == ViewportMode::Rendered &&
+            group.rendered_rt_excluded) continue;
         if (group.instances.empty() || group.sources.empty()) continue;
         std::vector<std::vector<SourceEntry>> entries(group.sources.size());
         for (size_t sourceIndex = 0; sourceIndex < group.sources.size(); ++sourceIndex) {
@@ -15947,6 +16052,8 @@ bool VulkanBackendAdapter::refreshRtScatterInstances() {
     refreshVulkanInstanceDataBinding(m_device.get(), m_vkInstances);
     m_scatterTransformRevisions.clear();
     for (const auto& group : groups) {
+        if (m_viewportMode == ViewportMode::Rendered &&
+            group.rendered_rt_excluded) continue;
         if (!group.instances.empty()) m_scatterTransformRevisions[group.id] = group.transform_revision;
     }
     m_gpuInstanceCpuMirrorStale = false;
@@ -17633,6 +17740,22 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         recordMaterialPreviewSdfSurfacePass(
             cmd, viewProj, view, static_cast<uint32_t>(width),
             static_cast<uint32_t>(height));
+    } else if (m_viewportMode == ViewportMode::Solid ||
+               m_viewportMode == ViewportMode::Matcap) {
+        recordMaterialPreviewVolumePass(
+            cmd, viewProj, view, static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height), false);
+        recordMaterialPreviewSdfSurfacePass(
+            cmd, viewProj, view, static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height), false);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_interactiveViewport.solidPipeline);
+        if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_interactiveViewport.pipelineLayout, 0, 1,
+                &m_interactiveViewport.matcapDescSet, 0, nullptr);
+        }
     }
 
     // ── Reference Grid (auto-orients to the active plane, adaptive spacing) ──

@@ -162,6 +162,12 @@ struct InstanceGroup {
     // are hidden from the foliage UI / brush tools. The owning system rebuilds
     // their instances every frame, so persisting them would be meaningless.
     bool transient = false;
+
+    // SurfaceSDF fluids use particle spheres only as a Solid/Matcap
+    // compatibility preview. Raster may draw them, while RayFusion and the
+    // full Rendered backend must omit the pool from their acceleration
+    // structures and use the SurfaceSDF volume instead.
+    bool rendered_rt_excluded = false;
     
     // Multi-Source Meshes (NEW)
     std::vector<ScatterSource> sources;             // Multiple source meshes with weights
