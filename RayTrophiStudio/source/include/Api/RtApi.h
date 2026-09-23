@@ -961,6 +961,90 @@ Result setCameraFStopPreset(int index);
 Result setCameraEvCompensation(float ev);
 
 // ---------------------------------------------------------------------------
+// Viewport camera NAVIGATION (Api/RtApiCameraNav.cpp).
+//
+// ★★★ These are the gestures the mouse and numpad drive, exposed as values so
+//   they can be tested. They were panel-only until 2026-09-23, which made the
+//   bug they were built for structurally invisible: the orbit pivot and the
+//   lens focal plane were the same number, so focusing near collapsed the
+//   navigation radius and the viewport stopped responding to pan and dolly --
+//   no error, no log, and nothing a screenshot could show.
+//
+// ★★★★★ THE PIVOT IS DERIVED, NOT STORED. In "selection" mode it is recomputed
+//   from the current selection at the start of every gesture, so it cannot go
+//   stale and it follows an animated object for free. In "free" mode the
+//   navigation anchor is the camera's own target, as before.
+// ---------------------------------------------------------------------------
+struct CameraPivotState {
+    std::string mode;             // "free" | "selection"
+    bool  locked = false;         // an anchor is armed (selection mode with a selection)
+    Vec3  pivot;                  // the anchor navigation actually turns around
+    // ★★★ nav_distance and focus_distance are SEPARATE FACTS and this pairing is
+    //   the measurement that proves it. One is the orbit radius, the other is
+    //   the lens focal plane. Moving the focus ring must not move nav_distance.
+    float nav_distance = 10.0f;
+    float focus_distance = 10.0f;
+    bool  orthographic = false;
+    float ortho_height = 10.0f;
+    std::string selection_name;   // empty when nothing is selected
+};
+
+// ★★★★★ WHICH CAMERA ARE WE BOUND TO. Added 2026-09-24 as an INSTRUMENT, before
+//   hunting the bug it exists to measure: the raster viewport does not refresh
+//   when the default scene's camera is translated, but it does after a project
+//   open / scene import / File>New. Those three are exactly the paths that
+//   REGISTER the camera (`SceneData::setActiveCamera` → `cameras` + `camera`).
+//   ★★★ Until this call existed the question "is the active camera actually in
+//   the camera list" had no answer, and three separate root-cause guesses were
+//   made about a thing nobody could measure. All three were wrong. Add the
+//   instrument first; then look.
+struct CameraInfo {
+    int index = -1;
+    std::string name;             // Camera::nodeName, empty when unnamed
+    Vec3 position;
+    Vec3 target;
+    float fov = 45.0f;
+    bool active = false;          // same object as SceneData::camera (pointer identity)
+};
+
+struct CameraListState {
+    int count = 0;                // scene.cameras.size()
+    int active_index = 0;         // scene.active_camera_index
+    bool has_active_camera = false;   // scene.camera != nullptr
+    // ★★★ THE MEASUREMENT. True when an active camera exists but is NOT in the
+    //   registry — the scene is being driven through a camera nothing else
+    //   knows about. A consumer that resolves the view through `cameras`
+    //   (rather than through `camera`) would silently follow a different
+    //   object, which is exactly "the viewport does not follow my camera".
+    bool active_is_orphan = false;
+    // active_index points past the end of `cameras`. Separate from orphan on
+    // purpose: an empty registry and a stale index are different faults and
+    // collapsing them would hide whichever is not being looked for.
+    bool active_index_out_of_range = false;
+    std::vector<CameraInfo> cameras;
+};
+
+Result listCameras(CameraListState& out);
+
+Result getCameraPivot(CameraPivotState& out);
+// "free" disarms the anchor; "selection" locks it to the selection's bounds centre.
+Result setCameraPivotMode(const std::string& mode);
+// Re-derive the anchor from the current selection. Cheap and idempotent; the
+// mouse/numpad handlers call it at the start of each gesture. A no-op in free mode.
+Result refreshPivotFromSelection();
+
+// Orbit around the pivot: world-Y yaw, camera-right pitch, in degrees.
+Result orbitCamera(float yaw_degrees, float pitch_degrees);
+// Distance MULTIPLIER toward the pivot (0.5 = half as far, 2.0 = twice as far).
+// ★ Does not touch focus_distance: dollying is not refocusing.
+Result dollyCamera(float factor);
+// Slide the camera in world units along its own right/up axes. The pivot rides
+// along, so a pan does not break the lock or change pan speed mid-gesture.
+Result panCamera(float right, float up);
+// Frame the selection's bounding sphere. lock_pivot also switches to "selection".
+Result frameSelected(bool lock_pivot);
+
+// ---------------------------------------------------------------------------
 // World / environment (Faz 5.1c). Narrow surface: background color plus the
 // Nishita sky's sun. Elevation/azimuth setters recompute the sun direction.
 // Clouds/fog/weather are intentionally out of scope for now. Not undoable;

@@ -89,6 +89,62 @@ public:
     float ortho_height = 10.0f;      // full vertical extent (world units) visible at the lookat plane
     StandardView standard_view = StandardView::Perspective;
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ORBIT PIVOT (viewport navigation anchor)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ★★★★★ THE PIVOT IS NOT THE FOCAL PLANE. Until 2026-09-23 there was no
+    //   pivot field: `lookat` played the part, and three unrelated writers
+    //   fought over it every frame --
+    //     frame_selected()  wrote the selection centre,
+    //     the middle-click raycast wrote whatever surface sat under the cursor,
+    //     setLookDirection() wrote `lookfrom + dir * focus_dist`.
+    //   The third one is the expensive one, and it explains a symptom that read
+    //   as unrelated: pulling the focus ring to 0.5 m made panning and dollying
+    //   crawl. `focus_dist` is a LENS property (depth of field, autofocus); the
+    //   moment it also set the navigation radius, focusing near re-anchored the
+    //   whole viewport 0.5 m in front of the camera. Nothing errored -- the
+    //   camera simply stopped responding, which nobody reports as a bug.
+    //
+    //   So the two live in separate fields now, and nothing below ever writes
+    //   `focus_dist`. Autofocus stays the only writer of the focal plane.
+    //
+    // ★★ Free vs Selection is a question of WHO OWNS THE ANCHOR, not of style:
+    //   - Free      : the anchor follows navigation (cursor raycast, fly-look).
+    //   - Selection : the anchor is the selection's bounds centre and survives
+    //                 orbit, dolly and pan. Re-armed by Frame Selected.
+    enum class PivotMode { Free, Selection };
+    PivotMode pivot_mode = PivotMode::Free;
+    Vec3 orbit_pivot;                 // world-space anchor
+    bool pivot_valid = false;         // false -> effectivePivot() falls back to lookat
+
+    // The anchor the navigation actually uses. Falls back to `lookat` so every
+    // caller has one question to ask, and an unarmed pivot reproduces the old
+    // behaviour instead of snapping to the origin.
+    Vec3 effectivePivot() const { return pivot_valid ? orbit_pivot : lookat; }
+
+    // Distance orbit/dolly work at and screen-correct pan is measured from.
+    // ★ Never `focus_dist` -- see the block above.
+    float navDistance() const;
+
+    // Arm/disarm the anchor. Neither moves the camera: arming a pivot must not
+    // jump the view, or Frame Selected could not be composed from these.
+    void setOrbitPivot(const Vec3& p) { orbit_pivot = p; pivot_valid = true; }
+    void clearOrbitPivot() { pivot_valid = false; }
+
+    // Orbit the camera around the effective pivot (world-Y yaw, camera-right
+    // pitch, degrees). `lookat` is re-aimed at the pivot: an orbit that does not
+    // look at what it turns around is a fly-look wearing an orbit's name.
+    void orbitAroundPivot(float dyaw_deg, float dpitch_deg);
+
+    // Dolly toward (negative) / away from (positive) the pivot. Exponential so
+    // the perceptual response is the same from centimetre detail to kilometre
+    // terrain, and the camera can never cross the anchor.
+    void dollyToPivot(float exponent);
+
+    // Translate camera, target AND pivot by the same offset, so panning slides
+    // the view without breaking the lock or changing the navigation radius.
+    void panWorld(const Vec3& offset);
+
     // Snap the camera to a standard axis-aligned view around the current lookat (pivot).
     // Preserves the current distance and frames the same world span (continuous switch).
     // setOrtho=true also flips to parallel projection (the usual DCC behaviour for these views).
